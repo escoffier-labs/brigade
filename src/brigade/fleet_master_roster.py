@@ -84,7 +84,7 @@ _DANGEROUS_VALUE_PATTERN = (
 )
 _DANGEROUS_VALUE = re.compile(
     _DANGEROUS_VALUE_PATTERN.replace(r"used\s+by", r"used\s+(?:by|on|for)").replace(
-        r"has\s+been", r"has\s+(?:been|value)"
+        r"has\s+been", r"has\s+(?:been|(?:(?:the|a)\s+)?value(?:\s+of)?)"
     ),
     re.IGNORECASE,
 )
@@ -132,7 +132,7 @@ _ON_OWNED_PROTECTED_ASSIGNMENT = re.compile(
 )
 _BARE_AUTH_PROFILE_NAME = re.compile(
     r"\bauth(?:entication)?[ _-]profiles?\s+"
-    r"(?!(?:this|the|a|an|is|are|was|were|has|have|had|will|can|could|should|must|may|might|"
+    r"(?!(?:this|the|a|an|is|are|was|were|has|have|had|will|can|could|should|must|may|might|require|requires|"
     r"selection|rotation|management|support|configuration|policy|availability|required|needed|"
     r"necessary|optional|available|regularly|for|in|as|to|with)\b)"
     r"(?:\"[^\"\n]+\"|'[^'\n]+'|`[^`\n]+`|[^\s.,;!?]+)",
@@ -152,7 +152,7 @@ _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
     r"(?:(?:named|called)\s+)?[\"'“‘`]?[A-Za-z_][A-Za-z0-9_]*[\"'”’`]?|"
     r"(?:the\s+)?[A-Za-z_][A-Za-z0-9_]*\s+environment\s+variable)"
     + _ROSTER_OWNERSHIP_QUALIFIER
-    + r"(?:\s*=(?!=|>)|\s+(?:value\s+)?(?:set\s+to|configured\s+(?:as|to|with)|to|as|is|are|was|were|equals|has\s+value|(?:can|could|may|might|must|shall|should|will|would)(?:\s+be)?|has\s+been|have\s+been|had\s+been|will\s+have\s+been)\s+(?!(?:"
+    + r"(?:\s*=(?!=|>)|\s+(?:value\s+)?(?:set\s+to|configured\s+(?:as|to|with)|to|as|is|are|was|were|equals|has\s+(?:(?:the|a)\s+)?value(?:\s+of)?|(?:can|could|may|might|must|shall|should|will|would)(?:\s+be)?|has\s+been|have\s+been|had\s+been|will\s+have\s+been)\s+(?!(?:"
     + _EXPLANATORY_SECRET_VALUE
     + r"))\S+|\s+(?:value\s*)?(?:=(?!=|>)|:)\s*(?!(?:"
     + _EXPLANATORY_SECRET_VALUE
@@ -315,7 +315,7 @@ def _has_filesystem_path_in_url_query(value: str) -> bool:
             decoded_path = _fully_unquote(parsed.path)
             decoded_path, _, embedded_query = decoded_path.partition("?")
             matrix_path_values = re.findall(
-                rf"(?:^|;)(?:{_PATH_LABEL})=([^;]*)",
+                rf"(?:^|;)(?:{_PATH_LABEL})(?:\[[^;\]]*\]|\.[^;=]+)*=([^;]*)",
                 decoded_path,
                 re.IGNORECASE,
             )
