@@ -237,6 +237,8 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "Authentication profile has the value production-admin",
         "Environment variable SERVICE_MODE has the value production",
         "Environment variable SERVICE_MODE has a value of production",
+        "Environment variable SERVICE_MODE currently is production",
+        "Environment variable SERVICE_MODE now equals production",
         "auth token: hunter2",
         "token is abcdefgh",
         "api key is shortkey",
@@ -698,13 +700,18 @@ def test_parse_accepts_text_containing_non_token_secret_prefixes(text: str) -> N
         "Support auth profile rotation.",
         "Configure authentication profile management.",
         "Use the auth profile for this service.",
+        "Authentication profile names must remain local.",
+        "Authentication profile policies require rotation.",
+        "Authentication profile values are prohibited.",
     ],
 )
-def test_parse_accepts_prose_that_mentions_auth_profiles(text: str) -> None:
+@pytest.mark.parametrize("field", ["purpose", "caveats"])
+def test_parse_accepts_prose_that_mentions_auth_profiles(field: str, text: str) -> None:
     document = _document()
-    document["seats"][0]["purpose"] = text  # type: ignore[index]
+    document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
 
-    assert fleet_master_roster.parse(document)["seats"][0]["purpose"] == text
+    parsed = fleet_master_roster.parse(document)["seats"][0]
+    assert parsed[field] == ([text] if field == "caveats" else text)
 
 
 @pytest.mark.parametrize("field", ["purpose", "caveats"])
@@ -972,6 +979,9 @@ def test_parse_rejects_common_extensionless_paths(field: str, path: str) -> None
         "The path was foo/bar",
         "The path will be foo/bar",
         "The path has been foo/bar",
+        "Path has the value foo/bar",
+        "Path has a value of foo/bar",
+        "Path currently is foo/bar",
         "Path = foo/bar",
         "Path value: foo/bar",
         "The path value is foo/bar",
@@ -1178,6 +1188,9 @@ def test_parse_rejects_dotted_credential_query_keys(field: str, text: str) -> No
         "API key currently is shortkey",
         "API key now equals shortkey",
         "Password remains hunter2",
+        "https://example.com/?userPassword=hunter2",
+        "Call /api?dbPassword=hunter2",
+        "openaiApiKey=shortkey",
     ],
 )
 def test_parse_rejects_compound_assignments_and_adverb_qualified_credentials(field: str, text: str) -> None:
