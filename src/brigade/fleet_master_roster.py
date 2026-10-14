@@ -114,6 +114,13 @@ _ON_OWNED_PROTECTED_ASSIGNMENT = re.compile(
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}|selection)\b)\S+",
     re.IGNORECASE,
 )
+_SUBJECT_FIRST_AUTH_PROFILE = re.compile(
+    r"\bauth(?:entication)?[ _-]profiles?\s+"
+    r"(?!(?:this|the|a|an|selection|rotation|management|support|configuration|policy|availability)\b)"
+    r"[^\s.,;!?]+\s+(?:is|are|was|were|has\s+been|have\s+been|had\s+been|will\s+be|"
+    r"remains|became)\s+(?:active|enabled|selected|configured|available|in\s+use)\b",
+    re.IGNORECASE,
+)
 _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
     r"\b(?:"
     r"(?:export\s+|env\s+|set\s+(?:environment\s+variable|env)\s+|"
@@ -121,7 +128,7 @@ _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
     r"(?:(?:named|called)\s+)?[\"'“‘`]?[A-Za-z_][A-Za-z0-9_]*[\"'”’`]?|"
     r"(?:the\s+)?[A-Za-z_][A-Za-z0-9_]*\s+environment\s+variable)"
     + _ROSTER_OWNERSHIP_QUALIFIER
-    + r"(?:\s*=(?!=|>)|\s+(?:value\s+)?(?:set\s+to|configured\s+(?:as|to|with)|to|as|is|are|was|were|equals|(?:can|could|may|might|must|shall|should|will|would)(?:\s+be)?|has\s+been|have\s+been|had\s+been|will\s+have\s+been)\s+(?!(?:"
+    + r"(?:\s*=(?!=|>)|\s+(?:value\s+)?(?:set\s+to|configured\s+(?:as|to|with)|to|as|is|are|was|were|equals|has\s+value|(?:can|could|may|might|must|shall|should|will|would)(?:\s+be)?|has\s+been|have\s+been|had\s+been|will\s+have\s+been)\s+(?!(?:"
     + _EXPLANATORY_SECRET_VALUE
     + r"))\S+|\s+(?:value\s*)?(?:=(?!=|>)|:)\s*(?!(?:"
     + _EXPLANATORY_SECRET_VALUE
@@ -664,6 +671,8 @@ def _text(value: Any, field: str, *, check_paths: bool = True) -> str:
         or _DANGEROUS_VALUE.search(decoded_form_text)
         or _ON_OWNED_PROTECTED_ASSIGNMENT.search(decoded_sensitive_text)
         or _ON_OWNED_PROTECTED_ASSIGNMENT.search(decoded_form_text)
+        or _SUBJECT_FIRST_AUTH_PROFILE.search(decoded_sensitive_text)
+        or _SUBJECT_FIRST_AUTH_PROFILE.search(decoded_form_text)
         or _URL_CREDENTIAL_QUERY.search(decoded_sensitive_text)
         or _URL_CREDENTIAL_QUERY.search(decoded_form_text)
         or _has_url_userinfo(decoded_sensitive_text)

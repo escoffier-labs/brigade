@@ -372,6 +372,22 @@ def test_parse_rejects_named_seat_auth_profile_qualifiers(field: str, text: str)
 @pytest.mark.parametrize(
     "text",
     [
+        "Authentication profile production-admin is active.",
+        "Environment variable SERVICE_MODE has value production.",
+    ],
+)
+def test_parse_rejects_subject_profile_and_has_value_environment_disclosures(field: str, text: str) -> None:
+    document = _document()
+    document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError):
+        fleet_master_roster.parse(document)
+
+
+@pytest.mark.parametrize("field", ["purpose", "caveats"])
+@pytest.mark.parametrize(
+    "text",
+    [
         "Password value=hunter2",
         "The API key for this seat=shortkey",
         "The API key used by implementer=shortkey",
