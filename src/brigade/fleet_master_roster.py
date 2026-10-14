@@ -167,6 +167,13 @@ _COMPOUND_NAMED_ASSIGNMENT = re.compile(
     r"(?P<value>(?:" + _EXPLANATORY_SECRET_VALUE + r")|[^\s&,;]+)",
     re.IGNORECASE,
 )
+_IMPERATIVE_COMPOUND_ASSIGNMENT = re.compile(
+    r"\b(?:set|configure(?:s|d)?|store(?:s|d)?|provide(?:s|d)?|supply|supplies|supplied|"
+    r"assign(?:s|ed)?|define(?:s|d)?)\s+(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?"
+    r"(?P<key>[A-Za-z][A-Za-z0-9_.-]*)\s+(?:(?:value\s+)?(?:to|as|with|is|equals)|:|=)\s+"
+    r"(?P<value>[^\s&,;]+)",
+    re.IGNORECASE,
+)
 _PATH_LABEL = r"(?:paths?|files?(?:\s+names?)?|filenames?|director(?:y|ies)|folders?|scripts?|repositor(?:y|ies)|repos?|locations?)"
 _VALUE_FIRST_PATH_DECLARATION = re.compile(
     r"\b(?:(?:set|choose|select|use|configure|store|save|copy|move)\s+)?"
@@ -219,7 +226,9 @@ _BARE_AUTH_PROFILE_NAME = re.compile(
     r"\bauth(?:entication)?[ _-]profiles?\s+"
     r"(?!(?:this|the|a|an|is|are|was|were|has|have|had|will|can|could|should|must|may|might|require|requires|"
     r"selection|rotation|management|support|configuration|policy|policies|availability|required|needed|names|values|"
-    r"necessary|optional|available|regularly|for|in|as|to|with)\b)"
+    r"necessary|optional|available|regularly|securely|safely|carefully|consistently|frequently|periodically|"
+    r"independently|centrally|locally|automatically|manually|before|after|during|without|throughout|using|"
+    r"for|in|as|to|with)\b)"
     r"(?:\"[^\"\n]+\"|'[^'\n]+'|`[^`\n]+`|[^\s.,;!?]+)",
     re.IGNORECASE,
 )
@@ -234,11 +243,24 @@ _DECLARATIVE_AUTH_PROFILE = re.compile(
     r"(?:\b(?:the\s+)?auth(?:entication)?[ _-]?profiles?\s+in\s+use\s+(?:is|are|:|=)\s+"
     r"(?!(?:required|needed|available|optional|necessary|selection|policy|policies)\b)"
     r"(?:\"[^\"\n]+\"|'[^'\n]+'|`[^`\n]+`|[^\s.,;!?]+)|"
-    r"(?<![\w.-])(?!(?:no|support|configure|rotate|use|the|a|an|this|that|these|those|my|our|their|your|"
-    r"auth|authentication|selection|rotation|management|configuration|policy|policies|availability|required|needed|"
-    r"names|values|necessary|optional|available|regularly|for|in|as|to|with)\b)"
-    r"(?:\"[^\"\n]+\"|'[^'\n]+'|`[^`\n]+`|[^\s.,;!?]+)\s+"
-    r"(?:is\s+)?(?:the\s+)?auth(?:entication)?[ _-]?profiles?\b)",
+    r"(?<![\w.-])(?!(?:no|support|configure|rotate|manage|audit|maintain|review|use|the|a|an|this|that|"
+    r"these|those|my|our|their|your|auth|authentication|selection|rotation|management|configuration|policy|"
+    r"policies|availability|required|needed|names|values|necessary|optional|available|regularly|for|in|as|to|with)\b)"
+    r"(?:\"[^\"\n]+\"|'[^'\n]+'|`[^`\n]+`|\[[^\]\n]+\]|\([^()\n]+\)|"
+    r"[A-Za-z0-9][A-Za-z0-9_.-]*(?:[-_.][A-Za-z0-9_.-]+|\d[A-Za-z0-9_.-]*))\s+"
+    r"(?:is\s+(?:the\s+|a\s+|an\s+)?)?auth(?:entication)?[ _-]?profiles?\b|"
+    r"(?<![\w.-])(?!(?:no|the|a|an|this|that|these|those|my|our|their|your|auth|authentication|"
+    r"selection|rotation|management|configuration|policy|policies|availability|required|needed|necessary|"
+    r"optional|available|regularly)\b)[A-Za-z][A-Za-z0-9_.-]*\s+is\s+(?:the\s+|a\s+|an\s+)?"
+    r"auth(?:entication)?[ _-]?profiles?\b)",
+    re.IGNORECASE,
+)
+_PROFILE_FOR_AUTHENTICATION = re.compile(
+    r"\b(?:use|select|choose|load|set|activate|switch(?:\s+to)?)\s+(?:(?:the|a|an|my|your|our|their)\s+)?"
+    r"profile\s+(?!(?:selection|rotation|management|configuration|support|policy|policies|required|needed|"
+    r"necessary|optional|available|availability|names|values)\b)"
+    r"(?:\"[^\"\n]+\"|'[^'\n]+'|`[^`\n]+`|\[[^\]\n]+\]|\([^()\n]+\)|[^\s.,;!?]+)\s+"
+    r"(?:for|to|with)\s+auth(?:entication)?\b",
     re.IGNORECASE,
 )
 _CLOUD_PROVIDER = (
@@ -448,6 +470,9 @@ def _has_sensitive_assignment_key(key: str, value: str, *, include_environment: 
 
 
 def _has_compound_sensitive_assignment(value: str) -> bool:
+    for match in _IMPERATIVE_COMPOUND_ASSIGNMENT.finditer(value):
+        if _has_sensitive_assignment_key(match.group("key"), match.group("value"), include_environment=False):
+            return True
     for pattern in (_COMPOUND_ASSIGNMENT, _COMPOUND_NAMED_ASSIGNMENT):
         for match in pattern.finditer(value):
             assigned_value = match.group("value")
@@ -995,6 +1020,8 @@ def _text(value: Any, field: str, *, check_paths: bool = True) -> str:
         or _SUBJECT_FIRST_AUTH_PROFILE.search(decoded_form_text)
         or _DECLARATIVE_AUTH_PROFILE.search(decoded_sensitive_text)
         or _DECLARATIVE_AUTH_PROFILE.search(decoded_form_text)
+        or _PROFILE_FOR_AUTHENTICATION.search(decoded_sensitive_text)
+        or _PROFILE_FOR_AUTHENTICATION.search(decoded_form_text)
         or _PROVIDER_AUTH_PROFILE.search(decoded_sensitive_text)
         or _PROVIDER_AUTH_PROFILE.search(decoded_form_text)
         or _PROVIDER_OWNED_AUTH_PROFILE_ASSIGNMENT.search(decoded_sensitive_text)
