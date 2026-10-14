@@ -385,6 +385,8 @@ def test_parse_rejects_named_seat_auth_profile_qualifiers(field: str, text: str)
         "The API key for 审查员 is shortkey",
         "Password assigned to 审查员 is hunter2",
         "Auth profile on 审查员 is production-admin",
+        "The API key for primary reviewer is shortkey",
+        "The API key for 审查 团队 is shortkey",
     ],
 )
 def test_parse_rejects_qualified_compact_credential_assignments(field: str, text: str) -> None:
@@ -1093,6 +1095,7 @@ def test_parse_accepts_url_routes_with_filesystem_named_components(field: str, t
         "See https://example.com/?%2Fhome%2Fexample=x",
         "See https://example.com/foo;path=foo/bar",
         "See https://example.com/foo;path=~example/work/repo",
+        "See https://example.com/foo;repository=~example/work/repo",
         "https://example.com/%2Fetc/passwd",
         "https://example.com/%7Eexample/.ssh/config",
         "Call /api?output=/etc/passwd",
@@ -1228,6 +1231,9 @@ def test_parse_rejects_perfect_tense_disclosures(field: str, text: str) -> None:
         "Path used by reviewer is foo/bar",
         "Path used on this seat is foo/bar",
         "Path used on reviewer is foo/bar",
+        "Path: ~example",
+        "Home directory is ~example",
+        "Open ~example",
         "%2Fetc%2Fpasswd",
         "%252Fetc%252Fpasswd",
         "See %2Fhome%2Fexample",

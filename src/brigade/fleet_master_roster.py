@@ -144,14 +144,14 @@ _EXPLICIT_TERMINAL_PATH = re.compile(
     + r"\s*"
     + _PATH_DECLARATION_LINKER
     + r"\s*[\"'“‘`()\[{]*\s*"
-    r"(?:~|/|\\|\.{1,2})(?=$|[\s,;!?\"'”’)\]}])",
+    r"(?:~[A-Za-z0-9_.-]*|/|\\|\.{1,2})(?=$|[\s,;!?\"'”’)\]}])",
     re.IGNORECASE,
 )
 _CONTEXTUAL_TERMINAL_PATH = re.compile(
     r"\b(?:cd|change\s+directory|start|operate|move|run|work|execute|inspect|open|read|write|load|save|navigate|copy|store)\s+"
     r"(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?"
     r"(?:(?:from|at|in|to|into|under)\s+)?[\"'“‘`()\[{]*\s*"
-    r"(?:~|/|\\|\.{1,2})(?=$|[,;!?\"'”’)\]}])",
+    r"(?:~[A-Za-z0-9_.-]*|/|\\|\.{1,2})(?=$|[,;!?\"'”’)\]}])",
     re.IGNORECASE,
 )
 _API_ROUTE_CONTEXT = re.compile(
@@ -215,11 +215,15 @@ def _normalize_protected_labels(value: str) -> str:
     return _QUOTED_PROTECTED_LABEL.sub(r"\g<label>", value)
 
 
-_UNICODE_OWNERSHIP_TARGET = re.compile(
+_OWNERSHIP_TARGET_WORD = (
+    r"(?!(?:this|the|seat|service|agent|is|are|was|were|equals|value|set|configured)\b)"
+    r"[^\W\d_][\w.-]*"
+)
+_OWNERSHIP_TARGET = re.compile(
     r"(?P<qualifier>\b(?:for|of|on|used\s+(?:by|on|for)|assigned\s+to)\s+)"
     r"(?P<determiner>(?:(?:this|the)\s+)?)"
     r"(?:(?P<prefix_role>seat|service|agent)\s+)?"
-    r"(?P<subject>[^\W\d_][\w.-]*)"
+    + rf"(?P<subject>{_OWNERSHIP_TARGET_WORD}(?:\s+{_OWNERSHIP_TARGET_WORD}){{0,2}})"
     r"(?P<suffix_role>\s+(?:seat|service|agent))?",
     re.IGNORECASE,
 )
@@ -228,7 +232,7 @@ _UNICODE_OWNERSHIP_TARGET = re.compile(
 def _normalize_ownership_targets(value: str) -> str:
     def replace(match: re.Match[str]) -> str:
         subject = match.group("subject")
-        if subject.isascii():
+        if subject.isascii() and len(subject.split()) == 1:
             return match.group()
         return (
             match.group("qualifier")
@@ -238,7 +242,7 @@ def _normalize_ownership_targets(value: str) -> str:
             + (match.group("suffix_role") or "")
         )
 
-    return _UNICODE_OWNERSHIP_TARGET.sub(replace, value)
+    return _OWNERSHIP_TARGET.sub(replace, value)
 
 
 def _has_bracketed_credential_query_key(key: str, value: str) -> bool:
@@ -267,7 +271,7 @@ def _has_filesystem_path_in_url_query(value: str) -> bool:
             decoded_path = _fully_unquote(parsed.path)
             decoded_path, _, embedded_query = decoded_path.partition("?")
             matrix_path_values = re.findall(
-                r"(?:^|;)(?:path|file|filename|directory|folder|location|workdir)=([^;]*)",
+                rf"(?:^|;)(?:{_PATH_LABEL})=([^;]*)",
                 decoded_path,
                 re.IGNORECASE,
             )
