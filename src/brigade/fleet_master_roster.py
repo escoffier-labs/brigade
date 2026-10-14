@@ -209,7 +209,7 @@ def _has_filesystem_path_in_url_query(value: str) -> bool:
                 or _ENVIRONMENT_ASSIGNMENT.search(decoded_path)
                 or _EXPLICIT_ENVIRONMENT_ASSIGNMENT.search(decoded_path)
                 or "//" in decoded_path.replace("\\", "/")
-                or _has_disallowed_api_route_query(f"Call {decoded_path}")
+                or _has_disallowed_api_route_query(f"GET {decoded_path}")
             ):
                 return True
             decoded_query = _fully_unquote(parsed.query)
@@ -568,18 +568,22 @@ def _text(value: Any, field: str, *, check_paths: bool = True) -> str:
     screening_text = _QUOTED_PROTECTED_LABEL.sub(r"\g<label>", value)
     screening_text = re.sub(r"“([^”\n]+)”", r'"\1"', screening_text)
     screening_text = re.sub(r"‘([^’\n]+)’", r"'\1'", screening_text)
+    decoded_sensitive_text = _fully_unquote(screening_text)
     path_text = _without_api_route_references(screening_text)
+    decoded_sensitive_path_text = _without_api_route_references(decoded_sensitive_text)
     decoded_paths = _decode_contextual_path_values(_decode_explicit_path_declarations(screening_text))
     decoded_path_text = _without_api_route_references(decoded_paths)
     if (
-        _DANGEROUS_VALUE.search(screening_text)
-        or _URL_CREDENTIAL_QUERY.search(screening_text)
-        or _has_url_userinfo(screening_text)
+        _DANGEROUS_VALUE.search(decoded_sensitive_text)
+        or _URL_CREDENTIAL_QUERY.search(decoded_sensitive_text)
+        or _has_url_userinfo(decoded_sensitive_text)
         or _has_filesystem_path_in_url_query(screening_text)
         or _has_disallowed_api_route_query(screening_text)
         or _ENVIRONMENT_ASSIGNMENT.search(path_text)
+        or _ENVIRONMENT_ASSIGNMENT.search(decoded_sensitive_path_text)
         or _EXPLICIT_ENVIRONMENT_ASSIGNMENT.search(path_text)
-        or contains_credential(screening_text)
+        or _EXPLICIT_ENVIRONMENT_ASSIGNMENT.search(decoded_sensitive_path_text)
+        or contains_credential(decoded_sensitive_text)
         or (
             check_paths
             and (

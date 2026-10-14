@@ -425,6 +425,16 @@ def test_parse_rejects_subject_first_credential_disclosures(field: str, text: st
 
 
 @pytest.mark.parametrize("field", ["purpose", "caveats"])
+@pytest.mark.parametrize("text", ["password%3Dhunter2", "API%20key%20is%20shortkey"])
+def test_parse_rejects_percent_encoded_credential_disclosures(field: str, text: str) -> None:
+    document = _document()
+    document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError):
+        fleet_master_roster.parse(document)
+
+
+@pytest.mark.parametrize("field", ["purpose", "caveats"])
 @pytest.mark.parametrize(
     "text",
     [
@@ -878,6 +888,22 @@ def test_parse_accepts_https_urls_in_descriptive_text(field: str, url: str) -> N
     ],
 )
 def test_parse_accepts_lowercase_key_value_prose(field: str, text: str) -> None:
+    document = _document()
+    document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
+
+    assert fleet_master_roster.parse(document)["seats"][0][field] == ([text] if field == "caveats" else text)
+
+
+@pytest.mark.parametrize("field", ["purpose", "caveats"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "See https://example.com/applications/123",
+        "See https://example.com/home/page",
+        "See https://example.com/etc/status",
+    ],
+)
+def test_parse_accepts_url_routes_with_filesystem_named_components(field: str, text: str) -> None:
     document = _document()
     document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
 
