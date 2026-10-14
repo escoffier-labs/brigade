@@ -1426,6 +1426,14 @@ def test_parse_rejects_fallback_targets_that_define_fallbacks() -> None:
         fleet_master_roster.parse(document)
 
 
+def test_parse_rejects_duplicate_fallbacks() -> None:
+    document = _document()
+    document["seats"][0]["fallbacks"] = ["reviewer", "reviewer"]  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError, match="duplicate fallback"):
+        fleet_master_roster.parse(document)
+
+
 def test_parse_rejects_non_utf8_json_bytes() -> None:
     encoded = json.dumps(_document()).encode("utf-16")
 

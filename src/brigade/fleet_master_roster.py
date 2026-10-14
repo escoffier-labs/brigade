@@ -940,6 +940,8 @@ def parse(raw: Mapping[str, Any] | bytes | str) -> dict[str, Any]:
         )
     seats_by_name = {seat["name"]: seat for seat in clean_seats}
     for seat in clean_seats:
+        if len(set(seat["fallbacks"])) != len(seat["fallbacks"]):
+            raise MasterRosterError(f"{seat['name']} has duplicate fallback seats")
         for fallback in seat["fallbacks"]:
             if not _SEAT_NAME.fullmatch(fallback) or fallback not in names or fallback == seat["name"]:
                 raise MasterRosterError(f"{seat['name']} has an invalid fallback seat: {fallback}")
