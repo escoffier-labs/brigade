@@ -91,7 +91,8 @@ _DANGEROUS_VALUE_PATTERN = (
 )
 _DANGEROUS_VALUE = re.compile(
     _DANGEROUS_VALUE_PATTERN.replace(r"used\s+by", r"used\s+(?:by|on|for)").replace(
-        r"has\s+been", r"has\s+(?:been|(?:(?:the|a)\s+)?value(?:\s+of)?)"
+        r"has\s+been",
+        rf"has\s+(?:{_ASSIGNMENT_ADVERB}\s+)*(?:been|(?:(?:the|a)\s+)?value(?:\s+of)?)",
     ),
     re.IGNORECASE,
 )
