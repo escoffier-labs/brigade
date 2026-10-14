@@ -1457,6 +1457,44 @@ class TestBoardBounds:
         assert first_ids | second_ids == set(node_ids)
         assert "7 unread messages" in second
 
+    def test_final_claim_only_page_resumes_remaining_event_pages(self, hub):
+        event_ids = [f"33333333-3333-4333-8333-{index:012d}" for index in range(fleet_hub.BOARD_LIMIT + 1)]
+        stamp = datetime.now(timezone.utc).isoformat()
+        events = [
+            _event(node_id, f"resume-event-{index}", 1, "run.dispatch.observed", repo="repo", harness="codex", ts=stamp)
+            for index, node_id in enumerate(event_ids)
+        ]
+        status, _headers, text = _request(hub, "POST", "/events", headers=_bearer(), body=events)
+        assert status == 200, text
+
+        claim_id = "44444444-4444-4444-8444-000000000001"
+        expires = datetime.now(timezone.utc).timestamp() + 3600
+        conn = fleet_hub.open_db(hub[2])
+        try:
+            conn.execute(
+                "INSERT INTO claims "
+                "(target, owner_node, holder_token, acquired_at, renewed_at, ttl_seconds, expires_at) "
+                "VALUES (?, ?, 'test-holder-token', ?, ?, 3600, ?)",
+                ("claim-only", claim_id, stamp, stamp, expires),
+            )
+            conn.execute("INSERT INTO claim_fences (target, generation) VALUES ('claim-only', 1)")
+            conn.commit()
+        finally:
+            conn.close()
+
+        _status, _headers, claim_page = _request(
+            hub, "GET", "/view/machines?claim_only=1&claim_offset=0", headers=_bearer()
+        )
+        assert f'data-node="{claim_id}"' in claim_page
+        more = re.search(r'class="fleet-more"><a href="([^"]+)"', claim_page)
+        assert more
+        next_path = html.unescape(more[1])
+        assert "offset=200" in next_path
+
+        status, _headers, event_page = _request(hub, "GET", next_path, headers=_bearer())
+        assert status == 200
+        assert f'data-node="{event_ids[-1]}"' in event_page
+
     def test_more_links_cover_events_and_claim_only_nodes_once(self, hub, monkeypatch):
         count = fleet_hub.BOARD_LIMIT * 2 + 1
         event_ids = [f"11111111-1111-4111-8111-{index:012d}" for index in range(count)]
