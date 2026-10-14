@@ -315,6 +315,7 @@ _PATH_DECLARATION = (
     r"\b" + _PATH_LABEL + r"(?:\s+value)?" + _PATH_DECLARATION_QUALIFIER + r"\s*" + _PATH_DECLARATION_LINKER
 )
 _ROOTED_PATH = re.compile(r"(?<![\w.-])(?:~(?:[A-Za-z0-9_.-]+)?[/\\]|[/\\]|\.{1,2}[/\\])(?=[\w.~-])")
+_TERMINAL_HOME_REFERENCE = re.compile(r"(?<![\w./~-])~(?:[A-Za-z0-9_.-]+)?(?=$|[\s,;:!?\"'“”‘’)\]}])")
 _EXPLICIT_TERMINAL_PATH = re.compile(
     r"\b(?:home\s+directory|"
     + _PATH_LABEL
@@ -1025,6 +1026,7 @@ def _text(value: Any, field: str, *, check_paths: bool = True) -> str:
                 _EXPLICIT_TERMINAL_PATH.search(candidate)
                 or _CONTEXTUAL_TERMINAL_PATH.search(candidate)
                 or _ROOTED_PATH.search(candidate)
+                or _TERMINAL_HOME_REFERENCE.search(candidate)
                 or _has_relative_path_evidence(
                     candidate,
                     model_identifier=field.endswith(".model") and _MODEL_IDENTIFIER.fullmatch(value) is not None,

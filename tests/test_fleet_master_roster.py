@@ -99,6 +99,7 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         fleet_master_roster.parse(document)
 
 
+@pytest.mark.parametrize("field", ["purpose", "caveats"])
 @pytest.mark.parametrize(
     "text",
     [
@@ -337,6 +338,8 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "Environment variable SERVICE_MODE: production",
         "Use environment variable service_mode=production",
         "Home directory: ~",
+        "Use ~",
+        "Use ~alice for configuration.",
         "The path is /",
         "The path is /秘密",
         "The path is .",
@@ -366,9 +369,9 @@ def test_parse_rejects_forbidden_seat_material(key: str, value: object) -> None:
         "Work from /",
     ],
 )
-def test_parse_rejects_secret_or_home_path_text(text: str) -> None:
+def test_parse_rejects_secret_or_home_path_text(field: str, text: str) -> None:
     document = _document()
-    document["seats"][0]["caveats"] = [text]  # type: ignore[index]
+    document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
 
     with pytest.raises(fleet_master_roster.MasterRosterError):
         fleet_master_roster.parse(document)
