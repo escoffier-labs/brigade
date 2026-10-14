@@ -25,6 +25,9 @@ _CLI_NAME = re.compile(r"^[a-z][a-z0-9._-]{0,63}$")
 _MODEL_IDENTIFIER = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/-]*$")
 _URL_SCHEME = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://")
 _ROSTER_SUBJECT = r"[^\W\d_][\w.-]*"
+_ASSIGNMENT_ADVERB = (
+    r"(?:[A-Za-z]+ly|now|still|just|already|currently|presently|always|never|eventually|temporarily|previously)"
+)
 _EXPLANATORY_SECRET_VALUE = (
     r"(?:required|optional|needed|necessary|available|configured(?!\s+(?:as|to|with)\b)|set(?!\s+to\b)|missing|unset|unavailable|"
     r"not\s+(?:required|optional|needed|necessary|available|configured|set|missing|unset|unavailable)|"
@@ -99,7 +102,7 @@ _ADVERB_QUALIFIED_CREDENTIAL_ASSIGNMENT = re.compile(
     r"\b(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|"
     r"api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)\s+"
     r"(?:(?:[A-Za-z]+ly|now|still|just|already|currently|presently|always|never|eventually|temporarily)\s+)*"
-    r"(?:is|are|was|were|equals|remains|remain|has\s+been|have\s+been|had\s+been|"
+    r"(?:is|are|was|were|equals|remains|remain|" + rf"(?:has|have|had)\s+(?:{_ASSIGNMENT_ADVERB}\s+)*been|"
     r"will\s+be|will\s+have\s+been)\s+" + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE})\b)\S+",
     re.IGNORECASE,
 )
@@ -145,9 +148,6 @@ _SENSITIVE_CLI_ARGUMENT_SUFFIXES = frozenset(
 )
 _CLI_ARGUMENT_PROSE_VALUES = frozenset(
     {"is", "are", "was", "were", "equals", "remains", "remain", "option", "argument", "flag", "parameter", "setting"}
-)
-_ASSIGNMENT_ADVERB = (
-    r"(?:[A-Za-z]+ly|now|still|just|already|currently|presently|always|never|eventually|temporarily|previously)"
 )
 _COMPOUND_ASSIGNMENT = re.compile(
     r"(?<![A-Za-z0-9_])(?P<key>[A-Za-z][A-Za-z0-9_.\[\]-]*)\s*=(?!=|>)\s*(?P<value>[^\s&,;]+)"
@@ -274,7 +274,7 @@ _PROVIDER_OWNED_AUTH_PROFILE_ASSIGNMENT = re.compile(
     + r"\s+(?:is|are|was|were|equals|remains|remain|becomes?|became|"
     + rf"(?:has|have|had)\s+(?:{_ASSIGNMENT_ADVERB}\s+)*been|will\s+(?:{_ASSIGNMENT_ADVERB}\s+)*have\s+been|"
     + r"(?:can|could|may|might|must|shall|should|will|would)(?:\s+be)?|set\s+to|configured\s+(?:as|to|with)|=|:)\s+"
-    r"(?!(?:required|needed|selection|support|supported|configuration|policy|availability|available|rotation)\b)"
+    r"(?!(?:required|needed|selection|support|supported|configuration|policy|availability|available|rotation|stable|reliable)\b)"
     r"(?:\"[^\"\n]+\"|'[^'\n]+'|`[^`\n]+`|[^\s.,;!?]+)",
     re.IGNORECASE,
 )
