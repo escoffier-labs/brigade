@@ -2435,6 +2435,29 @@ def test_wrong_run_package_manifest_uses_recorded_verify_run_id(tmp_path):
     assert bound["artifacts"][0]["run_binding"] == "source.verify_run_id"
 
 
+def test_ec12_run_scope_consumes_reparse_refusal_after_package_rejection(tmp_path, monkeypatch):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-reparse"
+    package_dir.mkdir(parents=True)
+    reader_type = control_crosswalk._AssessmentReader
+    real_info = reader_type.info
+
+    def refuse_package_reparse(reader, path):
+        if path == package_dir:
+            raise control_crosswalk._ReadRefusal("symlink_refused")
+        return real_info(reader, path)
+
+    monkeypatch.setattr(reader_type, "info", refuse_package_reparse)
+
+    readiness = _assess(target, "EC-12", RUN)
+
+    assert readiness["outcome"] == "incomplete"
+    assert readiness["population"]["unbound"] == 1
+    assert readiness["population"]["in_scope"] == 0
+    assert len(readiness["artifacts"]) == 1
+    assert readiness["artifacts"][0]["outcome"] == "rejected"
+
+
 def test_ec02_unreadable_receipt_no_longer_skips_run_check(tmp_path):
     target = _ws(tmp_path)
     run_dir = _verify_dir(target, "v1")

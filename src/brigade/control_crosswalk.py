@@ -1373,12 +1373,12 @@ def _evaluate_evidence_package_manifest(ctx: _Context) -> _Discovery:
     for package_dir in package_dirs:
         path = package_dir / "manifest.json"
         staged_receipt_candidates: dict[str, object] = {}
-        linked = _is_symlink(ctx, package_dir) or _is_symlink(ctx, path)
+        linked = control_crosswalk_package.linked_package(ctx, package_dir)
         if not linked and not _discovery_path_present(ctx, out, path):
             continue
         relpath = _relpath(ctx, path)
         manifest = None if linked else _read_json_object(ctx, path, manifest_reserve, strict_adapter)
-        if _is_symlink(ctx, package_dir) or _is_symlink(ctx, path):
+        if linked:
             if adapter is _verify_evidence_package:
                 obs = _obs(
                     relpath,

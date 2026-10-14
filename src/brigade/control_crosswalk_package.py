@@ -17,6 +17,17 @@ from . import (
 )
 
 
+def linked_package(ctx: _control_crosswalk_io._ReadContext, artifact: Path) -> bool:
+    """Consume link refusals represented by a package-specific rejection."""
+    manifest = artifact / "manifest.json"
+    linked = _control_crosswalk_io._is_symlink(ctx, artifact) or _control_crosswalk_io._is_symlink(ctx, manifest)
+    if linked:
+        for path in (artifact, manifest):
+            if ctx.reader.errors.get(path) == "symlink_refused":
+                ctx.reader.errors.pop(path)
+    return linked
+
+
 def check_entry_name(name: str, *, strict_package: bool) -> None:
     """Reject unsafe paths and names outside the strict package descriptor."""
     if not name or name in {".", ".."} or "/" in name or any(part == ".." for part in name.split("/")):
