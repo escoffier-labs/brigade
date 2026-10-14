@@ -374,9 +374,12 @@ def test_parse_rejects_named_seat_auth_profile_qualifiers(field: str, text: str)
     [
         "Authentication profile production-admin is active.",
         "Environment variable SERVICE_MODE has value production.",
+        "API key has value shortkey",
+        "Password has value hunter2",
+        "Path has value foo/bar",
     ],
 )
-def test_parse_rejects_subject_profile_and_has_value_environment_disclosures(field: str, text: str) -> None:
+def test_parse_rejects_subject_profile_and_has_value_disclosures(field: str, text: str) -> None:
     document = _document()
     document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
 

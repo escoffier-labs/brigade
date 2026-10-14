@@ -82,7 +82,12 @@ _DANGEROUS_VALUE_PATTERN = (
     r"\$(?:[A-Za-z_][A-Za-z0-9_]*|\{[A-Za-z_][^}]*\})"
     r"(?::[A-Za-z_][A-Za-z0-9_]*)?(?:[/\\][^\s]*)?))"
 )
-_DANGEROUS_VALUE = re.compile(_DANGEROUS_VALUE_PATTERN.replace(r"used\s+by", r"used\s+(?:by|on|for)"), re.IGNORECASE)
+_DANGEROUS_VALUE = re.compile(
+    _DANGEROUS_VALUE_PATTERN.replace(r"used\s+by", r"used\s+(?:by|on|for)").replace(
+        r"has\s+been", r"has\s+(?:been|value)"
+    ),
+    re.IGNORECASE,
+)
 _PATH_LABEL = r"(?:paths?|files?(?:\s+names?)?|filenames?|director(?:y|ies)|folders?|scripts?|repositor(?:y|ies)|repos?|locations?)"
 _QUOTED_PROTECTED_LABEL = re.compile(
     r"[\"'“‘`](?P<label>passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|"
@@ -137,7 +142,7 @@ _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
     + r"))\S+)",
     re.IGNORECASE,
 )
-_PATH_DECLARATION_LINKER = r"(?:is|are|was|were|equals|(?:can|could|may|might|must|shall|should|will|would)(?:\s+be)?|has\s+been|have\s+been|had\s+been|will\s+have\s+been|set\s+to|is\s+set\s+to|was\s+set\s+to|configured\s+(?:as|to)|:|=)"
+_PATH_DECLARATION_LINKER = r"(?:is|are|was|were|equals|(?:can|could|may|might|must|shall|should|will|would)(?:\s+be)?|has\s+(?:been|value)|have\s+been|had\s+been|will\s+have\s+been|set\s+to|is\s+set\s+to|was\s+set\s+to|configured\s+(?:as|to)|:|=)"
 _PATH_DECLARATION_QUALIFIER = r"(?:\s+(?:(?:for|of|on|used\s+(?:by|on|for)|assigned\s+to)\s+(?:(?:this|the)\s+)?(?:seat(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|service(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|agent(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?)))?"
 _PATH_DECLARATION = (
     r"\b" + _PATH_LABEL + r"(?:\s+value)?" + _PATH_DECLARATION_QUALIFIER + r"\s*" + _PATH_DECLARATION_LINKER
