@@ -407,6 +407,8 @@ def test_parse_rejects_value_first_credential_disclosures(field: str, text: str)
         "Run provider-cli --db_password hunter2",
         "Run provider-cli --github-token hunter2",
         "Run provider-cli --userPassword hunter2",
+        "Run aws --profile production-admin",
+        "Run provider-cli --aws-profile production-admin",
     ],
 )
 def test_parse_rejects_secrets_in_separate_cli_arguments(field: str, text: str) -> None:
@@ -483,6 +485,8 @@ def test_parse_rejects_subject_profile_and_has_value_disclosures(field: str, tex
         "The API key for 审查 团队 is shortkey",
         "Password -> hunter2",
         "API key => shortkey",
+        "Password becomes hunter2",
+        "API key became shortkey",
     ],
 )
 def test_parse_rejects_qualified_compact_credential_assignments(field: str, text: str) -> None:
@@ -1329,6 +1333,8 @@ def test_parse_rejects_encoded_assignments_in_api_route_paths(field: str, text: 
         "Call /api/etc/passwd",
         "Call /api/etc/passwd.",
         "Call /api/foo/etc/passwd",
+        "Call /login/password/hunter2",
+        "See https://example.com/login/token/shortkey",
         "GET /users/.ssh/id_rsa",
     ],
 )
