@@ -219,6 +219,17 @@ _SUBJECT_FIRST_AUTH_PROFILE = re.compile(
     r"remains|became)\s+(?:active|enabled|selected|configured|available|in\s+use)\b",
     re.IGNORECASE,
 )
+_DECLARATIVE_AUTH_PROFILE = re.compile(
+    r"(?:\b(?:the\s+)?auth(?:entication)?[ _-]?profiles?\s+in\s+use\s+(?:is|are|:|=)\s+"
+    r"(?!(?:required|needed|available|optional|necessary|selection|policy|policies)\b)"
+    r"(?:\"[^\"\n]+\"|'[^'\n]+'|`[^`\n]+`|[^\s.,;!?]+)|"
+    r"(?<![\w.-])(?!(?:no|support|configure|rotate|use|the|a|an|this|that|these|those|my|our|their|your|"
+    r"auth|authentication|selection|rotation|management|configuration|policy|policies|availability|required|needed|"
+    r"names|values|necessary|optional|available|regularly|for|in|as|to|with)\b)"
+    r"(?:\"[^\"\n]+\"|'[^'\n]+'|`[^`\n]+`|[^\s.,;!?]+)\s+"
+    r"(?:is\s+)?(?:the\s+)?auth(?:entication)?[ _-]?profiles?\b)",
+    re.IGNORECASE,
+)
 _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
     r"\b(?:"
     r"(?:export\s+|env\s+|set\s+(?:environment\s+variable|env)\s+|"
@@ -226,7 +237,7 @@ _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
     r"(?:(?:named|called)\s+)?[\"'“‘`]?[A-Za-z_][A-Za-z0-9_]*[\"'”’`]?|"
     r"(?:the\s+)?[A-Za-z_][A-Za-z0-9_]*\s+environment\s+variable)"
     + _ROSTER_OWNERSHIP_QUALIFIER
-    + r"(?:\s*=(?!=|>)|\s+(?:(?:[A-Za-z]+ly|now|still|just|already|currently|presently|always|never|eventually|temporarily)\s+)*(?:value\s+)?(?:set\s+to|configured\s+(?:as|to|with)|to|as|is|are|was|were|equals|becomes?|became|has\s+(?:(?:the|a)\s+)?value(?:\s+of)?|(?:can|could|may|might|must|shall|should|will|would)(?:\s+be)?|has\s+been|have\s+been|had\s+been|will\s+have\s+been)\s+(?!(?:"
+    + r"(?:\s*=(?!=|>)|\s+(?:(?:[A-Za-z]+ly|now|still|just|already|currently|presently|always|never|eventually|temporarily)\s+)*(?:value\s+)?(?:set\s+to|configured\s+(?:as|to|with)|to|as|is|are|was|were|equals|becomes?|became|contains?|includes?|has\s+(?:(?:the|a)\s+)?value(?:\s+of)?|(?:can|could|may|might|must|shall|should|will|would)(?:\s+be)?|has\s+been|have\s+been|had\s+been|will\s+have\s+been)\s+(?!(?:"
     + _EXPLANATORY_SECRET_VALUE
     + r"))\S+|\s+(?:value\s*)?(?:=(?!=|>)|:)\s*(?!(?:"
     + _EXPLANATORY_SECRET_VALUE
@@ -599,6 +610,12 @@ _PATH_CONTEXT = re.compile(
     r"[\"'“‘]*\s*(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?|" + _PATH_DECLARATION + r"\s*)[\"'“‘`()\[{]*\s*$",
     re.IGNORECASE,
 )
+_LOCATION_PATH_CONTEXT = re.compile(
+    r"\b(?:working|current|home|project|repository|repo|config(?:uration)?|data|cache|output|input|log|temp(?:orary)?)"
+    r"(?:\s+(?:directory|folder|path|location|file))?\s+(?:(?:is|are|was|were)\s+)?"
+    r"(?:located|stored|lives?|resides?|saved|kept)\s+(?:at|in|under)\s*$",
+    re.IGNORECASE,
+)
 _EXPLICIT_NAVIGATION_CONTEXT = re.compile(
     r"\b(?:cd|change\s+directory|start|operate|move|run|work|execute|inspect|open|read|write|load|save|navigate|copy|store|"
     r"delete|remove|edit|update|modify|rename|create|touch)\s+"
@@ -752,6 +769,7 @@ def _has_path_context(text: str, position: int) -> bool:
         pattern.search(prefix) is not None
         for pattern in (
             _PATH_CONTEXT,
+            _LOCATION_PATH_CONTEXT,
             _QUOTED_PATH_CONTEXT,
             _SPACED_PATH_CONTEXT,
             _QUOTED_PATH_DECLARATION_CONTEXT,
@@ -902,6 +920,8 @@ def _text(value: Any, field: str, *, check_paths: bool = True) -> str:
         or _BARE_AUTH_PROFILE_NAME.search(decoded_form_text)
         or _SUBJECT_FIRST_AUTH_PROFILE.search(decoded_sensitive_text)
         or _SUBJECT_FIRST_AUTH_PROFILE.search(decoded_form_text)
+        or _DECLARATIVE_AUTH_PROFILE.search(decoded_sensitive_text)
+        or _DECLARATIVE_AUTH_PROFILE.search(decoded_form_text)
         or _URL_CREDENTIAL_QUERY.search(decoded_sensitive_text)
         or _URL_CREDENTIAL_QUERY.search(decoded_form_text)
         or _has_url_userinfo(decoded_sensitive_text)
