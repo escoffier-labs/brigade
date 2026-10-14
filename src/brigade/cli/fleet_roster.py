@@ -7,8 +7,6 @@ import json
 import sys
 from pathlib import Path
 
-from .. import fleet_master_roster
-
 
 def register(fleet_sub: argparse._SubParsersAction) -> None:
     parser = fleet_sub.add_parser("roster", help="Validate or synchronize the fleet master roster.")
@@ -21,6 +19,8 @@ def register(fleet_sub: argparse._SubParsersAction) -> None:
 
 
 def dispatch_validate(args: argparse.Namespace) -> int:
+    from .. import fleet_master_roster
+
     try:
         with args.file.open("rb") as roster_file:
             raw = roster_file.read(fleet_master_roster.MAX_DOCUMENT_BYTES + 1)

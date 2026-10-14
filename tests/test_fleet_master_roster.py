@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 
 import pytest
@@ -480,6 +481,8 @@ def test_parse_rejects_subject_profile_and_has_value_disclosures(field: str, tex
         "Auth profile on 审查员 is production-admin",
         "The API key for primary reviewer is shortkey",
         "The API key for 审查 团队 is shortkey",
+        "Password -> hunter2",
+        "API key => shortkey",
     ],
 )
 def test_parse_rejects_qualified_compact_credential_assignments(field: str, text: str) -> None:
@@ -1577,6 +1580,22 @@ def test_fleet_roster_validate_cli_reports_document_digest(tmp_path, capsys) -> 
     assert output["revision"] == 7
     assert output["seats"] == 2
     assert output["sha256"].startswith("sha256:")
+
+
+def test_cli_parser_defers_roster_validator_import() -> None:
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from brigade.cli import _build_parser; _build_parser(); "
+            "import sys; assert 'brigade.fleet_master_roster' not in sys.modules",
+        ],
+        capture_output=True,
+        check=False,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def test_fleet_roster_validate_cli_refuses_forbidden_document(tmp_path, capsys) -> None:
