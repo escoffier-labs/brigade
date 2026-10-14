@@ -99,8 +99,20 @@ _URL_CREDENTIAL_QUERY = re.compile(
 )
 _ENVIRONMENT_ASSIGNMENT = re.compile(r"(?<![A-Za-z0-9=<>!])[A-Z_][A-Z0-9_]*\s*=(?!=|>)")
 _ROSTER_OWNERSHIP_QUALIFIER = (
-    r"(?:\s+(?:for|of|used\s+(?:by|on|for)|assigned\s+to)\s+(?:(?:this|the)\s+)?"
+    r"(?:\s+(?:for|of|on|used\s+(?:by|on|for)|assigned\s+to)\s+(?:(?:this|the)\s+)?"
     r"(?:seat(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|service(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|agent(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?))?"
+)
+_ON_OWNED_PROTECTED_ASSIGNMENT = re.compile(
+    r"\b(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|"
+    r"api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?|"
+    r"auth(?:entication)?[ _-]?profiles?)\s+on\s+"
+    r"(?:(?:this|the)\s+)?(?:seat(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|"
+    r"service(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|agent(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|"
+    r"[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?)\s+"
+    r"(?:(?:is|are|was|were|equals|(?:can|could|may|might|must|shall|should|will|would)(?:\s+be)?|"
+    r"has\s+been|have\s+been|had\s+been|will\s+have\s+been|set\s+to|configured\s+(?:as|to|with))\s+|[:=]\s*)"
+    + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}|selection)\b)\S+",
+    re.IGNORECASE,
 )
 _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
     r"\b(?:"
@@ -610,6 +622,8 @@ def _text(value: Any, field: str, *, check_paths: bool = True) -> str:
     if (
         _DANGEROUS_VALUE.search(decoded_sensitive_text)
         or _DANGEROUS_VALUE.search(decoded_form_text)
+        or _ON_OWNED_PROTECTED_ASSIGNMENT.search(decoded_sensitive_text)
+        or _ON_OWNED_PROTECTED_ASSIGNMENT.search(decoded_form_text)
         or _URL_CREDENTIAL_QUERY.search(decoded_sensitive_text)
         or _URL_CREDENTIAL_QUERY.search(decoded_form_text)
         or _has_url_userinfo(decoded_sensitive_text)

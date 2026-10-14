@@ -396,6 +396,23 @@ def test_parse_rejects_qualified_compact_credential_assignments(field: str, text
 @pytest.mark.parametrize(
     "text",
     [
+        "The API key on this seat is shortkey",
+        "Password on this service is hunter2",
+        "The auth profile on reviewer is production-admin",
+    ],
+)
+def test_parse_rejects_on_qualified_protected_assignments(field: str, text: str) -> None:
+    document = _document()
+    document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError):
+        fleet_master_roster.parse(document)
+
+
+@pytest.mark.parametrize("field", ["purpose", "caveats"])
+@pytest.mark.parametrize(
+    "text",
+    [
         "This seat uses API key shortkey",
         "Reviewer uses the password hunter2",
         "Reviewer is using API key shortkey",
