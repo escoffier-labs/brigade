@@ -151,7 +151,8 @@ _COMPOUND_ASSIGNMENT = re.compile(
 )
 _COMPOUND_NAMED_ASSIGNMENT = re.compile(
     r"(?<![A-Za-z0-9_])(?P<key>[A-Za-z][A-Za-z0-9_.\[\]-]*)\s*(?::(?!:)\s*|"
-    r"(?:(?:value\s+)?(?:is|are|was|were|equals|remains|remain|(?:can|could|may|might|must|shall|should|will|would)(?:\s+be)?)|"
+    r"(?:(?:value\s+)?(?:is|are|was|were|equals|remains|remain|has\s+been|have\s+been|had\s+been|will\s+have\s+been|"
+    r"(?:can|could|may|might|must|shall|should|will|would)(?:\s+be)?)|"
     r"has\s+(?:(?:the|a)\s+)?value(?:\s+of)?|set\s+to|configured\s+(?:as|to|with))\s+)"
     r"(?P<value>(?:" + _EXPLANATORY_SECRET_VALUE + r")|[^\s&,;]+)",
     re.IGNORECASE,
@@ -267,7 +268,8 @@ _PROVIDER_AUTH_PROFILE = re.compile(
 _PROVIDER_OWNED_AUTH_PROFILE_ASSIGNMENT = re.compile(
     r"\b(?:aws|azure|gcp|google\s+cloud|oci|oracle\s+cloud|ibm\s+cloud|alibaba\s+cloud)\s+profiles?"
     + _ROSTER_OWNERSHIP_QUALIFIER
-    + r"\s+(?:is|are|was|were|equals|remains|remain|becomes?|became|set\s+to|configured\s+(?:as|to|with)|=|:)\s+"
+    + r"\s+(?:is|are|was|were|equals|remains|remain|becomes?|became|has\s+been|have\s+been|had\s+been|"
+    r"will\s+have\s+been|set\s+to|configured\s+(?:as|to|with)|=|:)\s+"
     r"(?!(?:required|needed|selection|support|supported|configuration|policy|availability|available|rotation)\b)"
     r"(?:\"[^\"\n]+\"|'[^'\n]+'|`[^`\n]+`|[^\s.,;!?]+)",
     re.IGNORECASE,
@@ -374,7 +376,8 @@ def _normalize_protected_labels(value: str) -> str:
 
 
 _OWNERSHIP_TARGET_WORD = (
-    r"(?!(?:this|the|seat|service|agent|is|are|was|were|equals|value|set|configured)\b)"
+    r"(?!(?:this|the|seat|service|agent|is|are|was|were|equals|value|set|configured|has|have|had|will|"
+    r"can|could|may|might|must|shall|should|would|been|becomes?|became|remains?)\b)"
     r"[^\W\d_][\w.-]*"
 )
 _OWNERSHIP_TARGET = re.compile(
