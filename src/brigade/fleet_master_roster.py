@@ -257,11 +257,11 @@ def _normalize_ownership_targets(value: str) -> str:
     return _OWNERSHIP_TARGET.sub(replace, value)
 
 
-def _has_bracketed_credential_query_key(key: str, value: str) -> bool:
-    if "[" not in key and "]" not in key:
+def _has_nested_credential_query_key(key: str, value: str) -> bool:
+    if not any(separator in key for separator in ".[]"):
         return False
     return any(
-        _DANGEROUS_VALUE.search(f"{segment}={value}") for segment in re.split(r"[\[\]]+", key) if segment.strip()
+        _DANGEROUS_VALUE.search(f"{segment}={value}") for segment in re.split(r"[.\[\]]+", key) if segment.strip()
     )
 
 
@@ -316,7 +316,7 @@ def _has_filesystem_path_in_url_query(value: str) -> bool:
             query_value = _fully_unquote(query_value)
             if (
                 _DANGEROUS_VALUE.search(f"{key}={query_value}")
-                or _has_bracketed_credential_query_key(key, query_value)
+                or _has_nested_credential_query_key(key, query_value)
                 or _ENVIRONMENT_ASSIGNMENT.search(f"{key}={query_value}")
                 or _ENVIRONMENT_ASSIGNMENT.search(query_value)
                 or _EXPLICIT_ENVIRONMENT_ASSIGNMENT.search(query_value)
@@ -375,7 +375,7 @@ def _has_disallowed_api_route_query(value: str) -> bool:
             pair = f"{key}={decoded_value}"
             if (
                 _DANGEROUS_VALUE.search(pair)
-                or _has_bracketed_credential_query_key(key, decoded_value)
+                or _has_nested_credential_query_key(key, decoded_value)
                 or _ENVIRONMENT_ASSIGNMENT.search(pair)
                 or _EXPLICIT_ENVIRONMENT_ASSIGNMENT.search(pair)
             ):
