@@ -1121,6 +1121,7 @@ def test_parse_accepts_ordinary_slash_delimited_descriptive_prose(text: str) -> 
         "Write clear/concise summaries",
         "Open source/proprietary model analysis",
         "Read XML/JSON documents.",
+        "Read input/output.",
         "Write request/response examples.",
         "Inspect source/target mappings.",
         "Read request/response data.",

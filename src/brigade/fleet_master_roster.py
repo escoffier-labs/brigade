@@ -749,8 +749,9 @@ def _has_relative_path_evidence(value: str, *, model_identifier: bool = False) -
             return True
     for match in _RELATIVE_PATH.finditer(path_text):
         components = re.split(r"[/\\]", match.group("path"))
-        standalone = path_text.strip().rstrip(".,;:!?").casefold() == match.group("path").casefold()
-        if standalone and not model_identifier and match.group("path").casefold() not in _PROSE_SLASH_TERMS:
+        slash_term = match.group("path").rstrip(".,;:!?").casefold()
+        standalone = path_text.strip().rstrip(".,;:!?").casefold() == slash_term
+        if standalone and not model_identifier and slash_term not in _PROSE_SLASH_TERMS:
             return True
         path_context = _has_path_context(path_text, match.start())
         explicit_navigation = _EXPLICIT_NAVIGATION_CONTEXT.search(path_text[: match.start()]) is not None
@@ -760,7 +761,7 @@ def _has_relative_path_evidence(value: str, *, model_identifier: bool = False) -
         if (
             path_context
             and (not prose_continuation or filesystem_noun or explicit_navigation)
-            and match.group("path").casefold() not in _PROSE_SLASH_TERMS
+            and slash_term not in _PROSE_SLASH_TERMS
         ):
             return True
         if any(component.startswith(".") or component.casefold() in _FILESYSTEM_COMPONENTS for component in components):
