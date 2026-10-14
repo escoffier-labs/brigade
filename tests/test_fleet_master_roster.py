@@ -475,6 +475,25 @@ def test_parse_rejects_modal_declarations_and_encoded_api_routes(field: str, tex
 @pytest.mark.parametrize(
     "text",
     [
+        "API+key%3Dshortkey",
+        "Password+is+hunter2",
+        "Auth+profile%3Dproduction-admin",
+        "See https://example.com/foo;path=/etc/passwd",
+        "See https://example.com/foo;%2e%2e/etc/passwd",
+    ],
+)
+def test_parse_rejects_form_encoded_secrets_and_embedded_url_paths(field: str, text: str) -> None:
+    document = _document()
+    document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError):
+        fleet_master_roster.parse(document)
+
+
+@pytest.mark.parametrize("field", ["purpose", "caveats"])
+@pytest.mark.parametrize(
+    "text",
+    [
         "See https%3A%2F%2Fexample.com%2F%3Fpath%3D%2Fetc%2Fhosts",
         "See https%3A%2F%2Fexample.com%2F%3FSERVICE_MODE%3Dproduction",
     ],

@@ -9,7 +9,7 @@ import re
 import unicodedata
 from collections.abc import Mapping
 from typing import Any
-from urllib.parse import parse_qsl, unquote, urlsplit
+from urllib.parse import parse_qsl, unquote, unquote_plus, urlsplit
 
 from .worklore_validate import contains_credential
 
@@ -187,6 +187,14 @@ def _fully_unquote(value: str) -> str:
         value = decoded
 
 
+def _fully_unquote_plus(value: str) -> str:
+    while True:
+        decoded = unquote_plus(value)
+        if decoded == value:
+            return value
+        value = decoded
+
+
 def _has_url_userinfo(value: str) -> bool:
     for match in _HTTP_URL.finditer(value):
         try:
@@ -210,6 +218,11 @@ def _has_filesystem_path_in_url_query(value: str) -> bool:
                 or _EXPLICIT_ENVIRONMENT_ASSIGNMENT.search(decoded_path)
                 or "//" in decoded_path.replace("\\", "/")
                 or _has_disallowed_api_route_query(f"GET {decoded_path}")
+                or any(
+                    _has_disallowed_api_route_query(f"Call {decoded_path[index:]}")
+                    for index, character in enumerate(decoded_path)
+                    if character in "/\\" and index > 0
+                )
             ):
                 return True
             decoded_query = _fully_unquote(parsed.query)
@@ -569,23 +582,33 @@ def _text(value: Any, field: str, *, check_paths: bool = True) -> str:
     screening_text = re.sub(r"“([^”\n]+)”", r'"\1"', screening_text)
     screening_text = re.sub(r"‘([^’\n]+)’", r"'\1'", screening_text)
     decoded_sensitive_text = _fully_unquote(screening_text)
+    decoded_form_text = _fully_unquote_plus(screening_text)
     path_text = _without_api_route_references(screening_text)
     decoded_sensitive_path_text = _without_api_route_references(decoded_sensitive_text)
+    decoded_form_path_text = _without_api_route_references(decoded_form_text)
     decoded_paths = _decode_contextual_path_values(_decode_explicit_path_declarations(screening_text))
     decoded_path_text = _without_api_route_references(decoded_paths)
-    path_texts = (decoded_path_text, decoded_sensitive_path_text)
+    path_texts = (decoded_path_text, decoded_sensitive_path_text, decoded_form_path_text)
     if (
         _DANGEROUS_VALUE.search(decoded_sensitive_text)
+        or _DANGEROUS_VALUE.search(decoded_form_text)
         or _URL_CREDENTIAL_QUERY.search(decoded_sensitive_text)
+        or _URL_CREDENTIAL_QUERY.search(decoded_form_text)
         or _has_url_userinfo(decoded_sensitive_text)
+        or _has_url_userinfo(decoded_form_text)
         or _has_filesystem_path_in_url_query(decoded_sensitive_text)
+        or _has_filesystem_path_in_url_query(decoded_form_text)
         or _has_disallowed_api_route_query(screening_text)
         or _has_disallowed_api_route_query(decoded_sensitive_text)
+        or _has_disallowed_api_route_query(decoded_form_text)
         or _ENVIRONMENT_ASSIGNMENT.search(path_text)
         or _ENVIRONMENT_ASSIGNMENT.search(decoded_sensitive_path_text)
+        or _ENVIRONMENT_ASSIGNMENT.search(decoded_form_path_text)
         or _EXPLICIT_ENVIRONMENT_ASSIGNMENT.search(path_text)
         or _EXPLICIT_ENVIRONMENT_ASSIGNMENT.search(decoded_sensitive_path_text)
+        or _EXPLICIT_ENVIRONMENT_ASSIGNMENT.search(decoded_form_path_text)
         or contains_credential(decoded_sensitive_text)
+        or contains_credential(decoded_form_text)
         or (
             check_paths
             and any(
