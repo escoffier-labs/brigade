@@ -1162,6 +1162,28 @@ def test_parse_rejects_dotted_credential_query_keys(field: str, text: str) -> No
 @pytest.mark.parametrize(
     "text",
     [
+        "https://example.com/login?user_password=hunter2",
+        "Call /api?db_password=hunter2",
+        "user_password=hunter2",
+        "https://example.com/config?env[SERVICE_MODE]=production",
+        "Call /api?SERVICE_MODE[]=production",
+        "API key currently is shortkey",
+        "API key now equals shortkey",
+        "Password remains hunter2",
+    ],
+)
+def test_parse_rejects_compound_assignments_and_adverb_qualified_credentials(field: str, text: str) -> None:
+    document = _document()
+    document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError):
+        fleet_master_roster.parse(document)
+
+
+@pytest.mark.parametrize("field", ["purpose", "caveats"])
+@pytest.mark.parametrize(
+    "text",
+    [
         "See https://[invalid]/?path=/etc/passwd",
         "See https://[invalid]/?SERVICE_MODE=production",
     ],

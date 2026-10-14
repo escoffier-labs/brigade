@@ -88,6 +88,17 @@ _DANGEROUS_VALUE = re.compile(
     ),
     re.IGNORECASE,
 )
+_ADVERB_QUALIFIED_CREDENTIAL_ASSIGNMENT = re.compile(
+    r"\b(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|"
+    r"api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)\s+"
+    r"(?:(?:[A-Za-z]+ly|now|still|just|already|currently|presently|always|never|eventually|temporarily)\s+)*"
+    r"(?:is|are|was|were|equals|remains|remain|has\s+been|have\s+been|had\s+been|"
+    r"will\s+be|will\s+have\s+been)\s+" + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE})\b)\S+",
+    re.IGNORECASE,
+)
+_COMPOUND_ASSIGNMENT = re.compile(
+    r"(?<![A-Za-z0-9_])(?P<key>[A-Za-z][A-Za-z0-9_.\[\]-]*)\s*=(?!=|>)\s*(?P<value>[^\s&,;]+)"
+)
 _PATH_LABEL = r"(?:paths?|files?(?:\s+names?)?|filenames?|director(?:y|ies)|folders?|scripts?|repositor(?:y|ies)|repos?|locations?)"
 _QUOTED_PROTECTED_LABEL = re.compile(
     r"[\"'“‘`](?P<label>passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|"
@@ -265,11 +276,24 @@ def _normalize_ownership_targets(value: str) -> str:
     return _OWNERSHIP_TARGET.sub(replace, value)
 
 
-def _has_nested_credential_query_key(key: str, value: str) -> bool:
-    if not any(separator in key for separator in ".[]"):
-        return False
+def _has_sensitive_assignment_key(key: str, value: str) -> bool:
+    """Check each query-key component and suffix as a possible assignment label."""
+    components = [component for component in re.split(r"[.\[\]_-]+", key) if component]
+    candidates = {
+        separator.join(components[index:]) for index in range(len(components)) for separator in ("_", "-", " ")
+    }
     return any(
-        _DANGEROUS_VALUE.search(f"{segment}={value}") for segment in re.split(r"[.\[\]]+", key) if segment.strip()
+        _DANGEROUS_VALUE.search(f"{candidate}={value}")
+        or _ENVIRONMENT_ASSIGNMENT.search(f"{candidate}={value}")
+        or _EXPLICIT_ENVIRONMENT_ASSIGNMENT.search(f"{candidate}={value}")
+        for candidate in candidates
+    )
+
+
+def _has_compound_sensitive_assignment(value: str) -> bool:
+    return any(
+        _has_sensitive_assignment_key(match.group("key"), match.group("value"))
+        for match in _COMPOUND_ASSIGNMENT.finditer(value)
     )
 
 
@@ -324,7 +348,7 @@ def _has_filesystem_path_in_url_query(value: str) -> bool:
             query_value = _fully_unquote(query_value)
             if (
                 _DANGEROUS_VALUE.search(f"{key}={query_value}")
-                or _has_nested_credential_query_key(key, query_value)
+                or _has_sensitive_assignment_key(key, query_value)
                 or _ENVIRONMENT_ASSIGNMENT.search(f"{key}={query_value}")
                 or _ENVIRONMENT_ASSIGNMENT.search(query_value)
                 or _EXPLICIT_ENVIRONMENT_ASSIGNMENT.search(query_value)
@@ -383,7 +407,7 @@ def _has_disallowed_api_route_query(value: str) -> bool:
             pair = f"{key}={decoded_value}"
             if (
                 _DANGEROUS_VALUE.search(pair)
-                or _has_nested_credential_query_key(key, decoded_value)
+                or _has_sensitive_assignment_key(key, decoded_value)
                 or _ENVIRONMENT_ASSIGNMENT.search(pair)
                 or _EXPLICIT_ENVIRONMENT_ASSIGNMENT.search(pair)
             ):
@@ -684,6 +708,10 @@ def _text(value: Any, field: str, *, check_paths: bool = True) -> str:
     if (
         _DANGEROUS_VALUE.search(decoded_sensitive_text)
         or _DANGEROUS_VALUE.search(decoded_form_text)
+        or _ADVERB_QUALIFIED_CREDENTIAL_ASSIGNMENT.search(decoded_sensitive_text)
+        or _ADVERB_QUALIFIED_CREDENTIAL_ASSIGNMENT.search(decoded_form_text)
+        or _has_compound_sensitive_assignment(decoded_sensitive_text)
+        or _has_compound_sensitive_assignment(decoded_form_text)
         or _ON_OWNED_PROTECTED_ASSIGNMENT.search(decoded_sensitive_text)
         or _ON_OWNED_PROTECTED_ASSIGNMENT.search(decoded_form_text)
         or _BARE_AUTH_PROFILE_NAME.search(decoded_sensitive_text)
