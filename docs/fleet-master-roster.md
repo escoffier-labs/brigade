@@ -45,8 +45,10 @@ Validate a candidate file locally before sharing it:
 brigade fleet roster validate --file master-roster.json --json
 ```
 
-The command reports the revision, seat count, and canonical digest. It does not
-publish the document or change the local execution roster.
+The command reports the revision, seat count, and canonical digest. The digest
+is SHA-256 over compact JSON with sorted object keys, encoded as UTF-8 without
+ASCII escaping. It does not publish the document or change the local execution
+roster.
 
 ## Remaining work
 

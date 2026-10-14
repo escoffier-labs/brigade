@@ -67,7 +67,7 @@ _DANGEROUS_VALUE_PATTERN = (
     + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}))\S+|"
     r"\buse\s+(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?"
     r"(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)\s+"
-    + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE})\b)\S+|"
+    + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE}|budget(?:s)?)\b)\S+|"
     r"\b(?:use|set|configure(?:d)?|store(?:d)?|provide(?:d)?|generate(?:d)?)\s+"
     r"(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?"
     r"(?:passwords?|passwds?|passphrases?|secrets?|credentials?|tokens?|auth[_ -]?tokens?|api[_ -]?keys?|access[_ -]?tokens?|client[_ -]?secrets?|private[_ -]?keys?)\s+"
@@ -86,6 +86,10 @@ _DANGEROUS_VALUE = re.compile(
     _DANGEROUS_VALUE_PATTERN.replace(r"used\s+by", r"used\s+(?:by|on|for)").replace(
         r"has\s+been", r"has\s+(?:been|(?:(?:the|a)\s+)?value(?:\s+of)?)"
     ),
+    re.IGNORECASE,
+)
+_PROFILE_ASSIGNMENT = re.compile(
+    r"(?:^|[^A-Za-z0-9_])(?:[A-Za-z0-9_-]*[_-])?profile\s*=\s*" + rf"(?!(?:{_EXPLANATORY_SECRET_VALUE})\b)\S+",
     re.IGNORECASE,
 )
 _ADVERB_QUALIFIED_CREDENTIAL_ASSIGNMENT = re.compile(
@@ -214,7 +218,7 @@ _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
     r"(?:(?:named|called)\s+)?[\"'“‘`]?[A-Za-z_][A-Za-z0-9_]*[\"'”’`]?|"
     r"(?:the\s+)?[A-Za-z_][A-Za-z0-9_]*\s+environment\s+variable)"
     + _ROSTER_OWNERSHIP_QUALIFIER
-    + r"(?:\s*=(?!=|>)|\s+(?:(?:[A-Za-z]+ly|now|still|just|already|currently|presently|always|never|eventually|temporarily)\s+)*(?:value\s+)?(?:set\s+to|configured\s+(?:as|to|with)|to|as|is|are|was|were|equals|has\s+(?:(?:the|a)\s+)?value(?:\s+of)?|(?:can|could|may|might|must|shall|should|will|would)(?:\s+be)?|has\s+been|have\s+been|had\s+been|will\s+have\s+been)\s+(?!(?:"
+    + r"(?:\s*=(?!=|>)|\s+(?:(?:[A-Za-z]+ly|now|still|just|already|currently|presently|always|never|eventually|temporarily)\s+)*(?:value\s+)?(?:set\s+to|configured\s+(?:as|to|with)|to|as|is|are|was|were|equals|becomes?|became|has\s+(?:(?:the|a)\s+)?value(?:\s+of)?|(?:can|could|may|might|must|shall|should|will|would)(?:\s+be)?|has\s+been|have\s+been|had\s+been|will\s+have\s+been)\s+(?!(?:"
     + _EXPLANATORY_SECRET_VALUE
     + r"))\S+|\s+(?:value\s*)?(?:=(?!=|>)|:)\s*(?!(?:"
     + _EXPLANATORY_SECRET_VALUE
@@ -223,7 +227,7 @@ _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
     + r"))\S+)",
     re.IGNORECASE,
 )
-_PATH_DECLARATION_LINKER = r"(?:(?:[A-Za-z]+ly|now|still|just|already|currently|presently|always|never|eventually|temporarily)\s+)*(?:is|are|was|were|equals|(?:can|could|may|might|must|shall|should|will|would)(?:\s+be)?|has\s+(?:(?:the|a)\s+)?value(?:\s+of)?|has\s+been|have\s+been|had\s+been|will\s+have\s+been|set\s+to|is\s+set\s+to|was\s+set\s+to|configured\s+(?:as|to)|:|=)"
+_PATH_DECLARATION_LINKER = r"(?:(?:[A-Za-z]+ly|now|still|just|already|currently|presently|always|never|eventually|temporarily)\s+)*(?:is|are|was|were|equals|becomes?|became|(?:can|could|may|might|must|shall|should|will|would)(?:\s+be)?|has\s+(?:(?:the|a)\s+)?value(?:\s+of)?|has\s+been|have\s+been|had\s+been|will\s+have\s+been|set\s+to|is\s+set\s+to|was\s+set\s+to|configured\s+(?:as|to)|:|=)"
 _PATH_DECLARATION_QUALIFIER = r"(?:\s+(?:(?:for|of|on|used\s+(?:by|on|for)|assigned\s+to)\s+(?:(?:this|the)\s+)?(?:seat(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|service(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|agent(?:\s+[A-Za-z][A-Za-z0-9_.-]*)?|[A-Za-z][A-Za-z0-9_.-]*(?:\s+(?:seat|service|agent))?)))?"
 _PATH_DECLARATION = (
     r"\b" + _PATH_LABEL + r"(?:\s+value)?" + _PATH_DECLARATION_QUALIFIER + r"\s*" + _PATH_DECLARATION_LINKER
@@ -347,6 +351,7 @@ def _has_sensitive_assignment_key(key: str, value: str, *, include_environment: 
     }
     return any(
         _DANGEROUS_VALUE.search(f"{candidate}={value}")
+        or _PROFILE_ASSIGNMENT.search(f"{candidate}={value}")
         or (
             include_environment
             and (
@@ -735,24 +740,29 @@ def _has_relative_path_evidence(value: str, *, model_identifier: bool = False) -
     path_text = _VERSION_REFERENCE.sub("", _HTTP_URL.sub("", value))
     if _VALUE_FIRST_PATH_DECLARATION.search(path_text):
         return True
+    standalone_text = path_text.strip().rstrip(".,;:!?")
+    standalone_match = _STANDALONE_FILE.fullmatch(standalone_text)
+    standalone_filename = standalone_match.group("file") if standalone_match else None
+    declared_values = {
+        match.end() for match in re.finditer(_PATH_DECLARATION + r"\s*[\"'“‘]?", path_text, re.IGNORECASE)
+    }
     for match in _STANDALONE_FILE.finditer(path_text):
         filename = match.group("file").rstrip(".,;:!?")
         sensitive_name = filename.casefold() in _EXTENSIONLESS_FILES | _PRIVATE_KEY_FILES | {"credentials"}
         suffix = _MODEL_PATH_SUFFIX if model_identifier else _FILE_SUFFIX
         suffix_match = suffix.search(filename)
+        standalone = filename == standalone_filename
+        path_declaration = match.start() in declared_values
+        if not (filename.startswith(".") or sensitive_name or suffix_match or standalone or path_declaration):
+            continue
         trailing_text = path_text[match.end() :].strip(" .,;:!?")
         path_context = _has_path_context(path_text, match.start())
-        path_declaration = any(
-            pattern.search(path_text[: match.start()]) is not None
-            for pattern in (_EXPLICIT_PATH_DECLARATION, _QUOTED_PATH_DECLARATION_CONTEXT)
-        )
         file_like = filename.casefold() not in _PROSE_DOTTED_TERMS and (
             filename.startswith(".")
             or sensitive_name
             or path_declaration
             or (suffix_match and (path_context or not trailing_text or sensitive_name))
         )
-        standalone = path_text.strip().rstrip(".,;:!?") == filename
         if file_like and (path_context or standalone):
             return True
     for match in _RELATIVE_PATH.finditer(path_text):
@@ -962,11 +972,11 @@ def parse(raw: Mapping[str, Any] | bytes | str) -> dict[str, Any]:
 
     document = {"schema": SCHEMA, "revision": revision, "seats": clean_seats}
     try:
-        canonical = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=True)
+        canonical = json.dumps(document, sort_keys=True, separators=(",", ":"), ensure_ascii=False).encode("utf-8")
     except (ValueError, RecursionError) as exc:
         raise MasterRosterError("document cannot be represented as bounded JSON") from exc
-    if len(canonical.encode("ascii")) > MAX_DOCUMENT_BYTES:
+    if len(canonical) > MAX_DOCUMENT_BYTES:
         raise MasterRosterError(f"document must be at most {MAX_DOCUMENT_BYTES} bytes")
     result = copy.deepcopy(document)
-    result["sha256"] = "sha256:" + hashlib.sha256(canonical.encode("ascii")).hexdigest()
+    result["sha256"] = "sha256:" + hashlib.sha256(canonical).hexdigest()
     return result

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -45,6 +46,40 @@ def test_parse_master_roster_returns_canonical_digest_and_copy() -> None:
     assert parsed["seats"][0]["fallbacks"] == ["reviewer"]
     assert parsed["sha256"].startswith("sha256:")
     assert "sha256" not in document
+
+
+def test_parse_hashes_utf8_canonical_json() -> None:
+    document = _document()
+    document["seats"][0]["purpose"] = "Support café users."
+    parsed = fleet_master_roster.parse(document)
+    canonical = json.dumps(
+        {key: value for key, value in parsed.items() if key != "sha256"},
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=False,
+    ).encode("utf-8")
+
+    assert parsed["sha256"] == "sha256:" + hashlib.sha256(canonical).hexdigest()
+
+
+def test_parse_accepts_maximum_unicode_text_within_utf8_document_limit() -> None:
+    document = _document()
+    document["seats"] = [
+        {
+            "name": f"worker-{index}",
+            "cli": "codex",
+            "model": "gpt-5.6",
+            "purpose": "界" * fleet_master_roster.MAX_TEXT,
+            "caveats": [],
+            "fallbacks": [],
+            "enabled": True,
+        }
+        for index in range(fleet_master_roster.MAX_SEATS)
+    ]
+    raw = json.dumps(document, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    assert len(raw) < fleet_master_roster.MAX_DOCUMENT_BYTES
+
+    assert len(fleet_master_roster.parse(raw)["seats"]) == fleet_master_roster.MAX_SEATS
 
 
 @pytest.mark.parametrize(
@@ -443,6 +478,66 @@ def test_parse_rejects_bare_auth_profile_labels(field: str, text: str) -> None:
 
     with pytest.raises(fleet_master_roster.MasterRosterError):
         fleet_master_roster.parse(document)
+
+
+@pytest.mark.parametrize("field", ["purpose", "caveats"])
+@pytest.mark.parametrize(
+    "text",
+    [
+        "aws_profile=production-admin",
+        "https://example.com/?profile=production-admin",
+        "Call /api?aws_profile=production-admin",
+        "Environment variable SERVICE_MODE becomes production",
+        "Environment variable SERVICE_MODE became production",
+        "Path becomes foo/bar",
+        "Directory became foo/bar",
+    ],
+)
+def test_parse_rejects_profile_assignments_and_transition_disclosures(field: str, text: str) -> None:
+    document = _document()
+    document["seats"][0][field] = [text] if field == "caveats" else text  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError):
+        fleet_master_roster.parse(document)
+
+
+@pytest.mark.parametrize("text", ["Use the token budget efficiently.", "Use token budgets efficiently."])
+def test_parse_accepts_token_budget_prose(text: str) -> None:
+    document = _document()
+    document["seats"][0]["purpose"] = text
+
+    assert fleet_master_roster.parse(document)["seats"][0]["purpose"] == text
+
+
+def test_parse_does_not_rescan_path_context_for_ordinary_words(monkeypatch) -> None:
+    calls = 0
+    original = fleet_master_roster._has_path_context
+
+    def counted(text: str, position: int) -> bool:
+        nonlocal calls
+        calls += 1
+        return original(text, position)
+
+    monkeypatch.setattr(fleet_master_roster, "_has_path_context", counted)
+    document = {
+        "schema": fleet_master_roster.SCHEMA,
+        "revision": 1,
+        "seats": [
+            {
+                "name": "worker",
+                "cli": "codex",
+                "model": "gpt-5.6",
+                "purpose": "safe " * 64,
+                "caveats": [],
+                "fallbacks": [],
+                "enabled": True,
+            }
+        ],
+    }
+
+    fleet_master_roster.parse(document)
+
+    assert calls <= 4
 
 
 @pytest.mark.parametrize("field", ["purpose", "caveats"])
