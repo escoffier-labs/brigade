@@ -409,6 +409,7 @@ def test_parse_rejects_secret_or_home_path_text(text: str) -> None:
         "Use AWS profile production",
         "Use the production AWS profile",
         "Use production AWS profile",
+        "production AWS profile",
     ],
 )
 def test_parse_rejects_named_seat_auth_profile_qualifiers(field: str, text: str) -> None:
@@ -1235,9 +1236,6 @@ def test_parse_rejects_common_extensionless_paths(field: str, path: str) -> None
         "Config is stored in alpha/beta",
         "The path is Shared Folder/file",
         "Open Shared Folder/file for instructions",
-        "Open alpha/beta guide",
-        "Read alpha/beta guide",
-        "Run alpha/beta workflow",
         "GET /etc/passwd",
         "GET /users/../etc/passwd",
         "GET /v1/../etc/passwd",
@@ -1305,6 +1303,11 @@ def test_parse_accepts_ordinary_slash_delimited_descriptive_prose(text: str) -> 
         "支持 输入/输出 工作流。",
         "Run fast/slow tests.",
         "Run red/green deployments.",
+        "Read fast/slow guide.",
+        "Run red/green workflow.",
+        "Open alpha/beta guide.",
+        "Read alpha/beta guide.",
+        "Run alpha/beta workflow.",
     ],
 )
 def test_parse_accepts_standalone_slash_prose(field: str, text: str) -> None:

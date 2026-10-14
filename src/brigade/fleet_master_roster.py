@@ -244,7 +244,9 @@ _PROVIDER_AUTH_PROFILE = re.compile(
     r"(?:aws|azure|gcp|google\s+cloud|oci|oracle\s+cloud|ibm\s+cloud|alibaba\s+cloud)\s+profiles?\b|"
     r"\b(?:\"[^\"\n]+\"|'[^'\n]+'|`[^`\n]+`|[^\s.,;!?]+)\s+"
     r"(?:is|are|was|were)\s+(?:the|a|an)\s+"
-    r"(?:aws|azure|gcp|google\s+cloud|oci|oracle\s+cloud|ibm\s+cloud|alibaba\s+cloud)\s+profiles?\b",
+    r"(?:aws|azure|gcp|google\s+cloud|oci|oracle\s+cloud|ibm\s+cloud|alibaba\s+cloud)\s+profiles?\b|"
+    r"^\s*(?:\"[^\"\n]+\"|'[^'\n]+'|`[^`\n]+`|[^\s.,;!?]+)\s+"
+    r"(?:aws|azure|gcp|google\s+cloud|oci|oracle\s+cloud|ibm\s+cloud|alibaba\s+cloud)\s+profile\s*[.!?]*\s*$",
     re.IGNORECASE,
 )
 _EXPLICIT_ENVIRONMENT_ASSIGNMENT = re.compile(
@@ -625,7 +627,7 @@ _EXPLICIT_NAVIGATION_CONTEXT = re.compile(
 )
 _FILESYSTEM_NOUN_CONTINUATION = re.compile(
     r"\s+(?:[A-Za-z][A-Za-z-]*\s+){0,2}"
-    r"(?:files?|directories|folders?|scripts?|helpers?|guides?|workflows?|data|content|output)\b",
+    r"(?:files?|directories|folders?|scripts?|helpers?|data|content|output)\b",
     re.I,
 )
 _PATH_CONTEXT = re.compile(
