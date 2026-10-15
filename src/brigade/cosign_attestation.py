@@ -26,6 +26,10 @@ class CosignAttestationError(attestation.AttestationError):
     pass
 
 
+class CosignBundlePayloadMismatchError(CosignAttestationError):
+    """Raised when a validly shaped bundle carries a different statement."""
+
+
 def _snapshot_statement(statement: Mapping[str, Any]) -> tuple[dict[str, Any], bytes]:
     """Return a bounded plain-JSON in-toto Statement before invoking cosign."""
     try:
@@ -246,7 +250,7 @@ def validate_bundle(bundle: Mapping[str, Any], statement: Mapping[str, Any]) -> 
         raise CosignAttestationError("dsseEnvelope payload JSON must be an object")
 
     if decoded_statement != statement:
-        raise CosignAttestationError("dsseEnvelope payload does not match expected statement")
+        raise CosignBundlePayloadMismatchError("dsseEnvelope payload does not match expected statement")
 
     return dict(bundle)
 

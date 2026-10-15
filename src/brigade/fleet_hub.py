@@ -105,6 +105,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from . import fleet_command_deck, fleet_hub_preference, worklore_store
+from .fleet_hub_event_bounds import oversized_event_field
 from .fleet_hub_server import BoundedThreadingHTTPServer
 from .fleet_hub_status import (
     ACTIVE_EVENT_TTL_SECONDS as ACTIVE_EVENT_TTL_SECONDS,
@@ -728,6 +729,12 @@ def init_db(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+def _reject_bad_event_text(field: str, value: str) -> None:
+    if (error := oversized_event_field(field, value)) is not None:
+        raise FleetHubUnprocessable(error)
+    _reject_controls(value, field, kind="event")
+
+
 def _validate_event(raw: Any) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise FleetHubError("event must be a JSON object")
@@ -737,19 +744,19 @@ def _validate_event(raw: Any) -> dict[str, Any]:
         if kind is str:
             if not isinstance(value, str) or not value.strip():
                 raise FleetHubError(f"event field {field!r} must be a non-empty string")
-            _reject_controls(value, field, kind="event")
+            _reject_bad_event_text(field, value)
         elif not isinstance(value, int) or isinstance(value, bool) or value < 0:
             raise FleetHubError(f"event field {field!r} must be a non-negative integer")
         event[field] = value
     for field in OPTIONAL_STR_FIELDS:
         value = raw.get(field)
         if isinstance(value, str):
-            _reject_controls(value, field, kind="event")
+            _reject_bad_event_text(field, value)
         event[field] = value if isinstance(value, str) and value.strip() else None
     for field in OPTIONAL_EVENT_STR_FIELDS:
         value = raw.get(field)
         if isinstance(value, str):
-            _reject_controls(value, field, kind="event")
+            _reject_bad_event_text(field, value)
         cleaned = value if isinstance(value, str) and value.strip() else None
         if field == "repo_identity" and cleaned is not None:
             cleaned = cleaned.strip()

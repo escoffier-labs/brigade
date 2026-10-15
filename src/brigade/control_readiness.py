@@ -92,11 +92,13 @@ REASON_CODES = frozenset(
         "no_records",
         "not_git_repository",
         "only_out_of_scope",
+        "package_snapshot_mismatch",
         "period_not_supplied",
         "planned_commands_mismatch",
         "planned_commands_missing",
         "population_truncated",
         "read_limit_exceeded",
+        "receipt_digest_mismatch",
         "run_binding_mismatch",
         "schema_missing",
         "signature_mismatch",
@@ -158,10 +160,11 @@ class ArtifactObservation:
     scope: str = "in_scope"
     run_binding: str | None = None
     timestamp: datetime | None = None
+    source_digest_sha256: str | None = None
     outcome: str = ""
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "relpath": self.relpath,
             "scope": self.scope,
             "run_binding": self.run_binding,
@@ -170,6 +173,9 @@ class ArtifactObservation:
             "reason_codes": sorted(set(self.reasons)),
             "dimensions": {name: dict(self.dimensions[name]) for name in DIMENSIONS},
         }
+        if self.source_digest_sha256 is not None:
+            result["source_digest_sha256"] = self.source_digest_sha256
+        return result
 
 
 def validate_observation(obs: object) -> ArtifactObservation:
@@ -190,6 +196,12 @@ def validate_observation(obs: object) -> ArtifactObservation:
         raise ReadinessContractError(f"invalid scope {obs.scope!r}")
     if not isinstance(obs.reasons, list) or any(reason not in REASON_CODES for reason in obs.reasons):
         raise ReadinessContractError("unknown reason code")
+    if obs.source_digest_sha256 is not None and (
+        not isinstance(obs.source_digest_sha256, str)
+        or len(obs.source_digest_sha256) != 64
+        or any(character not in "0123456789abcdef" for character in obs.source_digest_sha256)
+    ):
+        raise ReadinessContractError("invalid source digest")
     if not isinstance(obs.dimensions, dict) or set(obs.dimensions) != set(DIMENSIONS):
         raise ReadinessContractError("observation must carry exactly the fixed dimensions")
     for name in DIMENSIONS:
