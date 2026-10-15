@@ -302,7 +302,7 @@ def dispatch(args) -> int:
                 lawful_basis=args.lawful_basis,
                 necessity=args.necessity,
             )
-        except evidence_derivative.DerivativeExportError as exc:
+        except (evidence_derivative.DerivativeExportError, NotImplementedError) as exc:
             print(f"error: cannot export evidence derivative: {exc}", file=sys.stderr)
             return 1
         print(f"evidence derivative exported ({report.removed_fields} fields removed)")

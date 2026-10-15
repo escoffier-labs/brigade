@@ -9,6 +9,7 @@ import json
 import os
 from dataclasses import fields, is_dataclass
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -87,6 +88,28 @@ def _assert_refused(directory: Path, code: str) -> None:
     with pytest.raises(PackageSnapshotError) as raised:
         snapshot_package(directory)
     assert raised.value.code == code
+
+
+def test_windows_reparse_stat_refusal_is_unsafe(monkeypatch: pytest.MonkeyPatch) -> None:
+    import brigade.evidence_package_snapshot as package_snapshot
+
+    reparse_error = package_snapshot.dirfd._nt_dirfd().ReparsePointRefusedError
+    monkeypatch.setattr(package_snapshot.os, "name", "nt")
+    monkeypatch.setattr(package_snapshot.dirfd, "nt_available", lambda: True)
+
+    def refuse_reparse(_parent: int, _name: str) -> os.stat_result:
+        raise reparse_error("path component is a reparse point")
+
+    monkeypatch.setattr(package_snapshot.dirfd, "stat_child", refuse_reparse)
+    with pytest.raises(PackageSnapshotError) as raised:
+        package_snapshot._read_child(
+            1,
+            "receipt.json",
+            limit=attestation_input.MAX_JSON_BYTES,
+            declared_size=None,
+            capture=True,
+        )
+    assert raised.value.code == "unsafe"
 
 
 def _restamp_package_receipt(directory: Path, receipt: dict[str, object]) -> None:
@@ -240,7 +263,7 @@ def test_source_must_equal_the_stored_receipt(tmp_path: Path, field: str) -> Non
     _assert_refused(directory, "mismatch")
 
 
-def test_stored_receipt_digest_and_patch_presence_are_required(tmp_path: Path) -> None:
+def test_manifest_digest_supports_legacy_receipt_and_optional_patch(tmp_path: Path) -> None:
     directory = _write_package(tmp_path)
     receipt = json.loads((directory / "receipt.json").read_text(encoding="utf-8"))
     receipt.pop("digests")
@@ -256,16 +279,33 @@ def test_stored_receipt_digest_and_patch_presence_are_required(tmp_path: Path) -
     source["receipt_sha256"] = localio.canonical_json_digest(receipt, exclude_keys={"digests"})
     manifest["entries_sha256"] = localio.canonical_json_digest(entries)
     _write_manifest(directory, manifest)
-    _assert_refused(directory, "malformed")
+    snapshot = snapshot_package(directory)
+    assert snapshot.source.receipt_sha256 == source["receipt_sha256"]
     assert evidence_package.verify_package(directory=directory, json_output=False) == 0
 
     directory = _write_package(tmp_path, files={})
+    receipt_path = directory / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["changes_patch_sha256"] = _sha256(b"patch removed after run")
+    _stamp_receipt(receipt)
+    receipt_bytes = json.dumps(receipt, sort_keys=True).encode("utf-8")
+    receipt_path.write_bytes(receipt_bytes)
+
     manifest = _manifest(directory)
+    entries = manifest["entries"]
     source = manifest["source"]
-    assert isinstance(source, dict)
-    source["changes_patch_sha256"] = "3" * 64
+    assert isinstance(entries, list) and isinstance(source, dict)
+    receipt_entry = next(entry for entry in entries if entry["path"] == "receipt.json")
+    receipt_entry["bytes"] = len(receipt_bytes)
+    receipt_entry["sha256"] = _sha256(receipt_bytes)
+    source["changes_patch_sha256"] = receipt["changes_patch_sha256"]
+    source["receipt_sha256"] = receipt["digests"]["receipt_sha256"]
+    manifest["entries_sha256"] = localio.canonical_json_digest(entries)
     _write_manifest(directory, manifest)
-    _assert_refused(directory, "malformed")
+
+    snapshot = snapshot_package(directory)
+    assert snapshot.source.changes_patch_sha256 == receipt["changes_patch_sha256"]
+    assert evidence_package.verify_package(directory=directory, json_output=False) == 0
 
 
 def test_patch_digest_must_match_source_receipt_entry_and_actual_bytes(tmp_path: Path) -> None:
@@ -285,6 +325,62 @@ def test_patch_digest_must_match_source_receipt_entry_and_actual_bytes(tmp_path:
     source["changes_patch_sha256"] = receipt["changes_patch_sha256"]
     source["receipt_sha256"] = receipt["digests"]["receipt_sha256"]
     manifest["entries_sha256"] = localio.canonical_json_digest(entries)
+    _write_manifest(directory, manifest)
+
+    _assert_refused(directory, "mismatch")
+
+
+def test_stale_receipt_digest_is_mismatch_and_malformed_digest_is_malformed(tmp_path: Path) -> None:
+    directory = _write_package(tmp_path)
+    receipt_path = directory / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["status"] = "tampered"
+    receipt_bytes = json.dumps(receipt, sort_keys=True).encode("utf-8")
+    receipt_path.write_bytes(receipt_bytes)
+    manifest = _manifest(directory)
+    receipt_entry = next(entry for entry in manifest["entries"] if entry["path"] == "receipt.json")
+    receipt_entry["bytes"] = len(receipt_bytes)
+    receipt_entry["sha256"] = _sha256(receipt_bytes)
+    manifest["entries_sha256"] = localio.canonical_json_digest(manifest["entries"])
+    _write_manifest(directory, manifest)
+    _assert_refused(directory, "mismatch")
+
+    directory = _write_package(tmp_path)
+    receipt_path = directory / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["digests"]["receipt_sha256"] = "not-a-sha256"
+    receipt_bytes = json.dumps(receipt, sort_keys=True).encode("utf-8")
+    receipt_path.write_bytes(receipt_bytes)
+    manifest = _manifest(directory)
+    receipt_entry = next(entry for entry in manifest["entries"] if entry["path"] == "receipt.json")
+    receipt_entry["bytes"] = len(receipt_bytes)
+    receipt_entry["sha256"] = _sha256(receipt_bytes)
+    manifest["entries_sha256"] = localio.canonical_json_digest(manifest["entries"])
+    _write_manifest(directory, manifest)
+    _assert_refused(directory, "malformed")
+
+
+def test_stale_receipt_digest_precedes_unsupported_schema_classification(tmp_path: Path) -> None:
+    directory = _write_package(tmp_path)
+    receipt_path = directory / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["schema_version"] = 999
+    receipt_bytes = json.dumps(receipt, sort_keys=True).encode("utf-8")
+    receipt_path.write_bytes(receipt_bytes)
+    manifest = _manifest(directory)
+    receipt_entry = next(entry for entry in manifest["entries"] if entry["path"] == "receipt.json")
+    receipt_entry["bytes"] = len(receipt_bytes)
+    receipt_entry["sha256"] = _sha256(receipt_bytes)
+    manifest["entries_sha256"] = localio.canonical_json_digest(manifest["entries"])
+    _write_manifest(directory, manifest)
+
+    _assert_refused(directory, "mismatch")
+
+
+def test_stale_entries_digest_is_mismatch(tmp_path: Path) -> None:
+    directory = _write_package(tmp_path)
+    manifest = _manifest(directory)
+    manifest["entries_sha256"] = "0" * 64
     _write_manifest(directory, manifest)
 
     _assert_refused(directory, "mismatch")
@@ -331,11 +427,13 @@ def test_successful_repeated_snapshots_close_each_root_descriptor(
 
     opened: list[int] = []
     closed: list[int] = []
+    writable_modes: list[bool] = []
     real_open = package_snapshot.dirfd.open_directory_nofollow
     real_close = os.close
 
-    def record_open(path: Path) -> int:
-        descriptor = real_open(path)
+    def record_open(path: Path, *, writable: bool = True) -> int:
+        writable_modes.append(writable)
+        descriptor = real_open(path, writable=writable)
         opened.append(descriptor)
         return descriptor
 
@@ -347,6 +445,7 @@ def test_successful_repeated_snapshots_close_each_root_descriptor(
     monkeypatch.setattr(os, "close", record_close)
     assert snapshot_package(directory).entries
     assert snapshot_package(directory).entries
+    assert writable_modes == [False, False]
     assert opened == [descriptor for descriptor in opened if descriptor in closed]
 
 
@@ -377,10 +476,10 @@ def test_every_opened_descriptor_is_closed_on_success_and_child_read_failure(
     monkeypatch.setattr(
         package_snapshot.dirfd,
         "open_directory_nofollow",
-        lambda path: track(real_open(path, package_snapshot.dirfd.root_directory_flags())),
+        lambda path, *, writable=True: track(real_open(path, package_snapshot.dirfd.root_directory_flags())),
     )
 
-    def open_child(parent: int, name: str, flags: int, mode: int = 0o600) -> int:
+    def open_child(parent: int, name: str, flags: int, mode: int = 0o600, *, share_write: bool = True) -> int:
         descriptor = track(real_open(name, flags, dir_fd=parent))
         child_descriptors.add(descriptor)
         return descriptor
@@ -414,6 +513,77 @@ def test_every_opened_descriptor_is_closed_on_success_and_child_read_failure(
     assert not active
 
 
+def test_child_write_denials_stay_open_through_final_validation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = _write_package(tmp_path)
+    import brigade.evidence_package_snapshot as package_snapshot
+
+    real_open_child = package_snapshot.dirfd.open_child_file
+    real_final_checks = package_snapshot._final_child_checks
+    opened_children: list[int] = []
+
+    def open_child(parent: int, name: str, flags: int, mode: int = 0o600, *, share_write: bool = True) -> int:
+        descriptor = real_open_child(parent, name, flags, mode, share_write=share_write)
+        opened_children.append(descriptor)
+        return descriptor
+
+    def check_with_held_children(root_fd: int, observed: dict[str, object], expected_names: frozenset[str]) -> None:
+        assert opened_children
+        for descriptor in opened_children:
+            os.fstat(descriptor)
+        real_final_checks(root_fd, observed, expected_names)
+
+    monkeypatch.setattr(package_snapshot.dirfd, "open_child_file", open_child)
+    monkeypatch.setattr(package_snapshot, "_final_child_checks", check_with_held_children)
+
+    snapshot_package(directory)
+
+    assert len(opened_children) >= 2
+    for descriptor in opened_children:
+        with pytest.raises(OSError):
+            os.fstat(descriptor)
+
+
+def test_child_files_are_opened_in_binary_mode_when_supported(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    directory = _write_package(tmp_path)
+    import brigade.evidence_package_snapshot as package_snapshot
+
+    binary_flag = 0x8000
+    monkeypatch.setattr(package_snapshot.os, "O_BINARY", binary_flag, raising=False)
+    real_open_child = package_snapshot.dirfd.open_child_file
+    flags_seen: list[int] = []
+
+    def open_child(parent: int, name: str, flags: int, mode: int = 0o600, *, share_write: bool = True) -> int:
+        flags_seen.append(flags)
+        return real_open_child(parent, name, flags & ~binary_flag, mode, share_write=share_write)
+
+    monkeypatch.setattr(package_snapshot.dirfd, "open_child_file", open_child)
+
+    snapshot_package(directory)
+
+    assert flags_seen
+    assert all(flags & binary_flag for flags in flags_seen)
+
+
+def test_child_files_are_opened_without_windows_write_sharing(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    directory = _write_package(tmp_path)
+    import brigade.evidence_package_snapshot as package_snapshot
+
+    real_open_child = package_snapshot.dirfd.open_child_file
+    sharing_modes: list[bool] = []
+
+    def open_child(parent: int, name: str, flags: int, mode: int = 0o600, *, share_write: bool = True) -> int:
+        sharing_modes.append(share_write)
+        return real_open_child(parent, name, flags, mode, share_write=share_write)
+
+    monkeypatch.setattr(package_snapshot.dirfd, "open_child_file", open_child)
+    snapshot_package(directory)
+
+    assert sharing_modes
+    assert not any(sharing_modes)
+
+
 def test_declared_companion_growth_uses_only_one_eof_probe(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     directory = _write_package(tmp_path, files={"changes.patch": b"small"})
     import brigade.evidence_package_snapshot as package_snapshot
@@ -425,9 +595,9 @@ def test_declared_companion_growth_uses_only_one_eof_probe(tmp_path: Path, monke
     real_open = package_snapshot.dirfd.open_child_file
     real_read = os.read
 
-    def record_patch_open(parent: int, name: str, flags: int, mode: int = 0o600) -> int:
+    def record_patch_open(parent: int, name: str, flags: int, mode: int = 0o600, *, share_write: bool = True) -> int:
         nonlocal patch_descriptor
-        descriptor = real_open(parent, name, flags, mode)
+        descriptor = real_open(parent, name, flags, mode, share_write=share_write)
         if name == "changes.patch":
             patch_descriptor = descriptor
         return descriptor
@@ -508,7 +678,7 @@ def test_capability_refusals_happen_before_root_open(
     monkeypatch.setattr(
         package_snapshot.dirfd,
         "open_directory_nofollow",
-        lambda path: (_ for _ in ()).throw(AssertionError("root open should not occur")),
+        lambda path, *, writable=True: (_ for _ in ()).throw(AssertionError("root open should not occur")),
     )
     if missing:
         monkeypatch.setattr(package_snapshot.os, "supports_fd", set())
@@ -540,6 +710,42 @@ def test_final_scan_is_fresh_and_anchored_to_the_held_directory(
     assert raised.value.code in {"changed", "unsafe"}
     assert (directory / "unexpected-child").exists()
     assert calls == 2
+
+
+def test_root_path_metadata_drift_does_not_change_directory_identity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    directory = _write_package(tmp_path)
+    import brigade.evidence_package_snapshot as package_snapshot
+
+    original_stat = os.stat
+
+    def stat_with_directory_metadata_drift(path, *args, **kwargs):
+        result = original_stat(path, *args, **kwargs)
+        if path == directory and kwargs.get("follow_symlinks") is False:
+            return SimpleNamespace(
+                st_dev=result.st_dev,
+                st_ino=result.st_ino,
+                st_size=result.st_size + 1,
+                st_mtime_ns=result.st_mtime_ns + 1,
+                st_ctime_ns=result.st_ctime_ns + 1,
+                st_mode=result.st_mode,
+            )
+        return result
+
+    monkeypatch.setattr(package_snapshot.os, "stat", stat_with_directory_metadata_drift)
+    monkeypatch.setattr(
+        package_snapshot.os,
+        "supports_dir_fd",
+        set(package_snapshot.os.supports_dir_fd) | {stat_with_directory_metadata_drift},
+    )
+    monkeypatch.setattr(
+        package_snapshot.os,
+        "supports_follow_symlinks",
+        set(package_snapshot.os.supports_follow_symlinks) | {stat_with_directory_metadata_drift},
+    )
+
+    assert snapshot_package(directory).source.verify_run_id == "20260908-120000-work-verify-package"
 
 
 def test_scan_refuses_repeated_names_without_consuming_an_unbounded_tail(
@@ -593,8 +799,8 @@ def test_root_replacement_after_open_cannot_redirect_child_reads(
     real_open = package_snapshot.dirfd.open_directory_nofollow
     real_child_open = package_snapshot.dirfd.open_child_file
 
-    def open_and_replace(path: Path) -> int:
-        descriptor = real_open(path)
+    def open_and_replace(path: Path, *, writable: bool = True) -> int:
+        descriptor = real_open(path, writable=writable)
         moved = tmp_path / "original-held"
         directory.rename(moved)
         if as_symlink:
@@ -603,8 +809,8 @@ def test_root_replacement_after_open_cannot_redirect_child_reads(
             replacement.rename(directory)
         return descriptor
 
-    def record_child_open(parent: int, name: str, flags: int, mode: int = 0o600) -> int:
-        descriptor = real_child_open(parent, name, flags, mode)
+    def record_child_open(parent: int, name: str, flags: int, mode: int = 0o600, *, share_write: bool = True) -> int:
+        descriptor = real_child_open(parent, name, flags, mode, share_write=share_write)
         opened_inodes.append(os.fstat(descriptor).st_ino)
         return descriptor
 
@@ -673,10 +879,10 @@ def test_declared_receipt_limit_is_malformed_before_receipt_open(
 
     real_open = package_snapshot.dirfd.open_child_file
 
-    def refuse_receipt_open(parent: int, name: str, flags: int, mode: int = 0o600) -> int:
+    def refuse_receipt_open(parent: int, name: str, flags: int, mode: int = 0o600, *, share_write: bool = True) -> int:
         if name == "receipt.json":
             raise AssertionError("oversized declared receipt was opened")
-        return real_open(parent, name, flags, mode)
+        return real_open(parent, name, flags, mode, share_write=share_write)
 
     monkeypatch.setattr(package_snapshot.dirfd, "open_child_file", refuse_receipt_open)
     _assert_refused(directory, "malformed")
@@ -698,10 +904,10 @@ def test_oversized_sparse_companion_is_refused_before_whole_read(
 
     real_open = package_snapshot.dirfd.open_child_file
 
-    def refuse_patch_open(parent: int, name: str, flags: int, mode: int = 0o600) -> int:
+    def refuse_patch_open(parent: int, name: str, flags: int, mode: int = 0o600, *, share_write: bool = True) -> int:
         if name == "changes.patch":
             raise AssertionError("oversized child was opened")
-        return real_open(parent, name, flags, mode)
+        return real_open(parent, name, flags, mode, share_write=share_write)
 
     monkeypatch.setattr(package_snapshot.dirfd, "open_child_file", refuse_patch_open)
     _assert_refused(directory, "malformed")
@@ -719,9 +925,9 @@ def test_oversized_sparse_companion_is_refused_before_whole_read(
     patch_descriptor = -1
     real_read = os.read
 
-    def record_patch_open(parent: int, name: str, flags: int, mode: int = 0o600) -> int:
+    def record_patch_open(parent: int, name: str, flags: int, mode: int = 0o600, *, share_write: bool = True) -> int:
         nonlocal patch_descriptor
-        descriptor = real_open(parent, name, flags, mode)
+        descriptor = real_open(parent, name, flags, mode, share_write=share_write)
         if name == "changes.patch":
             patch_descriptor = descriptor
         return descriptor
@@ -748,9 +954,9 @@ def test_opaque_companion_streaming_is_bounded(tmp_path: Path, monkeypatch: pyte
     real_open = package_snapshot.dirfd.open_child_file
     real_read = os.read
 
-    def record_summary_open(parent: int, name: str, flags: int, mode: int = 0o600) -> int:
+    def record_summary_open(parent: int, name: str, flags: int, mode: int = 0o600, *, share_write: bool = True) -> int:
         nonlocal summary_fd
-        descriptor = real_open(parent, name, flags, mode)
+        descriptor = real_open(parent, name, flags, mode, share_write=share_write)
         if name == "summary.md":
             summary_fd = descriptor
         return descriptor
@@ -793,7 +999,7 @@ def test_embedded_nul_and_runtime_unsupported_primitives_fail_closed(
 
     opened = False
 
-    def fail_if_opened(path: Path) -> int:
+    def fail_if_opened(path: Path, *, writable: bool = True) -> int:
         nonlocal opened
         opened = True
         raise AssertionError("embedded NUL reached root open")
@@ -804,7 +1010,7 @@ def test_embedded_nul_and_runtime_unsupported_primitives_fail_closed(
 
     directory = _write_package(tmp_path)
 
-    def unavailable_root(path: Path) -> int:
+    def unavailable_root(path: Path, *, writable: bool = True) -> int:
         raise NotImplementedError
 
     monkeypatch.setattr(package_snapshot.dirfd, "open_directory_nofollow", unavailable_root)
@@ -813,7 +1019,7 @@ def test_embedded_nul_and_runtime_unsupported_primitives_fail_closed(
     monkeypatch.setattr(
         package_snapshot.dirfd,
         "open_directory_nofollow",
-        lambda path: (_ for _ in ()).throw(OSError(errno.ENOSYS, "unsupported")),
+        lambda path, *, writable=True: (_ for _ in ()).throw(OSError(errno.ENOSYS, "unsupported")),
     )
     _assert_refused(directory, "unavailable")
 
@@ -860,13 +1066,13 @@ def test_runtime_unsupported_primitives_after_capability_admission_close_descrip
         active.add(descriptor)
         return descriptor
 
-    def open_root(path: Path) -> int:
-        return track(real_root_open(path))
+    def open_root(path: Path, *, writable: bool = True) -> int:
+        return track(real_root_open(path, writable=writable))
 
-    def open_child(parent: int, name: str, flags: int, mode: int = 0o600) -> int:
+    def open_child(parent: int, name: str, flags: int, mode: int = 0o600, *, share_write: bool = True) -> int:
         if operation == "child-open":
             unsupported()
-        descriptor = track(real_child_open(parent, name, flags, mode))
+        descriptor = track(real_child_open(parent, name, flags, mode, share_write=share_write))
         child_descriptors.add(descriptor)
         return descriptor
 

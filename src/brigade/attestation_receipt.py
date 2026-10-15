@@ -19,6 +19,10 @@ class ReceiptDigestError(ValueError):
     """Raised when receipt digest evidence is invalid."""
 
 
+class ReceiptDigestMismatchError(ReceiptDigestError):
+    """Raised when a valid stored digest does not match receipt content."""
+
+
 class ReceiptSelectionError(ValueError):
     """Raised when a bounded verify receipt selection cannot be made."""
 
@@ -73,7 +77,7 @@ def snapshot_receipt(receipt: Mapping[str, Any]) -> ReceiptSnapshot:
     if not isinstance(stored_digest, str) or not _SHA256_RE.fullmatch(stored_digest):
         raise ReceiptDigestError("receipt digest must be a lowercase SHA-256 hex string")
     if stored_digest != digest:
-        raise ReceiptDigestError("receipt digest does not match receipt content")
+        raise ReceiptDigestMismatchError("receipt digest does not match receipt content")
     return ReceiptSnapshot(receipt=snapshot, digest=digest)
 
 

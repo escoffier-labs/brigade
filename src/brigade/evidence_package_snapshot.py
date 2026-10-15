@@ -33,15 +33,21 @@ _SOURCE_KEYS = frozenset(
 )
 _ENTRY_KEYS = frozenset({"path", "sha256", "bytes", "media_type", "kind"})
 _LIMITATIONS = ["receipt-contains-local-paths", "integrity-only"]
+# Export and standalone package verification accept legacy schema-v1 receipts.
+_SUPPORTED_RECEIPT_SCHEMA_VERSIONS = frozenset({1, 2})
 _ALLOWED = {name: (kind, media_type) for name, kind, media_type in evidence_package.PACKAGE_FILES}
 _PACKAGE_NAMES = frozenset({"manifest.json", *_ALLOWED})
+MAX_PACKAGE_BYTES = _MANIFEST_MAX_BYTES + sum(
+    attestation_input.MAX_JSON_BYTES if name == "receipt.json" else evidence_package.MAX_ENTRY_BYTES
+    for name in _ALLOWED
+)
 
 
 class PackageSnapshotError(ValueError):
     """A strict package snapshot could not be produced safely."""
 
     def __init__(self, code: str):
-        if code not in {"unavailable", "unsafe", "malformed", "mismatch", "changed"}:
+        if code not in {"unavailable", "unsafe", "malformed", "mismatch", "changed", "read_limit_exceeded"}:
             raise ValueError("invalid package snapshot error code")
         self.code = code
         super().__init__(code)
@@ -92,6 +98,8 @@ def _unsupported_operation(error: OSError) -> bool:
 
 
 def _capabilities_available() -> bool:
+    if dirfd.nt_available():
+        return True
     return (
         os.name == "posix"
         and sys.platform != "win32"
@@ -117,29 +125,40 @@ def _same_observation(left: _Observation, right: _Observation) -> bool:
     return left == right
 
 
+def _same_directory_identity(left: _Observation, right: _Observation) -> bool:
+    return (left.device, left.inode) == (right.device, right.inode)
+
+
 def _scan_names(root_fd: int) -> frozenset[str]:
-    scan_fd = -1
     try:
-        scan_fd = os.open(".", dirfd.directory_flags(), dir_fd=root_fd)
-        names: set[str] = set()
-        entry_count = 0
-        with os.scandir(scan_fd) as iterator:
-            for entry in iterator:
-                entry_count += 1
-                if entry_count > len(_PACKAGE_NAMES) or entry.name not in _PACKAGE_NAMES or entry.name in names:
-                    _error("unsafe")
-                names.add(entry.name)
-        return frozenset(names)
+        if os.name == "posix":
+            scan_fd = os.open(".", dirfd.directory_flags(), dir_fd=root_fd)
+            try:
+                names: set[str] = set()
+                entry_count = 0
+                with os.scandir(scan_fd) as iterator:
+                    for entry in iterator:
+                        entry_count += 1
+                        if entry_count > len(_PACKAGE_NAMES) or entry.name not in _PACKAGE_NAMES or entry.name in names:
+                            _error("unsafe")
+                        names.add(entry.name)
+                return frozenset(names)
+            finally:
+                os.close(scan_fd)
+        windows_names: set[str] = set()
+        for name in dirfd.child_names(root_fd, len(_PACKAGE_NAMES) + 1):
+            if name not in _PACKAGE_NAMES or name in windows_names:
+                _error("unsafe")
+            windows_names.add(name)
+        return frozenset(windows_names)
     except PackageSnapshotError:
         raise
-    except (NotImplementedError, OSError):
+    except OSError as error:
+        if dirfd.is_reparse_point_refusal(error):
+            _error("unsafe")
         _error("unavailable")
-    finally:
-        if scan_fd != -1:
-            try:
-                os.close(scan_fd)
-            except (NotImplementedError, OSError):
-                pass
+    except NotImplementedError:
+        _error("unavailable")
 
 
 def _read_child(
@@ -149,16 +168,26 @@ def _read_child(
     limit: int,
     declared_size: int | None,
     capture: bool,
+    held_descriptors: list[int] | None = None,
 ) -> tuple[bytes | None, str, _Observation]:
     descriptor = -1
     try:
-        named = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+        named = (
+            os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+            if os.name == "posix"
+            else dirfd.stat_child(root_fd, name)
+        )
         if not stat.S_ISREG(named.st_mode):
             _error("unsafe")
         descriptor = dirfd.open_child_file(
             root_fd,
             name,
-            os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | getattr(os, "O_CLOEXEC", 0),
+            os.O_RDONLY
+            | getattr(os, "O_BINARY", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+            | getattr(os, "O_NONBLOCK", 0)
+            | getattr(os, "O_CLOEXEC", 0),
+            share_write=False,
         )
         initial = _observation(os.fstat(descriptor))
         if not stat.S_ISREG(os.fstat(descriptor).st_mode):
@@ -187,10 +216,17 @@ def _read_child(
         final = _observation(os.fstat(descriptor))
         if not _same_observation(initial, final):
             _error("changed")
+        if held_descriptors is not None:
+            held_descriptors.append(descriptor)
+            descriptor = -1
         return (b"".join(chunks) if chunks is not None else None, digest.hexdigest(), initial)
     except PackageSnapshotError:
         raise
-    except (NotImplementedError, OSError):
+    except OSError as error:
+        if dirfd.is_reparse_point_refusal(error):
+            _error("unsafe")
+        _error("unavailable")
+    except NotImplementedError:
         _error("unavailable")
     finally:
         if descriptor != -1:
@@ -280,11 +316,11 @@ def _validate_manifest(value: object) -> tuple[dict[str, Any], dict[str, Any], l
         entries.append(entry)
     if paths != sorted(paths) or len(paths) != len(set(paths)) or "receipt.json" not in paths:
         _error("malformed")
-    if not _is_digest(manifest["entries_sha256"], nullable=False) or manifest[
-        "entries_sha256"
-    ] != localio.canonical_json_digest(entries):
+    if not _is_digest(manifest["entries_sha256"], nullable=False):
         _error("malformed")
-    if (source["changes_patch_sha256"] is None) != ("changes.patch" not in paths):
+    if manifest["entries_sha256"] != localio.canonical_json_digest(entries):
+        _error("mismatch")
+    if source["changes_patch_sha256"] is None and "changes.patch" in paths:
         _error("malformed")
     return manifest, source, entries
 
@@ -294,10 +330,16 @@ def _final_child_checks(root_fd: int, observed: dict[str, _Observation], expecte
         _error("changed")
     for name, before in observed.items():
         try:
-            after = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+            after = (
+                os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+                if os.name == "posix"
+                else dirfd.stat_child(root_fd, name)
+            )
         except NotImplementedError:
             _error("unavailable")
         except OSError as error:
+            if dirfd.is_reparse_point_refusal(error):
+                _error("unsafe")
             if _unsupported_operation(error):
                 _error("unavailable")
             _error("changed")
@@ -312,16 +354,19 @@ def _validate_receipt(data: bytes, source: dict[str, Any]) -> str:
         parsed = attestation_input.strict_json_loads(data, max_bytes=attestation_input.MAX_JSON_BYTES)
     except attestation_input.AttestationInputError:
         _error("malformed")
-    if (
-        not isinstance(parsed, dict)
-        or type(parsed.get("schema_version")) is not int
-        or parsed["schema_version"] != 2
-        or not _is_run_id(parsed.get("run_id"), nullable=False)
-    ):
+    if not isinstance(parsed, dict):
         _error("malformed")
     try:
-        receipt_snapshot = attestation_receipt.snapshot_stored_receipt(parsed)
+        receipt_snapshot = attestation_receipt.snapshot_receipt(parsed)
+    except attestation_receipt.ReceiptDigestMismatchError:
+        _error("mismatch")
     except attestation_receipt.ReceiptDigestError:
+        _error("malformed")
+    if (
+        type(parsed.get("schema_version")) is not int
+        or parsed["schema_version"] not in _SUPPORTED_RECEIPT_SCHEMA_VERSIONS
+        or not _is_run_id(parsed.get("run_id"), nullable=False)
+    ):
         _error("malformed")
     for key in ("verify_run_id", "producer_run_id", "tree_fingerprint", "baseline_commit", "changes_patch_sha256"):
         receipt_key = "run_id" if key == "verify_run_id" else key
@@ -340,9 +385,10 @@ def snapshot_package(directory: Path) -> PackageSnapshot:
         _error("unsafe")
 
     root_fd = -1
+    held_descriptors: list[int] = []
     try:
         try:
-            root_fd = dirfd.open_directory_nofollow(directory)
+            root_fd = dirfd.open_directory_nofollow(directory, writable=False)
         except NotImplementedError:
             _error("unavailable")
         except OSError as error:
@@ -356,7 +402,12 @@ def snapshot_package(directory: Path) -> PackageSnapshot:
         if "manifest.json" not in initial_names:
             _error("malformed")
         manifest_bytes, manifest_digest, manifest_observation = _read_child(
-            root_fd, "manifest.json", limit=_MANIFEST_MAX_BYTES, declared_size=None, capture=True
+            root_fd,
+            "manifest.json",
+            limit=_MANIFEST_MAX_BYTES,
+            declared_size=None,
+            capture=True,
+            held_descriptors=held_descriptors,
         )
         assert manifest_bytes is not None
         try:
@@ -380,6 +431,7 @@ def snapshot_package(directory: Path) -> PackageSnapshot:
                 limit=attestation_input.MAX_JSON_BYTES if name == "receipt.json" else evidence_package.MAX_ENTRY_BYTES,
                 declared_size=entry["bytes"],
                 capture=name == "receipt.json",
+                held_descriptors=held_descriptors,
             )
             if digest != entry["sha256"]:
                 _error("mismatch")
@@ -393,7 +445,7 @@ def snapshot_package(directory: Path) -> PackageSnapshot:
                 del data
 
         assert receipt_digest is not None
-        if source["changes_patch_sha256"] is not None and patch_digest != source["changes_patch_sha256"]:
+        if patch_digest is not None and patch_digest != source["changes_patch_sha256"]:
             _error("mismatch")
 
         _final_child_checks(root_fd, observed, expected_names)
@@ -405,7 +457,7 @@ def snapshot_package(directory: Path) -> PackageSnapshot:
             if _unsupported_operation(error):
                 _error("unavailable")
             _error("changed")
-        if not stat.S_ISDIR(current_root.st_mode) or not _same_observation(root, _observation(current_root)):
+        if not stat.S_ISDIR(current_root.st_mode) or not _same_directory_identity(root, _observation(current_root)):
             _error("changed")
         return PackageSnapshot(
             manifest_bytes=manifest_bytes,
@@ -425,6 +477,11 @@ def snapshot_package(directory: Path) -> PackageSnapshot:
     except (NotImplementedError, OSError):
         _error("unavailable")
     finally:
+        for descriptor in held_descriptors:
+            try:
+                os.close(descriptor)
+            except (NotImplementedError, OSError):
+                pass
         if root_fd != -1:
             try:
                 os.close(root_fd)

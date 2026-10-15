@@ -109,7 +109,7 @@ def _read(root_fd: int, name: str, *, limit: int) -> tuple[bytes, tuple[int, int
             raise DerivativeExportError(f"source artifact exceeds size limit: {name}")
         flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
         flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_BINARY", 0)
-        descriptor = dirfd.open_child_file(root_fd, name, flags)
+        descriptor = dirfd.open_child_file(root_fd, name, flags, share_write=False)
         initial = os.fstat(descriptor)
         if not stat.S_ISREG(initial.st_mode):
             raise DerivativeExportError(f"source artifact is not a regular file: {name}")
@@ -295,18 +295,6 @@ def export_derivative(
     manifest = _json_object(raw["manifest.json"], "manifest", max_bytes=evidence_package_snapshot._MANIFEST_MAX_BYTES)
     if manifest.get("schema") != evidence_package.SCHEMA:
         raise DerivativeExportError("unsupported source package schema")
-    candidate_source = manifest.get("source")
-    candidate_entries = manifest.get("entries")
-    if (
-        isinstance(candidate_source, dict)
-        and "changes_patch_sha256" in candidate_source
-        and isinstance(candidate_entries, list)
-    ):
-        declares_patch = any(
-            isinstance(entry, dict) and entry.get("path") == "changes.patch" for entry in candidate_entries
-        )
-        if (candidate_source["changes_patch_sha256"] is None) != (not declares_patch):
-            raise DerivativeExportError("source patch digest does not match receipt and manifest")
     try:
         _, source_metadata, _ = evidence_package_snapshot._validate_manifest(manifest)
     except evidence_package_snapshot.PackageSnapshotError as exc:
@@ -314,7 +302,9 @@ def export_derivative(
     _validate_manifest_entries(manifest, raw)
     receipt = _json_object(raw["receipt.json"], "receipt")
     try:
-        receipt_snapshot = attestation_receipt.snapshot_stored_receipt(receipt)
+        receipt_snapshot = attestation_receipt.snapshot_receipt(receipt)
+    except attestation_receipt.ReceiptDigestMismatchError as exc:
+        raise DerivativeExportError("source receipt digest does not match receipt content") from exc
     except attestation_receipt.ReceiptDigestError as exc:
         raise DerivativeExportError("source receipt digest is invalid") from exc
     if source_metadata["receipt_sha256"] != receipt_snapshot.digest:
@@ -334,7 +324,7 @@ def export_derivative(
     receipt_patch_digest = receipt.get("changes_patch_sha256")
     manifest_patch_digest = source_metadata.get("changes_patch_sha256")
     if patch_data is None:
-        if receipt_patch_digest is not None or manifest_patch_digest is not None:
+        if receipt_patch_digest != manifest_patch_digest:
             raise DerivativeExportError("source patch digest does not match receipt and manifest")
     elif receipt_patch_digest != patch_digest or manifest_patch_digest != patch_digest:
         raise DerivativeExportError("source patch digest does not match receipt and manifest")
@@ -362,7 +352,7 @@ def export_derivative(
     source_artifacts = [
         {"path": name, "sha256": hashlib.sha256(raw[name]).hexdigest(), "bytes": len(raw[name])} for name in known_names
     ]
-    payload = {
+    payload: dict[str, Any] = {
         "schema": SCHEMA,
         "schema_version": SCHEMA_VERSION,
         "classification": "minimized-derivative",
@@ -390,6 +380,8 @@ def export_derivative(
         },
         "limitations": ["not-original-signed-object", "no-recipient-authorization-validation", "local-export-only"],
     }
+    if patch_data is None and manifest_patch_digest is not None:
+        payload["limitations"].append("source-patch-omitted")
     encoded = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode()
     parent_fd = output_fd = temp_fd = -1
     temp_name = f".derivative.json.tmp-{secrets.token_hex(4)}"
@@ -412,9 +404,12 @@ def export_derivative(
             os.close(current_parent_fd)
         dirfd.mkdir_child(parent_fd, out.name)
         created_output = True
+        created_entry = dirfd.stat_child(parent_fd, out.name)
+        output_identity = (created_entry.st_dev, created_entry.st_ino)
         output_fd = dirfd.open_child_directory(parent_fd, out.name)
         output_info = os.fstat(output_fd)
-        output_identity = (output_info.st_dev, output_info.st_ino)
+        if (output_info.st_dev, output_info.st_ino) != output_identity:
+            raise DerivativeExportError("derivative output directory changed during publication")
         output_entry = dirfd.stat_child(parent_fd, out.name)
         if (output_entry.st_dev, output_entry.st_ino) != output_identity:
             raise DerivativeExportError("derivative output directory changed during publication")

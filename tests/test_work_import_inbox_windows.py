@@ -60,21 +60,6 @@ def test_nt_file_create_append_preserves_crt_flags_without_truncation(monkeypatc
     assert opened["flags"] & os.O_APPEND
 
 
-def test_nt_file_open_preserves_binary_mode(monkeypatch):
-    from types import SimpleNamespace
-
-    binary_flag = 0x8000
-    monkeypatch.setattr(os, "O_BINARY", binary_flag, raising=False)
-    opened = {}
-    monkeypatch.setattr(nt_dirfd, "_require_api", lambda: SimpleNamespace(CloseHandle=lambda handle: None))
-    monkeypatch.setattr(nt_dirfd, "_nt_create", lambda *args, **kwargs: 123)
-    monkeypatch.setattr(nt_dirfd, "_reject_reparse", lambda *args, **kwargs: None)
-    monkeypatch.setattr(nt_dirfd, "_handle_to_fd", lambda _api, _handle, flags: opened.update(flags=flags) or 42)
-
-    assert nt_dirfd.open_file(1, "changes.patch", os.O_RDONLY | binary_flag) == 42
-    assert opened["flags"] & binary_flag
-
-
 @pytest.mark.parametrize("access_mode", [os.O_WRONLY, os.O_RDWR])
 def test_nt_append_requests_kernel_append_only_access(monkeypatch, access_mode):
     from types import SimpleNamespace

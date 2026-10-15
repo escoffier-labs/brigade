@@ -140,6 +140,29 @@ def test_derivative_excludes_inventory_logs_worker_checkpoint_and_prior_exports(
     assert json.loads(raw)["transformation"]["excluded_artifacts"] == 5
 
 
+@pytest.mark.parametrize("schema_version", [1, 2])
+def test_derivative_accepts_receipt_without_stored_digest(tmp_path: Path, schema_version: int) -> None:
+    run_dir, receipt = _fabricated_run_dir(tmp_path)
+    receipt["schema_version"] = schema_version
+    receipt.pop("digests")
+    (run_dir / "receipt.json").write_text(json.dumps(receipt), encoding="utf-8")
+    source = tmp_path / "source"
+    assert evidence_package.export_package(target=tmp_path, run_id=str(receipt["run_id"]), out_str=str(source)) == 0
+
+    out = tmp_path / "derivative"
+    evidence_derivative.export_derivative(
+        source=source,
+        out=out,
+        recipient="recipient-42",
+        authority="approved-case-7",
+        lawful_basis="contract",
+        necessity="review",
+    )
+    derivative = json.loads((out / "derivative.json").read_text(encoding="utf-8"))
+    assert derivative["evidence"]["receipt_metadata"]["schema_version"] == schema_version
+    assert derivative["evidence"]["receipt_metadata"]["run_id"] == receipt["run_id"]
+
+
 def test_derivative_rejects_receipt_with_invalid_stored_digest(tmp_path: Path) -> None:
     _, receipt = _fabricated_run_dir(tmp_path)
     source = tmp_path / "source"
@@ -160,7 +183,7 @@ def test_derivative_rejects_receipt_with_invalid_stored_digest(tmp_path: Path) -
             necessity="review",
         )
     except evidence_derivative.DerivativeExportError as exc:
-        assert str(exc) == "source receipt digest is invalid"
+        assert str(exc) == "source receipt digest does not match receipt content"
     else:
         raise AssertionError("derivative accepted a receipt with an invalid stored digest")
 
@@ -269,14 +292,14 @@ def test_derivative_rejects_source_artifact_replaced_after_initial_stat(tmp_path
     original_open = evidence_derivative.dirfd.open_child_file
     replaced = False
 
-    def replace_before_open(root_fd: int, name: str, flags: int, mode: int = 0o600) -> int:
+    def replace_before_open(root_fd: int, name: str, flags: int, mode: int = 0o600, **kwargs) -> int:
         nonlocal replaced
         if name == "changes.patch" and not replaced:
             replacement = tmp_path / "replacement.patch"
             replacement.write_bytes(b"replacement")
             replacement.replace(source / name)
             replaced = True
-        return original_open(root_fd, name, flags, mode)
+        return original_open(root_fd, name, flags, mode, **kwargs)
 
     monkeypatch.setattr(evidence_derivative.dirfd, "open_child_file", replace_before_open)
     try:
@@ -307,7 +330,7 @@ def test_derivative_rejects_unsupported_portable_package_schema_versions(tmp_pat
             "receipt-version",
             "receipt.json",
             "schema_version",
-            1,
+            99,
             "source receipt does not satisfy the portable package schema",
         ),
     ):
@@ -356,12 +379,12 @@ def test_derivative_rejects_source_inventory_added_during_export(tmp_path: Path,
     original_open = evidence_derivative.dirfd.open_child_file
     added = False
 
-    def add_artifact_after_inventory(root_fd: int, name: str, flags: int, mode: int = 0o600) -> int:
+    def add_artifact_after_inventory(root_fd: int, name: str, flags: int, mode: int = 0o600, **kwargs) -> int:
         nonlocal added
         if name == "changes.patch" and not added:
             (source / "attestation.json").write_text("late artifact", encoding="utf-8")
             added = True
-        return original_open(root_fd, name, flags, mode)
+        return original_open(root_fd, name, flags, mode, **kwargs)
 
     monkeypatch.setattr(evidence_derivative.dirfd, "open_child_file", add_artifact_after_inventory)
     try:
@@ -432,7 +455,7 @@ def test_derivative_rejects_patch_rewritten_with_recomputed_package_hashes(tmp_p
         raise AssertionError("derivative accepted a rewritten patch with recomputed package hashes")
 
 
-def test_derivative_rejects_package_missing_patch_artifact(tmp_path: Path) -> None:
+def test_derivative_records_omitted_patch_artifact(tmp_path: Path) -> None:
     _, receipt = _fabricated_run_dir(tmp_path)
     source = tmp_path / "source"
     assert evidence_package.export_package(target=tmp_path, run_id=str(receipt["run_id"]), out_str=str(source)) == 0
@@ -442,19 +465,19 @@ def test_derivative_rejects_package_missing_patch_artifact(tmp_path: Path) -> No
     manifest["entries_sha256"] = localio.canonical_json_digest(manifest["entries"])
     (source / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 
-    try:
-        evidence_derivative.export_derivative(
-            source=source,
-            out=tmp_path / "derivative",
-            recipient="recipient-42",
-            authority="approved-case-7",
-            lawful_basis="contract",
-            necessity="review",
-        )
-    except evidence_derivative.DerivativeExportError as exc:
-        assert str(exc) == "source patch digest does not match receipt and manifest"
-    else:
-        raise AssertionError("derivative accepted a package without its patch artifact")
+    out = tmp_path / "derivative"
+    evidence_derivative.export_derivative(
+        source=source,
+        out=out,
+        recipient="recipient-42",
+        authority="approved-case-7",
+        lawful_basis="contract",
+        necessity="review",
+    )
+    derivative = json.loads((out / "derivative.json").read_text(encoding="utf-8"))
+    assert "source-patch-omitted" in derivative["limitations"]
+    assert derivative["evidence"]["receipt_metadata"]["changes_patch_sha256"] == receipt["changes_patch_sha256"]
+    assert "changes.patch" not in {artifact["path"] for artifact in derivative["source_artifacts"]}
 
 
 def test_derivative_accepts_package_without_patch_when_digest_is_unavailable(tmp_path: Path) -> None:
@@ -526,9 +549,9 @@ def test_derivative_rejects_oversized_json_before_opening(tmp_path: Path, monkey
     opened: list[str] = []
     open_child_file = evidence_derivative.dirfd.open_child_file
 
-    def observe_open(parent: int, child: str, flags: int, mode: int = 0o600) -> int:
+    def observe_open(parent: int, child: str, flags: int, mode: int = 0o600, **kwargs) -> int:
         opened.append(child)
-        return open_child_file(parent, child, flags, mode)
+        return open_child_file(parent, child, flags, mode, **kwargs)
 
     monkeypatch.setattr(evidence_derivative.dirfd, "open_child_file", observe_open)
 
@@ -587,12 +610,12 @@ def test_derivative_preserves_concurrent_temporary_file_on_name_collision(tmp_pa
     open_child_file = evidence_derivative.dirfd.open_child_file
     concurrent_data = b"owned by another export"
 
-    def collide_on_temp(parent: int, name: str, flags: int, mode: int = 0o600) -> int:
+    def collide_on_temp(parent: int, name: str, flags: int, mode: int = 0o600, **kwargs) -> int:
         if name == ".derivative.json.tmp-collision":
             competitor = open_child_file(parent, name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, mode)
             os.write(competitor, concurrent_data)
             os.close(competitor)
-        return open_child_file(parent, name, flags, mode)
+        return open_child_file(parent, name, flags, mode, **kwargs)
 
     monkeypatch.setattr(evidence_derivative.dirfd, "open_child_file", collide_on_temp)
 
@@ -965,3 +988,113 @@ def test_derivative_export_cli_rejects_blank_authority(tmp_path: Path, capsys) -
     )
     assert not out.exists()
     assert "authorization metadata cannot be blank: authority" in capsys.readouterr().err
+
+
+def test_derivative_reads_deny_concurrent_windows_writers(tmp_path: Path, monkeypatch) -> None:
+    _, receipt = _fabricated_run_dir(tmp_path)
+    source = tmp_path / "source"
+    assert evidence_package.export_package(target=tmp_path, run_id=str(receipt["run_id"]), out_str=str(source)) == 0
+    original_open = evidence_derivative.dirfd.open_child_file
+    read_sharing: list[bool] = []
+
+    def observe_read(parent, name, flags, mode=0o600, *, share_write=True):
+        if not flags & (os.O_WRONLY | os.O_RDWR):
+            read_sharing.append(share_write)
+        return original_open(parent, name, flags, mode, share_write=share_write)
+
+    monkeypatch.setattr(evidence_derivative.dirfd, "open_child_file", observe_read)
+    evidence_derivative.export_derivative(
+        source=source,
+        out=tmp_path / "derivative",
+        recipient="recipient-42",
+        authority="approved-case-7",
+        lawful_basis="contract",
+        necessity="review",
+    )
+    assert read_sharing and not any(read_sharing)
+
+
+def test_derivative_cli_handles_unavailable_directory_operations(tmp_path: Path, monkeypatch, capsys) -> None:
+    source = tmp_path / "source"
+    source.mkdir()
+
+    def unavailable(*args, **kwargs):
+        raise NotImplementedError("directory operations unavailable")
+
+    monkeypatch.setattr(evidence_derivative.dirfd, "open_directory_nofollow", unavailable)
+    result = cli.main(
+        [
+            "receipts",
+            "export",
+            "derivative",
+            "--source",
+            str(source),
+            "--out",
+            str(tmp_path / "out"),
+            "--recipient",
+            "recipient-42",
+            "--authority",
+            "approved-case-7",
+            "--lawful-basis",
+            "contract",
+            "--necessity",
+            "review",
+        ]
+    )
+    assert result == 1
+    assert "error: cannot export evidence derivative: directory operations unavailable" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("competitor_content", [False, True])
+def test_derivative_refuses_output_directory_swapped_before_open(
+    tmp_path: Path, monkeypatch, competitor_content
+) -> None:
+    _, receipt = _fabricated_run_dir(tmp_path)
+    source = tmp_path / "source"
+    assert evidence_package.export_package(target=tmp_path, run_id=str(receipt["run_id"]), out_str=str(source)) == 0
+    out = tmp_path / "derivative"
+    original_open = evidence_derivative.dirfd.open_child_directory
+    swapped = False
+
+    def swap_before_open(parent, name, **kwargs):
+        nonlocal swapped
+        if name == out.name and not swapped:
+            out.rename(tmp_path / "created-directory")
+            out.mkdir()
+            if competitor_content:
+                (out / "competitor.txt").write_text("competing export", encoding="utf-8")
+            swapped = True
+        return original_open(parent, name, **kwargs)
+
+    monkeypatch.setattr(evidence_derivative.dirfd, "open_child_directory", swap_before_open)
+    with pytest.raises(evidence_derivative.DerivativeExportError, match="output directory changed"):
+        evidence_derivative.export_derivative(
+            source=source,
+            out=out,
+            recipient="recipient-42",
+            authority="approved-case-7",
+            lawful_basis="contract",
+            necessity="review",
+        )
+    assert out.is_dir()
+    assert {path.name for path in out.iterdir()} == ({"competitor.txt"} if competitor_content else set())
+    if competitor_content:
+        assert (out / "competitor.txt").read_text(encoding="utf-8") == "competing export"
+
+
+@pytest.mark.skipif(not evidence_derivative.dirfd.posix_available(), reason="POSIX filename rules")
+@pytest.mark.parametrize("component", ["2026-10-15T12:00", "parent\\child"])
+def test_derivative_publishes_beneath_valid_posix_component(tmp_path: Path, component: str) -> None:
+    _, receipt = _fabricated_run_dir(tmp_path)
+    source = tmp_path / "source"
+    assert evidence_package.export_package(target=tmp_path, run_id=str(receipt["run_id"]), out_str=str(source)) == 0
+    out = tmp_path / component / "derivative"
+    evidence_derivative.export_derivative(
+        source=source,
+        out=out,
+        recipient="recipient-42",
+        authority="approved-case-7",
+        lawful_basis="contract",
+        necessity="review",
+    )
+    assert (out / "derivative.json").is_file()

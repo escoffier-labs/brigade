@@ -26,11 +26,16 @@ from . import (
     agent_request,
     approval,
     attestation,
+    attestation_receipt,
     causal_receipt,
+    control_crosswalk_cosign,
+    control_crosswalk_package,
     control_readiness,
     cosign_attestation,
     evidence_package,
+    evidence_package_snapshot,
     localio,
+    receipt_schema,
     receipts_trailer,
     run_journal,
 )
@@ -122,13 +127,13 @@ class _Discovery:
     window: dict[str, Any] | None = None
 
 
-# Adapter seam for dedicated verifiers that are not wired yet (#1618).  An
-# adapter takes ``(target, artifact_path)`` (EC-12 passes the package
-# directory) and returns an ArtifactObservation with level, proposed outcome,
-# dimensions and reasons.  The result is checked against the fixed readiness
-# vocabulary; anything else is reported as ``verifier_error``.  The evaluator
-# still applies relpath, run binding and period.  ``None`` means not wired: the evaluator stops
-# at structural observation and reports ``verifier_not_wired``.
+# Adapter seam for dedicated verifiers. An adapter takes ``(target,
+# artifact_path)`` (EC-12 passes the package directory) and returns an
+# ArtifactObservation with level, proposed outcome, dimensions and reasons.
+# The result is checked against the fixed readiness vocabulary; anything else
+# is reported as ``verifier_error``. The evaluator still applies relpath, run
+# binding and period. ``None`` means the evaluator stops at structural
+# observation and reports ``verifier_not_wired``.
 VerifierAdapter = Callable[[Path, Path], control_readiness.ArtifactObservation]
 _VERIFIER_ADAPTERS: dict[str, VerifierAdapter | None] = {
     "cosign-bundle": None,
@@ -237,25 +242,62 @@ def _discovery_path_present(ctx: _Context, out: _Discovery, path: Path, *, direc
 
 
 def _adapter_observation(
-    adapter: VerifierAdapter, ctx: _Context, artifact: Path, relpath: str
+    adapter: VerifierAdapter, ctx: _Context, artifact: Path, relpath: str, *, reserve_bytes: int = 0
 ) -> control_readiness.ArtifactObservation:
     """Run a verifier adapter and hold its result to the readiness vocabulary."""
     try:
         snapshot_artifact = ctx.reader.snapshot_target / artifact.relative_to(ctx.target)
         if stat.S_ISDIR(ctx.reader.info(artifact).st_mode):
-            manifest = _read_json_object(ctx, artifact / "manifest.json")
-            ctx.reader.copy(artifact / "manifest.json")
-            if manifest is not None:
-                for entry in manifest.get("entries", []):
-                    name = entry.get("path") if isinstance(entry, dict) else None
-                    if not isinstance(name, str) or not evidence_package._is_safe_entry_path(name):
-                        raise _ReadRefusal("discovery_unreadable")
-                    ctx.reader.copy(artifact / name)
+            package_reserve = reserve_bytes if adapter is _verify_evidence_package else 0
+            snapshot_artifact = control_crosswalk_package.stage_source_package(
+                ctx.reader,
+                artifact,
+                lambda: _read_json_object(ctx, artifact / "manifest.json", reserve_bytes=package_reserve),
+                strict_package=adapter is _verify_evidence_package,
+                reserve_bytes=package_reserve,
+            )
         else:
+            if adapter is _verify_evidence_package:
+                return _invalid(ctx, artifact, "schema_missing")
             snapshot_artifact = ctx.reader.copy(artifact)
-            ctx.reader.copy(artifact.parent / "receipt.json")
-        _copy_public_trust(ctx)
+            receipt_path = artifact.parent / "receipt.json"
+            try:
+                ctx.reader.copy(receipt_path)
+            except OSError:
+                refusal = ctx.reader.errors.get(receipt_path)
+                if refusal in {"discovery_unreadable", "read_limit_exceeded", "symlink_refused"}:
+                    return _obs(relpath, "discovered", "invalid", _dims(), [refusal])
+                raise
+        if adapter not in {_verify_evidence_package, _verify_cosign_bundle}:
+            _copy_public_trust(ctx)
+        elif adapter is _verify_cosign_bundle:
+            try:
+                ctx.reader.copy(ctx.target / ".brigade" / "attestation" / "cosign.pub")
+            except OSError:
+                return _verifier_unavailable(relpath, "verifier_tool_unavailable")
         obs = control_readiness.validate_observation(adapter(ctx.reader.snapshot_target, snapshot_artifact))
+    except evidence_package_snapshot.PackageSnapshotError as exc:
+        if exc.code == "malformed":
+            return _obs(relpath, "discovered", "invalid", _dims(), ["schema_missing"])
+        if exc.code == "unsafe":
+            return _obs(
+                relpath,
+                "claim_validated",
+                "rejected",
+                _dims(integrity=("failed", "entry_path_unsafe"), subject="unknown", population="passed"),
+                ["entry_path_unsafe"],
+            )
+        if exc.code == "mismatch":
+            return _obs(
+                relpath,
+                "claim_validated",
+                "rejected",
+                _dims(integrity=("failed", "package_snapshot_mismatch"), subject="unknown", population="passed"),
+                ["package_snapshot_mismatch"],
+            )
+        if exc.code == "read_limit_exceeded":
+            return _verifier_unavailable(relpath, exc.code)
+        return _verifier_unavailable(relpath, "verifier_error")
     except Exception:
         return _verifier_unavailable(relpath, "verifier_error")
     obs.relpath = relpath
@@ -308,11 +350,7 @@ def _invalid(ctx: _Context, path: Path, reason: str, **dim_overrides: Any) -> co
 
 
 def _verify_receipt_children(ctx: _Context, filename: str) -> tuple[list[tuple[Path, Path]], _Discovery]:
-    """Bounded verify-run scan.
-
-    Verify receipts bind to a producer run through recorded fields, so a run
-    scope still needs the scan; a truncated scan keeps the claim incomplete.
-    """
+    """Bounded scan; truncated run-scoped receipts keep the claim incomplete."""
     root = ctx.target / ".brigade" / "work" / "verify-runs"
     children, truncated, error = _bounded_children(ctx, root)
     out = _Discovery(truncated=truncated)
@@ -344,8 +382,9 @@ def _evaluate_verify_receipt_completed(ctx: _Context) -> _Discovery:
         else:
             obs = _assess_verify_receipt(ctx, run_dir, path, receipt)
         # An unreadable receipt records no run identity, so it stays unbound.
-        _bind(obs, ctx, _receipt_binding(receipt))
-        obs.timestamp = _first_timestamp(receipt, "completed_at", "started_at")
+        _bind(obs, ctx, control_crosswalk_cosign.binding_candidates(obs, _receipt_binding(receipt)))
+        if not control_crosswalk_cosign.receipt_claims_untrusted(obs):
+            obs.timestamp = _first_timestamp(receipt, "completed_at", "started_at")
         _apply_period(obs, ctx)
         out.observations.append(obs)
     return out
@@ -354,19 +393,38 @@ def _evaluate_verify_receipt_completed(ctx: _Context) -> _Discovery:
 def _assess_verify_receipt(
     ctx: _Context, run_dir: Path, path: Path, receipt: dict[str, Any]
 ) -> control_readiness.ArtifactObservation:
-    """EC-01 structure of one verify receipt.
-
-    The stored digest and optional local HMAC are not verified here (the
-    integrity adapter is #1618), so integrity is ``not_checked`` and even a
-    well-formed successful receipt stops at ``structure_observed``.
-    """
+    """EC-01 verification result with a rederived writer-compatible digest."""
     relpath = _relpath(ctx, path)
-    if not isinstance(receipt.get("schema_version"), int):
-        return _obs(relpath, "discovered", "invalid", _dims(), ["schema_missing"])
+    schema_version = receipt.get("schema_version")
+    digests = receipt.get("digests")
+    has_digest_evidence = isinstance(digests, dict) and "receipt_sha256" in digests
+    receipt_digest: str | None = None
+
+    def invalid_schema() -> control_readiness.ArtifactObservation:
+        integrity = "passed" if receipt_digest else ("failed", "schema_missing")
+        return _obs(relpath, "discovered", "invalid", _dims(integrity=integrity), ["schema_missing"])
+
+    if "digests" in receipt:
+        try:
+            snapshot = attestation_receipt.snapshot_receipt(receipt)
+            if has_digest_evidence:
+                receipt_digest = snapshot.digest
+        except attestation_receipt.ReceiptDigestMismatchError:
+            return _obs(
+                relpath,
+                "claim_validated",
+                "rejected",
+                _dims(integrity=("failed", "receipt_digest_mismatch"), subject="unknown", population="passed"),
+                ["receipt_digest_mismatch"],
+            )
+        except attestation_receipt.ReceiptDigestError:
+            return invalid_schema()
+    if type(schema_version) is not int or schema_version != receipt_schema.VERIFY_RECEIPT_SCHEMA_VERSION:
+        return invalid_schema()
     subject: str | tuple[str, str] = (
         "passed" if receipt.get("run_id") == run_dir.name else ("failed", "run_binding_mismatch")
     )
-    integrity = ("not_checked", "verifier_not_wired")
+    integrity: Any = "passed" if has_digest_evidence else ("not_checked", "verifier_not_wired")
 
     def observed(
         proposed: str, population: Any, reasons: list[str] | None = None
@@ -381,7 +439,7 @@ def _assess_verify_receipt(
 
     status = receipt.get("status")
     if not isinstance(status, str):
-        return _obs(relpath, "discovered", "invalid", _dims(), ["schema_missing"])
+        return invalid_schema()
     commands = receipt.get("commands")
     # Producer receipt statuses: running (nonterminal) and the terminal
     # completed, failed, rejected (a command was refused) and canceled.
@@ -392,12 +450,12 @@ def _assess_verify_receipt(
     if status != "completed":
         return observed("incomplete", ("unknown", "status_not_terminal"))
     if not isinstance(commands, list):
-        return _obs(relpath, "discovered", "invalid", _dims(), ["schema_missing"])
+        return invalid_schema()
     if not commands:
         # An empty intended check list cannot establish that any test ran.
         return observed("incomplete", ("unknown", "empty_commands"))
     if not all(isinstance(c, dict) and type(c.get("exit_code")) is int for c in commands):
-        return _obs(relpath, "discovered", "invalid", _dims(), ["schema_missing"])
+        return invalid_schema()
     if any(c["exit_code"] != 0 for c in commands):
         return observed("failed", "passed", ["exit_code_nonzero"])
     planned = receipt.get("planned_commands")
@@ -411,6 +469,15 @@ def _assess_verify_receipt(
         return observed("incomplete", ("unknown", "planned_commands_mismatch"))
     if not all(c.get("status") == "completed" for c in commands):
         return observed("incomplete", ("unknown", "command_not_terminal"))
+    if has_digest_evidence:
+        return _obs(
+            relpath,
+            "claim_validated",
+            "validated" if subject == "passed" else "rejected",
+            _dims(integrity="passed", subject=subject, population="passed"),
+            [] if subject == "passed" else ["run_binding_mismatch"],
+            source_digest_sha256=receipt_digest,
+        )
     return observed("structure_observed", "passed", ["verifier_not_wired"])
 
 
@@ -484,6 +551,12 @@ def _verifier_unavailable(relpath: str, reason: str) -> control_readiness.Artifa
     )
 
 
+_verify_evidence_package = control_crosswalk_package.verify_evidence_package
+_VERIFIER_ADAPTERS["evidence-package"] = _verify_evidence_package
+_verify_cosign_bundle = control_crosswalk_cosign.verify_cosign_bundle
+_VERIFIER_ADAPTERS["cosign-bundle"] = _verify_cosign_bundle
+
+
 def _ssh_keygen_available() -> bool:
     return shutil.which("ssh-keygen") is not None
 
@@ -536,7 +609,7 @@ def _cosign_bundle_shape_ok(bundle: dict[str, Any]) -> bool:
 
 
 def _evaluate_cosign_bundle_exists(ctx: _Context) -> _Discovery:
-    """EC-03: cosign Sigstore bundle; structural only until a verifier adapter is wired."""
+    """Verify a run-bound cosign Test Result against the configured public key."""
     found, out = _verify_receipt_children(ctx, "attestation.sigstore.json")
     adapter = _VERIFIER_ADAPTERS.get("cosign-bundle")
     for run_dir, path in found:
@@ -568,9 +641,12 @@ def _evaluate_cosign_bundle_exists(ctx: _Context) -> _Discovery:
                 ),
                 ["verifier_not_wired"],
             )
-        _bind(obs, ctx, _receipt_binding(receipt))
-        obs.timestamp = _first_timestamp(receipt, "completed_at", "started_at")
+        _bind(obs, ctx, control_crosswalk_cosign.binding_candidates(obs, _receipt_binding(receipt)))
+        if not control_crosswalk_cosign.receipt_claims_untrusted(obs):
+            obs.timestamp = _first_timestamp(receipt, "completed_at", "started_at")
         _apply_period(obs, ctx)
+        if obs.scope == "in_scope":
+            out.verifier_unavailable |= obs.proposed == "unavailable"
         out.observations.append(obs)
     return out
 
@@ -617,8 +693,7 @@ def _agent_request_paths(ctx: _Context, run_dir: Path, out: _Discovery) -> list[
 def _evaluate_agent_request_signed(ctx: _Context) -> _Discovery:
     """EC-04: signed agent-request envelopes verify and name their run.
 
-    Signature, key trust and the statement's run are checked.  The ordering of
-    the request relative to worker dispatch is not independently checked.
+    Signature, key trust and statement run are checked; dispatch ordering is not.
     """
     run_dirs, out = _run_dirs(ctx)
     for run_dir in run_dirs:
@@ -1279,52 +1354,67 @@ def _evaluate_verify_archive_index_exists(ctx: _Context) -> _Discovery:
 
 
 def _evaluate_evidence_package_manifest(ctx: _Context) -> _Discovery:
-    """EC-12: evidence package manifests staged under ``.brigade/evidence-packages/``.
-
-    `brigade receipts export package --out` accepts any path, so discovery covers two
-    bounded staging locations: ``.brigade/evidence-packages/manifest.json``
-    (the root itself was the output) and ``<package>/manifest.json`` one level
-    down.  Deeper nesting is not discovered.  Without the strict package
-    verifier adapter (#1618) this checks the manifest schema, the recomputed
-    ``entries_sha256`` and that each listed entry is a safe, present regular
-    file.  Entry contents are not rehashed, so integrity stays ``not_checked``
-    and the claim cannot validate.
-    """
+    """EC-12 validates root and one-level package manifests with strict snapshots."""
     root = ctx.target / ".brigade" / "evidence-packages"
+    adapter = _VERIFIER_ADAPTERS.get("evidence-package")
+    strict_adapter = adapter is _verify_evidence_package
+    root_linked = strict_adapter and control_crosswalk_package.linked_package(ctx, root)
     children, truncated, error = _bounded_children(ctx, root)
+    children = [child for child in children if child.name != "manifest.json"]
     out = _Discovery(truncated=truncated)
     _record_discovery_error(out, ctx, root, error)
-    adapter = _VERIFIER_ADAPTERS.get("evidence-package")
-    package_dirs = ([root] if error is None and _discovery_path_present(ctx, out, root / "manifest.json") else []) + [
-        child for child in children if _discovery_path_present(ctx, out, child, directory=True)
-    ]
+    package_dirs: list[Path] = []
+    if error is None and (root_linked or _discovery_path_present(ctx, out, root / "manifest.json")):
+        package_dirs.append(root)
+    for child in children:
+        if strict_adapter and _is_symlink(ctx, child):
+            package_dirs.append(child)
+        elif _discovery_path_present(ctx, out, child, directory=True):
+            package_dirs.append(child)
+    manifest_reserve = evidence_package_snapshot.MAX_PACKAGE_BYTES if strict_adapter else 0
     for package_dir in package_dirs:
         path = package_dir / "manifest.json"
-        if not _discovery_path_present(ctx, out, path):
+        staged_receipt_candidates: dict[str, object] = {}
+        linked = control_crosswalk_package.linked_package(ctx, package_dir)
+        if not linked and not _discovery_path_present(ctx, out, path):
             continue
         relpath = _relpath(ctx, path)
-        manifest = None if (_is_symlink(ctx, package_dir) or _is_symlink(ctx, path)) else _read_json_object(ctx, path)
-        if _is_symlink(ctx, package_dir) or _is_symlink(ctx, path):
-            obs = _invalid(ctx, path, "symlink_refused")
+        manifest = None if linked else _read_json_object(ctx, path, manifest_reserve, strict_adapter)
+        if linked:
+            if strict_adapter:
+                obs = _obs(
+                    relpath,
+                    "claim_validated",
+                    "rejected",
+                    _dims(integrity=("failed", "entry_path_unsafe"), subject="unknown", population="passed"),
+                    ["entry_path_unsafe"],
+                )
+            else:
+                obs = _invalid(ctx, path, "symlink_refused")
         elif manifest is None:
-            obs = _invalid(ctx, path, "invalid_json")
+            obs = control_crosswalk_package.unreadable_manifest_observation(ctx.reader, relpath, path)
+            if strict_adapter:
+                ctx.reader.release_subtree(package_dir)
         elif adapter is not None:
-            obs = _adapter_observation(adapter, ctx, package_dir, relpath)
+            try:
+                obs = _adapter_observation(adapter, ctx, package_dir, relpath, reserve_bytes=manifest_reserve)
+                if strict_adapter and control_crosswalk_package.needs_staged_receipt(obs):
+                    staged_package = ctx.reader.snapshot_target / package_dir.relative_to(ctx.target)
+                    staged_receipt_candidates = control_crosswalk_package.receipt_binding_candidates(staged_package)
+            finally:
+                if strict_adapter:
+                    ctx.reader.release_subtree(package_dir)
         else:
             obs = _assess_package_manifest(ctx, package_dir, relpath, manifest)
         source = manifest.get("source") if isinstance(manifest, dict) else None
-        _bind(
-            obs,
-            ctx,
-            {
-                "source.producer_run_id": source.get("producer_run_id"),
-                "source.verify_run_id": source.get("verify_run_id"),
-            }
-            if isinstance(source, dict)
-            else {},
+        candidates = control_crosswalk_package.binding_candidates(
+            obs, source, staged_receipt_candidates, strict_package=strict_adapter
         )
+        _bind(obs, ctx, control_crosswalk_cosign.binding_candidates(obs, candidates))
+        manifest = control_crosswalk_package.trusted_timestamp_manifest(manifest, obs, strict_package=strict_adapter)
         obs.timestamp = _first_timestamp(manifest, "created_at")
         _apply_period(obs, ctx)
+        out.verifier_unavailable |= obs.scope == "in_scope" and obs.proposed == "unavailable"
         out.observations.append(obs)
     return out
 
@@ -1391,15 +1481,15 @@ _EVALUATORS: dict[str, _Rule] = {
     "verify-receipt-completed": _Rule(
         _evaluate_verify_receipt_completed,
         "in_module",
-        "verify-receipt-integrity",
-        "not_wired",
+        "attestation_receipt.snapshot_receipt",
+        "wired",
         frozenset({"integrity", "subject", "population"}),
     ),
     "sshsig-test-result-signed-ok": _Rule(
         _evaluate_sshsig_test_result_signed_ok, "delegated", "attestation.verify_attestation", "wired", _SIGNED_REQUIRED
     ),
     "cosign-bundle-exists": _Rule(
-        _evaluate_cosign_bundle_exists, "structural", "cosign-bundle", "not_wired", _SIGNED_REQUIRED
+        _evaluate_cosign_bundle_exists, "delegated", "cosign-bundle", "wired", _SIGNED_REQUIRED
     ),
     "agent-request-signed": _Rule(
         _evaluate_agent_request_signed, "delegated", "attestation.verify_attestation", "wired", _SIGNED_REQUIRED
@@ -1428,7 +1518,11 @@ _EVALUATORS: dict[str, _Rule] = {
         _evaluate_verify_archive_index_exists, "structural", None, "not_wired", _WORKSPACE_REQUIRED
     ),
     "evidence-package-manifest": _Rule(
-        _evaluate_evidence_package_manifest, "structural", "evidence-package", "not_wired", _WORKSPACE_REQUIRED
+        _evaluate_evidence_package_manifest,
+        "in_module",
+        "evidence_package_snapshot.snapshot_package",
+        "wired",
+        _WORKSPACE_REQUIRED,
     ),
 }
 
@@ -1669,7 +1763,8 @@ _STATE_CONTRACT_DOC: tuple[str, ...] = (
     "selected run is never lost behind the cap. Verify receipts bind to a run through recorded fields, so their "
     "scan stays bounded and can truncate. The run id must be a bare directory name. EC-12 discovers "
     "`.brigade/evidence-packages/manifest.json` and `.brigade/evidence-packages/<package>/manifest.json`; deeper "
-    "nesting is not discovered, and no strict package verification runs before #1618. Packages bind through "
+    "nesting is not discovered. The strict snapshot validates each package entry, its stored receipt digest, "
+    "and source metadata. Packages bind through "
     "either their recorded producer-run or verify-run identity. JSONL reads are capped at 8 MiB and 10,000 "
     "records. Discovery and reads refuse symlinked components beneath the canonical assessed target, "
     "including a linked `.brigade` or lifecycle `events/` ancestor. Metadata errors remain "
@@ -1684,9 +1779,9 @@ _STATE_CONTRACT_DOC: tuple[str, ...] = (
     "matching its directory, and one `completed` command with exit code 0 per planned check whose `command` "
     "display string equals the planned entry at the same position. A different, missing or reordered command is "
     "`incomplete` with `planned_commands_mismatch`. An empty intended check list never shows that a test ran. The "
-    "stored receipt digest and optional local HMAC are not verified before #1618, so `integrity` is a required "
-    "dimension reported `not_checked` with `verifier_not_wired`, and even a well-formed successful receipt stops "
-    "at `structure_observed` (`untested`). A reused receipt (`reused_from`) copies the commands of an earlier run; "
+    "stored writer digest is rederived when present; without it, `integrity` is `not_checked` and a successful "
+    "receipt stops at `structure_observed` (`untested`). A digest mismatch is rejected. A reused receipt "
+    "(`reused_from`) copies the commands of an earlier run; "
     "it is recorded, reused evidence, not a new execution under the new receipt id. EC-02 pins re-derivation to "
     "the attestation's own directory receipt and rejects an attestation whose run differs from its directory. "
     "EC-06 rejects a journal whose events name another run.",
@@ -1736,9 +1831,9 @@ _STATE_CONTRACT_DOC: tuple[str, ...] = (
     "the template schema remains `brigade.control_crosswalk.v1`. New root keys are `relationship_semantics`, "
     "`integrity_boundary`, `unmapped_evidence_properties`, `readiness_contract`, `assessment_period` and "
     "`evidence_readiness`. Mapping rows add `validation_level`, `evidence_outcome` and provenance fields. "
-    "`evidenced_passed` is stricter. Claims checked only "
-    "for presence or structure (EC-01, EC-03, EC-04, EC-07, EC-09, EC-10, EC-11 and EC-12) now report `untested` with "
-    "`structure_observed` until a dedicated verifier is wired. An EC-01 receipt with an empty command list or "
+    "Validated EC-01, EC-03 and EC-12 artifact observations include `source_digest_sha256`. `evidenced_passed` is stricter. "
+    "Claims checked only for presence or structure (EC-04, EC-07, EC-09, EC-10 and EC-11) report `untested` "
+    "with `structure_observed` until a dedicated verifier is wired. An EC-01 receipt with an empty command list or "
     "commands that do not match `planned_commands` is no longer a pass, and legacy receipts without "
     "`planned_commands` report `untested`. Artifacts now classified `invalid` (for example a previously accepted "
     "malformed cosign bundle or package manifest, or a ledger with a row lacking its required field) report "
