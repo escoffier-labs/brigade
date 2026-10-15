@@ -455,6 +455,7 @@ def test_ci_workflow_combines_python312_coverage_and_preserves_required_checks()
     assert "needs: [changes, test-shards, coverage, cosign-integration, fleet-hub-container]" in protected
     assert 'python: ["3.10", "3.11", "3.12"]' in protected
     assert "if: ${{ always() }}" in protected
+    assert "CHANGES_RESULT: ${{ needs.changes.result }}" in protected
     assert "SHARDS_RESULT: ${{ needs.test-shards.result }}" in protected
     assert "COVERAGE_RESULT: ${{ needs.coverage.result }}" in protected
     assert "COSIGN_RESULT: ${{ needs.cosign-integration.result }}" in protected
@@ -473,7 +474,7 @@ def test_ci_workflow_filters_container_builds_without_scheduling_the_required_ma
     container = _workflow_job_section(text, "fleet-hub-container")
     assert "fleet_hub_container: ${{ steps.filter.outputs.fleet_hub_container }}" in changes
     paths = changes.split("            fleet_hub_container:\n", 1)[1]
-    for path in ("ops/fleet-hub/**", "tests/fleet_hub_container_smoke.py", ".github/workflows/ci.yml"):
+    for path in (".dockerignore", "ops/fleet-hub/**", "tests/fleet_hub_container_smoke.py", ".github/workflows/ci.yml"):
         assert f"- '{path}'" in paths
     assert "schedule:" not in text[: text.index("jobs:")]
     assert "github.event_name == 'schedule'" not in text
@@ -505,13 +506,17 @@ def test_nightly_container_workflow_runs_only_the_container_smoke():
 
 @pytest.mark.parametrize("required", ["true", "false"])
 @pytest.mark.parametrize("container_result", ["success", "skipped", "failure", "cancelled"])
-def test_ci_workflow_required_test_gate_accepts_only_intentional_container_skips(required, container_result):
+@pytest.mark.parametrize("changes_result", ["success", "failure", "cancelled", "skipped"])
+def test_ci_workflow_required_test_gate_accepts_only_intentional_container_skips(
+    required, container_result, changes_result
+):
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     protected = _workflow_job_section(text, "test")
     assert "FLEET_HUB_REQUIRED: ${{ needs.changes.outputs.fleet_hub_container == 'true' }}" in protected
     shell = textwrap.dedent(protected.split("        run: |\n", 1)[1])
     env = dict(
         os.environ,
+        CHANGES_RESULT=changes_result,
         SHARDS_RESULT="success",
         COVERAGE_RESULT="success",
         COSIGN_RESULT="success",
@@ -519,7 +524,9 @@ def test_ci_workflow_required_test_gate_accepts_only_intentional_container_skips
         FLEET_HUB_REQUIRED=required,
     )
     result = subprocess.run(["bash", "-c", shell], env=env, capture_output=True, text=True)
-    expected = container_result == "success" or (container_result == "skipped" and required == "false")
+    expected = changes_result == "success" and (
+        container_result == "success" or (container_result == "skipped" and required == "false")
+    )
     assert (result.returncode == 0) is expected, result.stdout + result.stderr
 
 

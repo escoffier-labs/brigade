@@ -10,6 +10,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from tests._home import set_home
+
 
 ROOT = Path(__file__).resolve().parents[1]
 CONTAINER = ROOT / "ops" / "fleet-hub"
@@ -220,7 +222,7 @@ def test_quadlet_setup_starts_hub_without_enabling_or_replacing_local_client(tmp
         executable = commands / name
         executable.write_text("#!/bin/sh\n" + body)
         executable.chmod(0o755)
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, home)
     monkeypatch.setenv("USER", "test-operator")
     monkeypatch.setenv("PATH", str(commands) + os.pathsep + os.environ["PATH"])
 
