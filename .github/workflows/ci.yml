@@ -386,6 +386,57 @@ jobs:
             exit 1
           fi
 
+  # Shadow aggregate: keep all existing required checks and matrix names.
+  # ci-gate is not required until GitHub deliberate-failure checks are complete.
+  ci-gate:
+    if: always()
+    needs:
+      - changes
+      - lint
+      - test
+      - test-shards
+      - coverage
+      - cosign-integration
+      - component-manifest-provenance
+      - content-guard
+      - repo-metadata
+      - install-from-source
+      - quickstart-smoke
+      - windows-native-acceptance
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require all protected jobs and their dependencies
+        env:
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+
+          # Shadow policy: every current required job and dependency must
+          # succeed. No job in this closure has an intentional job-level skip.
+          mandatory = {
+              "changes", "lint", "test", "test-shards", "coverage",
+              "cosign-integration", "component-manifest-provenance",
+              "content-guard", "repo-metadata", "install-from-source",
+              "quickstart-smoke", "windows-native-acceptance",
+          }
+          needs = json.loads(os.environ["NEEDS_JSON"])
+          errors = []
+          if set(needs) != mandatory:
+              errors.append(
+                  f"DAG mismatch: missing={mandatory - set(needs)}, "
+                  f"extra={set(needs) - mandatory}"
+              )
+          for name in sorted(mandatory):
+              result = needs.get(name, {}).get("result")
+              if result != "success":
+                  errors.append(f"{name}: required success, got {result!r}")
+          if errors:
+              raise SystemExit("\n".join(errors))
+          print("All protected CI jobs and dependencies succeeded")
+          PY
+
   component-manifest-provenance:
     runs-on: ubuntu-latest
     steps:

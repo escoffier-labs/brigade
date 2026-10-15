@@ -465,6 +465,32 @@ def test_ci_workflow_combines_python312_coverage_and_preserves_required_checks()
     )
 
 
+def test_ci_workflow_shadow_gate_covers_required_jobs_and_their_dependencies():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    gate = _workflow_job_section(text, "ci-gate")
+    assert re.search(r"^    if: always\(\)$", gate, re.MULTILINE)
+    needs_block = gate.split("    needs:\n", 1)[1].split("    runs-on:", 1)[0]
+    needs = set(re.findall(r"^      - ([a-z0-9-]+)$", needs_block, re.MULTILINE))
+    # main's 20 required contexts, including the test/installer/quickstart
+    # matrix names, map to these nine jobs. Keep this snapshot independent
+    # of the workflow so a rename cannot silently remove gate coverage.
+    required_jobs = {
+        "changes",
+        "lint",
+        "test",
+        "component-manifest-provenance",
+        "content-guard",
+        "repo-metadata",
+        "install-from-source",
+        "quickstart-smoke",
+        "windows-native-acceptance",
+    }
+    assert needs == required_jobs | {"test-shards", "coverage", "cosign-integration"}
+    for name in needs:
+        _workflow_job_section(text, name)
+    assert "actions/checkout" not in gate
+
+
 def test_ci_workflow_caches_pip_for_jobs_that_install_dev_extras():
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     for job_name in ("lint", "test-shards", "coverage", "component-manifest-provenance", "repo-metadata"):
