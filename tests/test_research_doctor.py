@@ -502,9 +502,10 @@ def test_doctor_required_oracle_readiness_status(
     capabilities = (
         {"research.browser-discover"} if profile == "browser-ai" else {"research.synthesize", "research.review"}
     )
-    for lane in payload["lanes"]:
-        if lane["capability"] not in capabilities:
-            continue
+    checked_lanes = [lane for lane in payload["lanes"] if lane["capability"] in capabilities]
+    assert {lane["capability"] for lane in checked_lanes} == capabilities
+    for lane in checked_lanes:
+        assert lane["seat"] == "gemini_browser"
         assert lane["status"] == expected_status
         projection = lane["browser_preflight"]
         if condition == "missing-evidence":
