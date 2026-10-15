@@ -244,16 +244,19 @@ def export_derivative(
     necessity: str,
 ) -> DerivativeReport:
     """Create one local, integrity-only derivative without changing its source."""
-    source = source.expanduser()
-    out = out.expanduser()
-    if source.is_symlink() or not source.is_dir():
-        raise DerivativeExportError("source package is not a directory")
-    if out.is_symlink():
-        raise DerivativeExportError("derivative output cannot be a symlink")
-    source = source.resolve()
-    out = out.parent.resolve() / out.name
-    if out.exists():
-        raise DerivativeExportError("derivative output already exists")
+    try:
+        source = source.expanduser()
+        out = out.expanduser()
+        if source.is_symlink() or not source.is_dir():
+            raise DerivativeExportError("source package is not a directory")
+        if out.is_symlink():
+            raise DerivativeExportError("derivative output cannot be a symlink")
+        source = source.resolve()
+        out = out.parent.resolve() / out.name
+        if out.exists():
+            raise DerivativeExportError("derivative output already exists")
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise DerivativeExportError("derivative paths could not be resolved safely") from exc
     try:
         out.relative_to(source)
     except ValueError:

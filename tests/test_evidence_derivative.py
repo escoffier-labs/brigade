@@ -1198,3 +1198,20 @@ def test_derivative_rejects_foreign_output_entry_before_temporary_open(tmp_path:
         )
     assert (out / "competitor.txt").read_bytes() == competing_content
     assert {path.name for path in out.iterdir()} == {"competitor.txt"}
+
+
+@pytest.mark.parametrize("which", ["source", "out"])
+def test_derivative_reports_unresolvable_home_paths_as_export_errors(tmp_path: Path, which: str) -> None:
+    missing_user = Path("~brigade-no-such-user-1700/package")
+    paths = {"source": tmp_path, "out": tmp_path / "derivative"}
+    paths[which] = missing_user
+
+    with pytest.raises(evidence_derivative.DerivativeExportError, match="could not be resolved safely"):
+        evidence_derivative.export_derivative(
+            source=paths["source"],
+            out=paths["out"],
+            recipient="recipient-42",
+            authority="approved-case-7",
+            lawful_basis="contract",
+            necessity="review",
+        )
