@@ -115,7 +115,7 @@ from .fleet_hub_status import (
     latest_status as latest_status,
 )
 
-SCHEMA_VERSION = 29
+SCHEMA_VERSION = 30
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
@@ -538,6 +538,12 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     fleet_hub_claims.migrate_schema(conn)
     conn.execute("CREATE INDEX IF NOT EXISTS events_run_seq ON events (node_id, run_id, sequence)")
     conn.execute("CREATE INDEX IF NOT EXISTS events_received_at ON events (received_at)")
+    # v29 -> v30: Grokbot runs span nodes. Seek their first event without
+    # scanning the node-first index or sorting the run's history.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS events_grokbot_run_seq "
+        "ON events (run_id, sequence, received_at, digest) WHERE harness = 'grokbot'"
+    )
     # v3 -> v4 is one additive table; v5-v8 add cloud lease and policy
     # tables only, and v9 canonicalizes provider aliases. Existing event,
     # claim, node, and active lease rows survive.

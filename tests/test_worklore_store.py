@@ -2784,11 +2784,11 @@ def test_the_legacy_quota_reconciliation_runs_once_not_on_every_start(tmp_path):
     assert not [statement for statement in statements if "ROW_NUMBER() OVER (PARTITION BY" in statement]
 
 
-def test_fleet_hub_schema_is_v29_for_the_recoverable_link_ceiling(tmp_path):
-    assert fleet_hub.SCHEMA_VERSION == 29
+def test_fleet_hub_schema_is_v30_for_the_recoverable_link_ceiling(tmp_path):
+    assert fleet_hub.SCHEMA_VERSION == 30
     conn = fleet_hub.init_db(tmp_path / "hub.db")
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 29
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 30
         columns = {str(row[1]) for row in conn.execute("PRAGMA table_info(work_import_keys)")}
         assert "refused" in columns
         assert conn.execute("SELECT COUNT(*) FROM work_schema_meta").fetchone()[0] >= 1

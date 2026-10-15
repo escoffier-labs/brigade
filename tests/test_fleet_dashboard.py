@@ -482,6 +482,34 @@ class TestSortAndFilter:
         # a machine-board request grow with runs times journal history.
         assert any("SEARCH e2 USING INDEX events_run_seq (node_id=? AND run_id=?)" in detail for detail in plan)
 
+    @pytest.mark.parametrize("upgrade_from_v29", [False, True], ids=["fresh", "v29-upgrade"])
+    def test_grokbot_start_lookup_seeks_without_sorting(self, tmp_path, upgrade_from_v29):
+        db = tmp_path / "fleet.db"
+        conn = fleet_hub.init_db(db)
+        try:
+            _insert_event(conn, NODE_A, "grokbot-run", 1, "external.created", "2026-09-07T12:00:00Z", harness="grokbot")
+            conn.commit()
+            if upgrade_from_v29:
+                conn.execute("DROP INDEX IF EXISTS events_grokbot_run_seq")
+                conn.execute("PRAGMA user_version=29")
+                conn.commit()
+                conn.close()
+                conn = fleet_hub.init_db(db)
+            assert conn.execute("SELECT run_id FROM events").fetchall() == [("grokbot-run",)]
+            sql = fleet_hub_status._latest_sql(resolve_started_at=True)
+            plan = conn.execute("EXPLAIN QUERY PLAN " + sql).fetchall()
+            grokbot_searches = [
+                row for row in plan if "SEARCH e2 USING INDEX events_grokbot_run_seq (run_id=?)" in row[3]
+            ]
+            assert grokbot_searches, plan
+            # The index must also satisfy the tie-break order for LIMIT 1.
+            subquery_id = grokbot_searches[0][1]
+            assert not any(row[1] == subquery_id and "TEMP B-TREE" in row[3] for row in plan)
+            assert not any("SCAN e2" in row[3] for row in plan)
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
+        finally:
+            conn.close()
+
     def test_node_filter(self, hub):
         _seed(hub)
         _status, _headers, text = _request(hub, "GET", "/view/machines?node=1111", headers=_bearer())
