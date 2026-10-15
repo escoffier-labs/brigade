@@ -452,7 +452,7 @@ def test_ci_workflow_combines_python312_coverage_and_preserves_required_checks()
     assert "python -m coverage combine .coverage-data" in coverage
     assert "python -m coverage report --fail-under=78" in coverage
     assert "name: test (${{ matrix.python }})" in protected
-    assert "needs: [test-shards, coverage, cosign-integration, fleet-hub-container]" in protected
+    assert "needs: [changes, test-shards, coverage, cosign-integration, fleet-hub-container]" in protected
     assert 'python: ["3.10", "3.11", "3.12"]' in protected
     assert "if: ${{ always() }}" in protected
     assert "SHARDS_RESULT: ${{ needs.test-shards.result }}" in protected
@@ -462,9 +462,48 @@ def test_ci_workflow_combines_python312_coverage_and_preserves_required_checks()
     assert '[ "$COSIGN_RESULT" != "success" ]' in protected
     assert '[ "$FLEET_HUB_RESULT" != "success" ]' in protected
     assert (
-        '[ "$SHARDS_RESULT" != "success" ] || [ "$COVERAGE_RESULT" != "success" ] || [ "$COSIGN_RESULT" != "success" ] || [ "$FLEET_HUB_RESULT" != "success" ]'
+        '[ "$SHARDS_RESULT" != "success" ] || [ "$COVERAGE_RESULT" != "success" ] || [ "$COSIGN_RESULT" != "success" ]'
         in protected
     )
+
+
+def test_ci_workflow_filters_container_builds_and_runs_them_nightly():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    changes = _workflow_job_section(text, "changes")
+    container = _workflow_job_section(text, "fleet-hub-container")
+    assert "fleet_hub_container: ${{ steps.filter.outputs.fleet_hub_container }}" in changes
+    paths = changes.split("            fleet_hub_container:\n", 1)[1]
+    for path in ("ops/fleet-hub/**", "tests/fleet_hub_container_smoke.py", ".github/workflows/ci.yml"):
+        assert f"- '{path}'" in paths
+    assert re.search(r"^  schedule:\n    - cron: ['\"]0 3 \* \* \*['\"]$", text, re.MULTILINE)
+    assert "needs: changes" in container
+    assert (
+        "if: ${{ github.event_name == 'schedule' || needs.changes.outputs.fleet_hub_container == 'true' }}" in container
+    )
+    assert "platform: [linux/amd64, linux/arm64]" in container
+
+
+@pytest.mark.parametrize("required", ["true", "false"])
+@pytest.mark.parametrize("container_result", ["success", "skipped", "failure", "cancelled"])
+def test_ci_workflow_required_test_gate_accepts_only_intentional_container_skips(required, container_result):
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    protected = _workflow_job_section(text, "test")
+    assert (
+        "FLEET_HUB_REQUIRED: ${{ github.event_name == 'schedule' || needs.changes.outputs.fleet_hub_container == 'true' }}"
+        in protected
+    )
+    shell = textwrap.dedent(protected.split("        run: |\n", 1)[1])
+    env = dict(
+        os.environ,
+        SHARDS_RESULT="success",
+        COVERAGE_RESULT="success",
+        COSIGN_RESULT="success",
+        FLEET_HUB_RESULT=container_result,
+        FLEET_HUB_REQUIRED=required,
+    )
+    result = subprocess.run(["bash", "-c", shell], env=env, capture_output=True, text=True)
+    expected = container_result == "success" or (container_result == "skipped" and required == "false")
+    assert (result.returncode == 0) is expected, result.stdout + result.stderr
 
 
 def test_ci_workflow_caches_pip_for_jobs_that_install_dev_extras():

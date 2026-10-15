@@ -5,6 +5,7 @@ Wants=network-online.target
 
 [Container]
 Image=localhost/brigade-fleet-hub@REPLACE_WITH_RECORDED_DIGEST
+Pull=never
 ContainerName=brigade-fleet-hub
 PublishPort=127.0.0.1:3774:3774
 Volume=brigade-fleet.volume:/var/lib/brigade

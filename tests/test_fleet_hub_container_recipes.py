@@ -101,6 +101,12 @@ def test_compose_runbook_pins_the_built_local_image_id():
     assert 'docker image load --input "$archive"' in runbook
     assert 'test "$restored_id" = "$previous_id"' in runbook
     assert "image: ${previous_id}" in runbook
+    rollback = runbook.split("To roll back, load the saved image", 1)[1].split("```bash\n", 1)[1].split("\n```", 1)[0]
+    assert rollback.index("source_connection.backup(target_connection)") < rollback.index(
+        "cat > secrets/compose.image-id.yaml"
+    )
+    assert '--entrypoint python "$previous_id" -c' in rollback
+    assert '--volumes-from "$(docker compose -f compose.yaml -f secrets/compose.image-id.yaml ps -aq hub)"' in rollback
     assert "For an upgrade, follow the backup and stop sequence below before rebuilding" in runbook
     assert "secrets/compose.image-id.yaml up -d --no-build" in runbook
     assert "docker compose -f compose.yaml -f secrets/compose.image-id.yaml stop hub" in runbook
@@ -156,6 +162,10 @@ def test_quadlet_runbook_archives_and_restores_the_recorded_image():
     assert 'podman image save --format oci-archive --output "$archive" "$previous_ref"' in podman_runbook
     assert 'podman image load --input "$archive"' in podman_runbook
     assert 'test "$restored_id" = "$previous_id"' in podman_runbook
+    rollback = podman_runbook.split("# Set these from the saved archive name", 1)[1]
+    assert rollback.index('test "$restored_id" = "$previous_id"') < rollback.index(
+        "systemctl --user stop brigade-fleet.service"
+    )
     assert "REPLACE_WITH_RECORDED_DIGEST" in podman_runbook
     assert 'previous_id="REPLACE_WITH_RECORDED_IMAGE_ID"' not in podman_runbook
     assert 'previous_id="sha256:REPLACE_WITH_RECORDED_IMAGE_ID"' not in podman_runbook
@@ -230,7 +240,7 @@ def test_quadlet_setup_starts_hub_without_enabling_or_replacing_local_client(tmp
 def test_runbook_restore_keeps_live_database_when_sqlite_backup_fails(tmp_path):
     runbook = (ROOT / "docs" / "runbooks" / "fleet-hub-containers.md").read_text()
     commands = re.findall(
-        r'--entrypoint python (?:hub|"\$previous_ref") -c \'(.*?)\'\n',
+        r'--entrypoint python (?:hub|"\$previous_ref"|"\$previous_id") -c \'(.*?)\'\n',
         runbook,
         re.DOTALL,
     )
@@ -263,7 +273,7 @@ def test_runbook_restore_keeps_live_database_when_sqlite_backup_fails(tmp_path):
 def test_runbook_restore_replaces_live_database_from_valid_backup(tmp_path):
     runbook = (ROOT / "docs" / "runbooks" / "fleet-hub-containers.md").read_text()
     commands = re.findall(
-        r'--entrypoint python (?:hub|"\$previous_ref") -c \'(.*?)\'\n',
+        r'--entrypoint python (?:hub|"\$previous_ref"|"\$previous_id") -c \'(.*?)\'\n',
         runbook,
         re.DOTALL,
     )
@@ -304,6 +314,7 @@ def test_quadlet_recipe_has_equivalent_persistence_health_and_restart_policy():
     assert "HealthCmd=" in container
     assert "HealthOnFailure=kill" in container
     assert "Notify=healthy" in container
+    assert "Pull=never" in container
     assert "TimeoutStartSec=120" in container
     assert "Restart=on-failure" in container
     assert "User=10001" in volume

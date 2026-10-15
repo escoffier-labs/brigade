@@ -5,8 +5,9 @@ Linux Podman Quadlet recipes. The recipes are **preview**, not a claim of tested
 production support. CI builds and exercises the image on Linux/amd64 and
 Linux/arm64, including health, node authentication, event ingestion, crash
 retention, SQLite online backup and restore, and HTTPS enrollment through a
-loopback proxy sharing the Hub's network namespace. Podman/Quadlet remains a
-recipe proposal pending operator acceptance.
+loopback proxy sharing the Hub's network namespace. The Compose and Quadlet
+files are not executed in CI. Podman/Quadlet remains a recipe proposal pending
+operator acceptance.
 
 ## Recorded baseline
 
@@ -49,7 +50,9 @@ file. Compose file-backed secrets are read-only bind mounts, so the container
 must be able to read the source file's permissions. Keep the host directory
 private and make the file readable by the container's non-root UID. The file
 remains inaccessible to other host users because they cannot traverse the
-directory. The example path is ignored by Git. See [Docker Compose secrets](https://docs.docker.com/compose/how-tos/use-secrets/).
+directory. The example path is ignored by Git. Running `git clean -xdf` deletes
+`ops/fleet-hub/secrets/`, including tokens, image archives, and database backups.
+Keep a protected copy outside the checkout before cleaning it. See [Docker Compose secrets](https://docs.docker.com/compose/how-tos/use-secrets/).
 
 ```bash
 cd ops/fleet-hub
@@ -127,7 +130,8 @@ chmod 0600 "$archive"
 ```
 
 To roll back, load the saved image and verify that its ID matches before
-restoring the old ID in the override:
+restoring the database with that image. The override changes only after the
+restore succeeds:
 
 ```bash
 set -euo pipefail
@@ -139,14 +143,10 @@ docker image load --input "$archive"
 restored_id="$(docker image inspect --format '{{.Id}}' "$previous_id")"
 test "$restored_id" = "$previous_id"
 docker compose -f compose.yaml -f secrets/compose.image-id.yaml stop hub
-cat > secrets/compose.image-id.yaml <<EOF
-services:
-  hub:
-    image: ${previous_id}
-EOF
-docker compose -f compose.yaml -f secrets/compose.image-id.yaml run --rm --no-deps \
-  --user 0 --volume "$PWD/$backup_path:/restore/fleet-hub.db:ro" \
-  --entrypoint python hub -c 'import os,shutil,sqlite3,tempfile
+docker run --rm --pull never --user 0 \
+  --volumes-from "$(docker compose -f compose.yaml -f secrets/compose.image-id.yaml ps -aq hub)" \
+  --volume "$PWD/$backup_path:/restore/fleet-hub.db:ro" \
+  --entrypoint python "$previous_id" -c 'import os,shutil,sqlite3,tempfile
 database="/var/lib/brigade/fleet-hub.db"
 source="/restore/fleet-hub.db"
 if not os.path.isfile(source) or os.path.getsize(source) == 0: raise SystemExit("Backup must be a nonempty regular file")
@@ -167,6 +167,11 @@ try:
  os.chown(database, 10001, 10001)
 finally:
  if os.path.exists(staged): os.remove(staged)'
+cat > secrets/compose.image-id.yaml <<EOF
+services:
+  hub:
+    image: ${previous_id}
+EOF
 docker compose -f compose.yaml -f secrets/compose.image-id.yaml up -d --no-build \
   --wait --wait-timeout 120
 ```
@@ -208,8 +213,10 @@ it for its new ID, replace the override's `image` value, then start it with
 for the configured health check before returning.
 
 The named volume contains the database and its WAL/SHM sidecars. Keep it on a
-local filesystem, not NFS, SMB, or a cloud-synced directory. For ordinary
-updates, rebuild the versioned tag, record its new local image ID in the ignored
+local filesystem, not NFS, SMB, or a cloud-synced directory. Ordinary updates
+require the same sequence above: archive the deployed image, create the online
+database backup, and stop the Hub. Only after those steps succeed,
+rebuild the versioned tag, record its new local image ID in the ignored
 `secrets/compose.image-id.yaml`, then run `docker compose -f compose.yaml -f
 secrets/compose.image-id.yaml up -d --no-build --wait --wait-timeout 120`. Never add `--volumes` to
 `down`. This recipe intentionally runs one replica and has no shared-network
@@ -356,10 +363,10 @@ previous_ref="localhost/brigade-fleet-hub@${previous_digest}"
 image_id_file="${archive%.tar}.image-id"
 previous_id="$(cat "$image_id_file")"
 test -n "$previous_id"
-systemctl --user stop brigade-fleet.service
 podman image load --input "$archive"
 restored_id="$(podman image inspect --format '{{.Id}}' "$previous_ref")"
 test "$restored_id" = "$previous_id"
+systemctl --user stop brigade-fleet.service
 podman run --rm --user 0:0 \
   --volume brigade-fleet-state:/var/lib/brigade \
   --volume "$backup_path:/restore/fleet-hub.db:ro,Z" \
@@ -405,6 +412,10 @@ containers and named volumes live inside its Linux VM, so backup and restore
 must address that VM's storage rather than assuming a native host path.
 
 ## Security and operations boundary
+
+The image binds to `0.0.0.0` inside the container. A bare
+`docker run -p 3774:3774` publishes plain HTTP on every host interface. Use the
+explicit loopback publication in these recipes.
 
 Both recipes publish only on host loopback and mount the token as a protected
 file. Docker Compose requires Engine 28.0.0 or newer for localhost publication
