@@ -1098,3 +1098,103 @@ def test_derivative_publishes_beneath_valid_posix_component(tmp_path: Path, comp
         necessity="review",
     )
     assert (out / "derivative.json").is_file()
+
+
+@pytest.mark.skipif(not evidence_derivative.dirfd.posix_available(), reason="POSIX allows concurrent file writes")
+@pytest.mark.parametrize("phase", ["temporary-fsync", "published-fsync"])
+def test_derivative_rejects_in_place_rewrite_after_fsync(tmp_path: Path, monkeypatch, phase: str) -> None:
+    _, receipt = _fabricated_run_dir(tmp_path)
+    source = tmp_path / "source"
+    assert evidence_package.export_package(target=tmp_path, run_id=str(receipt["run_id"]), out_str=str(source)) == 0
+    out = tmp_path / "derivative"
+    fsync = os.fsync
+    fsync_directory = evidence_derivative.dirfd.fsync_directory
+    rewritten = False
+
+    def rewrite(path: Path) -> None:
+        nonlocal rewritten
+        original = path.read_bytes()
+        with path.open("r+b") as writer:
+            writer.write(b"[" + original[1:])
+        rewritten = True
+
+    def rewrite_after_temp_fsync(descriptor: int) -> None:
+        fsync(descriptor)
+        if not rewritten:
+            temporary = list(out.glob(".derivative.json.tmp-*"))
+            if temporary:
+                rewrite(temporary[0])
+
+    def rewrite_after_published_fsync(descriptor: int) -> None:
+        fsync_directory(descriptor)
+        rewrite(out / "derivative.json")
+
+    if phase == "temporary-fsync":
+        monkeypatch.setattr(evidence_derivative.os, "fsync", rewrite_after_temp_fsync)
+    else:
+        monkeypatch.setattr(evidence_derivative.dirfd, "fsync_directory", rewrite_after_published_fsync)
+
+    with pytest.raises(evidence_derivative.DerivativeExportError, match="output file changed"):
+        evidence_derivative.export_derivative(
+            source=source,
+            out=out,
+            recipient="recipient-42",
+            authority="approved-case-7",
+            lawful_basis="contract",
+            necessity="review",
+        )
+    assert rewritten
+    assert not out.exists()
+
+
+def test_derivative_publication_denies_concurrent_windows_writers(tmp_path: Path, monkeypatch) -> None:
+    _, receipt = _fabricated_run_dir(tmp_path)
+    source = tmp_path / "source"
+    assert evidence_package.export_package(target=tmp_path, run_id=str(receipt["run_id"]), out_str=str(source)) == 0
+    original_open = evidence_derivative.dirfd.open_child_file
+    publication_sharing: list[bool] = []
+
+    def observe_open(parent, name, flags, mode=0o600, *, share_write=True):
+        if flags & os.O_CREAT:
+            publication_sharing.append(share_write)
+        return original_open(parent, name, flags, mode, share_write=share_write)
+
+    monkeypatch.setattr(evidence_derivative.dirfd, "open_child_file", observe_open)
+    out = tmp_path / "derivative"
+    report = evidence_derivative.export_derivative(
+        source=source,
+        out=out,
+        recipient="recipient-42",
+        authority="approved-case-7",
+        lawful_basis="contract",
+        necessity="review",
+    )
+    assert publication_sharing and not any(publication_sharing)
+    assert report.derivative_sha256 == hashlib.sha256((out / "derivative.json").read_bytes()).hexdigest()
+
+
+def test_derivative_rejects_foreign_output_entry_before_temporary_open(tmp_path: Path, monkeypatch) -> None:
+    _, receipt = _fabricated_run_dir(tmp_path)
+    source = tmp_path / "source"
+    assert evidence_package.export_package(target=tmp_path, run_id=str(receipt["run_id"]), out_str=str(source)) == 0
+    out = tmp_path / "derivative"
+    original_open = evidence_derivative.dirfd.open_child_file
+    competing_content = b"competing export"
+
+    def add_foreign_entry(parent, name, flags, mode=0o600, **kwargs):
+        if flags & os.O_CREAT:
+            (out / "competitor.txt").write_bytes(competing_content)
+        return original_open(parent, name, flags, mode, **kwargs)
+
+    monkeypatch.setattr(evidence_derivative.dirfd, "open_child_file", add_foreign_entry)
+    with pytest.raises(evidence_derivative.DerivativeExportError, match="output directory contains unexpected entries"):
+        evidence_derivative.export_derivative(
+            source=source,
+            out=out,
+            recipient="recipient-42",
+            authority="approved-case-7",
+            lawful_basis="contract",
+            necessity="review",
+        )
+    assert (out / "competitor.txt").read_bytes() == competing_content
+    assert {path.name for path in out.iterdir()} == {"competitor.txt"}

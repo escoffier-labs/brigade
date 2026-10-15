@@ -383,6 +383,7 @@ def export_derivative(
     if patch_data is None and manifest_patch_digest is not None:
         payload["limitations"].append("source-patch-omitted")
     encoded = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode()
+    derivative_sha256 = hashlib.sha256(encoded).hexdigest()
     parent_fd = output_fd = temp_fd = -1
     temp_name = f".derivative.json.tmp-{secrets.token_hex(4)}"
     parent_identity: tuple[int, int] | None = None
@@ -418,6 +419,7 @@ def export_derivative(
             temp_name,
             os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0),
             0o600,
+            share_write=False,
         )
         temp_info = os.fstat(temp_fd)
         temp_identity = (temp_info.st_dev, temp_info.st_ino)
@@ -461,6 +463,35 @@ def export_derivative(
         if (output_entry.st_dev, output_entry.st_ino) != output_identity:
             raise DerivativeExportError("derivative output directory changed during publication")
         dirfd.fsync_directory(output_fd)
+        # Windows cannot deny write sharing while our write handle is open.
+        # Reopen relative to the held directory and revalidate identity and bytes.
+        os.close(temp_fd)
+        temp_fd = -1
+        published_fd = dirfd.open_child_file(
+            output_fd,
+            "derivative.json",
+            os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NONBLOCK", 0),
+            share_write=False,
+        )
+        with os.fdopen(published_fd, "rb") as reader:
+            before = os.fstat(reader.fileno())
+            if not stat.S_ISREG(before.st_mode) or (before.st_dev, before.st_ino) != temp_identity:
+                raise DerivativeExportError("derivative output file changed during publication")
+            content = reader.read(len(encoded) + 1)
+            after = os.fstat(reader.fileno())
+            final_entry = dirfd.stat_child(output_fd, "derivative.json")
+            if (
+                _file_observation(before) != _file_observation(after)
+                or _file_observation(before) != _file_observation(final_entry)
+                or hashlib.sha256(content).hexdigest() != derivative_sha256
+            ):
+                raise DerivativeExportError("derivative output file changed during publication")
+            try:
+                output_names = dirfd.child_names(output_fd, 2)
+            except (OSError, NotImplementedError) as exc:
+                raise DerivativeExportError("derivative output inventory could not be read safely") from exc
+            if output_names != ["derivative.json"]:
+                raise DerivativeExportError("derivative output directory contains unexpected entries")
     except BaseException as exc:
         if temp_fd != -1:
             os.close(temp_fd)
@@ -493,4 +524,4 @@ def export_derivative(
         for descriptor in (temp_fd, output_fd, parent_fd):
             if descriptor != -1:
                 os.close(descriptor)
-    return DerivativeReport(removed, redaction_occurrences, excluded, hashlib.sha256(encoded).hexdigest())
+    return DerivativeReport(removed, redaction_occurrences, excluded, derivative_sha256)
