@@ -198,6 +198,16 @@ def _normalize_probe(raw: object) -> dict[str, object]:
     return {str(k): v for k, v in redacted.items()}
 
 
+def _browser_unverified(probe_result: dict[str, object], *, executable: str | None) -> bool:
+    """Missing readiness evidence warns only when executable and auth checks pass."""
+    projection = probe_result.get("_browser_preflight_projection")
+    return (
+        isinstance(projection, dict)
+        and projection.get("status") == "unverified"
+        and _probe_healthy(probe_result, executable=executable)
+    )
+
+
 def _detail_text(value: object, *, configured: bool, capability: str) -> str:
     if isinstance(value, (dict, list, tuple)):
         return _redact_text(json.dumps(value, sort_keys=True, default=str))
@@ -359,6 +369,8 @@ def doctor_payload(
                 failure_kind = None
             if healthy:
                 status = "ok"
+            elif _browser_unverified(probe_result, executable=executable if isinstance(executable, str) else None):
+                status = "warn"
             else:
                 status = "fail" if browser_required else "warn"
             if status == "fail":
@@ -461,7 +473,9 @@ def doctor_payload(
                 optional_warnings = True
             else:
                 status = "ok"
-        elif allowed_fallback_healthy:
+        elif allowed_fallback_healthy or _browser_unverified(
+            primary_probe, executable=primary_executable if isinstance(primary_executable, str) else None
+        ):
             status = "warn"
             optional_warnings = True
         else:
