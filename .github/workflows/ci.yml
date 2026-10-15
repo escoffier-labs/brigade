@@ -4,8 +4,6 @@ on:
   push:
     branches: [main]
   pull_request:
-  schedule:
-    - cron: "0 3 * * *"
 
 permissions:
   contents: read
@@ -351,7 +349,7 @@ jobs:
 
   fleet-hub-container:
     needs: changes
-    if: ${{ github.event_name == 'schedule' || needs.changes.outputs.fleet_hub_container == 'true' }}
+    if: ${{ needs.changes.outputs.fleet_hub_container == 'true' }}
     name: Fleet Hub container (${{ matrix.platform }})
     runs-on: ubuntu-latest
     strategy:
@@ -408,7 +406,7 @@ jobs:
           COVERAGE_RESULT: ${{ needs.coverage.result }}
           COSIGN_RESULT: ${{ needs.cosign-integration.result }}
           FLEET_HUB_RESULT: ${{ needs.fleet-hub-container.result }}
-          FLEET_HUB_REQUIRED: ${{ github.event_name == 'schedule' || needs.changes.outputs.fleet_hub_container == 'true' }}
+          FLEET_HUB_REQUIRED: ${{ needs.changes.outputs.fleet_hub_container == 'true' }}
         run: |
           if [ "$SHARDS_RESULT" != "success" ] || [ "$COVERAGE_RESULT" != "success" ] || [ "$COSIGN_RESULT" != "success" ]; then
             echo "test-shards=$SHARDS_RESULT coverage=$COVERAGE_RESULT cosign-integration=$COSIGN_RESULT fleet-hub-container=$FLEET_HUB_RESULT"

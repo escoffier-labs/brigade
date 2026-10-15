@@ -467,7 +467,7 @@ def test_ci_workflow_combines_python312_coverage_and_preserves_required_checks()
     )
 
 
-def test_ci_workflow_filters_container_builds_and_runs_them_nightly():
+def test_ci_workflow_filters_container_builds_without_scheduling_the_required_matrix():
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     changes = _workflow_job_section(text, "changes")
     container = _workflow_job_section(text, "fleet-hub-container")
@@ -475,12 +475,32 @@ def test_ci_workflow_filters_container_builds_and_runs_them_nightly():
     paths = changes.split("            fleet_hub_container:\n", 1)[1]
     for path in ("ops/fleet-hub/**", "tests/fleet_hub_container_smoke.py", ".github/workflows/ci.yml"):
         assert f"- '{path}'" in paths
-    assert re.search(r"^  schedule:\n    - cron: ['\"]0 3 \* \* \*['\"]$", text, re.MULTILINE)
+    assert "schedule:" not in text[: text.index("jobs:")]
+    assert "github.event_name == 'schedule'" not in text
     assert "needs: changes" in container
-    assert (
-        "if: ${{ github.event_name == 'schedule' || needs.changes.outputs.fleet_hub_container == 'true' }}" in container
-    )
+    assert "if: ${{ needs.changes.outputs.fleet_hub_container == 'true' }}" in container
     assert "platform: [linux/amd64, linux/arm64]" in container
+
+
+def test_nightly_container_workflow_runs_only_the_container_smoke():
+    ci = (ROOT / ".github/workflows/ci.yml").read_text()
+    text = (ROOT / ".github/workflows/fleet-hub-container-nightly.yml").read_text()
+    header, jobs = text.split("jobs:\n", 1)
+    assert "name: fleet-hub-container-nightly\n" in header
+    assert re.search(r"^  schedule:\n    - cron: ['\"]0 3 \* \* \*['\"]$", header, re.MULTILINE)
+    assert "workflow_dispatch:" in header
+    assert "pull_request:" not in header
+    assert "push:" not in header
+    assert "permissions:\n  contents: read" in header
+    assert "group: fleet-hub-container-nightly-main" in header
+    assert "cancel-in-progress: false" in header
+    assert re.findall(r"^  ([a-z0-9][a-z0-9-]*):$", jobs, re.MULTILINE) == ["fleet-hub-container"]
+    container = _workflow_job_section(text, "fleet-hub-container")
+    assert "if: ${{ github.ref == 'refs/heads/main' }}" in container
+    assert "needs:" not in container
+    assert "continue-on-error" not in text
+    ci_container = _workflow_job_section(ci, "fleet-hub-container")
+    assert container[container.index("    name:") :].strip() == ci_container[ci_container.index("    name:") :].strip()
 
 
 @pytest.mark.parametrize("required", ["true", "false"])
@@ -488,10 +508,7 @@ def test_ci_workflow_filters_container_builds_and_runs_them_nightly():
 def test_ci_workflow_required_test_gate_accepts_only_intentional_container_skips(required, container_result):
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     protected = _workflow_job_section(text, "test")
-    assert (
-        "FLEET_HUB_REQUIRED: ${{ github.event_name == 'schedule' || needs.changes.outputs.fleet_hub_container == 'true' }}"
-        in protected
-    )
+    assert "FLEET_HUB_REQUIRED: ${{ needs.changes.outputs.fleet_hub_container == 'true' }}" in protected
     shell = textwrap.dedent(protected.split("        run: |\n", 1)[1])
     env = dict(
         os.environ,
