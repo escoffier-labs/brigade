@@ -505,6 +505,7 @@ def write_approval_resume_handoff(
         and bool(result.thread_id)
         and result.worker == requester_worker
         and result.thread_id == requester_thread_id
+        and result.transport == "codex-app-server"
     ]
     if len(matching) != 1:
         raise runguard.RetainRunLockError("approval pause requester did not match exactly one worker thread")
@@ -515,6 +516,7 @@ def write_approval_resume_handoff(
             "task": requester.task,
             "ok": False,
             "thread_id": requester.thread_id,
+            "transport": requester.transport,
             "status": "interrupted",
         }
     ]

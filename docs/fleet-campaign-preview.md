@@ -44,8 +44,8 @@ digests locally without putting task or specification contents in the file.
 The membership fingerprint covers sorted repository keys, authority kinds,
 exact IDs, authority fingerprints and specification fingerprints. Reordering
 changes no fingerprint. Paths, basenames, campaign names and latest runs never
-select or bind a member. Keys must be 1 to 128 ASCII letters, digits, dots,
-underscores, colons or hyphens, starting with a letter or digit. `latest` is
+select or bind a member. Keys must be 1 to 128 ASCII letters, digits or
+the punctuation `._:-`, starting with a letter or digit. `latest` is
 refused. Keys are intended to be opaque: never encode private text or secrets.
 Fingerprints must contain exactly 64 lowercase hexadecimal characters.
 
@@ -108,8 +108,99 @@ not task completion or safe launch. JSON is also the default without `--json`.
 Issues #1128 and #1121 remain open for persistent Hub grouping, cross-machine
 fan-out/resume, duplicate prevention, dashboard integration and Grok Bot
 campaign propagation. Exactly-once or two-conductor dispatch is outside this
-preview. Future persistence must follow #1576's offline schema25 work and bind
-existing Worklore/item authorities, per-member operation keys, response-lost
-reconciliation, explicit retries and canonical cross-machine repository
+preview. The current Hub code declares schema version 25 in
+`src/brigade/fleet_hub.py`. Issue #1576 covers hosted-worker concurrency policy.
+Future persistence must bind existing Worklore/item authorities, per-member
+operation keys, response-lost reconciliation, explicit retries and canonical
+cross-machine repository
 identity with fail-closed claim authority. The legacy late-acquire race in
 #1189 and local claim fallback after Hub failures remain launch constraints.
+
+## Exact local action inspection
+
+`brigade fleet campaign inspect` reads existing local action/import/task
+lineage. It uses the same enabled `repos.toml` selection as preview. It never
+initializes a workspace, contacts the Hub, creates imports, changes claims or
+dispatches work. Preview behavior and its resume candidates remain unchanged.
+
+```bash
+brigade fleet campaign inspect --target . --campaign-id campaign-a \
+  --repos repo-a --references references.json --json
+```
+
+The references file contains one exact action reference per selected member:
+
+```json
+[
+  {
+    "repo_id": "repo-a",
+    "action_id": "action-a",
+    "source_fingerprint": "aaaaaaaaaaaaaaaa"
+  }
+]
+```
+
+References accept exactly these three fields. Fingerprints follow the existing
+storage grammar: 16 or 64 lowercase hexadecimal characters. Preview bindings
+still require 64 characters. Input is limited to 256 references and 256 KiB.
+Each local ledger snapshot is limited to 4 MiB, including growth during reads.
+Reads retain file descriptors anchored at the configured workspace or
+repository root. Opens are nonblocking on POSIX. Child directories and files
+refuse symlinks and Windows
+reparse points. Only regular files are read. Descriptor and recorded-name
+checks detect replacement, growth and observed generation changes. Parsing
+uses those same bounded bytes without compatibility readers or temporary
+snapshot files. Opaque keys use preview's key
+grammar and must never encode private contents or secrets.
+
+Inspection requires an exact action ID and repository ID, its explicit stored
+fingerprint and a recorded review timestamp. The dispatch fingerprint must
+match before inspection follows its exact `target_import_id`. That import
+must have matching repo-fleet action, repository and fingerprint metadata. A
+promoted import leads only to its recorded exact task ID. The task must have
+source `import:repo-fleet` and exact `import_id`, `import_source`, `import_kind`,
+`fleet_action_id`, `repo_id` and `source_fingerprint` metadata linking it back
+to that promoted import. An unrelated task or changed provenance reports
+`task_mismatch`, with no local task observation.
+
+If recorded, the action's `target_import_id` and `target_task_id` and the
+dispatch's `target_task_id` must agree with the chain. Contradictions report
+`lineage_mismatch`. Action status must be a known non-archived action state.
+Missing or junk states report `action_status_invalid`. Archived or superseded
+actions report `action_superseded`. Recorded resolution states may be
+`dispatched`, `in-progress` or `completed`, and dispatch status may be
+`dispatched`. Negative states (`superseded`, `dismissed`, `stale`,
+`broken-reference`) and unknown recorded states report `lineage_mismatch`.
+These states confer no launch or completion authority.
+
+Prefixes, newer imports, synthesized fingerprints and task searches never
+repair missing lineage. Missing, duplicate, corrupt, superseded, mismatched or
+changed lineage stays unknown with a fixed reason code. There is no archive
+fallback: an archived import absent from the current import ledger reports
+`import_missing`. Pending imports report `import_not_promoted`, dismissed
+imports report `import_dismissed`, and unknown or missing import states report
+`import_status_invalid`. None yield a task observation.
+Stable malformed or unsafe ledgers report `ledger_refused`. Observed generation
+changes report `lineage_changed`.
+
+The JSON envelope contains `kind: "fleet-campaign-inspect"`, `read_only: true`,
+the campaign ID and members with opaque repository/action IDs,
+`source_fingerprint`, `action_binding`, `reason` and `local_task_status`.
+`action_binding: "matched"` means the recorded local chain reached an exact
+task with a recognized current status. It does not verify the requested
+campaign specification. `specification_verification` and `launch_safety`
+always remain `unknown`. The summary counts `inspected`, `matched` and
+`unknown` members and always reports `done: false`, even for local `done`
+tasks. No members are excluded from preview's resume candidates.
+
+Exact import and task IDs remain internal to lineage matching and provenance
+checks. The envelope omits `import_id` and `task_id` on every path because
+production-generated IDs can contain title slugs.
+
+Paths, summaries, task text, prompts, artifacts, credentials and raw exceptions
+are excluded. Valid inspection returns exit 0 even when members are unknown.
+Malformed inputs or repository selection return exit 2 with fixed JSON
+refusal codes. JSON is the default without `--json`. Reads detect observed
+generation changes but do not provide an atomic cross-ledger snapshot or
+cross-machine freshness guarantees. Hub observations and campaign completion
+or launch authority remain outside this slice.

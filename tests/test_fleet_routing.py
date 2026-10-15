@@ -341,6 +341,7 @@ def test_claim_collision_uses_live_db_claims_not_client_list(conn):
             now + 900,
         ),
     )
+    conn.execute("INSERT INTO claim_fences (target, generation) VALUES (?, 1)", ("repo/other",))
     conn.commit()
     _observe(conn, NODE_LINUX, active_claims=[], observed_at=_iso(_now() + timedelta(seconds=1)))
     decision = _route(conn)
@@ -764,6 +765,7 @@ def test_reservation_and_linked_claim_count_as_one_occupancy(conn):
         "VALUES (?, ?, NULL, NULL, NULL, NULL, ?, 'holder-linked', ?, ?, 900, ?)",
         ("repo/linked", NODE_LINUX, "session-linked", _iso(), _iso(), now + 900),
     )
+    conn.execute("INSERT INTO claim_fences (target, generation) VALUES (?, 1)", ("repo/linked",))
     conn.commit()
     second = _route(conn, session_id="session-next-slot")
     assert second["selected"]["machine"] == "worker-linux-1"

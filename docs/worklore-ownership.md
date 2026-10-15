@@ -7,10 +7,13 @@ ownership. The Hub records these actions as immutable events in its existing
 
 Ownership grants authority to mutate this Hub metadata. It does not establish
 filesystem exclusivity, prove that a process stopped, authenticate a verification
-result, or complete an item. Every projection reports `liveness: "unknown"` and
-`conflict_check: "not-performed"`. Local filesystem and repository locks still
-control physical exclusion. A previous writer may keep running after a handoff
-has fenced its Hub authority.
+result, or complete an item. Every projection reports `liveness: "unknown"`.
+New checkpoints record `conflict_check: "path-admission"`, a historical check of
+declared repository paths at that ownership revision. Older unchecked snapshots
+retain `not-performed`. See [checkpoint path admission](phase-worklore-path-scope-admission.md)
+for atomic replacement, overlap rules and bounded refusals. Local filesystem and
+repository locks still control physical exclusion. A previous writer may keep
+running after a handoff has fenced its Hub authority.
 
 ## Authority and lifecycle
 
@@ -102,6 +105,11 @@ retain the existing node-first authentication preference. HTTP admin callers
 may offer and withdraw through the same Hub route. The client forwards the nonce
 through one fixed header. It accepts no arbitrary caller headers.
 
+Raw HTTP checkpoint refusals include bounded `conflicts`, `resolution` and
+`truncated` details when applicable. The existing Python client preserves only
+the error code and sanitized message. Bounded propagation of those structured
+details through the client remains epic work.
+
 ```python
 from brigade import worklore_client
 
@@ -175,8 +183,16 @@ append event 201. An exhausted chain cannot start another ownership cycle.
 `ownership-capacity-exhausted` requires a successor item.
 
 Claim expiry, session end, lease expiry, node revocation, and unknown liveness
-never transfer ownership automatically. A dead holder remains recorded until an
-authorized release or a later reviewed recovery mechanism. A successor item is
-a bounded recovery option, not permission to take a still-running writer's files.
-Atomic write-conflict checks, authoritative verification and review ingestion,
-GitHub merge reconciliation, and issue completion require later slices.
+never transfer ownership automatically or remove a reserved path scope. Release
+requires the current holder nonce and an enrolled, unrevoked holder node. Admin
+and operator privileges cannot force release. A successor item addresses an
+exhausted event chain but cannot checkpoint over another item's reserved paths,
+including a lost holder's scope. Operator-reviewed reservation recovery for a
+lost holder capability remains future epic work. No supported recovery action
+in this slice bypasses holder authority.
+
+Atomic checkpoint path admission is implemented as described in the
+[phase document](phase-worklore-path-scope-admission.md). Dependencies,
+authoritative verification and review ingestion, GitHub merge reconciliation,
+resource arbitration, delegated scope, bounded client detail propagation,
+lost-holder recovery, and issue completion require later slices.

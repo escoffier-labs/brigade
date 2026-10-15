@@ -325,6 +325,114 @@ def test_allowlist_ratchet_rejects_growth_and_allows_deletion():
     windows_pytest.check_allowlist_ratchet({"test_known.py"}, baseline)
 
 
+@pytest.fixture
+def allowlist_repo(tmp_path):
+    """A real commit baseline, including an intentionally absent-file baseline."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q", str(repo)], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.name", "Test User"], check=True)
+    subprocess.run(["git", "-C", str(repo), "config", "user.email", "test@example.invalid"], check=True)
+    allowlist = repo / "tests" / "windows_pytest_allowlist.json"
+    allowlist.parent.mkdir()
+
+    def commit_baseline(payload):
+        if payload is not None:
+            allowlist.write_text(payload, encoding="utf-8")
+            subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(repo), "commit", "-qm", "baseline", "--allow-empty"], check=True)
+        return subprocess.run(
+            ["git", "-C", str(repo), "rev-parse", "HEAD"], check=True, capture_output=True, text=True
+        ).stdout.strip()
+
+    return repo, allowlist, commit_baseline
+
+
+def _allowlist_payload(entries):
+    return json.dumps({"known_failures": entries, "known_timeouts": []})
+
+
+def _allowlist_mode_argv(repo, allowlist, base):
+    argv = ["--check-allowlist-only", "--repo", str(repo), "--allowlist", str(allowlist)]
+    return argv if base is None else [*argv, "--base-ref", base]
+
+
+@pytest.mark.parametrize(
+    ("entries", "expected"),
+    [(["test_known.py", "test_new.py"], 2), (["test_known.py", "test_old.py"], 0), (["test_known.py"], 0)],
+    ids=["expansion", "unchanged", "shrink"],
+)
+def test_allowlist_only_checks_real_commit_without_running_harness(
+    allowlist_repo, monkeypatch, capsys, entries, expected
+):
+    repo, allowlist, commit = allowlist_repo
+    base = commit(_allowlist_payload(["test_known.py", "test_old.py"]))
+    allowlist.write_text(_allowlist_payload(entries), encoding="utf-8")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("allowlist-only mode entered the test harness")
+
+    for name in (
+        "is_windows",
+        "discover_files",
+        "make_temp_root",
+        "install_console_handler",
+        "run_files",
+        "write_record",
+    ):
+        monkeypatch.setattr(windows_pytest, name, forbidden)
+    assert windows_pytest.main(_allowlist_mode_argv(repo, allowlist, base)) == expected
+    if expected:
+        assert "allowlist expanded: test_new.py" in capsys.readouterr().err
+    # No pytest files exist: the ratchet validates names without discovering tests.
+    assert list(repo.rglob("test_*.py")) == []
+    assert not (repo / "record.json").exists()
+
+
+def test_allowlist_only_requires_base_instead_of_record(allowlist_repo, capsys):
+    repo, allowlist, _ = allowlist_repo
+    with pytest.raises(SystemExit) as exc:
+        windows_pytest.main(_allowlist_mode_argv(repo, allowlist, None))
+    assert exc.value.code == 2
+    error = capsys.readouterr().err
+    assert "--base-ref is required" in error
+    assert "--record is required" not in error
+
+
+@pytest.mark.parametrize("base", ["missing-base", "0" * 40, "HEAD:tests/windows_pytest_allowlist.json"])
+def test_allowlist_only_fails_closed_for_unavailable_or_noncommit_base(allowlist_repo, capsys, base):
+    repo, allowlist, commit = allowlist_repo
+    commit(_allowlist_payload([]))
+    assert windows_pytest.main(_allowlist_mode_argv(repo, allowlist, base)) == 2
+    assert "base ref is unavailable" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("payload", ["{broken", "[]", '{"known_failures": [], "known_timeouts": "wrong"}'])
+def test_allowlist_only_fails_closed_for_malformed_baseline(allowlist_repo, capsys, payload):
+    repo, allowlist, commit = allowlist_repo
+    base = commit(payload)
+    allowlist.write_text(_allowlist_payload([]), encoding="utf-8")
+    assert windows_pytest.main(_allowlist_mode_argv(repo, allowlist, base)) == 2
+    assert "allowlist check error:" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(("count", "expected"), [(182, 0), (183, 2)])
+def test_allowlist_only_initial_creation_uses_historical_cap(allowlist_repo, capsys, count, expected):
+    repo, allowlist, commit = allowlist_repo
+    base = commit(None)
+    allowlist.write_text(_allowlist_payload([f"test_initial_{i}.py" for i in range(count)]), encoding="utf-8")
+    assert windows_pytest.main(_allowlist_mode_argv(repo, allowlist, base)) == expected
+    if expected:
+        assert "initial allowlist exceeds 182 historical entries" in capsys.readouterr().err
+
+
+def test_full_windows_harness_still_requires_record(capsys):
+    with pytest.raises(SystemExit) as exc:
+        windows_pytest.main([])
+    assert exc.value.code == 2
+    assert "--record" in capsys.readouterr().err
+
+
 def test_shipped_allowlist_matches_the_initial_ratchet_cap():
     assert (
         len(windows_pytest.load_allowlist(windows_pytest.DEFAULT_ALLOWLIST)) == windows_pytest.INITIAL_ALLOWLIST_ENTRIES

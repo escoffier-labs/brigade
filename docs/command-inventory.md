@@ -28,7 +28,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade dogfood` (extras): 1 command path(s)
 - `brigade evidence`: 12 command path(s)
 - `brigade extras`: 3 command path(s)
-- `brigade fleet`: 59 command path(s)
+- `brigade fleet`: 60 command path(s)
 - `brigade friction` (extras): 3 command path(s)
 - `brigade governance`: 1 command path(s)
 - `brigade guard`: 1 command path(s)
@@ -51,7 +51,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade profiles`: 2 command path(s)
 - `brigade projection`: 1 command path(s)
 - `brigade projects` (extras): 10 command path(s)
-- `brigade receipts`: 16 command path(s)
+- `brigade receipts`: 17 command path(s)
 - `brigade reconfigure`: 1 command path(s)
 - `brigade release` (extras): 23 command path(s)
 - `brigade repos` (extras): 74 command path(s)
@@ -193,6 +193,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade extras off`
 - `brigade extras on`
 - `brigade extras status`
+- `brigade fleet campaign inspect`
 - `brigade fleet campaign preview`
 - `brigade fleet claims`
 - `brigade fleet cloud set`
@@ -410,6 +411,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade receipts export agent-change`
 - `brigade receipts export attestation`
 - `brigade receipts export commit-linkage`
+- `brigade receipts export journal`
 - `brigade receipts export miseledger`
 - `brigade receipts export openinference`
 - `brigade receipts export otel-genai`

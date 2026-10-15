@@ -639,6 +639,23 @@ def _classify_entry(
             open_pr=open_pr,
         ):
             classification = "needs-plan-approval"
+        elif (
+            provider == "jules"
+            and isinstance(provider_info, dict)
+            and provider_info.get("has_outputs") is False
+            and not (isinstance(provider_info.get("pull_request_url"), str) and provider_info.get("pull_request_url"))
+            and not (
+                isinstance(provider_info.get("activity_kinds"), list)
+                and JULES_WORK_ACTIVITY_KINDS.intersection(provider_info["activity_kinds"])
+            )
+            and not branch_exists
+            and not open_pr
+        ):
+            # An explicit empty output list is terminal evidence, not a job
+            # that is still pending or an artifact that can be landed. Keep
+            # plan-only sessions more specific above; other empty completions
+            # need operator investigation.
+            classification = "needs-investigation"
         else:
             ready_mark = ready_at or _parse_time(entry.get("dispatched_at"))
             age_hours = _hours_since(ready_mark, now)
@@ -1647,8 +1664,9 @@ def _jules_cloud_observation(target: Path) -> ProviderObservation:
         url = session.get("url")
         if isinstance(url, str):
             info["url"] = url
-        if session.get("has_outputs") is True:
-            info["has_outputs"] = True
+        has_outputs = session.get("has_outputs")
+        if isinstance(has_outputs, bool):
+            info["has_outputs"] = has_outputs
         pull_request_url = session.get("pull_request_url")
         if isinstance(pull_request_url, str):
             info["pull_request_url"] = pull_request_url

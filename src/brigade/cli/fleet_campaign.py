@@ -7,6 +7,7 @@ import json
 from pathlib import Path
 
 from .. import fleet_campaign as campaign
+from .. import fleet_campaign_authority as authority
 from ..repos_cmd.sweeps import _select_sweep_entries
 
 
@@ -33,6 +34,45 @@ def register(fleet_sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--observations", type=Path, help="Bounded typed supplied/unverified observation fixture JSON.")
     parser.add_argument("--json", action="store_true", help="Emit JSON (also the default).")
     parser.set_defaults(func=_dispatch)
+    inspector = commands.add_parser("inspect", help="Read-only exact local action/import/task lineage diagnostic.")
+    inspector.add_argument("--target", type=Path, default=Path.cwd())
+    inspector.add_argument("--campaign-id", required=True, help="Explicit opaque campaign ID.")
+    inspector.add_argument(
+        "--references", type=Path, required=True, help="Bounded JSON list of exact action references."
+    )
+    inspector.add_argument("--repos", help="Comma-separated exact enabled repos.toml IDs; default all enabled.")
+    inspector.add_argument("--json", action="store_true", help="Emit JSON (also the default).")
+    inspector.set_defaults(func=_inspect)
+
+
+def _inspect(args: argparse.Namespace) -> int:
+    try:
+        campaign.opaque_key(args.campaign_id)
+        ids = None
+        if args.repos is not None:
+            ids = args.repos.split(",")
+            if len(ids) > campaign.MAX_MEMBERS:
+                raise campaign.PreviewError("membership_refused")
+            ids = [campaign.opaque_key(value) for value in ids]
+        target = args.target.expanduser().resolve()
+        entries, errors, loaded = _select_sweep_entries(target, repo_ids=ids)
+        selected = {entry.repo_id for entry in entries}
+        if not loaded or errors or not selected or (ids is not None and set(ids) != selected):
+            raise campaign.PreviewError("repository_selection_refused")
+        payload = authority.inspect(
+            target=target,
+            campaign_id=args.campaign_id,
+            entries=entries,
+            references=authority.parse_references(_read_input(args.references)),
+        )
+    except campaign.PreviewError as exc:
+        print(json.dumps({"kind": authority.INSPECT_KIND, "read_only": True, "error": str(exc)}))
+        return 2
+    except (OSError, ValueError, TypeError, IndexError, RecursionError, RuntimeError):
+        print(json.dumps({"kind": authority.INSPECT_KIND, "read_only": True, "error": "input_refused"}))
+        return 2
+    print(json.dumps(payload, sort_keys=True, indent=2))
+    return 0
 
 
 def _read_input(path: Path) -> object:

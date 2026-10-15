@@ -45,7 +45,13 @@ def _write_run_dir(tmp_path: Path, *, results: list[dict]) -> Path:
     (run_dir / "plan.json").write_text(
         json.dumps({"assignments": [{"stage": 1, "worker": "cook", "task": "write code"}]})
     )
-    (run_dir / "worker-results.json").write_text(json.dumps({"results": results, "ground_truth": {}}))
+    normalized_results = [
+        {"transport": "codex-app-server", **result}
+        if isinstance(result.get("thread_id"), str) and "transport" not in result
+        else result
+        for result in results
+    ]
+    (run_dir / "worker-results.json").write_text(json.dumps({"results": normalized_results, "ground_truth": {}}))
     (run_dir / "synthesis.json").write_text(
         json.dumps(
             {
@@ -105,6 +111,15 @@ def test_roster_snapshot_preserves_invalid_final_fallback():
     roster = run_resume._roster_from_snapshot(snapshot)
 
     assert roster.agents["grok-review"].invalid_final_fallback == "cursor-grok"
+
+
+def test_legacy_approval_handoff_uses_run_transport_only_when_field_missing():
+    run_meta = {"codex_transport": "app-server"}
+
+    assert run_resume._is_resumable_appserver_result({}, run_meta)
+    assert run_resume._is_resumable_appserver_result({"transport": "codex-app-server"}, run_meta)
+    assert not run_resume._is_resumable_appserver_result({"transport": "direct"}, run_meta)
+    assert not run_resume._is_resumable_appserver_result({}, {"codex_transport": "direct"})
 
 
 def test_roster_snapshot_preserves_cloud_safe_mode():
@@ -200,7 +215,22 @@ def test_roster_snapshot_rejects_colliding_env_targets():
         run_resume._roster_from_snapshot(snapshot)
 
 
-def test_resume_reattaches_and_resynthesizes(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize(
+    "requested_model",
+    [
+        "cursor-auto",
+        "ghp_" + "A" * 24,
+        "github_pat_" + "A" * 24,
+        "xoxb-" + "A" * 16,
+        "sk-" + "A" * 24,
+        "AKIA" + "A" * 16,
+        "ASIA" + "A" * 16,
+        "AIza" + "a" * 30,
+        "glpat-" + "a" * 20,
+        "eyJ" + "A" * 8 + "." + "B" * 8 + "." + "C" * 8,
+    ],
+)
+def test_resume_reattaches_and_resynthesizes(tmp_path, monkeypatch, capsys, requested_model):
     run_dir = _write_run_dir(
         tmp_path,
         results=[
@@ -211,7 +241,89 @@ def test_resume_reattaches_and_resynthesizes(tmp_path, monkeypatch, capsys):
                 "detail": "timeout",
                 "text": "part",
                 "thread_id": "t-1",
+                "transport": "codex-app-server",
                 "status": "interrupted",
+                "failure_kind": "output-limit",
+                "timed_out": True,
+                "output_truncated": True,
+                "output_bytes": 16384,
+                "output_cap_bytes": 16384,
+            },
+            {
+                "worker": "cursor-worker",
+                "task": "inspect changes",
+                "ok": True,
+                "text": "prior result",
+                "transport": "acpx",
+                "requested_model": requested_model,
+                "effective_model": "composer-2.5",
+                "acpx_version": "0.12.0",
+                "stop_reason": "end_turn",
+                "protocol_version": 1,
+                "session_id": "acp-session",
+                "request_id": "req-2",
+                "events": [{"type": "agent_message_chunk"}],
+                "transport_warning": {
+                    "phase": "post-final",
+                    "kind": "permission-prompt-unavailable",
+                    "detail": "late permission prompt unavailable",
+                },
+                "exit_code": 7,
+                "duration_seconds": 3.25,
+                "reasoning": "medium",
+                "stdout_log": "worker-logs/cursor.stdout.log",
+                "stderr_log": "worker-logs/cursor.stderr.log",
+                "attempts": [
+                    {
+                        "kind": "initial",
+                        "worker": "cursor-worker",
+                        "task": "inspect changes",
+                        "transport": "acpx",
+                        "reasoning": "medium",
+                        "started_at": "2026-10-13T12:00:00+00:00",
+                        "finished_at": "2026-10-13T12:00:01+00:00",
+                        "exit_code": 7,
+                        "terminal_reason": "permission-prompt-unavailable",
+                        "failure_phase": "inference",
+                        "failure_kind": "permission-prompt-unavailable",
+                        "session_id": "acp-session",
+                        "selected": True,
+                        "failure": {
+                            "schema": "brigade.worker_failure.v1",
+                            "class": "unclassified",
+                            "domain": "infrastructure",
+                            "phase": "inference",
+                            "retry": "none",
+                            "detected_by": "legacy-failure-kind",
+                            "detail": "late permission prompt unavailable",
+                            "cause_code": "permission-prompt-unavailable",
+                            "attempt": 1,
+                        },
+                    }
+                ],
+                "metadata_provenance": {
+                    "observed_at": "2026-10-13T12:00:00+00:00",
+                    "fields": {
+                        "requested_model": {
+                            "source": "declared",
+                            "locator": "launch-argument",
+                            "digest": None,
+                            "unknown_reason": "mutable-alias-not-backend-identity",
+                        },
+                        "effective_model": {
+                            "source": "observed",
+                            "locator": "acp-config-option-update",
+                            "digest": None,
+                            "unknown_reason": "backend-revision-unavailable",
+                        },
+                        "acpx_version": {
+                            "source": "observed",
+                            "locator": "acpx-version-output",
+                            "digest": None,
+                            "unknown_reason": None,
+                        },
+                    },
+                },
             },
         ],
     )
@@ -243,6 +355,33 @@ def test_resume_reattaches_and_resynthesizes(tmp_path, monkeypatch, capsys):
     results = json.loads((run_dir / "worker-results.json").read_text())["results"]
     assert results[0]["ok"] is True and results[0]["text"] == "finished now"
     assert results[0]["status"] == "complete"
+    assert "failure_kind" not in results[0]
+    assert results[0].get("timed_out", False) is False
+    assert "output_truncated" not in results[0]
+    assert "output_bytes" not in results[0]
+    assert "output_cap_bytes" not in results[0]
+    assert results[1]["transport"] == "acpx"
+    if requested_model == "cursor-auto":
+        assert results[1]["requested_model"] == "cursor-auto"
+    else:
+        assert "requested_model" not in results[1]
+    assert results[1]["effective_model"] == "composer-2.5"
+    assert results[1]["acpx_version"] == "0.12.0"
+    assert results[1]["stop_reason"] == "end_turn"
+    assert results[1]["protocol_version"] == 1
+    assert results[1]["session_id"] == "acp-session"
+    assert results[1]["request_id"] == "req-2"
+    assert results[1]["events"] == [{"type": "agent_message_chunk"}]
+    assert results[1]["transport_warning"]["kind"] == "permission-prompt-unavailable"
+    assert results[1]["exit_code"] == 7
+    assert results[1]["duration_seconds"] == 3.25
+    assert results[1]["reasoning"] == "medium"
+    assert results[1]["stdout_log"] == "worker-logs/cursor.stdout.log"
+    assert results[1]["stderr_log"] == "worker-logs/cursor.stderr.log"
+    assert results[1]["attempts"][0]["terminal_reason"] == "permission-prompt-unavailable"
+    assert results[1]["attempts"][0]["failure_kind"] == "permission-prompt-unavailable"
+    assert results[1]["attempts"][0]["failure"]["detail"] == "late permission prompt unavailable"
+    assert results[1]["metadata_provenance"]["fields"]["effective_model"]["source"] == "observed"
     assert (run_dir / "final.txt").read_text().strip() == "final synthesis"
     run_json = json.loads((run_dir / "run.json").read_text())
     assert run_json["status"] == "ok"
@@ -260,6 +399,63 @@ def test_resume_reattaches_and_resynthesizes(tmp_path, monkeypatch, capsys):
     assert json.loads(synthesis_revisions[0].read_text()) == legacy_synthesis
     assert json.loads(worker_revisions[1].read_text()) == json.loads((run_dir / "worker-results.json").read_text())
     assert json.loads(synthesis_revisions[1].read_text()) == json.loads((run_dir / "synthesis.json").read_text())
+
+
+def test_resume_direct_worker_preserves_synthesis_provenance(tmp_path, monkeypatch):
+    metadata_provenance = {
+        "observed_at": "2026-10-13T12:00:00+00:00",
+        "fields": {
+            "effective_model": {
+                "source": "observed",
+                "locator": "acp-config-option-update",
+                "digest": None,
+                "unknown_reason": "backend-revision-unavailable",
+            }
+        },
+    }
+    direct_worker = {
+        **_RESUMABLE_COOK,
+        "transport": "codex-app-server",
+        "requested_model": "cursor-auto",
+        "effective_model": "composer-2.5",
+        "acpx_version": "0.12.0",
+        "metadata_provenance": metadata_provenance,
+    }
+    run_dir = _write_run_dir(tmp_path, results=[direct_worker])
+    meta = json.loads((run_dir / "run.json").read_text())
+    meta["worker"] = "cook"
+    (run_dir / "run.json").write_text(json.dumps(meta))
+    monkeypatch.setattr(run_resume.codex_appserver, "AppServer", _StubServer)
+    monkeypatch.setattr(
+        run_resume.agents,
+        "run_agent",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("direct-worker resume must not invoke chef")),
+    )
+
+    assert run_resume.resume(run_dir) == 0
+    synthesis_result = json.loads((run_dir / "synthesis.json").read_text())["result"]
+    assert synthesis_result["text"] == "finished now"
+    assert synthesis_result["transport"] == "codex-app-server"
+    assert "requested_model" not in synthesis_result
+    assert "effective_model" not in synthesis_result
+    assert "acpx_version" not in synthesis_result
+    assert "metadata_provenance" not in synthesis_result
+
+
+def test_resume_rejects_acp_transport_even_with_appserver_thread_id(tmp_path, monkeypatch, capsys):
+    acp_worker = {**_RESUMABLE_COOK, "transport": "acpx", "session_id": "acp-session"}
+    run_dir = _write_run_dir(tmp_path, results=[acp_worker])
+    meta = json.loads((run_dir / "run.json").read_text())
+    meta["worker"] = "cook"
+    (run_dir / "run.json").write_text(json.dumps(meta))
+    monkeypatch.setattr(
+        run_resume.codex_appserver,
+        "AppServer",
+        lambda *a, **k: (_ for _ in ()).throw(AssertionError("ACP worker must not resume through app-server")),
+    )
+
+    assert run_resume.resume(run_dir) == 2
+    assert "no resumable workers" in capsys.readouterr().err
 
 
 def test_resume_re_envelopes_output_and_drops_transplanted_identity(tmp_path, monkeypatch):
@@ -1051,6 +1247,7 @@ _RESUMABLE_COOK = {
     "detail": "timeout",
     "text": "part",
     "thread_id": "t-1",
+    "transport": "codex-app-server",
     "status": "interrupted",
 }
 
@@ -1594,7 +1791,8 @@ class _StatusThread:
         self._detail = detail
         self._timed_out = timed_out
 
-    def run_turn(self, prompt, *, timeout, on_event=None):  # noqa: ARG002
+    def run_turn(self, prompt, *, timeout, effort=None, on_event=None):  # noqa: ARG002
+        self.effort = effort
         return codex_appserver.TurnResult(
             text=self._text,
             ok=self._ok,
@@ -1622,10 +1820,11 @@ class _StatusServer(_StubServer):
         self.turn_status = turn_status
         self.turn_detail = turn_detail
         self.turn_timed_out = turn_timed_out
+        self.last_thread = None
 
     def resume_thread(self, thread_id, *, cwd, model=None, sandbox=None):
         self.resumed.append(thread_id)
-        return _StatusThread(
+        self.last_thread = _StatusThread(
             thread_id,
             text=self.turn_text,
             ok=self.turn_ok,
@@ -1633,6 +1832,7 @@ class _StatusServer(_StubServer):
             detail=self.turn_detail,
             timed_out=self.turn_timed_out,
         )
+        return self.last_thread
 
 
 def test_resume_maps_timed_out_direct_worker_to_timeout(tmp_path, monkeypatch):
@@ -1746,3 +1946,166 @@ def test_resume_resets_stale_failure_phase_before_retry(tmp_path, monkeypatch):
     assert results[0]["detail"] == "provider hung up"
     assert results[0].get("failure_phase") != "dispatch"
     assert "failure_phase" not in results[0]
+
+
+def test_resume_success_clears_stale_execution_metadata_and_keeps_attempt_history(tmp_path, monkeypatch):
+    stale = {
+        **_RESUMABLE_COOK,
+        "exit_code": 124,
+        "duration_seconds": 9.5,
+        "transport_warning": {"kind": "permission-prompt-unavailable", "detail": "old warning"},
+        "stdout_log": "old.stdout.log",
+        "stderr_log": "old.stderr.log",
+        "reasoning": "old reasoning",
+        "attempts": [
+            {
+                "kind": "initial",
+                "worker": "cook",
+                "task": "write code",
+                "transport": "codex-app-server",
+                "started_at": "2026-10-13T12:00:00+00:00",
+                "finished_at": "2026-10-13T12:00:01+00:00",
+                "exit_code": 124,
+                "terminal_reason": "timeout",
+                "selected": True,
+                "failure_kind": "timeout",
+                "failure": {"class": "timeout", "detail": "old timeout"},
+            }
+        ],
+    }
+    run_dir = _write_run_dir(tmp_path, results=[stale])
+    meta = json.loads((run_dir / "run.json").read_text())
+    meta["worker"] = "cook"
+    (run_dir / "run.json").write_text(json.dumps(meta))
+    roster = json.loads((run_dir / "roster.json").read_text())
+    roster["agents"]["cook"]["reasoning"] = "high"
+    (run_dir / "roster.json").write_text(json.dumps(roster))
+    server = _StatusServer(turn_text="resumed", turn_ok=True, turn_status="complete")
+    monkeypatch.setattr(run_resume.codex_appserver, "AppServer", lambda *a, **k: server)
+    monkeypatch.setattr(
+        run_resume.agents,
+        "run_agent",
+        lambda *a, **k: agents.AgentResult(text="final synthesis", ok=True),
+    )
+
+    assert run_resume.resume(run_dir) == 0
+    result = json.loads((run_dir / "worker-results.json").read_text())["results"][0]
+    assert result["ok"] is True
+    assert result["status"] == "complete"
+    for key in ("transport_warning", "exit_code", "duration_seconds", "stdout_log", "stderr_log"):
+        assert key not in result
+    assert result["reasoning"] == "high"
+    assert result["attempts"][0]["failure"]["detail"] == "old timeout"
+    synthesis_result = json.loads((run_dir / "synthesis.json").read_text())["result"]
+    assert synthesis_result["reasoning"] == "high"
+    assert server.last_thread.effort == "high"
+
+
+def test_resume_clears_stale_attempt_metadata_when_provider_raises(tmp_path, monkeypatch):
+    stale = {
+        **_RESUMABLE_COOK,
+        "failure_kind": "output-limit",
+        "timed_out": True,
+        "output_truncated": True,
+        "output_bytes": 99,
+        "output_cap_bytes": 100,
+        "effective_model": "old-model",
+        "session_id": "old-session",
+    }
+    run_dir = _write_run_dir(tmp_path, results=[stale])
+    meta = json.loads((run_dir / "run.json").read_text())
+    meta["worker"] = "cook"
+    (run_dir / "run.json").write_text(json.dumps(meta))
+
+    class FailingServer(_StubServer):
+        def resume_thread(self, thread_id, *, cwd, model=None, sandbox=None):
+            raise codex_appserver.AppServerError("app server disconnected")
+
+    monkeypatch.setattr(run_resume.codex_appserver, "AppServer", FailingServer)
+    monkeypatch.setattr(
+        run_resume.agents,
+        "run_agent",
+        lambda *a, **k: agents.AgentResult(text="unused", ok=True),
+    )
+
+    assert run_resume.resume(run_dir) == 2
+    results = json.loads((run_dir / "worker-results.json").read_text())["results"]
+    assert results[0]["detail"] == "app server disconnected"
+    assert results[0]["transport"] == "codex-app-server"
+    for key in (
+        "failure_kind",
+        "timed_out",
+        "output_truncated",
+        "output_bytes",
+        "output_cap_bytes",
+        "effective_model",
+        "session_id",
+    ):
+        assert key not in results[0]
+
+
+@pytest.mark.parametrize("probe_mode", ["raises", "unhealthy"])
+def test_resume_clears_stale_metadata_when_seat_probe_fails(tmp_path, monkeypatch, probe_mode):
+    stale = {
+        **_RESUMABLE_COOK,
+        "failure_kind": "output-limit",
+        "timed_out": True,
+        "output_truncated": True,
+        "output_bytes": 99,
+        "output_cap_bytes": 100,
+        "effective_model": "old-model",
+        "acpx_version": "0.12.0",
+        "metadata_provenance": {"fields": {"effective_model": {"source": "observed"}}},
+        "session_id": "old-session",
+        "request_id": "old-request",
+        "protocol_version": 1,
+        "safe_events": [{"type": "old-event"}],
+    }
+    run_dir = _write_run_dir(tmp_path, results=[stale])
+    meta = json.loads((run_dir / "run.json").read_text())
+    meta["worker"] = "cook"
+    (run_dir / "run.json").write_text(json.dumps(meta))
+
+    class FakeProbe:
+        def invalidate(self, *, seat):  # noqa: ARG002
+            pass
+
+        def probe(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            if probe_mode == "raises":
+                raise RuntimeError("probe unavailable")
+            return type("Health", (), {"status": "unhealthy", "failure": None})()
+
+    class NoCallServer(_StubServer):
+        def resume_thread(self, *args, **kwargs):  # noqa: ANN002, ANN003
+            raise AssertionError("unhealthy seat must not resume")
+
+    monkeypatch.setattr(run_resume.codex_appserver, "AppServer", NoCallServer)
+    monkeypatch.setattr(run_resume.seat_health, "SeatHealthProbe", lambda **kwargs: FakeProbe())
+    monkeypatch.setattr(run_resume.seat_health, "write_seat_health_receipt", lambda *a, **k: None)
+    monkeypatch.setattr(
+        run_resume.agents,
+        "run_agent",
+        lambda *a, **k: agents.AgentResult(text="unused", ok=True),
+    )
+
+    assert run_resume.resume(run_dir) == 2
+    results = json.loads((run_dir / "worker-results.json").read_text())["results"]
+    assert results[0]["status"] == "failed"
+    assert results[0]["failure_phase"] == "preflight"
+    assert results[0]["failure_kind"] == "unclassified"
+    expected_detail = "probe unavailable" if probe_mode == "raises" else "unhealthy"
+    assert expected_detail in results[0]["detail"]
+    for key in (
+        "timed_out",
+        "output_truncated",
+        "output_bytes",
+        "output_cap_bytes",
+        "effective_model",
+        "acpx_version",
+        "metadata_provenance",
+        "session_id",
+        "request_id",
+        "protocol_version",
+        "safe_events",
+    ):
+        assert key not in results[0]
