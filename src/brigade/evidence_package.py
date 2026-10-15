@@ -27,6 +27,7 @@ PACKAGE_FILES = (
     ("attestation.sigstore.json", "cosign-bundle", "application/vnd.dev.sigstore.bundle.v0.3+json"),
     ("summary.md", "summary", "text/plain"),
 )
+PACKAGE_ENTRY_NAMES = frozenset(name for name, _, _ in PACKAGE_FILES)
 
 
 class EvidencePackageError(Exception):

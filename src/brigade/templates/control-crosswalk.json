@@ -98,7 +98,7 @@
       "producer_command": "brigade receipts export package --run-id <id> --out .brigade/evidence-packages/<name>",
       "verifier_command": "brigade receipts verify-package <dir>",
       "state_rule": "evidence-package-manifest",
-      "note": "brigade evidence controls only inspects packages exported under .brigade/evidence-packages/ and recomputes the unsigned manifest entries_sha256; it does not rehash entry files. brigade receipts verify-package rehashes each entry."
+      "note": "brigade evidence controls validates package manifests, rehashes captured entries, rederives the stored receipt digest and checks the packaged source bindings. This verifies package integrity, not custody or control operation."
     }
   ],
   "frameworks": [
@@ -229,7 +229,7 @@
       "edition": "NIST AI 100-1, AI RMF 1.0 (January 2023), final",
       "artifact_contract": "brigade.work_verify_receipt from brigade work verify run: per-command argv and exit status.",
       "responsible_actor": "Adopting organization AI risk owner; Brigade only produces the artifact.",
-      "verification_limit": "The evaluator checks receipt structure, ordered planned-command matching and run binding, but does not yet rederive the stored digest or verify an optional local HMAC. Brigade cannot judge whether the check measures a mapped risk. A Brigade artifact does not establish that an organizational control or process operated."
+      "verification_limit": "The evaluator checks receipt structure, ordered planned-command matching and run binding, and rederives the stored digest when present. It does not verify optional local HMACs or establish independent custody or key-management effectiveness. Brigade cannot judge whether the check measures a mapped risk. A Brigade artifact does not establish that an organizational control or process operated."
     },
     {
       "claim_id": "EC-01",
@@ -1186,7 +1186,7 @@
       "relationship": "supports",
       "obligation_bearer": "provider",
       "applicability_condition": "any",
-      "rationale": "Package export supplies an unsigned manifest. The evaluator checks entries-list digest self-consistency, not file contents; verify-package rehashes files.",
+      "rationale": "The strict package snapshot rehashes captured entries and rederives the receipt digest. Package integrity does not establish custody or control operation.",
       "source_locator": "https://www.iso.org/standard/42001"
     },
     {
@@ -1196,7 +1196,7 @@
       "relationship": "supports",
       "obligation_bearer": "supplier",
       "applicability_condition": "any",
-      "rationale": "Package export supplies an unsigned manifest. The evaluator checks entries-list digest self-consistency, not file contents; verify-package rehashes files.",
+      "rationale": "The strict package snapshot rehashes captured entries and rederives the receipt digest. Package integrity does not establish custody or control operation.",
       "source_locator": "https://csrc.nist.gov/projects/ssdf"
     },
     {
@@ -1206,7 +1206,7 @@
       "relationship": "supports",
       "obligation_bearer": "service-organisation",
       "applicability_condition": "any",
-      "rationale": "Package export supplies an unsigned manifest. The evaluator checks entries-list digest self-consistency, not file contents; verify-package rehashes files.",
+      "rationale": "The strict package snapshot rehashes captured entries and rederives the receipt digest. Package integrity does not establish custody or control operation.",
       "source_locator": "https://csrc.nist.gov/Projects/risk-management/sp800-53-controls/downloads"
     },
     {
@@ -1216,7 +1216,7 @@
       "relationship": "supports",
       "obligation_bearer": "provider",
       "applicability_condition": "provider of a high-risk AI system",
-      "rationale": "Package export supplies an unsigned manifest. The evaluator checks entries-list digest self-consistency, not file contents; verify-package rehashes files.",
+      "rationale": "The strict package snapshot rehashes captured entries and rederives the receipt digest. Package integrity does not establish custody or control operation.",
       "source_locator": "https://artificialintelligenceact.eu/article/11/"
     },
     {
@@ -1226,7 +1226,7 @@
       "relationship": "supports",
       "obligation_bearer": "service-organisation",
       "applicability_condition": "any",
-      "rationale": "Package export supplies an unsigned manifest. The evaluator checks entries-list digest self-consistency, not file contents; verify-package rehashes files.",
+      "rationale": "The strict package snapshot rehashes captured entries and rederives the receipt digest. Package integrity does not establish custody or control operation.",
       "source_locator": "https://www.iso.org/standard/27001"
     },
     {
@@ -1236,7 +1236,7 @@
       "relationship": "partially-supports",
       "obligation_bearer": "service-organisation",
       "applicability_condition": "any",
-      "rationale": "Package export supplies an unsigned manifest. The evaluator checks entries-list digest self-consistency, not file contents; verify-package rehashes files. Not operational monitoring.",
+      "rationale": "The strict package snapshot rehashes captured entries and rederives the receipt digest. Package integrity does not establish custody or control operation. Not operational monitoring.",
       "source_locator": "https://www.aicpa-cima.com/resources/download/2017-trust-services-criteria-with-revised-points-of-focus-2022"
     },
     {
@@ -1246,7 +1246,7 @@
       "relationship": "supports",
       "obligation_bearer": "deployer",
       "applicability_condition": "any",
-      "rationale": "Package export supplies an unsigned manifest. The evaluator checks entries-list digest self-consistency, not file contents; verify-package rehashes files.",
+      "rationale": "The strict package snapshot rehashes captured entries and rederives the receipt digest. Package integrity does not establish custody or control operation.",
       "source_locator": "https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/"
     },
     {
@@ -1267,15 +1267,15 @@
       "claim_id": "EC-03",
       "framework_id": "nist-ai-rmf-1.0",
       "property": "signature integrity",
-      "artifact_contract": "brigade.attestation.cosign-dsse.v1 Sigstore bundle (attestation.sigstore.json) from brigade receipts export attestation --profile cosign, checked locally for media type and DSSE envelope.",
-      "responsible_actor": "Adopting organization, which operates cosign verification and its trust root; Brigade only records the bundle.",
+      "artifact_contract": "brigade.attestation.cosign-dsse.v1 Sigstore bundle (attestation.sigstore.json) from brigade receipts export attestation --profile cosign, checked against the run receipt and the configured .brigade/attestation/cosign.pub key.",
+      "responsible_actor": "Adopting organization, which configures and protects the cosign public key trust root; Brigade verifies the bundle against that key.",
       "applicability_condition": "Not applicable: no AI RMF 1.0 subcategory is assigned to this property, so no applicability condition is claimed.",
       "disposition": "unmapped-evidence-property",
       "superseded_control_id": "GOVERN 5.2",
       "edition": "NIST AI 100-1, AI RMF 1.0 (January 2023), final",
       "source_locator": "https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.100-1.pdf Section 5.1, Table 1, GOVERN 5.2",
       "rationale": "A cosign bundle supports the integrity of other evidence. No AI RMF 1.0 subcategory addresses signature integrity directly, and GOVERN 5.2 concerns adjudicated feedback.",
-      "verification_limit": "Bundle presence and media type are checked locally; signature verification needs cosign and an external trust root. A Brigade artifact does not establish that an organizational control or process operated."
+      "verification_limit": "The local cosign public key is treated as the configured trust root; its authority and custody remain the adopting organization's responsibility. A Brigade artifact does not establish that an organizational control or process operated."
     },
     {
       "claim_id": "EC-11",
@@ -1303,7 +1303,7 @@
       "edition": "NIST AI 100-1, AI RMF 1.0 (January 2023), final",
       "source_locator": "https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.100-1.pdf Section 5.1, Table 1, GOVERN 5.2",
       "rationale": "Packaging alone supplies no adjudicated feedback process. Map the constituent receipt and attestation evidence through EC-01 and EC-02 instead; EC-03 signature integrity is itself an unmapped evidence property.",
-      "verification_limit": "The evaluator checks the manifest schema, recomputes its unsigned entries-list digest and checks safe, present regular entries. Entry contents and packaged source are not yet revalidated by this index layer. A Brigade artifact does not establish that an organizational control or process operated."
+      "verification_limit": "The strict package snapshot rehashes every captured entry, rederives the receipt digest and checks the source metadata against that receipt. This does not establish that an organizational control or process operated, and does not establish independent custody."
     }
   ]
 }
