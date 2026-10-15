@@ -1492,6 +1492,7 @@ role = "code"
                 text="approval is required",
                 ok=True,
                 thread_id="tool-approval-thread",
+                transport="codex-app-server",
                 status="complete",
             ),
         ]
@@ -1541,6 +1542,7 @@ role = "code"
             "task": "request tool approval",
             "ok": False,
             "thread_id": "tool-approval-thread",
+            "transport": "codex-app-server",
             "status": "interrupted",
         }
     ]
@@ -1884,6 +1886,7 @@ def test_tools_redeemed_action_crash_reconciles_without_second_execution(
                     text="approval required",
                     ok=True,
                     thread_id="redeemed-thread",
+                    transport="codex-app-server",
                     status="complete",
                 )
             ],

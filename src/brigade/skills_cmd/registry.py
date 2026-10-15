@@ -6,10 +6,9 @@ reviewed packs into harness-specific folders.
 
 Residuals (accepted, documented): rollback validates restored bytes to the
 fresh-install bar against a capture-time fingerprint and does not claim
-state-root content authenticity; and on platforms without descriptor
-anchoring (Windows), state-root reads fall back to the lstat-guarded walker,
-which closes symlink/reparse redirection but keeps a small unavoidable
-check-then-use window because no held directory descriptor exists there.
+state-root content authenticity. State-root operations require a held no-follow
+descriptor on POSIX or a native Windows handle; unavailable backends refuse
+access instead of falling back to pathname reads.
 
 Further residuals from the final #1211 review are tracked in escoffier-labs/brigade#1214:
 small staging-path, hash-oracle, name-disclosure, and control-character items.
@@ -37,7 +36,7 @@ from pathlib import Path
 from typing import Any, Iterator, Literal, cast
 
 from .. import __version__ as BRIGADE_VERSION
-from .. import mcp_server
+from .. import mcp_server, dirfd
 from ..localio import slugify, utc_now_iso as _now
 from ..projection import kernel as projection
 from ..templates import template_root
@@ -487,7 +486,7 @@ def _collect_classified_source_tree(
         if any(part in {"", ".", ".."} for part in parts):
             return None, [], {}, f"refusing skills state path as import source: {raw}"
         try:
-            with _held_state_root(target) as anchor:
+            with _held_state_root(target, writable=False) as anchor:
                 if _state_entry_kind(anchor, *parts) != "dir":
                     return None, [], {}, f"refusing skills state path as import source: {raw}"
                 collected_dirs, collected_files = _read_tree_from_anchor(anchor, *parts)
@@ -603,7 +602,7 @@ def _resolve_diff_baseline(target: Path, skill_or_path: str, *, against: str = "
     # Registry existence is answered through the state-root anchor; a
     # symlinked entry is treated as absent rather than followed.
     try:
-        with _held_state_root(target) as anchor:
+        with _held_state_root(target, writable=False) as anchor:
             registry_exists = _read_state_file_bytes(anchor, "skills", "registry", skill_id, "SKILL.md") is not None
     except SkillsStatePathError:
         registry_exists = False
@@ -642,7 +641,7 @@ def _anchored_load_registry_metadata(target: Path, skill_id: str) -> tuple[Path,
     slug = _slug(skill_id)
     skill_dir = _skill_path(target, slug)
     try:
-        with _held_state_root(target) as anchor:
+        with _held_state_root(target, writable=False) as anchor:
             metadata = _anchored_registry_metadata(anchor, slug)
     except SkillsStatePathError:
         metadata = {}
@@ -652,7 +651,7 @@ def _anchored_load_registry_metadata(target: Path, skill_id: str) -> tuple[Path,
 def _registry_entry_present(target: Path, skill_id: str) -> bool:
     """Anchored existence check for one plain registry entry directory."""
     try:
-        with _held_state_root(target) as anchor:
+        with _held_state_root(target, writable=False) as anchor:
             return _state_entry_kind(anchor, "skills", "registry", _slug(skill_id)) == "dir"
     except SkillsStatePathError:
         return False
@@ -718,40 +717,19 @@ def _plain_subdirs_under_anchor(anchor: _StateRootAnchor, *relative: str) -> lis
     """List plain subdirectory names under an anchored state path.
 
     Returns ``None`` when the directory itself is missing; a symlinked or
-    non-directory component raises instead of being followed. On descriptor
-    platforms entries are enumerated from the held chain; elsewhere the
-    lstat-guarded fallback walker applies (symlinks skipped).
+    non-directory component raises instead of being followed. Entries are
+    enumerated from the held chain; unavailable backends refuse access.
     """
     if not _HAS_DESCRIPTOR_ANCHOR:
-        base = (anchor.workspace / ".brigade").joinpath(*relative)
-        current = anchor.workspace / ".brigade"
-        for part in relative:
-            current = current / part
-            if not current.exists():
-                return None
-            if current.is_symlink() or _is_reparse_point(current) or not current.is_dir():
-                raise SkillsStatePathError(f"skills state path must be plain directories: {current}")
-        names: list[str] = []
-        for entry in sorted(base.iterdir(), key=lambda item: item.name):
-            if entry.is_symlink():
-                continue
-            try:
-                st = entry.lstat()
-            except FileNotFoundError:
-                continue
-            except OSError as exc:
-                raise SkillsStatePathError(f"skills state entry could not be inspected safely: {entry}") from exc
-            if stat_module.S_ISDIR(st.st_mode):
-                names.append(entry.name)
-        return names
-    fd, opened = _anchor_open_chain(anchor, *relative, missing_ok=True)
+        raise _fallback_mutation_refusal("access", anchor.workspace / ".brigade")
+    fd, opened = _anchor_open_chain(anchor, *relative, missing_ok=True, writable=False)
     if fd is None:
         return None
     try:
         names = []
-        for name in sorted(os.listdir(fd)):
+        for name in sorted(dirfd.child_names(fd, sys.maxsize)):
             try:
-                st = os.lstat(name, dir_fd=fd)
+                st = dirfd.stat_child(fd, name, allow_reparse=True)
             except FileNotFoundError:
                 continue
             except OSError as exc:
@@ -761,6 +739,8 @@ def _plain_subdirs_under_anchor(anchor: _StateRootAnchor, *relative: str) -> lis
             if stat_module.S_ISDIR(st.st_mode):
                 names.append(name)
         return names
+    except OSError as exc:
+        raise SkillsStatePathError("skills state directory could not be listed safely") from exc
     finally:
         for held_fd in reversed(opened):
             os.close(held_fd)
@@ -776,7 +756,7 @@ def _iter_registry(target: Path) -> list[dict[str, Any]]:
     """
     rows: list[dict[str, Any]] = []
     try:
-        with _held_state_root(target) as anchor:
+        with _held_state_root(target, writable=False) as anchor:
             names = _plain_subdirs_under_anchor(anchor, "skills", "registry")
             if names is None:
                 return rows
@@ -803,34 +783,29 @@ _DIR_OPEN_FLAGS = os.O_RDONLY | _O_DIRECTORY | _O_NOFOLLOW | _CLOEXEC
 # ignore it.
 _FILE_READ_FLAGS = os.O_RDONLY | _O_NOFOLLOW | _O_NONBLOCK | _CLOEXEC
 _FILE_REPLACE_FLAGS = os.O_WRONLY | _O_NOFOLLOW | _CLOEXEC
-_HAS_DESCRIPTOR_ANCHOR = bool(_O_DIRECTORY) and bool(_O_NOFOLLOW) and os.open in os.supports_dir_fd
+_HAS_DESCRIPTOR_ANCHOR = dirfd.available()
 
 
 @dataclass
 class _StateRootAnchor:
     """A validated hold on the workspace's ``.brigade`` state root.
 
-    On POSIX the anchor holds an open descriptor taken with
-    ``O_DIRECTORY|O_NOFOLLOW``, so writes can be performed relative to the
-    held directory and a swapped-in replacement (different device/inode) is
-    detected by ``revalidate()``. On platforms without those APIs the anchor
-    validates via strict resolution immediately before each write; every
-    destination component below the state root is additionally rejected when
-    it is a symlink or reparse point and the parent is re-resolved strictly
-    just before use, but a small check-then-use window remains unavoidable
-    there because the final open cannot be anchored to a held descriptor.
+    POSIX directory descriptors and Windows native handles keep every child
+    lookup relative to the held tree. ``revalidate()`` detects replacement of
+    the state root before writes. Unavailable backends refuse all access.
     """
 
     workspace: Path
     fd: int | None = None
     identity: tuple[int, int] | None = None
+    writable: bool = True
 
     def revalidate(self) -> None:
         if not _HAS_DESCRIPTOR_ANCHOR:
             _verify_state_root_no_descriptor(self.workspace)
             return
         expected = self.identity
-        fd, identity = _open_state_root_descriptor(self.workspace)
+        fd, identity = _open_state_root_descriptor(self.workspace, writable=self.writable)
         os.close(fd)
         if identity != expected:
             raise SkillsStatePathError(
@@ -844,7 +819,7 @@ class _StateRootAnchor:
         self.identity = None
 
 
-def _open_state_root_descriptor(workspace: Path) -> tuple[int, tuple[int, int]]:
+def _open_state_root_descriptor(workspace: Path, *, writable: bool = True) -> tuple[int, tuple[int, int]]:
     """Validate and open ``.brigade`` relative to a held workspace descriptor.
 
     The workspace directory itself is opened first; ``.brigade`` is then only
@@ -853,21 +828,24 @@ def _open_state_root_descriptor(workspace: Path) -> tuple[int, tuple[int, int]]:
     new directory (or the validation that follows) outside the workspace.
     """
     try:
-        ws_fd = os.open(workspace, _DIR_OPEN_FLAGS)
+        ws_fd = dirfd.open_directory_nofollow(workspace, writable=writable)
     except OSError as exc:
         raise SkillsStatePathError(f"cannot open workspace directory: {workspace}") from exc
+    fd: int | None = None
     try:
         try:
-            fd = os.open(".brigade", _DIR_OPEN_FLAGS, dir_fd=ws_fd)
+            fd = dirfd.open_child_directory(ws_fd, ".brigade", writable=writable)
         except FileNotFoundError:
+            if not writable:
+                raise SkillsStatePathError(f"skills state root is missing: {workspace / '.brigade'}") from None
             try:
-                os.mkdir(".brigade", 0o755, dir_fd=ws_fd)
+                dirfd.mkdir_child(ws_fd, ".brigade", 0o755)
             except FileExistsError:
                 pass
             except OSError as exc:
                 raise SkillsStatePathError(f"cannot create skills state root: {workspace / '.brigade'}") from exc
             try:
-                fd = os.open(".brigade", _DIR_OPEN_FLAGS, dir_fd=ws_fd)
+                fd = dirfd.open_child_directory(ws_fd, ".brigade", writable=writable)
             except OSError as exc:
                 raise SkillsStatePathError(
                     f"cannot open skills state root without following symlinks: {workspace / '.brigade'}"
@@ -889,36 +867,30 @@ def _open_state_root_descriptor(workspace: Path) -> tuple[int, tuple[int, int]]:
             ) from exc
         st = os.fstat(fd)
         return fd, (st.st_dev, st.st_ino)
+    except BaseException:
+        if fd is not None:
+            os.close(fd)
+        raise
     finally:
         os.close(ws_fd)
 
 
 def _verify_state_root_no_descriptor(workspace: Path) -> None:
-    state_root = workspace / ".brigade"
-    if not state_root.exists():
-        try:
-            state_root.mkdir(parents=True, exist_ok=True)
-        except OSError as exc:
-            raise SkillsStatePathError(f"cannot create skills state root: {state_root}") from exc
-    if not state_root.is_dir() or state_root.is_symlink():
-        raise SkillsStatePathError(f"skills state root is not a plain directory: {state_root}")
-    probe = state_root.resolve(strict=True)
-    if probe != Path(os.path.realpath(workspace)) / ".brigade":
-        raise SkillsStatePathError(f"skills state root resolves outside the workspace: {state_root} -> {probe}")
+    raise _fallback_mutation_refusal("access", workspace / ".brigade")
 
 
-def _hold_state_root(workspace: Path) -> _StateRootAnchor:
-    """Validate the state root and take a held descriptor anchor on POSIX."""
+def _hold_state_root(workspace: Path, *, writable: bool = True) -> _StateRootAnchor:
+    """Validate the state root and take a held no-follow descriptor anchor."""
     if _HAS_DESCRIPTOR_ANCHOR:
-        fd, identity = _open_state_root_descriptor(workspace)
-        return _StateRootAnchor(workspace=workspace, fd=fd, identity=identity)
+        fd, identity = _open_state_root_descriptor(workspace, writable=writable)
+        return _StateRootAnchor(workspace=workspace, fd=fd, identity=identity, writable=writable)
     _verify_state_root_no_descriptor(workspace)
     return _StateRootAnchor(workspace=workspace)
 
 
 @contextlib.contextmanager
-def _held_state_root(workspace: Path) -> Iterator[_StateRootAnchor]:
-    anchor = _hold_state_root(workspace)
+def _held_state_root(workspace: Path, *, writable: bool = True) -> Iterator[_StateRootAnchor]:
+    anchor = _hold_state_root(workspace, writable=writable)
     try:
         yield anchor
     finally:
@@ -963,7 +935,7 @@ def _write_all_fd(fd: int, data: bytes) -> None:
 def _fallback_mutation_refusal(verb: str, display: Path) -> SkillsStatePathError:
     return SkillsStatePathError(
         f"skills state-root {verb} requires descriptor anchoring, which is unavailable on this platform; "
-        f"refusing unanchored mutation: {display}"
+        f"refusing unanchored access: {display}"
     )
 
 
@@ -972,10 +944,7 @@ def _write_state_file(anchor: _StateRootAnchor, *relative: str, data: bytes, mod
     anchor.revalidate()
     display = (anchor.workspace / ".brigade").joinpath(*relative)
     if not _HAS_DESCRIPTOR_ANCHOR:
-        # Fail closed: without a held directory descriptor the final open
-        # cannot be anchored to the validated root, so the check-then-use
-        # window would be exploitable. Mutate nothing.
-        raise _fallback_mutation_refusal("writes", display)
+        raise _fallback_mutation_refusal("access", anchor.workspace / ".brigade")
     assert anchor.fd is not None
     parent_fd = anchor.fd
     opened_chain: list[int] = []
@@ -983,20 +952,20 @@ def _write_state_file(anchor: _StateRootAnchor, *relative: str, data: bytes, mod
         with _anchored_fs_errors(str(display)):
             for part in relative[:-1]:
                 try:
-                    next_fd = os.open(part, _DIR_OPEN_FLAGS, dir_fd=parent_fd)
+                    next_fd = dirfd.open_child_directory(parent_fd, part)
                 except FileNotFoundError:
-                    os.mkdir(part, 0o755, dir_fd=parent_fd)
-                    next_fd = os.open(part, _DIR_OPEN_FLAGS, dir_fd=parent_fd)
+                    dirfd.mkdir_child(parent_fd, part, 0o755)
+                    next_fd = dirfd.open_child_directory(parent_fd, part)
                 opened_chain.append(next_fd)
                 parent_fd = next_fd
             try:
                 # Try O_EXCL first: a file created here cannot alias
                 # anything else.
-                file_fd = os.open(
+                file_fd = dirfd.open_child_file(
+                    parent_fd,
                     relative[-1],
                     os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _CLOEXEC,
                     mode,
-                    dir_fd=parent_fd,
                 )
             except FileExistsError:
                 # Replace an existing file without O_TRUNC: open it, prove
@@ -1005,13 +974,13 @@ def _write_state_file(anchor: _StateRootAnchor, *relative: str, data: bytes, mod
                 # refused before the victim loses a byte. O_NONBLOCK keeps
                 # a planted FIFO from blocking the open itself; it has no
                 # effect once fstat proves the descriptor is a regular file.
-                file_fd = os.open(
+                file_fd = dirfd.open_child_file(
+                    parent_fd,
                     relative[-1],
                     _FILE_REPLACE_FLAGS | _O_NONBLOCK,
-                    dir_fd=parent_fd,
                 )
-                _require_single_link_regular(file_fd, str(display))
             try:
+                _require_single_link_regular(file_fd, str(display))
                 os.ftruncate(file_fd, 0)
                 _write_all_fd(file_fd, data)
             finally:
@@ -1026,7 +995,7 @@ def _append_state_line(anchor: _StateRootAnchor, *relative: str, data: bytes) ->
     anchor.revalidate()
     display = (anchor.workspace / ".brigade").joinpath(*relative)
     if not _HAS_DESCRIPTOR_ANCHOR:
-        raise _fallback_mutation_refusal("appends", display)
+        raise _fallback_mutation_refusal("access", anchor.workspace / ".brigade")
     assert anchor.fd is not None
     parent_fd = anchor.fd
     opened_chain: list[int] = []
@@ -1034,17 +1003,17 @@ def _append_state_line(anchor: _StateRootAnchor, *relative: str, data: bytes) ->
         with _anchored_fs_errors(str(display)):
             for part in relative[:-1]:
                 try:
-                    next_fd = os.open(part, _DIR_OPEN_FLAGS, dir_fd=parent_fd)
+                    next_fd = dirfd.open_child_directory(parent_fd, part)
                 except FileNotFoundError:
-                    os.mkdir(part, 0o755, dir_fd=parent_fd)
-                    next_fd = os.open(part, _DIR_OPEN_FLAGS, dir_fd=parent_fd)
+                    dirfd.mkdir_child(parent_fd, part, 0o755)
+                    next_fd = dirfd.open_child_directory(parent_fd, part)
                 opened_chain.append(next_fd)
                 parent_fd = next_fd
             # O_NONBLOCK keeps a planted FIFO from blocking the open itself;
             # it has no effect once fstat proves the descriptor is a regular
             # file, so appends to real state files behave exactly as before.
             flags = os.O_WRONLY | os.O_APPEND | os.O_CREAT | _O_NOFOLLOW | _O_NONBLOCK | _CLOEXEC
-            file_fd = os.open(relative[-1], flags, 0o644, dir_fd=parent_fd)
+            file_fd = dirfd.open_child_file(parent_fd, relative[-1], flags, 0o644)
             try:
                 # Validate before the first byte moves: an append to a
                 # hardlinked state file would also append to the victim.
@@ -1069,43 +1038,8 @@ def _is_reparse_point(path: Path) -> bool:
 
 
 def _fallback_prepare_parent(anchor: _StateRootAnchor, *relative_dirs: str, create: bool = True) -> Path | None:
-    """No-descriptor platforms: validate the destination chain, then resolve the parent.
-
-    Rejects symlinks and reparse points across every destination component and
-    strictly re-resolves the parent immediately before use. With ``create``
-    the missing tail is created (and re-checked); without it a missing tail
-    yields ``None`` so read-only callers can treat the path as absent. A
-    residual check-then-use window remains on these platforms because the
-    final open cannot be anchored to a held directory descriptor; see
-    ``_StateRootAnchor``.
-    """
-    if any(part in {"", ".", ".."} for part in relative_dirs):
-        raise SkillsStatePathError(
-            f"skills state path must not contain '.' or '..' components: "
-            f"{(anchor.workspace / '.brigade').joinpath(*relative_dirs)}"
-        )
-    base = anchor.workspace / ".brigade"
-    chain = [base.joinpath(*relative_dirs[: index + 1]) for index in range(len(relative_dirs))]
-    for candidate in chain:
-        if candidate.is_symlink() or _is_reparse_point(candidate):
-            raise SkillsStatePathError(f"skills state path must not contain symlinks or reparse points: {candidate}")
-        if candidate.exists() and not candidate.is_dir():
-            raise SkillsStatePathError(f"skills state path must be plain directories: {candidate}")
-    parent = chain[-1] if chain else base
-    if not parent.exists():
-        if not create:
-            return None
-        parent.mkdir(parents=True, exist_ok=True)
-    for candidate in chain:
-        if candidate.is_symlink() or _is_reparse_point(candidate):
-            raise SkillsStatePathError(
-                f"skills state path gained a symlink or reparse point during creation: {candidate}"
-            )
-    resolved = Path(os.path.realpath(parent, strict=True))
-    expected = (Path(os.path.realpath(anchor.workspace)) / ".brigade").joinpath(*relative_dirs)
-    if resolved != expected:
-        raise SkillsStatePathError(f"skills state path resolves outside the workspace: {parent} -> {resolved}")
-    return parent
+    """Refuse the retired pathname fallback without touching the state tree."""
+    raise _fallback_mutation_refusal("access", anchor.workspace / ".brigade")
 
 
 def _require_plain_state_dirs(anchor: _StateRootAnchor, *relative: str) -> None:
@@ -1115,15 +1049,7 @@ def _require_plain_state_dirs(anchor: _StateRootAnchor, *relative: str) -> None:
     that exists must be a plain directory reachable without following links.
     """
     if not _HAS_DESCRIPTOR_ANCHOR:
-        base = anchor.workspace / ".brigade"
-        current = base
-        for part in relative:
-            current = current / part
-            if current.is_symlink() or _is_reparse_point(current):
-                raise SkillsStatePathError(f"skills state path must not contain symlinks or reparse points: {current}")
-            if current.exists() and not current.is_dir():
-                raise SkillsStatePathError(f"skills state path must be plain directories: {current}")
-        return
+        raise _fallback_mutation_refusal("access", anchor.workspace / ".brigade")
     assert anchor.fd is not None
     parent_fd = anchor.fd
     opened: list[int] = []
@@ -1132,7 +1058,7 @@ def _require_plain_state_dirs(anchor: _StateRootAnchor, *relative: str) -> None:
         for part in relative:
             current = current / part
             try:
-                fd = os.open(part, _DIR_OPEN_FLAGS, dir_fd=parent_fd)
+                fd = dirfd.open_child_directory(parent_fd, part)
             except FileNotFoundError:
                 break
             except OSError as exc:
@@ -1145,7 +1071,7 @@ def _require_plain_state_dirs(anchor: _StateRootAnchor, *relative: str) -> None:
 
 
 def _anchor_open_chain(
-    anchor: _StateRootAnchor, *relative: str, create: bool = False, missing_ok: bool = False
+    anchor: _StateRootAnchor, *relative: str, create: bool = False, missing_ok: bool = False, writable: bool = True
 ) -> tuple[int | None, list[int]]:
     """Open every component below the held state root relative to its parent.
 
@@ -1153,8 +1079,9 @@ def _anchor_open_chain(
     with ``O_DIRECTORY|O_NOFOLLOW`` against the previous descriptor, so no
     lookup can be redirected by a nested symlink; link components raise
     ``SkillsStatePathError`` instead of being followed. With ``missing_ok`` a
-    missing tail yields ``(None, opened)`` so absence can be handled without
-    following any path.
+    missing tail closes the partial chain and yields ``(None, [])`` so absence
+    can be handled without following any path. Reads pass ``writable=False``;
+    mutation callers keep writable handles even when ``create=False``.
     """
     assert anchor.fd is not None
     if any(part in {"", ".", ".."} for part in relative):
@@ -1169,21 +1096,23 @@ def _anchor_open_chain(
         for part in relative:
             current = current / part
             try:
-                fd = os.open(part, _DIR_OPEN_FLAGS, dir_fd=parent_fd)
+                fd = dirfd.open_child_directory(parent_fd, part, writable=writable)
             except FileNotFoundError:
                 if create:
                     try:
-                        os.mkdir(part, 0o755, dir_fd=parent_fd)
+                        dirfd.mkdir_child(parent_fd, part, 0o755)
                     except OSError as exc:
                         raise SkillsStatePathError(f"skills state path could not be created safely: {current}") from exc
                     try:
-                        fd = os.open(part, _DIR_OPEN_FLAGS, dir_fd=parent_fd)
+                        fd = dirfd.open_child_directory(parent_fd, part, writable=writable)
                     except OSError as exc:
                         raise SkillsStatePathError(
                             f"skills state path could not be reopened safely: {current}"
                         ) from exc
                 elif missing_ok:
-                    return None, opened
+                    for held_fd in reversed(opened):
+                        os.close(held_fd)
+                    return None, []
                 else:
                     raise SkillsStatePathError(
                         f"skills state path is missing under the state root: {current}"
@@ -1198,23 +1127,19 @@ def _anchor_open_chain(
         for fd in reversed(opened):
             os.close(fd)
         raise
-    return opened[-1], opened
+    return parent_fd, opened
 
 
 def _state_file_exists(anchor: _StateRootAnchor, *relative: str) -> bool:
     """Existence check for one regular file under the anchored state root."""
     if not _HAS_DESCRIPTOR_ANCHOR:
-        parent = _fallback_prepare_parent(anchor, *relative[:-1], create=False)
-        if parent is None:
-            return False
-        target = (anchor.workspace / ".brigade").joinpath(*relative)
-        return target.exists() and not target.is_symlink() and not _is_reparse_point(target) and target.is_file()
-    parent_fd, opened = _anchor_open_chain(anchor, *relative[:-1], missing_ok=True)
+        raise _fallback_mutation_refusal("access", anchor.workspace / ".brigade")
+    parent_fd, opened = _anchor_open_chain(anchor, *relative[:-1], missing_ok=True, writable=False)
     if parent_fd is None:
         return False
     try:
         try:
-            st = os.stat(relative[-1], dir_fd=parent_fd, follow_symlinks=False)
+            st = dirfd.stat_child(parent_fd, relative[-1], allow_reparse=True)
         except FileNotFoundError:
             return False
         except OSError as exc:
@@ -1231,44 +1156,44 @@ def _state_file_exists(anchor: _StateRootAnchor, *relative: str) -> bool:
 
 def _rm_children_recursive(dir_fd: int) -> None:
     """Delete every child of an open directory without following symlinks."""
-    for name in os.listdir(dir_fd):
-        st = os.lstat(name, dir_fd=dir_fd)
+    for name in dirfd.child_names(dir_fd, sys.maxsize):
+        st = dirfd.stat_child(dir_fd, name, allow_reparse=True)
         if stat_module.S_ISDIR(st.st_mode):
-            child_fd = os.open(name, _DIR_OPEN_FLAGS, dir_fd=dir_fd)
+            child_fd = dirfd.open_child_directory(dir_fd, name)
             try:
                 _rm_children_recursive(child_fd)
             finally:
                 os.close(child_fd)
-            os.rmdir(name, dir_fd=dir_fd)
+            dirfd.rmdir_child(dir_fd, name)
         else:
-            os.unlink(name, dir_fd=dir_fd)
+            dirfd.unlink_child(dir_fd, name, allow_reparse=True)
 
 
 def _remove_tree_in_anchor(anchor: _StateRootAnchor, *relative: str) -> None:
     """Recursively delete a subtree under the anchored state root, ``dir_fd`` throughout."""
     display = (anchor.workspace / ".brigade").joinpath(*relative)
     if not _HAS_DESCRIPTOR_ANCHOR:
-        raise _fallback_mutation_refusal("removals", display)
+        raise _fallback_mutation_refusal("access", anchor.workspace / ".brigade")
     parent_fd, opened = _anchor_open_chain(anchor, *relative[:-1], missing_ok=True)
     if parent_fd is None:
         return
     try:
         with _anchored_fs_errors(str(display)):
             try:
-                st = os.stat(relative[-1], dir_fd=parent_fd, follow_symlinks=False)
+                st = dirfd.stat_child(parent_fd, relative[-1], allow_reparse=True)
             except FileNotFoundError:
                 return
             except OSError as exc:
                 raise SkillsStatePathError(f"skills state path is not removable safely: {display}") from exc
             if stat_module.S_ISDIR(st.st_mode):
-                child_fd = os.open(relative[-1], _DIR_OPEN_FLAGS, dir_fd=parent_fd)
+                child_fd = dirfd.open_child_directory(parent_fd, relative[-1])
                 try:
                     _rm_children_recursive(child_fd)
                 finally:
                     os.close(child_fd)
-                os.rmdir(relative[-1], dir_fd=parent_fd)
+                dirfd.rmdir_child(parent_fd, relative[-1])
             else:
-                os.unlink(relative[-1], dir_fd=parent_fd)
+                dirfd.unlink_child(parent_fd, relative[-1], allow_reparse=True)
     finally:
         for fd in reversed(opened):
             os.close(fd)
@@ -1278,11 +1203,12 @@ def _unlink_in_anchor(anchor: _StateRootAnchor, *relative: str) -> None:
     """Unlink one file under the anchored state root without following symlinks."""
     display = (anchor.workspace / ".brigade").joinpath(*relative)
     if not _HAS_DESCRIPTOR_ANCHOR:
-        raise _fallback_mutation_refusal("unlinks", display)
+        raise _fallback_mutation_refusal("access", anchor.workspace / ".brigade")
     parent_fd, opened = _anchor_open_chain(anchor, *relative[:-1])
+    assert parent_fd is not None
     try:
         try:
-            os.unlink(relative[-1], dir_fd=parent_fd)
+            dirfd.unlink_child(parent_fd, relative[-1], allow_reparse=True)
         except FileNotFoundError:
             pass
         except OSError as exc:
@@ -1295,7 +1221,7 @@ def _unlink_in_anchor(anchor: _StateRootAnchor, *relative: str) -> None:
 def _read_regular_file_via_fd(name: str, dir_fd: int, display: Path, label: str) -> bytes:
     """Read one regular file through an ``O_NOFOLLOW`` descriptor below *dir_fd*."""
     try:
-        fd = os.open(name, _FILE_READ_FLAGS, dir_fd=dir_fd)
+        fd = dirfd.open_child_file(dir_fd, name, _FILE_READ_FLAGS)
     except OSError as exc:
         raise SkillsStatePathError(f"{label} file changed while being read: {display}") from exc
     try:
@@ -1327,13 +1253,13 @@ def _collect_fd_tree(
     dirs: list[tuple[str, ...]] = []
     files: dict[tuple[str, ...], bytes] = {}
     try:
-        names = sorted(os.listdir(dir_fd))
+        names = sorted(dirfd.child_names(dir_fd, sys.maxsize))
     except OSError as exc:
         raise SkillsStatePathError(f"{label} directory could not be listed safely: {display}") from exc
     for name in names:
         entry_display = display / name
         try:
-            st = os.lstat(name, dir_fd=dir_fd)
+            st = dirfd.stat_child(dir_fd, name, allow_reparse=True)
         except FileNotFoundError:
             raise SkillsStatePathError(f"{label} entry changed while being read: {entry_display}") from None
         except OSError as exc:
@@ -1345,7 +1271,7 @@ def _collect_fd_tree(
             parts = (*prefix, name)
             dirs.append(parts)
             try:
-                child_fd = os.open(name, _DIR_OPEN_FLAGS, dir_fd=dir_fd)
+                child_fd = dirfd.open_child_directory(dir_fd, name, writable=False)
             except OSError as exc:
                 raise SkillsStatePathError(f"{label} directory changed while being walked: {entry_display}") from exc
             try:
@@ -1370,27 +1296,11 @@ def _collect_source_tree(source_dir: Path) -> tuple[list[tuple[str, ...]], dict[
     regular files carrying more than one link (hardlinks) are refused.
     """
     if not _HAS_DESCRIPTOR_ANCHOR:
-        dirs: list[tuple[str, ...]] = []
-        files: dict[tuple[str, ...], bytes] = {}
-
-        def walk(current: Path, prefix: tuple[str, ...]) -> None:
-            for entry in sorted(current.iterdir(), key=lambda item: item.name):
-                if entry.is_symlink():
-                    continue
-                st = entry.lstat()
-                if stat_module.S_ISDIR(st.st_mode):
-                    parts = (*prefix, entry.name)
-                    dirs.append(parts)
-                    walk(entry, parts)
-                elif stat_module.S_ISREG(st.st_mode):
-                    if st.st_nlink > 1:
-                        raise SkillsStatePathError(f"skills source file must not be a hardlink: {entry}")
-                    files[(*prefix, entry.name)] = entry.read_bytes()
-
-        walk(source_dir, ())
-        return dirs, files
+        raise _fallback_mutation_refusal("source reads", source_dir)
     try:
-        root_fd = os.open(source_dir, _DIR_OPEN_FLAGS)
+        # NT extended paths need lexical normalization, without following reparse points.
+        root_path = Path(os.path.abspath(source_dir)) if sys.platform == "win32" else source_dir
+        root_fd = dirfd.open_directory_nofollow(root_path, writable=False)
     except OSError as exc:
         raise SkillsStatePathError(f"skills source must be a plain readable directory: {source_dir}") from exc
     try:
@@ -1407,28 +1317,14 @@ def _read_state_file_bytes(anchor: _StateRootAnchor, *relative: str) -> bytes | 
     """
     display = (anchor.workspace / ".brigade").joinpath(*relative)
     if not _HAS_DESCRIPTOR_ANCHOR:
-        parent = _fallback_prepare_parent(anchor, *relative[:-1], create=False)
-        if parent is None:
-            return None
-        target = parent / relative[-1]
-        try:
-            st = os.lstat(target)
-        except FileNotFoundError:
-            return None
-        except OSError as exc:
-            raise SkillsStatePathError(f"skills state file could not be inspected safely: {display}") from exc
-        if stat_module.S_ISLNK(st.st_mode) or getattr(st, "st_reparse_tag", False):
-            raise SkillsStatePathError(f"skills state file must not be a symlink or reparse point: {display}")
-        if not stat_module.S_ISREG(st.st_mode) or st.st_nlink != 1:
-            raise SkillsStatePathError(f"skills state file must be a plain single-link regular file: {display}")
-        return target.read_bytes()
-    parent_fd, opened = _anchor_open_chain(anchor, *relative[:-1], missing_ok=True)
+        raise _fallback_mutation_refusal("access", anchor.workspace / ".brigade")
+    parent_fd, opened = _anchor_open_chain(anchor, *relative[:-1], missing_ok=True, writable=False)
     if parent_fd is None:
         return None
     try:
         with _anchored_fs_errors(str(display)):
             try:
-                file_fd = os.open(relative[-1], _FILE_READ_FLAGS, dir_fd=parent_fd)
+                file_fd = dirfd.open_child_file(parent_fd, relative[-1], _FILE_READ_FLAGS)
             except FileNotFoundError:
                 return None
             except OSError as exc:
@@ -1458,23 +1354,13 @@ def _state_entry_kind(anchor: _StateRootAnchor, *relative: str) -> str:
     A symlinked component anywhere along the path is refused instead of followed.
     """
     if not _HAS_DESCRIPTOR_ANCHOR:
-        parent = _fallback_prepare_parent(anchor, *relative[:-1], create=False)
-        if parent is None:
-            return "missing"
-        target = parent / relative[-1]
-        if target.is_symlink() or _is_reparse_point(target):
-            raise SkillsStatePathError(
-                f"skills state path must not contain symlinks or reparse points: {(anchor.workspace / '.brigade').joinpath(*relative)}"
-            )
-        if not target.exists():
-            return "missing"
-        return "dir" if target.is_dir() else "other"
-    parent_fd, opened = _anchor_open_chain(anchor, *relative[:-1], missing_ok=True)
+        raise _fallback_mutation_refusal("access", anchor.workspace / ".brigade")
+    parent_fd, opened = _anchor_open_chain(anchor, *relative[:-1], missing_ok=True, writable=False)
     if parent_fd is None:
         return "missing"
     try:
         try:
-            st = os.stat(relative[-1], dir_fd=parent_fd, follow_symlinks=False)
+            st = dirfd.stat_child(parent_fd, relative[-1], allow_reparse=True)
         except FileNotFoundError:
             return "missing"
         except OSError as exc:
@@ -1496,14 +1382,11 @@ def _read_tree_from_anchor(
 ) -> tuple[list[tuple[str, ...]], dict[tuple[str, ...], bytes]]:
     """Read a plain directory subtree out of the anchored state root via descriptors.
 
-    Without descriptor anchoring the subtree is collected through the
-    lstat-guarded fallback walker (symlinks skipped, hardlinks refused);
-    callers still fail closed on any anchored mutation they attempt with the
-    result.
+    Unavailable descriptor backends refuse access without pathname reads.
     """
     if not _HAS_DESCRIPTOR_ANCHOR:
-        return _collect_source_tree((anchor.workspace / ".brigade").joinpath(*relative))
-    dir_fd, opened = _anchor_open_chain(anchor, *relative)
+        raise _fallback_mutation_refusal("access", anchor.workspace / ".brigade")
+    dir_fd, opened = _anchor_open_chain(anchor, *relative, writable=False)
     assert dir_fd is not None
     try:
         return _collect_fd_tree(dir_fd, (), (anchor.workspace / ".brigade").joinpath(*relative), "skills state")
@@ -1524,14 +1407,15 @@ def _write_collected_tree_into_anchor(
     """
     display = (anchor.workspace / ".brigade").joinpath(*relative)
     if not _HAS_DESCRIPTOR_ANCHOR:
-        raise _fallback_mutation_refusal("copies", display)
+        raise _fallback_mutation_refusal("access", anchor.workspace / ".brigade")
     _remove_tree_in_anchor(anchor, *relative)
     dest_parent_fd, opened = _anchor_open_chain(anchor, *relative[:-1], create=True)
+    assert dest_parent_fd is not None
     try:
         with _anchored_fs_errors(str(display)):
             try:
-                os.mkdir(relative[-1], 0o755, dir_fd=dest_parent_fd)
-                dest_fd = os.open(relative[-1], _DIR_OPEN_FLAGS, dir_fd=dest_parent_fd)
+                dirfd.mkdir_child(dest_parent_fd, relative[-1], 0o755)
+                dest_fd = dirfd.open_child_directory(dest_parent_fd, relative[-1])
             except OSError as exc:
                 raise SkillsStatePathError(f"skills state destination could not be created safely: {display}") from exc
             try:
@@ -1539,11 +1423,11 @@ def _write_collected_tree_into_anchor(
                     parent_fd = dest_fd
                     chain: list[int] = []
                     try:
-                        for part in parts:
-                            os.mkdir(part, 0o755, dir_fd=parent_fd)
-                            next_fd = os.open(part, _DIR_OPEN_FLAGS, dir_fd=parent_fd)
+                        for part in parts[:-1]:
+                            next_fd = dirfd.open_child_directory(parent_fd, part)
                             chain.append(next_fd)
                             parent_fd = next_fd
+                        dirfd.mkdir_child(parent_fd, parts[-1], 0o755)
                     finally:
                         for fd in reversed(chain):
                             os.close(fd)
@@ -1553,10 +1437,10 @@ def _write_collected_tree_into_anchor(
                     chain = []
                     try:
                         for part in parts[:-1]:
-                            next_fd = os.open(part, _DIR_OPEN_FLAGS, dir_fd=parent_fd)
+                            next_fd = dirfd.open_child_directory(parent_fd, part)
                             chain.append(next_fd)
                             parent_fd = next_fd
-                        file_fd = os.open(parts[-1], flags, 0o644, dir_fd=parent_fd)
+                        file_fd = dirfd.open_child_file(parent_fd, parts[-1], flags, 0o644)
                         try:
                             _write_all_fd(file_fd, data)
                         finally:
@@ -1602,7 +1486,7 @@ def _state_json_via_anchor(target: Path, *relative: str) -> dict[str, Any]:
     Missing or refused files yield ``{}``; outside content is never followed.
     """
     try:
-        with _held_state_root(target) as anchor:
+        with _held_state_root(target, writable=False) as anchor:
             raw = _read_state_file_bytes(anchor, *relative)
     except SkillsStatePathError:
         return {}
@@ -1618,7 +1502,7 @@ def _state_json_via_anchor(target: Path, *relative: str) -> dict[str, Any]:
 def _anchored_registry_text(target: Path, skill_id: str, *relative_tail: str) -> str | None:
     """Read one text file from a registry entry through the state-root anchor."""
     try:
-        with _held_state_root(target) as anchor:
+        with _held_state_root(target, writable=False) as anchor:
             raw = _read_state_file_bytes(anchor, "skills", "registry", skill_id, *relative_tail)
     except SkillsStatePathError:
         return None

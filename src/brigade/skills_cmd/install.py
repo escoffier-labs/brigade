@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Iterator, Literal, cast
 
 from .. import __version__ as BRIGADE_VERSION
+from .. import dirfd
 from .. import mcp_server
 from ..localio import slugify, utc_now_iso as _now
 from ..projection import kernel as projection
@@ -44,6 +45,12 @@ def _evaluate_install_dir(workspace: Path, harness: str, skill_id: str) -> tuple
         return registry._hermes_skills_root() / registry._slug(skill_id), False
     adapter = _adapter_map(workspace)[harness]
     install_dir = workspace / str(adapter["install_path"]).format(skill_id=skill_id)
+    parts = _packs_mod._lexical_state_root_parts(workspace, install_dir)
+    if parts is not None:
+        # State paths are lexical projections only. Read-only callers inspect
+        # them through held anchors; resolving here would follow a junction
+        # before those callers can refuse it.
+        return install_dir, not parts or ".." in install_dir.parts
     workspace_resolved = workspace.resolve()
     resolved = install_dir.resolve()
     escapes = (
@@ -56,6 +63,16 @@ def _install_dir(workspace: Path, harness: str, skill_id: str) -> Path:
     install_dir, escapes = _evaluate_install_dir(workspace, harness, skill_id)
     if escapes:
         raise ValueError(f"skill install path escapes workspace: {install_dir}")
+    parts = _packs_mod._lexical_state_root_parts(workspace, install_dir)
+    if parts is not None:
+        # Preserve the writable destination guard now that projection avoids
+        # resolve(). Missing state is created only by the mutation owner.
+        try:
+            with registry._held_state_root(workspace, writable=False) as anchor:
+                registry._state_entry_kind(anchor, *parts)
+        except registry.SkillsStatePathError as exc:
+            if not isinstance(exc.__context__, FileNotFoundError):
+                raise
     return install_dir
 
 
@@ -100,7 +117,7 @@ def _latest_install_receipt(target: Path, skill_id: str, harness: str) -> dict[s
     report the installation as unknown instead of surfacing outside JSON.
     """
     try:
-        with registry._held_state_root(target) as state_anchor:
+        with registry._held_state_root(target, writable=False) as state_anchor:
             raw = registry._read_state_file_bytes(
                 state_anchor, "skills", "installs", f"{registry._slug(skill_id)}-{harness}.json"
             )
@@ -122,7 +139,7 @@ def _install_history(target: Path, skill_id: str | None = None, harness: str | N
     the link to outside content.
     """
     try:
-        with registry._held_state_root(target) as state_anchor:
+        with registry._held_state_root(target, writable=False) as state_anchor:
             raw = registry._read_state_file_bytes(state_anchor, "skills", "installs", "history.jsonl")
     except registry.SkillsStatePathError:
         raw = None
@@ -245,16 +262,16 @@ def _previous_install_receipt(anchor: registry._StateRootAnchor, *, skill_id: st
 
 
 def _dir_fd_subtree_plain(fd: int) -> bool:
-    for name in os.listdir(fd):
+    for name in dirfd.child_names(fd, sys.maxsize):
         try:
-            st = os.lstat(name, dir_fd=fd)
+            st = dirfd.stat_child(fd, name, allow_reparse=True)
         except OSError:
             return False
         if stat_module.S_ISLNK(st.st_mode):
             return False
         if stat_module.S_ISDIR(st.st_mode):
             try:
-                child = os.open(name, registry._DIR_OPEN_FLAGS, dir_fd=fd)
+                child = dirfd.open_child_directory(fd, name, writable=False)
             except OSError:
                 return False
             try:
@@ -275,9 +292,9 @@ def _anchor_subtree_is_plain(anchor: registry._StateRootAnchor, *relative: str) 
     destination instead of writing over or around the planted entry.
     """
     if not registry._HAS_DESCRIPTOR_ANCHOR:
-        return True
+        raise registry._fallback_mutation_refusal("reads", anchor.workspace / ".brigade")
     try:
-        fd, opened = registry._anchor_open_chain(anchor, *relative, missing_ok=True)
+        fd, opened = registry._anchor_open_chain(anchor, *relative, missing_ok=True, writable=False)
     except registry.SkillsStatePathError:
         return False
     if fd is None:
@@ -320,7 +337,7 @@ def _installed_tree_snapshot(
     if anchor is not None:
         return _collect(anchor)
     try:
-        with registry._held_state_root(workspace) as fresh_anchor:
+        with registry._held_state_root(workspace, writable=False) as fresh_anchor:
             return _collect(fresh_anchor)
     except registry.SkillsStatePathError:
         # A redirected or planted component contributes nothing rather than
@@ -803,7 +820,7 @@ def _user_profile_package(
     # The package body comes from one anchored registry snapshot; nothing is
     # walked or re-read by pathname under the state root.
     try:
-        with registry._held_state_root(workspace) as anchor:
+        with registry._held_state_root(workspace, writable=False) as anchor:
             _snapshot_dirs, snapshot_files = registry._read_registry_entry_tree(anchor, skill_id)
     except registry.SkillsStatePathError:
         return None

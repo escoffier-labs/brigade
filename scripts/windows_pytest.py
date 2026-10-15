@@ -118,6 +118,11 @@ def validate_allowlist(allowlist: set[str], files: list[str]) -> None:
 
 
 def check_allowlist_ratchet(current: set[str], baseline: set[str] | None) -> None:
+    """Permit initial creation up to the historical cap only for an absent baseline.
+
+    load_allowlist_from_ref returns None only after verifying a valid commit and
+    confirming that it genuinely does not contain the baseline file.
+    """
     if baseline is None:
         if len(current) > INITIAL_ALLOWLIST_ENTRIES:
             raise ValueError(f"initial allowlist exceeds {INITIAL_ALLOWLIST_ENTRIES} historical entries")
@@ -726,7 +731,15 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--repo", type=Path, default=REPO_ROOT)
     parser.add_argument("--allowlist", type=Path, default=DEFAULT_ALLOWLIST)
     parser.add_argument(
-        "--record", type=Path, required=True, help="write measured results only; never changes the allowlist"
+        "--record", type=Path, help="write measured results only; required for the full Windows harness"
+    )
+    parser.add_argument(
+        "--check-allowlist-only",
+        action="store_true",
+        help=(
+            "check allowlist growth without running tests (requires --base-ref); a valid base commit without an "
+            f"allowlist permits initial creation up to {INITIAL_ALLOWLIST_ENTRIES} historical entries"
+        ),
     )
     parser.add_argument("--python", type=Path, default=Path(sys.executable))
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
@@ -736,15 +749,31 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--job-limit", type=float, default=3600)
     parser.add_argument("--startup-reserve", type=float, default=DEFAULT_STARTUP_RESERVE_SECONDS)
     parser.add_argument("--finalize-reserve", type=float, default=DEFAULT_FINALIZE_RESERVE_SECONDS)
-    parser.add_argument("--base-ref", help="compare the allowlist with this pull request base commit")
+    parser.add_argument("--base-ref", help="compare the allowlist with this base commit")
     parser.add_argument("--serial", action="append", default=[], metavar="TEST_FILE")
-    return parser.parse_args(argv)
+    args = parser.parse_args(argv)
+    if args.check_allowlist_only:
+        if not args.base_ref:
+            parser.error("--base-ref is required for --check-allowlist-only")
+    elif args.record is None:
+        parser.error("--record is required for the full Windows harness")
+    return args
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     entered_monotonic = time.monotonic()
     entered_wall = time.time()
     args = parse_args(sys.argv[1:] if argv is None else argv)
+    if args.check_allowlist_only:
+        try:
+            current = load_allowlist(args.allowlist)
+            baseline = load_allowlist_from_ref(args.repo.resolve(), args.base_ref, args.allowlist)
+            check_allowlist_ratchet(current, baseline)
+        except (OSError, ValueError, RuntimeError, subprocess.SubprocessError) as exc:
+            print(f"allowlist check error: {exc}", file=sys.stderr)
+            return 2
+        print(f"allowlist check: entries={len(current)} base={args.base_ref}")
+        return 0
     results: list[FileResult] = []
     partial_results: list[FileResult] = []
     temp_root: Path | None = None

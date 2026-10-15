@@ -109,6 +109,7 @@ _CREDENTIAL_RES = (
     re.compile(r"xox[abopsr]-[A-Za-z0-9-]{10,}"),
     re.compile(r"\bsk-[A-Za-z0-9_-]{20,}"),
     re.compile(r"\bAKIA[0-9A-Z]{16}\b"),
+    re.compile(r"\bASIA[0-9A-Z]{16}\b"),
     re.compile(r"\bAIza[0-9A-Za-z_-]{30,}"),
     re.compile(r"\bglpat-[0-9A-Za-z_-]{16,}"),
     re.compile(r"-----BEGIN [A-Z ]*PRIVATE KEY-----"),

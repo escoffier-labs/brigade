@@ -8,12 +8,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Fenced Worklore checkpoints atomically refuse overlapping repository path declarations with bounded, structured conflicts. Handoff, terminal and unchecked historical scopes remain reserved until explicit replacement or release. Ownership reads expose historical `path-admission` while retaining unknown liveness. (Refs #1595)
+- Windows skills state reads and mutations use held native handles, reject reparse escapes, and fail closed when anchoring is unavailable. Read-only commands retain traversal and read access without requesting mutation rights. (#1213)
 - `brigade memory recall --query` accepts bounded caller-supplied task context using the existing fail-open recall API. Task/worktree fixtures compare relevance against basename queries and report stale/scope limits. Search status adds read-only repeat-query/result counts from the existing local log, separate from verification scores. (#1563)
 - Persist bounded sanitized managed Claude review history in caller-owned SQLite transactions, with exact replay, revision snapshots and conservative caller-head projections across pushes and reruns. (#1601)
+- Fleet Hub schema 26 preserves legacy claims and adds durable target generations across acquire, supersede, release, and expiry pruning. Listings, inspection, JSONL/CSV exports, and Dolt history expose sanitized generations and the legacy protocol. Claims exports validate fences before output, and Dolt sinks add metadata columns while preserving table indexes and history. New fence targets are limited to 1,024 UTF-8 bytes while longer migrated targets remain usable. Existing fence history survives old-schema upgrades. Fence capacity, corruption, exhaustion, and unsupported newer schemas fail closed with sanitized HTTP refusals, including dashboard readers. Legacy late-acquire and same-holder races remain open. (#1189)
+- Cursor ACP worker receipts distinguish the declared model argument from the observed model label and `acpx` version, preserve unavailable backend revisions as unknown, and validate provenance before serialization. (#1624)
 
 - Jules cloud status preserves explicit empty-output evidence, so completed sessions with a recorded plan but no work are labeled for plan approval.
 - `brigade doctor` reports an `instruction-chain: codex` check for codex-harness targets. It estimates the Codex 0.160.0 project instruction chain at the target under stated default assumptions, warns on consumer-cap truncation separately from Brigade advisory budgets, and reports reason codes when it cannot evaluate. Results are fresh-disk estimates, never observed session consumption. (Refs #1564)
 
+- Explicit authority downgrades remove every posture marker governing a relocated workspace and stop when marker state cannot be read safely. (#1217)
+- Explicit authority downgrades remove every posture marker governing a relocated workspace, fail closed when marker state is unreadable, and record removed fingerprints only after rollback is no longer possible. (#1217)
+- Candidate skills use the same post-regression install margin as candidate memory cards: after a verified regression, clears must exceed hurts by at least `install_min_helped`, so a skill at helped=2, hurt=1 now holds instead of installing. Skills without regressions are unchanged, and zero-threshold fork overrides still require helped to exceed hurt. (#1686)
 - Run the full local verification gate in deterministic pytest shards with combined coverage and counted concurrency slots shared by linked worktrees. Shard and slot counts are configurable, and contention can wait for a bounded deadline.
 
 - Speed up strict JSON validation of unescaped ASCII strings while preserving byte limits, Unicode checks, and string-subclass isolation. (#1674)
@@ -26,6 +32,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - On Windows, control assessments classify refused symlinks and reparse points as `invalid` with `symlink_refused`, including linked run directories and local commit-trailer receipts. Synthetic NT metadata with unset file attributes no longer interrupts directory discovery. (#1642)
 - Add a local CRA actor and incident worksheet separating applicability, incident triggers, reporting deadlines, and actual filing evidence, with three synthetic drills. (#1625)
 - Add coordinated journal process qualification for locked same-key tail/index reads, replay/conflict, stale-head rejection, and deliberate termination at complete or partial write boundaries, with an inventory of durability limits. (#1565)
+- Journal sync failures report indeterminate outcomes. Checkpoint recovery synchronizes the verified head while holding the writer lock through terminalization, including recovery of multiple stale claims. (#1565)
 - `brigade doctor --operator` checks the Grok CLI against the reviewed 1.0.13 JSON-envelope floor when that harness is selected, with bounded probing and safe missing/uncertain-version diagnostics. (Refs #1351 item 7)
 
 - Correct the twelve reviewed NIST AI RMF claim mappings: six mismatched pairs receive conditional mappings, three become unmapped evidence properties, and three retain documented prerequisites. Provenance now names sources, actors and verification limits. Migration: `crosswalk_version` is 2 and `control_id` uses the NIST space format, so consumers matching old IDs must update. The template schema stays `brigade.control_crosswalk.v1`; controls output adds `relationship_semantics`, `integrity_boundary`, root `unmapped_evidence_properties` and per-row provenance keys. Local evidence states its tamper-evidence and custody limits: EC-12 rationales say the evaluator checks only the unsigned manifest's entries-list digest, and EC-06 says a consistent journal rewrite is undetectable without an external anchor. Licensed ISO/AICPA text remains unverified. (#1616)
@@ -116,6 +123,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `brigade center serve` views render in the Command Deck theme through the shared `ui_theme` shell: dark tokens, the Deck masthead and nav, and no light-mode colors. Status chip colors are unchanged. (#1495)
 - The fleet boards at `/view/machines` and `/view/repos` render in the Command Deck theme through a shared `ui_theme` module, and Deck forms gain a spacing scale (16px panels, 36px controls, 8px helper-text gap, 40px buttons). Routes are unchanged. (#1495)
 - Declared version and beta preview base move to 0.28.0 after the v0.27.0 tag so publish-dev wheels sort above stable. (#1468)
+
+- `brigade receipts export journal` exports one fully validated lifecycle journal as canonical JSONL, with inclusive UTC time filtering, original sequence order and digests, exclusive file creation, and no source mutation. Filtered subsets require original journal context for chain verification. This is the journal-export slice of #1407, following shipped trailers, packages and acknowledgement. Retention (#1621) and prune (#1622) remain separate, and the parent stays open.
 
 ## [0.27.0] - 2026-09-06
 

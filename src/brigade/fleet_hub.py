@@ -114,7 +114,7 @@ from .fleet_hub_status import (
     latest_status as latest_status,
 )
 
-SCHEMA_VERSION = 25
+SCHEMA_VERSION = 26
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
@@ -407,6 +407,12 @@ class FleetHubError(RuntimeError):
     """Hub configuration or request failure with an operator-readable message."""
 
 
+class FleetHubUnsupportedSchema(FleetHubError):
+    """A newer schema requires an upgraded hub before serving requests."""
+
+    public_message = "fleet hub database schema is newer than supported"
+
+
 class FleetHubForbidden(FleetHubError):
     """An authenticated caller asked to act as a node_id its token does not own (HTTP 403)."""
 
@@ -520,12 +526,15 @@ def _migrate_claims_table(conn: sqlite3.Connection) -> None:
 
 def _apply_schema(conn: sqlite3.Connection) -> None:
     """Create or upgrade every hub table. Caller holds BEGIN IMMEDIATE."""
+    from . import fleet_hub_claims
+
     conn.execute(_SCHEMA)
     for column in _EVENTS_ADDITIVE_COLUMNS:
         if column not in _events_columns(conn):
             conn.execute(f"ALTER TABLE events ADD COLUMN {column} {'INTEGER' if column == 'exit_status' else 'TEXT'}")
     if _claims_table_needs_migration(_claims_columns(conn)):
         _migrate_claims_table(conn)
+    fleet_hub_claims.migrate_schema(conn)
     conn.execute("CREATE INDEX IF NOT EXISTS events_run_seq ON events (node_id, run_id, sequence)")
     conn.execute("CREATE INDEX IF NOT EXISTS events_received_at ON events (received_at)")
     # v3 -> v4 is one additive table; v5-v8 add cloud lease and policy
@@ -614,11 +623,14 @@ def _init_schema(conn: sqlite3.Connection, db_path: Path) -> None:
     handlers still use ``open_db`` (#1161); this path is for startup and
     other ``init_db`` callers (tools, tests, a first-touch storm).
     """
+    from . import fleet_hub_claims
+
     for delay in _MIGRATION_LOCK_DELAYS:
         try:
             _refuse_newer_schema(conn, db_path)
             current = conn.execute("PRAGMA user_version").fetchone()[0]
             if current == SCHEMA_VERSION:
+                fleet_hub_claims.validate_schema(conn)
                 return
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("BEGIN IMMEDIATE")
@@ -627,13 +639,18 @@ def _init_schema(conn: sqlite3.Connection, db_path: Path) -> None:
                 raise
             current = conn.execute("PRAGMA user_version").fetchone()[0]
             if current == SCHEMA_VERSION:
+                fleet_hub_claims.validate_schema(conn)
                 return
             if delay is None:
                 raise
             time.sleep(delay)
             continue
         try:
-            _apply_schema(conn)
+            _refuse_newer_schema(conn, db_path)
+            if conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION:
+                fleet_hub_claims.validate_schema(conn)
+            else:
+                _apply_schema(conn)
             conn.commit()
         except sqlite3.OperationalError as exc:
             conn.rollback()
@@ -641,6 +658,7 @@ def _init_schema(conn: sqlite3.Connection, db_path: Path) -> None:
                 raise
             current = conn.execute("PRAGMA user_version").fetchone()[0]
             if current == SCHEMA_VERSION:
+                fleet_hub_claims.validate_schema(conn)
                 return
             if delay is None:
                 raise
@@ -656,7 +674,7 @@ def _refuse_newer_schema(conn: sqlite3.Connection, db_path: Path) -> None:
     """Raise ``FleetHubError`` when ``conn``'s database is from a newer hub."""
     current = conn.execute("PRAGMA user_version").fetchone()[0]
     if not isinstance(current, int) or current > SCHEMA_VERSION:
-        raise FleetHubError(
+        raise FleetHubUnsupportedSchema(
             f"fleet hub database {db_path} has schema version {current}; this brigade supports {SCHEMA_VERSION}"
         )
 
@@ -971,264 +989,28 @@ def _validate_lease(raw: Any, field: str) -> dict[str, str | None]:
 
 
 def _claim_payload(row: tuple[Any, ...]) -> dict[str, Any]:
-    return {
-        "target": row[0],
-        "owner_node": row[1],
-        "owner_conductor": row[2],
-        "harness": row[3],
-        "role": row[4],
-        "job": row[5],
-        "session": row[6],
-        "acquired_at": row[7],
-        "renewed_at": row[8],
-        "ttl_seconds": row[9],
-        "expires_at": _epoch_to_iso(row[10]),
-    }
+    from . import fleet_hub_claims
 
-
-# Payload columns only: holder_token is a fencing capability and is never
-# serialized to callers (it would let anyone forge a renew/release).
-_CLAIM_COLUMNS = (
-    "target, owner_node, owner_conductor, harness, role, job, session, acquired_at, renewed_at, ttl_seconds, expires_at"
-)
+    return fleet_hub_claims.payload(row)
 
 
 def _fetch_claim(conn: sqlite3.Connection, target: str) -> tuple[Any, ...] | None:
-    """Row as (_CLAIM_COLUMNS..., holder_token, lock_token, lock_acquired_at,
-    lock_run_dir); the fencing token is index 11, the lease token index 12."""
-    return conn.execute(
-        f"SELECT {_CLAIM_COLUMNS}, holder_token, lock_token, lock_acquired_at, lock_run_dir "
-        "FROM claims WHERE target = ?",
-        (target,),
-    ).fetchone()
+    from . import fleet_hub_claims
+
+    return fleet_hub_claims.fetch_claim(conn, target)
 
 
 def handle_claim(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None = None) -> tuple[int, dict[str, Any]]:
-    """Arbitrate one claim request; returns (http_status, response_payload).
+    """Legacy arbiter; validation and clock hooks remain compatible here."""
+    from . import fleet_hub_claims
 
-    ``caller_node`` is the node_id bound to the caller's node token: a
-    request whose ``node_id`` differs raises ``FleetHubForbidden`` before
-    any read or write (``None`` is the admin token with
-    ``--allow-admin-writes``, which may act as any node).
-
-    ``acquire`` prunes expired rows, grants a free or expired target, is
-    idempotent for the current holder (retrying a lost response extends the
-    TTL and preserves ``acquired_at`` while live), and answers 409 with the
-    owner for a held target. ``renew`` extends only an unexpired claim whose
-    stored fencing token matches the caller's ``holder``; ``release`` deletes
-    only that row — a sibling process on the same node without the token can
-    neither extend nor delete a live claim. Each mutation is a single SQL
-    statement, so two concurrent callers cannot both win.
-
-    ``scope: "node"`` (issue #1141) widens acquire to also replace an
-    unexpired row owned by the caller's own ``node_id`` under another token,
-    but only the exact row whose stored local lease (``lock``, recorded at
-    acquire) has the token the caller presents in ``supersede`` — the dead
-    run.lock its lease reconcile just released — and whose lease
-    ``acquired_at`` is not newer than the presented one (both are the
-    node's own ISO-8601 stamps, so the comparison never crosses clocks).
-    The response then carries the replaced row as ``superseded``. A row
-    without a recorded lease, a row owned by another node, or a row taken
-    under a different lease on the same node is refused with 409. Release
-    widens to delete the caller's node's row without a token; ``scope:
-    "force"`` (release only) deletes the row whoever owns it. A token-less
-    release reports the deleted row as ``claim``. A node-scoped release
-    must carry the ``acquired_at`` of the row the caller inspected (400
-    without it): the delete is fenced to that exact row, so a claim
-    re-acquired between the caller's inspect and its release is never
-    deleted (409 with the row seen inside the write transaction). Only
-    ``force`` deletes unfenced.
-    """
-    request = _validate_claim_request(raw)
-    if caller_node is not None and request["node_id"] != caller_node:
-        raise FleetHubForbidden(
-            f"claim node_id {request['node_id']!r} does not match the caller's node token ({caller_node})"
-        )
-    target = request["target"]
-    node = request["node_id"]
-    conductor = request["conductor"]
-    holder = request["holder"]
-    ttl = request["ttl_seconds"]
-    scope = request["scope"]
-    labels = request["labels"]
-    now = _now_epoch()
-    now_iso = _epoch_to_iso(now)
-    if request["action"] == "inspect":
-        row = _fetch_claim(conn, target)
-        if row is None or row[10] <= now:
-            return 200, {"inspected": True, "claim": None, "owned": False}
-        inspected: dict[str, Any] = {"inspected": True, "claim": _claim_payload(row), "owned": row[1] == node}
-        if row[1] == node:
-            inspected["lock_run_dir"] = row[14]
-        return 200, inspected
-    if request["action"] == "acquire":
-        # One write transaction: the prune, the prior-row read that the
-        # ``superseded`` receipt describes, and the upsert see one state.
-        conn.execute("BEGIN IMMEDIATE")
-        conn.execute("DELETE FROM claims WHERE expires_at <= ?", (now,))
-        # Only a same-node supersede needs the prior row (to report what it
-        # replaced); expired rows are already gone, so this is a live claim.
-        prior = _fetch_claim(conn, target) if scope == "node" else None
-        lock = request["lock"] or {"token": None, "acquired_at": None, "run_dir": None}
-        supersede = request["supersede"] or {"token": None, "acquired_at": None}
-        cursor = conn.execute(
-            "INSERT INTO claims "
-            "(target, owner_node, owner_conductor, harness, role, job, session, holder_token, "
-            "lock_token, lock_acquired_at, lock_run_dir, "
-            "acquired_at, renewed_at, ttl_seconds, expires_at) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
-            "ON CONFLICT(target) DO UPDATE SET "
-            "owner_node = excluded.owner_node, "
-            "owner_conductor = excluded.owner_conductor, "
-            "harness = excluded.harness, "
-            "role = excluded.role, "
-            "job = excluded.job, "
-            "session = excluded.session, "
-            "holder_token = excluded.holder_token, "
-            "lock_token = excluded.lock_token, "
-            "lock_acquired_at = excluded.lock_acquired_at, "
-            "lock_run_dir = excluded.lock_run_dir, "
-            "acquired_at = CASE WHEN claims.holder_token = excluded.holder_token "
-            "AND claims.owner_node = excluded.owner_node "
-            "AND claims.expires_at > ? THEN claims.acquired_at ELSE excluded.acquired_at END, "
-            "renewed_at = excluded.renewed_at, "
-            "ttl_seconds = excluded.ttl_seconds, "
-            "expires_at = excluded.expires_at "
-            "WHERE claims.expires_at <= ? "
-            "OR (claims.holder_token = excluded.holder_token AND claims.owner_node = excluded.owner_node) "
-            # Same-node supersede: the exact row taken under the dead lease
-            # the caller reconciled, and never a row under a newer lease.
-            "OR (? IS NOT NULL AND claims.owner_node = excluded.owner_node AND claims.lock_token = ? "
-            "AND (? IS NULL OR claims.lock_acquired_at IS NULL OR claims.lock_acquired_at <= ?))",
-            (
-                target,
-                node,
-                conductor,
-                labels["harness"],
-                labels["role"],
-                labels["job"],
-                labels["session"],
-                holder,
-                lock["token"],
-                lock["acquired_at"],
-                lock["run_dir"],
-                now_iso,
-                now_iso,
-                ttl,
-                now + ttl,
-                now,
-                now,
-                supersede["token"],
-                supersede["token"],
-                supersede["acquired_at"],
-                supersede["acquired_at"],
-            ),
-        )
-        conn.commit()
-        if cursor.rowcount == 1:
-            row = _fetch_claim(conn, target)
-            written = (
-                target,
-                node,
-                conductor,
-                labels["harness"],
-                labels["role"],
-                labels["job"],
-                labels["session"],
-                now_iso,
-                now_iso,
-                ttl,
-                now + ttl,
-            )
-            granted: dict[str, Any] = {"granted": True, "claim": _claim_payload(row if row is not None else written)}
-            if prior is not None and prior[11] != holder:
-                granted["superseded"] = _claim_payload(prior)
-            return 200, granted
-        row = _fetch_claim(conn, target)
-        owner = _claim_payload(row) if row is not None else None
-        held_by = owner["owner_node"] if owner is not None else "unknown"
-        error = f"target {target!r} is held by {held_by}"
-        if scope == "node" and row is not None and row[1] == node:
-            error += " under another lease than the reconciled dead run's (not superseded)"
-        return 409, {"granted": False, "error": error, "owner": owner}
-    if request["action"] == "renew":
-        cursor = conn.execute(
-            "UPDATE claims SET renewed_at = ?, ttl_seconds = ?, expires_at = ? "
-            "WHERE target = ? AND holder_token = ? AND owner_node = ? AND expires_at > ?",
-            (now_iso, ttl, now + ttl, target, holder, node, now),
-        )
-        conn.commit()
-        if cursor.rowcount == 1:
-            row = _fetch_claim(conn, target)
-            written = (target, node, conductor, None, None, None, None, now_iso, now_iso, ttl, now + ttl)
-            return 200, {"renewed": True, "claim": _claim_payload(row if row is not None else written)}
-        row = _fetch_claim(conn, target)
-        if row is not None and row[10] > now and (row[11] != holder or row[1] != node):
-            return 409, {
-                "renewed": False,
-                "error": f"target {target!r} is held by {row[1]}",
-                "owner": _claim_payload(row),
-            }
-        return 409, {"renewed": False, "error": f"claim on {target!r} is expired or missing", "owner": None}
-    if scope == "holder":
-        cursor = conn.execute(
-            "DELETE FROM claims WHERE target = ? AND holder_token = ? AND owner_node = ?",
-            (target, holder, node),
-        )
-        conn.commit()
-        if cursor.rowcount == 1:
-            return 200, {"released": True}
-        row = _fetch_claim(conn, target)
-        if row is not None:
-            return 409, {
-                "released": False,
-                "error": f"target {target!r} is held by {row[1]}",
-                "owner": _claim_payload(row),
-            }
-        return 200, {"released": False}
-    # Token-less release (issue #1141): the caller's own node's row, or with
-    # "force" whoever holds the target. The read and the delete share one
-    # write transaction, so the receipt's ``claim`` is the row the delete
-    # removed — a concurrent acquire cannot slip a new owner in between.
-    # ``acquired_at`` (from the caller's inspect) fences the delete to that
-    # exact row: a claim re-acquired in between is a different row.
-    expected_acquired_at = request["acquired_at"]
-    conn.execute("BEGIN IMMEDIATE")
-    prior = _fetch_claim(conn, target)
-    cursor = conn.execute(
-        "DELETE FROM claims WHERE target = ? AND (? = 1 OR owner_node = ?) AND (? IS NULL OR acquired_at = ?)",
-        (target, int(scope == "force"), node, expected_acquired_at, expected_acquired_at),
-    )
-    conn.commit()
-    if cursor.rowcount == 1:
-        released: dict[str, Any] = {"released": True}
-        if prior is not None:
-            released["claim"] = _claim_payload(prior)
-        return 200, released
-    # Reuse the in-transaction ``prior`` for the 409 payload. A post-commit
-    # re-read can describe a row that landed after this refusal (#1160).
-    if prior is not None:
-        if scope != "force" and prior[1] != node:
-            error = f"target {target!r} is held by {prior[1]}, not {node}"
-        else:
-            error = f"target {target!r} was re-acquired since it was inspected (now acquired {prior[7]})"
-        return 409, {"released": False, "error": error, "owner": _claim_payload(prior)}
-    return 200, {"released": False}
+    return fleet_hub_claims.handle_claim(conn, raw, caller_node=caller_node)
 
 
 def list_claims(conn: sqlite3.Connection, *, include_all: bool = False) -> list[dict[str, Any]]:
-    """All active claims (expired ones only with ``include_all``)."""
-    now = _now_epoch()
-    rows = conn.execute(f"SELECT {_CLAIM_COLUMNS} FROM claims ORDER BY target").fetchall()
-    result = []
-    for row in rows:
-        expired = row[10] <= now
-        if expired and not include_all:
-            continue
-        payload = _claim_payload(row)
-        payload["expired"] = expired
-        result.append(payload)
-    return result
+    from . import fleet_hub_claims
+
+    return fleet_hub_claims.list_claims(conn, include_all=include_all)
 
 
 # --- cloud admission and sanitized provider/model policy -------------------

@@ -9,6 +9,8 @@ import select
 import subprocess
 import sys
 import threading
+import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -17,6 +19,7 @@ from brigade import (
     aboyeur,
     dirfd,
     run_checkpoint,
+    run_control_journal,
     run_dirfd,
     run_events,
     run_journal,
@@ -728,9 +731,10 @@ def test_failed_fsync_leaves_snapshot_unchanged_but_complete_journal_line_visibl
     with runguard.run_lock(repo, run_dir=run_dir):
         with monkeypatch.context() as patch:
             patch.setattr(os, "fsync", fail_journal_fsync)
-            with pytest.raises(run_lifecycle.LifecycleJournalError):
+            with pytest.raises(run_lifecycle.LifecycleJournalError) as failure_info:
                 aboyeur._write_json(snapshot_path, {**payload, "status": "planning"})
 
+    assert getattr(failure_info.value, "outcome", None) == "indeterminate"
     assert snapshot_path.read_bytes() == before_snapshot
     # This is the confirmed gap in the stronger failed-append invariant.
     # No successful return occurred, yet the complete checkpoint line is
@@ -739,6 +743,748 @@ def test_failed_fsync_leaves_snapshot_unchanged_but_complete_journal_line_visibl
     report = run_journal.read_journal_bounded(path)
     assert report.chain_errors == [] and report.partial_tail is None
     assert len(report.events) == len(before_journal.splitlines()) + 1
+
+
+@pytest.mark.parametrize("failure", ["file", "directory"])
+def test_failed_append_reports_indeterminate_outcome_without_discarding_history(tmp_path, monkeypatch, failure):
+    """The approved contract retains bytes without reporting definite rejection."""
+    path = tmp_path / "events" / "lifecycle.jsonl"
+    first = _append(path)
+    base = {"status": "started"}
+    before = path.read_bytes()
+
+    def fail_sync(*args):
+        raise OSError(errno.EIO, "injected journal sync failure")
+
+    with monkeypatch.context() as patch:
+        if failure == "file":
+            patch.setattr(os, "fsync", fail_sync)
+        else:
+            patch.setattr(run_journal, "_fsync_directory", fail_sync)
+        with pytest.raises((OSError, run_journal.RunJournalError)) as failure_info:
+            _append(path, event_type="run.planning.started", payload={"detail": "planning"}, key="plan", previous=1)
+
+    report = run_journal.read_journal_bounded(path)
+    assert report.chain_errors == [] and report.partial_tail is None
+    assert path.read_bytes() != before
+    assert report.events[0] == first and len(report.events) == 2
+    forensic = run_projector.project_run_snapshot(base, report.events, journal_present=True)
+    assert forensic.status == "planning" and forensic.last_sequence == 2
+    assert getattr(failure_info.value, "outcome", None) == "indeterminate"
+
+
+@pytest.mark.parametrize("failure", ["file", "directory"])
+def test_recovery_cannot_publish_projection_when_fresh_journal_sync_fails(tmp_path, monkeypatch, failure):
+    """A recovered projection needs its own barrier, independent of old receipts."""
+    repo = tmp_path / "repo"
+    run_dir = repo / ".brigade" / "runs" / RUN_ID
+    run_dir.mkdir(parents=True)
+    snapshot_path = run_dir / "run.json"
+    bootstrap = {"schema": "brigade.run.v1", "status": "started", "lifecycle_journal_requested": True}
+    snapshot_path.write_bytes(run_projector.encode_snapshot_bytes(bootstrap))
+    base = {**bootstrap, "status": "planning", "run_journal_authority_requested": True}
+    with runguard.run_lock(repo, run_dir=run_dir):
+        checkpoint = run_checkpoint.write_checkpoint(
+            run_dir,
+            run_projector.encode_snapshot_bytes(base),
+            workspace=repo,
+            paired_event_type="run.planning.started",
+            body_kind="base-stripped",
+        )
+    assert checkpoint is not None
+    path = run_dir / "events" / "lifecycle.jsonl"
+    journal_inode = path.stat()
+    real_fsync = os.fsync
+    real_directory_sync = run_journal._fsync_directory
+
+    def fail_file_sync(fd):
+        info = os.fstat(fd)
+        if (info.st_dev, info.st_ino) == (journal_inode.st_dev, journal_inode.st_ino):
+            raise OSError(errno.EIO, "injected journal recovery sync failure")
+        return real_fsync(fd)
+
+    def fail_directory_sync(directory):
+        if directory == path.parent:
+            raise run_journal.RunJournalError("injected journal recovery directory sync failure")
+        return real_directory_sync(directory)
+
+    with monkeypatch.context() as patch:
+        if failure == "file":
+            patch.setattr(os, "fsync", fail_file_sync)
+        else:
+            patch.setattr(run_journal, "_fsync_directory", fail_directory_sync)
+        with pytest.raises((OSError, run_journal.RunJournalError)):
+            _append(
+                path,
+                event_type="run.planning.started",
+                payload={"detail": "planning"},
+                key="plan",
+                previous=checkpoint.sequence,
+            )
+        uncertain = path.read_bytes()
+        snapshot_path.unlink()
+        report = run_journal.read_journal_bounded(path)
+        assert report.chain_errors == [] and report.partial_tail is None
+        assert report.events[-1].event_type == "run.planning.started"
+        with pytest.raises(run_checkpoint.CheckpointError) as failure_info:
+            run_checkpoint.recover_from_checkpoint(run_dir, None)
+        assert failure_info.value.category == "journal-sync-indeterminate"
+        assert not snapshot_path.exists()
+        assert path.read_bytes() == uncertain
+
+    syncs = []
+    directory_inode = path.parent.stat()
+
+    def track_sync(fd):
+        info = os.fstat(fd)
+        identity = (info.st_dev, info.st_ino)
+        if identity == (journal_inode.st_dev, journal_inode.st_ino):
+            syncs.append("file")
+        elif identity == (directory_inode.st_dev, directory_inode.st_ino):
+            syncs.append("directory")
+        return real_fsync(fd)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(os, "fsync", track_sync)
+        recovered = run_checkpoint.recover_from_checkpoint(run_dir, None)
+    assert syncs == (["file", "directory"] if os.name == "posix" else ["file"])
+    assert recovered["status"] == "planning"
+    assert recovered["journal_last_sequence"] == report.events[-1].sequence
+    assert recovered["journal_last_event_digest"] == report.events[-1].event_digest
+    assert json.loads(snapshot_path.read_bytes()) == recovered
+    assert path.read_bytes() == uncertain
+
+
+@pytest.mark.parametrize("phase", ["claim", "terminal"])
+def test_control_sync_failure_preserves_code_and_exposes_indeterminate_outcome(tmp_path, monkeypatch, phase):
+    run_dir = tmp_path / RUN_ID
+    path = run_dir / "events" / "lifecycle.jsonl"
+    _append(path)
+    calls = []
+    real_fsync = os.fsync
+
+    def fail_sync(fd):
+        raise OSError(errno.EIO, "injected control sync failure")
+
+    def send(payload):
+        calls.append(payload)
+        monkeypatch.setattr(os, "fsync", fail_sync)
+        return {"ok": True}
+
+    if phase == "claim":
+        monkeypatch.setattr(os, "fsync", fail_sync)
+    with pytest.raises(run_control_journal.ControlJournalError) as failure_info:
+        run_control_journal.execute_control_request(run_dir, op="interrupt", request_id="sync-uncertain", send=send)
+    assert failure_info.value.code == "control_append_failed"
+    assert getattr(failure_info.value, "outcome", None) == "indeterminate"
+    assert len(calls) == (0 if phase == "claim" else 1)
+    before = path.read_bytes()
+    report = run_journal.read_journal_bounded(path)
+    assert report.chain_errors == [] and report.partial_tail is None
+    assert report.events[-1].event_type == ("control.requested" if phase == "claim" else "control.observed")
+    with pytest.raises(run_control_journal.ControlJournalError) as retry_info:
+        run_control_journal.execute_control_request(run_dir, op="interrupt", request_id="sync-uncertain", send=send)
+    assert retry_info.value.code == ("indeterminate" if phase == "claim" else "control_append_failed")
+    if phase == "terminal":
+        assert retry_info.value.outcome == "indeterminate"
+        monkeypatch.setattr(os, "fsync", real_fsync)
+        replay = run_control_journal.execute_control_request(
+            run_dir, op="interrupt", request_id="sync-uncertain", send=send
+        )
+        assert replay.replayed is True
+    assert len(calls) == (0 if phase == "claim" else 1)
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("failure", ["sequence", "digest", "partial", "close"])
+def test_recovery_barrier_refuses_unverified_head_or_close_failure(tmp_path, monkeypatch, failure):
+    repo = tmp_path / "repo"
+    run_dir = repo / ".brigade" / "runs" / RUN_ID
+    run_dir.mkdir(parents=True)
+    snapshot = run_dir / "run.json"
+    base = {"schema": "brigade.run.v1", "status": "started", "lifecycle_journal_requested": True}
+    snapshot.write_bytes(run_projector.encode_snapshot_bytes(base))
+    with runguard.run_lock(repo, run_dir=run_dir):
+        assert (
+            run_checkpoint.write_checkpoint(
+                run_dir, run_projector.encode_snapshot_bytes(base), workspace=repo, paired_event_type=None
+            )
+            is not None
+        )
+    snapshot.unlink()
+    path = run_dir / "events" / "lifecycle.jsonl"
+    before = path.read_bytes()
+    real_tail = run_journal._read_tail_state
+    real_close, real_fsync = os.close, os.fsync
+    journal_identity = path.stat()
+
+    def changed_tail(journal_path):
+        sequence, digest, index, partial, size = real_tail(journal_path)
+        if failure == "sequence":
+            sequence += 1
+        elif failure == "digest":
+            digest = "0" * 64
+        elif failure == "partial":
+            partial = b"incomplete"
+        return sequence, digest, index, partial, size
+
+    def fail_close(fd):
+        info = os.fstat(fd)
+        real_close(fd)
+        if (info.st_dev, info.st_ino) == (journal_identity.st_dev, journal_identity.st_ino):
+            raise OSError(errno.EIO, "injected recovery close failure")
+
+    with monkeypatch.context() as patch:
+        if failure == "close":
+
+            def at_sync(fd):
+                patch.setattr(os, "close", fail_close)
+                return real_fsync(fd)
+
+            patch.setattr(os, "fsync", at_sync)
+        else:
+            patch.setattr(run_journal, "_read_tail_state", changed_tail)
+        with pytest.raises(run_checkpoint.CheckpointError) as failure_info:
+            run_checkpoint.recover_from_checkpoint(run_dir, None)
+    assert failure_info.value.category == ("journal-sync-indeterminate" if failure == "close" else "journal-sync")
+    assert not snapshot.exists()
+    assert path.read_bytes() == before
+
+
+# Written to a private fixture root and run with an explicit environment. The
+# probe uses the platform's real lock primitive (flock or msvcrt byte zero) on a
+# fresh sibling-lock descriptor; open or unexpected probe errors fail the child.
+_ADMITTED_CONTROL_CHILD = r"""
+import errno
+import json
+import os
+import sys
+import time
+from pathlib import Path
+
+from brigade import fleet_client, run_control_journal, run_journal
+
+# Reporting is outside this storage qualification. Do not discover host fleet
+# identities, credentials, or repository metadata from a fixture's ancestors.
+fleet_client.report_journal_event = lambda *args, **kwargs: False
+markers = Path(sys.argv[1])
+run_dir = Path(sys.argv[2])
+journal = run_control_journal._journal_path(run_dir)
+
+def mark(name, value):
+    temporary = markers / (name + ".tmp")
+    temporary.write_text(json.dumps(value), encoding="utf-8")
+    temporary.replace(markers / name)
+
+def wait_for(name):
+    deadline = time.monotonic() + 30
+    while not (markers / name).exists():
+        if time.monotonic() >= deadline:
+            raise TimeoutError("child barrier: " + name)
+        time.sleep(0.01)
+
+def sibling_lock_held():
+    fd = run_journal._open_journal_lock(run_journal._journal_lock_path(journal))
+    try:
+        if run_journal.fcntl is not None:
+            try:
+                run_journal.fcntl.flock(fd, run_journal.fcntl.LOCK_EX | run_journal.fcntl.LOCK_NB)
+            except OSError as exc:
+                if exc.errno not in (errno.EAGAIN, errno.EWOULDBLOCK):
+                    raise
+                return "flock-contended"
+            run_journal.fcntl.flock(fd, run_journal.fcntl.LOCK_UN)
+            return None
+        os.lseek(fd, 0, os.SEEK_SET)
+        try:
+            run_journal.msvcrt.locking(fd, run_journal.msvcrt.LK_NBLCK, 1)
+        except OSError as exc:
+            if exc.errno not in (errno.EACCES, errno.EDEADLK):
+                raise
+            return "byte-lock-contended"
+        os.lseek(fd, 0, os.SEEK_SET)
+        run_journal.msvcrt.locking(fd, run_journal.msvcrt.LK_UNLCK, 1)
+        return None
+    finally:
+        os.close(fd)
+
+# Probe mode: report the sibling lock state from a process that holds no lock.
+if len(sys.argv) > 3 and sys.argv[3] == "probe":
+    mark(sys.argv[4], sibling_lock_held())
+    sys.exit(0)
+
+workspace = run_control_journal._preflight_live_control(run_dir)
+mark("admitted", {"workspace": None if workspace is None else str(workspace)})
+wait_for("go")
+contention = sibling_lock_held()
+if contention is not None:
+    mark("blocked", contention)
+fingerprint = run_control_journal.control_fingerprint_payload(op="interrupt", request_id="admitted")
+try:
+    state, requested, _terminal = run_control_journal._claim_control_request(
+        journal, run_dir=run_dir, workspace=workspace,
+        run_id=run_dir.name, request_id="admitted", fingerprint=fingerprint,
+    )
+except run_control_journal.ControlJournalError as exc:
+    mark("rejected", {"code": exc.code, "contention": contention})
+else:
+    mark("claimed", {"state": state, "sequence": requested.sequence, "contention": contention})
+"""
+
+
+def _await_marker(markers, child, *names):
+    """Bounded file-barrier poll that fails fast if the child exits first."""
+    deadline = time.monotonic() + 20
+    while True:
+        found = [name for name in names if (markers / name).exists()]
+        if found:
+            return found[0], json.loads((markers / found[0]).read_text(encoding="utf-8"))
+        if child.poll() is not None:
+            stdout, stderr = child.communicate(timeout=5)
+            pytest.fail(f"child exited {child.returncode} before {names}\nstdout:\n{stdout}\nstderr:\n{stderr}")
+        if time.monotonic() >= deadline:
+            pytest.fail(f"parent barrier timed out: {names}")
+        time.sleep(0.01)
+
+
+def test_recovery_publishes_only_the_head_it_synchronized(tmp_path, monkeypatch):
+    """A control claim admitted before recovery cannot append inside the publication window.
+
+    The fixture snapshot has no ``lock_workspace``, so the real preflight admits
+    the claim on its journal-only compatibility path. No owner process exists or
+    dies here; this qualifies storage interleaving of an admitted control writer
+    against recovery's synchronized head and snapshot publication.
+    """
+    repo = tmp_path / "repo"
+    run_dir = repo / ".brigade" / "runs" / RUN_ID
+    run_dir.mkdir(parents=True)
+    snapshot = run_dir / "run.json"
+    base = {"schema": "brigade.run.v1", "status": "started", "lifecycle_journal_requested": True}
+    snapshot.write_bytes(run_projector.encode_snapshot_bytes(base))
+    with runguard.run_lock(repo, run_dir=run_dir):
+        checkpoint = run_checkpoint.write_checkpoint(
+            run_dir,
+            run_projector.encode_snapshot_bytes({**base, "run_journal_authority_requested": True}),
+            workspace=repo,
+            paired_event_type=None,
+            body_kind="base-stripped",
+        )
+    assert checkpoint is not None
+    path = run_dir / "events" / "lifecycle.jsonl"
+    synchronized = run_journal.read_journal_bounded(path).events[-1]
+    assert synchronized.sequence == checkpoint.sequence
+    child_root = tmp_path / "child"
+    markers = child_root / "markers"
+    markers.mkdir(parents=True)
+    (child_root / "child.py").write_text(_ADMITTED_CONTROL_CHILD, encoding="utf-8")
+    environment = {
+        "HOME": str(child_root),
+        "USERPROFILE": str(child_root),
+        "TMP": str(child_root),
+        "TEMP": str(child_root),
+        "TMPDIR": str(child_root),
+        "PATH": os.defpath,
+        "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONIOENCODING": "utf-8",
+        "BRIGADE_HOME": str(child_root / "operator" / ".brigade"),
+        "BRIGADE_USER_DIR": str(child_root / "operator" / ".brigade"),
+        "BRIGADE_NO_UPDATE_CHECK": "1",
+    }
+    if os.name == "nt":
+        for key in ("SYSTEMROOT", "WINDIR"):
+            if key in os.environ:
+                environment[key] = os.environ[key]
+    published = {}
+    real_restore = run_checkpoint._restore_run_json_from_checkpoint
+
+    def restore_at_publication(*args, **kwargs):
+        # Release the admitted writer at the publication point. Whichever of
+        # "blocked" (sibling lock contended) or "claimed" (append landed) it
+        # reports first is decided by the lock state, not by scheduling.
+        markers.joinpath("go").touch()
+        published["window"] = _await_marker(markers, child, "blocked", "claimed")
+        tail = run_journal.read_journal_bounded(path).events[-1]
+        published["head"] = (tail.sequence, tail.event_digest)
+        return real_restore(*args, **kwargs)
+
+    child = subprocess.Popen(
+        [sys.executable, str(child_root / "child.py"), str(markers), str(run_dir)],
+        cwd=child_root,
+        env=environment,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+    )
+    try:
+        assert _await_marker(markers, child, "admitted") == ("admitted", {"workspace": None})
+        snapshot.unlink()
+        monkeypatch.setattr(run_checkpoint, "_restore_run_json_from_checkpoint", restore_at_publication)
+        with runguard.run_lock(repo, run_dir=run_dir):
+            recovered = run_checkpoint.recover_from_checkpoint(run_dir, None)
+        stdout, stderr = child.communicate(timeout=20)
+        assert child.returncode == 0, f"child exited {child.returncode}\nstdout:\n{stdout}\nstderr:\n{stderr}"
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.communicate(timeout=5)
+
+    contention = "flock-contended" if run_journal.fcntl is not None else "byte-lock-contended"
+    assert published["head"] == (synchronized.sequence, synchronized.event_digest)
+    assert published["window"] == ("blocked", contention)
+    assert recovered["journal_last_sequence"] == synchronized.sequence
+    assert recovered["journal_last_event_digest"] == synchronized.event_digest
+    assert json.loads(snapshot.read_bytes()) == recovered
+    claim = json.loads(markers.joinpath("claimed").read_text(encoding="utf-8"))
+    assert claim == {"state": "claimed", "sequence": synchronized.sequence + 1, "contention": contention}
+    events = run_journal.read_journal_bounded(path).events
+    assert events[synchronized.sequence - 1].to_dict() == synchronized.to_dict()
+    assert [event.event_type for event in events[synchronized.sequence :]] == ["control.requested"]
+    assert events[-1].previous_digest == synchronized.event_digest
+
+
+def test_caller_terminalization_holds_journal_until_terminal_receipt(tmp_path, monkeypatch, capsys):
+    """An admitted control claim cannot append between publication and terminalization.
+
+    Regression for the PR #1681 residual race through the real ``brigade runs
+    recover`` caller. A control claim admitted by the real
+    ``_preflight_live_control`` before recovery blocks on the journal lock during
+    checkpoint publication. Recovery must keep that lock through runguard's
+    terminal receipt write, and the claim must recheck liveness under the lock,
+    so the writer is refused ``control_run_not_live`` and the terminal cursor
+    names the journal's actual tail.
+
+    At the terminal boundary a separate process probes the real sibling lock.
+    If it is free, the writer is allowed to finish first so the defect shows
+    deterministically instead of depending on scheduling.
+
+    Exercised: the journal-only compatibility preflight (no ``lock_workspace``)
+    and a stale run lock whose recorded owner pid does not exist. No owner
+    process is started or killed, so owner death is not exercised.
+    """
+    from brigade import doctor, run_audit, runs_cmd
+
+    repo = tmp_path / "repo"
+    run_dir = repo / ".brigade" / "runs" / RUN_ID
+    run_dir.mkdir(parents=True)
+    snapshot = run_dir / "run.json"
+    base = {"schema": "brigade.run.v1", "status": "started", "lifecycle_journal_requested": True}
+    snapshot.write_bytes(run_projector.encode_snapshot_bytes(base))
+    with runguard.run_lock(repo, run_dir=run_dir):
+        checkpoint = run_checkpoint.write_checkpoint(
+            run_dir,
+            run_projector.encode_snapshot_bytes({**base, "run_journal_authority_requested": True}),
+            workspace=repo,
+            paired_event_type=None,
+            body_kind="base-stripped",
+        )
+    assert checkpoint is not None
+    path = run_dir / "events" / "lifecycle.jsonl"
+    synchronized = run_journal.read_journal_bounded(path).events[-1]
+    # A dead owner's lock for this run: the recorded pid is above any pid_max.
+    lock = runguard.lock_path(repo)
+    lock.mkdir(parents=True)
+    dead_pid = 99999999
+    (lock / "pid").write_text(f"{dead_pid}\n", encoding="utf-8")
+    (lock / "owner.json").write_text(
+        json.dumps(
+            {
+                "schema": "brigade.run_lock.v1",
+                "owner_token": "dead-owner",
+                "pid": dead_pid,
+                "run_dir": str(run_dir.resolve()),
+                "acquired_at": "2026-10-12T00:00:00+00:00",
+            }
+        ),
+        encoding="utf-8",
+    )
+    child_root = tmp_path / "child"
+    markers = child_root / "markers"
+    markers.mkdir(parents=True)
+    child_script = child_root / "child.py"
+    child_script.write_text(_ADMITTED_CONTROL_CHILD, encoding="utf-8")
+    environment = {
+        "HOME": str(child_root),
+        "USERPROFILE": str(child_root),
+        "TMP": str(child_root),
+        "TEMP": str(child_root),
+        "TMPDIR": str(child_root),
+        "PATH": os.defpath,
+        "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONIOENCODING": "utf-8",
+        "BRIGADE_HOME": str(child_root / "operator" / ".brigade"),
+        "BRIGADE_USER_DIR": str(child_root / "operator" / ".brigade"),
+        "BRIGADE_NO_UPDATE_CHECK": "1",
+    }
+    if os.name == "nt":
+        for key in ("SYSTEMROOT", "WINDIR"):
+            if key in os.environ:
+                environment[key] = os.environ[key]
+    observed = {}
+    real_restore = run_checkpoint._restore_run_json_from_checkpoint
+    real_terminalize = runguard._recover_run_artifact
+
+    def restore_at_publication(*args, **kwargs):
+        markers.joinpath("go").touch()
+        observed["window"] = _await_marker(markers, child, "blocked", "claimed")
+        return real_restore(*args, **kwargs)
+
+    def terminalize_at_boundary(*args, **kwargs):
+        probe = subprocess.run(
+            [sys.executable, str(child_script), str(markers), str(run_dir), "probe", "terminal-probe"],
+            cwd=child_root,
+            env=environment,
+            stdin=subprocess.DEVNULL,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            timeout=20,
+        )
+        assert probe.returncode == 0, f"probe stdout:\n{probe.stdout}\nstderr:\n{probe.stderr}"
+        observed["terminal_lock"] = json.loads(markers.joinpath("terminal-probe").read_text(encoding="utf-8"))
+        if observed["terminal_lock"] is None:
+            # The journal lock was released before terminalization; let the
+            # admitted writer finish so the defect is observed, not raced.
+            observed["claim"] = _await_marker(markers, child, "claimed", "rejected")
+        observed["pre_terminal_tail"] = run_journal.read_journal_bounded(path).events[-1].sequence
+        return real_terminalize(*args, **kwargs)
+
+    child = subprocess.Popen(
+        [sys.executable, str(child_script), str(markers), str(run_dir)],
+        cwd=child_root,
+        env=environment,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+    )
+    stdout = stderr = ""
+    try:
+        assert _await_marker(markers, child, "admitted") == ("admitted", {"workspace": None})
+        snapshot.unlink()
+        monkeypatch.setattr(run_checkpoint, "_restore_run_json_from_checkpoint", restore_at_publication)
+        monkeypatch.setattr(runguard, "_recover_run_artifact", terminalize_at_boundary)
+        rc = runs_cmd.recover(run_dir, cwd=repo)
+        stdout, stderr = child.communicate(timeout=20)
+        observed["child_rc"] = child.returncode
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.communicate(timeout=5)
+    observed["child_reaped"] = child.returncode is not None
+    monkeypatch.undo()
+
+    terminal = json.loads(snapshot.read_bytes())
+    events = run_journal.read_journal_bounded(path).events
+    tail = events[-1]
+    outcome = next(
+        (
+            (name, json.loads(markers.joinpath(name).read_text(encoding="utf-8")))
+            for name in ("claimed", "rejected")
+            if markers.joinpath(name).exists()
+        ),
+        None,
+    )
+    doctor_verdict = doctor._recovery_checkpoint_run_verdict(repo, run_dir)
+    audit = run_audit.audit_run(run_dir)
+    try:
+        run_checkpoint.recover_from_checkpoint(run_dir, terminal)
+        forensic = "covered"
+    except run_checkpoint.CheckpointError as exc:
+        forensic = exc.category
+    evidence = {
+        "rc": rc,
+        "window": observed.get("window"),
+        "terminal_lock": observed.get("terminal_lock"),
+        "pre_terminal_tail": observed.get("pre_terminal_tail"),
+        "writer_outcome": outcome,
+        "terminal_status": terminal.get("status"),
+        "terminal_cursor": (terminal.get("journal_last_sequence"), terminal.get("journal_last_event_digest")),
+        "synchronized": (synchronized.sequence, synchronized.event_digest),
+        "journal_tail": (tail.sequence, tail.event_digest, tail.event_type),
+        "control_requested_events": sum(event.event_type == "control.requested" for event in events),
+        "doctor_verdict": doctor_verdict,
+        "audit_result": audit.result,
+        "forensic_recovery": forensic,
+        "lock_cleared": not lock.exists(),
+        "child_rc": observed.get("child_rc"),
+        "child_reaped": observed["child_reaped"],
+    }
+    with capsys.disabled():
+        print("RESIDUAL-RACE-EVIDENCE " + json.dumps(evidence, sort_keys=True, default=str))
+
+    contention = "flock-contended" if run_journal.fcntl is not None else "byte-lock-contended"
+    assert evidence["child_rc"] == 0, f"child stdout:\n{stdout}\nstderr:\n{stderr}"
+    assert evidence["child_reaped"]
+    assert evidence["rc"] == 0
+    assert evidence["lock_cleared"]
+    assert evidence["window"] == ("blocked", contention)
+    # The recovery still holds the journal lock when the terminal receipt is written.
+    assert evidence["terminal_lock"] == contention
+    assert evidence["pre_terminal_tail"] == synchronized.sequence
+    assert evidence["writer_outcome"] == ("rejected", {"code": "control_run_not_live", "contention": contention})
+    assert evidence["control_requested_events"] == 0
+    assert evidence["journal_tail"][:2] == evidence["synchronized"]
+    assert evidence["terminal_status"] not in runguard._NONTERMINAL_RUN_STATUSES
+    assert evidence["terminal_cursor"] == evidence["journal_tail"][:2]
+    assert evidence["doctor_verdict"] == ("ok", "stale-lock-recovery receipt matches projection reconstruction")
+    assert evidence["forensic_recovery"] == "covered"
+
+
+def test_runs_recovery_completes_with_two_matching_stale_claims(tmp_path):
+    """Sibling recovery callbacks retain the outer journal mutation's reentry permission."""
+    from brigade import doctor
+
+    repo = tmp_path / "repo"
+    run_dir = repo / ".brigade" / "runs" / RUN_ID
+    run_dir.mkdir(parents=True)
+    snapshot = run_dir / "run.json"
+    base = {"schema": "brigade.run.v1", "status": "started", "lifecycle_journal_requested": True}
+    snapshot.write_bytes(run_projector.encode_snapshot_bytes(base))
+    with runguard.run_lock(repo, run_dir=run_dir):
+        checkpoint = run_checkpoint.write_checkpoint(
+            run_dir,
+            run_projector.encode_snapshot_bytes({**base, "run_journal_authority_requested": True}),
+            workspace=repo,
+            paired_event_type=None,
+            body_kind="base-stripped",
+        )
+    assert checkpoint is not None
+    lock = runguard.lock_path(repo)
+    claims = [lock.with_name(f".{lock.name}.{name}.stale") for name in ("first", "second")]
+    for index, claim in enumerate(claims):
+        claim.mkdir()
+        dead_pid = 99999999
+        (claim / "pid").write_text(f"{dead_pid}\n", encoding="utf-8")
+        (claim / "owner.json").write_text(
+            json.dumps(
+                {
+                    "schema": "brigade.run_lock.v1",
+                    "owner_token": f"dead-owner-{index}",
+                    "pid": dead_pid,
+                    "run_dir": str(run_dir.resolve()),
+                    "acquired_at": "2026-10-12T00:00:00+00:00",
+                }
+            ),
+            encoding="utf-8",
+        )
+    snapshot.unlink()
+    child_root = tmp_path / "child"
+    child_root.mkdir()
+    environment = {
+        "HOME": str(child_root),
+        "USERPROFILE": str(child_root),
+        "TMP": str(child_root),
+        "TEMP": str(child_root),
+        "TMPDIR": str(child_root),
+        "PATH": os.defpath,
+        "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONIOENCODING": "utf-8",
+        "BRIGADE_HOME": str(child_root / "operator" / ".brigade"),
+        "BRIGADE_USER_DIR": str(child_root / "operator" / ".brigade"),
+        "BRIGADE_NO_UPDATE_CHECK": "1",
+    }
+    if os.name == "nt":
+        for key in ("SYSTEMROOT", "WINDIR"):
+            if key in os.environ:
+                environment[key] = os.environ[key]
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import sys; from pathlib import Path; from brigade import runs_cmd; "
+            "sys.exit(runs_cmd.recover(Path(sys.argv[1]), cwd=Path(sys.argv[2])))",
+            str(run_dir),
+            str(repo),
+        ],
+        cwd=child_root,
+        env=environment,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+    )
+    try:
+        try:
+            stdout, stderr = child.communicate(timeout=20)
+        except subprocess.TimeoutExpired:
+            child.kill()
+            stdout, stderr = child.communicate(timeout=5)
+            pytest.fail(f"recovery timed out with two matching stale claims\nstdout:\n{stdout}\nstderr:\n{stderr}")
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.communicate(timeout=5)
+    assert child.returncode == 0, f"recovery stdout:\n{stdout}\nstderr:\n{stderr}"
+    assert not lock.exists()
+    assert all(not claim.exists() for claim in claims)
+    assert not list(lock.parent.glob(f".{lock.name}.*.stale"))
+    terminal = json.loads(snapshot.read_bytes())
+    assert terminal["status"] == "failed"
+    assert terminal["failure_phase"] == "stale-lock-recovery"
+    tail = run_journal.read_journal_bounded(run_dir / "events" / "lifecycle.jsonl").events[-1]
+    assert (terminal["journal_last_sequence"], terminal["journal_last_event_digest"]) == (
+        tail.sequence,
+        tail.event_digest,
+    )
+    assert doctor._recovery_checkpoint_run_verdict(repo, run_dir) == (
+        "ok",
+        "stale-lock-recovery receipt matches projection reconstruction",
+    )
+
+
+@pytest.mark.parametrize("operation", ["append-sync", "append-close", "replay-close"])
+def test_complete_append_or_replay_close_failure_keeps_indeterminate_outcome(tmp_path, monkeypatch, operation):
+    path = tmp_path / "events" / "lifecycle.jsonl"
+    original = _append(path)
+    journal_inode = path.stat()
+    real_close, real_fsync = os.close, os.fsync
+
+    def is_journal(fd):
+        info = os.fstat(fd)
+        return (info.st_dev, info.st_ino) == (journal_inode.st_dev, journal_inode.st_ino)
+
+    def fail_close(fd):
+        journal = is_journal(fd)
+        real_close(fd)
+        if journal:
+            raise OSError(errno.EIO, "injected journal close failure")
+
+    def fail_sync(fd):
+        if is_journal(fd):
+            raise OSError(errno.EIO, "injected journal sync failure")
+        return real_fsync(fd)
+
+    with monkeypatch.context() as patch:
+        # The tail reader closes a read-only journal descriptor first. Inject
+        # only after that real read, at the append/replay sync boundary.
+        def at_sync(fd):
+            patch.setattr(os, "close", fail_close)
+            return fail_sync(fd) if operation == "append-sync" else real_fsync(fd)
+
+        patch.setattr(os, "fsync", at_sync)
+        with pytest.raises((OSError, run_journal.RunJournalError)) as failure_info:
+            if operation == "replay-close":
+                _append(path)
+            else:
+                _append(path, event_type="run.planning.started", payload={"detail": "planning"}, key="plan", previous=1)
+    assert getattr(failure_info.value, "outcome", None) == "indeterminate"
+    assert (
+        "durability barrier failed" if operation == "append-sync" else "close failed"
+    ) in failure_info.value.diagnostic
+    report = run_journal.read_journal_bounded(path)
+    assert report.chain_errors == [] and report.partial_tail is None
+    assert report.events[0] == original
+    assert len(report.events) == (1 if operation == "replay-close" else 2)
 
 
 @pytest.mark.parametrize("failure", ["file", "directory"])
@@ -887,4 +1633,346 @@ def test_read_only_lookup_and_journal_read_do_not_sync(tmp_path, monkeypatch):
         == original
     )
     assert run_journal.read_journal_bounded(path).events == [original]
+    assert path.read_bytes() == before
+
+
+# Runs the real execute_control_request. The synthetic send callback marks
+# "sending" after the real control.requested claim is durable, then holds on a
+# file barrier until the parent has recovered and terminalized the run.
+_DELAYED_OUTCOME_CHILD = r"""
+import json
+import sys
+import time
+from pathlib import Path
+
+from brigade import fleet_client, run_control_journal, run_journal
+
+fleet_client.report_journal_event = lambda *args, **kwargs: False
+markers = Path(sys.argv[1])
+run_dir = Path(sys.argv[2])
+outcome = sys.argv[3]
+journal = run_control_journal._journal_path(run_dir)
+
+def mark(name, value):
+    temporary = markers / (name + ".tmp")
+    temporary.write_text(json.dumps(value), encoding="utf-8")
+    temporary.replace(markers / name)
+
+def wait_for(name):
+    deadline = time.monotonic() + 30
+    while not (markers / name).exists():
+        if time.monotonic() >= deadline:
+            raise TimeoutError("child barrier: " + name)
+        time.sleep(0.01)
+
+sends = []
+
+def send(payload):
+    sends.append(dict(payload))
+    tail = run_journal.read_journal_bounded(journal).events[-1]
+    mark("sending", {"payload": payload, "tail": [tail.sequence, tail.event_digest, tail.event_type]})
+    wait_for("release")
+    if outcome == "observed":
+        return {"ok": True, "op": payload["op"], "interrupted": 1}
+    if outcome == "rejected":
+        return {"ok": False, "error": "RAW-REJECT-DETAIL"}
+    raise ConnectionError("RAW-LOST-ACK-DETAIL")
+
+try:
+    result = run_control_journal.execute_control_request(
+        run_dir, op="interrupt", request_id="delayed", send=send,
+    )
+except run_control_journal.ControlJournalError as exc:
+    mark("finished", {
+        "error": exc.code,
+        "type": type(exc).__name__,
+        "outcome": getattr(exc, "outcome", None),
+        "diagnostic": exc.diagnostic,
+        "sends": len(sends),
+    })
+else:
+    terminal = result.terminal_event
+    mark("finished", {
+        "ok": result.response.get("ok"),
+        "error_class": result.response.get("error_class"),
+        "terminal": None if terminal is None else [terminal.sequence, terminal.event_type],
+        "requested": None if result.requested_event is None else result.requested_event.sequence,
+        "sends": len(sends),
+    })
+"""
+
+
+@pytest.mark.parametrize(
+    ("outcome", "observation"),
+    [("observed", "acknowledged"), ("rejected", "negative response"), ("failed", "unknown")],
+)
+def test_delayed_control_outcome_cannot_append_past_recovered_terminal_cursor(
+    tmp_path, monkeypatch, capsys, outcome, observation
+):
+    """A durable, checkpoint-covered request whose send returns after recovery.
+
+    PR #1681 review I1. ``control.requested`` is claimed by the real
+    ``execute_control_request`` and covered by a real latest checkpoint before
+    the real ``brigade runs recover`` terminalizes the run. The held send then
+    returns an acknowledgment (``observed``), a negative response
+    (``rejected``) or raises a lost-ack transport exception (``failed``), and
+    the real ``_append_control_event`` runs.
+
+    Healthy invariant: the delayed outcome never advances the journal past the
+    recovered terminal cursor, the transport is sent once, and doctor stays ok.
+    The refusal is a clean ``control_outcome_unrecorded`` error naming only the
+    observed response class; the durable request stays indeterminate.
+
+    Limits: the journal-only compatibility preflight (no ``lock_workspace``)
+    admits the request; the stale run lock names a nonexistent pid, so owner
+    death is not exercised; the transport is a synthetic held callback.
+    """
+    from brigade import doctor, runs_cmd
+
+    repo = tmp_path / "repo"
+    run_dir = repo / ".brigade" / "runs" / RUN_ID
+    run_dir.mkdir(parents=True)
+    snapshot = run_dir / "run.json"
+    base = {"schema": "brigade.run.v1", "status": "started", "lifecycle_journal_requested": True}
+    snapshot.write_bytes(run_projector.encode_snapshot_bytes(base))
+    authority = {**base, "run_journal_authority_requested": True}
+    with runguard.run_lock(repo, run_dir=run_dir):
+        first = run_checkpoint.write_checkpoint(
+            run_dir,
+            run_projector.encode_snapshot_bytes(authority),
+            workspace=repo,
+            paired_event_type=None,
+            body_kind="base-stripped",
+        )
+    assert first is not None
+    path = run_dir / "events" / "lifecycle.jsonl"
+    child_root = tmp_path / "child"
+    markers = child_root / "markers"
+    markers.mkdir(parents=True)
+    child_script = child_root / "child.py"
+    child_script.write_text(_DELAYED_OUTCOME_CHILD, encoding="utf-8")
+    environment = {
+        "HOME": str(child_root),
+        "USERPROFILE": str(child_root),
+        "TMP": str(child_root),
+        "TEMP": str(child_root),
+        "TMPDIR": str(child_root),
+        "PATH": os.defpath,
+        "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src"),
+        "PYTHONDONTWRITEBYTECODE": "1",
+        "PYTHONNOUSERSITE": "1",
+        "PYTHONIOENCODING": "utf-8",
+        "BRIGADE_HOME": str(child_root / "operator" / ".brigade"),
+        "BRIGADE_USER_DIR": str(child_root / "operator" / ".brigade"),
+        "BRIGADE_NO_UPDATE_CHECK": "1",
+    }
+    lock = runguard.lock_path(repo)
+    evidence = {"outcome": outcome}
+    fingerprint = run_control_journal.control_fingerprint_payload(op="interrupt", request_id="delayed")
+    child = subprocess.Popen(
+        [sys.executable, str(child_script), str(markers), str(run_dir), outcome],
+        cwd=child_root,
+        env=environment,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        encoding="utf-8",
+    )
+    stdout = stderr = ""
+    try:
+        evidence["sending"] = _await_marker(markers, child, "sending")[1]
+        requested = run_journal.read_journal_bounded(path).events[-1]
+        evidence["requested"] = (requested.sequence, requested.event_type, requested.payload.get("request_id"))
+        # A real latest checkpoint after the durable request covers it. A new
+        # projector-known field gives it a distinct idempotency key.
+        with runguard.run_lock(repo, run_dir=run_dir):
+            covering = run_checkpoint.write_checkpoint(
+                run_dir,
+                run_projector.encode_snapshot_bytes({**authority, "task": "control-pending"}),
+                workspace=repo,
+                paired_event_type=None,
+                body_kind="base-stripped",
+            )
+        evidence["covering_checkpoint"] = None if covering is None else (covering.sequence, covering.event_type)
+        covered_events = run_journal.read_journal_bounded(path).events
+        latest = run_checkpoint.latest_checkpoint_event(covered_events)
+        try:
+            run_checkpoint._verify_coverage(
+                covered_events,
+                latest,
+                run_checkpoint._parse_checkpoint_object(run_checkpoint.validate_checkpoint(run_dir, latest)),
+            )
+            evidence["coverage"] = "covered"
+        except run_checkpoint.CheckpointError as exc:
+            evidence["coverage"] = exc.category
+        # Recorded only: before recovery doctor compares the fixture's live
+        # run.json with the projection, which is not a coverage verdict.
+        evidence["doctor_covered"] = doctor._recovery_checkpoint_run_verdict(repo, run_dir)
+        evidence["pending_state"] = run_control_journal.inspect_control_request(
+            run_dir, request_id="delayed", fingerprint=fingerprint
+        )[0]
+        # A dead owner's lock for this run: the recorded pid is above any pid_max.
+        lock.mkdir(parents=True)
+        dead_pid = 99999999
+        (lock / "pid").write_text(f"{dead_pid}\n", encoding="utf-8")
+        (lock / "owner.json").write_text(
+            json.dumps(
+                {
+                    "schema": "brigade.run_lock.v1",
+                    "owner_token": "dead-owner",
+                    "pid": dead_pid,
+                    "run_dir": str(run_dir.resolve()),
+                    "acquired_at": "2026-10-12T00:00:00+00:00",
+                }
+            ),
+            encoding="utf-8",
+        )
+        snapshot.unlink()
+        evidence["rc"] = runs_cmd.recover(run_dir, cwd=repo)
+        recovered = json.loads(snapshot.read_bytes())
+        tail = run_journal.read_journal_bounded(path).events[-1]
+        evidence["recovered_status"] = recovered.get("status")
+        evidence["recovered_cursor"] = (
+            recovered.get("journal_last_sequence"),
+            recovered.get("journal_last_event_digest"),
+        )
+        evidence["recovered_tail"] = (tail.sequence, tail.event_digest, tail.event_type)
+        evidence["doctor_recovered"] = doctor._recovery_checkpoint_run_verdict(repo, run_dir)
+        evidence["lock_cleared"] = not lock.exists()
+        # Release the held send only after real terminalization returned.
+        markers.joinpath("release").touch()
+        evidence["finished"] = _await_marker(markers, child, "finished")[1]
+        stdout, stderr = child.communicate(timeout=20)
+        evidence["child_rc"] = child.returncode
+    finally:
+        if child.poll() is None:
+            child.kill()
+        child.communicate(timeout=5)
+    evidence["child_reaped"] = child.returncode is not None
+
+    final = json.loads(snapshot.read_bytes())
+    events = run_journal.read_journal_bounded(path).events
+    tail = events[-1]
+    evidence["final_cursor"] = (final.get("journal_last_sequence"), final.get("journal_last_event_digest"))
+    evidence["final_status"] = final.get("status")
+    evidence["final_tail"] = (tail.sequence, tail.event_digest, tail.event_type)
+    evidence["doctor_final"] = doctor._recovery_checkpoint_run_verdict(repo, run_dir)
+    try:
+        run_checkpoint.recover_from_checkpoint(run_dir, final)
+        evidence["forensic_recovery"] = "covered"
+    except run_checkpoint.CheckpointError as exc:
+        evidence["forensic_recovery"] = exc.category
+    controls = [event for event in events if event.event_type.startswith("control.")]
+    evidence["control_events"] = [
+        (event.sequence, event.event_type, event.payload.get("request_id")) for event in controls
+    ]
+    evidence["final_state"] = run_control_journal.inspect_control_request(
+        run_dir, request_id="delayed", fingerprint=fingerprint
+    )[0]
+    resends = []
+    try:
+        run_control_journal.execute_control_request(
+            run_dir, op="interrupt", request_id="delayed", send=lambda payload: resends.append(payload) or {"ok": True}
+        )
+        evidence["retry"] = "accepted"
+    except run_control_journal.ControlJournalError as exc:
+        evidence["retry"] = exc.code
+    evidence["retry_sends"] = len(resends)
+    with capsys.disabled():
+        print("DELAYED-OUTCOME-EVIDENCE " + json.dumps(evidence, sort_keys=True, default=str))
+
+    # Fixture preconditions: a durable request covered by a valid latest checkpoint.
+    assert evidence["child_rc"] == 0, f"child stdout:\n{stdout}\nstderr:\n{stderr}"
+    assert evidence["child_reaped"]
+    assert evidence["requested"] == (first.sequence + 1, "control.requested", "delayed")
+    assert evidence["sending"]["tail"][0] == first.sequence + 1
+    assert evidence["covering_checkpoint"] == (first.sequence + 2, "run.snapshot.checkpointed")
+    assert evidence["coverage"] == "covered"
+    assert evidence["pending_state"] == "indeterminate"
+    # Real recovery terminalized at the actual tail before the delayed outcome.
+    assert evidence["rc"] == 0
+    assert evidence["lock_cleared"]
+    assert evidence["recovered_status"] not in runguard._NONTERMINAL_RUN_STATUSES
+    assert evidence["recovered_cursor"] == evidence["recovered_tail"][:2]
+    assert evidence["doctor_recovered"][0] == "ok", evidence["doctor_recovered"]
+    assert evidence["finished"]["sends"] == 1
+    assert evidence["retry_sends"] == 0
+    # Healthy invariant (I1): the delayed outcome must not pass the terminal cursor.
+    assert evidence["final_tail"][:2] == evidence["recovered_cursor"]
+    assert evidence["final_cursor"] == evidence["final_tail"][:2]
+    assert evidence["doctor_final"][0] == "ok", evidence["doctor_final"]
+    assert evidence["forensic_recovery"] == "covered"
+    # The refused outcome is known unappended, not known undelivered.
+    finished = evidence["finished"]
+    assert finished["error"] == "control_outcome_unrecorded"
+    assert finished["type"] == "ControlJournalError"
+    assert finished["outcome"] is None
+    assert f"transport observation: {observation};" in finished["diagnostic"]
+    assert "RAW-" not in finished["diagnostic"]
+    assert evidence["control_events"] == [(first.sequence + 1, "control.requested", "delayed")]
+    assert evidence["final_state"] == "indeterminate"
+    assert evidence["retry"] == "control_run_not_live"
+
+
+def test_terminal_run_keeps_existing_control_receipt_and_refuses_new_outcome(tmp_path, monkeypatch):
+    """Idempotent receipts keep replay semantics after terminalization; new outcomes do not append."""
+    run_dir = tmp_path / RUN_ID
+    path = run_dir / "events" / "lifecycle.jsonl"
+    _append(path)
+    receipt = run_control_journal.execute_control_request(
+        run_dir, op="interrupt", request_id="done", send=lambda payload: {"ok": True}
+    ).terminal_event
+    terminal = {"schema": "brigade.run.v1", "status": "failed", "finished_at": "2026-10-12T00:00:00+00:00"}
+    (run_dir / "run.json").write_bytes(run_projector.encode_snapshot_bytes(terminal))
+    before = path.read_bytes()
+    syncs = []
+    real_sync = run_journal._sync_existing_journal
+    monkeypatch.setattr(
+        run_journal, "_sync_existing_journal", lambda journal: syncs.append(journal) or real_sync(journal)
+    )
+
+    def append(**overrides):
+        arguments = {
+            "run_dir": run_dir,
+            "workspace": None,
+            "run_id": RUN_ID,
+            "event_type": receipt.event_type,
+            "payload": dict(receipt.payload),
+            "idempotency_key": receipt.idempotency_key,
+            **overrides,
+        }
+        return run_control_journal._append_control_event(path, **arguments)
+
+    def refusal(**overrides):
+        with pytest.raises(run_control_journal.ControlJournalError) as info:
+            append(**overrides)
+        return info.value
+
+    assert append() == receipt
+    assert len(syncs) == 1
+    conflict = refusal(payload={**receipt.payload, "detail": "interrupted=9"})
+    assert conflict.code == "control_fingerprint_conflict"
+
+    def fail_sync(journal):
+        raise run_journal.IndeterminateOutcomeError("injected replay sync failure")
+
+    monkeypatch.setattr(run_journal, "_sync_existing_journal", fail_sync)
+    uncertain = refusal()
+    assert uncertain.code == "control_append_failed"
+    assert uncertain.outcome == "indeterminate"
+    monkeypatch.setattr(run_journal, "_sync_existing_journal", real_sync)
+    late = refusal(
+        event_type=run_control_journal.CONTROL_FAILED,
+        payload={
+            "op": "interrupt",
+            "request_id": "late",
+            "error_class": "transport_rejected",
+            "detail_digest": "0" * 64,
+        },
+        idempotency_key=run_control_journal.failed_idempotency_key("late"),
+    )
+    assert late.code == "control_outcome_unrecorded"
+    assert type(late) is run_control_journal.ControlJournalError
+    assert "transport observation: negative response;" in late.diagnostic
     assert path.read_bytes() == before

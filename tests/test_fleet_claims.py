@@ -1074,6 +1074,8 @@ class TestFleetClaimsCli:
                     4_000_000_000.0,
                 ),
             )
+            # Schema26 migration seeds one fence for every preserved legacy row.
+            conn.execute("INSERT INTO claim_fences (target, generation) VALUES (?, 1)", ("repo\x1b[31mred",))
             conn.commit()
         finally:
             conn.close()

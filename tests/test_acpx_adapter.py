@@ -2,11 +2,20 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from brigade import acpx_adapter
 from brigade import proc
 
 
 def _stream(*messages: dict) -> str:
+    if any(
+        isinstance(message.get("result"), dict)
+        and "protocolVersion" in message["result"]
+        and message.get("id") == "init-1"
+        for message in messages
+    ) and not any(message.get("method") == "initialize" and message.get("id") == "init-1" for message in messages):
+        messages = ({"jsonrpc": "2.0", "method": "initialize", "id": "init-1", "params": {}}, *messages)
     return "\n".join(json.dumps(message) for message in messages) + "\n"
 
 
@@ -216,6 +225,34 @@ def test_cursor_auth_status_uses_boolean_json_state_not_incidental_words(monkeyp
     assert prose.state == "unrecognized"
 
 
+def test_cursor_auth_status_redacts_credential_shapes_and_private_paths(monkeypatch):
+    sensitive_values = (
+        "ghp_" + "A" * 24,
+        "github_pat_" + "A" * 24,
+        "xoxb-" + "A" * 16,
+        "sk-" + "A" * 24,
+        "AKIA" + "A" * 16,
+        "ASIA" + "A" * 16,
+        "AIza" + "a" * 30,
+        "glpat-" + "a" * 20,
+        "eyJ" + "A" * 8 + "." + "B" * 8 + "." + "C" * 8,
+        r"\root\.ssh\id_rsa",
+    )
+    monkeypatch.setattr(acpx_adapter.proc, "which", lambda cmd: f"/bin/{cmd}")
+    for sensitive in sensitive_values:
+        monkeypatch.setattr(
+            acpx_adapter.proc,
+            "run",
+            lambda argv, sensitive=sensitive, **kwargs: proc.Result(
+                1, f"bad status {sensitive}", f"failure {sensitive}"
+            ),
+        )
+        status = acpx_adapter.cursor_auth_status()
+        assert sensitive not in status.detail
+        assert sensitive not in status.stdout
+        assert sensitive not in status.stderr
+
+
 def test_cursor_auth_status_redacts_ansi_and_common_credential_shapes(monkeypatch):
     monkeypatch.setattr(acpx_adapter.proc, "which", lambda cmd: f"/bin/{cmd}")
     monkeypatch.setattr(
@@ -279,6 +316,7 @@ def test_run_refuses_unauthenticated_cursor_before_acpx(monkeypatch, tmp_path):
     assert result.ok is False
     assert result.failure_phase == "preflight"
     assert result.failure_kind == "provider-auth"
+    assert result.requested_model == "composer-2.5"
     assert result.detail == (
         "cursor-agent CLI is not logged in; run `cursor-agent login` once, then verify with `cursor-agent status`"
     )
@@ -453,6 +491,934 @@ def test_run_parses_protocol_and_final_text(monkeypatch, tmp_path):
     assert result.effective_model == "composer-2.5"
 
 
+def test_parse_stream_ignores_model_like_values_outside_config_updates():
+    parsed, error = acpx_adapter.parse_stream(
+        _stream(
+            {"jsonrpc": "2.0", "id": "init-1", "result": {"protocolVersion": 1}},
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "config_option_update",
+                        "modelId": "grok-4.5[effort=high,fast=true]",
+                    }
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "hello", "model": "PRIVATE_MARKER"},
+                    }
+                },
+            },
+            {"jsonrpc": "2.0", "id": "req-1", "result": {"stopReason": "end_turn"}},
+        )
+    )
+
+    assert error == ""
+    assert parsed is not None and parsed["effective_model"] == "grok-4.5[effort=high,fast=true]"
+
+
+def test_parse_stream_accepts_default_model_with_empty_options():
+    parsed, error = acpx_adapter.parse_stream(
+        _stream(
+            {"jsonrpc": "2.0", "id": "init-1", "result": {"protocolVersion": 1}},
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {"update": {"sessionUpdate": "config_option_update", "modelId": "default[]"}},
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "answer"},
+                    }
+                },
+            },
+            {"jsonrpc": "2.0", "id": "req-1", "result": {"stopReason": "end_turn"}},
+        )
+    )
+
+    assert error == ""
+    assert parsed is not None and parsed["effective_model"] == "default[]"
+
+
+def test_parse_stream_clears_stale_model_after_rejected_explicit_update():
+    parsed, error = acpx_adapter.parse_stream(
+        _stream(
+            {"jsonrpc": "2.0", "id": "init-1", "result": {"protocolVersion": 1}},
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {"update": {"sessionUpdate": "config_option_update", "modelId": "model-a"}},
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "config_option_update",
+                        "modelId": "ghp_FAKE0123456789abcdefghijklmnopqrstuvwxyz",
+                    }
+                },
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "hello"},
+                    }
+                },
+            },
+        )
+    )
+
+    assert error == ""
+    assert parsed is not None and parsed["effective_model"] is None
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        {
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "update": {
+                    "sessionUpdate": "config_option_update",
+                    "configOptions": [
+                        {
+                            "id": "model",
+                            "category": "model",
+                            "type": "select",
+                            "currentValue": "composer-2.5",
+                            "options": [],
+                        },
+                        {
+                            "id": "fast-mode",
+                            "category": "model",
+                            "type": "select",
+                            "currentValue": "fast",
+                            "options": [],
+                        },
+                    ],
+                }
+            },
+        },
+        {
+            "jsonrpc": "2.0",
+            "id": "new-session",
+            "result": {
+                "configOptions": [
+                    {
+                        "id": "model",
+                        "category": "model",
+                        "type": "select",
+                        "currentValue": "composer-2.5",
+                        "options": [],
+                    },
+                    {
+                        "id": "fast-mode",
+                        "category": "model",
+                        "type": "select",
+                        "currentValue": "fast",
+                        "options": [],
+                    },
+                ]
+            },
+        },
+    ],
+    ids=["config-update", "session-response"],
+)
+def test_parse_stream_reads_standard_model_config_options(message):
+    parsed, error = acpx_adapter.parse_stream(
+        _stream(
+            {"jsonrpc": "2.0", "id": "init-1", "result": {"protocolVersion": 1}},
+            {"jsonrpc": "2.0", "method": "session/new", "id": "new-session", "params": {}},
+            message,
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "hello"},
+                    }
+                },
+            },
+        )
+    )
+
+    assert error == ""
+    assert parsed is not None and parsed["effective_model"] == "composer-2.5"
+    assert parsed["effective_model_locator"] == (
+        "acp-config-option-update" if message.get("method") == "session/update" else "acp-session-new-response"
+    )
+
+
+def test_parse_stream_ignores_config_options_from_unrelated_response():
+    parsed, error = acpx_adapter.parse_stream(
+        _stream(
+            {"jsonrpc": "2.0", "method": "session/new", "id": "new-1", "params": {}},
+            {
+                "jsonrpc": "2.0",
+                "id": "new-1",
+                "result": {"configOptions": [{"id": "model", "category": "model", "currentValue": "composer-2.5"}]},
+            },
+            {"jsonrpc": "2.0", "method": "session/list", "id": "other-1", "params": {}},
+            {
+                "jsonrpc": "2.0",
+                "id": "other-1",
+                "result": {"configOptions": [{"id": "model", "category": "model", "currentValue": "forged-model"}]},
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "hello"},
+                    }
+                },
+            },
+        )
+    )
+
+    assert error == ""
+    assert parsed is not None and parsed["effective_model"] == "composer-2.5"
+
+
+def test_parse_stream_keeps_jsonrpc_id_types_distinct():
+    parsed, error = acpx_adapter.parse_stream(
+        _stream(
+            {"jsonrpc": "2.0", "method": "session/new", "id": 1, "params": {}},
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "result": {"configOptions": [{"id": "model", "category": "model", "currentValue": "right-model"}]},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": "1",
+                "result": {"configOptions": [{"id": "model", "category": "model", "currentValue": "wrong-model"}]},
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "hello"},
+                    }
+                },
+            },
+        )
+    )
+
+    assert error == ""
+    assert parsed is not None and parsed["effective_model"] == "right-model"
+
+
+def test_parse_stream_only_completes_matching_active_prompt_ids():
+    streams = (
+        _stream(
+            {"jsonrpc": "2.0", "method": "session/prompt", "id": 1, "params": {}},
+            {"jsonrpc": "2.0", "id": "1", "result": {"stopReason": "end_turn"}},
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "partial"}}
+                },
+            },
+        ),
+        _stream(
+            {"jsonrpc": "2.0", "id": "req-1", "result": {"stopReason": "end_turn"}},
+            {"jsonrpc": "2.0", "method": "session/prompt", "id": "req-1", "params": {}},
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "partial"}}
+                },
+            },
+        ),
+    )
+    for stream in streams:
+        parsed, error = acpx_adapter.parse_stream(stream)
+        assert error == ""
+        assert parsed is not None
+        assert parsed["prompt_completed"] is False
+        assert parsed["stop_reason"] is None
+
+
+@pytest.mark.parametrize("agent_response_first", (True, False))
+def test_parse_stream_keeps_prompt_active_when_agent_request_reuses_its_id(agent_response_first):
+    messages = [
+        {"jsonrpc": "2.0", "method": "session/prompt", "id": "shared", "params": {}},
+        {"jsonrpc": "2.0", "method": "session/request_permission", "id": "shared", "params": {}},
+    ]
+    agent_response = {"jsonrpc": "2.0", "id": "shared", "result": {}}
+    if agent_response_first:
+        messages.append(agent_response)
+    messages.extend(
+        (
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "answer"},
+                    }
+                },
+            },
+            {"jsonrpc": "2.0", "id": "shared", "result": {"stopReason": "end_turn"}},
+        )
+    )
+    if not agent_response_first:
+        messages.append(agent_response)
+
+    parsed, error = acpx_adapter.parse_stream(_stream(*messages))
+
+    assert error == ""
+    assert parsed is not None
+    assert parsed["request_id"] == "shared"
+    assert parsed["text"] == "answer"
+    assert parsed["prompt_completed"] is True
+    assert parsed["stop_reason"] == "end_turn"
+
+
+def test_parse_stream_rejects_overlapping_prompts_before_uncorrelated_chunks():
+    parsed, error = acpx_adapter.parse_stream(
+        _stream(
+            {"jsonrpc": "2.0", "method": "session/prompt", "id": "old", "params": {}},
+            {"jsonrpc": "2.0", "method": "session/prompt", "id": "current", "params": {}},
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "partial"},
+                    }
+                },
+            },
+            {"jsonrpc": "2.0", "id": "old", "result": {"stopReason": "end_turn"}},
+        )
+    )
+
+    assert parsed is None
+    assert "overlapping session/prompt requests" in error
+
+
+def test_parse_stream_new_prompt_resets_previous_completion_and_text():
+    parsed, error = acpx_adapter.parse_stream(
+        _stream(
+            {"jsonrpc": "2.0", "method": "session/prompt", "id": "first", "params": {}},
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "old answer"},
+                    }
+                },
+            },
+            {"jsonrpc": "2.0", "id": "first", "result": {"stopReason": "end_turn"}},
+            {"jsonrpc": "2.0", "method": "session/prompt", "id": "latest", "params": {}},
+        ),
+        allow_empty_text=True,
+    )
+
+    assert error == "ACP stream contained no final assistant text"
+    assert parsed is not None
+    assert parsed["request_id"] == "latest"
+    assert parsed["text"] == ""
+    assert parsed["prompt_completed"] is False
+    assert parsed["stop_reason"] is None
+
+
+def test_parse_stream_ignores_colliding_agent_permission_error_for_prompt_state():
+    parsed, error = acpx_adapter.parse_stream(
+        _stream(
+            {"jsonrpc": "2.0", "method": "session/prompt", "id": "shared", "params": {}},
+            {
+                "jsonrpc": "2.0",
+                "method": "session/request_permission",
+                "id": "shared",
+                "params": {},
+            },
+            {
+                "jsonrpc": "2.0",
+                "id": "shared",
+                "error": {"code": -32072, "message": "PERMISSION_PROMPT_UNAVAILABLE"},
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "answer"},
+                    }
+                },
+            },
+            {"jsonrpc": "2.0", "id": "shared", "result": {"stopReason": "end_turn"}},
+        ),
+        allow_empty_text=True,
+    )
+
+    assert error == ""
+    assert parsed is not None
+    assert parsed["text"] == "answer"
+    assert parsed["stop_reason"] == "end_turn"
+    assert parsed["has_structured_jsonrpc_error"] is False
+
+
+def test_parse_stream_preserves_ambiguous_prompt_error_until_prompt_completion():
+    parsed, error = acpx_adapter.parse_stream(
+        _stream(
+            {"jsonrpc": "2.0", "method": "session/prompt", "id": "shared", "params": {}},
+            {
+                "jsonrpc": "2.0",
+                "method": "session/request_permission",
+                "id": "shared",
+                "params": {},
+            },
+            {"jsonrpc": "2.0", "id": "shared", "error": {"code": -32000, "message": "Model unavailable"}},
+            {"jsonrpc": "2.0", "id": "shared", "result": {"outcome": "selected"}},
+        ),
+        allow_empty_text=True,
+    )
+
+    assert parsed is not None
+    assert parsed["prompt_completed"] is False
+    assert parsed["structured_error_detail"] == "Model unavailable"
+    assert error == "Model unavailable"
+
+
+def test_parse_stream_rejects_duplicate_outstanding_prompt_id():
+    parsed, error = acpx_adapter.parse_stream(
+        _stream(
+            {"jsonrpc": "2.0", "method": "session/prompt", "id": "same", "params": {}},
+            {"jsonrpc": "2.0", "method": "session/prompt", "id": "same", "params": {}},
+        ),
+        allow_empty_text=True,
+    )
+
+    assert parsed is None
+    assert "overlapping session/prompt requests" in error
+
+
+def test_parse_stream_rejects_overlapping_prompt_before_superseded_permission_error():
+    parsed, error = acpx_adapter.parse_stream(
+        _stream(
+            {"jsonrpc": "2.0", "method": "session/prompt", "id": "old", "params": {}},
+            {"jsonrpc": "2.0", "method": "session/prompt", "id": "new", "params": {}},
+            {"jsonrpc": "2.0", "id": "old", "error": {"code": -32072, "message": "PERMISSION_PROMPT_UNAVAILABLE"}},
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "new answer"},
+                    }
+                },
+            },
+            {"jsonrpc": "2.0", "id": "new", "result": {"stopReason": "end_turn"}},
+        )
+    )
+
+    assert parsed is None
+    assert "overlapping session/prompt requests" in error
+
+
+@pytest.mark.parametrize("protocol_version", (True, "2"))
+def test_parse_stream_rejects_malformed_protocol_version(protocol_version):
+    parsed, error = acpx_adapter.parse_stream(
+        _stream(
+            {"jsonrpc": "2.0", "method": "initialize", "id": "init", "params": {}},
+            {"jsonrpc": "2.0", "id": "init", "result": {"protocolVersion": protocol_version}},
+            {"jsonrpc": "2.0", "method": "session/prompt", "id": "prompt", "params": {}},
+            {"jsonrpc": "2.0", "id": "prompt", "result": {"stopReason": "end_turn"}},
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "answer"},
+                    }
+                },
+            },
+        )
+    )
+
+    assert parsed is None
+    assert "malformed ACP protocol version" in error
+
+
+def test_parse_stream_rejects_protocol_version_outside_initialize_response():
+    parsed, error = acpx_adapter.parse_stream(
+        _stream(
+            {"jsonrpc": "2.0", "method": "initialize", "id": "init", "params": {}},
+            {"jsonrpc": "2.0", "id": "init", "result": {}},
+            {"jsonrpc": "2.0", "id": "other", "result": {"protocolVersion": 1}},
+            {"jsonrpc": "2.0", "method": "session/prompt", "id": "prompt", "params": {}},
+            {"jsonrpc": "2.0", "id": "prompt", "result": {"stopReason": "end_turn"}},
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "answer"},
+                    }
+                },
+            },
+        )
+    )
+
+    assert parsed is None
+    assert "protocolVersion outside initialize response" in error
+
+
+def test_parse_stream_rejects_same_direction_request_id_collision():
+    parsed, error = acpx_adapter.parse_stream(
+        _stream(
+            {"jsonrpc": "2.0", "method": "session/new", "id": "same", "params": {}},
+            {"jsonrpc": "2.0", "method": "session/prompt", "id": "same", "params": {}},
+            {
+                "jsonrpc": "2.0",
+                "id": "same",
+                "result": {"configOptions": [{"id": "model", "value": "forged-model"}], "stopReason": "end_turn"},
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "answer"},
+                    }
+                },
+            },
+        )
+    )
+
+    assert parsed is None
+    assert "duplicate outstanding JSON-RPC request id" in error
+
+
+@pytest.mark.parametrize(
+    "response",
+    (
+        {"id": "extra", "error": "not-an-error-object"},
+        {"id": "extra", "error": {"code": "bad", "message": "failure"}},
+        {"id": "extra", "error": {"code": -32000, "message": 4}},
+        {"id": True, "error": {"code": -32000, "message": "failure"}},
+    ),
+)
+def test_parse_stream_rejects_invalid_jsonrpc_error_responses(response):
+    parsed, error = acpx_adapter.parse_stream(
+        _stream(
+            {"jsonrpc": "2.0", "method": "session/prompt", "id": "req", "params": {}},
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "answer"}}
+                },
+            },
+            {"jsonrpc": "2.0", "id": "req", "result": {"stopReason": "end_turn"}},
+            {"jsonrpc": "2.0", **response},
+        )
+    )
+
+    assert parsed is None
+    assert "malformed JSON-RPC response" in error
+
+
+def test_parse_stream_accepts_null_id_jsonrpc_error():
+    parsed, error = acpx_adapter.parse_stream(
+        _stream(
+            {"jsonrpc": "2.0", "id": "init-1", "result": {"protocolVersion": 1}},
+            {"jsonrpc": "2.0", "method": "session/prompt", "id": "req", "params": {}},
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {"sessionUpdate": "agent_message_chunk", "content": {"type": "text", "text": "answer"}}
+                },
+            },
+            {"jsonrpc": "2.0", "id": "req", "result": {"stopReason": "end_turn"}},
+            {"jsonrpc": "2.0", "id": None, "error": {"code": -32000, "message": "provider failed"}},
+        )
+    )
+
+    assert error == ""
+    assert parsed is not None and parsed["has_structured_jsonrpc_error"] is True
+
+
+@pytest.mark.parametrize(
+    "response",
+    (
+        {"id": "req", "result": {"stopReason": "end_turn"}, "error": {"code": -32072}},
+        {"id": "req", "method": "session/prompt", "result": {"stopReason": "end_turn"}},
+        {"id": None, "result": {"stopReason": "end_turn"}},
+    ),
+)
+def test_parse_stream_rejects_malformed_jsonrpc_responses(response):
+    parsed, error = acpx_adapter.parse_stream(
+        _stream(
+            {"jsonrpc": "2.0", "method": "session/prompt", "id": "req", "params": {}},
+            {"jsonrpc": "2.0", **response},
+        )
+    )
+
+    assert parsed is None
+    assert "malformed JSON-RPC response" in error
+
+
+def test_parse_stream_drops_unrecognized_event_labels():
+    credential = "ghp_FAKE0123456789abcdefghijklmnopqrstuvwxyz"
+    parsed, error = acpx_adapter.parse_stream(
+        _stream(
+            {"jsonrpc": "2.0", "method": "session/prompt", "id": "req", "params": {}},
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {"update": {"sessionUpdate": credential, "status": credential}},
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {"update": {"sessionUpdate": "agent_message_chunk", "status": credential}},
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "safe answer"},
+                    }
+                },
+            },
+            {"jsonrpc": "2.0", "id": "req", "result": {"stopReason": "end_turn"}},
+        )
+    )
+
+    assert error == ""
+    assert parsed is not None
+    assert parsed["events"] == [{"type": "agent_message_chunk"}, {"type": "agent_message_chunk"}]
+    assert all("status" not in event for event in parsed["events"])
+
+
+@pytest.mark.parametrize("event_type", ("tool_call", "tool_call_update"))
+@pytest.mark.parametrize("status", ("pending", "in_progress", "completed", "failed"))
+def test_parse_stream_preserves_tool_call_lifecycle_status(event_type, status):
+    parsed, error = acpx_adapter.parse_stream(
+        _stream(
+            {"jsonrpc": "2.0", "method": "session/prompt", "id": "req-1", "params": {}},
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {"update": {"sessionUpdate": event_type, "status": status}},
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "done"},
+                    }
+                },
+            },
+            {"jsonrpc": "2.0", "id": "req-1", "result": {"stopReason": "end_turn"}},
+        )
+    )
+
+    assert error == ""
+    assert parsed is not None
+    assert parsed["events"][0] == {"type": event_type, "status": status}
+
+
+def test_parse_stream_retires_config_request_id_without_config_options():
+    parsed, error = acpx_adapter.parse_stream(
+        _stream(
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {"update": {"sessionUpdate": "config_option_update", "modelId": "right-model"}},
+            },
+            {"jsonrpc": "2.0", "method": "session/new", "id": "new-1", "params": {}},
+            {"jsonrpc": "2.0", "id": "new-1", "result": {}},
+            {
+                "jsonrpc": "2.0",
+                "id": "new-1",
+                "result": {"configOptions": [{"id": "model", "category": "model", "currentValue": "wrong-model"}]},
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "hello"},
+                    }
+                },
+            },
+        )
+    )
+
+    assert error == ""
+    assert parsed is not None and parsed["effective_model"] == "right-model"
+
+
+def test_parse_stream_reads_model_config_from_set_option_response():
+    parsed, error = acpx_adapter.parse_stream(
+        _stream(
+            {"jsonrpc": "2.0", "method": "session/set_config_option", "id": "set-1", "params": {}},
+            {
+                "jsonrpc": "2.0",
+                "id": "set-1",
+                "result": {"configOptions": [{"id": "model", "category": "model", "currentValue": "composer-2.5"}]},
+            },
+            {
+                "jsonrpc": "2.0",
+                "method": "session/update",
+                "params": {
+                    "update": {
+                        "sessionUpdate": "agent_message_chunk",
+                        "content": {"type": "text", "text": "hello"},
+                    }
+                },
+            },
+        )
+    )
+
+    assert error == ""
+    assert parsed is not None and parsed["effective_model"] == "composer-2.5"
+    assert parsed["effective_model_locator"] == "acp-set-config-option-response"
+
+
+def test_failed_run_preserves_observed_model_and_session_metadata(monkeypatch, tmp_path):
+    stream = _stream(
+        {"jsonrpc": "2.0", "id": "init-1", "result": {"protocolVersion": 1}},
+        {
+            "jsonrpc": "2.0",
+            "id": "req-1",
+            "method": "session/prompt",
+            "params": {"sessionId": "session-1", "prompt": "hidden"},
+        },
+        {
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "session-1",
+                "update": {"sessionUpdate": "config_option_update", "modelId": "composer-2.5"},
+            },
+        },
+        {"jsonrpc": "2.0", "id": "req-1", "error": {"code": -32000, "message": "provider failed"}},
+    )
+    monkeypatch.setattr(acpx_adapter.proc, "which", lambda cmd: f"/bin/{cmd}")
+    monkeypatch.setattr(acpx_adapter, "cursor_auth_status", _authenticated_status)
+    outputs = iter([proc.Result(0, "acpx 0.12.0\n", ""), proc.Result(1, stream, "provider failed")])
+    monkeypatch.setattr(acpx_adapter.proc, "run", lambda argv, **kwargs: next(outputs))
+
+    result = acpx_adapter.run_cursor(
+        "inspect", cwd=tmp_path, timeout=120, model="composer-2.5", version="0.12.0", read_only=True
+    )
+
+    assert result.ok is False
+    assert result.effective_model == "composer-2.5"
+    assert result.protocol_version == 1
+    assert result.session_id == "session-1"
+    assert result.request_id == "req-1"
+    assert result.safe_events
+
+
+def test_output_limit_failure_preserves_model_from_complete_retained_frames(monkeypatch, tmp_path):
+    retained = _stream(
+        {"jsonrpc": "2.0", "id": "init-1", "result": {"protocolVersion": 1}},
+        {
+            "jsonrpc": "2.0",
+            "id": "req-1",
+            "method": "session/prompt",
+            "params": {"sessionId": "session-1", "prompt": "hidden"},
+        },
+        {
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "session-1",
+                "update": {"sessionUpdate": "config_option_update", "modelId": "composer-2.5"},
+            },
+        },
+    )
+    overflow = proc.Result(
+        -15,
+        retained + proc.TRUNCATION_MARKER + '{"jsonrpc":"2.0"',
+        "combined output exceeded capture limit",
+        output_limit_exceeded=True,
+        stdout_bytes=proc.MAX_CAPTURE_BYTES + 1,
+    )
+    monkeypatch.setattr(acpx_adapter.proc, "which", lambda cmd: f"/bin/{cmd}")
+    monkeypatch.setattr(acpx_adapter, "cursor_auth_status", _authenticated_status)
+    outputs = iter([proc.Result(0, "acpx 0.12.0\n", ""), overflow])
+    monkeypatch.setattr(acpx_adapter.proc, "run", lambda argv, **kwargs: next(outputs))
+
+    result = acpx_adapter.run_cursor(
+        "inspect", cwd=tmp_path, timeout=120, model="composer-2.5", version="0.12.0", read_only=True
+    )
+
+    assert result.ok is False
+    assert result.failure_kind == "output-limit"
+    assert result.effective_model == "composer-2.5"
+    assert result.effective_model_locator == "acp-config-option-update"
+    assert result.session_id == "session-1"
+    assert result.request_id == "req-1"
+
+
+@pytest.mark.parametrize(
+    "message",
+    (
+        "model unavailable",
+        "provider token" + "=" + "ghp_" + "FAKE0123456789abcdefghijklmnopqrstuvwxyz",
+        "x" * 300,
+    ),
+)
+def test_run_cursor_uses_sanitized_bounded_structured_error_without_stderr(monkeypatch, tmp_path, message):
+    stream = _stream({"jsonrpc": "2.0", "id": None, "error": {"code": -32602, "message": message}})
+    monkeypatch.setattr(acpx_adapter.proc, "which", lambda cmd: f"/bin/{cmd}")
+    monkeypatch.setattr(acpx_adapter, "cursor_auth_status", _authenticated_status)
+    outputs = iter([proc.Result(0, "acpx 0.12.0\n", ""), proc.Result(1, stream, "")])
+    monkeypatch.setattr(acpx_adapter.proc, "run", lambda argv, **kwargs: next(outputs))
+
+    result = acpx_adapter.run_cursor(
+        "inspect", cwd=tmp_path, timeout=120, model="composer-2.5", version="0.12.0", read_only=True
+    )
+
+    assert result.ok is False
+    assert result.detail
+    assert len(result.detail) <= 200
+    if message == "model unavailable":
+        assert result.detail == message
+    elif "ghp_" in message:
+        assert "ghp_" not in result.detail
+
+
+def test_failed_run_redacts_credential_shaped_provider_diagnostic(monkeypatch, tmp_path):
+    credential = "ghp_FAKE0123456789abcdefghijklmnopqrstuvwxyz"
+    stream = _stream(
+        {"jsonrpc": "2.0", "id": "init-1", "result": {"protocolVersion": 1}},
+        {"jsonrpc": "2.0", "method": "session/prompt", "id": "req-1", "params": {}},
+        {
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "update": {
+                    "sessionUpdate": "agent_message_chunk",
+                    "content": {"type": "text", "text": "partial"},
+                }
+            },
+        },
+        {"jsonrpc": "2.0", "id": "req-1", "error": {"code": -32000, "message": "provider failed"}},
+    )
+    monkeypatch.setattr(acpx_adapter.proc, "which", lambda cmd: f"/bin/{cmd}")
+    monkeypatch.setattr(acpx_adapter, "cursor_auth_status", _authenticated_status)
+    outputs = iter([proc.Result(0, "acpx 0.12.0\n", ""), proc.Result(1, stream, f"provider error {credential}")])
+    monkeypatch.setattr(acpx_adapter.proc, "run", lambda argv, **kwargs: next(outputs))
+
+    result = acpx_adapter.run_cursor(
+        "inspect", cwd=tmp_path, timeout=120, model="composer-2.5", version="0.12.0", read_only=True
+    )
+
+    assert result.ok is False
+    assert result.detail == "<redacted diagnostic>"
+    assert credential not in result.detail
+
+
+def test_structured_permission_failure_preserves_prior_model_evidence(monkeypatch, tmp_path):
+    stream = _stream(
+        {"jsonrpc": "2.0", "id": "init-1", "result": {"protocolVersion": 1}},
+        {
+            "jsonrpc": "2.0",
+            "method": "session/update",
+            "params": {
+                "sessionId": "session-1",
+                "update": {"sessionUpdate": "config_option_update", "modelId": "composer-2.5"},
+            },
+        },
+        {"jsonrpc": "2.0", "id": "perm-1", "error": {"code": -32072, "message": "PERMISSION_PROMPT_UNAVAILABLE"}},
+    )
+    monkeypatch.setattr(acpx_adapter.proc, "which", lambda cmd: f"/bin/{cmd}")
+    monkeypatch.setattr(acpx_adapter, "cursor_auth_status", _authenticated_status)
+    outputs = iter([proc.Result(0, "acpx 0.12.0\n", ""), proc.Result(5, stream, "")])
+    monkeypatch.setattr(acpx_adapter.proc, "run", lambda argv, **kwargs: next(outputs))
+
+    result = acpx_adapter.run_cursor(
+        "inspect", cwd=tmp_path, timeout=120, model="composer-2.5", version="0.12.0", read_only=True
+    )
+
+    assert result.ok is False
+    assert result.failure_kind == "provider-startup"
+    assert result.effective_model == "composer-2.5"
+    assert result.effective_model_locator == "acp-config-option-update"
+
+
+def test_parse_stream_rejects_known_credential_families_as_model_ids():
+    credential_models = (
+        "ghp_" + "A" * 24,
+        "github_pat_" + "A" * 24,
+        "xoxb-" + "A" * 16,
+        "sk-" + "A" * 24,
+        "AKIA" + "A" * 16,
+        "ASIA" + "A" * 16,
+        "AIza" + "a" * 30,
+        "glpat-" + "a" * 20,
+        "eyJ" + "A" * 8 + "." + "B" * 8 + "." + "C" * 8,
+    )
+    for model_id in credential_models:
+        parsed, error = acpx_adapter.parse_stream(
+            _stream(
+                {"jsonrpc": "2.0", "id": "init-1", "result": {"protocolVersion": 1}},
+                {
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {"update": {"sessionUpdate": "config_option_update", "modelId": model_id}},
+                },
+                {
+                    "jsonrpc": "2.0",
+                    "method": "session/update",
+                    "params": {
+                        "update": {
+                            "sessionUpdate": "agent_message_chunk",
+                            "content": {"type": "text", "text": "done"},
+                        }
+                    },
+                },
+                {"jsonrpc": "2.0", "id": "req-1", "result": {"stopReason": "end_turn"}},
+            )
+        )
+        assert error == ""
+        assert parsed is not None and parsed["effective_model"] is None
+
+
 def test_run_rejects_in_band_provider_error_with_protocol_evidence(monkeypatch, tmp_path):
     diagnostic = (
         "I will check the provider first.\n"
@@ -560,6 +1526,33 @@ def test_run_rejects_version_mismatch(monkeypatch, tmp_path):
     assert "requires acpx 0.12.0" in result.detail
     assert result.failure_phase == "preflight"
     assert result.failure_kind == "version-mismatch"
+    assert result.transport == "acpx"
+    assert result.requested_model == "composer-2.5"
+
+
+def test_run_missing_executable_and_unsafe_worktree_keep_configured_model(monkeypatch, tmp_path):
+    monkeypatch.setattr(acpx_adapter.proc, "which", lambda cmd: None)
+    missing = acpx_adapter.run_cursor(
+        "inspect", cwd=tmp_path, timeout=120, model="composer-2.5", version="0.12.0", read_only=True
+    )
+    assert missing.failure_kind == "missing-executable"
+    assert missing.transport == "acpx"
+    assert missing.requested_model == "composer-2.5"
+
+    monkeypatch.setattr(acpx_adapter.proc, "which", lambda cmd: f"/bin/{cmd}")
+    monkeypatch.setattr(acpx_adapter, "cursor_auth_status", _authenticated_status)
+    monkeypatch.setattr(acpx_adapter, "installed_version", lambda **kwargs: ("0.12.0", ""))
+
+    def reject_argv(**kwargs):
+        raise ValueError("unsafe")
+
+    monkeypatch.setattr(acpx_adapter, "build_argv", reject_argv)
+    unsafe = acpx_adapter.run_cursor(
+        "inspect", cwd=tmp_path, timeout=120, model="composer-2.5", version="0.12.0", read_only=True
+    )
+    assert unsafe.failure_kind == "unsafe-worktree"
+    assert unsafe.transport == "acpx"
+    assert unsafe.requested_model == "composer-2.5"
 
 
 def test_run_rejects_invalid_or_empty_protocol_output(monkeypatch, tmp_path):
@@ -697,6 +1690,10 @@ def test_run_rejects_invalid_utf8_stderr_with_valid_acp_stdout(monkeypatch, tmp_
     assert result.failure_phase == "harness"
     assert result.failure_kind == "decode-failure"
     assert decode_error in result.detail
+    assert result.effective_model == "composer-2.5"
+    assert result.effective_model_locator == "acp-config-option-update"
+    assert result.protocol_version == 1
+    assert result.session_id == "session-1"
     assert "hello" not in result.text
 
 

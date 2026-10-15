@@ -35,6 +35,13 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_export = receipts_sub.add_parser("export", help="Export receipts for external ingest.")
     export_sub = p_export.add_subparsers(dest="receipts_export_command", metavar="<export-target>")
     export_sub.required = True
+    p_journal = export_sub.add_parser("journal", help="Export validated lifecycle events as canonical JSONL.")
+    p_journal.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_journal.add_argument("--run-id", required=True, help="Exact run directory name (no latest or prefix lookup).")
+    p_journal.add_argument("--format", choices=("jsonl",), default="jsonl", help="Output format. Defaults to jsonl.")
+    p_journal.add_argument("--since", help="Inclusive UTC date or timezone-aware ISO timestamp cutoff.")
+    p_journal.add_argument("--out", metavar="PATH|-", default="-", help="New private output file, or '-' for stdout.")
+    p_journal.set_defaults(func=dispatch)
     p_miseledger = export_sub.add_parser("miseledger", help="Export receipts as miseledger.adapter.v1 JSONL.")
     p_miseledger.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_miseledger.add_argument("--out", default="-", help="Output path, or '-' for stdout.")
@@ -227,6 +234,16 @@ def dispatch(args) -> int:
     from .. import receipts_cmd
     from .. import receipts_trailer
 
+    if args.receipts_command == "export" and args.receipts_export_command == "journal":
+        from .. import journal_export
+
+        return journal_export.export_journal(
+            target=args.target,
+            run_id=args.run_id,
+            out=args.out,
+            since=args.since,
+            format=args.format,
+        )
     if args.receipts_command == "trailer":
         return receipts_trailer.trailer(run_id=args.run)
     if args.receipts_command == "verify":

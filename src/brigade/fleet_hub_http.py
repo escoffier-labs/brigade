@@ -32,6 +32,7 @@ from . import fleet_model_inventory
 from . import fleet_policy_page
 from . import fleet_repo_policy_page
 from . import fleet_work_page
+from .fleet_hub_claims import ClaimFenceError, ClaimTargetError
 from .worklore_validate import WorkloreValidationError
 from .fleet_hub import (
     DASHBOARD_COOKIE,
@@ -41,6 +42,7 @@ from .fleet_hub import (
     FleetHubError,
     FleetHubForbidden,
     FleetHubUnprocessable,
+    FleetHubUnsupportedSchema,
     _ASSET_CACHE_CONTROL,
     _ASSET_CONTENT_TYPES,
     _ASSET_ROUTES,
@@ -608,6 +610,9 @@ def make_handler(
                 # Non-migrating connection (#1161): the schema exists because
                 # server startup created it; this open is read/write only.
                 conn = open_db(Path(db_path))
+            except FleetHubUnsupportedSchema:
+                self._send_json(503, {"error": FleetHubUnsupportedSchema.public_message})
+                return
             except (FleetHubError, sqlite3.Error) as exc:
                 self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
                 return
@@ -634,6 +639,9 @@ def make_handler(
                     ],
                 )
                 nodes = node_summary(board.runs)
+            except ClaimFenceError as exc:
+                self._send_json(503, {"error": str(exc)})
+                return
             except sqlite3.Error as exc:
                 self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
                 return
@@ -681,6 +689,9 @@ def make_handler(
                 return
             try:
                 conn = open_db(Path(db_path))
+            except FleetHubUnsupportedSchema:
+                self._send_json(503, {"error": FleetHubUnsupportedSchema.public_message})
+                return
             except (FleetHubError, sqlite3.Error) as exc:
                 self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
                 return
@@ -744,6 +755,9 @@ def make_handler(
                     except (FleetHubError, sqlite3.Error, KeyError, ValueError) as exc:
                         policy_error = f"the policy authority could not be read ({type(exc).__name__})"
                 control_plane = control_plane_from_hub(conn)
+            except ClaimFenceError as exc:
+                self._send_json(503, {"error": str(exc)})
+                return
             except sqlite3.Error as exc:
                 self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
                 return
@@ -1232,6 +1246,9 @@ def make_handler(
                 include_all = parse_qs(query).get("all", [""])[0].lower() in ("1", "true", "yes")
                 try:
                     conn = open_db(Path(db_path))
+                except FleetHubUnsupportedSchema:
+                    self._send_json(503, {"error": FleetHubUnsupportedSchema.public_message})
+                    return
                 except (FleetHubError, sqlite3.Error) as exc:
                     self._send_json(500, {"error": f"hub database error: {exc}"})
                     return
@@ -1296,6 +1313,9 @@ def make_handler(
                         payload = fleet_hub_policy_api.read_policy(conn, history=history, limit=limit)
                     else:
                         payload = {"claims": fleet_claim_display.list_display_claims(conn, include_all=include_all)}
+                except ClaimFenceError as exc:
+                    self._send_json(503, {"error": str(exc)})
+                    return
                 except sqlite3.Error as exc:
                     self._send_json(500, {"error": f"hub database error: {exc}"})
                     return
@@ -1317,6 +1337,9 @@ def make_handler(
                 return
             try:
                 conn = open_db(Path(db_path))
+            except FleetHubUnsupportedSchema:
+                self._send_json(503, {"error": FleetHubUnsupportedSchema.public_message})
+                return
             except (FleetHubError, sqlite3.Error) as exc:
                 self._send_json(500, {"error": f"hub database error: {exc}"})
                 return
@@ -1404,6 +1427,9 @@ def make_handler(
             # at server startup.
             try:
                 conn = open_db(Path(db_path))
+            except FleetHubUnsupportedSchema:
+                self._send_json(503, {"error": FleetHubUnsupportedSchema.public_message})
+                return
             except (FleetHubError, sqlite3.Error) as exc:
                 self._send_json(500, {"error": f"hub database error: {exc}"})
                 return
@@ -1523,6 +1549,15 @@ def make_handler(
                     status, body_payload = handle_grokbot(conn, parsed, caller_node=caller_node, config=frozen_deck)
                 else:
                     status, body_payload = handle_node_request(conn, parsed)
+            except FleetHubUnsupportedSchema:
+                self._send_json(503, {"error": FleetHubUnsupportedSchema.public_message})
+                return
+            except ClaimTargetError as exc:
+                self._send_json(422, exc.payload())
+                return
+            except ClaimFenceError as exc:
+                self._send_json(503, {"error": str(exc)})
+                return
             except fleet_hub_policy_api.FleetPolicyApiError as exc:
                 self._send_json(exc.status, exc.payload())
                 return
