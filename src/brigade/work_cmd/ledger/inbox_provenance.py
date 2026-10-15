@@ -1205,6 +1205,24 @@ def _append_import_records_locked(
                 canonical_existing_proof = False
             canonical_existing_row = import_model._has_canonical_untrusted_import_identity(existing_item)
             canonical_incoming_row = import_model._has_canonical_untrusted_import_identity(record)
+            if (
+                not canonical_existing_row
+                and canonical_incoming_row
+                and canonical_existing_proof
+                and _metadata(existing_item).get("source_item_key") == _metadata(record).get("source_item_key")
+                and _import_fingerprint(existing_item) == _import_fingerprint(record)
+            ):
+                # The proof binds the persisted row to its raw-derived identity.
+                # Reproduce the writer's text transformation before comparing
+                # immutable content, so unrelated legacy rows cannot suppress it.
+                source = _resolve_import_provenance_source(record, provenance_source)
+                origin, _modality = _import_origin_modality(source, kind=str(record["kind"]))
+                persisted_text, _redaction, failed = evidence_redaction.apply_and_record(
+                    str(record["text"]), origin=origin
+                )
+                canonical_existing_row = not failed and import_model._untrusted_import_canonical_hash(
+                    existing_item
+                ) == import_model._untrusted_import_canonical_hash({**record, "text": persisted_text})
             canonical_migration = migrate_untrusted_identities and canonical_incoming_row and not canonical_existing_row
             existing_migration_proof = (
                 authority_record is not None
