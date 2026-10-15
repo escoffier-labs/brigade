@@ -195,7 +195,7 @@ def build_rows(
         last_ts = str(run.get("ts") or "")
         last = _parse_stamp(run.get("received_at")) or _parse_stamp(last_ts)
         age = max(0.0, (now - last).total_seconds()) if last is not None else None
-        started = _parse_stamp(started_at.get((node_id, run_id)))
+        started = _parse_stamp(started_at.get((node_id, run_id)) or run.get("started_at"))
         live = not is_terminal_state(state)
         elapsed: float | None = None
         if started is not None:
@@ -599,6 +599,29 @@ def _machine_unread_exclusions(
     return excluded
 
 
+def machine_sort_key(node_id: str, rows: list[RunRow], query: DashboardQuery) -> tuple[Any, ...]:
+    """Use the most urgent matching run to order a machine before pagination."""
+    keys: list[tuple[Any, ...]] = []
+    for row in rows:
+        if not (row.live or query.include_all):
+            continue
+        if query.sort == "age":
+            keys.append((_elapsed_key(row), _rank(row)))
+        elif query.sort == "state":
+            keys.append((_rank(row), row.state, _elapsed_key(row)))
+        elif query.sort == "attention":
+            keys.append((_rank(row), _elapsed_key(row)))
+    if not keys:
+        if query.sort == "age":
+            return (1.0, _IDLE_RANK, node_id)
+        if query.sort == "state":
+            return (_IDLE_RANK, "", 1.0, node_id)
+        if query.sort == "attention":
+            return (_IDLE_RANK, 1.0, node_id)
+        return (0, node_id)
+    return (*min(keys), node_id)
+
+
 def _machine_board(
     rows: list[RunRow],
     nodes: list[dict[str, Any]],
@@ -625,11 +648,8 @@ def _machine_board(
     unread_ids = _machine_unread_candidates(query, unread_counts, excluded_node_ids=excluded_ids)
     node_ids.update(unread_ids[unread_offset : unread_offset + room])
 
-    def card_key(node_id: str) -> tuple[int, str]:
-        worst = min(
-            (_rank(row) for row in by_node.get(node_id, []) if row.live or query.include_all), default=_IDLE_RANK
-        )
-        return (worst if query.sort in ("attention", "state", "age") else 0, node_id)
+    def card_key(node_id: str) -> tuple[Any, ...]:
+        return machine_sort_key(node_id, by_node.get(node_id, []), query)
 
     cards = []
     for node_id in sorted(node_ids, key=card_key)[:MACHINE_CARD_LIMIT]:

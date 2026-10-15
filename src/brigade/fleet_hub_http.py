@@ -666,18 +666,9 @@ def make_handler(
                 truncated_node_ids: set[str] = set()
                 if query_model is not None:
 
-                    def machine_priority(entry: dict[str, Any]) -> int:
-                        if query_model.sort not in ("attention", "state", "age"):
-                            return 0
+                    def machine_priority(entry: dict[str, Any]) -> tuple[Any, ...]:
                         rows = fleet_dashboard.build_rows([entry], {}, now=current)
-                        return min(
-                            (
-                                fleet_dashboard.BUCKET_RANK.get(row.bucket, fleet_dashboard._IDLE_RANK)
-                                for row in rows
-                                if row.live or query_model.include_all
-                            ),
-                            default=fleet_dashboard._IDLE_RANK,
-                        )
+                        return fleet_dashboard.machine_sort_key(str(entry["node_id"]), rows, query_model)
 
                     def machine_matches(entry: dict[str, Any]) -> bool:
                         return bool(
@@ -876,6 +867,7 @@ def make_handler(
                 nodes=render_nodes,
                 started_at=render_started_at,
                 nonce=nonce,
+                now=current,
                 more_href=more_href,
                 unread_counts=render_unread_counts,
                 unread_offset=unread_offset,

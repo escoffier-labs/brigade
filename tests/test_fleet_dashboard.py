@@ -471,6 +471,17 @@ class TestBoards:
 
 
 class TestSortAndFilter:
+    def test_machine_start_lookup_seeks_the_node_run_index(self, hub):
+        conn = fleet_hub.open_db(hub[2])
+        try:
+            sql = fleet_hub_status._latest_sql(resolve_started_at=True)
+            plan = [row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + sql)]
+        finally:
+            conn.close()
+        # The generic start lookup runs once per latest run. A scan here makes
+        # a machine-board request grow with runs times journal history.
+        assert any("SEARCH e2 USING INDEX events_run_seq (node_id=? AND run_id=?)" in detail for detail in plan)
+
     def test_node_filter(self, hub):
         _seed(hub)
         _status, _headers, text = _request(hub, "GET", "/view/machines?node=1111", headers=_bearer())
@@ -524,6 +535,41 @@ class TestSortAndFilter:
 
         assert f'data-node="{failed_node}"' in first
         assert first.index(f'data-node="{failed_node}"') < first.index(f'data-node="{node_ids[0]}"')
+
+    @pytest.mark.parametrize("sort", ["attention", "age", "state"])
+    def test_machine_page_matches_full_order_within_one_bucket(self, hub, sort):
+        node_ids = [f"00000000-0000-4000-8000-{index:012d}" for index in range(fleet_hub.BOARD_LIMIT + 1)]
+        now = datetime.now(timezone.utc)
+        events = []
+        for index, node_id in enumerate(node_ids):
+            # All runs share a bucket. Age and state order oppose node-ID order.
+            start = (now - timedelta(minutes=index + 1)).isoformat()
+            state = "run.dispatch.observed" if index % 2 else "run.started"
+            events.extend(
+                [
+                    _event(node_id, f"run-{index}", 1, "run.created", repo="repo", harness="codex", ts=start),
+                    _event(node_id, f"run-{index}", 2, state, repo="repo", harness="codex", ts=now.isoformat()),
+                ]
+            )
+        status, _headers, text = _request(hub, "POST", "/events", headers=_bearer(), body=events)
+        assert status == 200, text
+        expected = sorted(
+            range(len(node_ids)),
+            key=lambda index: (
+                (("run.dispatch.observed" if index % 2 else "run.started"), -index) if sort == "state" else (-index,)
+            ),
+        )
+
+        status, _headers, first = _request(hub, "GET", f"/view/machines?sort={sort}", headers=_bearer())
+        assert status == 200
+        assert re.findall(r'data-node="([^"]+)"', first) == [
+            node_ids[index] for index in expected[: fleet_hub.BOARD_LIMIT]
+        ]
+        more = re.search(r'class="fleet-more"><a href="([^"]+)"', first)
+        assert more
+        status, _headers, second = _request(hub, "GET", html.unescape(more[1]), headers=_bearer())
+        assert status == 200
+        assert re.findall(r'data-node="([^"]+)"', second) == [node_ids[expected[-1]]]
 
     def test_sort_orders_repo_rows(self, hub):
         _seed(hub)

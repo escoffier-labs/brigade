@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
+import logging
 import os
 from pathlib import Path
+from typing import Any
 
 
 class AppendRollbackError(OSError):
@@ -13,6 +16,12 @@ class AppendRollbackError(OSError):
 def append_record(fd: int, data: bytes, path: Path, dir_fd: int | None) -> None:
     original_size = os.fstat(fd).st_size
     try:
+        # A killed writer may leave an incomplete final JSON record. Separate it
+        # from the next append so tolerant event readers can recover that event.
+        if original_size:
+            os.lseek(fd, original_size - 1, os.SEEK_SET)
+            if os.read(fd, 1) != b"\n":
+                data = b"\n" + data
         remaining = memoryview(data)
         while remaining:
             written = os.write(fd, remaining)
@@ -66,3 +75,24 @@ def fsync_parent(path: Path, dir_fd: int | None) -> None:
             os.fsync(fd)
         finally:
             os.close(fd)
+
+
+def parse_records(text: str, *, strict: bool) -> list[dict[str, Any]]:
+    """Event delivery skips damaged records; durable message queues fail closed."""
+    records = []
+    for line in text.splitlines():
+        if not line.strip():
+            continue
+        error = "fleet spool contains an invalid record"
+        try:
+            record = json.loads(line)
+        except json.JSONDecodeError:
+            error = "fleet spool contains malformed JSON"
+        else:
+            if isinstance(record, dict):
+                records.append(record)
+                continue
+        if strict:
+            raise ValueError(error)
+        logging.getLogger("brigade.fleet").warning("%s; skipping event record", error)
+    return records

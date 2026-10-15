@@ -113,16 +113,34 @@ class TestSpoolPrivacy:
 
         assert spool.read_bytes() == original
 
-    def test_flush_preserves_malformed_spool(self, home):
+    @pytest.mark.parametrize("bad_record", [b'{"run_id":\n', b'{"run_id":', b"[]\n"])
+    def test_flush_delivers_valid_events_around_malformed_records(self, home, monkeypatch, bad_record):
         spool = _spool()
         spool.parent.mkdir(parents=True, exist_ok=True)
-        original = b'{"run_id":\n'
-        spool.write_bytes(original)
+        spool.write_bytes(b'{"run_id":"keep"}\n' + bad_record)
+        delivered = []
+        monkeypatch.setattr(
+            fleet_client, "_post_events_blocking", lambda _hub, _token, events, **kw: delivered.extend(events)
+        )
 
-        with pytest.raises(fleet_client.FleetClientError, match="malformed JSON"):
-            fleet_client.flush_spool(fleet_client.resolve_node_id(), hub_url="http://127.0.0.1:9", token="token")
+        assert (
+            fleet_client.flush_spool(fleet_client.resolve_node_id(), hub_url="http://127.0.0.1:9", token="token") == 1
+        )
+        assert delivered == [{"run_id": "keep"}]
+        assert not spool.exists()
 
-        assert spool.read_bytes() == original
+    def test_report_event_after_torn_tail_delivers_old_and_new_events(self, home, monkeypatch):
+        spool = _spool()
+        spool.parent.mkdir(parents=True, exist_ok=True)
+        spool.write_bytes(b'{"run_id":"old"}\n{"run_id":')
+        delivered = []
+        monkeypatch.setattr(
+            fleet_client, "_post_events_blocking", lambda _hub, _token, events, **kw: delivered.extend(events)
+        )
+
+        assert fleet_client.report_event({"run_id": "new"})
+        assert [event["run_id"] for event in delivered] == ["old", "new"]
+        assert not spool.exists()
 
     def test_flush_preserves_spool_with_invalid_utf8(self, home):
         spool = _spool()

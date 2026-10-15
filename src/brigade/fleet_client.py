@@ -106,6 +106,7 @@ from . import fleet_claim_target as _claim_target
 from .fleet_client_spool import append_record as _append_spool_record
 from .fleet_client_spool import ensure_directory as _ensure_spool_directory
 from .fleet_client_spool import fsync_parent as _fsync_spool_parent
+from .fleet_client_spool import parse_records as _parse_spool_records
 from . import toml_compat as tomllib
 from .fleet_claim_lifecycle import _ConfirmedClaimLease as _ConfirmedClaimLease
 
@@ -628,7 +629,7 @@ def _encode(event: dict[str, Any]) -> str:
     return json.dumps(event, sort_keys=True)
 
 
-def _read_spool(path: Path, *, dir_fd: int | None = None) -> list[dict[str, Any]]:
+def _read_spool(path: Path, *, dir_fd: int | None = None, strict: bool = False) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
     try:
         fd = _open_private(path, os.O_RDONLY, dir_fd=dir_fd)
@@ -638,18 +639,10 @@ def _read_spool(path: Path, *, dir_fd: int | None = None) -> list[dict[str, Any]
         return events
     except (OSError, UnicodeError, FleetClientError) as exc:
         raise FleetClientError(f"fleet spool could not be read: {type(exc).__name__}") from exc
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            parsed = json.loads(line)
-        except json.JSONDecodeError:
-            raise FleetClientError("fleet spool contains malformed JSON") from None
-        if not isinstance(parsed, dict):
-            raise FleetClientError("fleet spool contains an invalid record")
-        events.append(parsed)
-    return events
+    try:
+        return _parse_spool_records(text, strict=strict)
+    except ValueError as exc:
+        raise FleetClientError(str(exc)) from None
 
 
 def _write_spool_atomic(path: Path, events: list[dict[str, Any]], *, dir_fd: int | None = None) -> None:
@@ -754,7 +747,7 @@ def _spool_append_locked(
         _write_spool_atomic(path, kept, dir_fd=dir_fd)
         return True
     try:
-        fd = _open_private(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, dir_fd=dir_fd)
+        fd = _open_private(path, os.O_RDWR | os.O_APPEND | os.O_CREAT, dir_fd=dir_fd)
         try:
             _append_spool_record(fd, line.encode("utf-8"), path, dir_fd)
         finally:

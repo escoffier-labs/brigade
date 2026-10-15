@@ -144,7 +144,7 @@ def _online(body: dict[str, Any]) -> dict[str, Any]:
 def _queue_locked(path: Path, message: dict[str, Any], *, dir_fd: int | None = None) -> dict[str, Any]:
     if not fleet_client._spool_append_locked(path, message, dir_fd=dir_fd, evict_oldest=False):
         try:
-            pending = fleet_client._read_spool(path, dir_fd=dir_fd)
+            pending = fleet_client._read_spool(path, dir_fd=dir_fd, strict=True)
         except fleet_client.FleetClientError as exc:
             raise fleet_client.FleetClientError(
                 f"fleet message persistence is ambiguous for client_id {message['client_id']}; "
@@ -180,7 +180,7 @@ def _response_confirms(payload: dict[str, Any], message: dict[str, Any]) -> bool
 
 
 def _remove_queued_locked(path: Path, client_id: str, *, dir_fd: int | None) -> None:
-    queued = fleet_client._read_spool(path, dir_fd=dir_fd)
+    queued = fleet_client._read_spool(path, dir_fd=dir_fd, strict=True)
     remaining = [entry for entry in queued if entry.get("client_id") != client_id]
     if len(remaining) != len(queued):
         fleet_client._write_spool_atomic(path, remaining, dir_fd=dir_fd)
@@ -196,7 +196,7 @@ def _send_ordered(message: dict[str, Any], hub: str, token: str, node_id: str) -
                 drain_started = monotonic()
                 batch_limit = MESSAGE_BATCH_SIZE - 1 if message.get("action") == "reply" else MESSAGE_BATCH_SIZE
                 _delivered, globally_blocked = _drain_locked(path, hub, token, max_messages=batch_limit, dir_fd=dir_fd)
-                pending = fleet_client._read_spool(path, dir_fd=dir_fd)
+                pending = fleet_client._read_spool(path, dir_fd=dir_fd, strict=True)
                 recipient = message.get("_recipient") or message.get("to")
                 if any(queued.get("action") == "reply" and _message_recipient(queued) is None for queued in pending):
                     return _queue_locked(path, message, dir_fd=dir_fd)
@@ -251,7 +251,7 @@ def _send_ordered(message: dict[str, Any], hub: str, token: str, node_id: str) -
             with fleet_client._spool_lock(path) as dir_fd:
                 already_queued = any(
                     entry.get("client_id") == message["client_id"]
-                    for entry in fleet_client._read_spool(path, dir_fd=dir_fd)
+                    for entry in fleet_client._read_spool(path, dir_fd=dir_fd, strict=True)
                 )
                 if not already_queued:
                     _queue_locked(path, message, dir_fd=dir_fd)
@@ -555,7 +555,7 @@ def _pending_principal_revocation_request(
     """Read or persist a revoke's enrollment generation across ambiguous retries."""
     path = _principal_revocation_path(name, admin_token)
     with fleet_client._spool_lock(path) as dir_fd:
-        pending = fleet_client._read_spool(path, dir_fd=dir_fd)
+        pending = fleet_client._read_spool(path, dir_fd=dir_fd, strict=True)
         for item in pending:
             request_id = item.get("request_id")
             generation = item.get("expected_enrollment_id")
@@ -586,7 +586,7 @@ def _pending_principal_request(
 ) -> dict[str, Any]:
     path = _principal_pending_path(name, admin_token)
     with fleet_client._spool_lock(path) as dir_fd:
-        pending = fleet_client._read_spool(path, dir_fd=dir_fd)
+        pending = fleet_client._read_spool(path, dir_fd=dir_fd, strict=True)
     if not pending:
         # Migrate requests written before retry state stopped depending on the
         # mutable node identity. Never nest spool locks: they share a process lock.
@@ -596,7 +596,7 @@ def _pending_principal_request(
             if legacy_path == path or legacy_path.is_symlink() or not legacy_path.is_file():
                 continue
             with fleet_client._spool_lock(legacy_path) as legacy_fd:
-                legacy_pending = fleet_client._read_spool(legacy_path, dir_fd=legacy_fd)
+                legacy_pending = fleet_client._read_spool(legacy_path, dir_fd=legacy_fd, strict=True)
             if legacy_pending:
                 legacy_request_id = next(
                     (
@@ -607,7 +607,7 @@ def _pending_principal_request(
                     None,
                 )
                 with fleet_client._spool_lock(path) as dir_fd:
-                    pending = fleet_client._read_spool(path, dir_fd=dir_fd)
+                    pending = fleet_client._read_spool(path, dir_fd=dir_fd, strict=True)
                     if not pending:
                         pending = legacy_pending
                         fleet_client._write_spool_atomic(path, pending, dir_fd=dir_fd)
@@ -616,7 +616,7 @@ def _pending_principal_request(
                 break
     if not pending:
         with fleet_client._spool_lock(path) as dir_fd:
-            pending = fleet_client._read_spool(path, dir_fd=dir_fd)
+            pending = fleet_client._read_spool(path, dir_fd=dir_fd, strict=True)
             if not pending:
                 new_request: dict[str, Any] = {
                     "name": name,
@@ -642,7 +642,7 @@ def _pending_principal_request(
 
 def _clear_principal_request(path: Path, *, request_id: str) -> bool:
     with fleet_client._spool_lock(path) as dir_fd:
-        pending = fleet_client._read_spool(path, dir_fd=dir_fd)
+        pending = fleet_client._read_spool(path, dir_fd=dir_fd, strict=True)
         remaining = [item for item in pending if item.get("request_id") != request_id]
         if len(remaining) == len(pending):
             return False
@@ -652,7 +652,7 @@ def _clear_principal_request(path: Path, *, request_id: str) -> bool:
 
 def _pending_principal_request_id(path: Path, name: str, *, enrollment_id: str | None) -> str | None:
     with fleet_client._spool_lock(path) as dir_fd:
-        pending = fleet_client._read_spool(path, dir_fd=dir_fd)
+        pending = fleet_client._read_spool(path, dir_fd=dir_fd, strict=True)
     for item in pending:
         request_id = item.get("request_id")
         if item.get("name") == name and isinstance(request_id, str) and request_id and request_id == enrollment_id:
@@ -720,7 +720,7 @@ def _reply_recipient(hub: str, token: str, message_id: int, *, timeout: float | 
 def _drain_locked(
     path: Path, hub: str, token: str, *, max_messages: int | None = None, dir_fd: int | None = None
 ) -> tuple[int, bool]:
-    messages = fleet_client._read_spool(path, dir_fd=dir_fd)
+    messages = fleet_client._read_spool(path, dir_fd=dir_fd, strict=True)
     deadline = monotonic() + MESSAGE_DRAIN_DEADLINE_SECONDS
     delivered = 0
     attempted = 0
