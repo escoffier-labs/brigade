@@ -78,6 +78,7 @@ def test_approval_handoff_selects_completed_requester_not_unrelated_workers(tmp_
             text="approval is required",
             ok=True,
             thread_id="thread-requester",
+            transport="codex-app-server",
             status="complete",
         ),
     ]
@@ -96,6 +97,7 @@ def test_approval_handoff_selects_completed_requester_not_unrelated_workers(tmp_
             "status": "interrupted",
             "task": "request approval",
             "thread_id": "thread-requester",
+            "transport": "codex-app-server",
             "worker": "requester",
         }
     ]
@@ -2688,6 +2690,18 @@ def test_record_run_termination_write_error_retains_run_lock(tmp_path, monkeypat
 
 
 def test_run_direct_worker_writes_complete_process_logs(monkeypatch, tmp_path):
+    metadata_provenance = {
+        "observed_at": "2026-10-13T12:00:00+00:00",
+        "fields": {
+            "effective_model": {
+                "source": "observed",
+                "locator": "acp-config-option-update",
+                "digest": None,
+                "unknown_reason": "backend-revision-unavailable",
+            }
+        },
+    }
+
     def fake_run_agent(cli_ref, prompt, **kwargs):
         return agents.AgentResult(
             text="answer",
@@ -2696,6 +2710,12 @@ def test_run_direct_worker_writes_complete_process_logs(monkeypatch, tmp_path):
             stderr="adapter diagnostic\n",
             exit_code=0,
             timed_out=False,
+            transport="acpx",
+            requested_model="Bearer PRIVATE_MARKER",
+            effective_model="composer-2.5",
+            effective_model_locator="acp-config-option-update",
+            acpx_version="0.12.0",
+            metadata_provenance=metadata_provenance,
         )
 
     output_dir = tmp_path / "run"
@@ -2715,11 +2735,15 @@ def test_run_direct_worker_writes_complete_process_logs(monkeypatch, tmp_path):
     assert worker_payload["timed_out"] is False
     assert worker_payload["stdout_log"] == "logs/worker-001-coder.stdout.log"
     assert worker_payload["stderr_log"] == "logs/worker-001-coder.stderr.log"
+    assert "requested_model" not in worker_payload
+    assert worker_payload["metadata_provenance"]["fields"]["effective_model"]["source"] == "observed"
     assert (output_dir / worker_payload["stdout_log"]).read_text() == "answer\n"
     assert (output_dir / worker_payload["stderr_log"]).read_text() == "adapter diagnostic\n"
     synthesis = json.loads((output_dir / "synthesis.json").read_text())["result"]
     assert synthesis["stdout_log"] == worker_payload["stdout_log"]
     assert synthesis["stderr_log"] == worker_payload["stderr_log"]
+    assert "requested_model" not in synthesis
+    assert synthesis["metadata_provenance"] == worker_payload["metadata_provenance"]
 
 
 def test_run_direct_worker_preserves_timeout_as_terminal_status(monkeypatch, tmp_path):
@@ -3121,7 +3145,23 @@ def test_run_passes_agent_models(monkeypatch):
     ]
 
 
-def test_dispatch_uses_acpx_transport(monkeypatch, tmp_path):
+@pytest.mark.parametrize(
+    ("effective_model", "acpx_version", "effective_source", "effective_reason", "version_source", "version_reason"),
+    [
+        ("composer-2.5", "0.12.0", "observed", "backend-revision-unavailable", "observed", None),
+        (None, None, "unknown", "effective-model-not-reported", "unknown", "acpx-version-not-reported"),
+    ],
+)
+def test_dispatch_uses_acpx_transport(
+    monkeypatch,
+    tmp_path,
+    effective_model,
+    acpx_version,
+    effective_source,
+    effective_reason,
+    version_source,
+    version_reason,
+):
     from brigade import acpx_adapter
 
     seen = {}
@@ -3132,9 +3172,10 @@ def test_dispatch_uses_acpx_transport(monkeypatch, tmp_path):
             text="through ACP",
             ok=True,
             transport="acpx",
-            requested_model="composer-2.5",
-            effective_model="composer-2.5",
+            requested_model="cursor-auto",
+            effective_model=effective_model,
             protocol_version=1,
+            acpx_version=acpx_version,
         )
 
     monkeypatch.setattr(acpx_adapter, "run_cursor", fake_cursor)
@@ -3146,7 +3187,7 @@ def test_dispatch_uses_acpx_transport(monkeypatch, tmp_path):
                 "composer",
                 "cursor",
                 "build",
-                model="composer-2.5",
+                model="cursor-auto",
                 transport="acpx",
                 transport_version="0.12.0",
             ),
@@ -3161,6 +3202,14 @@ def test_dispatch_uses_acpx_transport(monkeypatch, tmp_path):
     assert result.ok is True and result.transport == "acpx"
     assert seen["version"] == "0.12.0"
     assert seen["read_only"] is True
+    fields = result.metadata_provenance["fields"]
+    assert fields["requested_model"]["source"] == "declared"
+    assert fields["requested_model"]["unknown_reason"] == "mutable-alias-not-backend-identity"
+    assert fields["effective_model"]["source"] == effective_source
+    assert fields["effective_model"]["unknown_reason"] == effective_reason
+    assert fields["acpx_version"]["locator"] == "acpx-version-output"
+    assert fields["acpx_version"]["source"] == version_source
+    assert fields["acpx_version"]["unknown_reason"] == version_reason
 
 
 def test_direct_acpx_auth_failure_reaches_worker_run_receipt_and_human_summary(monkeypatch, capsys, tmp_path):

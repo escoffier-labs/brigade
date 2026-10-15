@@ -15,6 +15,7 @@ import re
 import sqlite3
 from typing import Any, Mapping
 
+from . import worklore_scope as scope
 from . import worklore_store as store
 from .worklore_validate import WorkloreValidationError, safe_text
 
@@ -351,6 +352,7 @@ def _transition(
         result["last_report"] = dict(incoming) | {"reporter_node": actor_id}
     elif action == "checkpoint":
         result.update({key: value for key, value in body.items() if key not in {"action", "generation"}})
+        result["conflict_check"] = "path-admission"
     else:
         result = _initial()
         result["generation"] = snapshot["generation"]
@@ -517,6 +519,8 @@ def ownership_action(
         if len(serialized.encode("utf-8")) > OWNERSHIP_EVENT_MAX_BYTES:
             raise _invalid("ownership event exceeds serialized byte bound; ownership unchanged")
         placeholders = ",".join(["?"] * len(store._EVENT_COLUMNS) + [store._EVENT_SEQ_SQL])
+        if action == "checkpoint":
+            scope.admit_checkpoint(conn, work_id, body, current_holder_digest=result["holder_hash"])
         conn.execute(
             f"INSERT INTO work_events ({','.join(store._EVENT_INSERT_COLUMNS)}) VALUES ({placeholders})",
             (

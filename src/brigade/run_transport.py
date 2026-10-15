@@ -103,7 +103,18 @@ def _is_direct_grok_invalid_final(
     )
 
 
-def _cloudflare_preflight_failure(agent: Agent, assignment: Assignment) -> WorkerResult | None:
+def _receipt_transport(agent: Agent, *, appserver: object | None = None) -> str:
+    """Map roster dispatch and execution context to the receipt transport."""
+    if agent.transport == "acpx":
+        return "acpx"
+    if agent.cli == "codex" and agent.env is None and appserver is not None:
+        return "codex-app-server"
+    return "cli"
+
+
+def _cloudflare_preflight_failure(
+    agent: Agent, assignment: Assignment, *, appserver: object | None = None
+) -> WorkerResult | None:
     """Return a preflight failure if the agent's Cloudflare route lacks env.
 
     Empty string values are treated as missing.
@@ -120,6 +131,17 @@ def _cloudflare_preflight_failure(agent: Agent, assignment: Assignment) -> Worke
         detail=detail,
         failure_phase="preflight",
         failure_kind="provider-config",
+        transport=_receipt_transport(agent, appserver=appserver),
+        requested_model=agent.model,
+        metadata_provenance=_metadata_provenance(
+            agents.AgentResult(
+                text="",
+                ok=False,
+                failure_phase="preflight",
+                transport=_receipt_transport(agent, appserver=appserver),
+                requested_model=agent.model,
+            )
+        ),
     )
 
 
@@ -128,6 +150,7 @@ def _selected_agent_preflight(
     *,
     roster: Roster,
     quarantine_state: SeatQuarantineState,
+    appserver: object | None = None,
 ) -> agents.AgentResult | None:
     """Refuse a candidate before any external call.
 
@@ -143,8 +166,10 @@ def _selected_agent_preflight(
             text="",
             ok=False,
             detail=f"seat {selected_agent.name} is quarantined for this run",
-            failure_phase="dispatch",
+            failure_phase="preflight",
             failure_kind="unclassified",
+            transport=_receipt_transport(selected_agent, appserver=appserver),
+            requested_model=selected_agent.model,
         )
     if selected_agent.cli is None or not is_cli_allowed(selected_agent.cli, roster):
         return agents.AgentResult(
@@ -155,8 +180,10 @@ def _selected_agent_preflight(
                 if selected_agent.cli is None
                 else f"{selected_agent.cli} is not allowed by limits.allow_models"
             ),
-            failure_phase="dispatch",
+            failure_phase="preflight",
             failure_kind="unclassified",
+            transport=_receipt_transport(selected_agent, appserver=appserver),
+            requested_model=selected_agent.model,
         )
     cloudflare_detail = agents.cloudflare_ai_gateway_preflight_detail(selected_agent.model)
     if cloudflare_detail is not None:
@@ -166,6 +193,8 @@ def _selected_agent_preflight(
             detail=cloudflare_detail,
             failure_phase="preflight",
             failure_kind="provider-config",
+            transport=_receipt_transport(selected_agent, appserver=appserver),
+            requested_model=selected_agent.model,
         )
     return None
 
@@ -325,6 +354,7 @@ class WorkerResult:
     transport: str = "cli"
     requested_model: str | None = None
     effective_model: str | None = None
+    effective_model_locator: str | None = None
     reasoning: str | None = None
     stop_reason: str | None = None
     protocol_version: int | None = None
@@ -336,6 +366,7 @@ class WorkerResult:
     failure_kind: str | None = None
     transport_warning: dict[str, object] | None = None
     cloud_environment: dict[str, str] | None = None
+    metadata_provenance: dict[str, object] | None = None
     env_overrides: tuple[str, ...] = ()
     endpoint_host: str | None = None
     attempts: tuple[WorkerAttempt, ...] = ()
@@ -347,6 +378,41 @@ class WorkerResult:
     # another machine. ``None`` for ordinary local work. Carries the target
     # provenance and pending-handoff facts; never implies a local edit.
     remote: dict[str, Any] | None = None
+
+
+def _metadata_provenance(result: agents.AgentResult) -> dict[str, object] | None:
+    """Attribute only facts that the acpx Cursor adapter can distinguish."""
+    if result.transport != "acpx":
+        return None
+    fields: dict[str, object] = {}
+    requested_unknown = (
+        "requested-model-not-recorded"
+        if result.requested_model is None
+        else "mutable-alias-not-backend-identity"
+        if result.requested_model in {"auto", "cursor-auto"}
+        else "launched-argument-not-backend-observation"
+    )
+    fields["requested_model"] = {
+        "source": "unknown" if result.requested_model is None else "declared",
+        "locator": "configured-request" if result.failure_phase == "preflight" else "launch-argument",
+        "digest": None,
+        "unknown_reason": "execution-not-started" if result.failure_phase == "preflight" else requested_unknown,
+    }
+    fields["effective_model"] = {
+        "source": "unknown" if result.effective_model is None else "observed",
+        "locator": result.effective_model_locator or "no-backend-observation",
+        "digest": None,
+        "unknown_reason": "effective-model-not-reported"
+        if result.effective_model is None
+        else "backend-revision-unavailable",
+    }
+    fields["acpx_version"] = {
+        "source": "unknown" if result.acpx_version is None else "observed",
+        "locator": "acpx-version-output",
+        "digest": None,
+        "unknown_reason": "acpx-version-not-reported" if result.acpx_version is None else None,
+    }
+    return {"observed_at": _attempt_timestamp(), "fields": fields}
 
 
 def _is_output_limit_failure(result: agents.AgentResult | WorkerResult) -> bool:
@@ -621,8 +687,19 @@ def dispatch(
                 text="",
                 ok=False,
                 detail=f"seat {assignment.worker} is quarantined for this run",
-                failure_phase="dispatch",
+                failure_phase="preflight",
                 failure_kind="unclassified",
+                transport=_receipt_transport(agent, appserver=appserver),
+                requested_model=agent.model,
+                metadata_provenance=_metadata_provenance(
+                    agents.AgentResult(
+                        text="",
+                        ok=False,
+                        failure_phase="preflight",
+                        transport=_receipt_transport(agent, appserver=appserver),
+                        requested_model=agent.model,
+                    )
+                ),
             )
         if agent.cli is None or not is_cli_allowed(agent.cli, roster):
             return WorkerResult(
@@ -635,8 +712,21 @@ def dispatch(
                     if agent.cli is None
                     else f"{agent.cli} is not allowed by limits.allow_models"
                 ),
+                failure_phase="preflight",
+                failure_kind="unclassified",
+                transport=_receipt_transport(agent, appserver=appserver),
+                requested_model=agent.model,
+                metadata_provenance=_metadata_provenance(
+                    agents.AgentResult(
+                        text="",
+                        ok=False,
+                        failure_phase="preflight",
+                        transport=_receipt_transport(agent, appserver=appserver),
+                        requested_model=agent.model,
+                    )
+                ),
             )
-        preflight = _cloudflare_preflight_failure(agent, assignment)
+        preflight = _cloudflare_preflight_failure(agent, assignment, appserver=appserver)
         if preflight is not None:
             return preflight
         prompt = build_prompt(
@@ -670,6 +760,17 @@ def dispatch(
                 detail=detail,
                 failure_phase="dispatch",
                 failure_kind=failure_kind,
+                transport=_receipt_transport(agent, appserver=appserver),
+                requested_model=agent.model,
+                metadata_provenance=_metadata_provenance(
+                    agents.AgentResult(
+                        text="",
+                        ok=False,
+                        failure_phase="preflight",
+                        transport=_receipt_transport(agent, appserver=appserver),
+                        requested_model=agent.model,
+                    )
+                ),
                 provenance=request.envelope,
             )
         started = time.monotonic()
@@ -716,6 +817,7 @@ def dispatch(
                     detail=exc.message[:200],
                     failure_phase="preflight",
                     failure_kind=exc.code,
+                    transport=_receipt_transport(selected_agent, appserver=appserver),
                     requested_model=selected_agent.model,
                     reasoning=selected_agent.reasoning,
                 )
@@ -947,6 +1049,7 @@ def dispatch(
                 selected_agent,
                 roster=roster,
                 quarantine_state=quarantine_state,
+                appserver=appserver,
             )
             if blocked is not None:
                 return blocked
@@ -976,6 +1079,8 @@ def dispatch(
                                 detail=lease_error,
                                 failure_phase="preflight",
                                 failure_kind="fleet-model-policy",
+                                transport=_receipt_transport(selected_agent, appserver=appserver),
+                                requested_model=selected_agent.model,
                             )
                         else:
                             result = _invoke_external(
@@ -1037,6 +1142,7 @@ def dispatch(
                 ),
                 transport_warning=result.transport_warning,
                 cloud_environment=result.cloud_environment,
+                metadata_provenance=_metadata_provenance(result),
                 thread_id=result.thread_id,
                 status=result.status,
                 stdout=_bound_capture_text(result.stdout),
@@ -1047,6 +1153,7 @@ def dispatch(
                 transport=result.transport,
                 requested_model=result.requested_model,
                 effective_model=result.effective_model,
+                effective_model_locator=result.effective_model_locator,
                 reasoning=result.reasoning,
                 stop_reason=result.stop_reason,
                 protocol_version=result.protocol_version,

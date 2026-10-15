@@ -479,7 +479,12 @@ def _write_external_directory_authority(
 
 
 def _downgrade_durability_checkpoint(path: Path) -> None:
-    """Test seam: dest bytes have changed; parent-dir durability has not run yet."""
+    """Persist a changed authority entry before recording downgrade completion."""
+    directory = _open_directory_nofollow(path.parent)
+    try:
+        _dirfd_fsync(directory)
+    finally:
+        os.close(directory)
 
 
 def _publish_authority_store_payload(
@@ -560,6 +565,18 @@ def downgrade_external_directory_authority(
     actor: str | None = None,
     env: Mapping[str, str] | None = None,
 ) -> dict[str, Any]:
+    from ... import authority_marker
+
+    with authority_marker.isolation_marker_lock(target=target, env=env):
+        return _downgrade_external_directory_authority_locked(target, actor=actor, env=env)
+
+
+def _downgrade_external_directory_authority_locked(
+    target: Path,
+    *,
+    actor: str | None = None,
+    env: Mapping[str, str] | None = None,
+) -> dict[str, Any]:
     """Convert a signed store to unsigned, remove the sticky marker, and audit.
 
     The envelope must be bound to this destination target. A valid MAC for a
@@ -579,8 +596,17 @@ def downgrade_external_directory_authority(
     fingerprint = authority_marker.target_fingerprint(workspace)
     marker_path = authority_marker.signed_marker_path(fingerprint, env=env)
     authority_marker.reject_unsafe_marker_path(marker_path, workspace, env=env)
-    posture_path = authority_marker.isolation_marker_path(fingerprint, env=env)
-    authority_marker.reject_unsafe_marker_path(posture_path, workspace, env=env)
+
+    try:
+        live_identity = _workspace_directory_identity(workspace)
+    except OSError as exc:
+        raise OSError("authority downgrade cannot identify the workspace posture markers") from exc
+    governing_posture_paths = authority_marker.governing_isolation_marker_paths(
+        workspace, env=env, workspace_identity=live_identity
+    )
+    for p in governing_posture_paths:
+        authority_marker.reject_unsafe_marker_path(p, workspace, env=env)
+
     isolation_path = security_config_path(workspace)
 
     store_backup, raw_payload = _read_raw_authority_store(store_path)
@@ -612,16 +638,16 @@ def downgrade_external_directory_authority(
         marker_bytes = None
     except OSError as exc:
         raise OSError("authority signed marker is unreadable") from exc
-    try:
-        posture_bytes = posture_path.read_bytes()
-    except FileNotFoundError:
-        posture_bytes = None
-    except OSError as exc:
-        raise OSError("authority isolation posture marker is unreadable") from exc
+    posture_backups: dict[Path, bytes] = {}
+    for p in governing_posture_paths:
+        try:
+            posture_backups[p] = p.read_bytes()
+        except OSError as exc:
+            raise OSError("authority isolation posture marker is unreadable") from exc
 
     actor_value = actor if actor is not None else authority_marker.operator_identity(env=env)
     resolved = str(workspace)
-    if unsigned_record is None and marker_bytes is None and posture_bytes is None:
+    if unsigned_record is None and marker_bytes is None and not posture_backups:
         return {
             "action": "authority-downgrade",
             "actor": actor_value,
@@ -633,6 +659,7 @@ def downgrade_external_directory_authority(
             "target_fingerprint": fingerprint,
         }
 
+    transaction_id = uuid4().hex
     intent = {
         "action": "authority-downgrade",
         "actor": actor_value,
@@ -642,6 +669,7 @@ def downgrade_external_directory_authority(
         "store_unwrapped": unsigned_record is not None,
         "target": resolved,
         "target_fingerprint": fingerprint,
+        "transaction_id": transaction_id,
     }
     try:
         authority_marker.append_audit(intent, env=env)
@@ -665,7 +693,7 @@ def downgrade_external_directory_authority(
 
     changed: dict[Path, bytes] = {}
     marker_removed = False
-    posture_removed = False
+    postures_removed: list[Path] = []
 
     def _record_change(path: Path, backup: bytes | None) -> None:
         if backup is not None:
@@ -673,12 +701,46 @@ def downgrade_external_directory_authority(
         _downgrade_durability_checkpoint(path)
 
     def _restore_all() -> None:
-        for path, backup in changed.items():
-            _restore_authority_file(path, backup)
+        failures: list[tuple[Path, OSError]] = []
+
+        def _restore(path: Path, backup: bytes) -> None:
+            try:
+                _restore_authority_file(path, backup)
+                if path.read_bytes() != backup:
+                    raise OSError("restored authority bytes did not match the pre-downgrade backup")
+                _downgrade_durability_checkpoint(path)
+            except OSError as exc:
+                failures.append((path, exc))
+
+        for path, backup in reversed(tuple(changed.items())):
+            _restore(path, backup)
         if marker_removed and marker_bytes is not None:
-            _restore_authority_file(marker_path, marker_bytes)
-        if posture_removed and posture_bytes is not None:
-            _restore_authority_file(posture_path, posture_bytes)
+            _restore(marker_path, marker_bytes)
+        for p in postures_removed:
+            if p in posture_backups:
+                _restore(p, posture_backups[p])
+        if failures:
+            first_path, first_error = failures[0]
+            raise OSError(
+                f"authority downgrade rollback incomplete for {len(failures)} file(s); first: {first_path.name}"
+            ) from first_error
+
+    def _append_rollback_failed() -> None:
+        try:
+            authority_marker.append_audit(
+                {
+                    "action": "authority-downgrade",
+                    "actor": actor_value,
+                    "created_at": utc_now_iso_z(),
+                    "phase": "rollback-failed",
+                    "target": resolved,
+                    "target_fingerprint": fingerprint,
+                    "transaction_id": transaction_id,
+                },
+                env=env,
+            )
+        except OSError:
+            pass
 
     try:
         if unsigned_record is not None:
@@ -708,17 +770,35 @@ def downgrade_external_directory_authority(
             else:
                 marker_removed = True
                 _downgrade_durability_checkpoint(marker_path)
-        if posture_bytes is not None:
+        for p in governing_posture_paths:
             try:
-                posture_path.unlink()
+                p.unlink()
             except FileNotFoundError:
                 pass
             else:
-                posture_removed = True
-                _downgrade_durability_checkpoint(posture_path)
+                postures_removed.append(p)
+                _downgrade_durability_checkpoint(p)
     except OSError:
         try:
             _restore_all()
+        except OSError as restore_exc:
+            _append_rollback_failed()
+            raise OSError(
+                "authority downgrade failed and rollback was incomplete; inspect authority state"
+            ) from restore_exc
+        try:
+            authority_marker.append_audit(
+                {
+                    "action": "authority-downgrade",
+                    "actor": actor_value,
+                    "created_at": utc_now_iso_z(),
+                    "phase": "rolled-back",
+                    "target": resolved,
+                    "target_fingerprint": fingerprint,
+                    "transaction_id": transaction_id,
+                },
+                env=env,
+            )
         except OSError:
             pass
         raise
@@ -729,10 +809,12 @@ def downgrade_external_directory_authority(
         "created_at": utc_now_iso_z(),
         "phase": "complete",
         "removed": marker_removed,
-        "posture_marker_removed": posture_removed,
+        "posture_marker_removed": bool(postures_removed),
+        "posture_marker_fingerprints_removed": sorted(path.name for path in postures_removed),
         "store_unwrapped": unsigned_record is not None,
         "target": resolved,
         "target_fingerprint": fingerprint,
+        "transaction_id": transaction_id,
     }
     try:
         completion["audit_path"] = str(authority_marker.append_audit(completion, env=env))
@@ -740,7 +822,23 @@ def downgrade_external_directory_authority(
         try:
             _restore_all()
         except OSError as restore_exc:
+            _append_rollback_failed()
             raise OSError("authority downgrade audit failed and marker restore failed") from restore_exc
+        try:
+            authority_marker.append_audit(
+                {
+                    "action": "authority-downgrade",
+                    "actor": actor_value,
+                    "created_at": utc_now_iso_z(),
+                    "phase": "rolled-back",
+                    "target": resolved,
+                    "target_fingerprint": fingerprint,
+                    "transaction_id": transaction_id,
+                },
+                env=env,
+            )
+        except OSError:
+            raise OSError("authority downgrade audit failed; state restored but audit outcome is uncertain") from exc
         raise OSError("authority downgrade audit failed; marker restored") from exc
     return completion
 
