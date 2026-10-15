@@ -438,16 +438,23 @@ class TestHubClaims:
             assert "error" in payload
         assert _post(url, token, _claim(ttl_seconds=fleet_hub.CLAIM_TTL_MIN_SECONDS))[0] == 200
 
-    def test_claim_target_uses_event_repository_bound(self, hub):
+    def test_claim_target_uses_fence_utf8_byte_bound(self, hub):
         url, token, _db = hub
         target_limit = EVENT_FIELD_MAX_CHARS["repo"]
 
         status, _payload = _post(url, token, _claim(target="r" * target_limit))
         assert status == 200
 
-        status, payload = _post(url, token, _claim(target="r" * (target_limit + 1)))
-        assert status == 400
-        assert payload["error"] == f"claim field 'target' must be at most {target_limit} characters"
+        for target in ("r" * (target_limit + 1), "é" * 513):
+            status, payload = _post(url, token, _claim(target=target))
+            assert status == 422
+            assert payload["error"] == {
+                "code": "invalid-field",
+                "field": "target",
+                "message": "claim target exceeds UTF-8 byte limit",
+                "limit": target_limit,
+                "unit": "utf8-bytes",
+            }
 
     def test_legacy_oversized_claim_remains_manageable(self, hub, clock):
         url, token, db = hub
@@ -460,6 +467,8 @@ class TestHubClaims:
                 "VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (target, NODE_A, "h1", "legacy-acquired", "legacy-renewed", 900, clock["now"] + 900),
             )
+            # Schema 26 migration assigns every preserved claim its initial fence.
+            conn.execute("INSERT INTO claim_fences (target, generation) VALUES (?, 1)", (target,))
             conn.commit()
         finally:
             conn.close()
@@ -470,6 +479,8 @@ class TestHubClaims:
         assert status == 200 and payload["renewed"] is True
         status, payload = _post(url, token, _claim("release", target=target))
         assert status == 200 and payload["released"] is True
+        status, payload = _post(url, token, _claim(target=target))
+        assert status == 200
 
     def test_unknown_and_malformed_node_ids_rejected(self, hub):
         """Two identity-less or cloned nodes must never both be granted."""
