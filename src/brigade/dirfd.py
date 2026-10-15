@@ -41,6 +41,11 @@ def nt_available() -> bool:
     return bool(_nt_dirfd().available())
 
 
+def is_reparse_point_refusal(error: OSError) -> bool:
+    """Return whether a Windows handle operation refused a reparse point."""
+    return nt_available() and isinstance(error, _nt_dirfd().ReparsePointRefusedError)
+
+
 def available() -> bool:
     return posix_available() or nt_available()
 
@@ -162,8 +167,10 @@ def _posix_open_child_file(parent: int, name: str, flags: int, mode: int) -> int
     return os.open(name, flags, dir_fd=parent)
 
 
-def _nt_open_child_file(parent: int, name: str, flags: int, mode: int) -> int:
-    return _nt_dirfd().open_file(parent, name, flags, mode)
+def _nt_open_child_file(parent: int, name: str, flags: int, mode: int, *, share_write: bool = True) -> int:
+    if share_write:
+        return _nt_dirfd().open_file(parent, name, flags, mode)
+    return _nt_dirfd().open_file(parent, name, flags, mode, share_write=False)
 
 
 def _posix_replace_children(parent: int, source: str, destination: str) -> None:
@@ -233,12 +240,13 @@ def mkdir_child(parent: int, name: str, mode: int = 0o700) -> None:
     raise unavailable("directory operations")
 
 
-def open_child_file(parent: int, name: str, flags: int, mode: int = 0o600) -> int:
+def open_child_file(parent: int, name: str, flags: int, mode: int = 0o600, *, share_write: bool = True) -> int:
+    """Open a contained child, optionally denying concurrent Windows writes."""
     _validate_child_component(name)
     if posix_available():
         return _posix_open_child_file(parent, name, flags, mode)
     if nt_available():
-        return _nt_open_child_file(parent, name, flags, mode)
+        return _nt_open_child_file(parent, name, flags, mode, share_write=share_write)
     raise unavailable("import inbox operations")
 
 

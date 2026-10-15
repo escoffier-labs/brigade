@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import base64
 import json
+import hashlib
+import os
 from pathlib import Path
 
 import pytest
 
-from brigade import cli, control_crosswalk, localio
+from brigade import attestation, attestation_input, cli, control_crosswalk, cosign_attestation, localio
 from brigade.control_crosswalk import (
     EVIDENCE_CONTROLS_SCHEMA,
     HEADER_NOTICE,
@@ -21,6 +24,7 @@ from brigade.control_crosswalk import (
 )
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+RUN = "research-run"
 CONTROL_CROSSWALK_DOC = REPO_ROOT / "docs" / "control-crosswalk.md"
 
 
@@ -72,6 +76,42 @@ def test_assessment_reader_charges_failed_growing_reads_to_shared_budget(
             assert reader.used == transported
     finally:
         reader.close()
+
+
+def test_assessment_reader_default_budget_stays_at_64_mib(tmp_path):
+    from brigade.control_crosswalk import _AssessmentReader
+
+    reader = _AssessmentReader(tmp_path)
+    try:
+        assert reader.byte_budget == 64 * 1024 * 1024
+    finally:
+        reader.close()
+
+
+def test_assessment_reader_opens_files_in_binary_mode_when_supported(tmp_path, monkeypatch):
+    from brigade import dirfd
+    from brigade.control_crosswalk import _AssessmentReader
+
+    path = tmp_path / "bytes.bin"
+    path.write_bytes(b"before\r\nafter\x00")
+    binary_flag = 0x8000
+    monkeypatch.setattr(os, "O_BINARY", binary_flag, raising=False)
+    real_open_child = dirfd.open_child_file
+    flags_seen = []
+
+    def open_child(parent, name, flags, mode=0o600, *, share_write=True):
+        flags_seen.append((flags, share_write))
+        return real_open_child(parent, name, flags & ~binary_flag, mode, share_write=share_write)
+
+    monkeypatch.setattr(dirfd, "open_child_file", open_child)
+    reader = _AssessmentReader(tmp_path)
+    try:
+        assert reader.read(path) == b"before\r\nafter\x00"
+    finally:
+        reader.close()
+
+    assert flags_seen
+    assert all(flags & binary_flag and not share_write for flags, share_write in flags_seen)
 
 
 def test_assessment_reader_charges_chunks_before_later_io_error(tmp_path, monkeypatch):
@@ -240,7 +280,7 @@ def test_framework_not_mapped_appears_in_doc():
         assert name in rendered, f"framework {name} missing from rendered doc"
 
 
-def test_completed_verify_receipt_is_structure_only_until_integrity_adapter(tmp_path):
+def test_completed_verify_receipt_without_stored_digest_is_structure_only(tmp_path):
     target = tmp_path / "ws"
     target.mkdir()
     run_dir = target / ".brigade" / "work" / "verify-runs" / "20260101-000000-test"
@@ -250,11 +290,215 @@ def test_completed_verify_receipt_is_structure_only_until_integrity_adapter(tmp_
 
     ec01 = next(m for m in evaluated["mappings"] if m["claim_id"] == "EC-01" and m["framework_id"] == "iso-42001-2023")
     ec02 = next(m for m in evaluated["mappings"] if m["claim_id"] == "EC-02" and m["framework_id"] == "iso-42001-2023")
-    # The receipt is unsigned and its digest is not rederived (#1618), so a
+    # Without a stored digest there is nothing authenticated to rederive, so a
     # well-formed successful receipt is structure, not validated evidence.
     assert ec01["state"] == "untested"
     assert ec01["evidence_outcome"] == "structure_observed"
     assert ec02["state"] == "untested"
+
+
+def test_completed_verify_receipt_with_digest_algorithm_but_no_hash_is_structure_only(tmp_path):
+    target = _ws(tmp_path)
+    run_dir = _verify_dir(target, "verify-a")
+    _write_verify_receipt(run_dir, run_id="verify-a", producer_run_id=RUN)
+    receipt_path = run_dir / "receipt.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["digests"] = {"algorithm": "sha256"}
+    _write_json(receipt_path, receipt)
+
+    readiness = _assess(target, "EC-01", RUN)
+
+    assert readiness["outcome"] == "structure_observed"
+    assert readiness["dimensions"]["integrity"] == {"status": "not_checked", "reason": "verifier_not_wired"}
+
+
+def test_completed_verify_receipt_with_rederived_digest_is_validated(tmp_path):
+    target = _ws(tmp_path)
+    run_dir = _verify_dir(target, "verify-a")
+    _write_verify_receipt(run_dir, run_id="verify-a", producer_run_id=RUN)
+    receipt = json.loads((run_dir / "receipt.json").read_text())
+    receipt["digests"] = {
+        "algorithm": "sha256",
+        "receipt_sha256": localio.canonical_json_digest(receipt, exclude_keys={"digests"}),
+    }
+    _write_json(run_dir / "receipt.json", receipt)
+
+    readiness = _assess(target, "EC-01", RUN)
+
+    assert readiness["outcome"] == "validated"
+    assert readiness["dimensions"]["integrity"] == {"status": "passed", "reason": None}
+    assert readiness["artifacts"][0]["source_digest_sha256"] == receipt["digests"]["receipt_sha256"]
+    assert readiness["verifier"]["name"] == "attestation_receipt.snapshot_receipt"
+
+
+def test_completed_verify_receipt_rejects_unsupported_schema_version(tmp_path):
+    target = _ws(tmp_path)
+    run_dir = _verify_dir(target, "verify-a")
+    _write_verify_receipt(run_dir, run_id="verify-a", producer_run_id=RUN)
+    receipt = json.loads((run_dir / "receipt.json").read_text())
+    receipt["schema_version"] = 999
+    receipt["digests"] = {
+        "algorithm": "sha256",
+        "receipt_sha256": localio.canonical_json_digest(receipt, exclude_keys={"digests"}),
+    }
+    _write_json(run_dir / "receipt.json", receipt)
+
+    readiness = _assess(target, "EC-01", RUN)
+
+    assert readiness["outcome"] == "invalid"
+    assert readiness["reason"] == "schema_missing"
+
+
+def test_completed_verify_receipt_rejects_stale_digest_before_schema(tmp_path):
+    target = _ws(tmp_path)
+    run_dir = _verify_dir(target, "verify-a")
+    _write_verify_receipt(run_dir, run_id="verify-a", producer_run_id=RUN)
+    receipt = json.loads((run_dir / "receipt.json").read_text())
+    receipt["digests"] = {
+        "algorithm": "sha256",
+        "receipt_sha256": localio.canonical_json_digest(receipt, exclude_keys={"digests"}),
+    }
+    receipt["schema_version"] = 999
+    _write_json(run_dir / "receipt.json", receipt)
+
+    readiness = _assess(target, "EC-01", RUN)
+
+    assert readiness["outcome"] == "incomplete"
+    assert readiness["population"]["unbound"] == 1
+    assert readiness["artifacts"][0]["outcome"] == "rejected"
+    assert readiness["artifacts"][0]["reason_codes"] == ["receipt_digest_mismatch"]
+
+
+@pytest.mark.parametrize(
+    "digests",
+    [
+        None,
+        {"algorithm": "sha512", "receipt_sha256": "a" * 64},
+        {"algorithm": "sha256", "receipt_sha256": None},
+        {"algorithm": "sha256", "receipt_sha256": "not-a-digest"},
+    ],
+)
+def test_completed_verify_receipt_reports_malformed_digest_metadata_as_invalid(tmp_path, digests):
+    target = _ws(tmp_path)
+    run_dir = _verify_dir(target, "verify-a")
+    _write_verify_receipt(run_dir, run_id="verify-a", producer_run_id=RUN)
+    receipt = json.loads((run_dir / "receipt.json").read_text())
+    receipt["digests"] = digests
+    _write_json(run_dir / "receipt.json", receipt)
+
+    workspace = _assess(target, "EC-01")
+    assert workspace["outcome"] == "invalid"
+    assert workspace["reason"] == "schema_missing"
+
+    readiness = _assess(target, "EC-01", RUN)
+
+    assert readiness["outcome"] == "incomplete"
+    assert readiness["reason"] == "artifact_not_run_bound"
+    assert readiness["population"]["unbound"] == 1
+    assert readiness["artifacts"][0]["outcome"] == "invalid"
+    assert readiness["artifacts"][0]["scope"] == "unbound"
+    assert readiness["artifacts"][0]["reason_codes"] == ["schema_missing"]
+
+
+def test_ec01_does_not_bind_or_period_filter_receipt_with_unverified_digest_metadata(tmp_path):
+    target = _ws(tmp_path)
+    run_dir = _verify_dir(target, "verify-a")
+    _write_verify_receipt(run_dir, run_id="verify-a", producer_run_id=RUN)
+    receipt_path = run_dir / "receipt.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["digests"] = {"algorithm": "sha256", "receipt_sha256": None}
+    receipt["producer_run_id"] = "tampered-run"
+    receipt["run_id"] = "tampered-run"
+    receipt["completed_at"] = "2020-01-01T00:00:00Z"
+    _write_json(receipt_path, receipt)
+
+    result = _assess(
+        target,
+        "EC-01",
+        RUN,
+        period=("2026-01-01T00:00:00Z", "2026-12-31T23:59:59Z"),
+    )
+
+    assert result["outcome"] == "incomplete"
+    assert result["population"]["unbound"] == 1
+    assert result["population"]["out_of_period"] == 0
+    assert result["artifacts"][0]["scope"] == "unbound"
+    assert result["artifacts"][0]["reason_codes"] == ["schema_missing", "timestamp_missing"]
+
+
+def test_completed_verify_receipt_does_not_bind_digest_rejection_from_tampered_fields(tmp_path):
+    target = _ws(tmp_path)
+    run_dir = _verify_dir(target, "verify-a")
+    _write_verify_receipt(run_dir, run_id="verify-a", producer_run_id=RUN)
+    receipt_path = run_dir / "receipt.json"
+    receipt = json.loads(receipt_path.read_text())
+    receipt["digests"] = {
+        "algorithm": "sha256",
+        "receipt_sha256": localio.canonical_json_digest(receipt, exclude_keys={"digests"}),
+    }
+    _write_json(receipt_path, receipt)
+    receipt["producer_run_id"] = "tampered-run"
+    _write_json(receipt_path, receipt)
+
+    readiness = _assess(target, "EC-01", RUN)
+
+    assert readiness["outcome"] == "incomplete"
+    assert readiness["population"]["unbound"] == 1
+    assert readiness["artifacts"][0]["outcome"] == "rejected"
+    assert readiness["artifacts"][0]["scope"] == "unbound"
+
+
+def test_completed_verify_receipt_rejects_non_integer_schema_version(tmp_path):
+    target = _ws(tmp_path)
+    run_dir = _verify_dir(target, "verify-a")
+    _write_verify_receipt(run_dir, run_id="verify-a", producer_run_id=RUN)
+    receipt = json.loads((run_dir / "receipt.json").read_text())
+    receipt["schema_version"] = 2.0
+    receipt["digests"] = {
+        "algorithm": "sha256",
+        "receipt_sha256": localio.canonical_json_digest(receipt, exclude_keys={"digests"}),
+    }
+    _write_json(run_dir / "receipt.json", receipt)
+
+    readiness = _assess(target, "EC-01", RUN)
+
+    assert readiness["outcome"] == "invalid"
+    assert readiness["reason"] == "schema_missing"
+
+
+def test_completed_verify_receipt_with_changed_payload_is_rejected(tmp_path):
+    target = _ws(tmp_path)
+    run_dir = _verify_dir(target, "verify-a")
+    _write_verify_receipt(run_dir, run_id="verify-a")
+    receipt = json.loads((run_dir / "receipt.json").read_text())
+    receipt["digests"] = {
+        "algorithm": "sha256",
+        "receipt_sha256": localio.canonical_json_digest(receipt, exclude_keys={"digests"}),
+    }
+    receipt["commands"][0]["command"] = "false"
+    _write_json(run_dir / "receipt.json", receipt)
+
+    readiness = _assess(target, "EC-01")
+
+    assert readiness["outcome"] == "rejected"
+    assert readiness["reason"] == "receipt_digest_mismatch"
+
+
+def test_completed_verify_receipt_with_wrong_directory_binding_is_rejected(tmp_path):
+    target = _ws(tmp_path)
+    run_dir = _verify_dir(target, "verify-a")
+    _write_verify_receipt(run_dir, run_id="verify-b")
+    receipt = json.loads((run_dir / "receipt.json").read_text())
+    receipt["digests"] = {
+        "algorithm": "sha256",
+        "receipt_sha256": localio.canonical_json_digest(receipt, exclude_keys={"digests"}),
+    }
+    _write_json(run_dir / "receipt.json", receipt)
+
+    readiness = _assess(target, "EC-01")
+
+    assert readiness["outcome"] == "rejected"
+    assert readiness["reason"] == "run_binding_mismatch"
 
 
 def test_run_scoped_query_excludes_other_producer_runs(tmp_path):
@@ -339,7 +583,61 @@ def test_ec11_parses_multiline_index_jsonl(tmp_path):
     assert readiness["dimensions"]["integrity"] == {"status": "not_checked", "reason": "verifier_not_wired"}
 
 
-def test_ec12_evidence_package_manifest_untested_passed_failed(tmp_path):
+def _write_strict_package(
+    package_dir: Path,
+    *,
+    producer_run_id: str | None = RUN,
+    verify_run_id: str = "verify-a",
+    receipt_schema_version: int = 2,
+) -> None:
+    receipt: dict = {
+        "schema_version": receipt_schema_version,
+        "run_id": verify_run_id,
+        "producer_run_id": producer_run_id,
+        "tree_fingerprint": "1" * 40,
+        "baseline_commit": "2" * 40,
+        "changes_patch_sha256": hashlib.sha256(b"patch").hexdigest(),
+    }
+    receipt["digests"] = {
+        "algorithm": "sha256",
+        "receipt_sha256": localio.canonical_json_digest(receipt, exclude_keys={"digests"}),
+    }
+    contents = {"receipt.json": json.dumps(receipt, sort_keys=True).encode(), "changes.patch": b"patch"}
+    allowed = {name: (kind, media) for name, kind, media in control_crosswalk.evidence_package.PACKAGE_FILES}
+    entries = [
+        {
+            "path": name,
+            "sha256": hashlib.sha256(data).hexdigest(),
+            "bytes": len(data),
+            "media_type": allowed[name][1],
+            "kind": allowed[name][0],
+        }
+        for name, data in sorted(contents.items())
+    ]
+    source = {
+        "verify_run_id": verify_run_id,
+        "producer_run_id": producer_run_id,
+        "tree_fingerprint": receipt["tree_fingerprint"],
+        "baseline_commit": receipt["baseline_commit"],
+        "changes_patch_sha256": receipt["changes_patch_sha256"],
+        "receipt_sha256": receipt["digests"]["receipt_sha256"],
+    }
+    manifest = {
+        "schema": control_crosswalk.evidence_package.SCHEMA,
+        "schema_version": 1,
+        "created_at": "2026-09-06T00:00:00Z",
+        "source": source,
+        "entries": entries,
+        "entries_sha256": localio.canonical_json_digest(entries),
+        "limitations": ["receipt-contains-local-paths", "integrity-only"],
+    }
+    package_dir.mkdir(parents=True, exist_ok=True)
+    for name, data in contents.items():
+        (package_dir / name).write_bytes(data)
+    _write_json(package_dir / "manifest.json", manifest)
+
+
+def test_ec12_strict_package_snapshot_validates_and_rejects_tampering(tmp_path):
     target = tmp_path / "ws"
     target.mkdir()
 
@@ -351,55 +649,702 @@ def test_ec12_evidence_package_manifest_untested_passed_failed(tmp_path):
     assert all(m["state"] == "untested" for m in ec12_rows), [m["state"] for m in ec12_rows]
 
     pkg_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
-    pkg_dir.mkdir(parents=True)
-    entries = [
-        {
-            "path": "receipt.json",
-            "sha256": "a" * 64,
-            "bytes": 2,
-            "media_type": "application/json",
-            "kind": "receipt",
+    _write_strict_package(pkg_dir)
+    evaluated = control_crosswalk.evaluate_controls(target)
+    ec12_rows = [
+        m for m in evaluated["mappings"] if m["claim_id"] == "EC-12" and m["relationship"] != "no-relationship"
+    ]
+    assert all(m["state"] == "evidenced_passed" for m in ec12_rows), [m["state"] for m in ec12_rows]
+    assert evaluated["evidence_readiness"]["EC-12"]["outcome"] == "validated"
+    assert (
+        evaluated["evidence_readiness"]["EC-12"]["artifacts"][0]["source_digest_sha256"]
+        == hashlib.sha256((pkg_dir / "manifest.json").read_bytes()).hexdigest()
+    )
+
+    (pkg_dir / "changes.patch").write_text("tampered", encoding="utf-8")
+
+    evaluated = control_crosswalk.evaluate_controls(target)
+    ec12_rows = [
+        m for m in evaluated["mappings"] if m["claim_id"] == "EC-12" and m["relationship"] != "no-relationship"
+    ]
+    assert all(m["state"] == "evidenced_failed" for m in ec12_rows), [m["state"] for m in ec12_rows]
+    assert evaluated["evidence_readiness"]["EC-12"]["reason"] == "package_snapshot_mismatch"
+
+
+def test_ec12_holds_source_handles_through_final_package_recheck(tmp_path, monkeypatch):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir)
+    io = control_crosswalk._control_crosswalk_io
+    original_check = io.package_source_issue
+    readers = []
+
+    def check_with_held_source_handles(reader, artifact, *args, **kwargs):
+        assert artifact == package_dir
+        assert {path.name for path in reader.held_reads if path.parent == artifact} == {
+            "manifest.json",
+            "receipt.json",
+            "changes.patch",
         }
-    ]
-    entries.sort(key=lambda e: e["path"])
-    manifest = {
-        "schema": "brigade.evidence_package.v1",
-        "schema_version": 1,
-        "created_at": "2026-09-06T00:00:00Z",
-        "source": {"verify_run_id": "run-1", "receipt_sha256": "b" * 64},
-        "entries": entries,
-        "entries_sha256": localio.canonical_json_digest(entries),
-        "limitations": [],
+        for descriptor in reader.held_reads.values():
+            os.fstat(descriptor)
+        readers.append(reader)
+        return original_check(reader, artifact, *args, **kwargs)
+
+    monkeypatch.setattr(io, "package_source_issue", check_with_held_source_handles)
+
+    readiness = _assess(target, "EC-12")
+
+    assert readiness["outcome"] == "validated"
+    assert len(readers) == 1
+    assert readers[0].held_reads == {}
+
+
+def test_ec12_accepts_export_supported_legacy_receipt_schema(tmp_path):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-legacy"
+    _write_strict_package(package_dir, receipt_schema_version=1)
+
+    readiness = _assess(target, "EC-12")
+
+    assert readiness["outcome"] == "validated"
+    assert readiness["artifacts"][0]["outcome"] == "validated"
+
+
+def test_ec12_rejects_stale_stored_receipt_digest_as_package_mismatch(tmp_path):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir)
+
+    receipt_path = package_dir / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["status"] = "failed"
+    _write_json(receipt_path, receipt)
+
+    manifest_path = package_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    receipt_entry = next(entry for entry in manifest["entries"] if entry["path"] == "receipt.json")
+    receipt_bytes = receipt_path.read_bytes()
+    receipt_entry["bytes"] = len(receipt_bytes)
+    receipt_entry["sha256"] = hashlib.sha256(receipt_bytes).hexdigest()
+    manifest["entries_sha256"] = localio.canonical_json_digest(manifest["entries"])
+    _write_json(manifest_path, manifest)
+
+    result = _assess(target, "EC-12")
+
+    assert result["outcome"] == "rejected"
+    assert result["reason"] == "package_snapshot_mismatch"
+
+
+def test_ec12_rejects_receipt_tampering_before_unsupported_schema(tmp_path):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-unsupported-tampered"
+    _write_strict_package(package_dir)
+    receipt_path = package_dir / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["schema_version"] = 999
+    _write_json(receipt_path, receipt)
+
+    manifest_path = package_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    receipt_entry = next(entry for entry in manifest["entries"] if entry["path"] == "receipt.json")
+    receipt_bytes = receipt_path.read_bytes()
+    receipt_entry["bytes"] = len(receipt_bytes)
+    receipt_entry["sha256"] = hashlib.sha256(receipt_bytes).hexdigest()
+    manifest["entries_sha256"] = localio.canonical_json_digest(manifest["entries"])
+    _write_json(manifest_path, manifest)
+
+    result = _assess(target, "EC-12")
+
+    assert result["outcome"] == "rejected"
+    assert result["reason"] == "package_snapshot_mismatch"
+
+
+def test_ec12_rejects_stale_manifest_entries_digest_as_mismatch(tmp_path):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-stale-entries-digest"
+    _write_strict_package(package_dir)
+    manifest_path = package_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["entries_sha256"] = "0" * 64
+    _write_json(manifest_path, manifest)
+
+    result = _assess(target, "EC-12")
+
+    assert result["outcome"] == "rejected"
+    assert result["reason"] == "package_snapshot_mismatch"
+
+
+def test_ec12_binds_package_mismatch_from_packaged_receipt(tmp_path):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir, producer_run_id=RUN)
+    manifest_path = package_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["source"]["producer_run_id"] = "tampered-run"
+    _write_json(manifest_path, manifest)
+
+    readiness = _assess(target, "EC-12", RUN)
+
+    assert readiness["outcome"] == "rejected"
+    assert readiness["population"]["in_scope"] == 1
+    assert readiness["artifacts"][0]["outcome"] == "rejected"
+    assert readiness["artifacts"][0]["scope"] == "in_scope"
+    assert readiness["reason"] == "package_snapshot_mismatch"
+
+
+def test_ec12_does_not_bind_invalid_package_from_unstaged_manifest(tmp_path):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-invalid-binding"
+    _write_strict_package(package_dir, producer_run_id=RUN)
+    manifest_path = package_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["source"]["producer_run_id"] = "other-run"
+    manifest["source"]["verify_run_id"] = "other-run"
+    manifest["entries"][0]["bytes"] = -1
+    _write_json(manifest_path, manifest)
+
+    result = _assess(target, "EC-12", RUN)
+
+    assert result["outcome"] == "incomplete"
+    assert result["population"]["unbound"] == 1
+    assert result["artifacts"][0]["outcome"] == "invalid"
+    assert result["artifacts"][0]["scope"] == "unbound"
+
+
+def test_ec12_does_not_period_filter_rejected_package_from_manifest_timestamp(tmp_path):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-tampered-period"
+    _write_strict_package(package_dir, producer_run_id=RUN)
+    manifest_path = package_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["source"]["baseline_commit"] = "f" * 40
+    manifest["created_at"] = "2020-01-01T00:00:00Z"
+    _write_json(manifest_path, manifest)
+
+    result = _assess(
+        target,
+        "EC-12",
+        RUN,
+        period=("2026-01-01T00:00:00Z", "2026-12-31T23:59:59Z"),
+    )
+
+    assert result["outcome"] == "rejected"
+    assert result["population"]["out_of_period"] == 0
+    assert result["artifacts"][0]["scope"] == "in_scope"
+    assert result["artifacts"][0]["reason_codes"] == ["package_snapshot_mismatch", "timestamp_missing"]
+
+
+def test_ec12_does_not_period_filter_schema_invalid_package_from_manifest_timestamp(tmp_path):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-invalid-period"
+    _write_strict_package(package_dir, producer_run_id=RUN)
+    manifest_path = package_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["limitations"] = ["unsupported"]
+    manifest["created_at"] = "2020-01-01T00:00:00Z"
+    _write_json(manifest_path, manifest)
+
+    result = _assess(
+        target,
+        "EC-12",
+        RUN,
+        period=("2026-01-01T00:00:00Z", "2026-12-31T23:59:59Z"),
+    )
+
+    assert result["outcome"] == "invalid"
+    assert result["population"]["out_of_period"] == 0
+    assert result["artifacts"][0]["outcome"] == "invalid"
+    assert result["artifacts"][0]["scope"] == "in_scope"
+
+
+def test_ec12_caps_manifest_and_entry_reads_for_the_discovered_population(tmp_path, monkeypatch):
+    target = _ws(tmp_path)
+    package_root = target / ".brigade" / "evidence-packages"
+    first = package_root / "pkg-1"
+    second = package_root / "pkg-2"
+    _write_strict_package(first)
+    _write_strict_package(second)
+    package_bytes = sum(path.stat().st_size for path in first.iterdir())
+    monkeypatch.setattr(control_crosswalk.evidence_package_snapshot, "MAX_PACKAGE_BYTES", package_bytes)
+    monkeypatch.setattr(control_crosswalk, "_ASSESSMENT_BYTE_BUDGET", 0)
+
+    readiness = _assess(target, "EC-12")
+
+    assert readiness["artifacts"][0]["outcome"] == "validated"
+    assert readiness["artifacts"][1]["outcome"] == "unavailable"
+    assert "read_limit_exceeded" in readiness["artifacts"][1]["reason_codes"]
+
+
+def test_ec12_ignores_unavailable_wrong_run_package_verifier_state(tmp_path, monkeypatch):
+    target = _ws(tmp_path)
+    package_root = target / ".brigade" / "evidence-packages"
+    in_scope = package_root / "a-valid"
+    wrong_run = package_root / "z-wrong"
+    _write_strict_package(in_scope, verify_run_id=RUN)
+    _write_strict_package(wrong_run, verify_run_id="other-run", producer_run_id="other-run")
+    failing_entry = wrong_run / "changes.patch"
+    original_copy = control_crosswalk._AssessmentReader.copy
+
+    def fail_wrong_run_entry(reader, path, *args, **kwargs):
+        if path == failing_entry:
+            raise OSError("synthetic source read failure")
+        return original_copy(reader, path, *args, **kwargs)
+
+    monkeypatch.setattr(control_crosswalk._AssessmentReader, "copy", fail_wrong_run_entry)
+
+    readiness = _assess(target, "EC-12", RUN)
+
+    assert readiness["outcome"] == "validated"
+    assert readiness["verifier"]["status"] == "wired"
+    assert readiness["artifacts"][0]["outcome"] == "validated"
+    assert readiness["artifacts"][1]["scope"] == "wrong_run"
+    assert readiness["artifacts"][1]["outcome"] == "unavailable"
+
+
+def test_ec12_valid_package_ignores_symlinked_public_trust_file(tmp_path):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir)
+    trust_dir = target / ".brigade" / "attestation"
+    trust_dir.mkdir()
+    external_signers = tmp_path / "allowed_signers"
+    external_signers.write_text("unrelated trust data", encoding="utf-8")
+    try:
+        (trust_dir / "allowed_signers").symlink_to(external_signers)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+
+    readiness = _assess(target, "EC-12")
+
+    assert readiness["outcome"] == "validated"
+    assert readiness["artifacts"][0]["outcome"] == "validated"
+
+
+def test_ec12_rejects_unlisted_package_children(tmp_path):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir)
+    (package_dir / "unlisted.txt").write_text("unexpected", encoding="utf-8")
+
+    readiness = _assess(target, "EC-12")
+
+    assert readiness["outcome"] == "rejected"
+    assert readiness["reason"] == "entry_path_unsafe"
+    assert readiness["artifacts"][0]["outcome"] == "rejected"
+
+
+def test_ec12_rejects_unlisted_child_after_five_package_entries(tmp_path):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir)
+    (package_dir / "zzz-unlisted.txt").write_text("unexpected", encoding="utf-8")
+
+    readiness = _assess(target, "EC-12")
+
+    assert readiness["outcome"] == "rejected"
+    assert readiness["reason"] == "entry_path_unsafe"
+    assert readiness["artifacts"][0]["outcome"] == "rejected"
+
+
+def test_ec12_rejects_child_added_while_package_is_staged(tmp_path, monkeypatch):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir)
+    manifest_path = package_dir / "manifest.json"
+    late_path = package_dir / "late-unlisted.txt"
+    original_copy = control_crosswalk._AssessmentReader.copy
+
+    def copy_then_add(reader, path, *args, **kwargs):
+        result = original_copy(reader, path, *args, **kwargs)
+        if path == manifest_path:
+            late_path.write_text("unexpected", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(control_crosswalk._AssessmentReader, "copy", copy_then_add)
+
+    readiness = _assess(target, "EC-12")
+
+    assert readiness["outcome"] == "rejected"
+    assert readiness["reason"] == "entry_path_unsafe"
+    assert readiness["artifacts"][0]["outcome"] == "rejected"
+
+
+def test_ec12_rejects_entry_changed_after_staging(tmp_path, monkeypatch):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir)
+    entry_path = package_dir / "changes.patch"
+    original_copy = control_crosswalk._AssessmentReader.copy
+
+    def copy_then_rewrite(reader, path, *args, **kwargs):
+        result = original_copy(reader, path, *args, **kwargs)
+        if path == entry_path:
+            entry_path.write_text("changed after staging", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(control_crosswalk._AssessmentReader, "copy", copy_then_rewrite)
+
+    readiness = _assess(target, "EC-12")
+
+    assert readiness["outcome"] == "rejected"
+    assert readiness["reason"] == "package_snapshot_mismatch"
+    assert readiness["artifacts"][0]["outcome"] == "rejected"
+
+
+def test_ec12_rejects_entry_metadata_that_differs_when_opened(tmp_path, monkeypatch):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir)
+    receipt_path = package_dir / "receipt.json"
+    original_copy = control_crosswalk._AssessmentReader.copy
+
+    def copy_with_different_opened_metadata(reader, path, *args, **kwargs):
+        result = original_copy(reader, path, *args, **kwargs)
+        if path == receipt_path:
+            opened = reader.read_metadata[path]
+            reader.read_metadata[path] = (opened[0], opened[1] + 1, *opened[2:])
+        return result
+
+    monkeypatch.setattr(control_crosswalk._AssessmentReader, "copy", copy_with_different_opened_metadata)
+
+    readiness = _assess(target, "EC-12")
+
+    assert readiness["outcome"] == "rejected"
+    assert readiness["reason"] == "package_snapshot_mismatch"
+    assert readiness["artifacts"][0]["outcome"] == "rejected"
+
+
+def test_ec12_rejects_package_directory_replaced_while_staging(tmp_path, monkeypatch):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir)
+    displaced_dir = package_dir.with_name("pkg-1-original")
+    manifest_path = package_dir / "manifest.json"
+    original_copy = control_crosswalk._AssessmentReader.copy
+
+    def copy_then_replace_directory(reader, path, *args, **kwargs):
+        result = original_copy(reader, path, *args, **kwargs)
+        if path == manifest_path:
+            package_dir.rename(displaced_dir)
+            package_dir.mkdir()
+        return result
+
+    monkeypatch.setattr(control_crosswalk._AssessmentReader, "copy", copy_then_replace_directory)
+
+    readiness = _assess(target, "EC-12")
+
+    assert readiness["outcome"] == "unavailable"
+    assert readiness["reason"] == "verifier_error"
+    assert readiness["artifacts"][0]["outcome"] == "unavailable"
+    assert displaced_dir.is_dir()
+    assert package_dir.is_dir()
+
+
+def test_ec12_rejects_package_directory_metadata_changed_while_staging(tmp_path, monkeypatch):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir)
+    manifest_path = package_dir / "manifest.json"
+    transient_path = package_dir / "transient-entry"
+    original_copy = control_crosswalk._AssessmentReader.copy
+
+    def copy_then_change_directory(reader, path, *args, **kwargs):
+        result = original_copy(reader, path, *args, **kwargs)
+        if path == manifest_path:
+            transient_path.write_text("temporary", encoding="utf-8")
+            transient_path.unlink()
+        return result
+
+    monkeypatch.setattr(control_crosswalk._AssessmentReader, "copy", copy_then_change_directory)
+
+    readiness = _assess(target, "EC-12")
+
+    assert readiness["outcome"] == "unavailable"
+    assert readiness["reason"] == "verifier_error"
+    assert readiness["artifacts"][0]["outcome"] == "unavailable"
+
+
+def test_ec12_rejects_manifest_changed_after_its_initial_read(tmp_path, monkeypatch):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir)
+    manifest_path = package_dir / "manifest.json"
+    original_copy = control_crosswalk._AssessmentReader.copy
+
+    def copy_then_rewrite_manifest(reader, path, *args, **kwargs):
+        result = original_copy(reader, path, *args, **kwargs)
+        if path == manifest_path:
+            manifest_path.write_text(manifest_path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+        return result
+
+    monkeypatch.setattr(control_crosswalk._AssessmentReader, "copy", copy_then_rewrite_manifest)
+
+    readiness = _assess(target, "EC-12")
+
+    assert readiness["outcome"] == "rejected"
+    assert readiness["reason"] == "package_snapshot_mismatch"
+    assert readiness["artifacts"][0]["outcome"] == "rejected"
+
+
+def test_ec12_rejects_unsafe_manifest_entry_path(tmp_path):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir)
+    manifest_path = package_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["entries"][0]["path"] = "../receipt.json"
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    readiness = _assess(target, "EC-12")
+
+    assert readiness["outcome"] == "rejected"
+    assert readiness["reason"] == "entry_path_unsafe"
+    assert readiness["artifacts"][0]["outcome"] == "rejected"
+
+
+def test_ec12_rejects_symlinked_package_manifest(tmp_path):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir)
+    manifest_path = package_dir / "manifest.json"
+    external_manifest = tmp_path / "manifest.json"
+    external_manifest.write_bytes(manifest_path.read_bytes())
+    manifest_path.unlink()
+    try:
+        manifest_path.symlink_to(external_manifest)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+
+    readiness = _assess(target, "EC-12")
+
+    assert readiness["outcome"] == "rejected"
+    assert readiness["reason"] == "entry_path_unsafe"
+    assert readiness["artifacts"][0]["outcome"] == "rejected"
+
+
+def test_ec12_rejects_nonregular_package_manifest(tmp_path):
+    target = _ws(tmp_path)
+    manifest_path = target / ".brigade" / "evidence-packages" / "pkg-dir-manifest" / "manifest.json"
+    manifest_path.mkdir(parents=True)
+
+    readiness = _assess(target, "EC-12")
+
+    assert readiness["outcome"] == "rejected"
+    assert readiness["artifacts"][0]["outcome"] == "rejected"
+    assert readiness["artifacts"][0]["reason_codes"] == ["entry_path_unsafe"]
+
+
+def test_ec12_preserves_manifest_read_refusal_as_unavailable(tmp_path, monkeypatch):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-unreadable-manifest"
+    _write_strict_package(package_dir)
+    manifest_path = package_dir / "manifest.json"
+    original_read = control_crosswalk._AssessmentReader.read
+
+    def refuse_manifest(reader, path, *args, **kwargs):
+        if path == manifest_path:
+            reader.errors[path] = "discovery_unreadable"
+            raise control_crosswalk._control_crosswalk_io._ReadRefusal("discovery_unreadable")
+        return original_read(reader, path, *args, **kwargs)
+
+    monkeypatch.setattr(control_crosswalk._AssessmentReader, "read", refuse_manifest)
+
+    readiness = _assess(target, "EC-12")
+
+    assert readiness["outcome"] == "unavailable"
+    assert readiness["artifacts"][0]["outcome"] == "unavailable"
+    assert readiness["artifacts"][0]["reason_codes"] == ["discovery_unreadable"]
+
+
+def test_ec12_rejects_symlinked_package_directory(tmp_path):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir)
+    linked_dir = package_dir.parent / "linked-package"
+    try:
+        linked_dir.symlink_to(package_dir, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+
+    readiness = _assess(target, "EC-12")
+
+    assert readiness["outcome"] == "rejected"
+    assert readiness["reason"] == "entry_path_unsafe"
+    assert any(artifact["outcome"] == "rejected" for artifact in readiness["artifacts"])
+
+
+def test_ec12_rejects_symlinked_package_entry(tmp_path):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir, producer_run_id=RUN)
+    external_patch = tmp_path / "external.patch"
+    external_patch.write_bytes((package_dir / "changes.patch").read_bytes())
+    entry_path = package_dir / "changes.patch"
+    entry_path.unlink()
+    try:
+        entry_path.symlink_to(external_patch)
+    except OSError as exc:
+        pytest.skip(f"symlink creation unavailable: {exc}")
+
+    readiness = _assess(target, "EC-12", RUN)
+
+    assert readiness["outcome"] == "rejected"
+    assert readiness["population"]["in_scope"] == 1
+    assert readiness["artifacts"][0]["scope"] == "in_scope"
+    assert readiness["artifacts"][0]["reason_codes"] == ["entry_path_unsafe"]
+    assert readiness["artifacts"][0]["outcome"] == "rejected"
+
+
+def test_ec12_rejects_reparse_refusal_for_package_entry_during_staging(tmp_path, monkeypatch):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir)
+    reparse_error = control_crosswalk._control_crosswalk_io.dirfd._nt_dirfd().ReparsePointRefusedError
+    reader_type = control_crosswalk._AssessmentReader
+    real_info = reader_type.info
+
+    def refuse_reparse(reader, path):
+        if path.name == "changes.patch":
+            raise reparse_error("path component is a reparse point")
+        return real_info(reader, path)
+
+    monkeypatch.setattr(reader_type, "info", refuse_reparse)
+    monkeypatch.setattr(
+        control_crosswalk._control_crosswalk_io.dirfd,
+        "is_reparse_point_refusal",
+        lambda error: isinstance(error, reparse_error),
+    )
+
+    readiness = _assess(target, "EC-12")
+
+    assert readiness["outcome"] == "rejected"
+    assert readiness["reason"] == "entry_path_unsafe"
+
+
+def test_package_source_recheck_maps_reparse_entry_to_unsafe(tmp_path, monkeypatch):
+    reader_type = control_crosswalk._AssessmentReader
+    io = control_crosswalk._control_crosswalk_io
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir)
+    reader = reader_type(target)
+    package_fd = reader.directory(package_dir)
+    initial_directory = io._package_entry_metadata(os.fstat(package_fd))
+    assert initial_directory is not None
+    expected_names = set(io.dirfd.child_names(package_fd, len(control_crosswalk.evidence_package.PACKAGE_FILES) + 2))
+    entry_path = package_dir / "changes.patch"
+    metadata = {"changes.patch": io._package_entry_metadata(os.stat(entry_path))}
+    reparse_error = io.dirfd._nt_dirfd().ReparsePointRefusedError
+    real_info = reader_type.info
+
+    def refuse_reparse(instance, path):
+        if instance is reader and path == entry_path:
+            raise reparse_error("path component is a reparse point")
+        return real_info(instance, path)
+
+    monkeypatch.setattr(reader_type, "info", refuse_reparse)
+    monkeypatch.setattr(io.dirfd, "is_reparse_point_refusal", lambda error: isinstance(error, reparse_error))
+    try:
+        issue = io.package_source_issue(
+            reader,
+            package_dir,
+            package_fd,
+            initial_directory,
+            expected_names,
+            metadata,
+            max_children=len(control_crosswalk.evidence_package.PACKAGE_FILES) + 2,
+        )
+    finally:
+        reader.close()
+
+    assert issue == "unsafe"
+
+
+@pytest.mark.parametrize(
+    "patch_size", [attestation_input.MAX_JSON_BYTES + 1, control_crosswalk.evidence_package.MAX_ENTRY_BYTES]
+)
+def test_ec12_accepts_package_entry_within_entry_limit(tmp_path, patch_size):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir)
+    patch = b"p" * patch_size
+    receipt_path = package_dir / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["changes_patch_sha256"] = hashlib.sha256(patch).hexdigest()
+    receipt["digests"] = {
+        "algorithm": "sha256",
+        "receipt_sha256": localio.canonical_json_digest(receipt, exclude_keys={"digests"}),
     }
-    (pkg_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
+    receipt_bytes = json.dumps(receipt, sort_keys=True).encode()
+    receipt_path.write_bytes(receipt_bytes)
+    (package_dir / "changes.patch").write_bytes(patch)
+    manifest_path = package_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["source"]["changes_patch_sha256"] = hashlib.sha256(patch).hexdigest()
+    manifest["source"]["receipt_sha256"] = receipt["digests"]["receipt_sha256"]
+    for entry in manifest["entries"]:
+        data = (package_dir / entry["path"]).read_bytes()
+        entry["sha256"] = hashlib.sha256(data).hexdigest()
+        entry["bytes"] = len(data)
+    manifest["entries_sha256"] = localio.canonical_json_digest(manifest["entries"])
+    _write_json(manifest_path, manifest)
 
-    # A listed entry that is absent is rejected, not passed.
-    evaluated = control_crosswalk.evaluate_controls(target)
-    ec12_rows = [
-        m for m in evaluated["mappings"] if m["claim_id"] == "EC-12" and m["relationship"] != "no-relationship"
-    ]
-    assert all(m["state"] == "evidenced_failed" for m in ec12_rows), [m["state"] for m in ec12_rows]
-    assert evaluated["evidence_readiness"]["EC-12"]["reason"] == "entry_missing"
+    readiness = _assess(target, "EC-12")
 
-    # v2: a self-consistent manifest with present entries is structurally observed.
-    # Entry contents are not rehashed until the strict package verifier is wired,
-    # so it is not validated evidence.
-    (pkg_dir / "receipt.json").write_text("{}", encoding="utf-8")
-    evaluated = control_crosswalk.evaluate_controls(target)
-    ec12_rows = [
-        m for m in evaluated["mappings"] if m["claim_id"] == "EC-12" and m["relationship"] != "no-relationship"
-    ]
-    assert all(m["state"] == "untested" for m in ec12_rows), [m["state"] for m in ec12_rows]
-    assert all(m["evidence_outcome"] == "structure_observed" for m in ec12_rows)
+    assert readiness["outcome"] == "validated"
 
-    manifest["entries_sha256"] = "c" * 64
-    (pkg_dir / "manifest.json").write_text(json.dumps(manifest, indent=2, sort_keys=True), encoding="utf-8")
 
-    evaluated = control_crosswalk.evaluate_controls(target)
-    ec12_rows = [
-        m for m in evaluated["mappings"] if m["claim_id"] == "EC-12" and m["relationship"] != "no-relationship"
-    ]
-    assert all(m["state"] == "evidenced_failed" for m in ec12_rows), [m["state"] for m in ec12_rows]
+@pytest.mark.parametrize("entries", [None, "not-a-list"])
+def test_ec12_reports_malformed_entry_list_as_invalid(tmp_path, entries):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir)
+    manifest_path = package_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["entries"] = entries
+    _write_json(manifest_path, manifest)
+
+    readiness = _assess(target, "EC-12")
+
+    assert readiness["outcome"] == "invalid"
+    assert readiness["reason"] == "schema_missing"
+
+
+def test_ec12_reports_oversized_declared_package_entry_as_malformed(tmp_path):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir)
+    manifest_path = package_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    patch_entry = next(entry for entry in manifest["entries"] if entry["path"] == "changes.patch")
+    patch_entry["bytes"] = control_crosswalk.evidence_package.MAX_ENTRY_BYTES + 1
+    manifest["entries_sha256"] = localio.canonical_json_digest(manifest["entries"])
+    with (package_dir / "changes.patch").open("wb") as stream:
+        stream.truncate(control_crosswalk.evidence_package.MAX_ENTRY_BYTES + 1)
+    _write_json(manifest_path, manifest)
+
+    readiness = _assess(target, "EC-12")
+
+    assert readiness["outcome"] == "invalid"
+    assert readiness["reason"] == "schema_missing"
+
+
+@pytest.mark.parametrize("bad_name", ["bad\\name", "bad:name", "bad\x00name", "manifest.json"])
+def test_ec12_reports_descriptor_invalid_entry_names_as_malformed(tmp_path, bad_name):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir)
+    manifest_path = package_dir / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    patch_entry = next(entry for entry in manifest["entries"] if entry["path"] == "changes.patch")
+    patch_entry["path"] = bad_name
+    _write_json(manifest_path, manifest)
+
+    readiness = _assess(target, "EC-12")
+
+    assert readiness["outcome"] == "invalid"
+    assert readiness["reason"] == "schema_missing"
 
 
 def test_json_output_is_sorted_and_includes_schema(tmp_path, capsys):
@@ -592,8 +1537,6 @@ def test_rendered_doc_shows_unmapped_property_contracts():
 
 # --- brigade.claim_readiness.v1 contract (#1617) ---------------------------
 
-RUN = "research-run"
-
 
 def _ws(tmp_path: Path) -> Path:
     target = tmp_path / "ws"
@@ -629,6 +1572,661 @@ def _fixture_ec03(target: Path) -> None:
         _verify_dir(target, "v1") / "attestation.sigstore.json",
         {"mediaType": cosign_attestation.SIGSTORE_BUNDLE_MEDIA_TYPE, "dsseEnvelope": {}},
     )
+
+
+def _write_cosign_assessment_fixture(
+    target: Path,
+    *,
+    wrong_run: bool = False,
+    run_dir_name: str = "verify-a",
+    producer_run_id: str | None = None,
+) -> Path:
+    run_dir = _verify_dir(target, run_dir_name)
+    _write_verify_receipt(
+        run_dir,
+        run_id="verify-b" if wrong_run else run_dir_name,
+        producer_run_id=producer_run_id,
+    )
+    receipt_path = run_dir / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["tree_fingerprint"] = "1" * 40
+    receipt["changes_patch_sha256"] = "2" * 64
+    _write_json(receipt_path, receipt)
+    statement = attestation.build_statement(receipt)
+    payload = attestation.canonical_statement_bytes(statement)
+    bundle = {
+        "mediaType": cosign_attestation.SIGSTORE_BUNDLE_MEDIA_TYPE,
+        "verificationMaterial": {"publicKey": {"hint": "fixture"}, "tlogEntries": []},
+        "dsseEnvelope": {
+            "payloadType": attestation.DSSE_PAYLOAD_TYPE,
+            "payload": base64.b64encode(payload).decode("ascii"),
+            "signatures": [{"sig": base64.b64encode(b"signature").decode("ascii")}],
+        },
+    }
+    _write_json(run_dir / "attestation.sigstore.json", bundle)
+    key_path = target / ".brigade" / "attestation" / "cosign.pub"
+    key_path.parent.mkdir(parents=True, exist_ok=True)
+    key_path.write_text("fixture public key", encoding="utf-8")
+    return run_dir
+
+
+def test_ec03_cosign_bundle_is_cryptographically_verified_and_receipt_bound(tmp_path, monkeypatch):
+    from brigade import control_crosswalk_cosign
+
+    target = _ws(tmp_path)
+    run_dir = _write_cosign_assessment_fixture(target)
+    calls = []
+    monkeypatch.setattr(cosign_attestation, "require_safe_cosign", lambda: ("/usr/bin/cosign", (2, 6, 5)))
+    monkeypatch.setattr(
+        control_crosswalk_cosign.subprocess,
+        "run",
+        lambda command, **_kwargs: calls.append(command) or type("Result", (), {"returncode": 0})(),
+    )
+
+    result = _assess(target, "EC-03")
+
+    assert result["outcome"] == "incomplete"
+    assert result["dimensions"]["signature"]["status"] == "passed"
+    assert result["dimensions"]["authorization"]["status"] == "unknown"
+    assert (
+        result["artifacts"][0]["source_digest_sha256"]
+        == hashlib.sha256((run_dir / "attestation.sigstore.json").read_bytes()).hexdigest()
+    )
+    assert calls and "--insecure-ignore-tlog=true" in calls[0]
+    assert "--digest=1111111111111111111111111111111111111111" in calls[0]
+
+
+def test_ec03_cosign_bundle_rejects_wrong_run_binding(tmp_path, monkeypatch):
+    from brigade import control_crosswalk_cosign
+
+    target = _ws(tmp_path)
+    _write_cosign_assessment_fixture(target, wrong_run=True)
+    monkeypatch.setattr(cosign_attestation, "require_safe_cosign", lambda: ("/usr/bin/cosign", (2, 6, 5)))
+    monkeypatch.setattr(
+        control_crosswalk_cosign.subprocess,
+        "run",
+        lambda *_args, **_kwargs: type("Result", (), {"returncode": 0})(),
+    )
+
+    result = _assess(target, "EC-03")
+
+    assert result["outcome"] == "rejected"
+    assert result["reason"] == "run_binding_mismatch"
+    assert result["dimensions"]["integrity"]["status"] == "passed"
+    assert result["dimensions"]["signature"]["status"] == "passed"
+
+
+def test_ec03_signature_failure_does_not_pass_unchecked_run_binding(tmp_path, monkeypatch):
+    from brigade import control_crosswalk_cosign
+
+    target = _ws(tmp_path)
+    _write_cosign_assessment_fixture(target, wrong_run=True)
+    monkeypatch.setattr(cosign_attestation, "require_safe_cosign", lambda: ("/usr/bin/cosign", (2, 6, 5)))
+    monkeypatch.setattr(
+        control_crosswalk_cosign.subprocess,
+        "run",
+        lambda *_args, **_kwargs: type("Result", (), {"returncode": 1})(),
+    )
+
+    result = _assess(target, "EC-03")
+
+    assert result["outcome"] == "rejected"
+    assert result["dimensions"]["signature"]["status"] == "failed"
+    assert result["dimensions"]["subject"]["status"] == "unknown"
+
+
+def test_ec03_does_not_bind_preverification_invalid_bundle_from_receipt(tmp_path):
+    target = _ws(tmp_path)
+    run_dir = _write_cosign_assessment_fixture(target, producer_run_id=RUN)
+    bundle_path = run_dir / "attestation.sigstore.json"
+    bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    bundle["mediaType"] = "application/invalid"
+    _write_json(bundle_path, bundle)
+    receipt_path = run_dir / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["producer_run_id"] = "tampered-run"
+    _write_json(receipt_path, receipt)
+
+    result = _assess(target, "EC-03", RUN)
+
+    assert result["outcome"] == "incomplete"
+    assert result["population"]["unbound"] == 1
+    assert result["artifacts"][0]["outcome"] == "invalid"
+    assert result["artifacts"][0]["scope"] == "unbound"
+
+
+def test_ec03_classifies_missing_bundle_verification_material_as_invalid(tmp_path):
+    target = _ws(tmp_path)
+    run_dir = _write_cosign_assessment_fixture(target, producer_run_id=RUN)
+    bundle_path = run_dir / "attestation.sigstore.json"
+    bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    bundle.pop("verificationMaterial")
+    _write_json(bundle_path, bundle)
+
+    result = _assess(target, "EC-03", RUN)
+
+    assert result["outcome"] == "incomplete"
+    assert result["population"]["unbound"] == 1
+    assert result["artifacts"][0]["outcome"] == "invalid"
+    assert result["artifacts"][0]["scope"] == "unbound"
+    assert result["artifacts"][0]["reason_codes"] == ["schema_missing"]
+
+
+def test_ec03_cosign_bundle_preserves_unavailable_verifier_state(tmp_path, monkeypatch):
+    target = _ws(tmp_path)
+    run_dir = _write_cosign_assessment_fixture(target)
+    (target / ".brigade" / "attestation" / "cosign.pub").unlink()
+
+    result = _assess(target, "EC-03")
+
+    assert result["outcome"] == "unavailable"
+    assert result["reason"] == "verifier_tool_unavailable"
+    assert result["verifier"]["status"] == "unavailable"
+    assert not run_dir.joinpath("attestation.sigstore.json").is_symlink()
+
+
+@pytest.mark.parametrize("refusal", ["symlink_refused", "discovery_unreadable", "read_limit_exceeded"])
+def test_ec03_refused_companion_receipt_is_invalid_evidence(tmp_path, monkeypatch, refusal):
+    target = _ws(tmp_path)
+    run_dir = _write_cosign_assessment_fixture(target)
+    receipt_path = run_dir / "receipt.json"
+    original_copy = control_crosswalk._AssessmentReader.copy
+
+    def refuse_receipt(reader, path, **kwargs):
+        if path == receipt_path:
+            reader.errors[path] = refusal
+            raise control_crosswalk._control_crosswalk_io._ReadRefusal(refusal)
+        return original_copy(reader, path, **kwargs)
+
+    monkeypatch.setattr(control_crosswalk._AssessmentReader, "copy", refuse_receipt)
+
+    result = _assess(target, "EC-03")
+
+    assert result["outcome"] == "invalid"
+    assert result["reason"] == refusal
+    assert result["verifier"]["status"] == "wired"
+
+
+def test_ec03_keeps_verifier_outage_unbound_for_claim_status(tmp_path, monkeypatch):
+    import subprocess
+
+    from brigade import control_crosswalk_cosign
+
+    target = _ws(tmp_path)
+    _write_cosign_assessment_fixture(target, producer_run_id=RUN)
+    _write_cosign_assessment_fixture(target, run_dir_name="verify-b", producer_run_id="other-run")
+    monkeypatch.setattr(cosign_attestation, "require_safe_cosign", lambda: ("/usr/bin/cosign", (2, 6, 5)))
+    calls = []
+
+    def timeout_wrong_run(command, **kwargs):
+        calls.append(command)
+        bundle_path = command[command.index("--bundle") + 1]
+        if "verify-b" in bundle_path:
+            raise subprocess.TimeoutExpired(command, kwargs["timeout"])
+        return type("Result", (), {"returncode": 0})()
+
+    monkeypatch.setattr(control_crosswalk_cosign.subprocess, "run", timeout_wrong_run)
+
+    result = _assess(target, "EC-03", RUN)
+
+    assert result["outcome"] == "incomplete"
+    assert result["verifier"]["status"] == "wired"
+    assert result["population"]["wrong_run"] == 0
+    assert result["population"]["unbound"] == 1
+    assert len(calls) == 2
+
+
+def test_ec03_rejects_receipt_tampering_before_incomplete_classification(tmp_path):
+    target = _ws(tmp_path)
+    run_dir = _write_cosign_assessment_fixture(target)
+    receipt_path = run_dir / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["commands"][0]["status"] = "running"
+    _write_json(receipt_path, receipt)
+
+    result = _assess(target, "EC-03")
+
+    assert result["outcome"] == "rejected"
+    assert result["reason"] == "signature_mismatch"
+
+
+def test_ec03_reports_malformed_receipt_digest_metadata_as_invalid(tmp_path):
+    target = _ws(tmp_path)
+    run_dir = _write_cosign_assessment_fixture(target, producer_run_id=RUN)
+    receipt_path = run_dir / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["digests"] = {"algorithm": "sha512", "receipt_sha256": "a" * 64}
+    _write_json(receipt_path, receipt)
+
+    result = _assess(target, "EC-03", RUN)
+
+    assert result["outcome"] == "incomplete"
+    assert result["population"]["unbound"] == 1
+    assert result["artifacts"][0]["outcome"] == "invalid"
+    assert result["artifacts"][0]["scope"] == "unbound"
+    assert result["artifacts"][0]["reason_codes"] == ["schema_missing"]
+
+
+def test_ec03_does_not_bind_rejected_bundle_from_tampered_receipt(tmp_path):
+    target = _ws(tmp_path)
+    run_dir = _write_cosign_assessment_fixture(target, producer_run_id=RUN)
+    receipt_path = run_dir / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["producer_run_id"] = "tampered-run"
+    _write_json(receipt_path, receipt)
+
+    result = _assess(target, "EC-03", RUN)
+
+    assert result["outcome"] == "incomplete"
+    assert result["population"]["unbound"] == 1
+    artifact = result["artifacts"][0]
+    assert artifact["outcome"] == "rejected"
+    assert artifact["scope"] == "unbound"
+    assert artifact["reason_codes"] == ["signature_mismatch"]
+
+
+def test_ec03_does_not_period_filter_rejected_bundle_from_tampered_timestamp(tmp_path):
+    target = _ws(tmp_path)
+    run_dir = _write_cosign_assessment_fixture(target, producer_run_id=RUN)
+    receipt_path = run_dir / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["completed_at"] = "2020-01-01T00:00:00Z"
+    _write_json(receipt_path, receipt)
+
+    result = _assess(
+        target,
+        "EC-03",
+        period=("2026-01-01T00:00:00Z", "2026-12-31T23:59:59Z"),
+    )
+
+    assert result["outcome"] == "rejected"
+    assert result["population"]["out_of_period"] == 0
+    assert result["artifacts"][0]["scope"] == "in_scope"
+    assert "signature_mismatch" in result["artifacts"][0]["reason_codes"]
+    assert "timestamp_missing" in result["artifacts"][0]["reason_codes"]
+
+
+def test_ec03_authenticates_digestless_run_binding_before_classifying_wrong_run(tmp_path):
+    target = _ws(tmp_path)
+    run_dir = _write_cosign_assessment_fixture(target, producer_run_id=RUN)
+    receipt_path = run_dir / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt.pop("digests", None)
+    receipt["run_id"] = "tampered-verify-run"
+    receipt["producer_run_id"] = "tampered-producer-run"
+    _write_json(receipt_path, receipt)
+
+    result = _assess(target, "EC-03", RUN)
+
+    assert result["outcome"] == "incomplete"
+    assert result["population"]["unbound"] == 1
+    assert result["artifacts"][0]["outcome"] == "rejected"
+    assert result["artifacts"][0]["scope"] == "unbound"
+    assert result["artifacts"][0]["reason_codes"] == ["signature_mismatch"]
+
+
+@pytest.mark.parametrize("field", ["tree_fingerprint", "changes_patch_sha256"])
+def test_ec03_classifies_missing_statement_subject_fields_as_invalid(tmp_path, field):
+    target = _ws(tmp_path)
+    run_dir = _write_cosign_assessment_fixture(target, producer_run_id=RUN)
+    receipt_path = run_dir / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt.pop("digests", None)
+    receipt.pop(field)
+    _write_json(receipt_path, receipt)
+
+    result = _assess(target, "EC-03", RUN)
+
+    assert result["outcome"] == "incomplete"
+    assert result["population"]["unbound"] == 1
+    assert result["artifacts"][0]["outcome"] == "invalid"
+    assert result["artifacts"][0]["scope"] == "unbound"
+    assert result["artifacts"][0]["reason_codes"] == ["schema_missing"]
+
+
+def test_ec03_does_not_bind_preverification_schema_failure_from_receipt(tmp_path):
+    target = _ws(tmp_path)
+    run_dir = _write_cosign_assessment_fixture(target, producer_run_id=RUN)
+    receipt_path = run_dir / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt.pop("digests", None)
+    receipt.pop("tree_fingerprint")
+    receipt["run_id"] = "other-run"
+    receipt["producer_run_id"] = "other-run"
+    _write_json(receipt_path, receipt)
+
+    result = _assess(target, "EC-03", RUN)
+
+    assert result["outcome"] == "incomplete"
+    assert result["population"]["unbound"] == 1
+    assert result["artifacts"][0]["outcome"] == "invalid"
+    assert result["artifacts"][0]["scope"] == "unbound"
+    assert result["artifacts"][0]["reason_codes"] == ["schema_missing"]
+
+
+def test_ec12_binds_malformed_package_from_staged_receipt_identity(tmp_path):
+    target = _ws(tmp_path)
+    package_root = target / ".brigade" / "evidence-packages"
+    _write_strict_package(package_root / "pkg-valid", producer_run_id=RUN)
+    malformed = package_root / "pkg-malformed"
+    _write_strict_package(malformed, producer_run_id=None, verify_run_id=RUN)
+    manifest_path = malformed / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["source"]["verify_run_id"] = ""
+    manifest["entries_sha256"] = localio.canonical_json_digest(manifest["entries"])
+    _write_json(manifest_path, manifest)
+
+    result = _assess(target, "EC-12", RUN)
+
+    assert result["outcome"] == "invalid"
+    artifact = next(item for item in result["artifacts"] if "pkg-malformed" in item["relpath"])
+    assert artifact["scope"] == "in_scope"
+    assert artifact["run_binding"] == "receipt.run_id"
+    assert artifact["reason_codes"] == ["schema_missing"]
+
+
+def test_ec12_leaves_pre_staging_package_rejections_unbound(tmp_path):
+    target = _ws(tmp_path)
+    package = target / ".brigade" / "evidence-packages" / "pkg-unsafe"
+    _write_strict_package(package, producer_run_id=RUN)
+    manifest_path = package / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["source"]["producer_run_id"] = "tampered-run"
+    _write_json(manifest_path, manifest)
+    (package / "unlisted.txt").write_text("unlisted", encoding="utf-8")
+
+    result = _assess(target, "EC-12", RUN)
+
+    assert result["outcome"] == "incomplete"
+    assert result["population"]["unbound"] == 1
+    assert result["artifacts"][0]["outcome"] == "rejected"
+    assert result["artifacts"][0]["scope"] == "unbound"
+    assert result["artifacts"][0]["reason_codes"] == ["entry_path_unsafe"]
+
+
+def test_ec12_does_not_bind_package_rejection_from_receipt_with_stale_digest(tmp_path):
+    target = _ws(tmp_path)
+    package = target / ".brigade" / "evidence-packages" / "pkg-stale-receipt"
+    _write_strict_package(package, producer_run_id=RUN)
+    receipt_path = package / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["producer_run_id"] = "tampered-run"
+    receipt["run_id"] = "tampered-run"
+    _write_json(receipt_path, receipt)
+
+    manifest_path = package / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["source"]["producer_run_id"] = "tampered-run"
+    manifest["source"]["verify_run_id"] = "tampered-run"
+    for entry in manifest["entries"]:
+        if entry["path"] == "receipt.json":
+            raw_receipt = receipt_path.read_bytes()
+            entry["bytes"] = len(raw_receipt)
+            entry["sha256"] = hashlib.sha256(raw_receipt).hexdigest()
+    manifest["entries_sha256"] = localio.canonical_json_digest(manifest["entries"])
+    _write_json(manifest_path, manifest)
+
+    result = _assess(target, "EC-12", RUN)
+
+    assert result["outcome"] == "incomplete"
+    assert result["population"]["unbound"] == 1
+    assert result["artifacts"][0]["outcome"] == "rejected"
+    assert result["artifacts"][0]["scope"] == "unbound"
+    assert result["artifacts"][0]["reason_codes"] == ["package_snapshot_mismatch"]
+
+
+def test_ec12_preserves_read_limit_refusal_during_package_staging(tmp_path, monkeypatch):
+    target = _ws(tmp_path)
+    package = target / ".brigade" / "evidence-packages" / "pkg-bounded-read"
+    _write_strict_package(package)
+    manifest_path = package / "manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["created_at"] = "2020-01-01T00:00:00Z"
+    manifest["source"]["producer_run_id"] = "tampered-run"
+    manifest["source"]["verify_run_id"] = "tampered-run"
+    _write_json(manifest_path, manifest)
+    limit = (package / "manifest.json").stat().st_size + (package / "receipt.json").stat().st_size
+    monkeypatch.setattr(control_crosswalk.evidence_package_snapshot, "MAX_PACKAGE_BYTES", limit)
+    monkeypatch.setattr(control_crosswalk, "_ASSESSMENT_BYTE_BUDGET", 0)
+
+    result = _assess(
+        target,
+        "EC-12",
+        RUN,
+        period=("2026-01-01T00:00:00Z", "2026-12-31T23:59:59Z"),
+    )
+
+    artifact = result["artifacts"][0]
+    assert result["outcome"] == "unavailable"
+    assert result["population"]["out_of_period"] == 0
+    assert artifact["outcome"] == "unavailable"
+    assert artifact["scope"] == "in_scope"
+    assert artifact["run_binding"] == "receipt.producer_run_id"
+    assert artifact["reason_codes"] == ["read_limit_exceeded", "timestamp_missing"]
+
+
+def test_ec12_classifies_a_missing_manifest_listed_entry_as_snapshot_mismatch(tmp_path):
+    target = _ws(tmp_path)
+    package = target / ".brigade" / "evidence-packages" / "pkg-missing-entry"
+    _write_strict_package(package, producer_run_id=RUN)
+    (package / "changes.patch").unlink()
+
+    result = _assess(target, "EC-12", RUN)
+
+    assert result["outcome"] == "rejected"
+    assert result["artifacts"][0]["outcome"] == "rejected"
+    assert result["artifacts"][0]["scope"] == "in_scope"
+    assert result["artifacts"][0]["reason_codes"] == ["package_snapshot_mismatch"]
+
+
+@pytest.mark.parametrize(
+    ("receipt_status", "mutate", "reason"),
+    [
+        ("completed", lambda receipt: receipt["commands"][0].update(status="running"), "command_not_terminal"),
+        ("completed", lambda receipt: receipt["commands"][0].update(status=[]), "command_not_terminal"),
+        ("completed", lambda receipt: receipt["commands"][0].update(status={}), "command_not_terminal"),
+        ("canceled", lambda receipt: receipt["commands"][0].update(status="interrupted"), "status_canceled"),
+        ("canceled", lambda receipt: receipt.update(commands=[]), "status_canceled"),
+        ("canceled", lambda receipt: receipt.update(planned_commands=["first", "second"]), "status_canceled"),
+    ],
+)
+def test_ec03_classifies_incomplete_receipts(tmp_path, monkeypatch, receipt_status, mutate, reason):
+    from brigade import control_crosswalk_cosign
+
+    target = _ws(tmp_path)
+    run_dir = _write_cosign_assessment_fixture(target)
+    receipt_path = run_dir / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["status"] = receipt_status
+    mutate(receipt)
+    _write_json(receipt_path, receipt)
+    bundle_path = run_dir / "attestation.sigstore.json"
+    bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    statement = attestation.build_statement(receipt)
+    bundle["dsseEnvelope"]["payload"] = base64.b64encode(attestation.canonical_statement_bytes(statement)).decode(
+        "ascii"
+    )
+    _write_json(bundle_path, bundle)
+    monkeypatch.setattr(cosign_attestation, "require_safe_cosign", lambda: ("/usr/bin/cosign", (2, 6, 5)))
+    monkeypatch.setattr(
+        control_crosswalk_cosign.subprocess,
+        "run",
+        lambda *_args, **_kwargs: type("Result", (), {"returncode": 0})(),
+    )
+
+    result = _assess(target, "EC-03")
+
+    assert result["outcome"] == "incomplete"
+    assert result["reason"] == reason
+    assert result["dimensions"]["integrity"]["status"] == "passed"
+    assert result["dimensions"]["signature"]["status"] == "passed"
+    assert result["dimensions"]["authorization"]["status"] == "unknown"
+    assert result["dimensions"]["subject"]["status"] == "passed"
+
+
+@pytest.mark.parametrize(
+    ("receipt_status", "command_status", "exit_code", "reason"),
+    [
+        ("failed", "failed", 1, "status_failed"),
+        ("failed", "timed_out", 124, "status_failed"),
+        ("failed", "timed_out", None, "status_failed"),
+        ("rejected", "rejected", 2, "status_rejected"),
+    ],
+)
+def test_ec03_preserves_signed_terminal_command_failures(
+    tmp_path, monkeypatch, receipt_status, command_status, exit_code, reason
+):
+    from brigade import control_crosswalk_cosign
+
+    target = _ws(tmp_path)
+    run_dir = _write_cosign_assessment_fixture(target)
+    receipt_path = run_dir / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["status"] = receipt_status
+    receipt["commands"][0].update(status=command_status, exit_code=exit_code)
+    _write_json(receipt_path, receipt)
+    bundle_path = run_dir / "attestation.sigstore.json"
+    bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    statement = attestation.build_statement(receipt)
+    bundle["dsseEnvelope"]["payload"] = base64.b64encode(attestation.canonical_statement_bytes(statement)).decode(
+        "ascii"
+    )
+    _write_json(bundle_path, bundle)
+    monkeypatch.setattr(cosign_attestation, "require_safe_cosign", lambda: ("/usr/bin/cosign", (2, 6, 5)))
+    monkeypatch.setattr(
+        control_crosswalk_cosign.subprocess,
+        "run",
+        lambda *_args, **_kwargs: type("Result", (), {"returncode": 0})(),
+    )
+
+    result = _assess(target, "EC-03")
+
+    assert result["outcome"] == "failed"
+    assert result["reason"] == reason
+    assert result["legacy_state"] == "evidenced_failed"
+
+
+@pytest.mark.parametrize("schema_version", [None, 2.0, 999])
+def test_ec03_rejects_unsupported_receipt_schema(tmp_path, schema_version):
+    target = _ws(tmp_path)
+    run_dir = _write_cosign_assessment_fixture(target)
+    receipt_path = run_dir / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    if schema_version is None:
+        receipt.pop("schema_version")
+    else:
+        receipt["schema_version"] = schema_version
+    _write_json(receipt_path, receipt)
+
+    result = _assess(target, "EC-03")
+
+    assert result["outcome"] == "rejected"
+    assert result["reason"] == "signature_mismatch"
+
+
+@pytest.mark.parametrize("schema_version", [None, 2.0, 999])
+def test_ec03_invalidates_authenticated_unsupported_receipt_schema(tmp_path, monkeypatch, schema_version):
+    from brigade import control_crosswalk_cosign
+
+    target = _ws(tmp_path)
+    run_dir = _write_cosign_assessment_fixture(target)
+    receipt_path = run_dir / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    if schema_version is None:
+        receipt.pop("schema_version")
+    else:
+        receipt["schema_version"] = schema_version
+    _write_json(receipt_path, receipt)
+
+    bundle_path = run_dir / "attestation.sigstore.json"
+    bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    statement = attestation.build_statement(receipt)
+    bundle["dsseEnvelope"]["payload"] = base64.b64encode(attestation.canonical_statement_bytes(statement)).decode(
+        "ascii"
+    )
+    _write_json(bundle_path, bundle)
+    monkeypatch.setattr(cosign_attestation, "require_safe_cosign", lambda: ("/usr/bin/cosign", (2, 6, 5)))
+    monkeypatch.setattr(
+        control_crosswalk_cosign.subprocess,
+        "run",
+        lambda *_args, **_kwargs: type("Result", (), {"returncode": 0})(),
+    )
+
+    result = _assess(target, "EC-03")
+
+    assert result["outcome"] == "invalid"
+    assert result["reason"] == "schema_missing"
+
+
+def test_ec03_cosign_bundle_rejects_signature_failure(tmp_path, monkeypatch):
+    from brigade import control_crosswalk_cosign
+
+    target = _ws(tmp_path)
+    _write_cosign_assessment_fixture(target)
+    monkeypatch.setattr(cosign_attestation, "require_safe_cosign", lambda: ("/usr/bin/cosign", (2, 6, 5)))
+    monkeypatch.setattr(
+        control_crosswalk_cosign.subprocess,
+        "run",
+        lambda *_args, **_kwargs: type("Result", (), {"returncode": 1})(),
+    )
+
+    result = _assess(target, "EC-03")
+
+    assert result["outcome"] == "rejected"
+    assert result["reason"] == "signature_mismatch"
+    assert result["dimensions"]["signature"]["status"] == "failed"
+
+
+def test_ec03_cosign_bundle_marks_missing_cosign_tool_unavailable(tmp_path, monkeypatch):
+    target = _ws(tmp_path)
+    _write_cosign_assessment_fixture(target)
+
+    def unavailable():
+        raise cosign_attestation.CosignAttestationError("cosign is absent")
+
+    monkeypatch.setattr(cosign_attestation, "require_safe_cosign", unavailable)
+
+    result = _assess(target, "EC-03")
+
+    assert result["outcome"] == "unavailable"
+    assert result["reason"] == "verifier_tool_unavailable"
+    assert result["verifier"]["status"] == "unavailable"
+
+
+def test_ec03_does_not_bind_or_period_filter_receipt_before_signature_verification(tmp_path, monkeypatch):
+    target = _ws(tmp_path)
+    run_dir = _write_cosign_assessment_fixture(target, producer_run_id=RUN)
+    receipt_path = run_dir / "receipt.json"
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    receipt["run_id"] = "tampered-run"
+    receipt["producer_run_id"] = "tampered-run"
+    receipt["completed_at"] = "2020-01-01T00:00:00Z"
+    _write_json(receipt_path, receipt)
+    bundle_path = run_dir / "attestation.sigstore.json"
+    bundle = json.loads(bundle_path.read_text(encoding="utf-8"))
+    statement = attestation.build_statement(receipt)
+    bundle["dsseEnvelope"]["payload"] = base64.b64encode(attestation.canonical_statement_bytes(statement)).decode(
+        "ascii"
+    )
+    _write_json(bundle_path, bundle)
+
+    def unavailable():
+        raise cosign_attestation.CosignAttestationError("cosign is absent")
+
+    monkeypatch.setattr(cosign_attestation, "require_safe_cosign", unavailable)
+    result = _assess(
+        target,
+        "EC-03",
+        RUN,
+        period=("2026-01-01T00:00:00Z", "2026-12-31T23:59:59Z"),
+    )
+
+    assert result["outcome"] == "incomplete"
+    assert result["population"]["unbound"] == 1
+    assert result["population"]["out_of_period"] == 0
+    assert result["artifacts"][0]["outcome"] == "unavailable"
+    assert result["artifacts"][0]["scope"] == "unbound"
+    assert result["artifacts"][0]["reason_codes"] == ["timestamp_missing", "verifier_tool_unavailable"]
 
 
 def _fixture_ec07(target: Path) -> None:
@@ -682,13 +2280,13 @@ def _fixture_ec12(target: Path) -> None:
 
 # claim -> (fixture, workspace outcome, workspace reason, run-scoped outcome)
 _ISSUE_FIXTURES = {
-    "EC-01": (_fixture_ec01, "invalid", "schema_missing", "invalid"),
-    "EC-03": (_fixture_ec03, "invalid", "dsse_signatures_missing", "invalid"),
+    "EC-01": (_fixture_ec01, "invalid", "schema_missing", "incomplete"),
+    "EC-03": (_fixture_ec03, "invalid", "dsse_signatures_missing", "incomplete"),
     "EC-07": (_fixture_ec07, "invalid", "schema_missing", "incomplete"),
     "EC-09": (_fixture_ec09, "incomplete", "no_explicit_verdict", "incomplete"),
     "EC-10": (_fixture_ec10, "invalid", "invalid_jsonl_line", "incomplete"),
     "EC-11": (_fixture_ec11, "invalid", "schema_missing", "incomplete"),
-    "EC-12": (_fixture_ec12, "rejected", "entry_missing", "incomplete"),
+    "EC-12": (_fixture_ec12, "invalid", "schema_missing", "incomplete"),
 }
 
 
@@ -718,13 +2316,13 @@ def test_issue_1617_fixtures_are_not_presented_as_validated(tmp_path, claim_id):
 def test_issue_fixture_ec12_rejected_in_workspace_scope_and_unbound_for_run(tmp_path):
     target = _ws(tmp_path)
     _fixture_ec12(target)
-    assert control_crosswalk._evaluate_claim_state(target, "EC-12", None) == "evidenced_failed"
+    assert control_crosswalk._evaluate_claim_state(target, "EC-12", None) != "evidenced_passed"
     run_scoped = _assess(target, "EC-12", RUN)
     # Whole-workspace artifacts are never inferred to belong to the requested run.
     assert run_scoped["population"]["unbound"] == 1
     assert run_scoped["population"]["in_scope"] == 0
     assert run_scoped["reason"] == "artifact_not_run_bound"
-    assert run_scoped["artifacts"][0]["outcome"] == "rejected"
+    assert run_scoped["artifacts"][0]["outcome"] == "invalid"
     assert run_scoped["legacy_state"] == "untested"
 
 
@@ -797,18 +2395,15 @@ def test_mixed_population_incomplete_and_malformed_siblings_are_not_hidden(tmp_p
 def test_mixed_population_valid_and_rejected_package_manifests(tmp_path):
     target = _ws(tmp_path)
     good = target / ".brigade" / "evidence-packages" / "pkg-a"
-    _write_json(good / "manifest.json", _package_manifest([_RECEIPT_ENTRY]))
-    (good / "receipt.json").write_text("{}")
-    bad_manifest = _package_manifest([_RECEIPT_ENTRY])
-    bad_manifest["entries_sha256"] = "c" * 64
+    _write_strict_package(good)
     bad = target / ".brigade" / "evidence-packages" / "pkg-b"
-    _write_json(bad / "manifest.json", bad_manifest)
-    (bad / "receipt.json").write_text("{}")
+    _write_strict_package(bad)
+    (bad / "changes.patch").write_text("tampered", encoding="utf-8")
 
     readiness = _assess(target, "EC-12")
     assert readiness["outcome"] == "rejected"
-    assert readiness["reason"] == "entries_digest_mismatch"
-    assert readiness["population"]["structure_observed"] == 1
+    assert readiness["reason"] == "package_snapshot_mismatch"
+    assert readiness["population"]["validated"] == 1
     assert readiness["population"]["rejected"] == 1
     assert readiness["dimensions"]["integrity"]["status"] == "failed"
 
@@ -831,14 +2426,61 @@ def test_wrong_run_receipt_is_excluded_and_counted(tmp_path):
 def test_wrong_run_package_manifest_uses_recorded_verify_run_id(tmp_path):
     target = _ws(tmp_path)
     pkg = target / ".brigade" / "evidence-packages" / "pkg-1"
-    _write_json(pkg / "manifest.json", _package_manifest([_RECEIPT_ENTRY], verify_run_id="other-run"))
-    (pkg / "receipt.json").write_text("{}")
+    _write_strict_package(pkg, producer_run_id="other-producer", verify_run_id="other-run")
     readiness = _assess(target, "EC-12", RUN)
     assert readiness["population"]["wrong_run"] == 1
     assert readiness["outcome"] == "absent"
     bound = _assess(target, "EC-12", "other-run")
     assert bound["population"]["in_scope"] == 1
     assert bound["artifacts"][0]["run_binding"] == "source.verify_run_id"
+
+
+def test_ec12_run_scope_consumes_reparse_refusal_after_package_rejection(tmp_path, monkeypatch):
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-reparse"
+    package_dir.mkdir(parents=True)
+    reader_type = control_crosswalk._AssessmentReader
+    real_info = reader_type.info
+
+    def refuse_package_reparse(reader, path):
+        if path == package_dir:
+            raise control_crosswalk._ReadRefusal("symlink_refused")
+        return real_info(reader, path)
+
+    monkeypatch.setattr(reader_type, "info", refuse_package_reparse)
+
+    readiness = _assess(target, "EC-12", RUN)
+
+    assert readiness["outcome"] == "incomplete"
+    assert readiness["population"]["unbound"] == 1
+    assert readiness["population"]["in_scope"] == 0
+    assert len(readiness["artifacts"]) == 1
+    assert readiness["artifacts"][0]["outcome"] == "rejected"
+
+
+def test_ec12_run_scope_classifies_root_manifest_reparse_as_package_rejection(tmp_path, monkeypatch):
+    target = _ws(tmp_path)
+    root = target / ".brigade" / "evidence-packages"
+    _write_json(root / "manifest.json", _package_manifest([_RECEIPT_ENTRY]))
+    reader_type = control_crosswalk._AssessmentReader
+    real_info = reader_type.info
+    manifest_path = root / "manifest.json"
+
+    def refuse_root_manifest_reparse(reader, path):
+        if path == manifest_path:
+            raise control_crosswalk._ReadRefusal("symlink_refused")
+        return real_info(reader, path)
+
+    monkeypatch.setattr(reader_type, "info", refuse_root_manifest_reparse)
+
+    readiness = _assess(target, "EC-12", RUN)
+
+    assert readiness["outcome"] == "incomplete"
+    assert readiness["population"]["unbound"] == 1, readiness["artifacts"]
+    assert readiness["population"]["in_scope"] == 0
+    assert readiness["artifacts"][0]["relpath"] == ".brigade/evidence-packages/manifest.json"
+    assert readiness["artifacts"][0]["outcome"] == "rejected"
+    assert readiness["artifacts"][0]["reason_codes"] == ["entry_path_unsafe"]
 
 
 def test_ec02_unreadable_receipt_no_longer_skips_run_check(tmp_path):
@@ -1061,6 +2703,74 @@ def test_assessment_period_freshness(tmp_path):
     assert outside["population"]["out_of_period"] == 1
     assert outside["outcome"] == "absent"
     assert outside["legacy_state"] == "untested"
+
+
+@pytest.mark.parametrize("claim_id", ["EC-03", "EC-12"])
+def test_verifier_outage_is_not_filtered_by_unverified_period_metadata(tmp_path, monkeypatch, claim_id):
+    from brigade import control_readiness
+
+    target = _ws(tmp_path)
+    root = target / ".brigade"
+    if claim_id == "EC-12":
+        root = root / "evidence-packages"
+        for name, created_at in (
+            ("pkg-in", "2026-09-06T00:00:00Z"),
+            ("pkg-out", "2026-10-06T00:00:00Z"),
+        ):
+            package = root / name
+            _write_strict_package(package)
+            manifest_path = package / "manifest.json"
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["created_at"] = created_at
+            _write_json(manifest_path, manifest)
+    else:
+        for name, completed_at in (
+            ("verify-in", "2026-09-06T00:00:01+00:00"),
+            ("verify-out", "2026-10-06T00:00:01+00:00"),
+        ):
+            run_dir = _write_cosign_assessment_fixture(target, run_dir_name=name, producer_run_id=RUN)
+            receipt_path = run_dir / "receipt.json"
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            receipt["completed_at"] = completed_at
+            _write_json(receipt_path, receipt)
+
+    def adapter(_target, artifact_path):
+        if (artifact_path.parent if claim_id == "EC-03" else artifact_path).name.endswith("out"):
+            return control_crosswalk._verifier_unavailable(artifact_path.name, "verifier_tool_unavailable")
+        return control_readiness.ArtifactObservation(
+            artifact_path.name,
+            "claim_validated",
+            "validated",
+            control_readiness.dims(
+                integrity="passed",
+                signature="passed",
+                authorization="passed",
+                subject="passed",
+                population="passed",
+            ),
+        )
+
+    adapter_name = "cosign-bundle" if claim_id == "EC-03" else "evidence-package"
+    monkeypatch.setitem(control_crosswalk._VERIFIER_ADAPTERS, adapter_name, adapter)
+
+    result = _assess(
+        target,
+        claim_id,
+        RUN if claim_id == "EC-03" else None,
+        period=("2026-09-01T00:00:00+00:00", "2026-09-30T23:59:59+00:00"),
+    )
+
+    if claim_id == "EC-03":
+        assert result["outcome"] == "incomplete"
+        assert result["population"]["out_of_period"] == 0
+        assert result["verifier"]["status"] == "wired"
+        assert result["population"]["in_scope"] == 1
+        assert result["population"]["unbound"] == 1
+    else:
+        assert result["outcome"] == "validated"
+        assert result["verifier"]["status"] == "wired"
+        assert result["population"]["in_scope"] == 1
+        assert result["population"]["out_of_period"] == 1
 
 
 def test_assessment_period_missing_timestamp_is_incomplete(tmp_path):
@@ -1615,9 +3325,80 @@ def test_ec12_discovers_root_and_one_level_manifests_only(tmp_path):
         ".brigade/evidence-packages/manifest.json",
         ".brigade/evidence-packages/pkg-1/manifest.json",
     ]
-    assert readiness["outcome"] == "structure_observed"
-    assert readiness["legacy_state"] == "untested"
-    assert "verifier_not_wired" in readiness["reason_codes"]
+    assert readiness["outcome"] == "rejected"
+    assert "entry_path_unsafe" in readiness["reason_codes"]
+    assert readiness["legacy_state"] == "evidenced_failed"
+    assert "schema_missing" in readiness["reason_codes"]
+
+
+def test_ec12_uses_strict_package_snapshot_and_retains_source_run_binding(tmp_path, monkeypatch):
+    from brigade import evidence_package_snapshot
+
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_json(
+        package_dir / "manifest.json",
+        {
+            "schema": "brigade.evidence_package.v1",
+            "entries": [],
+            "source": {"producer_run_id": RUN, "verify_run_id": "verify-a"},
+            "created_at": "2026-01-01T00:00:00Z",
+        },
+    )
+    seen: list[Path] = []
+
+    def snapshot(directory: Path):
+        seen.append(directory)
+        return type("Snapshot", (), {"manifest_sha256": "a" * 64})()
+
+    monkeypatch.setattr(evidence_package_snapshot, "snapshot_package", snapshot)
+    result = _assess(target, "EC-12", RUN)
+
+    assert result["outcome"] == "validated"
+    assert result["population"]["in_scope"] == 1
+    assert seen and seen[0] != package_dir
+    assert seen[0].name == package_dir.name
+    assert control_crosswalk._verify_evidence_package(target, package_dir).proposed == "validated"
+
+
+def test_ec12_snapshot_mismatch_is_rejected_with_package_reason(tmp_path, monkeypatch):
+    from brigade import evidence_package_snapshot
+
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_json(
+        package_dir / "manifest.json",
+        {"schema": "brigade.evidence_package.v1", "entries": [], "source": {"producer_run_id": RUN}},
+    )
+
+    def mismatch(_directory: Path):
+        raise evidence_package_snapshot.PackageSnapshotError("mismatch")
+
+    monkeypatch.setattr(evidence_package_snapshot, "snapshot_package", mismatch)
+    result = _assess(target, "EC-12")
+
+    assert result["outcome"] == "rejected"
+    assert result["reason"] == "package_snapshot_mismatch"
+
+
+def test_ec12_unknown_snapshot_code_is_unavailable(tmp_path, monkeypatch):
+    from brigade import evidence_package_snapshot
+
+    target = _ws(tmp_path)
+    package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
+    _write_strict_package(package_dir)
+
+    def unknown_code(_directory: Path):
+        error = evidence_package_snapshot.PackageSnapshotError("mismatch")
+        error.code = "future_code"
+        raise error
+
+    monkeypatch.setattr(evidence_package_snapshot, "snapshot_package", unknown_code)
+    result = _assess(target, "EC-12")
+
+    assert result["outcome"] == "unavailable"
+    assert result["reason"] == "verifier_error"
+    assert result["verifier"]["status"] == "unavailable"
 
 
 @pytest.mark.parametrize(
@@ -1626,17 +3407,13 @@ def test_ec12_discovers_root_and_one_level_manifests_only(tmp_path):
 def test_package_scope_accepts_each_recorded_run_namespace(tmp_path, selected_run, binding):
     target = _ws(tmp_path)
     pkg = target / ".brigade" / "evidence-packages" / "pkg-1"
-    manifest = _package_manifest([_RECEIPT_ENTRY], verify_run_id="verify-other")
-    manifest["source"]["producer_run_id"] = RUN
-    _write_json(pkg / "manifest.json", manifest)
-    (pkg / "receipt.json").write_text("{}")
+    _write_strict_package(pkg, producer_run_id=RUN, verify_run_id="verify-other")
     observed = _assess(target, "EC-12", selected_run)
     assert observed["population"]["in_scope"] == 1
     assert observed["population"]["wrong_run"] == 0
     assert observed["artifacts"][0]["run_binding"] == binding
-    assert observed["outcome"] == "incomplete"
-    assert observed["validation_level"] == "structure_observed"
-    assert observed["dimensions"]["subject"]["status"] == "unknown"
+    assert observed["outcome"] == "validated"
+    assert observed["validation_level"] == "claim_validated"
     foreign = _assess(target, "EC-12", "foreign-producer")
     assert foreign["population"]["wrong_run"] == 1
     assert foreign["outcome"] == "absent"
@@ -1678,7 +3455,7 @@ def test_ec01_forged_well_shaped_receipt_without_digest_never_validates(tmp_path
     assert readiness["legacy_state"] == "untested"
     assert "integrity" in readiness["required_dimensions"]
     assert readiness["dimensions"]["integrity"] == {"status": "not_checked", "reason": "verifier_not_wired"}
-    assert readiness["verifier"]["status"] == "not_wired"
+    assert readiness["verifier"]["status"] == "wired"
     assert control_crosswalk._evaluate_claim_state(target, "EC-01", None) != "evidenced_passed"
 
 
@@ -2729,10 +4506,10 @@ def test_assessment_refuses_nonregular_trust_without_reading_private_keys(tmp_pa
     original_open = dirfd.open_child_file
     opened = []
 
-    def observe(parent, name, flags, mode=0o600):
+    def observe(parent, name, flags, mode=0o600, *, share_write=True):
         opened.append(name)
         assert name != "signing-key"
-        return original_open(parent, name, flags, mode)
+        return original_open(parent, name, flags, mode, share_write=share_write)
 
     monkeypatch.setattr(dirfd, "open_child_file", observe)
     assert _assess(target, "EC-05")["outcome"] == "validated"
