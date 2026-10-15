@@ -92,14 +92,20 @@ running. Check its logs, then restart the pinned service and verify health:
 ```bash
 docker compose -f compose.yaml -f secrets/compose.image-id.yaml logs --tail=100 hub
 docker compose -f compose.yaml -f secrets/compose.image-id.yaml restart hub
-attempt=0
-until curl --fail http://127.0.0.1:3774/health; do
-  attempt=$((attempt + 1))
-  if [ "$attempt" -ge 60 ]; then
-    echo "Fleet Hub did not recover after restart" >&2
+deadline=$((SECONDS + 120))
+while true; do
+  remaining=$((deadline - SECONDS))
+  if [ "$remaining" -le 0 ]; then
+    echo "Fleet Hub did not recover within 120 seconds after restart" >&2
     exit 1
   fi
-  sleep 2
+  if curl --fail --connect-timeout 2 --max-time "$remaining" http://127.0.0.1:3774/health; then
+    break
+  fi
+  remaining=$((deadline - SECONDS))
+  if [ "$remaining" -gt 0 ]; then
+    sleep "$((remaining < 2 ? remaining : 2))"
+  fi
 done
 ```
 
@@ -198,20 +204,24 @@ docker compose -f compose.yaml -f secrets/compose.image-id.yaml stop hub
 After the backup succeeds and the service stops, rebuild the candidate, inspect
 it for its new ID, replace the override's `image` value, then start it with
 `docker compose -f compose.yaml -f secrets/compose.image-id.yaml up -d --no-build
---wait --wait-timeout 120`. Starting it may migrate the database. Compose
+--wait --wait-timeout 120`. Starting it may migrate the database. Compose waits
 for the configured health check before returning.
 
 The named volume contains the database and its WAL/SHM sidecars. Keep it on a
 local filesystem, not NFS, SMB, or a cloud-synced directory. For ordinary
 updates, rebuild the versioned tag, record its new local image ID in the ignored
 `secrets/compose.image-id.yaml`, then run `docker compose -f compose.yaml -f
-secrets/compose.image-id.yaml up -d --no-build`. Never add `--volumes` to
+secrets/compose.image-id.yaml up -d --no-build --wait --wait-timeout 120`. Never add `--volumes` to
 `down`. This recipe intentionally runs one replica and has no shared-network
 database support.
 
 ## Rootless Podman Quadlet
 
-Use a Podman release whose Quadlet generator supports `HealthOnFailure=kill`.
+Use a Podman release whose Quadlet generator supports `HealthOnFailure=kill`
+and [`Notify=healthy`](https://docs.podman.io/en/stable/markdown/podman-systemd.unit.5.html#notify-defaults-to-false).
+The unit waits for its health check before systemd reports startup success,
+with a 120-second startup timeout. Both initial deployment and rollback use
+this readiness gate.
 
 Build the pinned image locally and record its digest. Keep an operator copy of
 the admin token in a private file, import that file as a Podman secret, render
@@ -219,6 +229,7 @@ the Quadlet with the digest, and copy the volume unit to
 `~/.config/containers/systemd/`:
 
 ```bash
+set -euo pipefail
 podman build -f ops/fleet-hub/Containerfile \
   --build-arg BRIGADE_REF=e6009f6969dc6e45db2ab93790aa3e407c791409 \
   -t localhost/brigade-fleet-hub:0.28.0-e6009f6 .
@@ -278,7 +289,7 @@ test "$(loginctl show-user "$USER" --property=Linger --value)" = yes || {
 }
 systemctl --user daemon-reload
 systemctl --user restart brigade-fleet.service
-curl --fail http://127.0.0.1:3774/health
+curl --fail --max-time 5 http://127.0.0.1:3774/health
 ```
 
 Before rebuilding the versioned tag, archive the image referenced by the
@@ -369,6 +380,7 @@ sed "s|REPLACE_WITH_RECORDED_DIGEST|${previous_digest}|" \
 chmod 0644 "$HOME/.config/containers/systemd/brigade-fleet.container"
 systemctl --user daemon-reload
 systemctl --user restart brigade-fleet.service
+curl --fail --max-time 5 http://127.0.0.1:3774/health
 ```
 
 Rootless UID mapping must make volume UID 10001 writable. The volume Quadlet

@@ -21,6 +21,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator, Literal, cast
 
 from .. import __version__ as BRIGADE_VERSION
+from .. import dirfd
 from .. import mcp_server
 from ..localio import slugify, utc_now_iso as _now
 from ..projection import kernel as projection
@@ -125,7 +126,7 @@ def _skill_packs(target: Path) -> list[dict[str, Any]]:
     """
     packs: list[dict[str, Any]] = []
     try:
-        with _registry_mod._held_state_root(target) as anchor:
+        with _registry_mod._held_state_root(target, writable=False) as anchor:
             for sub, archived in ((("skills", "packs"), False), (("skills", "packs-archive"), True)):
                 names = _registry_mod._plain_subdirs_under_anchor(anchor, *sub)
                 if not names:
@@ -438,23 +439,11 @@ def pack_archive(*, target: Path, pack_id: str, json_output: bool = False) -> in
             # The archived entry is always a validated plain directory
             # directly under the anchored packs root; a manifest-supplied
             # physical path is never honoured as the move source.
-            candidates: list[tuple[str, dict[str, Any]]] = []
             try:
-                packs_fd, packs_opened = _registry_mod._anchor_open_chain(state_anchor, "skills", "packs")
+                names = _registry_mod._plain_subdirs_under_anchor(state_anchor, "skills", "packs") or []
             except _registry_mod.SkillsStatePathError:
-                packs_fd, packs_opened = None, []
-            if packs_fd is not None:
-                try:
-                    for name in sorted(os.listdir(packs_fd)):
-                        try:
-                            st = os.lstat(name, dir_fd=packs_fd)
-                        except FileNotFoundError:
-                            continue
-                        if stat_module.S_ISDIR(st.st_mode):
-                            candidates.append((name, _anchored_pack_manifest(state_anchor, name)))
-                finally:
-                    for fd in reversed(packs_opened):
-                        os.close(fd)
+                names = []
+            candidates = [(name, _anchored_pack_manifest(state_anchor, name)) for name in names]
             if pack_id == "latest":
                 dated = [row for row in candidates if row[1]]
                 matches = [max(dated, key=lambda row: (str(row[1].get("created_at") or ""), row[0]))] if dated else []
@@ -471,18 +460,20 @@ def pack_archive(*, target: Path, pack_id: str, json_output: bool = False) -> in
             archive_fd, archive_opened = _registry_mod._anchor_open_chain(
                 state_anchor, "skills", "packs-archive", create=True
             )
+            assert archive_fd is not None
             try:
                 packs_fd, packs_opened = _registry_mod._anchor_open_chain(state_anchor, "skills", "packs")
+                assert packs_fd is not None
                 try:
                     try:
-                        os.stat(pack_name, dir_fd=archive_fd, follow_symlinks=False)
+                        dirfd.stat_child(archive_fd, pack_name, allow_reparse=True)
                     except FileNotFoundError:
                         pass
                     else:
                         print(f"error: archived skill pack already exists: {destination}", file=sys.stderr)
                         return 2
                     with _registry_mod._anchored_fs_errors(str(destination)):
-                        os.rename(pack_name, pack_name, src_dir_fd=packs_fd, dst_dir_fd=archive_fd)
+                        dirfd.rename_child(packs_fd, pack_name, archive_fd, pack_name)
                 finally:
                     for fd in reversed(packs_opened):
                         os.close(fd)

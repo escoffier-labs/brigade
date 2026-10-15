@@ -570,6 +570,7 @@ class AgentResult:
     transport: str = "cli"
     requested_model: str | None = None
     effective_model: str | None = None
+    effective_model_locator: str | None = None
     reasoning: str | None = None
     stop_reason: str | None = None
     protocol_version: int | None = None
@@ -585,6 +586,8 @@ class AgentResult:
     failure_kind: str | None = None
     transport_warning: dict[str, object] | None = None
     cloud_environment: dict[str, str] | None = None
+    # Closed, receipt-safe attribution for model and harness metadata.
+    metadata_provenance: dict[str, object] | None = None
 
 
 def is_known(cli_ref: str) -> bool:

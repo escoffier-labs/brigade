@@ -14,7 +14,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import cli, skills_cmd
+from brigade import cli, dirfd, skills_cmd
 from brigade.projection import kernel as projection
 from brigade.skills_cmd.packs import UnsupportedLexicalPathError, _absolute_lexical_path
 
@@ -49,6 +49,48 @@ def _write_skill(root, name="security-review"):
         )
     )
     return skill_dir
+
+
+def test_import_preserves_nested_source_directories(tmp_path, capsys):
+    source = _write_skill(tmp_path / "source")
+    nested = source / "scripts" / "nested"
+    (nested / "empty").mkdir(parents=True)
+    (nested / "data.txt").write_bytes(b"nested source\n")
+
+    assert skills_cmd.import_skill(target=tmp_path, source=source, json_output=True) == 0
+    capsys.readouterr()
+    imported = tmp_path / ".brigade" / "skills" / "registry" / "security-review"
+    assert (imported / "scripts" / "nested" / "empty").is_dir()
+    assert (imported / "scripts" / "nested" / "data.txt").read_bytes() == b"nested source\n"
+
+
+@pytest.mark.skipif(not dirfd.posix_available(), reason="POSIX bundle component names")
+@pytest.mark.parametrize("suffix", [":part", "\\part"], ids=["colon", "backslash"])
+def test_skills_posix_bundle_component_lifecycle(tmp_path, capsys, suffix):
+    source = _write_skill(tmp_path / "source")
+    parts = ("scripts", "nested" + suffix, "data" + suffix)
+    source.joinpath(*parts[:-1]).mkdir(parents=True)
+    registry = tmp_path / ".brigade" / "skills" / "registry" / "security-review"
+    installed = tmp_path / ".brigade" / "skills" / "mcp-resources" / "security-review"
+    for index, data in enumerate((b"original\x00\xff\n", b"updated\x00\xfe\n")):
+        source.joinpath(*parts).write_bytes(data)
+        assert skills_cmd.import_skill(target=tmp_path, source=source, force=bool(index), json_output=True) == 0
+        capsys.readouterr()
+        assert registry.joinpath(*parts).read_bytes() == data
+        assert skills_cmd.lint(target=tmp_path, skill="registry:security-review", json_output=True) == 0
+        assert json.loads(capsys.readouterr().out)["valid"] is True
+        assert (
+            skills_cmd.install(
+                workspace=tmp_path, skill="security-review", harness="mcp", force=bool(index), json_output=True
+            )
+            == 0
+        )
+        capsys.readouterr()
+        assert installed.joinpath(*parts).read_bytes() == data
+    assert skills_cmd.uninstall(workspace=tmp_path, skill="security-review", harness="mcp", json_output=True) == 0
+    capsys.readouterr()
+    assert not installed.exists()
+    assert registry.joinpath(*parts).read_bytes() == data
 
 
 def test_skills_import_lint_search_and_install_all(tmp_path, capsys):
@@ -634,14 +676,14 @@ def test_inbox_accept_rereads_current_state(tmp_path, capsys, monkeypatch):
     real_held = skills_cmd._held_state_root
 
     @contextlib.contextmanager
-    def flip_before_accept_hold(target):
+    def flip_before_accept_hold(target, *, writable=True):
         holds["n"] += 1
         if holds["n"] == 2:
             current = json.loads(meta_path.read_text())
             current["status"] = "rejected"
             current["reason"] = "flipped-before-lock"
             meta_path.write_text(json.dumps(current, indent=2, sort_keys=True) + "\n")
-        with real_held(target) as anchor:
+        with real_held(target, writable=writable) as anchor:
             yield anchor
 
     monkeypatch.setattr(skills_cmd, "_held_state_root", flip_before_accept_hold)
@@ -1260,6 +1302,18 @@ def test_skills_diff_marks_legacy_receipt_unknown(tmp_path, capsys):
     assert payload["drift"]["local_edit"] == "unknown"
 
 
+@pytest.mark.parametrize("operation", ["compatibility", "diff"])
+def test_state_install_projection_preserves_missing_read_only_commands(tmp_path, capsys, operation):
+    if operation == "compatibility":
+        assert skills_cmd.compatibility(target=tmp_path, skill="bundled:brigade-work", json_output=True) == 0
+        payload = json.loads(capsys.readouterr().out)
+        assert next(row for row in payload["adapters"] if row["id"] == "mcp")["installed"] is False
+    else:
+        assert skills_cmd.diff(target=tmp_path, skill="bundled:brigade-work", harness="mcp", json_output=True) == 0
+        assert json.loads(capsys.readouterr().out)["installed"] is False
+    assert not (tmp_path / ".brigade").exists()
+
+
 def test_skills_fleet_does_not_repair_missing_copy_with_legacy_receipt(tmp_path):
     receipt = tmp_path / ".brigade" / "skills" / "installs" / "brigade-work-cursor.json"
     receipt.parent.mkdir(parents=True)
@@ -1561,7 +1615,7 @@ def test_fallback_state_writes_refuse_symlinked_components(tmp_path, monkeypatch
     linked = workspace / ".brigade" / "skills" / "linked"
     linked.symlink_to(outside, target_is_directory=True)
     monkeypatch.setattr(skills_cmd, "_HAS_DESCRIPTOR_ANCHOR", False)
-    anchor = skills_cmd._hold_state_root(workspace)
+    anchor = skills_cmd._StateRootAnchor(workspace)
     try:
         with pytest.raises(skills_cmd.SkillsStatePathError):
             skills_cmd._write_state_file(anchor, "skills", "linked", "receipt.json", data=b"x")
@@ -1603,16 +1657,14 @@ def test_missing_state_root_creation_refuses_swapped_ancestor(tmp_path, monkeypa
     workspace.mkdir()
     evil = tmp_path / "evil"
     evil.mkdir()
-    real_mkdir = os.mkdir
+    real_mkdir = dirfd.mkdir_child
 
-    def swap_during_creation(path, mode=0o777, *, dir_fd=None):
+    def swap_during_creation(parent, name, mode=0o700):
         shutil.move(str(workspace), str(tmp_path / "ws-original"))
         (home / "ws").symlink_to(evil, target_is_directory=True)
-        if dir_fd is None:
-            return real_mkdir(path, mode)
-        return real_mkdir(path, mode, dir_fd=dir_fd)
+        return real_mkdir(parent, name, mode)
 
-    monkeypatch.setattr(os, "mkdir", swap_during_creation)
+    monkeypatch.setattr(dirfd, "mkdir_child", swap_during_creation)
 
     with pytest.raises(skills_cmd.SkillsStatePathError):
         skills_cmd._open_state_root_descriptor(workspace)
@@ -1758,10 +1810,10 @@ def test_collect_source_tree_refuses_entry_swapped_to_symlink(tmp_path, monkeypa
     swapped.unlink()
     swapped.symlink_to(secret)
 
-    real_lstat = os.lstat
+    real_stat = dirfd.stat_child
 
-    def lying_lstat(name, *, dir_fd=None):
-        st = real_lstat(name, dir_fd=dir_fd) if dir_fd is not None else real_lstat(name)
+    def lying_stat(parent, name, *, allow_reparse=False):
+        st = real_stat(parent, name, allow_reparse=allow_reparse)
         if name == "CHANGELOG.md":
             # Pretend the entry passed the regular-file check so only the
             # O_NOFOLLOW open can catch that it is really a symlink.
@@ -1781,7 +1833,7 @@ def test_collect_source_tree_refuses_entry_swapped_to_symlink(tmp_path, monkeypa
             )
         return st
 
-    monkeypatch.setattr(os, "lstat", lying_lstat)
+    monkeypatch.setattr(dirfd, "stat_child", lying_stat)
 
     with pytest.raises(skills_cmd.SkillsStatePathError, match="changed while being read"):
         skills_cmd._collect_source_tree(source)
@@ -1940,9 +1992,10 @@ def test_fallback_without_descriptor_anchor_fails_closed_for_state_mutations(tmp
     monkeypatch.setattr(skills_cmd, "_HAS_DESCRIPTOR_ANCHOR", False)
     dirs: list[tuple[str, ...]] = [("nested",)]
     files: dict[tuple[str, ...], bytes] = {("nested", "new.txt"): b"data\n"}
-    anchor = skills_cmd._hold_state_root(workspace)
+    anchor = skills_cmd._StateRootAnchor(workspace)
     try:
-        assert skills_cmd._read_state_file_bytes(anchor, "skills", "installs", "existing.json") == b"{}\n"
+        with pytest.raises(skills_cmd.SkillsStatePathError):
+            skills_cmd._read_state_file_bytes(anchor, "skills", "installs", "existing.json")
         with pytest.raises(skills_cmd.SkillsStatePathError):
             skills_cmd._write_state_file(anchor, "skills", "installs", "written.json", data=b"x\n")
         with pytest.raises(skills_cmd.SkillsStatePathError):
@@ -1964,16 +2017,17 @@ def test_fallback_without_descriptor_anchor_fails_closed_for_state_mutations(tmp
 
 
 @pytest.mark.skipif(not hasattr(os, "symlink"), reason="platform cannot create symlinks")
-def test_fallback_read_keeps_working_but_refuses_symlinked_state_file(tmp_path, monkeypatch):
+def test_unavailable_backend_refuses_plain_and_symlinked_state_reads(tmp_path, monkeypatch):
     workspace = tmp_path / "ws"
     installs = workspace / ".brigade" / "skills" / "installs"
     installs.mkdir(parents=True)
     (installs / "plain.txt").write_text("plain\n")
     (installs / "link.txt").symlink_to(tmp_path / "target.txt")
     monkeypatch.setattr(skills_cmd, "_HAS_DESCRIPTOR_ANCHOR", False)
-    anchor = skills_cmd._hold_state_root(workspace)
+    anchor = skills_cmd._StateRootAnchor(workspace)
     try:
-        assert skills_cmd._read_state_file_bytes(anchor, "skills", "installs", "plain.txt") == b"plain\n"
+        with pytest.raises(skills_cmd.SkillsStatePathError):
+            skills_cmd._read_state_file_bytes(anchor, "skills", "installs", "plain.txt")
         with pytest.raises(skills_cmd.SkillsStatePathError):
             skills_cmd._read_state_file_bytes(anchor, "skills", "installs", "link.txt")
     finally:
@@ -2008,7 +2062,7 @@ def test_anchor_primitives_translate_injected_os_errors_into_typed_refusals(tmp_
         assert isinstance(exc_info.value.__cause__, OSError)
         monkeypatch.undo()
 
-        monkeypatch.setattr(os, "unlink", _raise_io)
+        monkeypatch.setattr(dirfd, "unlink_child", _raise_io)
         with pytest.raises(skills_cmd.SkillsStatePathError) as exc_info:
             skills_cmd._unlink_in_anchor(anchor, "skills", "installs", "existing.json")
         assert isinstance(exc_info.value.__cause__, OSError)

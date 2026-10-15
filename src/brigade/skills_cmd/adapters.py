@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any, Iterator, Literal, cast
 
 from .. import __version__ as BRIGADE_VERSION
+from .. import dirfd
 from .. import mcp_server
 from ..localio import slugify, utc_now_iso as _now
 from ..projection import kernel as projection
@@ -28,6 +29,7 @@ from ..untrusted import scan_untrusted
 
 from . import registry as _registry_mod
 from . import search_validate as _search_validate_mod
+from . import packs as _packs_mod
 
 if TYPE_CHECKING:
     import brigade.skills_cmd.install as _install_mod
@@ -119,7 +121,7 @@ def _mcp_read_resource(target: Path, uri: str) -> tuple[str, str] | tuple[None, 
     # Every registry read below goes through the held state-root anchor; a
     # refused or absent entry yields (None, None) instead of outside content.
     try:
-        with _registry_mod._held_state_root(target) as anchor:
+        with _registry_mod._held_state_root(target, writable=False) as anchor:
             if name == "SKILL.md":
                 raw = _registry_mod._read_state_file_bytes(anchor, "skills", "registry", skill_id, "SKILL.md")
                 return (raw.decode("utf-8", errors="replace"), "text/markdown") if raw is not None else (None, None)
@@ -201,7 +203,7 @@ def _mcp_tool_call(target: Path, name: str, arguments: dict[str, Any]) -> tuple[
         return text or "", text is None
     if name == "get_skill_metadata":
         try:
-            with _registry_mod._held_state_root(target) as anchor:
+            with _registry_mod._held_state_root(target, writable=False) as anchor:
                 metadata = _registry_mod._anchored_registry_metadata(anchor, skill_id)
         except _registry_mod.SkillsStatePathError:
             metadata = {}
@@ -253,6 +255,12 @@ def publish(*, target: Path, skill: str, scope: str, json_output: bool = False) 
     scope_slug = _registry_mod._slug(scope)
     if not scope_slug:
         print(f"error: invalid publish scope: {scope}", file=sys.stderr)
+        return 2
+    # Unanchored backends can never write the proposal, so refuse before the
+    # anchored lint reads and before any state is created.
+    if not _registry_mod._HAS_DESCRIPTOR_ANCHOR:
+        refusal = _registry_mod._fallback_mutation_refusal("writes", target / ".brigade")
+        print(f"error: {refusal}", file=sys.stderr)
         return 2
     lint_payload = _search_validate_mod._lint_payload(target, skill)
     if not lint_payload["valid"]:
@@ -391,37 +399,15 @@ def _plain_files_under_anchor(anchor: _registry_mod._StateRootAnchor, *relative:
     directory, refusal for symlinked components, symlinked entries skipped.
     """
     if not _registry_mod._HAS_DESCRIPTOR_ANCHOR:
-        base = (anchor.workspace / ".brigade").joinpath(*relative)
-        current = anchor.workspace / ".brigade"
-        for part in relative:
-            current = current / part
-            if not current.exists():
-                return None
-            if current.is_symlink() or _registry_mod._is_reparse_point(current) or not current.is_dir():
-                raise _registry_mod.SkillsStatePathError(f"skills state path must be plain directories: {current}")
-        names: list[str] = []
-        for entry in sorted(base.iterdir(), key=lambda item: item.name):
-            if entry.is_symlink():
-                continue
-            try:
-                st = entry.lstat()
-            except FileNotFoundError:
-                continue
-            except OSError as exc:
-                raise _registry_mod.SkillsStatePathError(
-                    f"skills state entry could not be inspected safely: {entry}"
-                ) from exc
-            if stat_module.S_ISREG(st.st_mode):
-                names.append(entry.name)
-        return names
-    fd, opened = _registry_mod._anchor_open_chain(anchor, *relative, missing_ok=True)
+        raise _registry_mod._fallback_mutation_refusal("reads", anchor.workspace / ".brigade")
+    fd, opened = _registry_mod._anchor_open_chain(anchor, *relative, missing_ok=True, writable=False)
     if fd is None:
         return None
     try:
         names = []
-        for name in sorted(os.listdir(fd)):
+        for name in sorted(dirfd.child_names(fd, sys.maxsize)):
             try:
-                st = os.lstat(name, dir_fd=fd)
+                st = dirfd.stat_child(fd, name, allow_reparse=True)
             except FileNotFoundError:
                 continue
             except OSError as exc:
@@ -431,6 +417,8 @@ def _plain_files_under_anchor(anchor: _registry_mod._StateRootAnchor, *relative:
             if stat_module.S_ISREG(st.st_mode):
                 names.append(name)
         return names
+    except OSError as exc:
+        raise _registry_mod.SkillsStatePathError("skills state directory could not be listed safely") from exc
     finally:
         for held_fd in reversed(opened):
             os.close(held_fd)
@@ -444,7 +432,7 @@ def _fleet_receipts(target: Path) -> dict[tuple[str, str], dict[str, Any]]:
     """
     receipts: dict[tuple[str, str], dict[str, Any]] = {}
     try:
-        with _registry_mod._held_state_root(target) as anchor:
+        with _registry_mod._held_state_root(target, writable=False) as anchor:
             names = _plain_files_under_anchor(anchor, "skills", "installs")
             if not names:
                 return receipts
@@ -476,6 +464,37 @@ def _fleet_receipts(target: Path) -> dict[tuple[str, str], dict[str, Any]]:
     return receipts
 
 
+def _state_install_copy_ids(target: Path, probe: Path, skill_ids: list[str], harness: str) -> set[str]:
+    """Discover a state-backed adapter's copies without pathname reads."""
+    parts = _packs_mod._lexical_state_root_parts(target, probe)
+    assert parts is not None
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        return set()
+    discovered: set[str] = set()
+    try:
+        with _registry_mod._held_state_root(target, writable=False) as anchor:
+            names = _registry_mod._plain_subdirs_under_anchor(anchor, *parts[:-1]) or []
+            for name in names:
+                try:
+                    if _registry_mod._read_state_file_bytes(anchor, *parts[:-1], name, "SKILL.md") is not None:
+                        discovered.add(_registry_mod._slug(name))
+                except _registry_mod.SkillsStatePathError:
+                    continue
+            for skill_id in skill_ids:
+                install_dir, escapes = _install_mod._evaluate_install_dir(target, harness, skill_id)
+                installed_parts = _packs_mod._lexical_state_root_parts(target, install_dir)
+                if escapes or not installed_parts:
+                    continue
+                try:
+                    if _registry_mod._state_entry_kind(anchor, *installed_parts) != "missing":
+                        discovered.add(skill_id)
+                except _registry_mod.SkillsStatePathError:
+                    continue
+    except _registry_mod.SkillsStatePathError:
+        return set()
+    return discovered
+
+
 def _fleet_copy_keys(target: Path) -> list[tuple[str, str]]:
     keys = set(_fleet_receipts(target))
     skill_ids = _fleet_skill_ids(target)
@@ -483,6 +502,9 @@ def _fleet_copy_keys(target: Path) -> list[tuple[str, str]]:
         if harness == "hermes":
             continue
         probe, _probe_escapes = _install_mod._evaluate_install_dir(target, harness, "__brigade_probe__")
+        if _packs_mod._lexical_state_root_parts(target, probe) is not None:
+            keys.update((skill_id, harness) for skill_id in _state_install_copy_ids(target, probe, skill_ids, harness))
+            continue
         root = probe.parent
         if root.is_dir():
             for path in sorted(item for item in root.iterdir() if item.is_dir()):
@@ -608,14 +630,9 @@ def _fleet_status_payload(target: Path) -> dict[str, Any]:
             continue
         source_dir = Path(str(lint_payload["skill_dir"]))
         metadata = raw_metadata if isinstance((raw_metadata := lint_payload.get("metadata")), dict) else {}
-        if selector is not None and selector.startswith("registry:"):
+        if source_dir_parts := _packs_mod._lexical_state_root_parts(target, source_dir):
             # Registry rendering text comes from the anchored read.
-            source_text = (
-                _registry_mod._anchored_registry_text(
-                    target, _registry_mod._slug(selector.removeprefix("registry:")), "SKILL.md"
-                )
-                or ""
-            )
+            source_text = _registry_mod._anchored_registry_text(target, source_dir_parts[2], "SKILL.md") or ""
         else:
             source_text = _registry_mod._skill_md_path(source_dir).read_text(encoding="utf-8", errors="replace")
         supported = raw_supported if isinstance((raw_supported := metadata.get("supported_harnesses")), list) else []
@@ -633,7 +650,7 @@ def _fleet_status_payload(target: Path) -> dict[str, Any]:
         )
         if not drift["receipt_known"]:
             status = "unknown"
-        elif _registry_mod._skill_md_path(installed_dir).is_file() and not supported_state:
+        elif drift["installed"] and not supported_state:
             status = "unsupported"
         elif drift["overall"] == "missing":
             status = "missing"

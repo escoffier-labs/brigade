@@ -36,8 +36,8 @@ from .aboyeur.direct_worker_finish import (
 )
 from .aboyeur.planning import resolve_run_sandbox
 from .roster import Agent, Roster, _as_bool, _as_capabilities, _as_command, _as_env
-from .run_receipts import agent_result_from_worker
-from .run_transport import Assignment
+from .run_receipts import agent_result_from_worker, agent_result_payload
+from .run_transport import Assignment, WorkerAttempt
 
 _RESUMABLE_STATUSES = ("interrupted", "failed")
 _NONTERMINAL_RUN_STATUSES = frozenset(
@@ -63,6 +63,57 @@ def _load_json(run_dir: Path, name: str) -> dict | None:
     except (OSError, json.JSONDecodeError):
         return None
     return data if isinstance(data, dict) else None
+
+
+def _worker_attempts_from_payload(value: object) -> tuple[WorkerAttempt, ...]:
+    if not isinstance(value, list):
+        return ()
+    attempts: list[WorkerAttempt] = []
+    for row in value:
+        if not isinstance(row, dict) or not all(
+            isinstance(row.get(key), str)
+            for key in ("kind", "worker", "task", "transport", "started_at", "finished_at", "terminal_reason")
+        ):
+            continue
+        exit_code = row.get("exit_code")
+        if exit_code is not None and (not isinstance(exit_code, int) or isinstance(exit_code, bool)):
+            continue
+        selected = row.get("selected", False)
+        if not isinstance(selected, bool):
+            continue
+        failure = row.get("failure")
+        failure = failure if isinstance(failure, dict) else {}
+        failure_detail = failure.get("detail")
+        if not isinstance(failure_detail, str):
+            failure_detail = ""
+        attempts.append(
+            WorkerAttempt(
+                kind=row["kind"],
+                worker=row["worker"],
+                task=row["task"],
+                transport=row["transport"],
+                model=row.get("model") if isinstance(row.get("model"), str) else None,
+                reasoning=row.get("reasoning") if isinstance(row.get("reasoning"), str) else None,
+                started_at=row["started_at"],
+                finished_at=row["finished_at"],
+                exit_code=exit_code,
+                terminal_reason=row["terminal_reason"],
+                failure_phase=row.get("failure_phase") if isinstance(row.get("failure_phase"), str) else None,
+                failure_kind=row.get("failure_kind") if isinstance(row.get("failure_kind"), str) else None,
+                session_id=row.get("session_id") if isinstance(row.get("session_id"), str) else None,
+                selected=selected,
+                stdout_log=row.get("stdout_log") if isinstance(row.get("stdout_log"), str) else None,
+                stderr_log=row.get("stderr_log") if isinstance(row.get("stderr_log"), str) else None,
+                detail=failure_detail,
+                ok=not bool(failure),
+                timed_out=(
+                    failure.get("timed_out") is True
+                    or failure.get("class") == "timeout"
+                    or row.get("failure_kind") == "timeout"
+                ),
+            )
+        )
+    return tuple(attempts)
 
 
 def _utc_now() -> datetime:
@@ -315,6 +366,12 @@ def _interrupted_appserver_results(run_dir: Path) -> dict | None:
     if not recovered:
         return None
     return receipt_schema.worker_results_document(recovered)
+
+
+def _is_resumable_appserver_result(result: dict, run_meta: dict) -> bool:
+    return result.get("transport") == "codex-app-server" or (
+        "transport" not in result and run_meta.get("codex_transport") == "app-server"
+    )
 
 
 def _interrupted_salvage_blocked(
@@ -763,7 +820,10 @@ def _resume_locked(
     resumable = [
         r
         for r in results
-        if isinstance(r.get("thread_id"), str) and not r.get("ok") and r.get("status") in _RESUMABLE_STATUSES
+        if _is_resumable_appserver_result(r, run_meta)
+        and isinstance(r.get("thread_id"), str)
+        and not r.get("ok")
+        and r.get("status") in _RESUMABLE_STATUSES
     ]
     stuck = [r for r in results if not r.get("ok") and r not in resumable]
     for r in stuck:
@@ -817,9 +877,41 @@ def _resume_locked(
     probe = seat_health.SeatHealthProbe(collect_executable_version=False)
     try:
         for entry in resumable:
-            entry.pop("failure_phase", None)
             worker = entry.get("worker", "")
             agent = roster.agents.get(worker)
+            for stale_key in (
+                "failure_phase",
+                "failure_kind",
+                "timed_out",
+                "output_truncated",
+                "output_bytes",
+                "output_cap_bytes",
+                "effective_model",
+                "acpx_version",
+                "metadata_provenance",
+                "session_id",
+                "request_id",
+                "stop_reason",
+                "protocol_version",
+                "events",
+                "safe_events",
+                "transport_warning",
+                "exit_code",
+                "duration_seconds",
+                "stdout_log",
+                "stderr_log",
+                "reasoning",
+            ):
+                entry.pop(stale_key, None)
+            if agent is not None and isinstance(agent.model, str):
+                entry["requested_model"] = agent.model
+            else:
+                entry.pop("requested_model", None)
+            if agent is not None and isinstance(agent.reasoning, str):
+                entry["reasoning"] = agent.reasoning
+            else:
+                entry.pop("reasoning", None)
+            entry["transport"] = "codex-app-server"
             if agent is not None:
                 probe.invalidate(seat=agent.name)
                 try:
@@ -833,6 +925,8 @@ def _resume_locked(
                 except Exception as exc:
                     entry["detail"] = f"resume seat probe failed: {exc}"[:200]
                     entry["status"] = "failed"
+                    entry["failure_phase"] = "preflight"
+                    entry["failure_kind"] = "unclassified"
                     print(f"skipping resume for {worker}: seat probe failed", file=sys.stderr)
                     continue
                 try:
@@ -921,6 +1015,13 @@ def _resume_locked(
             text=r.get("text", ""),
             ok=bool(r.get("ok")),
             detail=r.get("detail", ""),
+            transport=r.get("transport") if isinstance(r.get("transport"), str) else "cli",
+            requested_model=r.get("requested_model") if isinstance(r.get("requested_model"), str) else None,
+            effective_model=r.get("effective_model") if isinstance(r.get("effective_model"), str) else None,
+            acpx_version=r.get("acpx_version") if isinstance(r.get("acpx_version"), str) else None,
+            metadata_provenance=(
+                r.get("metadata_provenance") if isinstance(r.get("metadata_provenance"), dict) else None
+            ),
             thread_id=r.get("thread_id"),
             status=r.get("status", ""),
             provenance=r.get("provenance") if isinstance(r.get("provenance"), dict) else None,
@@ -931,6 +1032,51 @@ def _resume_locked(
             failure_phase=(
                 r.get("failure_phase") if not r.get("ok") and isinstance(r.get("failure_phase"), str) else None
             ),
+            transport_warning=(r.get("transport_warning") if isinstance(r.get("transport_warning"), dict) else None),
+            cloud_environment=(
+                {
+                    key: item
+                    for key, item in r["cloud_environment"].items()
+                    if isinstance(key, str) and isinstance(item, str)
+                }
+                if isinstance(r.get("cloud_environment"), dict)
+                else None
+            ),
+            reasoning=r.get("reasoning") if isinstance(r.get("reasoning"), str) else None,
+            stdout_log=r.get("stdout_log") if isinstance(r.get("stdout_log"), str) else None,
+            stderr_log=r.get("stderr_log") if isinstance(r.get("stderr_log"), str) else None,
+            exit_code=(
+                r.get("exit_code")
+                if isinstance(r.get("exit_code"), int) and not isinstance(r.get("exit_code"), bool)
+                else None
+            ),
+            duration_seconds=(
+                r.get("duration_seconds")
+                if isinstance(r.get("duration_seconds"), (int, float))
+                and not isinstance(r.get("duration_seconds"), bool)
+                else None
+            ),
+            stop_reason=r.get("stop_reason") if isinstance(r.get("stop_reason"), str) else None,
+            protocol_version=(
+                r.get("protocol_version")
+                if isinstance(r.get("protocol_version"), int) and not isinstance(r.get("protocol_version"), bool)
+                else None
+            ),
+            session_id=r.get("session_id") if isinstance(r.get("session_id"), str) else None,
+            request_id=(
+                r.get("request_id")
+                if isinstance(r.get("request_id"), (str, int)) and not isinstance(r.get("request_id"), bool)
+                else None
+            ),
+            safe_events=tuple(event for event in r.get("events", []) if isinstance(event, dict))
+            if isinstance(r.get("events"), list)
+            else (),
+            attempts=_worker_attempts_from_payload(r.get("attempts")),
+            env_overrides=tuple(item for item in r.get("env_overrides", []) if isinstance(item, str))
+            if isinstance(r.get("env_overrides"), list)
+            else (),
+            endpoint_host=r.get("endpoint_host") if isinstance(r.get("endpoint_host"), str) else None,
+            remote=r.get("remote") if isinstance(r.get("remote"), dict) else None,
             timed_out=bool(r.get("timed_out")),
             output_truncated=bool(r.get("output_truncated")),
             output_bytes=int(r.get("output_bytes") or 0),
@@ -968,11 +1114,7 @@ def _resume_locked(
             )
         )
         final = agent_result_from_worker(direct_result)
-        synthesis_result: dict[str, object] = {"ok": final.ok, "detail": final.detail, "text": final.text}
-        if final.failure_phase is not None:
-            synthesis_result["failure_phase"] = final.failure_phase
-        if final.failure_kind is not None:
-            synthesis_result["failure_kind"] = final.failure_kind
+        synthesis_result = agent_result_payload(final)
         synthesis_payload = receipt_schema.synthesis_document(
             mode="direct-worker",
             worker=run_meta.get("worker") if isinstance(run_meta.get("worker"), str) else None,

@@ -79,32 +79,32 @@ def _skill_names_at(root: Path) -> set[str]:
         return names
     from . import skills_cmd
 
-    for skill_md in root.glob(".*/skills/*/SKILL.md"):
-        if skills_cmd._lexical_state_root_parts(root, skill_md) is not None:
+    for harness_root in root.glob(".*"):
+        if skills_cmd._lexical_state_root_parts(root, harness_root) is not None:
             continue
-        skill_id = _safe_skill_id_component(skill_md.parent.name)
-        if skill_id is None:
-            continue
-        if _contained_under(root_resolved, skill_md) is None:
-            continue
-        names.add(skill_id)
-    if (root / ".brigade").exists():
-        try:
-            with skills_cmd._held_state_root(root) as anchor:
-                listed = skills_cmd._plain_subdirs_under_anchor(anchor, "skills", "registry")
-                if listed:
-                    for name in listed:
-                        skill_id = _safe_skill_id_component(name)
-                        if skill_id is None:
-                            continue
-                        try:
-                            raw = skills_cmd._read_state_file_bytes(anchor, "skills", "registry", name, "SKILL.md")
-                        except skills_cmd.SkillsStatePathError:
-                            continue
-                        if raw is not None:
-                            names.add(skill_id)
-        except skills_cmd.SkillsStatePathError:
-            pass
+        for skill_md in harness_root.glob("skills/*/SKILL.md"):
+            skill_id = _safe_skill_id_component(skill_md.parent.name)
+            if skill_id is None:
+                continue
+            if _contained_under(root_resolved, skill_md) is None:
+                continue
+            names.add(skill_id)
+    try:
+        with skills_cmd._held_state_root(root, writable=False) as anchor:
+            listed = skills_cmd._plain_subdirs_under_anchor(anchor, "skills", "registry")
+            if listed:
+                for name in listed:
+                    skill_id = _safe_skill_id_component(name)
+                    if skill_id is None:
+                        continue
+                    try:
+                        raw = skills_cmd._read_state_file_bytes(anchor, "skills", "registry", name, "SKILL.md")
+                    except skills_cmd.SkillsStatePathError:
+                        continue
+                    if raw is not None:
+                        names.add(skill_id)
+    except skills_cmd.SkillsStatePathError:
+        pass
     return names
 
 
@@ -135,22 +135,22 @@ def _artifact_content_path_at(root: Path, artifact_id: str) -> Path | None:
         return None
     from . import skills_cmd
 
-    # Enumerate harness skill roots without interpolating the untrusted id into glob.
-    # `.brigade/skills` matches this glob but is state-root content; skip it
-    # so a registry directory symlink cannot pass containment.
-    for skills_root in sorted(path for path in root.glob(".*/skills") if path.is_dir()):
-        if skills_cmd._lexical_state_root_parts(root, skills_root) is not None:
+    # Exclude state before any pathname traversal of a harness's skills directory.
+    for harness_root in sorted(root.glob(".*")):
+        if skills_cmd._lexical_state_root_parts(root, harness_root) is not None:
+            continue
+        skills_root = harness_root / "skills"
+        if not skills_root.is_dir():
             continue
         candidate = skills_root / skill_id / "SKILL.md"
         contained = _contained_under(root_resolved, candidate)
         if contained is not None:
             return contained
-    if (root / ".brigade").exists():
-        if skills_cmd._registry_entry_present(root, skill_id):
-            registry_dir = root / ".brigade" / "skills" / "registry" / skill_id
-            _dirs, files = skills_cmd._installed_tree_snapshot(root, registry_dir)
-            if ("SKILL.md",) in files:
-                return registry_dir / "SKILL.md"
+    if skills_cmd._registry_entry_present(root, skill_id):
+        registry_dir = root / ".brigade" / "skills" / "registry" / skill_id
+        _dirs, files = skills_cmd._installed_tree_snapshot(root, registry_dir)
+        if ("SKILL.md",) in files:
+            return registry_dir / "SKILL.md"
     return None
 
 

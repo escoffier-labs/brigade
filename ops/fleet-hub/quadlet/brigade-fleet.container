@@ -14,8 +14,10 @@ HealthInterval=30s
 HealthTimeout=3s
 HealthRetries=3
 HealthOnFailure=kill
+Notify=healthy
 
 [Service]
+TimeoutStartSec=120
 Restart=on-failure
 RestartSec=5
 

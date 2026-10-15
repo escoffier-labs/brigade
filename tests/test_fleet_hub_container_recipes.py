@@ -92,8 +92,9 @@ def test_compose_runbook_pins_the_built_local_image_id():
         runbook,
     )
     assert "docker compose -f compose.yaml -f secrets/compose.image-id.yaml restart hub" in runbook
-    assert runbook.count("--wait --wait-timeout 120") == 3
-    assert "attempt=0\nuntil curl --fail http://127.0.0.1:3774/health; do" in runbook
+    assert runbook.count("--wait --wait-timeout 120") == 4
+    assert "deadline=$((SECONDS + 120))" in runbook
+    assert 'curl --fail --connect-timeout 2 --max-time "$remaining"' in runbook
     assert "rebuild the versioned tag, record its new local image ID" in runbook
     assert 'docker image save --output "$archive" "$previous_id"' in runbook
     assert 'docker image load --input "$archive"' in runbook
@@ -258,6 +259,8 @@ def test_quadlet_recipe_has_equivalent_persistence_health_and_restart_policy():
     assert "Secret=brigade-fleet-admin-token,target=admin_token" in container
     assert "HealthCmd=" in container
     assert "HealthOnFailure=kill" in container
+    assert "Notify=healthy" in container
+    assert "TimeoutStartSec=120" in container
     assert "Restart=on-failure" in container
     assert "User=10001" in volume
     assert "Group=10001" in volume

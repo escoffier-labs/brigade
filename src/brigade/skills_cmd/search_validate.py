@@ -164,7 +164,7 @@ def _lint_registry_payload(
     """
     display_dir = registry._skill_path(target, skill_id)
     try:
-        with registry._held_state_root(target) as anchor:
+        with registry._held_state_root(target, writable=False) as anchor:
             snapshot_dirs, snapshot_files = registry._read_registry_entry_tree(anchor, skill_id)
             if ("skill.json",) not in snapshot_files:
                 # A missing, symlinked, or otherwise unreadable metadata file
@@ -208,6 +208,12 @@ def _lint_payload(
             display if display.name else display.parent,
             f"refusing skills state path outside the registry anchoring: {display}",
         )
+    # A bare id that is neither an existing pathname nor a bundled skill falls
+    # through to the registry. Lint that entry from the anchored snapshot too;
+    # the entry is the one named by the request, never by its own metadata id.
+    skill_dir, _metadata, source = registry._load_skill(target, requested)
+    if source.get("kind") == "registry":
+        return _lint_registry_payload(target, skill_dir.name, harness=harness, mode=mode)
     return _lint_path_payload(target, skill_or_path, harness=harness, mode=mode)
 
 
@@ -217,6 +223,11 @@ def _lint_path_payload(
     from .. import agent_skill_format
 
     skill_dir, metadata, source = registry._load_skill(target, skill_or_path)
+    if source.get("kind") == "registry" and not contain:
+        # The selector can reclassify between loads (an operator path removed
+        # after _lint_payload saw it). A registry entry is never read by
+        # pathname; lint the one this load named from the anchored snapshot.
+        return _lint_registry_payload(target, skill_dir.name, harness=harness, mode=mode)
     skill_md = registry._skill_md_path(skill_dir)
     errors: list[str] = []
     warnings: list[str] = []
@@ -382,6 +393,20 @@ def lint(
     return 0 if payload["valid"] else 1
 
 
+def _installed_copy_present(target: Path, installed_dir: Path) -> bool:
+    """Whether an installed copy has SKILL.md, reading state copies via the anchor."""
+    parts = _packs_mod._lexical_state_root_parts(target, installed_dir)
+    if parts is None:
+        return registry._skill_md_path(installed_dir).is_file()
+    if not parts or any(part in {"", ".", ".."} for part in parts):
+        return False
+    try:
+        with registry._held_state_root(target, writable=False) as anchor:
+            return registry._read_state_file_bytes(anchor, *parts, "SKILL.md") is not None
+    except registry.SkillsStatePathError:
+        return False
+
+
 def _compatibility_payload(target: Path, skill: str) -> dict[str, Any]:
     lint_payload = _lint_payload(target, skill)
     metadata = raw_metadata if isinstance((raw_metadata := lint_payload.get("metadata")), dict) else {}
@@ -391,10 +416,15 @@ def _compatibility_payload(target: Path, skill: str) -> dict[str, Any]:
     source_text = ""
     skill_dir = Path(str(lint_payload.get("skill_dir") or ""))
     skill_md = registry._skill_md_path(skill_dir)
-    if skill.startswith("registry:"):
-        # Anchored registry read; a refused entry contributes no text.
+    source = raw_source if isinstance((raw_source := lint_payload.get("source")), dict) else {}
+    if source.get("kind") == "registry":
+        # Anchored registry read for every selector form that classified as a
+        # registry entry; a refused entry contributes no text.
+        source_parts = _packs_mod._lexical_state_root_parts(target, skill_dir) or ()
         source_text = (
-            registry._anchored_registry_text(target, registry._slug(skill.removeprefix("registry:")), "SKILL.md") or ""
+            registry._anchored_registry_text(target, source_parts[2], "SKILL.md") or ""
+            if len(source_parts) == 3
+            else ""
         )
     elif skill_md.is_file():
         source_text = skill_md.read_text(encoding="utf-8", errors="replace")
@@ -403,12 +433,20 @@ def _compatibility_payload(target: Path, skill: str) -> dict[str, Any]:
         install_path = adapter.get("install_path")
         installed = False
         installed_path = None
+        install_refused = False
         if install_path:
-            installed_dir = _install_mod._install_dir(target, adapter_id, skill_id)
-            installed_path = str(installed_dir)
-            installed = registry._skill_md_path(installed_dir).is_file()
+            try:
+                installed_dir = _install_mod._install_dir(target, adapter_id, skill_id)
+            except registry.SkillsStatePathError:
+                # A refused install copy is reported, never inspected or diffed.
+                install_refused = True
+            else:
+                installed_path = str(installed_dir)
+                installed = _installed_copy_present(target, installed_dir)
         supported_state = adapter_id in supported or not supported
         blockers: list[str] = []
+        if install_refused:
+            blockers.append("installed copy refused by skills state anchoring")
         if adapter.get("status") == "planned":
             blockers.append("adapter planned")
         if not install_path:
