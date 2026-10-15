@@ -234,6 +234,23 @@ def _validate_manifest_entries(manifest: dict[str, Any], raw: dict[str, bytes]) 
         raise DerivativeExportError("source package contents do not match its manifest")
 
 
+def _is_within_directory(path: Path, directory: Path) -> bool:
+    """Compare directory identity, not path text, so case-folding and bind mounts can't hide nesting."""
+    try:
+        target = os.stat(directory)
+        identity = (target.st_dev, target.st_ino)
+        for candidate in (path, *path.parents):
+            try:
+                info = os.stat(candidate)
+            except FileNotFoundError:
+                continue  # Ancestors created later by the exporter cannot be the source.
+            if (info.st_dev, info.st_ino) == identity:
+                return True
+    except OSError as exc:
+        raise DerivativeExportError("derivative paths could not be resolved safely") from exc
+    return False
+
+
 def export_derivative(
     *,
     source: Path,
@@ -257,11 +274,7 @@ def export_derivative(
             raise DerivativeExportError("derivative output already exists")
     except (OSError, RuntimeError, ValueError) as exc:
         raise DerivativeExportError("derivative paths could not be resolved safely") from exc
-    try:
-        out.relative_to(source)
-    except ValueError:
-        pass
-    else:
+    if _is_within_directory(out.parent, source):
         raise DerivativeExportError("derivative output cannot be inside its source package")
 
     root_fd = -1

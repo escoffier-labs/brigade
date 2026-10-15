@@ -1215,3 +1215,33 @@ def test_derivative_reports_unresolvable_home_paths_as_export_errors(tmp_path: P
             lawful_basis="contract",
             necessity="review",
         )
+
+
+def test_derivative_rejects_output_inside_source_by_directory_identity(tmp_path: Path, monkeypatch) -> None:
+    _, receipt = _fabricated_run_dir(tmp_path)
+    source = tmp_path / "source"
+    assert evidence_package.export_package(target=tmp_path, run_id=str(receipt["run_id"]), out_str=str(source)) == 0
+    alias = tmp_path / "alias"
+    alias.mkdir()
+    real_stat = os.stat
+    source_info = real_stat(source)
+
+    def aliasing_stat(path, *args, **kwargs):
+        # Emulate a case-insensitive name or bind mount: a different path text for the source directory.
+        if Path(path) == alias:
+            return source_info
+        return real_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(evidence_derivative.os, "stat", aliasing_stat)
+    before = sorted(entry.name for entry in source.iterdir())
+
+    with pytest.raises(evidence_derivative.DerivativeExportError, match="cannot be inside its source package"):
+        evidence_derivative.export_derivative(
+            source=source,
+            out=alias / "derivative",
+            recipient="recipient-42",
+            authority="approved-case-7",
+            lawful_basis="contract",
+            necessity="review",
+        )
+    assert sorted(entry.name for entry in source.iterdir()) == before
