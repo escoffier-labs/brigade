@@ -43,3 +43,10 @@ def test_claude_session_is_review_only():
     assert disallowed is not None
     for tool in ("Edit", "Write", "MultiEdit", "NotebookEdit", "Bash(git push:*)", "Bash(git commit:*)"):
         assert tool in disallowed.group(1).split(",")
+
+
+def test_inline_and_review_events_skip_fork_prs():
+    text = _text()
+    condition = text[text.index("    if: >-") : text.index("    runs-on:")]
+    # Fork PR review events get no secrets, so they must be limited to same-repo branches.
+    assert condition.count("github.event.pull_request.head.repo.full_name == github.repository") == 2

@@ -26,13 +26,22 @@ concurrency:
 
 jobs:
   claude:
+    # issue_comment runs in the base-repo context, so a top-level @claude comment works on
+    # fork PRs too. Inline and review-body events on fork PRs get no secrets, so they only
+    # run for same-repo branches; on a fork PR, mention @claude in a top-level comment.
     if: >-
       (
-        (github.event_name == 'issue_comment' || github.event_name == 'pull_request_review_comment')
+        github.event_name == 'issue_comment'
+        && contains(github.event.comment.body, '@claude')
+        && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
+      ) || (
+        github.event_name == 'pull_request_review_comment'
+        && github.event.pull_request.head.repo.full_name == github.repository
         && contains(github.event.comment.body, '@claude')
         && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.comment.author_association)
       ) || (
         github.event_name == 'pull_request_review'
+        && github.event.pull_request.head.repo.full_name == github.repository
         && contains(github.event.review.body, '@claude')
         && contains(fromJSON('["OWNER","MEMBER","COLLABORATOR"]'), github.event.review.author_association)
       )
