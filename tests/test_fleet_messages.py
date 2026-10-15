@@ -311,10 +311,10 @@ def test_retry_deduplication_quota_and_dashboard_unread_count(message_hub, monke
     assert "quota" in rejected[1]["error"]
 
     page = _get(base, ADMIN, "/view/machines")
-    assert "1 unread messages" in page
+    assert "1 unread message</div>" in page
     assert _request(base, token_b, {"action": "ack", "id": first[1]["message"]["id"]})[0] == 200
     page = _get(base, ADMIN, "/view/machines")
-    assert "1 unread messages" not in page
+    assert "unread message" not in page
     monkeypatch.setattr(fleet_hub_messages, "SENDER_DAILY_QUOTA", 1)
     sender_limited = _request(
         base,
@@ -346,7 +346,7 @@ def test_dashboard_cookie_user_does_not_see_unread_message_count(message_hub):
     )
     with urllib.request.urlopen(request, timeout=5) as response:
         page = response.read().decode("utf-8")
-    assert "1 unread messages" not in page
+    assert "unread message" not in page
 
 
 def test_revoked_recipient_exact_retry_returns_existing_before_active_check(message_hub):

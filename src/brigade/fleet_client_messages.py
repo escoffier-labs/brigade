@@ -664,9 +664,11 @@ def flush(node_id: str, *, hub_url: str | None = None, token: str | None = None)
     config = fleet_client.load_fleet_config()
     hub = hub_url or config["hub_url"]
     auth = token or fleet_client.load_fleet_settings()["node_token"]
+    if not hub or not auth:
+        return 0
     path = _spool_path(node_id, auth)
     _warn_inactive_spools(node_id, path)
-    if not hub or not path.is_file():
+    if not path.is_file():
         return 0
     with fleet_client._spool_lock(path) as dir_fd:
         return _flush_locked(path, hub, auth, dir_fd=dir_fd)

@@ -1233,7 +1233,7 @@ class TestBoardBounds:
 
         assert status == 200
         assert f'data-node="{NODE_A}"' in page
-        assert "1 unread messages" in page
+        assert "1 unread message</div>" in page
 
     def test_machine_pages_bound_runs_per_node_without_splitting_machine(self, hub, monkeypatch):
         run_ids = [f"run-{index:03d}" for index in range(201)]

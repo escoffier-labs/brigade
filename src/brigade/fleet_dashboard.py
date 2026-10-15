@@ -538,7 +538,7 @@ def _machine_card(
     if isinstance(events, int):
         meta.append(f"{events} events")
     if unread_count:
-        meta.append(f"{unread_count} unread messages")
+        meta.append(f"{unread_count} unread message{'s' if unread_count != 1 else ''}")
     holds = ""
     if held:
         items = "".join(f"<li>{esc(claim.target)}: {esc(_claim_text(claim))}</li>" for claim in held)

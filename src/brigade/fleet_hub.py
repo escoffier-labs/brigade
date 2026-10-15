@@ -720,6 +720,9 @@ def _secure_hub_database_storage(db_path: Path) -> None:
         except FileNotFoundError:
             created = True
         parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # Follow relocated data directories, but validate the final files below.
+        parent = parent.resolve()
+        db_path = parent / db_path.name
         parent_info = parent.lstat()
     except OSError as exc:
         raise FleetHubError(f"could not secure fleet hub database directory: {type(exc).__name__}") from exc
