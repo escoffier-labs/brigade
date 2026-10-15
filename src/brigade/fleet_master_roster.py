@@ -170,7 +170,7 @@ _COMPOUND_NAMED_ASSIGNMENT = re.compile(
 _IMPERATIVE_COMPOUND_ASSIGNMENT = re.compile(
     r"\b(?:set|configure(?:s|d)?|store(?:s|d)?|provide(?:s|d)?|supply|supplies|supplied|"
     r"assign(?:s|ed)?|define(?:s|d)?)\s+(?:(?:the|a|an|my|your|our|their|his|her|its)\s+)?"
-    r"(?P<key>[A-Za-z][A-Za-z0-9_.-]*)\s+(?:(?:value\s+)?(?:to|as|with|is|equals)|:|=)\s+"
+    r"(?P<key>[A-Za-z][A-Za-z0-9_.\[\]-]*)\s+(?:(?:value\s+)?(?:to|as|with|is|equals)|:|=)\s+"
     r"(?P<value>[^\s&,;]+)",
     re.IGNORECASE,
 )
@@ -225,7 +225,7 @@ _ON_OWNED_PROTECTED_ASSIGNMENT = re.compile(
 _BARE_AUTH_PROFILE_NAME = re.compile(
     r"\bauth(?:entication)?[ _-]profiles?\s+"
     r"(?!(?:this|the|a|an|is|are|was|were|has|have|had|will|can|could|should|must|may|might|require|requires|"
-    r"selection|rotation|management|support|configuration|policy|policies|availability|required|needed|names|values|"
+    r"selection|rotation|management|concerns?|support|configuration|policy|policies|availability|required|needed|names|values|"
     r"necessary|optional|available|regularly|securely|safely|carefully|consistently|frequently|periodically|"
     r"independently|centrally|locally|automatically|manually|before|after|during|without|throughout|using|"
     r"for|in|as|to|with)\b)"
@@ -252,7 +252,8 @@ _DECLARATIVE_AUTH_PROFILE = re.compile(
     r"(?<![\w.-])(?!(?:no|the|a|an|this|that|these|those|my|our|their|your|auth|authentication|"
     r"selection|rotation|management|configuration|policy|policies|availability|required|needed|necessary|"
     r"optional|available|regularly)\b)[A-Za-z][A-Za-z0-9_.-]*\s+is\s+(?:the\s+|a\s+|an\s+)?"
-    r"auth(?:entication)?[ _-]?profiles?\b)",
+    r"auth(?:entication)?[ _-]?profiles?\b"
+    r"(?!\s+(?!(?:for|of|on|used|assigned|in|active|enabled|selected|configured|available)\b)[^\W\d_]))",
     re.IGNORECASE,
 )
 _PROFILE_FOR_AUTHENTICATION = re.compile(
