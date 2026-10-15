@@ -292,6 +292,21 @@ def test_nt_directory_enumeration_is_bounded_and_rejects_malformed_replies(monke
         assert all(call[-1] is False for call in calls[1:])
 
 
+@pytest.mark.parametrize(
+    "status",
+    [
+        0x8000002D,  # STATUS_STOPPED_ON_SYMLINK
+        0xC0000279,  # STATUS_IO_REPARSE_TAG_NOT_HANDLED
+        0xC0000280,  # STATUS_REPARSE_POINT_NOT_RESOLVED
+    ],
+)
+def test_nt_reparse_statuses_raise_typed_refusal(status):
+    from brigade.work_cmd import nt_dirfd
+
+    with pytest.raises(nt_dirfd.ReparsePointRefusedError, match="reparse point"):
+        nt_dirfd._raise_ntstatus(status)
+
+
 def test_child_names_never_falls_back_to_a_pathname(monkeypatch):
     monkeypatch.setattr(dirfd, "posix_available", lambda: False)
     monkeypatch.setattr(dirfd, "nt_available", lambda: False)
@@ -319,6 +334,7 @@ def nt_metadata_kernel(monkeypatch):
     live = set()
     closed = []
     opens = []
+    conversions = []
     failures = set()
     real_fstat, real_close = os.fstat, os.close
 
@@ -363,6 +379,7 @@ def nt_metadata_kernel(monkeypatch):
     def convert(handle, flags):
         if "convert" in failures:
             raise OSError("CRT conversion failed")
+        conversions.append(flags)
         return handle
 
     def fstat(handle):
@@ -385,7 +402,7 @@ def nt_metadata_kernel(monkeypatch):
     monkeypatch.setattr(os, "close", close)
     monkeypatch.setattr(dirfd, "posix_available", lambda: False)
     monkeypatch.setattr(dirfd, "nt_available", lambda: True)
-    return SimpleNamespace(opens=opens, live=live, closed=closed, failures=failures)
+    return SimpleNamespace(opens=opens, live=live, closed=closed, failures=failures, conversions=conversions)
 
 
 def test_assessment_reader_descends_directories_with_nt_metadata(tmp_path, nt_metadata_kernel):
@@ -428,6 +445,33 @@ def test_nt_stat_child_reads_only_metadata_and_closes(tmp_path, nt_metadata_kern
     assert len(kernel.closed) == len(set(kernel.closed)) == 2
 
 
+def test_nt_open_child_file_can_deny_write_sharing(tmp_path, nt_metadata_kernel):
+    from brigade.work_cmd import nt_dirfd
+
+    kernel = nt_metadata_kernel
+    parent = nt_dirfd.open_root_directory(tmp_path, writable=False)
+    descriptor = dirfd.open_child_file(parent, "receipt.json", os.O_RDONLY, share_write=False)
+    try:
+        assert kernel.opens[-1][-1] == nt_dirfd._FILE_SHARE_READ | nt_dirfd._FILE_SHARE_DELETE
+    finally:
+        os.close(descriptor)
+        os.close(parent)
+
+
+def test_nt_open_child_file_preserves_binary_mode_for_crt_descriptor(tmp_path, monkeypatch, nt_metadata_kernel):
+    from brigade.work_cmd import nt_dirfd
+
+    binary_flag = 0x8000
+    monkeypatch.setattr(os, "O_BINARY", binary_flag, raising=False)
+    parent = nt_dirfd.open_root_directory(tmp_path, writable=False)
+    descriptor = dirfd.open_child_file(parent, "receipt.json", os.O_RDONLY | binary_flag)
+    try:
+        assert nt_metadata_kernel.conversions[-1] & binary_flag
+    finally:
+        os.close(descriptor)
+        os.close(parent)
+
+
 @pytest.mark.parametrize(
     "name,failure,error,message,child_closed",
     [
@@ -452,8 +496,10 @@ def test_nt_stat_child_refuses_unsafe_or_failed_metadata_without_leaks(
     if failure:
         kernel.failures.add(failure)
     try:
-        with pytest.raises(error, match=message):
+        with pytest.raises(error, match=message) as raised:
             dirfd.stat_child(parent, name)
+        if name in {"link", "junction"}:
+            assert isinstance(raised.value, nt_dirfd.ReparsePointRefusedError)
         assert kernel.live == {parent}
         assert len(kernel.closed) == int(child_closed)
     finally:

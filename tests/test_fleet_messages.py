@@ -1161,7 +1161,7 @@ def test_schema_v28_migrates_principal_retry_state_and_unacked_index(tmp_path):
 
     migrated = fleet_hub.init_db(db)
     try:
-        assert migrated.execute("PRAGMA user_version").fetchone()[0] == 30
+        assert migrated.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
         columns = {row[1] for row in migrated.execute("PRAGMA table_info(fleet_message_principals)")}
         indexes = {row[1] for row in migrated.execute("PRAGMA index_list(fleet_messages)")}
         assert "enrollment_id" in columns
@@ -2954,7 +2954,6 @@ def test_schema_migrates_existing_version_26_message_rows(tmp_path):
     client_id, payload_hash = conn.execute("SELECT client_id,payload_hash FROM fleet_messages WHERE id=1").fetchone()
     assert client_id == "legacy-1"
     assert payload_hash == fleet_hub_messages._payload_digest(NODE_B, "Legacy", "Keep me", None, "normal")
-    assert fleet_hub.SCHEMA_VERSION == 30
     conn.close()
 
 

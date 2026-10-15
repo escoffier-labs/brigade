@@ -1,8 +1,18 @@
 # Windows per-file pytest sweep
 
-The `windows-pytest` CI job runs each discovered `tests/**/test_*.py` file in
-its own process and uploads the logs and `summary.json`. It remains advisory
-(`continue-on-error: true`). Required checks retain their existing policy.
+The `windows-pytest` job in `windows-observe.yml` runs each discovered
+`tests/**/test_*.py` file in its own process and uploads the logs and
+`summary.json`, retained for seven days. It runs on hosted Windows nightly at
+07:17 UTC or manually on `main`. Regressions and incomplete accounting fail
+the observer workflow, whose check is not required for merging.
+
+The required `lint` job checks allowlist growth without running tests, using
+`scripts/windows_pytest.py --check-allowlist-only --base-ref <sha>`. It fetches
+the PR base SHA, merge-group base SHA, or previous push SHA at depth one and
+fails if the base or baseline cannot be loaded. A valid base commit without
+the allowlist permits initial creation up to the existing 182-entry cap.
+The observer has no PR base reference. Required native Windows acceptance
+retains its existing policy.
 
 ## Failure accounting
 
@@ -32,7 +42,7 @@ a log that does not exist because its process never launched.
 ## CI and local budgets
 
 The first workflow step captures a UTC wall-clock epoch into `GITHUB_ENV`
-before checkout, Python setup, installation, and base-ref fetching. The
+before checkout, Python setup, and installation. The
 driver receives that value through `--job-started-at`, with these settings:
 
 | Option | CI value | Purpose |

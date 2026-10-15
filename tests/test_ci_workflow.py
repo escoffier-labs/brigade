@@ -1,8 +1,11 @@
 from pathlib import Path
 import json
+import os
+import textwrap
 import re
 import subprocess
 
+import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -317,17 +320,29 @@ def test_ci_workflow_cancels_superseded_runs_for_the_same_pr_or_ref():
     assert "cancel-in-progress: true" in header
 
 
-def test_ci_workflow_runs_per_file_windows_pytest_and_uploads_results():
-    text = (ROOT / ".github/workflows/ci.yml").read_text()
+def test_nightly_windows_observer_preserves_per_file_budgets_and_results():
+    ci = (ROOT / ".github/workflows/ci.yml").read_text()
+    assert "  windows-pytest:" not in ci
+    text = (ROOT / ".github/workflows/windows-observe.yml").read_text()
     section = _workflow_job_section(text, "windows-pytest")
 
-    assert "if: github.event_name == 'pull_request'" in section
-    assert "continue-on-error: true" in section
+    header = text[: text.index("jobs:")]
+    assert "schedule:" in header
+    assert "cron: '17 7 * * *'" in header
+    assert "workflow_dispatch:" in header
+    assert "pull_request:" not in header
+    assert "push:" not in header
+    assert "permissions:\n  contents: read" in header
+    assert "group: windows-observe-main" in header
+    assert "cancel-in-progress: false" in header
+    assert "if: ${{ github.ref == 'refs/heads/main' }}" in section
+    assert "continue-on-error" not in text
     assert "runs-on: windows-latest" in section
     assert "timeout-minutes: 90" in section
     assert "shell: cmd" in section
     assert "persist-credentials: false" in section
-    assert "git fetch --no-tags --depth=1 origin ${{ github.event.pull_request.base.sha }}" in section
+    assert "git fetch" not in section
+    assert "pull_request.base" not in section
     assert 'python -m pip install -e ".[dev]"' in section
     assert "|| exit /b 1" in section
     budget = _workflow_step_section(text, "windows-pytest", "Capture job budget")
@@ -335,13 +350,13 @@ def test_ci_workflow_runs_per_file_windows_pytest_and_uploads_results():
     assert "shell: pwsh" in budget
     assert "ToUnixTimeSeconds()" in budget
     assert "$env:GITHUB_ENV" in budget
-    driver = _workflow_step_section(text, "windows-pytest", "Run per-file pytest ratchet")
+    driver = _workflow_step_section(text, "windows-pytest", "Observe full Windows suite")
     assert "timeout-minutes: 85" in driver
     assert '--record "%RUNNER_TEMP%\\windows-pytest-results\\summary.json"' in driver
     assert '--job-started-at "%WINDOWS_PYTEST_JOB_STARTED_AT%"' in driver
     assert "--job-limit 5400 --startup-reserve 120 --finalize-reserve 300" in driver
     assert "--job-timeout 5100" in driver
-    assert "--base-ref ${{ github.event.pull_request.base.sha }}" in driver
+    assert "--base-ref" not in driver
     assert driver.count("--serial ") == 2
     assert "--serial test_runs_serve.py" in driver
     assert "--serial test_aboyeur.py" in driver
@@ -350,7 +365,65 @@ def test_ci_workflow_runs_per_file_windows_pytest_and_uploads_results():
     assert "uses: actions/upload-artifact@v7" in artifact
     assert "path: ${{ runner.temp }}/windows-pytest-results" in artifact
     assert "if-no-files-found: warn" in artifact
+    assert "retention-days: 7" in artifact
+    assert 'python-version: "3.12"' in section
+    assert "cache: pip" in section
+    assert "cache-dependency-path: pyproject.toml" in section
     assert "powershell" not in section
+
+
+@pytest.mark.skipif(os.name == "nt", reason="lint shell step runs on Ubuntu")
+@pytest.mark.parametrize(
+    ("base", "fetch_status", "expected_commands"),
+    [("", 0, []), ("a" * 40, 128, ["git"]), ("a" * 40, 0, ["git", "python"])],
+    ids=["missing-base", "failed-fetch", "available-base"],
+)
+def test_required_lint_allowlist_step_fails_closed_before_checking(tmp_path, base, fetch_status, expected_commands):
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    lint = _workflow_job_section(text, "lint")
+    assert text.count("--check-allowlist-only") == 1
+    step = _workflow_step_section(text, "lint", "Windows allowlist ratchet")
+    assert "continue-on-error" not in step
+    assert (
+        "BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}"
+        in step
+    )
+    assert lint.index("actions/checkout") < lint.index("Windows allowlist ratchet")
+    script = textwrap.dedent(step.split("        run: |\n", 1)[1])
+    # Execute the actual workflow shell. Transport stubs log argv only, never
+    # implement ratchet policy, which is tested against real Git commits.
+    command_log = tmp_path / "commands.log"
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for name, status in (("git", fetch_status), ("python", 0)):
+        stub = bin_dir / name
+        stub.write_text(
+            f'#!/bin/sh\nfor arg in \'{name}\' "$@"; do printf \'%s\\n\' "$arg"; done >> "$COMMAND_LOG"\nexit {status}\n'
+        )
+        stub.chmod(0o755)
+    env = {**os.environ, "BASE_SHA": base, "COMMAND_LOG": str(command_log), "PATH": f"{bin_dir}:{os.environ['PATH']}"}
+    result = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", script], env=env, capture_output=True, text=True)
+    lines = command_log.read_text().splitlines() if command_log.exists() else []
+    assert [line for line in lines if line in {"git", "python"}] == expected_commands
+    if expected_commands == ["git", "python"]:
+        assert result.returncode == 0
+        assert lines == [
+            "git",
+            "fetch",
+            "--no-tags",
+            "--depth=1",
+            "origin",
+            base,
+            "python",
+            "scripts/windows_pytest.py",
+            "--check-allowlist-only",
+            "--base-ref",
+            base,
+        ]
+    else:
+        assert result.returncode != 0
+        if not base:
+            assert "base SHA is missing" in result.stdout + result.stderr
 
 
 def test_ci_workflow_runs_four_shards_on_every_supported_python():
