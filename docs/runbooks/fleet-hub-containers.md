@@ -223,6 +223,11 @@ The unit waits for its health check before systemd reports startup success,
 with a 120-second startup timeout. Both initial deployment and rollback use
 this readiness gate.
 
+Hub setup leaves the operator account's Fleet client configuration untouched.
+An admin-only client config sends the admin token for events and claims,
+which this Hub rejects with HTTP 403 because admin writes are disabled by
+default. Enroll the local client after the Hub starts, as described below.
+
 Build the pinned image locally and record its digest. Keep an operator copy of
 the admin token in a private file, import that file as a Podman secret, render
 the Quadlet with the digest, and copy the volume unit to
@@ -235,12 +240,6 @@ podman build -f ops/fleet-hub/Containerfile \
   -t localhost/brigade-fleet-hub:0.28.0-e6009f6 .
 image_digest="$(podman image inspect --format '{{.Digest}}' localhost/brigade-fleet-hub:0.28.0-e6009f6)"
 case "$image_digest" in sha256:*) ;; *) echo "Expected a sha256 image digest" >&2; exit 1 ;; esac
-install -d -m 0700 ~/.brigade
-fleet_config="$HOME/.brigade/fleet.toml"
-if [ -e "$fleet_config" ] || [ -L "$fleet_config" ]; then
-  echo "Existing $fleet_config was preserved. Merge [fleet] hub_url and token_file into it without removing node_token_file or other settings." >&2
-  exit 1
-fi
 umask 077
 token_dir="$HOME/.local/share/brigade-fleet-hub"
 install -d -m 0700 "$token_dir"
@@ -260,16 +259,10 @@ else
   unset generated_token
   chmod 0600 "$token_file"
   podman secret create brigade-fleet-admin-token "$token_file" || {
-    echo "Could not create the Podman secret; no Fleet config or unit was installed" >&2
+    echo "Could not create the Podman secret; no unit was installed" >&2
     exit 1
   }
 fi
-cat > "$fleet_config" <<EOF
-[fleet]
-hub_url = "http://127.0.0.1:3774"
-token_file = "$token_file"
-EOF
-chmod 0600 "$fleet_config"
 install -d ~/.config/containers/systemd
 sed "s|REPLACE_WITH_RECORDED_DIGEST|${image_digest}|" \
   ops/fleet-hub/quadlet/brigade-fleet.container \
@@ -291,6 +284,23 @@ systemctl --user daemon-reload
 systemctl --user restart brigade-fleet.service
 curl --fail --max-time 5 http://127.0.0.1:3774/health
 ```
+
+If this account also runs Brigade work and is not already enrolled, enroll its
+machine identity using the saved admin token for this command only:
+
+```bash
+node_id="$(brigade node --machine --json | python3 -c 'import json,sys; print(json.load(sys.stdin)["node_id"])')"
+BRIGADE_FLEET_HUB_URL=http://127.0.0.1:3774 \
+  BRIGADE_FLEET_TOKEN="$(cat "$HOME/.local/share/brigade-fleet-hub/admin-token")" \
+  brigade fleet nodes add "$node_id"
+```
+
+Save the returned node token in a private file before enabling the client.
+Follow [client enrollment](fleet-hub-proxmox.md#7-enroll-and-configure-each-brigade-client)
+to install it and configure `node_token_file`, using `http://127.0.0.1:3774`
+for this local Hub. To retain admin CLI access, also set
+`token_file = "~/.local/share/brigade-fleet-hub/admin-token"` in that final
+`[fleet]` section. Preserve existing client settings when merging the config.
 
 Before rebuilding the versioned tag, archive the image referenced by the
 installed unit. Podman's image archive preserves the image layers, history,

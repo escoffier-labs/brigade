@@ -1,4 +1,5 @@
 import importlib.util
+import os
 import re
 import sqlite3
 import subprocess
@@ -159,13 +160,11 @@ def test_quadlet_runbook_archives_and_restores_the_recorded_image():
     assert 'previous_id="REPLACE_WITH_RECORDED_IMAGE_ID"' not in podman_runbook
     assert 'previous_id="sha256:REPLACE_WITH_RECORDED_IMAGE_ID"' not in podman_runbook
     assert 'podman secret create brigade-fleet-admin-token "$token_file"' in podman_runbook
-    assert "no Fleet config or unit was installed" in podman_runbook
+    assert "no unit was installed" in podman_runbook
     assert "if podman secret inspect brigade-fleet-admin-token" in podman_runbook
     assert 'token_file="$token_dir/admin-token"' in podman_runbook
     assert 'generated_token="$(python3 -c' in podman_runbook
     assert 'printf \'%s\\n\' "$generated_token" > "$token_file"' in podman_runbook
-    assert 'fleet_config="$HOME/.brigade/fleet.toml"' in podman_runbook
-    assert 'if [ -e "$fleet_config" ] || [ -L "$fleet_config" ]; then' in podman_runbook
     assert 'elif [ -e "$token_file" ] || [ -L "$token_file" ]; then' in podman_runbook
     assert "podman exec brigade-fleet-hub python -c" in podman_runbook
     assert 'podman cp brigade-fleet-hub:/var/lib/brigade/fleet-hub-pre-upgrade.db "$backup_path"' in podman_runbook
@@ -181,6 +180,51 @@ def test_quadlet_runbook_archives_and_restores_the_recorded_image():
     assert "systemctl --user start brigade-fleet.service" not in podman_runbook
     assert 'loginctl enable-linger "$USER"' in podman_runbook
     assert 'loginctl show-user "$USER" --property=Linger --value' in podman_runbook
+
+
+@pytest.mark.parametrize("existing_config", [False, True], ids=["fresh-client", "enrolled-client"])
+@pytest.mark.skipif(sys.platform != "linux", reason="Rootless Quadlet setup targets Linux")
+def test_quadlet_setup_starts_hub_without_enabling_or_replacing_local_client(tmp_path, monkeypatch, existing_config):
+    runbook = (ROOT / "docs" / "runbooks" / "fleet-hub-containers.md").read_text()
+    quadlet = runbook.split("## Rootless Podman Quadlet", maxsplit=1)[1]
+    setup = re.search(r"```bash\n(.*?)\n```", quadlet, re.DOTALL)
+    assert setup is not None
+    home = tmp_path / "home"
+    home.mkdir()
+    config = home / ".brigade" / "fleet.toml"
+    original = '[fleet]\nhub_url = "http://hub.test"\nnode_token_file = "node-token"\n'
+    if existing_config:
+        config.parent.mkdir()
+        config.write_text(original)
+    commands = tmp_path / "bin"
+    commands.mkdir()
+    stubs = {
+        "podman": (
+            'case "$1 $2" in\n  "image inspect") printf "sha256:%064d\\n" 0 ;;\n  "secret inspect") exit 1 ;;\nesac\n'
+        ),
+        "loginctl": "printf 'yes\\n'\n",
+        "systemctl": 'printf "%s\\n" "$*" >> "$HOME/service-actions"\n',
+        "curl": "exit 0\n",
+    }
+    for name, body in stubs.items():
+        executable = commands / name
+        executable.write_text("#!/bin/sh\n" + body)
+        executable.chmod(0o755)
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USER", "test-operator")
+    monkeypatch.setenv("PATH", str(commands) + os.pathsep + os.environ["PATH"])
+
+    result = subprocess.run(["bash"], input=setup.group(1), cwd=ROOT, capture_output=True, text=True)
+
+    assert result.returncode == 0, result.stderr
+    assert (home / "service-actions").read_text().splitlines() == [
+        "--user daemon-reload",
+        "--user restart brigade-fleet.service",
+    ]
+    if existing_config:
+        assert config.read_text() == original
+    else:
+        assert not config.exists()
 
 
 def test_runbook_restore_keeps_live_database_when_sqlite_backup_fails(tmp_path):
