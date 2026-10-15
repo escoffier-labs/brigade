@@ -7,18 +7,21 @@ import io
 import json
 import os
 import sqlite3
+import subprocess
 import sys
 from pathlib import Path
 
 import pytest
 
 from brigade import fleet_export, fleet_hub
+from tests._home import home_env, set_home
 from tests.support import assert_private_mode
 
 FAKE_DOLT_LOG_ENV = "BRIGADE_TEST_DOLT_LOG"
 FAKE_DOLT_CAPTURE_ENV = "BRIGADE_TEST_DOLT_CAPTURE"
 FAKE_DOLT_EXIT_ENV = "BRIGADE_TEST_DOLT_EXIT"
 FAKE_DOLT_STATUS_ENV = "BRIGADE_TEST_DOLT_STATUS"
+REAL_DOLT_BIN_ENV = "BRIGADE_TEST_DOLT_BIN"
 
 NODE_A = "11111111-1111-4111-8111-111111111111"
 NODE_B = "22222222-2222-4222-8222-222222222222"
@@ -73,6 +76,42 @@ def _set_claim_expiry(db: Path, target: str, expires_at: float) -> None:
         conn.commit()
     finally:
         conn.close()
+
+
+def _claim_request(action: str, target: str, holder: str) -> dict:
+    return {"action": action, "target": target, "node_id": "node-a", "holder": holder, "ttl_seconds": 900}
+
+
+def _seed_generations(db: Path) -> None:
+    """repo-a: acquire, release, reacquire (fence 3); repo-expired: one expired acquire (fence 1)."""
+    conn = fleet_hub.init_db(db)
+    try:
+        for action, target, holder in (
+            ("acquire", "repo-a", "holder-1"),
+            ("release", "repo-a", "holder-1"),
+            ("acquire", "repo-a", "holder-2"),
+            ("acquire", "repo-expired", "holder-expired"),
+        ):
+            assert fleet_hub.handle_claim(conn, _claim_request(action, target, holder))[0] == 200
+        conn.execute("UPDATE claims SET expires_at = 0 WHERE target = 'repo-expired'")
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _exec(db: Path, *statements: str) -> None:
+    conn = sqlite3.connect(db)
+    try:
+        for statement in statements:
+            conn.execute(statement)
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def _db_bytes(db: Path) -> list[bytes]:
+    # A read-only WAL open may leave an empty sidecar behind; only content counts.
+    return [path.read_bytes() for path in (db, Path(f"{db}-wal")) if path.exists() and path.stat().st_size]
 
 
 def _set_received_at(db: Path, run_id: str, received_at: str) -> None:
@@ -413,6 +452,112 @@ class TestExport:
         assert list(tmp_path.glob(f".{out_file.name}.*.tmp")) == []
 
 
+FENCE_DAMAGE = {
+    "visible-fence-missing": (["DELETE FROM claim_fences WHERE target = 'repo-a'"], "claim generation fence"),
+    "hidden-expired-fence-missing": (
+        ["DELETE FROM claim_fences WHERE target = 'repo-expired'"],
+        "claim generation fence",
+    ),
+    "hidden-expired-bad-floor": (
+        ["PRAGMA ignore_check_constraints=ON", "UPDATE claim_fences SET generation = 0 WHERE target = 'repo-expired'"],
+        "claim generation fence",
+    ),
+    "bad-floor-without-claims": (
+        ["DELETE FROM claims", "PRAGMA ignore_check_constraints=ON", "UPDATE claim_fences SET generation = -1"],
+        "claim generation fence",
+    ),
+    "lookalike-schema-without-claims": (
+        [
+            "DELETE FROM claims",
+            "DROP TABLE claim_fences",
+            "CREATE TABLE claim_fences (target TEXT PRIMARY KEY, generation INTEGER)",
+        ],
+        "unsupported definition",
+    ),
+    "fence-table-missing": (["DROP TABLE claim_fences"], "claim generation fence"),
+    "legacy-schema-without-fences": (["DROP TABLE claim_fences", "PRAGMA user_version=25"], "claim generation fence"),
+    "newer-schema": ([f"PRAGMA user_version={fleet_hub.SCHEMA_VERSION + 1}"], "schema version"),
+}
+
+
+class TestClaimGenerationExport:
+    @pytest.mark.parametrize("fmt", ["jsonl", "csv"])
+    def test_rows_carry_current_generation_and_legacy_protocol_without_capabilities(self, tmp_path, capsys, fmt):
+        from brigade import cli
+
+        db = tmp_path / "hub.db"
+        _seed_generations(db)
+
+        def rows(*extra: str) -> list[dict]:
+            assert cli.main(["fleet", "export", "--db", str(db), "--claims", "--format", fmt, *extra]) == 0
+            out = capsys.readouterr().out
+            assert "holder-" not in out
+            if fmt == "csv":
+                assert out.splitlines()[0] == ",".join(fleet_export.CLAIM_COLUMNS)
+                return list(csv.DictReader(io.StringIO(out)))
+            return [json.loads(line) for line in out.splitlines()]
+
+        live = rows()
+        assert [(r["target"], str(r["generation"]), r["protocol"]) for r in live] == [("repo-a", "3", "legacy")]
+        included = rows("--include-expired")
+        assert [(r["target"], str(r["generation"]), r["protocol"]) for r in included] == [
+            ("repo-a", "3", "legacy"),
+            ("repo-expired", "1", "legacy"),
+        ]
+        assert fleet_export.CLAIM_COLUMNS[-3:] == ("expired", "generation", "protocol")
+
+    @pytest.mark.parametrize("damage", FENCE_DAMAGE)
+    def test_damaged_fence_state_refuses_claims_export_without_touching_output_or_database(
+        self, tmp_path, capsys, damage
+    ):
+        from brigade import cli
+
+        db = tmp_path / "hub.db"
+        _seed_generations(db)
+        statements, message = FENCE_DAMAGE[damage]
+        _exec(db, *statements)
+        out_file = tmp_path / "claims.jsonl"
+        out_file.write_text("keep this content\n", encoding="utf-8")
+        before = _db_bytes(db)
+
+        assert cli.main(["fleet", "export", "--db", str(db), "--claims", "--out", str(out_file)]) == 1
+        captured = capsys.readouterr()
+        assert captured.err.startswith("error: ") and message in captured.err
+        assert captured.out == "" and "Traceback" not in captured.err
+        assert out_file.read_text(encoding="utf-8") == "keep this content\n"
+        assert list(tmp_path.glob(f".{out_file.name}.*.tmp")) == []
+        assert _db_bytes(db) == before
+
+    def test_damaged_fence_state_writes_no_csv_header_to_stdout(self, tmp_path, capsys):
+        from brigade import cli
+
+        db = tmp_path / "hub.db"
+        _seed_generations(db)
+        _exec(db, "DELETE FROM claim_fences WHERE target = 'repo-a'")
+
+        assert cli.main(["fleet", "export", "--db", str(db), "--claims", "--format", "csv"]) == 1
+        assert capsys.readouterr().out == ""
+
+    def test_legacy_schema_refuses_claims_but_events_still_export(self, tmp_path, capsys):
+        from brigade import cli
+
+        db = tmp_path / "hub.db"
+        _seed_events(db, _event())
+        _seed_generations(db)
+        _exec(db, "DROP TABLE claim_fences", "PRAGMA user_version=25")
+
+        assert cli.main(["fleet", "export", "--db", str(db), "--claims"]) == 1
+        assert "claim generation fence" in capsys.readouterr().err
+        assert cli.main(["fleet", "export", "--db", str(db)]) == 0
+        assert [json.loads(line)["run_id"] for line in capsys.readouterr().out.splitlines()] == ["r1"]
+        conn = sqlite3.connect(db)
+        try:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 25
+            assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'claim_fences'").fetchone()
+        finally:
+            conn.close()
+
+
 class TestSinkConfig:
     def test_defaults_to_disabled_without_config(self, home):
         config = fleet_export.load_sink_config()
@@ -459,6 +604,93 @@ class TestSinkConfig:
 
         assert ok is True and message == ""
         assert observed["timeout"] == 37.5
+
+
+class TestDoltWorkingSetStatus:
+    """``dolt status --porcelain`` is preferred; only Dolt's explicit unsupported-option error uses dolt_status."""
+
+    PORCELAIN = ["status", "--porcelain"]
+    FALLBACK = ["sql", "-r", "json", "-q", "SELECT table_name FROM dolt_status"]
+    UNSUPPORTED = "dolt status --porcelain failed: error: unknown option `porcelain'"
+
+    def _status(self, tmp_path, monkeypatch, responses):
+        calls = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(argv)
+            return responses[len(calls) - 1]
+
+        monkeypatch.setattr(fleet_export, "_run_dolt", fake_run)
+        result = fleet_export._dolt_working_set_status(dolt_binary="dolt", cwd=tmp_path, timeout_seconds=5)
+        return result, calls
+
+    def test_supported_porcelain_is_used_without_fallback(self, tmp_path, monkeypatch):
+        result, calls = self._status(tmp_path, monkeypatch, [(True, "", " M fleet_claims\n")])
+        assert result == (True, "", " M fleet_claims\n")
+        assert calls == [self.PORCELAIN]
+
+    @pytest.mark.parametrize(
+        ("stdout", "expected"),
+        [
+            ("{}\n", ""),
+            ('{"rows": []}', ""),
+            ('{"rows": [{"table_name":"fleet_claims"},{"table_name":"fleet_events"}]}', "fleet_claims\nfleet_events"),
+        ],
+    )
+    def test_unsupported_porcelain_falls_back_to_dolt_status_json(self, tmp_path, monkeypatch, stdout, expected):
+        result, calls = self._status(tmp_path, monkeypatch, [(False, self.UNSUPPORTED, ""), (True, "", stdout)])
+        assert result == (True, "", expected)
+        assert calls == [self.PORCELAIN, self.FALLBACK]
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "dolt status --porcelain failed: fatal: Unable to locate a dolt repository",
+            "dolt timed out after 5s: dolt status --porcelain",
+            "could not run dolt: [Errno 13] Permission denied: 'dolt'",
+            "dolt status --porcelain failed: error: unknown option `ignored'",
+        ],
+    )
+    def test_other_porcelain_failures_fail_closed_without_fallback_or_retry(self, tmp_path, monkeypatch, message):
+        result, calls = self._status(tmp_path, monkeypatch, [(False, message, "")])
+        assert result == (False, message, "")
+        assert calls == [self.PORCELAIN]
+
+    @pytest.mark.parametrize(
+        "message",
+        [
+            "dolt sql -r failed: error on line 1 for query SELECT table_name FROM dolt_status: table not found",
+            "dolt timed out after 5s: dolt sql -r json -q SELECT table_name FROM dolt_status",
+        ],
+    )
+    def test_fallback_sql_error_or_timeout_fails_closed(self, tmp_path, monkeypatch, message):
+        result, calls = self._status(tmp_path, monkeypatch, [(False, self.UNSUPPORTED, ""), (False, message, "")])
+        assert result == (False, message, "")
+        assert calls == [self.PORCELAIN, self.FALLBACK]
+
+    @pytest.mark.parametrize(
+        "stdout",
+        [
+            "",
+            "not json",
+            "[]",
+            '"rows"',
+            '{"rows": "fleet_claims"}',
+            '{"rows": [{}]}',
+            '{"rows": [{"table_name": 7}]}',
+            '{"rows": [{"table_name": ""}]}',
+            '{"rows": ["fleet_claims"]}',
+            '{"rows": [], "unexpected": 1}',
+            '{"unexpected": []}',
+        ],
+    )
+    def test_fallback_malformed_or_unexpected_response_fails_closed(self, tmp_path, monkeypatch, stdout):
+        (ok, message, status), calls = self._status(
+            tmp_path, monkeypatch, [(False, self.UNSUPPORTED, ""), (True, "", stdout)]
+        )
+        assert (ok, status) == (False, "")
+        assert "dolt_status" in message
+        assert calls == [self.PORCELAIN, self.FALLBACK]
 
 
 class TestSink:
@@ -531,6 +763,50 @@ class TestSink:
         parsed_claims = list(csv.DictReader(io.StringIO(claims_csv.read_text(encoding="utf-8"))))
         assert parsed_claims[0]["expired"] == "0"
         assert len(claim_rows) == 2
+
+    @pytest.mark.skipif(os.name != "posix", reason="fake dolt shell stub requires POSIX")
+    def test_sink_claims_carry_generation_and_protocol_columns(self, home, fake_dolt, tmp_path, monkeypatch):
+        from brigade import cli
+
+        db = tmp_path / "hub.db"
+        _seed_generations(db)
+        capture = tmp_path / "capture"
+        capture.mkdir()
+        log = tmp_path / "dolt.log"
+        monkeypatch.setenv(FAKE_DOLT_LOG_ENV, str(log))
+        monkeypatch.setenv(FAKE_DOLT_CAPTURE_ENV, str(capture))
+        _write_config(home, f'[fleet.sink]\nenabled = true\ndolt_dir = "{tmp_path / "dolt-home"}"\n')
+
+        assert cli.main(["fleet", "sink", "--db", str(db)]) == 0
+        claims_csv = (capture / "fleet_claims.csv").read_text(encoding="utf-8")
+        assert claims_csv.splitlines()[0] == ",".join(fleet_export.CLAIM_COLUMNS)
+        (row,) = csv.DictReader(io.StringIO(claims_csv))
+        assert (row["target"], row["generation"], row["protocol"]) == ("repo-a", "3", "legacy")
+        assert "holder-" not in claims_csv
+        ddl = fleet_export._DOLT_SCHEMA_CLAIMS
+        assert "generation bigint NOT NULL" in ddl and "protocol varchar(16) NOT NULL" in ddl
+        assert ddl in log.read_text(encoding="utf-8").splitlines()
+
+    @pytest.mark.skipif(os.name != "posix", reason="fake dolt shell stub requires POSIX")
+    def test_sink_refuses_damaged_claim_fences_before_dolt_watermark_or_commit(
+        self, home, fake_dolt, tmp_path, monkeypatch, capsys
+    ):
+        from brigade import cli
+
+        db = tmp_path / "hub.db"
+        _seed_events(db, _event())
+        _seed_generations(db)
+        _exec(db, "DELETE FROM claim_fences WHERE target = 'repo-expired'")
+        dolt_dir = tmp_path / "dolt-home"
+        log = tmp_path / "dolt.log"
+        monkeypatch.setenv(FAKE_DOLT_LOG_ENV, str(log))
+        monkeypatch.setenv(FAKE_DOLT_CAPTURE_ENV, str(tmp_path))
+        _write_config(home, f'[fleet.sink]\nenabled = true\ndolt_dir = "{dolt_dir}"\n')
+
+        assert cli.main(["fleet", "sink", "--db", str(db)]) == 1
+        assert "claim generation fence" in capsys.readouterr().err
+        assert not log.exists()
+        assert not (dolt_dir / fleet_export.EVENTS_WATERMARK_FILE).exists()
 
     @pytest.mark.skipif(os.name != "posix", reason="fake dolt shell stub requires POSIX")
     def test_sink_csv_uses_dolt_null_marker_while_jsonl_keeps_null(
@@ -715,6 +991,161 @@ class TestSink:
         assert cli.main(["fleet", "sink", "--db", str(db)]) == 0
         rows = list(csv.DictReader(io.StringIO((capture / "fleet_events.csv").read_text(encoding="utf-8"))))
         assert [row["run_id"] for row in rows] == ["first", "second", "third"]
+
+
+_LEGACY_DOLT_CLAIMS = (
+    "CREATE TABLE fleet_claims ("
+    "target varchar(512) NOT NULL PRIMARY KEY, owner_node varchar(128) NOT NULL, "
+    "owner_conductor varchar(128), acquired_at varchar(64) NOT NULL, renewed_at varchar(64) NOT NULL, "
+    "ttl_seconds bigint NOT NULL, expires_at varchar(64) NOT NULL, expired boolean NOT NULL)"
+)
+
+
+class _RealDolt:
+    """Drives an explicit real Dolt binary against temp directories only."""
+
+    def __init__(self, binary: str, home: Path) -> None:
+        self.binary = binary
+        self.home = home
+
+    def run(self, cwd: Path, *args: str) -> str:
+        env = {**os.environ, **home_env(self.home), "DOLT_ROOT_PATH": str(self.home)}
+        proc = subprocess.run(
+            [self.binary, *args], cwd=cwd, env=env, capture_output=True, text=True, check=False, timeout=120
+        )
+        assert proc.returncode == 0, f"dolt {' '.join(args[:2])} failed: {proc.stderr or proc.stdout}"
+        return proc.stdout
+
+    def rows(self, cwd: Path, query: str) -> list[dict[str, str]]:
+        return list(csv.DictReader(io.StringIO(self.run(cwd, "sql", "-r", "csv", "-q", query))))
+
+    def commit_count(self, cwd: Path) -> int:
+        return int(self.rows(cwd, "SELECT COUNT(*) AS n FROM dolt_log")[0]["n"])
+
+    def columns(self, cwd: Path) -> dict[str, str]:
+        return {r["Field"]: r["Null"] for r in self.rows(cwd, "SHOW COLUMNS FROM fleet_claims")}
+
+
+@pytest.fixture()
+def real_dolt(tmp_path, monkeypatch):
+    real = os.environ.get(REAL_DOLT_BIN_ENV)
+    if not real:
+        pytest.skip(f"{REAL_DOLT_BIN_ENV} names an explicit real dolt binary for the optional migration tests")
+    home = tmp_path / "dolt-user-home"
+    home.mkdir()
+    set_home(monkeypatch, home)
+    return _RealDolt(real, home)
+
+
+def _seed_legacy_dolt(dolt: _RealDolt, dolt_dir: Path) -> None:
+    """A pre-generation sink: legacy claims columns, a sentinel row, an index, an unrelated table, history."""
+    dolt_dir.mkdir()
+    dolt.run(dolt_dir, "init", "--name", "brigade", "--email", "brigade@example.test")
+    dolt.run(
+        dolt_dir,
+        "sql",
+        "-q",
+        _LEGACY_DOLT_CLAIMS + "; CREATE INDEX idx_claims_owner ON fleet_claims (owner_node); "
+        "INSERT INTO fleet_claims VALUES ('sentinel-old', 'node-old', NULL, 'a', 'b', 900, 'c', false); "
+        "CREATE TABLE unrelated_notes (id bigint NOT NULL PRIMARY KEY, body varchar(64) NOT NULL); "
+        "INSERT INTO unrelated_notes VALUES (1, 'keep me')",
+    )
+    dolt.run(dolt_dir, "add", "-A")
+    dolt.run(dolt_dir, "commit", "-m", "pre-generation sink state")
+
+
+def _write_real_dolt_config(home: Path, dolt: _RealDolt, dolt_dir: Path) -> None:
+    _write_config(home, f'[fleet.sink]\nenabled = true\ndolt_binary = "{dolt.binary}"\ndolt_dir = "{dolt_dir}"\n')
+
+
+class TestDoltClaimsMigration:
+    @pytest.mark.skipif(os.name != "posix", reason="fake dolt shell stub requires POSIX")
+    def test_claims_schema_step_is_one_static_idempotent_batch(self, home, fake_dolt, tmp_path, monkeypatch):
+        from brigade import cli
+
+        db = tmp_path / "hub.db"
+        _seed_generations(db)
+        log = tmp_path / "dolt.log"
+        capture = tmp_path / "capture"
+        capture.mkdir()
+        monkeypatch.setenv(FAKE_DOLT_LOG_ENV, str(log))
+        monkeypatch.setenv(FAKE_DOLT_CAPTURE_ENV, str(capture))
+        _write_config(home, f'[fleet.sink]\nenabled = true\ndolt_dir = "{tmp_path / "dolt-home"}"\n')
+        assert cli.main(["fleet", "sink", "--db", str(db)]) == 0
+
+        ddl = fleet_export._DOLT_SCHEMA_CLAIMS
+        argv_lines = log.read_text(encoding="utf-8").splitlines()
+        assert argv_lines.count(ddl) == 1 and "\n" not in ddl
+        assert ddl.startswith("CREATE TABLE IF NOT EXISTS fleet_claims (")
+        for column, definition in (("generation", "BIGINT NULL"), ("protocol", "VARCHAR(16) NULL")):
+            assert f"'ALTER TABLE fleet_claims ADD COLUMN {column} {definition}'" in ddl
+            assert f"column_name = '{column}'" in ddl
+        assert ddl.count("; PREPARE brigade_stmt FROM") == 2 and ddl.count("DEALLOCATE PREPARE brigade_stmt") == 2
+        assert "DROP" not in ddl.upper() and "ADD COLUMN IF" not in ddl.upper()
+
+    def test_old_dolt_claims_table_is_migrated_idempotently_without_losing_history(
+        self, home, real_dolt, tmp_path, capsys
+    ):
+        from brigade import cli
+
+        db = tmp_path / "hub.db"
+        _seed_generations(db)
+        dolt_dir = tmp_path / "old-dolt"
+        _seed_legacy_dolt(real_dolt, dolt_dir)
+        before_commits = real_dolt.commit_count(dolt_dir)
+        _write_real_dolt_config(home, real_dolt, dolt_dir)
+
+        assert cli.main(["fleet", "sink", "--db", str(db)]) == 0
+        assert "1 claim(s)" in capsys.readouterr().out
+        query = "SELECT target, owner_node, generation, protocol FROM fleet_claims"
+        claims = real_dolt.rows(dolt_dir, query)
+        columns = real_dolt.columns(dolt_dir)
+        assert claims == [{"target": "repo-a", "owner_node": "node-a", "generation": "3", "protocol": "legacy"}]
+        assert columns["generation"] == "YES" and columns["protocol"] == "YES"
+        assert "idx_claims_owner" in {r["Key_name"] for r in real_dolt.rows(dolt_dir, "SHOW INDEX FROM fleet_claims")}
+        assert real_dolt.rows(dolt_dir, "SELECT id, body FROM unrelated_notes") == [{"id": "1", "body": "keep me"}]
+        messages = {r["message"] for r in real_dolt.rows(dolt_dir, "SELECT message FROM dolt_log")}
+        assert "pre-generation sink state" in messages
+        assert real_dolt.commit_count(dolt_dir) == before_commits + 1
+
+        assert cli.main(["fleet", "sink", "--db", str(db)]) == 0
+        assert "no working-set changes" in capsys.readouterr().out
+        assert real_dolt.rows(dolt_dir, query) == claims
+        assert real_dolt.columns(dolt_dir) == columns
+        assert real_dolt.commit_count(dolt_dir) == before_commits + 1
+
+    def test_fresh_dolt_sink_creates_required_generation_columns(self, home, real_dolt, tmp_path):
+        from brigade import cli
+
+        db = tmp_path / "hub.db"
+        _seed_generations(db)
+        dolt_dir = tmp_path / "fresh-dolt"
+        _write_real_dolt_config(home, real_dolt, dolt_dir)
+
+        assert cli.main(["fleet", "sink", "--db", str(db)]) == 0
+        assert cli.main(["fleet", "sink", "--db", str(db)]) == 0
+        columns = real_dolt.columns(dolt_dir)
+        assert columns["generation"] == "NO" and columns["protocol"] == "NO"
+        claims = real_dolt.rows(dolt_dir, "SELECT target, generation, protocol FROM fleet_claims")
+        assert claims == [{"target": "repo-a", "generation": "3", "protocol": "legacy"}]
+
+    def test_corrupt_source_fails_before_any_dolt_change(self, home, real_dolt, tmp_path, capsys):
+        from brigade import cli
+
+        db = tmp_path / "hub.db"
+        _seed_generations(db)
+        _exec(db, "DELETE FROM claim_fences WHERE target = 'repo-a'")
+        dolt_dir = tmp_path / "old-dolt"
+        _seed_legacy_dolt(real_dolt, dolt_dir)
+        before_commits = real_dolt.commit_count(dolt_dir)
+        _write_real_dolt_config(home, real_dolt, dolt_dir)
+
+        assert cli.main(["fleet", "sink", "--db", str(db)]) == 1
+        assert "claim generation fence" in capsys.readouterr().err
+        assert {"generation", "protocol"}.isdisjoint(real_dolt.columns(dolt_dir))
+        assert [r["target"] for r in real_dolt.rows(dolt_dir, "SELECT target FROM fleet_claims")] == ["sentinel-old"]
+        assert real_dolt.commit_count(dolt_dir) == before_commits
+        assert real_dolt.rows(dolt_dir, "SELECT COUNT(*) AS n FROM dolt_status")[0]["n"] == "0"
 
 
 def test_export_and_sink_parser_callbacks_are_lazy_wrappers():

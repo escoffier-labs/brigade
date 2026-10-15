@@ -106,6 +106,19 @@ def validate_component(name: str) -> str:
     return name
 
 
+def _validate_child_component(name: str) -> str:
+    """Allow POSIX filename characters only when using the POSIX backend."""
+    if not posix_available():
+        return validate_component(name)
+    if not isinstance(name, str) or not name:
+        raise OSError("path component is empty")
+    if name in {".", ".."}:
+        raise OSError("path component is not contained")
+    if "/" in name or "\x00" in name:
+        raise OSError("path component is not a single contained name")
+    return name
+
+
 def _posix_open_directory(path: Path) -> int:
     flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_CLOEXEC", 0)
     return os.open(path, flags)
@@ -135,8 +148,8 @@ def _nt_open_child_directory(parent: int, name: str) -> int:
     return _nt_dirfd().open_child_directory(parent, name)
 
 
-def _posix_mkdir_child(parent: int, name: str) -> None:
-    os.mkdir(name, 0o700, dir_fd=parent)
+def _posix_mkdir_child(parent: int, name: str, mode: int = 0o700) -> None:
+    os.mkdir(name, mode, dir_fd=parent)
 
 
 def _nt_mkdir_child(parent: int, name: str) -> None:
@@ -197,7 +210,7 @@ def open_file_nofollow(path: Path, flags: int, mode: int = 0o600) -> int:
 
 
 def open_child_directory(parent: int, name: str, *, writable: bool = True) -> int:
-    validate_component(name)
+    _validate_child_component(name)
     if posix_available():
         return _posix_open_child_directory(parent, name)
     if nt_available():
@@ -209,10 +222,10 @@ def open_child_directory(parent: int, name: str, *, writable: bool = True) -> in
     raise unavailable("directory operations")
 
 
-def mkdir_child(parent: int, name: str) -> None:
-    validate_component(name)
+def mkdir_child(parent: int, name: str, mode: int = 0o700) -> None:
+    _validate_child_component(name)
     if posix_available():
-        _posix_mkdir_child(parent, name)
+        _posix_mkdir_child(parent, name, mode)
         return
     if nt_available():
         _nt_mkdir_child(parent, name)
@@ -221,7 +234,7 @@ def mkdir_child(parent: int, name: str) -> None:
 
 
 def open_child_file(parent: int, name: str, flags: int, mode: int = 0o600) -> int:
-    validate_component(name)
+    _validate_child_component(name)
     if posix_available():
         return _posix_open_child_file(parent, name, flags, mode)
     if nt_available():
@@ -231,7 +244,7 @@ def open_child_file(parent: int, name: str, flags: int, mode: int = 0o600) -> in
 
 def open_child_lock_file(parent: int, name: str, mode: int = 0o600) -> int:
     """Open a sibling lock under a held parent with no-follow and minimal rights."""
-    validate_component(name)
+    _validate_child_component(name)
     if posix_available():
         return _posix_open_child_file(parent, name, file_flags(os.O_RDWR | os.O_CREAT), mode)
     if nt_available():
@@ -240,8 +253,8 @@ def open_child_lock_file(parent: int, name: str, mode: int = 0o600) -> int:
 
 
 def replace_children(parent: int, source: str, destination: str) -> None:
-    validate_component(source)
-    validate_component(destination)
+    _validate_child_component(source)
+    _validate_child_component(destination)
     if posix_available():
         _posix_replace_children(parent, source, destination)
         return
@@ -251,24 +264,56 @@ def replace_children(parent: int, source: str, destination: str) -> None:
     raise unavailable("import inbox operations")
 
 
-def unlink_child(parent: int, name: str) -> None:
-    validate_component(name)
+def unlink_child(parent: int, name: str, *, allow_reparse: bool = False) -> None:
+    _validate_child_component(name)
     if posix_available():
         _posix_unlink_child(parent, name)
         return
     if nt_available():
-        _nt_unlink_child(parent, name)
+        if allow_reparse:
+            _nt_dirfd().unlink_child(parent, name, allow_reparse=True)
+        else:
+            _nt_unlink_child(parent, name)
         return
     raise unavailable("import inbox operations")
 
 
-def stat_child(parent: int, name: str) -> os.stat_result:
-    validate_component(name)
+def stat_child(parent: int, name: str, *, allow_reparse: bool = False) -> os.stat_result:
+    _validate_child_component(name)
     if posix_available():
         return _posix_stat_child(parent, name)
     if nt_available():
+        if allow_reparse:
+            return _nt_dirfd().stat_child(parent, name, allow_reparse=True)
         return _nt_stat_child(parent, name)
     raise unavailable("import inbox validation")
+
+
+def rmdir_child(parent: int, name: str) -> None:
+    """Remove an empty plain directory relative to its held parent."""
+    _validate_child_component(name)
+    if posix_available():
+        os.rmdir(name, dir_fd=parent)
+        return
+    if nt_available():
+        _nt_dirfd().unlink_child(parent, name, directory=True)
+        return
+    raise unavailable("directory removal")
+
+
+def rename_child(source_parent: int, source: str, destination_parent: int, destination: str) -> None:
+    """Move a plain child directory between two held parents."""
+    _validate_child_component(source)
+    _validate_child_component(destination)
+    if posix_available():
+        os.rename(source, destination, src_dir_fd=source_parent, dst_dir_fd=destination_parent)
+        return
+    if nt_available():
+        _nt_dirfd().replace_children(
+            source_parent, source, destination, replace=False, destination_parent=destination_parent, directory=True
+        )
+        return
+    raise unavailable("directory moves")
 
 
 def fsync_directory(descriptor: int) -> None:
@@ -287,11 +332,16 @@ def child_names(parent: int, limit: int) -> list[str]:
         raise ValueError("directory name limit must be positive")
     if posix_available():
         names: list[str] = []
-        with os.scandir(parent) as entries:
-            for entry in entries:
-                names.append(entry.name)
-                if len(names) == limit:
-                    break
+        # A fresh open description avoids stale enumeration state on the held fd.
+        scan_fd = os.open(".", directory_flags(), dir_fd=parent)
+        try:
+            with os.scandir(scan_fd) as entries:
+                for entry in entries:
+                    names.append(entry.name)
+                    if len(names) == limit:
+                        break
+        finally:
+            os.close(scan_fd)
         return names
     if nt_available():
         return list(_nt_dirfd().child_names(parent, limit))

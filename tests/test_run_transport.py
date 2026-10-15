@@ -16,6 +16,70 @@ from brigade.roster import Agent, Roster
 from brigade.run_transport import Assignment
 
 
+def test_acpx_metadata_provenance_uses_adapter_evidence_locators():
+    response_result = agents.AgentResult(
+        text="answer",
+        ok=True,
+        transport="acpx",
+        requested_model="composer-2.5",
+        effective_model="composer-2.5",
+        effective_model_locator="acp-session-new-response",
+    )
+    preflight_result = agents.AgentResult(
+        text="",
+        ok=False,
+        failure_phase="preflight",
+        transport="acpx",
+        requested_model="composer-2.5",
+    )
+
+    response = run_transport._metadata_provenance(response_result)["fields"]
+    preflight = run_transport._metadata_provenance(preflight_result)["fields"]
+    assert response["effective_model"]["locator"] == "acp-session-new-response"
+    assert preflight["requested_model"]["locator"] == "configured-request"
+    assert preflight["requested_model"]["unknown_reason"] == "execution-not-started"
+
+
+@pytest.mark.parametrize(
+    ("appserver", "expected_transport"),
+    [(None, "cli"), (object(), "codex-app-server")],
+)
+def test_direct_cloudflare_preflight_uses_runtime_receipt_transport(
+    monkeypatch, tmp_path, appserver, expected_transport
+):
+    monkeypatch.delenv("CLOUDFLARE_ACCOUNT_ID", raising=False)
+    monkeypatch.delenv("CLOUDFLARE_GATEWAY_ID", raising=False)
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent(name="chef", cli="codex", role="plan"),
+            "coder": Agent(
+                name="coder",
+                cli="codex",
+                role="write",
+                model="cloudflare-ai-gateway/example",
+            ),
+        },
+        max_workers=1,
+    )
+
+    result = run_transport.dispatch(
+        [Assignment(worker="coder", task="implement it")],
+        roster,
+        build_prompt=lambda agent, assignment, **kwargs: assignment.task,
+        run_appserver_worker=lambda *args, **kwargs: agents.AgentResult(text="", ok=False),
+        event_writer=lambda *args, **kwargs: None,
+        cwd=tmp_path,
+        read_only=True,
+        output_dir=tmp_path,
+        appserver=appserver,
+    )[0]
+
+    assert result.ok is False
+    assert result.failure_phase == "preflight"
+    assert result.transport == expected_transport
+
+
 def _roster() -> Roster:
     return Roster(
         orchestrator="chef",
@@ -94,6 +158,92 @@ def test_dispatch_acquires_and_releases_only_the_invoked_worker_seat(monkeypatch
     assert results[0].ok is True
     assert acquired == ["coder"]
     assert released == ["coder"]
+
+
+def test_acpx_model_lease_denial_keeps_configured_provenance(tmp_path):
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent(name="chef", cli="codex", role="plan"),
+            "cursor": Agent(
+                name="cursor",
+                cli="cursor",
+                role="write",
+                transport="acpx",
+                transport_version="0.12.0",
+                model="composer-2.5",
+            ),
+        },
+        max_workers=1,
+    )
+
+    @contextmanager
+    def denied_lease(agent):
+        yield f"lease denied for {agent.name}"
+
+    result = run_transport.dispatch(
+        [Assignment(worker="cursor", task="inspect")],
+        roster,
+        build_prompt=lambda agent, assignment, **kwargs: assignment.task,
+        run_appserver_worker=lambda *args, **kwargs: agents.AgentResult(text="", ok=False),
+        event_writer=lambda *args, **kwargs: None,
+        cwd=tmp_path,
+        read_only=True,
+        output_dir=tmp_path,
+        model_lease=denied_lease,
+    )[0]
+
+    assert result.failure_kind == "fleet-model-policy"
+    assert result.transport == "acpx"
+    assert result.requested_model == "composer-2.5"
+    assert result.metadata_provenance is not None
+    assert result.metadata_provenance["fields"]["requested_model"]["locator"] == "configured-request"
+
+
+def test_rejected_acpx_request_keeps_configured_provenance(monkeypatch, tmp_path):
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent(name="chef", cli="codex", role="plan"),
+            "cursor": Agent(
+                name="cursor",
+                cli="cursor",
+                role="write",
+                transport="acpx",
+                transport_version="0.12.0",
+                model="composer-2.5",
+            ),
+        },
+        max_workers=1,
+    )
+    rejected = message_envelope.MessageDelivery(
+        message_id="rejected",
+        phase="work",
+        from_seat="brigade",
+        to_seat="cursor",
+        kind="worker-request",
+        envelope={},
+        delivered=False,
+        reason="blocked",
+    )
+    monkeypatch.setattr(message_envelope, "emit", lambda *args, **kwargs: rejected)
+
+    result = run_transport.dispatch(
+        [Assignment(worker="cursor", task="inspect")],
+        roster,
+        build_prompt=lambda agent, assignment, **kwargs: assignment.task,
+        run_appserver_worker=lambda *args, **kwargs: agents.AgentResult(text="", ok=False),
+        event_writer=lambda *args, **kwargs: None,
+        cwd=tmp_path,
+        read_only=True,
+        output_dir=tmp_path,
+    )[0]
+
+    assert result.failure_phase == "dispatch"
+    assert result.transport == "acpx"
+    assert result.requested_model == "composer-2.5"
+    assert result.metadata_provenance is not None
+    assert result.metadata_provenance["fields"]["requested_model"]["locator"] == "configured-request"
 
 
 def test_dispatch_releases_lease_when_worker_invocation_raises(monkeypatch, tmp_path):
@@ -707,6 +857,7 @@ def test_dispatch_does_not_invoke_run_agent_when_admission_lease_denies(monkeypa
     assert results[0].ok is False
     assert results[0].failure_kind == "fleet-model-policy"
     assert results[0].failure_phase == "preflight"
+    assert results[0].transport == "cli"
     assert calls == []
 
 
@@ -1193,6 +1344,7 @@ def _interrupted_resume_run(
                         "detail": "timeout",
                         "text": "partial",
                         "thread_id": "t-sandbox",
+                        "transport": "codex-app-server",
                         "status": "interrupted",
                     }
                 ],

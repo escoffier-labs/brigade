@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import ctypes
 import os
+import stat
 import struct
 import sys
 from ctypes import wintypes
@@ -131,10 +132,12 @@ class _FILE_DISPOSITION_INFORMATION(ctypes.Structure):
 
 
 def _make_unicode(name: str) -> tuple[_UNICODE_STRING, Any]:
+    encoded = name.encode("utf-16-le", errors="surrogatepass")
     buf = ctypes.create_unicode_buffer(name)
     us = _UNICODE_STRING()
-    us.Length = len(name) * 2
-    us.MaximumLength = len(buf) * 2
+    # NT counts UTF-16 bytes. Non-BMP characters occupy two code units.
+    us.Length = len(encoded)
+    us.MaximumLength = len(encoded) + 2
     us.Buffer = ctypes.cast(buf, wintypes.LPWSTR)
     return us, buf
 
@@ -443,7 +446,15 @@ def open_lock_file(parent: int, name: str) -> int:
     return _handle_to_fd(api, handle, os.O_RDWR | getattr(os, "O_BINARY", 0))
 
 
-def replace_children(parent: int, source: str, destination: str, *, replace: bool = True) -> None:
+def replace_children(
+    parent: int,
+    source: str,
+    destination: str,
+    *,
+    replace: bool = True,
+    destination_parent: int | None = None,
+    directory: bool = False,
+) -> None:
     """Rename ``source`` to ``destination`` relative to the held parent handle."""
     api = _require_api()
     validate_component(source)
@@ -454,18 +465,22 @@ def replace_children(parent: int, source: str, destination: str, *, replace: boo
         source,
         access=_DELETE | _FILE_READ_ATTRIBUTES | _SYNCHRONIZE,
         disposition=_FILE_OPEN,
-        options=_FILE_NON_DIRECTORY_FILE | _FILE_SYNCHRONOUS_IO_NONALERT | _FILE_OPEN_REPARSE_POINT,
+        options=(_FILE_DIRECTORY_FILE if directory else _FILE_NON_DIRECTORY_FILE)
+        | _FILE_SYNCHRONOUS_IO_NONALERT
+        | _FILE_OPEN_REPARSE_POINT,
         attributes=_FILE_ATTRIBUTE_NORMAL,
     )
     try:
-        _reject_reparse(api, handle, expected_directory=False)
-        info, length = _rename_information(api, parent, destination, replace=replace)
+        _reject_reparse(api, handle, expected_directory=directory)
+        info, length = _rename_information(
+            api, parent if destination_parent is None else destination_parent, destination, replace=replace
+        )
         _nt_set_info(api, handle, info, length, _FileRenameInformation, name=destination)
     finally:
         api.CloseHandle(handle)
 
 
-def unlink_child(parent: int, name: str) -> None:
+def unlink_child(parent: int, name: str, *, directory: bool = False, allow_reparse: bool = False) -> None:
     """Unlink ``name`` relative to the held parent without following a reparse point."""
     api = _require_api()
     handle = _nt_create(
@@ -474,11 +489,13 @@ def unlink_child(parent: int, name: str) -> None:
         name,
         access=_DELETE | _FILE_READ_ATTRIBUTES | _SYNCHRONIZE,
         disposition=_FILE_OPEN,
-        options=_FILE_NON_DIRECTORY_FILE | _FILE_SYNCHRONOUS_IO_NONALERT | _FILE_OPEN_REPARSE_POINT,
+        options=(0 if allow_reparse else _FILE_DIRECTORY_FILE if directory else _FILE_NON_DIRECTORY_FILE)
+        | _FILE_SYNCHRONOUS_IO_NONALERT
+        | _FILE_OPEN_REPARSE_POINT,
         attributes=_FILE_ATTRIBUTE_NORMAL,
     )
     try:
-        _reject_reparse(api, handle, expected_directory=False)
+        _reject_reparse(api, handle, expected_directory=directory, allow_reparse=allow_reparse)
         info = api.FILE_DISPOSITION_INFORMATION()
         info.DeleteFile = True
         _nt_set_info(api, handle, ctypes.byref(info), ctypes.sizeof(info), _FileDispositionInformation, name=name)
@@ -486,8 +503,8 @@ def unlink_child(parent: int, name: str) -> None:
         api.CloseHandle(handle)
 
 
-def stat_child(parent: int, name: str) -> os.stat_result:
-    """Read file or directory metadata under the held parent, refusing reparse points."""
+def stat_child(parent: int, name: str, *, allow_reparse: bool = False) -> os.stat_result:
+    """Read held-child metadata; optionally classify reparse points without following."""
     api = _require_api()
     handle = _nt_create(
         api,
@@ -499,14 +516,17 @@ def stat_child(parent: int, name: str) -> os.stat_result:
         attributes=_FILE_ATTRIBUTE_NORMAL,
     )
     try:
-        _reject_reparse(api, handle, expected_directory=None)
+        reparse = _reject_reparse(api, handle, expected_directory=None, allow_reparse=allow_reparse)
     except BaseException:
         api.CloseHandle(handle)
         raise
     # Conversion closes on failure and transfers ownership to the fd on success.
     descriptor = _handle_to_fd(api, handle, os.O_RDONLY)
     try:
-        return os.fstat(descriptor)
+        metadata = os.fstat(descriptor)
+        if reparse:
+            return os.stat_result((stat.S_IFLNK | stat.S_IMODE(metadata.st_mode), *metadata[1:]))
+        return metadata
     finally:
         os.close(descriptor)
 
@@ -572,18 +592,21 @@ def _handle_from_fd(fd: int) -> int:
     return int(msvcrt.get_osfhandle(fd))  # type: ignore[attr-defined]
 
 
-def _reject_reparse(api: Any, handle: Any, *, expected_directory: bool | None) -> None:
+def _reject_reparse(api: Any, handle: Any, *, expected_directory: bool | None, allow_reparse: bool = False) -> bool:
     info = api.BY_HANDLE_FILE_INFORMATION()
     if not api.GetFileInformationByHandle(handle, ctypes.byref(info)):
         raise _win_error()
     attributes = int(info.dwFileAttributes)
     if attributes & _FILE_ATTRIBUTE_REPARSE_POINT:
+        if allow_reparse:
+            return True
         raise OSError("path component is a reparse point")
     is_directory = bool(attributes & _FILE_ATTRIBUTE_DIRECTORY)
     if expected_directory and not is_directory:
         raise OSError("path component is not a directory")
     if expected_directory is False and is_directory:
         raise OSError("path component is a directory")
+    return False
 
 
 def _nt_create(
@@ -634,8 +657,8 @@ def _nt_set_info(api: Any, handle: Any, info: Any, length: int, klass: int, *, n
 
 
 def _rename_information(api: Any, parent: int, destination: str, *, replace: bool) -> tuple[Any, int]:
-    encoded = destination.encode("utf-16-le")
-    nchars = len(destination)
+    encoded = destination.encode("utf-16-le", errors="surrogatepass")
+    nchars = len(encoded) // 2
     rename_class = api.make_rename_class(nchars)
     info = rename_class()
     info.ReplaceIfExists = bool(replace)

@@ -116,6 +116,7 @@ def test_ordinary_identities_are_not_private_paths(value: str) -> None:
         "xoxb-1234567890-abcdef",
         "sk-" + "c" * 32,
         "AKIAIOSFODNN7EXAMPLE",
+        "ASIAIOSFODNN7EXAMPLE",
         "-----BEGIN OPENSSH PRIVATE KEY-----",
         "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghij",
         "password=" + "s" * 20,

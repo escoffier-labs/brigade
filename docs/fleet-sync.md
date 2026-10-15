@@ -539,7 +539,13 @@ the hub database in read-only mode and streams events in `(node_id, run_id,
 sequence, digest)` order. The columns have a fixed order, the event digest is
 included, and exporting the same database twice produces identical bytes.
 `--claims` exports the live claims snapshot in `target` order, omits the claim
-holder token, and includes an explicit `expired` column. Expired rows are
+holder token, and includes an explicit `expired` column followed by `generation`
+and `protocol`. Positional CSV consumers must accept those two trailing columns.
+Generation comes from the durable target fence, and protocol is `legacy`.
+The exporter validates all fences in the same read snapshot as the claims.
+Missing, corrupt, or newer-schema fence state refuses claims export before any
+output is written. A pre-generation hub database must first be upgraded to schema
+26 by starting the upgraded hub once. Event-only export remains available. Expired rows are
 excluded unless the human export also passes `--include-expired`. `--since`
 filters on the event's `ts`. `--since-received` filters on the hub's
 `received_at` value. Incremental archives should use `--since-received` because
@@ -586,10 +592,23 @@ event log on every pass.
 `dolt table import -u` for `fleet_events`, which is an append log, and `dolt
 table import -r` for `fleet_claims`, which is a live snapshot. The claims
 snapshot excludes expired rows. Replacing it removes released or expired claims
-from Dolt on the next pass. The sink CSV writes SQL NULL as Dolt's `\N` import
+from Dolt on the next pass. The sink validates claims before importing either
+table. A claims refusal stops the whole pass, including events, without advancing
+the watermark. After upgrading Brigade, upgrade the hub database to schema 26
+before running the sink.
+
+Existing Dolt claims tables gain nullable `generation` and `protocol` columns
+without losing indexes, unrelated tables, or history. Successful snapshot imports
+populate both fields. These migrated columns remain nullable, while fresh tables
+require them. A downgraded writer can therefore leave null metadata in a migrated
+mirror. Dolt history is derived data, and the hub remains the fence authority.
+The sink CSV writes SQL NULL as Dolt's `\N` import
 marker and Boolean claim expiry as `0` or `1`; JSONL continues to use `null` and
 JSON Booleans. After both imports, the sink reports unparseable incremental
-`received_at` values on stderr and checks `dolt status --porcelain`. A changed working set
+`received_at` values on stderr and checks `dolt status --porcelain`. Only an
+explicit unsupported-option error, as returned by Dolt 2.4.2, uses a JSON query
+against `dolt_status` instead. Other errors, timeouts, and malformed fallback
+responses stop the pass. A changed working set
 is staged with `dolt add -A` and committed with the UTC export time followed by
 `fleet events/claims`. That same time is the expiry cutoff for the claims
 snapshot. An unchanged pass skips the add and commit commands.

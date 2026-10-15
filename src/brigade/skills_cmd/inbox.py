@@ -122,54 +122,15 @@ def _anchored_proposals(target: Path) -> list[tuple[str, dict[str, Any]]]:
     """
     entries: list[tuple[str, bytes]] = []
     try:
-        with _registry_mod._held_state_root(target) as state_anchor:
-            if not _registry_mod._HAS_DESCRIPTOR_ANCHOR:
-                # lstat-guarded fallback for platforms without anchoring.
-                root = _registry_mod._inbox_root(target)
-                if root.is_symlink() or _registry_mod._is_reparse_point(root) or not root.is_dir():
-                    return []
-                for child in sorted(root.iterdir(), key=lambda item: item.name):
-                    if child.is_symlink() or _registry_mod._is_reparse_point(child) or not child.is_dir():
-                        continue
-                    meta = _proposal_meta_path(child)
-                    try:
-                        st = os.lstat(meta)
-                    except OSError:
-                        continue
-                    if stat_module.S_ISLNK(st.st_mode) or getattr(st, "st_reparse_tag", False):
-                        continue
-                    if not stat_module.S_ISREG(st.st_mode):
-                        continue
-                    try:
-                        entries.append((child.name, meta.read_bytes()))
-                    except OSError:
-                        continue
-            else:
+        with _registry_mod._held_state_root(target, writable=False) as state_anchor:
+            names = _registry_mod._plain_subdirs_under_anchor(state_anchor, "skills", "inbox") or []
+            for name in names:
                 try:
-                    inbox_fd, opened = _registry_mod._anchor_open_chain(state_anchor, "skills", "inbox")
+                    raw = _registry_mod._read_state_file_bytes(state_anchor, "skills", "inbox", name, "proposal.json")
                 except _registry_mod.SkillsStatePathError:
-                    return []
-                names: list[str] = []
-                try:
-                    for name in sorted(os.listdir(inbox_fd)):
-                        try:
-                            st = os.lstat(name, dir_fd=inbox_fd)
-                        except FileNotFoundError:
-                            continue
-                        if stat_module.S_ISDIR(st.st_mode):
-                            names.append(name)
-                finally:
-                    for fd in reversed(opened):
-                        os.close(fd)
-                for name in names:
-                    try:
-                        raw = _registry_mod._read_state_file_bytes(
-                            state_anchor, "skills", "inbox", name, "proposal.json"
-                        )
-                    except _registry_mod.SkillsStatePathError:
-                        continue
-                    if raw is not None:
-                        entries.append((name, raw))
+                    continue
+                if raw is not None:
+                    entries.append((name, raw))
     except _registry_mod.SkillsStatePathError:
         return []
     proposals: list[tuple[str, dict[str, Any]]] = []
@@ -327,7 +288,7 @@ def inbox_diff(*, target: Path, proposal_id: str, json_output: bool = False) -> 
     proposed_display = _registry_mod._inbox_root(target) / name / "skill" / "SKILL.md"
     existing_display = _registry_mod._skill_path(target, skill_id) / "SKILL.md"
     try:
-        with _registry_mod._held_state_root(target) as state_anchor:
+        with _registry_mod._held_state_root(target, writable=False) as state_anchor:
             # Both sides are read through the held anchor: the proposed tree
             # via descriptor collection and the registry copy via the
             # anchored reader, so symlinked components never drag outside

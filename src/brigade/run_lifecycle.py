@@ -159,6 +159,12 @@ class LifecycleJournalError(RuntimeError):
     """Bounded lifecycle-journal failure; run.json must not advance past it."""
 
 
+class IndeterminateLifecycleError(LifecycleJournalError):
+    """The journal barrier failed and visible history may have committed."""
+
+    outcome = "indeterminate"
+
+
 @contextmanager
 def checkpoint_event_pair() -> Iterator[None]:
     """Serialize one checkpoint/event pair and defer SIGTERM across its gap.
@@ -704,6 +710,8 @@ def _allowlisted_payload(
 
 
 def _bound_journal_failure(exc: BaseException) -> LifecycleJournalError:
+    if isinstance(exc, run_journal.IndeterminateOutcomeError):
+        return IndeterminateLifecycleError(run_events._bound(exc.diagnostic))
     if isinstance(exc, run_journal.RunJournalError):
         return LifecycleJournalError(run_events._bound(exc.diagnostic))
     if isinstance(exc, run_events.CanonicalizationError):
@@ -1027,6 +1035,7 @@ def record_lifecycle_transition(
 
 
 __all__ = [
+    "IndeterminateLifecycleError",
     "LifecycleJournalError",
     "STATUS_EVENT_TYPE",
     "approval_idempotency_key",
