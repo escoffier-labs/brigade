@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from brigade import fleet_client, fleet_hub
+from brigade.fleet_hub_event_bounds import EVENT_FIELD_MAX_CHARS
 from brigade import fleet_hub_sessions as sessions
 from tests import thread_sync
 
@@ -436,6 +437,50 @@ class TestHubClaims:
             assert status == 400, bad
             assert "error" in payload
         assert _post(url, token, _claim(ttl_seconds=fleet_hub.CLAIM_TTL_MIN_SECONDS))[0] == 200
+
+    def test_claim_target_uses_fence_utf8_byte_bound(self, hub):
+        url, token, _db = hub
+        target_limit = EVENT_FIELD_MAX_CHARS["repo"]
+
+        status, _payload = _post(url, token, _claim(target="r" * target_limit))
+        assert status == 200
+
+        for target in ("r" * (target_limit + 1), "é" * 513):
+            status, payload = _post(url, token, _claim(target=target))
+            assert status == 422
+            assert payload["error"] == {
+                "code": "invalid-field",
+                "field": "target",
+                "message": "claim target exceeds UTF-8 byte limit",
+                "limit": target_limit,
+                "unit": "utf8-bytes",
+            }
+
+    def test_legacy_oversized_claim_remains_manageable(self, hub, clock):
+        url, token, db = hub
+        target = "r" * (EVENT_FIELD_MAX_CHARS["repo"] + 1)
+        conn = sqlite3.connect(db)
+        try:
+            conn.execute(
+                "INSERT INTO claims "
+                "(target, owner_node, holder_token, acquired_at, renewed_at, ttl_seconds, expires_at) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                (target, NODE_A, "h1", "legacy-acquired", "legacy-renewed", 900, clock["now"] + 900),
+            )
+            # Schema 26 migration assigns every preserved claim its initial fence.
+            conn.execute("INSERT INTO claim_fences (target, generation) VALUES (?, 1)", (target,))
+            conn.commit()
+        finally:
+            conn.close()
+
+        status, payload = _post(url, token, _claim("inspect", target=target))
+        assert status == 200 and payload["claim"]["target"] == target
+        status, payload = _post(url, token, _claim("renew", target=target))
+        assert status == 200 and payload["renewed"] is True
+        status, payload = _post(url, token, _claim("release", target=target))
+        assert status == 200 and payload["released"] is True
+        status, payload = _post(url, token, _claim(target=target))
+        assert status == 200
 
     def test_unknown_and_malformed_node_ids_rejected(self, hub):
         """Two identity-less or cloned nodes must never both be granted."""
