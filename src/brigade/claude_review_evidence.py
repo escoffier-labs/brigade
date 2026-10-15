@@ -167,6 +167,8 @@ def _head(value: object) -> str | None:
 def _timestamp(value: object) -> str | None:
     if not isinstance(value, str) or len(value) > 40 or not _TIME_RE.fullmatch(value):
         return None
+    # Python 3.10 accepts only three or six fractional digits in fromisoformat.
+    value = re.sub(r"\.(\d{1,6})", lambda match: "." + match[1].ljust(6, "0"), value)
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00")).astimezone(timezone.utc)
         return parsed.isoformat().replace("+00:00", "Z")

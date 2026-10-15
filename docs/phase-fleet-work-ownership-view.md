@@ -35,9 +35,11 @@ its own local completion timestamp. `consistency: separate-reads` explicitly
 permits intervening writes; there is no atomic combined revision. Report
 freshness is `unassessed`: this read has no provider liveness or expiry proof.
 Absent checkpoint/report metadata is `unobserved`; unowned is a real ownership
-state, distinct from a missing item. Liveness is always `unknown` and conflict
-checking is always `not-performed`. Reported evidence remains unverified and
-provider lifecycle remains unobserved.
+state, distinct from a missing item. Liveness is always `unknown`. Conflict
+checking follows the current [checkpoint path admission contract](phase-worklore-path-scope-admission.md):
+new checkpoints record `path-admission`, while older unchecked snapshots retain
+`not-performed`. Reported evidence remains unverified and provider lifecycle
+remains unobserved.
 
 Failures exit 1, with fixed JSON on stderr under `--json` and plain safe text
 otherwise. `not-found` means missing; stale revision/generation refusals mean
@@ -48,8 +50,9 @@ the existing private-data and terminal-control validation.
 
 ## Remaining #1595 criteria
 
-Path arbitration, eligibility/scheduling, dependency reconciliation, actual
+Physical-filesystem exclusion, eligibility/scheduling, dependency reconciliation, actual
 handoff orchestration and controlled three-owner acceptance remain open.
+Checkpoint admission for declared paths is implemented in the linked contract.
 There are no ownership writes, provider calls, queues, schemas, migrations,
 new runtime dependencies or deployment changes in this slice. Expansion needs
 an explicitly authorized follow-on contract, not inferred operator authority.

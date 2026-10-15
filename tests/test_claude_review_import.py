@@ -326,6 +326,68 @@ def test_links_are_bound_to_repo_and_never_fetched(url):
     assert all(path.startswith(BASE + "/") for path, _, _ in transport.calls)
 
 
+@pytest.mark.parametrize(
+    "kind,endpoint,suffix",
+    [
+        ("checks", CHECKS, "runs/10"),
+        ("checks", CHECKS, "check-runs/10"),
+        ("annotations", CHECKS, "runs/10"),
+        ("reviews", REVIEWS, "pull/7#pullrequestreview-10"),
+        ("comments", INLINE, "pull/7#discussion_r10"),
+        ("comments", INLINE, "pull/7#discussion-diff-10"),
+        ("comments", COMMENTS, "pull/7#issuecomment-10"),
+    ],
+)
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "valid",
+        "other-owner",
+        "other-repo",
+        "other-pr",
+        "other-id",
+        "resource-case",
+        "fragment-case",
+        "http",
+        "host-case",
+        "credentials",
+        "port",
+        "query",
+        "encoding",
+    ],
+)
+def test_source_urls_accept_repository_case_only(kind, endpoint, suffix, variant):
+    url = f"https://github.com/Example/Project/{suffix}"
+    replacements = {
+        "other-owner": ("Example/", "Other/"),
+        "other-repo": ("Project/", "Other/"),
+        "other-pr": ("pull/7", "pull/8"),
+        "other-id": ("10", "11"),
+        "resource-case": (suffix.split("/")[0], suffix.split("/")[0].upper()),
+        "fragment-case": (suffix.split("#")[-1], suffix.split("#")[-1].upper()),
+        "http": ("https:", "http:"),
+        "host-case": ("github.com", "GitHub.com"),
+        "credentials": ("github.com", "user@github.com"),  # <!-- content-guard: allow email --> synthetic URL userinfo
+        "port": ("github.com", "github.com:443"),
+        "query": (suffix, suffix.replace("#", "?token=example#") if "#" in suffix else suffix + "?token=example"),
+        "encoding": ("Example", "%45xample"),
+    }
+    if variant != "valid":
+        before, after = replacements[variant]
+        url = url.replace(before, after)
+    pages = {
+        (CHECKS, 1): {"total_count": 1, "check_runs": [check(details_url=url, html_url=url)]},
+        (f"{BASE}/check-runs/10/annotations", 1): [annotation()],
+    }
+    if endpoint != CHECKS:
+        pages[(endpoint, 1)] = [{"id": 10, "html_url": url}]
+    transport = FixtureGet(pages)
+    record = collect(transport)[kind][0]
+    unchanged = variant == "other-pr" and endpoint == CHECKS
+    assert record["source_url"] == (url if variant == "valid" or unchanged else None)
+    assert all(path.startswith(BASE + "/") for path, _, _ in transport.calls)
+
+
 def test_future_timestamps_and_unavailable_transport_remain_unknown():
     result = collect(
         FixtureGet(

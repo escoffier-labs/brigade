@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlsplit
 from . import toml_compat
 from . import worklore_ownership as ownership
 from . import worklore_store as store
+from .worklore_scope import ScopeAdmissionError
 from .fleet_client import FLEET_CONFIG_REL_PATH, brigade_home
 from .worklore_validate import WorkloreValidationError
 
@@ -59,6 +60,9 @@ _STATUS_BY_CODE = {
     "idempotency-conflict": 409,
     "idempotency-key-required": 400,
     "ownership-capacity-exhausted": 409,
+    "path-scope-conflict": 409,
+    "path-scope-capacity-exhausted": 409,
+    "path-scope-unavailable": 409,
 }
 
 _STORE_ERRORS = (
@@ -498,4 +502,7 @@ def _mapped_error(exc: Exception) -> tuple[int, dict[str, Any]]:
     code = exc.code  # type: ignore[attr-defined]
     if code not in _STATUS_BY_CODE:
         return 400, {"error": "request failed", "code": "field-bound"}
-    return _STATUS_BY_CODE[code], {"error": str(exc), "code": code}
+    payload = {"error": str(exc), "code": code}
+    if isinstance(exc, ScopeAdmissionError):
+        payload.update(exc.details)
+    return _STATUS_BY_CODE[code], payload

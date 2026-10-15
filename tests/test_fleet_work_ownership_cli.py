@@ -246,3 +246,30 @@ def test_raw_json_limits_produce_fixed_refusals(hub, monkeypatch, capsys, stage,
     assert "PRIVATE-UNEXPECTED" not in output.err
     assert len(requests) == stage + 1
     assert all(request.get_method() == "GET" and request.data is None for request in requests)
+
+
+@pytest.mark.parametrize("marker", ["path-admission", "not-performed", None])
+@pytest.mark.parametrize("as_json", [False, True])
+def test_show_admission_is_bounded_historical_metadata(hub, capsys, marker, as_json):
+    raw = hub[0][1]["ownership"]
+    if marker is None:
+        raw.pop("conflict_check")
+    else:
+        raw["conflict_check"] = marker
+    args = ["fleet", "work", "ownership", "show", WORK_ID] + (["--json"] if as_json else [])
+    assert cli.main(args) == 0
+    output = capsys.readouterr()
+    expected = marker or "not-performed"
+    if as_json:
+        payload = json.loads(output.out)
+        assert payload["conflict_check"] == expected and payload["liveness"] == "unknown"
+    else:
+        assert f"liveness: unknown; conflict_check: {expected}" in output.out
+
+
+def test_show_refuses_arbitrary_admission_marker(hub, capsys):
+    hub[0][1]["ownership"]["conflict_check"] = "PRIVATE-UNEXPECTED"
+    assert cli.main(["fleet", "work", "ownership", "show", WORK_ID, "--json"]) == 1
+    output = capsys.readouterr()
+    assert json.loads(output.err)["code"] == "invalid-response"
+    assert "PRIVATE-UNEXPECTED" not in output.err + output.out

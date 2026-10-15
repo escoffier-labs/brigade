@@ -868,6 +868,7 @@ def test_derivative_counts_redaction_matches_separately_from_removed_fields(tmp_
     report = evidence_derivative.export_derivative(
         source=source,
         out=out,
+        # Synthetic input. content-guard: allow email content-guard: allow api-key-assignment
         recipient='contact operator@contoso.example api_key="sk-test-abcdefghijklmnopqrstuv"',
         authority="approved-case-7",
         lawful_basis="contract",
@@ -878,7 +879,7 @@ def test_derivative_counts_redaction_matches_separately_from_removed_fields(tmp_
     transformation = json.loads(raw)["transformation"]
     assert report.removed_fields == transformation["removed_fields"] == 3
     assert report.redaction_occurrences == transformation["redaction_occurrences"] == 2
-    assert "operator@contoso.example" not in raw
+    assert "operator@contoso.example" not in raw  # content-guard: allow email
     assert "sk-test-abcdefghijklmnopqrstuv" not in raw
 
 

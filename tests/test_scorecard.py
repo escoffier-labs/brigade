@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import sys
 from pathlib import Path
+
+import pytest
 
 from brigade import cli, localio, outcome, outcome_cmd, scorecard, verify_manifest, verify_trial
 
@@ -751,3 +754,70 @@ def test_utility_evidence_is_independent_of_effectiveness_plan(scoreable_target)
     per_check = card.utility_guardrails["per_check"]
     assert per_check["guardrail.tests-green"]["passing_units"] == 1
     assert per_check["guardrail.lint-clean"]["passing_units"] == 1
+
+
+def _skill_card_with_counts(*, helped: int, hurt: int) -> scorecard.SubjectScorecard:
+    return scorecard.SubjectScorecard(
+        subject=scorecard.SubjectRef("skill", "brigade-work", "fp"),
+        dimensions={"effectiveness": {"helped": helped, "hurt": hurt}},
+        utility_guardrails={
+            "required_check_ids": ["guardrail.tests-green"],
+            "per_check": {"guardrail.tests-green": {"passing_units": 2, "failing_units": 0}},
+        },
+    )
+
+
+def _decide_skill_candidate(
+    *, helped: int, hurt: int, config: outcome.ReconcileConfig | None = None
+) -> outcome.Decision:
+    return scorecard.decide_scorecard(
+        _skill_card_with_counts(helped=helped, hurt=hurt),
+        artifact_id="brigade-work",
+        current_status="candidate",
+        last_action_ts=None,
+        now=dt.datetime(2026, 10, 12, tzinfo=dt.timezone.utc),
+        config=config or outcome.ReconcileConfig(),
+    )
+
+
+def test_skill_candidate_margin_of_one_over_regression_holds():
+    """#1686: skills use the card install margin, so helped=2 hurt=1 holds."""
+    decision = _decide_skill_candidate(helped=2, hurt=1)
+    assert decision.action == "hold"
+    assert decision.new_status == "candidate"
+    assert decision.reason == "withheld: verified helped margin over regressions below 2"
+
+
+def test_skill_candidate_installs_once_margin_reaches_install_min_helped():
+    decision = _decide_skill_candidate(helped=3, hurt=1)
+    assert decision.action == "install"
+    assert decision.reason == "verified helped outnumbers regressions"
+
+
+def test_skill_candidate_without_regressions_is_unchanged_by_margin():
+    decision = _decide_skill_candidate(helped=2, hurt=0)
+    assert decision.action == "install"
+    assert decision.reason == "verified helped, no regressions"
+    assert _decide_skill_candidate(helped=1, hurt=0).reason == "insufficient verified evidence"
+
+
+@pytest.mark.parametrize(
+    "config",
+    [
+        outcome.ReconcileConfig(),
+        # Unrestricted fork overrides must still require helped > hurt.
+        outcome.ReconcileConfig(install_min_helped=0, effective_wilson_min=0.0),
+    ],
+)
+def test_skill_and_card_install_margins_agree(config):
+    now = dt.datetime(2026, 10, 12, tzinfo=dt.timezone.utc)
+    for helped, hurt in [(0, 0), (2, 1), (3, 1), (2, 0), (4, 2), (3, 2)]:
+        card = outcome.decide(
+            outcome.OutcomeScore("card", helped, hurt, 0, 0.0, None),
+            current_status="candidate",
+            last_action_ts=None,
+            now=now,
+            config=config,
+        )
+        skill = _decide_skill_candidate(helped=helped, hurt=hurt, config=config)
+        assert (skill.action, skill.reason) == (card.action, card.reason), (helped, hurt)
