@@ -40,6 +40,33 @@ def test_classify_source_origin_matches_work_inbox_producers() -> None:
     assert evidence_redaction.classify_source_origin("") == "unknown"
 
 
+@pytest.mark.parametrize("include_clean", [False, True], ids=["redacted-only", "mixed-clean"])
+def test_import_ingest_dedupes_redacted_rows_within_batch(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str], include_clean: bool
+) -> None:
+    target = tmp_path / "workspace"
+    target.mkdir()
+    sensitive = {"text": f"Contact {FAKE_EMAIL}", "kind": "finding"}
+    clean = {"text": "Ordinary imported note survives", "kind": "finding"}
+    records = [sensitive, clean, sensitive] if include_clean else [sensitive, sensitive]
+    input_path = tmp_path / "imports.jsonl"
+    input_path.write_text("".join(json.dumps(record) + "\n" for record in records), encoding="utf-8")
+
+    assert work_cmd.import_ingest(target=target, input_path=input_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    expected_created = 2 if include_clean else 1
+    assert payload["created"] == expected_created
+    assert payload["skipped"] == 1
+    assert work_cmd.import_list(target=target, all_imports=True, json_output=True) == 0
+    stored = json.loads(capsys.readouterr().out)["imports"]
+    assert len(stored) == expected_created
+    assert all(item["status"] == "pending" for item in stored)
+    assert sum(item["metadata"]["provenance"]["redaction"]["status"] == "redacted" for item in stored) == 1
+    assert FAKE_EMAIL not in json.dumps(stored)
+    if include_clean:
+        assert any(item["text"] == clean["text"] for item in stored)
+
+
 @pytest.mark.parametrize(
     ("source", "origin"),
     [
