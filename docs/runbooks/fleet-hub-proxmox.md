@@ -1,8 +1,8 @@
 # Fleet hub on a Proxmox LXC
 
-This runbook provisions the Phase 2 fleet hub as an unprivileged Debian LXC on a Proxmox VE 9.x host. The hub accepts run events over Tailscale and serves the live aggregate from one SQLite database. Local journals remain authoritative. A hub outage only delays the aggregate view and causes clients to spool events locally.
+This runbook provisions the Phase 2 fleet hub as an unprivileged Debian LXC on a Proxmox VE 9.x host. Tailscale Serve exposes the hub over HTTPS and forwards requests to a loopback-only Brigade service. The hub serves the live aggregate from one SQLite database. Local journals remain authoritative. A hub outage only delays the aggregate view and causes clients to spool events locally.
 
-The examples use the Tailscale MagicDNS name `brigade-hub`. Replace every other angle-bracket value before running a command.
+The Tailscale Serve URL is printed by `tailscale serve status`. Use its HTTPS tailnet DNS name as `<HUB_TAILNET_FQDN>` wherever the client URL appears below. Replace every other angle-bracket value before running a command.
 
 ## Target layout
 
@@ -11,7 +11,7 @@ The examples use the Tailscale MagicDNS name `brigade-hub`. Replace every other 
 - 1 vCPU, 512 MB RAM, 4 GB root disk
 - Unprivileged CT with nesting disabled
 - Tailscale inside the CT, hostname `brigade-hub`
-- Brigade bound to the CT's Tailscale IPv4 address on TCP port 3774
+- Brigade bound to `127.0.0.1:3774`, behind Tailscale Serve HTTPS
 - SQLite database at `/var/lib/brigade/fleet-hub.db`
 - Root-owned, mode `0600` systemd environment file at `/etc/brigade/fleet-hub.env`
 
@@ -96,7 +96,7 @@ tailscale status
 tailscale ip -4
 ```
 
-The pre-auth key must be reusable or have enough uses for the intended rebuilds. Do not put the key in this repository or in a systemd unit. Record the IPv4 printed by `tailscale ip -4` as `<TAILSCALE_IPV4>` for the service unit below.
+The pre-auth key must be reusable or have enough uses for the intended rebuilds. Do not put the key in this repository or in a systemd unit. The IPv4 is useful for checking that Tailscale is connected; the Brigade service below binds to loopback.
 
 Confirm the MagicDNS name resolves from the CT and from one client machine:
 
@@ -129,7 +129,8 @@ Keep `<BRIGADE_GIT_REF>` identical on the hub and clients while rolling out a Ph
 The 1Password item is named `brigade-fleet-hub`. The command below expects `op` to be authenticated for the vault containing that item and for the item field to be `password`. Run it in the CT as root, or populate the file through an approved root-only provisioning session.
 
 ```bash
-install -d -o root -g root -m 0750 /etc/brigade /var/lib/brigade
+install -d -o root -g root -m 0750 /etc/brigade
+install -d -o root -g root -m 0700 /var/lib/brigade
 umask 077
 fleet_token="$(op read 'op://<VAULT>/brigade-fleet-hub/password')" && \
   printf 'BRIGADE_FLEET_TOKEN=%s\n' "$fleet_token" > /etc/brigade/fleet-hub.env
@@ -148,7 +149,7 @@ Expected output includes `root:root 600`. The service reads `BRIGADE_FLEET_TOKEN
 
 ## 5. Install and start the systemd service
 
-Write `/etc/systemd/system/brigade-fleet.service` with the Tailscale IPv4 captured in step 2:
+Write `/etc/systemd/system/brigade-fleet.service`:
 
 ```ini
 [Unit]
@@ -162,7 +163,7 @@ Type=simple
 User=root
 WorkingDirectory=/var/lib/brigade
 EnvironmentFile=/etc/brigade/fleet-hub.env
-ExecStart=/usr/local/bin/brigade fleet serve --host <TAILSCALE_IPV4> --port 3774 --db /var/lib/brigade/fleet-hub.db
+ExecStart=/usr/local/bin/brigade fleet serve --host 127.0.0.1 --port 3774 --db /var/lib/brigade/fleet-hub.db --trust-forwarded-proto
 Restart=on-failure
 RestartSec=5
 PrivateTmp=true
@@ -175,7 +176,7 @@ ReadWritePaths=/var/lib/brigade
 WantedBy=multi-user.target
 ```
 
-The `--host` value is required. Do not bind to all interfaces; the hub is intended to listen on the Tailscale interface only. The explicit `--db` path keeps the database under `/var/lib/brigade`, independent of the service user's home directory.
+The `--host` value is required. Do not bind to all interfaces or a routable address; the hub must listen on loopback so Tailscale Serve is its only network frontend. The explicit `--db` path keeps the database under `/var/lib/brigade`, independent of the service user's home directory. The database directory must be owned by root and mode `0700`.
 
 A new hub starts with node tokens required for writes. Only a hub that must keep serving clients still on the shared token should add `--allow-admin-writes` to `ExecStart`; see *Migration from the shared token* below for when to add it and when to take it away.
 
@@ -186,16 +187,18 @@ systemctl daemon-reload
 systemctl enable --now brigade-fleet.service
 systemctl status --no-pager brigade-fleet.service
 journalctl -u brigade-fleet.service -n 50 --no-pager
+tailscale serve --bg 3774
+tailscale serve status
 ```
 
-The startup log should name `<TAILSCALE_IPV4>:3774` and `/var/lib/brigade/fleet-hub.db`.
+Tailscale Serve provides the HTTPS MagicDNS origin `https://<HUB_TAILNET_FQDN>` and proxies it to the local service. The startup log should name `127.0.0.1:3774` and `/var/lib/brigade/fleet-hub.db`. Keep the Serve proxy on this same CT; do not forward to the Tailscale interface or another host.
 
 ## 6. Verify health and authenticated status
 
 Health does not require the bearer token:
 
 ```bash
-curl --fail --silent --show-error http://brigade-hub:3774/health
+curl --fail --silent --show-error https://<HUB_TAILNET_FQDN>/health
 ```
 
 Expected response:
@@ -209,7 +212,7 @@ From a client that has the same token, check the protected status endpoint:
 ```bash
 curl --fail --silent --show-error \
   -H "Authorization: Bearer $(<~/.brigade/fleet.token)" \
-  http://brigade-hub:3774/status
+  https://<HUB_TAILNET_FQDN>/status
 ```
 
 An empty result is valid before any client reports an event. An HTTP 401 means the request reached the hub but the token did not match.
@@ -222,25 +225,25 @@ smoke_token="$(curl --fail --silent --show-error \
   -H "Authorization: Bearer $(<~/.brigade/fleet.token)" \
   -H 'Content-Type: application/json' \
   --data '{"action":"add","node_id":"smoke-<NODE_ID>","label":"smoke test"}' \
-  http://brigade-hub:3774/nodes | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')"
+  https://<HUB_TAILNET_FQDN>/nodes | python3 -c 'import json,sys; print(json.load(sys.stdin)["token"])')"
 
 curl --fail --silent --show-error \
   -X POST \
   -H "Authorization: Bearer $smoke_token" \
   -H 'Content-Type: application/json' \
   --data '{"node_id":"smoke-<NODE_ID>","run_id":"smoke-<RUN_ID>","repo":"<REPO_NAME>","seat":"<SEAT>","harness":"<HARNESS>","state":"run.started","ts":"<ISO8601_UTC>","sequence":1,"digest":"<EVENT_DIGEST>"}' \
-  http://brigade-hub:3774/events
+  https://<HUB_TAILNET_FQDN>/events
 
 curl --fail --silent --show-error \
   -H "Authorization: Bearer $(<~/.brigade/fleet.token)" \
-  http://brigade-hub:3774/status
+  https://<HUB_TAILNET_FQDN>/status
 
 curl --fail --silent --show-error \
   -X POST \
   -H "Authorization: Bearer $(<~/.brigade/fleet.token)" \
   -H 'Content-Type: application/json' \
   --data '{"action":"revoke","node_id":"smoke-<NODE_ID>"}' \
-  http://brigade-hub:3774/nodes
+  https://<HUB_TAILNET_FQDN>/nodes
 unset smoke_token
 ```
 
@@ -270,7 +273,7 @@ chmod 0700 ~/.brigade
 
 cat > ~/.brigade/fleet.toml <<'EOF'
 [fleet]
-hub_url = "http://brigade-hub:3774"
+hub_url = "https://<HUB_TAILNET_FQDN>"
 node_token_file = "~/.brigade/fleet-node.token"
 EOF
 
@@ -297,7 +300,7 @@ New-Item -ItemType Directory -Force "$env:USERPROFILE\.brigade" | Out-Null
 Copy-Item <NODE_TOKEN_FILE> "$env:USERPROFILE\.brigade\fleet-node.token"
 @'
 [fleet]
-hub_url = "http://brigade-hub:3774"
+hub_url = "https://<HUB_TAILNET_FQDN>"
 node_token_file = "~/.brigade/fleet-node.token"
 '@ | Set-Content -Encoding utf8 "$env:USERPROFILE\.brigade\fleet.toml"
 icacls "$env:USERPROFILE\.brigade\fleet-node.token" /inheritance:r /grant:r "$env:USERNAME:(R)" | Out-Null
@@ -323,12 +326,12 @@ Event reporting is best effort. A failed POST is appended under the Brigade home
 
 ### Fleet dashboard from a laptop or phone
 
-The hub serves a read-only web view of the same data at `http://brigade-hub:3774/` (machine cards) and `http://brigade-hub:3774/view/repos` (repo board). The dashboard accepts the admin token (not a node token). From a machine that holds it, a bearer header works as for `/status`:
+The hub serves a read-only web view of the same data at `https://<HUB_TAILNET_FQDN>/` (machine cards) and `https://<HUB_TAILNET_FQDN>/view/repos` (repo board). The dashboard accepts the admin token (not a node token). From a machine that holds it, a bearer header works as for `/status`:
 
 ```bash
 curl --silent --show-error \
   -H "Authorization: Bearer $(<~/.brigade/fleet.token)" \
-  http://brigade-hub:3774/ | head
+  https://<HUB_TAILNET_FQDN>/ | head
 ```
 
 Before enrolling a phone, configure an HTTPS proxy that forwards to a hub
@@ -339,17 +342,18 @@ recognizes this scheme only from an immediate loopback peer and sets Secure
 on the cookie. Tailscale Serve HTTPS needs this configuration and explicit
 opt-in. Tailscale identity trust is optional for this enrollment flow.
 
-The direct Tailnet HTTP setup above supports the node/event flow. Dashboard
-admin operations require an HTTPS hub origin or numeric loopback HTTP.
+The HTTPS Tailscale Serve origin supports node, event, messaging, and
+dashboard operations. Do not configure clients with the direct backend URL
+`http://<TAILSCALE_IPV4>:3774`; clients reject remote cleartext hub URLs before
+attaching bearer credentials.
 `--base-url` changes only the printed browser origin, never the admin request
-endpoint. It cannot make a direct Tailnet HTTP admin endpoint acceptable.
-Both URLs must contain only an origin. When moving the earlier Tailnet bind
-behind a loopback proxy, update node clients' `hub_url` to the HTTPS origin
-and preserve their existing node credentials.
+endpoint. It cannot make the direct HTTP backend acceptable.
+Both URLs must contain only an origin. Set each client's `hub_url` to
+`https://<HUB_TAILNET_FQDN>` and preserve its existing node credentials.
 
-Replace `https://hub.example.test` in these examples with the real configured
-HTTPS origin. On the admin client with its already configured admin credential,
-override the earlier HTTP `hub_url` to mint a private five-minute read-only
+Replace the HTTPS origin in these examples with `https://<HUB_TAILNET_FQDN>`.
+On the admin client with its already configured admin credential,
+override the configured `hub_url` to mint a private five-minute read-only
 enrollment URL:
 
 ```bash
@@ -409,7 +413,7 @@ Example service unit that binds loopback and trusts the proxy header:
 ExecStart=/usr/local/bin/brigade fleet serve --host 127.0.0.1 --port 3774 --db /var/lib/brigade/fleet-hub.db --trust-tailscale-identity
 ```
 
-Pair this with a Tailscale Serve rule on the same host that forwards `https://brigade-hub` (or a funnel you control) to `http://127.0.0.1:3774`. Do not configure a Serve rule that points at a routable or remote backend address; the whole point is that the proxy is the only thing that can legitimately present the header, and it must speak to the hub over loopback.
+Pair this with a Tailscale Serve rule on the same host that forwards `https://<HUB_TAILNET_FQDN>` (or a funnel you control) to `http://127.0.0.1:3774`. Do not configure a Serve rule that points at a routable or remote backend address; the whole point is that the proxy is the only thing that can legitimately present the header, and it must speak to the hub over loopback.
 
 ## Migration from the shared token
 
@@ -434,8 +438,10 @@ set -eu
 
 backup_dir=/var/backups/brigade
 stamp=$(date -u +%Y%m%dT%H%M%SZ)
-install -d -o root -g root -m 0750 "$backup_dir"
+umask 077
+install -d -o root -g root -m 0700 "$backup_dir"
 sqlite3 /var/lib/brigade/fleet-hub.db ".backup '$backup_dir/fleet-hub-$stamp.db'"
+chmod 0600 "$backup_dir/fleet-hub-$stamp.db"
 find "$backup_dir" -type f -name 'fleet-hub-*.db' -mtime +14 -delete
 ```
 
@@ -454,6 +460,7 @@ After=brigade-fleet.service
 
 [Service]
 Type=oneshot
+UMask=0077
 ExecStart=/usr/local/sbin/brigade-fleet-backup
 ```
 
@@ -484,6 +491,18 @@ ls -lh /var/backups/brigade/
 
 Copy backups off the CT through the operator's existing backup system. The local timer is not a replacement for an off-host copy.
 
+For an existing backup directory, stop the timer, confirm the path is the
+dedicated backup directory, then tighten it and existing database backups:
+
+```bash
+systemctl stop brigade-fleet-backup.timer
+test -d /var/backups/brigade && test ! -L /var/backups/brigade
+chown root:root /var/backups/brigade
+chmod 0700 /var/backups/brigade
+find /var/backups/brigade -type f -name 'fleet-hub-*.db' -exec chmod 0600 {} +
+systemctl start brigade-fleet-backup.timer
+```
+
 ## 9. Compact the event journal (optional)
 
 The classic boards (`/view/machines`, `/view/repos`) refresh about every 10s and now read a latest-state-per-run page: terminal history is windowed to 24h unless `all=1`, and each page is LIMITed. That keeps render cost flat as the journal grows. The events table itself is still an append-only log. Dashboard GET handlers never delete rows.
@@ -511,6 +530,32 @@ pipx list
 systemctl status --no-pager brigade-fleet.service
 ```
 
+For installations created from an earlier version of this runbook, migrate
+the direct Tailnet HTTP endpoint before upgrading clients. Stop the hub,
+confirm `/var/lib/brigade` is the dedicated data directory (not a symlink),
+and tighten its ownership and mode. Replace the service unit with the
+loopback-only `ExecStart` from section 5, then restart the hub and enable
+Tailscale Serve. Update each client to `https://<HUB_TAILNET_FQDN>`; offline
+events and messages remain in local spools until the new URL is configured.
+
+```bash
+systemctl stop brigade-fleet.service
+test -d /var/lib/brigade && test ! -L /var/lib/brigade
+chown root:root /var/lib/brigade
+chmod 0700 /var/lib/brigade
+stat -c '%U:%G %a %n' /var/lib/brigade
+```
+
+After editing the service unit, activate and verify the proxy:
+
+```bash
+systemctl daemon-reload
+systemctl start brigade-fleet.service
+tailscale serve --bg 3774
+tailscale serve status
+curl --fail --silent --show-error https://<HUB_TAILNET_FQDN>/health
+```
+
 Upgrade to a reviewed ref:
 
 ```bash
@@ -520,7 +565,7 @@ PIPX_HOME=/opt/pipx PIPX_BIN_DIR=/usr/local/bin \
   "git+https://github.com/escoffier-labs/brigade.git@<NEW_BRIGADE_GIT_REF>"
 systemctl start brigade-fleet.service
 systemctl status --no-pager brigade-fleet.service
-curl --fail --silent --show-error http://brigade-hub:3774/health
+curl --fail --silent --show-error https://<HUB_TAILNET_FQDN>/health
 ```
 
 Roll back the application to a known-good ref with the same sequence:

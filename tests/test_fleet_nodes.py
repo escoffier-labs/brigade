@@ -685,7 +685,7 @@ class TestServerStartupMigration:
 
     def _pre_holder_token_db(self, db: Path) -> None:
         """An early-v2 database: a claims table predating holder tokens."""
-        db.parent.mkdir(parents=True, exist_ok=True)
+        db.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         conn = sqlite3.connect(str(db))
         try:
             conn.execute("CREATE TABLE claims (target TEXT PRIMARY KEY, node_id TEXT, expires_at TEXT)")

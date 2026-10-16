@@ -658,7 +658,7 @@ def test_upgrade_v22_preserves_nodes_events_claims_presence_and_rollback_refuses
     conn.commit()
     conn.close()
     conn = fleet_hub.init_db(db)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 26
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
     assert {table: conn.execute(f"SELECT * FROM {table}").fetchall() for table in tables} == before
     assert store.mint(conn)["code"]
     conn.close()

@@ -92,6 +92,17 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_package.add_argument("--json", action="store_true", help="Print a brigade.evidence_package_export.v1 summary.")
     p_package.set_defaults(func=dispatch)
 
+    p_derivative = export_sub.add_parser(
+        "derivative", help="Export a minimized derivative of a portable evidence package."
+    )
+    p_derivative.add_argument("--source", type=Path, required=True, help="Source evidence package directory.")
+    p_derivative.add_argument("--out", type=Path, required=True, help="New local derivative directory.")
+    p_derivative.add_argument("--recipient", required=True, help="Organization-supplied recipient reference.")
+    p_derivative.add_argument("--authority", required=True, help="Organization-supplied authorization reference.")
+    p_derivative.add_argument("--lawful-basis", required=True, help="Organization-supplied lawful basis.")
+    p_derivative.add_argument("--necessity", required=True, help="Organization-supplied necessity statement.")
+    p_derivative.set_defaults(func=dispatch)
+
     for projection in ("otel-genai", "openinference"):
         parser = export_sub.add_parser(projection, help=f"Export privacy-safe {projection} span JSONL.")
         parser.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
@@ -279,6 +290,23 @@ def dispatch(args) -> int:
             force=args.force,
             json_output=args.json,
         )
+    if args.receipts_command == "export" and args.receipts_export_command == "derivative":
+        from .. import evidence_derivative
+
+        try:
+            report = evidence_derivative.export_derivative(
+                source=args.source,
+                out=args.out,
+                recipient=args.recipient,
+                authority=args.authority,
+                lawful_basis=args.lawful_basis,
+                necessity=args.necessity,
+            )
+        except (evidence_derivative.DerivativeExportError, NotImplementedError) as exc:
+            print(f"error: cannot export evidence derivative: {exc}", file=sys.stderr)
+            return 1
+        print(f"evidence derivative exported ({report.removed_fields} fields removed)")
+        return 0
     if args.receipts_command == "export" and args.receipts_export_command == "miseledger":
         return receipts_cmd.export_miseledger(
             target=args.target,

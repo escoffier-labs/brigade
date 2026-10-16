@@ -199,6 +199,10 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_flush = fleet_sub.add_parser("flush", help="Re-POST locally spooled events to the fleet hub.")
     p_flush.set_defaults(func=_dispatch_flush)
 
+    from .fleet_messages import register as register_messages
+
+    register_messages(fleet_sub)
+
     p_cloud = fleet_sub.add_parser("cloud", help="Read the fleet hub's sanitized cloud lease snapshot.")
     p_cloud.add_argument("--all", action="store_true", help="Include released and expired cloud leases.")
     p_cloud.add_argument("--json", action="store_true", help="Emit JSON instead of a table.")
@@ -1667,12 +1671,33 @@ def _dispatch_models_default_set(args: argparse.Namespace) -> int:
 
 
 def _dispatch_flush(args: argparse.Namespace) -> int:
-    from .. import fleet_client
+    from .. import fleet_client, fleet_client_messages
 
     node_id = fleet_client.resolve_node_id()
-    flushed = fleet_client.flush_spool(node_id)
-    print(f"flushed {flushed} spooled event(s) for node {node_id}")
-    return 0
+    event_error: fleet_client.FleetClientError | OSError | None = None
+    try:
+        events = fleet_client.flush_spool(node_id)
+    except (fleet_client.FleetClientError, OSError) as exc:
+        events = 0
+        event_error = exc
+    message_error: fleet_client.FleetClientError | OSError | None = None
+    try:
+        messages = fleet_client_messages.flush(node_id)
+    except (fleet_client.FleetClientError, OSError) as exc:
+        messages = 0
+        message_error = exc
+    if event_error is not None:
+        print(f"flushed {messages} message(s) for node {node_id}")
+    else:
+        if messages:
+            print(f"flushed {events} spooled event(s) and {messages} message(s) for node {node_id}")
+        else:
+            print(f"flushed {events} spooled event(s) for node {node_id}")
+    if event_error is not None:
+        print(f"warning: could not flush fleet events: {_safe_table_cell(event_error)}", file=sys.stderr)
+    if message_error is not None:
+        print(f"warning: could not flush fleet messages: {_safe_table_cell(message_error)}", file=sys.stderr)
+    return 1 if event_error is not None or message_error is not None else 0
 
 
 def _print_work_payload(payload: object, *, json_output: bool) -> int:

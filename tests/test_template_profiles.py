@@ -80,6 +80,22 @@ def test_render_hashes_are_deterministic_for_same_selection():
     assert all(len(item["sha256"]) == 64 for item in first)
 
 
+def test_unrendered_text_template_digest_uses_canonical_line_endings(tmp_path, monkeypatch):
+    (tmp_path / "example.json").write_bytes(b'{"value":1}\r\n')
+    monkeypatch.setattr(template_profiles, "template_root", lambda: tmp_path)
+    monkeypatch.setattr(
+        template_profiles,
+        "resolve_manifests",
+        lambda _selection: ([{"src": "example.json", "dst": "example.json"}], [], None),
+    )
+    selection = Selection(depth="repo", harnesses=["claude"], owner="claude", includes=[])
+
+    record = template_profiles.compute_profile_renders(selection)[0]
+
+    assert record["byte_size"] == len(b'{"value":1}\n')
+    assert record["sha256"] == hashlib.sha256(b'{"value":1}\n').hexdigest()
+
+
 def test_render_hash_matches_installed_bytes(tmp_path):
     selection = template_profiles.resolve_profile("repo-claude")
     renders = {item["dst"]: item for item in template_profiles.compute_profile_renders(selection)}

@@ -77,6 +77,16 @@ def is_text(src: str) -> bool:
     return Path(src).suffix.lower() in TEXT_EXTENSIONS
 
 
+def canonical_template_bytes(path: Path) -> bytes:
+    """Return UTF-8 template bytes with LF endings, preserving binary assets."""
+    data = path.read_bytes()
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data
+    return text.replace("\r\n", "\n").replace("\r", "\n").encode("utf-8")
+
+
 def harness_memory_owner(harness: str, fallback: str) -> str:
     """Map a harness id to a human-readable memory owner name."""
     mapping = {

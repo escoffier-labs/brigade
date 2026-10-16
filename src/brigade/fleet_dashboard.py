@@ -33,6 +33,7 @@ from .fleet_command_deck import is_terminal_state
 from . import ui_theme
 
 REFRESH_SECONDS = 10
+MACHINE_CARD_LIMIT = 200
 # A non-terminal run whose latest event is older than this has no heartbeat
 # reaching the hub; it needs a human look.
 STALE_AFTER_SECONDS = 30 * 60
@@ -194,7 +195,7 @@ def build_rows(
         last_ts = str(run.get("ts") or "")
         last = _parse_stamp(run.get("received_at")) or _parse_stamp(last_ts)
         age = max(0.0, (now - last).total_seconds()) if last is not None else None
-        started = _parse_stamp(started_at.get((node_id, run_id)))
+        started = _parse_stamp(started_at.get((node_id, run_id)) or run.get("started_at"))
         live = not is_terminal_state(state)
         elapsed: float | None = None
         if started is not None:
@@ -526,6 +527,8 @@ def _machine_card(
     *,
     now: datetime,
     sort: str,
+    unread_count: int = 0,
+    truncated_history: bool = False,
 ) -> str:
     last_seen = _parse_stamp((node_info or {}).get("last_received_at"))
     last_age = (now - last_seen).total_seconds() if last_seen is not None else None
@@ -534,10 +537,17 @@ def _machine_card(
     events = (node_info or {}).get("events")
     if isinstance(events, int):
         meta.append(f"{events} events")
+    if unread_count:
+        meta.append(f"{unread_count} unread message{'s' if unread_count != 1 else ''}")
     holds = ""
     if held:
         items = "".join(f"<li>{esc(claim.target)}: {esc(_claim_text(claim))}</li>" for claim in held)
         holds = f'<div class="fleet-holds">{esc("holds")}<ul>{items}</ul></div>'
+    history_note = (
+        f'<p class="fleet-history-truncated">{esc("older runs omitted; showing a bounded recent history")}</p>'
+        if truncated_history
+        else ""
+    )
     table = _run_table(sort_rows(rows, sort), f"node-{short_node(node_id)}", with_node=False)
     return (
         f'<article class="machine-card" data-node="{esc(node_id)}">'
@@ -546,8 +556,70 @@ def _machine_card(
         f'<h2 class="machine-card-title" title="{esc(node_id)}">{esc(short_node(node_id))}</h2>'
         f'<div class="machine-card-line">{esc(" · ".join(meta))}</div>'
         f"{_count_strip(rows)}</div></header>"
-        f"{holds}{table}</article>"
+        f"{holds}{history_note}{table}</article>"
     )
+
+
+def _machine_base_node_ids(
+    rows: list[RunRow], nodes: list[dict[str, Any]], claims: list[ClaimRow], query: DashboardQuery
+) -> set[str]:
+    node_ids = {row.node_id for row in rows}
+    info_ids = {str(node.get("node_id") or "") for node in nodes}
+    claim_ids = {claim.owner_node for claim in claims if claim.owner_node and not claim.expired}
+    if not query.node and not query.attention_only and not query.seat and not query.state and not query.repo:
+        node_ids |= {node_id for node_id in info_ids if node_id}
+        node_ids |= claim_ids
+    elif query.node:
+        node_ids |= {node_id for node_id in info_ids if node_id and _contains(node_id, query.node)}
+        node_ids |= {node_id for node_id in claim_ids if _contains(node_id, query.node)}
+    return node_ids
+
+
+def _machine_unread_candidates(
+    query: DashboardQuery, unread_counts: dict[str, int], *, excluded_node_ids: set[str] | None = None
+) -> list[str]:
+    if query.attention_only or query.seat or query.state or query.repo:
+        return []
+    excluded_node_ids = excluded_node_ids or set()
+    return sorted(
+        node_id
+        for node_id, count in unread_counts.items()
+        if count > 0 and node_id not in excluded_node_ids and (not query.node or _contains(node_id, query.node))
+    )
+
+
+def _machine_unread_exclusions(
+    query: DashboardQuery, current_base_node_ids: set[str], complete_base_node_ids: set[str]
+) -> set[str]:
+    excluded = set(current_base_node_ids)
+    if not query.node and not query.attention_only and not query.seat and not query.state and not query.repo:
+        excluded |= complete_base_node_ids
+    elif query.node:
+        excluded |= {node_id for node_id in complete_base_node_ids if _contains(node_id, query.node)}
+    return excluded
+
+
+def machine_sort_key(node_id: str, rows: list[RunRow], query: DashboardQuery) -> tuple[Any, ...]:
+    """Use the most urgent matching run to order a machine before pagination."""
+    keys: list[tuple[Any, ...]] = []
+    for row in rows:
+        if not (row.live or query.include_all):
+            continue
+        if query.sort == "age":
+            keys.append((_elapsed_key(row), _rank(row)))
+        elif query.sort == "state":
+            keys.append((_rank(row), row.state, _elapsed_key(row)))
+        elif query.sort == "attention":
+            keys.append((_rank(row), _elapsed_key(row)))
+    if not keys:
+        if query.sort == "age":
+            return (1.0, _IDLE_RANK, node_id)
+        if query.sort == "state":
+            return (_IDLE_RANK, "", 1.0, node_id)
+        if query.sort == "attention":
+            return (_IDLE_RANK, 1.0, node_id)
+        return (0, node_id)
+    return (*min(keys), node_id)
 
 
 def _machine_board(
@@ -557,29 +629,42 @@ def _machine_board(
     query: DashboardQuery,
     *,
     now: datetime,
+    unread_counts: dict[str, int] | None = None,
+    unread_offset: int = 0,
+    unread_only_page: bool = False,
+    complete_base_node_ids: set[str] | None = None,
+    truncated_node_ids: set[str] | None = None,
 ) -> str:
     info = {str(node.get("node_id") or ""): node for node in nodes}
     by_node: dict[str, list[RunRow]] = {}
     for row in rows:
         by_node.setdefault(row.node_id, []).append(row)
-    node_ids = set(by_node)
-    claim_nodes = {claim.owner_node for claim in claims if claim.owner_node and not claim.expired}
-    if not query.node and not query.attention_only and not query.seat and not query.state and not query.repo:
-        node_ids |= {node_id for node_id in info if node_id}
-        node_ids |= claim_nodes
-    elif query.node:
-        node_ids |= {node_id for node_id in info if node_id and _contains(node_id, query.node)}
-        node_ids |= {node_id for node_id in claim_nodes if _contains(node_id, query.node)}
+    unread_counts = unread_counts or {}
+    base_node_ids = _machine_base_node_ids(rows, nodes, claims, query)
 
-    def card_key(node_id: str) -> tuple[int, str]:
-        worst = min((_rank(row) for row in by_node.get(node_id, []) if row.live), default=_IDLE_RANK)
-        return (worst if query.sort in ("attention", "state", "age") else 0, node_id)
+    node_ids = set() if unread_only_page else base_node_ids
+    room = max(0, MACHINE_CARD_LIMIT - len(node_ids))
+    excluded_ids = _machine_unread_exclusions(query, base_node_ids, complete_base_node_ids or set())
+    unread_ids = _machine_unread_candidates(query, unread_counts, excluded_node_ids=excluded_ids)
+    node_ids.update(unread_ids[unread_offset : unread_offset + room])
+
+    def card_key(node_id: str) -> tuple[Any, ...]:
+        return machine_sort_key(node_id, by_node.get(node_id, []), query)
 
     cards = []
-    for node_id in sorted(node_ids, key=card_key):
+    for node_id in sorted(node_ids, key=card_key)[:MACHINE_CARD_LIMIT]:
         held = [claim for claim in claims if claim.owner_node == node_id and not claim.expired]
         cards.append(
-            _machine_card(node_id, by_node.get(node_id, []), info.get(node_id), held, now=now, sort=query.sort)
+            _machine_card(
+                node_id,
+                by_node.get(node_id, []),
+                info.get(node_id),
+                held,
+                now=now,
+                sort=query.sort,
+                unread_count=unread_counts.get(node_id, 0),
+                truncated_history=node_id in (truncated_node_ids or set()),
+            )
         )
     if not cards:
         return f'<p class="machine-empty">{esc("No machines match.")}</p>'
@@ -711,6 +796,11 @@ def render_page(
     nonce: str,
     now: datetime | None = None,
     more_href: str | None = None,
+    unread_counts: dict[str, int] | None = None,
+    unread_offset: int = 0,
+    unread_only_page: bool = False,
+    complete_base_node_ids: set[str] | None = None,
+    truncated_node_ids: set[str] | None = None,
 ) -> str:
     """Render the full dashboard document for one board.
 
@@ -726,13 +816,25 @@ def render_page(
         {str(node.get("node_id") or "") for node in nodes}
         | {row.node_id for row in all_rows}
         | {claim.owner_node for claim in claim_rows if claim.owner_node and not claim.expired}
+        | {node_id for node_id, count in (unread_counts or {}).items() if count > 0}
     )
     node_ids = [node_id for node_id in node_ids if node_id]
     if query.view == "repos":
         board = _repo_board(_repo_entries(all_rows, claim_rows, query), query.sort)
         title = "Fleet: Repos"
     else:
-        board = _machine_board(visible, nodes, claim_rows, query, now=current)
+        board = _machine_board(
+            visible,
+            nodes,
+            claim_rows,
+            query,
+            now=current,
+            unread_counts=unread_counts,
+            unread_offset=unread_offset,
+            unread_only_page=unread_only_page,
+            complete_base_node_ids=complete_base_node_ids,
+            truncated_node_ids=truncated_node_ids,
+        )
         title = "Fleet: Machines"
     stamp = current.astimezone(timezone.utc).strftime("%H:%M:%S UTC")
     more = f'<p class="fleet-more"><a href="{esc(more_href)}">{esc("more")}</a></p>' if more_href else ""

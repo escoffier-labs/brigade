@@ -96,6 +96,7 @@ import os
 import re
 import secrets
 import sqlite3
+import stat
 import sys
 import threading
 import time
@@ -115,7 +116,7 @@ from .fleet_hub_status import (
     latest_status as latest_status,
 )
 
-SCHEMA_VERSION = 26
+SCHEMA_VERSION = 30
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
@@ -538,6 +539,12 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     fleet_hub_claims.migrate_schema(conn)
     conn.execute("CREATE INDEX IF NOT EXISTS events_run_seq ON events (node_id, run_id, sequence)")
     conn.execute("CREATE INDEX IF NOT EXISTS events_received_at ON events (received_at)")
+    # v29 -> v30: Grokbot runs span nodes. Seek their first event without
+    # scanning the node-first index or sorting the run's history.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS events_grokbot_run_seq "
+        "ON events (run_id, sequence, received_at, digest) WHERE harness = 'grokbot'"
+    )
     # v3 -> v4 is one additive table; v5-v8 add cloud lease and policy
     # tables only, and v9 canonicalizes provider aliases. Existing event,
     # claim, node, and active lease rows survive.
@@ -607,6 +614,11 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     from . import fleet_hub_enrollment
 
     fleet_hub_enrollment.ensure_schema(conn)
+    from . import fleet_hub_messages
+
+    # v26 -> v28 added messages and named principals; v28 -> v29 adds
+    # recoverable principal enrollment and an unacked-recipient index.
+    fleet_hub_messages.ensure_schema(conn)
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 
@@ -706,6 +718,69 @@ def open_db(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+def _secure_hub_database_storage(db_path: Path) -> None:
+    parent = db_path.parent
+    try:
+        try:
+            parent.lstat()
+            created = False
+        except FileNotFoundError:
+            created = True
+        parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # Follow relocated data directories, but validate the final files below.
+        parent = parent.resolve()
+        db_path = parent / db_path.name
+        parent_info = parent.lstat()
+    except OSError as exc:
+        raise FleetHubError(f"could not secure fleet hub database directory: {type(exc).__name__}") from exc
+    if not stat.S_ISDIR(parent_info.st_mode) or stat.S_ISLNK(parent_info.st_mode):
+        raise FleetHubError("fleet hub database parent must be a directory")
+    if created and os.name == "posix":
+        try:
+            fd = os.open(
+                parent,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+            )
+            try:
+                os.fchmod(fd, 0o700)
+                if stat.S_IMODE(os.fstat(fd).st_mode) != 0o700:
+                    raise FleetHubError("fleet hub database directory could not be made private (mode 0700)")
+            finally:
+                os.close(fd)
+        except (OSError, NotImplementedError) as exc:
+            raise FleetHubError(f"could not secure fleet hub database directory: {type(exc).__name__}") from exc
+
+    for path in (db_path, Path(f"{db_path}-wal"), Path(f"{db_path}-shm"), Path(f"{db_path}-journal")):
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            if path != db_path:
+                continue
+            flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+            try:
+                fd = os.open(path, flags, 0o600)
+            except FileExistsError:
+                info = path.lstat()
+            else:
+                os.close(fd)
+                info = path.lstat()
+        except OSError as exc:
+            raise FleetHubError(f"could not inspect fleet hub database file: {type(exc).__name__}") from exc
+        if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            raise FleetHubError("fleet hub database files must be regular files")
+        if os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o600:
+            try:
+                fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+                try:
+                    if not stat.S_ISREG(os.fstat(fd).st_mode):
+                        raise FleetHubError("fleet hub database files must be regular files")
+                    os.fchmod(fd, 0o600)
+                finally:
+                    os.close(fd)
+            except (OSError, NotImplementedError) as exc:
+                raise FleetHubError(f"could not secure fleet hub database file: {type(exc).__name__}") from exc
+
+
 def init_db(db_path: Path) -> sqlite3.Connection:
     """Open the hub database and create/migrate its schema.
 
@@ -716,13 +791,14 @@ def init_db(db_path: Path) -> sqlite3.Connection:
     so request connections inherit it without re-issuing the pragma.
     """
     db_path = Path(db_path).expanduser()
-    db_path.parent.mkdir(parents=True, exist_ok=True)
+    _secure_hub_database_storage(db_path)
     resolved = db_path.resolve()
     conn = sqlite3.connect(str(resolved), timeout=10)
     try:
         conn.execute(f"PRAGMA busy_timeout={_INIT_BUSY_TIMEOUT_MS}")
         with _migration_lock(resolved):
             _init_schema(conn, resolved)
+        _secure_hub_database_storage(resolved)
     except BaseException:
         conn.close()
         raise
