@@ -3566,3 +3566,21 @@ def test_doctor_codex_instruction_chain_fix_prefix_inside_path_roundtrips(tmp_pa
     assert len(commands) == 1
     argv = shlex.split(commands[0])
     assert argv[argv.index("--target") + 1] == str(repo)
+
+
+@pytest.mark.parametrize("extras_on", [False, True])
+def test_doctor_codex_instruction_chain_remedy_enables_extras_when_off(tmp_path: Path, monkeypatch, extras_on: bool):
+    from brigade import doctor_agent, extras
+
+    monkeypatch.setattr(extras, "enabled", lambda: extras_on)
+    repo = _codex_repo(tmp_path)
+    (repo / "AGENTS.md").write_text("x" * 40_000, encoding="utf-8")
+    status, _name, detail = _codex_chain_check(repo)
+    if not context_preview._POSIX_NOFOLLOW_SUPPORTED:
+        _assert_unsupported_codex_chain(status, detail)
+        return
+    assert "brigade context preview" in detail
+    assert ("`brigade extras on`" in detail) is (not extras_on)
+    commands = doctor_agent.extract_commands(detail)
+    assert any(command.startswith("brigade context preview") for command in commands)
+    assert ("brigade extras on" in commands) is (not extras_on)

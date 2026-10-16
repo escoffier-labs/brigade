@@ -6,6 +6,7 @@ import json
 import shlex
 from pathlib import Path
 
+from . import extras
 from .doctor import MANUAL, OK, WARN, CheckResult
 
 _CODEX_CHAIN_NAME = "instruction-chain: codex"
@@ -41,15 +42,17 @@ def check_codex_instruction_chain(target: Path) -> CheckResult:
     target_text = str(target)
     # Controls would reach the terminal and backticks would split agent command
     # extraction, so only display-safe targets are spelled out.
+    # `context` is an extras-only command, so the remedy must enable extras first.
+    enable = "" if extras.enabled() else "run `brigade extras on` (or set BRIGADE_EXTRAS=1), then "
     if target_text.isprintable() and "`" not in target_text:
         quoted = shlex.quote(target_text)
         remedy = (
-            "replace assumptions with effective settings and run "
+            f"{enable}replace assumptions with effective settings and run "
             f"`brigade context preview --target {quoted} --cwd {quoted} {flags}`"
         )
     else:
         remedy = (
-            "replace assumptions with effective settings and run brigade context preview "
+            f"{enable}replace assumptions with effective settings and run brigade context preview "
             f"with --target and --cwd set to this target and {flags}"
         )
     try:
