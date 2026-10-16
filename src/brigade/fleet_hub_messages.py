@@ -244,6 +244,21 @@ def unread_counts(conn: sqlite3.Connection) -> dict[str, int]:
     return counts
 
 
+def agent_unread_counts(conn: sqlite3.Connection) -> dict[str, int]:
+    """Unread totals for active agent principals, grouped over the unacked index.
+
+    The board calls ``unread_counts`` first to prune expired messages.
+    """
+    return {
+        str(recipient): int(count)
+        for recipient, count in conn.execute(
+            "SELECT message.recipient,COUNT(*) FROM fleet_messages AS message "
+            "JOIN fleet_message_principals AS principal ON principal.principal_id=message.recipient "
+            "WHERE message.acked_at IS NULL AND principal.revoked_at IS NULL GROUP BY message.recipient"
+        )
+    }
+
+
 def _text(value: Any, name: str, limit: int, *, required: bool = True) -> str | None:
     if value is None and not required:
         return None
