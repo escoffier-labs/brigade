@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import sqlite3
 import urllib.request
 
@@ -76,7 +77,7 @@ def test_readonly_board_neither_queries_nor_discloses_agent_counts(hub, agent_in
     base, _token_a, _token_b, db = hub
     assert "agent:fixture" in _get(base, ADMIN, "/view/machines")
 
-    def forbidden_query(_conn):
+    def forbidden_query(_conn, limit=0):
         pytest.fail("read-only board queried private agent inbox totals")
 
     monkeypatch.setattr(fleet_hub_messages, "agent_unread_counts", forbidden_query)
@@ -97,10 +98,30 @@ def test_agent_projection_uses_one_grouped_unacked_index_scan(hub, agent_inbox):
     with sqlite3.connect(db) as conn:
         statements = []
         conn.set_trace_callback(statements.append)
-        assert fleet_hub_messages.agent_unread_counts(conn) == {"agent:fixture": 2}
+        assert fleet_hub_messages.agent_unread_counts(conn) == ({"agent:fixture": 2}, False)
         selects = [sql for sql in statements if sql.lstrip().upper().startswith("SELECT")]
         assert len(selects) == 1
         assert selects[0].upper().count("GROUP BY") == 1
         plan = conn.execute("EXPLAIN QUERY PLAN " + selects[0]).fetchall()
         assert any("fleet_messages_unacked_recipient" in row[3] for row in plan)
         assert not any("TEMP B-TREE" in row[3] for row in plan)
+
+
+def test_agent_projection_is_capped_and_flags_more(hub, agent_inbox, monkeypatch):
+    base, token_a, _token_b, db = hub
+    assert _post_path(base, ADMIN, "/message-principals", {"name": "second"})[0] == 201
+    status, _result = _request(base, token_a, {"action": "send", "to": "agent:second", "subject": "S", "body": "B"})
+    assert status == 201
+    with sqlite3.connect(db) as conn:
+        assert fleet_hub_messages.agent_unread_counts(conn, limit=1) == ({"agent:fixture": 2}, True)
+        assert fleet_hub_messages.agent_unread_counts(conn, limit=2) == (
+            {"agent:fixture": 2, "agent:second": 1},
+            False,
+        )
+    monkeypatch.setattr(
+        fleet_hub_messages, "agent_unread_counts", functools.partial(fleet_hub_messages.agent_unread_counts, limit=1)
+    )
+    page = _get(base, ADMIN, "/view/machines")
+    assert 'data-principal="agent:fixture"' in page
+    assert 'data-principal="agent:second"' not in page
+    assert "More agents have unread messages than are shown." in page
