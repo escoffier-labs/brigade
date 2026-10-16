@@ -22,6 +22,9 @@ MAX_LIST_RESPONSE_BYTES = 7 * 1024 * 1024
 MAX_FUTURE_SKEW = timedelta(minutes=5)
 MAX_SQLITE_INTEGER = (1 << 63) - 1
 _PRINCIPAL_NAME_RE = re.compile(r"^[a-z][a-z0-9._-]{0,62}$")
+_SENDER_LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
+_THREAD_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/#-]{0,127}$")
+KINDS = frozenset({"message", "question", "completion"})
 _ENROLLMENT_ID_RE = re.compile(r"^[A-Za-z0-9_-]{16,128}$")
 _PRINCIPAL_TOKEN_RE = re.compile(r"^[A-Za-z0-9_-]{32,128}$")
 
@@ -82,10 +85,40 @@ class MessageAuthError(MessageError):
 
 
 def _payload_digest(
-    recipient: str, subject: str, body: str, reference: str | None, priority: str, reply_to: int | None = None
+    recipient: str,
+    subject: str,
+    body: str,
+    reference: str | None,
+    priority: str,
+    reply_to: int | None = None,
+    *,
+    extras: dict[str, str] | None = None,
 ) -> str:
-    value = json.dumps([recipient, subject, body, reference, priority, reply_to], ensure_ascii=False)
+    fields: list[Any] = [recipient, subject, body, reference, priority, reply_to]
+    if extras:
+        fields.append(extras)
+    value = json.dumps(fields, ensure_ascii=False)
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _metadata(raw: dict[str, Any], *, sender: str | None = None) -> dict[str, str]:
+    extras: dict[str, str] = {}
+    for field, pattern in (("sender_label", _SENDER_LABEL_RE), ("thread", _THREAD_RE)):
+        value = raw.get(field)
+        if value is None:
+            continue
+        if field == "sender_label" and sender is not None and sender.startswith("agent:"):
+            raise MessageError("sender_label is only available to node principals")
+        if not isinstance(value, str) or pattern.fullmatch(value) is None:
+            raise MessageError(f"{field} is invalid")
+        extras[field] = value
+    kind = raw.get("kind")
+    if kind is not None:
+        if not isinstance(kind, str) or kind not in KINDS:
+            raise MessageError("kind must be message, question, or completion")
+        if kind != "message":
+            extras["kind"] = kind
+    return extras
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -147,6 +180,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         "SELECT 1 FROM fleet_message_sends AS s WHERE s.sender=m.sender AND s.client_id=m.client_id)",
         (send_cutoff,),
     )
+    conn.execute("CREATE INDEX IF NOT EXISTS fleet_messages_sender ON fleet_messages (sender, id)")
     conn.execute("CREATE INDEX IF NOT EXISTS fleet_messages_inbox ON fleet_messages (recipient, id)")
     conn.execute(
         "CREATE INDEX IF NOT EXISTS fleet_messages_unacked_recipient "
@@ -238,13 +272,18 @@ def _row(row: tuple[Any, ...]) -> dict[str, Any]:
         "created_at",
         "acked_at",
         "acked_by",
+        "sender_label",
+        "thread",
+        "kind",
     )
-    return dict(zip(keys, row, strict=True))
+    result = dict(zip(keys, row, strict=True))
+    result["kind"] = result["kind"] or "message"
+    return result
 
 
 def _fetch(conn: sqlite3.Connection, message_id: int) -> dict[str, Any] | None:
     row = conn.execute(
-        "SELECT id,sender,recipient,subject,body,reference,priority,client_id,reply_to,created_at,acked_at,acked_by "
+        "SELECT id,sender,recipient,subject,body,reference,priority,client_id,reply_to,created_at,acked_at,acked_by,sender_label,thread,kind "
         "FROM fleet_messages WHERE id=?",
         (message_id,),
     ).fetchone()
@@ -491,7 +530,8 @@ def send(
     if not isinstance(priority, str) or priority not in PRIORITIES:
         raise MessageError("priority must be low, normal, high, or urgent")
     assert recipient is not None and subject is not None and body is not None
-    message_hash = _payload_digest(recipient, subject, body, reference, priority, reply_to)
+    extras = _metadata(raw, sender=sender)
+    message_hash = _payload_digest(recipient, subject, body, reference, priority, reply_to, extras=extras)
     opened = not conn.in_transaction
     if opened:
         conn.execute("BEGIN IMMEDIATE")
@@ -537,8 +577,8 @@ def send(
             raise MessageQuotaError("sender message quota exceeded", code="message_sender_quota")
         created_at = enqueued_at
         cursor = conn.execute(
-            "INSERT INTO fleet_messages(sender,recipient,subject,body,reference,priority,client_id,payload_hash,reply_to,created_at,received_at) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO fleet_messages(sender,recipient,subject,body,reference,priority,client_id,payload_hash,reply_to,created_at,received_at,sender_label,thread,kind) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 sender,
                 recipient,
@@ -551,6 +591,9 @@ def send(
                 reply_to,
                 created_at,
                 now.isoformat(),
+                extras.get("sender_label"),
+                extras.get("thread"),
+                extras.get("kind"),
             ),
         )
         message_id = cursor.lastrowid
@@ -579,12 +622,18 @@ def list_messages(conn: sqlite3.Connection, raw: dict[str, Any], *, recipient: s
     if not isinstance(unacked, bool):
         raise MessageError("unacked must be a boolean")
     rows = conn.execute(
-        "SELECT id,sender,recipient,subject,body,reference,priority,client_id,reply_to,created_at,acked_at,acked_by "
+        "SELECT id,sender,recipient,subject,body,reference,priority,client_id,reply_to,created_at,acked_at,acked_by,sender_label,thread,kind "
         "FROM fleet_messages WHERE recipient=? AND id>? "
         + ("AND acked_at IS NULL " if unacked else "")
         + "ORDER BY id LIMIT 100",
         (recipient, after),
     ).fetchall()
+    if opened:
+        conn.commit()
+    return _message_page(rows, after=after)
+
+
+def _message_page(rows: list[tuple[Any, ...]], *, after: int) -> dict[str, Any]:
     messages: list[dict[str, Any]] = []
     serialized_messages_size = 0
     for row in rows:
@@ -599,9 +648,32 @@ def list_messages(conn: sqlite3.Connection, raw: dict[str, Any], *, recipient: s
             break
         messages.append(candidate)
         serialized_messages_size += separator_size + len(serialized_candidate)
-    if opened:
-        conn.commit()
     return {"messages": messages, "next_cursor": messages[-1]["id"] if messages else after}
+
+
+def sent(conn: sqlite3.Connection, raw: dict[str, Any], *, sender: str) -> dict[str, Any]:
+    _prune_expired(conn)
+    if set(raw) - {"action", "after", "ids"} or ("after" in raw and "ids" in raw):
+        raise MessageError("sent accepts either after or ids")
+    after = raw.get("after", 0)
+    if not _sqlite_integer(after, allow_zero=True):
+        raise MessageError("after must be a non-negative integer within SQLite's range")
+    params: list[Any] = [sender]
+    if "ids" in raw:
+        ids = raw["ids"]
+        if not isinstance(ids, list) or not 1 <= len(ids) <= 100 or not all(_sqlite_integer(i) for i in ids):
+            raise MessageError("ids must contain 1 to 100 positive integers within SQLite's range")
+        condition = "id IN (" + ",".join("?" for _ in ids) + ")"
+        params.extend(ids)
+    else:
+        condition = "id>?"
+        params.append(after)
+    rows = conn.execute(
+        "SELECT id,sender,recipient,subject,body,reference,priority,client_id,reply_to,created_at,acked_at,acked_by,"
+        "sender_label,thread,kind FROM fleet_messages WHERE sender=? AND " + condition + " ORDER BY id LIMIT 100",
+        params,
+    ).fetchall()
+    return _message_page(rows, after=after)
 
 
 def ack(conn: sqlite3.Connection, message_id: Any, *, recipient: str) -> dict[str, Any] | None:
@@ -657,6 +729,7 @@ def reply(conn: sqlite3.Connection, raw: dict[str, Any], *, sender: str) -> dict
                 "priority": raw.get("priority", accepted[3]),
                 "client_id": client_id,
                 "enqueued_at": raw.get("enqueued_at"),
+                **{field: raw[field] for field in ("sender_label", "thread", "kind") if field in raw},
             },
             sender=sender,
             reply_to=message_id,
@@ -684,6 +757,9 @@ def reply(conn: sqlite3.Connection, raw: dict[str, Any], *, sender: str) -> dict
             "priority": raw.get("priority", "normal"),
             "client_id": raw.get("client_id"),
             "enqueued_at": raw.get("enqueued_at"),
+            "thread": raw.get("thread", original["thread"]),
+            "sender_label": raw.get("sender_label"),
+            "kind": raw.get("kind"),
         },
         sender=sender,
         reply_to=message_id,
@@ -699,6 +775,8 @@ def handle(conn: sqlite3.Connection, raw: Any, *, caller: str | None) -> tuple[i
     action = raw.get("action")
     if action == "send":
         return 201, {"message": send(conn, raw, sender=caller, enforce_policy=caller.startswith("agent:"))}
+    if action == "sent":
+        return 200, _as_active_principal(conn, caller, lambda: sent(conn, raw, sender=caller))
     if action == "list":
         return 200, _as_active_principal(conn, caller, lambda: list_messages(conn, raw, recipient=caller))
     if action == "ack":
@@ -707,4 +785,4 @@ def handle(conn: sqlite3.Connection, raw: Any, *, caller: str | None) -> tuple[i
     if action == "reply":
         message = _as_active_principal(conn, caller, lambda: reply(conn, raw, sender=caller))
         return (201, {"message": message}) if message else (404, {"error": "message not found"})
-    raise MessageError("action must be send, list, ack, or reply")
+    raise MessageError("action must be send, list, sent, ack, or reply")
