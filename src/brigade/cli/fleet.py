@@ -480,6 +480,10 @@ def register(sub: argparse._SubParsersAction) -> None:
 
     register_policy(fleet_sub)
 
+    from .fleet_roster import register as register_roster
+
+    register_roster(fleet_sub)
+
 
 def _dispatch_serve(args: argparse.Namespace, *, environ: Mapping[str, str] | None = None) -> int:
     from .. import fleet_command_deck, fleet_hub
