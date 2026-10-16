@@ -3525,7 +3525,8 @@ def test_doctor_codex_instruction_chain_remedy_command_roundtrips(tmp_path: Path
         _assert_unsupported_codex_chain(status, detail)
         return
     assert status == doctor_mod.WARN
-    commands = doctor_agent.extract_commands(detail)
+    # The remedy may lead with `brigade extras on`; the preview command comes last.
+    commands = [c for c in doctor_agent.extract_commands(detail) if c != "brigade extras on"]
     assert len(commands) == 1
     argv = shlex.split(commands[0])
     assert argv[:3] == ["brigade", "context", "preview"]
@@ -3562,7 +3563,8 @@ def test_doctor_codex_instruction_chain_fix_prefix_inside_path_roundtrips(tmp_pa
     repo = tmp_path / "a fix: brigade foo"
     status, _name, detail = check_codex_instruction_chain(repo)
     assert status == doctor_mod.WARN
-    commands = doctor_agent.extract_commands(detail)
+    # The remedy may lead with `brigade extras on`; the preview command comes last.
+    commands = [c for c in doctor_agent.extract_commands(detail) if c != "brigade extras on"]
     assert len(commands) == 1
     argv = shlex.split(commands[0])
     assert argv[argv.index("--target") + 1] == str(repo)
@@ -3572,7 +3574,12 @@ def test_doctor_codex_instruction_chain_fix_prefix_inside_path_roundtrips(tmp_pa
 def test_doctor_codex_instruction_chain_remedy_enables_extras_when_off(tmp_path: Path, monkeypatch, extras_on: bool):
     from brigade import doctor_agent, extras
 
-    monkeypatch.setattr(extras, "enabled", lambda: extras_on)
+    marker = tmp_path / "extras-marker"
+    if extras_on:
+        marker.write_text("on\n", encoding="utf-8")
+    monkeypatch.setattr(extras, "marker_path", lambda: marker)
+    # A one-shot env opt-in does not persist to the emitted command.
+    monkeypatch.setenv("BRIGADE_EXTRAS", "1")
     repo = _codex_repo(tmp_path)
     (repo / "AGENTS.md").write_text("x" * 40_000, encoding="utf-8")
     status, _name, detail = _codex_chain_check(repo)

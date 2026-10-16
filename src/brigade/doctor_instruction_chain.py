@@ -43,7 +43,9 @@ def check_codex_instruction_chain(target: Path) -> CheckResult:
     # Controls would reach the terminal and backticks would split agent command
     # extraction, so only display-safe targets are spelled out.
     # `context` is an extras-only command, so the remedy must enable extras first.
-    enable = "" if extras.enabled() else "run `brigade extras on` (or set BRIGADE_EXTRAS=1), then "
+    # Only the persistent marker survives this process; a one-shot BRIGADE_EXTRAS=1
+    # on the doctor invocation does not carry over to the emitted command.
+    enable = "" if extras.marker_path().is_file() else "run `brigade extras on` (or set BRIGADE_EXTRAS=1), then "
     if target_text.isprintable() and "`" not in target_text:
         quoted = shlex.quote(target_text)
         remedy = (
