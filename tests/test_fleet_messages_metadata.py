@@ -9,7 +9,7 @@ from brigade import fleet_hub_messages as messages
 from tests.test_fleet_messages import NODE_A, NODE_B, _request
 from tests.test_fleet_message_grants import enroll, send
 
-pytest_plugins = ["tests.test_fleet_messages", "tests.test_fleet_message_grants"]
+pytest_plugins = ["tests._fleet_message_fixtures"]
 
 
 def test_node_label_and_agent_label_rejection(hub):

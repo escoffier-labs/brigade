@@ -7,17 +7,7 @@ import pytest
 from brigade import fleet_hub, fleet_hub_messages as messages
 from tests.test_fleet_messages import ADMIN, NODE_A, NODE_B, _post_path, _request
 
-pytest_plugins = ["tests.test_fleet_messages"]
-
-
-class _RedactedHub(tuple):
-    def __repr__(self):
-        return "<fixture hub credentials redacted>"
-
-
-@pytest.fixture
-def hub(message_hub):
-    return _RedactedHub(message_hub)
+pytest_plugins = ["tests._fleet_message_fixtures"]
 
 
 def enroll(base, **kwargs):

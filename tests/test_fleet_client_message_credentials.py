@@ -12,7 +12,7 @@ from brigade import fleet_client_message_credentials as credentials
 from tests.test_fleet_messages import NODE_A, NODE_B
 from tests.test_fleet_message_grants import enroll
 
-pytest_plugins = ["tests.test_fleet_messages", "tests.test_fleet_message_grants"]
+pytest_plugins = ["tests._fleet_message_fixtures"]
 
 
 def token_file(tmp_path, name="agent", value=None):
