@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read
@@ -19,13 +21,14 @@ jobs:
       contents: read
       pull-requests: read
     outputs:
-      code_graph: ${{ steps.filter.outputs.code_graph }}
-      evidence_ledger: ${{ steps.filter.outputs.evidence_ledger }}
-      notify: ${{ steps.filter.outputs.notify }}
-      fleet_hub_container: ${{ steps.filter.outputs.fleet_hub_container }}
+      code_graph: ${{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.code_graph }}
+      evidence_ledger: ${{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.evidence_ledger }}
+      notify: ${{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.notify }}
+      fleet_hub_container: ${{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.fleet_hub_container }}
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v4
+        if: ${{ github.event_name != 'merge_group' }}
         id: filter
         with:
           filters: |
@@ -670,6 +673,31 @@ jobs:
           if (-not (Test-Path (Join-Path $target "tools/antislop.md"))) { throw "missing antislop tool" }
           if (-not (Test-Path (Join-Path $target "INSTALL_FOR_AGENTS.md"))) { throw "missing full-kit guide" }
           if (-not (Test-Path (Join-Path $target "rules/issue-tdd-loop.md"))) { throw "missing issue/TDD rule" }
+
+  # Optional capacity probe. Existing protected checks remain hosted.
+  trusted-runner-canary:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.BRIGADE_SELF_HOSTED == 'on' }}
+    runs-on:
+      group: brigade-trusted
+      labels: [self-hosted, linux, x64]
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Smoke source CLI in a temporary workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+          python3 -m brigade --version
+          target="$(mktemp -d)"
+          trap 'rm -rf "$target"' EXIT
+          git init -q -b main "$target"
+          python3 -m brigade init --target "$target" --depth workspace --harnesses claude,codex
+          python3 -m brigade doctor --target "$target"
 
   windows-native-acceptance:
     name: windows-native-acceptance
