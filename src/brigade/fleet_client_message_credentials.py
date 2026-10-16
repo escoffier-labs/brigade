@@ -6,6 +6,7 @@ import hmac
 import os
 import re
 import stat
+import sys
 
 from . import fleet_client
 
@@ -32,11 +33,14 @@ def read_message_token_file(path: str) -> str:
             raise ValueError
         fd = os.open(path, flags)
         info = os.fstat(fd)
-        geteuid = getattr(os, "geteuid", None)
+        # Windows synthesizes POSIX mode bits (0666 for a writable file) that chmod
+        # cannot clear, and has no euid; keep only the platform-neutral checks there.
+        posix = sys.platform != "win32"
+        geteuid = getattr(os, "geteuid", None) if posix else None
         if (
             not stat.S_ISREG(info.st_mode)
             or (geteuid is not None and info.st_uid != geteuid())
-            or info.st_mode & 0o077
+            or (posix and info.st_mode & 0o077)
             or info.st_size > 4096
         ):
             raise ValueError

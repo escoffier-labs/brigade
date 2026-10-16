@@ -3,6 +3,7 @@
 import io
 import json
 import os
+import sys
 
 import pytest
 
@@ -554,3 +555,29 @@ def test_confirmed_spool_removal_preserves_other_entry_with_same_client_id(confi
         fleet_client._write_spool_atomic(path, [confirmed, other], dir_fd=fd)
         client._remove_queued_locked(path, confirmed, dir_fd=fd)
     assert fleet_client._read_spool(path) == [other]
+
+
+@pytest.mark.parametrize("invalid", [None, "symlink", "oversize", "charset", "directory"])
+def test_windows_skips_posix_mode_and_owner_bits_only(configured, tmp_path, monkeypatch, invalid):
+    path = token_file(tmp_path)
+    # Windows synthesizes 0666 for writable files and chmod cannot clear group/other bits.
+    path.chmod(0o666)
+    if invalid == "symlink":
+        link = tmp_path / "link"
+        link.symlink_to(path)
+        path = link
+    elif invalid == "oversize":
+        path.write_text("x" * 4097)
+    elif invalid == "charset":
+        path.write_text("!" * 40)
+    elif invalid == "directory":
+        path.unlink()
+        path.mkdir(mode=0o700)
+    owner = os.geteuid()
+    monkeypatch.setattr(os, "geteuid", lambda: owner + 1)
+    monkeypatch.setattr(sys, "platform", "win32")
+    if invalid is None:
+        assert credentials.read_message_token_file(str(path)) == path.read_text()
+    else:
+        with pytest.raises(fleet_client.FleetClientError):
+            credentials.read_message_token_file(str(path))
