@@ -40,6 +40,14 @@ class MessageError(ValueError):
     """A bounded queue request was invalid."""
 
 
+class MessageForbidden(MessageError):
+    """A principal lacks permission for the requested recipient."""
+
+    def __init__(self, message: str, *, code: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
 class MessageFutureTimestamp(MessageError):
     """A queued message timestamp that may become valid after clock correction."""
 
@@ -106,6 +114,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE fleet_messages ADD COLUMN payload_hash TEXT")
     if "received_at" not in columns:
         conn.execute("ALTER TABLE fleet_messages ADD COLUMN received_at TEXT")
+    for column in ("sender_label", "thread", "kind"):
+        if column not in columns:
+            conn.execute(f"ALTER TABLE fleet_messages ADD COLUMN {column} TEXT")
     conn.execute("UPDATE fleet_messages SET client_id='legacy-' || id WHERE client_id IS NULL")
     conn.execute("UPDATE fleet_messages SET received_at=created_at WHERE received_at IS NULL")
     rows = conn.execute(
@@ -148,6 +159,9 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
     )
     conn.execute("CREATE INDEX IF NOT EXISTS fleet_message_sends_received ON fleet_message_sends (received_at)")
     conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS fleet_messages_sender_client ON fleet_messages (sender, client_id)")
+    from . import fleet_hub_message_grants
+
+    fleet_hub_message_grants.ensure_schema(conn)
     _prune_expired(conn)
 
 
@@ -287,10 +301,13 @@ def _enqueued_at(value: Any) -> str:
     return stamp.isoformat()
 
 
-def add_principal(conn: sqlite3.Connection, raw: object) -> dict[str, str | None]:
-    allowed = {"name", "label", "request_id", "token", "expected_enrollment_id"}
+def add_principal(conn: sqlite3.Connection, raw: object) -> dict[str, Any]:
+    from . import fleet_hub_message_grants as grants
+
+    allowed = {"name", "label", "request_id", "token", "expected_enrollment_id", "may_send_to"}
     if not isinstance(raw, dict) or set(raw) - allowed:
         raise MessageError("principal enrollment requires only name and optional label")
+    patterns = grants.normalize_patterns(raw.get("may_send_to", []))
     name = _text(raw.get("name"), "name", 63)
     label = _text(raw.get("label", name), "label", 128)
     assert name is not None and label is not None
@@ -348,10 +365,11 @@ def add_principal(conn: sqlite3.Connection, raw: object) -> dict[str, str | None
                 (label, token_hash, created_at, request_id, principal_id, expected_enrollment_id),
             )
         elif request_id is not None and existing[1] == request_id:
-            if existing[2] != token_hash or existing[3] != label:
+            if existing[2] != token_hash or existing[3] != label or grants.grants_for(conn, principal_id) != patterns:
                 raise MessageConflict("request_id was already used for a different principal enrollment")
         else:
             raise MessageError("message principal already exists")
+        grants.replace_grants(conn, principal_id, patterns)
         conn.commit()
     except BaseException:
         conn.rollback()
@@ -362,6 +380,7 @@ def add_principal(conn: sqlite3.Connection, raw: object) -> dict[str, str | None
         "label": label,
         "token": secret,
         "enrollment_id": request_id,
+        "may_send_to": patterns,
     }
 
 
@@ -373,16 +392,28 @@ def lookup_principal_token(conn: sqlite3.Connection, presented: str) -> str | No
     return str(row[0]) if row else None
 
 
-def get_principal(conn: sqlite3.Connection, raw: object) -> dict[str, str | None] | None:
+def get_principal(conn: sqlite3.Connection, raw: object) -> dict[str, Any] | None:
+    from . import fleet_hub_message_grants as grants
+
     if not isinstance(raw, dict) or set(raw) != {"action", "name"} or raw.get("action") != "get":
         raise MessageError("principal lookup requires action='get' and name")
     name = _text(raw.get("name"), "name", 63)
     assert name is not None
     row = conn.execute(
-        "SELECT principal_id,name,enrollment_id FROM fleet_message_principals WHERE principal_id=?",
+        "SELECT principal_id,name,enrollment_id,revoked_at FROM fleet_message_principals WHERE principal_id=?",
         (f"agent:{name}",),
     ).fetchone()
-    return {"principal_id": str(row[0]), "name": str(row[1]), "enrollment_id": row[2]} if row else None
+    return (
+        {
+            "principal_id": str(row[0]),
+            "name": str(row[1]),
+            "enrollment_id": row[2],
+            "revoked": row[3] is not None,
+            "may_send_to": grants.grants_for(conn, str(row[0])),
+        }
+        if row
+        else None
+    )
 
 
 def revoke_principal(conn: sqlite3.Connection, raw: object) -> dict[str, str | None] | None:
@@ -423,6 +454,11 @@ def revoke_principal(conn: sqlite3.Connection, raw: object) -> dict[str, str | N
 
 
 def handle_principal_admin(conn: sqlite3.Connection, raw: object) -> tuple[int, dict[str, Any]]:
+    if isinstance(raw, dict) and raw.get("action") == "grants":
+        from .fleet_hub_message_grants import set_grants
+
+        principal = set_grants(conn, raw)
+        return (200, {"principal": principal}) if principal else (404, {"error": "principal not found"})
     if isinstance(raw, dict) and raw.get("action") == "get":
         principal = get_principal(conn, raw)
         return (200, {"principal": principal}) if principal else (404, {"error": "principal not found"})
@@ -430,13 +466,20 @@ def handle_principal_admin(conn: sqlite3.Connection, raw: object) -> tuple[int, 
         principal = revoke_principal(conn, raw)
         return (200, {"principal": principal}) if principal else (404, {"error": "principal not found"})
     if isinstance(raw, dict) and raw.get("action") not in (None, "add"):
-        raise MessageError("principal action must be add or revoke")
+        raise MessageError("principal action must be add, get, grants, or revoke")
     if isinstance(raw, dict) and "action" in raw:
         raw = {key: value for key, value in raw.items() if key != "action"}
     return 201, {"principal": add_principal(conn, raw)}
 
 
-def send(conn: sqlite3.Connection, raw: dict[str, Any], *, sender: str, reply_to: int | None = None) -> dict[str, Any]:
+def send(
+    conn: sqlite3.Connection,
+    raw: dict[str, Any],
+    *,
+    sender: str,
+    reply_to: int | None = None,
+    enforce_policy: bool = False,
+) -> dict[str, Any]:
     _prune_expired(conn)
     recipient = _text(raw.get("to"), "to", 256)
     subject = _text(raw.get("subject"), "subject", SUBJECT_LIMIT)
@@ -475,6 +518,10 @@ def send(conn: sqlite3.Connection, raw: dict[str, Any], *, sender: str, reply_to
             if revoked is not None:
                 raise MessageRecipientInactive("recipient is temporarily inactive", recipient=recipient)
             raise MessageError("recipient is not an active hub principal")
+        if enforce_policy:
+            from .fleet_hub_message_grants import require_permitted
+
+            require_permitted(conn, sender, recipient)
         count = conn.execute(
             "SELECT COUNT(*) FROM fleet_messages WHERE recipient=? AND acked_at IS NULL", (recipient,)
         ).fetchone()[0]
@@ -613,6 +660,7 @@ def reply(conn: sqlite3.Connection, raw: dict[str, Any], *, sender: str) -> dict
             },
             sender=sender,
             reply_to=message_id,
+            enforce_policy=sender.startswith("agent:"),
         )
         return _fetch(conn, message["id"])
     subject = raw.get("subject")
@@ -650,9 +698,7 @@ def handle(conn: sqlite3.Connection, raw: Any, *, caller: str | None) -> tuple[i
         raise MessageError("message request must be an object")
     action = raw.get("action")
     if action == "send":
-        if caller.startswith("agent:"):
-            return 403, {"error": "named external principals may reply to messages but may not start messages"}
-        return 201, {"message": send(conn, raw, sender=caller)}
+        return 201, {"message": send(conn, raw, sender=caller, enforce_policy=caller.startswith("agent:"))}
     if action == "list":
         return 200, _as_active_principal(conn, caller, lambda: list_messages(conn, raw, recipient=caller))
     if action == "ack":
