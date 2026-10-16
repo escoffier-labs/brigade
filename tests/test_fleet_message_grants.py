@@ -75,13 +75,13 @@ def test_grants_replacement_and_idempotent_replay(hub):
     assert send(base, principal["token"])[0] == 403
 
 
-def test_inbound_reply_exempt_but_root_retry_cannot_bypass_policy(hub):
+def test_inbound_reply_requires_grants_and_root_retry_conflicts(hub):
     base, token_a, _, _ = hub
     principal = enroll(base)
     parent = send(base, token_a, "agent:fixture")[1]["message"]
     status, result = _request(base, principal["token"], {"action": "reply", "id": parent["id"], "body": "Reply"})
-    assert status == 201
-    assert result["message"]["recipient"] == NODE_A
+    assert status == 403
+    assert result["code"] == "message_recipient_not_permitted"
     set_grants(base, [NODE_A])
     root = send(base, principal["token"], client_id="root")[1]["message"]
     set_grants(base, [])
@@ -89,7 +89,7 @@ def test_inbound_reply_exempt_but_root_retry_cannot_bypass_policy(hub):
         base, principal["token"], {"action": "reply", "id": root["id"], "body": "Work", "client_id": "root"}
     )
     # The root digest includes reply_to=None, so this retry conflicts before delivery.
-    assert status in (403, 409)
+    assert status == 409
 
 
 def test_agent_recipient_cap_and_daily_quota(hub, monkeypatch):
@@ -182,3 +182,68 @@ def test_v30_migration_preserves_message_digest(tmp_path):
         assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION > 30
     finally:
         conn.close()
+
+
+def test_agent_replies_share_recipient_cap_with_initial_sends(hub):
+    base, token_a, _, _ = hub
+    principal = enroll(base, may_send_to=[NODE_A])
+    parent = send(base, token_a, "agent:fixture")[1]["message"]
+    assert send(base, principal["token"], client_id="initial")[0] == 201
+    request = {"action": "reply", "id": parent["id"], "body": "Reply"}
+    for index in range(199):
+        assert _request(base, principal["token"], {**request, "client_id": f"reply-{index}"})[0] == 201
+    status, result = _request(base, principal["token"], {**request, "client_id": "over-cap"})
+    assert status == 429
+    assert result["code"] == "message_sender_recipient_quota"
+    # Accepted retries neither consume quota nor require a current grant.
+    set_grants(base, [])
+    assert _request(base, principal["token"], {**request, "client_id": "reply-0"})[0] == 201
+    assert _request(base, principal["token"], {**request, "client_id": "new-reply"})[0] == 403
+
+
+def test_ungranted_agent_cannot_probe_recipient_state(hub):
+    base, _, _, _ = hub
+    principal = enroll(base)
+    other = _post_path(base, ADMIN, "/message-principals", {"name": "other"})[1]["principal"]
+    _post_path(
+        base,
+        ADMIN,
+        "/message-principals",
+        {"action": "revoke", "name": "other", "expected_enrollment_id": other["enrollment_id"]},
+    )
+    responses = [send(base, principal["token"], recipient) for recipient in (NODE_A, "agent:other", "missing-node")]
+    assert (
+        responses
+        == [(403, {"error": "recipient is not permitted by send grants", "code": "message_recipient_not_permitted"})]
+        * 3
+    )
+
+
+def test_enrollment_replay_reports_changed_admin_grants(hub):
+    base, _, _, _ = hub
+    request = {"name": "fixture", "request_id": "r" * 32, "token": "t" * 40, "may_send_to": [NODE_A]}
+    assert _post_path(base, ADMIN, "/message-principals", request)[0] == 201
+    assert set_grants(base, [NODE_B])[0] == 200
+    status, result = _post_path(base, ADMIN, "/message-principals", request)
+    assert status == 409
+    assert result["code"] == "principal_enrollment_grants_changed"
+    assert "grants" in result["error"]
+    assert _post_path(base, ADMIN, "/message-principals", {"action": "get", "name": "fixture"})[1]["principal"][
+        "may_send_to"
+    ] == [NODE_B]
+
+
+def test_grant_validation_does_not_load_hub_server():
+    import subprocess
+    import sys
+
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from brigade.fleet_hub_message_grants import normalize_patterns; import sys; assert normalize_patterns(['node-a']) == ['node-a']; assert 'brigade.fleet_hub' not in sys.modules",
+        ],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr

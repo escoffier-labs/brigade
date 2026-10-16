@@ -14,7 +14,7 @@ _TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{32,512}")
 
 
 class FleetMessageHubError(fleet_client.FleetClientError):
-    """A message request rejected by the hub with structured status and code."""
+    """A message operation failure with structured status and code."""
 
     def __init__(self, message: str, *, status: int | None = None, code: str | None = None) -> None:
         super().__init__(message)
@@ -32,7 +32,13 @@ def read_message_token_file(path: str) -> str:
             raise ValueError
         fd = os.open(path, flags)
         info = os.fstat(fd)
-        if not stat.S_ISREG(info.st_mode) or info.st_uid != os.geteuid() or info.st_mode & 0o077 or info.st_size > 4096:
+        geteuid = getattr(os, "geteuid", None)
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or (geteuid is not None and info.st_uid != geteuid())
+            or info.st_mode & 0o077
+            or info.st_size > 4096
+        ):
             raise ValueError
         raw = os.read(fd, 4097)
         if len(raw) > 4096:
@@ -42,8 +48,9 @@ def read_message_token_file(path: str) -> str:
             raise ValueError
         return token
     except (OSError, ValueError, UnicodeError):
-        raise fleet_client.FleetClientError(
-            "message token file must be a private, owned regular file containing a valid token"
+        raise FleetMessageHubError(
+            "message token file must be a private, owned regular file containing a valid token",
+            code="token_file_invalid",
         ) from None
     finally:
         if fd is not None:
@@ -64,7 +71,9 @@ def message_settings(token_file: str | None) -> tuple[str, str, str]:
             raise fleet_client.FleetClientError("no fleet node token configured")
     admin = settings.get("admin_token", "")
     if admin and hmac.compare_digest(token.encode("utf-8"), admin.encode("utf-8")):
-        raise fleet_client.FleetClientError("admin credentials cannot be used for message operations")
+        raise FleetMessageHubError(
+            "admin credentials cannot be used for message operations", code="admin_token_refused"
+        )
     try:
         scope = fleet_client.resolve_node_id()
     except fleet_client.FleetClientError:

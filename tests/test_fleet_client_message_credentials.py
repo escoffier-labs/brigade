@@ -214,7 +214,7 @@ def test_sent_client_rejects_bad_pages(configured, monkeypatch, response):
         client.sent(ids=[1, 2])
 
 
-def test_pending_enrollment_preserves_grants(configured, monkeypatch):
+def test_pending_enrollment_preserves_grants(configured, monkeypatch, caplog):
     monkeypatch.setattr(client, "_principal_enrollment_generation", lambda *_args: None)
     calls = []
 
@@ -228,6 +228,7 @@ def test_pending_enrollment_preserves_grants(configured, monkeypatch):
             client.manage_principal("add", name="fixture", may_send_to=patterns)
     assert [body["may_send_to"] for body in calls] == [[NODE_A], [NODE_A]]
     assert calls[0]["request_id"] == calls[1]["request_id"]
+    assert "pending enrollment retains its original send grants" in caplog.text
 
 
 def test_client_grants_and_show_use_admin(hub, tmp_path, monkeypatch):
@@ -284,7 +285,7 @@ def test_cli_agent_reply_list_and_ack(hub, tmp_path, monkeypatch, capsys):
     from tests.test_fleet_message_grants import send
 
     base, token_a, _, _ = hub
-    principal = enroll(base)
+    principal = enroll(base, may_send_to=[NODE_A])
     parent = send(base, token_a, "agent:fixture", thread="issue:44")[1]["message"]
     path = token_file(tmp_path, value=principal["token"])
     monkeypatch.setenv("BRIGADE_HOME", str(tmp_path / "state"))
@@ -323,3 +324,233 @@ def test_cli_agent_reply_list_and_ack(hub, tmp_path, monkeypatch, capsys):
     assert cli.main(["fleet", "msg", "ack", "99999", "--token-file", str(path), "--json"]) == 1
     error = json.loads(capsys.readouterr().out)
     assert error == {"error": "message not found", "status": 404, "code": None}
+
+
+@pytest.mark.parametrize("invalid", [None, "mode", "newline", "symlink", "oversize", "charset", "directory"])
+def test_token_file_without_geteuid_keeps_other_checks(configured, tmp_path, monkeypatch, invalid):
+    path = token_file(tmp_path)
+    if invalid == "mode":
+        path.chmod(0o644)
+    elif invalid == "newline":
+        path.write_text(path.read_text() + "\n")
+    elif invalid == "symlink":
+        link = tmp_path / "link"
+        link.symlink_to(path)
+        path = link
+    elif invalid == "oversize":
+        path.write_text("x" * 4097)
+    elif invalid == "charset":
+        path.write_text("!" * 40)
+    elif invalid == "directory":
+        path.unlink()
+        path.mkdir(mode=0o700)
+    monkeypatch.delattr(os, "geteuid", raising=False)
+    if invalid is None:
+        assert credentials.read_message_token_file(str(path)) == path.read_text()
+    else:
+        with pytest.raises(fleet_client.FleetClientError):
+            credentials.read_message_token_file(str(path))
+
+
+@pytest.mark.parametrize("action", ["send", "reply"])
+def test_queued_client_id_retry_is_unique_and_conflicts_locally(configured, monkeypatch, action):
+    calls = []
+
+    def offline(_hub, _token, body, **_kwargs):
+        calls.append(body)
+        raise fleet_client.FleetClientError("offline")
+
+    monkeypatch.setattr(client, "_request", offline)
+
+    def submit(body="Work"):
+        fields = {"subject": "Task", "body": body, "reference": None, "priority": "normal", "client_id": "same"}
+        return client.send(recipient=NODE_B, **fields) if action == "send" else client.reply(42, **fields)
+
+    first = submit()
+    assert submit() == first
+    path = client._spool_path(NODE_A, "fixture-node")
+    original = fleet_client._read_spool(path)
+    assert len(original) == 1
+    with pytest.raises(client.FleetMessageHubError) as error:
+        submit("Different")
+    assert error.value.status is None
+    assert error.value.code == "spool_conflict"
+    assert fleet_client._read_spool(path) == original
+    assert len(calls) == 1
+
+
+def test_spooled_client_id_cannot_discard_other_recipient(configured, monkeypatch):
+    calls = []
+
+    def deliver(_hub, _token, body, **_kwargs):
+        calls.append(body["to"])
+        if body["to"] == NODE_A:
+            return 400, {"code": "message_recipient_inactive"}
+        return 201, {"message": {"id": 42, "client_id": body["client_id"]}}
+
+    monkeypatch.setattr(client, "_request", deliver)
+    fields = {"subject": "Task", "body": "Work", "reference": None, "priority": "normal", "client_id": "same"}
+    assert client.send(recipient=NODE_A, **fields)["queued"] is True
+    with pytest.raises(client.FleetMessageHubError, match="client_id"):
+        client.send(recipient=NODE_B, **fields)
+    path = client._spool_path(NODE_A, "fixture-node")
+    assert [row["to"] for row in fleet_client._read_spool(path)] == [NODE_A]
+    assert NODE_B not in calls
+    assert "message" in client.send(recipient=NODE_B, **{**fields, "client_id": "other"})
+    assert [row["to"] for row in fleet_client._read_spool(path)] == [NODE_A]
+
+
+def test_no_grants_enrollment_uses_v30_wire_body(configured, monkeypatch):
+    monkeypatch.setattr(client, "_principal_enrollment_generation", lambda *_args: None)
+    calls = []
+
+    def legacy_hub(_hub, _token, body):
+        calls.append(body)
+        if "may_send_to" in body:
+            return 400, {"error": "unknown field"}
+        return 201, {"principal": {**body, "principal_id": "agent:fixture", "enrollment_id": body["request_id"]}}
+
+    monkeypatch.setattr(client, "_principal_admin_request", legacy_hub)
+    assert client.manage_principal("add", name="fixture")["principal"]["principal_id"] == "agent:fixture"
+    assert "may_send_to" not in calls[0]
+
+
+@pytest.mark.parametrize(
+    "failure,code",
+    [
+        ("token", "token_file_invalid"),
+        ("client-id", "client_id_invalid"),
+        ("admin", "admin_token_refused"),
+        ("body", "invalid_argument"),
+        ("stdin", "invalid_argument"),
+        ("spool", "spool_conflict"),
+    ],
+)
+def test_cli_local_json_codes(configured, tmp_path, monkeypatch, capsys, failure, code):
+    monkeypatch.setattr(
+        client, "_request", lambda *_args, **_kwargs: (_ for _ in ()).throw(fleet_client.FleetClientError("offline"))
+    )
+    fields = {
+        "recipient": NODE_B,
+        "subject": "Task",
+        "body": "Original",
+        "reference": None,
+        "priority": "normal",
+        "client_id": "stable",
+    }
+    if failure == "spool":
+        assert client.send(**fields)["queued"] is True
+    argv = [
+        "fleet",
+        "msg",
+        "send",
+        "--to",
+        NODE_B,
+        "--subject",
+        "Task",
+        "--body-file",
+        "-",
+        "--client-id",
+        "stable",
+        "--json",
+    ]
+    raw = b"Different"
+    if failure == "token":
+        argv += ["--token-file", str(tmp_path / "missing")]
+    elif failure == "client-id":
+        argv += ["--client-id", "bad/id"]
+    elif failure == "admin":
+        monkeypatch.setattr(
+            fleet_client,
+            "load_fleet_settings",
+            lambda: {"hub_url": "https://hub.invalid", "node_token": "fixture-admin", "admin_token": "fixture-admin"},
+        )
+    elif failure == "body":
+        raw = b""
+    elif failure == "stdin":
+        raw = b"x" * 65537
+    monkeypatch.setattr("sys.stdin", io.TextIOWrapper(io.BytesIO(raw)))
+    assert cli.main(argv) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] is None
+    assert result["code"] == code
+
+
+def test_cli_transport_failure_remains_distinct(configured, monkeypatch, capsys):
+    def unavailable(*_args, **_kwargs):
+        raise OSError("offline")
+
+    monkeypatch.setattr(fleet_client, "_hub_open", unavailable)
+    assert cli.main(["fleet", "msg", "list", "--json"]) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] is None
+    assert result["code"] == "hub_unavailable"
+
+
+def test_enrollment_grants_conflict_clears_stale_pending(hub, tmp_path, monkeypatch):
+    from tests.test_fleet_messages import ADMIN
+    from tests.test_fleet_message_grants import set_grants
+
+    base, _, _, _ = hub
+    monkeypatch.setenv("BRIGADE_HOME", str(tmp_path / "state"))
+    monkeypatch.setattr(
+        fleet_client, "load_fleet_settings", lambda: {"hub_url": base, "node_token": "", "admin_token": ADMIN}
+    )
+    ids = []
+    client.manage_principal(
+        "add", name="fixture", may_send_to=[NODE_A], _defer_finalize=True, _deferred_request_ids=ids
+    )
+    assert set_grants(base, [NODE_B])[0] == 200
+    with pytest.raises(client.FleetMessageHubError) as error:
+        client.manage_principal("add", name="fixture", may_send_to=[NODE_A])
+    assert error.value.status == 409
+    assert error.value.code == "principal_enrollment_grants_changed"
+    path = client._principal_pending_path("fixture", ADMIN)
+    assert fleet_client._read_spool(path) == []
+    # The stale replay is gone. The current principal remains inspectable and can be re-enrolled explicitly.
+    assert client.show_principal("fixture")["principal"]["may_send_to"] == [NODE_B]
+    with pytest.raises(client.FleetMessageHubError, match="already exists") as retry:
+        client.manage_principal("add", name="fixture")
+    assert retry.value.status == 400
+    client.manage_principal("revoke", name="fixture")
+    fresh = client.manage_principal("add", name="fixture", may_send_to=[NODE_B])
+    assert fresh["principal"]["enrollment_id"] != ids[0]
+
+
+def test_disappearing_legacy_spool_does_not_abort_send(configured, monkeypatch):
+    from pathlib import Path
+
+    legacy = fleet_client.spool_path(NODE_A).parent / f"{NODE_A}.messages.jsonl"
+    legacy.parent.mkdir(parents=True, exist_ok=True)
+    legacy.touch(mode=0o600)
+    original = Path.stat
+    checks = 0
+
+    def vanished(path, *args, **kwargs):
+        nonlocal checks
+        if path == legacy:
+            checks += 1
+            if checks == 3:
+                raise FileNotFoundError("legacy spool disappeared")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", vanished)
+    monkeypatch.setattr(
+        client,
+        "_request",
+        lambda _hub, _token, body, **_kwargs: (201, {"message": {"id": 42, "client_id": body["client_id"]}}),
+    )
+    assert (
+        client.send(recipient=NODE_B, subject="Task", body="Work", reference=None, priority="normal")["message"]["id"]
+        == 42
+    )
+
+
+def test_confirmed_spool_removal_preserves_other_entry_with_same_client_id(configured):
+    path = client._spool_path(NODE_A, "fixture-node")
+    confirmed = {"action": "send", "client_id": "legacy-duplicate", "to": NODE_A, "body": "First"}
+    other = {**confirmed, "to": NODE_B, "body": "Second"}
+    with fleet_client._spool_lock(path) as fd:
+        fleet_client._write_spool_atomic(path, [confirmed, other], dir_fd=fd)
+        client._remove_queued_locked(path, confirmed, dir_fd=fd)
+    assert fleet_client._read_spool(path) == [other]

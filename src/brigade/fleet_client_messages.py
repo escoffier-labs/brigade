@@ -43,10 +43,10 @@ def _spool_path(node_id: str, token: str | None = None) -> Path:
 def _warn_inactive_spools(node_id: str, active_path: Path) -> None:
     directory = fleet_client.spool_path(node_id).parent
     legacy_path = directory / f"{node_id}.messages.jsonl"
-    if legacy_path.is_file() and not legacy_path.is_symlink() and legacy_path.stat().st_size:
-        _LOG.warning("legacy fleet message spool %s has no credential scope; leaving it untouched", legacy_path)
     prefix = "messages-"
     try:
+        if legacy_path.is_file() and not legacy_path.is_symlink() and legacy_path.stat().st_size:
+            _LOG.warning("legacy fleet message spool %s has no credential scope; leaving it untouched", legacy_path)
         stale_count = sum(
             1
             for path in directory.iterdir()
@@ -92,17 +92,21 @@ def _request_with_timeout(hub: str, token: str, body: dict[str, Any], timeout: f
                 payload = {"error": f"HTTP {exc.code}"}
             status = exc.code
         except Exception as exc:
-            raise fleet_client.FleetClientError(f"fleet hub messages failed: {type(exc).__name__}") from exc
+            raise FleetMessageHubError(
+                f"fleet hub messages failed: {type(exc).__name__}", code="hub_unavailable"
+            ) from exc
         if not isinstance(payload, dict):
             raise fleet_client.FleetClientError("fleet hub messages returned an invalid response")
         return status, payload
 
     try:
         return fleet_client._run_with_deadline(request_blocking, timeout=timeout)
-    except fleet_client.FleetClientError:
+    except FleetMessageHubError:
         raise
+    except fleet_client.FleetClientError as exc:
+        raise FleetMessageHubError(str(exc), code="hub_unavailable") from exc
     except Exception as exc:
-        raise fleet_client.FleetClientError(f"fleet hub messages failed: {type(exc).__name__}") from exc
+        raise FleetMessageHubError(f"fleet hub messages failed: {type(exc).__name__}", code="hub_unavailable") from exc
 
 
 def _safe_log_text(value: Any) -> str:
@@ -143,7 +147,32 @@ def _online(body: dict[str, Any], *, token_file: str | None = None) -> dict[str,
     return payload
 
 
+def _queued_retry(path: Path, message: dict[str, Any], *, dir_fd: int | None) -> dict[str, Any] | None:
+    def payload(entry: dict[str, Any]) -> dict[str, Any]:
+        # Enqueue time and resolved recipient hints are local delivery state.
+        return {
+            key: value
+            for key, value in entry.items()
+            if not key.startswith("_")
+            and key != "enqueued_at"
+            and value is not None
+            and not (key == "kind" and value == "message")
+        }
+
+    matching = [
+        entry
+        for entry in fleet_client._read_spool(path, dir_fd=dir_fd, strict=True)
+        if entry.get("client_id") == message["client_id"]
+    ]
+    if any(payload(entry) != payload(message) for entry in matching):
+        raise FleetMessageHubError("client_id is already queued for a different message", code="spool_conflict")
+    return {"queued": True, "client_id": message["client_id"]} if matching else None
+
+
 def _queue_locked(path: Path, message: dict[str, Any], *, dir_fd: int | None = None) -> dict[str, Any]:
+    existing = _queued_retry(path, message, dir_fd=dir_fd)
+    if existing is not None:
+        return existing
     if not fleet_client._spool_append_locked(path, message, dir_fd=dir_fd, evict_oldest=False):
         try:
             pending = fleet_client._read_spool(path, dir_fd=dir_fd, strict=True)
@@ -181,11 +210,13 @@ def _response_confirms(payload: dict[str, Any], message: dict[str, Any]) -> bool
     return isinstance(response_message, dict) and response_message.get("client_id") == message.get("client_id")
 
 
-def _remove_queued_locked(path: Path, client_id: str, *, dir_fd: int | None) -> None:
+def _remove_queued_locked(path: Path, message: dict[str, Any], *, dir_fd: int | None) -> None:
     queued = fleet_client._read_spool(path, dir_fd=dir_fd, strict=True)
-    remaining = [entry for entry in queued if entry.get("client_id") != client_id]
-    if len(remaining) != len(queued):
-        fleet_client._write_spool_atomic(path, remaining, dir_fd=dir_fd)
+    for index, entry in enumerate(queued):
+        if entry == message:
+            del queued[index]
+            fleet_client._write_spool_atomic(path, queued, dir_fd=dir_fd)
+            break
 
 
 def _send_ordered(message: dict[str, Any], hub: str, token: str, node_id: str) -> dict[str, Any]:
@@ -195,6 +226,9 @@ def _send_ordered(message: dict[str, Any], hub: str, token: str, node_id: str) -
     try:
         with fleet_client._spool_lock(path) as dir_fd:
             if _spool_exists_locked(path, dir_fd):
+                existing = _queued_retry(path, message, dir_fd=dir_fd)
+                if existing is not None:
+                    return existing
                 drain_started = monotonic()
                 batch_limit = MESSAGE_BATCH_SIZE - 1 if message.get("action") == "reply" else MESSAGE_BATCH_SIZE
                 _delivered, globally_blocked = _drain_locked(path, hub, token, max_messages=batch_limit, dir_fd=dir_fd)
@@ -238,7 +272,7 @@ def _send_ordered(message: dict[str, Any], hub: str, token: str, node_id: str) -
                     return queued_result
                 if status == 400 and payload.get("code") == "message_recipient_inactive":
                     return queued_result
-                _remove_queued_locked(path, message["client_id"], dir_fd=dir_fd)
+                _remove_queued_locked(path, message, dir_fd=dir_fd)
                 raise FleetMessageHubError(
                     str(payload.get("error") or f"fleet hub returned HTTP {status}"),
                     status=status,
@@ -248,7 +282,7 @@ def _send_ordered(message: dict[str, Any], hub: str, token: str, node_id: str) -
                 _LOG.warning("fleet message response did not confirm the submitted request; queueing it")
                 return queued_result
             try:
-                _remove_queued_locked(path, message["client_id"], dir_fd=dir_fd)
+                _remove_queued_locked(path, message, dir_fd=dir_fd)
             except (fleet_client.FleetClientError, OSError) as exc:
                 _LOG.warning("confirmed fleet message remains in local spool: %s", type(exc).__name__)
             return payload
@@ -282,7 +316,9 @@ def _client_id(value: str | None) -> str:
     if value is None:
         return uuid4().hex
     if not isinstance(value, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,64}", value) is None:
-        raise fleet_client.FleetClientError("client_id must contain 1 to 64 letters, digits, underscores, or hyphens")
+        raise FleetMessageHubError(
+            "client_id must contain 1 to 64 letters, digits, underscores, or hyphens", code="client_id_invalid"
+        )
     return value
 
 
@@ -457,17 +493,23 @@ def _principal_admin_request(hub: str, admin_token: str, body: dict[str, Any]) -
                 payload = {"error": f"HTTP {exc.code}"}
             status = exc.code
         except Exception as exc:
-            raise fleet_client.FleetClientError(f"fleet hub principal management failed: {type(exc).__name__}") from exc
+            raise FleetMessageHubError(
+                f"fleet hub principal management failed: {type(exc).__name__}", code="hub_unavailable"
+            ) from exc
         if not isinstance(payload, dict):
             raise fleet_client.FleetClientError("fleet hub principal management returned an invalid response")
         return status, payload
 
     try:
         return fleet_client._run_with_deadline(request_blocking, timeout=fleet_client.FLUSH_TIMEOUT_SECONDS)
-    except fleet_client.FleetClientError:
+    except FleetMessageHubError:
         raise
+    except fleet_client.FleetClientError as exc:
+        raise FleetMessageHubError(str(exc), code="hub_unavailable") from exc
     except Exception as exc:
-        raise fleet_client.FleetClientError(f"fleet hub principal management failed: {type(exc).__name__}") from exc
+        raise FleetMessageHubError(
+            f"fleet hub principal management failed: {type(exc).__name__}", code="hub_unavailable"
+        ) from exc
 
 
 def _principal_enrollment_generation(hub: str, admin_token: str, name: str) -> str | None:
@@ -522,6 +564,8 @@ def manage_principal(
                 name, settings["admin_token"], label, expected_enrollment_id=generation, may_send_to=may_send_to
             )
         )
+        if not body.get("may_send_to"):
+            body.pop("may_send_to", None)
         body["token"] = hmac.new(
             settings["admin_token"].encode("utf-8"),
             f"brigade-message-principal:{name}:{body['request_id']}".encode("utf-8"),
@@ -555,7 +599,8 @@ def manage_principal(
             action == "add"
             and pending_path is not None
             and status == 409
-            and payload.get("code") in ("principal_enrollment_revoked", "principal_enrollment_changed")
+            and payload.get("code")
+            in ("principal_enrollment_revoked", "principal_enrollment_changed", "principal_enrollment_grants_changed")
         ):
             _clear_principal_request(pending_path, request_id=body["request_id"])
         elif (
@@ -740,6 +785,10 @@ def _pending_principal_request(
             if isinstance(item.get("label"), str):
                 pending_request["label"] = item["label"]
             pending_request["may_send_to"] = item.get("may_send_to", [])
+            if may_send_to is not None and sorted(set(may_send_to)) != pending_request["may_send_to"]:
+                _LOG.warning(
+                    "pending enrollment retains its original send grants. Use principals grants after enrollment"
+                )
             return pending_request
     raise fleet_client.FleetClientError("could not preserve pending principal enrollment request")
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sqlite3
 from datetime import datetime, timezone
 from typing import Any
@@ -11,6 +12,8 @@ from . import fleet_hub_messages as messages
 GRANT_LIMIT = 64
 WILDCARDS = frozenset({"*", "node:*", "agent:*"})
 AGENT_RECIPIENT_UNACKED_CAP = 200
+# Mirrors fleet_hub.CLAIM_ID_PATTERN without importing the hub server on clients.
+_NODE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -20,8 +23,6 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
 
 
 def normalize_patterns(raw: object) -> list[str]:
-    from .fleet_hub import CLAIM_ID_PATTERN
-
     if not isinstance(raw, list) or len(raw) > GRANT_LIMIT:
         raise messages.MessageError(f"may_send_to must be a list of at most {GRANT_LIMIT} patterns")
     for pattern in raw:
@@ -32,7 +33,7 @@ def normalize_patterns(raw: object) -> list[str]:
         if pattern.startswith("agent:"):
             valid = messages._PRINCIPAL_NAME_RE.fullmatch(pattern[6:]) is not None
         else:
-            valid = pattern != "unknown" and CLAIM_ID_PATTERN.fullmatch(pattern) is not None
+            valid = pattern != "unknown" and _NODE_ID_RE.fullmatch(pattern) is not None
         if not valid:
             raise messages.MessageError("invalid recipient grant pattern")
     return sorted(set(raw))
@@ -56,7 +57,7 @@ def grants_for(conn: sqlite3.Connection, principal_id: str) -> list[str]:
     ]
 
 
-def require_permitted(conn: sqlite3.Connection, sender: str, recipient: str) -> None:
+def require_granted(conn: sqlite3.Connection, sender: str, recipient: str) -> None:
     if not sender.startswith("agent:"):
         return
     allowed = {recipient, "*", "agent:*" if recipient.startswith("agent:") else "node:*"}
@@ -64,6 +65,11 @@ def require_permitted(conn: sqlite3.Connection, sender: str, recipient: str) -> 
         raise messages.MessageForbidden(
             "recipient is not permitted by send grants", code="message_recipient_not_permitted"
         )
+
+
+def require_recipient_cap(conn: sqlite3.Connection, sender: str, recipient: str) -> None:
+    if not sender.startswith("agent:"):
+        return
     count = conn.execute(
         "SELECT COUNT(*) FROM fleet_messages WHERE sender=? AND recipient=? AND acked_at IS NULL",
         (sender, recipient),

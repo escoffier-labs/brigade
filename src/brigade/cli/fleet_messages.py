@@ -1,4 +1,13 @@
-"""CLI for the Fleet Hub principal message queue."""
+"""CLI for the Fleet Hub principal message queue.
+
+JSON failures contain error, status, and code. Local failures have null status
+and a non-null code: token_file_invalid (unsafe or invalid token file),
+client_id_invalid (invalid retry key), spool_conflict (queued key reused with a
+different payload), admin_token_refused (admin credential used for messaging),
+or invalid_argument (other local validation, configuration, or filesystem error).
+Transport failures use hub_unavailable with null status. Hub refusals preserve
+the HTTP status and the hub's code, which may be null on older hubs.
+"""
 
 from __future__ import annotations
 
@@ -132,9 +141,13 @@ def _result(
         from .fleet import _safe_table_cell
 
         if args.json:
+            status = getattr(exc, "status", None)
+            code = getattr(exc, "code", None)
+            if status is None and code is None:
+                code = "invalid_argument"
             print(
                 json.dumps(
-                    {"error": str(exc), "status": getattr(exc, "status", None), "code": getattr(exc, "code", None)},
+                    {"error": str(exc), "status": status, "code": code},
                     sort_keys=True,
                 )
             )

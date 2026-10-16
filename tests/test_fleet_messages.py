@@ -686,8 +686,8 @@ def test_named_external_principal_uses_its_own_revocable_identity(message_hub):
         == 403
     )
     replied = _request(base, token, {"action": "reply", "id": inbox[1]["messages"][0]["id"], "body": "Done"})
-    assert replied[0] == 201
-    assert replied[1]["message"]["sender"] == "agent:miller"
+    assert replied[0] == 403
+    assert replied[1]["code"] == "message_recipient_not_permitted"
 
     revoked = _post_path(
         base,

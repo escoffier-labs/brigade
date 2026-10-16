@@ -404,8 +404,13 @@ def add_principal(conn: sqlite3.Connection, raw: object) -> dict[str, Any]:
                 (label, token_hash, created_at, request_id, principal_id, expected_enrollment_id),
             )
         elif request_id is not None and existing[1] == request_id:
-            if existing[2] != token_hash or existing[3] != label or grants.grants_for(conn, principal_id) != patterns:
+            if existing[2] != token_hash or existing[3] != label:
                 raise MessageConflict("request_id was already used for a different principal enrollment")
+            if grants.grants_for(conn, principal_id) != patterns:
+                raise MessageConflict(
+                    "principal send grants changed since enrollment. Inspect principals show or revoke before re-enrolling",
+                    code="principal_enrollment_grants_changed",
+                )
         else:
             raise MessageError("message principal already exists")
         grants.replace_grants(conn, principal_id, patterns)
@@ -517,7 +522,6 @@ def send(
     *,
     sender: str,
     reply_to: int | None = None,
-    enforce_policy: bool = False,
 ) -> dict[str, Any]:
     _prune_expired(conn)
     recipient = _text(raw.get("to"), "to", 256)
@@ -548,6 +552,9 @@ def send(
             if opened:
                 conn.commit()
             return _fetch(conn, int(existing[0])) or {}
+        from .fleet_hub_message_grants import require_granted, require_recipient_cap
+
+        require_granted(conn, sender, recipient)
         if not _active_principal(conn, recipient):
             revoked = conn.execute(
                 "SELECT 1 FROM nodes WHERE node_id=? AND revoked_at IS NOT NULL "
@@ -558,10 +565,7 @@ def send(
             if revoked is not None:
                 raise MessageRecipientInactive("recipient is temporarily inactive", recipient=recipient)
             raise MessageError("recipient is not an active hub principal")
-        if enforce_policy:
-            from .fleet_hub_message_grants import require_permitted
-
-            require_permitted(conn, sender, recipient)
+        require_recipient_cap(conn, sender, recipient)
         count = conn.execute(
             "SELECT COUNT(*) FROM fleet_messages WHERE recipient=? AND acked_at IS NULL", (recipient,)
         ).fetchone()[0]
@@ -733,7 +737,6 @@ def reply(conn: sqlite3.Connection, raw: dict[str, Any], *, sender: str) -> dict
             },
             sender=sender,
             reply_to=message_id,
-            enforce_policy=sender.startswith("agent:"),
         )
         return _fetch(conn, message["id"])
     subject = raw.get("subject")
@@ -774,7 +777,7 @@ def handle(conn: sqlite3.Connection, raw: Any, *, caller: str | None) -> tuple[i
         raise MessageError("message request must be an object")
     action = raw.get("action")
     if action == "send":
-        return 201, {"message": send(conn, raw, sender=caller, enforce_policy=caller.startswith("agent:"))}
+        return 201, {"message": send(conn, raw, sender=caller)}
     if action == "sent":
         return 200, _as_active_principal(conn, caller, lambda: sent(conn, raw, sender=caller))
     if action == "list":
