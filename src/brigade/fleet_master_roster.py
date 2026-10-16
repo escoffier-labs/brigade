@@ -55,7 +55,9 @@ def _bounded_json_integer(value: str) -> int:
 
 
 def _text(value: Any, field: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    # Exact str only: a subclass could override __eq__/__hash__ to pass the
+    # closed-vocabulary checks and then serialize a different value.
+    if type(value) is not str or not value.strip():
         raise MasterRosterError(f"{field} must be a non-empty string")
     if len(value) > MAX_TEXT:
         raise MasterRosterError(f"{field} must be at most {MAX_TEXT} characters")
@@ -81,7 +83,7 @@ def _choice(value: Any, field: str, allowed: frozenset[str]) -> str:
 
 
 def _unknown_fields(value: Mapping[str, Any], allowed: frozenset[str], where: str) -> None:
-    if any(not isinstance(key, str) for key in value):
+    if any(type(key) is not str for key in value):
         raise MasterRosterError(f"{where} keys must be strings")
     if any(_SURROGATE.search(key) for key in value):
         raise MasterRosterError(f"{where} keys must contain valid Unicode scalar values")

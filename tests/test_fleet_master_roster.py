@@ -570,3 +570,31 @@ def test_fleet_roster_validate_does_not_echo_invalid_fallback(tmp_path, capsys) 
     path.write_text(json.dumps(document), encoding="utf-8")
     assert cli.main(["fleet", "roster", "validate", "--file", str(path)]) == 1
     assert "hunter2" not in capsys.readouterr().err
+
+
+class _Impostor(str):
+    """Compares equal to an allowed value while carrying different text."""
+
+    def __eq__(self, other: object) -> bool:
+        return True
+
+    def __hash__(self) -> int:
+        return hash("implementation")
+
+
+@pytest.mark.parametrize("field", ["purpose", "cli", "name"])
+def test_parse_rejects_string_subclass_values(field: str) -> None:
+    document = _document()
+    document["seats"][0][field] = _Impostor("private-area/config-prod")  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError, match="non-empty string"):
+        fleet_master_roster.parse(document)
+
+
+def test_parse_rejects_string_subclass_keys() -> None:
+    document = _document()
+    seat = document["seats"][0]  # type: ignore[index]
+    seat[_Impostor("enabled")] = seat.pop("enabled")  # type: ignore[index]
+
+    with pytest.raises(fleet_master_roster.MasterRosterError, match="keys must be strings"):
+        fleet_master_roster.parse(document)
