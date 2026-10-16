@@ -829,6 +829,78 @@ class TestCli:
         finally:
             conn.close()
 
+    def test_flush_command_reports_events_when_message_flush_fails(self, monkeypatch, capsys):
+        from brigade import cli, fleet_client_messages
+
+        monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
+        monkeypatch.setattr(fleet_client, "flush_spool", lambda _node_id: 3)
+
+        def fail_message_flush(_node_id):
+            raise fleet_client.FleetClientError("message spool unreadable")
+
+        monkeypatch.setattr(fleet_client_messages, "flush", fail_message_flush)
+
+        assert cli.main(["fleet", "flush"]) == 1
+
+        captured = capsys.readouterr()
+        assert f"flushed 3 spooled event(s) for node {NODE_A}" in captured.out
+        assert "could not flush fleet messages: message spool unreadable" in captured.err
+
+    def test_flush_command_continues_messages_when_event_spool_fails(self, monkeypatch, capsys):
+        from brigade import cli, fleet_client_messages
+
+        monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
+
+        def fail_event_flush(_node_id):
+            raise fleet_client.FleetClientError("event spool unreadable")
+
+        monkeypatch.setattr(fleet_client, "flush_spool", fail_event_flush)
+        monkeypatch.setattr(fleet_client_messages, "flush", lambda _node_id: 2)
+
+        assert cli.main(["fleet", "flush"]) == 1
+
+        captured = capsys.readouterr()
+        assert f"flushed 2 message(s) for node {NODE_A}" in captured.out
+        assert "could not flush fleet events: event spool unreadable" in captured.err
+
+    def test_flush_command_continues_messages_when_event_spool_raises_oserror(self, monkeypatch, capsys):
+        from brigade import cli, fleet_client_messages
+
+        monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
+
+        def fail_event_flush(_node_id):
+            raise OSError("event spool lock failed")
+
+        monkeypatch.setattr(fleet_client, "flush_spool", fail_event_flush)
+        monkeypatch.setattr(fleet_client_messages, "flush", lambda _node_id: 2)
+
+        assert cli.main(["fleet", "flush"]) == 1
+
+        captured = capsys.readouterr()
+        assert f"flushed 2 message(s) for node {NODE_A}" in captured.out
+        assert "could not flush fleet events: event spool lock failed" in captured.err
+
+    def test_flush_command_escapes_spool_error_control_characters(self, monkeypatch, capsys):
+        from brigade import cli, fleet_client_messages
+
+        monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
+
+        def fail_event_flush(_node_id):
+            raise fleet_client.FleetClientError("event spool rejected\x1b[31mevent")
+
+        def fail_message_flush(_node_id):
+            raise OSError("message spool denied\x1b[32mwrite")
+
+        monkeypatch.setattr(fleet_client, "flush_spool", fail_event_flush)
+        monkeypatch.setattr(fleet_client_messages, "flush", fail_message_flush)
+
+        assert cli.main(["fleet", "flush"]) == 1
+
+        captured = capsys.readouterr()
+        assert "\x1b" not in captured.err
+        assert "\\x1b[31mevent" in captured.err
+        assert "\\x1b[32mwrite" in captured.err
+
     def test_format_age(self):
         from datetime import datetime, timezone
 

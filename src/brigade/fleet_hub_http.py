@@ -21,7 +21,14 @@ from urllib.parse import parse_qs, urlencode
 
 from . import fleet_hub_enrollment as enrollment
 from . import fleet_claim_display
-from . import fleet_command_deck, fleet_dashboard, fleet_hub_grokbot, fleet_hub_sessions, worklore_http
+from . import (
+    fleet_command_deck,
+    fleet_dashboard,
+    fleet_hub_grokbot,
+    fleet_hub_messages,
+    fleet_hub_sessions,
+    worklore_http,
+)
 from . import fleet_hub as _hub
 from . import fleet_hub_model_roster
 from . import fleet_hub_policy_api
@@ -84,9 +91,32 @@ def _board_include_all(params: dict[str, list[str]]) -> bool:
     return params.get("all", [""])[0].lower() in ("1", "true", "yes", "on")
 
 
-def _board_more_href(path: str, params: dict[str, list[str]], *, next_offset: int) -> str:
+def _board_more_href(
+    path: str,
+    params: dict[str, list[str]],
+    *,
+    next_offset: int,
+    unread_offset: int | None = None,
+    unread_only_page: bool = False,
+    claim_offset: int | None = None,
+    claim_only_page: bool = False,
+) -> str:
     next_params = {key: list(values) for key, values in params.items()}
     next_params["offset"] = [str(next_offset)]
+    if unread_offset is not None:
+        next_params["unread_offset"] = [str(unread_offset)]
+    if unread_only_page:
+        next_params["unread_only"] = ["1"]
+    else:
+        next_params.pop("unread_only", None)
+    if claim_offset is not None:
+        next_params["claim_offset"] = [str(claim_offset)]
+    elif not claim_only_page:
+        next_params.pop("claim_offset", None)
+    if claim_only_page:
+        next_params["claim_only"] = ["1"]
+    else:
+        next_params.pop("claim_only", None)
     rest = urlencode(next_params, doseq=True)
     return f"{path}?{rest}" if rest else path
 
@@ -223,6 +253,10 @@ def make_handler(
                 return True, None
             node_id, revoked = lookup_node_token(conn, presented)
             if node_id is None:
+                if self.path.partition("?")[0] == "/messages":
+                    principal = fleet_hub_messages.lookup_principal_token(conn, presented)
+                    if principal is not None:
+                        return False, principal
                 self._send_json(401, {"error": "unauthorized"})
                 return None
             if revoked:
@@ -599,7 +633,10 @@ def make_handler(
                 self._send_html(404, "Not found.\n", content_type=plain)
                 return
             params = parse_qs(query, keep_blank_values=False)
-            if not (self._authorized() or self._cookie_authorized() or self._tailscale_identity_authorized()):
+            dashboard_authorized = (
+                self._authorized() or self._cookie_authorized() or self._tailscale_identity_authorized()
+            )
+            if not dashboard_authorized:
                 self._send_html(
                     401,
                     "Unauthorized: use brigade fleet enroll for read-only dashboard access.\n",
@@ -618,14 +655,66 @@ def make_handler(
                 return
             try:
                 include_all = _board_include_all(params)
+                current = datetime.now(timezone.utc)
                 offset = fleet_hub_status.clamp_board_offset(params.get("offset", ["0"])[0])
-                board = board_status(
-                    conn,
-                    include_all=include_all,
-                    offset=offset,
-                    history_window_seconds=frozen_deck.stale_history_after_seconds,
-                    stale_history_after_seconds=frozen_deck.stale_history_after_seconds,
+                query_model = (
+                    fleet_dashboard.parse_query(urlencode(params, doseq=True), view=view)
+                    if view == "machines"
+                    else None
                 )
+                complete_base_node_ids: set[str] = set()
+                truncated_node_ids: set[str] = set()
+                if query_model is not None:
+
+                    def machine_priority(entry: dict[str, Any]) -> tuple[Any, ...]:
+                        rows = fleet_dashboard.build_rows([entry], {}, now=current)
+                        return fleet_dashboard.machine_sort_key(str(entry["node_id"]), rows, query_model)
+
+                    def machine_matches(entry: dict[str, Any]) -> bool:
+                        return bool(
+                            fleet_dashboard.filter_rows(
+                                fleet_dashboard.build_rows([entry], {}, now=current), query_model
+                            )
+                        )
+
+                    complete_base_node_ids, machine_node_ids, machine_more = fleet_hub_status.board_machine_page(
+                        conn,
+                        include_all=include_all,
+                        offset=offset,
+                        now=current,
+                        history_window_seconds=frozen_deck.stale_history_after_seconds,
+                        stale_history_after_seconds=frozen_deck.stale_history_after_seconds,
+                        predicate=machine_matches,
+                        resolve_last_known_seat=bool(query_model.seat),
+                        priority=machine_priority,
+                    )
+                    machine_limit = fleet_hub_status.BOARD_LIMIT
+                    board_runs, truncated_node_ids = fleet_hub_status.board_status_for_nodes(
+                        conn,
+                        machine_node_ids,
+                        include_all=include_all,
+                        now=current,
+                        history_window_seconds=frozen_deck.stale_history_after_seconds,
+                        stale_history_after_seconds=frozen_deck.stale_history_after_seconds,
+                        resolve_last_known_seat=True,
+                        predicate=machine_matches,
+                        priority=machine_priority,
+                    )
+                    board = fleet_hub_status.BoardStatus(
+                        runs=board_runs,
+                        more=machine_more,
+                        offset=offset,
+                        limit=machine_limit,
+                    )
+                else:
+                    board = board_status(
+                        conn,
+                        include_all=include_all,
+                        offset=offset,
+                        now=current,
+                        history_window_seconds=frozen_deck.stale_history_after_seconds,
+                        stale_history_after_seconds=frozen_deck.stale_history_after_seconds,
+                    )
                 claims = fleet_claim_display.list_display_claims(conn, include_all=include_all)
                 started_at = run_started_at(
                     conn,
@@ -639,6 +728,9 @@ def make_handler(
                     ],
                 )
                 nodes = node_summary(board.runs)
+                unread_counts = (
+                    fleet_hub_messages.unread_counts(conn) if self._authorized() and view == "machines" else {}
+                )
             except ClaimFenceError as exc:
                 self._send_json(503, {"error": str(exc)})
                 return
@@ -648,16 +740,140 @@ def make_handler(
             finally:
                 conn.close()
             more_href = _board_more_href(path, params, next_offset=board.offset + board.limit) if board.more else None
+            unread_offset = fleet_hub_status.clamp_board_offset(params.get("unread_offset", ["0"])[0])
+            unread_only_page = params.get("unread_only", [""])[0] == "1"
+            claim_offset = fleet_hub_status.clamp_board_offset(params.get("claim_offset", ["0"])[0])
+            claim_only_page = params.get("claim_only", [""])[0] == "1"
+            render_runs = board.runs
+            render_claims = claims
+            render_nodes = nodes
+            render_started_at = started_at
+            render_unread_counts = unread_counts
+            if view == "machines":
+                assert query_model is not None
+                page_rows = fleet_dashboard.filter_rows(
+                    fleet_dashboard.build_rows(board.runs, started_at, now=current), query_model
+                )
+                page_claims = fleet_dashboard.build_claims(claims, now=current)
+                event_node_ids = fleet_dashboard._machine_base_node_ids(page_rows, nodes, [], query_model)
+                complete_claim_node_ids = fleet_dashboard._machine_base_node_ids([], [], page_claims, query_model)
+                claim_only_ids = sorted(complete_claim_node_ids - complete_base_node_ids)
+                excluded_node_ids = (
+                    fleet_dashboard._machine_unread_exclusions(query_model, event_node_ids, complete_base_node_ids)
+                    | complete_claim_node_ids
+                )
+                unread_ids = fleet_dashboard._machine_unread_candidates(
+                    query_model, unread_counts, excluded_node_ids=excluded_node_ids
+                )
+                if claim_only_page:
+                    render_runs = []
+                    render_nodes = []
+                    render_started_at = {}
+                    claim_ids = claim_only_ids[claim_offset : claim_offset + fleet_dashboard.MACHINE_CARD_LIMIT]
+                    render_claims = [claim for claim in claims if claim.get("owner_node") in claim_ids]
+                    render_unread_counts = {
+                        node_id: unread_counts[node_id] for node_id in claim_ids if node_id in unread_counts
+                    }
+                    next_claim_offset = claim_offset + len(claim_ids)
+                    if next_claim_offset < len(claim_only_ids):
+                        more_href = _board_more_href(
+                            path,
+                            params,
+                            next_offset=board.offset,
+                            claim_offset=next_claim_offset,
+                            claim_only_page=True,
+                        )
+                    elif unread_offset < len(unread_ids):
+                        more_href = _board_more_href(
+                            path,
+                            params,
+                            next_offset=board.offset,
+                            unread_offset=unread_offset,
+                            unread_only_page=True,
+                            claim_offset=next_claim_offset,
+                        )
+                    elif board.more:
+                        more_href = _board_more_href(
+                            path,
+                            params,
+                            next_offset=board.offset + board.limit,
+                            unread_offset=unread_offset,
+                            claim_offset=next_claim_offset,
+                        )
+                    else:
+                        more_href = None
+                else:
+                    event_claims = [claim for claim in claims if claim.get("owner_node") in event_node_ids]
+                    room = (
+                        fleet_dashboard.MACHINE_CARD_LIMIT
+                        if unread_only_page
+                        else max(0, fleet_dashboard.MACHINE_CARD_LIMIT - len(event_node_ids))
+                    )
+                    selected_claim_ids: list[str] = []
+                    if not board.more and not unread_only_page and unread_offset >= len(unread_ids):
+                        selected_claim_ids = claim_only_ids[claim_offset : claim_offset + room]
+                        render_claims = event_claims + [
+                            claim for claim in claims if claim.get("owner_node") in selected_claim_ids
+                        ]
+                    else:
+                        render_claims = event_claims
+                    rendered_node_ids = event_node_ids | set(selected_claim_ids)
+                    render_unread_counts = {
+                        node_id: count
+                        for node_id, count in unread_counts.items()
+                        if node_id not in complete_claim_node_ids or node_id in rendered_node_ids
+                    }
+                    unread_room = max(0, room - len(selected_claim_ids))
+                    consumed = len(unread_ids[unread_offset : unread_offset + unread_room])
+                    next_unread_offset = unread_offset + consumed
+                    unread_more = next_unread_offset < len(unread_ids)
+                    next_claim_offset = claim_offset + len(selected_claim_ids)
+                    claim_more = next_claim_offset < len(claim_only_ids)
+                    if unread_more:
+                        # Unread cards continue before the next event or claim-only page.
+                        more_href = _board_more_href(
+                            path,
+                            params,
+                            next_offset=board.offset,
+                            unread_offset=next_unread_offset,
+                            unread_only_page=True,
+                            claim_offset=next_claim_offset,
+                        )
+                    elif claim_more:
+                        more_href = _board_more_href(
+                            path,
+                            params,
+                            next_offset=board.offset,
+                            unread_offset=next_unread_offset,
+                            claim_offset=next_claim_offset,
+                            claim_only_page=True,
+                        )
+                    elif board.more:
+                        more_href = _board_more_href(
+                            path,
+                            params,
+                            next_offset=board.offset + board.limit,
+                            unread_offset=next_unread_offset,
+                            claim_offset=next_claim_offset,
+                        )
+                    else:
+                        more_href = None
             nonce = secrets.token_urlsafe(16)
             page = fleet_dashboard.render_page(
                 view=view,
                 query_string=urlencode(params, doseq=True),
-                runs=board.runs,
-                claims=claims,
-                nodes=nodes,
-                started_at=started_at,
+                runs=render_runs,
+                claims=render_claims,
+                nodes=render_nodes,
+                started_at=render_started_at,
                 nonce=nonce,
+                now=current,
                 more_href=more_href,
+                unread_counts=render_unread_counts,
+                unread_offset=unread_offset,
+                unread_only_page=unread_only_page,
+                complete_base_node_ids=complete_base_node_ids,
+                truncated_node_ids=truncated_node_ids,
             )
             # The legacy board used ``/`` as its machines route. Root now
             # belongs to the Command Deck, so keep every legacy navigation
@@ -1411,7 +1627,18 @@ def make_handler(
             if path.startswith("/work/"):
                 self._handle_worklore()
                 return
-            if path not in ("/events", "/claims", "/nodes", "/cloud", "/models", "/grokbot", "/sessions", "/policy"):
+            if path not in (
+                "/events",
+                "/claims",
+                "/nodes",
+                "/cloud",
+                "/models",
+                "/grokbot",
+                "/sessions",
+                "/policy",
+                "/messages",
+                "/message-principals",
+            ):
                 self._send_json(404, {"error": "not found"})
                 return
             if self._bearer() is None:
@@ -1443,10 +1670,14 @@ def make_handler(
                     if not is_admin:
                         self._send_json(403, {"error": "the admin token is required to manage nodes"})
                         return
+                elif path == "/message-principals":
+                    if not is_admin:
+                        self._send_json(403, {"error": "the admin token is required to enroll message principals"})
+                        return
                 elif path == "/policy" and is_admin and not allow_admin_writes:
                     # Document writes stay admin. Resolve/prepare/ack need a node token.
                     pass
-                elif path in ("/events", "/claims", "/sessions") and is_admin and not allow_admin_writes:
+                elif path in ("/events", "/claims", "/sessions", "/messages") and is_admin and not allow_admin_writes:
                     self._send_json(
                         403,
                         {
@@ -1476,6 +1707,10 @@ def make_handler(
                     status, body_payload = handle_claim(conn, parsed, caller_node=caller_node)
                 elif path == "/sessions":
                     status, body_payload = handle_session(conn, parsed, caller_node=caller_node)
+                elif path == "/messages":
+                    status, body_payload = fleet_hub_messages.handle(conn, parsed, caller=caller_node)
+                elif path == "/message-principals":
+                    status, body_payload = fleet_hub_messages.handle_principal_admin(conn, parsed)
                 elif path == "/cloud":
                     if (
                         is_admin
@@ -1560,6 +1795,33 @@ def make_handler(
                 return
             except fleet_hub_policy_api.FleetPolicyApiError as exc:
                 self._send_json(exc.status, exc.payload())
+                return
+            except fleet_hub_messages.MessageConflict as exc:
+                payload = {"error": str(exc)}
+                if exc.code is not None:
+                    payload["code"] = exc.code
+                self._send_json(409, payload)
+                return
+            except fleet_hub_messages.MessageQuotaError as exc:
+                payload = {"error": str(exc), "code": exc.code}
+                if exc.recipient is not None:
+                    payload["recipient"] = exc.recipient
+                self._send_json(429, payload)
+                return
+            except fleet_hub_messages.MessageRecipientInactive as exc:
+                self._send_json(
+                    400,
+                    {"error": str(exc), "code": "message_recipient_inactive", "recipient": exc.recipient},
+                )
+                return
+            except fleet_hub_messages.MessageAuthError as exc:
+                self._send_json(403, {"error": str(exc), "code": "message_sender_inactive"})
+                return
+            except fleet_hub_messages.MessageFutureTimestamp as exc:
+                self._send_json(400, {"error": str(exc), "code": "message_timestamp_future"})
+                return
+            except fleet_hub_messages.MessageError as exc:
+                self._send_json(400, {"error": str(exc)})
                 return
             except FleetHubForbidden as exc:
                 self._send_json(403, {"error": str(exc)})
