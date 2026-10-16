@@ -642,3 +642,47 @@ systemctl start brigade-fleet.service
 ```
 
 If lock errors continue, check that the backup script is using `.backup` and not a second long-running writer, then review the CT disk and memory pressure.
+
+
+## External agent principals
+
+Upgrade the hub to schema 31 before enabling agent sends. Agents start with no
+send grants. A node may supply a display-only `--sender-label`. Agents cannot.
+Replies to messages addressed to the agent remain available without send grants.
+
+Enroll using the administrator credential and stream the one-time token directly
+into a private file. Substitute an enrolled node ID for `example-node`. The token
+file must be owned by the invoking effective user, have no group or other access,
+and contain only the token, with no trailing newline.
+
+```bash
+set -euo pipefail
+umask 077
+brigade fleet msg principals add example-agent --may-send-to example-node --json |
+  jq -j '.principal.token' > example-agent.token
+brigade fleet msg principals show example-agent --json
+brigade fleet msg list --token-file example-agent.token --json
+```
+
+`--token-file PATH` takes precedence over `BRIGADE_FLEET_MESSAGE_TOKEN_FILE`, then
+the node credential. Set the path only for message subprocesses. A token file does
+not require an enrolled node identity. Do not pass a token value in argv or an
+agent environment variable. Administrator credentials are refused for messaging.
+Use a stable `--client-id` when retrying a send or reply. Check acknowledgements
+with `brigade fleet msg sent --id MESSAGE_ID --token-file example-agent.token
+--json`, and drain that credential's queue with `brigade fleet msg flush
+--token-file example-agent.token --json`.
+
+Replace grants, clear initial-send permission, or revoke the credential:
+
+```bash
+brigade fleet msg principals grants example-agent --may-send-to example-node
+brigade fleet msg principals grants example-agent --clear
+brigade fleet msg principals revoke example-agent
+```
+
+Grants accept exact node IDs, exact `agent:NAME`, `node:*`, `agent:*`, or `*`.
+Agents cannot send to themselves. Each agent may queue 200 unacknowledged initial
+messages per recipient. The existing daily sender quota also applies. A grant
+change applies to new sends. Replaying an accepted client ID returns its original
+message. Re-enrollment without grants clears previous grants.

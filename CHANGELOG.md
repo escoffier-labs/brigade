@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fleet messages support administrator-managed agent send grants, protected per-invocation token files, sender labels, threads and kinds, sender-scoped acknowledgement status, stable client IDs, credential-scoped flushing, and JSON error status and codes. Hub schema 31 migrates existing messages without changing legacy payload hashes. (Refs #1688, #1121)
+
 - Fleet Hub upgrade: initialization now enforces mode `0600` on the database and SQLite `-wal`, `-shm`, and `-journal` sidecars on POSIX. Startup fails if required permission changes are refused, including sidecars owned by another user or storage on a read-only filesystem. Check ownership and writable storage before upgrading. `brigade fleet flush` now exits `1` if either the event or message flush fails. (Refs #1688)
 - Research doctor reports missing browser readiness evidence as a warning when executable and auth checks pass, including required browser discovery and Oracle-only synthesis or review. Actual readiness blockers, missing executables, and failed authentication still fail required lanes. (#1713)
 - Fenced Worklore checkpoints atomically refuse overlapping repository path declarations with bounded, structured conflicts. Handoff, terminal and unchecked historical scopes remain reserved until explicit replacement or release. Ownership reads expose historical `path-admission` while retaining unknown liveness. (Refs #1595)

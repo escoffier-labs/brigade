@@ -7,6 +7,7 @@ import hmac
 import json
 import logging
 import os
+import re
 import stat
 from time import monotonic
 import urllib.error
@@ -17,6 +18,7 @@ from typing import Any
 from uuid import uuid4
 
 from . import fleet_client
+from .fleet_client_message_credentials import FleetMessageHubError, message_settings
 from . import fleet_hub_messages as _message_limits
 
 _LOG = logging.getLogger("brigade.fleet")
@@ -26,7 +28,7 @@ MESSAGE_DRAIN_DEADLINE_SECONDS = 12.0
 _NOT_PROVIDED = object()
 
 
-class _UnauthorizedError(fleet_client.FleetClientError):
+class _UnauthorizedError(FleetMessageHubError):
     """A sender authentication failure cannot safely queue work in its scoped spool."""
 
 
@@ -41,7 +43,7 @@ def _spool_path(node_id: str, token: str | None = None) -> Path:
 def _warn_inactive_spools(node_id: str, active_path: Path) -> None:
     directory = fleet_client.spool_path(node_id).parent
     legacy_path = directory / f"{node_id}.messages.jsonl"
-    if legacy_path.is_file() and not legacy_path.is_symlink():
+    if legacy_path.is_file() and not legacy_path.is_symlink() and legacy_path.stat().st_size:
         _LOG.warning("legacy fleet message spool %s has no credential scope; leaving it untouched", legacy_path)
     prefix = "messages-"
     try:
@@ -53,6 +55,7 @@ def _warn_inactive_spools(node_id: str, active_path: Path) -> None:
             and path.name.endswith(".jsonl")
             and path.is_file()
             and not path.is_symlink()
+            and path.stat().st_size > 0
         )
     except OSError:
         return
@@ -124,20 +127,19 @@ def _spool_exists_locked(path: Path, dir_fd: int | None) -> bool:
     return True
 
 
-def _settings() -> tuple[str, str, str]:
-    settings = fleet_client.load_fleet_settings()
-    if not settings["hub_url"]:
-        raise fleet_client.FleetClientError("no fleet hub configured (~/.brigade/fleet.toml [fleet] hub_url)")
-    if not settings["node_token"]:
-        raise fleet_client.FleetClientError("no fleet node token configured")
-    return settings["hub_url"], settings["node_token"], fleet_client.resolve_node_id()
+def _settings(token_file: str | None = None) -> tuple[str, str, str]:
+    return message_settings(token_file)
 
 
-def _online(body: dict[str, Any]) -> dict[str, Any]:
-    hub, token, _node_id = _settings()
+def _online(body: dict[str, Any], *, token_file: str | None = None) -> dict[str, Any]:
+    hub, token, _node_id = _settings() if token_file is None else _settings(token_file)
     status, payload = _request(hub, token, body)
     if not 200 <= status < 300:
-        raise fleet_client.FleetClientError(str(payload.get("error") or f"fleet hub returned HTTP {status}"))
+        raise FleetMessageHubError(
+            str(payload.get("error") or f"fleet hub returned HTTP {status}"),
+            status=status,
+            code=payload.get("code"),
+        )
     return payload
 
 
@@ -237,7 +239,11 @@ def _send_ordered(message: dict[str, Any], hub: str, token: str, node_id: str) -
                 if status == 400 and payload.get("code") == "message_recipient_inactive":
                     return queued_result
                 _remove_queued_locked(path, message["client_id"], dir_fd=dir_fd)
-                raise fleet_client.FleetClientError(str(payload.get("error") or f"fleet hub returned HTTP {status}"))
+                raise FleetMessageHubError(
+                    str(payload.get("error") or f"fleet hub returned HTTP {status}"),
+                    status=status,
+                    code=payload.get("code"),
+                )
             if not _response_confirms(payload, message):
                 _LOG.warning("fleet message response did not confirm the submitted request; queueing it")
                 return queued_result
@@ -272,8 +278,59 @@ def _validate_sqlite_integer(value: Any, field: str, *, allow_zero: bool = False
         raise fleet_client.FleetClientError(f"{field} must be {qualifier} integer within SQLite's range")
 
 
-def send(*, recipient: str, subject: str, body: str, reference: str | None, priority: str) -> dict[str, Any]:
-    hub, token, node_id = _settings()
+def _client_id(value: str | None) -> str:
+    if value is None:
+        return uuid4().hex
+    if not isinstance(value, str) or re.fullmatch(r"[A-Za-z0-9_-]{1,64}", value) is None:
+        raise fleet_client.FleetClientError("client_id must contain 1 to 64 letters, digits, underscores, or hyphens")
+    return value
+
+
+def _wire_metadata(**values: str | None) -> dict[str, str]:
+    raw = {key: value for key, value in values.items() if value is not None}
+    try:
+        _message_limits._metadata(raw)
+    except _message_limits.MessageError as exc:
+        raise fleet_client.FleetClientError(str(exc)) from exc
+    return raw
+
+
+def sent(*, after: int = 0, ids: list[int] | None = None, token_file: str | None = None) -> dict[str, Any]:
+    _validate_sqlite_integer(after, "after cursor", allow_zero=True)
+    body: dict[str, Any] = {"action": "sent"}
+    if ids is not None:
+        if after != 0 or not isinstance(ids, list) or not 1 <= len(ids) <= 100:
+            raise fleet_client.FleetClientError("sent accepts either after or 1 to 100 ids")
+        for message_id in ids:
+            _validate_sqlite_integer(message_id, "message id")
+        body["ids"] = ids
+    else:
+        body["after"] = after
+    payload = _validate_page(_online(body, token_file=token_file), after=after)
+    if ids is not None and any(message["id"] not in ids for message in payload["messages"]):
+        raise fleet_client.FleetClientError("fleet hub returned an invalid message page")
+    return payload
+
+
+def flush_credential(token_file: str | None = None) -> int:
+    hub, token, scope = _settings() if token_file is None else _settings(token_file)
+    return flush(scope, hub_url=hub, token=token)
+
+
+def send(
+    *,
+    recipient: str,
+    subject: str,
+    body: str,
+    reference: str | None,
+    priority: str,
+    thread: str | None = None,
+    kind: str | None = None,
+    sender_label: str | None = None,
+    client_id: str | None = None,
+    token_file: str | None = None,
+) -> dict[str, Any]:
+    hub, token, node_id = _settings() if token_file is None else _settings(token_file)
     try:
         recipient = _message_limits._text(recipient, "to", 256) or ""
         subject = _message_limits._text(subject, "subject", _message_limits.SUBJECT_LIMIT) or ""
@@ -290,15 +347,20 @@ def send(*, recipient: str, subject: str, body: str, reference: str | None, prio
         "body": body,
         "ref": reference,
         "priority": priority,
-        "client_id": uuid4().hex,
+        "client_id": _client_id(client_id),
         "enqueued_at": datetime.now(timezone.utc).isoformat(),
     }
+    message.update(_wire_metadata(thread=thread, kind=kind, sender_label=sender_label))
     return _send_ordered(message, hub, token, node_id)
 
 
-def list_messages(*, after: int = 0, unacked: bool = False) -> dict[str, Any]:
+def list_messages(*, after: int = 0, unacked: bool = False, token_file: str | None = None) -> dict[str, Any]:
     _validate_sqlite_integer(after, "after cursor", allow_zero=True)
-    payload = _online({"action": "list", "after": after, "unacked": unacked})
+    payload = _online({"action": "list", "after": after, "unacked": unacked}, token_file=token_file)
+    return _validate_page(payload, after=after)
+
+
+def _validate_page(payload: dict[str, Any], *, after: int) -> dict[str, Any]:
     messages = payload.get("messages")
     next_cursor = payload.get("next_cursor")
     previous_id = after
@@ -317,6 +379,7 @@ def list_messages(*, after: int = 0, unacked: bool = False) -> dict[str, Any]:
             previous_id = message_id
     if (
         not valid_ids
+        or (isinstance(messages, list) and len(messages) > 100)
         or isinstance(next_cursor, bool)
         or not isinstance(next_cursor, int)
         or next_cursor > _message_limits.MAX_SQLITE_INTEGER
@@ -326,9 +389,9 @@ def list_messages(*, after: int = 0, unacked: bool = False) -> dict[str, Any]:
     return payload
 
 
-def ack(message_id: int) -> dict[str, Any]:
+def ack(message_id: int, *, token_file: str | None = None) -> dict[str, Any]:
     _validate_sqlite_integer(message_id, "message id")
-    payload = _online({"action": "ack", "id": message_id})
+    payload = _online({"action": "ack", "id": message_id}, token_file=token_file)
     message = payload.get("message")
     response_id = message.get("id") if isinstance(message, dict) else None
     if isinstance(response_id, bool) or not isinstance(response_id, int) or response_id != message_id:
@@ -336,8 +399,20 @@ def ack(message_id: int) -> dict[str, Any]:
     return payload
 
 
-def reply(message_id: int, *, body: str, subject: str | None, reference: str | None, priority: str) -> dict[str, Any]:
-    hub, token, node_id = _settings()
+def reply(
+    message_id: int,
+    *,
+    body: str,
+    subject: str | None,
+    reference: str | None,
+    priority: str,
+    thread: str | None = None,
+    kind: str | None = None,
+    sender_label: str | None = None,
+    client_id: str | None = None,
+    token_file: str | None = None,
+) -> dict[str, Any]:
+    hub, token, node_id = _settings() if token_file is None else _settings(token_file)
     _validate_sqlite_integer(message_id, "message id")
     try:
         body = _message_limits._text(body, "body", _message_limits.BODY_LIMIT) or ""
@@ -355,9 +430,10 @@ def reply(message_id: int, *, body: str, subject: str | None, reference: str | N
         "subject": subject,
         "ref": reference,
         "priority": priority,
-        "client_id": uuid4().hex,
+        "client_id": _client_id(client_id),
         "enqueued_at": datetime.now(timezone.utc).isoformat(),
     }
+    message.update(_wire_metadata(thread=thread, kind=kind, sender_label=sender_label))
     return _send_ordered(message, hub, token, node_id)
 
 
@@ -424,6 +500,7 @@ def manage_principal(
     *,
     name: str,
     label: str | None = None,
+    may_send_to: list[str] | None = None,
     _defer_finalize: bool = False,
     _deferred_request_ids: list[str] | None = None,
 ) -> dict[str, Any]:
@@ -440,7 +517,11 @@ def manage_principal(
     revoke_pending_request_id: str | None = None
     if action == "add":
         generation = _principal_enrollment_generation(settings["hub_url"], settings["admin_token"], name)
-        body.update(_pending_principal_request(name, settings["admin_token"], label, expected_enrollment_id=generation))
+        body.update(
+            _pending_principal_request(
+                name, settings["admin_token"], label, expected_enrollment_id=generation, may_send_to=may_send_to
+            )
+        )
         body["token"] = hmac.new(
             settings["admin_token"].encode("utf-8"),
             f"brigade-message-principal:{name}:{body['request_id']}".encode("utf-8"),
@@ -459,6 +540,13 @@ def manage_principal(
             raise fleet_client.FleetClientError("could not preserve pending principal revocation request")
         body["expected_enrollment_id"] = pending["expected_enrollment_id"]
         revoke_pending_request_id = pending["request_id"]
+    elif action == "grants":
+        from .fleet_hub_message_grants import normalize_patterns
+
+        try:
+            body["may_send_to"] = normalize_patterns(may_send_to)
+        except _message_limits.MessageError as exc:
+            raise fleet_client.FleetClientError(str(exc)) from exc
     elif label is not None:
         body["label"] = label
     status, payload = _principal_admin_request(settings["hub_url"], settings["admin_token"], body)
@@ -485,7 +573,7 @@ def manage_principal(
         message = str(payload.get("error") or f"fleet hub returned HTTP {status}")
         if action == "add" and payload.get("code") in ("principal_enrollment_revoked", "principal_enrollment_changed"):
             message += "; run principals add again to request a new enrollment generation"
-        raise fleet_client.FleetClientError(message)
+        raise FleetMessageHubError(message, status=status, code=payload.get("code"))
     if action == "add" and pending_path is not None:
         principal = payload.get("principal")
         returned_token = principal.get("token") if isinstance(principal, dict) else None
@@ -522,6 +610,14 @@ def manage_principal(
         if add_request_id is not None:
             _clear_principal_request(add_path, request_id=add_request_id)
     return payload
+
+
+def set_principal_grants(name: str, patterns: list[str]) -> dict[str, Any]:
+    return manage_principal("grants", name=name, may_send_to=patterns)
+
+
+def show_principal(name: str) -> dict[str, Any]:
+    return manage_principal("get", name=name)
 
 
 def finalize_principal_add(name: str, *, request_id: str) -> None:
@@ -583,6 +679,7 @@ def _pending_principal_request(
     label: str | None,
     *,
     expected_enrollment_id: str | None = None,
+    may_send_to: list[str] | None = None,
 ) -> dict[str, Any]:
     path = _principal_pending_path(name, admin_token)
     with fleet_client._spool_lock(path) as dir_fd:
@@ -623,6 +720,12 @@ def _pending_principal_request(
                     "request_id": uuid4().hex,
                     "expected_enrollment_id": expected_enrollment_id,
                 }
+                from .fleet_hub_message_grants import normalize_patterns
+
+                try:
+                    new_request["may_send_to"] = normalize_patterns(may_send_to if may_send_to is not None else [])
+                except _message_limits.MessageError as exc:
+                    raise fleet_client.FleetClientError(str(exc)) from exc
                 if label is not None:
                     new_request["label"] = label
                 fleet_client._write_spool_atomic(path, [new_request], dir_fd=dir_fd)
@@ -636,6 +739,7 @@ def _pending_principal_request(
                 pending_request["expected_enrollment_id"] = expected
             if isinstance(item.get("label"), str):
                 pending_request["label"] = item["label"]
+            pending_request["may_send_to"] = item.get("may_send_to", [])
             return pending_request
     raise fleet_client.FleetClientError("could not preserve pending principal enrollment request")
 
@@ -691,7 +795,9 @@ def _reply_recipient(hub: str, token: str, message_id: int, *, timeout: float | 
     status, payload = _request(hub, token, body) if timeout is None else _request(hub, token, body, timeout=timeout)
     messages = payload.get("messages")
     if status == 401 or (status == 403 and payload.get("code") == "message_sender_inactive"):
-        raise _UnauthorizedError(str(payload.get("error") or f"fleet hub returned HTTP {status}"))
+        raise _UnauthorizedError(
+            str(payload.get("error") or f"fleet hub returned HTTP {status}"), status=status, code=payload.get("code")
+        )
     if status != 200 or not isinstance(messages, list):
         raise fleet_client.FleetClientError("fleet hub could not resolve the reply recipient")
     previous_id = message_id - 1
@@ -784,8 +890,12 @@ def _drain_locked(
         if status == 401 or (status == 403 and code == "message_sender_inactive"):
             retained.extend(messages[index:])
             fleet_client._write_spool_atomic(path, retained, dir_fd=dir_fd)
-            raise _UnauthorizedError(str(payload.get("error") or f"fleet hub returned HTTP {status}"))
-        if status == 429 and code == "message_recipient_quota":
+            raise _UnauthorizedError(
+                str(payload.get("error") or f"fleet hub returned HTTP {status}"),
+                status=status,
+                code=payload.get("code"),
+            )
+        if status == 429 and code in ("message_recipient_quota", "message_sender_recipient_quota"):
             rejected_recipient = payload.get("recipient") or recipient
             if isinstance(rejected_recipient, str):
                 message["_recipient"] = rejected_recipient
