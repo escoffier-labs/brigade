@@ -1,5 +1,8 @@
 """Message metadata, digest compatibility, and sender acknowledgement views."""
 
+import sqlite3
+from datetime import datetime, timedelta, timezone
+
 import pytest
 
 from brigade import fleet_hub_messages as messages
@@ -122,3 +125,25 @@ def test_sent_byte_cap_and_agent_scope(hub, monkeypatch):
     assert status == 200
     assert [row["id"] for row in page["messages"]] == [first["id"]]
     assert page["next_cursor"] == first["id"]
+
+
+def test_expired_parent_reply_retry_keeps_inherited_thread(message_hub):
+    base, token_a, token_b, db = message_hub
+    parent = _request(
+        base, token_a, {"action": "send", "to": NODE_B, "subject": "Parent", "body": "Old", "thread": "issue:7"}
+    )[1]["message"]
+    reply_request = {"action": "reply", "id": parent["id"], "body": "Recent", "client_id": "thread-retry"}
+    reply = _request(base, token_b, reply_request)[1]["message"]
+    assert reply["thread"] == "issue:7"
+    conn = sqlite3.connect(db)
+    conn.execute(
+        "UPDATE fleet_messages SET created_at=? WHERE id=?",
+        ((datetime.now(timezone.utc) - timedelta(days=91)).isoformat(), parent["id"]),
+    )
+    conn.commit()
+    conn.close()
+    _request(base, token_b, {"action": "list"})
+    replayed = _request(base, token_b, reply_request)
+    assert replayed[0] == 201
+    assert replayed[1]["message"]["id"] == reply["id"]
+    assert replayed[1]["message"]["thread"] == "issue:7"

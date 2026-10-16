@@ -711,7 +711,7 @@ def reply(conn: sqlite3.Connection, raw: dict[str, Any], *, sender: str) -> dict
         if not client_id:
             return None
         accepted = conn.execute(
-            "SELECT recipient,subject,reference,priority FROM fleet_messages "
+            "SELECT recipient,subject,reference,priority,thread FROM fleet_messages "
             "WHERE sender=? AND client_id=? AND reply_to IS NULL",
             (sender, client_id),
         ).fetchone()
@@ -733,7 +733,8 @@ def reply(conn: sqlite3.Connection, raw: dict[str, Any], *, sender: str) -> dict
                 "priority": raw.get("priority", accepted[3]),
                 "client_id": client_id,
                 "enqueued_at": raw.get("enqueued_at"),
-                **{field: raw[field] for field in ("sender_label", "thread", "kind") if field in raw},
+                "thread": raw.get("thread", accepted[4]),
+                **{field: raw[field] for field in ("sender_label", "kind") if field in raw},
             },
             sender=sender,
             reply_to=message_id,
