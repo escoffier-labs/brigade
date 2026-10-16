@@ -363,7 +363,7 @@ jobs:
         with:
           python-version: "3.12"
       - uses: docker/setup-qemu-action@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: docker/setup-buildx-action@v4
       - name: Build and exercise the container image
         run: python tests/fleet_hub_container_smoke.py --platform "${{ matrix.platform }}"
 
