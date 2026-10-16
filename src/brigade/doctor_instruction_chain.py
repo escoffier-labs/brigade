@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import shlex
 from pathlib import Path
 
@@ -45,7 +46,10 @@ def check_codex_instruction_chain(target: Path) -> CheckResult:
     # `context` is an extras-only command, so the remedy must enable extras first.
     # Only the persistent marker survives this process; a one-shot BRIGADE_EXTRAS=1
     # on the doctor invocation does not carry over to the emitted command.
-    enable = "" if extras.marker_path().is_file() else "run `brigade extras on` (or set BRIGADE_EXTRAS=1), then "
+    # An explicit BRIGADE_EXTRAS=0 in the shell overrides the marker for later commands too.
+    explicitly_off = os.environ.get("BRIGADE_EXTRAS", "").strip().lower() in {"0", "false", "no", "off"}
+    persistent = extras.marker_path().is_file() and not explicitly_off
+    enable = "" if persistent else "run `brigade extras on` (or set BRIGADE_EXTRAS=1), then "
     if target_text.isprintable() and "`" not in target_text:
         quoted = shlex.quote(target_text)
         remedy = (
