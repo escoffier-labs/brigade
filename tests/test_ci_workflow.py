@@ -447,6 +447,7 @@ def test_ci_workflow_combines_python312_coverage_and_preserves_required_checks()
     assert "COVERAGE_FILE: .coverage.${{ matrix.python }}.${{ matrix.shard }}" in shards
     assert "--cov=brigade --cov-report=\n" in shards
     assert "--cov-report=term" not in shards
+    assert "--cov-branch" not in shards
     assert "uses: actions/upload-artifact@v7" in shards
     assert "include-hidden-files: true" in shards
     assert "uses: actions/download-artifact@v8" in coverage
@@ -631,11 +632,20 @@ def test_ci_workflow_test_shards_installs_grokbot_extra_on_python312():
     assert section.index("      - name: Install\n") < section.index("      - name: Install with grokbot extra\n")
 
 
+def test_ci_workflow_uses_sysmon_only_on_python312_covered_shard_step():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    step = _workflow_step_section(text, "test-shards", "Pytest shard with coverage")
+
+    assert "if: matrix.python == '3.12'\n" in step
+    assert "        env:\n          COVERAGE_CORE: sysmon\n" in step
+    assert "COVERAGE_CORE" not in text.replace(step, "")
+
+
 def test_ci_workflow_test_shards_asserts_grokbot_mcp_tests_run_without_skips():
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     step = _workflow_step_section(text, "test-shards", "Assert grokbot MCP tests run without skips")
 
-    assert "if: matrix.python == '3.12'" in step
+    assert "if: matrix.python == '3.12' && matrix.shard == 0\n" in step
     assert "tests/test_grokbot_mcp.py" in step
     assert "pytest_exit=$?" in step
     assert "[ $pytest_exit -ne 0 ]" in step

@@ -326,10 +326,11 @@ jobs:
       - name: Pytest shard with coverage
         if: matrix.python == '3.12'
         env:
+          COVERAGE_CORE: sysmon
           COVERAGE_FILE: .coverage.${{ matrix.python }}.${{ matrix.shard }}
         run: python scripts/ci_pytest_shard.py --shard-index "${{ matrix.shard }}" --shard-count 4 -- -q --cov=brigade --cov-report=
       - name: Assert grokbot MCP tests run without skips
-        if: matrix.python == '3.12'
+        if: matrix.python == '3.12' && matrix.shard == 0
         run: |
           output=$(python -m pytest tests/test_grokbot_mcp.py -q --no-header -p no:cacheprovider 2>&1)
           pytest_exit=$?
