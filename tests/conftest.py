@@ -1,6 +1,7 @@
 import os
 import sys
 from pathlib import Path
+from tempfile import mkdtemp
 
 import pytest
 
@@ -83,14 +84,26 @@ def _seat_health_probe_reports_healthy(monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
-def _isolate_hermes_home(tmp_path_factory, monkeypatch):
+def _isolate_hermes_home(_isolation_temp_root, monkeypatch):
     """Point HERMES_HOME at a dedicated temp dir (outside the test's tmp_path so
     it never pollutes workspace assertions) so hermes-harness skill installs
     never touch the real ~/.hermes. The dir exists, so the 'Hermes is installed'
     gate passes for tests that exercise hermes installs; tests that need the
     absent-Hermes case re-point HERMES_HOME in their own body."""
-    home = tmp_path_factory.mktemp("hermes_home")
+    home = Path(mkdtemp(prefix="hermes_home-", dir=_isolation_temp_root))
     monkeypatch.setenv("HERMES_HOME", str(home))
+
+
+@pytest.fixture(scope="session")
+def _isolation_temp_root(tmp_path_factory):
+    """Keep private isolation dirs in one pytest-owned, retained parent.
+
+    Random names avoid numbered allocation scans as the suite grows. Keeping
+    this parent under the base temp preserves pytest cleanup and Git ceilings.
+    """
+    root = tmp_path_factory.getbasetemp() / "isolated-homes"
+    root.mkdir(mode=PRIVATE_DIRECTORY_MODE)
+    return root
 
 
 @pytest.fixture(autouse=True)
@@ -203,7 +216,7 @@ def _guard_agent_cli_spawns(monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
-def _isolate_user_brigade_dir(tmp_path_factory, monkeypatch):
+def _isolate_user_brigade_dir(_isolation_temp_root, monkeypatch):
     """Redirect user-level ``~/.brigade`` sticky state away from the real home.
 
     Authority signed-markers default to ``$HOME/.brigade`` (``BRIGADE_USER_DIR``).
@@ -214,7 +227,7 @@ def _isolate_user_brigade_dir(tmp_path_factory, monkeypatch):
     default location instead of a ``user_brigade`` temp that accidentally
     omits that component.
     """
-    home = tmp_path_factory.mktemp("operator_home")
+    home = Path(mkdtemp(prefix="operator_home-", dir=_isolation_temp_root))
     user_dir = home / ".brigade"
     user_dir.mkdir(mode=PRIVATE_DIRECTORY_MODE)
     set_home(monkeypatch, home)
@@ -256,7 +269,7 @@ def _isolate_fleet_workspace_walk(tmp_path, monkeypatch, request):
 
 
 @pytest.fixture(autouse=True)
-def _no_managed_tools_on_path(monkeypatch, request, tmp_path_factory):
+def _no_managed_tools_on_path(monkeypatch, request, _isolation_temp_root):
     """Default to the bare-host baseline: no managed tool resolves.
 
     Managed-tool resolution goes through ``component_bins.resolve``, which
@@ -285,8 +298,8 @@ def _no_managed_tools_on_path(monkeypatch, request, tmp_path_factory):
     # Point the managed-component data root at a temp dir so nothing in the
     # suite (component_bins.managed_path, doctor's components check) reads the
     # developer's real installed.json or managed bin dir.
-    data_root = tmp_path_factory.mktemp("component_data")
-    config_root = tmp_path_factory.mktemp("component_config")
+    data_root = Path(mkdtemp(prefix="component_data-", dir=_isolation_temp_root))
+    config_root = Path(mkdtemp(prefix="component_config-", dir=_isolation_temp_root))
     monkeypatch.setenv("XDG_DATA_HOME", str(data_root))
     monkeypatch.setenv("XDG_CONFIG_HOME", str(config_root))
     monkeypatch.setenv("LOCALAPPDATA", str(data_root))
