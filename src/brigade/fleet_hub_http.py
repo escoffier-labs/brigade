@@ -36,8 +36,6 @@ from . import fleet_hub_roster_page
 from . import fleet_hub_routing
 from . import fleet_hub_status
 from . import fleet_hub_event_bounds as request_bounds
-from . import fleet_hub_pagination
-from . import fleet_hub_read_bounds
 from .fleet_hub_claim_cardinality import ClaimCardinalityError
 from . import fleet_model_inventory
 from . import fleet_policy_page
@@ -223,8 +221,6 @@ def make_handler(
     frozen_deck = deck_config if deck_config is not None else fleet_command_deck.DeckConfig()
 
     class _Handler(BaseHTTPRequestHandler):
-        _read_limits: list[fleet_hub_read_bounds.ReadLimit]
-
         server_version = "brigade-fleet-hub/1"
         sys_version = ""
         # Idle-socket guard: a peer that connects and never sends a request
@@ -275,7 +271,7 @@ def make_handler(
             if credential is None:
                 return False
             try:
-                conn = self._open_db()
+                conn = open_db(Path(db_path))
                 try:
                     return enrollment.authorized(conn, credential)
                 finally:
@@ -346,7 +342,7 @@ def make_handler(
                 if self._prefetch():
                     raise enrollment.EnrollmentError()
                 code = enrollment.code_param(query)
-                conn = self._open_db()
+                conn = open_db(Path(db_path))
                 try:
                     if not enrollment.available(conn, code):
                         raise enrollment.EnrollmentError()
@@ -376,7 +372,7 @@ def make_handler(
                 return
             try:
                 code = enrollment.code_param(body.decode("ascii"))
-                conn = self._open_db()
+                conn = open_db(Path(db_path))
                 try:
                     credential = enrollment.redeem(conn, code)
                 finally:
@@ -408,7 +404,7 @@ def make_handler(
                     after = params.get("after")
                     if after is not None and not enrollment.valid_session_id(after):
                         raise enrollment.EnrollmentError()
-                    conn = self._open_db()
+                    conn = open_db(Path(db_path))
                     try:
                         payload = enrollment.list_sessions(conn, include_all=params.get("all") == "1", after=after)
                     finally:
@@ -440,7 +436,7 @@ def make_handler(
                         or not enrollment.valid_session_id(raw["session_id"])
                     ):
                         raise enrollment.EnrollmentError()
-                    conn = self._open_db()
+                    conn = open_db(Path(db_path))
                     try:
                         if path == "/dashboard/enrollment":
                             payload = enrollment.mint(conn, label)
@@ -519,7 +515,7 @@ def make_handler(
                 self._send_json(404, {"error": "not found"})
                 return True
             try:
-                conn = self._open_db()
+                conn = open_db(Path(db_path))
             except (FleetHubError, sqlite3.Error):
                 self._send_json(500, {"error": "hub database error"})
                 return True
@@ -556,13 +552,6 @@ def make_handler(
             self._send_json(status, payload)
             return True
 
-        def _open_db(self) -> Any:
-            conn = open_db(Path(db_path))
-            if self.command != "GET":
-                return conn
-            self._read_limits.append(fleet_hub_read_bounds.ReadLimit(conn))
-            return conn
-
         def _read_json_body(self, limit: int = MAX_BODY_BYTES, *, empty_delete: bool = False) -> Any:
             try:
                 return request_bounds.read_json_body(self, limit=limit, empty_delete=empty_delete)
@@ -572,8 +561,6 @@ def make_handler(
                 return None
 
         def _send_json(self, status: int, payload: dict[str, Any]) -> None:
-            if any(read_limit.exceeded for read_limit in getattr(self, "_read_limits", [])):
-                status, payload = 413, fleet_hub_read_bounds.limit_payload()
             body = json.dumps(payload).encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", "application/json")
@@ -599,11 +586,6 @@ def make_handler(
                 f"style-src 'nonce-{nonce}'; img-src 'self'; manifest-src 'self'; connect-src 'none'; base-uri 'none'; "
                 "form-action 'self'; frame-ancestors 'none'"
             )
-            if any(read_limit.exceeded for read_limit in getattr(self, "_read_limits", [])):
-                status = 413
-                body = "Results truncated: complete projection exceeds the Hub row limit.\n"
-                content_type = "text/plain; charset=utf-8"
-                extra_headers = {**(extra_headers or {}), "X-Brigade-Truncated": "true"}
             data = body.encode("utf-8")
             self.send_response(status)
             self.send_header("Content-Type", content_type)
@@ -665,7 +647,7 @@ def make_handler(
             try:
                 # Non-migrating connection (#1161): the schema exists because
                 # server startup created it; this open is read/write only.
-                conn = self._open_db()
+                conn = open_db(Path(db_path))
             except FleetHubUnsupportedSchema:
                 self._send_json(503, {"error": FleetHubUnsupportedSchema.public_message})
                 return
@@ -696,33 +678,29 @@ def make_handler(
                             )
                         )
 
-                    # These existing streaming projections retain bounded node
-                    # rankings and run pages. Budget node identities here so
-                    # the generic row guard does not replace their run caps.
-                    with self._read_limits[-1].machine_projection():
-                        complete_base_node_ids, machine_node_ids, machine_more = fleet_hub_status.board_machine_page(
-                            conn,
-                            include_all=include_all,
-                            offset=offset,
-                            now=current,
-                            history_window_seconds=frozen_deck.stale_history_after_seconds,
-                            stale_history_after_seconds=frozen_deck.stale_history_after_seconds,
-                            predicate=machine_matches,
-                            resolve_last_known_seat=bool(query_model.seat),
-                            priority=machine_priority,
-                        )
-                        machine_limit = fleet_hub_status.BOARD_LIMIT
-                        board_runs, truncated_node_ids = fleet_hub_status.board_status_for_nodes(
-                            conn,
-                            machine_node_ids,
-                            include_all=include_all,
-                            now=current,
-                            history_window_seconds=frozen_deck.stale_history_after_seconds,
-                            stale_history_after_seconds=frozen_deck.stale_history_after_seconds,
-                            resolve_last_known_seat=True,
-                            predicate=machine_matches,
-                            priority=machine_priority,
-                        )
+                    complete_base_node_ids, machine_node_ids, machine_more = fleet_hub_status.board_machine_page(
+                        conn,
+                        include_all=include_all,
+                        offset=offset,
+                        now=current,
+                        history_window_seconds=frozen_deck.stale_history_after_seconds,
+                        stale_history_after_seconds=frozen_deck.stale_history_after_seconds,
+                        predicate=machine_matches,
+                        resolve_last_known_seat=bool(query_model.seat),
+                        priority=machine_priority,
+                    )
+                    machine_limit = fleet_hub_status.BOARD_LIMIT
+                    board_runs, truncated_node_ids = fleet_hub_status.board_status_for_nodes(
+                        conn,
+                        machine_node_ids,
+                        include_all=include_all,
+                        now=current,
+                        history_window_seconds=frozen_deck.stale_history_after_seconds,
+                        stale_history_after_seconds=frozen_deck.stale_history_after_seconds,
+                        resolve_last_known_seat=True,
+                        predicate=machine_matches,
+                        priority=machine_priority,
+                    )
                     board = fleet_hub_status.BoardStatus(
                         runs=board_runs,
                         more=machine_more,
@@ -934,7 +912,7 @@ def make_handler(
                 )
                 return
             try:
-                conn = self._open_db()
+                conn = open_db(Path(db_path))
             except FleetHubUnsupportedSchema:
                 self._send_json(503, {"error": FleetHubUnsupportedSchema.public_message})
                 return
@@ -1058,7 +1036,7 @@ def make_handler(
         ) -> None:
             plain = "text/plain; charset=utf-8"
             try:
-                conn = self._open_db()
+                conn = open_db(Path(db_path))
             except (FleetHubError, sqlite3.Error) as exc:
                 self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
                 return
@@ -1106,7 +1084,7 @@ def make_handler(
                 self._send_html(400, "Invalid observed work page query.\n", content_type=plain)
                 return
             try:
-                conn = self._open_db()
+                conn = open_db(Path(db_path))
                 try:
                     conn.execute("PRAGMA query_only=ON")
                     page = fleet_work_page.load_observed_group(conn, group)
@@ -1140,7 +1118,7 @@ def make_handler(
                 self._send_html(400, "Invalid Worklore page query.\n", content_type=plain)
                 return
             try:
-                conn = self._open_db()
+                conn = open_db(Path(db_path))
                 try:
                     page = fleet_work_page.load_page(conn, cursor=cursor)
                 finally:
@@ -1185,7 +1163,7 @@ def make_handler(
         ) -> None:
             plain = "text/plain; charset=utf-8"
             try:
-                conn = self._open_db()
+                conn = open_db(Path(db_path))
             except (FleetHubError, sqlite3.Error) as exc:
                 self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
                 return
@@ -1252,7 +1230,7 @@ def make_handler(
                 self._send_html(403, "form token mismatch: reload the page\n", content_type=plain)
                 return
             try:
-                conn = self._open_db()
+                conn = open_db(Path(db_path))
             except (FleetHubError, sqlite3.Error) as exc:
                 self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
                 return
@@ -1312,7 +1290,7 @@ def make_handler(
             presented = self._bearer()
             if presented is not None:
                 try:
-                    conn = self._open_db()
+                    conn = open_db(Path(db_path))
                 except (FleetHubError, sqlite3.Error) as exc:
                     self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
                     return None
@@ -1376,7 +1354,7 @@ def make_handler(
                 # A bearer is checked against the database (node tokens) before the
                 # body is read, exactly like the JSON routes.
                 try:
-                    conn = self._open_db()
+                    conn = open_db(Path(db_path))
                 except (FleetHubError, sqlite3.Error) as exc:
                     self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
                     return
@@ -1414,7 +1392,7 @@ def make_handler(
                 self._send_html(403, "form token mismatch: reload the page\n", content_type=plain)
                 return
             try:
-                conn = self._open_db()
+                conn = open_db(Path(db_path))
             except (FleetHubError, sqlite3.Error) as exc:
                 self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
                 return
@@ -1437,7 +1415,6 @@ def make_handler(
                 return
             self._render_roster(status=422, editable=True, error=result.message, submission=submission)
 
-        @fleet_hub_read_bounds.guard_get
         def do_GET(self) -> None:  # noqa: N802 - stdlib handler API
             path, _, query = self.path.partition("?")
             if self._refuse_token_query(query):
@@ -1492,7 +1469,7 @@ def make_handler(
                     return
                 include_all = parse_qs(query).get("all", [""])[0].lower() in ("1", "true", "yes")
                 try:
-                    conn = self._open_db()
+                    conn = open_db(Path(db_path))
                 except FleetHubUnsupportedSchema:
                     self._send_json(503, {"error": FleetHubUnsupportedSchema.public_message})
                     return
@@ -1506,27 +1483,19 @@ def make_handler(
                         return
                     is_admin, _node = caller
                     presented = self._bearer()
-                    if path in fleet_hub_pagination.LIST_PATHS:
-                        if path == "/nodes" and not is_admin:
+                    if path == "/nodes":
+                        if not is_admin:
                             self._send_json(403, {"error": "the admin token is required to manage nodes"})
                             return
-                        try:
-                            limit, offset = fleet_hub_pagination.page_parameters(parse_qs(query))
-                        except ValueError as exc:
-                            self._send_json(400, {"error": str(exc)})
-                            return
-                        payload = fleet_hub_pagination.list_page(
-                            conn,
-                            path,
-                            include_all=include_all,
-                            limit=limit,
-                            offset=offset,
-                            stale_history_after_seconds=frozen_deck.stale_history_after_seconds,
-                        )
-                        if not payload["truncated"] and not {"limit", "cursor"}.intersection(parse_qs(query)):
-                            payload = {
-                                fleet_hub_pagination.LIST_PATHS[path]: payload[fleet_hub_pagination.LIST_PATHS[path]]
-                            }
+                        payload = {"nodes": list_nodes(conn)}
+                    elif path == "/status":
+                        payload = {
+                            "runs": latest_status(
+                                conn,
+                                include_all=include_all,
+                                stale_history_after_seconds=frozen_deck.stale_history_after_seconds,
+                            )
+                        }
                     elif path == "/cloud":
                         if parse_qs(query).get("view", [""])[0] == "capabilities":
                             # Fixed-size preflight, independent of leases and provider policy rows.
@@ -1544,6 +1513,8 @@ def make_handler(
                     elif path == "/preference":
                         pref = get_run_preference(conn)
                         payload = {"preference": {key: value for key, value in pref.items() if value is not None}}
+                    elif path == "/sessions":
+                        payload = {"sessions": list_sessions(conn, include_all=include_all)}
                     elif path == "/policy/status":
                         payload = fleet_hub_policy_api.read_status(conn)
                     elif path == "/policy/inventory":
@@ -1564,6 +1535,8 @@ def make_handler(
                             )
                             return
                         payload = fleet_hub_policy_api.read_policy(conn, history=history, limit=limit)
+                    else:
+                        payload = {"claims": fleet_claim_display.list_display_claims(conn, include_all=include_all)}
                 except ClaimFenceError as exc:
                     self._send_json(503, {"error": str(exc)})
                     return
@@ -1587,7 +1560,7 @@ def make_handler(
                 self._send_json(401, {"error": "unauthorized"})
                 return
             try:
-                conn = self._open_db()
+                conn = open_db(Path(db_path))
             except FleetHubUnsupportedSchema:
                 self._send_json(503, {"error": FleetHubUnsupportedSchema.public_message})
                 return
@@ -1677,7 +1650,7 @@ def make_handler(
             # non-migrating connection (#1161): the schema was created once
             # at server startup.
             try:
-                conn = self._open_db()
+                conn = open_db(Path(db_path))
             except FleetHubUnsupportedSchema:
                 self._send_json(503, {"error": FleetHubUnsupportedSchema.public_message})
                 return

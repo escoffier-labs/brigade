@@ -938,10 +938,15 @@ def fetch_status(*, hub_url: str | None = None, include_all: bool = False) -> li
     hub = hub_url or config["hub_url"]
     if not hub:
         raise FleetClientError("no fleet hub configured (~/.brigade/fleet.toml [fleet] hub_url)")
-    from .fleet_client_pagination import fetch_list
-
-    path = "/status?all=1" if include_all else "/status"
-    return fetch_list(hub, config["token"], path, "runs")
+    url = hub.rstrip("/") + ("/status?all=1" if include_all else "/status")
+    request = urllib.request.Request(url, headers={"Authorization": f"Bearer {config['token']}"})
+    try:
+        with _hub_open(request, timeout=REPORT_TIMEOUT_SECONDS) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception as exc:
+        raise FleetClientError(f"fleet hub status failed: {exc}") from exc
+    runs = payload.get("runs") if isinstance(payload, dict) else None
+    return list(runs) if isinstance(runs, list) else []
 
 
 def fetch_run_preference(*, hub_url: str | None = None) -> dict[str, Any]:
@@ -1077,6 +1082,10 @@ class FleetClaimExpiredError(FleetClaimHeldError):
     """A granted response arrived after its conservative local deadline."""
 
 
+class FleetClaimQuotaError(FleetClaimHeldError):
+    """The hub refused another active claim for this node."""
+
+
 class FleetClaimAuthError(FleetClaimHeldError):
     """The hub refused a claim on credentials (HTTP 401/403): the token is
     unknown, revoked, or not allowed to write.
@@ -1109,12 +1118,12 @@ def _post_claim_blocking(hub_url: str, token: str, body: dict[str, Any], *, time
         with _hub_open(request, timeout=timeout) as response:
             return response.status, json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        if exc.code in (400, 401, 403, 409):
+        if exc.code in (400, 401, 403, 409, 429):
             # A held/expired refusal is an answer, not a transport failure;
             # a 400 carries the hub's validation message (e.g. an older hub
             # that does not know a request field), a 403 names the node the
             # caller's token is bound to, and a 401 says why (unknown or
-            # revoked token), all worth surfacing verbatim.
+            # revoked token). A 429 carries a definite claim quota refusal.
             try:
                 return exc.code, json.loads(exc.read().decode("utf-8"))
             except (OSError, UnicodeDecodeError, json.JSONDecodeError):
@@ -1213,6 +1222,8 @@ def _claim_op(
     payload = payload if isinstance(payload, dict) else {}
     detail = payload.get("error") if isinstance(payload.get("error"), str) else None
     owner = payload.get("owner") if isinstance(payload.get("owner"), dict) else None
+    if status == 429 and payload.get("code") == "claim_cardinality_exceeded":
+        return ClaimDecision(granted=False, reason="quota", detail=detail, holder=holder)
     if status in (401, 403):
         # A stable credential answer (#1161): retrying cannot heal it and it
         # must never be mistaken for a transport failure (which would fail
@@ -1430,11 +1441,19 @@ def fetch_sessions(*, hub_url: str | None = None, include_all: bool = False) -> 
     hub = hub_url or config["hub_url"]
     if not hub:
         raise FleetClientError("no fleet hub configured (~/.brigade/fleet.toml [fleet] hub_url)")
-    from .fleet_client_pagination import fetch_list
-
-    path = "/sessions?all=1" if include_all else "/sessions"
-    limit = MAX_SESSION_HISTORY_RESPONSE_BYTES if include_all else MAX_ACTIVE_SESSIONS_RESPONSE_BYTES
-    return fetch_list(hub, config["token"], path, "sessions", response_limit=limit)
+    url = hub.rstrip("/") + ("/sessions?all=1" if include_all else "/sessions")
+    request = urllib.request.Request(url, headers={"Authorization": f"Bearer {config['token']}"})
+    try:
+        with _hub_open(request, timeout=REPORT_TIMEOUT_SECONDS) as response:
+            limit = MAX_SESSION_HISTORY_RESPONSE_BYTES if include_all else MAX_ACTIVE_SESSIONS_RESPONSE_BYTES
+            raw = _read_bounded_response(response, limit=limit)
+            payload = json.loads(raw.decode("utf-8"))
+    except FleetClientError:
+        raise
+    except Exception as exc:
+        raise FleetClientError(f"fleet hub sessions failed: {type(exc).__name__}") from exc
+    sessions = payload.get("sessions") if isinstance(payload, dict) else None
+    return list(sessions) if isinstance(sessions, list) else []
 
 
 def fetch_claims(*, hub_url: str | None = None, include_all: bool = False) -> list[dict[str, Any]]:
@@ -1443,10 +1462,18 @@ def fetch_claims(*, hub_url: str | None = None, include_all: bool = False) -> li
     hub = hub_url or config["hub_url"]
     if not hub:
         raise FleetClientError("no fleet hub configured (~/.brigade/fleet.toml [fleet] hub_url)")
-    from .fleet_client_pagination import fetch_list
+    url = hub.rstrip("/") + ("/claims?all=1" if include_all else "/claims")
+    request = urllib.request.Request(url, headers={"Authorization": f"Bearer {config['token']}"})
+    try:
+        with _hub_open(request, timeout=REPORT_TIMEOUT_SECONDS) as response:
+            payload = json.loads(response.read().decode("utf-8"))
+    except Exception as exc:
+        raise FleetClientError(f"fleet hub claims failed: {exc}") from exc
+    claims = payload.get("claims") if isinstance(payload, dict) else None
+    return list(claims) if isinstance(claims, list) else []
 
-    path = "/claims?all=1" if include_all else "/claims"
-    return fetch_list(hub, config["token"], path, "claims")
+
+# --- per-node credentials (issue #1150): admin-token control plane ----------
 
 
 def _admin_request(path: str, body: dict[str, Any] | None, *, what: str) -> dict[str, Any]:
@@ -1499,9 +1526,8 @@ def revoke_node(node_id: str) -> dict[str, Any]:
 
 def fetch_nodes() -> list[dict[str, Any]]:
     """GET /nodes from the hub (admin token); raises FleetClientError when refused or unreachable."""
-    from .fleet_client_pagination import collect_pages
-
-    return collect_pages(lambda path: _admin_request(path, None, what="nodes"), "/nodes", "nodes")
+    nodes = _admin_request("/nodes", None, what="nodes").get("nodes")
+    return list(nodes) if isinstance(nodes, list) else []
 
 
 def _claim_renew_interval(ttl_seconds: int) -> float:
@@ -1680,6 +1706,8 @@ def repo_claim(
         # owner means the target freed mid-request.
         request_start = time.monotonic()
         decision = acquire_claim(target, supersede_dead_owner=supersede_dead_owner, **acquire_kwargs)
+    if not decision.granted and decision.reason == "quota":
+        raise FleetClaimQuotaError(f"fleet hub claim quota refused {target!r}: {decision.detail}")
     if not decision.granted and decision.reason == "auth-failed":
         # Fail closed (#1161): bad credentials would turn "the hub refused"
         # into "every node runs unprotected on its local lock". No retry,
@@ -1868,7 +1896,7 @@ def repo_claim(
                     except Exception:
                         _LOG.warning("fleet credential-failure callback raised; the run keeps unwinding", exc_info=True)
                 return
-            if outcome.reason == "held":
+            if outcome.reason in ("held", "quota"):
                 lease.terminate(outcome.reason, notify=True)
                 return
             if lease.terminate(outcome.reason):

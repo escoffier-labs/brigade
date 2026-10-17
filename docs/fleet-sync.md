@@ -708,49 +708,44 @@ Hub-arbitrated repo claims (`POST /claims`, `GET /claims`,
   an authorization — any enrolled node may still `--force`, attributed to
   its own `node_id`.
 
-### Hub request and result bounds
+### Hub request and claim bounds
 
 The Hub checks declared request length before reading or parsing a JSON body.
 Bodies above 8 MiB return HTTP 413. Missing, ambiguous, or invalid body framing
-returns HTTP 400. Worklore retains its smaller 256 KiB body limit and 1 MiB import
-limit. Dashboard enrollment retains its 16 KiB body limit.
+returns HTTP 400 and closes the connection. Transfer-Encoding and duplicate
+Content-Length headers are refused. Worklore retains its smaller 256 KiB body
+limit and 1 MiB import limit. Dashboard enrollment retains its 16 KiB body limit.
 
-Every JSON object or array accepts at most 1000 items. JSON nesting accepts at
-most 32 containers, counting the root container. Structural violations return
-HTTP 400 before domain ingestion starts. An invalid item rejects the entire
-event batch. Existing event string bounds still apply.
+Before JSON decoding, a single byte scan checks nesting and aggregate complexity.
+A document accepts at most 32 levels of containers, 32768 objects and arrays in
+total, and 65536 aggregate items. Each array element or object member counts as
+one item. Duplicate object keys count separately during the scan. Punctuation
+inside strings does not count. Decoded objects and arrays also accept at most
+1000 items each, with aggregate checks repeated after decoding. These checks
+cover fields that domain validators ignore. Violations return HTTP 400 before
+ingestion starts. An invalid item rejects the entire event batch. Existing event
+string bounds still apply.
 
 Each node may hold at most 1024 active claims. A new acquisition beyond that
-limit returns HTTP 429 with `code=claim_cardinality_exceeded`. Existing claims
-remain held. Retry, renewal, release, and replacement of an existing target stay
-available. The quota check shares the acquisition write transaction. Expired
-claims do not consume the active quota.
+limit returns HTTP 429 with `code=claim_cardinality_exceeded`. Direct API callers
+receive `ClaimCardinalityError`. Existing claims remain held. Retry, renewal,
+release, and replacement of an existing target stay available. The quota check
+runs after existing-target decisions inside the acquisition write transaction.
+Expired claims do not consume the active quota. An index on
+`claims(owner_node, expires_at)` supports the count and is created idempotently
+at startup, including on current-version databases, without a schema version bump.
 
-`GET /status`, `/claims`, `/nodes`, and `/sessions` accept `limit` from 1 through
-200. `cursor` is a decimal offset from the preceding response's `next_cursor`.
-The maximum offset is 1000000. Preserve `all=1` on each request when reading
-history. Responses retain their existing `runs`, `claims`, `nodes`, or `sessions`
-array. A response with more rows includes `truncated: true` and `next_cursor`.
-Requests with an explicit limit or cursor also include `truncated: false` and
-`next_cursor: null` on the last page. Small default responses retain their
-previous shape.
+Fleet clients classify this refusal as `quota`. `repo_claim` raises
+`FleetClaimQuotaError`, a subclass of `FleetClaimHeldError`, before admitting
+work. A heartbeat quota refusal terminates the lease through the existing claim
+loss channel. The default policy cancels guarded work.
 
-Follow a continuation even when its array is empty. Status cursors count scanned
-latest rows before terminal-state filtering. Fleet client list functions collect
-all pages and reject missing, invalid, repeated, or excessive continuations.
-Pages are live views. Concurrent inserts or removals can shift offsets, so they
-do not provide a stable historical snapshot.
+The 1 MiB Worklore import ceiling predates these changes. A contract-shaped batch
+of 500 observations can serialize to about 4.27 MB and exceed it. This
+incompatibility still needs a follow-up. The import ceiling remains 1 MiB.
 
-Other GET projections hydrate at most 1000 rows per SQL cursor. This includes
-ancillary dashboard reads, cloud status, policy status, inventory, and model
-rosters. The Machines board streams run rows under its existing per-node and
-2000-run page caps. Its streaming queries count at most 1000 distinct node
-identities instead of individual run rows. A projection requiring more rows returns HTTP 413 with
-`code=result_limit_exceeded` and `truncated: true`. Caught HTML failures carry
-`X-Brigade-Truncated: true` instead of a JSON body. The Hub refuses the whole
-projection because partial occupancy counts or a signed partial roster could
-mislead consumers. This bound limits materialized rows. It does not bound the
-SQLite work required to sort or aggregate the underlying table.
-
+GET endpoints and fleet list clients retain their existing response behavior.
+Result-set bounds, keyset pagination, and a current-status projection move to
+[the 0.29.0 follow-up](https://github.com/escoffier-labs/brigade/issues/1738).
 Retention, POST throttling, per-node fairness behind a proxy, and the fronting
-proxy runbook are deferred to the 0.29.0 follow-up.
+proxy runbook also remain deferred to that issue.

@@ -214,6 +214,8 @@ def _acquire(conn: sqlite3.Connection, request: dict[str, Any], now: float) -> t
         if request["scope"] == "node" and prior[1] == node:
             error += " under another lease than the reconciled dead run's (not superseded)"
         return 409, {"granted": False, "error": error, "owner": hub._claim_payload(prior)}
+    # Existing-target and stale-holder decisions must precede quota checks;
+    # retries and replacements do not consume another claim slot.
     if prior is None:
         fleet_hub_claim_cardinality.check_new_claim(conn, node, now)
     if not retry:

@@ -45,6 +45,8 @@ def oversized_event_field(field: str, value: Any) -> str | None:
 # Apply to every JSON container, including fields a domain validator ignores.
 MAX_JSON_DEPTH = 32
 MAX_JSON_CONTAINER_ITEMS = 1000
+MAX_JSON_CONTAINERS = 32768
+MAX_JSON_ITEMS = 65536
 WORKLORE_BODY_BYTES = 262144
 WORKLORE_IMPORT_BODY_BYTES = 1048576
 
@@ -57,11 +59,16 @@ class RequestBoundsError(ValueError):
         self.status = status
 
 
-def bounded_json_loads(raw: bytes, **kwargs: Any) -> Any:
-    """Check nesting before the recursive decoder, then bound all containers."""
-    import json
+def _scan_json(raw: bytes) -> None:
+    """Bound decoded object growth in one byte pass with a depth-bounded stack.
 
-    depth = 0
+    Each nonempty container contributes its first item and each comma adds
+    another. Object members count once, including duplicate keys. Quoted
+    punctuation and escaped quotes cannot consume the structural budgets.
+    The decoder remains responsible for JSON syntax validation.
+    """
+    empty: list[bool] = []
+    containers = items = 0
     quoted = escaped = False
     for byte in raw:
         if quoted:
@@ -71,22 +78,50 @@ def bounded_json_loads(raw: bytes, **kwargs: Any) -> Any:
                 escaped = True
             elif byte == 34:
                 quoted = False
-        elif byte == 34:
-            quoted = True
-        elif byte in (91, 123):
-            depth += 1
-            if depth > MAX_JSON_DEPTH:
-                raise RequestBoundsError(f"JSON nesting exceeds {MAX_JSON_DEPTH}")
-        elif byte in (93, 125):
-            depth -= 1
+        else:
+            if byte in (9, 10, 13, 32):
+                continue
+            if byte in (93, 125):
+                if empty:
+                    empty.pop()
+                continue
+            if byte == 44 or (empty and empty[-1] and byte != 58):
+                items += 1
+                if items > MAX_JSON_ITEMS:
+                    raise RequestBoundsError(f"JSON aggregate items exceed {MAX_JSON_ITEMS}")
+                if empty:
+                    empty[-1] = False
+            if byte == 34:
+                quoted = True
+            elif byte in (91, 123):
+                containers += 1
+                if containers > MAX_JSON_CONTAINERS:
+                    raise RequestBoundsError(f"JSON containers exceed {MAX_JSON_CONTAINERS}")
+                empty.append(True)
+                if len(empty) > MAX_JSON_DEPTH:
+                    raise RequestBoundsError(f"JSON nesting exceeds {MAX_JSON_DEPTH}")
+
+
+def bounded_json_loads(raw: bytes, **kwargs: Any) -> Any:
+    """Bound structural complexity before decoding and check the result too."""
+    import json
+
+    _scan_json(raw)
     try:
         value = json.loads(raw.decode("utf-8"), **kwargs)
     except (UnicodeError, ValueError, RecursionError) as exc:
         raise RequestBoundsError("body is not valid JSON") from exc
     pending = [value]
+    containers = items = 0
     while pending:
         item = pending.pop()
         if isinstance(item, (list, dict)):
+            containers += 1
+            items += len(item)
+            if containers > MAX_JSON_CONTAINERS:
+                raise RequestBoundsError(f"JSON containers exceed {MAX_JSON_CONTAINERS}")
+            if items > MAX_JSON_ITEMS:
+                raise RequestBoundsError(f"JSON aggregate items exceed {MAX_JSON_ITEMS}")
             if len(item) > MAX_JSON_CONTAINER_ITEMS:
                 raise RequestBoundsError(f"JSON container exceeds {MAX_JSON_CONTAINER_ITEMS} items")
             pending.extend(item.values() if isinstance(item, dict) else item)
