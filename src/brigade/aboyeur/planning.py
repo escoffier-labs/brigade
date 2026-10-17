@@ -22,6 +22,7 @@ from typing import Any, Callable, ContextManager, Iterator, Mapping, Sequence
 from uuid import uuid4
 
 from .. import agents
+from .. import claim_loss_cancellation
 from .. import fleet_session_bootstrap
 from .. import codex_appserver
 from .. import context_eval
@@ -440,10 +441,8 @@ def _call_with_process_registry(
     )
     if accepts_registry:
         kwargs["process_registry"] = process_registry
-    try:
+    with claim_loss_cancellation.cancellation_boundary(lambda: proc.check_cancellation(process_registry)):
         return function(*args, **kwargs)
-    finally:
-        proc.check_cancellation(process_registry)
 
 
 def _coverage_missing(route: RouteBrief | None, assignments: list[Assignment]) -> list[str]:

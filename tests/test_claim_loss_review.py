@@ -9,12 +9,17 @@ import sys
 import threading
 import time
 from contextlib import contextmanager
+from datetime import timedelta
+from types import SimpleNamespace
 
 import pytest
 
 from brigade import aboyeur, agents, cli, fleet_client, fleet_session_bootstrap, proc, runguard
 from brigade import fleet_t3_transport as t3
-from brigade.aboyeur import planning
+from brigade.aboyeur import orchestrator, planning
+from brigade import claim_loss_cancellation, run_budget, run_lifecycle, run_transport
+from tests.test_aboyeur import _roster
+from tests.run_test_helpers import run_aboyeur_guarded
 from tests._posix import requires_process_groups
 from tests.test_fleet_t3_transport import FakePolicyClient, FakeT3Runner, REVISION, _eligible, _succeeded
 
@@ -39,7 +44,7 @@ def claimed_run(tmp_path, monkeypatch):
     monkeypatch.setattr(fleet_client, "load_model_policy_snapshot", lambda: {"state": "unconfigured", "models": []})
     monkeypatch.setattr(fleet_session_bootstrap, "ensure_prompt", lambda prompt, **kwargs: prompt)
 
-    def run(*, direct=False):
+    def run(*, direct=False, transport="exec"):
         argv = [
             "run",
             "do something",
@@ -48,7 +53,7 @@ def claimed_run(tmp_path, monkeypatch):
             "--cwd",
             str(ws),
             "--codex-transport",
-            "exec",
+            transport,
             "--no-code-graph",
             "--no-evidence",
             "--no-route",
@@ -185,7 +190,7 @@ def test_canceled_registry_refuses_popen(monkeypatch):
         raise AssertionError("canceled registry launched a child")
 
     monkeypatch.setattr(proc.subprocess, "Popen", forbidden)
-    with pytest.raises(KeyboardInterrupt):
+    with pytest.raises(proc.ProcessCancelledError):
         proc.run([sys.executable, "-c", "pass"], process_registry=registry)
 
 
@@ -235,7 +240,7 @@ def test_remote_cancellation_prevents_new_side_effects(tmp_path, boundary):
     runner = FakeT3Runner({"doctor": _eligible(), "capacity": _eligible(), "submit": _succeeded()})
     client = t3.T3FleetClient(runner=runner, process_registry=registry)
     resolution = t3.RouteResolution(route=t3.ROUTE_REMOTE, reason="selected", seat="coder", decision_id="dec-fixed")
-    with pytest.raises(KeyboardInterrupt):
+    with pytest.raises(proc.ProcessCancelledError):
         t3.execute_remote(
             resolution,
             "inspect",
@@ -248,3 +253,233 @@ def test_remote_cancellation_prevents_new_side_effects(tmp_path, boundary):
         )
     assert len(policy.delegation_calls) == (0 if boundary == "delegation" else 1)
     assert "submit" not in runner.verbs()
+
+
+@pytest.mark.parametrize("phase", ["dispatch", "appserver-start"])
+def test_claim_loss_cannot_replace_retained_lock_failure(claimed_run, monkeypatch, phase):
+    ws, callbacks, run = claimed_run
+    monkeypatch.setattr(agents, "run_agent", lambda *args, **kwargs: agents.AgentResult(text="done", ok=True))
+    if phase == "dispatch":
+        record = run_lifecycle.record_dispatch_fact
+
+        def failed_receipt(*args, **kwargs):
+            if kwargs["event_type"] == "run.dispatch.requested":
+                callbacks["lost"]("held")
+                raise OSError("dispatch receipt unavailable")
+            return record(*args, **kwargs)
+
+        monkeypatch.setattr(run_lifecycle, "record_dispatch_fact", failed_receipt)
+    else:
+
+        class FailedServer:
+            def __init__(self, **kwargs):
+                pass
+
+            def start(self):
+                callbacks["lost"]("held")
+                raise runguard.RetainRunLockError("app-server lifecycle unavailable")
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(orchestrator.codex_appserver, "AppServer", FailedServer)
+    assert run(direct=True, transport="exec" if phase == "dispatch" else "app-server") == 2
+    assert runguard.lock_path(ws).exists(), "claim loss replaced the failure that required lock retention"
+
+
+def test_budget_cancelled_parallel_wave_remains_budget_exhausted(tmp_path, monkeypatch):
+    monkeypatch.setenv("BRIGADE_LIFECYCLE_JOURNAL", "1")
+    first_started = threading.Event()
+    cancelled = threading.Event()
+    reserve = run_budget.BudgetCoordinator.reserve_and_record_dispatch
+    cancel = proc.ProcessRegistry.cancel
+
+    def expired_second_dispatch(self, *, seat, **kwargs):
+        if seat == "reviewer":
+            assert first_started.wait(5)
+            self.clock = lambda: self._started_at + timedelta(seconds=7200)
+        return reserve(self, seat=seat, **kwargs)
+
+    def observed_cancel(self):
+        result = cancel(self)
+        cancelled.set()
+        return result
+
+    def run_agent(cli_ref, prompt, *, process_registry=None, **kwargs):
+        if cli_ref == "ollama:llama3.3":
+            first_started.set()
+            assert cancelled.wait(5)
+            result = proc.run([sys.executable, "-c", "pass"], process_registry=process_registry)
+            return agents.AgentResult(text=result.stdout, ok=result.code == 0)
+        return agents.AgentResult(
+            text=json.dumps(
+                {
+                    "assignments": [
+                        {"worker": "coder", "task": "implement", "stage": 1},
+                        {"worker": "reviewer", "task": "review", "stage": 1},
+                    ]
+                }
+            ),
+            ok=True,
+        )
+
+    # Observe the already-running worker first, so its launch refusal cannot
+    # hide behind the second worker's budget exception in completion ordering.
+    monkeypatch.setattr(run_transport, "as_completed", lambda futures: iter(futures))
+    monkeypatch.setattr(run_budget.BudgetCoordinator, "reserve_and_record_dispatch", expired_second_dispatch)
+    monkeypatch.setattr(proc.ProcessRegistry, "cancel", observed_cancel)
+    monkeypatch.setattr(agents, "run_agent", run_agent)
+    output_dir = tmp_path / "run"
+    try:
+        rc = run_aboyeur_guarded(
+            "build feature",
+            _roster(),
+            cwd=tmp_path,
+            output_dir=output_dir,
+            route_enabled=False,
+            code_graph_enabled=False,
+            evidence_enabled=False,
+            run_budget_payload={
+                "schema": "brigade.run_budget.v1",
+                "schema_version": 1,
+                "ceilings": {"wall_clock_seconds": 3600},
+            },
+        )
+    except KeyboardInterrupt as exc:
+        pytest.fail(f"budget wave escaped as operator cancellation: {exc}")
+    assert rc == 1
+    receipt = json.loads((output_dir / "run.json").read_text())
+    assert receipt["failure"]["kind"] == "budget-exhausted"
+
+
+@pytest.mark.parametrize("state", ["running", "succeeded"])
+def test_submit_handle_is_persisted_before_claim_cancellation(tmp_path, state):
+    scope = claim_loss_cancellation.ClaimLossCancellation()
+    handles = []
+    fake = FakeT3Runner({"doctor": _eligible(), "capacity": _eligible(), "submit": _succeeded(state=state)})
+
+    def response_then_loss(command, **kwargs):
+        response = fake(command, **kwargs)
+        if command[1] == "submit":
+            scope.request()
+        return response
+
+    client = t3.T3FleetClient(runner=response_then_loss, process_registry=scope.process_registry)
+    resolution = t3.RouteResolution(route=t3.ROUTE_REMOTE, reason="selected", seat="coder", decision_id="dec-fixed")
+    with pytest.raises(claim_loss_cancellation.ClaimLossCancelled):
+        t3.execute_remote(
+            resolution,
+            "inspect",
+            title="inspect",
+            cwd=tmp_path,
+            client=client,
+            policy_client=FakePolicyClient(),
+            parent_request_id="run-test",
+            source_revision=REVISION,
+            on_handle=lambda *handle: handles.append(handle),
+        )
+    assert len(handles) == 1, "a successful submit lost its recoverable remote handle"
+    assert handles[0][1] == _succeeded()["request_id"]
+    assert "wait" not in fake.verbs()
+
+
+def test_cancellation_wait_uses_snapshot_after_unregister(monkeypatch):
+    scope = claim_loss_cancellation.ClaimLossCancellation()
+    snapshot = threading.Event()
+    finish = threading.Event()
+
+    class Process:
+        def poll(self):
+            return 0 if finish.is_set() else None
+
+    processes = [Process() for _ in range(3)]
+    for process in processes:
+        scope.process_registry.register(process)
+
+    def slow_batch(batch, **kwargs):
+        assert len(batch) == 3
+        for process in batch:
+            scope.process_registry.unregister(process)
+        snapshot.set()
+        assert finish.wait(2)
+
+    monkeypatch.setattr(proc, "_terminate_processes", slow_batch)
+    scope.request()
+    scope.__enter__()
+    assert snapshot.wait(2)
+    times = iter([0.0, 6.0])
+    monkeypatch.setattr(claim_loss_cancellation, "time", SimpleNamespace(monotonic=lambda: next(times, 6.0)))
+    wait = scope._done.wait
+
+    def complete_batch(timeout):
+        finish.set()
+        return wait(1)
+
+    monkeypatch.setattr(scope._done, "wait", complete_batch)
+    try:
+        scope.__exit__(None, None, None)
+    finally:
+        finish.set()
+        scope._watcher.join(timeout=2)
+    assert all(outcome.result == "interrupted" for outcome in scope.outcomes)
+
+
+@pytest.mark.parametrize("boundary", ["stop", "deadline", "done-check", "outcomes"])
+def test_heartbeat_interrupt_during_exit_resumes_cleanup(monkeypatch, boundary):
+    scope = claim_loss_cancellation.ClaimLossCancellation()
+    scope.request()
+    scope.__enter__()
+    assert scope._done.wait(2)
+    fired = False
+
+    def interrupt_once(function):
+        def interrupted(*args, **kwargs):
+            nonlocal fired
+            if not fired:
+                fired = True
+                _thread.interrupt_main()
+            return function(*args, **kwargs)
+
+        return interrupted
+
+    if boundary == "stop":
+        monkeypatch.setattr(scope._stopped, "set", interrupt_once(scope._stopped.set))
+    elif boundary == "deadline":
+        original = proc.ProcessRegistry.cancellation_timeout.fget
+        monkeypatch.setattr(proc.ProcessRegistry, "cancellation_timeout", property(interrupt_once(original)))
+    elif boundary == "done-check":
+        monkeypatch.setattr(scope._done, "is_set", interrupt_once(scope._done.is_set))
+    else:
+        original = proc.ProcessRegistry.cancellation_outcomes.fget
+        monkeypatch.setattr(proc.ProcessRegistry, "cancellation_outcomes", property(interrupt_once(original)))
+    error = None
+    try:
+        scope.__exit__(None, None, None)
+    except BaseException as exc:
+        error = exc
+    assert fired
+    assert error is None, f"heartbeat interrupt escaped cleanup or caused false retention: {error!r}"
+
+
+def test_repeated_cancel_resignals_only_survivors(monkeypatch):
+    class Process:
+        running = True
+
+        def poll(self):
+            return None if self.running else 0
+
+    process = Process()
+    calls = []
+
+    def terminate(batch, **kwargs):
+        calls.append(batch)
+        if len(calls) == 2:
+            process.running = False
+
+    monkeypatch.setattr(proc, "_terminate_processes", terminate)
+    registry = proc.ProcessRegistry()
+    registry.register(process, seat="coder")
+    assert registry.cancel() == (proc.ProcessCancelOutcome("coder", "still_active"),)
+    assert registry.cancel() == (proc.ProcessCancelOutcome("coder", "interrupted"),)
+    registry.cancel()
+    assert calls == [(process,), (process,)], "exited process identities must not be signalled again"
