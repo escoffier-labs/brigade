@@ -391,7 +391,7 @@ def _status_entry(
         if projected != state:
             entry["original_state"] = state
             entry["state"] = projected
-    if age_stale and state != "external.unknown" and not fleet_command_deck.is_terminal_state(state):
+    if age_stale and entry["state"] != "external.unknown" and not fleet_command_deck.is_terminal_state(state):
         age = _received_at_age_seconds(row[12], now=now)
         if age is not None and age > stale_history_after_seconds:
             entry["original_state"] = state

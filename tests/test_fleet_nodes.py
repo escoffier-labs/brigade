@@ -1036,3 +1036,35 @@ def test_unknown_t3_runs_remain_visible_in_attention_view(hub, view):
     assert "unknown-t3" in page
     assert "external.unknown" in page
     assert 'data-bucket="running"' not in page
+
+
+@pytest.mark.parametrize("future", [False, True])
+def test_unknown_source_time_stays_unknown_in_history(hub, future):
+    from datetime import datetime, timedelta, timezone
+
+    url, db = hub
+    token = _enroll(url, NODE_A)
+    now = datetime.now(timezone.utc)
+    event = {
+        **_event(run_id="unknown-source-history"),
+        "harness": "t3-fleet",
+        "ts": (now + timedelta(days=1)).isoformat() if future else "not-a-time",
+    }
+    assert _request(url, "/events", token, event)[0] == 200
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("UPDATE events SET received_at = ?", ((now - timedelta(days=2)).isoformat(),))
+        conn.commit()
+        assert conn.execute("SELECT state FROM events").fetchone()[0] == "run.started"
+    finally:
+        conn.close()
+    run = _request(url, "/status?all=1", token)[1]["runs"][0]
+    assert run["state"] == "external.unknown"
+    assert run["original_state"] == "run.started"
+    for view in ("machines", "repos"):
+        request = urllib.request.Request(url + "/view/" + view + "?all=1", headers={"Authorization": f"Bearer {ADMIN}"})
+        with urllib.request.urlopen(request, timeout=5) as response:
+            page = response.read().decode()
+        assert "unknown-source-history" in page
+        assert "external.unknown" in page
+        assert 'data-bucket="stale"' not in page
