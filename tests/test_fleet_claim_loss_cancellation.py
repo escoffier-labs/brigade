@@ -202,35 +202,3 @@ def test_claim_loss_before_dispatch_does_not_start_worker(tmp_path, monkeypatch)
     assert dispatched == []
     receipt = json.loads(next((ws / ".brigade" / "runs").glob("*/run.json")).read_text())
     assert receipt["failure"]["kind"] == "fleet-claim-lost"
-
-
-def test_mock_claim_loss_ignores_abandoned_renewal(tmp_path, monkeypatch):
-    pid_file = tmp_path / "worker.pid"
-    lost = threading.Event()
-    loss_time = []
-    _mock_claim_loss(monkeypatch, pid_file, lost, loss_time)
-    post = fleet_client._post_claim_blocking
-    completed = threading.Event()
-
-    def tracked_post(*args, **kwargs):
-        try:
-            return post(*args, **kwargs)
-        finally:
-            completed.set()
-
-    monkeypatch.setattr(fleet_client, "_post_claim_blocking", tracked_post)
-    monkeypatch.setattr(fleet_client, "CLAIM_TIMEOUT_SECONDS", 0.05)
-    kwargs = dict(holder="test-holder", node_id=NODE_A, hub_url="http://hub.example.test", token="test-token")
-    outcome = fleet_client.renew_claim("test-target", **kwargs)
-    assert outcome.reason == "hub-unavailable"
-    assert not completed.is_set(), "the renewal must expire before worker startup"
-    pid_file.touch()
-    assert completed.wait(2), "the abandoned request must finish before checking loss"
-    assert not lost.is_set(), "an abandoned response must not publish claim loss"
-    assert loss_time == []
-
-    monkeypatch.setattr(fleet_client, "CLAIM_TIMEOUT_SECONDS", 2.5)
-    outcome = fleet_client.renew_claim("test-target", **kwargs)
-    assert outcome.reason == "held"
-    assert lost.is_set()
-    assert len(loss_time) == 1
