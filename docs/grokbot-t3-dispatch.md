@@ -38,14 +38,14 @@ paths with your configured values.
   "prompt_max_bytes": 16384,
   "ledger_path": "$HOME/.config/grokbot-t3/ledger.sqlite3",
   "wake_path": "$HOME/.config/grokbot-t3/wake.json",
-  "writable_paths": []
+  "writable_paths": ["$HOME/.local/state/t3-fleet"]
 }
 ```
 
 | Key | Meaning |
 |---|---|
 | `schema` | Must be `brigade.grokbot.t3-dispatch-runtime.v1`. |
-| `enabled` | Boolean kill switch for mutating tools. |
+| `enabled` | Boolean kill switch for submit, followup, answer, and approve. Interrupt stays available. |
 | `t3_fleet_bin` | Absolute path to the local `t3-fleet` executable. |
 | `git_bin` | Absolute path to `git`, used to resolve `base_ref`. |
 | `repositories` | Nonempty map of allowed repository ids to `remote` and `default_branch`, up to 50 entries. Remotes must be HTTPS Git URLs ending in `.git`. |
@@ -53,13 +53,19 @@ paths with your configured values.
 | `seats` | Nonempty, unique seat allowlist. |
 | `default_seat` | Seat used when the bot omits `seat`, must be in `seats`. |
 | `fallback_seat` | A different allowed seat, or `null` to disable fallback. |
-| `fleet_enrolled` | Boolean controlling automatic host routing and submit override reasons. |
+| `fleet_enrolled` | Boolean controlling submit override reasons. Host selection always uses the allowlist. |
 | `max_open` | Open requests across all callers, 1 through 20. Example: 6. |
-| `daily_limit` | Submits per UTC day, 1 through 200. Example: 30. |
+| `daily_limit` | Submit and followup attempts per UTC day, including timeouts, refusals, and fallback launches, 1 through 200. Example: 30. |
 | `prompt_max_bytes` | Prompt byte limit, 1024 through 32768. Example: 16384. |
 | `ledger_path` | Absolute path to the pack-owned SQLite ledger. |
 | `wake_path` | Absolute path to the wake config below. |
 | `writable_paths` | Up to 8 additional absolute paths permitted by the service write sandbox. |
+
+The service sandbox permits writes to the ledger and wake directories plus
+`writable_paths`. Include the actual t3-fleet state directory explicitly, such
+as `$HOME/.local/state/t3-fleet` after expansion. SSH `known_hosts` and
+`ControlPath` directories may also need write access. The unit renderers do
+not add these paths automatically. Doctor warns when `writable_paths` is empty.
 
 Submits and follow-ups always send `runtime_mode: full-access`. This is fixed
 internally and is not a runtime JSON key or tool argument. Calls use machine
@@ -74,8 +80,8 @@ and returns `fallback_used: true`. A bot-named seat never falls back.
 With `fleet_enrolled: false`, every submit sends an explicit host and seat
 without `override_reason`. For `host: auto`, the pack chooses the allowlisted
 `eligible` host with the most free slots (`limit - active`). Ties follow
-`hosts` order. With `fleet_enrolled: true`, `auto` passes through and every
-submit carries `override_reason: grokbot t3-dispatch seat <seat> for <caller>`.
+`hosts` order. With `fleet_enrolled: true`, the pack still picks an explicit
+allowlisted host from capacity, and every submit carries `override_reason: grokbot t3-dispatch seat <seat> for <caller>`.
 
 ## Setup
 
@@ -105,7 +111,7 @@ saving, and keep each key file owner-only with mode `0600`.
 {
   "schema": "brigade.grokbot.t3-dispatch-wake.v1",
   "targets": {
-    "example-bot": [
+    "default": [
       {
         "url": "https://example.com/hooks/t3-wake",
         "key_file": "$HOME/.config/grokbot-t3/wake.key"
@@ -116,23 +122,30 @@ saving, and keep each key file owner-only with mode `0600`.
 ```
 
 The caller name selects its target list, with `default` used when no matching
-caller entry exists. Each list accepts 1 through 4 targets. Wake requests use
+caller entry exists. The `default` target list is required. Add caller-specific
+lists alongside it when needed. Each list accepts 1 through 4 targets. Wake requests use
 HTTPS POST, `Authorization: Bearer <key>` and `X-Automation-Key: <key>`, an
-8-second timeout, and one attempt per target per timer tick. The JSON body
+8-second timeout, no redirects or environment proxies, and one attempt per
+pending target per timer tick. A redirect counts as a failed wake. The JSON body
 contains only `request_id`, `state`, `repository`, and `title`.
 
 The watcher wakes on `needs_attention`, `unknown`, `succeeded`, `failed`, or
 `interrupted`. A state change clears `notified_state`, so a second question
 after a running stretch wakes again. A wake counts as delivered only when
-every target for the caller returns HTTP 200. Failed delivery retries on the
-next tick. Results append to `wake-notify.jsonl` beside `wake_path`.
+every target for the caller returns HTTP 200. Only failed targets retry on the
+next tick. Successes and attempt counts persist across watcher restarts and
+reset on a state change. After 30 failed delivery ticks for a request and state,
+the watcher marks that state notified and logs `gave-up`. After 30 consecutive
+status failures, it records `unknown`, stops polling that row, and sends one
+notification, subject to the same delivery retry cap. A successful status poll
+resets the failure count. Results append to `wake-notify.jsonl` beside `wake_path`.
 
 ## Tools
 
 | Tool | Arguments | Does |
 |---|---|---|
 | `t3_capacity` | none | `t3-fleet capacity`, projected to host, active, limit, state. Read-only. |
-| `t3_submit` | `repository`, `prompt`, `title`, `caller`, optional `host` (default `auto`), `seat`, `base_ref`, `interaction_mode` (`default` or `plan`) | Validates against allowlists and limits, resolves `base_ref` (default the repository's default branch) to a 40-character SHA with `git ls-remote` in the controller's checkout, picks a host when `auto` and not enrolled (most free capacity among allowlisted eligible hosts), prepends the dispatch header, runs `t3-fleet submit` in machine mode with one `t3-fleet.request.v1` JSON object on stdin carrying the prompt and `runtime_mode: full-access` (the prompt never reaches argv), records the request in the ledger, returns `request_id`, host, seat. |
+| `t3_submit` | `repository`, `prompt`, `title`, `caller`, optional `host` (default `auto`), `seat`, `base_ref`, `interaction_mode` (`default` or `plan`) | Validates against allowlists and limits, resolves `base_ref` (default the repository's default branch) to a 40-character SHA with `git ls-remote` in the controller's checkout, picks an allowlisted host when `auto`, including in enrolled mode (most free capacity among allowlisted eligible hosts), prepends the dispatch header, runs `t3-fleet submit` in machine mode with one `t3-fleet.request.v1` JSON object on stdin carrying the prompt and `runtime_mode: full-access` (the prompt never reaches argv), records the request in the ledger, returns `request_id`, host, seat. |
 | `t3_status` | `request_id` | `t3-fleet status`, projected: state, `needs_attention`, `pending_request` (as `t3-fleet` bounds it), thread id, seat, last update. |
 | `t3_wait` | `request_id`, `timeout_s` (max 60) | Bounded `t3-fleet wait`. |
 | `t3_followup` | `request_id`, `message` | `t3-fleet followup` in machine mode, with the message and `runtime_mode: full-access` on stdin. |
@@ -143,7 +156,15 @@ next tick. Results append to `wake-notify.jsonl` beside `wake_path`.
 
 `caller` is the bot's own name and selects its wake targets. The title prefix
 is `[grokbot:<caller>]`. Tools taking `request_id` accept only requests in this
-pack's ledger.
+pack's ledger. `base_ref` is a branch name only, resolved under `refs/heads/`.
+Git tags and SHAs are not resolved as revisions.
+
+Followups count toward `daily_limit`. Reopening a terminal request also checks
+`max_open`. A submit with a known request id but an error or unrecognized state
+is recorded as `unknown` and returns `submit-unknown` with that id. Submit
+attempts without a recoverable id still count toward `daily_limit`. Do not
+resubmit an unknown outcome. Ask the operator to inspect and recover it through
+`t3-fleet`.
 
 ## Kill switch
 
@@ -154,7 +175,9 @@ it reads the runtime once at start:
 systemctl --user restart brigade-grokbot-t3-dispatch.service
 ```
 
-Mutating tools then return `dispatch-disabled`. For an immediate hard stop:
+Submit, followup, answer, and approve then return `dispatch-disabled`.
+`t3_interrupt` stays available while disabled so it can stop active work.
+Read tools remain available. For an immediate hard stop:
 
 ```bash
 systemctl --user stop brigade-grokbot-t3-dispatch.service cloudflared-grokbot-t3.service

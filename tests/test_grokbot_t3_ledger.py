@@ -84,3 +84,51 @@ def test_recent_projection(tmp_path):
         "updated_at",
     }
     assert [row["request_id"] for row in ledger.recent("Builder", 10)] == ["r1"]
+
+
+def test_existing_requests_seed_attempt_count_once(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "ledger.sqlite3"
+    ledger = Ledger(path)
+    _record(ledger, "old")
+    ledger.close()
+    with sqlite3.connect(path) as connection:
+        connection.execute("DROP TABLE IF EXISTS attempts")
+    ledger = Ledger(path)
+    assert ledger.attempts_since(T0.replace(hour=0)) == 1
+    ledger.record_attempt(T0)
+    ledger.close()
+    ledger = Ledger(path)
+    assert ledger.attempts_since(T0.replace(hour=0)) == 2
+    ledger.close()
+
+
+def test_existing_parent_mode_is_preserved(tmp_path):
+    parent = tmp_path / "shared"
+    parent.mkdir(mode=0o750)
+    ledger = Ledger(parent / "ledger.sqlite3")
+    assert stat.S_IMODE(parent.stat().st_mode) == 0o750
+    ledger.close()
+
+
+def test_existing_writable_parent_is_rejected_without_chmod(tmp_path):
+    import pytest
+    from brigade.grokbot_t3.contracts import T3DispatchError
+
+    parent = tmp_path / "shared"
+    parent.mkdir()
+    parent.chmod(0o770)
+    with pytest.raises(T3DispatchError, match="Dispatch is unavailable"):
+        Ledger(parent / "ledger.sqlite3")
+    assert stat.S_IMODE(parent.stat().st_mode) == 0o770
+    assert not (parent / "ledger.sqlite3").exists()
+
+
+def test_existing_parent_must_be_owned_by_current_user(tmp_path, monkeypatch):
+    import pytest
+    from brigade.grokbot_t3.contracts import T3DispatchError
+
+    monkeypatch.setattr(os, "getuid", lambda: tmp_path.stat().st_uid + 1)
+    with pytest.raises(T3DispatchError, match="Dispatch is unavailable"):
+        Ledger(tmp_path / "ledger.sqlite3")

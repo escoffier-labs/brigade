@@ -47,18 +47,18 @@ brigade-grokbot-t3-watch.timer (every 1 min)
   - OpenCode seats are limited to free or Go models whose provider keeps no data and does not train on prompts, per the OpenCode models page on 2026-10-16. New roster seats: `dsflash` = `opencode/deepseek-v4.1-flash-free` (200K context, free for a limited time, no end date published) and `glmflash` = `opencode/glm-5.3-flash-free` (free for a limited time). `opencode-go/deepseek-v4.1-flash` (Go subscription, 1M context, $80 a month cap) is not a seat in this version. Excluded because the provider may train on or log prompts: `muse13` (Meta contributor tier), Big Pickle, LL Alpha, Exo, MiMo free models, and the NVIDIA trial Nemotrons.
   - `hosts`: allowlist. Default: every fleet host configured in `t3-fleet` (for example `["host-a", "host-b", "host-c"]`).
   - `runtime_mode`: fixed `full-access`. Not a tool argument.
-  - `fleet_enrolled`: `false` today. When false, the pack always sends an explicit host and seat and no override reason. When true, `host: "auto"` is passed through and named hosts or seats carry an override reason.
-  - `max_open`: default `6` open requests across all bots. `daily_limit`: default `30` submits per UTC day.
+  - `fleet_enrolled`: `false` today. When false, the pack always sends an explicit host and seat and no override reason. When true, the pack still picks an explicit allowlisted host from capacity for `host: "auto"`, and each submit carries an override reason. The host allowlist remains authoritative.
+  - `max_open`: default `6` open requests across all bots. `daily_limit`: default `30` submit and followup attempts per UTC day, including timeouts, refusals, and fallback launches.
   - `prompt_max_bytes`: default `16384`.
   - `ledger_path`, `wake_path` (see piece 3).
-  - `enabled`: kill switch. When false, every mutating tool returns `dispatch-disabled`.
+  - `enabled`: kill switch. When false, submit, followup, answer, and approve return `dispatch-disabled`. Interrupt stays available to stop active work, and read tools remain available.
 
 ### 2. Tools
 
 | Tool | Arguments | Does |
 |---|---|---|
 | `t3_capacity` | none | `t3-fleet capacity`, projected to host, active, limit, state. Read-only. |
-| `t3_submit` | `repository`, `prompt`, `title`, `caller`, optional `host` (default `auto`), `seat`, `base_ref`, `interaction_mode` (`default` or `plan`) | Validates against allowlists and limits, resolves `base_ref` (default the repository's default branch) to a 40-character SHA with `git ls-remote` in the controller's checkout, picks a host when `auto` and not enrolled (most free capacity among allowlisted eligible hosts), prepends the dispatch header, runs `t3-fleet submit` in machine mode with one `t3-fleet.request.v1` JSON object on stdin carrying the prompt and `runtime_mode: full-access` (the prompt never reaches argv), records the request in the ledger, returns `request_id`, host, seat. |
+| `t3_submit` | `repository`, `prompt`, `title`, `caller`, optional `host` (default `auto`), `seat`, `base_ref`, `interaction_mode` (`default` or `plan`) | Validates against allowlists and limits, resolves `base_ref` (default the repository's default branch) to a 40-character SHA with `git ls-remote` in the controller's checkout, picks an allowlisted host when `auto`, including in enrolled mode (most free capacity among allowlisted eligible hosts), prepends the dispatch header, runs `t3-fleet submit` in machine mode with one `t3-fleet.request.v1` JSON object on stdin carrying the prompt and `runtime_mode: full-access` (the prompt never reaches argv), records the request in the ledger, returns `request_id`, host, seat. |
 | `t3_status` | `request_id` | `t3-fleet status`, projected: state, `needs_attention`, `pending_request` (as `t3-fleet` bounds it), thread id, seat, last update. |
 | `t3_wait` | `request_id`, `timeout_s` (max 60) | Bounded `t3-fleet wait`. |
 | `t3_followup` | `request_id`, `message` | `t3-fleet followup` in machine mode, with the message and `runtime_mode: full-access` on stdin. |
@@ -81,8 +81,9 @@ Do not merge. Stop and ask only for spending, new external accounts, publication
 
 - Ledger: SQLite at `ledger_path`, table `requests(request_id, caller, repository, host, seat, title, prompt_sha256, created_at, last_state, notified_state, notified_at)`. Prompt text is never stored or logged; only its SHA-256.
 - Wake config `wake_path` (0600): `{"targets": {"<caller>": [{"url": "...", "key_file": "..."}], "default": [...]}}`. Same POST contract as the existing Builder wake: `Authorization: Bearer <key>`, `X-Automation-Key: <key>`, JSON body, 8 s timeout, one try per tick.
-- `python -m brigade.grokbot_t3 watch --target <queue-workspace>` runs once per timer tick. For each ledger row whose state is not terminal, or terminal but not yet notified, it runs `t3-fleet status`. It wakes the caller when the state changes to `needs_attention` (question or approval pending), `unknown`, or a terminal state (`succeeded`, `failed`, `interrupted`). Body: `{"request_id", "state", "repository", "title"}`. The bot reads PR details through `t3_status` or GitHub. No thread content. `notified_state` is written only after HTTP 200, so a failed wake retries on the next tick. Results append to `wake-notify.jsonl` beside `wake_path`.
-- Units: `brigade-grokbot-t3-dispatch.service`, `brigade-grokbot-t3-watch.service` (oneshot), `brigade-grokbot-t3-watch.timer` (`OnUnitActiveSec=1min`), rendered by `pack install-service` (listener) and `python -m brigade.grokbot_t3 install-watch` (watcher).
+- `python -m brigade.grokbot_t3 watch --target <queue-workspace>` runs once per timer tick. For each ledger row whose state is not terminal, or terminal but not yet notified, it runs `t3-fleet status`. It wakes the caller when the state changes to `needs_attention` (question or approval pending), `unknown`, or a terminal state (`succeeded`, `failed`, `interrupted`). Body: `{"request_id", "state", "repository", "title"}`. The bot reads PR details through `t3_status` or GitHub. No thread content. A `default` target list is required. Wake POSTs refuse redirects and environment proxies. Delivery successes are persisted per target for the current state, so only failed targets retry on the next tick. After 30 failed delivery ticks for the same request and state, mark it notified and log `gave-up`. After 30 consecutive status failures, record `unknown`, stop polling that row, and send one notification with the same delivery cap. Successful status calls reset the failure count. State changes clear delivery successes and attempts. Results append to `wake-notify.jsonl` beside `wake_path`.
+- Service write access must explicitly include the t3-fleet state directory in `writable_paths`. SSH `known_hosts` and `ControlPath` directories may also require writes. Empty `writable_paths` produces a doctor warning. Doctor also checks wake-config loading and ledger writability.
+- Units use `After=network.target`: `brigade-grokbot-t3-dispatch.service`, `brigade-grokbot-t3-watch.service` (oneshot), `brigade-grokbot-t3-watch.timer` (`OnUnitActiveSec=1min`), rendered by `pack install-service` (listener) and `python -m brigade.grokbot_t3 install-watch` (watcher).
 
 ### 4. Edge
 
@@ -106,7 +107,9 @@ All three hosts run T3 0.0.46 nightlies (audit 2026-10-16). The installed `t3-fl
 - `t3-fleet` exit codes and JSON error states pass through as tool errors with the same code (`capacity-full`, `host-offline`, `repository-unknown`, and the rest). The pack adds `seat-not-allowed`, `host-not-allowed`, `repository-not-allowed`, `prompt-too-large`, `open-limit`, `daily-limit`, `dispatch-disabled`, `unknown-request`.
 - Submit timeout 60 s, other calls 30 s. On a submit timeout the pack returns `submit-unknown` with the request id when known and never resubmits. Recovery follows the skill: `t3-fleet recover`.
 - A watcher failure never touches a thread. A listener crash leaves running threads running; the ledger lets the next start resume wakes.
-- `base_ref` that does not resolve fails the submit before anything launches.
+- `base_ref` is a branch name only, resolved under `refs/heads/`. Git tags and SHAs are not resolved as revisions. An unresolved branch fails before anything launches.
+- Every submit and followup attempt is persisted separately from successful launches. A followup reopening a terminal request must pass `max_open` before launch.
+- An error envelope with a request id, or a submit result with an unrecognized state, records that request as `unknown` and returns `submit-unknown` with its id. Unknown outcomes must be inspected and recovered by the operator through `t3-fleet` before retrying.
 
 ## Security
 

@@ -11,6 +11,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable
 
+from ..grokbot_feed import _NoRedirect
 from . import contracts as c
 from .fleet import FleetCallError, FleetTimeout
 from .ledger import Ledger
@@ -22,6 +23,7 @@ MAX_WAKE_BYTES = 16_384
 MAX_KEY_BYTES = 1_024
 MAX_TARGETS = 4
 POST_TIMEOUT = 8
+MAX_ATTEMPTS = 30
 Post = Callable[[str, str, dict[str, Any]], int]
 
 
@@ -37,7 +39,7 @@ def load_wake_config(path: Path) -> dict[str, list[dict[str, str]]]:
     if not isinstance(payload, dict) or set(payload) != {"schema", "targets"} or payload["schema"] != WAKE_SCHEMA:
         raise _bad()
     targets = payload["targets"]
-    if not isinstance(targets, dict) or not targets:
+    if not isinstance(targets, dict) or "default" not in targets:
         raise _bad()
     parsed: dict[str, list[dict[str, str]]] = {}
     for name, entries in targets.items():
@@ -78,7 +80,8 @@ def post_wake(url: str, key: str, body: dict[str, Any]) -> int:
         headers={"Content-Type": "application/json", "Authorization": f"Bearer {key}", "X-Automation-Key": key},
     )
     try:
-        with urllib.request.urlopen(request, timeout=POST_TIMEOUT) as response:
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), _NoRedirect())
+        with opener.open(request, timeout=POST_TIMEOUT) as response:
             return int(response.status)
     except urllib.error.HTTPError as exc:
         return int(exc.code)
@@ -108,42 +111,61 @@ def run_watch_once(
     for row in ledger.pending_notifications():
         state = row["last_state"]
         notified = row["notified_state"]
-        if state not in c.TERMINAL_STATES:
+        status_exhausted = state == "unknown" and row["status_failures"] >= MAX_ATTEMPTS
+        if state not in c.TERMINAL_STATES and not status_exhausted:
             summary["checked"] += 1
             try:
                 result = runner.status(row["request_id"])
             except (FleetCallError, FleetTimeout):
                 summary["failed"] += 1
-                continue
-            new_state = result.get("state") if isinstance(result.get("state"), str) else "unknown"
+                failures = ledger.record_status_poll(row["request_id"], failed=True)
+                if failures < MAX_ATTEMPTS:
+                    continue
+                new_state = "unknown"
+            else:
+                ledger.record_status_poll(row["request_id"], failed=False)
+                new_state = result.get("state") if isinstance(result.get("state"), str) else "unknown"
             if new_state != state:
                 ledger.update_state(row["request_id"], new_state, clock())
                 state = new_state
                 notified = None
+                row["delivered_targets"] = "[]"
         if state not in c.NOTIFY_STATES or notified == state:
             continue
         targets = wake_targets.get(row["caller"]) or wake_targets.get("default") or []
         body = {"request_id": row["request_id"], "state": state, "repository": row["repository"], "title": row["title"]}
         statuses: list[int] = []
+        delivered = set(json.loads(row["delivered_targets"]))
+        target_ids = {json.dumps([target["url"], target["key_file"]]) for target in targets}
         for target in targets:
+            target_id = json.dumps([target["url"], target["key_file"]])
+            if target_id in delivered:
+                continue
             try:
                 key = read_key(target["key_file"])
+                code = post(target["url"], key, body)
             except c.T3DispatchError:
-                statuses.append(0)
-                continue
-            statuses.append(post(target["url"], key, body))
-        _append_log(
-            log_path,
-            {
-                "at": clock().isoformat(timespec="seconds"),
-                "request_id": row["request_id"],
-                "state": state,
-                "statuses": statuses,
-            },
-        )
-        if statuses and all(code == 200 for code in statuses):
+                code = 0
+            statuses.append(code)
+            if code == 200:
+                delivered.add(target_id)
+        attempts = ledger.record_wake_attempt(row["request_id"], state, delivered)
+        complete = bool(targets) and target_ids <= delivered
+        gave_up = not complete and attempts >= MAX_ATTEMPTS
+        record: dict[str, Any] = {
+            "at": clock().isoformat(timespec="seconds"),
+            "request_id": row["request_id"],
+            "state": state,
+            "statuses": statuses,
+        }
+        if gave_up:
+            record["note"] = "gave-up"
+        _append_log(log_path, record)
+        if complete:
             ledger.mark_notified(row["request_id"], state, clock())
             summary["woken"] += 1
         else:
+            if gave_up:
+                ledger.mark_notified(row["request_id"], state, clock())
             summary["failed"] += 1
     return summary

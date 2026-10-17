@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import json
 import os
 import sqlite3
+import stat
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .contracts import TERMINAL_STATES
+from .contracts import TERMINAL_STATES, T3DispatchError
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS requests (
@@ -36,18 +39,43 @@ def _ts(now: datetime) -> str:
 
 class Ledger:
     def __init__(self, path: Path):
-        path.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
-        os.chmod(path.parent, 0o700)
+        try:
+            path.parent.mkdir(mode=0o700, parents=True)
+        except FileExistsError:
+            parent = path.parent.stat()
+            if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.getuid() or parent.st_mode & 0o022:
+                raise T3DispatchError("unavailable") from None
+        else:
+            os.chmod(path.parent, 0o700)
         fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
         os.close(fd)
         os.chmod(path, 0o600)
-        self._conn = sqlite3.connect(str(path), timeout=10, isolation_level=None)
+        self._lock = threading.Lock()
+        self._conn = sqlite3.connect(str(path), timeout=10, isolation_level=None, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute(_SCHEMA)
+        # Seed legacy rows once, atomically with creation of the attempt ledger.
+        with self._conn:
+            self._conn.execute("BEGIN IMMEDIATE")
+            existing = self._conn.execute(
+                "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'attempts'"
+            ).fetchone()
+            self._conn.execute("CREATE TABLE IF NOT EXISTS attempts (attempted_at TEXT NOT NULL)")
+            if existing is None:
+                self._conn.execute("INSERT INTO attempts SELECT created_at FROM requests")
+            columns = {row["name"] for row in self._conn.execute("PRAGMA table_info(requests)")}
+            for name, definition in {
+                "status_failures": "INTEGER NOT NULL DEFAULT 0",
+                "wake_attempts": "INTEGER NOT NULL DEFAULT 0",
+                "delivered_targets": "TEXT NOT NULL DEFAULT '[]'",
+            }.items():
+                if name not in columns:
+                    self._conn.execute(f"ALTER TABLE requests ADD COLUMN {name} {definition}")
 
     def close(self) -> None:
-        self._conn.close()
+        with self._lock:
+            self._conn.close()
 
     def record_submit(
         self,
@@ -62,58 +90,101 @@ class Ledger:
         state: str,
         now: datetime,
     ) -> None:
-        ts = _ts(now)
-        self._conn.execute(
-            "INSERT INTO requests (request_id, caller, repository, host, seat, title, prompt_sha256, "
-            "created_at, updated_at, last_state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (request_id, caller, repository, host, seat, title, prompt_sha256, ts, ts, state),
-        )
+        with self._lock:
+            ts = _ts(now)
+            self._conn.execute(
+                "INSERT INTO requests (request_id, caller, repository, host, seat, title, prompt_sha256, "
+                "created_at, updated_at, last_state) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (request_id, caller, repository, host, seat, title, prompt_sha256, ts, ts, state),
+            )
 
     def get(self, request_id: str) -> dict[str, Any] | None:
-        row = self._conn.execute("SELECT * FROM requests WHERE request_id = ?", (request_id,)).fetchone()
-        return dict(row) if row is not None else None
+        with self._lock:
+            row = self._conn.execute("SELECT * FROM requests WHERE request_id = ?", (request_id,)).fetchone()
+            return dict(row) if row is not None else None
 
     def update_state(self, request_id: str, state: str, now: datetime) -> None:
-        self._conn.execute(
-            "UPDATE requests SET notified_state = CASE WHEN last_state = ? THEN notified_state ELSE NULL END, "
-            "last_state = ?, updated_at = ? WHERE request_id = ?",
-            (state, state, _ts(now), request_id),
-        )
+        with self._lock:
+            self._conn.execute(
+                "UPDATE requests SET notified_state = CASE WHEN last_state = ? THEN notified_state ELSE NULL END, "
+                "wake_attempts = CASE WHEN last_state = ? THEN wake_attempts ELSE 0 END, "
+                "delivered_targets = CASE WHEN last_state = ? THEN delivered_targets ELSE '[]' END, "
+                "last_state = ?, updated_at = ? WHERE request_id = ?",
+                (state, state, state, state, _ts(now), request_id),
+            )
 
     def mark_notified(self, request_id: str, state: str, now: datetime) -> None:
-        self._conn.execute(
-            "UPDATE requests SET notified_state = ?, notified_at = ? WHERE request_id = ?",
-            (state, _ts(now), request_id),
-        )
+        with self._lock:
+            self._conn.execute(
+                "UPDATE requests SET notified_state = ?, notified_at = ? WHERE request_id = ?",
+                (state, _ts(now), request_id),
+            )
 
     def open_count(self) -> int:
-        placeholders = ", ".join("?" for _ in _TERMINAL)
-        row = self._conn.execute(
-            f"SELECT COUNT(*) FROM requests WHERE last_state NOT IN ({placeholders})", _TERMINAL
-        ).fetchone()
-        return int(row[0])
+        with self._lock:
+            placeholders = ", ".join("?" for _ in _TERMINAL)
+            row = self._conn.execute(
+                f"SELECT COUNT(*) FROM requests WHERE last_state NOT IN ({placeholders})", _TERMINAL
+            ).fetchone()
+            return int(row[0])
 
     def submits_since(self, since: datetime) -> int:
-        row = self._conn.execute("SELECT COUNT(*) FROM requests WHERE created_at >= ?", (_ts(since),)).fetchone()
-        return int(row[0])
+        with self._lock:
+            row = self._conn.execute("SELECT COUNT(*) FROM requests WHERE created_at >= ?", (_ts(since),)).fetchone()
+            return int(row[0])
 
     def recent(self, caller: str | None, limit: int) -> list[dict[str, Any]]:
-        if caller is None:
-            rows = self._conn.execute(
-                f"SELECT {_PUBLIC} FROM requests ORDER BY created_at DESC, rowid DESC LIMIT ?", (limit,)
-            ).fetchall()
-        else:
-            rows = self._conn.execute(
-                f"SELECT {_PUBLIC} FROM requests WHERE caller = ? ORDER BY created_at DESC, rowid DESC LIMIT ?",
-                (caller, limit),
-            ).fetchall()
-        return [dict(row) for row in rows]
+        with self._lock:
+            if caller is None:
+                rows = self._conn.execute(
+                    f"SELECT {_PUBLIC} FROM requests ORDER BY created_at DESC, rowid DESC LIMIT ?", (limit,)
+                ).fetchall()
+            else:
+                rows = self._conn.execute(
+                    f"SELECT {_PUBLIC} FROM requests WHERE caller = ? ORDER BY created_at DESC, rowid DESC LIMIT ?",
+                    (caller, limit),
+                ).fetchall()
+            return [dict(row) for row in rows]
 
     def pending_notifications(self) -> list[dict[str, Any]]:
-        placeholders = ", ".join("?" for _ in _TERMINAL)
-        rows = self._conn.execute(
-            f"SELECT * FROM requests WHERE last_state NOT IN ({placeholders}) "
-            "OR notified_state IS NULL OR notified_state != last_state ORDER BY created_at, rowid",
-            _TERMINAL,
-        ).fetchall()
-        return [dict(row) for row in rows]
+        with self._lock:
+            placeholders = ", ".join("?" for _ in _TERMINAL)
+            rows = self._conn.execute(
+                f"SELECT * FROM requests WHERE last_state NOT IN ({placeholders}) "
+                "OR notified_state IS NULL OR notified_state != last_state ORDER BY created_at, rowid",
+                _TERMINAL,
+            ).fetchall()
+            return [dict(row) for row in rows]
+
+    def record_attempt(self, now: datetime) -> None:
+        with self._lock:
+            self._conn.execute("INSERT INTO attempts (attempted_at) VALUES (?)", (_ts(now),))
+
+    def attempts_since(self, since: datetime) -> int:
+        with self._lock:
+            row = self._conn.execute("SELECT COUNT(*) FROM attempts WHERE attempted_at >= ?", (_ts(since),)).fetchone()
+            return int(row[0])
+
+    def record_status_poll(self, request_id: str, *, failed: bool) -> int:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE requests SET status_failures = "
+                + ("status_failures + 1" if failed else "0")
+                + " WHERE request_id = ?",
+                (request_id,),
+            )
+            row = self._conn.execute(
+                "SELECT status_failures FROM requests WHERE request_id = ?", (request_id,)
+            ).fetchone()
+            return int(row[0])
+
+    def record_wake_attempt(self, request_id: str, state: str, delivered: set[str]) -> int:
+        with self._lock:
+            self._conn.execute(
+                "UPDATE requests SET wake_attempts = wake_attempts + 1, delivered_targets = ? WHERE request_id = ? AND last_state = ?",
+                (json.dumps(sorted(delivered)), request_id, state),
+            )
+            row = self._conn.execute(
+                "SELECT wake_attempts FROM requests WHERE request_id = ?", (request_id,)
+            ).fetchone()
+            return int(row[0])

@@ -157,3 +157,31 @@ def test_resolve_revision_failures(stdout, code):
     runner = fleet.FleetRunner("/bin/t3-fleet", "/usr/bin/git", run=FakeRun(stdout, returncode=code))
     with pytest.raises(fleet.RevisionError):
         runner.resolve_revision("https://github.com/x/y.git", "main")
+
+
+def test_runtime_and_followup_interaction_modes_are_configurable():
+    run = FakeRun(_ok(request_id="r1", state="running"))
+    runner = fleet.FleetRunner("/bin/t3-fleet", "/usr/bin/git", run=run, runtime_mode="read-only")
+    runner.submit(
+        host="host-a",
+        repository="brigade",
+        source_revision=SHA,
+        title="t",
+        seat="sol61",
+        prompt="p",
+        interaction_mode="plan",
+        override_reason=None,
+    )
+    runner.followup("r1", "next", interaction_mode="plan")
+    runner.followup("r1", "default interaction")
+    bodies = [json.loads(call[1]["input"]) for call in run.calls]
+    assert all(body["runtime_mode"] == "read-only" for body in bodies)
+    assert [body["interaction_mode"] for body in bodies] == ["plan", "plan", "default"]
+
+
+def test_child_env_preserves_fleet_config_without_unrelated_secrets(monkeypatch):
+    monkeypatch.setenv("T3_FLEET_CONFIG", "/srv/t3/fleet.toml")
+    monkeypatch.setenv("UNRELATED_SECRET", "not-a-real-secret")
+    environment = fleet.child_env()
+    assert environment["T3_FLEET_CONFIG"] == "/srv/t3/fleet.toml"
+    assert "UNRELATED_SECRET" not in environment

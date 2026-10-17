@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 from datetime import datetime, timezone
 from typing import Any, Callable
 
@@ -48,6 +49,7 @@ class T3DispatchTools:
         ledger: Ledger,
         now: Callable[[], datetime] | None = None,
     ):
+        self._dispatch_lock = threading.Lock()
         self.runtime = runtime
         self.runner = runner
         self.ledger = ledger
@@ -112,8 +114,6 @@ class T3DispatchTools:
     def _choose_host(self, requested: str) -> str:
         if requested != c.HOST_AUTO:
             return requested
-        if self.runtime.fleet_enrolled:
-            return c.HOST_AUTO
         result = self._fleet(self.runner.capacity)
         best: tuple[int, int, str] | None = None
         for entry in result.get("hosts", []):
@@ -136,6 +136,8 @@ class T3DispatchTools:
     def _submit_once(
         self, *, host: str, args: dict[str, Any], revision: str, title: str, seat: str, prompt: str
     ) -> dict[str, Any]:
+        self._check_daily_limit()
+        self.ledger.record_attempt(self.now())
         override = f"grokbot t3-dispatch seat {seat} for {args['caller']}" if self.runtime.fleet_enrolled else None
         return self.runner.submit(
             host=host,
@@ -148,7 +150,16 @@ class T3DispatchTools:
             override_reason=override,
         )
 
+    def _check_daily_limit(self) -> None:
+        midnight = self.now().astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+        if self.ledger.attempts_since(midnight) >= self.runtime.daily_limit:
+            raise c.T3DispatchError("daily-limit")
+
     def submit(self, args: dict[str, Any]) -> dict[str, Any]:
+        with self._dispatch_lock:
+            return self._submit_locked(args)
+
+    def _submit_locked(self, args: dict[str, Any]) -> dict[str, Any]:
         self._require_enabled()
         runtime = self.runtime
         repo = runtime.repositories.get(args["repository"])
@@ -164,9 +175,7 @@ class T3DispatchTools:
         if self.ledger.open_count() >= runtime.max_open:
             raise c.T3DispatchError("open-limit")
         now = self.now()
-        midnight = now.astimezone(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
-        if self.ledger.submits_since(midnight) >= runtime.daily_limit:
-            raise c.T3DispatchError("daily-limit")
+        self._check_daily_limit()
         try:
             revision = self.runner.resolve_revision(repo.remote, args["base_ref"] or repo.default_branch)
         except RevisionError as exc:
@@ -183,6 +192,7 @@ class T3DispatchTools:
             except FleetCallError as exc:
                 can_fall_back = (
                     exc.code == FALLBACK_CODE
+                    and exc.request_id is None
                     and exc.reason == FALLBACK_REASON
                     and args["seat"] is None
                     and runtime.fallback_seat is not None
@@ -195,14 +205,24 @@ class T3DispatchTools:
                     host=host, args=args, revision=revision, title=title, seat=seat, prompt=prompt
                 )
         except FleetCallError as exc:
-            raise _fleet_error(exc) from exc
+            if not isinstance(exc.request_id, str) or not c.HANDLE_RE.fullmatch(exc.request_id):
+                raise _fleet_error(exc) from exc
+            result = {"request_id": exc.request_id, "state": "unknown"}
         except FleetTimeout as exc:
             raise c.T3DispatchError("submit-unknown") from exc
         request_id = result.get("request_id")
         if not isinstance(request_id, str) or not c.HANDLE_RE.fullmatch(request_id):
             raise c.T3DispatchError("submit-unknown")
         raw_state = result.get("state")
-        state = raw_state if isinstance(raw_state, str) else "unknown"
+        known_states = c.TERMINAL_STATES | {
+            "queued",
+            "preflight",
+            "dispatching",
+            "running",
+            "needs_attention",
+            "blocked_offline",
+        }
+        state = raw_state if isinstance(raw_state, str) and raw_state in known_states else "unknown"
         self.ledger.record_submit(
             request_id=request_id,
             caller=args["caller"],
@@ -214,6 +234,8 @@ class T3DispatchTools:
             state=state,
             now=now,
         )
+        if state == "unknown":
+            raise c.T3DispatchError("submit-unknown", request_id=request_id)
         return {
             "request_id": request_id,
             "host": str(result.get("host") or host),
@@ -235,21 +257,31 @@ class T3DispatchTools:
         return project_status(result)
 
     def followup(self, args: dict[str, Any]) -> dict[str, Any]:
+        with self._dispatch_lock:
+            return self._followup_locked(args)
+
+    def _followup_locked(self, args: dict[str, Any]) -> dict[str, Any]:
         self._require_enabled()
-        self._known(args["request_id"])
+        row = self._known(args["request_id"])
+        if row["last_state"] in c.TERMINAL_STATES and self.ledger.open_count() >= self.runtime.max_open:
+            raise c.T3DispatchError("open-limit")
         if len(args["message"].encode("utf-8")) > self.runtime.prompt_max_bytes:
             raise c.T3DispatchError("prompt-too-large")
+        self._check_daily_limit()
+        self.ledger.record_attempt(self.now())
         result = self._fleet(self.runner.followup, args["request_id"], args["message"])
         self._record_state(args["request_id"], result)
         return project_status(result)
 
     def answer(self, args: dict[str, Any]) -> dict[str, Any]:
+        self._require_enabled()
         self._known(args["request_id"])
         result = self._fleet(self.runner.answer, args["request_id"], args["input_id"], args["answers"])
         self._record_state(args["request_id"], result)
         return project_status(result)
 
     def approve(self, args: dict[str, Any]) -> dict[str, Any]:
+        self._require_enabled()
         self._known(args["request_id"])
         result = self._fleet(self.runner.approve, args["request_id"], args["approval_id"], args["decision"])
         self._record_state(args["request_id"], result)

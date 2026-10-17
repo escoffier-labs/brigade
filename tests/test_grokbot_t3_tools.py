@@ -124,10 +124,10 @@ def test_explicit_host_and_base_ref(make):
     assert runner.last_branch == "release/1"
 
 
-def test_enrolled_passes_auto_and_override_reason(make):
+def test_enrolled_picks_allowlisted_host_and_override_reason(make):
     tools, runner, _ = make(fleet_enrolled=True)
     _submit(tools)
-    assert runner.submits[0]["host"] == "auto"
+    assert runner.submits[0]["host"] == "host-b"
     assert runner.submits[0]["override_reason"] == "grokbot t3-dispatch seat dsflash for Builder"
 
 
@@ -235,3 +235,117 @@ def test_unknown_tool_and_bad_args(make):
     tools, _, _ = make()
     assert tools.call_tool("t3_nope", {})["error"]["code"] == "invalid_request"
     assert tools.call_tool("t3_status", {"request_id": "bad id"})["error"]["code"] == "invalid_request"
+
+
+@pytest.mark.parametrize("limits,code", [({"max_open": 1}, "open-limit"), ({"daily_limit": 1}, "daily-limit")])
+def test_concurrent_submits_cannot_exceed_limits(make, limits, code, monkeypatch):
+    from concurrent.futures import ThreadPoolExecutor
+    from threading import Barrier
+    from time import sleep
+
+    tools, runner, ledger = make(**limits)
+    original = runner.submit
+    start = Barrier(2)
+
+    def delayed_submit(**kwargs):
+        result = original(**kwargs)
+        sleep(0.1)  # Keep the first launch in flight while the other caller checks limits.
+        return result
+
+    monkeypatch.setattr(runner, "submit", delayed_submit)
+
+    def launch():
+        start.wait(timeout=5)
+        return _submit(tools)
+
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        results = list(pool.map(lambda _: launch(), range(2)))
+    assert len(runner.submits) == 1
+    assert sum(result.get("error", {}).get("code") == code for result in results) == 1
+    assert ledger.open_count() == 1
+
+
+@pytest.mark.parametrize(
+    "outcome", [FleetCallError("unknown_state", request_id="r9"), {"request_id": "r9", "state": "odd-state"}]
+)
+def test_unknown_submit_with_handle_is_recorded(make, monkeypatch, outcome):
+    tools, runner, ledger = make()
+
+    def submit(**kwargs):
+        if isinstance(outcome, Exception):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(runner, "submit", submit)
+    result = _submit(tools)
+    assert result["error"]["code"] == "submit-unknown"
+    assert result["error"]["request_id"] == "r9"
+    assert ledger.get("r9")["last_state"] == "unknown"
+    assert tools.call_tool("t3_recent", {})["requests"][0]["request_id"] == "r9"
+
+
+def test_timed_out_submit_consumes_daily_attempt(make):
+    tools, runner, _ = make(daily_limit=1)
+    runner.submit_errors = [FleetTimeout("submit")]
+    result = _submit(tools)
+    assert result["error"]["code"] == "submit-unknown"
+    assert "t3_recent" not in result["error"]["message"]
+    assert _submit(tools)["error"]["code"] == "daily-limit"
+    assert len(runner.submits) == 1
+
+
+def test_refused_submit_and_fallback_each_consume_daily_attempt(make):
+    tools, runner, _ = make(daily_limit=1)
+    runner.submit_errors = [FleetCallError("policy_rejected", "model-admission-denied")]
+    assert _submit(tools)["error"]["code"] == "daily-limit"
+    assert len(runner.submits) == 1
+
+
+@pytest.mark.parametrize(
+    "name,args",
+    [
+        ("t3_answer", {"input_id": "q1", "answers": {"q": "a"}}),
+        ("t3_approve", {"approval_id": "a1", "decision": "accept"}),
+    ],
+)
+def test_disabled_blocks_answer_and_approve_but_allows_interrupt(make, name, args):
+    from dataclasses import replace
+
+    tools, _, ledger = make()
+    _submit(tools)
+    tools.runtime = replace(tools.runtime, enabled=False)
+    assert tools.call_tool(name, {"request_id": "r1", **args})["error"]["code"] == "dispatch-disabled"
+    assert tools.call_tool("t3_interrupt", {"request_id": "r1"})["state"] == "interrupted"
+    assert ledger.get("r1")["last_state"] == "interrupted"
+
+
+def test_followup_cannot_reopen_past_open_limit(make):
+    tools, runner, ledger = make(max_open=1)
+    _submit(tools)
+    ledger.update_state("r1", "succeeded", NOW)
+    _submit(tools)
+    result = tools.call_tool("t3_followup", {"request_id": "r1", "message": "more"})
+    assert result["error"]["code"] == "open-limit"
+    assert not hasattr(runner, "followed")
+    assert ledger.get("r1")["last_state"] == "succeeded"
+
+
+def test_followup_consumes_daily_attempt_even_on_timeout(make, monkeypatch):
+    tools, runner, _ = make(daily_limit=2)
+    _submit(tools)
+
+    def timeout(*args):
+        raise FleetTimeout("followup")
+
+    monkeypatch.setattr(runner, "followup", timeout)
+    assert tools.call_tool("t3_followup", {"request_id": "r1", "message": "more"})["error"]["code"] == "unavailable"
+    assert tools.call_tool("t3_followup", {"request_id": "r1", "message": "more"})["error"]["code"] == "daily-limit"
+
+
+def test_admission_error_with_handle_never_falls_back(make):
+    tools, runner, ledger = make()
+    runner.submit_errors = [FleetCallError("policy_rejected", "model-admission-denied", "r9")]
+    result = _submit(tools)
+    assert len(runner.submits) == 1
+    assert result["error"]["code"] == "submit-unknown"
+    assert ledger.get("r9")["last_state"] == "unknown"

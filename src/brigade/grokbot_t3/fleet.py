@@ -33,6 +33,7 @@ ENV_KEYS = (
     "XDG_STATE_HOME",
     "XDG_DATA_HOME",
     "T3_FLEET_STATE",
+    "T3_FLEET_CONFIG",
 )
 
 Run = Callable[..., "subprocess.CompletedProcess[str]"]
@@ -59,10 +60,13 @@ def child_env() -> dict[str, str]:
 
 
 class FleetRunner:
-    def __init__(self, t3_fleet_bin: str, git_bin: str, *, run: Run = subprocess.run):
+    def __init__(
+        self, t3_fleet_bin: str, git_bin: str, *, run: Run = subprocess.run, runtime_mode: str = "full-access"
+    ):
         self.t3_fleet_bin = t3_fleet_bin
         self.git_bin = git_bin
         self._run = run
+        self.runtime_mode = runtime_mode
 
     def call(self, action: str, payload: dict[str, Any], *, timeout: float) -> dict[str, Any]:
         body = json.dumps({"schema": REQUEST_SCHEMA, "action": action, **payload}, separators=(",", ":"))
@@ -126,7 +130,7 @@ class FleetRunner:
             "title": title,
             "seat": seat,
             "prompt": prompt,
-            "runtime_mode": "full-access",
+            "runtime_mode": self.runtime_mode,
             "interaction_mode": interaction_mode,
         }
         if override_reason is not None:
@@ -141,12 +145,12 @@ class FleetRunner:
             "wait", {"request_id": request_id, "timeout": float(timeout_s)}, timeout=timeout_s + CALL_TIMEOUT
         )
 
-    def followup(self, request_id: str, prompt: str) -> dict[str, Any]:
+    def followup(self, request_id: str, prompt: str, interaction_mode: str = "default") -> dict[str, Any]:
         payload = {
             "request_id": request_id,
             "prompt": prompt,
-            "runtime_mode": "full-access",
-            "interaction_mode": "default",
+            "runtime_mode": self.runtime_mode,
+            "interaction_mode": interaction_mode,
         }
         return self.call("followup", payload, timeout=SUBMIT_TIMEOUT)
 

@@ -52,7 +52,7 @@ ERROR_MESSAGES = {
     "base-ref-unresolved": "Base ref did not resolve to a commit",
     "no-eligible-host": "No allowlisted host has free capacity",
     "fleet-error": "t3-fleet refused the request",
-    "submit-unknown": "Submit outcome is unknown; check t3_recent before retrying",
+    "submit-unknown": "Submit outcome is unknown; do not resubmit. Ask the operator to inspect t3-fleet and recover",
     "unavailable": "Dispatch is unavailable",
 }
 
