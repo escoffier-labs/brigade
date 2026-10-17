@@ -2,7 +2,7 @@
 
 ## Supported versions
 
-GraphTrail is early-stage (0.x). Only the latest release on the `master` branch receives security fixes. Pin to a released tag or commit if you need a known-good version.
+GraphTrail is early-stage (0.x). Security fixes land in the maintained engine under `engines/code-graph` on Brigade's `main` branch. The standalone repository is archived and its crates.io releases are frozen. Pin to a released tag or commit if you need a known-good version.
 
 ## Reporting a vulnerability
 
