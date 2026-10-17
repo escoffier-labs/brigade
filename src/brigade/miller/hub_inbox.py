@@ -432,6 +432,8 @@ class HubInbox:
                 if row.get("reply_to") == msg_id and row["sender"] == self.config.principal
             )
         for row in replies:
+            if deadline is not None and time.monotonic() >= deadline:
+                break  # Unacked replies are still returned; the next poll acks them.
             bound = {} if deadline is None else {"timeout": max(0.1, min(45.0, deadline - time.monotonic()))}
             try:
                 self._call("ack", row["id"], agent=False, **bound)

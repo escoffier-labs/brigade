@@ -682,6 +682,26 @@ class TestHubInbox(HubFixture):
         self.assertTrue(timeouts)
         self.assertTrue(all(0 < value <= 1.0 for value in timeouts), timeouts)
 
+    def test_wait_replies_stops_acks_after_deadline(self):
+        # Replies are still returned; acks past the deadline are left for the next poll.
+        from unittest.mock import patch
+
+        import brigade.miller.hub_inbox as hub_module
+
+        for _ in range(3):
+            self.runner.add(sender="agent:miller", recipient="node-a", reply_to=1)
+        clock = [100.0]
+
+        def on_call(action, args, kwargs):
+            if action == "list_messages":
+                clock[0] = 200.0
+
+        self.runner.on_call = on_call
+        with patch.object(hub_module.time, "monotonic", lambda: clock[0]):
+            replies, _ = self.hub.wait_replies(1, 0, deadline=150.0)
+        self.assertEqual(len(replies), 3)
+        self.assertEqual([c for c in self.runner.calls if c["action"] == "ack"], [])
+
     def test_wait_replies_survives_ack_failure_and_ignores_other_threads(self):
         self.runner.add(sender="agent:miller", recipient="node-a", reply_to=1)
         self.runner.add(sender="agent:miller", recipient="node-a", reply_to=2)
