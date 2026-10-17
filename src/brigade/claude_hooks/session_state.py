@@ -9,7 +9,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-from .. import dirfd, inbox_lock, localio
+from .. import inbox_lock, localio
 from . import anchored_io, envelope
 
 _SESSION_STATE_PROCESS_LOCKS_GUARD = threading.Lock()
@@ -95,11 +95,6 @@ def _pending_increment_path(target: Path, session_id: str) -> Path:
     return _pending_path(state_path)
 
 
-def _journal_path_is_safe_without_nofollow(path: Path) -> bool:
-    """Require a no-follow descriptor backend, including native Windows."""
-    return dirfd.available()
-
-
 def _parse_timeout_journal(data: bytes) -> tuple[int, bool, str | None]:
     """Return marker count, whether announce was claimed, and the first claim id.
 
@@ -130,25 +125,21 @@ def _parse_timeout_journal(data: bytes) -> tuple[int, bool, str | None]:
 
 def _read_sidecar_bytes(path: Path, max_bytes: int) -> bytes:
     """Read one sidecar relative to the validated sessions directory."""
-    if not _journal_path_is_safe_without_nofollow(path):
-        return b""
     return anchored_io.read_sidecar(path, max_bytes)
 
 
 def _read_timeout_journal(target: Path, session_id: str) -> tuple[int, bool, str | None]:
-    """Read the timeout journal, or ``(0, False, None)`` on refusal or failure."""
+    """Read the timeout journal; missing journals are empty, integrity refusals raise."""
     return _parse_timeout_journal(_read_sidecar_bytes(_journal_path(target, session_id), _TIMEOUT_JOURNAL_MAX_BYTES))
 
 
 def _journal_timeout_count(target: Path, session_id: str) -> int:
-    """Return the number of non-empty timeout markers, or zero on read failure."""
+    """Return the number of non-empty timeout markers, or zero for a missing journal."""
     return _read_timeout_journal(target, session_id)[0]
 
 
 def _append_sidecar_line(path: Path, payload: bytes, *, max_bytes: int | None) -> bool:
     """Append one sidecar line relative to its validated sessions directory."""
-    if not _journal_path_is_safe_without_nofollow(path):
-        return False
     return anchored_io.append_sidecar(path, payload, max_bytes=max_bytes)
 
 
@@ -173,7 +164,7 @@ def _append_timeout_marker(target: Path, session_id: str) -> int:
 
 
 def _pending_timeout_count(target: Path, session_id: str) -> int:
-    """Return overflow pending-increment markers, or zero on read failure."""
+    """Return overflow pending-increment markers, or zero for a missing sidecar."""
     data = _read_sidecar_bytes(_pending_increment_path(target, session_id), _PENDING_MAX_BYTES)
     return sum(1 for raw in data.splitlines() if raw.strip())
 
@@ -432,6 +423,8 @@ def _apply_timeout_followup_inprocess(
 ) -> str:
     try:
         state = _rt()._record_hook_timeout(target, session_id, announce=True)
+    except anchored_io.SessionIntegrityError:
+        raise
     except OSError:
         journal_lines, journal_announced, _claim = _read_timeout_journal(target, session_id)
         pending_lines = _pending_timeout_count(target, session_id)
@@ -489,8 +482,15 @@ def _bounded_timeout_followup(event: str, log_target: Path, session_id: str, exc
         except OSError:
             return
 
+    def followup() -> str:
+        try:
+            return _rt()._apply_timeout_followup_inprocess(event, log_target, session_id, detail, publish=publish)
+        except anchored_io.SessionIntegrityError:
+            publish("integrity_refused")
+            return "integrity_refused"
+
     _rt()._run_best_effort_bounded(
-        lambda: _rt()._apply_timeout_followup_inprocess(event, log_target, session_id, detail, publish=publish),
+        followup,
         timeout=_rt()._TIMEOUT_FOLLOWUP_SECONDS,
         default="degraded",
         on_abandon=mark_abandon,

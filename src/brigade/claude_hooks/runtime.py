@@ -2646,6 +2646,28 @@ def _hook_run_body(
     pin_target: Path | None,
     on_prologue: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
+    """Keep integrity refusals distinct across both worker transports."""
+    try:
+        return _hook_run_body_unchecked(event, payload, pin_target=pin_target, on_prologue=on_prologue)
+    except anchored_io.SessionIntegrityError:
+        # Return a normal worker outcome so Windows serialization cannot turn
+        # this refusal into a generic fail-open exception in the parent.
+        return {
+            "kind": "ok",
+            "result": anchored_io.integrity_envelope(event),
+            "log_target": None,
+            "claim_path": None,
+            "session_id": _session_id_from_payload(payload),
+        }
+
+
+def _hook_run_body_unchecked(
+    event: str,
+    payload: dict[str, Any],
+    *,
+    pin_target: Path | None,
+    on_prologue: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
     """Run every filesystem-touching ``hook_run`` step.
 
     The parent process must not call this. Pin resolution, target discovery,
@@ -3150,6 +3172,9 @@ def hook_run(
         followup_target = exc.log_target if exc.log_target is not None else log_target
         if followup_target is not None and _is_timeout_degraded(exc):
             followup = _bounded_timeout_followup(event, followup_target, session_id, exc)
+            if followup == "integrity_refused":
+                envelope.emit_stdout(anchored_io.integrity_envelope(event))
+                return 0
             if followup == "latched":
                 envelope.emit_stdout(envelope.latched_envelope(event))
                 return 0

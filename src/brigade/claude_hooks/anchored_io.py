@@ -25,6 +25,25 @@ _COMPONENTS = (".brigade", "work", "claude-hooks", "sessions")
 _ACTIVE: ContextVar[SessionDirectory | None] = ContextVar("claude_session_directory", default=None)
 
 
+class SessionIntegrityError(OSError):
+    """Session I/O cannot prove path integrity; never interpret this as absence."""
+
+
+def integrity_envelope(event: str) -> dict[str, Any]:
+    reason = "Brigade session state integrity check failed. Restore the session directory and run brigade doctor."
+    if event == "Stop":
+        return {"decision": "block", "reason": reason}
+    if event == "PreToolUse":
+        return {
+            "hookSpecificOutput": {
+                "hookEventName": event,
+                "permissionDecision": "deny",
+                "permissionDecisionReason": reason,
+            }
+        }
+    return {"continue": False, "stopReason": reason}
+
+
 def _identity(info: os.stat_result) -> tuple[int, int]:
     return info.st_dev, info.st_ino
 
@@ -56,14 +75,16 @@ class SessionDirectory:
                         raise
                     self.validate()
                     try:
-                        dirfd.mkdir_child(parent, name)
+                        dirfd.mkdir_child(parent, name, 0o700 if name == "sessions" else 0o777)
                     except FileExistsError:
                         pass
                     child = dirfd.open_child_directory(parent, name, writable=create)
                 self.chain.append(child)
             self.validate()
-        except BaseException:
+        except BaseException as exc:
             self.close()
+            if isinstance(exc, OSError) and not isinstance(exc, (FileNotFoundError, SessionIntegrityError)):
+                raise SessionIntegrityError(f"Claude hook session directory refused: {exc}") from exc
             raise
 
     @property
@@ -77,21 +98,32 @@ class SessionDirectory:
 
     def validate(self) -> None:
         """Refuse renamed, linked or replaced components without following them."""
+        try:
+            self._validate_chain()
+        except SessionIntegrityError:
+            raise
+        except OSError as exc:
+            raise SessionIntegrityError("Claude hook session directory changed or became unreadable") from exc
+
+    def _validate_chain(self) -> None:
         root_info = os.lstat(self.target)
         if not _plain_directory(root_info) or _identity(root_info) != _identity(os.fstat(self.chain[0])):
-            raise OSError("Claude hook target directory changed during session I/O")
+            raise SessionIntegrityError("Claude hook target directory changed during session I/O")
         for index, name in enumerate(_COMPONENTS[: len(self.chain) - 1]):
             named = dirfd.stat_child(self.chain[index], name, allow_reparse=True)
             held = os.fstat(self.chain[index + 1])
             if not _plain_directory(named) or _identity(named) != _identity(held):
-                raise OSError("Claude hook session directory changed during session I/O")
+                raise SessionIntegrityError("Claude hook session directory changed during session I/O")
         if self.lock is not None:
             self.validate_file(*self.lock)
 
     def validate_file(self, name: str, fd: int) -> os.stat_result:
         """Require the named file to remain a single-link regular held inode."""
-        held = os.fstat(fd)
-        named = dirfd.stat_child(self.fd, name, allow_reparse=True)
+        try:
+            held = os.fstat(fd)
+            named = dirfd.stat_child(self.fd, name, allow_reparse=True)
+        except OSError as exc:
+            raise SessionIntegrityError("Claude hook session file changed or became unreadable") from exc
         if (
             not stat.S_ISREG(held.st_mode)
             or held.st_nlink != 1
@@ -100,7 +132,7 @@ class SessionDirectory:
             or getattr(named, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT
             or _identity(named) != _identity(held)
         ):
-            raise OSError("Claude hook session file is not a single-link regular held file")
+            raise SessionIntegrityError("Claude hook session file is not a single-link regular held file")
         return held
 
     @contextlib.contextmanager
@@ -109,13 +141,32 @@ class SessionDirectory:
         self.validate()
         flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
         flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_BINARY", 0)
-        fd = dirfd.open_child_file(self.fd, name, flags, 0o600)
-        try:
-            self.validate_file(name, fd)
-            self.validate()
-            yield fd
-        finally:
-            os.close(fd)
+        reading = not flags & (os.O_WRONLY | os.O_RDWR)
+        for _ in range(8 if reading else 1):
+            try:
+                fd = dirfd.open_child_file(self.fd, name, flags, 0o600)
+            except FileNotFoundError:
+                self.validate()
+                raise
+            except OSError as exc:
+                raise SessionIntegrityError(f"Claude hook session file refused: {exc}") from exc
+            try:
+                if reading:
+                    held = os.fstat(fd)
+                    if stat.S_ISREG(held.st_mode) and held.st_nlink == 0:
+                        # Atomic replace won the open-to-fstat window. Retry
+                        # the known name, without reporting missing state.
+                        continue
+                    if not stat.S_ISREG(held.st_mode) or held.st_nlink != 1:
+                        raise SessionIntegrityError("Claude hook session file is not a single-link regular file")
+                else:
+                    self.validate_file(name, fd)
+                self.validate()
+                yield fd
+                return
+            finally:
+                os.close(fd)
+        raise SessionIntegrityError("Claude hook session file changed repeatedly while opening")
 
     def read_bytes(self, name: str, max_bytes: int | None = None) -> bytes:
         with self.open_file(name, os.O_RDONLY) as fd:
@@ -128,7 +179,8 @@ class SessionDirectory:
                 chunks.append(chunk)
                 if remaining is not None:
                     remaining -= len(chunk)
-            self.validate_file(name, fd)
+            # Atomic publication may change the name and unlink this inode.
+            # Its contents remain trusted after the initial held-fd check.
             self.validate()
             return b"".join(chunks)
 
@@ -140,7 +192,10 @@ class SessionDirectory:
             self.validate()
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
             flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_BINARY", 0)
-            fd = dirfd.open_child_file(self.fd, temporary, flags, 0o600)
+            try:
+                fd = dirfd.open_child_file(self.fd, temporary, flags, 0o600)
+            except OSError as exc:
+                raise SessionIntegrityError(f"Claude hook temporary session file refused: {exc}") from exc
             created = True
             try:
                 self.validate_file(temporary, fd)
@@ -150,6 +205,7 @@ class SessionDirectory:
                 self.validate_file(temporary, fd)
                 self.validate()
                 dirfd.replace_children(self.fd, temporary, name)
+                self.validate_file(name, fd)
             finally:
                 os.close(fd)
             dirfd.fsync_directory(self.fd)
@@ -157,15 +213,28 @@ class SessionDirectory:
             if created:
                 # Cleanup stays relative even when a parent was renamed.
                 with contextlib.suppress(FileNotFoundError):
-                    dirfd.unlink_child(self.fd, temporary)
+                    try:
+                        dirfd.unlink_child(self.fd, temporary)
+                    except FileNotFoundError:
+                        raise
+                    except OSError as exc:
+                        raise SessionIntegrityError("Claude hook temporary session file cleanup refused") from exc
 
     @contextlib.contextmanager
     def held_lock(self, name: str, *, deadline_seconds: float) -> Iterator[None]:
+        if self.lock is not None:
+            raise RuntimeError("nested Claude session locks are not supported")
         self.validate()
-        if os.name == "nt":
-            fd = dirfd.open_child_lock_file(self.fd, name)
-        else:
-            fd = dirfd.open_child_file(self.fd, name, dirfd.file_flags(os.O_RDWR | os.O_CREAT | os.O_NONBLOCK), 0o600)
+        try:
+            if os.name == "nt":
+                fd = dirfd.open_child_lock_file(self.fd, name)
+            else:
+                fd = dirfd.open_child_file(
+                    self.fd, name, dirfd.file_flags(os.O_RDWR | os.O_CREAT | os.O_NONBLOCK), 0o600
+                )
+        except OSError as exc:
+            raise SessionIntegrityError(f"Claude hook session lock file refused: {exc}") from exc
+        acquired = False
         try:
             self.validate_file(name, fd)
             deadline = time.monotonic() + deadline_seconds
@@ -173,6 +242,7 @@ class SessionDirectory:
                 inbox_lock._msvcrt_lock_with_deadline(fd, name, deadline, deadline_seconds)
             else:
                 inbox_lock._flock_with_deadline(fd, name, deadline, deadline_seconds)
+            acquired = True
             # Reuse the existing fork cleanup so children cannot prolong locks.
             with inbox_lock._HELD_FILE_LOCK_FDS_GUARD:
                 inbox_lock._HELD_FILE_LOCK_FDS.add(fd)
@@ -187,6 +257,12 @@ class SessionDirectory:
                 with inbox_lock._HELD_FILE_LOCK_FDS_GUARD:
                     inbox_lock._HELD_FILE_LOCK_FDS.discard(fd)
         finally:
+            if acquired:
+                with contextlib.suppress(OSError):
+                    if os.name == "nt" and inbox_lock.msvcrt is not None:
+                        inbox_lock.msvcrt.locking(fd, inbox_lock.msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined]
+                    elif inbox_lock.fcntl is not None:
+                        inbox_lock.fcntl.flock(fd, inbox_lock.fcntl.LOCK_UN)
             os.close(fd)
 
 
@@ -201,13 +277,13 @@ def _write_all(fd: int, data: bytes) -> None:
 
 @contextlib.contextmanager
 def session_directory(target: Path, *, create: bool = False) -> Iterator[SessionDirectory]:
-    target = target.expanduser().absolute()
+    target = target.expanduser().resolve()
     active = _ACTIVE.get()
     if active is not None and active.target == target and active.pid == os.getpid():
         active.validate()
         yield active
         return
-    anchor = SessionDirectory(target.resolve(), create=create)
+    anchor = SessionDirectory(target, create=create)
     try:
         yield anchor
     finally:
@@ -217,7 +293,7 @@ def session_directory(target: Path, *, create: bool = False) -> Iterator[Session
 def _read_json(anchor: SessionDirectory, name: str) -> dict[str, Any] | None:
     try:
         value = json.loads(anchor.read_bytes(name))
-    except (OSError, UnicodeError, ValueError):
+    except (FileNotFoundError, UnicodeError, ValueError):
         return None
     return value if isinstance(value, dict) else None
 
@@ -226,7 +302,7 @@ def read_json(target: Path, name: str) -> dict[str, Any] | None:
     try:
         with session_directory(target) as anchor:
             return _read_json(anchor, name)
-    except OSError:
+    except FileNotFoundError:
         return None
 
 
@@ -235,17 +311,23 @@ def write_json(target: Path, name: str, payload: dict[str, Any]) -> None:
         anchor.write_json(name, payload)
 
 
+def _sidecar_target(path: Path) -> Path:
+    if tuple(path.parent.parts[-4:]) != _COMPONENTS:
+        raise SessionIntegrityError("Claude hook sidecar layout is not a sessions directory")
+    return path.parents[4]
+
+
 def read_sidecar(path: Path, max_bytes: int) -> bytes:
     try:
-        with session_directory(path.parents[4]) as anchor:
+        with session_directory(_sidecar_target(path)) as anchor:
             return anchor.read_bytes(path.name, max_bytes)
-    except OSError:
+    except FileNotFoundError:
         return b""
 
 
 def append_sidecar(path: Path, payload: bytes, *, max_bytes: int | None) -> bool:
     try:
-        with session_directory(path.parents[4], create=True) as anchor:
+        with session_directory(_sidecar_target(path), create=True) as anchor:
             with anchor.open_file(path.name, os.O_WRONLY | os.O_CREAT | os.O_APPEND) as fd:
                 if max_bytes is not None and os.fstat(fd).st_size >= max_bytes:
                     return False
@@ -253,6 +335,8 @@ def append_sidecar(path: Path, payload: bytes, *, max_bytes: int | None) -> bool
                 anchor.validate_file(path.name, fd)
                 _write_all(fd, payload)
         return True
+    except SessionIntegrityError:
+        raise
     except OSError:
         return False
 
@@ -275,6 +359,7 @@ def iter_states(
                     continue
                 if stat.S_ISREG(info.st_mode) and (threshold is None or info.st_mtime >= threshold):
                     candidates.append((info.st_mtime, name))
+            anchor.validate()
             candidates.sort(reverse=True)
             if limit is not None:
                 candidates = candidates[: max(limit, 0)]
@@ -282,6 +367,8 @@ def iter_states(
                 value = _read_json(anchor, name)
                 if value is not None:
                     yield value
+    except SessionIntegrityError:
+        raise
     except FileNotFoundError:
         return
     except OSError as exc:
