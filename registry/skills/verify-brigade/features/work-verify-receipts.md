@@ -93,8 +93,8 @@ Observed: helper exit 3, `"status": "failed"`, and a receipt written anyway at
   second identical run can return the earlier `run_id`. That is correct
   behavior, not a stale result. `--no-reuse` forces execution - but never pass
   it to the repo's full `./scripts/verify` gate.
-- Status 75 from the full gate means another full verification already holds
-  the lock for this checkout. Do not retry it with a bigger timeout; run
+- Status 75 from the full gate means every verification slot for the Git common
+  directory is occupied. Do not retry it with a bigger timeout; run
   `./scripts/verify-focused` or wait.
 - The receipt captures a code-graph delta by shelling out to the `graphtrail`
   binary. On a host without it, `code_graph_delta` comes back
