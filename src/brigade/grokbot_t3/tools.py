@@ -221,6 +221,8 @@ class T3DispatchTools:
             raise c.T3DispatchError("submit-unknown") from exc
         request_id = result.get("request_id")
         if not isinstance(request_id, str) or not c.HANDLE_RE.fullmatch(request_id):
+            # A success envelope without a usable id may still mean a launch happened.
+            self.ledger.record_in_doubt(args["caller"], now)
             raise c.T3DispatchError("submit-unknown")
         raw_state = result.get("state")
         known_states = c.TERMINAL_STATES | {

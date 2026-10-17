@@ -63,7 +63,7 @@ def test_pending_notifications(tmp_path):
     _record(ledger, "done-notified", state="failed")
     ledger.mark_notified("done-notified", "failed", T0)
     ids = [row["request_id"] for row in ledger.pending_notifications()]
-    assert ids == ["running", "done-unnotified"]
+    assert ids == ["done-unnotified", "running"]
 
 
 def test_recent_projection(tmp_path):
@@ -193,3 +193,13 @@ def test_legacy_requests_default_to_default_interaction_mode(tmp_path):
     ledger = Ledger(path)
     assert ledger.get("r1")["interaction_mode"] == "default"
     ledger.close()
+
+
+def test_pending_notifications_puts_terminal_rows_first_then_least_recently_polled(tmp_path):
+    ledger = Ledger(tmp_path / "l.sqlite3")
+    _record(ledger, "old-running", state="running")
+    _record(ledger, "new-running", state="running")
+    _record(ledger, "done", state="succeeded")
+    ledger.mark_polled("old-running")
+    ids = [row["request_id"] for row in ledger.pending_notifications()]
+    assert ids == ["done", "new-running", "old-running"]

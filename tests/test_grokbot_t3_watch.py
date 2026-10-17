@@ -474,3 +474,48 @@ def test_row_log_failure_cannot_bypass_wake_retry_cap(setup):
     assert len(post.calls) == 30
     assert ledger.get("r1")["notified_state"] == "succeeded"
     assert summary == {"checked": 0, "woken": 0, "failed": 0}
+
+
+def test_pass_budget_defers_remaining_rows(setup):
+    tmp_path, targets, ledger = setup
+    for rid in ("r1", "r2", "r3"):
+        _record(ledger, rid)
+    ticks = iter([0.0, 0.0, 0.0, 10.0, 10.0, 10.0])
+    summary = watch.run_watch_once(
+        runner=Runner({"r1": "running", "r2": "running", "r3": "running"}),
+        ledger=ledger,
+        wake_targets=targets,
+        log_path=tmp_path / "w.jsonl",
+        now=lambda: NOW,
+        post=Post([]),
+        budget_seconds=5.0,
+        monotonic=lambda: next(ticks),
+    )
+    assert summary["checked"] == 2
+    assert summary["deferred"] == 1
+
+
+def test_polling_rotates_so_later_rows_are_reached(setup):
+    tmp_path, targets, ledger = setup
+    for rid in ("r1", "r2", "r3"):
+        _record(ledger, rid)
+    seen = []
+
+    class OneShot:
+        def status(self, request_id):
+            seen.append(request_id)
+            return {"schema": "t3-fleet.result.v1", "request_id": request_id, "state": "running"}
+
+    for _ in range(3):
+        clock = iter([0.0, 0.0, 10.0, 10.0])
+        watch.run_watch_once(
+            runner=OneShot(),
+            ledger=ledger,
+            wake_targets=targets,
+            log_path=tmp_path / "w.jsonl",
+            now=lambda: NOW,
+            post=Post([]),
+            budget_seconds=5.0,
+            monotonic=clock.__next__,
+        )
+    assert seen == ["r1", "r2", "r3"]

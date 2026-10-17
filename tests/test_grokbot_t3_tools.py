@@ -467,3 +467,11 @@ def test_unreadable_submit_without_id_reserves_an_open_slot(make):
     runner.submit_errors = [FleetProtocolError("internal_error")]
     assert _submit(tools)["error"]["code"] == "submit-unknown"
     assert _submit(tools)["error"]["code"] == "open-limit"
+
+
+def test_success_envelope_without_request_id_reserves_a_slot(make, monkeypatch):
+    tools, runner, ledger = make(max_open=1)
+    monkeypatch.setattr(runner, "submit", lambda **kwargs: {"state": "running", "host": kwargs["host"]})
+    assert _submit(tools)["error"]["code"] == "submit-unknown"
+    assert ledger.open_count(NOW) == 1
+    assert _submit(tools)["error"]["code"] == "open-limit"

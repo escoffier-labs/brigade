@@ -81,6 +81,7 @@ class Ledger:
                 "status_poll_delay": "INTEGER NOT NULL DEFAULT 0",
                 "wake_attempts": "INTEGER NOT NULL DEFAULT 0",
                 "delivered_targets": "TEXT NOT NULL DEFAULT '[]'",
+                "last_polled_seq": "INTEGER NOT NULL DEFAULT 0",
             }.items():
                 if name not in columns:
                     self._conn.execute(f"ALTER TABLE requests ADD COLUMN {name} {definition}")
@@ -192,8 +193,10 @@ class Ledger:
             placeholders = ", ".join("?" for _ in _TERMINAL)
             rows = self._conn.execute(
                 f"SELECT * FROM requests WHERE last_state NOT IN ({placeholders}) "
-                "OR notified_state IS NULL OR notified_state != last_state ORDER BY created_at, rowid",
-                _TERMINAL,
+                "OR notified_state IS NULL OR notified_state != last_state "
+                # Terminal rows need no status call, so deliver them first; then poll the least recently polled.
+                f"ORDER BY CASE WHEN last_state IN ({placeholders}) THEN 0 ELSE 1 END, last_polled_seq, created_at, rowid",
+                _TERMINAL + _TERMINAL,
             ).fetchall()
             return [dict(row) for row in rows]
 
@@ -218,6 +221,15 @@ class Ledger:
                 "SELECT status_failures FROM requests WHERE request_id = ?", (request_id,)
             ).fetchone()
             return int(row[0])
+
+    def mark_polled(self, request_id: str) -> None:
+        """Move a row to the back of the polling order."""
+        with self._lock:
+            self._conn.execute(
+                "UPDATE requests SET last_polled_seq = (SELECT COALESCE(MAX(last_polled_seq), 0) + 1 FROM requests) "
+                "WHERE request_id = ?",
+                (request_id,),
+            )
 
     def status_poll_due(self, request_id: str) -> bool:
         with self._lock:

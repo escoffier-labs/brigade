@@ -6,6 +6,7 @@ import http.client
 import json
 import os
 import re
+import time
 import urllib.error
 import urllib.request
 from datetime import datetime, timezone
@@ -24,6 +25,8 @@ MAX_WAKE_BYTES = 16_384
 MAX_KEY_BYTES = 1_024
 MAX_TARGETS = 4
 POST_TIMEOUT = 8
+# Stay inside the watcher unit's TimeoutStartSec=300 with room for shutdown.
+PASS_BUDGET_SECONDS = 240.0
 MAX_ATTEMPTS = 30
 Post = Callable[[str, str, dict[str, Any]], int]
 
@@ -106,10 +109,18 @@ def run_watch_once(
     log_path: Path,
     now: Callable[[], datetime] | None = None,
     post: Post = post_wake,
+    budget_seconds: float = PASS_BUDGET_SECONDS,
+    monotonic: Callable[[], float] = time.monotonic,
 ) -> dict[str, int]:
     clock = now or (lambda: datetime.now(timezone.utc))
     summary = {"checked": 0, "woken": 0, "failed": 0}
-    for row in ledger.pending_notifications():
+    started = monotonic()
+    rows = ledger.pending_notifications()
+    for index, row in enumerate(rows):
+        if monotonic() - started >= budget_seconds:
+            # Leave the rest for the next tick; the ordering puts them first next time.
+            summary["deferred"] = len(rows) - index
+            break
         state = row["last_state"]
         delivered: set[str] = set()
         wake_attempt_recorded = False
@@ -119,6 +130,7 @@ def run_watch_once(
             if state not in c.TERMINAL_STATES and (not status_exhausted or ledger.status_poll_due(row["request_id"])):
                 summary["checked"] += 1
                 status_failed = False
+                ledger.mark_polled(row["request_id"])
                 try:
                     result = runner.status(row["request_id"])
                 except (FleetCallError, FleetTimeout):

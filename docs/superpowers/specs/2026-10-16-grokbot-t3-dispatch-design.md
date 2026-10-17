@@ -104,7 +104,7 @@ All three hosts run T3 0.0.46 nightlies (audit 2026-10-16). The installed `t3-fl
 
 ## Failure handling
 
-- `t3-fleet` exit codes and JSON error states pass through as tool errors with the same code (`capacity-full`, `host-offline`, `repository-unknown`, and the rest). The pack adds `seat-not-allowed`, `host-not-allowed`, `repository-not-allowed`, `prompt-too-large`, `open-limit`, `daily-limit`, `dispatch-disabled`, `unknown-request`.
+- A `t3-fleet` refusal returns the closed public code `fleet-error`, with the `t3-fleet` code in `fleet_code`, its reason in `fleet_reason`, and the request id when one exists. The public `error.code` vocabulary stays closed so bots can rely on it; `t3-fleet` codes (`host_unavailable`, `policy_rejected`, `invalid_request`, and the rest) are read from `fleet_code`. The pack adds `seat-not-allowed`, `host-not-allowed`, `repository-not-allowed`, `prompt-too-large`, `open-limit`, `daily-limit`, `dispatch-disabled`, `unknown-request`.
 - Submit timeout 60 s, other calls 30 s. On a submit timeout the pack returns `submit-unknown` with the request id when known and never resubmits. Recovery follows the skill: `t3-fleet recover`.
 - A watcher failure never touches a thread. A listener crash leaves running threads running; the ledger lets the next start resume wakes.
 - `base_ref` is a branch name only, resolved under `refs/heads/`. Git tags and SHAs are not resolved as revisions. An unresolved branch fails before anything launches.
