@@ -116,7 +116,7 @@ from .fleet_hub_status import (
     latest_status as latest_status,
 )
 
-SCHEMA_VERSION = 31
+SCHEMA_VERSION = 32
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
@@ -330,6 +330,7 @@ CREATE TABLE IF NOT EXISTS model_policy (
     brigade_model TEXT NOT NULL DEFAULT '',
     t3_instance_id TEXT NOT NULL DEFAULT '',
     t3_service_tier TEXT NOT NULL DEFAULT '',
+    t3_model TEXT NOT NULL DEFAULT '',
     notes TEXT,
     updated_at TEXT NOT NULL
 );
@@ -620,6 +621,8 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     # recoverable principal enrollment and an unacked-recipient index.
     # v30 -> v31 adds message metadata columns and external agent send grants.
     fleet_hub_messages.ensure_schema(conn)
+    # v31 -> v32 adds model_policy.t3_model (native T3 launch model) through
+    # fleet_hub_model_roster.ensure_schema's additive column migration.
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 

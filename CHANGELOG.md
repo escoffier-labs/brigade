@@ -8,6 +8,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Grok Bot: new first-party connector pack `t3-dispatch` launches and steers T3 threads through `t3-fleet`, with a one-minute wake watcher.
+- `brigade fleet models set` accepts `--t3-model` and `--clear-t3-model` to bind the exact native model id T3 launches for a seat, next to `--t3-instance-id`. The t3-fleet plan binding then carries `model`, so seats whose canonical id differs from the native id (for example OpenCode `opencode/<model>`) launch through T3. The value requires a T3 instance binding, survives later `set` calls and fleet policy activation, and does not change the brigade-run plan. Hub schema 32 adds an additive `model_policy.t3_model` column.
+
 - The admin fleet Machines board shows unread totals for active agent principals in an Agents panel. Acknowledged messages and revoked principals disappear from the panel. (#1723)
 
 - Fleet messages support administrator-managed agent send grants, protected per-invocation token files, sender labels, threads and kinds, sender-scoped acknowledgement status, stable client IDs, credential-scoped flushing, and JSON error status and codes. Hub schema 31 migrates existing messages without changing legacy payload hashes. Tighten #1705: every new agent message, including replies, requires a matching send grant and shares the 200-per-recipient unacknowledged cap. Reusing a queued client ID preserves identical requests and refuses changed payloads locally. Enrollment without grants remains compatible with schema 30 hubs. (Refs #1688, #1121)

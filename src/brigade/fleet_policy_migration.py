@@ -209,10 +209,15 @@ def _legacy_bindings(seat: Mapping[str, Any]) -> dict[str, dict[str, Any]]:
     launch_model = brigade.get("model")
     if isinstance(launch_model, str) and launch_model:
         brigade_binding["model"] = launch_model
-    return {
+    legacy: dict[str, dict[str, Any]] = {
         "brigade": brigade_binding,
         "t3_fleet": {"instance_id": instance_id, "service_tier": service_tier},
     }
+    native = _as_mapping(bindings.get("native"))
+    native_model = native.get("model")
+    if instance_id and isinstance(native_model, str) and native_model:
+        legacy["native"] = {"instance_id": native.get("instance_id") or instance_id, "model": native_model}
+    return legacy
 
 
 def _map_legacy_seat(seat: Mapping[str, Any]) -> dict[str, Any]:

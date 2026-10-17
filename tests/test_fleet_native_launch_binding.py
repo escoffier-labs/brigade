@@ -21,6 +21,7 @@ from brigade import (
     fleet_hub,
     fleet_hub_model_roster,
     fleet_hub_policy,
+    fleet_hub_policy_api,
     fleet_model_admission,
     fleet_model_roster,
     fleet_policy,
@@ -226,7 +227,14 @@ def conn(tmp_path):
         connection.close()
 
 
-def _set_seat(conn, *, brigade_model: object = NATIVE, expected_revision: int = 1) -> dict[str, object]:
+def _set_seat(
+    conn,
+    *,
+    brigade_model: object = NATIVE,
+    expected_revision: int = 1,
+    t3_model: object = None,
+    t3_instance_id: str = "opencode",
+) -> dict[str, object]:
     body: dict[str, object] = {
         "action": "set",
         "expected_revision": expected_revision,
@@ -237,12 +245,14 @@ def _set_seat(conn, *, brigade_model: object = NATIVE, expected_revision: int = 
         "enabled": True,
         "limit": 1,
         "brigade_cli": "opencode",
-        "t3_instance_id": "opencode",
+        "t3_instance_id": t3_instance_id,
         "t3_service_tier": "",
         "notes": "",
     }
     if brigade_model is not None:
         body["brigade_model"] = brigade_model
+    if t3_model is not None:
+        body["t3_model"] = t3_model
     status, payload = fleet_hub_model_roster.handle_model_policy(conn, body)
     assert status == 200, payload
     return payload
@@ -264,7 +274,7 @@ def _set_default(conn, *, consumer: str, expected_revision: int) -> None:
 def _document() -> dict[str, object]:
     return {
         "schema": fleet_policy.POLICY_SCHEMA,
-        "defaults": {"data": {"allow_training": True}},
+        "defaults": {"data": {"allow_training": True, "allow_free": True}},
         "machines": {"worker-linux-1": {"os": "linux", "concurrency": 2, "node_id": NODE_A}},
         "seats": {},
         "consumers": {
@@ -345,6 +355,7 @@ def test_operator_roster_page_toggle_keeps_the_native_binding(conn):
             "brigade_model": row.brigade_model,
             "t3_instance_id": row.t3_instance_id,
             "t3_service_tier": row.t3_service_tier,
+            "t3_model": row.t3_model,
             "notes": row.notes,
         },
     )
@@ -537,3 +548,370 @@ def test_client_preserves_and_clears_the_native_binding(monkeypatch):
     fleet_client.set_model_policy(PROVIDER, CANONICAL, SEAT, enabled=True, brigade_model="", expected_revision=4)
     assert posted[-1]["brigade_model"] == ""
     assert posted[-1]["model"] == CANONICAL
+
+
+# --- Native T3 launch model (t3-fleet plan binding) ------------------------
+
+
+def _t3_plan_binding(conn, consumer: str = "t3-fleet") -> dict[str, object] | None:
+    seat = fleet_hub_model_roster.raw_seats(conn)[0]
+    return fleet_hub_model_roster._binding_for(consumer, seat)
+
+
+def test_t3_model_adds_the_native_launch_model_to_the_t3_fleet_plan(conn):
+    policy = _set_seat(conn, brigade_model="", t3_model=NATIVE)
+    assert policy["policy"]["t3_model"] == NATIVE
+    seat = fleet_hub_model_roster.raw_seats(conn)[0]
+    assert seat["model"] == CANONICAL
+    assert seat["bindings"]["native"] == {"instance_id": "opencode", "model": NATIVE}
+    assert seat["bindings"]["t3_fleet"] == {"instance_id": "opencode", "service_tier": None}
+    assert _t3_plan_binding(conn) == {"instance_id": "opencode", "service_tier": None, "model": NATIVE}
+    assert fleet_model_admission._binding_for("t3-fleet", seat) == {
+        "instance_id": "opencode",
+        "service_tier": None,
+        "model": NATIVE,
+    }
+    assert (
+        fleet_model_roster.validate_roster_rows(
+            {"seats": [seat], "consumer_defaults": {"t3-fleet": SEAT}, "retired_models": []}
+        )
+        is None
+    )
+
+
+def test_t3_model_does_not_change_the_brigade_run_plan(conn):
+    _set_seat(conn, brigade_model="")
+    before = _t3_plan_binding(conn, "brigade-run")
+    _set_seat(conn, brigade_model="", t3_model=NATIVE, expected_revision=2)
+    assert _t3_plan_binding(conn, "brigade-run") == before == {"instance_id": "opencode", "service_tier": None}
+    _set_seat(conn, brigade_model=NATIVE, t3_model="opencode/other-native", expected_revision=3)
+    assert _t3_plan_binding(conn, "brigade-run") == {
+        "instance_id": "opencode",
+        "service_tier": None,
+        "model": NATIVE,
+    }
+    assert _t3_plan_binding(conn)["model"] == "opencode/other-native"
+
+
+def test_seat_without_t3_model_has_no_native_group_or_plan_model(conn):
+    _set_seat(conn)
+    seat = fleet_hub_model_roster.raw_seats(conn)[0]
+    assert "native" not in seat["bindings"]
+    assert _t3_plan_binding(conn) == {"instance_id": "opencode", "service_tier": None}
+
+
+def test_clearing_t3_model_removes_the_plan_model(conn):
+    _set_seat(conn, brigade_model="", t3_model=NATIVE)
+    cleared = _set_seat(conn, brigade_model="", t3_model="", expected_revision=2)
+    assert cleared["policy"]["t3_model"] is None
+    assert "native" not in fleet_hub_model_roster.raw_seats(conn)[0]["bindings"]
+    assert _t3_plan_binding(conn) == {"instance_id": "opencode", "service_tier": None}
+
+
+def test_t3_model_without_a_t3_instance_is_rejected(conn):
+    with pytest.raises(fleet_hub.FleetHubError, match="t3_instance_id"):
+        _set_seat(conn, t3_model=NATIVE, t3_instance_id="")
+    with pytest.raises(fleet_hub.FleetHubError, match="t3_instance_id"):
+        fleet_hub_model_roster._validate_set(
+            {
+                "action": "set",
+                "expected_revision": 1,
+                "seat": SEAT,
+                "provider": PROVIDER,
+                "model": CANONICAL,
+                "reasoning": "high",
+                "enabled": True,
+                "t3_model": NATIVE,
+            }
+        )
+    assert fleet_hub_model_roster.raw_seats(conn) == []
+
+
+@pytest.mark.parametrize(
+    "native",
+    ("opencode/muse\x00spark", "opencode/muse\nspark", "a" * 257, "/leading-separator", "opencode/muse spark"),
+)
+def test_hub_rejects_unsafe_t3_model_ids(conn, native):
+    with pytest.raises(fleet_hub.FleetHubError):
+        _set_seat(conn, t3_model=native)
+
+
+def test_retired_t3_model_cannot_be_enabled(conn):
+    status, payload = fleet_hub_model_roster.handle_model_policy(
+        conn,
+        {"action": "retire", "expected_revision": 1, "provider": "openai", "family": "gpt-5.6"},
+    )
+    assert status == 200, payload
+    body = {
+        "action": "set",
+        "expected_revision": 2,
+        "seat": "retired-seat",
+        "provider": "openai",
+        "model": "current-model",
+        "reasoning": "high",
+        "enabled": True,
+        "t3_instance_id": "openai",
+        "t3_model": "gpt-5.6-high",
+    }
+    status, denied = fleet_hub_model_roster.handle_model_policy(conn, body)
+    assert status == 409 and denied["error"] == "retired-model"
+    status, allowed = fleet_hub_model_roster.handle_model_policy(conn, {**body, "enabled": False})
+    assert status == 200, allowed
+
+
+def test_roster_page_toggle_keeps_the_t3_model(conn):
+    from brigade import fleet_command_deck, fleet_hub_roster_page
+
+    _set_seat(conn, brigade_model="", t3_model=NATIVE)
+    view = fleet_hub_roster_page.load_view(conn, fleet_command_deck.DeckConfig())
+    row = next(item for item in view.seats if item.seat == SEAT)
+    assert row.t3_model == NATIVE
+    fleet_hub_model_roster._write_set(
+        conn,
+        {
+            "seat": row.seat,
+            "provider": row.provider,
+            "model": row.model,
+            "reasoning": row.reasoning,
+            "enabled": False,
+            "limit": row.limit,
+            "brigade_cli": row.brigade_cli,
+            "brigade_model": row.brigade_model,
+            "t3_instance_id": row.t3_instance_id,
+            "t3_service_tier": row.t3_service_tier,
+            "t3_model": row.t3_model,
+            "notes": row.notes,
+        },
+    )
+    seat = fleet_hub_model_roster.raw_seats(conn)[0]
+    assert seat["enabled"] is False
+    assert seat["bindings"]["native"]["model"] == NATIVE
+
+
+def test_t3_model_survives_policy_authority_activation(conn):
+    _set_seat(conn, brigade_model="", t3_model=NATIVE)
+    _set_default(conn, consumer="brigade-run", expected_revision=2)
+    _set_default(conn, consumer="t3-fleet", expected_revision=3)
+    _activate(conn)
+    roster = fleet_hub_model_roster.project_roster(conn, audience_node_id=NODE_A)
+    seat = next(item for item in roster["seats"] if item["seat"] == SEAT)
+    assert seat["bindings"]["native"] == {"instance_id": "opencode", "model": NATIVE}
+    assert roster["consumer_launch_bindings"]["t3-fleet"][SEAT]["native"]["model"] == NATIVE
+    assert fleet_model_roster.validate_roster_rows(roster) is None
+    assert fleet_hub_model_roster._binding_for("t3-fleet", seat) == {
+        "instance_id": "opencode",
+        "service_tier": None,
+        "model": NATIVE,
+    }
+
+
+# --- Launch proof against the stored t3_model -----------------------------
+
+PROOF_SESSION = "session-t3-native"
+
+
+def _t3_prepare_and_ack(conn, *, model: str):
+    current = fleet_hub_policy.current_policy(conn)
+    status, prepared = fleet_hub_policy_api.handle_policy(
+        conn,
+        {
+            "action": "prepare",
+            "consumer": "t3-fleet",
+            "repo_identity": REPO,
+            "session_id": PROOF_SESSION,
+            "origin": "local",
+            "provider": PROVIDER,
+            "model": model,
+            "instance_id": "opencode",
+        },
+        caller_node=NODE_A,
+        is_admin=False,
+    )
+    assert status == 200, prepared
+    status, ack = fleet_hub_policy_api.handle_policy(
+        conn,
+        {
+            "action": "acknowledge",
+            "consumer": "t3-fleet",
+            "repo_identity": REPO,
+            "session_id": PROOF_SESSION,
+            "version": current["revision"] if prepared.get("version") is None else prepared["version"],
+            "digest": prepared["digest"],
+            "status": "applied",
+            "context_hash": prepared["context_hash"],
+        },
+        caller_node=NODE_A,
+        is_admin=False,
+    )
+    assert status == 200, ack
+    return prepared
+
+
+def _t3_launch(conn, prepared):
+    roster = fleet_hub_model_roster.project_roster(conn, audience_node_id=NODE_A)
+    return fleet_hub_model_roster.handle_model_policy(
+        conn,
+        {
+            "action": "admit",
+            "schema": fleet_model_roster.ADMISSION_REQUEST_SCHEMA,
+            "consumer": "t3-fleet",
+            "seat": SEAT,
+            "request_id": "eeeeeeee-eeee-4eee-8eee-eeeeeeeeeeee",
+            "phase": "launch",
+            "expect_revision": roster["revision"],
+            "expect_digest": roster["document_sha256"],
+            "policy_session_id": PROOF_SESSION,
+            "policy_version": prepared["version"],
+            "policy_digest": prepared["digest"],
+            "repo_identity": REPO,
+            "policy_context_hash": prepared["context_hash"],
+        },
+        caller_node=NODE_A,
+    )
+
+
+def _activate_with_t3_model(conn):
+    _set_seat(conn, brigade_model="", t3_model=NATIVE)
+    _set_default(conn, consumer="brigade-run", expected_revision=2)
+    _set_default(conn, consumer="t3-fleet", expected_revision=3)
+    _activate(conn)
+
+
+def test_launch_proof_accepts_the_stored_t3_model(conn):
+    _activate_with_t3_model(conn)
+    prepared = _t3_prepare_and_ack(conn, model=NATIVE)
+    status, payload = _t3_launch(conn, prepared)
+    # t3-fleet launches also need a routing reservation. Every identity check
+    # (seat, canonical model, native launch model) runs before that gate, so
+    # reaching it means the stored t3_model was accepted as the launch model.
+    assert status == 409
+    assert payload["error"] == "decision-proof-missing"
+
+
+def test_launch_proof_rejects_a_launch_model_other_than_the_stored_t3_model(conn, monkeypatch):
+    _activate_with_t3_model(conn)
+    prepared = _t3_prepare_and_ack(conn, model=NATIVE)
+    original = fleet_hub_model_roster._selected_identities
+
+    def _other(selected):
+        identities = original(selected)
+        identities["launch_model"] = "opencode/other-native"
+        identities["native_model"] = "opencode/other-native"
+        return identities
+
+    monkeypatch.setattr(fleet_hub_model_roster, "_selected_identities", _other)
+    status, payload = _t3_launch(conn, prepared)
+    assert status == 409
+    assert payload["error"] == "policy-proof-identity-mismatch"
+
+
+def test_prepare_refuses_a_t3_launch_model_that_is_not_stored(conn):
+    _activate_with_t3_model(conn)
+    for model in ("opencode/other-native", CANONICAL):
+        with pytest.raises(fleet_hub_policy_api.FleetPolicyApiError, match="no configured seat binding"):
+            fleet_hub_policy_api.handle_policy(
+                conn,
+                {
+                    "action": "prepare",
+                    "consumer": "t3-fleet",
+                    "repo_identity": REPO,
+                    "session_id": PROOF_SESSION,
+                    "origin": "local",
+                    "provider": PROVIDER,
+                    "model": model,
+                    "instance_id": "opencode",
+                },
+                caller_node=NODE_A,
+                is_admin=False,
+            )
+
+
+# --- CLI and client -------------------------------------------------------
+
+
+def test_models_set_cli_sends_clears_and_echoes_t3_model(monkeypatch):
+    calls: list[dict[str, object]] = []
+
+    def _set_model_policy(provider, model, seat, **kwargs):
+        calls.append({"provider": provider, "model": model, "seat": seat, **kwargs})
+        policy = {"provider": provider, "model": model, "seat": seat, "enabled": True}
+        if kwargs.get("t3_model"):
+            policy["t3_model"] = kwargs["t3_model"]
+        return policy
+
+    monkeypatch.setattr(fleet_client, "set_model_policy", _set_model_policy)
+    out = StringIO()
+    monkeypatch.setattr("sys.stdout", out)
+    monkeypatch.setattr("sys.stderr", StringIO())
+    base = ["fleet", "models", "set", PROVIDER, CANONICAL, SEAT, "--enable", "--expect-revision", "2"]
+    assert cli.main([*base, "--t3-instance-id", "opencode", "--t3-model", NATIVE, "--json"]) == 0
+    assert calls[-1]["t3_model"] == NATIVE
+    assert json.loads(out.getvalue())["t3_model"] == NATIVE
+    assert cli.main([*base, "--clear-t3-model"]) == 0
+    assert calls[-1]["t3_model"] == ""
+    assert cli.main(base) == 0
+    assert "t3_model" not in calls[-1]
+
+
+def test_models_set_cli_rejects_setting_and_clearing_t3_model_together(monkeypatch):
+    monkeypatch.setattr("sys.stdout", StringIO())
+    monkeypatch.setattr("sys.stderr", StringIO())
+    with pytest.raises(SystemExit) as excinfo:
+        cli.main(
+            [
+                "fleet",
+                "models",
+                "set",
+                PROVIDER,
+                CANONICAL,
+                SEAT,
+                "--enable",
+                "--t3-model",
+                NATIVE,
+                "--clear-t3-model",
+                "--expect-revision",
+                "2",
+            ]
+        )
+    assert excinfo.value.code != 0
+
+
+def test_client_preserves_and_clears_the_t3_model(monkeypatch):
+    posted: list[dict[str, object]] = []
+    existing = {
+        "seats": [
+            {
+                "seat": SEAT,
+                "provider": PROVIDER,
+                "model": CANONICAL,
+                "reasoning": "high",
+                "enabled": True,
+                "bindings": {
+                    "brigade": {"cli": "opencode"},
+                    "t3_fleet": {"instance_id": "opencode", "service_tier": None},
+                    "native": {"instance_id": "opencode", "model": NATIVE},
+                },
+            }
+        ],
+        "revision": 4,
+    }
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: {"hub_url": "https://hub.invalid", "admin_token": "admin-token"},
+    )
+    monkeypatch.setattr(fleet_client, "_get_models_blocking", lambda *args, **kwargs: existing)
+
+    def _post(hub, token, body, **kwargs):
+        posted.append(body)
+        return 200, {"policy": {"seat": SEAT, "provider": PROVIDER, "model": CANONICAL, "enabled": True}}
+
+    monkeypatch.setattr(fleet_client, "_post_model_policy_blocking", _post)
+    fleet_client.set_model_policy(PROVIDER, CANONICAL, SEAT, enabled=True, expected_revision=4)
+    assert posted[-1]["t3_model"] == NATIVE
+    fleet_client.set_model_policy(PROVIDER, CANONICAL, SEAT, enabled=True, t3_model="", expected_revision=4)
+    assert posted[-1]["t3_model"] == ""
+    fleet_client.set_model_policy(
+        PROVIDER, CANONICAL, SEAT, enabled=True, t3_model="opencode/replacement", expected_revision=4
+    )
+    assert posted[-1]["t3_model"] == "opencode/replacement"

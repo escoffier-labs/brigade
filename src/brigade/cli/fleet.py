@@ -256,6 +256,22 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_models_set.add_argument(
         "--t3-service-tier", default=None, dest="t3_service_tier", help="Optional T3 service tier."
     )
+    t3_launch_model = p_models_set.add_mutually_exclusive_group()
+    t3_launch_model.add_argument(
+        "--t3-model",
+        default=None,
+        dest="t3_model",
+        help=(
+            "Exact native model id T3 launches (e.g. opencode/deepseek-v4.1-flash-free). "
+            "Requires a T3 instance binding."
+        ),
+    )
+    t3_launch_model.add_argument(
+        "--clear-t3-model",
+        action="store_true",
+        dest="clear_t3_model",
+        help="Drop the native T3 launch model so the canonical model is launched.",
+    )
     p_models_set.add_argument(
         "--expect-revision", type=int, required=True, dest="expect_revision", help="Current hub roster revision."
     )
@@ -1492,6 +1508,10 @@ def _dispatch_models_set(args: argparse.Namespace) -> int:
             kwargs["t3_instance_id"] = args.t3_instance_id
         if args.t3_service_tier is not None:
             kwargs["t3_service_tier"] = args.t3_service_tier
+        if args.clear_t3_model:
+            kwargs["t3_model"] = ""
+        elif args.t3_model is not None:
+            kwargs["t3_model"] = args.t3_model
         kwargs["expected_revision"] = args.expect_revision
         policy = fleet_client.set_model_policy(args.provider, args.model, args.seat, **kwargs)
     except fleet_client.FleetClientError as exc:
@@ -1507,6 +1527,9 @@ def _dispatch_models_set(args: argparse.Namespace) -> int:
     launch = policy.get("brigade_model")
     if isinstance(launch, str) and launch:
         line += f"; brigade launch model {launch}"
+    t3_launch = policy.get("t3_model")
+    if isinstance(t3_launch, str) and t3_launch:
+        line += f"; t3 launch model {t3_launch}"
     print(line)
     return 0
 
