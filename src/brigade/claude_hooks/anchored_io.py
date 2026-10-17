@@ -8,6 +8,7 @@ read/modify/write transaction. No pathname fallback is permitted.
 from __future__ import annotations
 
 import contextlib
+import errno
 import json
 import os
 import stat
@@ -23,15 +24,17 @@ from .. import dirfd, inbox_lock
 
 _COMPONENTS = (".brigade", "work", "claude-hooks", "sessions")
 _ACTIVE: ContextVar[SessionDirectory | None] = ContextVar("claude_session_directory", default=None)
+_WINDOWS_REPLACE_ATTEMPTS = 5
+_WINDOWS_REPLACE_BACKOFF_SECONDS = 0.01
 
 
 class SessionIntegrityError(OSError):
     """Session I/O cannot prove path integrity; never interpret this as absence."""
 
 
-def integrity_envelope(event: str) -> dict[str, Any]:
+def integrity_envelope(event: str, *, stop_hook_active: bool = False) -> dict[str, Any]:
     reason = "Brigade session state integrity check failed. Restore the session directory and run brigade doctor."
-    if event == "Stop":
+    if event == "Stop" and not stop_hook_active:
         return {"decision": "block", "reason": reason}
     if event == "PreToolUse":
         return {
@@ -42,6 +45,27 @@ def integrity_envelope(event: str) -> dict[str, Any]:
             }
         }
     return {"continue": False, "stopReason": reason}
+
+
+def _raise_integrity_error(error: OSError) -> None:
+    """Translate only no-follow path/type refusals, preserving ordinary I/O errors."""
+    if (
+        isinstance(error, (NotADirectoryError, IsADirectoryError))
+        or error.errno in {errno.ELOOP, errno.ENOTDIR, errno.EISDIR}
+        or dirfd.is_reparse_point_refusal(error)
+        # The native backend's handle metadata check has no errno for these.
+        or (os.name == "nt" and str(error) in {"path component is not a directory", "path component is a directory"})
+    ):
+        raise SessionIntegrityError(f"Claude hook session path refused: {error}") from error
+
+
+def _windows_replace_contention(error: OSError) -> bool:
+    return os.name == "nt" and (
+        isinstance(error, PermissionError)
+        or getattr(error, "winerror", None) in {5, 32, 33}
+        # nt_dirfd preserves STATUS_SHARING_VIOLATION as an untyped OSError.
+        or str(error).endswith("NTSTATUS=0xC0000043")
+    )
 
 
 def _identity(info: os.stat_result) -> tuple[int, int]:
@@ -83,8 +107,8 @@ class SessionDirectory:
             self.validate()
         except BaseException as exc:
             self.close()
-            if isinstance(exc, OSError) and not isinstance(exc, (FileNotFoundError, SessionIntegrityError)):
-                raise SessionIntegrityError(f"Claude hook session directory refused: {exc}") from exc
+            if isinstance(exc, OSError):
+                _raise_integrity_error(exc)
             raise
 
     @property
@@ -100,10 +124,11 @@ class SessionDirectory:
         """Refuse renamed, linked or replaced components without following them."""
         try:
             self._validate_chain()
-        except SessionIntegrityError:
-            raise
+        except FileNotFoundError as exc:
+            raise SessionIntegrityError("Claude hook held session directory disappeared") from exc
         except OSError as exc:
-            raise SessionIntegrityError("Claude hook session directory changed or became unreadable") from exc
+            _raise_integrity_error(exc)
+            raise
 
     def _validate_chain(self) -> None:
         root_info = os.lstat(self.target)
@@ -122,8 +147,11 @@ class SessionDirectory:
         try:
             held = os.fstat(fd)
             named = dirfd.stat_child(self.fd, name, allow_reparse=True)
+        except FileNotFoundError as exc:
+            raise SessionIntegrityError("Claude hook held session file disappeared") from exc
         except OSError as exc:
-            raise SessionIntegrityError("Claude hook session file changed or became unreadable") from exc
+            _raise_integrity_error(exc)
+            raise
         if (
             not stat.S_ISREG(held.st_mode)
             or held.st_nlink != 1
@@ -149,7 +177,8 @@ class SessionDirectory:
                 self.validate()
                 raise
             except OSError as exc:
-                raise SessionIntegrityError(f"Claude hook session file refused: {exc}") from exc
+                _raise_integrity_error(exc)
+                raise
             try:
                 if reading:
                     held = os.fstat(fd)
@@ -195,16 +224,28 @@ class SessionDirectory:
             try:
                 fd = dirfd.open_child_file(self.fd, temporary, flags, 0o600)
             except OSError as exc:
-                raise SessionIntegrityError(f"Claude hook temporary session file refused: {exc}") from exc
+                _raise_integrity_error(exc)
+                raise
             created = True
             try:
                 self.validate_file(temporary, fd)
                 self.validate()
                 _write_all(fd, data)
                 os.fsync(fd)
-                self.validate_file(temporary, fd)
-                self.validate()
-                dirfd.replace_children(self.fd, temporary, name)
+                for attempt in range(_WINDOWS_REPLACE_ATTEMPTS):
+                    self.validate_file(temporary, fd)
+                    self.validate()
+                    try:
+                        dirfd.replace_children(self.fd, temporary, name)
+                    except OSError as exc:
+                        _raise_integrity_error(exc)
+                        if not _windows_replace_contention(exc):
+                            raise
+                        if attempt + 1 == _WINDOWS_REPLACE_ATTEMPTS:
+                            raise OSError(errno.EBUSY, "Windows session publication remained busy") from exc
+                        time.sleep(_WINDOWS_REPLACE_BACKOFF_SECONDS)
+                    else:
+                        break
                 self.validate_file(name, fd)
             finally:
                 os.close(fd)
@@ -212,13 +253,16 @@ class SessionDirectory:
         finally:
             if created:
                 # Cleanup stays relative even when a parent was renamed.
-                with contextlib.suppress(FileNotFoundError):
-                    try:
-                        dirfd.unlink_child(self.fd, temporary)
-                    except FileNotFoundError:
-                        raise
-                    except OSError as exc:
-                        raise SessionIntegrityError("Claude hook temporary session file cleanup refused") from exc
+                primary_error = sys.exc_info()[1]
+                try:
+                    dirfd.unlink_child(self.fd, temporary)
+                except FileNotFoundError:
+                    pass
+                except OSError as exc:
+                    if isinstance(primary_error, SessionIntegrityError):
+                        raise primary_error from exc
+                    _raise_integrity_error(exc)
+                    raise
 
     @contextlib.contextmanager
     def held_lock(self, name: str, *, deadline_seconds: float) -> Iterator[None]:
@@ -233,7 +277,8 @@ class SessionDirectory:
                     self.fd, name, dirfd.file_flags(os.O_RDWR | os.O_CREAT | os.O_NONBLOCK), 0o600
                 )
         except OSError as exc:
-            raise SessionIntegrityError(f"Claude hook session lock file refused: {exc}") from exc
+            _raise_integrity_error(exc)
+            raise
         acquired = False
         try:
             self.validate_file(name, fd)

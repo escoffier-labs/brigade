@@ -40,6 +40,18 @@ def test_doctor_reports_enforced_current_package(tmp_path: Path, capsys):
     assert "enforced" in check["detail"]
 
 
+def test_doctor_reports_session_integrity_refusal_without_crashing(tmp_path: Path, capsys):
+    target = _wired(tmp_path)
+    sessions = target / ".brigade" / "work" / "claude-hooks" / "sessions"
+    sessions.parent.mkdir(parents=True, exist_ok=True)
+    sessions.write_text("not a directory")
+
+    check = _loop_check(target, capsys, expect_rc=1)
+
+    assert check["status"] == "FAIL"
+    assert "session directory integrity refused:" in check["detail"]
+
+
 def test_doctor_reports_advisory_only_without_hooks(tmp_path: Path, capsys):
     target = _wired(tmp_path)
     assert hooks_uninstall(target=target) == 0

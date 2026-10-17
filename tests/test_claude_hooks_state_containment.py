@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import subprocess
 import threading
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -95,10 +97,11 @@ def test_parent_swap_during_locked_transaction_fails_closed(state_tree, componen
     with runtime._session_state_lock(target, "s"):
         try:
             parent.rename(parent.with_name(f"{parent.name}-held"))
-        except PermissionError:
+        except PermissionError as exc:
             # Native Windows can deny relocation while the sibling lock is
             # open. That denial must preserve the original state and tree.
             assert os.name == "nt"
+            assert exc.winerror == 5
             assert runtime.read_session_state(target, "s") == {"session_id": "original"}
         else:
             _directory_link(parent, outside)
@@ -127,12 +130,12 @@ def test_windows_unavailable_backend_never_falls_back_to_paths(state_tree, monke
 
     with pytest.raises(OSError, match="unavailable"):
         runtime.write_session_state(target, "s", {"session_id": "s"})
-    with pytest.raises(anchored_io.SessionIntegrityError):
+    with pytest.raises(OSError, match="unavailable") as caught:
         runtime.read_session_state(target, "s")
-    with pytest.raises(anchored_io.SessionIntegrityError):
-        session_state._append_pending_increment(target, "s")
-    with pytest.raises(anchored_io.SessionIntegrityError):
-        list(runtime.iter_session_states(target))
+    assert not isinstance(caught.value, anchored_io.SessionIntegrityError)
+    assert session_state._append_pending_increment(target, "s") is False
+    assert list(runtime.iter_session_states(target)) == []
+    assert "unavailable" in capsys.readouterr().err
     assert list(sessions.iterdir()) == []
     assert list(outside.iterdir()) == []
 
@@ -149,7 +152,11 @@ def test_read_during_atomic_replace_never_loses_state(state_tree) -> None:
             generation = 0
             while not stop.is_set():
                 generation += 1
-                runtime.write_session_state(target, "s", {"write_observed": True, "generation": generation})
+                try:
+                    runtime.write_session_state(target, "s", {"write_observed": True, "generation": generation})
+                except OSError as exc:
+                    assert os.name == "nt" and exc.errno == errno.EBUSY
+                    assert not isinstance(exc, anchored_io.SessionIntegrityError)
                 started.set()
         except Exception as exc:
             failures.append(exc)
@@ -181,12 +188,18 @@ def test_read_trusts_held_file_after_atomic_replace(state_tree, monkeypatch) -> 
         data = original_read(fd, count)
         if not replaced:
             replaced = True
-            runtime.write_session_state(target, "s", {"write_observed": True, "generation": 2})
+            try:
+                runtime.write_session_state(target, "s", {"write_observed": True, "generation": 2})
+            except OSError as exc:
+                # Classic Windows rename cannot replace this held reader.
+                assert os.name == "nt" and exc.errno == errno.EBUSY
+                assert not isinstance(exc, anchored_io.SessionIntegrityError)
         return data
 
     with monkeypatch.context() as patch:
         patch.setattr(os, "read", racing_read)
         assert runtime.read_session_state(target, "s") == {"write_observed": True, "generation": 1}
+    runtime.write_session_state(target, "s", {"write_observed": True, "generation": 2})
     assert runtime.read_session_state(target, "s") == {"write_observed": True, "generation": 2}
 
 
@@ -208,6 +221,7 @@ def test_transient_read_swap_never_rebuilds_write_observed(tmp_path, monkeypatch
     original_stat = dirfd.stat_child
     read_seen = False
     swapped = False
+    rename_refused = False
 
     def tracked_read(fd, count):
         nonlocal read_seen
@@ -218,10 +232,15 @@ def test_transient_read_swap_never_rebuilds_write_observed(tmp_path, monkeypatch
         return data
 
     def racing_stat(parent, name, **kwargs):
-        nonlocal swapped
-        if read_seen and name == "sessions" and not swapped:
+        nonlocal swapped, rename_refused
+        if read_seen and name == "sessions" and not (swapped or rename_refused):
+            try:
+                sessions.rename(held)
+            except PermissionError as exc:
+                assert os.name == "nt" and exc.winerror == 5
+                rename_refused = True
+                return original_stat(parent, name, **kwargs)
             swapped = True
-            sessions.rename(held)
             _directory_link(sessions, outside)
             try:
                 return original_stat(parent, name, **kwargs)
@@ -236,15 +255,21 @@ def test_transient_read_swap_never_rebuilds_write_observed(tmp_path, monkeypatch
     with monkeypatch.context() as patch:
         patch.setattr(os, "read", tracked_read)
         patch.setattr(dirfd, "stat_child", racing_stat)
-        with pytest.raises(OSError, match="session directory"):
-            runtime.handle_payload("Stop", {"cwd": str(target), "session_id": "s", "stop_hook_active": False})
-    assert swapped
+        try:
+            result = runtime.handle_payload("Stop", {"cwd": str(target), "session_id": "s", "stop_hook_active": False})
+        except anchored_io.SessionIntegrityError:
+            assert swapped
+        else:
+            assert rename_refused and result is not None and result["decision"] == "block"
+    assert swapped or rename_refused
     assert path.read_bytes() == before
     assert list(outside.iterdir()) == []
 
 
-@pytest.mark.parametrize("event", ["Stop", "PreToolUse", "PostToolUse"])
-def test_integrity_refusal_blocks_hook_without_rebuilding_state(tmp_path, capsys, event) -> None:
+@pytest.mark.parametrize(
+    "event,stop_active", [("Stop", False), ("Stop", True), ("PreToolUse", False), ("PostToolUse", False)]
+)
+def test_integrity_refusal_blocks_hook_without_rebuilding_state(tmp_path, capsys, event, stop_active) -> None:
     target = _wired_claude(tmp_path)
     runtime.write_session_state(target, "s", {"write_observed": True})
     sessions = runtime._sessions_root(target)
@@ -256,12 +281,14 @@ def test_integrity_refusal_blocks_hook_without_rebuilding_state(tmp_path, capsys
     capsys.readouterr()
     assert (
         runtime.hook_run(
-            event=event, package=PACKAGE_REF, stdin_text=json.dumps({"cwd": str(target), "session_id": "s"})
+            event=event,
+            package=PACKAGE_REF,
+            stdin_text=json.dumps({"cwd": str(target), "session_id": "s", "stop_hook_active": stop_active}),
         )
         == 0
     )
     result = json.loads(capsys.readouterr().out)
-    if event == "Stop":
+    if event == "Stop" and not stop_active:
         assert result["decision"] == "block"
     elif event == "PreToolUse":
         assert result["hookSpecificOutput"]["permissionDecision"] == "deny"
@@ -344,3 +371,125 @@ def test_write_does_not_create_missing_target(tmp_path) -> None:
     with pytest.raises(OSError):
         runtime.write_session_state(target, "s", {})
     assert not target.exists()
+
+
+@pytest.mark.parametrize("failure", ["access", "sharing", "ntstatus", "exhausted"])
+def test_windows_publication_retries_contention_with_a_small_budget(state_tree, monkeypatch, failure) -> None:
+    target, sessions, _outside = state_tree
+    runtime.write_session_state(target, "s", {"generation": 1})
+    monkeypatch.setattr(anchored_io, "os", SimpleNamespace(**(vars(os) | {"name": "nt"})))
+    original_replace = dirfd.replace_children
+    calls = []
+    sleeps = []
+
+    def contended(parent, source, destination, **kwargs):
+        calls.append((parent, source, destination))
+        if len(calls) <= 2 or failure == "exhausted":
+            if failure == "ntstatus":
+                raise OSError("Windows no-follow directory operation failed: NTSTATUS=0xC0000043")
+            error = (
+                OSError("sharing violation")
+                if failure == "sharing"
+                else PermissionError("path component access denied")
+            )
+            if failure == "sharing":
+                error.winerror = 32
+            raise error
+        original_replace(parent, source, destination, **kwargs)
+
+    monkeypatch.setattr(dirfd, "replace_children", contended)
+    monkeypatch.setattr(anchored_io.time, "sleep", sleeps.append)
+    if failure == "exhausted":
+        with pytest.raises(OSError) as caught:
+            runtime.write_session_state(target, "s", {"generation": 2})
+        assert caught.value.errno == errno.EBUSY
+        assert not isinstance(caught.value, anchored_io.SessionIntegrityError)
+        assert runtime.read_session_state(target, "s") == {"generation": 1}
+        assert len(calls) == 5
+    else:
+        runtime.write_session_state(target, "s", {"generation": 2})
+        assert runtime.read_session_state(target, "s") == {"generation": 2}
+        assert len(calls) == 3
+    assert sum(sleeps) <= 0.04
+    assert not list(sessions.glob("*.tmp"))
+
+
+@pytest.mark.parametrize("failure", [errno.ENOSPC, errno.EROFS])
+def test_resource_write_error_fails_open_with_doctor_pointer(tmp_path, monkeypatch, capsys, failure) -> None:
+    target = _wired_claude(tmp_path)
+    runtime.write_session_state(target, "s", {"write_observed": True})
+    path = runtime._state_path(target, "s")
+    before = path.read_bytes()
+    original_open = dirfd.open_child_file
+
+    def full_disk(parent, name, flags, *args, **kwargs):
+        if name.endswith(".tmp"):
+            raise OSError(failure, "session storage unavailable")
+        return original_open(parent, name, flags, *args, **kwargs)
+
+    monkeypatch.setattr(dirfd, "open_child_file", full_disk)
+    monkeypatch.setattr(
+        runtime,
+        "_run_timed_handle_payload",
+        lambda event, raw, *, pin: runtime._hook_run_body(event, json.loads(raw), pin_target=pin),
+    )
+    capsys.readouterr()
+    assert (
+        runtime.hook_run(
+            event="Stop", package=PACKAGE_REF, stdin_text=json.dumps({"cwd": str(target), "session_id": "s"})
+        )
+        == 0
+    )
+    result = json.loads(capsys.readouterr().out)
+    assert result == runtime.envelope.degraded_envelope("Stop")
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "operation,error_number",
+    [
+        ("directory", errno.EROFS),
+        ("read", errno.EACCES),
+        ("temp", errno.ENOSPC),
+        ("lock", errno.EMFILE),
+        ("cleanup", errno.EIO),
+        ("validate", getattr(errno, "EDQUOT", errno.ENOSPC)),
+        ("file_stat", errno.EIO),
+    ],
+)
+def test_session_resource_errors_remain_plain_oserrors(state_tree, monkeypatch, operation, error_number) -> None:
+    target, _sessions, _outside = state_tree
+    runtime.write_session_state(target, "s", {"write_observed": True})
+    with anchored_io.session_directory(target) as anchor:
+
+        def unavailable(*_args, **_kwargs):
+            raise OSError(error_number, "resource unavailable")
+
+        with pytest.raises(OSError) as caught:
+            if operation == "directory":
+                monkeypatch.setattr(dirfd, "open_directory_nofollow", unavailable)
+                runtime.read_session_state(target, "s")
+            elif operation == "validate":
+                monkeypatch.setattr(dirfd, "stat_child", unavailable)
+                anchor.validate()
+            elif operation == "file_stat":
+                monkeypatch.setattr(dirfd, "stat_child", unavailable)
+                anchor.validate_file("s.json", anchor.fd)
+            elif operation == "cleanup":
+                monkeypatch.setattr(dirfd, "unlink_child", unavailable)
+                anchor.write_json("s.json", {})
+            else:
+                monkeypatch.setattr(
+                    dirfd,
+                    "open_child_lock_file" if operation == "lock" and os.name == "nt" else "open_child_file",
+                    unavailable,
+                )
+                if operation == "read":
+                    anchor.read_bytes(runtime._state_path(target, "s").name)
+                elif operation == "temp":
+                    anchor.write_json("s.json", {})
+                else:
+                    with anchor.held_lock("s.lock", deadline_seconds=1):
+                        pytest.fail("lock opener unexpectedly succeeded")
+        assert caught.value.errno == error_number
+        assert not isinstance(caught.value, anchored_io.SessionIntegrityError)

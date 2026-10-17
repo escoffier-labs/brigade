@@ -2654,7 +2654,7 @@ def _hook_run_body(
         # this refusal into a generic fail-open exception in the parent.
         return {
             "kind": "ok",
-            "result": anchored_io.integrity_envelope(event),
+            "result": anchored_io.integrity_envelope(event, stop_hook_active=payload.get("stop_hook_active") is True),
             "log_target": None,
             "claim_path": None,
             "session_id": _session_id_from_payload(payload),
@@ -3150,6 +3150,7 @@ def hook_run(
     log_target: Path | None = None
     session_id = "unknown"
     result: dict[str, Any] | None = None
+    payload: dict[str, Any] = {}
     try:
         payload, raw = _load_hook_stdin(stdin_text=stdin_text)
         session_id = _session_id_from_payload(payload)
@@ -3173,7 +3174,9 @@ def hook_run(
         if followup_target is not None and _is_timeout_degraded(exc):
             followup = _bounded_timeout_followup(event, followup_target, session_id, exc)
             if followup == "integrity_refused":
-                envelope.emit_stdout(anchored_io.integrity_envelope(event))
+                envelope.emit_stdout(
+                    anchored_io.integrity_envelope(event, stop_hook_active=payload.get("stop_hook_active") is True)
+                )
                 return 0
             if followup == "latched":
                 envelope.emit_stdout(envelope.latched_envelope(event))

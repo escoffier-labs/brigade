@@ -10,7 +10,7 @@ The session-directory operations are:
 
 | Operation | Containment |
 | --- | --- |
-| JSON read | Open the known name relative to the held sessions directory and validate the held file as regular with one link. Trust its contents across concurrent atomic replacement, then revalidate the directory chain. An inode already unlinked before its initial check triggers a bounded open retry. |
+| JSON read | Open the known name relative to the held sessions directory and validate the held file as regular with one link. Trust its contents and revalidate the directory chain after reading. POSIX permits concurrent atomic replacement. Windows can delay publication until the reader closes. An inode already unlinked before its initial check triggers a bounded open retry. |
 | JSON write | Create an exclusive sibling temporary file with mode `0600`, write and fsync it, revalidate, replace the known name relative to the same directory, compare the published name with the held temporary fd, and sync the directory. Temporary cleanup also uses the held directory. |
 | Timeout journal and pending increments | Read or append the known sidecar name relative to the held directory with the existing byte limits. |
 | Session lock | Open a known sibling name relative to the held directory and use the existing deadline-bounded flock or Windows byte lock. Check the held lock identity before protected access. |
@@ -32,15 +32,37 @@ enumeration. Current main provides held-handle enumeration for recent-state
 listing. If that operation is unavailable, listing produces a diagnostic and
 returns no state. It never falls back to reopening a directory pathname.
 
+The Windows backend uses classic `FileRenameInformation`. Replacing a
+destination with open handles can return access denied or a sharing violation.
+Session publication retries those errors up to 5 times with 10 ms between
+attempts, revalidating the directory chain and temporary file before every
+attempt. The added backoff totals at most 40 ms, below the hook's 250 ms lock
+budget. Filesystem calls can take additional time. Exhaustion raises an ordinary
+`OSError` with `EBUSY`. A reader that remains open can prevent publication for
+the entire retry window. POSIX publication errors are not retried.
+
 Missing state returns the existing empty result. Malformed JSON retains its
-existing behavior. Directory changes, reparse points, invalid file types and
-link counts raise `SessionIntegrityError`. State reads, timeout journals,
+existing behavior. Changed or disappeared held objects, reparse points, invalid
+file types and link counts raise `SessionIntegrityError`. No-follow walk errors
+`ELOOP` and `ENOTDIR` also indicate integrity refusal. State reads, timeout journals,
 pending increments, latch reads and announce claims propagate that refusal.
 They never reinterpret it as missing state or persist a rebuilt state after it.
-The timed worker returns a blocking Stop response, a denied PreToolUse response,
-or [`continue: false`](https://code.claude.com/docs/en/hooks#json-output) for
-other events. The integrity result survives Windows
+The timed worker returns a blocking first Stop response, a denied PreToolUse
+response, or [`continue: false`](https://code.claude.com/docs/en/hooks#json-output)
+for other events. If Stop already has `stop_hook_active: true`, integrity refusal
+also returns `continue: false` and ends the session without another Stop block.
+The integrity result survives Windows
 worker serialization and the bounded timeout follow-up path.
+
+Permission and resource failures, such as `EACCES`, `EROFS`, `ENOSPC`, `EDQUOT`,
+`EMFILE` and `EIO`, remain ordinary I/O errors. The outer hook retains its
+fail-open response with the doctor pointer. Best-effort sidecar append failures
+retain their false result. Backend unavailability also remains an ordinary I/O
+error, with no pathname fallback.
+
+Doctor reports `FAIL claude work loop: session directory integrity refused: ...`
+for unsafe session storage. Repository adoption records the refusal as an issue
+on that repository's partial row and continues reporting the other repositories.
 
 Writes remain bound to the validated directory object. A same-uid attacker can
 rename that directory and relocate the object, but cannot redirect its held
@@ -59,9 +81,11 @@ Windows, including swaps of every component below the target during a held
 transaction. Its Windows-only backend-unavailable test is marked with a native
 platform skip. The same file also runs the read-during-replace regression.
 If Windows refuses a directory rename while the sibling lock is open, the
-parent-swap test asserts that refusal and verifies the original state and
+parent-swap test requires Windows error 5 and verifies the original state and
 outside tree are unchanged. If the rename succeeds, it exercises the operation
 and requires an integrity refusal. Neither outcome skips the native test.
+The transient-read swap test records a swap only after rename succeeds. It also
+accepts an asserted Windows error 5 while preserving observed-write state.
 
 The PR's `windows-native-acceptance` job explicitly selects this file together
 with process-containment and skills-state tests, and fails on native test skips.

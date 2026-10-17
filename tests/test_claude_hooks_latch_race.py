@@ -256,10 +256,12 @@ def test_journal_refuses_unavailable_nofollow_backend(tmp_path: Path, monkeypatc
     outside.write_bytes(b"outside\n")
     journal.symlink_to(outside)
     monkeypatch.setattr(os, "O_NOFOLLOW", 0, raising=False)
-    with pytest.raises(anchored_io.SessionIntegrityError, match="unavailable"):
+    with pytest.raises(OSError, match="unavailable") as caught:
         session_state._journal_timeout_count(target, "symlink")
-    with pytest.raises(anchored_io.SessionIntegrityError, match="unavailable"):
+    assert not isinstance(caught.value, anchored_io.SessionIntegrityError)
+    with pytest.raises(OSError, match="unavailable") as caught:
         session_state._append_timeout_marker(target, "symlink")
+    assert not isinstance(caught.value, anchored_io.SessionIntegrityError)
     assert outside.read_bytes() == b"outside\n"
 
 
