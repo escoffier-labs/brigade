@@ -27,9 +27,12 @@ import os
 import re
 import subprocess
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
+
+from . import proc
 
 SCHEMA = "brigade.fleet_t3_transport.v1"
 CONSUMER = "brigade-run"
@@ -318,6 +321,31 @@ def resolve_route(
 # --- public t3-fleet client --------------------------------------------------
 
 
+def _run_client(
+    command: list[str],
+    *,
+    timeout: float,
+    cwd: str | None,
+    process_registry: proc.ProcessRegistry | None,
+    **_kwargs: Any,
+) -> subprocess.CompletedProcess[str]:
+    """Supervise only the local client group, never the delegated remote job."""
+    result = proc.run(
+        command,
+        timeout=timeout,
+        cwd=Path(cwd) if cwd is not None else None,
+        process_registry=process_registry,
+        supervise_group=True,
+    )
+    if result.code == 127 and result.stderr.startswith("command not found:"):
+        raise FileNotFoundError(result.stderr)
+    if result.code == 124 and f"timeout after {timeout}s" in result.stderr:
+        raise subprocess.TimeoutExpired(command, timeout)
+    if result.decode_failed or result.stream_limit_exceeded or result.incomplete_process_group:
+        raise subprocess.SubprocessError("local t3-fleet output or process-group cleanup was incomplete")
+    return subprocess.CompletedProcess(command, result.code, stdout=result.stdout, stderr=result.stderr)
+
+
 @dataclass
 class T3FleetClient:
     """Bounded wrapper over the public ``t3-fleet`` command surface.
@@ -330,13 +358,15 @@ class T3FleetClient:
 
     executable: str = CLIENT_EXECUTABLE
     timeout: float = DEFAULT_CALL_TIMEOUT
-    runner: Callable[..., Any] = subprocess.run
+    runner: Callable[..., Any] | None = None
     cwd: Path | None = None
+    process_registry: proc.ProcessRegistry | None = None
 
     def _invoke(self, argv: Sequence[str], *, timeout: float | None = None) -> dict[str, Any]:
         command = [self.executable, *argv]
         try:
-            completed = self.runner(
+            runner = self.runner or partial(_run_client, process_registry=self.process_registry)
+            completed = runner(
                 command,
                 capture_output=True,
                 text=True,
@@ -891,6 +921,7 @@ def build_source_transport(
     snapshot: Mapping[str, Any] | None = None,
     policy_client: Any | None = None,
     client: T3FleetClient | None = None,
+    process_registry: proc.ProcessRegistry | None = None,
     node_id: str | None = None,
     document: Mapping[str, Any] | None = None,
     machine_override: str | None = None,
@@ -924,6 +955,10 @@ def build_source_transport(
     routing = document.get("routing")
     if not isinstance(routing, Mapping) or routing.get("enabled") is not True:
         return None
+    if client is None:
+        client = T3FleetClient(cwd=cwd, process_registry=process_registry)
+    elif process_registry is not None:
+        client = replace(client, process_registry=process_registry)
     return SourceTransport(
         cwd=cwd,
         run_id=run_id,
@@ -931,7 +966,7 @@ def build_source_transport(
         node_id=node_id if node_id is not None else fleet_client.resolve_node_id(),
         document=document,
         policy_client=resolved_client,
-        client=client if client is not None else T3FleetClient(cwd=cwd),
+        client=client,
         workload=workload,
         machine_override=machine_override,
         override_reason=override_reason,

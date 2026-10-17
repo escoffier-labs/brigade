@@ -20,6 +20,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator, Mapping, Sequence
 
 from .. import agents
+from .. import claim_loss_cancellation
 from .. import codex_appserver
 from .. import context_eval
 from .. import evidence_brief as evidence_brief_mod
@@ -101,6 +102,7 @@ def _worker_remote_transport(
     cwd: Path | None,
     run_id: str,
     model_policy: FleetModelPolicyResolution,
+    process_registry: proc.ProcessRegistry,
 ) -> Any | None:
     """Build the worker-only fleet remote transport, or ``None`` for local runs.
 
@@ -116,6 +118,7 @@ def _worker_remote_transport(
             cwd=cwd,
             run_id=run_id,
             snapshot=model_policy.receipt,
+            process_registry=process_registry,
         )
     except Exception as exc:  # never let transport wiring break a local run
         print(f"warning: fleet remote transport unavailable: {exc}", file=sys.stderr)
@@ -472,6 +475,7 @@ def _write_run_seat_health_receipt(
 
 @_terminalize_run_lifecycle
 @_model_lease_lifecycle
+@claim_loss_cancellation.guard_run
 def run(
     task: str,
     roster: Roster,
@@ -506,11 +510,13 @@ def run(
     verification_contract_payload: Mapping[str, Any] | None = None,
     run_budget_payload: Mapping[str, Any] | None = None,
     model_policy_snapshot: Mapping[str, Any] | None = None,
+    process_registry: proc.ProcessRegistry | None = None,
+    check_cancellation: Callable[[], None] | None = None,
 ) -> int:
     if run_budget_payload is not None:
         run_budget_payload = run_budget.validate_explicit_declaration(run_budget_payload)
     started_at = datetime.now(timezone.utc)
-    process_registry = proc.ProcessRegistry()
+    process_registry = process_registry or proc.ProcessRegistry()
     transport_for_payload = codex_transport or roster.codex_transport
     cwd = cwd.expanduser().resolve() if cwd is not None else None
     lock_workspace = lock_workspace.expanduser().resolve() if lock_workspace is not None else cwd
@@ -1447,6 +1453,8 @@ def run(
             raise runguard.RetainRunLockError(f"failed to record budget cancel receipt: {exc}") from exc
 
     def dispatch_interrupted() -> None:
+        if check_cancellation is not None:
+            check_cancellation()
         if output_dir is None:
             return
         active_seat = active_seats[0] if len(active_seats) == 1 else None
@@ -1568,6 +1576,7 @@ def run(
         cwd=cwd,
         run_id=output_dir.name if output_dir is not None else message_envelope.IN_MEMORY_RUN_ID,
         model_policy=model_policy,
+        process_registry=process_registry,
     )
     try:
         try:
@@ -1609,6 +1618,8 @@ def run(
                 model_lease=lease_model_agent,
                 remote_transport=remote_transport,
             )
+            if check_cancellation is not None:
+                check_cancellation()
         except runguard.RetainRunLockError:
             raise
         except run_budget.BudgetPolicyError as exc:
