@@ -80,11 +80,10 @@ select a different account or harness native identity.
 
 `agy` 1.4.0 lists `gemini-4-argon-{low,medium,high}` alongside
 `gemini-3.8-flash-{low,medium,high}`. An operator can expose these as Google
-subscription seats, for example:
+subscription seats. An Argon seat, for example:
 
 | Seat | Model | Binding | Access | Security review |
 |---|---|---|---|---|
-| `agy_flash` | `gemini-3.8-flash-high` (Gemini 3.8 Flash High) | `antigravity` | Antigravity subscription | Not for security review |
 | `agy_argon` | `gemini-4-argon-high` (Gemini 4 Argon High) | `antigravity` | Antigravity subscription | Not for security review |
 
 An Argon roster seat pins `cli = "antigravity"` and
