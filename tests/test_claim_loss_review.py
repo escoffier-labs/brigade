@@ -151,12 +151,28 @@ def test_lock_release_waits_for_registered_process_exit(claimed_run, monkeypatch
             thread.join(timeout=2)
 
 
-@pytest.mark.parametrize("result", ["error", "still_active"])
+@pytest.mark.parametrize("result", ["error", "still_active", "watcher-error"])
 def test_cancellation_failure_retains_run_lock(claimed_run, monkeypatch, capsys, result):
     ws, callbacks, run = claimed_run
-    monkeypatch.setattr(proc.ProcessRegistry, "cancel", lambda self: (proc.ProcessCancelOutcome("coder", result),))
 
-    def active_run(*args, **kwargs):
+    class Process:
+        def poll(self):
+            return None
+
+    def terminate(*args, **kwargs):
+        if result == "error":
+            raise OSError("cancellation unavailable")
+
+    if result == "watcher-error":
+
+        def failed_watcher(self):
+            raise RuntimeError("watcher unavailable")
+
+        monkeypatch.setattr(proc.ProcessRegistry, "cancel", failed_watcher)
+    monkeypatch.setattr(proc, "_terminate_processes", terminate)
+
+    def active_run(*args, process_registry=None, **kwargs):
+        process_registry.register(Process(), seat="coder")
         callbacks["lost"]("held")
         return 0
 
@@ -483,3 +499,148 @@ def test_repeated_cancel_resignals_only_survivors(monkeypatch):
     assert registry.cancel() == (proc.ProcessCancelOutcome("coder", "interrupted"),)
     registry.cancel()
     assert calls == [(process,), (process,)], "exited process identities must not be signalled again"
+
+
+@pytest.mark.parametrize("phase", ["startup", "dispatch"])
+def test_appserver_close_interrupt_preserves_inflight_retention(claimed_run, monkeypatch, phase):
+    ws, callbacks, run = claimed_run
+
+    class Server:
+        def __init__(self, **kwargs):
+            pass
+
+        def start(self):
+            if phase == "startup":
+                raise runguard.RetainRunLockError("startup receipt unavailable")
+
+        def close(self):
+            callbacks["lost"]("held")
+            _thread.interrupt_main()
+
+    def failed_dispatch(*args, **kwargs):
+        raise runguard.RetainRunLockError("dispatch receipt unavailable")
+
+    monkeypatch.setattr(orchestrator.codex_appserver, "AppServer", Server)
+    monkeypatch.setattr(planning, "dispatch", failed_dispatch)
+    assert run(direct=True, transport="app-server") == 2
+    assert runguard.lock_path(ws).exists(), "cleanup interrupt replaced the in-flight retention failure"
+
+
+@pytest.mark.parametrize("resignal", [False, True])
+def test_exit_uses_latest_survivor_state_and_releases_lock(tmp_path, monkeypatch, resignal):
+    scope = claim_loss_cancellation.ClaimLossCancellation()
+
+    class Process:
+        running = True
+
+        def poll(self):
+            return None if self.running else 0
+
+    process = Process()
+    calls = []
+
+    def terminate(batch, **kwargs):
+        calls.append(batch)
+        if len(calls) == 2:
+            process.running = False
+
+    monkeypatch.setattr(proc, "_terminate_processes", terminate)
+    scope.process_registry.register(process, seat="coder")
+    with runguard.run_lock(tmp_path):
+        scope.request()
+        with scope:
+            assert scope._done.wait(2)
+            assert scope.outcomes == (proc.ProcessCancelOutcome("coder", "still_active"),)
+            if resignal:
+                assert scope.process_registry.cancel() == (proc.ProcessCancelOutcome("coder", "interrupted"),)
+            else:
+                process.running = False
+            scope.process_registry.unregister(process)
+    assert not runguard.lock_path(tmp_path).exists()
+    assert scope.outcomes == (proc.ProcessCancelOutcome("coder", "interrupted"),)
+    assert calls == ([(process,), (process,)] if resignal else [(process,)])
+
+
+@pytest.mark.parametrize("scheduler", ["waves", "dag"])
+def test_interrupt_shutdown_preserves_worker_retention(tmp_path, monkeypatch, scheduler):
+    started = threading.Event()
+    interrupted = threading.Event()
+
+    def worker(*args, **kwargs):
+        started.set()
+        assert interrupted.wait(5)
+        raise runguard.RetainRunLockError("worker receipt unavailable")
+
+    def interrupt_completion(futures):
+        assert started.wait(5)
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(agents, "run_agent", worker)
+    monkeypatch.setattr(run_transport, "as_completed", interrupt_completion)
+    error = None
+    try:
+        with runguard.run_lock(tmp_path):
+            run_transport.dispatch(
+                [run_transport.Assignment(worker="coder", task="inspect", stage=1, covers=("inspect",))],
+                _roster(),
+                build_prompt=lambda *args, **kwargs: "inspect",
+                run_appserver_worker=lambda *args, **kwargs: pytest.fail("unused app-server"),
+                event_writer=lambda *args, **kwargs: None,
+                cwd=tmp_path,
+                scheduler=scheduler,
+                route_dependencies={"inspect": ()},
+                on_interrupt=interrupted.set,
+            )
+    except BaseException as exc:
+        error = exc
+    assert isinstance(error, runguard.RetainRunLockError), f"worker retention failure lost: {error!r}"
+    assert isinstance(error.__cause__, KeyboardInterrupt)
+    assert runguard.lock_path(tmp_path).exists()
+
+
+@pytest.mark.parametrize("granted", [False, True])
+def test_remote_transport_supervision_requires_claim(claimed_run, monkeypatch, granted):
+    _ws, _callbacks, run = claimed_run
+    registries = []
+
+    @contextmanager
+    def claim(*args, **kwargs):
+        yield fleet_client.ClaimDecision(granted, "ok")
+
+    def transport(**kwargs):
+        registries.append(kwargs.get("process_registry"))
+        return None
+
+    monkeypatch.setattr(fleet_client, "repo_claim", claim)
+    monkeypatch.setattr(t3, "build_source_transport", transport)
+    monkeypatch.setattr(agents, "run_agent", lambda *args, **kwargs: agents.AgentResult(text="done", ok=True))
+    assert run(direct=True) == 0
+    assert len(registries) == 1
+    assert (registries[0] is not None) == granted
+
+
+@pytest.mark.parametrize("link", ["context", "cause", "both-with-cycle"])
+@pytest.mark.parametrize("cancelled", [KeyboardInterrupt, claim_loss_cancellation.ClaimLossCancelled])
+def test_run_lock_preserves_chained_retention(tmp_path, link, cancelled):
+    retained = runguard.RetainRunLockError("receipt unavailable")
+    intermediate = RuntimeError("cleanup failed")
+    interrupt = cancelled()
+    if link == "cause":
+        intermediate.__cause__ = retained
+        interrupt.__cause__ = intermediate
+    else:
+        intermediate.__context__ = retained
+        interrupt.__context__ = intermediate
+        if link == "both-with-cycle":
+            unrelated = RuntimeError("unrelated cause")
+            interrupt.__cause__ = unrelated
+            unrelated.__context__ = interrupt
+    error = None
+    try:
+        with runguard.run_lock(tmp_path):
+            raise interrupt
+    except BaseException as exc:
+        error = exc
+    assert error is retained, f"exception chain lost retention: {error!r}"
+    assert error.__cause__ is interrupt
+    assert runguard.lock_path(tmp_path).exists()

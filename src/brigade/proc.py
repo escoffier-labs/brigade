@@ -107,6 +107,9 @@ class ProcessRegistry:
     def cancellation_outcomes(self) -> tuple[ProcessCancelOutcome, ...]:
         with self._lock:
             observed = dict(self._cancel_outcomes)
+            for process, outcome in observed.items():
+                if outcome.result == "still_active" and process.poll() is not None:
+                    observed[process] = ProcessCancelOutcome(outcome.seat, "interrupted")
             for process, seat in self._processes.items():
                 if process not in observed:
                     observed[process] = ProcessCancelOutcome(

@@ -71,6 +71,32 @@ class RetainRunLockError(RunGuardError):
     """A terminal receipt could not be written, so stale recovery still needs the lock."""
 
 
+def retained_run_lock_error(error: BaseException) -> RetainRunLockError | None:
+    """Find retention failures even when asynchronous cleanup replaces them."""
+    pending = [error]
+    seen: set[int] = set()
+    while pending:
+        current = pending.pop()
+        if id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, RetainRunLockError):
+            return current
+        for chained in (current.__context__, current.__cause__):
+            if chained is not None:
+                pending.append(chained)
+    return None
+
+
+def raise_if_retained_run_lock(error: BaseException) -> None:
+    """Preserve a retention failure before converting or handling cancellation."""
+    retained = retained_run_lock_error(error)
+    if retained is not None:
+        if retained is error:
+            raise retained
+        raise retained from error
+
+
 class DirtyWorktreeError(RunGuardError):
     def __init__(self, paths: list[str]):
         self.paths = paths
@@ -1313,8 +1339,10 @@ def run_lock(
     retain_lock = False
     try:
         yield path
-    except RetainRunLockError:
-        retain_lock = True
+    except BaseException as exc:
+        retain_lock = retained_run_lock_error(exc) is not None
+        if retain_lock:
+            raise_if_retained_run_lock(exc)
         raise
     finally:
         if ownership is not None and not retain_lock:

@@ -94,7 +94,7 @@ def _worker_remote_transport(
     cwd: Path | None,
     run_id: str,
     model_policy: FleetModelPolicyResolution,
-    process_registry: proc.ProcessRegistry,
+    process_registry: proc.ProcessRegistry | None,
 ) -> Any | None:
     """Build the worker-only fleet remote transport, or ``None`` for local runs.
 
@@ -220,7 +220,8 @@ def _terminalize_run_lifecycle(function: Callable[..., int]) -> Callable[..., in
                 return function(*args, **kwargs)
         except runguard.RetainRunLockError:
             raise
-        except KeyboardInterrupt:
+        except KeyboardInterrupt as exc:
+            runguard.raise_if_retained_run_lock(exc)
             terminate_existing(
                 status="canceled",
                 failure_kind="keyboard-interrupt",
@@ -506,6 +507,7 @@ def run(
     check_cancellation: Callable[[], None] | None = None,
 ) -> int:
     check_cancellation = check_cancellation or (lambda: None)
+    claim_process_registry = process_registry
     if run_budget_payload is not None:
         run_budget_payload = run_budget.validate_explicit_declaration(run_budget_payload)
     started_at = datetime.now(timezone.utc)
@@ -1571,7 +1573,7 @@ def run(
         cwd=cwd,
         run_id=output_dir.name if output_dir is not None else message_envelope.IN_MEMORY_RUN_ID,
         model_policy=model_policy,
-        process_registry=process_registry,
+        process_registry=claim_process_registry,
     )
     try:
         try:
@@ -1632,7 +1634,8 @@ def run(
                     active_seats=active_seats,
                 )
             return 1
-        except KeyboardInterrupt:
+        except KeyboardInterrupt as exc:
+            runguard.raise_if_retained_run_lock(exc)
             check_cancellation()
             active_seat = active_seats[0] if len(active_seats) == 1 else None
             if output_dir is not None:

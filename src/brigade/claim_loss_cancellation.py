@@ -28,7 +28,8 @@ def cancellation_boundary(check: Callable[[], None]) -> Iterator[None]:
         yield
     except runguard.RetainRunLockError:
         raise
-    except BaseException:
+    except BaseException as exc:
+        runguard.raise_if_retained_run_lock(exc)
         check()
         raise
     else:
@@ -42,7 +43,8 @@ def guard_run(function: Callable[..., int]) -> Callable[..., int]:
     def wrapped(*args: Any, **kwargs: Any) -> int:
         try:
             return function(*args, **kwargs)
-        except KeyboardInterrupt:
+        except (KeyboardInterrupt, ClaimLossCancelled) as exc:
+            runguard.raise_if_retained_run_lock(exc)
             check = kwargs.get("check_cancellation")
             if check is not None:
                 check()
@@ -71,6 +73,7 @@ class ClaimLossCancellation:
         self.outcomes: tuple[proc.ProcessCancelOutcome, ...] = ()
         self._done = threading.Event()
         self._watcher: threading.Thread | None = None
+        self._watcher_error: BaseException | None = None
         self._shutdown_deadline: float | None = None
 
     def __enter__(self) -> ClaimLossCancellation:
@@ -83,7 +86,8 @@ class ClaimLossCancellation:
             try:
                 self._finish_exit()
                 return
-            except KeyboardInterrupt:
+            except KeyboardInterrupt as exc:
+                runguard.raise_if_retained_run_lock(exc)
                 if not self._requested.is_set():
                     raise
 
@@ -98,9 +102,13 @@ class ClaimLossCancellation:
                 raise runguard.RetainRunLockError("claim-loss cancellation timed out; local run lock retained")
             self._done.wait(remaining)
         if self._requested.is_set():
+            if self._watcher_error is not None:
+                raise runguard.RetainRunLockError(
+                    "claim-loss cancellation watcher failed; local run lock retained"
+                ) from self._watcher_error
             # Include failures retained by concurrent dispatch cleanup and late registration.
             try:
-                self.outcomes += self.process_registry.cancellation_outcomes
+                self.outcomes = self.process_registry.cancellation_outcomes
             except KeyboardInterrupt:
                 raise
             except BaseException as exc:
@@ -127,7 +135,8 @@ class ClaimLossCancellation:
                 if self._stopped.is_set():
                     return
             self.outcomes = self.process_registry.cancel()
-        except BaseException:
+        except BaseException as exc:
+            self._watcher_error = exc
             self.outcomes = (proc.ProcessCancelOutcome(None, "error"),)
         finally:
             self._done.set()

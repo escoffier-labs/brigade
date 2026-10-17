@@ -47,7 +47,8 @@ def _terminalize_escaped_run(
         yield
     except runguard.RetainRunLockError:
         raise
-    except (KeyboardInterrupt, ClaimLossCancelled):
+    except (KeyboardInterrupt, ClaimLossCancelled) as exc:
+        runguard.raise_if_retained_run_lock(exc)
         failure = interrupt_failure() if interrupt_failure is not None else None
         if (
             (should_terminalize is None or should_terminalize())
@@ -850,7 +851,8 @@ def dispatch(args) -> int:
                 claim_cancellation.raise_if_requested()
             except runguard.RetainRunLockError:
                 raise
-            except (KeyboardInterrupt, ClaimLossCancelled):
+            except (KeyboardInterrupt, ClaimLossCancelled) as exc:
+                runguard.raise_if_retained_run_lock(exc)
                 failure = _fleet_interrupt_failure()
                 if output_dir is not None:
                     if failure is not None:
@@ -1025,7 +1027,8 @@ def dispatch(args) -> int:
                                 reason="clean and branch-backed",
                             )
                             print(f"worktree removed: {worktree_cwd}", file=sys.stderr)
-    except (KeyboardInterrupt, ClaimLossCancelled):
+    except (KeyboardInterrupt, ClaimLossCancelled) as exc:
+        runguard.raise_if_retained_run_lock(exc)
         if fleet_credential_failure:
             # The interrupt came from the fleet heartbeat's credential-failure
             # callback (#1161), which already printed and recorded the reason.
@@ -1080,6 +1083,7 @@ def _dispatch_detached(
 ) -> int:
     from .. import aboyeur as aboyeur_mod
     from .. import proc as proc_mod
+    from .. import runguard
 
     output_dir = output_dir.expanduser().resolve()
     lifecycle_seat = args.worker or roster.orchestrator
@@ -1220,7 +1224,8 @@ def _dispatch_detached(
             print(f"artifacts: {output_dir}", file=sys.stderr)
             print(f"log: {log_path}", file=sys.stderr)
             return 0
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as exc:
+        runguard.raise_if_retained_run_lock(exc)
         print("error: run canceled by user", file=sys.stderr)
         return 130
     except Exception as exc:
