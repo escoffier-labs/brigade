@@ -13,6 +13,7 @@ from typing import Any, TypeGuard
 SUBJECT_LIMIT = 200
 BODY_LIMIT = 64 * 1024
 REF_LIMIT = 256
+AGENT_UNREAD_LIMIT = 50
 PRIORITIES = frozenset({"low", "normal", "high", "urgent"})
 UNACKED_QUOTA = 1000
 SENDER_DAILY_QUOTA = 1000
@@ -242,6 +243,23 @@ def unread_counts(conn: sqlite3.Connection) -> dict[str, int]:
     }
     conn.commit()
     return counts
+
+
+def agent_unread_counts(conn: sqlite3.Connection, limit: int = AGENT_UNREAD_LIMIT) -> tuple[dict[str, int], bool]:
+    """Unread totals for at most ``limit`` active agent principals, in principal order.
+
+    Grouped over the unacked index. The flag is true when more principals have
+    unread messages than were returned. The board calls ``unread_counts`` first
+    to prune expired messages.
+    """
+    rows = conn.execute(
+        "SELECT message.recipient,COUNT(*) FROM fleet_messages AS message "
+        "JOIN fleet_message_principals AS principal ON principal.principal_id=message.recipient "
+        "WHERE message.acked_at IS NULL AND principal.revoked_at IS NULL GROUP BY message.recipient "
+        "ORDER BY message.recipient LIMIT ?",
+        (limit + 1,),
+    ).fetchall()
+    return {str(recipient): int(count) for recipient, count in rows[:limit]}, len(rows) > limit
 
 
 def _text(value: Any, name: str, limit: int, *, required: bool = True) -> str | None:

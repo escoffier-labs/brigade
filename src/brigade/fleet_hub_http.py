@@ -731,6 +731,11 @@ def make_handler(
                 unread_counts = (
                     fleet_hub_messages.unread_counts(conn) if self._authorized() and view == "machines" else {}
                 )
+                agent_unread_counts, agent_unread_more = (
+                    fleet_hub_messages.agent_unread_counts(conn)
+                    if self._authorized() and view == "machines"
+                    else ({}, False)
+                )
             except ClaimFenceError as exc:
                 self._send_json(503, {"error": str(exc)})
                 return
@@ -870,6 +875,8 @@ def make_handler(
                 now=current,
                 more_href=more_href,
                 unread_counts=render_unread_counts,
+                agent_unread_counts=agent_unread_counts,
+                agent_unread_more=agent_unread_more,
                 unread_offset=unread_offset,
                 unread_only_page=unread_only_page,
                 complete_base_node_ids=complete_base_node_ids,

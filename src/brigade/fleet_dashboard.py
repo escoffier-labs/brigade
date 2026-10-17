@@ -782,6 +782,24 @@ def _repo_board(entries: list[_RepoEntry], sort: str) -> str:
     )
 
 
+def _agent_board(unread_counts: dict[str, int], more: bool = False) -> str:
+    rows = "".join(
+        f'<tr data-principal="{esc(principal)}"><td class="fleet-node">{esc(principal)}</td>'
+        f"<td>{count} unread message{'s' if count != 1 else ''}</td></tr>"
+        for principal, count in sorted(unread_counts.items())
+        if count > 0
+    )
+    if not rows:
+        return ""
+    note = '<p class="fleet-more">More agents have unread messages than are shown.</p>' if more else ""
+    return (
+        '<section aria-label="Agents"><h2>Agents</h2>'
+        '<div class="table-wrap"><table class="data-table"><thead><tr>'
+        '<th scope="col">Principal</th><th scope="col">Inbox</th></tr></thead>'
+        f"<tbody>{rows}</tbody></table></div>{note}</section>"
+    )
+
+
 # --- page ------------------------------------------------------------------
 
 
@@ -797,6 +815,8 @@ def render_page(
     now: datetime | None = None,
     more_href: str | None = None,
     unread_counts: dict[str, int] | None = None,
+    agent_unread_counts: dict[str, int] | None = None,
+    agent_unread_more: bool = False,
     unread_offset: int = 0,
     unread_only_page: bool = False,
     complete_base_node_ids: set[str] | None = None,
@@ -835,6 +855,7 @@ def render_page(
             complete_base_node_ids=complete_base_node_ids,
             truncated_node_ids=truncated_node_ids,
         )
+        board += _agent_board(agent_unread_counts or {}, agent_unread_more)
         title = "Fleet: Machines"
     stamp = current.astimezone(timezone.utc).strftime("%H:%M:%S UTC")
     more = f'<p class="fleet-more"><a href="{esc(more_href)}">{esc("more")}</a></p>' if more_href else ""
