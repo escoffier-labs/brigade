@@ -310,7 +310,7 @@ def planted(workspace: Path) -> dict[str, Path]:
 @pytest.fixture
 def server(workspace: Path, planted: dict[str, Path]) -> ThreadingHTTPServer:
     httpd = runs_serve.make_server(cwd=workspace, port=0)
-    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread = threading.Thread(target=httpd.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     thread.start()
     _wait_until_ready(httpd)
     yield httpd

@@ -37,7 +37,7 @@ def hub(tmp_path):
     token = "test-token-12345"
     # Legacy shared-token mode (pre-#1150): the one token posts as any node.
     server = fleet_hub.make_server("127.0.0.1", 0, db, token, allow_admin_writes=True)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     thread.start()
     yield f"http://127.0.0.1:{server.server_address[1]}", token, db
     server.shutdown()

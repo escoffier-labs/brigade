@@ -42,7 +42,7 @@ def snapshot(conn):
 def http_authority(authority):
     conn, path, clock = authority
     server = hub.make_server("127.0.0.1", 0, path, "fake-admin-token", allow_admin_writes=True)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     thread.start()
     yield conn, clock, server.server_address
     server.shutdown()
