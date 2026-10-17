@@ -568,3 +568,52 @@ def test_stale_terminal_poll_cannot_close_a_newer_running_request(setup, listene
     assert ledger.open_count(NOW) == 1
     assert post.calls == []
     assert summary == {"checked": 1, "woken": 0, "failed": 0}
+
+
+def test_reopened_terminal_row_gets_no_stale_wake(setup, monkeypatch):
+    tmp_path, targets, ledger = setup
+    _record(ledger, "r1", state="succeeded")
+    snapshot = ledger.pending_notifications
+
+    def snapshot_then_reopen():
+        # A follow-up sets its reopening marker after the watcher reads the terminal row.
+        rows = snapshot()
+        ledger.update_state("r1", c.REOPENING_STATE, NOW, owner_write=True)
+        return rows
+
+    monkeypatch.setattr(ledger, "pending_notifications", snapshot_then_reopen)
+    post = Post([])
+    watch.run_watch_once(
+        runner=Runner({}),
+        ledger=ledger,
+        wake_targets=targets,
+        log_path=tmp_path / "w.jsonl",
+        now=lambda: NOW,
+        post=post,
+    )
+    assert post.calls == []
+    row = ledger.get("r1")
+    assert row["last_state"] == c.REOPENING_STATE
+    assert row["wake_attempts"] == 0
+
+
+def test_reopen_between_targets_stops_the_remaining_wakes(setup):
+    tmp_path, targets, ledger = setup
+    targets["Builder"].append({**targets["Builder"][0], "url": "https://example.com/second"})
+    _record(ledger, "r1", state="succeeded")
+    post = Post([])
+
+    def reopening_post(url, key, body):
+        ledger.update_state("r1", c.REOPENING_STATE, NOW, owner_write=True)
+        return post(url, key, body)
+
+    watch.run_watch_once(
+        runner=Runner({}),
+        ledger=ledger,
+        wake_targets=targets,
+        log_path=tmp_path / "w.jsonl",
+        now=lambda: NOW,
+        post=reopening_post,
+    )
+    assert len(post.calls) == 1
+    assert ledger.get("r1")["last_state"] == c.REOPENING_STATE

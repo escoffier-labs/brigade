@@ -126,6 +126,7 @@ def run_watch_once(
         wake_attempt_recorded = False
         try:
             notified = row["notified_state"]
+            revision = row["state_revision"]
             status_exhausted = state == "unknown" and row["status_failures"] >= MAX_ATTEMPTS
             if state not in c.TERMINAL_STATES and (not status_exhausted or ledger.status_poll_due(row["request_id"])):
                 summary["checked"] += 1
@@ -154,6 +155,7 @@ def run_watch_once(
                     if not applied:
                         # The listener recorded a newer state while status was in flight; handle it next tick.
                         continue
+                    revision += 1
                 if new_state != state:
                     state = new_state
                     notified = None
@@ -170,10 +172,16 @@ def run_watch_once(
             statuses: list[int] = []
             delivered = set(json.loads(row["delivered_targets"]))
             target_ids = {wake_target_id(target["url"]) for target in targets}
+            superseded = False
             for target in targets:
                 target_id = wake_target_id(target["url"])
                 if target_id in delivered:
                     continue
+                current = ledger.get(row["request_id"])
+                if current is None or current["state_revision"] != revision:
+                    # A follow-up or status call moved the row on since it was read; never wake for the old state.
+                    superseded = True
+                    break
                 try:
                     key = read_key(target["key_file"])
                     code = post(target["url"], key, body)
@@ -182,6 +190,8 @@ def run_watch_once(
                 statuses.append(code)
                 if code == 200:
                     delivered.add(target_id)
+            if superseded:
+                continue
             attempts = ledger.record_wake_attempt(row["request_id"], state, delivered)
             wake_attempt_recorded = True
             complete = bool(targets) and target_ids <= delivered
