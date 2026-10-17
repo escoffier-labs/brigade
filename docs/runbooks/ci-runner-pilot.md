@@ -22,10 +22,11 @@ an aggregate check or replacement of the existing 20 required statuses.
 
 [PR #1721](https://github.com/escoffier-labs/brigade/pull/1721) owns the separate
 shadow aggregate rollout. This pilot does not add another aggregate job or
-helper. That PR still needs its documented rebase and conditional Fleet Hub
-container acceptance: an unchanged container may intentionally skip, while a
-required container must succeed. Check its current diff and evidence before
-integration.
+helper. That PR merges current main and includes conditional Fleet Hub container
+acceptance: a container may skip only after successful classification explicitly
+marks it unchanged. Merge groups require container success. Check its current
+diff and acceptance evidence before integration. The shadow ci-gate remains
+nonrequired and excludes the optional trusted-runner-canary.
 
 Keep any aggregate nonrequired until deliberate failure cases have been proved
 on GitHub. Record run URLs and head commits showing rejection of failures,

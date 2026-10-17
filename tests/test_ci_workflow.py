@@ -520,6 +520,29 @@ def test_ci_shadow_gate_accepts_only_classified_container_skips(event, flag, cha
     assert (result.returncode == 0) is expected, result.stdout + result.stderr
 
 
+@pytest.mark.parametrize("mutation", ["failure", "cancelled", "skipped", "missing", "extra"])
+def test_ci_shadow_gate_rejects_bad_results_and_dependency_mismatches(mutation):
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    gate = _workflow_job_section(text, "ci-gate")
+    needs_block = gate.split("    needs:\n", 1)[1].split("    runs-on:", 1)[0]
+    names = re.findall(r"^      - ([a-z0-9-]+)$", needs_block, re.MULTILINE)
+    script = textwrap.dedent(gate.split("        run: |\n", 1)[1])
+    for name in names if mutation != "extra" else ["unexpected-job"]:
+        needs = {job: {"result": "success"} for job in names}
+        needs["changes"]["outputs"] = {"fleet_hub_container": "true"}
+        if mutation == "missing":
+            del needs[name]
+        else:
+            needs[name] = {"result": "success" if mutation == "extra" else mutation}
+        result = subprocess.run(
+            ["bash", "-c", script],
+            env=dict(os.environ, NEEDS_JSON=json.dumps(needs), EVENT_NAME="pull_request"),
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0, (name, mutation, result.stdout, result.stderr)
+
+
 def test_ci_workflow_filters_container_builds_without_scheduling_the_required_matrix():
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     changes = _workflow_job_section(text, "changes")
