@@ -6,8 +6,11 @@ The opt-in `/claims/v2` contract below remains a proposal. The first storage
 prerequisite now implements offline schema25 to schema26 migration and shared
 durable generations for the existing `/claims` writers. No v2 endpoint,
 capability, client, epoch provisioning, or live activation ships in this slice.
-The legacy unknown-outcome/late-acquire orphan race remains unprotected. Neither
-#1189 nor parent #1121 is complete.
+The subsequent legacy fix adds optional generation comparisons and durable
+retired-holder fences to `/claims`, without implementing this v2 proposal.
+See [implemented legacy fencing](fleet-claim-fencing.md) for the current
+compatibility contract, refusal reasons, and schema 33 migration. The storage
+prerequisite and pinned-base descriptions below record the earlier boundary.
 
 #1576 supplied schema25. This slice changes offline storage only and performs no
 live reads or deployment. Version 0.28.0 and database schema metadata do not
@@ -97,9 +100,9 @@ the first check and the write lock cannot be written to by this hub. The
 following requests return a static HTTP 503 that discloses no database path
 when the database is newer: the authenticated `GET` routes `/status`,
 `/claims`, `/nodes`, `/cloud`, `/models`, `/preference`, `/sessions`, and the
-`/policy` routes; the authenticated `POST` routes `/events`, `/claims`,
-`/nodes`, `/cloud`, `/models`, `/grokbot`, `/sessions`, and `/policy`;
-`PUT /preference`; the dashboard pages; and the Command Deck overview and
+`/policy` routes, the authenticated `POST` routes `/events`, `/claims`,
+`/nodes`, `/cloud`, `/models`, `/grokbot`, `/sessions`, and `/policy`,
+`PUT /preference`, the dashboard pages, and the Command Deck overview and
 repository pages. The dashboard and deck pages map the error only after
 authorization succeeds through an admin bearer token or a trusted Tailscale
 identity. A request authorized only by a dashboard session cookie can still get
@@ -113,7 +116,7 @@ Legacy clients still treat HTTP 503 as a hub-unavailable outcome and may fall
 back to a local-only lock. That fallback does not provide cross-machine
 exclusion. Explicit client handling of these refusal responses remains open.
 
-These generations alone do not fix delayed legacy acquire, same-holder ABA,
+At the storage-prerequisite checkpoint, these generations alone did not fix delayed legacy acquire, same-holder ABA,
 or backup restore and rollback. A missing release can advance the fence and a
 later unfenced legacy POST can still acquire an orphan. A delayed legacy renew
 or holder release can affect a later tenure with the same identities. Force
@@ -334,7 +337,7 @@ still create an unprotected legacy orphan. Its fence advancement protects stale
 v2 requests only. It does not fix the original legacy race or extend v2 cleanup
 to legacy attempts.
 
-Legacy requests carry no generation, so shared fence advancement does not make
+At the pinned base, legacy requests carry no generation, so shared fence advancement does not make
 legacy-to-legacy mutations tenure-specific. A delayed renew can extend a later
 live legacy row with the same target, node, and holder. A delayed holder release
 can delete a later row with those same identities. Force release without

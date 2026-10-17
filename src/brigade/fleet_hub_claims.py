@@ -1,7 +1,7 @@
 """Legacy claim arbitration and durable per-target generation authority.
 
-All current claim rows are legacy. V2 tagging and origin provenance require
-another migration. These fences do not make legacy requests tenure-specific.
+All current claim rows are legacy. Generation-less retired holders cannot regain authority.
+Optional generations fence callers that deliberately reuse a holder identity.
 """
 
 from __future__ import annotations
@@ -14,6 +14,7 @@ from . import fleet_hub as hub
 # Fences are never evicted. At capacity, existing targets remain usable but
 # an unseen target must fail closed, including a missing legacy release.
 MAX_CLAIM_TARGETS = 100_000
+MAX_RETIRED_HOLDERS = 100_000
 MAX_CLAIM_TARGET_BYTES = 1024
 MAX_GENERATION = 2**63 - 1
 CLAIM_COLUMNS = (
@@ -26,7 +27,16 @@ CREATE TABLE claim_fences (
         CHECK (typeof(generation) = 'integer' AND generation >= 1 AND generation <= 9223372036854775807)
 )
 """
-_FENCE_DEFINITION = " ".join(_FENCE_SCHEMA.split())
+_RETIRED_SCHEMA = """
+CREATE TABLE claim_retired_holders (
+    target TEXT NOT NULL,
+    owner_node TEXT NOT NULL,
+    holder_token TEXT NOT NULL,
+    generation INTEGER NOT NULL
+        CHECK (typeof(generation) = 'integer' AND generation >= 1 AND generation <= 9223372036854775807),
+    PRIMARY KEY (target, owner_node, holder_token)
+)
+"""
 
 
 class ClaimFenceError(hub.FleetHubError):
@@ -66,7 +76,7 @@ def _checked_generation(value: Any) -> int:
     return value
 
 
-def _validate_structure(conn: sqlite3.Connection) -> None:
+def _validate_structure(conn: sqlite3.Connection, table: str = "claim_fences", schema: str = _FENCE_SCHEMA) -> None:
     """Admit only the exact table this slice creates, without writing.
 
     A hand-built look-alike can lack the primary key or range CHECK, or use
@@ -74,20 +84,18 @@ def _validate_structure(conn: sqlite3.Connection) -> None:
     repair: rewriting it could change which targets share a fence.
     """
     # NOCASE: SQLite stores a trigger's tbl_name as written in its ON clause.
-    entries = conn.execute(
-        "SELECT type, sql FROM sqlite_master WHERE tbl_name = 'claim_fences' COLLATE NOCASE"
-    ).fetchall()
+    entries = conn.execute("SELECT type, sql FROM sqlite_master WHERE tbl_name = ? COLLATE NOCASE", (table,)).fetchall()
     if not entries:
         raise ClaimFenceError("claim generation fence storage is missing or corrupt")
     tables = [sql for kind, sql in entries if kind == "table"]
     # The primary key's automatic index has no SQL. Any other index, trigger, or
     # view could alter fence semantics.
     others = [entry for entry in entries if entry[0] != "table" and not (entry[0] == "index" and entry[1] is None)]
-    if len(tables) != 1 or others or " ".join(tables[0].split()) != _FENCE_DEFINITION:
+    if len(tables) != 1 or others or " ".join(tables[0].split()) != " ".join(schema.split()):
         raise ClaimFenceError("claim generation fence storage has an unsupported definition")
 
 
-def validate_schema(conn: sqlite3.Connection) -> None:
+def _validate_fences(conn: sqlite3.Connection) -> None:
     """Read-only integrity check. Never repair current-schema fence history."""
     try:
         _validate_structure(conn)
@@ -109,6 +117,28 @@ def validate_schema(conn: sqlite3.Connection) -> None:
         raise ClaimFenceError("claim generation fence capacity exceeded")
 
 
+def validate_schema(conn: sqlite3.Connection) -> None:
+    """Validate both durable authorities without repairing or evicting history."""
+    _validate_fences(conn)
+    try:
+        _validate_structure(conn, "claim_retired_holders", _RETIRED_SCHEMA)
+        invalid = conn.execute(
+            "SELECT 1 FROM claim_retired_holders r LEFT JOIN claim_fences f ON f.target = r.target "
+            "WHERE f.target IS NULL OR typeof(r.generation) != 'integer' OR r.generation < 1 "
+            "OR r.generation > f.generation OR typeof(r.owner_node) != 'text' "
+            "OR length(r.owner_node) NOT BETWEEN 1 AND 128 OR typeof(r.holder_token) != 'text' "
+            "OR length(r.holder_token) NOT BETWEEN 1 AND 128 LIMIT 1"
+        ).fetchone()
+        count = conn.execute("SELECT COUNT(*) FROM claim_retired_holders").fetchone()[0]
+    except sqlite3.OperationalError as exc:
+        _refuse_missing_schema(exc)
+        raise
+    if invalid:
+        raise ClaimFenceError("claim retired-holder fence is missing or corrupt")
+    if count > MAX_RETIRED_HOLDERS:
+        raise ClaimFenceError("claim retired-holder fence capacity exceeded")
+
+
 def migrate_schema(conn: sqlite3.Connection) -> None:
     """One-time migration; caller owns schema transaction and version update."""
     # NOCASE: SQLite treats CLAIM_FENCES and claim_fences as one name, so an existing
@@ -117,13 +147,18 @@ def migrate_schema(conn: sqlite3.Connection) -> None:
         # Existing history is authoritative even when user_version is old.
         # Validate its definition and rows without resetting generations or
         # backfilling missing rows.
-        validate_schema(conn)
-        return
-    targets = conn.execute("SELECT target FROM claims ORDER BY target LIMIT ?", (MAX_CLAIM_TARGETS + 1,)).fetchall()
-    if len(targets) > MAX_CLAIM_TARGETS:
-        raise ClaimFenceError("claim generation fence capacity exceeded during migration")
-    conn.execute(_FENCE_SCHEMA)
-    conn.executemany("INSERT INTO claim_fences (target, generation) VALUES (?, 1)", targets)
+        _validate_fences(conn)
+    else:
+        targets = conn.execute("SELECT target FROM claims ORDER BY target LIMIT ?", (MAX_CLAIM_TARGETS + 1,)).fetchall()
+        if len(targets) > MAX_CLAIM_TARGETS:
+            raise ClaimFenceError("claim generation fence capacity exceeded during migration")
+        conn.execute(_FENCE_SCHEMA)
+        conn.executemany("INSERT INTO claim_fences (target, generation) VALUES (?, 1)", targets)
+    # v32 -> v33: preserve every live claim and generation. Older versions had
+    # no retired-holder history to recover. Never recreate current-schema state.
+    if not conn.execute("SELECT 1 FROM sqlite_master WHERE name = 'claim_retired_holders' COLLATE NOCASE").fetchone():
+        conn.execute(_RETIRED_SCHEMA)
+    validate_schema(conn)
 
 
 def generation(conn: sqlite3.Connection, target: str, *, has_claim: bool) -> int:
@@ -152,6 +187,69 @@ def _advance(conn: sqlite3.Connection, target: str, current: int) -> int:
     else:
         conn.execute("UPDATE claim_fences SET generation = ? WHERE target = ?", (current + 1, target))
     return current + 1
+
+
+def _retired(conn: sqlite3.Connection, target: str, node: str, holder: str, current: int) -> int:
+    try:
+        row = conn.execute(
+            "SELECT generation FROM claim_retired_holders WHERE target = ? AND owner_node = ? AND holder_token = ?",
+            (target, node, holder),
+        ).fetchone()
+    except sqlite3.OperationalError as exc:
+        _refuse_missing_schema(exc)
+        raise
+    if row is None:
+        return 0
+    value = _checked_generation(row[0])
+    if value > current:
+        raise ClaimFenceError("claim retired-holder fence is missing or corrupt")
+    return value
+
+
+def _retire(conn: sqlite3.Connection, target: str, node: str, holder: str, current: int) -> None:
+    if not _retired(conn, target, node, holder, current):
+        count = conn.execute("SELECT COUNT(*) FROM claim_retired_holders").fetchone()[0]
+        if count >= MAX_RETIRED_HOLDERS:
+            raise ClaimFenceError("claim retired-holder fence capacity exceeded")
+    conn.execute(
+        "INSERT INTO claim_retired_holders (target, owner_node, holder_token, generation) VALUES (?, ?, ?, ?) "
+        "ON CONFLICT(target, owner_node, holder_token) DO UPDATE SET generation = excluded.generation",
+        (target, node, holder, current),
+    )
+
+
+def _stale(
+    conn: sqlite3.Connection, request: dict[str, Any], row: tuple[Any, ...] | None, current: int
+) -> tuple[int, dict[str, Any]] | None:
+    action, holder = request["action"], request["holder"]
+    retired = 0
+    if holder is not None and (action != "release" or request["scope"] == "holder"):
+        retired = _retired(conn, request["target"], request["node_id"], holder, current)
+    expected = request["generation"]
+    # Acquire retries may carry the pre-acquire fence. Only the same live
+    # holder can retry that transition; renew/release require its tenure fence.
+    retry = (
+        action == "acquire"
+        and row is not None
+        and row[1] == request["node_id"]
+        and row[11] == holder
+        and expected == current - 1
+        and expected >= retired
+    )
+    reason = None
+    if expected is not None and expected != current and not retry:
+        reason = "stale-generation"
+    elif expected is None and retired:
+        reason = "stale-holder"
+    if reason is None:
+        return None
+    key = {"acquire": "granted", "renew": "renewed", "release": "released"}[action]
+    return 409, {
+        key: False,
+        "reason": reason,
+        "error": f"claim operation refused: {reason}",
+        "owner": hub._claim_payload(row) if row is not None else None,
+    }
 
 
 def payload(row: tuple[Any, ...]) -> dict[str, Any]:
@@ -184,13 +282,15 @@ def fetch_claim(conn: sqlite3.Connection, target: str) -> tuple[Any, ...] | None
 
 def _prune(conn: sqlite3.Connection, now: float) -> None:
     targets = conn.execute(
-        "SELECT target FROM claims WHERE expires_at <= ? LIMIT ?", (now, MAX_CLAIM_TARGETS + 1)
+        "SELECT target, owner_node, holder_token FROM claims WHERE expires_at <= ? LIMIT ?",
+        (now, MAX_CLAIM_TARGETS + 1),
     ).fetchall()
     if len(targets) > MAX_CLAIM_TARGETS:
         raise ClaimFenceError("claim generation fence capacity exceeded")
-    for (target,) in targets:
+    for target, node, holder in targets:
         current = generation(conn, target, has_claim=True)
-        _advance(conn, target, current)
+        ended = _advance(conn, target, current)
+        _retire(conn, target, node, holder, ended)
         conn.execute("DELETE FROM claims WHERE target = ?", (target,))
 
 
@@ -199,6 +299,9 @@ def _acquire(conn: sqlite3.Connection, request: dict[str, Any], now: float) -> t
     target, node, holder = request["target"], request["node_id"], request["holder"]
     prior = hub._fetch_claim(conn, target)
     current = generation(conn, target, has_claim=prior is not None)
+    stale = _stale(conn, request, prior, current)
+    if stale is not None:
+        return stale
     retry = prior is not None and prior[1] == node and prior[11] == holder
     supersede = request["supersede"]
     replace = (
@@ -214,7 +317,9 @@ def _acquire(conn: sqlite3.Connection, request: dict[str, Any], now: float) -> t
             error += " under another lease than the reconciled dead run's (not superseded)"
         return 409, {"granted": False, "error": error, "owner": hub._claim_payload(prior)}
     if not retry:
-        _advance(conn, target, current)
+        started = _advance(conn, target, current)
+        if prior is not None:
+            _retire(conn, target, prior[1], prior[11], started)
     lock = request["lock"] or {"token": None, "acquired_at": None, "run_dir": None}
     labels = request["labels"]
     now_iso = hub._epoch_to_iso(now)
@@ -276,6 +381,9 @@ def _decide(conn: sqlite3.Connection, request: dict[str, Any], now: float) -> tu
         if row[1] == node:
             inspected["lock_run_dir"] = row[14]
         return 200, inspected
+    stale = _stale(conn, request, row, current)
+    if stale is not None:
+        return stale
     if request["action"] == "renew":
         if row is not None and row[10] > now and row[11] == holder and row[1] == node:
             conn.execute(
@@ -300,7 +408,11 @@ def _decide(conn: sqlite3.Connection, request: dict[str, Any], now: float) -> tu
         else ((scope == "force" or row[1] == node) and (expected is None or row[7] == expected))
     )
     if accepted:
-        _advance(conn, target, current)
+        ended = _advance(conn, target, current)
+        if row is not None:
+            _retire(conn, target, row[1], row[11], ended)
+        elif scope == "holder":
+            _retire(conn, target, node, holder, ended)
         conn.execute("DELETE FROM claims WHERE target = ?", (target,))
         released: dict[str, Any] = {"released": row is not None}
         if scope != "holder" and row is not None:
@@ -323,6 +435,10 @@ def _refuse_newer_schema(conn: sqlite3.Connection) -> None:
 
 def handle_claim(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None = None) -> tuple[int, dict[str, Any]]:
     request = hub._validate_claim_request(raw)
+    expected = raw.get("generation")
+    if "generation" in raw and (type(expected) is not int or not 0 <= expected <= MAX_GENERATION):
+        raise hub.FleetHubError("claim field 'generation' must be an integer in [0, 9223372036854775807]")
+    request["generation"] = expected
     if caller_node is not None and request["node_id"] != caller_node:
         raise hub.FleetHubForbidden(
             f"claim node_id {request['node_id']!r} does not match the caller's node token ({caller_node})"
@@ -331,6 +447,19 @@ def handle_claim(conn: sqlite3.Connection, raw: Any, *, caller_node: str | None 
     # Early refusal avoids taking the write lock on a known-newer database. A
     # newer hub can still migrate before BEGIN returns, so check again inside.
     _refuse_newer_schema(conn)
+    if request["action"] == "release" and request["scope"] != "holder" and expected is None:
+        # Legacy operator requests have no holder incarnation. Bind them to
+        # the ingress snapshot before waiting for the write lock. New clients
+        # send the generation they inspected before putting the POST on wire.
+        observed = conn.execute(
+            "SELECT f.generation, EXISTS(SELECT 1 FROM claims WHERE target = ?) "
+            "FROM (SELECT 1) LEFT JOIN claim_fences f ON f.target = ?",
+            (request["target"], request["target"]),
+        ).fetchone()
+        assert observed is not None
+        if observed[0] is None and observed[1]:
+            raise ClaimFenceError("claim generation fence is missing or corrupt")
+        request["generation"] = _checked_generation(observed[0]) if observed[0] is not None else 0
     conn.execute("BEGIN" if request["action"] == "inspect" else "BEGIN IMMEDIATE")
     try:
         _refuse_newer_schema(conn)

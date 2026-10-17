@@ -1068,6 +1068,7 @@ class ClaimDecision:
     superseded: dict[str, Any] | None = None
     lock_run_dir: str | None = None
     cancel_event: threading.Event | None = None
+    generation: int | None = None
 
 
 class FleetClaimHeldError(FleetClientError):
@@ -1162,6 +1163,7 @@ def _claim_op(
     lock: Mapping[str, str] | None = None,
     supersede: Mapping[str, str] | None = None,
     acquired_at: str | None = None,
+    generation: int | None = None,
     harness: str | None = None,
     role: str | None = None,
     job: str | None = None,
@@ -1199,6 +1201,8 @@ def _claim_op(
             body["supersede"] = dict(supersede)
         if acquired_at is not None:
             body["acquired_at"] = acquired_at
+        if generation is not None:
+            body["generation"] = generation
         if conductor:
             body["conductor"] = conductor
         try:
@@ -1230,12 +1234,19 @@ def _claim_op(
         superseded = payload.get("superseded") if isinstance(payload.get("superseded"), dict) else None
         run_dir = payload.get("lock_run_dir") if isinstance(payload.get("lock_run_dir"), str) else None
         return ClaimDecision(
-            granted=True, reason="ok", claim=claim, holder=holder, superseded=superseded, lock_run_dir=run_dir
+            granted=True,
+            reason="ok",
+            claim=claim,
+            holder=holder,
+            superseded=superseded,
+            lock_run_dir=run_dir,
+            generation=payload.get("generation", claim.get("generation") if claim else None),
         )
     if status in (200, 409):
-        return ClaimDecision(
-            granted=False, reason="held" if owner is not None else "missing", owner=owner, detail=detail, holder=holder
-        )
+        reason = payload.get("reason")
+        if reason not in ("stale-holder", "stale-generation"):
+            reason = "held" if owner is not None else "missing"
+        return ClaimDecision(granted=False, reason=reason, owner=owner, detail=detail, holder=holder)
     return ClaimDecision(
         granted=False, reason="hub-unavailable", detail=detail or f"hub returned HTTP {status}", holder=holder
     )
@@ -1301,6 +1312,9 @@ def release_claim(
     ``held``). The deleted row comes back as ``ClaimDecision.claim``.
     """
     kwargs.pop("ttl_seconds", None)
+    if force and kwargs.get("generation") is None:
+        kwargs.pop("generation", None)
+        return _claim_lifecycle._force_release(target, holder=holder, acquired_at=acquired_at, **kwargs)
     scope = "force" if force else ("holder" if holder is not None else "node")
     return _claim_op("release", target, holder=holder, scope=scope, acquired_at=acquired_at, **kwargs)
 
@@ -1730,6 +1744,8 @@ def repo_claim(
         yield decision
         return
     if not decision.granted:
+        if decision.reason in ("stale-holder", "stale-generation"):
+            raise FleetClaimHeldError(f"fleet claim on {target!r} refused: {decision.reason}", owner=decision.owner)
         owner = decision.owner or {}
         held_by = owner.get("owner_node") or "another node"
         until = owner.get("expires_at") or "its TTL expires"
@@ -1888,7 +1904,7 @@ def repo_claim(
                     except Exception:
                         _LOG.warning("fleet credential-failure callback raised; the run keeps unwinding", exc_info=True)
                 return
-            if outcome.reason == "held":
+            if outcome.reason in ("held", "stale-holder", "stale-generation"):
                 lease.terminate(outcome.reason, notify=True)
                 return
             if lease.terminate(outcome.reason):

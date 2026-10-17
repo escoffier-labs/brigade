@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from types import ModuleType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import threading
@@ -19,6 +19,22 @@ def _client() -> ModuleType:
     from . import fleet_client
 
     return fleet_client
+
+
+def _force_release(target: str, *, holder: str | None, acquired_at: str | None, **kwargs: Any) -> Any:
+    """Fence operator force to inspection, retaining old-hub compatibility."""
+    inspected = _client().inspect_claim(target, **kwargs)
+    if not inspected.granted:
+        return inspected
+    return _client()._claim_op(
+        "release",
+        target,
+        holder=holder,
+        scope="force",
+        acquired_at=acquired_at,
+        generation=inspected.generation if inspected.generation is not None else 0,
+        **kwargs,
+    )
 
 
 class _ConfirmedClaimLease:

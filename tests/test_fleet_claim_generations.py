@@ -10,7 +10,7 @@ from http.client import HTTPConnection
 
 import pytest
 
-from brigade import fleet_hub as hub
+from brigade import fleet_client, fleet_hub as hub
 
 
 @pytest.fixture()
@@ -35,7 +35,232 @@ def snapshot(conn):
     return (
         conn.execute("SELECT * FROM claims ORDER BY target").fetchall(),
         conn.execute("SELECT * FROM claim_fences ORDER BY target").fetchall(),
+        conn.execute("SELECT * FROM claim_retired_holders ORDER BY target, owner_node, holder_token").fetchall(),
     )
+
+
+def test_missing_holder_release_fences_a_late_legacy_acquire(authority):
+    conn, path, _ = authority
+    assert request(conn, "release") == (200, {"released": False})
+    # The abandoned POST can first reach the hub after cleanup and restart.
+    with hub.init_db(path) as reopened:
+        status, result = request(reopened)
+        assert status == 409
+        assert result["granted"] is False
+        assert hub.list_claims(reopened, include_all=True) == []
+        # A different holder remains a valid legacy client.
+        assert request(reopened, holder="fake-fresh-holder")[0] == 200
+
+
+@pytest.mark.parametrize("action", ["acquire", "renew", "release"])
+def test_stale_generation_cannot_act_on_same_holder_new_incarnation(authority, action):
+    conn, _, _ = authority
+    _, first = request(conn)
+    old_generation = first["claim"]["generation"]
+    assert request(conn, "release")[0] == 200
+    _, current = request(conn, generation=fence(conn))
+    assert current["claim"]["generation"] > old_generation
+    before = snapshot(conn)
+    status, _ = request(conn, action, generation=old_generation)
+    assert status == 409
+    assert snapshot(conn) == before
+    assert request(conn, action, generation=current["claim"]["generation"])[0] == 200
+
+
+def test_stale_force_release_cannot_delete_new_generation(authority):
+    conn, _, _ = authority
+    _, first = request(conn)
+    old_generation = first["claim"]["generation"]
+    assert request(conn, "release")[0] == 200
+    assert request(conn, holder="fake-next-holder")[0] == 200
+    before = snapshot(conn)
+    status, _ = request(conn, "release", scope="force", generation=old_generation)
+    assert status == 409
+    assert snapshot(conn) == before
+
+
+@pytest.mark.parametrize("scope", ["node", "force"])
+def test_generationless_operator_release_is_bound_before_waiting_for_write_lock(authority, scope):
+    conn, path, _ = authority
+    _, original = request(conn)
+
+    class ReplacementBeforeBegin:
+        def __getattr__(self, name):
+            return getattr(conn, name)
+
+        def execute(self, sql, *args):
+            if sql == "BEGIN IMMEDIATE":
+                with hub.init_db(path) as other:
+                    request(other, "release")
+                    request(other, holder="fake-next-holder")
+            return conn.execute(sql, *args)
+
+    status, result = request(
+        ReplacementBeforeBegin(), "release", scope=scope, acquired_at=original["claim"]["acquired_at"]
+    )
+    assert status == 409 and result["reason"] == "stale-generation"
+    assert hub.list_claims(conn)[0]["generation"] == 3
+
+
+@pytest.mark.parametrize("ending", ["release", "expire", "supersede", "force"])
+def test_retirement_survives_restart_and_refuses_only_old_holder(authority, ending):
+    conn, path, clock = authority
+    request(conn, ttl_seconds=1, lock={"token": "fake-lock"})
+    if ending == "expire":
+        clock["now"] += 1
+        request(conn, target="fake-prune")
+    elif ending == "supersede":
+        request(conn, holder="fake-replacement", scope="node", supersede={"token": "fake-lock"})
+    else:
+        request(conn, "release", **({"scope": "force", "node": "fake-operator"} if ending == "force" else {}))
+    with hub.init_db(path) as reopened:
+        for action in ("acquire", "renew", "release"):
+            status, response = request(reopened, action)
+            assert status == 409 and response["reason"] == "stale-holder"
+        if ending == "supersede":
+            assert request(reopened, "renew", holder="fake-replacement")[1]["renewed"] is True
+        else:
+            assert request(reopened, holder="fake-fresh")[1]["granted"] is True
+            assert request(reopened, "renew", holder="fake-fresh")[1]["renewed"] is True
+            assert request(reopened, "release", holder="fake-fresh")[1]["released"] is True
+
+
+def test_retired_holder_capacity_rolls_back_every_transition(authority, monkeypatch):
+    from brigade import fleet_hub_claims
+
+    conn, _, clock = authority
+    request(conn, "release", holder="fake-first")
+    request(conn, ttl_seconds=1)
+    monkeypatch.setattr(fleet_hub_claims, "MAX_RETIRED_HOLDERS", 1)
+    before = snapshot(conn)
+    for scope in ("holder", "node", "force"):
+        with pytest.raises(hub.FleetHubError, match="retired-holder fence capacity exceeded"):
+            request(
+                conn,
+                "release",
+                scope=scope,
+                **({"acquired_at": hub.list_claims(conn)[0]["acquired_at"]} if scope == "node" else {}),
+            )
+        assert snapshot(conn) == before
+    clock["now"] += 1
+    with pytest.raises(hub.FleetHubError, match="retired-holder fence capacity exceeded"):
+        request(conn, target="fake-new")
+    assert snapshot(conn) == before
+    # Existing retired markers still refuse stale requests without needing space.
+    assert request(conn, "release", holder="fake-first")[1]["reason"] == "stale-holder"
+    assert snapshot(conn) == before
+
+
+def test_schema32_migration_preserves_live_claim_and_fences(authority):
+    conn, path, _ = authority
+    request(conn)
+    before = snapshot(conn)[:2]
+    conn.execute("DROP TABLE claim_retired_holders")
+    conn.execute("PRAGMA user_version=32")
+    conn.commit()
+    with hub.init_db(path) as migrated:
+        assert migrated.execute("PRAGMA user_version").fetchone()[0] == hub.SCHEMA_VERSION
+        assert snapshot(migrated)[:2] == before
+        assert request(migrated, "renew")[0] == 200
+        assert request(migrated, "release")[0] == 200
+    with hub.init_db(path) as reopened:
+        assert request(reopened)[1]["reason"] == "stale-holder"
+
+
+@pytest.mark.parametrize("damage", ["drop", "invalid", "future", "orphan", "trigger"])
+def test_corrupt_retired_holder_state_refuses_without_repair(authority, damage):
+    conn, path, _ = authority
+    request(conn, "release")
+    if damage == "drop":
+        conn.execute("DROP TABLE claim_retired_holders")
+    elif damage == "trigger":
+        conn.execute("CREATE TRIGGER fake_retired AFTER DELETE ON claim_retired_holders BEGIN SELECT 1; END")
+    else:
+        conn.execute("PRAGMA ignore_check_constraints=ON")
+        if damage == "orphan":
+            conn.execute("UPDATE claim_retired_holders SET target = 'fake-orphan'")
+        else:
+            conn.execute("UPDATE claim_retired_holders SET generation = ?", (0 if damage == "invalid" else 100,))
+    conn.commit()
+    before = conn.iterdump()
+    original = list(before)
+    with pytest.raises(hub.FleetHubError, match="fence"):
+        hub.init_db(path)
+    assert list(conn.iterdump()) == original
+
+
+@pytest.mark.parametrize("value", [None, True, -1, 1.5, "1", 2**63])
+def test_optional_generation_validation_is_strict(authority, value):
+    conn, _, _ = authority
+    before = snapshot(conn)
+    with pytest.raises(hub.FleetHubError, match="generation"):
+        request(conn, generation=value)
+    assert snapshot(conn) == before
+
+
+def test_new_client_with_old_hub_ignores_additive_generation(monkeypatch):
+    # A legacy endpoint fixture ignores unknown fields and returns no fence
+    # metadata. The contract here is client serialization and response handling.
+    posted = []
+    live = None
+
+    def old_endpoint(url, token, body, *, timeout):
+        nonlocal live
+        posted.append(body)
+        if body["action"] == "acquire":
+            live = {"target": body["target"], "owner_node": body["node_id"]}
+            return 200, {"granted": True, "claim": live}
+        if body["action"] == "inspect":
+            return 200, {"inspected": True, "claim": live}
+        if body["action"] == "renew":
+            return 200, {"renewed": live is not None, "claim": live}
+        live = None
+        return 200, {"released": True}
+
+    monkeypatch.setattr(fleet_client, "_post_claim_blocking", old_endpoint)
+    settings = {"node_id": "fake-node", "hub_url": "https://hub.example.invalid", "token": "fake-token"}
+    assert fleet_client.acquire_claim("fake-target", holder="fake-holder", generation=0, **settings).granted
+    assert fleet_client.renew_claim("fake-target", holder="fake-holder", generation=1, **settings).granted
+    assert fleet_client.release_claim("fake-target", force=True, **settings).granted
+    assert [body["action"] for body in posted] == ["acquire", "renew", "inspect", "release"]
+    assert posted[0]["generation"] == 0 and posted[1]["generation"] == 1
+    assert posted[-1]["generation"] == 0
+
+
+def test_client_force_release_sends_inspected_generation_and_stale_is_terminal(authority, monkeypatch):
+    conn, _, _ = authority
+    request(conn)
+
+    def endpoint(url, token, body, *, timeout):
+        if body["action"] == "release":
+            assert body["generation"] == 1
+            request(conn, "release")
+            request(conn, holder="fake-new-holder")
+        return hub.handle_claim(conn, body)
+
+    monkeypatch.setattr(fleet_client, "_post_claim_blocking", endpoint)
+    monkeypatch.setattr(fleet_client, "_run_with_deadline", lambda fn, **kw: fn())
+    settings = {"node_id": "fake-node", "hub_url": "https://hub.example.invalid", "token": "fake-token"}
+    assert fleet_client.release_claim("fake-target", force=True, **settings).reason == "stale-generation"
+    assert fleet_client.acquire_claim("fake-target", holder="fake-holder", **settings).reason == "stale-holder"
+    assert hub.list_claims(conn)[0]["generation"] == 3
+
+
+def test_client_force_release_on_unseen_target_fences_generation_zero(authority, monkeypatch):
+    conn, _, _ = authority
+
+    def endpoint(url, token, body, *, timeout):
+        if body["action"] == "release":
+            request(conn, holder="fake-new-holder")
+        return hub.handle_claim(conn, body)
+
+    monkeypatch.setattr(fleet_client, "_post_claim_blocking", endpoint)
+    monkeypatch.setattr(fleet_client, "_run_with_deadline", lambda fn, **kw: fn())
+    outcome = fleet_client.release_claim(
+        "fake-target", force=True, node_id="fake-node", hub_url="https://hub.example.invalid", token="fake-token"
+    )
+    assert outcome.reason == "stale-generation"
+    assert hub.list_claims(conn)[0]["generation"] == 1
 
 
 @pytest.fixture()
@@ -139,9 +364,9 @@ def test_live_retry_renew_release_missing_release_and_reacquire(authority):
     assert request(conn, "renew")[1]["claim"]["generation"] == 1
     assert request(conn, "release") == (200, {"released": True})
     assert request(conn, "inspect")[1]["generation"] == 2
-    assert request(conn, "release") == (200, {"released": False})
+    assert request(conn, "release", holder="fake-missing-holder") == (200, {"released": False})
     assert fence(conn) == 3
-    assert request(conn)[1]["claim"]["generation"] == 4
+    assert request(conn, holder="fake-fresh-holder")[1]["claim"]["generation"] == 4
     assert hub.list_claims(conn)[0]["generation"] == 4
 
 
@@ -158,7 +383,7 @@ def test_global_expiry_retirement_is_once_and_survives_free_restart(authority):
     request(conn, target="fake-trigger")
     assert fence(conn) == 2
     with hub.init_db(path) as reopened:
-        assert request(reopened)[1]["claim"]["generation"] == 3
+        assert request(reopened, holder="fake-fresh-holder")[1]["claim"]["generation"] == 3
         assert fence(reopened, "fake-other") == 2
 
 
@@ -221,8 +446,8 @@ def test_capacity_refuses_new_target_and_rolls_back_global_pruning(authority, mo
     assert snapshot(conn) == before
     assert not conn.in_transaction
     # Existing target remains usable at the cap, with retirement + acquisition.
-    assert request(conn)[1]["claim"]["generation"] == 3
-    request(conn, "release")
+    assert request(conn, holder="fake-fresh-holder")[1]["claim"]["generation"] == 3
+    request(conn, "release", holder="fake-fresh-holder")
     assert fence(conn) == 4
     with pytest.raises(hub.FleetHubError, match="capacity"):
         request(conn, "release", target="fake-new")
@@ -399,7 +624,7 @@ def test_migration_preserves_oversize_legacy_target_and_its_operability(authorit
         assert fence(migrated, target) == 1
         assert request(migrated, "renew", target=target)[0] == 200
         assert request(migrated, "release", target=target)[0] == 200
-        assert request(migrated, target=target)[1]["claim"]["generation"] == 3
+        assert request(migrated, target=target, holder="fake-fresh-holder")[1]["claim"]["generation"] == 3
 
 
 @pytest.mark.parametrize("path", ["/view/machines", "/view/repos", "/", "/deck", "/deck/repos"])
@@ -515,7 +740,7 @@ def test_two_connections_migrate_schema25_once(authority):
         futures = [pool.submit(migrate) for _ in range(2)]
         results = [future.result(timeout=15) for future in futures]
     assert all(version == hub.SCHEMA_VERSION for version, _ in results)
-    assert results[0][1] == results[1][1] == (original, [("fake-target", 1)])
+    assert results[0][1] == results[1][1] == (original, [("fake-target", 1)], [])
 
 
 @pytest.mark.parametrize("method", ["GET", "POST"])
@@ -536,7 +761,7 @@ def test_claim_request_newer_schema_uses_static_refusal(authority):
     conn.commit()
     with pytest.raises(hub.FleetHubError, match="^fleet hub database schema is newer than supported$"):
         request(conn)
-    assert snapshot(conn) == ([], [])
+    assert snapshot(conn) == ([], [], [])
 
 
 _CHECK = "CHECK (typeof(generation) = 'integer' AND generation >= 1 AND generation <= 9223372036854775807)"

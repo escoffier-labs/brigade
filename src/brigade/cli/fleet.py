@@ -872,6 +872,9 @@ def _print_claim_failure(decision, *, what: str) -> bool:
     if decision.reason == "invalid":
         print(f"error: {decision.detail}", file=sys.stderr)
         return True
+    if not decision.granted and decision.reason not in ("held", "missing"):
+        print(f"error: fleet hub claim {what} refused: {decision.reason}", file=sys.stderr)
+        return True
     return False
 
 

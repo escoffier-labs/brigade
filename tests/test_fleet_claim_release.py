@@ -534,6 +534,25 @@ class TestClient:
 
 
 class TestReleaseCli:
+    @pytest.mark.parametrize("reason", ["stale-holder", "stale-generation", "future-refusal"])
+    @pytest.mark.parametrize("operation", ["force", "release", "acquire", "heartbeat"])
+    def test_stale_and_unknown_refusals_are_reported(self, monkeypatch, capsys, reason, operation):
+        from brigade import cli
+
+        refusal = fleet_client.ClaimDecision(False, reason)
+        for name in ("release_claim", "acquire_claim", "renew_claim"):
+            monkeypatch.setattr(fleet_client, name, lambda *args, **kwargs: refusal)
+        action = {
+            "force": ["--release", "fake-target", "--force"],
+            "release": ["--release", "fake-target", "--holder", "fake-holder"],
+            "acquire": ["--acquire", "fake-target", "--harness", "codex", "--session", "fake-session"],
+            "heartbeat": ["--heartbeat", "fake-target", "--holder", "fake-holder"],
+        }[operation]
+        assert cli.main(["fleet", "claims", *action]) == 1
+        output = capsys.readouterr()
+        assert reason in output.err
+        assert "no active claim" not in output.out
+
     @pytest.fixture(autouse=True)
     def _home(self, tmp_path, monkeypatch):
         monkeypatch.setenv("BRIGADE_HOME", str(tmp_path / "brigade-home"))
