@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from typing import Any, Callable
 
 from . import contracts as c
-from .fleet import FleetCallError, FleetTimeout, RevisionError
+from .fleet import FleetCallError, FleetProtocolError, FleetTimeout, RevisionError
 from .ledger import Ledger
 from .runtime_config import Runtime
 
@@ -210,6 +210,8 @@ class T3DispatchTools:
                 )
         except FleetCallError as exc:
             if not isinstance(exc.request_id, str) or not c.HANDLE_RE.fullmatch(exc.request_id):
+                if isinstance(exc, FleetProtocolError):
+                    raise c.T3DispatchError("submit-unknown") from exc
                 raise _fleet_error(exc) from exc
             result = {"request_id": exc.request_id, "state": "unknown"}
         except FleetTimeout as exc:

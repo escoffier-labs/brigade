@@ -94,9 +94,23 @@ def test_error_envelope_raises_fleet_call_error():
 
 def test_garbage_output_is_internal_error():
     runner = fleet.FleetRunner("/bin/t3-fleet", "/usr/bin/git", run=FakeRun("not json"))
-    with pytest.raises(fleet.FleetCallError) as info:
+    with pytest.raises(fleet.FleetProtocolError) as info:
         runner.capacity()
     assert info.value.code == "internal_error"
+
+
+def test_valid_result_with_nonzero_exit_keeps_request_id():
+    run = FakeRun(_ok(request_id="host-a-r7", state="running"), returncode=3)
+    with pytest.raises(fleet.FleetProtocolError) as info:
+        fleet.FleetRunner("/bin/t3-fleet", "/usr/bin/git", run=run).status("host-a-r7")
+    assert info.value.request_id == "host-a-r7"
+
+
+def test_missing_binary_is_definite_failure_not_protocol():
+    run = FakeRun(raises=FileNotFoundError("t3-fleet"))
+    with pytest.raises(fleet.FleetCallError) as info:
+        fleet.FleetRunner("/bin/t3-fleet", "/usr/bin/git", run=run).capacity()
+    assert not isinstance(info.value, fleet.FleetProtocolError)
 
 
 def test_timeout_raises_fleet_timeout():

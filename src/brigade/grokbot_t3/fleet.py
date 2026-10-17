@@ -47,6 +47,10 @@ class FleetCallError(Exception):
         self.request_id = request_id
 
 
+class FleetProtocolError(FleetCallError):
+    """t3-fleet ran but its output could not be trusted, so any side effect is unknown."""
+
+
 class FleetTimeout(Exception):
     pass
 
@@ -86,13 +90,13 @@ class FleetRunner:
             raise FleetCallError("internal_error") from exc
         output = proc.stdout or proc.stderr or ""
         if len(output.encode("utf-8")) > MAX_OUTPUT_BYTES:
-            raise FleetCallError("internal_error")
+            raise FleetProtocolError("internal_error")
         try:
             result = json.loads(output)
         except json.JSONDecodeError as exc:
-            raise FleetCallError("internal_error") from exc
+            raise FleetProtocolError("internal_error") from exc
         if not isinstance(result, dict):
-            raise FleetCallError("internal_error")
+            raise FleetProtocolError("internal_error")
         if result.get("schema") == ERROR_SCHEMA:
             raw_error = result.get("error")
             error: dict[str, Any] = raw_error if isinstance(raw_error, dict) else {}
@@ -105,7 +109,8 @@ class FleetRunner:
                 request_id if isinstance(request_id, str) else None,
             )
         if result.get("schema") != RESULT_SCHEMA or proc.returncode != 0:
-            raise FleetCallError("internal_error")
+            request_id = result.get("request_id") if result.get("schema") == RESULT_SCHEMA else None
+            raise FleetProtocolError("internal_error", None, request_id if isinstance(request_id, str) else None)
         return result
 
     def capacity(self) -> dict[str, Any]:

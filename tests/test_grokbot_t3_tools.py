@@ -184,6 +184,24 @@ def test_no_eligible_host_and_unresolved_ref(make):
     assert _submit(tools)["error"]["code"] == "base-ref-unresolved"
 
 
+def test_unreadable_submit_output_is_unknown_not_refused(make):
+    from brigade.grokbot_t3.fleet import FleetProtocolError
+
+    tools, runner, ledger = make()
+    runner.submit_errors = [FleetProtocolError("internal_error")]
+    out = _submit(tools)
+    assert out["error"]["code"] == "submit-unknown"
+
+
+def test_unreadable_submit_output_with_request_id_is_recorded(make):
+    from brigade.grokbot_t3.fleet import FleetProtocolError
+
+    tools, runner, ledger = make()
+    runner.submit_errors = [FleetProtocolError("internal_error", None, "host-a-r9")]
+    _submit(tools)
+    assert ledger.get("host-a-r9")["last_state"] == "unknown"
+
+
 def test_submit_timeout_is_unknown(make):
     tools, runner, _ = make()
     runner.submit_errors = [FleetTimeout("submit")]
