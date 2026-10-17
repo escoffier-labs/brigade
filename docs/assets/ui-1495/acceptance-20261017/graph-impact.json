@@ -1,0 +1,877 @@
+[
+  {
+    "command": "brigade code sync --target .",
+    "result": "indexed files=1518 symbols=37854 calls=83696 imports=21866 deleted=0"
+  },
+  {
+    "path": "src/brigade/ui_theme.py",
+    "returncode": 0,
+    "json": {
+      "attribution": "tests statically attributed through incoming call edges; a lower bound, not coverage. Absence here does not mean untested (fixtures, dynamic dispatch, and harness-driven tests are invisible to call edges).",
+      "depth": 3,
+      "changed_files": [
+        "src/brigade/ui_theme.py"
+      ],
+      "missing_files": [],
+      "affected_tests": [
+        {
+          "file_path": "tests/test_receipt_schema_audit.py",
+          "min_hops": 1,
+          "via": [
+            "test_run_sidecar_emits_schema_version"
+          ]
+        }
+      ],
+      "impacted_files": [
+        {
+          "file_path": "src/brigade/fleet_command_deck.py",
+          "min_hops": 1,
+          "via": [
+            "_document",
+            "render_deck"
+          ]
+        },
+        {
+          "file_path": "src/brigade/fleet_dashboard.py",
+          "min_hops": 1,
+          "via": [
+            "_document",
+            "render_page"
+          ]
+        },
+        {
+          "file_path": "src/brigade/fleet_repo_policy_page.py",
+          "min_hops": 1,
+          "via": [
+            "_leaf_items",
+            "_live_items",
+            "_row_html",
+            "render"
+          ]
+        },
+        {
+          "file_path": "src/brigade/fleet_hub_http.py",
+          "min_hops": 2,
+          "via": [
+            "_serve_deck",
+            "_render_policy",
+            "_render_roster",
+            "_serve_dashboard",
+            "_serve_observed_work"
+          ]
+        },
+        {
+          "file_path": "src/brigade/fleet_hub_roster_page.py",
+          "min_hops": 2,
+          "via": [
+            "render"
+          ]
+        },
+        {
+          "file_path": "src/brigade/fleet_policy_page.py",
+          "min_hops": 2,
+          "via": [
+            "render"
+          ]
+        },
+        {
+          "file_path": "src/brigade/fleet_work_page.py",
+          "min_hops": 2,
+          "via": [
+            "render",
+            "render_observed_group"
+          ]
+        }
+      ],
+      "truncated": false
+    },
+    "stdout": "{\n  \"attribution\": \"tests statically attributed through incoming call edges; a lower bound, not coverage. Absence here does not mean untested (fixtures, dynamic dispatch, and harness-driven tests are invisible to call edges).\",\n  \"depth\": 3,\n  \"changed_files\": [\n    \"src/brigade/ui_theme.py\"\n  ],\n  \"missing_files\": [],\n  \"affected_tests\": [\n    {\n      \"file_path\": \"tests/test_receipt_schema_audit.py\",\n      \"min_hops\": 1,\n      \"via\": [\n        \"test_run_sidecar_emits_schema_version\"\n      ]\n    }\n  ],\n  \"impacted_files\": [\n    {\n      \"file_path\": \"src/brigade/fleet_command_deck.py\",\n      \"min_hops\": 1,\n      \"via\": [\n        \"_document\",\n        \"render_deck\"\n      ]\n    },\n    {\n      \"file_path\": \"src/brigade/fleet_dashboard.py\",\n      \"min_hops\": 1,\n      \"via\": [\n        \"_document\",\n        \"render_page\"\n      ]\n    },\n    {\n      \"file_path\": \"src/brigade/fleet_repo_policy_page.py\",\n      \"min_hops\": 1,\n      \"via\": [\n        \"_leaf_items\",\n        \"_live_items\",\n        \"_row_html\",\n        \"render\"\n      ]\n    },\n    {\n      \"file_path\": \"src/brigade/fleet_hub_http.py\",\n      \"min_hops\": 2,\n      \"via\": [\n        \"_serve_deck\",\n        \"_render_policy\",\n        \"_render_roster\",\n        \"_serve_dashboard\",\n        \"_serve_observed_work\"\n      ]\n    },\n    {\n      \"file_path\": \"src/brigade/fleet_hub_roster_page.py\",\n      \"min_hops\": 2,\n      \"via\": [\n        \"render\"\n      ]\n    },\n    {\n      \"file_path\": \"src/brigade/fleet_policy_page.py\",\n      \"min_hops\": 2,\n      \"via\": [\n        \"render\"\n      ]\n    },\n    {\n      \"file_path\": \"src/brigade/fleet_work_page.py\",\n      \"min_hops\": 2,\n      \"via\": [\n        \"render\",\n        \"render_observed_group\"\n      ]\n    }\n  ],\n  \"truncated\": false\n}\n",
+    "stderr": ""
+  },
+  {
+    "path": "src/brigade/fleet_command_deck.py",
+    "returncode": 0,
+    "json": {
+      "attribution": "tests statically attributed through incoming call edges; a lower bound, not coverage. Absence here does not mean untested (fixtures, dynamic dispatch, and harness-driven tests are invisible to call edges).",
+      "depth": 3,
+      "changed_files": [
+        "src/brigade/fleet_command_deck.py"
+      ],
+      "missing_files": [],
+      "affected_tests": [],
+      "impacted_files": [
+        {
+          "file_path": "src/brigade/cli/fleet.py",
+          "min_hops": 1,
+          "via": [
+            "_dispatch_serve"
+          ]
+        },
+        {
+          "file_path": "src/brigade/doctor.py",
+          "min_hops": 1,
+          "via": [
+            "security_station_checks"
+          ]
+        },
+        {
+          "file_path": "src/brigade/fleet_dashboard.py",
+          "min_hops": 1,
+          "via": [
+            "build_rows",
+            "live",
+            "render_page"
+          ]
+        },
+        {
+          "file_path": "src/brigade/fleet_hub.py",
+          "min_hops": 1,
+          "via": [
+            "handle_cloud",
+            "make_server",
+            "run_started_at",
+            "make_handler",
+            "run"
+          ]
+        },
+        {
+          "file_path": "src/brigade/fleet_hub_grokbot.py",
+          "min_hops": 1,
+          "via": [
+            "handle_grokbot",
+            "list_jobs",
+            "sweep_expired_jobs",
+            "_loop"
+          ]
+        },
+        {
+          "file_path": "src/brigade/fleet_hub_http.py",
+          "min_hops": 1,
+          "via": [
+            "_serve_deck",
+            "control_plane_from_hub",
+            "make_handler",
+            "_render_policy",
+            "_render_roster"
+          ]
+        },
+        {
+          "file_path": "src/brigade/fleet_hub_roster_page.py",
+          "min_hops": 1,
+          "via": [
+            "render",
+            "_policy_select",
+            "_select"
+          ]
+        },
+        {
+          "file_path": "src/brigade/fleet_hub_status.py",
+          "min_hops": 1,
+          "via": [
+            "_status_entry",
+            "latest_status",
+            "board_machine_page",
+            "board_status",
+            "board_status_for_nodes"
+          ]
+        },
+        {
+          "file_path": "src/brigade/fleet_policy_page.py",
+          "min_hops": 1,
+          "via": [
+            "_esc",
+            "render",
+            "_acknowledged_cell",
+            "_actions",
+            "_activation_panel"
+          ]
+        },
+        {
+          "file_path": "src/brigade/fleet_repo_policy_page.py",
+          "min_hops": 1,
+          "via": [
+            "_coordination",
+            "_leaf_items",
+            "_live_items",
+            "_row_html",
+            "render"
+          ]
+        },
+        {
+          "file_path": "src/brigade/fleet_work_page.py",
+          "min_hops": 1,
+          "via": [
+            "_references",
+            "_text",
+            "render",
+            "render_observed_group",
+            "_item"
+          ]
+        },
+        {
+          "file_path": "src/brigade/work_cmd/session/run_status.py",
+          "min_hops": 1,
+          "via": [
+            "doctor"
+          ]
+        }
+      ],
+      "truncated": false
+    },
+    "stdout": "{\n  \"attribution\": \"tests statically attributed through incoming call edges; a lower bound, not coverage. Absence here does not mean untested (fixtures, dynamic dispatch, and harness-driven tests are invisible to call edges).\",\n  \"depth\": 3,\n  \"changed_files\": [\n    \"src/brigade/fleet_command_deck.py\"\n  ],\n  \"missing_files\": [],\n  \"affected_tests\": [],\n  \"impacted_files\": [\n    {\n      \"file_path\": \"src/brigade/cli/fleet.py\",\n      \"min_hops\": 1,\n      \"via\": [\n        \"_dispatch_serve\"\n      ]\n    },\n    {\n      \"file_path\": \"src/brigade/doctor.py\",\n      \"min_hops\": 1,\n      \"via\": [\n        \"security_station_checks\"\n      ]\n    },\n    {\n      \"file_path\": \"src/brigade/fleet_dashboard.py\",\n      \"min_hops\": 1,\n      \"via\": [\n        \"build_rows\",\n        \"live\",\n        \"render_page\"\n      ]\n    },\n    {\n      \"file_path\": \"src/brigade/fleet_hub.py\",\n      \"min_hops\": 1,\n      \"via\": [\n        \"handle_cloud\",\n        \"make_server\",\n        \"run_started_at\",\n        \"make_handler\",\n        \"run\"\n      ]\n    },\n    {\n      \"file_path\": \"src/brigade/fleet_hub_grokbot.py\",\n      \"min_hops\": 1,\n      \"via\": [\n        \"handle_grokbot\",\n        \"list_jobs\",\n        \"sweep_expired_jobs\",\n        \"_loop\"\n      ]\n    },\n    {\n      \"file_path\": \"src/brigade/fleet_hub_http.py\",\n      \"min_hops\": 1,\n      \"via\": [\n        \"_serve_deck\",\n        \"control_plane_from_hub\",\n        \"make_handler\",\n        \"_render_policy\",\n        \"_render_roster\"\n      ]\n    },\n    {\n      \"file_path\": \"src/brigade/fleet_hub_roster_page.py\",\n      \"min_hops\": 1,\n      \"via\": [\n        \"render\",\n        \"_policy_select\",\n        \"_select\"\n      ]\n    },\n    {\n      \"file_path\": \"src/brigade/fleet_hub_status.py\",\n      \"min_hops\": 1,\n      \"via\": [\n        \"_status_entry\",\n        \"latest_status\",\n        \"board_machine_page\",\n        \"board_status\",\n        \"board_status_for_nodes\"\n      ]\n    },\n    {\n      \"file_path\": \"src/brigade/fleet_policy_page.py\",\n      \"min_hops\": 1,\n      \"via\": [\n        \"_esc\",\n        \"render\",\n        \"_acknowledged_cell\",\n        \"_actions\",\n        \"_activation_panel\"\n      ]\n    },\n    {\n      \"file_path\": \"src/brigade/fleet_repo_policy_page.py\",\n      \"min_hops\": 1,\n      \"via\": [\n        \"_coordination\",\n        \"_leaf_items\",\n        \"_live_items\",\n        \"_row_html\",\n        \"render\"\n      ]\n    },\n    {\n      \"file_path\": \"src/brigade/fleet_work_page.py\",\n      \"min_hops\": 1,\n      \"via\": [\n        \"_references\",\n        \"_text\",\n        \"render\",\n        \"render_observed_group\",\n        \"_item\"\n      ]\n    },\n    {\n      \"file_path\": \"src/brigade/work_cmd/session/run_status.py\",\n      \"min_hops\": 1,\n      \"via\": [\n        \"doctor\"\n      ]\n    }\n  ],\n  \"truncated\": false\n}\n",
+    "stderr": ""
+  },
+  {
+    "path": "src/brigade/fleet_dashboard.py",
+    "returncode": 0,
+    "json": {
+      "attribution": "tests statically attributed through incoming call edges; a lower bound, not coverage. Absence here does not mean untested (fixtures, dynamic dispatch, and harness-driven tests are invisible to call edges).",
+      "depth": 3,
+      "changed_files": [
+        "src/brigade/fleet_dashboard.py"
+      ],
+      "missing_files": [],
+      "affected_tests": [],
+      "impacted_files": [
+        {
+          "file_path": "engines/code-graph/src/query/context.rs",
+          "min_hops": 1,
+          "via": [
+            "personalize_context_pack",
+            "personalized_callers_are_ordered_by_caller_file_rank",
+            "personalized_context_keeps_exact_task_mentioned_files",
+            "personalized_task_seed_outranks_unrelated_high_degree_hub"
+          ]
+        },
+        {
+          "file_path": "src/brigade/fleet_hub_http.py",
+          "min_hops": 1,
+          "via": [
+            "_serve_dashboard",
+            "machine_matches",
+            "machine_priority",
+            "do_GET"
+          ]
+        }
+      ],
+      "truncated": false
+    },
+    "stdout": "{\n  \"attribution\": \"tests statically attributed through incoming call edges; a lower bound, not coverage. Absence here does not mean untested (fixtures, dynamic dispatch, and harness-driven tests are invisible to call edges).\",\n  \"depth\": 3,\n  \"changed_files\": [\n    \"src/brigade/fleet_dashboard.py\"\n  ],\n  \"missing_files\": [],\n  \"affected_tests\": [],\n  \"impacted_files\": [\n    {\n      \"file_path\": \"engines/code-graph/src/query/context.rs\",\n      \"min_hops\": 1,\n      \"via\": [\n        \"personalize_context_pack\",\n        \"personalized_callers_are_ordered_by_caller_file_rank\",\n        \"personalized_context_keeps_exact_task_mentioned_files\",\n        \"personalized_task_seed_outranks_unrelated_high_degree_hub\"\n      ]\n    },\n    {\n      \"file_path\": \"src/brigade/fleet_hub_http.py\",\n      \"min_hops\": 1,\n      \"via\": [\n        \"_serve_dashboard\",\n        \"machine_matches\",\n        \"machine_priority\",\n        \"do_GET\"\n      ]\n    }\n  ],\n  \"truncated\": false\n}\n",
+    "stderr": ""
+  },
+  {
+    "path": "src/brigade/center_cmd/dashboard/render.py",
+    "returncode": 0,
+    "json": {
+      "attribution": "tests statically attributed through incoming call edges; a lower bound, not coverage. Absence here does not mean untested (fixtures, dynamic dispatch, and harness-driven tests are invisible to call edges).",
+      "depth": 3,
+      "changed_files": [
+        "src/brigade/center_cmd/dashboard/render.py"
+      ],
+      "missing_files": [],
+      "affected_tests": [],
+      "impacted_files": [],
+      "truncated": false
+    },
+    "stdout": "{\n  \"attribution\": \"tests statically attributed through incoming call edges; a lower bound, not coverage. Absence here does not mean untested (fixtures, dynamic dispatch, and harness-driven tests are invisible to call edges).\",\n  \"depth\": 3,\n  \"changed_files\": [\n    \"src/brigade/center_cmd/dashboard/render.py\"\n  ],\n  \"missing_files\": [],\n  \"affected_tests\": [],\n  \"impacted_files\": [],\n  \"truncated\": false\n}\n",
+    "stderr": ""
+  },
+  {
+    "path": "src/brigade/center_cmd/dashboard/views/__init__.py",
+    "returncode": 0,
+    "json": {
+      "attribution": "tests statically attributed through incoming call edges; a lower bound, not coverage. Absence here does not mean untested (fixtures, dynamic dispatch, and harness-driven tests are invisible to call edges).",
+      "depth": 3,
+      "changed_files": [
+        "src/brigade/center_cmd/dashboard/views/__init__.py"
+      ],
+      "missing_files": [],
+      "affected_tests": [
+        {
+          "file_path": "tests/test_grokbot_obsidian_runtime.py",
+          "min_hops": 1,
+          "via": [
+            "test_pinned_fetch_rejects_redirects_and_oversize_response",
+            "test_spki_pin_extracts_from_generated_certificate",
+            "test_wrong_pin_never_sends_authorization_bearing_http"
+          ]
+        }
+      ],
+      "impacted_files": [
+        {
+          "file_path": "scripts/published-artifact-acceptance.py",
+          "min_hops": 1,
+          "via": [
+            "wait_for_github_release_tag",
+            "run_acceptance",
+            "main"
+          ]
+        },
+        {
+          "file_path": "scripts/verify_component_manifest_provenance.py",
+          "min_hops": 1,
+          "via": [
+            "_fetch_json",
+            "verify_manifest",
+            "main",
+            "resolve_tag_commit"
+          ]
+        },
+        {
+          "file_path": "src/brigade/center_cmd/serve.py",
+          "min_hops": 1,
+          "via": [
+            "loader"
+          ]
+        },
+        {
+          "file_path": "src/brigade/mcp_adapters.py",
+          "min_hops": 1,
+          "via": [
+            "_codex_write_file"
+          ]
+        },
+        {
+          "file_path": "src/brigade/center_cmd/dashboard/snapshot.py",
+          "min_hops": 2,
+          "via": [
+            "_run"
+          ]
+        },
+        {
+          "file_path": "src/brigade/grokbot_backup/actions.py",
+          "min_hops": 2,
+          "via": [
+            "_list_json_records",
+            "_list_operations",
+            "_list_proposals"
+          ]
+        }
+      ],
+      "truncated": false
+    },
+    "stdout": "{\n  \"attribution\": \"tests statically attributed through incoming call edges; a lower bound, not coverage. Absence here does not mean untested (fixtures, dynamic dispatch, and harness-driven tests are invisible to call edges).\",\n  \"depth\": 3,\n  \"changed_files\": [\n    \"src/brigade/center_cmd/dashboard/views/__init__.py\"\n  ],\n  \"missing_files\": [],\n  \"affected_tests\": [\n    {\n      \"file_path\": \"tests/test_grokbot_obsidian_runtime.py\",\n      \"min_hops\": 1,\n      \"via\": [\n        \"test_pinned_fetch_rejects_redirects_and_oversize_response\",\n        \"test_spki_pin_extracts_from_generated_certificate\",\n        \"test_wrong_pin_never_sends_authorization_bearing_http\"\n      ]\n    }\n  ],\n  \"impacted_files\": [\n    {\n      \"file_path\": \"scripts/published-artifact-acceptance.py\",\n      \"min_hops\": 1,\n      \"via\": [\n        \"wait_for_github_release_tag\",\n        \"run_acceptance\",\n        \"main\"\n      ]\n    },\n    {\n      \"file_path\": \"scripts/verify_component_manifest_provenance.py\",\n      \"min_hops\": 1,\n      \"via\": [\n        \"_fetch_json\",\n        \"verify_manifest\",\n        \"main\",\n        \"resolve_tag_commit\"\n      ]\n    },\n    {\n      \"file_path\": \"src/brigade/center_cmd/serve.py\",\n      \"min_hops\": 1,\n      \"via\": [\n        \"loader\"\n      ]\n    },\n    {\n      \"file_path\": \"src/brigade/mcp_adapters.py\",\n      \"min_hops\": 1,\n      \"via\": [\n        \"_codex_write_file\"\n      ]\n    },\n    {\n      \"file_path\": \"src/brigade/center_cmd/dashboard/snapshot.py\",\n      \"min_hops\": 2,\n      \"via\": [\n        \"_run\"\n      ]\n    },\n    {\n      \"file_path\": \"src/brigade/grokbot_backup/actions.py\",\n      \"min_hops\": 2,\n      \"via\": [\n        \"_list_json_records\",\n        \"_list_operations\",\n        \"_list_proposals\"\n      ]\n    }\n  ],\n  \"truncated\": false\n}\n",
+    "stderr": ""
+  },
+  {
+    "path": "tests/test_ui_theme.py",
+    "returncode": 0,
+    "json": {
+      "attribution": "tests statically attributed through incoming call edges; a lower bound, not coverage. Absence here does not mean untested (fixtures, dynamic dispatch, and harness-driven tests are invisible to call edges).",
+      "depth": 3,
+      "changed_files": [
+        "tests/test_ui_theme.py"
+      ],
+      "missing_files": [],
+      "affected_tests": [
+        {
+          "file_path": "tests/test_ui_theme.py",
+          "min_hops": 0,
+          "via": [
+            "test_base_css_carries_the_spacing_scale",
+            "test_document_emits_shell_with_nonce_and_optional_refresh",
+            "test_spacing_export_and_shared_component_alias_contract",
+            "test_tokens_define_every_color_once"
+          ]
+        }
+      ],
+      "impacted_files": [],
+      "truncated": false
+    },
+    "stdout": "{\n  \"attribution\": \"tests statically attributed through incoming call edges; a lower bound, not coverage. Absence here does not mean untested (fixtures, dynamic dispatch, and harness-driven tests are invisible to call edges).\",\n  \"depth\": 3,\n  \"changed_files\": [\n    \"tests/test_ui_theme.py\"\n  ],\n  \"missing_files\": [],\n  \"affected_tests\": [\n    {\n      \"file_path\": \"tests/test_ui_theme.py\",\n      \"min_hops\": 0,\n      \"via\": [\n        \"test_base_css_carries_the_spacing_scale\",\n        \"test_document_emits_shell_with_nonce_and_optional_refresh\",\n        \"test_spacing_export_and_shared_component_alias_contract\",\n        \"test_tokens_define_every_color_once\"\n      ]\n    }\n  ],\n  \"impacted_files\": [],\n  \"truncated\": false\n}\n",
+    "stderr": ""
+  },
+  {
+    "path": "tests/test_ui_theme_integration.py",
+    "returncode": 0,
+    "json": {
+      "attribution": "tests statically attributed through incoming call edges; a lower bound, not coverage. Absence here does not mean untested (fixtures, dynamic dispatch, and harness-driven tests are invisible to call edges).",
+      "depth": 3,
+      "changed_files": [
+        "tests/test_ui_theme_integration.py"
+      ],
+      "missing_files": [],
+      "affected_tests": [
+        {
+          "file_path": "tests/test_ui_theme_integration.py",
+          "min_hops": 0,
+          "via": [
+            "Markup",
+            "__init__",
+            "descendants",
+            "elements",
+            "fleet_pages"
+          ]
+        }
+      ],
+      "impacted_files": [],
+      "truncated": false
+    },
+    "stdout": "{\n  \"attribution\": \"tests statically attributed through incoming call edges; a lower bound, not coverage. Absence here does not mean untested (fixtures, dynamic dispatch, and harness-driven tests are invisible to call edges).\",\n  \"depth\": 3,\n  \"changed_files\": [\n    \"tests/test_ui_theme_integration.py\"\n  ],\n  \"missing_files\": [],\n  \"affected_tests\": [\n    {\n      \"file_path\": \"tests/test_ui_theme_integration.py\",\n      \"min_hops\": 0,\n      \"via\": [\n        \"Markup\",\n        \"__init__\",\n        \"descendants\",\n        \"elements\",\n        \"fleet_pages\"\n      ]\n    }\n  ],\n  \"impacted_files\": [],\n  \"truncated\": false\n}\n",
+    "stderr": ""
+  },
+  {
+    "path": "tests/test_center_dashboard.py",
+    "returncode": 0,
+    "json": {
+      "attribution": "tests statically attributed through incoming call edges; a lower bound, not coverage. Absence here does not mean untested (fixtures, dynamic dispatch, and harness-driven tests are invisible to call edges).",
+      "depth": 3,
+      "changed_files": [
+        "tests/test_center_dashboard.py"
+      ],
+      "missing_files": [],
+      "affected_tests": [
+        {
+          "file_path": "tests/test_center_dashboard.py",
+          "min_hops": 0,
+          "via": [
+            "_boom",
+            "_fanout_topology_two_harnesses",
+            "_inventory_item",
+            "_stub_memory_ops_json",
+            "_topology_payload"
+          ]
+        }
+      ],
+      "impacted_files": [],
+      "truncated": false
+    },
+    "stdout": "{\n  \"attribution\": \"tests statically attributed through incoming call edges; a lower bound, not coverage. Absence here does not mean untested (fixtures, dynamic dispatch, and harness-driven tests are invisible to call edges).\",\n  \"depth\": 3,\n  \"changed_files\": [\n    \"tests/test_center_dashboard.py\"\n  ],\n  \"missing_files\": [],\n  \"affected_tests\": [\n    {\n      \"file_path\": \"tests/test_center_dashboard.py\",\n      \"min_hops\": 0,\n      \"via\": [\n        \"_boom\",\n        \"_fanout_topology_two_harnesses\",\n        \"_inventory_item\",\n        \"_stub_memory_ops_json\",\n        \"_topology_payload\"\n      ]\n    }\n  ],\n  \"impacted_files\": [],\n  \"truncated\": false\n}\n",
+    "stderr": ""
+  },
+  {
+    "path": "CHANGELOG.md",
+    "returncode": 0,
+    "json": {
+      "attribution": "tests statically attributed through incoming call edges; a lower bound, not coverage. Absence here does not mean untested (fixtures, dynamic dispatch, and harness-driven tests are invisible to call edges).",
+      "depth": 3,
+      "changed_files": [],
+      "missing_files": [
+        "CHANGELOG.md"
+      ],
+      "affected_tests": [],
+      "impacted_files": [],
+      "truncated": false
+    },
+    "stdout": "{\n  \"attribution\": \"tests statically attributed through incoming call edges; a lower bound, not coverage. Absence here does not mean untested (fixtures, dynamic dispatch, and harness-driven tests are invisible to call edges).\",\n  \"depth\": 3,\n  \"changed_files\": [],\n  \"missing_files\": [\n    \"CHANGELOG.md\"\n  ],\n  \"affected_tests\": [],\n  \"impacted_files\": [],\n  \"truncated\": false\n}\n",
+    "stderr": ""
+  },
+  {
+    "command": "brigade code affected before edits",
+    "json": {
+      "attribution": "tests statically attributed through incoming call edges; a lower bound, not coverage. Absence here does not mean untested (fixtures, dynamic dispatch, and harness-driven tests are invisible to call edges).",
+      "depth": 3,
+      "changed_files": [
+        "src/brigade/center_cmd/dashboard/render.py",
+        "src/brigade/fleet_command_deck.py",
+        "src/brigade/fleet_dashboard.py",
+        "src/brigade/ui_theme.py",
+        "tests/test_center_dashboard.py",
+        "tests/test_fleet_command_deck.py",
+        "tests/test_fleet_dashboard.py",
+        "tests/test_ui_theme.py"
+      ],
+      "missing_files": [
+        "CHANGELOG.md"
+      ],
+      "affected_tests": [
+        {
+          "file_path": "tests/test_center_dashboard.py",
+          "min_hops": 0,
+          "via": [
+            "_boom",
+            "_fanout_topology_two_harnesses",
+            "_inventory_item",
+            "_stub_memory_ops_json",
+            "_topology_payload"
+          ]
+        },
+        {
+          "file_path": "tests/test_fleet_command_deck.py",
+          "min_hops": 0,
+          "via": [
+            "TestDeckCli",
+            "_asset_request",
+            "_bearer",
+            "_control_plane_snapshot",
+            "_empty_view"
+          ]
+        },
+        {
+          "file_path": "tests/test_fleet_dashboard.py",
+          "min_hops": 0,
+          "via": [
+            "TestAssets",
+            "TestBoardBounds",
+            "TestBoards",
+            "TestDashboardAuth",
+            "TestLoopbackAddressHelper"
+          ]
+        },
+        {
+          "file_path": "tests/test_ui_theme.py",
+          "min_hops": 0,
+          "via": [
+            "test_base_css_carries_the_spacing_scale",
+            "test_document_emits_shell_with_nonce_and_optional_refresh",
+            "test_spacing_export_and_shared_component_alias_contract",
+            "test_tokens_define_every_color_once"
+          ]
+        },
+        {
+          "file_path": "tests/test_receipt_schema_audit.py",
+          "min_hops": 1,
+          "via": [
+            "test_run_sidecar_emits_schema_version"
+          ]
+        },
+        {
+          "file_path": "tests/test_worklore_http.py",
+          "min_hops": 1,
+          "via": [
+            "test_admin_worklore_patch_succeeds_without_allow_admin_writes",
+            "test_existing_claim_and_dashboard_routes_stay_unchanged",
+            "test_fleet_hub_reads_operator_configuration_once_for_a_non_operator_node",
+            "test_hub_marks_configured_operator_node_only",
+            "test_worklore_native_create_to_burn_on_enabled_hub"
+          ]
+        }
+      ],
+      "impacted_files": [
+        {
+          "file_path": "engines/code-graph/src/query/context.rs",
+          "min_hops": 1,
+          "via": [
+            "personalize_context_pack",
+            "personalized_callers_are_ordered_by_caller_file_rank",
+            "personalized_context_keeps_exact_task_mentioned_files",
+            "personalized_task_seed_outranks_unrelated_high_degree_hub"
+          ]
+        },
+        {
+          "file_path": "src/brigade/cli/fleet.py",
+          "min_hops": 1,
+          "via": [
+            "_dispatch_serve"
+          ]
+        },
+        {
+          "file_path": "src/brigade/doctor.py",
+          "min_hops": 1,
+          "via": [
+            "security_station_checks"
+          ]
+        },
+        {
+          "file_path": "src/brigade/fleet_hub.py",
+          "min_hops": 1,
+          "via": [
+            "handle_cloud",
+            "make_server",
+            "run_started_at",
+            "make_handler",
+            "run"
+          ]
+        },
+        {
+          "file_path": "src/brigade/fleet_hub_grokbot.py",
+          "min_hops": 1,
+          "via": [
+            "handle_grokbot",
+            "list_jobs",
+            "sweep_expired_jobs",
+            "_loop"
+          ]
+        },
+        {
+          "file_path": "src/brigade/fleet_hub_http.py",
+          "min_hops": 1,
+          "via": [
+            "_serve_dashboard",
+            "_serve_deck",
+            "control_plane_from_hub",
+            "machine_matches",
+            "machine_priority"
+          ]
+        },
+        {
+          "file_path": "src/brigade/fleet_hub_roster_page.py",
+          "min_hops": 1,
+          "via": [
+            "render",
+            "_policy_select",
+            "_select"
+          ]
+        },
+        {
+          "file_path": "src/brigade/fleet_hub_status.py",
+          "min_hops": 1,
+          "via": [
+            "_status_entry",
+            "latest_status",
+            "board_machine_page",
+            "board_status",
+            "board_status_for_nodes"
+          ]
+        },
+        {
+          "file_path": "src/brigade/fleet_policy_page.py",
+          "min_hops": 1,
+          "via": [
+            "_esc",
+            "render",
+            "_acknowledged_cell",
+            "_actions",
+            "_activation_panel"
+          ]
+        },
+        {
+          "file_path": "src/brigade/fleet_repo_policy_page.py",
+          "min_hops": 1,
+          "via": [
+            "_coordination",
+            "_leaf_items",
+            "_live_items",
+            "_row_html",
+            "render"
+          ]
+        },
+        {
+          "file_path": "src/brigade/fleet_work_page.py",
+          "min_hops": 1,
+          "via": [
+            "_references",
+            "_text",
+            "render",
+            "render_observed_group",
+            "_item"
+          ]
+        },
+        {
+          "file_path": "src/brigade/grokbot_backup/tools.py",
+          "min_hops": 1,
+          "via": [
+            "_iso",
+            "_execute",
+            "_operation_status",
+            "_overview",
+            "_propose"
+          ]
+        },
+        {
+          "file_path": "src/brigade/grokbot_fleet/probes.py",
+          "min_hops": 1,
+          "via": [
+            "_iso_now",
+            "observe_local_host",
+            "collect_incident",
+            "observe_host_raw",
+            "observe_linux_ssh_host"
+          ]
+        },
+        {
+          "file_path": "src/brigade/grokbot_fleet/tools.py",
+          "min_hops": 1,
+          "via": [
+            "_iso",
+            "_action_receipt",
+            "_execute_wazuh",
+            "_host_status",
+            "_incident_bundle"
+          ]
+        },
+        {
+          "file_path": "src/brigade/grokbot_n8n/tools.py",
+          "min_hops": 1,
+          "via": [
+            "_iso",
+            "n8n_action_status",
+            "n8n_execute_action",
+            "n8n_execution_bundle",
+            "n8n_overview"
+          ]
+        },
+        {
+          "file_path": "src/brigade/grokbot_wazuh/tools.py",
+          "min_hops": 1,
+          "via": [
+            "_iso",
+            "wazuh_action_status",
+            "wazuh_alert_status",
+            "wazuh_classify",
+            "wazuh_incident_bundle"
+          ]
+        },
+        {
+          "file_path": "src/brigade/update_cmd.py",
+          "min_hops": 1,
+          "via": [
+            "run_update"
+          ]
+        },
+        {
+          "file_path": "src/brigade/work_cmd/session/run_status.py",
+          "min_hops": 1,
+          "via": [
+            "doctor"
+          ]
+        },
+        {
+          "file_path": "src/brigade/cli/update.py",
+          "min_hops": 2,
+          "via": [
+            "dispatch"
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "command": "brigade code affected before edits",
+    "json": {
+      "attribution": "tests statically attributed through incoming call edges; a lower bound, not coverage. Absence here does not mean untested (fixtures, dynamic dispatch, and harness-driven tests are invisible to call edges).",
+      "depth": 3,
+      "changed_files": [
+        "src/brigade/center_cmd/dashboard/views/__init__.py",
+        "tests/test_ui_theme_integration.py"
+      ],
+      "missing_files": [
+        ".claude/memory-handoffs/2026-10-17-deck-spacing.md",
+        "docs/assets/ui-1495/acceptance-20261017"
+      ],
+      "affected_tests": [
+        {
+          "file_path": "tests/test_ui_theme_integration.py",
+          "min_hops": 0,
+          "via": [
+            "Markup",
+            "__init__",
+            "descendants",
+            "elements",
+            "fleet_pages"
+          ]
+        },
+        {
+          "file_path": "tests/test_grokbot_obsidian_runtime.py",
+          "min_hops": 1,
+          "via": [
+            "test_pinned_fetch_rejects_redirects_and_oversize_response",
+            "test_spki_pin_extracts_from_generated_certificate",
+            "test_wrong_pin_never_sends_authorization_bearing_http"
+          ]
+        }
+      ],
+      "impacted_files": [
+        {
+          "file_path": "scripts/published-artifact-acceptance.py",
+          "min_hops": 1,
+          "via": [
+            "wait_for_github_release_tag",
+            "run_acceptance",
+            "main"
+          ]
+        },
+        {
+          "file_path": "scripts/verify_component_manifest_provenance.py",
+          "min_hops": 1,
+          "via": [
+            "_fetch_json",
+            "verify_manifest",
+            "main",
+            "resolve_tag_commit"
+          ]
+        },
+        {
+          "file_path": "src/brigade/center_cmd/serve.py",
+          "min_hops": 1,
+          "via": [
+            "loader"
+          ]
+        },
+        {
+          "file_path": "src/brigade/mcp_adapters.py",
+          "min_hops": 1,
+          "via": [
+            "_codex_write_file"
+          ]
+        },
+        {
+          "file_path": "src/brigade/center_cmd/dashboard/snapshot.py",
+          "min_hops": 2,
+          "via": [
+            "_run"
+          ]
+        },
+        {
+          "file_path": "src/brigade/grokbot_backup/actions.py",
+          "min_hops": 2,
+          "via": [
+            "_list_json_records",
+            "_list_operations",
+            "_list_proposals"
+          ]
+        }
+      ],
+      "truncated": false
+    }
+  },
+  {
+    "command": "brigade code affected before edits",
+    "json": {
+      "attribution": "tests statically attributed through incoming call edges; a lower bound, not coverage. Absence here does not mean untested (fixtures, dynamic dispatch, and harness-driven tests are invisible to call edges).",
+      "depth": 3,
+      "changed_files": [],
+      "missing_files": [
+        "docs/assets/ui-1495/acceptance-20261017/README.md",
+        "docs/assets/ui-1495/acceptance-20261017/after-deck-policy.png",
+        "docs/assets/ui-1495/acceptance-20261017/after-deck-repos.png",
+        "docs/assets/ui-1495/acceptance-20261017/after-deck-roster.png",
+        "docs/assets/ui-1495/acceptance-20261017/after-deck.png",
+        "docs/assets/ui-1495/acceptance-20261017/after-view-machines.png",
+        "docs/assets/ui-1495/acceptance-20261017/after-view-outcomes.png",
+        "docs/assets/ui-1495/acceptance-20261017/after-view-repos.png",
+        "docs/assets/ui-1495/acceptance-20261017/before-deck-policy.png",
+        "docs/assets/ui-1495/acceptance-20261017/before-deck-repos.png",
+        "docs/assets/ui-1495/acceptance-20261017/before-deck-roster.png",
+        "docs/assets/ui-1495/acceptance-20261017/before-deck.png",
+        "docs/assets/ui-1495/acceptance-20261017/before-view-machines.png",
+        "docs/assets/ui-1495/acceptance-20261017/before-view-outcomes.png",
+        "docs/assets/ui-1495/acceptance-20261017/before-view-repos.png",
+        "docs/assets/ui-1495/acceptance-20261017/layout.json"
+      ],
+      "affected_tests": [],
+      "impacted_files": [],
+      "truncated": false
+    }
+  },
+  {
+    "command": "brigade code affected before edits",
+    "json": {
+      "attribution": "tests statically attributed through incoming call edges; a lower bound, not coverage. Absence here does not mean untested (fixtures, dynamic dispatch, and harness-driven tests are invisible to call edges).",
+      "depth": 3,
+      "changed_files": [],
+      "missing_files": [
+        "docs/assets/ui-1495/acceptance-20261017/after-policy-form.png",
+        "docs/assets/ui-1495/acceptance-20261017/before-policy-form.png"
+      ],
+      "affected_tests": [],
+      "impacted_files": [],
+      "truncated": false
+    }
+  },
+  {
+    "command": "brigade code affected before edits",
+    "json": {
+      "attribution": "tests statically attributed through incoming call edges; a lower bound, not coverage. Absence here does not mean untested (fixtures, dynamic dispatch, and harness-driven tests are invisible to call edges).",
+      "depth": 3,
+      "changed_files": [],
+      "missing_files": [
+        "docs/assets/ui-1495/acceptance-20261017/graph-impact.json"
+      ],
+      "affected_tests": [],
+      "impacted_files": [],
+      "truncated": false
+    }
+  }
+]
