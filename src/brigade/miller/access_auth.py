@@ -288,7 +288,7 @@ class AccessVerifier:
             )
             ensure(
                 claims["email"] == self.config.approved_email
-                and claims.get("type", "app") == "app"
+                and claims.get("type") == "app"
                 and "common_name" not in claims
             )
             subject = claims["sub"]

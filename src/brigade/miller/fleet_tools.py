@@ -48,6 +48,17 @@ class _FleetErrorResult(FleetCallError):
 class _MillerFleetRunner(FleetRunner):
     """Preserve Miller's error envelope without changing the shared dispatch runner."""
 
+    def __init__(self, *args: Any, fleet_config: Path | None = None, **kwargs: Any):
+        super().__init__(*args, **kwargs)
+        # t3-fleet must read the same controller config Miller validated against.
+        self.fleet_config = fleet_config
+
+    def _child_env(self) -> dict[str, str]:
+        env = child_env()
+        if self.fleet_config is not None:
+            env["T3_FLEET_CONFIG"] = str(self.fleet_config)
+        return env
+
     def call(self, action: str, payload: dict[str, Any], *, timeout: float) -> dict[str, Any]:
         body = json.dumps({"schema": REQUEST_SCHEMA, "action": action, **payload}, separators=(",", ":"))
         try:
@@ -57,7 +68,7 @@ class _MillerFleetRunner(FleetRunner):
                 capture_output=True,
                 text=True,
                 timeout=timeout,
-                env=child_env(),
+                env=self._child_env(),
                 check=False,
             )
         except subprocess.TimeoutExpired as exc:
@@ -173,7 +184,12 @@ class FleetTools:
         self.runner = (
             runner
             if runner is not None
-            else _MillerFleetRunner(runtime.paths.bin.t3_fleet, runtime.paths.bin.git, runtime_mode="full-access")
+            else _MillerFleetRunner(
+                runtime.paths.bin.t3_fleet,
+                runtime.paths.bin.git,
+                runtime_mode="full-access",
+                fleet_config=runtime.paths.fleet_config,
+            )
         )
         self.commands = commands if commands is not None else CommandRunner()
         self.environment = child_environment(child_path(runtime.paths.bin))

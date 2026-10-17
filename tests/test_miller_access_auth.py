@@ -382,6 +382,7 @@ class SignatureChecks(unittest.TestCase):
             dict(sub=""),
             dict(sub=42),
             dict(type="service"),
+            dict(type="org"),
             dict(common_name="service"),
             dict(exp=now - 120),
             dict(nbf=now + 120),
@@ -392,7 +393,8 @@ class SignatureChecks(unittest.TestCase):
             dict(exp=now - 5, iat=now + 5, nbf=now - 10),
         ]
         tokens = [self.token(changes=value) for value in changes]
-        tokens += [self.token(remove=(name,)) for name in ("iss", "aud", "sub", "email", "exp", "nbf", "iat")]
+        # A token without an explicit `type: app` is not an application token (Cloudflare uses `org` for sessions).
+        tokens += [self.token(remove=(name,)) for name in ("iss", "aud", "sub", "email", "exp", "nbf", "iat", "type")]
         tokens.append(self.token(key=self.other_key))
 
         async def scenario():

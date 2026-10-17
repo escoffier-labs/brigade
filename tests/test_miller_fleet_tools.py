@@ -77,7 +77,12 @@ def fleet(miller_private_dir):
         tools = FleetTools(
             runtime,
             state,
-            runner=_MillerFleetRunner(runtime.paths.bin.t3_fleet, runtime.paths.bin.git, run=run),
+            runner=_MillerFleetRunner(
+                runtime.paths.bin.t3_fleet,
+                runtime.paths.bin.git,
+                run=run,
+                fleet_config=runtime.paths.fleet_config,
+            ),
             commands=commands,
             clock=lambda: NOW,
         )
@@ -455,3 +460,17 @@ def test_journal_error_message_keeps_bridge_bound(fleet):
     run.output = json.dumps({"schema": "t3-fleet.error.v1", "error": {"code": "failed", "message": message}})
     tools.fleet_interrupt(REQUEST)
     assert tools.fleet_recent()["operations"][0]["summary"]["error_message"] == message[:300]
+
+
+def test_runner_passes_the_validated_fleet_config(fleet):
+    # Miller validates against runtime.paths.fleet_config; t3-fleet must read that same file.
+    tools, run, _ = fleet
+    tools.fleet_capacity()
+    _, kwargs = run.calls[-1]
+    assert kwargs["env"]["T3_FLEET_CONFIG"] == str(tools.runtime.paths.fleet_config)
+
+
+def test_default_runner_carries_the_configured_fleet_file(fleet):
+    tools, _, _ = fleet
+    default = FleetTools(tools.runtime, tools.state)
+    assert default.runner.fleet_config == tools.runtime.paths.fleet_config
