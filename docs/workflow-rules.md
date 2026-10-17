@@ -1,6 +1,6 @@
 # Workflow Rule Templates
 
-Brigade installs repo-shareable workflow rule templates under `rules/` for issue and TDD work loops.
+Brigade installs repo-shareable workflow rule templates under `rules/` for issue and TDD work loops with `--depth workspace`, `--full`, or `--include repo-extras`. Minimal repo installs omit them.
 
 Installed files:
 

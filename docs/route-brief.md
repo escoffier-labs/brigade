@@ -34,9 +34,10 @@ plans it.
 
 Two stages carry locks that user approval releases:
 
-- `ship` is held whenever the task requests a commit, push, PR, or release. The
-  brief tells the orchestrator no worker may perform it. `--approve-ship` releases
-  it.
+- `ship` is held when task keywords match `ship`, `commit and push`, `open a PR`,
+  `pull request`, `release`, `publish`, or `deploy`. A standalone commit or push
+  request does not match this heuristic. The brief tells the orchestrator no worker
+  may perform it. `--approve-ship` releases it.
 - `system-execute` is held when the task smells destructive (`destructive-op`),
   pending `destructive-approved`.
 

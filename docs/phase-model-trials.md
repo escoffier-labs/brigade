@@ -1,5 +1,7 @@
 # Model Trials
 
+Status (2026-10-17): shipped in #235 (b68163cfb).
+
 ## Goal
 
 Add a dependency-free, resumable model experiment surface that runs named

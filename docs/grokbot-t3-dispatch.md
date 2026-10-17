@@ -2,7 +2,7 @@
 
 ## Purpose
 
-Let Grok Bot bots launch and steer T3 Code threads on the operator's three fleet hosts through Codex, Claude Code, and OpenCode seats. Bots get a free-form dispatch connector: they write the prompt, pick the repository, host, and seat, and get woken when a thread finishes or asks a question.
+Let Grok Bot bots launch and steer T3 Code threads on allowlisted fleet hosts through configured seats. Bots get a free-form dispatch connector: they write the prompt, pick the repository, host, and seat, and get woken when a thread finishes or asks a question.
 
 ## Runtime JSON
 

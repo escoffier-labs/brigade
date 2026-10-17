@@ -65,8 +65,8 @@ snapshots if another target fails.
 
 ## What gets installed
 
-One markdown file per skill, byte-identical to its source in
-[escoffier-labs/skillet](https://github.com/escoffier-labs/skillet). No
+One markdown file per skill, vendored from
+[escoffier-labs/skillet](https://github.com/escoffier-labs/skillet), with links adjusted for this distribution. No
 dependencies, no code execution, no config changes. Read the file before you
 adopt it, like anything else that instructs an agent.
 

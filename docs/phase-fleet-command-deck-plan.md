@@ -1,5 +1,7 @@
 # Fleet Command Deck implementation plan
 
+Status (2026-10-17): shipped in #1251 (bb7e4b808).
+
 > Historical design: #1153 supersedes bearer query enrollment and cookie edit
 > authority in this document. Current enrollment uses a five-minute code and
 > same-origin confirmation POST. Browser cookies grant read-only HTML access,

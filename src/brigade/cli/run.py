@@ -14,6 +14,7 @@ from subprocess import DEVNULL, STDOUT, Popen
 from typing import Any, Callable, Iterator, Mapping
 
 from ..fleet_claim_target import ClaimTargetError
+from ..claim_loss_cancellation import ClaimLossCancellation, ClaimLossCancelled
 
 
 _DETACH_START_TIMEOUT_SECONDS = 30.0
@@ -46,7 +47,8 @@ def _terminalize_escaped_run(
         yield
     except runguard.RetainRunLockError:
         raise
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ClaimLossCancelled) as exc:
+        runguard.raise_if_retained_run_lock(exc)
         failure = interrupt_failure() if interrupt_failure is not None else None
         if (
             (should_terminalize is None or should_terminalize())
@@ -621,6 +623,8 @@ def dispatch(args) -> int:
     # Set when the fleet heartbeat reports lost ownership (#1157): without
     # this the interrupt would be remembered as "canceled by user".
     fleet_claim_loss: list[str] = []
+    claim_cancellation = ClaimLossCancellation()
+    fleet_claim_granted = False
 
     def _fleet_interrupt_failure() -> tuple[str, str, str, str] | None:
         """Classify a fleet-caused interrupt from the main thread (#1157
@@ -649,14 +653,15 @@ def dispatch(args) -> int:
 
     def abort_on_fleet_claim_lost(reason: str | None) -> None:
         """Heartbeat-thread callback (#1157): another owner now holds the
-        claim this run was granted. Only the cheap classification marker is
-        recorded here; the terminal receipt itself is written by the
+        claim this run was granted. The classification marker and cancellation
+        event are recorded here; the terminal receipt itself is written by the
         main-thread handler (#1157 round 2), where a write failure surfaces
         loudly instead of silently degrading to a user-cancel record.
         The marker lands before the fallible stderr print (#1157 round 3):
         a failed write must not stop the abort from being classified."""
         detail = reason or "held by another node"
         fleet_claim_loss.append(detail)
+        claim_cancellation.request()
         print(
             f"error: fleet claim on {claim_target!r} was lost ({detail}); canceling the active run",
             file=sys.stderr,
@@ -757,7 +762,7 @@ def dispatch(args) -> int:
                     (owner for owner in reversed(reconciled_dead_owners) if owner and owner.get("owner_token")),
                     None,
                 )
-                lifecycle.enter_context(
+                claim_decision = lifecycle.enter_context(
                     fleet_client.repo_claim(
                         claim_target,
                         base_path=run_cwd,
@@ -768,6 +773,9 @@ def dispatch(args) -> int:
                         on_claim_lost=abort_on_fleet_claim_lost,
                     )
                 )
+                fleet_claim_granted = bool(getattr(claim_decision, "granted", False))
+                if fleet_claim_granted:
+                    lifecycle.enter_context(claim_cancellation)
             if args.requester_key is not None:
                 from .. import agent_request
 
@@ -834,11 +842,17 @@ def dispatch(args) -> int:
                 run_kwargs["route_overrides"] = tuple(args.route_signals)
             run_kwargs["fail_fast"] = not args.keep_going
             run_kwargs["scheduler"] = _resolved_scheduler(args, loaded_roster)
+            if fleet_claim_granted:
+                run_kwargs["process_registry"] = claim_cancellation.process_registry
+                run_kwargs["check_cancellation"] = claim_cancellation.raise_if_requested
             try:
+                claim_cancellation.raise_if_requested()
                 rc = aboyeur_mod.run(args.task, loaded_roster, **run_kwargs)
+                claim_cancellation.raise_if_requested()
             except runguard.RetainRunLockError:
                 raise
-            except KeyboardInterrupt:
+            except (KeyboardInterrupt, ClaimLossCancelled) as exc:
+                runguard.raise_if_retained_run_lock(exc)
                 failure = _fleet_interrupt_failure()
                 if output_dir is not None:
                     if failure is not None:
@@ -1013,7 +1027,8 @@ def dispatch(args) -> int:
                                 reason="clean and branch-backed",
                             )
                             print(f"worktree removed: {worktree_cwd}", file=sys.stderr)
-    except KeyboardInterrupt:
+    except (KeyboardInterrupt, ClaimLossCancelled) as exc:
+        runguard.raise_if_retained_run_lock(exc)
         if fleet_credential_failure:
             # The interrupt came from the fleet heartbeat's credential-failure
             # callback (#1161), which already printed and recorded the reason.
@@ -1068,6 +1083,7 @@ def _dispatch_detached(
 ) -> int:
     from .. import aboyeur as aboyeur_mod
     from .. import proc as proc_mod
+    from .. import runguard
 
     output_dir = output_dir.expanduser().resolve()
     lifecycle_seat = args.worker or roster.orchestrator
@@ -1208,7 +1224,8 @@ def _dispatch_detached(
             print(f"artifacts: {output_dir}", file=sys.stderr)
             print(f"log: {log_path}", file=sys.stderr)
             return 0
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as exc:
+        runguard.raise_if_retained_run_lock(exc)
         print("error: run canceled by user", file=sys.stderr)
         return 130
     except Exception as exc:

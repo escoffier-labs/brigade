@@ -1,6 +1,6 @@
 # Fleet Model Roster Authority
 
-Status: proposed contract for operator review.
+Status (2026-10-17): shipped in #1332 (24ef87303).
 
 Date: 2026-08-30.
 

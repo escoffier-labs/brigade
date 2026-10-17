@@ -470,6 +470,79 @@ def test_ci_workflow_combines_python312_coverage_and_preserves_required_checks()
     )
 
 
+def test_ci_workflow_shadow_gate_covers_required_jobs_and_their_dependencies():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    gate = _workflow_job_section(text, "ci-gate")
+    assert re.search(r"^    if: always\(\)$", gate, re.MULTILINE)
+    needs_block = gate.split("    needs:\n", 1)[1].split("    runs-on:", 1)[0]
+    needs = set(re.findall(r"^      - ([a-z0-9-]+)$", needs_block, re.MULTILINE))
+    # main's 20 required contexts, including the test/installer/quickstart
+    # matrix names, map to these nine jobs. Keep this snapshot independent
+    # of the workflow so a rename cannot silently remove gate coverage.
+    required_jobs = {
+        "changes",
+        "lint",
+        "test",
+        "component-manifest-provenance",
+        "content-guard",
+        "repo-metadata",
+        "install-from-source",
+        "quickstart-smoke",
+        "windows-native-acceptance",
+    }
+    assert needs == required_jobs | {"test-shards", "coverage", "cosign-integration", "fleet-hub-container"}
+    for name in needs:
+        _workflow_job_section(text, name)
+    assert "actions/checkout" not in gate
+
+
+@pytest.mark.parametrize("event", ["pull_request", "merge_group"])
+@pytest.mark.parametrize("flag", ["true", "false", "", None])
+@pytest.mark.parametrize("changes_result", ["success", "failure", "cancelled", "skipped"])
+@pytest.mark.parametrize("container_result", ["success", "skipped", "failure", "cancelled"])
+def test_ci_shadow_gate_accepts_only_classified_container_skips(event, flag, changes_result, container_result):
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    gate = _workflow_job_section(text, "ci-gate")
+    needs_block = gate.split("    needs:\n", 1)[1].split("    runs-on:", 1)[0]
+    needs = {name: {"result": "success"} for name in re.findall(r"^      - ([a-z0-9-]+)$", needs_block, re.MULTILINE)}
+    needs["changes"] = {"result": changes_result, "outputs": {"fleet_hub_container": flag}}
+    needs["fleet-hub-container"] = {"result": container_result}
+    script = textwrap.dedent(gate.split("        run: |\n", 1)[1])
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env=dict(os.environ, NEEDS_JSON=json.dumps(needs), EVENT_NAME=event),
+        capture_output=True,
+        text=True,
+    )
+    expected = changes_result == "success" and (
+        container_result == "success" or (container_result == "skipped" and flag == "false" and event != "merge_group")
+    )
+    assert (result.returncode == 0) is expected, result.stdout + result.stderr
+
+
+@pytest.mark.parametrize("mutation", ["failure", "cancelled", "skipped", "missing", "extra"])
+def test_ci_shadow_gate_rejects_bad_results_and_dependency_mismatches(mutation):
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    gate = _workflow_job_section(text, "ci-gate")
+    needs_block = gate.split("    needs:\n", 1)[1].split("    runs-on:", 1)[0]
+    names = re.findall(r"^      - ([a-z0-9-]+)$", needs_block, re.MULTILINE)
+    script = textwrap.dedent(gate.split("        run: |\n", 1)[1])
+    for name in names if mutation != "extra" else ["unexpected-job"]:
+        needs = {job: {"result": "success"} for job in names}
+        needs["changes"]["outputs"] = {"fleet_hub_container": "true"}
+        if mutation == "missing":
+            del needs[name]
+        else:
+            needs[name] = {"result": "success" if mutation == "extra" else mutation}
+        result = subprocess.run(
+            ["bash", "-c", script],
+            env=dict(os.environ, NEEDS_JSON=json.dumps(needs), EVENT_NAME="pull_request"),
+            capture_output=True,
+            text=True,
+        )
+        assert result.returncode != 0, (name, mutation, result.stdout, result.stderr)
+
+
 def test_ci_workflow_filters_container_builds_without_scheduling_the_required_matrix():
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     changes = _workflow_job_section(text, "changes")
@@ -1359,7 +1432,8 @@ def test_ci_migration_preserves_existing_job_names_and_hosted_routing():
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     jobs = text.split("jobs:\n", 1)[1]
     assert set(re.findall(r"^  ([a-z0-9-]+):$", jobs, re.MULTILINE)) == set(EXISTING_CI_JOBS) | {
-        "trusted-runner-canary"
+        "trusted-runner-canary",
+        "ci-gate",
     }
     for job, name in EXISTING_CI_JOBS.items():
         section = _workflow_job_section(text, job)

@@ -103,8 +103,9 @@ Format: trigger, then the rule, then what to do instead.
   `operator.py`, `init.py`, `work/`); `__init__.py` builds the parser and dispatches
   to each module's `register`/`dispatch`.
 - New harness adapter? Follow the step list in `CONTRIBUTING.md` (manifest,
-  templates, `KNOWN_HARNESSES`, CI matrix, README table).
-- Doctor checks return `OK`, `WARN`, `FAIL`, or `MANUAL`. Prefer `WARN` or
+  templates, `KNOWN_HARNESSES`, CI matrix, the writer harness table in
+  `docs/overview.md`, and the harness list in `docs/technical-guide.md`).
+- Doctor checks return `OK`, `INFO`, `WARN`, `FAIL`, or `MANUAL`. Prefer `WARN` or
   `MANUAL` for optional wiring; `FAIL` means the profile is broken.
 - `docs/plans/` and `docs/specs/` are gitignored scratch space; reviewed plans
   live at tracked `docs/phase-*.md` paths.

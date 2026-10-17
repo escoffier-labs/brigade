@@ -1,6 +1,6 @@
 # Schema
 
-The MVP uses one SQLite migration with these concepts:
+The archive uses schema version 5, with idempotent migrations in `internal/archive/db.go` and these concepts:
 
 - `sources`: source tools such as `discrawl`, `codex`, `hermes`, `notes`, or `gitlog`
 - `collections`: bounded containers such as channels, exports, sessions, and repos
@@ -16,6 +16,7 @@ The MVP uses one SQLite migration with these concepts:
 - `source_scans`: source-file scan manifests for native imports
 - `source_scan_runs` / `source_scan_observed`: memory projection scan receipts and manifests
 - `provenance_events`: append-only trust transition events keyed by item id (schema v4; after #850 ingest_seq v3)
+- `used_capabilities`: spent trust-review capability nonces (schema v5)
 - `item_fts`: SQLite FTS5 index for item and artifact text
 
 Items may carry `tombstoned_at` for soft removal. Live memory cards are the
@@ -87,7 +88,9 @@ Python consumers load `brigade.trust-policy.v1` and omit `unknown` / `quarantine
 
 ### Read verification
 
-Search, show, session list/search/transcript, evidence bundles, HTTP, and MCP recompute envelope `hashes.content` (and `hashes.raw` when the raw body is materialized) against the stored bytes. A mismatch suppresses snippets and item bodies, sets `integrity_mismatch: true`, and appends one idempotent `provenance_events` row per item/hash/mismatch without deleting the item. Content eligibility is centralized: a body or snippet is emitted only when the envelope parses and `trust.injection.status` is the validated typed value `clean` on a non-`unknown` / non-`quarantined` label. Imports stamp `quarantined`/`pending`; an operator must pass `miseledger trust review --mark-injection-clean` (a deliberate flag, not a side effect of moving the trust label) before any surface emits the body. Provenance parse errors are blocking. Stored digest representations are compared exactly and are not lowercased or otherwise normalized to authorize a body. Direct `miseledger show --include-untrusted-body` and `--forensic-content` are CLI-only operator reveals typed by a human. MCP `show_item` and HTTP `/items/{id}` do not accept a caller-settable reveal field; a request argument an injected model can set is not a reveal decision.
+Search, show, session list/search/transcript, evidence bundles, HTTP, and MCP recompute envelope `hashes.content` (and `hashes.raw` when the raw body is materialized) against the stored bytes. A mismatch suppresses snippets and item bodies, sets `integrity_mismatch: true`, and appends one idempotent `provenance_events` row per item/hash/mismatch without deleting the item. Content eligibility is centralized: a body or snippet is emitted only when the envelope parses and `trust.injection.status` is the validated typed value `clean` on a non-`unknown` / non-`quarantined` label. Imports stamp `quarantined`/`pending`. An operator must use `brigade evidence trust review miseledger:item:<item-id> --content-hash <current-content-digest> --mark-injection-clean` before any surface emits the body. Provenance parse errors are blocking. Stored digest representations are compared exactly and are not lowercased or otherwise normalized to authorize a body. Direct `miseledger show --include-untrusted-body` and `--forensic-content` are CLI-only operator reveals typed by a human. MCP `show_item` and HTTP `/items/{id}` do not accept a caller-settable reveal field. A request argument an injected model can set is not a reveal decision.
+
+Evidence bundles pass through a final output sanitizer: query text and filters are omitted, and ineligible results collapse to `id`, `eligibility_status`, and `reason_code`. The ineligible id is opaque and must not be treated as an archive item id for `show` or trust review. Eligible artifact lists remain arrays.
 
 ### Legacy banner
 

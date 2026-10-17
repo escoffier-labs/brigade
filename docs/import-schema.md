@@ -33,7 +33,10 @@ brigade work import promote --all --source memory-care --kind task
 
 ## Record Shape
 
-Each non-empty line must be one JSON object:
+Each non-empty line must be one JSON object. The validator is
+[`_validate_import_record`](../src/brigade/work_cmd/ledger/inbox_provenance.py),
+with accepted kinds, task types, priorities, and templates in
+[`work_cmd.constants`](../src/brigade/work_cmd/constants.py):
 
 ```json
 {"text":"Refresh memory card memory/cards/tools.md: source-of-truth changed","kind":"task","source":"memory-care","metadata":{"card_file":"memory/cards/tools.md","reason":"source-of-truth changed"}}
@@ -45,9 +48,9 @@ Required fields:
 
 Optional fields:
 
-- `kind`: one of `task`, `finding`, `decision`, `preference`, `incident`, `link`, or `command`. Defaults to `task`.
+- `kind`: one of `task`, `finding`, `decision`, `preference`, `incident`, `link`, `command`, or `context`. Defaults to `task`.
 - `source`: non-empty string identifying the producer, such as `memory-care`, `slack`, `discord`, `telegram`, or `repo-scan`. Defaults to `manual`.
-- `metadata`: JSON object with producer-specific context.
+- `metadata`: JSON object with producer-specific context. Omitted or `null` becomes an empty object.
 
 Task-only optional fields:
 
@@ -82,6 +85,13 @@ Recommended metadata keys:
 - `evidence_summary`: compact evidence summary, not raw private chat text.
 - `evidence`: local evidence path, not raw private chat text.
 - `handoff_target_document`: optional explicit target document for `promote-handoff`, such as `TOOLS.md`, `USER.md`, `rules/scanner-imports.md`, or `.learnings/LEARNINGS.md`.
+
+Configured scanner output is untrusted. The
+[`scanner import boundary`](../src/brigade/work_cmd/scanners.py) replaces the
+row's source with the configured scanner source and derives canonical
+`source_item_key` and `source_fingerprint` values. Incoming identity claims are
+retained only as bounded `declared_*` metadata by
+[`_sanitize_untrusted_import_record`](../src/brigade/work_cmd/ledger/import_model.py).
 
 Scanner run provenance metadata is added by `brigade work scanners run --ingest-output`, and also attached to new inbox records that a scanner command writes directly during a run when Brigade can match the source:
 
@@ -253,7 +263,9 @@ Each export finding must provide `provider`, `surface_id`, `issue_id`, `issue_ty
 
 ## Provenance Envelope
 
-New work import items carry a `brigade.provenance-envelope.v1` envelope under `metadata.provenance`. Python producers stamp through `ledger._make_import`. Research findings persist the same envelope at `checkpoint.json.findings[].provenance` and `findings.json`, plus an exact `{title}\\n{summary}\\n{evidence}` text projection. Receipt adapter rows from `_verify_miseledger_item` and `_run_miseledger_item` start `untrusted`. Consumer enforcement lands in later slices.
+New work import items carry a `brigade.provenance-envelope.v1` envelope under `metadata.provenance`. Python producers stamp through `ledger._make_import`. Research findings persist the same envelope at `checkpoint.json.findings[].provenance` and `findings.json`, plus an exact `{title}\\n{summary}\\n{evidence}` text projection. [Receipt adapter rows](../src/brigade/receipts_cmd.py) start `untrusted`. Consumer enforcement is described below and implemented by
+[`trust_gate.py`](../src/brigade/trust_gate.py). The envelope
+validator and closed field sets are in [`provenance.py`](../src/brigade/provenance.py).
 
 ### Location
 

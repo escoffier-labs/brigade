@@ -1,5 +1,7 @@
 # Roster Resolution Parity Plan
 
+Status (2026-10-17): shipped in #233 (1e407ca2a).
+
 Goal: make `brigade run` and `brigade roster doctor` resolve explicit, workspace, and user roster paths through one tested helper.
 
 Architecture: `src/brigade/roster.py` owns path selection and missing-path diagnostics. The run CLI and roster doctor call that helper before loading the TOML. Explicit `--roster` paths never fall back, workspace rosters win over user rosters, and a missing implicit roster names both checked paths.

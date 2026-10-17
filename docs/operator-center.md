@@ -1,6 +1,6 @@
 # Local Operator Center
 
-`brigade center` is a read-only CLI view over local Brigade state. It is meant for wrappers and future UI experiments that need one stable JSON surface without starting a server, database, daemon, scheduler, or sync engine.
+`brigade center` provides CLI views over local Brigade state, local report and action metadata, and an optional read-only dashboard. Wrappers can use its JSON commands without starting the dashboard server.
 
 `brigade daily` is the agent-facing driver on top of the same local evidence. The center commands answer "what exists"; the daily commands answer "what is the best next safe thing to do, what evidence supports it, and how do I close it out?"
 
@@ -17,6 +17,7 @@ brigade center templates
 brigade center templates --json
 brigade center schema
 brigade center schema --json
+brigade center serve --target .
 brigade center report plan
 brigade center report build
 brigade center report list
@@ -124,6 +125,8 @@ brigade work phases session report build <session-id|latest>
 brigade work phases session report list
 brigade work phases session report show <report-id|latest>
 ```
+
+`serve` starts the local dashboard on `127.0.0.1:8765` by default. Use `--host` and `--port` to change the bind. A non-loopback bind requires `--token` and at least one `--allowed-host`. This server is separate from the Fleet Hub dashboard.
 
 `status` summarizes active work, pending tasks, pending imports, scanner sweep health, review health, handoff drafts, tool catalog health, learning candidates, context packs, release readiness, release candidates, repo fleet, roadmap health, project consolidation, and security health.
 
@@ -319,4 +322,4 @@ Claude use is compliant only when a repo-scoped write session was briefed and ha
 
 Center status, center reviews, work brief, work doctor, release doctor, and release evidence include fleet sweep, fleet report, fleet action queue, dispatch, reconciliation, fleet release train action, and manual evidence health.
 
-The operator center never invokes scanners, tools, reviewers, handoff ingestion, release publishing, git commands that mutate state, or remote APIs. Only `center report build`, `center report archive`, `center report diff --record`, `center actions import-issues`, `center actions build/start/done/defer/archive`, and `center readiness closeout/import-issues` write local gitignored center files or work imports. Daily commands add local plan and run receipts under `.brigade/daily/` and can call only the bounded safe flows documented above.
+The operator center never invokes scanners, tools, reviewers, handoff ingestion, release publishing, git commands that mutate state, or remote APIs. Only `center report build/archive/closeout`, `center report diff --record`, `center actions import-issues`, `center actions build/start/done/defer/archive`, and `center readiness closeout/import-issues` write local gitignored center files or work imports. Daily commands add local plan and run receipts under `.brigade/daily/` and can call only the bounded safe flows documented above.

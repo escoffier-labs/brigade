@@ -163,7 +163,7 @@ The sections below were moved verbatim from `ROADMAP.md` on 2026-06-09 when the 
 
 > **In plain terms:** the everyday loop. `brigade work brief` each morning shows what is up, `brigade work run` does a chunk of work and auto-saves its artifacts and a memory note, and there is a private local to-do list that never gets committed. The long run-on bullet below is just the full feature list for long unattended runs; it boils down to "log every step in checkpoints so you can see what happened and resume if it crashes."
 
-Status: in progress.
+Status (2026-10-17): daily-driver command surface implemented. AFK hardening through phase 250 closed in 8dede13c4.
 
 Current public-readiness focus:
 
@@ -186,7 +186,7 @@ Current public-readiness focus:
 
 > **In plain terms:** make the "think first, then build" habit explicit. Big tasks should produce a local plan before execution, deep work can start with a plan for making the plan, and raw links, transcripts, screenshots, or errors should enter as reviewable context instead of trusted instructions. The operator still chooses what moves forward; Brigade just keeps the plan, receipts, and resume points tidy.
 
-Status: in progress.
+Status (2026-10-17): plan-first operator loop shipped in #72 (d08a305e4).
 
 Goal: make Brigade the provider-neutral plan, receipt, and review layer for agentic engineering workflows across Codex, Claude Code, OpenClaw, Hermes, and similar harnesses.
 

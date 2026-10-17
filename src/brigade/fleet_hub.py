@@ -265,7 +265,10 @@ _CLAIMS_ADDITIVE_COLUMNS = (
 _EVENTS_ADDITIVE_COLUMNS = ("exit_status", "capability_fingerprint", "repo_identity", "context")
 # Independently developed migrations can reserve the same schema version.
 # Register nullable additions here so current-version databases self-heal too.
-_ADDITIVE_COLUMNS = (("events", "context", "ALTER TABLE events ADD COLUMN context TEXT"),)
+_ADDITIVE_COLUMNS = (
+    ("events", "context", "ALTER TABLE events ADD COLUMN context TEXT"),
+    ("model_policy", "t3_model", "ALTER TABLE model_policy ADD COLUMN t3_model TEXT NOT NULL DEFAULT ''"),
+)
 
 
 def _missing_additive_columns(conn: sqlite3.Connection) -> list[str]:

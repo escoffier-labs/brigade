@@ -23,7 +23,7 @@ Closes #
 - [ ] `cargo clippy --all-targets --all-features -- -D warnings` passes
 - [ ] `cargo test --all-features` passes
 - [ ] Added or updated tests covering the change
-- [ ] Updated the `Unreleased` section of `CHANGELOG.md` for any user-visible effect
+- [ ] Updated the `Unreleased` section of the root `CHANGELOG.md` for any user-visible effect
 - [ ] No personal details, hostnames, IPs, account names, tokens, or unredacted absolute paths in code, tests, fixtures, or this PR (run `content-guard` before pushing)
-- [ ] No new default runtime dependency, the default build stays network-free, and the MCP server stays read-only
-- [ ] Conventional commit messages, no AI co-authorship trailers
+- [ ] No new default runtime dependency, the default build stays network-free, and MCP query connections stay read-only with refresh writes explicit and opt-in
+- [ ] Conventional commit messages and co-author trailers follow the root contributor policy

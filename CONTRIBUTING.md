@@ -183,7 +183,7 @@ To add a harness:
 4. Update `HARNESS_PRIORITY` if the new harness should be an owner candidate (readers usually want to land near OpenClaw/Hermes in the priority list).
 5. If it is a writer, add it to `WRITER_INBOXES` in `src/brigade/selection.py` and update any writer-specific installer, doctor, or ingest tests.
 6. Add the harness to the CI matrix in `.github/workflows/ci.yml`.
-7. Add a row to the harness table in `README.md`.
+7. Add a row to the writer harness table in `docs/overview.md` and update the harness list in `docs/technical-guide.md`.
 
 ## Adding a depth
 
@@ -195,11 +195,11 @@ Includes live at `src/brigade/templates/includes/<id>.json`. Add the id to `KNOW
 
 ## Adding a doctor check
 
-Check functions live in `src/brigade/doctor.py` and nearby command modules. Each returns structured status data where status is `OK`, `WARN`, `FAIL`, or `MANUAL`. Prefer `WARN` or `MANUAL` over `FAIL` for things the user can choose not to wire up - `FAIL` should mean "this profile is broken."
+Check functions live in `src/brigade/doctor.py` and nearby command modules. Each returns structured status data where status is `OK`, `INFO`, `WARN`, `FAIL`, or `MANUAL`. Prefer `WARN` or `MANUAL` over `FAIL` for things the user can choose not to wire up - `FAIL` should mean "this profile is broken."
 
 ## Promoting an experimental adapter
 
-The Hermes adapter is currently marked experimental. To graduate it (or any future experimental adapter) to "tested":
+The Hermes adapter is validated against a real Hermes install. To graduate a future experimental adapter to "tested":
 
 - A doctor check exists that meaningfully exercises the adapter against a real install.
 - Someone has run the full init + doctor cycle on a real Hermes workspace and reported it on an issue.
