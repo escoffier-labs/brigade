@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- `brigade run` cancels registered local worker groups when its fleet claim is lost, including silent subprocess waits. Local `t3-fleet` waits now share that cancellation registry and clean up their own process group. Remote job and target-owned reservation semantics are unchanged. (#1219)
+- Runs with an acquired fleet claim now share one cancellation registry across registered local workers and local `t3-fleet` client calls. `brigade run` checks claim loss before planning, synthesis, dispatch, and terminal result receipts, waits for cancellation outcomes before releasing its local run lock, and retains the lock if cancellation fails. POSIX groups get a three-second SIGTERM grace for nested seats. Only directly registered groups are guaranteed to stop. T3 calls without a registry retain their previous subprocess behavior. Remote jobs and target-owned reservations are unchanged. (#1219)
 
 - `brigade fleet events report` delivers or durably queues T3 lifecycle observations with stable replay digests and bounded execution context. Hub schema 32 preserves event history and exposes reported initiators and request correlation on fleet boards. Unknown or delayed observations do not appear as running. (Refs #1630, #1121)
 - Upgrade the hub before enabling t3-fleet reporting. T3 observations remain fresh for 900 seconds with a 300-second producer heartbeat. Permanent hub rejections return exit 2 without queueing. Older binaries refuse schema 32. For the nullable context-column migration alone, rollback can retain the column and set `PRAGMA user_version=31`. See [deployment and rollback instructions](docs/fleet-t3-events.md).

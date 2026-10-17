@@ -362,10 +362,19 @@ class T3FleetClient:
     cwd: Path | None = None
     process_registry: proc.ProcessRegistry | None = None
 
+    def check_cancellation(self) -> None:
+        if self.process_registry is not None:
+            self.process_registry.ensure_launch_allowed()
+
     def _invoke(self, argv: Sequence[str], *, timeout: float | None = None) -> dict[str, Any]:
+        self.check_cancellation()
         command = [self.executable, *argv]
         try:
-            runner = self.runner or partial(_run_client, process_registry=self.process_registry)
+            runner = self.runner or (
+                subprocess.run
+                if self.process_registry is None
+                else partial(_run_client, process_registry=self.process_registry)
+            )
             completed = runner(
                 command,
                 capture_output=True,
@@ -381,6 +390,7 @@ class T3FleetClient:
         except (OSError, subprocess.SubprocessError) as exc:
             raise TransportDenial("t3-client-error", f"t3-fleet {argv[0]} failed to run: {exc}") from exc
 
+        self.check_cancellation()
         stdout = _bounded(getattr(completed, "stdout", "") or "")
         stderr = _one_line(getattr(completed, "stderr", "") or "")
         code = int(getattr(completed, "returncode", 1) or 0)
@@ -640,6 +650,7 @@ def execute_remote(
     from .fleet_client_policy import FleetPolicyClientError
 
     try:
+        client.check_cancellation()
         delegation = policy_client.create_delegation(
             decision_id=resolution.decision_id,
             source_revision=revision,
@@ -666,6 +677,7 @@ def execute_remote(
     request_id: str | None = None
     try:
         _require_eligible(client)
+        client.check_cancellation()
         submitted = client.submit(
             delegation_id=delegation_id,
             title=title,

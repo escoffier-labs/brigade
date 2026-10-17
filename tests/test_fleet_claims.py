@@ -1831,8 +1831,10 @@ class TestDispatchWiring:
 
         monkeypatch.setattr(aboyeur, "run", fake_run)
         monkeypatch.setattr(sys, "stderr", _DeadStderr(sys.stderr))
+        started = time.monotonic()
         with contextlib.suppress(ValueError):
             self._run(ws, roster_path)
+        assert time.monotonic() - started < 5, "claim cancellation reached the 10-second process timeout"
         receipt = self._receipt(ws)
         assert receipt["status"] == "failed"
         assert receipt["failure"]["kind"] == "fleet-claim-lost"

@@ -1045,6 +1045,7 @@ def dispatch(
             resume_session_id: str | None = None,
         ) -> agents.AgentResult:
             """Record transport facts around exactly one real external call."""
+            proc.check_cancellation(process_registry)
             blocked = _selected_agent_preflight(
                 selected_agent,
                 roster=roster,

@@ -692,7 +692,6 @@ def dispatch(args) -> int:
                 _terminalize_escaped_run(output_dir, seat=lifecycle_seat, interrupt_failure=_fleet_interrupt_failure)
             )
             lifecycle.enter_context(aboyeur_mod.terminal_sigterm_handler(output_dir, seat=lifecycle_seat))
-            lifecycle.enter_context(claim_cancellation)
             if output_dir is not None:
                 start_kwargs: dict[str, Any] = {
                     "task": args.task,
@@ -774,6 +773,8 @@ def dispatch(args) -> int:
                     )
                 )
                 fleet_claim_granted = bool(getattr(claim_decision, "granted", False))
+                if fleet_claim_granted:
+                    lifecycle.enter_context(claim_cancellation)
             if args.requester_key is not None:
                 from .. import agent_request
 

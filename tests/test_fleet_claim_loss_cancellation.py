@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 import signal
+import subprocess
 import sys
 import threading
 import time
@@ -14,7 +15,8 @@ from pathlib import Path
 import pytest
 
 from brigade import aboyeur, agents, cli, fleet_client, fleet_session_bootstrap, fleet_t3_transport as t3, proc
-from brigade.aboyeur import orchestrator
+from brigade.claim_loss_cancellation import CLAIM_LOSS_TERMINATE_GRACE_SECONDS
+from tests.test_fleet_t3_transport import FakePolicyClient, REVISION, REPO, WINDOWS_NODE, _document
 from tests._posix import requires_process_groups
 from tests.test_fleet_claims import NODE_A, NODE_B, _plant_home_identity
 
@@ -22,6 +24,15 @@ from tests.test_fleet_claims import NODE_A, NODE_B, _plant_home_identity
 @requires_process_groups
 @pytest.mark.parametrize("transport", ["local", "t3"])
 def test_claim_loss_stops_silent_worker_without_main_interrupt(tmp_path: Path, monkeypatch, transport):
+    _exercise_blocked_child(tmp_path, monkeypatch, transport)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native Windows process-tree cancellation")
+def test_native_windows_claim_loss_stops_silent_worker(tmp_path, monkeypatch):
+    _exercise_blocked_child(tmp_path, monkeypatch, "local")
+
+
+def _exercise_blocked_child(tmp_path: Path, monkeypatch, transport):
     """The fallback kills only after the bound, so a queued interrupt cannot pass."""
     ws = tmp_path / "ws"
     (ws / ".brigade").mkdir(parents=True)
@@ -43,8 +54,11 @@ def test_claim_loss_stops_silent_worker_without_main_interrupt(tmp_path: Path, m
     child = ws / "silent-worker"
     child.write_text(
         f"#!{sys.executable}\n"
-        "import os, signal, time\n"
+        "import json, os, signal, sys, time\n"
         "from pathlib import Path\n"
+        "if len(sys.argv) > 1 and sys.argv[1] != 'wait':\n"
+        "    print(json.dumps({'schema': 't3-fleet.result.v1', 'hosts': [{'state': 'eligible'}], "
+        "'request_id': 'worker/req-test', 'result': {'state': 'running'}})); sys.exit(0)\n"
         "signal.signal(signal.SIGTERM, signal.SIG_IGN)\n"
         f"Path({str(pid_file)!r}).write_text(str(os.getpid()))\n"
         "time.sleep(60)\n"
@@ -71,7 +85,15 @@ def test_claim_loss_stops_silent_worker_without_main_interrupt(tmp_path: Path, m
     def kill_worker():
         if pid_file.exists():
             try:
-                os.killpg(int(pid_file.read_text()), signal.SIGKILL)
+                if os.name == "nt":
+                    subprocess.run(
+                        ["taskkill", "/PID", pid_file.read_text(), "/T", "/F"],
+                        capture_output=True,
+                        timeout=5,
+                        check=False,
+                    )
+                else:
+                    os.killpg(int(pid_file.read_text()), signal.SIGKILL)
             except ProcessLookupError:
                 try:
                     os.kill(int(pid_file.read_text()), signal.SIGKILL)
@@ -79,28 +101,40 @@ def test_claim_loss_stops_silent_worker_without_main_interrupt(tmp_path: Path, m
                     pass
 
     def failsafe():
-        if lost.wait(15) and not finished.wait(4):
+        if lost.wait(15) and not finished.wait(CLAIM_LOSS_TERMINATE_GRACE_SECONDS + 3):
             kill_worker()
 
     def run_agent(*args, process_registry=None, **kwargs):
-        result = proc.run([str(child)], timeout=15, process_registry=process_registry)
+        result = proc.run([sys.executable, str(child)], timeout=15, process_registry=process_registry)
         return agents.AgentResult(text=result.stdout, ok=result.code == 0, detail=result.stderr)
 
-    def remote_transport(**kwargs):
-        registry_kwargs = {key: value for key, value in kwargs.items() if key == "process_registry"}
-        client = t3.T3FleetClient(executable=str(child), cwd=ws, **registry_kwargs)
+    build = t3.build_source_transport
+    policy = FakePolicyClient()
 
-        def dispatch(*args):
-            client.wait(request_id="worker/req-test", timeout=15)
-            raise AssertionError("a silent waiter cannot complete successfully")
-
-        return dispatch
+    def source_transport(**kwargs):
+        if transport == "local":
+            return None
+        kwargs.update(
+            snapshot={
+                "state": "authoritative",
+                "fleet_policy": {
+                    "active": True,
+                    "version": 1,
+                    "digest": "sha256:" + "a" * 64,
+                },
+            },
+            policy_client=policy,
+            document=_document(),
+            node_id=WINDOWS_NODE,
+            client=t3.T3FleetClient(executable=str(child), cwd=ws),
+        )
+        return build(**kwargs)
 
     monkeypatch.setattr(fleet_client, "_post_claim_blocking", post)
     monkeypatch.setattr(agents, "run_agent", run_agent)
-    monkeypatch.setattr(
-        orchestrator, "_worker_remote_transport", remote_transport if transport == "t3" else lambda **kw: None
-    )
+    monkeypatch.setattr(t3, "build_source_transport", source_transport)
+    monkeypatch.setattr(t3, "immutable_source_revision", lambda cwd: REVISION)
+    monkeypatch.setattr(fleet_session_bootstrap, "_repo_identity", lambda *args: REPO)
     watchdog = threading.Thread(target=failsafe, daemon=True)
     watchdog.start()
     try:
@@ -127,7 +161,9 @@ def test_claim_loss_stops_silent_worker_without_main_interrupt(tmp_path: Path, m
         kill_worker()
         watchdog.join(timeout=1)
     assert lost.is_set(), "the worker must start before ownership is revoked"
-    assert ended_at - loss_time[0] < 3, "claim loss left the silent worker alive until the failsafe killed it"
+    assert ended_at - loss_time[0] < CLAIM_LOSS_TERMINATE_GRACE_SECONDS + 2, (
+        "claim loss left the silent worker alive until the failsafe killed it"
+    )
     assert rc == 2
     receipt = json.loads(next((ws / ".brigade" / "runs").glob("*/run.json")).read_text())
     assert receipt["status"] == "failed"
@@ -150,3 +186,5 @@ def test_claim_loss_before_dispatch_does_not_start_worker(tmp_path, monkeypatch)
     monkeypatch.setattr(aboyeur, "run", lambda *args, **kwargs: dispatched.append(True) or 0)
     assert cli.main(["run", "do something", "--roster", str(roster), "--cwd", str(ws)]) == 2
     assert dispatched == []
+    receipt = json.loads(next((ws / ".brigade" / "runs").glob("*/run.json")).read_text())
+    assert receipt["failure"]["kind"] == "fleet-claim-lost"

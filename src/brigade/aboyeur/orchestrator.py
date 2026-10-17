@@ -73,15 +73,7 @@ class FleetModelPolicyResolution:
     error: str | None = None
 
 
-def _model_lease_lifecycle(function: Callable[..., int]) -> Callable[..., int]:
-    """Freeze one startup policy snapshot without reserving unused seats."""
-
-    def wrapped(task: str, roster: Roster, *args: Any, **kwargs: Any) -> int:
-        snapshot = fleet_client.load_model_policy_snapshot()
-        kwargs["model_policy_snapshot"] = snapshot
-        return function(task, roster, *args, **kwargs)
-
-    return wrapped
+_model_lease_lifecycle = claim_loss_cancellation.model_lease_lifecycle
 
 
 def resolve_fleet_model_policy(
@@ -513,6 +505,7 @@ def run(
     process_registry: proc.ProcessRegistry | None = None,
     check_cancellation: Callable[[], None] | None = None,
 ) -> int:
+    check_cancellation = check_cancellation or (lambda: None)
     if run_budget_payload is not None:
         run_budget_payload = run_budget.validate_explicit_declaration(run_budget_payload)
     started_at = datetime.now(timezone.utc)
@@ -1325,7 +1318,10 @@ def run(
                     process_registry=process_registry,
                     **appserver_kwargs,
                 )
-                appserver.start()
+                try:
+                    appserver.start()
+                finally:
+                    check_cancellation()
             except codex_appserver.AppServerError as exc:
                 close_appserver()
                 transport_routing_payload = seat_health_policy.transport_fallback_decision(
@@ -1427,6 +1423,7 @@ def run(
             return 1
 
     def stage_started(stage: int, seats: tuple[str, ...]) -> None:
+        check_cancellation()
         nonlocal active_stage, active_seats
         active_stage = stage
         active_seats = seats
@@ -1453,8 +1450,7 @@ def run(
             raise runguard.RetainRunLockError(f"failed to record budget cancel receipt: {exc}") from exc
 
     def dispatch_interrupted() -> None:
-        if check_cancellation is not None:
-            check_cancellation()
+        check_cancellation()
         if output_dir is None:
             return
         active_seat = active_seats[0] if len(active_seats) == 1 else None
@@ -1495,6 +1491,7 @@ def run(
         return recorded_attempt if isinstance(recorded_attempt, int) else None
 
     def dispatch_requested(agent: Agent) -> int | None:
+        check_cancellation()
         # Enforce wall-clock / worker-dispatch ceilings before new work starts (#593).
         # Attempt allocation and reservation share one lock; retries reclaim an
         # open pending identity while concurrent same-seat callers mint anew.
@@ -1618,8 +1615,7 @@ def run(
                 model_lease=lease_model_agent,
                 remote_transport=remote_transport,
             )
-            if check_cancellation is not None:
-                check_cancellation()
+            check_cancellation()
         except runguard.RetainRunLockError:
             raise
         except run_budget.BudgetPolicyError as exc:
@@ -1639,6 +1635,7 @@ def run(
                 )
             return 1
         except KeyboardInterrupt:
+            check_cancellation()
             active_seat = active_seats[0] if len(active_seats) == 1 else None
             if output_dir is not None:
                 artifacts.record_run_termination(
@@ -1926,6 +1923,7 @@ def run(
         return drift_rc
     workers_ok = direct_worker or all(result.ok for result in worker_results)
     if output_dir is not None:
+        check_cancellation()
         direct_worker_finish.write_completed_run_receipt(
             output_dir,
             write_json=run_io._write_json,
@@ -1969,6 +1967,7 @@ def run(
             return 2
         print(f"handoff: {handoff}", file=sys.stderr)
         if output_dir is not None:
+            check_cancellation()
             direct_worker_finish.write_ok_after_handoff_receipt(
                 output_dir,
                 write_json=run_io._write_json,
