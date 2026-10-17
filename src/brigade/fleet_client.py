@@ -1118,12 +1118,12 @@ def _post_claim_blocking(hub_url: str, token: str, body: dict[str, Any], *, time
         with _hub_open(request, timeout=timeout) as response:
             return response.status, json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        if exc.code in (400, 401, 403, 409, 429):
+        if exc.code in (400, 401, 403, 409):
             # A held/expired refusal is an answer, not a transport failure;
             # a 400 carries the hub's validation message (e.g. an older hub
             # that does not know a request field), a 403 names the node the
             # caller's token is bound to, and a 401 says why (unknown or
-            # revoked token). A 429 carries a definite claim quota refusal.
+            # revoked token), all worth surfacing verbatim.
             try:
                 return exc.code, json.loads(exc.read().decode("utf-8"))
             except (OSError, UnicodeDecodeError, json.JSONDecodeError):
@@ -1222,7 +1222,7 @@ def _claim_op(
     payload = payload if isinstance(payload, dict) else {}
     detail = payload.get("error") if isinstance(payload.get("error"), str) else None
     owner = payload.get("owner") if isinstance(payload.get("owner"), dict) else None
-    if status == 429 and payload.get("code") == "claim_cardinality_exceeded":
+    if status == 409 and payload.get("reason") == "claim_cardinality_exceeded":
         return ClaimDecision(granted=False, reason="quota", detail=detail, holder=holder)
     if status in (401, 403):
         # A stable credential answer (#1161): retrying cannot heal it and it

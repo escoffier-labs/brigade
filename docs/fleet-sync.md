@@ -727,7 +727,7 @@ ingestion starts. An invalid item rejects the entire event batch. Existing event
 string bounds still apply.
 
 Each node may hold at most 1024 active claims. A new acquisition beyond that
-limit returns HTTP 429 with `code=claim_cardinality_exceeded`. Direct API callers
+limit returns HTTP 409 with `reason=claim_cardinality_exceeded`. Direct API callers
 receive `ClaimCardinalityError`. Existing claims remain held. Retry, renewal,
 release, and replacement of an existing target stay available. The quota check
 runs after existing-target decisions inside the acquisition write transaction.
@@ -735,7 +735,9 @@ Expired claims do not consume the active quota. An index on
 `claims(owner_node, expires_at)` supports the count and is created idempotently
 at startup, including on current-version databases, without a schema version bump.
 
-Fleet clients classify this refusal as `quota`. `repo_claim` raises
+The response includes an empty `owner` object so deployed clients classify the
+409 as a definite refusal instead of falling back to local-only work. New fleet
+clients classify this refusal as `quota`. `repo_claim` raises
 `FleetClaimQuotaError`, a subclass of `FleetClaimHeldError`, before admitting
 work. A heartbeat quota refusal terminates the lease through the existing claim
 loss channel. The default policy cancels guarded work.

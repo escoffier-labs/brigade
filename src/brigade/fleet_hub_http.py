@@ -1774,7 +1774,7 @@ def make_handler(
                 self._send_json(503, {"error": FleetHubUnsupportedSchema.public_message})
                 return
             except ClaimCardinalityError as exc:
-                self._send_json(429, exc.payload())
+                self._send_json(409, exc.payload())
                 return
             except ClaimTargetError as exc:
                 self._send_json(422, exc.payload())

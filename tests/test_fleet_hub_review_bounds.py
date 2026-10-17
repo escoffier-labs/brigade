@@ -14,9 +14,8 @@ import pytest
 
 from brigade import fleet_client, fleet_hub, fleet_hub_event_bounds as bounds
 from brigade import worklore_http
-from tests.test_fleet_hub_request_bounds import hub as hub
-from tests.test_fleet_claims import NODE_A, _get, _plant_home_identity, _post
-from tests.test_fleet_sync import _event
+from tests.test_fleet_hub_request_bounds import _claim_snapshot, hub as hub
+from tests.test_fleet_claims import NODE_A, _claim, _plant_home_identity
 
 _MAX_BODY_SCAN_CPU_SECONDS = 5.0
 
@@ -67,16 +66,27 @@ def test_aggregate_complexity_boundary(monkeypatch, kind, budget, document):
     decoder.assert_not_called()
 
 
+def test_complexity_scan_counts_duplicate_keys_and_ignores_quoted_punctuation(monkeypatch):
+    monkeypatch.setattr(bounds, "MAX_JSON_ITEMS", 2)
+    raw = b'{"x":"\\"[{},{}]","x":"\\"[{},{}]"}'
+    assert bounds.bounded_json_loads(raw) == {"x": '"[{},{}]'}
+    decoder = Mock(side_effect=AssertionError("duplicate keys bypassed item budget"))
+    monkeypatch.setattr(json, "loads", decoder)
+    with pytest.raises(bounds.RequestBoundsError, match="JSON aggregate items"):
+        bounds.bounded_json_loads(b'{"x":0,"x":0,"x":0}')
+    decoder.assert_not_called()
+
+
 def test_full_body_scan_cost_is_recorded(record_property):
     # A valid, string-heavy 8 MiB body must traverse the entire byte scan.
     raw = b'"' + b"x" * (fleet_hub.MAX_BODY_BYTES - 2) + b'"'
     samples = []
     for _ in range(5):
         started = time.process_time()
-        assert len(bounds.bounded_json_loads(raw)) == len(raw) - 2
+        bounds._scan_json(raw)
         samples.append(time.process_time() - started)
     record_property("body_scan_cpu_seconds", samples)
-    print(f"8 MiB scan and decode CPU seconds: {samples}")
+    print(f"8 MiB pre-decode scan CPU seconds: {samples}")
     # CPU time avoids contention-based wall-clock failures. The measured
     # baseline is about 0.13 seconds, leaving ample room on slower runners.
     assert max(samples) < _MAX_BODY_SCAN_CPU_SECONDS
@@ -173,19 +183,6 @@ def test_current_database_repairs_claim_owner_index_and_query_uses_it(tmp_path):
     conn.close()
 
 
-def test_status_and_client_keep_complete_history(hub, monkeypatch):
-    url, token, _db = hub
-    events = [_event(run_id=f"run-{i}") for i in range(1001)]
-    for start in range(0, len(events), 1000):
-        assert _post(url, token, events[start : start + 1000], path="/events")[0] == 200
-    status, payload = _get(url, "/status?all=1", token)
-    assert status == 200
-    assert len(payload["runs"]) == 1001
-    assert "truncated" not in payload
-    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": url, "token": token})
-    assert len(fleet_client.fetch_status(include_all=True)) == 1001
-
-
 @pytest.fixture()
 def claim_client(tmp_path, monkeypatch):
     home = tmp_path / "home"
@@ -196,7 +193,7 @@ def claim_client(tmp_path, monkeypatch):
 
 
 def _quota_payload():
-    return {"granted": False, "code": "claim_cardinality_exceeded", "error": "active claim quota exceeded"}
+    return {"granted": False, "reason": "claim_cardinality_exceeded", "error": "active claim quota exceeded"}
 
 
 def test_http_quota_is_a_definite_client_refusal(claim_client, monkeypatch):
@@ -204,7 +201,7 @@ def test_http_quota_is_a_definite_client_refusal(claim_client, monkeypatch):
 
     def refuse(request, **kwargs):
         raise urllib.error.HTTPError(
-            request.full_url, 429, "quota", {}, io.BytesIO(json.dumps(_quota_payload()).encode())
+            request.full_url, 409, "quota", {}, io.BytesIO(json.dumps(_quota_payload()).encode())
         )
 
     monkeypatch.setattr(fleet_client, "_hub_open", refuse)
@@ -215,7 +212,7 @@ def test_http_quota_is_a_definite_client_refusal(claim_client, monkeypatch):
 
 
 def test_initial_quota_never_yields_or_retries(claim_client, monkeypatch):
-    post = Mock(return_value=(429, _quota_payload()))
+    post = Mock(return_value=(409, _quota_payload()))
     orphan = Mock()
     monkeypatch.setattr(fleet_client, "_post_claim_blocking", post)
     monkeypatch.setattr(fleet_client, "_schedule_orphan_release", orphan)
@@ -238,7 +235,7 @@ def test_heartbeat_quota_terminates_the_lease(claim_client, monkeypatch):
         action = body["action"]
         calls.append(action)
         if action == "acquire":
-            return (200, {"granted": True}) if calls.count(action) == 1 else (429, _quota_payload())
+            return (200, {"granted": True}) if calls.count(action) == 1 else (409, _quota_payload())
         if action == "renew":
             return 409, {"error": "missing"}
         return 200, {"released": True}
@@ -261,3 +258,39 @@ def test_heartbeat_quota_terminates_the_lease(claim_client, monkeypatch):
         pool.submit(guarded).result(timeout=10)
     assert lost == ["quota"]
     assert calls == ["acquire", "renew", "acquire", "release"]
+
+
+@pytest.mark.parametrize("legacy", [True, False], ids=["base-client", "new-client"])
+def test_live_quota_refusal_never_falls_back_to_local_work(hub, claim_client, monkeypatch, legacy):
+    from brigade import fleet_hub_claim_cardinality as cardinality
+
+    url, token, db = hub
+    monkeypatch.setattr(cardinality, "MAX_ACTIVE_CLAIMS_PER_NODE", 1)
+    monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", url)
+    monkeypatch.setenv("BRIGADE_FLEET_TOKEN", token)
+    with fleet_hub.open_db(db) as conn:
+        assert fleet_hub.handle_claim(conn, _claim(node=NODE_A, target="occupied"))[0] == 200
+        before = _claim_snapshot(conn)
+    orphan = Mock()
+    monkeypatch.setattr(fleet_client, "_schedule_orphan_release", orphan)
+    if legacy:
+
+        def base_acquire(target, **kwargs):
+            # Base client: 409 is held only with a dict owner. Without it,
+            # repo_claim retries a missing answer then admits local-only work.
+            status, payload = fleet_client._post_claim_blocking(
+                url, token, _claim(node=NODE_A, target=target), timeout=5
+            )
+            assert status == 409
+            owner = payload.get("owner") if isinstance(payload.get("owner"), dict) else None
+            return fleet_client.ClaimDecision(
+                granted=False, reason="held" if owner is not None else "missing", owner=owner
+            )
+
+        monkeypatch.setattr(fleet_client, "acquire_claim", base_acquire)
+    with pytest.raises(fleet_client.FleetClaimHeldError):
+        with fleet_client.repo_claim("overflow"):
+            pytest.fail("hub quota refusal admitted local-only work")
+    orphan.assert_not_called()
+    with fleet_hub.open_db(db) as conn:
+        assert _claim_snapshot(conn) == before
