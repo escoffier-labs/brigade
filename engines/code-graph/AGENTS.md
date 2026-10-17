@@ -38,7 +38,7 @@ Run checks through Brigade so the exit code is recorded, then capture the outcom
 brigade work verify run --target . --command "cargo test --all-features" --capture brigade-work
 ```
 
-Replace `brigade-work` with another installed skill or card only when it guided that verification. Ad hoc command receipts are audit-only and do not score artifacts. If `--capture` was omitted, use `brigade outcome capture <skill-or-card-id> --run-id <run-id> --kind skill` with the exact verification run id. After substantial work, write durable findings in the standard Memory Handoff format under `.claude/memory-handoffs/`, then run `brigade handoff lint` before finishing.
+Replace `brigade-work` with another installed skill or card only when it guided that verification. Ad hoc command receipts are audit-only and do not score artifacts. If `--capture` was omitted, use `brigade outcome capture <skill-or-card-id> --run-id <run-id> --kind <skill|card>` with the exact verification run id and the artifact's kind. After substantial work, write durable findings in the standard Memory Handoff format under `.claude/memory-handoffs/`, then run `brigade handoff lint` before finishing.
 
 ## Module map
 
