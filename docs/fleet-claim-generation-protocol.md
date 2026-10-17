@@ -55,9 +55,10 @@ Fences persist indefinitely, including free, renamed, and retired targets.
 Distinct stored targets are capped at 100,000. Each newly inserted target is
 limited to 1,024 UTF-8 bytes, including multibyte input. The byte limit applies
 only to new fences: migration preserves longer legacy targets, and those targets
-remain operable. Invalid UTF-8 refuses cleanly. An overlong new target returns
-HTTP 422 with an `invalid-field` error naming `target`, `limit: 1024`, and
-`unit: utf8-bytes`, without echoing the submitted value.
+remain operable. Invalid UTF-8 returns HTTP 422. An overlong new target returns
+HTTP 409 with `reason: "claim-target-too-long"`, `owner: {}`, and an
+`invalid-field` error naming `target`, `limit: 1024`, and `unit: utf8-bytes`,
+without echoing the submitted value.
 
 A new target at capacity fails closed with structured HTTP 409 and the static
 message `claim generation fence capacity exceeded`, while existing targets
@@ -81,8 +82,9 @@ reach the whole fleet: startup validation prevents the hub from starting,
 claim listings fail in dashboards and routing occupancy, and a corrupt expired
 claim can block acquisition of other targets during global pruning. The
 `/claims`, authenticated HTML dashboard, and Command Deck readers return
-structured, sanitized HTTP 409 with `reason: "claim-fence-refused"` and
-`owner: {}` for fence refusal. SQLite lock and I/O errors
+structured, sanitized HTTP 503 with `reason: "claim-fence-refused"` for fence
+refusal. Claim mutation and heartbeat paths return HTTP 409 with that reason
+and `owner: {}`. SQLite lock and I/O errors
 retain their SQLite error classification and existing startup retry policy.
 
 Startup validates current-schema fencing state without recreating it. An
@@ -113,9 +115,13 @@ dashboard session API, the roster and policy form pages, observed work, the
 work queue, and the `/work/` routes, are not mapped by this slice and still
 return their generic database error.
 
-Fence refusals use HTTP 409. An empty `owner` object keeps the base legacy
-client on its terminal `held` path. Without it, that client treats an owner-less
-409 as `missing`, retries, and admits local-only work. Current clients preserve
+Fence refusals on claim mutations and heartbeats use HTTP 409 with a reason
+and an empty `owner` object. Read-only API GETs, dashboards, and Command Deck
+use HTTP 503 with a reason. The empty `owner` object on terminal 409 refusals,
+including `stale-holder`, `stale-generation`, `claim-fence-refused`, and
+`claim-target-too-long`, keeps the base legacy client on its terminal `held`
+path. Without it, that client treats an owner-less 409 as `missing`, retries,
+and admits local-only work. Current clients preserve
 `claim-fence-refused` as terminal. Upgrade clients before relying on capacity
 fail-closed and verify the deployed versions. HTTP 503 for unsupported newer
 schemas still permits legacy local fallback and provides no cross-machine

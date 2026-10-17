@@ -57,6 +57,8 @@ _RETIRED_INDEXES = (
 class ClaimFenceError(hub.FleetHubError):
     """Authoritative fencing storage cannot safely serve this operation."""
 
+    reason = "claim-fence-refused"
+
 
 class _RetirementCapacityError(ClaimFenceError):
     """A retirement budget is full, without implying corrupt target fences."""
@@ -64,6 +66,9 @@ class _RetirementCapacityError(ClaimFenceError):
 
 class ClaimTargetError(hub.FleetHubUnprocessable):
     """A target cannot be represented within new fence storage bounds."""
+
+    status = 422
+    reason: str | None = None
 
     def __init__(self, message: str, *, limit: int | None = None) -> None:
         super().__init__(message)
@@ -74,9 +79,16 @@ class ClaimTargetError(hub.FleetHubUnprocessable):
         if self.limit is not None:
             error.update(limit=self.limit, unit="utf8-bytes")
         payload: dict[str, Any] = {"error": error}
-        if self.limit is not None:
-            payload.update(reason="claim-target-too-long", owner={})
+        if self.reason is not None:
+            payload.update(reason=self.reason, owner={})
         return payload
+
+
+class ClaimTargetTooLongError(ClaimTargetError, ClaimFenceError):
+    """A new target exceeds the fence byte bound and must fail closed."""
+
+    status = 409
+    reason = "claim-target-too-long"
 
 
 def _target_bytes(target: str) -> bytes:
@@ -238,7 +250,7 @@ def _advance(conn: sqlite3.Connection, target: str, current: int) -> int:
         raise ClaimFenceError("claim generation fence exhausted")
     if current == 0:
         if len(_target_bytes(target)) > MAX_CLAIM_TARGET_BYTES:
-            raise ClaimTargetError("claim target exceeds UTF-8 byte limit", limit=MAX_CLAIM_TARGET_BYTES)
+            raise ClaimTargetTooLongError("claim target exceeds UTF-8 byte limit", limit=MAX_CLAIM_TARGET_BYTES)
         count = conn.execute("SELECT COUNT(*) FROM claim_fences").fetchone()[0]
         if count >= MAX_CLAIM_TARGETS:
             raise ClaimFenceError("claim generation fence capacity exceeded")
@@ -388,7 +400,7 @@ def _stale(
         key: False,
         "reason": reason,
         "error": f"claim operation refused: {reason}",
-        "owner": hub._claim_payload(row) if row is not None else None,
+        "owner": hub._claim_payload(row) if row is not None else {},
     }
 
 

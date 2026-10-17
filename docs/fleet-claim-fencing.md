@@ -86,7 +86,10 @@ marker require no new row. Expiry, live-holder release, node release, force
 release, and supersede retirements are exempt from the per-node quota so existing
 holders can retire. Superseding admission still checks the quota before replacing
 the live holder, which prevents repeated replacements from filling global history.
-The global cap applies to every retirement.
+The global cap applies to every retirement. After a crash, same-node supersede
+admission remains subject to the per-node quota. Waiting for the dead claim's
+TTL to expire does not restore admission: the node's own in-horizon retirement
+rows must age out before its quota allows another tenure.
 
 At 1 retirement per second, the former lifetime cap of 100,000 lasted 27.8 hours.
 With seven-day retention, that rate retains at most 604,801 rows globally when
@@ -130,7 +133,9 @@ Orphan cleanup retries `claim-fence-refused` with
 backoff until its TTL deadline. An ambiguous initial acquire followed by this
 refusal schedules cleanup without admitting work. Final release refusals on exit
 or after a rejected late grant also schedule background cleanup so recovery can
-retire the holder.
+retire the holder. Ordinary exit also schedules a holder-scoped background
+release on `hub-unavailable`, with retries bounded by the TTL. The daemon may
+end earlier if the process exits.
 
 `GET /status` includes `claim_fencing.retired_holder_rows` and
 `claim_fencing.retired_holder_horizon_seconds`. On refusal, stop the source of

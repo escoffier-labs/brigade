@@ -440,10 +440,12 @@ def http_authority(authority):
     thread.join(timeout=5)
 
 
-def http_claim(address, method, target="fake-target", action="acquire"):
+def http_claim(address, method, target="fake-target", action="acquire", **extra):
     client = HTTPConnection(*address, timeout=5)
     try:
-        body = json.dumps({"action": action, "target": target, "node_id": "fake-node", "holder": "fake-holder"})
+        body = json.dumps(
+            {"action": action, "target": target, "node_id": "fake-node", "holder": "fake-holder", **extra}
+        )
         client.request(
             method,
             "/claims",
@@ -1150,7 +1152,9 @@ def test_expiry_pruning_is_bounded_and_always_handles_requested_target(authority
     assert conn.execute("SELECT COUNT(*) FROM claim_retired_holders").fetchone()[0] == 33
 
 
-@pytest.mark.parametrize("damage", ["target-capacity", "retired-capacity", "corrupt", "target-too-long"])
+@pytest.mark.parametrize(
+    "damage", ["target-capacity", "retired-capacity", "corrupt", "target-too-long", "stale-holder"]
+)
 def test_new_hub_refusal_is_terminal_under_base_client_handling(http_authority, monkeypatch, damage):
     from brigade import fleet_hub_claims
 
@@ -1163,6 +1167,8 @@ def test_new_hub_refusal_is_terminal_under_base_client_handling(http_authority, 
     elif damage == "corrupt":
         conn.execute("DROP TABLE claim_fences")
         conn.commit()
+    elif damage == "stale-holder":
+        request(conn, "release")
     monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.example.invalid"})
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda base_path=None: "fake-node")
     monkeypatch.setattr(fleet_client, "_schedule_orphan_release", lambda *a, **kw: pytest.fail("local fallback"))
@@ -1186,7 +1192,11 @@ def test_new_hub_refusal_is_terminal_under_base_client_handling(http_authority, 
     assert len(responses) == 1
     assert responses[0][0] == 409
     assert responses[0][1]["reason"] == (
-        "claim-target-too-long" if damage == "target-too-long" else "claim-fence-refused"
+        "claim-target-too-long"
+        if damage == "target-too-long"
+        else "stale-holder"
+        if damage == "stale-holder"
+        else "claim-fence-refused"
     )
 
 
@@ -1301,3 +1311,69 @@ def test_exit_fence_refusal_schedules_cleanup_and_recovers(http_authority, monke
     assert recovered.wait(5), "exit fence refusal abandoned cleanup before recovery"
     assert releases == [attempts[0]] * len(releases)
     assert snapshot(conn)[0] == []
+
+
+@pytest.mark.parametrize("action", ["acquire", "renew", "release"])
+@pytest.mark.parametrize("reason", ["stale-holder", "stale-generation"])
+def test_free_target_terminal_refusal_has_compatibility_owner(http_authority, action, reason):
+    conn, _, address = http_authority
+    request(conn, "release")
+    before = snapshot(conn)
+    status, payload = http_claim(
+        address, "POST", action=action, **({"generation": 0} if reason == "stale-generation" else {})
+    )
+    if action == "release" and reason == "stale-holder":
+        assert (status, payload) == (200, {"released": False, "reason": "stale-holder"})
+    else:
+        assert status == 409
+        assert payload["reason"] == reason
+        assert payload["owner"] == {}
+    assert snapshot(conn) == before
+
+
+def test_free_target_stale_holder_heartbeat_is_terminal_under_base_client_handling(http_authority, monkeypatch):
+    _, _, address = http_authority
+    responses, acquisitions, lost = [], [], []
+    notified = threading.Event()
+    monkeypatch.setattr(fleet_client, "_thread", SimpleNamespace(interrupt_main=lambda: None))
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.example.invalid"})
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda base_path=None: "fake-node")
+    monkeypatch.setattr(fleet_client, "_claim_renew_interval", lambda ttl: 0.01)
+
+    def base_decision(status, payload, key):
+        # The deployed base client ignores fencing reasons. It maps a 409
+        # with a non-dict owner to missing, allowing local-lock continuation.
+        owner = payload.get("owner") if isinstance(payload.get("owner"), dict) else None
+        granted = status == 200 and payload.get(key) is True
+        reason = "ok" if granted else "held" if owner is not None else "missing"
+        return fleet_client.ClaimDecision(granted, reason, owner=owner)
+
+    def acquire(target, **kwargs):
+        acquisitions.append(kwargs["holder"])
+        status, payload = http_claim(address, "POST", target=target, holder=kwargs["holder"])
+        return base_decision(status, payload, "granted")
+
+    def renew(target, **kwargs):
+        assert http_claim(address, "POST", target=target, action="release", holder=kwargs["holder"])[0] == 200
+        status, payload = http_claim(address, "POST", target=target, action="renew", holder=kwargs["holder"])
+        responses.append((status, payload))
+        return base_decision(status, payload, "renewed")
+
+    def on_loss(reason):
+        lost.append(reason)
+        notified.set()
+
+    monkeypatch.setattr(fleet_client, "acquire_claim", acquire)
+    monkeypatch.setattr(fleet_client, "renew_claim", renew)
+    monkeypatch.setattr(
+        fleet_client, "release_claim", lambda target, **kw: fleet_client.ClaimDecision(False, "stale-holder")
+    )
+    with fleet_client.repo_claim("fake-target", ttl_seconds=60, on_claim_lost=on_loss) as decision:
+        assert notified.wait(2), "base client continued on the local lock after a stale-holder heartbeat refusal"
+        assert decision.cancel_event.is_set()
+    assert lost == ["held"]
+    assert len(acquisitions) == 1
+    assert len(responses) == 1
+    assert responses[0][0] == 409
+    assert responses[0][1]["reason"] == "stale-holder"
+    assert responses[0][1]["owner"] == {}

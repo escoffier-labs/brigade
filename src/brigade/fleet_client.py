@@ -111,7 +111,14 @@ from .fleet_client_spool import ensure_directory as _ensure_spool_directory
 from .fleet_client_spool import fsync_parent as _fsync_spool_parent
 from .fleet_client_spool import parse_records as _parse_spool_records
 from . import toml_compat as tomllib
-from .fleet_claim_lifecycle import _ConfirmedClaimLease as _ConfirmedClaimLease
+from .fleet_claim_lifecycle import (
+    CLAIM_FENCE_REFUSALS,
+    CLEANUP_RETRY_REASONS,
+    STALE_CLAIM_REFUSALS,
+    TERMINAL_CLAIM_REFUSALS,
+    UNCERTAIN_CLEANUP_REASONS,
+    _ConfirmedClaimLease as _ConfirmedClaimLease,
+)
 
 try:
     import fcntl
@@ -1229,7 +1236,7 @@ def _claim_op(
         return ClaimDecision(
             granted=False, reason="auth-failed", detail=detail or f"hub returned HTTP {status}", holder=holder
         )
-    if payload.get("reason") in ("claim-fence-refused", "claim-target-too-long"):
+    if payload.get("reason") in CLAIM_FENCE_REFUSALS:
         return ClaimDecision(granted=False, reason=payload["reason"], detail=detail, holder=holder)
     if status == 200 and payload.get(_CLAIM_OK_KEYS[action]) is True:
         claim = payload.get("claim") if isinstance(payload.get("claim"), dict) else None
@@ -1246,7 +1253,7 @@ def _claim_op(
         )
     if status in (200, 409):
         reason = payload.get("reason")
-        if reason not in ("stale-holder", "stale-generation"):
+        if reason not in STALE_CLAIM_REFUSALS:
             reason = "held" if owner is not None else "missing"
         return ClaimDecision(granted=False, reason=reason, owner=owner, detail=detail, holder=holder)
     return ClaimDecision(
@@ -1750,7 +1757,7 @@ def repo_claim(
             _schedule_orphan_release(
                 target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds
             )
-        if decision.reason in ("stale-holder", "stale-generation", "claim-fence-refused", "claim-target-too-long"):
+        if decision.reason in TERMINAL_CLAIM_REFUSALS:
             raise FleetClaimHeldError(f"fleet claim on {target!r} refused: {decision.reason}", owner=decision.owner)
         owner = decision.owner or {}
         held_by = owner.get("owner_node") or "another node"
@@ -1778,8 +1785,7 @@ def repo_claim(
     def _release_on_exit(*, admission_refused: bool = False) -> None:
         release_outcome = release_claim(target, holder=holder, node_id=node_id, conductor=conductor)
         if ambiguous_initial_acquire or (
-            pending_orphan_release.is_set()
-            and release_outcome.reason in ("hub-unavailable", "missing", "claim-fence-refused")
+            pending_orphan_release.is_set() and release_outcome.reason in UNCERTAIN_CLEANUP_REASONS
         ):
             # Inline cleanup survives imminent CLI exit: two further calls,
             # each spaced by one request timeout and bounded by that timeout.
@@ -1790,20 +1796,16 @@ def repo_claim(
             for _ in range(EXIT_ORPHAN_RELEASE_RETRIES):
                 time.sleep(CLAIM_TIMEOUT_SECONDS)
                 release_outcome = release_claim(target, holder=holder, node_id=node_id, conductor=conductor)
-                if not ambiguous_initial_acquire and release_outcome.reason not in (
-                    "hub-unavailable",
-                    "missing",
-                    "claim-fence-refused",
-                ):
+                if not ambiguous_initial_acquire and release_outcome.reason not in UNCERTAIN_CLEANUP_REASONS:
                     break
-            if release_outcome.reason in ("hub-unavailable", "missing", "claim-fence-refused"):
+            if release_outcome.reason in UNCERTAIN_CLEANUP_REASONS:
                 _LOG.warning(
                     "fleet claim on %s: exit cleanup could not confirm the orphaned claim's release "
                     "(last answer: %s); the row lives until its TTL expires",
                     target,
                     release_outcome.reason,
                 )
-        if release_outcome.reason in ("hub-unavailable", "claim-fence-refused"):
+        if release_outcome.reason in CLEANUP_RETRY_REASONS:
             # A refused release has not retired this holder. Keep cleanup
             # alive after both ordinary exit and rejected admission.
             _schedule_orphan_release(
@@ -1865,7 +1867,7 @@ def repo_claim(
 
     def _release_rejected_grant() -> None:
         release_outcome = release_claim(target, holder=holder, node_id=node_id, conductor=conductor)
-        if release_outcome.reason in ("hub-unavailable", "claim-fence-refused"):
+        if release_outcome.reason in CLEANUP_RETRY_REASONS:
             _schedule_orphan_release(
                 target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds
             )
@@ -1917,13 +1919,7 @@ def repo_claim(
                     except Exception:
                         _LOG.warning("fleet credential-failure callback raised; the run keeps unwinding", exc_info=True)
                 return
-            if outcome.reason in (
-                "held",
-                "stale-holder",
-                "stale-generation",
-                "claim-fence-refused",
-                "claim-target-too-long",
-            ):
+            if outcome.reason == "held" or outcome.reason in TERMINAL_CLAIM_REFUSALS:
                 lease.terminate(outcome.reason, notify=True)
                 return
             if lease.terminate(outcome.reason):
