@@ -225,6 +225,6 @@ A seat that answers a smoke prompt is wired, not proven. The pattern:
 
 1. Smoke the seat: `brigade run --roster <roster> --read-only --worker <seat> --output-dir <dir> "Reply with exactly: SEAT-OK"` and confirm `run.json` records `status=ok` with the expected text in `final.txt`.
 2. Bench it against an incumbent seat on a task with an objectively gradable answer (a planted bug with a known line and fix works well), and keep the receipts.
-3. Capture the outcome against the seat so `brigade outcome rank` learns something: a seat with no outcome history is a guess wearing a roster stanza.
+3. Keep the seat's benchmark results with its run receipts. `brigade outcome capture` attributes verification to a skill or card, not a model seat. Ad hoc verification receipts are audit-only. Skill/card scoring requires an eligible registered verifier manifest.
 
 Retire stale IDs on sight. Harness model inventories drift: one roster carried a model ID its harness no longer listed (it worked only through fuzzy mapping), and a hosted model was retired upstream two days before a run tried to use it. Run `brigade roster doctor` after changing direct Cursor, Grok, or Ollama seats. It reports `exact`, `fuzzy-resolved`, `missing`, or `unavailable`; the last three warn without rejecting the roster. A transient inventory failure is not evidence that a model disappeared.

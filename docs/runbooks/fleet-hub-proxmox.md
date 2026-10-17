@@ -1,6 +1,6 @@
 # Fleet hub on a Proxmox LXC
 
-This runbook provisions the Phase 2 fleet hub as an unprivileged Debian LXC on a Proxmox VE 9.x host. Tailscale Serve exposes the hub over HTTPS and forwards requests to a loopback-only Brigade service. The hub serves the live aggregate from one SQLite database. Local journals remain authoritative. A hub outage only delays the aggregate view and causes clients to spool events locally.
+This runbook provisions the Phase 2 fleet hub as an unprivileged Debian LXC on a Proxmox VE 9.x host. Tailscale Serve exposes the hub over HTTPS and forwards requests to a loopback-only Brigade service. The hub serves the live aggregate from one SQLite database. Local journals remain authoritative. A hub outage delays the aggregate view and causes clients to spool events locally. Hub-based model admission can still refuse launches.
 
 The Tailscale Serve URL is printed by `tailscale serve status`. Use its HTTPS tailnet DNS name as `<HUB_TAILNET_FQDN>` wherever the client URL appears below. Replace every other angle-bracket value before running a command.
 
@@ -522,7 +522,7 @@ Fourteen days is a starting horizon, not a required policy. Keep at least the de
 
 ## Upgrade and rollback
 
-Before changing the Brigade ref, run a backup and save the current ref (note that schema v19 adds columns to `run_preference` and the section 8 backup precedes the rollout):
+Before changing the Brigade ref, run a backup and save the current ref. The current hub uses schema 32, which adds `events.context` and `model_policy.t3_model`. Startup also repairs either missing additive column on a database already marked schema 32. Upgrade the hub before enabling T3 lifecycle reporting or native T3 launch models. See [T3 lifecycle reporting](../fleet-t3-events.md) for rollback constraints. The section 8 backup precedes the rollout:
 
 ```bash
 systemctl start brigade-fleet-backup.service

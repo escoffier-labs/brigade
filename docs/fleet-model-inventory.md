@@ -12,8 +12,9 @@ without heuristic string guessing.
 
 Model availability exists across three distinct layers that must not be conflated:
 
-1. **CLI Local Access (`cli_local`)**: Proves an installed tool executable is
-   logged in and capable of executing dispatches locally.
+1. **CLI Local Access (`cli_local`)**: Requires evidence that an installed tool
+   can execute locally. A successful model-list probe alone does not prove login
+   or dispatch capability.
 2. **Cloud Model Catalogue (`cloud_catalog`)**: Represents models listed in a
    remote vendor API or documentation catalogue. A catalogue listing does not
    guarantee local CLI execution.
@@ -138,7 +139,11 @@ measurement fields:
 - `expires_at`: ISO 8601 string
 - `models`: Canonical sorted model records
 - `error_reason`: Sanitized safe error code
-- `evidence_type`: Observation type (`cli_probe` or `manual_browser`)
+- `evidence_type`: Observation type (`cli_probe`, `catalog`, or `manual_browser`)
+
+The server derives the evidence type from the trusted source. `cli:opencode`
+uses `catalog`, `manual:browser` uses `manual_browser`, and the other allowed CLI
+sources use `cli_probe`. A conflicting caller-supplied type is rejected.
 
 If an incoming observation generates an existing ID with differing content, an
 `InventoryCollisionError` is raised.
