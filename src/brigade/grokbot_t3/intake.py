@@ -16,7 +16,11 @@ query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
     issue(number: $number) {
       title body lastEditedAt
-      comments(first: 100) { nodes { body authorAssociation createdAt lastEditedAt } }
+      labels(first: 100) { nodes { name } }
+      comments(first: 100) {
+        pageInfo { hasNextPage }
+        nodes { body authorAssociation createdAt lastEditedAt }
+      }
       timelineItems(itemTypes: [LABELED_EVENT, RENAMED_TITLE_EVENT], last: 50) {
         nodes {
           __typename
@@ -72,6 +76,15 @@ def fetch_snapshot(gh: Callable[[list[str]], tuple[int, str]], slug: str, number
             raise ValueError
         edited = issue["lastEditedAt"]
         edited_at = timestamp(edited) if edited is not None else None
+        current_labels = issue["labels"]["nodes"]
+        if not isinstance(current_labels, list):
+            raise ValueError
+        names = [entry["name"] for entry in current_labels]
+        if any(not isinstance(entry, str) for entry in names):
+            raise ValueError
+        more_comments = issue["comments"]["pageInfo"]["hasNextPage"]
+        if not isinstance(more_comments, bool):
+            raise ValueError
         comments = issue["comments"]["nodes"]
         events = issue["timelineItems"]["nodes"]
         if not isinstance(comments, list) or not isinstance(events, list):
@@ -101,6 +114,12 @@ def fetch_snapshot(gh: Callable[[list[str]], tuple[int, str]], slug: str, number
             parsed_comments.append((text, association, created, comment_edited_at))
     except (KeyError, TypeError, ValueError) as exc:
         raise IntakeError("snapshot-failed") from exc
+    # The label list came from an earlier call; a maintainer may have removed the label since.
+    if label not in names:
+        raise IntakeError("approval-revoked")
+    # The worker is told the snapshot is the whole task, so a truncated comment list is refused, not dropped.
+    if more_comments:
+        raise IntakeError("too-many-comments")
     if not approvals:
         raise IntakeError("approval-not-found")
     approval = max(approvals)

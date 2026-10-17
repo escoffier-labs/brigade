@@ -41,7 +41,8 @@ def snapshot_payload(**overrides):
         "title": "Approved title",
         "body": "Approved body",
         "lastEditedAt": None,
-        "comments": {"nodes": [comment()]},
+        "labels": {"nodes": [{"name": "grokbot-build-approved"}]},
+        "comments": {"pageInfo": {"hasNextPage": False}, "nodes": [comment()]},
         "timelineItems": {
             "nodes": [
                 {"__typename": "LabeledEvent", "createdAt": APPROVED_AT, "label": {"name": "grokbot-build-approved"}}
@@ -113,6 +114,7 @@ def test_snapshot_filters_comments_using_latest_matching_approval(make):
     payload = snapshot_payload(
         lastEditedAt=APPROVED_AT,
         comments={
+            "pageInfo": {"hasNextPage": False},
             "nodes": [
                 comment("Member text", "MEMBER", APPROVED_AT, APPROVED_AT),
                 comment("Untrusted text", "NONE"),
@@ -120,7 +122,7 @@ def test_snapshot_filters_comments_using_latest_matching_approval(make):
                 comment("Edited text", edited=AFTER),
                 comment("Collaborator text", "COLLABORATOR"),
                 comment("Owner text"),
-            ]
+            ],
         },
         timelineItems={
             "nodes": [
@@ -142,6 +144,8 @@ def test_snapshot_filters_comments_using_latest_matching_approval(make):
     "overrides,error",
     [
         ({"lastEditedAt": AFTER}, "edited-after-approval"),
+        ({"labels": {"nodes": [{"name": "other-label"}]}}, "approval-revoked"),
+        ({"comments": {"pageInfo": {"hasNextPage": True}, "nodes": [comment()]}}, "too-many-comments"),
         (
             {
                 "timelineItems": {
@@ -214,6 +218,11 @@ def test_snapshot_failure_releases_claim(make, response):
         (("lastEditedAt",), False),
         (("lastEditedAt",), "not a timestamp"),
         (("lastEditedAt",), "2026-10-16T11:00:00"),
+        (("labels",), None),
+        (("labels", "nodes"), {}),
+        (("labels", "nodes", 0, "name"), 7),
+        (("comments", "pageInfo"), None),
+        (("comments", "pageInfo", "hasNextPage"), "no"),
         (("comments",), []),
         (("comments", "nodes"), None),
         (("comments", "nodes", 0), None),

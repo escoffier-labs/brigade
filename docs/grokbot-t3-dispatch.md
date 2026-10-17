@@ -245,6 +245,9 @@ Comments by others, added after approval, or edited after approval are dropped.
 An issue whose body was edited or title renamed after approval is refused with `edited-after-approval`;
 re-apply the label to approve the new text. Missing approval events produce
 `approval-not-found`, and failed or malformed snapshots produce `snapshot-failed`.
+The snapshot rechecks that the approval label is still on the issue
+(`approval-revoked` if it was removed after listing), and an issue with more than
+100 comments is refused with `too-many-comments` rather than truncated.
 The worker follows the snapshot without fetching the issue or comments again,
 implements and tests the change, and opens a pull request without merging.
 Issue titles, bodies, and comments never enter intake's ledger or summary.
