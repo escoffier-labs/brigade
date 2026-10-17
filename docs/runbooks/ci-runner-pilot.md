@@ -39,7 +39,17 @@ when introducing an aggregate.
 Before activation, verify the server-side `brigade-trusted` runner group accepts
 only `.github/workflows/ci.yml@refs/heads/main` in this repository. Keep that exact
 workflow/ref restriction. Do not add pull-request refs or merge-queue refs.
-Prepare one ephemeral Ubuntu runner with system `python3` and Git available.
+Prepare one ephemeral Ubuntu runner with system Python 3.10 or newer and Git
+available. During provisioning, verify the interpreter before taking the clean
+snapshot or enabling the canary:
+
+```sh
+python3 -c 'import sys; print(sys.version); sys.exit(0 if sys.version_info >= (3, 10) else "Python 3.10+ required")'
+```
+
+Source execution bypasses the package installer, so the job cannot rely on
+`requires-python` to reject an unsupported interpreter. Keep the canary disabled
+if this check fails.
 
 With the compatible workflow on `main`, set repository variable
 `BRIGADE_SELF_HOSTED` to exactly `on` to enable the canary for subsequent pushes
