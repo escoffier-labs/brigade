@@ -24,7 +24,9 @@ def _notify(args, runtime):
             deadline, cursor, succeeded = time.monotonic() + args.timeout, args.wait, False
             while True:
                 try:
-                    replies, cursor = hub.wait_replies(args.wait, cursor)
+                    # Each poll is bounded by the CLI deadline, with at least 2 s so --timeout 0 checks once.
+                    poll_deadline = max(deadline, time.monotonic() + 2.0)
+                    replies, cursor = hub.wait_replies(args.wait, cursor, deadline=poll_deadline)
                     succeeded = True
                 except MillerError as error:
                     if error.code not in ("hub_unavailable", "hub_quota"):

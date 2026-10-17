@@ -156,6 +156,24 @@ def test_notify_wait_and_timeout(configured, capsys, responses, code, error):
     assert value.get("error") == error
 
 
+def test_notify_wait_passes_its_deadline(configured, capsys):
+    import time
+
+    target, _, _ = configured
+    seen = []
+
+    def wait(msg_id, cursor, *, deadline=None):
+        seen.append(deadline)
+        return [{"id": 2, "body": "answer"}], 2
+
+    started = time.monotonic()
+    with patch.object(cli.HubInbox, "wait_replies", side_effect=wait):
+        assert cli.main(["notify", "--target", str(target), "--wait", "1", "--timeout", "5"]) == 0
+    # Each poll is bounded by the CLI deadline (at least 2 s so --timeout 0 still checks once).
+    assert seen and started + 2 <= seen[0] <= time.monotonic() + 5
+    capsys.readouterr()
+
+
 def test_probe_route_failures_are_bounded(configured):
     target, runtime, _ = configured
     from brigade.miller.lifecycle import _load_config

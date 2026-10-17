@@ -420,9 +420,11 @@ class HubInbox:
             self.state.hub_upsert([row], node_id=self.config.node_id, clock=self.clock)
         return row
 
-    def wait_replies(self, msg_id: int, cursor: int) -> tuple[builtins.list[dict[str, Any]], int]:
+    def wait_replies(
+        self, msg_id: int, cursor: int, *, deadline: float | None = None
+    ) -> tuple[builtins.list[dict[str, Any]], int]:
         replies: builtins.list[dict[str, Any]] = []
-        for rows, next_cursor, _ in self._pages(after=cursor, agent=False, max_pages=5):
+        for rows, next_cursor, _ in self._pages(after=cursor, agent=False, max_pages=5, deadline=deadline):
             cursor = next_cursor
             replies.extend(
                 dict(id=row["id"], msg_id=msg_id, created_at=row["created_at"], body=row["body"])
@@ -430,8 +432,9 @@ class HubInbox:
                 if row.get("reply_to") == msg_id and row["sender"] == self.config.principal
             )
         for row in replies:
+            bound = {} if deadline is None else {"timeout": max(0.1, min(45.0, deadline - time.monotonic()))}
             try:
-                self._call("ack", row["id"], agent=False)
+                self._call("ack", row["id"], agent=False, **bound)
             except MillerError:
                 pass
         return replies, cursor

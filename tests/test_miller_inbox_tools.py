@@ -673,6 +673,15 @@ class TestHubInbox(HubFixture):
         self.assertEqual(self.rows("hub_inbox"), [])
         self.assertEqual(self.state.hub_get("node_spool_pending"), "1")
 
+    def test_wait_replies_bounds_requests_by_deadline(self):
+        # notify --wait passes its deadline, so a slow hub cannot hold one poll past it.
+        import time
+
+        self.hub.wait_replies(1, 0, deadline=time.monotonic() + 1.0)
+        timeouts = [c["timeout"] for c in self.runner.calls if c["action"] == "list_messages"]
+        self.assertTrue(timeouts)
+        self.assertTrue(all(0 < value <= 1.0 for value in timeouts), timeouts)
+
     def test_wait_replies_survives_ack_failure_and_ignores_other_threads(self):
         self.runner.add(sender="agent:miller", recipient="node-a", reply_to=1)
         self.runner.add(sender="agent:miller", recipient="node-a", reply_to=2)
