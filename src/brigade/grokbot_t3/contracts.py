@@ -23,6 +23,9 @@ TOOLS = frozenset(
     }
 )
 TERMINAL_STATES = frozenset({"succeeded", "failed", "interrupted"})
+# Provisional marker while a follow-up to a finished request is in flight; only that follow-up may replace it.
+REOPENING_STATE = "reopening"
+REOPENING_TTL_SECONDS = 600
 NOTIFY_STATES = TERMINAL_STATES | frozenset({"needs_attention", "unknown"})
 APPROVAL_DECISIONS = frozenset({"accept", "acceptForSession", "decline", "cancel"})
 INTERACTION_MODES = frozenset({"default", "plan"})

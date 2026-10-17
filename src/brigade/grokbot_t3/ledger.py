@@ -13,7 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from .contracts import TERMINAL_STATES, T3DispatchError
+from .contracts import REOPENING_STATE, REOPENING_TTL_SECONDS, TERMINAL_STATES, T3DispatchError
 
 IN_DOUBT_TTL = timedelta(hours=2)
 _SCHEMA = """
@@ -145,9 +145,18 @@ class Ledger:
         *,
         reset_status_failures: bool = True,
         expected_revision: int | None = None,
+        owner_write: bool = False,
     ) -> bool:
-        """Set state and advance its revision, optionally requiring an observed revision. Return whether applied."""
+        """Set state and advance its revision, optionally requiring an observed revision. Return whether applied.
+
+        Only the follow-up that set the provisional reopening marker (owner_write) may replace it while it is
+        fresh; pollers may replace it once it is older than REOPENING_TTL_SECONDS (the follow-up crashed).
+        """
         guard = " AND state_revision = ?" if expected_revision is not None else ""
+        params: tuple[Any, ...] = (expected_revision,) if expected_revision is not None else ()
+        if not owner_write:
+            guard += " AND (last_state != ? OR updated_at <= ?)"
+            params += (REOPENING_STATE, _ts(now - timedelta(seconds=REOPENING_TTL_SECONDS)))
         with self._lock:
             cursor = self._conn.execute(
                 "UPDATE requests SET notified_state = CASE WHEN last_state = ? THEN notified_state ELSE NULL END, "
@@ -157,7 +166,7 @@ class Ledger:
                 "status_poll_delay = CASE WHEN ? THEN 0 ELSE status_poll_delay END, "
                 "state_revision = state_revision + 1, last_state = ?, updated_at = ? WHERE request_id = ?" + guard,
                 (state, state, state, reset_status_failures, reset_status_failures, state, _ts(now), request_id)
-                + ((expected_revision,) if expected_revision is not None else ()),
+                + params,
             )
             return cursor.rowcount > 0
 

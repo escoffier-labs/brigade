@@ -98,11 +98,20 @@ class T3DispatchTools:
         except FleetTimeout as exc:
             raise c.T3DispatchError("unavailable") from exc
 
-    def _record_state(self, request_id: str, result: dict[str, Any], expected_revision: int | None = None) -> None:
+    def _record_state(
+        self,
+        request_id: str,
+        result: dict[str, Any],
+        expected_revision: int | None = None,
+        *,
+        owner_write: bool = False,
+    ) -> None:
         """Write the reported state; with expected_revision, only if no other actor changed the row meanwhile."""
         state = result.get("state")
         if isinstance(state, str):
-            self.ledger.update_state(request_id, state, self.now(), expected_revision=expected_revision)
+            self.ledger.update_state(
+                request_id, state, self.now(), expected_revision=expected_revision, owner_write=owner_write
+            )
 
     def capacity(self, _args: dict[str, Any]) -> dict[str, Any]:
         result = self._fleet(self.runner.capacity)
@@ -298,14 +307,16 @@ class T3DispatchTools:
         revision = row["state_revision"]
         if prior in c.TERMINAL_STATES:
             # Mark the row open before t3-fleet can reopen the work, so a crash cannot hide the new turn.
-            reopened = self.ledger.update_state(request_id, "unknown", self.now(), expected_revision=revision)
+            reopened = self.ledger.update_state(
+                request_id, c.REOPENING_STATE, self.now(), expected_revision=revision, owner_write=True
+            )
             current = self.ledger.get(request_id)
             revision = current["state_revision"] if current else revision
         try:
             result = self.runner.followup(request_id, args["message"], row["interaction_mode"])
         except (FleetTimeout, FleetProtocolError) as exc:
             # t3-fleet may have accepted the turn, so the request is open again until a status call says otherwise.
-            self.ledger.update_state(request_id, "unknown", self.now(), expected_revision=revision)
+            self.ledger.update_state(request_id, "unknown", self.now(), expected_revision=revision, owner_write=True)
             raise c.T3DispatchError("submit-unknown", request_id=request_id) from exc
         except FleetCallError as exc:
             if reopened:
@@ -316,9 +327,9 @@ class T3DispatchTools:
             raise _fleet_error(exc) from exc
         if not isinstance(result.get("state"), str):
             # Accepted but state-less: the request may have reopened, so keep it open until a status call says otherwise.
-            self.ledger.update_state(request_id, "unknown", self.now(), expected_revision=revision)
+            self.ledger.update_state(request_id, "unknown", self.now(), expected_revision=revision, owner_write=True)
             raise c.T3DispatchError("submit-unknown", request_id=request_id)
-        self._record_state(request_id, result, expected_revision=revision)
+        self._record_state(request_id, result, expected_revision=revision, owner_write=True)
         return project_status(result)
 
     def answer(self, args: dict[str, Any]) -> dict[str, Any]:

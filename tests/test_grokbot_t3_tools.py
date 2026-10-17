@@ -531,7 +531,7 @@ def test_terminal_followup_is_open_while_fleet_runs(make, monkeypatch):
 
     monkeypatch.setattr(runner, "followup", watching_followup)
     out = tools.call_tool("t3_followup", {"request_id": "r1", "message": "again"})
-    assert seen == ["unknown"]
+    assert seen == ["reopening"]
     assert out["error"]["code"] == "fleet-error"
     row = ledger.get("r1")
     assert row["last_state"] == "succeeded"
@@ -549,3 +549,35 @@ def test_status_does_not_overwrite_a_newer_state(make, monkeypatch):
     monkeypatch.setattr(runner, "status", racing_status)
     tools.call_tool("t3_status", {"request_id": "r1"})
     assert ledger.get("r1")["last_state"] == "needs_attention"
+
+
+def test_status_during_followup_cannot_clobber_the_reopen(make, monkeypatch):
+    tools, runner, ledger = make()
+    _submit(tools)
+    ledger.update_state("r1", "succeeded", NOW)
+
+    def racing_followup(request_id, prompt, interaction_mode="default"):
+        # A direct status call lands while t3-fleet is accepting the follow-up and still reports the old turn.
+        monkeypatch.setattr(runner, "status", lambda rid: {"request_id": rid, "state": "succeeded"})
+        tools.call_tool("t3_status", {"request_id": request_id})
+        assert ledger.get(request_id)["last_state"] == "reopening"
+        return {"request_id": request_id, "state": "running"}
+
+    monkeypatch.setattr(runner, "followup", racing_followup)
+    out = tools.call_tool("t3_followup", {"request_id": "r1", "message": "again"})
+    assert out["state"] == "running"
+    assert ledger.get("r1")["last_state"] == "running"
+    assert ledger.open_count(NOW) == 1
+
+
+def test_stale_reopening_marker_can_be_replaced_by_pollers(make):
+    from datetime import timedelta
+
+    from brigade.grokbot_t3 import contracts as c
+
+    tools, runner, ledger = make()
+    _submit(tools)
+    ledger.update_state("r1", c.REOPENING_STATE, NOW, owner_write=True)
+    assert not ledger.update_state("r1", "succeeded", NOW + timedelta(seconds=60))
+    assert ledger.update_state("r1", "succeeded", NOW + timedelta(seconds=c.REOPENING_TTL_SECONDS + 1))
+    assert ledger.get("r1")["last_state"] == "succeeded"
