@@ -390,7 +390,8 @@ class T3FleetClient:
         except (OSError, subprocess.SubprocessError) as exc:
             raise TransportDenial("t3-client-error", f"t3-fleet {argv[0]} failed to run: {exc}") from exc
 
-        self.check_cancellation()
+        if argv[0] != "submit":
+            self.check_cancellation()
         stdout = _bounded(getattr(completed, "stdout", "") or "")
         stderr = _one_line(getattr(completed, "stderr", "") or "")
         code = int(getattr(completed, "returncode", 1) or 0)
@@ -691,6 +692,7 @@ def execute_remote(
         # recovers the existing request instead of resubmitting the prompt.
         if on_handle is not None:
             on_handle(delegation_id, request_id)
+        client.check_cancellation()
         state = _state(submitted)
         if state in TERMINAL_STATES or state in ATTENTION_STATES:
             return _outcome_from(

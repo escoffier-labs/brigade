@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import threading
 import time
+from contextlib import contextmanager
 from functools import wraps
-from typing import Any, Callable
+from typing import Any, Callable, Iterator
 
 from . import fleet_client, proc, runguard
 from .roster import Roster
@@ -18,6 +19,20 @@ CLAIM_LOSS_KILL_GRACE_SECONDS = 0.5
 
 class ClaimLossCancelled(BaseException):
     """Unwind claim loss without recording an operator or provider failure."""
+
+
+@contextmanager
+def cancellation_boundary(check: Callable[[], None]) -> Iterator[None]:
+    """Check loss after a call without replacing a failure that retains the lock."""
+    try:
+        yield
+    except runguard.RetainRunLockError:
+        raise
+    except BaseException:
+        check()
+        raise
+    else:
+        check()
 
 
 def guard_run(function: Callable[..., int]) -> Callable[..., int]:
@@ -56,6 +71,7 @@ class ClaimLossCancellation:
         self.outcomes: tuple[proc.ProcessCancelOutcome, ...] = ()
         self._done = threading.Event()
         self._watcher: threading.Thread | None = None
+        self._shutdown_deadline: float | None = None
 
     def __enter__(self) -> ClaimLossCancellation:
         self._watcher = threading.Thread(target=self._watch, name="brigade-claim-cancel", daemon=True)
@@ -63,21 +79,30 @@ class ClaimLossCancellation:
         return self
 
     def __exit__(self, *_exc: object) -> None:
+        while True:
+            try:
+                self._finish_exit()
+                return
+            except KeyboardInterrupt:
+                if not self._requested.is_set():
+                    raise
+
+    def _finish_exit(self) -> None:
         self._stopped.set()
-        deadline = time.monotonic() + self.process_registry.cancellation_timeout
+        if self._shutdown_deadline is None:
+            self._shutdown_deadline = time.monotonic() + self.process_registry.cancellation_timeout
+        deadline = self._shutdown_deadline
         while not self._done.is_set():
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 raise runguard.RetainRunLockError("claim-loss cancellation timed out; local run lock retained")
-            try:
-                self._done.wait(remaining)
-            except KeyboardInterrupt:
-                if not self._requested.is_set():
-                    raise
+            self._done.wait(remaining)
         if self._requested.is_set():
             # Include failures retained by concurrent dispatch cleanup and late registration.
             try:
                 self.outcomes += self.process_registry.cancellation_outcomes
+            except KeyboardInterrupt:
+                raise
             except BaseException as exc:
                 raise runguard.RetainRunLockError(
                     "claim-loss cancellation outcomes unavailable; local run lock retained"

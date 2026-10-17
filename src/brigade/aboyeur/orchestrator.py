@@ -1318,10 +1318,8 @@ def run(
                     process_registry=process_registry,
                     **appserver_kwargs,
                 )
-                try:
+                with claim_loss_cancellation.cancellation_boundary(check_cancellation):
                     appserver.start()
-                finally:
-                    check_cancellation()
             except codex_appserver.AppServerError as exc:
                 close_appserver()
                 transport_routing_payload = seat_health_policy.transport_fallback_decision(
