@@ -269,14 +269,25 @@ _ADDITIVE_COLUMNS = (
     ("events", "context", "ALTER TABLE events ADD COLUMN context TEXT"),
     ("model_policy", "t3_model", "ALTER TABLE model_policy ADD COLUMN t3_model TEXT NOT NULL DEFAULT ''"),
 )
+_ADDITIVE_INDEXES = (
+    ("claims_owner_expiry", "CREATE INDEX IF NOT EXISTS claims_owner_expiry ON claims (owner_node, expires_at)"),
+)
 
 
 def _missing_additive_columns(conn: sqlite3.Connection) -> list[str]:
-    return [
+    missing = [
         ddl
         for table, column, ddl in _ADDITIVE_COLUMNS
         if column not in {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
     ]
+    # Index repair shares the current-version self-heal transaction and its
+    # read-only fast path. Claim fencing tables retain their strict validation.
+    missing.extend(
+        ddl
+        for name, ddl in _ADDITIVE_INDEXES
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?", (name,)).fetchone() is None
+    )
+    return missing
 
 
 # Per-node credentials (schema v4, issue #1150): node_id -> SHA-256 of the
@@ -555,6 +566,8 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     if _claims_table_needs_migration(_claims_columns(conn)):
         _migrate_claims_table(conn)
     fleet_hub_claims.migrate_schema(conn)
+    for _name, ddl in _ADDITIVE_INDEXES:
+        conn.execute(ddl)
     conn.execute("CREATE INDEX IF NOT EXISTS events_run_seq ON events (node_id, run_id, sequence)")
     conn.execute("CREATE INDEX IF NOT EXISTS events_received_at ON events (received_at)")
     # v29 -> v30: Grokbot runs span nodes. Seek their first event without

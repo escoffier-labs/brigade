@@ -1082,6 +1082,10 @@ class FleetClaimExpiredError(FleetClaimHeldError):
     """A granted response arrived after its conservative local deadline."""
 
 
+class FleetClaimQuotaError(FleetClaimHeldError):
+    """The hub refused another active claim for this node."""
+
+
 class FleetClaimAuthError(FleetClaimHeldError):
     """The hub refused a claim on credentials (HTTP 401/403): the token is
     unknown, revoked, or not allowed to write.
@@ -1218,6 +1222,8 @@ def _claim_op(
     payload = payload if isinstance(payload, dict) else {}
     detail = payload.get("error") if isinstance(payload.get("error"), str) else None
     owner = payload.get("owner") if isinstance(payload.get("owner"), dict) else None
+    if status == 409 and payload.get("reason") == "claim-cardinality-exceeded":
+        return ClaimDecision(granted=False, reason="quota", detail=detail, holder=holder)
     if status in (401, 403):
         # A stable credential answer (#1161): retrying cannot heal it and it
         # must never be mistaken for a transport failure (which would fail
@@ -1700,6 +1706,12 @@ def repo_claim(
         # owner means the target freed mid-request.
         request_start = time.monotonic()
         decision = acquire_claim(target, supersede_dead_owner=supersede_dead_owner, **acquire_kwargs)
+    if not decision.granted and decision.reason == "quota":
+        if ambiguous_initial_acquire:
+            _schedule_orphan_release(
+                target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds
+            )
+        raise FleetClaimQuotaError(f"fleet hub claim quota refused {target!r}: {decision.detail}")
     if not decision.granted and decision.reason == "auth-failed":
         # Fail closed (#1161): bad credentials would turn "the hub refused"
         # into "every node runs unprotected on its local lock". No retry,
@@ -1888,7 +1900,7 @@ def repo_claim(
                     except Exception:
                         _LOG.warning("fleet credential-failure callback raised; the run keeps unwinding", exc_info=True)
                 return
-            if outcome.reason == "held":
+            if outcome.reason in ("held", "quota"):
                 lease.terminate(outcome.reason, notify=True)
                 return
             if lease.terminate(outcome.reason):

@@ -707,3 +707,49 @@ Hub-arbitrated repo claims (`POST /claims`, `GET /claims`,
   intent that keeps honest clients from stealing each other's claims, not
   an authorization — any enrolled node may still `--force`, attributed to
   its own `node_id`.
+
+### Hub request and claim bounds
+
+The Hub checks declared request length before reading or parsing a JSON body.
+Bodies above 8 MiB return HTTP 413. Missing, ambiguous, or invalid body framing
+returns HTTP 400 and closes the connection. Transfer-Encoding and duplicate
+Content-Length headers are refused. Worklore retains its smaller 256 KiB body
+limit and 1 MiB import limit. Dashboard enrollment retains its 16 KiB body limit.
+
+Before JSON decoding, regex scans check nesting and aggregate complexity.
+A document accepts at most 32 levels of containers, 32768 objects and arrays in
+total, and 131072 aggregate items. Each array element or object member counts as
+one item. Duplicate object keys count separately during the scan. Punctuation
+inside strings does not count. Decoded objects and arrays also accept at most
+1000 items each, with aggregate checks repeated after decoding. These checks
+cover fields that domain validators ignore. Violations return HTTP 400 before
+ingestion starts. An invalid item rejects the entire event batch. Existing event
+string bounds still apply.
+
+Each node may hold at most 1024 active claims. A new acquisition beyond that
+limit returns HTTP 409 with `reason=claim-cardinality-exceeded`. Direct API callers
+receive `ClaimCardinalityError`. Existing claims remain held. Retry, renewal,
+release, and replacement of an existing target stay available. The quota check
+runs after existing-target decisions inside the acquisition write transaction.
+Expired claims do not consume the active quota. An index on
+`claims(owner_node, expires_at)` supports the count and is created idempotently
+at startup, including on current-version databases, without a schema version bump.
+
+The response includes an empty `owner` object so deployed clients classify the
+409 as a definite refusal instead of falling back to local-only work. New fleet
+clients classify this refusal as `quota`. `repo_claim` raises
+`FleetClaimQuotaError`, a subclass of `FleetClaimHeldError`, before admitting
+work. An ambiguous initial acquire followed by quota refusal schedules cleanup
+fenced to the original holder token. CLI JSON includes the decision reason.
+A heartbeat quota refusal terminates the lease through the existing claim
+loss channel. The default policy cancels guarded work.
+
+The 1 MiB Worklore import ceiling predates these changes. A contract-shaped batch
+of 500 observations can serialize to about 4.27 MB and exceed it. This
+incompatibility still needs a follow-up. The import ceiling remains 1 MiB.
+
+GET endpoints and fleet list clients retain their existing response behavior.
+Result-set bounds, keyset pagination, and a current-status projection move to
+[the 0.29.0 follow-up](https://github.com/escoffier-labs/brigade/issues/1738).
+Retention, POST throttling, per-node fairness behind a proxy, and the fronting
+proxy runbook also remain deferred to that issue.
