@@ -1,5 +1,7 @@
 # Run Adapter Evidence
 
+Status (2026-10-17): shipped in #234 (1cf74a833).
+
 ## Goal
 
 Make every `brigade run` CLI adapter preserve enough process evidence to

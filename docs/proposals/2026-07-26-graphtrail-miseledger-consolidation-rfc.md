@@ -1,6 +1,6 @@
 # RFC: GraphTrail and MiseLedger product and release ownership
 
-Status: draft, awaiting operator decision
+Status (2026-10-17): Option A accepted in #352. Source consolidation shipped in #379 (9925d3d29) and #381 (1fc58554f), with archival recorded in #424 (980834dd7).
 
 Decision owner: operator
 

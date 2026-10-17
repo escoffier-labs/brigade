@@ -1,6 +1,6 @@
 # Care-managed maintainer memory jobs
 
-Status: proposed  
+Status (2026-10-17): per-job registration support shipped in #901 (de3672b49). Operator job cutover is not verified here.
 Issue: #762  
 Depends on: the target-scoped `brigade care` redo from #759
 

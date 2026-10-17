@@ -1,7 +1,7 @@
 # Worklore Ledger Specification
 
 Date: 2026-08-29
-Status: proposed for operator review
+Status (2026-10-17): core ledger and GitHub/Brigade adapters shipped in #1361 (c55a1c046). Ops Deck integration is tracked separately.
 
 ## Decision summary
 

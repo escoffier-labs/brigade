@@ -1,5 +1,7 @@
 # Eval cell identity and resume semantics
 
+Status (2026-10-17): shipped in #436 (645ff6a96).
+
 This document is the contract for `brigade.eval_cell.v1` receipts produced by
 `src/brigade/model_trials.py`. It freezes the rules that become compatibility
 surfaces at the stable cut: how `cell_id` is derived, what `execute --resume`
