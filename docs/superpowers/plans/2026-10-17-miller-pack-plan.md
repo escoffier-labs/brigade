@@ -265,6 +265,8 @@ with `workload`, `override_reason` and `allow_queue` present only when given.
 
 ## Task 8: hub, memory and inbox tools
 
+> Execution note (2026-10-17): Task 8 was split into 8a (inbox_tools.py and hub_inbox.py over the message API, committed 5a1d8bfe) and 8b (hub_tools.py, memory_tools.py, adapter.py).
+
 **Files:** Create `src/brigade/miller/hub_tools.py`, `memory_tools.py`, `inbox_tools.py`, `adapter.py`, and their three test files.
 
 - [ ] Port tests: `test_bridge_v2.py` `OverviewAndMemoryChecks` (505-578), `HandoffChecks` (579-634), `InboxChecks` (664-713, hub-mode cases only), `CompositionChecks` (748-end); `test_bridge_v4.py` all; `test_bridge_v5.py` `V5Digest` (262-385); `test_bridge_v6.py` `HubInboxChecks` (157-649) and `InboxTrustChecks` (1083-end). Replace `FakeHubRunner` (argv for `brigade fleet msg`) with a fake of `brigade.fleet_client_messages` functions patched via `monkeypatch.setattr`.
