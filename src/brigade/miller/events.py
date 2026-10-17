@@ -308,9 +308,18 @@ class EventService:
                 last_normal = c.execute("SELECT max(timestamp) FROM wake_attempts WHERE priority='normal'").fetchone()[
                     0
                 ]
-                if count >= 30 or (
-                    row["priority"] == "normal" and last_normal is not None and (now - last_normal < 300)
-                ):
+                retry_at = None
+                if count >= 30:
+                    oldest = c.execute("SELECT min(timestamp) FROM wake_attempts").fetchone()[0]
+                    retry_at = oldest + 3600
+                if row["priority"] == "normal" and last_normal is not None and (now - last_normal < 300):
+                    retry_at = max(retry_at or 0, last_normal + 300)
+                if retry_at is not None:
+                    # Defer to the window end so the row is not reselected and rewritten every second.
+                    c.execute(
+                        "UPDATE event_deliveries SET next_attempt=? WHERE event_id=? AND subscription_id=?",
+                        (retry_at, row["event_id"], row["subscription_id"]),
+                    )
                     continue
                 # Reserve failures too, so retries cannot exceed the hourly wake ceiling.
                 c.execute("INSERT INTO wake_attempts VALUES (?,?)", (now, row["priority"]))

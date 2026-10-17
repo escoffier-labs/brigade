@@ -212,6 +212,31 @@ class EventIntegrationChecks(EventFixture):
 
         asyncio.run(scenario())
 
+    def test_throttled_deliveries_are_deferred_to_the_window_end(self):
+        # A throttled row must not be re-selected (and rewritten) every second until its window ends.
+        def pending():
+            with self.state.transaction() as c:
+                return [r[0] for r in c.execute("SELECT next_attempt FROM event_deliveries WHERE state='pending'")]
+
+        async def scenario():
+            await self.subscribe()
+            now = time.time()
+            self.notify("agent", "normal")
+            await self.events.deliver(now)
+            self.notify("agent", "later normal")
+            await self.events.deliver(now + 1)
+            self.assertEqual(pending(), [now + 300])
+            await self.events.deliver(now + 301)
+            for i in range(40):
+                self.notify("agent", "urgent " + str(i), priority="urgent")
+            await self.events.deliver(now + 302)
+            self.assertEqual(len(self.deliveries), 30)
+            # The ceiling frees one slot when the oldest attempt (at now) leaves the hour.
+            self.assertTrue(pending())
+            self.assertTrue(all(value == now + 3600 for value in pending()), pending())
+
+        asyncio.run(scenario())
+
     def test_completion_only_for_tracked_requests_and_followup_generation(self):
         operation = self.state.begin_operation("fleet_submit", {})
         self.state.finish_operation(operation, REQUEST, "ok")
