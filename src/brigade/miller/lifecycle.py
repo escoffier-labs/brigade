@@ -20,7 +20,7 @@ from . import contracts as c
 from .access_auth import AccessVerifier, METADATA_PATH, bounded_headers, unique_object
 from .adapter import MillerTools, build_tools, validate_arguments
 from .events import EventService, EventsApp, IDENTITY
-from .runtime_config import Runtime, load_runtime, validate_runtime_reference
+from .runtime_config import Runtime, load_runtime
 from .safe_state import identity
 from .server import register_tools
 from .state import BridgeState, call_label
@@ -238,47 +238,6 @@ def _valid_host(value: object) -> bool:
         return False
 
 
-def _load_validated_instance(target: Path) -> dict[str, Any]:
-    """Temporary loader until the connector is registered in the pack registry."""
-    try:
-        value = json.loads(
-            grokbot_ops._read_regular_text(grokbot_packs.instance_config_path(target, c.PACK_ID)),
-            object_pairs_hook=unique_object,
-        )
-        required = {
-            "schema",
-            "pack_id",
-            "pack_version",
-            "bind",
-            "allowed_hosts",
-            "allowed_origins",
-            "public_route",
-            "runtime_path",
-        }
-        c.require(isinstance(value, dict) and required <= set(value) <= required | {"host_local"}, "invalid_config")
-        c.require(
-            value["schema"] == "brigade.grokbot.connector-instance.v1" and value["pack_id"] == c.PACK_ID,
-            "invalid_config",
-        )
-        c.require(
-            isinstance(value["pack_version"], str) and bool(grokbot_packs.VERSION_RE.fullmatch(value["pack_version"])),
-            "invalid_config",
-        )
-        grokbot_packs._parse_default_bind(value["bind"])
-        for key, validator in (("allowed_hosts", _valid_host), ("allowed_origins", grokbot_mcp._valid_origin)):
-            c.require(isinstance(value[key], list) and all(validator(item) for item in value[key]), "invalid_config")
-        c.require(
-            isinstance(value["public_route"], str)
-            and bool(grokbot_packs.PUBLIC_ROUTE_RE.fullmatch(value["public_route"])),
-            "invalid_config",
-        )
-        c.require("host_local" not in value or type(value["host_local"]) is bool, "invalid_config")
-        value["runtime_path"] = validate_runtime_reference(value["runtime_path"])
-        return value
-    except (OSError, ValueError, TypeError, KeyError):
-        raise c.MillerError("invalid_config") from None
-
-
 def _load_config(
     target: Path,
     *,
@@ -286,7 +245,7 @@ def _load_config(
     allowed_hosts: list[str] | None = None,
     allowed_origins: list[str] | None = None,
 ) -> tuple[MillerListenerConfig, Runtime]:
-    instance = _load_validated_instance(target)
+    instance = grokbot_packs._load_instance_config(target, c.PACK_ID)
     host, port = grokbot_packs._parse_default_bind(bind if bind is not None else instance["bind"])
     hosts = instance["allowed_hosts"] if allowed_hosts is None else allowed_hosts
     origins = instance["allowed_origins"] if allowed_origins is None else allowed_origins
@@ -450,7 +409,7 @@ def _hardening(runtime: Runtime) -> str:
 
 
 def render_unit(target: Path, *, python: str | None = None) -> str:
-    instance = _load_validated_instance(target)
+    instance = grokbot_packs._load_instance_config(target, c.PACK_ID)
     runtime = load_runtime(Path(instance["runtime_path"]))
     args = [
         python or sys.executable,
