@@ -393,8 +393,11 @@ class TestHubClaims:
         status, payload = _post(url, token, _claim("release"))
         assert (status, payload) == (200, {"released": True})
         status, payload = _post(url, token, _claim("release"))
-        assert status == 409 and payload["reason"] == "stale-holder"
-        assert _post(url, token, _claim("release", holder="fresh-missing")) == (200, {"released": False})
+        assert status == 200 and payload["reason"] == "stale-holder"
+        assert _post(url, token, _claim("release", holder="fresh-missing")) == (
+            200,
+            {"released": False, "reason": "stale-holder"},
+        )
         assert _post(url, token, _claim(node=NODE_B))[1]["granted"] is True
 
     def test_conductor_distinguishes_owners_on_one_node(self, hub):

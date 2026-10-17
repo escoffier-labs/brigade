@@ -1196,7 +1196,7 @@ def _release_session(
         return 2
     harness, role, job, session = labels["harness"], labels["role"], labels["job"], labels["session"]
     decision = fleet_client.release_claim(target, holder=holder)
-    if _print_claim_failure(decision, what="release"):
+    if not (as_json and decision.reason == "stale-holder") and _print_claim_failure(decision, what="release"):
         return 1
     published = None
     if decision.granted and outcome is not None:
@@ -1222,6 +1222,8 @@ def _release_session(
                 sort_keys=True,
             )
         )
+    if as_json and decision.reason == "stale-holder":
+        _print_claim_failure(decision, what="release")
     if decision.granted:
         if not as_json:
             print(f"released claim on {target!r}")

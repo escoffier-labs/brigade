@@ -39,9 +39,169 @@ def snapshot(conn):
     )
 
 
+def test_retirement_horizon_boundary_preserves_target_fences(authority):
+    from brigade import fleet_hub_claims
+
+    conn, _, clock = authority
+    request(conn, "release")
+    original = fence(conn)
+    horizon = getattr(fleet_hub_claims, "RETIRED_HOLDER_HORIZON_SECONDS", 604800)
+    clock["now"] += horizon
+    assert request(conn)[1]["reason"] == "stale-holder"
+    clock["now"] += 1
+    # Expired history is no longer authority, even before a background sweep.
+    assert request(conn)[1]["granted"] is True
+    assert fence(conn) == original + 1
+    assert conn.execute("SELECT COUNT(*) FROM claim_retired_holders").fetchone()[0] == 0
+
+
+def test_expired_history_makes_room_before_capacity_refusal(authority, monkeypatch):
+    from brigade import fleet_hub_claims
+
+    conn, _, clock = authority
+    request(conn, "release")
+    monkeypatch.setattr(fleet_hub_claims, "MAX_RETIRED_HOLDERS", 1)
+    clock["now"] += getattr(fleet_hub_claims, "RETIRED_HOLDER_HORIZON_SECONDS", 604800) + 1
+    assert request(conn, "release", holder="fake-next")[0] == 200
+    assert fence(conn) == 2
+    assert conn.execute("SELECT holder_token FROM claim_retired_holders").fetchall() == [("fake-next",)]
+
+
+def test_per_node_retirement_quota_isolates_abusive_free_target_releases(authority, monkeypatch):
+    from brigade import fleet_hub_claims
+
+    conn, _, _ = authority
+    monkeypatch.setattr(fleet_hub_claims, "MAX_RETIRED_HOLDERS_PER_NODE", 1, raising=False)
+    request(conn, "release", node="fake-abuser")
+    before = snapshot(conn)
+    with pytest.raises(hub.FleetHubError, match="quota"):
+        request(conn, "release", node="fake-abuser", holder="fake-next")
+    assert snapshot(conn) == before
+    assert request(conn, node="fake-neighbor", holder="fake-fresh")[0] == 200
+    assert request(conn, "release", node="fake-neighbor", holder="fake-fresh")[0] == 200
+
+
+def test_prune_leaves_unretirable_unrelated_target_in_place(authority, monkeypatch):
+    from brigade import fleet_hub_claims
+
+    conn, _, clock = authority
+    request(conn, ttl_seconds=1)
+    request(conn, "release", target="fake-other-history")
+    monkeypatch.setattr(fleet_hub_claims, "MAX_RETIRED_HOLDERS_PER_NODE", 1, raising=False)
+    clock["now"] += 1
+    assert request(conn, target="fake-neighbor", node="fake-neighbor")[0] == 200
+    assert conn.execute("SELECT 1 FROM claims WHERE target='fake-target'").fetchone()
+    assert fence(conn) == 1
+    with pytest.raises(hub.FleetHubError, match="quota"):
+        request(conn, holder="fake-new-holder")
+
+
+def test_refused_cleanup_also_refuses_late_generationless_acquire(authority, monkeypatch):
+    from brigade import fleet_hub_claims
+
+    conn, _, _ = authority
+    request(conn, "release", target="fake-budget")
+    monkeypatch.setattr(fleet_hub_claims, "MAX_RETIRED_HOLDERS", 1)
+    before = snapshot(conn)
+    with pytest.raises(hub.FleetHubError, match="capacity"):
+        request(conn, "release")
+    with pytest.raises(hub.FleetHubError, match="capacity"):
+        request(conn)
+    assert snapshot(conn) == before
+
+
+def test_schema33_migration_preserves_retirements_and_starts_conservative_horizon(authority):
+    conn, path, clock = authority
+    request(conn)
+    live = snapshot(conn)[:2]
+    conn.execute("DROP TABLE claim_retired_holders")
+    conn.execute("""CREATE TABLE claim_retired_holders (
+        target TEXT NOT NULL, owner_node TEXT NOT NULL, holder_token TEXT NOT NULL,
+        generation INTEGER NOT NULL
+            CHECK (typeof(generation) = 'integer' AND generation >= 1 AND generation <= 9223372036854775807),
+        PRIMARY KEY (target, owner_node, holder_token)
+        )""")
+    conn.execute("INSERT INTO claim_retired_holders VALUES ('fake-target','fake-node','fake-old',1)")
+    conn.execute("PRAGMA user_version=33")
+    conn.commit()
+    with hub.init_db(path) as migrated:
+        assert snapshot(migrated)[:2] == live
+        assert migrated.execute("SELECT retired_at FROM claim_retired_holders").fetchone() == (clock["now"],)
+        assert request(migrated, holder="fake-old")[1]["reason"] == "stale-holder"
+        assert request(migrated, "renew")[0] == 200
+
+
+def test_unmigrated_schema32_claim_export_does_not_require_retired_table(authority):
+    from datetime import datetime, timezone
+    from brigade import fleet_export, fleet_hub_claims
+
+    conn, _, clock = authority
+    request(conn)
+    conn.execute("DROP TABLE claim_retired_holders")
+    conn.execute("PRAGMA user_version=32")
+    conn.commit()
+    fleet_hub_claims.validate_schema(conn)
+    records = list(fleet_export.iter_claim_records(conn, now=datetime.fromtimestamp(clock["now"], timezone.utc)))
+    assert len(records) == 1
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 32
+    assert not conn.execute("SELECT 1 FROM sqlite_master WHERE name='claim_retired_holders'").fetchone()
+
+
+@pytest.mark.parametrize("scope", ["node", "force"])
+def test_ingress_snapshot_missing_schema_is_fence_refusal(authority, scope):
+    from brigade.fleet_hub_claims import ClaimFenceError
+
+    conn, _, _ = authority
+    conn.execute("DROP TABLE claim_fences")
+    conn.commit()
+    with pytest.raises(ClaimFenceError, match="fence storage"):
+        request(conn, "release", scope=scope, acquired_at="2023-11-14T22:13:20Z")
+
+
+def test_missing_row_holder_release_is_idempotent_stale_payload(authority):
+    conn, _, _ = authority
+    request(conn, "release")
+    before = snapshot(conn)
+    assert request(conn, "release") == (200, {"released": False, "reason": "stale-holder"})
+    assert snapshot(conn) == before
+
+
+def test_status_exposes_retired_history_budget(http_authority):
+    from brigade import fleet_hub_claims
+
+    conn, _, address = http_authority
+    request(conn, "release")
+    client = HTTPConnection(*address, timeout=5)
+    try:
+        client.request("GET", "/status", headers={"Authorization": "Bearer fake-admin-token"})
+        response = client.getresponse()
+        assert response.status == 200
+        budget = json.loads(response.read())["claim_fencing"]
+        assert budget["retired_holder_rows"] == 1
+        assert budget["retired_holder_horizon_seconds"] == fleet_hub_claims.RETIRED_HOLDER_HORIZON_SECONDS
+    finally:
+        client.close()
+
+
+def test_fence_refusal_never_admits_local_only_work(http_authority, monkeypatch):
+    conn, _, address = http_authority
+    conn.execute("DROP TABLE claim_fences")
+    conn.commit()
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_config",
+        lambda: {"hub_url": f"http://{address[0]}:{address[1]}", "token": "fake-admin-token"},
+    )
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda base_path=None: "fake-node")
+    monkeypatch.setattr(fleet_client, "_schedule_orphan_release", lambda *a, **kw: pytest.fail("fallback cleanup"))
+    with pytest.raises(fleet_client.FleetClaimHeldError, match="claim-fence-refused"):
+        with fleet_client.repo_claim("fake-target"):
+            pytest.fail("fence refusal admitted local-only work")
+
+
 def test_missing_holder_release_fences_a_late_legacy_acquire(authority):
     conn, path, _ = authority
-    assert request(conn, "release") == (200, {"released": False})
+    assert request(conn, "release") == (200, {"released": False, "reason": "stale-holder"})
     # The abandoned POST can first reach the hub after cleanup and restart.
     with hub.init_db(path) as reopened:
         status, result = request(reopened)
@@ -116,7 +276,8 @@ def test_retirement_survives_restart_and_refuses_only_old_holder(authority, endi
     with hub.init_db(path) as reopened:
         for action in ("acquire", "renew", "release"):
             status, response = request(reopened, action)
-            assert status == 409 and response["reason"] == "stale-holder"
+            assert status == (200 if action == "release" and ending != "supersede" else 409)
+            assert response["reason"] == "stale-holder"
         if ending == "supersede":
             assert request(reopened, "renew", holder="fake-replacement")[1]["renewed"] is True
         else:
@@ -305,7 +466,10 @@ def test_http_fence_refusal_is_structured_503_without_mutation(http_authority, m
         )
     conn.commit()
     before = snapshot(conn)
-    assert http_claim(address, method) == (503, {"error": "claim generation fence is missing or corrupt"})
+    assert http_claim(address, method) == (
+        503,
+        {"error": "claim generation fence is missing or corrupt", "reason": "claim-fence-refused"},
+    )
     assert snapshot(conn) == before
 
 
@@ -323,7 +487,7 @@ def test_http_storage_limits_are_503_and_roll_back_pruning(http_authority, monke
     clock["now"] += 2
     before = snapshot(conn)
     error = "claim generation fence capacity exceeded" if refusal == "capacity" else "claim generation fence exhausted"
-    assert http_claim(address, "POST", target="fake-new") == (503, {"error": error})
+    assert http_claim(address, "POST", target="fake-new") == (503, {"error": error, "reason": "claim-fence-refused"})
     assert snapshot(conn) == before
 
 
@@ -364,7 +528,10 @@ def test_live_retry_renew_release_missing_release_and_reacquire(authority):
     assert request(conn, "renew")[1]["claim"]["generation"] == 1
     assert request(conn, "release") == (200, {"released": True})
     assert request(conn, "inspect")[1]["generation"] == 2
-    assert request(conn, "release", holder="fake-missing-holder") == (200, {"released": False})
+    assert request(conn, "release", holder="fake-missing-holder") == (
+        200,
+        {"released": False, "reason": "stale-holder"},
+    )
     assert fence(conn) == 3
     assert request(conn, holder="fake-fresh-holder")[1]["claim"]["generation"] == 4
     assert hub.list_claims(conn)[0]["generation"] == 4
@@ -639,7 +806,10 @@ def test_authenticated_html_fence_refusal_is_structured_503(http_authority, path
         client.request("GET", path, headers={"Authorization": "Bearer fake-admin-token"})
         response = client.getresponse()
         assert response.status == 503
-        assert json.loads(response.read()) == {"error": "claim generation fence is missing or corrupt"}
+        assert json.loads(response.read()) == {
+            "error": "claim generation fence is missing or corrupt",
+            "reason": "claim-fence-refused",
+        }
     finally:
         client.close()
     assert snapshot(conn) == before

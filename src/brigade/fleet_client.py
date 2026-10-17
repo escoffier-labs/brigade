@@ -1115,7 +1115,7 @@ def _post_claim_blocking(hub_url: str, token: str, body: dict[str, Any], *, time
         with _hub_open(request, timeout=timeout) as response:
             return response.status, json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        if exc.code in (400, 401, 403, 409):
+        if exc.code in (400, 401, 403, 409, 503):
             # A held/expired refusal is an answer, not a transport failure;
             # a 400 carries the hub's validation message (e.g. an older hub
             # that does not know a request field), a 403 names the node the
@@ -1229,6 +1229,8 @@ def _claim_op(
         return ClaimDecision(
             granted=False, reason="auth-failed", detail=detail or f"hub returned HTTP {status}", holder=holder
         )
+    if payload.get("reason") == "claim-fence-refused":
+        return ClaimDecision(granted=False, reason="claim-fence-refused", detail=detail, holder=holder)
     if status == 200 and payload.get(_CLAIM_OK_KEYS[action]) is True:
         claim = payload.get("claim") if isinstance(payload.get("claim"), dict) else None
         superseded = payload.get("superseded") if isinstance(payload.get("superseded"), dict) else None
@@ -1744,7 +1746,7 @@ def repo_claim(
         yield decision
         return
     if not decision.granted:
-        if decision.reason in ("stale-holder", "stale-generation"):
+        if decision.reason in ("stale-holder", "stale-generation", "claim-fence-refused"):
             raise FleetClaimHeldError(f"fleet claim on {target!r} refused: {decision.reason}", owner=decision.owner)
         owner = decision.owner or {}
         held_by = owner.get("owner_node") or "another node"
@@ -1904,7 +1906,7 @@ def repo_claim(
                     except Exception:
                         _LOG.warning("fleet credential-failure callback raised; the run keeps unwinding", exc_info=True)
                 return
-            if outcome.reason in ("held", "stale-holder", "stale-generation"):
+            if outcome.reason in ("held", "stale-holder", "stale-generation", "claim-fence-refused"):
                 lease.terminate(outcome.reason, notify=True)
                 return
             if lease.terminate(outcome.reason):

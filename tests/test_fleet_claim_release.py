@@ -534,6 +534,19 @@ class TestClient:
 
 
 class TestReleaseCli:
+    def test_missing_holder_release_json_preserves_refusal_payload(self, hub, monkeypatch, capsys):
+        from brigade import cli
+
+        url, token, _ = hub
+        _env(monkeypatch, url, token)
+        args = ["fleet", "claims", "--release", "fake-target", "--holder", "fake-holder", "--json"]
+        assert cli.main(args) == 1
+        capsys.readouterr()
+        assert cli.main(args) == 1
+        output = capsys.readouterr()
+        assert json.loads(output.out)["released"] is False
+        assert "stale-holder" in output.err
+
     @pytest.mark.parametrize("reason", ["stale-holder", "stale-generation", "future-refusal"])
     @pytest.mark.parametrize("operation", ["force", "release", "acquire", "heartbeat"])
     def test_stale_and_unknown_refusals_are_reported(self, monkeypatch, capsys, reason, operation):

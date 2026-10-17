@@ -9,7 +9,7 @@ capability, client, epoch provisioning, or live activation ships in this slice.
 The subsequent legacy fix adds optional generation comparisons and durable
 retired-holder fences to `/claims`, without implementing this v2 proposal.
 See [implemented legacy fencing](fleet-claim-fencing.md) for the current
-compatibility contract, refusal reasons, and schema 33 migration. The storage
+compatibility contract, refusal reasons, and schema 34 migration. The storage
 prerequisite and pinned-base descriptions below record the earlier boundary.
 
 #1576 supplied schema25. This slice changes offline storage only and performs no
