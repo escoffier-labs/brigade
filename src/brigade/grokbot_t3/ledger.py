@@ -136,17 +136,29 @@ class Ledger:
             row = self._conn.execute("SELECT * FROM requests WHERE request_id = ?", (request_id,)).fetchone()
             return dict(row) if row is not None else None
 
-    def update_state(self, request_id: str, state: str, now: datetime, *, reset_status_failures: bool = True) -> None:
+    def update_state(
+        self,
+        request_id: str,
+        state: str,
+        now: datetime,
+        *,
+        reset_status_failures: bool = True,
+        expected_state: str | None = None,
+    ) -> bool:
+        """Set the state; with expected_state, only if the row still holds it. Returns whether a row changed."""
+        guard = " AND last_state = ?" if expected_state is not None else ""
         with self._lock:
-            self._conn.execute(
+            cursor = self._conn.execute(
                 "UPDATE requests SET notified_state = CASE WHEN last_state = ? THEN notified_state ELSE NULL END, "
                 "wake_attempts = CASE WHEN last_state = ? THEN wake_attempts ELSE 0 END, "
                 "delivered_targets = CASE WHEN last_state = ? THEN delivered_targets ELSE '[]' END, "
                 "status_failures = CASE WHEN ? THEN 0 ELSE status_failures END, "
                 "status_poll_delay = CASE WHEN ? THEN 0 ELSE status_poll_delay END, "
-                "last_state = ?, updated_at = ? WHERE request_id = ?",
-                (state, state, state, reset_status_failures, reset_status_failures, state, _ts(now), request_id),
+                "last_state = ?, updated_at = ? WHERE request_id = ?" + guard,
+                (state, state, state, reset_status_failures, reset_status_failures, state, _ts(now), request_id)
+                + ((expected_state,) if expected_state is not None else ()),
             )
+            return cursor.rowcount > 0
 
     def mark_notified(self, request_id: str, state: str, now: datetime) -> None:
         with self._lock:

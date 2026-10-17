@@ -144,7 +144,16 @@ def run_watch_once(
                 else:
                     new_state = result.get("state") if isinstance(result.get("state"), str) else "unknown"
                 if new_state != state or not status_failed:
-                    ledger.update_state(row["request_id"], new_state, clock(), reset_status_failures=not status_failed)
+                    applied = ledger.update_state(
+                        row["request_id"],
+                        new_state,
+                        clock(),
+                        reset_status_failures=not status_failed,
+                        expected_state=state,
+                    )
+                    if not applied:
+                        # The listener recorded a newer state while status was in flight; handle it next tick.
+                        continue
                 if new_state != state:
                     state = new_state
                     notified = None

@@ -128,3 +128,20 @@ def test_public_error_shape():
         }
     }
     assert c.T3DispatchError("not-a-code").code == "unavailable"
+
+
+def test_lone_surrogates_are_rejected():
+    with pytest.raises(c.T3DispatchError):
+        c.parse_submit(_submit(prompt="bad \ud800 text"))
+    with pytest.raises(c.T3DispatchError):
+        c.parse_submit(_submit(title="bad \udfff"))
+    with pytest.raises(c.T3DispatchError):
+        c.parse_followup({"request_id": "r1", "message": "\ud800"})
+
+
+def test_error_fields_are_bounded_and_plain():
+    error = c.T3DispatchError("fleet-error", fleet_code="x" * 5000, fleet_reason="a b\nc", request_id="bad id")
+    out = error.public_error()["error"]
+    assert len(out["fleet_code"]) == c.FIELD_MAX
+    assert out["fleet_reason"] == "a-b-c"
+    assert "request_id" not in out

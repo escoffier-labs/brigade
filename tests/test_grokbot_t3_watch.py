@@ -519,3 +519,22 @@ def test_polling_rotates_so_later_rows_are_reached(setup):
             monotonic=clock.__next__,
         )
     assert seen == ["r1", "r2", "r3"]
+
+
+def test_watcher_does_not_overwrite_a_newer_state(setup):
+    tmp_path, targets, ledger = setup
+    _record(ledger, "r1", state="succeeded")
+    ledger.update_state("r1", "running", NOW)
+
+    class Racing:
+        def status(self, request_id):
+            # The listener reopens the request while this status call is in flight.
+            ledger.update_state(request_id, "needs_attention", NOW)
+            return {"schema": "t3-fleet.result.v1", "request_id": request_id, "state": "succeeded"}
+
+    post = Post([])
+    watch.run_watch_once(
+        runner=Racing(), ledger=ledger, wake_targets=targets, log_path=tmp_path / "w.jsonl", now=lambda: NOW, post=post
+    )
+    assert ledger.get("r1")["last_state"] == "needs_attention"
+    assert post.calls == []

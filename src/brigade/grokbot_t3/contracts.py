@@ -58,6 +58,17 @@ ERROR_MESSAGES = {
 }
 
 
+_FIELD_RE = re.compile(r"[^A-Za-z0-9_.:-]")
+FIELD_MAX = 64
+
+
+def _bounded_field(value: object) -> str | None:
+    """Keep upstream codes and reasons short and plain so error results stay inside the public limit."""
+    if not isinstance(value, str) or not value:
+        return None
+    return _FIELD_RE.sub("-", value)[:FIELD_MAX]
+
+
 class T3DispatchError(ValueError):
     """Stable public failure. Messages never include prompts, paths, or secrets."""
 
@@ -72,9 +83,9 @@ class T3DispatchError(ValueError):
         if code not in ERROR_MESSAGES:
             code = "unavailable"
         self.code = code
-        self.fleet_code = fleet_code
-        self.fleet_reason = fleet_reason
-        self.request_id = request_id
+        self.fleet_code = _bounded_field(fleet_code)
+        self.fleet_reason = _bounded_field(fleet_reason)
+        self.request_id = request_id if isinstance(request_id, str) and HANDLE_RE.fullmatch(request_id) else None
         super().__init__(ERROR_MESSAGES[code])
 
     def public_error(self) -> dict[str, dict[str, str]]:
@@ -133,10 +144,18 @@ def _ref(value: object) -> str:
     return ref
 
 
+def _encodable(value: str) -> str:
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise _invalid() from exc
+    return value
+
+
 def _text(value: object) -> str:
     if not isinstance(value, str) or not value.strip() or "\x00" in value:
         raise _invalid()
-    return value
+    return _encodable(value)
 
 
 def _title(value: object) -> str:
@@ -144,7 +163,7 @@ def _title(value: object) -> str:
         raise _invalid()
     if any(ch in value for ch in "\r\n\x00"):
         raise _invalid()
-    return value
+    return _encodable(value)
 
 
 def _bounded_int(value: object, low: int, high: int) -> int:
