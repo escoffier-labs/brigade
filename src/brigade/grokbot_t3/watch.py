@@ -15,7 +15,7 @@ from typing import Any, Callable
 
 from ..grokbot_feed import _NoRedirect
 from . import contracts as c
-from .fleet import FleetCallError, FleetTimeout
+from .fleet import CALL_TIMEOUT, FleetCallError, FleetTimeout
 from .ledger import Ledger, wake_target_id
 from .runtime_config import read_owner_file
 
@@ -25,8 +25,10 @@ MAX_WAKE_BYTES = 16_384
 MAX_KEY_BYTES = 1_024
 MAX_TARGETS = 4
 POST_TIMEOUT = 8
-# Stay inside the watcher unit's TimeoutStartSec=300 with room for shutdown.
-PASS_BUDGET_SECONDS = 240.0
+# The watcher unit's TimeoutStartSec. The budget is checked only before each row starts, so reserve the
+# slowest row (a status call plus a post to every target) and startup and shutdown time.
+UNIT_TIMEOUT_SECONDS = 300
+PASS_BUDGET_SECONDS = float(UNIT_TIMEOUT_SECONDS - CALL_TIMEOUT - MAX_TARGETS * POST_TIMEOUT - 30)
 MAX_ATTEMPTS = 30
 Post = Callable[[str, str, dict[str, Any]], int]
 

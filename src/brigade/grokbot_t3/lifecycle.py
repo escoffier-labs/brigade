@@ -17,7 +17,7 @@ from .fleet import FleetCallError, FleetRunner, FleetTimeout
 from .ledger import Ledger
 from .runtime_config import Runtime, load_runtime, validate_runtime_reference
 from .tools import T3DispatchTools
-from .watch import load_wake_config, run_watch_once
+from .watch import UNIT_TIMEOUT_SECONDS, load_wake_config, run_watch_once
 
 MAX_REQUEST_BYTES = c.MAX_REQUEST_BYTES
 WATCH_SERVICE = "brigade-grokbot-t3-watch.service"
@@ -485,7 +485,7 @@ def render_watch_units(target: Path, *, python: str | None = None) -> tuple[str,
         "[Service]\n"
         "Type=oneshot\n"
         f"ExecStart={exec_start}\n"
-        "TimeoutStartSec=300\n"
+        f"TimeoutStartSec={UNIT_TIMEOUT_SECONDS}\n"
         f"{_hardening(runtime)}"
     )
     timer = (

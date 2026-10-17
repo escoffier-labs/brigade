@@ -617,3 +617,11 @@ def test_reopen_between_targets_stops_the_remaining_wakes(setup):
     )
     assert len(post.calls) == 1
     assert ledger.get("r1")["last_state"] == c.REOPENING_STATE
+
+
+def test_pass_budget_leaves_room_for_the_slowest_row():
+    from brigade.grokbot_t3.fleet import CALL_TIMEOUT
+
+    # A row that starts just inside the budget may still make a status call and post to every target.
+    slowest_row = CALL_TIMEOUT + watch.MAX_TARGETS * watch.POST_TIMEOUT
+    assert watch.PASS_BUDGET_SECONDS + slowest_row < watch.UNIT_TIMEOUT_SECONDS
