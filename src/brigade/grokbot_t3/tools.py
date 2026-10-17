@@ -176,7 +176,7 @@ class T3DispatchTools:
             raise c.T3DispatchError("seat-not-allowed")
         if len(args["prompt"].encode("utf-8")) > runtime.prompt_max_bytes:
             raise c.T3DispatchError("prompt-too-large")
-        if self.ledger.open_count() >= runtime.max_open:
+        if self.ledger.open_count(self.now()) >= runtime.max_open:
             raise c.T3DispatchError("open-limit")
         now = self.now()
         self._check_daily_limit()
@@ -211,10 +211,13 @@ class T3DispatchTools:
         except FleetCallError as exc:
             if not isinstance(exc.request_id, str) or not c.HANDLE_RE.fullmatch(exc.request_id):
                 if isinstance(exc, FleetProtocolError):
+                    self.ledger.record_in_doubt(args["caller"], now)
                     raise c.T3DispatchError("submit-unknown") from exc
                 raise _fleet_error(exc) from exc
             result = {"request_id": exc.request_id, "state": "unknown"}
         except FleetTimeout as exc:
+            # The launch may have happened with no request id to track, so hold a slot until it expires.
+            self.ledger.record_in_doubt(args["caller"], now)
             raise c.T3DispatchError("submit-unknown") from exc
         request_id = result.get("request_id")
         if not isinstance(request_id, str) or not c.HANDLE_RE.fullmatch(request_id):
@@ -274,7 +277,7 @@ class T3DispatchTools:
     def _followup_locked(self, args: dict[str, Any]) -> dict[str, Any]:
         self._require_enabled()
         row = self._known(args["request_id"])
-        if row["last_state"] in c.TERMINAL_STATES and self.ledger.open_count() >= self.runtime.max_open:
+        if row["last_state"] in c.TERMINAL_STATES and self.ledger.open_count(self.now()) >= self.runtime.max_open:
             raise c.T3DispatchError("open-limit")
         if len(args["message"].encode("utf-8")) > self.runtime.prompt_max_bytes:
             raise c.T3DispatchError("prompt-too-large")

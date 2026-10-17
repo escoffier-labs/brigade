@@ -162,7 +162,8 @@ Git tags and SHAs are not resolved as revisions.
 Followups count toward `daily_limit`. Reopening a terminal request also checks
 `max_open`. A submit with a known request id but an error or unrecognized state
 is recorded as `unknown` and returns `submit-unknown` with that id. Submit
-attempts without a recoverable id still count toward `daily_limit`. Do not
+attempts without a recoverable id still count toward `daily_limit` and hold
+one `max_open` slot for two hours, because the thread may be running. Do not
 resubmit an unknown outcome. Ask the operator to inspect and recover it through
 `t3-fleet`.
 

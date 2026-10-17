@@ -9,12 +9,13 @@ import os
 import sqlite3
 import stat
 import threading
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
 from .contracts import TERMINAL_STATES, T3DispatchError
 
+IN_DOUBT_TTL = timedelta(hours=2)
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS requests (
     request_id TEXT PRIMARY KEY,
@@ -61,6 +62,9 @@ class Ledger:
         self._conn.row_factory = sqlite3.Row
         self._conn.execute("PRAGMA journal_mode=WAL")
         self._conn.execute(_SCHEMA)
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS in_doubt (caller TEXT NOT NULL, created_at TEXT NOT NULL, expires_at TEXT NOT NULL)"
+        )
         # Seed legacy rows once, atomically with creation of the attempt ledger.
         with self._conn:
             self._conn.execute("BEGIN IMMEDIATE")
@@ -146,13 +150,24 @@ class Ledger:
                 (state, _ts(now), request_id, state),
             )
 
-    def open_count(self) -> int:
+    def open_count(self, now: datetime | None = None) -> int:
+        """Open requests plus unexpired in-doubt reservations."""
+        current = _ts(now or datetime.now(timezone.utc))
         with self._lock:
             placeholders = ", ".join("?" for _ in _TERMINAL)
             row = self._conn.execute(
                 f"SELECT COUNT(*) FROM requests WHERE last_state NOT IN ({placeholders})", _TERMINAL
             ).fetchone()
-            return int(row[0])
+            doubt = self._conn.execute("SELECT COUNT(*) FROM in_doubt WHERE expires_at > ?", (current,)).fetchone()
+            return int(row[0]) + int(doubt[0])
+
+    def record_in_doubt(self, caller: str, now: datetime) -> None:
+        """Hold an open slot for a submit whose launch is unknown and has no request id."""
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO in_doubt (caller, created_at, expires_at) VALUES (?, ?, ?)",
+                (caller, _ts(now), _ts(now + IN_DOUBT_TTL)),
+            )
 
     def submits_since(self, since: datetime) -> int:
         with self._lock:

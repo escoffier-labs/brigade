@@ -444,3 +444,26 @@ def test_prefixed_title_is_capped_for_t3_fleet(make):
     sent = runner.submits[0]["title"]
     assert len(sent) <= 120
     assert sent.startswith("[grokbot:" + "A" * 48 + "] ")
+
+
+def test_timed_out_submit_reserves_an_open_slot_until_expiry(make):
+    from datetime import timedelta
+
+    from brigade.grokbot_t3.ledger import IN_DOUBT_TTL
+
+    tools, runner, ledger = make(max_open=1)
+    runner.submit_errors = [FleetTimeout("submit")]
+    assert _submit(tools)["error"]["code"] == "submit-unknown"
+    assert ledger.open_count(NOW) == 1
+    assert _submit(tools)["error"]["code"] == "open-limit"
+    assert len(runner.submits) == 1
+    assert ledger.open_count(NOW + IN_DOUBT_TTL + timedelta(seconds=1)) == 0
+
+
+def test_unreadable_submit_without_id_reserves_an_open_slot(make):
+    from brigade.grokbot_t3.fleet import FleetProtocolError
+
+    tools, runner, ledger = make(max_open=1)
+    runner.submit_errors = [FleetProtocolError("internal_error")]
+    assert _submit(tools)["error"]["code"] == "submit-unknown"
+    assert _submit(tools)["error"]["code"] == "open-limit"
