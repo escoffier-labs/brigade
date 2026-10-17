@@ -48,7 +48,7 @@ Spec: `docs/superpowers/specs/2026-10-17-miller-pack-design.md` (approved 2026-1
 ## Pinned decisions
 
 - Pack id `miller`; unit `brigade-miller.service`; default bind `127.0.0.1:8779`; MCP server name stays `dot-t3` and version `"0.28.0"` (the bridge's `MCPServer("dot-t3", version="0.28.0")`), so ChatGPT sees the same server identity.
-- Kept tools (35): every tool in `$BRIDGE/dot_mcp.py` `TOOL_SCHEMAS` (lines 875-948) except `dot_t3_submit_review`, `dot_t3_job_status`, `dot_t3_job_result`.
+- Kept tools (32): every tool in `$BRIDGE/dot_mcp.py` `TOOL_SCHEMAS` (lines 875-948) except `dot_t3_submit_review`, `dot_t3_job_status`, `dot_t3_job_result`.
 - Errors: `MillerError(code)` with the bridge's existing codes; the tool result shape is unchanged (`{"error": code, ...}` dicts, as the bridge returns today).
 - Instance config keys: `MILLER_INSTANCE_KEYS = (INSTANCE_KEYS - {"bearer"}) | {"runtime_path"}`. Miller has no bearer reference.
 - Runtime schema id `brigade.miller.runtime.v1`; max size 65,536 bytes; read through `brigade.grokbot_t3.runtime_config.read_owner_file`.
@@ -70,9 +70,9 @@ def miller_private_dir(tmp_path: Path) -> Path:
 
 ChatGPT sees the schemas the MCP SDK derives from each registered tool function, not the bridge's `TOOL_SCHEMAS` table. So the snapshot is taken from the bridge's own server registration.
 
-**Files:** Create `scripts/capture_miller_snapshot.py`, `tests/fixtures/miller_tools_snapshot.json`.
+**Files:** Create `tests/fixtures/miller_tools_snapshot.json`. The capture script `scripts/capture_miller_snapshot.py` stays local and untracked: `/scripts/*` is ignored unless allowlisted, and the script only works against the private bridge, which is retired after cutover.
 
-- [ ] Write `scripts/capture_miller_snapshot.py`:
+- [x] Write `scripts/capture_miller_snapshot.py`:
 
 ```python
 """Capture Miller's registered tools (name, description, input schema, annotations) from the bridge source.
@@ -108,7 +108,7 @@ def main(bridge: str, out: str) -> int:
     dot_mcp.build_app(SimpleNamespace(), verifier=SimpleNamespace(validated=True), approved_identity="snapshot@example.test")
     tools = asyncio.run(captured[0].list_tools())
     entries = {
-        tool.name: tool.model_dump(mode="json", exclude_none=True)
+        tool.name: tool.model_dump(mode="json", by_alias=True, exclude_none=True)
         for tool in sorted(tools, key=lambda item: item.name)
         if tool.name not in DROPPED
     }
@@ -121,9 +121,9 @@ if __name__ == "__main__":
     raise SystemExit(main(sys.argv[1], sys.argv[2]))
 ```
 
-- [ ] Run it with the dispatcher-supplied `$BRIDGE` and the interpreter the dispatcher names: expect it to print `35`. (`identity()` at `$BRIDGE/dot_mcp.py:143` accepts any printable ASCII string up to 256 characters, so the placeholder passes.)
-- [ ] Open the fixture and confirm each entry has `name`, `description`, `inputSchema` and `annotations`, and that the `dot_t3_capabilities` description still mentions the dropped review tools only if the bridge text does; Task 8 rewrites that description, and the test in Task 9 compares descriptions for every tool except `dot_t3_capabilities`.
-- [ ] Guard-scan the fixture; replace any private host name in description text with the placeholder the docs use, and note each replacement in the commit message. Commit: `git add scripts/capture_miller_snapshot.py tests/fixtures/miller_tools_snapshot.json && git commit -m "test(miller): freeze the bridge tool snapshot"`.
+- [x] Run it with the dispatcher-supplied `$BRIDGE` and the interpreter the dispatcher names: expect it to print `32` (the bridge registers 35 tools; 3 are dropped). (`identity()` at `$BRIDGE/dot_mcp.py:143` accepts any printable ASCII string up to 256 characters, so the placeholder passes.)
+- [x] Open the fixture and confirm each entry has `name`, `description`, `inputSchema` and `annotations`, and that the `dot_t3_capabilities` description still mentions the dropped review tools only if the bridge text does; Task 8 rewrites that description, and the test in Task 9 compares descriptions for every tool except `dot_t3_capabilities`.
+- [x] Guard-scan the fixture; replace any private host name in description text with the placeholder the docs use, and note each replacement in the commit message. Commit: `git add tests/fixtures/miller_tools_snapshot.json && git commit -m "test(miller): freeze the bridge tool snapshot"`.
 
 ## Task 2: contracts
 
@@ -281,12 +281,12 @@ with `workload`, `override_reason` and `allow_queue` present only when given.
   - `test_missing_jwt_returns_401_with_resource_metadata`.
   - `test_render_unit` asserts `ExecStart` runs `-m brigade run cloud grokbot serve --pack miller --target <t> --bind <b>` with `--allow-host`/`--allow-origin` flags and no bearer flag, and the hardening lines from Pinned decisions.
   - `test_canary_checks_anonymous_401_metadata_and_registry`.
-  - `test_registered_tools_match_snapshot`: build the app with a fake `MillerTools`, capture the `MCPServer` the same way Task 1's script does, and assert `tool.model_dump(mode="json", exclude_none=True)` equals the fixture entry for every tool, comparing every field for every tool except the `description` of `dot_t3_capabilities`.
+  - `test_registered_tools_match_snapshot`: build the app with a fake `MillerTools`, capture the `MCPServer` the same way Task 1's script does, and assert `tool.model_dump(mode="json", by_alias=True, exclude_none=True)` equals the fixture entry for every tool, comparing every field for every tool except the `description` of `dot_t3_capabilities`.
 - [ ] Run, expect failures.
 - [ ] Implement `lifecycle.py`, structured like `src/brigade/grokbot_t3/lifecycle.py`:
   - `MillerListenerConfig(target, bind_host, bind_port, allowed_hosts, allowed_origins, runtime_path)`.
   - `_MillerGate.reject_reason(path, method, headers)`: route check (404), size, Host and Origin (403, same rules as `_T3RequestGate`), then `AccessVerifier.verify(headers.get("cf-access-jwt-assertion"))` (401 with `www-authenticate: Bearer resource_metadata="<resource>/.well-known/oauth-protected-resource/mcp"` as the bridge sends at `$BRIDGE/dot_mcp.py:2178-2306`).
-  - `build_app(config, tools, runtime)`: `MCPServer(c.SERVICE_NAME, version=c.SERVER_VERSION)`; register the 35 tools by copying their `@server.tool(...)` blocks and function signatures verbatim from `$BRIDGE/dot_mcp.py:2345-2565` (minus the three dropped tools), with each body calling `MillerTools.call`; the `annotations()` helper and the `invoke()` call-log wrapper come from 2321-2348; the resource metadata route, the events app wrapper from Task 6, `streamable_http_app(json_response=True, stateless_http=True, ...)`, wrapped in the gate.
+  - `build_app(config, tools, runtime)`: `MCPServer(c.SERVICE_NAME, version=c.SERVER_VERSION)`; register the 32 tools by copying their `@server.tool(...)` blocks and function signatures verbatim from `$BRIDGE/dot_mcp.py:2345-2565` (minus the three dropped tools), with each body calling `MillerTools.call`; the `annotations()` helper and the `invoke()` call-log wrapper come from 2321-2348; the resource metadata route, the events app wrapper from Task 6, `streamable_http_app(json_response=True, stateless_http=True, ...)`, wrapped in the gate.
   - `run_listener`, `build_listener_from_target(target, *, bind, allowed_hosts, allowed_origins)`, `doctor(target)` (checks: dependency, config, state, access-config, hub-token, t3-fleet capacity), `canary(target)` (anonymous `POST /mcp` returns 401, metadata document answers with the configured resource, `set(registered tool names) == contracts.TOOLS`), `render_unit`, `write_unit`, `render_watch_units`, `write_watch_units` (unit text per Pinned decisions).
 - [ ] Implement `watch.py` from `$BRIDGE/dot-inbox-watch` with the five checks and dedupe state file `inbox-watch.json` in the state dir; probe URLs come from the instance bind and `runtime.auth.resource`; alerts run `runtime.notify_command` with the message on stdin.
 - [ ] Implement `__main__.py`: `serve` (delegates to `run_cloud` serve), `notify` (from `$BRIDGE/dot-notify`, hub mode only), `calls` (from `$BRIDGE/bridge-calls`), `watch --target <t>`.
@@ -307,7 +307,7 @@ with `workload`, `override_reason` and `allow_queue` present only when given.
   - `_miller_runtime_reference` mirrors `_t3_runtime_reference`, mapping `miller.MillerError` to `PackError("unsafe-path")`.
   - `doctor`, `canary`, `render_install_service`, `apply_install_service`: `elif pack["id"] == MILLER_PACK_ID:` branches calling `miller.doctor`, `miller.canary`, `miller.render_unit(target, python=sys.executable)`, `miller.write_unit(target, out_dir, force=force)`, adding `miller.MillerError` to the caught exception tuples next to `grokbot_t3.T3DispatchError`.
 - [ ] Implement in `run_cloud.py` the `serve --pack miller` branch next to the t3 branch at about line 1194: reject `--bearer-file`/`--bearer-env` with the existing usage error, then `config, tools, runtime = miller.build_listener_from_target(target, bind=..., allowed_hosts=..., allowed_origins=...)` and `miller.run_listener(config, tools, runtime)`; add `miller.MillerError` to the caught tuple near line 1244.
-- [ ] Write `docs/grokbot-miller.md` with the sections of `docs/grokbot-t3-dispatch.md`: purpose, runtime JSON table (from Task 3), setup commands (`pack setup miller --runtime-path ...`, `pack doctor`, `pack canary`, `pack install-service`), the watch timer, the tool table (35 tools, gated ones marked), and the security model (Access JWT at the origin, no bearer, Host/Origin allowlists, state directory checks). Placeholders only for hosts and paths.
+- [ ] Write `docs/grokbot-miller.md` with the sections of `docs/grokbot-t3-dispatch.md`: purpose, runtime JSON table (from Task 3), setup commands (`pack setup miller --runtime-path ...`, `pack doctor`, `pack canary`, `pack install-service`), the watch timer, the tool table (32 tools, gated ones marked), and the security model (Access JWT at the origin, no bearer, Host/Origin allowlists, state directory checks). Placeholders only for hosts and paths.
 - [ ] Run to green: `python -m pytest tests/test_grokbot_packs.py tests/test_miller_*.py -q`, then `./scripts/verify-focused tests/test_grokbot_packs.py tests/test_miller_contracts.py`, the size ratchet test, and the guard scan on every new or changed file. Commit: `feat(miller): register the Miller connector pack`.
 
 ## Task 11: cutover (operator, not a worker)
