@@ -73,18 +73,20 @@ class RetainRunLockError(RunGuardError):
 
 def retained_run_lock_error(error: BaseException) -> RetainRunLockError | None:
     """Find retention failures even when asynchronous cleanup replaces them."""
-    pending = [error]
+    current: BaseException | None = error
     seen: set[int] = set()
-    while pending:
-        current = pending.pop()
+    while current is not None and len(seen) < 64:
         if id(current) in seen:
-            continue
+            break
         seen.add(id(current))
         if isinstance(current, RetainRunLockError):
             return current
-        for chained in (current.__context__, current.__cause__):
-            if chained is not None:
-                pending.append(chained)
+        if current.__cause__ is not None:
+            current = current.__cause__
+        elif not current.__suppress_context__:
+            current = current.__context__
+        else:
+            break
     return None
 
 
@@ -92,9 +94,7 @@ def raise_if_retained_run_lock(error: BaseException) -> None:
     """Preserve a retention failure before converting or handling cancellation."""
     retained = retained_run_lock_error(error)
     if retained is not None:
-        if retained is error:
-            raise retained
-        raise retained from error
+        raise retained
 
 
 class DirtyWorktreeError(RunGuardError):

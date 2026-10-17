@@ -82,14 +82,23 @@ class ClaimLossCancellation:
         return self
 
     def __exit__(self, *_exc: object) -> None:
+        retained: runguard.RetainRunLockError | None = None
         while True:
             try:
                 self._finish_exit()
-                return
+                break
             except KeyboardInterrupt as exc:
-                runguard.raise_if_retained_run_lock(exc)
+                retained = retained or runguard.retained_run_lock_error(exc)
                 if not self._requested.is_set():
+                    if retained is None:
+                        raise
+                    break
+            except runguard.RetainRunLockError:
+                if retained is None:
                     raise
+                break
+        if retained is not None:
+            raise retained
 
     def _finish_exit(self) -> None:
         self._stopped.set()

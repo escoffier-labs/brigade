@@ -21,7 +21,15 @@ from brigade import claim_loss_cancellation, run_budget, run_lifecycle, run_tran
 from tests.test_aboyeur import _roster
 from tests.run_test_helpers import run_aboyeur_guarded
 from tests._posix import requires_process_groups
-from tests.test_fleet_t3_transport import FakePolicyClient, FakeT3Runner, REVISION, _eligible, _succeeded
+from tests.test_fleet_t3_transport import (
+    FakePolicyClient,
+    FakeT3Runner,
+    REVISION,
+    WINDOWS_NODE,
+    _document,
+    _eligible,
+    _succeeded,
+)
 
 
 @pytest.fixture
@@ -594,7 +602,7 @@ def test_interrupt_shutdown_preserves_worker_retention(tmp_path, monkeypatch, sc
     except BaseException as exc:
         error = exc
     assert isinstance(error, runguard.RetainRunLockError), f"worker retention failure lost: {error!r}"
-    assert isinstance(error.__cause__, KeyboardInterrupt)
+    assert isinstance(error.__context__, KeyboardInterrupt)
     assert runguard.lock_path(tmp_path).exists()
 
 
@@ -619,10 +627,12 @@ def test_remote_transport_supervision_requires_claim(claimed_run, monkeypatch, g
     assert (registries[0] is not None) == granted
 
 
-@pytest.mark.parametrize("link", ["context", "cause", "both-with-cycle"])
+@pytest.mark.parametrize("link", ["context", "cause", "context-cycle"])
 @pytest.mark.parametrize("cancelled", [KeyboardInterrupt, claim_loss_cancellation.ClaimLossCancelled])
 def test_run_lock_preserves_chained_retention(tmp_path, link, cancelled):
     retained = runguard.RetainRunLockError("receipt unavailable")
+    original_cause = OSError("receipt storage unavailable")
+    retained.__cause__ = original_cause
     intermediate = RuntimeError("cleanup failed")
     interrupt = cancelled()
     if link == "cause":
@@ -631,10 +641,8 @@ def test_run_lock_preserves_chained_retention(tmp_path, link, cancelled):
     else:
         intermediate.__context__ = retained
         interrupt.__context__ = intermediate
-        if link == "both-with-cycle":
-            unrelated = RuntimeError("unrelated cause")
-            interrupt.__cause__ = unrelated
-            unrelated.__context__ = interrupt
+        if link == "context-cycle":
+            retained.__context__ = interrupt
     error = None
     try:
         with runguard.run_lock(tmp_path):
@@ -642,5 +650,189 @@ def test_run_lock_preserves_chained_retention(tmp_path, link, cancelled):
     except BaseException as exc:
         error = exc
     assert error is retained, f"exception chain lost retention: {error!r}"
-    assert error.__cause__ is interrupt
+    assert error.__cause__ is original_cause
     assert runguard.lock_path(tmp_path).exists()
+
+
+@pytest.mark.parametrize("scheduler", ["waves", "dag"])
+def test_claim_cancel_shutdown_preserves_sibling_retention(tmp_path, monkeypatch, scheduler):
+    started = threading.Barrier(2)
+    cancelled = threading.Event()
+    retained = runguard.RetainRunLockError("sibling receipt unavailable")
+
+    def worker(cli_ref, *args, **kwargs):
+        started.wait(timeout=5)
+        if cli_ref == "ollama:llama3.3":
+            cancelled.set()
+            raise claim_loss_cancellation.ClaimLossCancelled
+        assert cancelled.wait(5)
+        time.sleep(0.2)
+        raise retained
+
+    monkeypatch.setattr(agents, "run_agent", worker)
+    error = None
+    try:
+        with runguard.run_lock(tmp_path):
+            run_transport.dispatch(
+                [
+                    run_transport.Assignment(worker="coder", task="inspect", stage=1, covers=("inspect",)),
+                    run_transport.Assignment(worker="reviewer", task="review", stage=1, covers=("review",)),
+                ],
+                _roster(),
+                build_prompt=lambda *args, **kwargs: "inspect",
+                run_appserver_worker=lambda *args, **kwargs: pytest.fail("unused app-server"),
+                event_writer=lambda *args, **kwargs: None,
+                cwd=tmp_path,
+                scheduler=scheduler,
+                route_dependencies={"inspect": (), "review": ()},
+            )
+    except BaseException as exc:
+        error = exc
+    assert error is retained, f"sibling retention failure lost: {error!r}"
+    assert runguard.lock_path(tmp_path).exists()
+
+
+@pytest.mark.parametrize("link", ["suppressed", "explicit-cause"])
+def test_run_lock_ignores_hidden_historical_retention(tmp_path, link):
+    with pytest.raises(RuntimeError, match="handled cleanup") as caught:
+        with runguard.run_lock(tmp_path):
+            try:
+                raise runguard.RetainRunLockError("historical receipt failure")
+            except runguard.RetainRunLockError:
+                if link == "suppressed":
+                    raise RuntimeError("handled cleanup") from None
+                raise RuntimeError("handled cleanup") from ValueError("current cause")
+    assert type(caught.value) is RuntimeError
+    assert not runguard.lock_path(tmp_path).exists()
+
+
+@pytest.mark.parametrize("depth,found", [(63, True), (64, False)])
+def test_retention_chain_walk_is_bounded(depth, found):
+    retained = runguard.RetainRunLockError("receipt unavailable")
+    error = retained
+    for _ in range(depth):
+        wrapper = RuntimeError("cleanup")
+        wrapper.__cause__ = error
+        error = wrapper
+    assert (runguard.retained_run_lock_error(error) is retained) == found
+
+
+@pytest.mark.parametrize("finish", ["complete", "deadline"])
+def test_retention_interrupt_waits_for_cancellation_exit(monkeypatch, finish):
+    scope = claim_loss_cancellation.ClaimLossCancellation()
+    cancelling = threading.Event()
+    release = threading.Event()
+    retained = runguard.RetainRunLockError("receipt unavailable")
+
+    def cancel():
+        cancelling.set()
+        assert release.wait(5)
+        return ()
+
+    monkeypatch.setattr(scope.process_registry, "cancel", cancel)
+    scope.request()
+    scope.__enter__()
+    assert cancelling.wait(2)
+    wait = scope._done.wait
+    calls = []
+    if finish == "deadline":
+        scope._shutdown_deadline = time.monotonic() + 0.05
+
+    def interrupted_wait(timeout):
+        calls.append(timeout)
+        if len(calls) == 1:
+            raise KeyboardInterrupt from retained
+        if finish == "complete":
+            release.set()
+        return wait(timeout)
+
+    monkeypatch.setattr(scope._done, "wait", interrupted_wait)
+    try:
+        with pytest.raises(runguard.RetainRunLockError) as caught:
+            scope.__exit__(None, None, None)
+        assert len(calls) >= 2, "retention escaped while the watcher was still cancelling"
+        assert caught.value is retained
+        if finish == "complete":
+            assert scope._done.is_set()
+        else:
+            assert time.monotonic() >= scope._shutdown_deadline
+    finally:
+        release.set()
+        scope._watcher.join(timeout=2)
+
+
+@requires_process_groups
+@pytest.mark.parametrize("blocked_command", ["rev-parse", "status"])
+def test_claim_loss_stops_source_revision_before_delegation(tmp_path, monkeypatch, blocked_command):
+    scope = claim_loss_cancellation.ClaimLossCancellation()
+    ready = tmp_path / "revision-ready"
+    finished = threading.Event()
+    loss_time = []
+    processes = []
+    popen = subprocess.Popen
+    policy = FakePolicyClient()
+    runner = FakeT3Runner({"doctor": _eligible(), "capacity": _eligible(), "submit": _succeeded()})
+
+    def revision_process(command, *args, **kwargs):
+        if command[:2] == ["git", "-C"]:
+            if command[3] == blocked_command:
+                script = (
+                    "import signal,time; from pathlib import Path; "
+                    "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+                    f"Path({str(ready)!r}).touch(); time.sleep(30)"
+                )
+            else:
+                script = f"print({REVISION!r})" if command[3] == "rev-parse" else "pass"
+            command = [sys.executable, "-c", script]
+        process = popen(command, *args, **kwargs)
+        processes.append(process)
+        return process
+
+    def lose_claim():
+        deadline = time.monotonic() + 5
+        while not ready.exists() and time.monotonic() < deadline:
+            if finished.wait(0.01):
+                return
+        if ready.exists():
+            loss_time.append(time.monotonic())
+            scope.request()
+        if not finished.wait(scope.process_registry.cancellation_timeout + 1):
+            for process in processes:
+                if process.poll() is None:
+                    process.kill()
+
+    monkeypatch.setattr(subprocess, "Popen", revision_process)
+    transport = t3.build_source_transport(
+        cwd=tmp_path,
+        run_id="run-revision-test",
+        snapshot={
+            "state": "authoritative",
+            "fleet_policy": {"active": True, "version": 1, "digest": "sha256:" + "a" * 64},
+        },
+        policy_client=policy,
+        document=_document(),
+        node_id=WINDOWS_NODE,
+        client=t3.T3FleetClient(runner=runner),
+        process_registry=scope.process_registry,
+    )
+    assert transport is not None
+    watchdog = threading.Thread(target=lose_claim, daemon=True)
+    watchdog.start()
+    error = None
+    try:
+        with runguard.run_lock(tmp_path):
+            with scope:
+                transport("coder", "inspect", "inspect")
+    except BaseException as exc:
+        error = exc
+    finally:
+        finished.set()
+        watchdog.join(timeout=2)
+        proc._terminate_processes(tuple(processes), terminate_grace=0.01, kill_grace=0.1)
+    assert loss_time, "revision command did not reach the blocked boundary"
+    assert time.monotonic() - loss_time[0] < scope.process_registry.cancellation_timeout
+    assert isinstance(error, claim_loss_cancellation.ClaimLossCancelled), repr(error)
+    assert not policy.delegation_calls
+    assert "submit" not in runner.verbs()
+    assert all(process.poll() is not None for process in processes)
+    assert not runguard.lock_path(tmp_path).exists()

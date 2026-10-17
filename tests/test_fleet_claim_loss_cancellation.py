@@ -133,7 +133,7 @@ def _exercise_blocked_child(tmp_path: Path, monkeypatch, transport):
     monkeypatch.setattr(fleet_client, "_post_claim_blocking", post)
     monkeypatch.setattr(agents, "run_agent", run_agent)
     monkeypatch.setattr(t3, "build_source_transport", source_transport)
-    monkeypatch.setattr(t3, "immutable_source_revision", lambda cwd: REVISION)
+    monkeypatch.setattr(t3, "immutable_source_revision", lambda cwd, **kwargs: REVISION)
     monkeypatch.setattr(fleet_session_bootstrap, "_repo_identity", lambda *args: REPO)
     watchdog = threading.Thread(target=failsafe, daemon=True)
     watchdog.start()

@@ -173,7 +173,12 @@ def target_binding(document: Mapping[str, Any], seat: str) -> dict[str, Any] | N
     return fleet_model_roster.adapter_plan_binding(CONSUMER, bindings, adapter=ADAPTER)
 
 
-def immutable_source_revision(cwd: Path, *, runner: Callable[..., Any] = subprocess.run) -> str:
+def immutable_source_revision(
+    cwd: Path,
+    *,
+    runner: Callable[..., Any] | None = None,
+    process_registry: proc.ProcessRegistry | None = None,
+) -> str:
     """Return a clean 40-character HEAD, or refuse with ``remote-context-unavailable``.
 
     Dirty tracked content or relevant untracked content means the approved work
@@ -182,6 +187,12 @@ def immutable_source_revision(cwd: Path, *, runner: Callable[..., Any] = subproc
     local run. Ignored paths (local credentials, build output) are excluded by
     ``git status --porcelain`` and are never transferred.
     """
+    runner = runner or (
+        subprocess.run
+        if process_registry is None
+        else partial(_run_client, cwd=None, process_registry=process_registry)
+    )
+    proc.check_cancellation(process_registry)
     try:
         head = runner(
             ["git", "-C", str(cwd), "rev-parse", "HEAD"],
@@ -191,12 +202,15 @@ def immutable_source_revision(cwd: Path, *, runner: Callable[..., Any] = subproc
             check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
+        proc.check_cancellation(process_registry)
         raise TransportDenial("remote-context-unavailable", f"source revision is unreadable: {exc}") from exc
+    proc.check_cancellation(process_registry)
     if getattr(head, "returncode", 1) != 0:
         raise TransportDenial("remote-context-unavailable", "source checkout has no resolvable HEAD revision")
     revision = _one_line(getattr(head, "stdout", ""), 64)
     if SHA_RE.match(revision) is None:
         raise TransportDenial("remote-context-unavailable", "source HEAD is not an immutable 40-character revision")
+    proc.check_cancellation(process_registry)
     try:
         status = runner(
             ["git", "-C", str(cwd), "status", "--porcelain"],
@@ -206,7 +220,9 @@ def immutable_source_revision(cwd: Path, *, runner: Callable[..., Any] = subproc
             check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
+        proc.check_cancellation(process_registry)
         raise TransportDenial("remote-context-unavailable", f"source cleanliness is unreadable: {exc}") from exc
+    proc.check_cancellation(process_registry)
     if getattr(status, "returncode", 1) != 0:
         raise TransportDenial("remote-context-unavailable", "source checkout cleanliness is unverifiable")
     if str(getattr(status, "stdout", "") or "").strip():
@@ -894,14 +910,16 @@ class SourceTransport:
         )
 
     def __call__(self, seat: str, task: str, prompt: str) -> RemoteDispatch | None:
+        self.client.check_cancellation()
         resolution = self.resolve(seat)
+        self.client.check_cancellation()
         if resolution.route == ROUTE_ORIGIN:
             return None
         if resolution.route == ROUTE_BLOCKED:
             return RemoteDispatch(resolution=resolution)
         if self._revision is None:
             try:
-                self._revision = immutable_source_revision(self.cwd)
+                self._revision = immutable_source_revision(self.cwd, process_registry=self.client.process_registry)
             except TransportDenial as exc:
                 return RemoteDispatch(
                     resolution=resolution,

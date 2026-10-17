@@ -1382,9 +1382,11 @@ def dispatch(
                 runguard.raise_if_retained_run_lock(exc)
                 _raise_retained_future_error(future_to_index, exc)
             raise
-        except BaseException:
+        except BaseException as exc:
             cancel_active_work(future_to_index)
             executor.shutdown(wait=True, cancel_futures=True)
+            if not isinstance(exc, runguard.RetainRunLockError):
+                _raise_retained_future_error(future_to_index, exc)
             raise
         else:
             executor.shutdown(wait=True)
@@ -1395,14 +1397,15 @@ def dispatch(
     return all_results
 
 
-def _raise_retained_future_error(futures: dict[Any, int], interrupt: KeyboardInterrupt) -> None:
+def _raise_retained_future_error(futures: dict[Any, int], interrupt: BaseException) -> None:
     """Do not discard worker cleanup failures when interrupting the scheduler."""
     for future in futures:
         if future.done() and not future.cancelled():
             error = future.exception()
             retained = runguard.retained_run_lock_error(error) if error is not None else None
             if retained is not None:
-                raise retained from interrupt
+                retained.__context__ = interrupt
+                raise retained
 
 
 def _dag_placement_error(
@@ -1626,9 +1629,11 @@ def _dag_dispatch(
             runguard.raise_if_retained_run_lock(exc)
             _raise_retained_future_error(future_to_index, exc)
         raise
-    except BaseException:
+    except BaseException as exc:
         cancel_active_work(future_to_index)
         executor.shutdown(wait=True, cancel_futures=True)
+        if not isinstance(exc, runguard.RetainRunLockError):
+            _raise_retained_future_error(future_to_index, exc)
         raise
     else:
         executor.shutdown(wait=True)
