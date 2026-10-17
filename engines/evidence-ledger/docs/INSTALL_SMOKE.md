@@ -23,7 +23,7 @@ miseledger version
 miseledger init
 miseledger doctor --mcp --json
 
-repo=/path/to/miseledger
+repo=/path/to/brigade/engines/evidence-ledger
 miseledger import adapter "$repo/testdata/adapters/discrawl.fixture.jsonl" --source discrawl --json
 miseledger import codex "$repo/testdata/harnesses/codex-session.fixture.jsonl" --json
 miseledger import openclaw "$repo/testdata/harnesses/openclaw-session.fixture.jsonl" --json
@@ -54,6 +54,6 @@ Expected results:
 - `miseledger doctor --archive --json` returns `ok: true`
 - search returns at least one result
 - evidence returns `untrusted_context: true` and a stable bundle ID
-- evidence result `artifacts` fields encode as arrays, including empty arrays
+- eligible evidence result `artifacts` fields encode as arrays, including empty arrays. Quarantined results contain only an opaque `id`, `eligibility_status`, and `reason_code`
 
 The archive smoke covers Cursor's current SQLite reader in Go tests because the shell smoke does not require the external `sqlite3` program. The fixture database is created in a temporary test directory from `testdata/harnesses/cursor-conversations.fixture.sql`.

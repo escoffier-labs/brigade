@@ -4,7 +4,7 @@
 slice for issue #1601. It uses the existing pure normalizer and an injected
 `GetTransport`. It performs no credential access, live network call, provider
 mutation, persistence, review purchase, trigger, rerun or merge-policy decision.
-The new module has no production callers yet.
+`claude_review_history` calls this collector; neither module is wired into the CLI.
 
 ## Verified GitHub contract
 

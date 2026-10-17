@@ -27,6 +27,8 @@ A full Brigade work run can follow this circuit:
 
 Capture the outcome against the skill or card that did the work (`brigade outcome capture`), then rank and reconcile when you want promotion or rollback. The model never grades its own work. Details: [work closeout](work-closeout.md), [outcome scoring](outcome-scoring.md), [code intelligence](code-intelligence.md).
 
+Current main scores only eligible verification receipts. Ad hoc `--command` and `--argv-json` receipts remain audit evidence. Use `--manifest <id>` with a tracked verifier under `verify/manifests/` for artifact scoring and inspect its reported eligibility.
+
 Ordinary runs have no hard run-budget unless one is declared. When declared, only wall-clock and worker-dispatch ceilings are enforced today. External activity observations are best-effort.
 
 ## Stack At A Glance
@@ -199,14 +201,14 @@ flowchart LR
     MEM["durable memory<br/>cards · docs · learnings"]
     INBOX["review inbox<br/>ambiguous · risky"]
 
-    C & CL & O & A & P & CU & AI & G & CO & GH & Q & K & AD & OH & H --> DRAFT --> OWNER
+    C & CL & O & A & P & CU & AI & G & CO & GH & Q & K & AD & OH & GR & AM & CR & H --> DRAFT --> OWNER
     OWNER -->|safe targeted, auto-filed| MEM
     OWNER -.->|needs judgment| INBOX
 
     classDef local fill:#eff6ff,stroke:#2563eb,color:#1e3a8a;
     classDef review fill:#fff7ed,stroke:#ea580c,color:#7c2d12;
     classDef memory fill:#ecfdf5,stroke:#059669,color:#064e3b;
-    class C,CL,O,A,P,CU,AI,G,CO,GH,Q,K,AD,OH,H,DRAFT local;
+    class C,CL,O,A,P,CU,AI,G,CO,GH,Q,K,AD,OH,GR,AM,CR,H,DRAFT local;
     class INBOX review;
     class OWNER,MEM memory;
 ```
@@ -215,7 +217,7 @@ The important part is the boundary. The ingester should be conservative: safe ca
 
 ### Card Promotion And MEMORY.md
 
-Long-term memory has two layers. Knowledge cards under `memory/cards/` hold the detail: YAML frontmatter (`topic`, `category`, `tags`, `created`, `updated`) plus the durable facts. `MEMORY.md` is the index: one line per card, loaded at session start, never holding card content itself. When the ingester promotes a handoff, it creates or updates the card first, then adds or refreshes the one-line index entry. No-card handoffs append to the right document instead. Brigade records the receipt for every outcome but never edits `MEMORY.md` or cards itself; the memory owner does the writing.
+Long-term memory has two layers. Knowledge cards under `memory/cards/` hold the detail: YAML frontmatter (`topic`, `category`, `tags`, `created`, `updated`) plus the durable facts. `MEMORY.md` is the index: one line per card, loaded at session start, never holding card content itself. `brigade ingest` can create or update eligible cards, reinforce an existing match, and append targeted no-card content to the right document. The memory owner maintains the one-line index entries in `MEMORY.md`. Ingest does not refresh that index.
 
 ```mermaid
 flowchart LR
@@ -227,7 +229,8 @@ flowchart LR
     RECEIPT["ingest receipt<br/>promoted · routed · skipped · failed"]
 
     HANDOFF --> INGEST
-    INGEST -->|create-card / update-card| CARD --> INDEX
+    INGEST -->|create-card / update-card| CARD
+    CARD -->|memory owner updates index| INDEX
     INGEST -->|no-card| DOCS
     INGEST --> RECEIPT
 
@@ -406,6 +409,8 @@ Search and context tools:
 Brigade also has native local workflows for [repo fleet operations](repo-fleet.md), [portable tool catalogs](tool-catalog.md), [security scans](security.md), and [handoff promotion](handoff-promotion.md). The highlights are below.
 
 ## Repo Fleet
+
+Enable the optional operator suite with `brigade extras on` before using the `repos`, `research`, `pantry`, or `notifications` commands below.
 
 `brigade repos` watches a configured set of local repositories and turns their state into reviewable evidence: health scans, sweeps, reports, fleet actions, and release trains.
 

@@ -6,7 +6,7 @@ MiseLedger exposes a local stdio MCP server so agents can query the archive with
 miseledger mcp
 ```
 
-The server does not make network calls. It reads the local MiseLedger SQLite archive and returns imported content as untrusted evidence.
+The server does not make network calls. It queries the local MiseLedger SQLite archive and returns eligible imported content as untrusted evidence. Queries may migrate the archive, record integrity-mismatch events, and cache evidence bundles.
 
 ## Transport
 
@@ -155,4 +155,6 @@ Evidence responses include:
 - artifact refs
 - warnings
 
-Use `show_item` only after search or evidence identifies a relevant item. Prefer `create_evidence_bundle` when an agent needs citeable context for a plan or handoff, then use `show_evidence_bundle` when a later step needs the same cached bundle.
+New imports are quarantined with pending injection status. Bodies and snippets require validated provenance, matching digests, an eligible trust label, and injection status `clean`. Evidence bundles return ineligible stubs containing only an opaque `id`, `eligibility_status`, and `reason_code`. Outbound bundles omit query text and filters. Operators review archive item ids through `brigade evidence trust review` with `--mark-injection-clean`. MCP and HTTP cannot request the CLI-only forensic body reveal. See [SCHEMA.md](SCHEMA.md#read-verification).
+
+Use `show_item` only after search identifies an archive item id or evidence returns an eligible result. Ineligible bundle ids are opaque stubs and cannot identify an item for `show_item`. Prefer `create_evidence_bundle` when an agent needs citeable context for a plan or handoff, then use `show_evidence_bundle` when a later step needs the same cached bundle.

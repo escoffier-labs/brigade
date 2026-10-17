@@ -28,7 +28,7 @@ Reviewers are configured as `[[reviewer]]` entries:
 [[reviewer]]
 id = "codex-review"
 name = "Codex local code review"
-command = "codex review --json"
+command = "review-wrapper --findings .brigade/reviews/codex-review-findings.json"
 cwd = "."
 enabled = false
 timeout = 600
@@ -39,6 +39,8 @@ findings_path = ".brigade/reviews/codex-review-findings.json"
 supported_modes = ["diff", "workspace"]
 privacy_mode = "safe-summary"
 ```
+
+Replace `review-wrapper` with your local reviewer command. It must write the normalized findings JSON to `findings_path`. Brigade does not convert raw reviewer stdout into findings.
 
 The command is parsed with `shlex` and executed directly without a shell. High-risk shell commands and shell metacharacters are refused. All review state and logs stay under `.brigade/` and should remain gitignored.
 

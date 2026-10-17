@@ -11,12 +11,12 @@ status of each phase.
 ## Shape
 
 - Each machine's **local run journal stays the source of truth**
-  (`.brigade/runs/<run>/events/*.jsonl`, digest-chained). A machine never
-  depends on the hub to do its own work.
+  (`.brigade/runs/<run>/events/*.jsonl`, digest-chained). Local journaling
+  continues during a hub outage. Hub-based model admission can still refuse launches.
 - A **single small hub** (`brigade fleet serve`) runs on a dedicated Proxmox
-  LXC CT, bound to its Tailscale IP, bearer-token auth, one SQLite file in WAL
+  LXC CT, bound to loopback behind Tailscale Serve HTTPS, bearer-token auth, one SQLite file in WAL
   mode. It is an aggregator (and, from Phase 4, a claim arbiter), not the
-  source of truth.
+  source of truth for local event history.
 - On every journal append a machine POSTs the event, denormalized with its
   identity (`node_id`, `repo`, `seat`, `harness`), to the hub. If the hub is
   unreachable the event is spooled locally and flushed in order on reconnect;
@@ -65,6 +65,32 @@ the persisted global override. An older Brigade cannot open the upgraded databas
 The override has no reset command. Set it explicitly to the desired value to
 change it again. Explicit null limits are rejected. For direct policy API writes,
 omitted reason and subscription fields remain even when enabling a provider.
+
+## Native launch model bindings
+
+A hub seat's canonical `model` can differ from the exact model ID accepted by
+its execution harness. `fleet models set` accepts separate `--brigade-model`
+and `--t3-model` bindings. `--t3-model` requires a `--t3-instance-id` binding and
+projects as `bindings.native.model` for T3. Brigade workers use only their
+`bindings.brigade` launch model. Without a launch override, execution falls back to the
+canonical ID. `--clear-t3-model` removes the T3 override.
+
+For a legacy roster that has not activated policy authority, use the current
+roster revision from `brigade fleet models list --json`:
+
+```bash
+brigade fleet models set opencode model-example seat-example --enable \
+  --reasoning medium --t3-instance-id instance-example \
+  --t3-model opencode/model-example --expect-revision <REVISION> --json
+```
+
+Enabling a seat or selecting a consumer default refuses retired canonical or
+native launch models. Policy activation merges native binding fields
+individually, preserving an existing instance ID without dropping the mapped
+launch model. Schema 32 stores `model_policy.t3_model` and `events.context`.
+Startup repairs either missing additive column even if the database already
+reports version 32. Upgrade the Hub before using the new T3 binding or
+[lifecycle reporter](fleet-t3-events.md).
 
 ## Trust model
 
@@ -132,9 +158,12 @@ Hub (`src/brigade/fleet_hub.py`):
   `--allow-admin-writes`); one event object or an array (max 1000), every
   event carrying the caller's `node_id` (403 otherwise); a batch with any
   invalid event is rejected whole; responds `{"accepted": n, "duplicate": m}`.
-- `GET /status` — admin or node token; latest event per `(node_id, run_id)`
-  for runs whose latest state is not terminal (`run.completed`,
-  `run.failed`, `run.interrupted`); `?all=1` includes terminal runs. A
+- `GET /status`: admin or node token. Latest event per `(node_id, run_id)`
+  for nonterminal runs received within 30 minutes. Terminal states include
+  `run.completed`, `run.failed`, `run.interrupted`, `run.orphaned`,
+  `verify.completed`, and external completion, failure, cancellation,
+  cancellation acknowledgement, or expiry, plus any state ending in
+  `.cancelled`, `.timed_out`, or `.timeout`. `?all=1` includes history. A
   terminal event that omitted `seat` keeps the last non-empty seat from
   earlier events on that run.
 - `GET /preference` — admin or node token; the one-row fleet run preference
@@ -197,11 +226,14 @@ after the journal write completes and the lock is released):
   spool.
 - When a spool exists, new events are appended to it and the spool is flushed
   in order (100 per request) so the hub never sees a node's events out of
-  sequence. `brigade fleet flush` drains it explicitly.
+  sequence on this journal path. The explicit `fleet events report` path sends
+  its own observation first, independently of a backlog, and returns a delivery
+  receipt. `brigade fleet flush` drains the shared spool explicitly.
 - Hub traffic never uses a proxy (#1154): the client's opener is built with
   an empty `ProxyHandler`, so `HTTP_PROXY`/`HTTPS_PROXY` can neither receive
   the bearer token nor blackhole tailnet requests. Prefer HTTPS via Tailscale
-  Serve where possible. Redirects are followed only within the same origin,
+  Serve for remote hubs. Remote cleartext HTTP is refused before credentials
+  are attached. Redirects are followed only within the same origin,
   compared with default ports normalized (`http://hub` and `http://hub:80`
   are one origin); a cross-origin 302 is refused instead of replaying the
   Authorization header to another host (#1157).
@@ -324,9 +356,10 @@ phone over Tailscale:
   remaining), its last outcome, and a `collision` flag when two nodes have
   live runs on one repo or a live run is not on the claim owner.
 - Attention buckets: `failed`, `awaiting approval` (`run.paused`,
-  `approval.requested`, `approval.held`), `stale` (non-terminal with no event
-  for 30 min), `running`, `queued`, `interrupted`, `succeeded`. The default
-  sort surfaces the first three at the top, oldest first within a bucket.
+  `approval.requested`, `approval.held`), `unknown`, `stale` (non-terminal with no event
+  for 30 min, or a T3 observation older than 900 seconds), `running`, `queued`,
+  `interrupted`, `succeeded`. The default sort surfaces failed, awaiting approval,
+  unknown and stale runs at the top, oldest first within a bucket.
 - Query params: `sort=attention|age|node|repo|state|seat`, substring filters
   `node=`, `repo=`, `seat=` (matches seat or harness), `state=` (bucket or raw
   event type), `attention=1` (needs-attention only), `all=1` (include
@@ -649,8 +682,8 @@ FROM compared
 ORDER BY iso_week;
 ```
 
-Run the hub under a process supervisor on the CT, e.g.
-`brigade fleet serve --host "$(tailscale ip -4)" --token-file /etc/brigade/fleet-token`.
+Run the hub under a process supervisor on the CT, behind a same-host HTTPS proxy, e.g.
+`brigade fleet serve --host 127.0.0.1 --trust-forwarded-proto --token-file /etc/brigade/fleet-token`.
 
 ## Phase 4 surface (claims)
 

@@ -975,3 +975,21 @@ def test_set_default_refuses_a_seat_whose_t3_model_was_retired(conn):
         conn, {"action": "set-default", "expected_revision": 3, "consumer": "t3-fleet", "seat": "gpt-seat"}
     )
     assert status == 409 and denied["error"] == "retired-model"
+
+
+def test_missing_t3_model_column_is_repaired_on_a_current_version_hub(tmp_path):
+    from brigade import fleet_hub
+
+    db = tmp_path / "hub.db"
+    conn = fleet_hub.init_db(db)
+    assert "t3_model" in {row[1] for row in conn.execute("PRAGMA table_info(model_policy)")}
+    # A hub that reached this schema version through another migration never ran the roster column add.
+    conn.execute("ALTER TABLE model_policy DROP COLUMN t3_model")
+    conn.execute(f"PRAGMA user_version={fleet_hub.SCHEMA_VERSION}")
+    conn.commit()
+    conn.close()
+    conn = fleet_hub.init_db(db)
+    try:
+        assert "t3_model" in {row[1] for row in conn.execute("PRAGMA table_info(model_policy)")}
+    finally:
+        conn.close()

@@ -1,6 +1,6 @@
 # work_cmd.py Package Split Plan
 
-Status: planned, not started. Prerequisites landed first: `brigade.localio` helper extraction and the `brigade.actionqueue` extraction. This note captures the seam analysis so the split can execute in a dedicated session without re-deriving it.
+Status: initial module-to-package split implemented in commit `1d3d4ac49`; the follow-on extraction described here remains unfinished. Prerequisites landed first: `brigade.localio` helper extraction and the `brigade.actionqueue` extraction. This note captures the seam analysis so the remaining work can execute in a dedicated session without re-deriving it.
 
 ## Why this is the last refactor stage, not the first
 

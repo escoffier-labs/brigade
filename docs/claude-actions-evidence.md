@@ -71,31 +71,13 @@ and PR identities. Nothing follows these links.
 
 ## Remaining #1602 acceptance
 
-- Passive diagnostics separating app access, workflow configuration/enabled
-  state, auth declaration, Actions execution, managed review and Claude cloud
-  observability. Each fact still needs authority, scope, source URL/revision
-  and observation time.
-- Diagnostic states for confirmed, operator-reported, absent in complete scope,
-  unknown, unsupported and access denied. Missing checks or runs must not imply
-  installation state, readiness or completion.
-- Bounded discovery of the actual action, triggers and permissions, including
-  pinned refs, renamed jobs, reusable/composite definitions, non-default
-  branches and inaccessible external definitions.
-- Declared API-key, subscription OAuth and provider/federation inputs, with
-  secret availability kept separate from readiness. Diagnostics must not read
-  credential values or execute authentication probes.
-- Supported read-only GitHub importer with explicit page/object budgets,
-  pagination/truncation reporting, 403/404/429 handling, delayed observations,
-  idempotent attempt and provider-object refresh, and historical head retention.
-- Job and artifact metadata, supported runner classification, and explicit
-  expired, deleted or unavailable artifact observations. Artifact downloads,
-  logs and transcripts remain excluded.
-- Persistence and the same bounded JSON and FleetHub operator readouts. Keep
-  Actions records separate from managed review, Claude cloud adoption and
-  cloud capacity/admission.
-- Offline integration tests for app-only reports, workflow/auth declarations,
-  discovery uncertainty, disabled workflows, pagination and access errors.
-  This slice covers only the pure run-normalization contracts.
+- Cross-refresh history, refresh ordering and idempotent persistence for run,
+  job and artifact observations. Persistence and CLI/FleetHub readouts remain
+  open. Keep Actions records separate from managed review, Claude cloud adoption
+  and cloud capacity/admission.
+- General YAML normalization beyond caller-supplied mappings and provider auth
+  readiness require supported evidence. Artifact downloads, logs and transcripts
+  remain excluded.
 
 No setup step, app installation, workflow/secret write, paid review, dispatch,
 rerun or trigger comment is implemented.

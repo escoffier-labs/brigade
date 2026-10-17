@@ -35,11 +35,10 @@ brigade work brief --target .
 Run checks through Brigade so the exit code is recorded, then capture the outcome against the skill or card that guided the change:
 
 ```bash
-brigade work verify run --target . --command "cargo test --all-features"
-brigade outcome capture taste --run-id latest --kind skill
+brigade work verify run --target . --command "cargo test --all-features" --capture brigade-work
 ```
 
-Replace `taste` with the skill or card used for that verification. After substantial work, write durable findings in the standard Memory Handoff format under `.claude/memory-handoffs/`, then run `brigade handoff lint` before finishing.
+Replace `brigade-work` with another installed skill or card only when it guided that verification. Ad hoc command receipts are audit-only and do not score artifacts. If `--capture` was omitted, use `brigade outcome capture <skill-or-card-id> --run-id <run-id> --kind <skill|card>` with the exact verification run id and the artifact's kind. After substantial work, write durable findings in the standard Memory Handoff format under `.claude/memory-handoffs/`, then run `brigade handoff lint` before finishing.
 
 ## Module map
 
@@ -58,7 +57,7 @@ The code is split into focused modules:
 
 ## MCP smoke test
 
-Build, then pipe newline-delimited JSON-RPC into the server over stdio. It speaks JSON-RPC 2.0 and exposes fourteen tools (`search`, `callers`, `callees`, `impact`, `context`, `stats`, `doctor`, `file_neighbors`, `dead_code`, `cycles`, `affected`, `explain`, `repos`, `diff`).
+Build, then pipe newline-delimited JSON-RPC into the server over stdio. It speaks JSON-RPC 2.0 and exposes fifteen tools (`search`, `outline`, `callers`, `callees`, `impact`, `context`, `stats`, `doctor`, `file_neighbors`, `dead_code`, `cycles`, `affected`, `explain`, `repos`, `diff`).
 
 ```bash
 cargo run -- init .
@@ -78,6 +77,6 @@ printf '%s\n%s\n' \
 - Schema, JSON output shapes, and MCP tool contracts are stable contracts; breaking changes need a conversation first.
 - Each language extractor owns an `EXTRACTOR_FINGERPRINT` constant. Bump that language's fingerprint whenever the extractor can produce different symbols, imports, calls, symbol ids, signatures, containers, body hashes, language labels, or filtering behavior for the same file content. Do not bump unrelated language fingerprints. One exception: a change to the SHARED symbol-id derivation in `extractors/common.rs` affects every language at once and must ship as a schema migration that rewrites ids in place (see the v7 rewrite in `store/schema.rs`), not as a fingerprint bump on every language.
 - No personal details, hostnames, IPs, account IDs, or live auth profiles in code, tests, or fixtures.
-- Conventional commits only. No AI co-authorship trailers.
+- Conventional commits and co-author trailers follow the root [contributor policy](../../CONTRIBUTING.md).
 
 See `CONTRIBUTING.md` for what lands easily and `README.md` for the full design rationale.

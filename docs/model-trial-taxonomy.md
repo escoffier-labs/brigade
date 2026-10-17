@@ -49,5 +49,8 @@ cell.json inlines the full prompt and absolute run_dir. Any export/projection pa
 strip/digest prompts and relativize paths by default. Enforced by test.
 
 ## Deferred (post-freeze, additive)
+The retry column above describes the deferred design. `--retry-transient` is
+not accepted by the current [trial CLI](../src/brigade/cli/model.py).
+
 --retry-transient: opt-in re-run of adapter_error and timeout-reason cells as new attempts,
 failed attempt kept on disk. Default off. Not required for the freeze.

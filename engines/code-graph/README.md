@@ -23,7 +23,7 @@
 </p>
 
 <p align="center">
-  <img src="https://shieldcn.dev/github/ci/escoffier-labs/graphtrail.svg?branch=master&workflow=ci.yml" alt="CI status">
+  <img src="https://shieldcn.dev/github/ci/escoffier-labs/brigade.svg?branch=main&workflow=ci.yml" alt="CI status">
   <img src="https://img.shields.io/crates/v/graphtrail.svg" alt="crates.io version">
   <img src="https://shieldcn.dev/badge/license-MIT-green.svg" alt="MIT license">
   <img src="https://shieldcn.dev/badge/MCP-server-8A2BE2.svg" alt="MCP server">
@@ -133,7 +133,7 @@ The server exposes fifteen tools. This list is verified against the live `tools/
 | `callers` | `symbol` (`depth` optional, default 1, clamped to 1..5) | Symbols that call the given symbol (incoming call edges), with `hops` on each edge, plus how `symbol` resolved (see [Symbol resolution](#symbol-resolution)). |
 | `callees` | `symbol` (`depth` optional, default 1, clamped to 1..5) | Symbols called by the given symbol (outgoing call edges), with `hops` on each edge, plus how `symbol` resolved. |
 | `impact` | `symbol` (`depth` optional, default 1, clamped to 1..5) | Combined callers and callees of a symbol (the blast radius of a change), with `hops` on each edge, plus how `symbol` resolved. |
-| `context` | `task` (`limit` optional, default 12) | A context pack: matching entry points plus their caller/callee neighborhood and related files. |
+| `context` | `task` (`limit` optional, default 12, `format`, `personalized`, and `max_chars` optional) | A context pack: matching entry points plus their caller/callee neighborhood and related files. |
 | `stats` | none | Counts of files, symbols, edges, imports, schema version, sync metadata, and per-language file counts. |
 | `doctor` | none | Freshness contract for the graph: schema status, resolver status, last sync age, branch drift, pending file changes, ignored entries, skipped and parse-error files, and `FRESH`/`STALE`/`NEEDS-MIGRATION` verdict. |
 | `file_neighbors` | `path` | Files connected to an indexed file by incoming or outgoing call edges. |
@@ -146,6 +146,7 @@ The server exposes fifteen tools. This list is verified against the live `tools/
 
 Every tool additionally accepts an optional `repo` or `db` selector for multi-repo use.
 `doctor`, `repos`, and `diff` do not accept `refresh`; `doctor` reports staleness and leaves refresh to the query tools that opt into it.
+MCP `callers`, `callees`, and `impact` also accept an optional `limit` to bound returned edges. The CLI does not expose this option.
 Call-edge tools cap each direction at 500 real edges. When a traversal is capped, the `edges` array includes a final row with `kind: "truncated"`.
 
 ### Symbol resolution
@@ -265,7 +266,7 @@ GraphTrail is a sidecar, not a platform. It does not:
 - make network calls in the default build
 - own memory, receipts, publishing, or scheduling (those stay in Brigade and MiseLedger)
 - keep semantic chunks, summaries, or embeddings (Code Search owns those)
-- mutate your code, or write graph state unless a supported MCP query explicitly sets `refresh: true`
+- mutate your code. Graph-index writes come from CLI `init`, `sync`, foreground `watch`, or a supported MCP query that explicitly sets `refresh: true`
 
 It indexes source into a graph and answers structural questions. That is the whole job.
 

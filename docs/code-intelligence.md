@@ -10,7 +10,7 @@ brigade code sync --target .
 brigade code doctor --target .
 ```
 
-`sync` builds or refreshes the local index. Status reports whether the index is present and usable. Without a synced index, verify still runs. The receipt simply omits or empties the graph delta.
+`sync` builds or refreshes the local index. Status reports whether the index is present and usable. Verification attempts to sync or build the index when the engine is available. If capture fails, verification still runs and the receipt records the graph-delta failure status.
 
 ## Structural queries
 
@@ -19,6 +19,7 @@ brigade code callers <symbol>
 brigade code callees <symbol>
 brigade code impact <symbol>
 brigade code context "<task>"
+brigade code outline <path>
 ```
 
 Use these before edits that rename symbols or change call shape. `impact` and `context` are the usual entry points for agent briefs.
@@ -31,18 +32,18 @@ Not every Brigade command writes a receipt. Ad hoc shell commands outside `work 
 
 ## Export and Center
 
-v0.27.0 adds a bounded JSON export contract and a Center view:
+The code map exposes a bounded JSON export contract and a Center view:
 
 ```bash
 brigade code export --target . --json
 brigade code export --target . --json --symbol <symbol> --overlay
 ```
 
-The export caps the module map at 48 modules and 96 edges. `--overlay` reads the local Git change set. The Center dashboard consumes this command contract instead of opening the graph database itself. Stable v0.26.1 already exposes the structural query surface above.
+The export caps the module map at 15 modules and 24 edges. `--overlay` reads the local Git change set. The Center dashboard consumes this command contract instead of opening the graph database itself.
 
 ## MCP access
 
-`brigade setup` can expose the code map through MCP so harnesses query callers, impact, and context without leaving their native tool loop. Historical MCP entry labels may still say `graphtrail`.
+`brigade setup` installs `graphtrail-mcp`. Register it in the harness configuration directly or through `brigade mcp sync` so agents can query callers, impact, and context. Historical MCP entry labels may still say `graphtrail`.
 
 ## Limitations
 

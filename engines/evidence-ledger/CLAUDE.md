@@ -6,7 +6,7 @@
 
 ## Memory handoff
 
-The canonical memory owner on this repo is **claude**. Claude Code may keep local session context, but durable knowledge must be written as a Memory Handoff in `.claude/memory-handoffs/`. Full contract in `AGENTS.md`.
+Follow the root memory ownership policy. Claude Code may keep local session context, but durable knowledge must be written as a Memory Handoff in the root `.claude/memory-handoffs/`. Full contract in the root `AGENTS.md`.
 
 At the end of any substantial task, check whether the session produced durable knowledge. If yes, write a handoff using `.claude/memory-handoffs/TEMPLATE.md`. Do not wait to be reminded.
 
@@ -29,7 +29,7 @@ For large scoping work, invoke `ultra-work-scout` first. It is installed with th
 
 ## Git
 
-- Do not add `Co-Authored-By` or AI-attribution trailers to commits, PR bodies, or public docs.
+- Follow the root contributor policy for in-house commit co-author trailers and external contributions.
 - Use conventional commits.
 - Never bypass pre-push hooks (`--no-verify`) unless the user has explicitly accepted the risk.
 - Never push to `main` directly on shared repos. Feature branch + PR.

@@ -1817,18 +1817,24 @@ class TestDispatchWiring:
 
         monkeypatch.setattr(fleet_client, "_post_claim_blocking", post)
 
-        # Poll instead of one long sleep: interrupt_main queues the
-        # KeyboardInterrupt for the interpreter's next bytecode check, which
-        # a single 30-second sleep syscall would never reach.
+        # A silent child wait must unwind even with broken abort diagnostics.
+        # Claim cancellation stops its registered group without bytecode polls.
         def fake_run(*_a, **_kw):
-            deadline = time.monotonic() + 60
-            while time.monotonic() < deadline:
-                time.sleep(0.02)
+            from brigade import proc
+
+            proc.run(
+                [sys.executable, "-c", "import time; time.sleep(60)"],
+                timeout=10,
+                process_registry=_kw["process_registry"],
+            )
+            return 0
 
         monkeypatch.setattr(aboyeur, "run", fake_run)
         monkeypatch.setattr(sys, "stderr", _DeadStderr(sys.stderr))
+        started = time.monotonic()
         with contextlib.suppress(ValueError):
             self._run(ws, roster_path)
+        assert time.monotonic() - started < 5, "claim cancellation reached the 10-second process timeout"
         receipt = self._receipt(ws)
         assert receipt["status"] == "failed"
         assert receipt["failure"]["kind"] == "fleet-claim-lost"

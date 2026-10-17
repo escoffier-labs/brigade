@@ -21,9 +21,9 @@
 </p>
 
 <p align="center">
-  <img src="https://shieldcn.dev/github/ci/escoffier-labs/miseledger.svg?branch=master&workflow=ci.yml" alt="CI status">
-  <img src="https://shieldcn.dev/github/release/escoffier-labs/miseledger.svg" alt="Latest release">
-  <img src="https://shieldcn.dev/badge/go-1.22%2B-00ADD8.svg?logo=go&logoColor=white" alt="Go 1.22+">
+  <img src="https://shieldcn.dev/github/ci/escoffier-labs/brigade.svg?branch=main&workflow=ci.yml" alt="CI status">
+  <img src="https://shieldcn.dev/github/release/escoffier-labs/brigade.svg" alt="Latest release">
+  <img src="https://shieldcn.dev/badge/go-1.26%2B-00ADD8.svg?logo=go&logoColor=white" alt="Go 1.26+">
   <img src="https://shieldcn.dev/badge/license-MIT-green.svg" alt="MIT license">
 </p>
 
@@ -46,7 +46,7 @@ MISELEDGER_VERSION="$MISELEDGER_VERSION" sh install.sh
 miseledger init
 miseledger crawl sessions
 miseledger search "cookie rotation"
-miseledger evidence --json
+miseledger evidence "cookie rotation" --json
 ```
 
 Review `install.sh` before running it. The installer downloads release binaries and verifies their sha256 checksums against the release `checksums.txt`. To verify GitHub artifact provenance for a downloaded release asset, run `gh attestation verify <asset> --repo escoffier-labs/miseledger`.
@@ -54,8 +54,9 @@ Review `install.sh` before running it. The installer downloads release binaries 
 Or from source:
 
 ```bash
-git clone https://github.com/escoffier-labs/miseledger.git
-cd miseledger && go build -o bin/miseledger ./cmd/miseledger
+git clone https://github.com/escoffier-labs/brigade.git
+cd brigade/engines/evidence-ledger
+go build -o bin/miseledger ./cmd/miseledger
 ```
 
 ## What it does
@@ -130,9 +131,9 @@ MiseLedger follows one ingest path:
 
 <p align="center"><em>Generated from <code>docs/assets/workflows/stack-map.json</code> with <code>plating workflow</code>.</em></p>
 
-MiseLedger owns local agent-session crawling, local artifact crawling, archive ingest, SQLite, FTS, relations, scan manifests, reader APIs, and evidence bundles.
+MiseLedger owns local agent-session crawling, local artifact crawl wrappers, archive ingest, SQLite, FTS, relations, scan manifests, reader APIs, and evidence bundles.
 
-External crawler tools keep their native sync and query behavior. Six wrappers consume source-owned adapter JSONL. The Telegram wrapper converts Telecrawl's public JSON message output into the same adapter contract.
+External crawler tools keep their native sync and query behavior. Five wrappers consume source-owned adapter JSONL. The GitHub wrapper converts Gitcrawl thread rows, and the Telegram wrapper converts Telecrawl's public JSON message output into the same adapter contract.
 
 ## Runtime Paths
 
@@ -232,6 +233,8 @@ miseledger doctor --archive --json
 
 Re-running the same imports is idempotent and does not increase item counts.
 
+New imports start with quarantined provenance and pending injection status. Search can locate them, but bodies and snippets stay hidden until an operator reviews them through `brigade evidence trust review` with `--mark-injection-clean`. Evidence bundles return ineligible stubs for such items. See [schema trust rules](docs/SCHEMA.md#read-verification).
+
 ## Native Session Adapters
 
 Native adapter generators convert local session JSON and JSONL into `miseledger.adapter.v1` records:
@@ -240,6 +243,7 @@ Native adapter generators convert local session JSON and JSONL into `miseledger.
 miseledger adapter codex ~/.codex/sessions --out codex.adapter.jsonl --limit 100
 miseledger adapter openclaw ~/.openclaw/agents --out openclaw.adapter.jsonl --since 2026-06-01
 miseledger adapter claude ~/.claude/projects --out claude.adapter.jsonl --limit 100
+miseledger adapter pi ~/.pi/agent/sessions --out pi.adapter.jsonl --limit 100
 miseledger adapter hermes ~/.hermes/sessions --out hermes.adapter.jsonl --limit 100
 miseledger adapter opencode ~/.local/share/opencode --out opencode.adapter.jsonl --limit 100
 miseledger adapter cursor ~/.config/Cursor/User --out cursor.adapter.jsonl
@@ -252,6 +256,7 @@ Native import commands stream generated adapter records into the same adapter in
 miseledger import codex ~/.codex/sessions --json
 miseledger import openclaw ~/.openclaw/agents --json
 miseledger import claude ~/.claude/projects --json
+miseledger import pi ~/.pi/agent/sessions --json
 miseledger import hermes ~/.hermes/sessions --json
 miseledger import opencode ~/.local/share/opencode --json
 miseledger import cursor ~/.config/Cursor/User --json
@@ -338,13 +343,14 @@ Native compatibility imports remain available when you want to point at one sour
 ```bash
 miseledger import codex ~/.codex/sessions --json
 miseledger import claude ~/.claude/projects --json
+miseledger import pi ~/.pi/agent/sessions --json
 miseledger import openclaw ~/.openclaw/agents --json
 miseledger import opencode ~/.local/share/opencode --json
 miseledger import hermes ~/.hermes/sessions --json
 miseledger import grok ~/.grok/sessions --json
 ```
 
-Local artifact crawls add defaults for common archive sources:
+Local artifact crawl wrappers add defaults for common archive sources. Every route except `crawl adapter` requires `sourceharvest` on `PATH`; `crawl adapter` imports adapter JSONL directly:
 
 ```bash
 miseledger crawl docs ./notes --json
@@ -371,7 +377,7 @@ miseledger import adapter discrawl.adapter.jsonl --json
 
 Archived StationTrail and SourceHarvest exports are still ordinary `miseledger.adapter.v1` JSONL, so already-generated files can be imported with `miseledger import adapter`.
 
-Discord, Slack, Granola, Notion, and Gmail call each crawler's adapter exporter. GitHub calls current Gitcrawl's `sync` and `threads --json` commands, then converts those thread rows locally. Telegram calls `telecrawl --json messages`. MiseLedger converts the returned message array locally and maps `--since` to Telecrawl's `--after` flag.
+Discord, Slack, Granola, and Notion call each crawler's `export adapter` command. Gmail calls `mailcrawl gmail export`. GitHub calls current Gitcrawl's `sync` and `threads --json` commands, then converts those thread rows locally. Telegram calls `telecrawl --json messages`. MiseLedger converts the returned message array locally and maps `--since` to Telecrawl's `--after` flag.
 
 Gmail remains explicit about account selection. Gog may have configured accounts, but MiseLedger requires `--account` so a crawl cannot silently pick a mailbox. Use `--metadata-only`, a narrow `--query`, and `--dry-run` first. `scripts/smoke_gmail_metadata.sh` does exactly that with the first configured Gog account and does not import mail.
 
@@ -424,6 +430,8 @@ Archive maintenance commands are local-only:
 miseledger stats --json
 miseledger relations backfill --json
 miseledger compact --json
+miseledger fork snapshot.db --json
+miseledger diff snapshot.db --json
 miseledger migrate codex-arguments --dry-run --json
 miseledger prune --policy default --dry-run --json
 miseledger prune imports --before 2026-01-01 --dry-run --json
@@ -432,6 +440,8 @@ miseledger doctor --archive --json
 ```
 
 `stats` summarizes archive contents by source, item kind, actor type, collection kind, and recent imports. `relations backfill` resolves stored `target_external_id` values after later imports add the target item. `compact` checkpoints, analyzes, vacuums, and optimizes the SQLite archive. `prune --policy default --dry-run` reports old operational-noise items eligible for retention pruning. Destructive policy pruning requires `--apply --export <path>` and writes compressed adapter JSONL before deleting item rows. `prune imports` removes old import metadata and warning rows only. `prune scans --missing` removes scan manifest rows for files no longer present. See [docs/RETENTION_POLICY.md](docs/RETENTION_POLICY.md) for policy file shape and deletion semantics.
+
+`fork <dest-db>` writes a consistent archive snapshot and refuses to overwrite an existing file. `diff <fork-db>` compares the live archive with that snapshot. `diff <base-db> <fork-db>` compares two explicit snapshots, reporting added, changed, and removed items plus relation changes.
 
 `doctor --archive` checks SQLite quick-check status, foreign keys, orphan rows, unresolved relations, FTS coverage, and missing scan paths. It reports counts and status only, not transcript content.
 
@@ -443,7 +453,7 @@ Discovery reports candidate roots and supported file counts only:
 miseledger sources discover --json
 ```
 
-It checks Codex sessions, OpenClaw agents, Claude projects, OpenCode exports, Hermes session files, Cursor history, and Grok sessions without printing private transcript content.
+It checks Codex sessions, OpenClaw agents, Claude projects, Pi sessions, OpenCode exports, Hermes session files, Cursor history, and Grok sessions without printing private transcript content.
 
 ## Browser UI
 
@@ -502,7 +512,7 @@ miseledger evidence list --json
 miseledger explain "adapter contract" --source codex --json
 ```
 
-Evidence output includes a stable bundle `id`, a `miseledger://evidence/<id>` resource URI, the query, filters, generated timestamp, result item IDs, snippets, FTS scores, source and collection context, actor context, raw refs, artifact refs, source grouping, optional related items, optional artifact text, and warnings. Evidence results dedupe repeated content hashes. Generated bundles are cached under MiseLedger's private cache directory and can be shown later with `miseledger evidence show`.
+Evidence output includes a stable bundle `id`, a `miseledger://evidence/<id>` resource URI, generated timestamp, eligible result item IDs, snippets, FTS scores, source and collection context, actor context, raw refs, artifact refs, source grouping, optional related items, optional artifact text, and warnings. Query text and filters are omitted from outbound bundles. Ineligible results contain only an opaque `id`, `eligibility_status`, and `reason_code`. Evidence results dedupe repeated content hashes. Generated bundles are cached under MiseLedger's private cache directory and can be shown later with `miseledger evidence show`.
 
 Cached bundles carry an HMAC over their canonical reference (bundle ID, item IDs, filters, `generated_at`), keyed by a random 32-byte key at `<data-dir>/miseledger/evidence-bundle-mac.key`. The key file is validated on every load — regular file (no symlink; opened with `O_NOFOLLOW` where available), owned by the current uid, mode 0600, exactly 32 bytes — and first creation is exclusive and descriptor-relative (`openat(O_CREAT|O_EXCL|O_NOFOLLOW, 0600)` against the validated data-directory handle held across the miss-or-create sequence), so concurrent initializers converge on one key and a data directory swapped in between cannot receive or interpose key material. A refused key fails the operation closed. Residual: a process running as the same uid can still read or replace a valid key once validation passes; isolating scanners under a different uid is tracked in [#1093](https://github.com/escoffier-labs/miseledger/issues/1093).
 
@@ -543,7 +553,7 @@ It does not:
 - execute imported text. Every imported record is treated as untrusted evidence, not instructions
 - replace upstream crawler binaries for domain-specific sync and query behavior
 - embed, rank with a model, or call an LLM to answer a query
-- mutate or delete your normalized evidence on `prune` or `compact` (those touch import metadata, scan rows, and SQLite housekeeping only)
+- delete normalized evidence on `compact`, `prune imports`, or `prune scans`. Policy pruning can delete matched items after exporting them and requires `--apply --export <path>`
 
 ## Privacy
 
