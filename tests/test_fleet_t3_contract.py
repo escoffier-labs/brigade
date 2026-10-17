@@ -13,7 +13,17 @@ from brigade.cli import main
 from brigade.fleet_execution_context import ExecutionContextError, validate_context
 from tests.test_fleet_events_cli import _args
 
-pytest_plugins = ["tests.test_fleet_events_cli"]
+
+# Defined here rather than shared through pytest_plugins, which does not
+# expose a fixture when pytest collected the other module first.
+@pytest.fixture()
+def reporter(tmp_path, monkeypatch):
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: "node-test")
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "http://hub.invalid", "token": "test"})
+    monkeypatch.setattr(fleet_client, "spool_path", lambda _node: tmp_path / "spool" / "events.jsonl")
+    sent = []
+    monkeypatch.setattr(fleet_client, "_post_events", lambda _hub, _token, body, **_kw: sent.append(body))
+    return sent, tmp_path / "spool" / "events.jsonl"
 
 
 @pytest.mark.parametrize("version", [31, 32])
