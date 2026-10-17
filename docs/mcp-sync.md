@@ -64,7 +64,7 @@ receipts.
 | Cursor user | `~/.cursor/mcp.json` | JSON `mcpServers`. **User-scoped** (`--harness cursor --user-scope`) |
 | Codex user | `~/.codex/config.toml` | TOML `[mcp_servers.<name>]`. **User-scoped** (`--harness codex-user --user-scope`) |
 | OpenCode user | `~/.config/opencode/opencode.json` | JSON `mcp`. **User-scoped** (`--harness opencode-user --user-scope`) |
-| Kimi user | `~/.kimi-code/mcp.json` | JSON `mcpServers`. **User-scoped** (`--harness kimi-user --user-scope`) |
+| Kimi user | `~/.kimi-code/mcp.json` (legacy root; `~/.kimi` when the capability probe selects it) | JSON `mcpServers`. **User-scoped** (`--harness kimi-user --user-scope`) |
 | Grok user | `~/.grok/config.toml` | TOML `[mcp_servers.<name>]`. **User-scoped** (`--harness grok-user --user-scope`) |
 | OpenClaw | `~/.openclaw/openclaw.json` | JSON `mcp.servers`. **User-scoped** (`--user-scope`) |
 | Hermes | `~/.hermes/config.yaml` | YAML `mcp_servers`. **User-scoped** (`--user-scope`) |

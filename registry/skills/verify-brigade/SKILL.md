@@ -6,8 +6,9 @@ description: "Prove a Brigade change works by driving the real `brigade` CLI aga
 # Verify Brigade
 
 This skill verifies the `brigade` CLI against a temp target. The optional Center
-dashboard is a separate surface. Run the CLI and read what it wrote. This skill drives it through one helper,
-`control-brigade.py`, so a proof is a rerunnable command instead of a story.
+dashboard is a separate surface. Run the CLI and read what it wrote. This skill
+drives it through one helper, `control-brigade.py`, so a proof is a rerunnable
+command instead of a story.
 
 Every drive happens in a temp target this skill creates. The helper enforces
 that: `--target` is accepted only when it resolves *under* `<state-root>/targets`,

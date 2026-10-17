@@ -162,7 +162,8 @@ Hub (`src/brigade/fleet_hub.py`):
   for nonterminal runs received within 30 minutes. Terminal states include
   `run.completed`, `run.failed`, `run.interrupted`, `run.orphaned`,
   `verify.completed`, and external completion, failure, cancellation,
-  cancellation acknowledgement, or expiry. `?all=1` includes history. A
+  cancellation acknowledgement, or expiry, plus any state ending in
+  `.cancelled`, `.timed_out`, or `.timeout`. `?all=1` includes history. A
   terminal event that omitted `seat` keeps the last non-empty seat from
   earlier events on that run.
 - `GET /preference` — admin or node token; the one-row fleet run preference

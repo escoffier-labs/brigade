@@ -350,7 +350,7 @@ miseledger import hermes ~/.hermes/sessions --json
 miseledger import grok ~/.grok/sessions --json
 ```
 
-Local artifact crawl wrappers require `sourceharvest` on `PATH` and add defaults for common archive sources:
+Local artifact crawl wrappers add defaults for common archive sources. Every route except `crawl adapter` requires `sourceharvest` on `PATH`; `crawl adapter` imports adapter JSONL directly:
 
 ```bash
 miseledger crawl docs ./notes --json

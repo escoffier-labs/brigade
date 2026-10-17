@@ -101,7 +101,7 @@ The project filter matches normalized project, workspace, workspace-directory, a
 
 ## Import Local Sources
 
-Local artifact crawl wrappers (require `sourceharvest` on `PATH`):
+Local artifact crawl wrappers (all except `crawl adapter` require `sourceharvest` on `PATH`):
 
 ```bash
 miseledger crawl docs ./notes --json
