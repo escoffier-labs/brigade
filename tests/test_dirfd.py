@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import stat
 import sys
@@ -554,3 +555,23 @@ def test_nt_stat_child_refuses_unsafe_or_failed_metadata_without_leaks(
     finally:
         os.close(parent)
     assert len(kernel.closed) == len(set(kernel.closed))
+
+
+@pytest.mark.parametrize("held", [True, False])
+def test_fsync_directory_tolerates_refused_windows_flush_only_on_a_held_descriptor(tmp_path, monkeypatch, held):
+    def refused_flush(descriptor):
+        raise OSError(errno.EBADF, "Bad file descriptor")
+
+    descriptor = os.open(tmp_path / "held", os.O_CREAT | os.O_RDWR, 0o600)
+    monkeypatch.setattr(dirfd.sys, "platform", "win32")
+    monkeypatch.setattr(dirfd.os, "fsync", refused_flush)
+    if held:
+        try:
+            dirfd.fsync_directory(descriptor)
+        finally:
+            os.close(descriptor)
+        return
+    os.close(descriptor)
+    with pytest.raises(OSError) as raised:
+        dirfd.fsync_directory(descriptor)
+    assert raised.value.errno == errno.EBADF
