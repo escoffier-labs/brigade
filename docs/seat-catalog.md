@@ -108,6 +108,11 @@ cli = "antigravity"
 model = "Gemini 3.8 Flash (Low)"
 role = "Fast worker for research, summaries, scans, and small code changes; retain a stronger independent reviewer for security-sensitive or cross-file decisions."
 
+[agents.agy_argon]
+cli = "antigravity"
+model = "gemini-4-argon-high"
+role = "Gemini 4 Argon High worker on the Antigravity subscription for implementation and research. Not for security review."
+
 [agents.reviewer2]
 cli = "antigravity"
 model = "Claude Sonnet 4.6 (Thinking)"
@@ -115,6 +120,8 @@ role = "Cross-model reviewer on the Google lane; verify claims without spending 
 ```
 
 Pin the display name or the effort slug (`gemini-3.8-flash-low`). The published API id `gemini-3.8-flash` is recognized by agy but requires `--effort`; Brigade maps that bare id to the low-effort slug so `brigade run --model gemini-3.8-flash` reaches the same seat.
+
+The 2026-10-17 conductor check found `gemini-4-argon-low`, `gemini-4-argon-medium`, and `gemini-4-argon-high` in `agy` 1.4.0's model list, alongside the Gemini 3.8 Flash effort variants. The `agy_argon` seat pins Gemini 4 Argon High through the Antigravity subscription, beside `agy_flash`. Bare `gemini-N[.N]-argon` IDs follow the same default as flash/pro: `gemini-4-argon` maps to `gemini-4-argon-low`. Already-suffixed slugs pass through unchanged, so pin `gemini-4-argon-high` for the High seat. Do not route security review to `agy_argon`.
 
 Harness filters can change the result before inference. In August 2026 author receipts, Antigravity served a Gemini 3.7 Flash security canary that Cursor rejected at the provider boundary. Record provider refusals separately from model output.
 
@@ -152,7 +159,7 @@ cli = "claude"
 model = "glm-5.2"
 read_only_capable = false
 role = "Open-weight worker on an Anthropic-compatible API; relief for orchestrator-tier work."
-env = { ANTHROPIC_BASE_URL = "https://api.example.com/anthropic", ANTHROPIC_AUTH_TOKEN_REF = "GLM_API_KEY", CLAUDE_CONFIG_DIR = "/home/operator/.claude-lanes" }
+env = { ANTHROPIC_BASE_URL = "https://api.example.com/anthropic", ANTHROPIC_AUTH_TOKEN_REF = "GLM_API_KEY", CLAUDE_CONFIG_DIR = "/path/to/claude-lanes" }
 ```
 
 This proxy example opts out of read-only dispatch. Set the value to `true` only after
