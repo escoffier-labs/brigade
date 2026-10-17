@@ -199,3 +199,14 @@ def test_child_env_preserves_fleet_config_without_unrelated_secrets(monkeypatch)
     environment = fleet.child_env()
     assert environment["T3_FLEET_CONFIG"] == "/srv/t3/fleet.toml"
     assert "UNRELATED_SECRET" not in environment
+
+
+def test_nested_result_envelope_is_flattened():
+    stdout = json.dumps(
+        {"schema": "t3-fleet.result.v1", "request_id": "host-a-r5", "result": {"state": "running", "host": "host-a"}}
+    )
+    result = fleet.FleetRunner("/bin/t3-fleet", "/usr/bin/git", run=FakeRun(stdout)).status("host-a-r5")
+    assert result["state"] == "running"
+    assert result["host"] == "host-a"
+    assert result["request_id"] == "host-a-r5"
+    assert "result" not in result

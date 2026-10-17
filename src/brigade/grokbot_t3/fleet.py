@@ -111,6 +111,11 @@ class FleetRunner:
         if result.get("schema") != RESULT_SCHEMA or proc.returncode != 0:
             request_id = result.get("request_id") if result.get("schema") == RESULT_SCHEMA else None
             raise FleetProtocolError("internal_error", None, request_id if isinstance(request_id, str) else None)
+        nested = result.get("result")
+        if isinstance(nested, dict):
+            flattened = {key: value for key, value in result.items() if key != "result"}
+            flattened.update(nested)
+            return flattened
         return result
 
     def capacity(self) -> dict[str, Any]:

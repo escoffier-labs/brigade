@@ -357,7 +357,7 @@ def test_followup_consumes_daily_attempt_even_on_timeout(make, monkeypatch):
         raise FleetTimeout("followup")
 
     monkeypatch.setattr(runner, "followup", timeout)
-    assert tools.call_tool("t3_followup", {"request_id": "r1", "message": "more"})["error"]["code"] == "unavailable"
+    assert tools.call_tool("t3_followup", {"request_id": "r1", "message": "more"})["error"]["code"] == "submit-unknown"
     assert tools.call_tool("t3_followup", {"request_id": "r1", "message": "more"})["error"]["code"] == "daily-limit"
 
 
@@ -419,3 +419,28 @@ def test_followup_preserves_submitted_interaction_mode_after_reopen(make, mode):
     assert runner.followed_mode == mode
     assert tools.ledger.get("r1")["interaction_mode"] == mode
     tools.ledger.close()
+
+
+def test_followup_timeout_on_terminal_request_reopens_as_unknown(make):
+    tools, runner, ledger = make()
+    _submit(tools)
+    ledger.update_state("r1", "succeeded", NOW)
+    before = ledger.open_count()
+
+    def slow_followup(request_id, prompt, interaction_mode="default"):
+        raise FleetTimeout("followup")
+
+    runner.followup = slow_followup
+    out = tools.call_tool("t3_followup", {"request_id": "r1", "message": "one more change"})
+    assert out["error"]["code"] == "submit-unknown"
+    assert out["error"]["request_id"] == "r1"
+    assert ledger.get("r1")["last_state"] == "unknown"
+    assert ledger.open_count() == before + 1
+
+
+def test_prefixed_title_is_capped_for_t3_fleet(make):
+    tools, runner, _ = make()
+    _submit(tools, title="x" * 120, caller="A" * 48)
+    sent = runner.submits[0]["title"]
+    assert len(sent) <= 120
+    assert sent.startswith("[grokbot:" + "A" * 48 + "] ")

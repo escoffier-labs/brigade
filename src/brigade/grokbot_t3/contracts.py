@@ -35,6 +35,7 @@ WAIT_MAX_SECONDS = 60
 RECENT_DEFAULT = 10
 RECENT_MAX = 20
 TITLE_MAX = 120
+FLEET_TITLE_MAX = 120
 CALLER_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9 ._-]{0,47}$")
 HANDLE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,199}$")
 NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")

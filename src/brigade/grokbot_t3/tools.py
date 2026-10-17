@@ -185,7 +185,7 @@ class T3DispatchTools:
         except RevisionError as exc:
             raise c.T3DispatchError("base-ref-unresolved") from exc
         host = self._choose_host(args["host"])
-        title = f"[grokbot:{args['caller']}] {args['title']}"
+        title = f"[grokbot:{args['caller']}] {args['title']}"[: c.FLEET_TITLE_MAX].rstrip()
         prompt = compose_prompt(args["caller"], args["prompt"])
         fallback_used = False
         try:
@@ -280,7 +280,14 @@ class T3DispatchTools:
             raise c.T3DispatchError("prompt-too-large")
         self._check_daily_limit()
         self.ledger.record_attempt(self.now())
-        result = self._fleet(self.runner.followup, args["request_id"], args["message"], row["interaction_mode"])
+        try:
+            result = self.runner.followup(args["request_id"], args["message"], row["interaction_mode"])
+        except (FleetTimeout, FleetProtocolError) as exc:
+            # t3-fleet may have accepted the turn, so the request is open again until a status call says otherwise.
+            self.ledger.update_state(args["request_id"], "unknown", self.now())
+            raise c.T3DispatchError("submit-unknown", request_id=args["request_id"]) from exc
+        except FleetCallError as exc:
+            raise _fleet_error(exc) from exc
         self._record_state(args["request_id"], result)
         return project_status(result)
 
