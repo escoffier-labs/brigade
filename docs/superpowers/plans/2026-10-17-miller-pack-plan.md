@@ -278,22 +278,22 @@ with `workload`, `override_reason` and `allow_queue` present only when given.
 
 **Files:** Create `src/brigade/miller/lifecycle.py`, `watch.py`, `__main__.py`, `tests/test_miller_lifecycle.py`, `tests/test_miller_watch.py`.
 
-- [ ] Port tests: `test_legacy_dot_mcp.py` `AuthenticationChecks` (287-313); `test_bridge_v6.py` `ConfigChecks` (698-757) and `ScriptChecks` (758-911, the `notify`, `calls` and `watch` cases; drop migration-script cases); `test_bridge_v5.py` `V5CallLogComposition` (201-261) and `V5Scripts` (386-end). Add these new tests:
+- [x] Port tests: `test_legacy_dot_mcp.py` `AuthenticationChecks` (287-313); `test_bridge_v6.py` `ConfigChecks` (698-757) and `ScriptChecks` (758-911, the `notify`, `calls` and `watch` cases; drop migration-script cases); `test_bridge_v5.py` `V5CallLogComposition` (201-261) and `V5Scripts` (386-end). Add these new tests:
   - `test_only_two_routes_admitted`: any path other than `/mcp` (POST) and `/.well-known/oauth-protected-resource/mcp` (GET) returns 404 before the verifier runs.
   - `test_host_and_origin_rejected_before_auth`: wrong Host returns 403 and the verifier mock is not called.
   - `test_missing_jwt_returns_401_with_resource_metadata`.
   - `test_render_unit` asserts `ExecStart` runs `-m brigade run cloud grokbot serve --pack miller --target <t> --bind <b>` with `--allow-host`/`--allow-origin` flags and no bearer flag, and the hardening lines from Pinned decisions.
   - `test_canary_checks_anonymous_401_metadata_and_registry`.
   - `test_registered_tools_match_snapshot`: build the app with a fake `MillerTools`, capture the `MCPServer` the same way Task 1's script does, and assert `tool.model_dump(mode="json", by_alias=True, exclude_none=True)` equals the fixture entry for every tool, comparing every field for every tool except the `description` of `dot_t3_capabilities`.
-- [ ] Run, expect failures.
-- [ ] Implement `lifecycle.py`, structured like `src/brigade/grokbot_t3/lifecycle.py`:
+- [x] Run, expect failures.
+- [x] Implement `lifecycle.py`, structured like `src/brigade/grokbot_t3/lifecycle.py`:
   - `MillerListenerConfig(target, bind_host, bind_port, allowed_hosts, allowed_origins, runtime_path)`.
   - `_MillerGate.reject_reason(path, method, headers)`: route check (404), size, Host and Origin (403, same rules as `_T3RequestGate`), then `AccessVerifier.verify(headers.get("cf-access-jwt-assertion"))` (401 with `www-authenticate: Bearer resource_metadata="<resource>/.well-known/oauth-protected-resource/mcp"` as the bridge sends at `$BRIDGE/dot_mcp.py:2178-2306`).
   - `build_app(config, tools, runtime)`: `MCPServer(c.SERVICE_NAME, version=c.SERVER_VERSION)`; register the 32 tools by copying their `@server.tool(...)` blocks and function signatures verbatim from `$BRIDGE/dot_mcp.py:2345-2565` (minus the three dropped tools), with each body calling `MillerTools.call`; the `annotations()` helper and the `invoke()` call-log wrapper come from 2321-2348; the resource metadata route, the events app wrapper from Task 6, `streamable_http_app(json_response=True, stateless_http=True, ...)`, wrapped in the gate.
   - `run_listener`, `build_listener_from_target(target, *, bind, allowed_hosts, allowed_origins)`, `doctor(target)` (checks: dependency, config, state, access-config, hub-token, t3-fleet capacity), `canary(target)` (anonymous `POST /mcp` returns 401, metadata document answers with the configured resource, `set(registered tool names) == contracts.TOOLS`), `render_unit`, `write_unit`, `render_watch_units`, `write_watch_units` (unit text per Pinned decisions).
-- [ ] Implement `watch.py` from `$BRIDGE/dot-inbox-watch` with the five checks and dedupe state file `inbox-watch.json` in the state dir; probe URLs come from the instance bind and `runtime.auth.resource`; alerts run `runtime.notify_command` with the message on stdin.
-- [ ] Implement `__main__.py`: `serve` (delegates to `run_cloud` serve), `notify` (from `$BRIDGE/dot-notify`, hub mode only), `calls` (from `$BRIDGE/bridge-calls`), `watch --target <t>`.
-- [ ] Run to green. Commit: `feat(miller): add the listener, watch and entry points`.
+- [x] Implement `watch.py` from `$BRIDGE/dot-inbox-watch` with the five checks and dedupe state file `inbox-watch.json` in the state dir; probe URLs come from the instance bind and `runtime.auth.resource`; alerts run `runtime.notify_command` with the message on stdin.
+- [x] Implement `__main__.py`: `serve` (delegates to `run_cloud` serve), `notify` (from `$BRIDGE/dot-notify`, hub mode only), `calls` (from `$BRIDGE/bridge-calls`), `watch --target <t>`.
+- [x] Run to green. Commit: `feat(miller): add the listener, watch and entry points`.
 
 ## Task 10: registry, CLI and docs
 
