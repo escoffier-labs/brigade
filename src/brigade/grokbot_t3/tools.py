@@ -188,6 +188,8 @@ class T3DispatchTools:
         title = f"[grokbot:{args['caller']}] {args['title']}"[: c.FLEET_TITLE_MAX].rstrip()
         prompt = compose_prompt(args["caller"], args["prompt"])
         fallback_used = False
+        # Reserve the slot before t3-fleet can launch anything; release it only once the outcome is durable or refused.
+        reservation = self.ledger.record_in_doubt(args["caller"], now)
         try:
             try:
                 result = self._submit_once(
@@ -211,18 +213,17 @@ class T3DispatchTools:
         except FleetCallError as exc:
             if not isinstance(exc.request_id, str) or not c.HANDLE_RE.fullmatch(exc.request_id):
                 if isinstance(exc, FleetProtocolError):
-                    self.ledger.record_in_doubt(args["caller"], now)
                     raise c.T3DispatchError("submit-unknown") from exc
+                # A definite refusal launched nothing, so the slot goes back.
+                self.ledger.release_in_doubt(reservation)
                 raise _fleet_error(exc) from exc
             result = {"request_id": exc.request_id, "state": "unknown"}
         except FleetTimeout as exc:
-            # The launch may have happened with no request id to track, so hold a slot until it expires.
-            self.ledger.record_in_doubt(args["caller"], now)
+            # The launch may have happened with no request id to track, so the reservation stays until it expires.
             raise c.T3DispatchError("submit-unknown") from exc
         request_id = result.get("request_id")
         if not isinstance(request_id, str) or not c.HANDLE_RE.fullmatch(request_id):
-            # A success envelope without a usable id may still mean a launch happened.
-            self.ledger.record_in_doubt(args["caller"], now)
+            # A success envelope without a usable id may still mean a launch happened; keep the reservation.
             raise c.T3DispatchError("submit-unknown")
         raw_state = result.get("state")
         known_states = c.TERMINAL_STATES | {
@@ -245,6 +246,7 @@ class T3DispatchTools:
             state=state,
             now=now,
             interaction_mode=args["interaction_mode"],
+            release_reservation=reservation,
         )
         if state == "unknown":
             raise c.T3DispatchError("submit-unknown", request_id=request_id)
@@ -293,6 +295,10 @@ class T3DispatchTools:
             raise c.T3DispatchError("submit-unknown", request_id=args["request_id"]) from exc
         except FleetCallError as exc:
             raise _fleet_error(exc) from exc
+        if not isinstance(result.get("state"), str):
+            # Accepted but state-less: the request may have reopened, so keep it open until a status call says otherwise.
+            self.ledger.update_state(args["request_id"], "unknown", self.now())
+            raise c.T3DispatchError("submit-unknown", request_id=args["request_id"])
         self._record_state(args["request_id"], result)
         return project_status(result)
 

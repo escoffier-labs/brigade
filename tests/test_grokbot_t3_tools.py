@@ -475,3 +475,37 @@ def test_success_envelope_without_request_id_reserves_a_slot(make, monkeypatch):
     assert _submit(tools)["error"]["code"] == "submit-unknown"
     assert ledger.open_count(NOW) == 1
     assert _submit(tools)["error"]["code"] == "open-limit"
+
+
+def test_slot_is_reserved_while_t3_fleet_submits(make, monkeypatch):
+    tools, runner, ledger = make()
+    seen = []
+    original = runner.submit
+
+    def watching_submit(**kwargs):
+        seen.append(ledger.open_count(NOW))
+        return original(**kwargs)
+
+    monkeypatch.setattr(runner, "submit", watching_submit)
+    assert _submit(tools)["request_id"] == "r1"
+    assert seen == [1]
+    assert ledger.open_count(NOW) == 1
+
+
+def test_definite_refusal_releases_the_reservation(make):
+    tools, runner, ledger = make()
+    runner.submit_errors = [FleetCallError("invalid_request")]
+    assert _submit(tools)["error"]["code"] == "fleet-error"
+    assert ledger.open_count(NOW) == 0
+
+
+def test_stateless_followup_on_terminal_request_becomes_unknown(make, monkeypatch):
+    tools, runner, ledger = make()
+    _submit(tools)
+    ledger.update_state("r1", "succeeded", NOW)
+    monkeypatch.setattr(
+        runner, "followup", lambda request_id, prompt, interaction_mode="default": {"request_id": request_id}
+    )
+    out = tools.call_tool("t3_followup", {"request_id": "r1", "message": "again"})
+    assert out["error"]["code"] == "submit-unknown"
+    assert ledger.get("r1")["last_state"] == "unknown"

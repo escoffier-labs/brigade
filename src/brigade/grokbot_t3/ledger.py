@@ -118,14 +118,18 @@ class Ledger:
         state: str,
         now: datetime,
         interaction_mode: str = "default",
+        release_reservation: int | None = None,
     ) -> None:
-        with self._lock:
+        with self._lock, self._conn:
             ts = _ts(now)
             self._conn.execute(
                 "INSERT INTO requests (request_id, caller, repository, host, seat, title, prompt_sha256, "
                 "created_at, updated_at, last_state, interaction_mode) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (request_id, caller, repository, host, seat, title, prompt_sha256, ts, ts, state, interaction_mode),
             )
+            if release_reservation is not None:
+                # Same transaction as the insert, so the slot is never counted zero or two times.
+                self._conn.execute("DELETE FROM in_doubt WHERE rowid = ?", (release_reservation,))
 
     def get(self, request_id: str) -> dict[str, Any] | None:
         with self._lock:
@@ -162,13 +166,18 @@ class Ledger:
             doubt = self._conn.execute("SELECT COUNT(*) FROM in_doubt WHERE expires_at > ?", (current,)).fetchone()
             return int(row[0]) + int(doubt[0])
 
-    def record_in_doubt(self, caller: str, now: datetime) -> None:
-        """Hold an open slot for a submit whose launch is unknown and has no request id."""
+    def record_in_doubt(self, caller: str, now: datetime) -> int:
+        """Hold an open slot for a submit whose launch is not yet known to be tracked."""
         with self._lock:
-            self._conn.execute(
+            cursor = self._conn.execute(
                 "INSERT INTO in_doubt (caller, created_at, expires_at) VALUES (?, ?, ?)",
                 (caller, _ts(now), _ts(now + IN_DOUBT_TTL)),
             )
+            return int(cursor.lastrowid or 0)
+
+    def release_in_doubt(self, reservation: int) -> None:
+        with self._lock:
+            self._conn.execute("DELETE FROM in_doubt WHERE rowid = ?", (reservation,))
 
     def submits_since(self, since: datetime) -> int:
         with self._lock:
