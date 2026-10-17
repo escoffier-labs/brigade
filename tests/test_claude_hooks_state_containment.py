@@ -121,6 +121,29 @@ def test_parent_swap_during_locked_transaction_fails_closed(state_tree, componen
     assert sorted(str(path.relative_to(outside)) for path in outside.rglob("*")) == original_files
 
 
+@pytest.mark.parametrize("append", ["journal", "pending"])
+def test_sidecars_stay_in_held_directory_after_alias_retarget(state_tree, tmp_path, append) -> None:
+    target, sessions, outside = state_tree
+    alias = tmp_path / "alias"
+    _directory_link(alias, target)
+    original_files = sorted(str(path.relative_to(outside)) for path in outside.rglob("*"))
+
+    with runtime._session_state_lock(alias, "s"):
+        if os.name == "nt":
+            os.rmdir(alias)
+        else:
+            alias.unlink()
+        _directory_link(alias, outside)
+        if append == "journal":
+            session_state._append_timeout_marker(alias, "s")
+        else:
+            session_state._append_pending_increment(alias, "s")
+
+    assert sorted(str(path.relative_to(outside)) for path in outside.rglob("*")) == original_files
+    suffix = ".timeouts" if append == "journal" else ".timeouts.pending"
+    assert (sessions / f"{runtime._state_path(target, 's').name}{suffix}").exists()
+
+
 @pytest.mark.skipif(os.name != "nt", reason="requires native Windows handle-relative backend")
 def test_windows_unavailable_backend_never_falls_back_to_paths(state_tree, monkeypatch, capsys) -> None:
     from brigade.work_cmd import nt_dirfd

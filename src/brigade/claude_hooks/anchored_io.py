@@ -329,9 +329,14 @@ def _write_all(fd: int, data: bytes) -> None:
         remaining = remaining[written:]
 
 
+def requested_target(target: Path) -> Path:
+    """Absolute target path as named by the caller, without following links."""
+    return Path(os.path.abspath(target.expanduser()))
+
+
 @contextlib.contextmanager
 def session_directory(target: Path, *, create: bool = False) -> Iterator[SessionDirectory]:
-    requested = Path(os.path.abspath(target.expanduser()))
+    requested = requested_target(target)
     target = requested.resolve()
     active = _ACTIVE.get()
     if active is not None and active.pid == os.getpid() and active.held_for(requested, target):

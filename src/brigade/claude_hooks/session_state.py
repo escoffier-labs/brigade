@@ -86,12 +86,14 @@ def _pending_path(state_path: Path) -> Path:
 
 
 def _journal_path(target: Path, session_id: str) -> Path:
-    state_path = _rt()._state_path(target.expanduser().resolve(), session_id)
+    # Sidecars name the target as the caller did so a held anchor still matches after a link is retargeted.
+    state_path = _rt()._state_path(anchored_io.requested_target(target), session_id)
     return _timeouts_path(state_path)
 
 
 def _pending_increment_path(target: Path, session_id: str) -> Path:
-    state_path = _rt()._state_path(target.expanduser().resolve(), session_id)
+    # Sidecars name the target as the caller did so a held anchor still matches after a link is retargeted.
+    state_path = _rt()._state_path(anchored_io.requested_target(target), session_id)
     return _pending_path(state_path)
 
 
