@@ -240,10 +240,10 @@ Runtime JSON shape (all keys required unless marked optional):
 
 **Files:** Create `src/brigade/miller/events.py`, `src/brigade/miller/webhooks.py`, `tests/test_miller_events.py`.
 
-- [ ] Port tests: `test_bridge_v3.py` `EventChecks`, `EventIntegrationChecks`, `EventRotationChecks`, `WebhookTransportChecks` (62-558); drop `MainModuleIdentityChecks` (559-end, it tests the `__main__` alias hack being removed).
-- [ ] Run, expect failures.
-- [ ] Implement `webhooks.py` from the signing and delivery half of `$BRIDGE/dot_events.py` (Standard Webhooks signature, h11-over-ssl POST, allowed host check reading `Runtime.callback_hosts` instead of `CALLBACK_HOSTS`). Implement `events.py` from `EventService` (198-627) and `EventsApp` (628-775). Replace every lazy `import dot_mcp` with direct imports from `brigade.miller.state` and `brigade.miller.safe_state`; the `IDENTITY` `ContextVar` moves to `events.py` and `lifecycle.py` imports it from there.
-- [ ] Run to green. Commit: `feat(miller): port MCP events and webhook delivery`.
+- [x] Port tests: `test_bridge_v3.py` `EventChecks`, `EventIntegrationChecks`, `EventRotationChecks`, `WebhookTransportChecks` (62-558); drop `MainModuleIdentityChecks` (559-end, it tests the `__main__` alias hack being removed).
+- [x] Run, expect failures.
+- [x] Implement `webhooks.py` from the signing and delivery half of `$BRIDGE/dot_events.py` (Standard Webhooks signature, h11-over-ssl POST, allowed host check reading `Runtime.callback_hosts` instead of `CALLBACK_HOSTS`). Implement `events.py` from `EventService` (198-627) and `EventsApp` (628-775). Replace every lazy `import dot_mcp` with direct imports from `brigade.miller.state` and `brigade.miller.safe_state`; the `IDENTITY` `ContextVar` moves to `events.py` and `lifecycle.py` imports it from there.
+- [x] Run to green. Commit: `feat(miller): port MCP events and webhook delivery`.
 
 ## Task 7: fleet tools over FleetRunner
 
