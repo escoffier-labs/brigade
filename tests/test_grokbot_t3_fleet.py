@@ -52,6 +52,9 @@ def test_submit_sends_prompt_on_stdin_only():
     assert body["action"] == "submit"
     assert body["prompt"] == "SECRET PROMPT TEXT"
     assert body["runtime_mode"] == "full-access"
+    # The Fleet Hub board shows who launched each T3 thread.
+    assert body["initiator_kind"] == "agent"
+    assert body["initiator_label"] == "grokbot"
     assert "override_reason" not in body
     assert kwargs["timeout"] == fleet.SUBMIT_TIMEOUT
     assert set(kwargs["env"]) <= set(fleet.ENV_KEYS)
