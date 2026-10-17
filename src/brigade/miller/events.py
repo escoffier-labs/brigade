@@ -395,9 +395,11 @@ class EventService:
                     logging.getLogger("dot-events").warning("hub_credential_invalid")
 
     async def run(self) -> None:
-        async with asyncio.TaskGroup() as group:
-            group.create_task(self.periodic(self.poll_requests, 30))
-            group.create_task(self.periodic(self.deliver, 1))
+        import anyio
+
+        async with anyio.create_task_group() as group:
+            group.start_soon(self.periodic, self.poll_requests, 30)
+            group.start_soon(self.periodic, self.deliver, 1)
             hub = self.hub
             if hub is not None:
-                group.create_task(self.periodic(self.poll_hub, self.hub_poll_seconds))
+                group.start_soon(self.periodic, self.poll_hub, self.hub_poll_seconds)

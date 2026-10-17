@@ -74,7 +74,7 @@ async def webhook_post(
     assert parts.hostname is not None
     if len(body) > 262144:
         raise ValueError("body_too_large")
-    async with asyncio.timeout(10):
+    with anyio.fail_after(10):
         addresses = await asyncio.get_running_loop().getaddrinfo(parts.hostname, 443, type=socket.SOCK_STREAM)
         ips = list(dict.fromkeys(cast(str, item[4][0]) for item in addresses))
         if not ips or any(not ipaddress.ip_address(ip).is_global for ip in ips):

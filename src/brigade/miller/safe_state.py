@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from contextlib import contextmanager
-import fcntl
 import logging
 import os
 from pathlib import Path
@@ -96,6 +95,7 @@ def redact_credentials(text: str) -> str:
 
 
 def private_file(info: os.stat_result) -> None:
+    require(os.name == "posix", "unsafe_state")
     require(
         stat.S_ISREG(info.st_mode)
         and info.st_uid == os.geteuid()
@@ -106,6 +106,7 @@ def private_file(info: os.stat_result) -> None:
 
 
 def private_directory(directory: Path, *, create: bool = False) -> int:
+    require(os.name == "posix", "unsafe_state")
     current = None
     try:
         path = Path(directory)
@@ -148,6 +149,7 @@ def trusted_directory(directory: Path, *, allow_group_write: bool = False, code:
     this user and not world-writable. Group write is accepted only when asked and
     only for this user's own primary group (the canonical cards dir is 0775).
     """
+    require(os.name == "posix", code)
     current = None
     try:
         path = Path(directory)
@@ -218,6 +220,7 @@ class PrivateDatabase:
         self.close()
 
     def file(self, name: str) -> int:
+        require(os.name == "posix", "unsafe_state")
         descriptor = os.open(name, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=self.fd)
         try:
             private_file(os.fstat(descriptor))
@@ -227,6 +230,7 @@ class PrivateDatabase:
         return descriptor
 
     def check_files(self) -> None:
+        require(os.name == "posix", "unsafe_state")
         assert self.fd is not None
         private = os.fstat(self.fd)
         require(private.st_uid == os.geteuid() and stat.S_IMODE(private.st_mode) == 0o700, "unsafe_state")
@@ -238,6 +242,12 @@ class PrivateDatabase:
 
     @contextmanager
     def lock(self, name: str, *, nonblocking: bool = False) -> Iterator[None]:
+        require(os.name == "posix", "unsafe_state")
+        try:
+            import fcntl
+        except ImportError:
+            raise MillerError("unsafe_state") from None
+
         descriptor = None
         try:
             descriptor = self.file(name)

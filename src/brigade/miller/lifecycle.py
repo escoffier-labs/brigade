@@ -120,7 +120,9 @@ class _MillerGate:
             return
         body = bytearray()
         try:
-            async with asyncio.timeout(10):
+            import anyio
+
+            with anyio.fail_after(10):
                 for _ in range(64):
                     message = await receive()
                     if message.get("type") != "http.request":

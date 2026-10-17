@@ -50,9 +50,12 @@ def unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
 
 def _jwt() -> ModuleType:
     try:
+        import cryptography  # noqa: F401 - RSA verification requires this backend.
         import jwt
     except ImportError:
         raise OptionalDependencyError() from None
+    if not jwt.algorithms.has_crypto or "RS256" not in jwt.algorithms.get_default_algorithms():
+        raise OptionalDependencyError()
     return jwt
 
 
@@ -76,10 +79,11 @@ async def fetch_public_keys(team_domain: str) -> bytes:
     Imports, TLS context creation and connection happen only when called.
     """
     try:
-        async with asyncio.timeout(FETCH_SECONDS):
+        import anyio
+
+        with anyio.fail_after(FETCH_SECONDS):
             import ssl
 
-            import anyio
             import h11
 
             host = team_domain
@@ -221,13 +225,15 @@ class AccessVerifier:
         self.validated = True
 
     async def signing_key(self, kid: str) -> Any:
+        import anyio
+
         async with self.lock:
             now = self.monotonic()
             if now < self.expires and kid in self.keys:
                 return self.keys[kid]
             ensure(now - self.last_attempt >= REFRESH_INTERVAL)
             self.last_attempt = now  # Failed refreshes are throttled too.
-            async with asyncio.timeout(FETCH_SECONDS):
+            with anyio.fail_after(FETCH_SECONDS):
                 data = await self.fetch()
             keys = parse_keys(data)  # Commit only an entirely valid key set.
             self.keys, self.expires = keys, self.monotonic() + CACHE_TTL

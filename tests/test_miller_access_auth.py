@@ -7,6 +7,10 @@ import json
 import unittest
 from unittest.mock import patch
 
+import pytest
+
+pytest.importorskip("cryptography")
+
 from cryptography.hazmat.primitives.asymmetric import rsa
 import jwt
 
