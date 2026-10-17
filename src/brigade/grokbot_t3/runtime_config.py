@@ -182,7 +182,7 @@ def _intake(value: object, repositories: Mapping[str, Repository], max_open: int
         caller=value["caller"],
         gh_bin=_abs(value["gh_bin"]),
         max_per_pass=_int(value["max_per_pass"], 1, 5),
-        headroom=_int(value["headroom"], 0, max_open - 1),
+        headroom=_int(value["headroom"], 1, max_open - 1),
     )
 
 

@@ -15,7 +15,7 @@ SNAPSHOT_QUERY = """
 query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
     issue(number: $number) {
-      title body lastEditedAt
+      title body state lastEditedAt
       labels(first: 100) { nodes { name } }
       comments(first: 100) {
         pageInfo { hasNextPage }
@@ -71,8 +71,8 @@ def fetch_snapshot(gh: Callable[[list[str]], tuple[int, str]], slug: str, number
         if not isinstance(payload, dict) or "errors" in payload:
             raise ValueError
         issue = payload["data"]["repository"]["issue"]
-        title, body = issue["title"], issue["body"]
-        if not isinstance(title, str) or not isinstance(body, str):
+        title, body, state = issue["title"], issue["body"], issue["state"]
+        if not isinstance(title, str) or not isinstance(body, str) or not isinstance(state, str):
             raise ValueError
         edited = issue["lastEditedAt"]
         edited_at = timestamp(edited) if edited is not None else None
@@ -115,6 +115,9 @@ def fetch_snapshot(gh: Callable[[list[str]], tuple[int, str]], slug: str, number
     except (KeyError, TypeError, ValueError) as exc:
         raise IntakeError("snapshot-failed") from exc
     # The label list came from an earlier call; a maintainer may have removed the label since.
+    # The issue list is also from that earlier call; the issue may have been closed since.
+    if state != "OPEN":
+        raise IntakeError("issue-closed")
     if label not in names:
         raise IntakeError("approval-revoked")
     # The worker is told the snapshot is the whole task, so a truncated comment list is refused, not dropped.
@@ -128,6 +131,7 @@ def fetch_snapshot(gh: Callable[[list[str]], tuple[int, str]], slug: str, number
         raise IntakeError("edited-after-approval")
     return {
         "title": title,
+        "labels": names,
         "body": body,
         "comments": [
             text
@@ -235,18 +239,17 @@ def run_intake_once(
             if not ledger.claim_intake(key, now):
                 summary["held"].append(key)
                 continue
-            seats = [
-                label["name"][len("t3-seat:") :] for label in issue["labels"] if label["name"].startswith("t3-seat:")
-            ]
-            if len(seats) > 1 or (seats and seats[0] not in runtime.seats):
-                ledger.release_intake(key)
-                summary["errors"].append({"issue": key, "error": "bad-seat-label"})
-                continue
             try:
                 snapshot = fetch_snapshot(gh, slug, number, policy.label)
             except IntakeError as exc:
                 ledger.release_intake(key)
                 summary["errors"].append({"issue": key, "error": exc.code})
+                continue
+            # Seat labels come from the snapshot, so a change after listing is honored.
+            seats = [name[len("t3-seat:") :] for name in snapshot["labels"] if name.startswith("t3-seat:")]
+            if len(seats) > 1 or (seats and seats[0] not in runtime.seats):
+                ledger.release_intake(key)
+                summary["errors"].append({"issue": key, "error": "bad-seat-label"})
                 continue
             args = {
                 "repository": repo_id,

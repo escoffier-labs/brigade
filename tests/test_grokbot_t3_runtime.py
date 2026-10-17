@@ -146,6 +146,7 @@ def test_intake_policy_preserves_repository_order(tmp_path):
         {"repositories": ["brigade", "brigade"]},
         {"headroom": 6},
         {"headroom": -1},
+        {"headroom": 0},
         {"max_per_pass": 0},
         {"max_per_pass": 6},
         {"max_per_pass": True},

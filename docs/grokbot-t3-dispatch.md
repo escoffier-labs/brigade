@@ -212,8 +212,9 @@ with an HTTPS GitHub remote such as `https://github.com/example/example-repo.git
 Repository ids must be unique. Both labels must be different, begin with a
 letter or digit, contain only letters, digits, `.`, `_`, `:`, or `-`, and be at
 most 50 characters. `caller` follows the existing caller rules. `gh_bin` must
-be absolute. `max_per_pass` accepts 1 through 5, and `headroom` accepts 0 through
-`max_open - 1`.
+be absolute. `max_per_pass` accepts 1 through 5, and `headroom` accepts 1 through
+`max_open - 1`. Intake and the listener run in separate processes, so their slot
+checks can race; a headroom of at least 1 keeps that race inside `max_open`.
 
 Run a pass or write its systemd user units:
 
@@ -236,7 +237,8 @@ processes repositories in configured order and issues by ascending number, and
 submits at most `max_per_pass`. It checks headroom before each submit and stops
 the pass when fewer than `headroom + 1` open slots remain.
 The existing dispatch limits and default/fallback seat rules
-still apply. One `t3-seat:<seat>` label selects an allowlisted seat. Multiple seat
+still apply. One `t3-seat:<seat>` label, read from the snapshot's current labels, selects an
+allowlisted seat. Multiple seat
 labels or an unknown seat produce `bad-seat-label` without submitting.
 
 The worker receives a snapshot of the title, body, and comments from owners,
@@ -245,8 +247,8 @@ Comments by others, added after approval, or edited after approval are dropped.
 An issue whose body was edited or title renamed after approval is refused with `edited-after-approval`;
 re-apply the label to approve the new text. Missing approval events produce
 `approval-not-found`, and failed or malformed snapshots produce `snapshot-failed`.
-The snapshot rechecks that the approval label is still on the issue
-(`approval-revoked` if it was removed after listing), and an issue with more than
+The snapshot rechecks that the issue is still open (`issue-closed`) and that the
+approval label is still on it (`approval-revoked` if it was removed after listing), and an issue with more than
 100 comments is refused with `too-many-comments` rather than truncated.
 The worker follows the snapshot without fetching the issue or comments again,
 implements and tests the change, and opens a pull request without merging.

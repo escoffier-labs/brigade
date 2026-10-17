@@ -40,6 +40,7 @@ def snapshot_payload(**overrides):
     issue = {
         "title": "Approved title",
         "body": "Approved body",
+        "state": "OPEN",
         "lastEditedAt": None,
         "labels": {"nodes": [{"name": "grokbot-build-approved"}]},
         "comments": {"pageInfo": {"hasNextPage": False}, "nodes": [comment()]},
@@ -144,6 +145,7 @@ def test_snapshot_filters_comments_using_latest_matching_approval(make):
     "overrides,error",
     [
         ({"lastEditedAt": AFTER}, "edited-after-approval"),
+        ({"state": "CLOSED"}, "issue-closed"),
         ({"labels": {"nodes": [{"name": "other-label"}]}}, "approval-revoked"),
         ({"comments": {"pageInfo": {"hasNextPage": True}, "nodes": [comment()]}}, "too-many-comments"),
         (
@@ -218,6 +220,7 @@ def test_snapshot_failure_releases_claim(make, response):
         (("lastEditedAt",), False),
         (("lastEditedAt",), "not a timestamp"),
         (("lastEditedAt",), "2026-10-16T11:00:00"),
+        (("state",), 5),
         (("labels",), None),
         (("labels", "nodes"), {}),
         (("labels", "nodes", 0, "name"), 7),
@@ -371,9 +374,16 @@ def test_limit_and_ascending_issue_order(make):
     assert len(runner.submits) == 1
 
 
+def seat_snapshot(*labels):
+    nodes = [{"name": name} for name in ("grokbot-build-approved", *labels)]
+    return (0, json.dumps(snapshot_payload(labels={"nodes": nodes})))
+
+
 def test_seat_label(make):
     tools, runner, _ = make()
-    result = run(tools, FakeGh((0, json.dumps([issue(42, "t3-seat:luna6")])), (0, "")))
+    # The listing is stale; the snapshot's current labels decide the seat.
+    gh = FakeGh((0, json.dumps([issue(42, "t3-seat:sol61")])), (0, ""), snapshots=[seat_snapshot("t3-seat:luna6")])
+    result = run(tools, gh)
     assert runner.submits[0]["seat"] == "luna6"
     assert result["submitted"][0]["seat"] == "luna6"
 
@@ -383,7 +393,7 @@ def test_seat_label(make):
 )
 def test_bad_seat_labels_release_claim(make, labels):
     tools, runner, ledger = make()
-    result = run(tools, FakeGh((0, json.dumps([issue(42, *labels)]))))
+    result = run(tools, FakeGh((0, json.dumps([issue(42)])), snapshots=[seat_snapshot(*labels)]))
     assert result["errors"] == [{"issue": "brigade#42", "error": "bad-seat-label"}]
     assert runner.submits == []
     assert ledger.claim_intake("brigade#42", NOW)
