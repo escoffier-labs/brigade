@@ -252,7 +252,7 @@ Runtime JSON shape (all keys required unless marked optional):
 - [x] Port tests from `test_bridge_v2.py` `FleetArgvChecks` (317-482), `EnrolledSubmitChecks` (483-504), `DispatchGateChecks` (284-307) and `test_bridge_v6.py` `CompletionChecks` (650-697). Rewrite every argv assertion as an assertion on the JSON payload the fake runner receives. The fake replaces `FleetRunner._run` (see `tests/test_grokbot_t3_fleet.py` for the pattern). For `fleet_submit` the payload must equal:
 
 ```python
-{"schema": "t3-fleet.request.v1", "action": "submit", "host": "rocinante", "repository": "brigade",
+{"schema": "t3-fleet.request.v1", "action": "submit", "host": "alpha", "repository": "brigade",
  "source_revision": SHA, "title": "t", "prompt": "<prompt with owner authorization appended>",
  "runtime_mode": "full-access", "interaction_mode": "default", "seat": "sol61",
  "initiator_kind": "agent", "initiator_label": "miller"}
