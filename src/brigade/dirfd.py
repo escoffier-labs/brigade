@@ -11,6 +11,7 @@ from __future__ import annotations
 import errno
 import importlib
 import os
+import stat
 import sys
 from pathlib import Path
 from typing import Any
@@ -398,14 +399,13 @@ def fsync_directory(descriptor: int) -> None:
 
 
 def _refused_windows_directory_flush(descriptor: int, exc: OSError) -> bool:
-    """The CRT reports a refused directory flush as EBADF with no winerror; a held descriptor still stats."""
+    """The CRT reports a refused directory flush as EBADF with no winerror; only a held directory qualifies."""
     if exc.errno != errno.EBADF:
         return False
     try:
-        os.fstat(descriptor)
+        return stat.S_ISDIR(os.fstat(descriptor).st_mode)
     except OSError:
         return False
-    return True
 
 
 def child_names(parent: int, limit: int) -> list[str]:
