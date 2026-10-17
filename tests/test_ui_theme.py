@@ -1,5 +1,7 @@
 """Shared Deck theme: tokens, base CSS, and the HTML shell (#1495)."""
 
+import re
+
 from brigade import ui_theme
 
 
@@ -22,13 +24,19 @@ def test_tokens_define_every_color_once():
     assert "color-scheme: dark;" in ui_theme.TOKENS
 
 
+def test_tokens_derive_spacing_properties_from_the_exported_scale():
+    declarations = re.findall(r"--space-(\d+):\s*(\d+)px;", ui_theme.TOKENS)
+    assert [(int(index), int(pixels)) for index, pixels in declarations] == list(enumerate(ui_theme.SPACING, 1))
+
+
 def test_base_css_carries_the_spacing_scale():
+    # Token substitution preserves the existing sizes, including optical 10px table padding.
     css = ui_theme.BASE_CSS
-    assert ".panel, .repo-panel { padding: 16px; }" in css
-    assert ".panel + .panel { margin-top: 16px; }" in css
-    assert "th, td { padding: 10px 12px;" in css
-    assert ".hint { display: block; margin-top: 8px;" in css
-    assert ".roster-actions button { min-height: 40px;" in css
+    assert ".panel, .repo-panel { padding: var(--space-4); }" in css
+    assert ".panel + .panel { margin-top: var(--space-4); }" in css
+    assert "th, td { padding: 10px var(--space-3);" in css
+    assert ".hint { display: block; margin-top: var(--space-2);" in css
+    assert ".roster-actions button { min-height: var(--space-8);" in css
     assert ".chip-ok" in css and ".chip-bad" in css and ".callout" in css
 
 
@@ -50,4 +58,4 @@ def test_spacing_export_and_shared_component_alias_contract():
     assert ui_theme.SPACING == (4, 8, 12, 16, 20, 24, 32, 40)
     for component in ("page-kicker", "page-title", "page-meta", "deck-nav"):
         assert f".{component}" in ui_theme.BASE_CSS
-    assert ".hint { display: block; margin-top: 8px; color: var(--muted);" in ui_theme.BASE_CSS
+    assert ".hint { display: block; margin-top: var(--space-2); color: var(--muted);" in ui_theme.BASE_CSS

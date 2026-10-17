@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Deck, fleet boards, and Center use shared spacing tokens derived from one scale while preserving existing layout sizes. Center navigation explicitly uses the shared Deck nav class. (#1495)
+
 - `brigade fleet events report` delivers or durably queues T3 lifecycle observations with stable replay digests and bounded execution context. Hub schema 32 preserves event history and exposes reported initiators and request correlation on fleet boards. Unknown or delayed observations do not appear as running. (Refs #1630, #1121)
 - Upgrade the hub before enabling t3-fleet reporting. T3 observations remain fresh for 900 seconds with a 300-second producer heartbeat. Permanent hub rejections return exit 2 without queueing. Older binaries refuse schema 32. For the nullable context-column migration alone, rollback can retain the column and set `PRAGMA user_version=31`. See [deployment and rollback instructions](docs/fleet-t3-events.md).
 
