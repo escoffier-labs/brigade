@@ -100,12 +100,12 @@ conservative URL allowlist may omit other legitimate provider links.
 
 ## Remaining issue coverage
 
-Issue #1601 remains open. Later integration must bind canonical repository and
-PR identity, import annotations/reviews/comments, correlate duplicate finding
-representations without adding their counts, and retain resolved-thread and
-supersession history. It must also bound and paginate authorized reads, retain
-truncation and 403/404/429/access-denied reasons, and expose evidence through
-existing Worklore, Hub JSON and FleetHub readouts. No shared schema, registry,
+Issue #1601 remains open. The bounded collector and SQLite history module now
+import annotations, reviews and comments, and retain check-round supersession.
+Later integration must establish supported app identity for reviews and inline
+comments, correlate duplicate finding representations without adding their
+counts, retain resolved-thread history, and expose evidence through existing
+Worklore, Hub JSON and FleetHub readouts. No shared schema, registry,
 daemon, CLI, branch protection or review-trigger behavior changes in this slice.
 
 ## Regression evidence
