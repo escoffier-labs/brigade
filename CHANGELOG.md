@@ -7,8 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Antigravity model pins map bare Gemini Argon IDs such as `gemini-4-argon` to the default low-effort slug, matching flash/pro. Explicit effort slugs remain unchanged. Document the `agy_argon` Gemini 4 Argon High subscription seat for implementation and research, excluding security review.
-
+- Antigravity model pins map bare Gemini Argon IDs such as `gemini-4-argon` to the default low-effort slug, matching flash/pro. Explicit effort slugs remain unchanged. Document the `agy_argon` Gemini 4 Argon High subscription seat for implementation and research, excluding security review. (Refs #1747)
 - `brigade fleet events report` delivers or durably queues T3 lifecycle observations with stable replay digests and bounded execution context. Hub schema 32 preserves event history and exposes reported initiators and request correlation on fleet boards. Unknown or delayed observations do not appear as running. (Refs #1630, #1121)
 - Upgrade the hub before enabling t3-fleet reporting. T3 observations remain fresh for 900 seconds with a 300-second producer heartbeat. Permanent hub rejections return exit 2 without queueing. Older binaries refuse schema 32. For the nullable context-column migration alone, rollback can retain the column and set `PRAGMA user_version=31`. See [deployment and rollback instructions](docs/fleet-t3-events.md).
 

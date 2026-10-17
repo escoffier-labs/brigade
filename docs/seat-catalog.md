@@ -121,7 +121,7 @@ role = "Cross-model reviewer on the Google lane; verify claims without spending 
 
 Pin the display name or the effort slug (`gemini-3.8-flash-low`). The published API id `gemini-3.8-flash` is recognized by agy but requires `--effort`; Brigade maps that bare id to the low-effort slug so `brigade run --model gemini-3.8-flash` reaches the same seat.
 
-The 2026-10-17 conductor check found `gemini-4-argon-low`, `gemini-4-argon-medium`, and `gemini-4-argon-high` in `agy` 1.4.0's model list, alongside the Gemini 3.8 Flash effort variants. The `agy_argon` seat pins Gemini 4 Argon High through the Antigravity subscription, beside `agy_flash`. Bare `gemini-N[.N]-argon` IDs follow the same default as flash/pro: `gemini-4-argon` maps to `gemini-4-argon-low`. Already-suffixed slugs pass through unchanged, so pin `gemini-4-argon-high` for the High seat. Do not route security review to `agy_argon`.
+`agy` 1.4.0 lists `gemini-4-argon-low`, `gemini-4-argon-medium`, and `gemini-4-argon-high` alongside the Gemini 3.8 Flash effort variants. The example `agy_argon` seat pins Gemini 4 Argon High through the Antigravity subscription, beside the Flash seat above. Bare `gemini-N[.N]-argon` IDs follow the same default as flash/pro: `gemini-4-argon` maps to `gemini-4-argon-low`. Already-suffixed slugs pass through unchanged, so pin `gemini-4-argon-high` for the High seat. Do not route security review to `agy_argon`.
 
 Harness filters can change the result before inference. In August 2026 author receipts, Antigravity served a Gemini 3.7 Flash security canary that Cursor rejected at the provider boundary. Record provider refusals separately from model output.
 

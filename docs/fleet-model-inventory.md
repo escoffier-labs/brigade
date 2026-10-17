@@ -78,19 +78,18 @@ select a different account or harness native identity.
 
 ### Antigravity subscription seats
 
-The conductor verified `agy` 1.4.0's model list on 2026-10-17. It lists
-`gemini-4-argon-{low,medium,high}` alongside `gemini-3.8-flash-{low,medium,high}`.
-The Fleet Hub roster at revision 81 includes these Google subscription seats:
+`agy` 1.4.0 lists `gemini-4-argon-{low,medium,high}` alongside
+`gemini-3.8-flash-{low,medium,high}`. An operator can expose these as Google
+subscription seats, for example:
 
 | Seat | Model | Binding | Access | Security review |
 |---|---|---|---|---|
 | `agy_flash` | `gemini-3.8-flash-high` (Gemini 3.8 Flash High) | `antigravity` | Antigravity subscription | Not for security review |
 | `agy_argon` | `gemini-4-argon-high` (Gemini 4 Argon High) | `antigravity` | Antigravity subscription | Not for security review |
 
-The hub `agy_argon` seat and matching operator roster seat were added out of
-band on 2026-10-17. The hub seat has limit 4 and reasoning `none`. The local
-seat pins `cli = "antigravity"` and `model = "gemini-4-argon-high"`.
-These are operator-managed seats, not additions to the repository's roster
+An Argon roster seat pins `cli = "antigravity"` and
+`model = "gemini-4-argon-high"`, and the matching Fleet Hub seat uses binding
+`antigravity`. These are operator-managed seats, not additions to the repository's roster
 templates. A model-list observation proves the advertised identity, not a
 successful dispatch or security-review suitability.
 
