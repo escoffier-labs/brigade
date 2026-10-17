@@ -25,6 +25,7 @@ Spec: `docs/superpowers/specs/2026-10-17-miller-pack-design.md` (approved 2026-1
 | `src/brigade/miller/runtime_config.py` | Owner-only runtime JSON parsing into a frozen `Runtime` |
 | `src/brigade/miller/access_auth.py` | Cloudflare Access JWT verifier and JWKS cache |
 | `src/brigade/miller/safe_state.py` | Private directory walk, private file check, `PrivateDatabase` |
+| `src/brigade/miller/process.py` | `CommandResult`, `CommandRunner`, `child_environment`, result bounding (`bound_result`, `parse_json_bytes`) |
 | `src/brigade/miller/state.py` | `BridgeState`: hub inbox cache, replies, operations journal, call log |
 | `src/brigade/miller/events.py` | `EventService`: `events/*` RPC, tracked requests, hub poller |
 | `src/brigade/miller/webhooks.py` | Standard Webhooks signing and bounded HTTPS delivery |
@@ -228,11 +229,11 @@ Runtime JSON shape (all keys required unless marked optional):
 
 ## Task 5: safe state and bridge state
 
-**Files:** Create `src/brigade/miller/safe_state.py`, `src/brigade/miller/state.py`, `tests/test_miller_state.py`.
+**Files:** Create `src/brigade/miller/safe_state.py`, `src/brigade/miller/process.py`, `src/brigade/miller/state.py`, `tests/test_miller_state.py`, `tests/test_miller_process.py`.
 
-- [ ] Port tests: `$BRIDGE/tests/test_bridge_v5.py` `V5CallLogState` (117-175); `test_bridge_v2.py` `BoundingChecks` (635-663); the `PrivateDatabase` and private directory cases from `test_legacy_dot_mcp.py` `AdapterChecks` whose names contain `unsafe` or `private`. Every temp dir comes from `miller_private_dir`.
+- [ ] Port tests: `$BRIDGE/tests/test_bridge_v5.py` `V5CallLogState` (117-175) and `test_legacy_dot_mcp.py` `test_unsafe_directory_database_and_ancestors_rejected` (257-277) into `tests/test_miller_state.py`; `test_bridge_v2.py` `CommandRunnerChecks` and `BoundingChecks` into `tests/test_miller_process.py`. Add a state test that opens a fresh database and asserts the tables `inbox`, `replies`, `operations`, `call_log`, `hub_inbox`, `hub_state` and every table `_initialize_event_tables` creates exist. Every temp dir comes from `miller_private_dir`.
 - [ ] Run, expect failures.
-- [ ] Implement `safe_state.py` from `$BRIDGE/dot_mcp.py` lines 134-285 (errors, validators, redaction, `private_file`, `private_directory`, `trusted_directory`) and the `PrivateDatabase` class from 287-458. Do not copy `Store` or `PilotProcess`. Implement `state.py` from 1021-1256 (`BridgeState`), deleting the local inbox paths (`notify`, local `inbox` and `replies` writers used only when `inbox_backend == "local"`); keep the table definitions for `inbox` and `replies` so the old bridge can still open the database (spec decision 5). `BridgeState.__init__(self, state_dir: Path)` takes the directory from `Runtime.paths.state_dir`.
+- [ ] Implement `safe_state.py` from `$BRIDGE/dot_mcp.py` lines 134-285 (errors, validators, redaction, `private_file`, `private_directory`, `trusted_directory`) and the `PrivateDatabase` class from 287-458. Do not copy `Store` or `PilotProcess`. Implement `process.py` from `$BRIDGE/dot_mcp.py` 574-678 (`CommandResult`, `child_environment`, `CommandRunner`) and 679-750 (`_scrub`, `_clamp`, `bound_result`, `parse_json_bytes`); `encoded_size` already lives in `contracts.py`, import it. `child_environment(path: str, extra: Mapping[str, str] | None = None)` takes the PATH value instead of the `CHILD_PATH` constant; callers build it as the de-duplicated parent directories of every `Runtime.paths.bin` entry followed by `/usr/bin:/bin`. Port `test_bridge_v2.py` `CommandRunnerChecks` (714-747) and `BoundingChecks` (635-663) into `tests/test_miller_process.py`. Implement `state.py` from 1021-1256 (`BridgeState`). Delete the local inbox methods `notify`, `reply`, `replies`, `messages` and `ack`; keep the `CREATE TABLE` statements for `inbox` and `replies` so the old bridge can still open the database (spec decision 5). `state.py` owns every table: copy the body of `$BRIDGE/dot_events.py` `initialize(connection)` (line 160 onward) into `state.py` as `_initialize_event_tables(connection)` and call it where the bridge called `dot_events.initialize`. `BridgeState.__init__(self, state_dir: Path)` takes the directory from `Runtime.paths.state_dir`.
 - [ ] Run to green. Commit: `feat(miller): port private state and the bridge database`.
 
 ## Task 6: events and webhooks
