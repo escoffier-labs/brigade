@@ -14,7 +14,8 @@ Set the version in `pyproject.toml`, then synchronize every stamped location:
 ## 2. Full verification
 
 ```bash
-./scripts/verify
+export BRIGADE_EXTRAS=1
+brigade work verify run --target . --argv-json '["./scripts/verify"]' --timeout 3600 --capture brigade-work
 brigade security template-audit --target .
 brigade runbook run docs/runbooks/cold-start-gate.json --target . --approved
 ```

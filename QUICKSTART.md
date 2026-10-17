@@ -87,7 +87,7 @@ uv tool install brigade-cli
 brigade setup
 ```
 
-For an intentional Brigade development machine on the `0.27` preview line:
+For an intentional Brigade development machine on the `0.28` preview line:
 
 ```bash
 brigade update --channel beta
@@ -232,6 +232,8 @@ brigade work verify run --target . --command "pytest -q" --capture <skill-or-car
 
 Capture against an id you actually have: a skill you followed, a memory card (`--kind card`), or `brigade-work` itself when nothing else applies. `brigade work brief` surfaces the loop's own health so an empty ledger never goes unnoticed.
 
+The `--command` example captures audit evidence only. Artifact scoring requires an eligible receipt from `--manifest <id>` using a tracked verifier under `verify/manifests/`. Inspect the reported scoreability before relying on it for promotion or rollback.
+
 ## Optional: close the GraphTrail ↔ Brigade ↔ MiseLedger loop
 
 0.21.0 already ships receipt deltas, MiseLedger export, evidence briefs, and context evals. Productizing them is a short dogfood path:
@@ -268,6 +270,7 @@ That is the differentiated loop: receipts that feed the next run's context, with
 When the agent runs on a different machine from your daily browser login, the **pantry** station wires [Agent Pantry](https://brigade.tools/agentpantry) as a process-boundary Go binary. Brigade installs and plans; it does not mint PSKs or start services.
 
 ```bash
+brigade extras on                                         # enables pantry and notifications below
 brigade add pantry                                          # go install agentpantry
 brigade pantry setup plan --role sink --peer 127.0.0.1:8787 # agent host
 brigade pantry setup plan --role source --peer <sink>:8787  # daily driver
