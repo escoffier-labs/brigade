@@ -22,6 +22,7 @@ DISPATCH_HEADER = (
 STATUS_KEYS = ("request_id", "host", "state", "needs_attention", "thread_id", "updated_at", "pending_request")
 FALLBACK_CODE = "policy_rejected"
 FALLBACK_REASON = "model-admission-denied"
+_REOPEN_ATTEMPTS = 3
 
 
 def compose_prompt(caller: str, prompt: str) -> str:
@@ -303,15 +304,24 @@ class T3DispatchTools:
         self.ledger.record_attempt(self.now())
         request_id = args["request_id"]
         prior = row["last_state"]
+        notified = row["notified_state"]
         reopened = False
         revision = row["state_revision"]
         if prior in c.TERMINAL_STATES:
             # Mark the row open before t3-fleet can reopen the work, so a crash cannot hide the new turn.
-            reopened = self.ledger.update_state(
-                request_id, c.REOPENING_STATE, self.now(), expected_revision=revision, owner_write=True
-            )
-            current = self.ledger.get(request_id)
-            revision = current["state_revision"] if current else revision
+            # A concurrent poll can rewrite the same terminal state and win the compare-and-set; retry
+            # against the fresh revision, and never launch while the row still reads terminal.
+            for _ in range(_REOPEN_ATTEMPTS):
+                reopened = self.ledger.update_state(
+                    request_id, c.REOPENING_STATE, self.now(), expected_revision=revision, owner_write=True
+                )
+                current = self._known(request_id)
+                revision = current["state_revision"]
+                if reopened or current["last_state"] not in c.TERMINAL_STATES:
+                    break
+                prior, notified = current["last_state"], current["notified_state"]
+            else:
+                raise c.T3DispatchError("unavailable")
         try:
             result = self.runner.followup(request_id, args["message"], row["interaction_mode"])
         except (FleetTimeout, FleetProtocolError) as exc:
@@ -321,9 +331,7 @@ class T3DispatchTools:
         except FleetCallError as exc:
             if reopened:
                 # A definite refusal reopened nothing, so restore the terminal state and its delivered wake.
-                self.ledger.restore_terminal(
-                    request_id, prior, row["notified_state"], self.now(), expected_revision=revision
-                )
+                self.ledger.restore_terminal(request_id, prior, notified, self.now(), expected_revision=revision)
             raise _fleet_error(exc) from exc
         if not isinstance(result.get("state"), str):
             # Accepted but state-less: the request may have reopened, so keep it open until a status call says otherwise.

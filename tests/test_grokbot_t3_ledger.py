@@ -228,3 +228,31 @@ def test_legacy_state_revision_migrates_and_survives_reopen(tmp_path):
     assert ledger.update_state("r1", "succeeded", T0, expected_revision=1)
     assert ledger.get("r1")["state_revision"] == 2
     ledger.close()
+
+
+def test_record_submit_converts_the_reservation_atomically(tmp_path):
+    import sqlite3
+
+    import pytest
+
+    ledger = Ledger(tmp_path / "t3" / "ledger.sqlite3")
+    reservation = ledger.record_in_doubt("Builder", T0)
+    ledger._conn.execute(
+        "CREATE TRIGGER fail_release BEFORE DELETE ON in_doubt BEGIN SELECT RAISE(ABORT, 'release failed'); END"
+    )
+    with pytest.raises(sqlite3.IntegrityError):
+        ledger.record_submit(
+            request_id="r1",
+            caller="Builder",
+            repository="brigade",
+            host="host-a",
+            seat="dsflash",
+            title="t",
+            prompt_sha256="0" * 64,
+            state="dispatching",
+            now=T0,
+            release_reservation=reservation,
+        )
+    # The insert rolled back with the failed release: the slot is counted once, as the reservation.
+    assert ledger.get("r1") is None
+    assert ledger.open_count(T0) == 1

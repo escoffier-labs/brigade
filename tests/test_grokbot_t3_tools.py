@@ -581,3 +581,52 @@ def test_stale_reopening_marker_can_be_replaced_by_pollers(make):
     assert not ledger.update_state("r1", "succeeded", NOW + timedelta(seconds=60))
     assert ledger.update_state("r1", "succeeded", NOW + timedelta(seconds=c.REOPENING_TTL_SECONDS + 1))
     assert ledger.get("r1")["last_state"] == "succeeded"
+
+
+def _poll_before_reopen(ledger, monkeypatch, times):
+    """Make a concurrent poll rewrite the same terminal state just before each reopen compare-and-set."""
+    from brigade.grokbot_t3 import contracts as c
+
+    original = ledger.update_state
+    left = [times]
+
+    def racing_update(request_id, state, now, **kwargs):
+        if state == c.REOPENING_STATE and left[0]:
+            left[0] -= 1
+            original(request_id, "succeeded", now)
+        return original(request_id, state, now, **kwargs)
+
+    monkeypatch.setattr(ledger, "update_state", racing_update)
+
+
+def test_followup_retries_the_reopen_marker_after_a_racing_poll(make, monkeypatch):
+    tools, runner, ledger = make()
+    _submit(tools)
+    ledger.update_state("r1", "succeeded", NOW)
+    _poll_before_reopen(ledger, monkeypatch, times=1)
+    seen = []
+
+    def watching_followup(request_id, prompt, interaction_mode="default"):
+        seen.append(ledger.get(request_id)["last_state"])
+        return {"request_id": request_id, "state": "running"}
+
+    monkeypatch.setattr(runner, "followup", watching_followup)
+    out = tools.call_tool("t3_followup", {"request_id": "r1", "message": "again"})
+    assert seen == ["reopening"]
+    assert out["state"] == "running"
+    assert ledger.get("r1")["last_state"] == "running"
+
+
+def test_followup_does_not_launch_without_the_reopen_marker(make, monkeypatch):
+    tools, runner, ledger = make()
+    _submit(tools)
+    ledger.update_state("r1", "succeeded", NOW)
+    _poll_before_reopen(ledger, monkeypatch, times=100)
+    launched = []
+    monkeypatch.setattr(
+        runner, "followup", lambda request_id, prompt, interaction_mode="default": launched.append(request_id)
+    )
+    out = tools.call_tool("t3_followup", {"request_id": "r1", "message": "again"})
+    assert out["error"]["code"] == "unavailable"
+    assert launched == []
+    assert ledger.get("r1")["last_state"] == "succeeded"

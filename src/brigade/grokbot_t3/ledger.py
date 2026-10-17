@@ -122,6 +122,8 @@ class Ledger:
         release_reservation: int | None = None,
     ) -> None:
         with self._lock, self._conn:
+            # The connection autocommits, so open the transaction explicitly or the insert and release split.
+            self._conn.execute("BEGIN IMMEDIATE")
             ts = _ts(now)
             self._conn.execute(
                 "INSERT INTO requests (request_id, caller, repository, host, seat, title, prompt_sha256, "
