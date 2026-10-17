@@ -73,7 +73,10 @@ class ClaimTargetError(hub.FleetHubUnprocessable):
         error: dict[str, Any] = {"code": "invalid-field", "field": "target", "message": str(self)}
         if self.limit is not None:
             error.update(limit=self.limit, unit="utf8-bytes")
-        return {"error": error}
+        payload: dict[str, Any] = {"error": error}
+        if self.limit is not None:
+            payload.update(reason="claim-target-too-long", owner={})
+        return payload
 
 
 def _target_bytes(target: str) -> bytes:
@@ -468,9 +471,10 @@ def _acquire(
         if request["scope"] == "node" and prior[1] == node:
             error += " under another lease than the reconciled dead run's (not superseded)"
         return 409, {"granted": False, "error": error, "owner": hub._claim_payload(prior)}
-    if not retry and not replace:
-        # A refused missing-holder cleanup must not be followed by an
-        # unfenced late admission while that retirement budget remains full.
+    if not retry:
+        # Every new holder, including a superseding replacement, needs
+        # retirement capacity. Only the old holder's retirement is exempt
+        # from the node quota, so replacements cannot chain past it.
         budget.check(target, node, holder, enforce_node_quota=True)
     if not retry:
         started = _advance(conn, target, current)

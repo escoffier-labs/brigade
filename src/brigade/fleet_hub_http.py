@@ -737,7 +737,7 @@ def make_handler(
                     else ({}, False)
                 )
             except ClaimFenceError as exc:
-                self._send_json(409, {"error": str(exc), "reason": "claim-fence-refused", "owner": {}})
+                self._send_json(503, {"error": str(exc), "reason": "claim-fence-refused", "owner": {}})
                 return
             except sqlite3.Error as exc:
                 self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
@@ -979,7 +979,7 @@ def make_handler(
                         policy_error = f"the policy authority could not be read ({type(exc).__name__})"
                 control_plane = control_plane_from_hub(conn)
             except ClaimFenceError as exc:
-                self._send_json(409, {"error": str(exc), "reason": "claim-fence-refused", "owner": {}})
+                self._send_json(503, {"error": str(exc), "reason": "claim-fence-refused", "owner": {}})
                 return
             except sqlite3.Error as exc:
                 self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
@@ -1538,7 +1538,7 @@ def make_handler(
                     else:
                         payload = {"claims": fleet_claim_display.list_display_claims(conn, include_all=include_all)}
                 except ClaimFenceError as exc:
-                    self._send_json(409, {"error": str(exc), "reason": "claim-fence-refused", "owner": {}})
+                    self._send_json(503, {"error": str(exc), "reason": "claim-fence-refused", "owner": {}})
                     return
                 except sqlite3.Error as exc:
                     self._send_json(500, {"error": f"hub database error: {exc}"})
@@ -1796,7 +1796,7 @@ def make_handler(
                 self._send_json(503, {"error": FleetHubUnsupportedSchema.public_message})
                 return
             except ClaimTargetError as exc:
-                self._send_json(422, exc.payload())
+                self._send_json(409 if exc.limit is not None else 422, exc.payload())
                 return
             except ClaimFenceError as exc:
                 self._send_json(409, {"error": str(exc), "reason": "claim-fence-refused", "owner": {}})

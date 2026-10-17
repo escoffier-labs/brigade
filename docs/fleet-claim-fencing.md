@@ -76,14 +76,17 @@ expired claims plus the requested target, which is always checked regardless
 of its position in the backlog. The per-target `claim_fences` are never evicted.
 
 Retirement storage allows 1,000,000 rows globally and 100,000 in-horizon rows
-per node for missing-row holder releases and fresh-acquire admission.
+per node for missing-row holder releases and every non-retry acquire admission,
+including superseding replacements.
 An index on `(owner_node, retired_at)` supports the node quota. The transaction
 counts global rows once and caches each checked node's indexed count.
 A node that repeatedly releases fresh holders on a free target reaches its own
 quota before it can fill the global budget. Updates to an existing in-horizon
 marker require no new row. Expiry, live-holder release, node release, force
-release, and supersede retirements are exempt from the per-node quota because
-they are bounded by live claims. The global cap applies to every retirement.
+release, and supersede retirements are exempt from the per-node quota so existing
+holders can retire. Superseding admission still checks the quota before replacing
+the live holder, which prevents repeated replacements from filling global history.
+The global cap applies to every retirement.
 
 At 1 retirement per second, the former lifetime cap of 100,000 lasted 27.8 hours.
 With seven-day retention, that rate retains at most 604,801 rows globally when
@@ -111,16 +114,23 @@ Existing live-holder retries and renewals keep their normal behavior.
 Capacity checks reclaim a bounded batch of out-of-horizon rows before refusing.
 A large expired backlog may require several transactions to reclaim. No
 in-horizon marker is evicted to admit a request. Corrupt or missing current-schema storage refuses
-without repair. Fencing failures return HTTP 409 with
+without repair. Claim mutation fencing failures return HTTP 409 with
 `reason: "claim-fence-refused"` and `owner: {}`. The empty owner object carries
 no ownership identity. It makes pre-fencing clients classify the refusal as
 `held`, since an owner-less 409 maps to `missing` and can permit local-only work
 after a retry. This is a terminal authority refusal. The client
 raises from `repo_claim` instead of admitting work under only the local lock,
 and a heartbeat treats it as terminal ownership loss. Transport outages retain
-their existing handling. Orphan cleanup retries `claim-fence-refused` with
+their existing handling. Read-only dashboard, Command Deck, and API GETs return
+HTTP 503 with the same reason so uptime monitors detect corrupt fence storage.
+New targets over 1,024 UTF-8 bytes return HTTP 409 with
+`reason: "claim-target-too-long"` and `owner: {}`, preventing local fallback in
+both current and base clients. Invalid UTF-8 retains its validation refusal.
+Orphan cleanup retries `claim-fence-refused` with
 backoff until its TTL deadline. An ambiguous initial acquire followed by this
-refusal schedules cleanup without admitting work.
+refusal schedules cleanup without admitting work. Final release refusals on exit
+or after a rejected late grant also schedule background cleanup so recovery can
+retire the holder.
 
 `GET /status` includes `claim_fencing.retired_holder_rows` and
 `claim_fencing.retired_holder_horizon_seconds`. On refusal, stop the source of

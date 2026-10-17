@@ -451,7 +451,9 @@ class TestHubClaims:
 
         for target in ("r" * (target_limit + 1), "é" * 513):
             status, payload = _post(url, token, _claim(target=target))
-            assert status == 422
+            assert status == 409
+            assert payload["reason"] == "claim-target-too-long"
+            assert payload["owner"] == {}
             assert payload["error"] == {
                 "code": "invalid-field",
                 "field": "target",
@@ -3181,9 +3183,9 @@ class TestConfirmedLeaseDeadline:
             dispatch.set()
 
     @pytest.mark.parametrize("watcher_first", [True, False])
-    @pytest.mark.parametrize("release_unavailable", [True, False])
+    @pytest.mark.parametrize("release_reason", ["ok", "hub-unavailable", "claim-fence-refused"])
     def test_rejected_renew_cleans_before_blocked_callback(
-        self, monkeypatch, lease_clock, watcher_first, release_unavailable
+        self, monkeypatch, lease_clock, watcher_first, release_reason
     ):
         renew_started = threading.Event()
         finish_renew = threading.Event()
@@ -3217,9 +3219,7 @@ class TestConfirmedLeaseDeadline:
         def release(*a, **kw):
             self.releases.append(kw["holder"])
             cleaned.set()
-            return fleet_client.ClaimDecision(
-                not release_unavailable, "hub-unavailable" if release_unavailable else "ok"
-            )
+            return fleet_client.ClaimDecision(release_reason == "ok", release_reason)
 
         monkeypatch.setattr(fleet_client._ConfirmedClaimLease, "watch", watch)
         monkeypatch.setattr(fleet_client, "renew_claim", renew)
@@ -3237,7 +3237,7 @@ class TestConfirmedLeaseDeadline:
                 # remain live. Context-exit release cannot satisfy this check.
                 assert cleaned.wait(2), "late successful renew leaked until context exit"
                 assert self.releases == holders
-                if release_unavailable:
+                if release_reason != "ok":
                     thread_sync.wait_for_predicate(
                         lambda: scheduled == holders, description="rejected renew orphan cleanup"
                     )
@@ -3499,6 +3499,21 @@ class TestConfirmedLeaseDeadline:
         finally:
             finish_callback.set()
             finish_renew.set()
+
+    @pytest.mark.parametrize("reason", ["claim-fence-refused", "claim-target-too-long"])
+    def test_authority_refusal_heartbeat_cancels_guarded_work(self, monkeypatch, lease_clock, reason):
+        lost = []
+        notified = threading.Event()
+
+        def on_loss(value):
+            lost.append(value)
+            notified.set()
+
+        monkeypatch.setattr(fleet_client, "renew_claim", lambda *a, **kw: fleet_client.ClaimDecision(False, reason))
+        with fleet_client.repo_claim("repo-a", ttl_seconds=60, on_claim_lost=on_loss) as decision:
+            assert notified.wait(2), "authority refusal did not notify guarded work"
+            assert decision.cancel_event.is_set()
+        assert lost == [reason]
 
     @pytest.mark.parametrize("reason", ["auth-failed", "invalid"])
     def test_terminal_failure_disarms_expiry_watcher(self, monkeypatch, lease_clock, reason):
