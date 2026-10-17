@@ -30,7 +30,7 @@ These come from the fleet plan and need no re-approval:
 3. **Use the hub message Python API** (`brigade.fleet_client_messages`) instead of shelling out to `brigade fleet msg`. Same calls, same token file, no argv exposure of message bodies.
 4. **Use `brigade.grokbot_t3.fleet.FleetRunner` for every t3-fleet call.** It sends the request as JSON on stdin, so prompts and titles never reach argv. The bridge currently builds argv flags. The initiator label stays `agent`/`miller`.
 5. **Keep the state schema.** The pack opens the existing state directory and its two databases unchanged, so ChatGPT's event subscriptions, tracked requests, the operations journal and the call log survive the cutover. Any schema change in this first version is additive, so the old bridge can still start on the same files for rollback.
-6. **No new runtime dependency.** PyJWT arrives with `mcp>=2` (the `grokbot` extra). The verifier imports it lazily and `doctor` reports it as a dependency check like the other packs. Listing `pyjwt[crypto]` explicitly in the extra is left to a follow-up issue, per the dependency policy.
+6. **One added optional dependency.** RS256 verification needs `cryptography`, which `mcp>=2` does not pull in (it depends on PyJWT without the `crypto` extra). The `grokbot` extra now lists `pyjwt[crypto]>=2` (owner-approved 2026-10-17). Core Brigade stays zero-dependency. The verifier imports PyJWT lazily, `doctor` checks both PyJWT and `cryptography`, and a missing RSA backend fails closed with `OptionalDependencyError`.
 
 ## Architecture
 
