@@ -1,5 +1,7 @@
 # Roster Reproducibility
 
+Status (2026-10-17): shipped in #234 (1cf74a833).
+
 ## Goal
 
 Record and apply per-seat reasoning settings, report read-only enforcement for

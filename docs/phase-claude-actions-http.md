@@ -1,5 +1,7 @@
 # Passive Actions HTTPS reads, issue #1602
 
+Status (2026-10-17): HTTPS read transport shipped in #1695 (e6009f696). Broader Actions integration remains outside this slice.
+
 ## Scope and design
 
 PRs #1608, #1626 and #1677 supplied offline diagnostics, run import and metadata

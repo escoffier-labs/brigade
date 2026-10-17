@@ -1,5 +1,7 @@
 # Fleet interactive session presence
 
+Status (2026-10-17): shipped in #1319 (6bb785bec).
+
 ## Goal
 
 Make the Fleet Hub the source of truth for interactive agent presence so an

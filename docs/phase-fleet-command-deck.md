@@ -6,7 +6,7 @@
 > independent expiry and revocation. See [Fleet sync](fleet-sync.md#browser-enrollment-and-lost-device-revocation)
 > for current commands. Any token-query examples below describe retired behavior.
 
-Status: reviewed implementation specification, awaiting operator approval before any code lands.
+Status (2026-10-17): shipped in #1251 (bb7e4b808).
 Scope: design only. The implementing agent works test-first from this document.
 Deployment line: Brigade beta main (`main`). Version 0.27.0 stays as it is. nothing here cuts or bumps a release.
 Provenance: past-work evidence id `a347f29f260af60ce27f7c1d`. supersedes the machine board from issue #1124 / PR #1145 as the primary hub view after canary approval.

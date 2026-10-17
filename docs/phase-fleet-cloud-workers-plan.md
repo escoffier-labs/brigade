@@ -1,5 +1,7 @@
 # Fleet Cloud Workers implementation plan
 
+Status (2026-10-17): hub admission, provider adapters, and Command Deck shipped in #1251 (bb7e4b808).
+
 ## Goal
 
 Make the beta fleet hub authoritative for cloud-agent admission and honest

@@ -34,6 +34,11 @@ podman run --rm --entrypoint python localhost/brigade-fleet-hub:0.28.0-e6009f6 \
 Deploy the recorded `localhost/brigade-fleet-hub@sha256:<REVIEWED_DIGEST>`,
 not a mutable tag. This repository does not publish the image to a registry.
 
+This pinned baseline predates schema 32, T3 lifecycle intake, and per-seat native
+T3 launch models. Use a separately reviewed newer image before enabling those
+features. See [T3 lifecycle reporting](../fleet-t3-events.md) for upgrade and
+rollback constraints. The baseline smoke results above do not verify those features.
+
 ## Docker Compose
 
 Docker Engine 28.0.0 or newer is required for the localhost-only port

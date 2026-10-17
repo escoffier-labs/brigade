@@ -48,4 +48,4 @@ Repo installs use:
 
 ## Boundary
 
-Root workspace files such as `/AGENTS.md`, `/MEMORY.md`, `/TOOLS.md`, `/memory/cards/`, `.brigade/`, and `.claude/` are local dogfood state and intentionally ignored. Template source belongs under `src/brigade/templates/`.
+Root workspace files such as `/MEMORY.md`, `/TOOLS.md`, `/memory/cards/`, `.brigade/`, and `.claude/` are local dogfood state and intentionally ignored. Root `/AGENTS.md` is tracked contributor guidance. Template source belongs under `src/brigade/templates/`.

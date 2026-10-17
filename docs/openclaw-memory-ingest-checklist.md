@@ -35,7 +35,7 @@ Review:
 
 ## Ingest Boundary
 
-Brigade does not write canonical memory. OpenClaw, Hermes, or another memory owner performs the actual ingest as an explicit operator-approved action. Safe targeted handoffs may be filed by the ingester; skipped, failed, malformed, warning, or ambiguous outcomes remain review work.
+In this external-owner workflow, OpenClaw, Hermes, or another memory owner performs the actual ingest as an explicit operator-approved action. Brigade also provides an opt-in local ingestor through `brigade ingest --promote-cards --route-documents` when it is the chosen ingestor. Without those flags, `brigade ingest` stages handoffs for review. Safe targeted handoffs may be filed by the ingester; skipped, failed, malformed, warning, or ambiguous outcomes remain review work.
 
 Treat every file under `.claude/memory-handoffs/`, `.codex/memory-handoffs/`, `.opencode/memory-handoffs/`, `.antigravity/memory-handoffs/`, `.pi/memory-handoffs/`, `.cursor/memory-handoffs/`, `.aider/memory-handoffs/`, `.goose/memory-handoffs/`, `.continue/memory-handoffs/`, `.copilot/memory-handoffs/`, `.qwen/memory-handoffs/`, `.kimi/memory-handoffs/`, `.adal/memory-handoffs/`, `.openhands/memory-handoffs/`, `.grok/memory-handoffs/`, `.amp/memory-handoffs/`, `.crush/memory-handoffs/`, and `.hermes/memory-handoffs/` as pending ingest or review until it has an ingestion receipt or manual archive record.
 

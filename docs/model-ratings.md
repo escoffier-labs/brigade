@@ -38,6 +38,9 @@ to an exit code or a scripted grader:
 
 Run each task through `brigade work verify run --target . --command "<grader>"`
 so the grading run itself leaves a receipt in `.brigade/work/verify-runs/`.
+Ad hoc `--command` receipts are audit evidence and do not score skills or cards.
+Artifact scoring requires an eligible registered `--manifest` receipt. Keep
+model-seat ratings in the benchmark results separately.
 
 ## Example: pilot run, 2026-07-11
 
@@ -76,9 +79,10 @@ What this run actually showed:
   `transport_version` for read-only Composer cells. Direct Grok 4.5 Cursor
   cells have also returned exit 0 with empty assistant text (issue #231), so
   keep those failures in the adapter bucket instead of scoring them as model 0s.
-- **Adapter gaps are not model gaps.** The plain `claude -p` adapter cannot
-  edit files headless. Give the model the same permissions the other seats get
-  when you benchmark, then note the adapter limit in your roster instead.
+- **Adapter gaps are not model gaps.** Claude write seats require explicit
+  `--sandbox danger-full-access` or Brigade's linked `--worktree` path. The
+  headless adapter refuses a native `workspace-write` sandbox or an unspecified
+  write sandbox. Record the actual permissions used for each benchmark cell.
 - **Deep working directories break app-server steering.** Unix socket paths cap
   near 108 characters. Brigade warns and the run completes without live control.
 

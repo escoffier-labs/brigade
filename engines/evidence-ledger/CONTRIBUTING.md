@@ -30,4 +30,4 @@ Open an issue before a PR for:
 
 - **No real personal evidence** in tests or fixtures; use small synthetic
   `adapter.v1` records.
-- Conventional commits, no AI co-authorship trailers.
+- Conventional commits and co-author trailers follow the root [contributor policy](../../CONTRIBUTING.md).

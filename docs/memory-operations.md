@@ -102,12 +102,12 @@ Care does not auto-edit card bodies on scan. Scheduling stays operator-owned. Se
 | Owner | Role |
 | --- | --- |
 | Canonical memory system | Long-term cards, rules, `MEMORY.md` index |
-| Brigade | Receipts, queues, topology/inventory views, review gate plumbing |
+| Brigade | Receipts, queues, topology/inventory views, review gate plumbing, and opt-in local ingestion |
 | Scheduler | External cron, systemd, launchd, or CI that invokes Brigade |
 | Manual process | Human or agent commands run on demand |
 | External adapter | Harness-native memory that is not the Brigade owner |
 
-Safe targeted handoffs may auto-file under owner policy. Ambiguous or risky notes wait for review. Brigade does not replace OpenClaw, Hermes, or another chosen memory owner unless the operator asks for that migration.
+Safe targeted handoffs may auto-file under owner policy. `brigade ingest` stages handoffs for review by default. Explicit `--promote-cards` and `--route-documents` enable card and document writes into the target's canonical stores. Ambiguous or risky notes wait for review. Brigade does not replace OpenClaw, Hermes, or another chosen memory owner unless the operator asks for that migration.
 
 ## Center view
 

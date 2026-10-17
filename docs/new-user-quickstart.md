@@ -73,9 +73,9 @@ brigade operator doctor --target ~/agent-workspace --profile local-operator
 Expected shape:
 
 ```text
-quickstart: ok
-operator doctor: ready yes
-blocking issues: 0
+status: ok
+ready: yes
+blocking_issues: 0
 ```
 
 For a machine-readable first-run report:

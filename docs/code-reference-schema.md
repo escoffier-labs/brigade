@@ -1,6 +1,9 @@
 # Structured code references
 
-`schemas/code-reference.v1.schema.json` is Brigade's stable contract for an exact code reference. A reference names its repository, immutable revision, repository-relative file, qualified symbol, symbol kind, source span, and change kind. `schema` is always `brigade.code-reference.v1`.
+`schemas/code-reference.v1.schema.json` is Brigade's stable contract for an exact code reference. A reference names its repository, immutable revision, repository-relative file, qualified symbol, symbol kind, source span, and change kind. `schema` is always `brigade.code-reference.v1`. The Python validator is
+[`code_references.validate`](../src/brigade/code_references.py). It requires
+`repository` in `owner/name` form and `revision.commit` as 40 lowercase hex
+characters. `change_kind` is `added`, `changed`, or `removed`.
 
 Brigade emits references in receipt metadata as `item.metadata.code_references`. JSON is compact, sorted-key UTF-8 JSON. `source_span` is an exact range expressed as positive `start_line` and positive `line_count`, so it cannot represent a reversed range. Both values are bounded by `9007199254740991` (`2^53 - 1`), the largest integer represented exactly by JavaScript JSON consumers and the Go and Python implementations. JSON Schema's `integer` type accepts numeric JSON values with no fractional part, including `1.0` and `1e0`; Brigade normalizes accepted values to canonical integer JSON.
 

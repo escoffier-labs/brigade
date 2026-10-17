@@ -152,9 +152,11 @@ post comments, enable reviews or invoke a paid service.
 
 ## Remaining #1602 acceptance and verification
 
-The run/jobs/artifact importer, supported live GitHub reads, persistence, CLI
-and FleetHub readouts remain open. General YAML normalization and provider
-auth readiness require supported evidence before those facets can be confirmed. This slice adds no runtime dependencies or existing-module changes.
+The bounded run normalizer, job/artifact metadata collector and opt-in GitHub
+Actions GET transport are separate modules. Persistence, CLI and FleetHub
+readouts remain open. General YAML normalization and provider auth readiness
+require supported evidence before those facets can be confirmed. This slice adds
+no runtime dependencies or existing-module changes.
 
 Tests in `tests/test_claude_actions_diagnostics.py` cover app-only reports,
 auth declarations and redaction, absence/completeness, disabled metadata,

@@ -2,7 +2,11 @@
 
 Machine-readable contracts for the three sanctioned receipt families audited in
 [#506](receipt-schema-audit.md). These are documentation contracts, not runtime
-JSON Schema files.
+JSON Schema files. Version constants and document writers live in
+[`receipt_schema.py`](../src/brigade/receipt_schema.py), with worker and synthesis
+field serialization in [`run_receipts.py`](../src/brigade/run_receipts.py). Verify
+and closeout writers live in
+[`work_cmd/verification.py`](../src/brigade/work_cmd/verification.py).
 
 ## Evolution rules (all families)
 
@@ -155,7 +159,7 @@ receipts or routing authority.
 | Field | Type | Notes |
 | --- | --- | --- |
 | `command` | string | Display command |
-| `argv` | array of string | no | Resolved argv |
+| `argv` | array of string | Resolved argv |
 | `env` | array of string | Sorted `KEY=value` pairs |
 | `status` | string | `completed`, `failed`, `timed_out`, `rejected`, `interrupted` |
 | `exit_code` | integer \| null | Child exit status. `null` when interrupted or timed out without one. Rejected commands use `2` |
@@ -223,9 +227,9 @@ directory with the same files and file hashes as the source.
 | `created_at` | string | yes | ISO-8601 |
 | `session` | object | yes | Session summary |
 | `session_path` | string | yes | |
-| `task` | object \| null | | Task summary |
+| `task` | object \| null | yes | Task summary, or `null` when absent |
 | `acceptance_criteria` | array | yes | |
-| `verification` | object \| null | | Latest verify receipt ref |
+| `verification` | object \| null | yes | Latest verify receipt ref, or `null` when absent |
 | `scanner_sweep` | object | yes | |
 | `code_review` | object | yes | |
 | `handoff_drafts` | object | yes | |
@@ -691,6 +695,7 @@ transport env path. See `docs/skill-registry.md`.
 | `schema` | string | yes | Always `brigade.worker_results.v1` |
 | `schema_version` | integer | yes (new writes) | `1` |
 | `results` | array of object | yes | Worker result entries (below) |
+| `producer_run_id` | string | no | Containing orchestrator run id when supplied by the producer or `BRIGADE_RUN_ID` |
 | `ground_truth` | object | no | No-op / ground-truth metadata when present |
 
 **Worker result entry** (`run_receipts.worker_payload`)
@@ -706,6 +711,12 @@ transport env path. See `docs/skill-registry.md`.
 | `failure_phase` | string | Optional failure phase |
 | `failure_kind` | string | Optional failure kind |
 | `transport_warning` | object | Optional transport warning metadata |
+| `failure` | object | Optional normalized `brigade.worker_failure.v1` on failed workers |
+| `cloud_environment` | object | Optional cloud execution metadata |
+| `metadata_provenance` | object | Optional allowlisted model and adapter-version observations with `observed_at` and `fields` |
+| `output_truncated` | boolean | Present and `true` when output was truncated |
+| `output_bytes`, `output_cap_bytes` | integer | Original output size and capture cap when truncated |
+| `provenance` | object | Optional worker-result provenance envelope |
 | `thread_id` | string | App-server thread id when resumable |
 | `status` | string | App-server turn status (with `thread_id`) |
 | `exit_code` | integer | Optional child exit code |
@@ -742,6 +753,7 @@ transport env path. See `docs/skill-registry.md`.
 | `failure_kind` | string \| null | Failure kind when applicable |
 | `session_id` | string \| null | Session id when applicable |
 | `selected` | boolean | Whether this attempt was selected |
+| `failure` | object | Optional normalized `brigade.worker_failure.v1` for an unsuccessful or failure-stamped attempt |
 | `stdout_log`, `stderr_log` | string | Optional log paths |
 
 ---
@@ -771,6 +783,8 @@ transport env path. See `docs/skill-registry.md`.
 | `failure_phase` | string | Optional failure phase |
 | `failure_kind` | string | Optional failure kind |
 | `transport_warning` | object | Optional transport warning metadata |
+| `cloud_environment` | object | Optional cloud execution metadata |
+| `metadata_provenance` | object | Optional allowlisted model and adapter-version observations with `observed_at` and `fields` |
 | `exit_code` | integer | Optional child exit code |
 | `timed_out` | boolean | Present when exit metadata or timeout applies |
 | `stdout_log`, `stderr_log` | string | Optional log paths |
@@ -1292,10 +1306,12 @@ precede every merge or ship event even if its signed `decidedAt` was backdated.
 Projector version 7 makes existing `run.json` snapshots stale input for
 `run_shadow`. Regenerate the shadow after the projection is refreshed.
 
-Approval v1 remains verification-only compatibility. Verification reports
-`binding: receipt` because its subjects contain verify receipt digests. That
-binding is not portable Test Result evidence and cannot satisfy a future
-agent-change evidence index.
+Approval v1 remains a compatibility profile. Verification reports
+`binding: receipt` because its subjects contain verify receipt digests rather
+than portable Test Result payload digests. The agent-change verifier accepts
+current v1 approvals after strict artifact and journal-event validation and
+reverification of requester evidence
+([approval-reference verifier](../src/brigade/agent_change_approval_verify.py)).
 
 #### `human-approval/v2` portable evidence profile
 
@@ -1392,15 +1408,14 @@ time, and nonce. It does not include task text, workspace paths, argv,
 environment values, or command output. Requester principal and key id are
 projected into `run.json` for separation-of-duties evaluation.
 
-Approval v1 keeps its current compatibility behavior and may use those
-projected fields when present. A future approval v2 must not trust the
-projection alone. Before using requester identity for segregation of duties,
-it must load the referenced request envelope, verify its SSHSIG signature
-against the target's `allowed_signers` policy and optional KRL, recompute the
-canonical statement digest, and require that digest to match the paired
-`request.signed` event. This requirement applies only to the SSHSIG request
-profile. It does not route request verification through the separate cosign
-profile.
+Approval v1 keeps its compatibility behavior and may use those projected
+fields when present. Approval v2 uses
+[`verify_recorded_request`](../src/brigade/approval_v2.py) to load the referenced
+request envelope, verify its SSHSIG signature against the target's
+`allowed_signers` policy and optional KRL, recompute the canonical statement
+digest, and require that digest to match the paired `request.signed` event.
+This applies only to the SSHSIG request profile. Request verification does not
+use the separate cosign profile.
 
 ---
 
@@ -1600,7 +1615,10 @@ are non-success for consumers.
 **Envelope:** DSSE over an in-toto Statement v1, signed with
 `brigade.sshsig-dsse.v1` and written to `<run-dir>/linkage/<commit-sha>.json`.
 
-Predicate carried by the commit-linkage statement.
+Predicate carried by the commit-linkage statement. The
+[`build_statement` writer](../src/brigade/commit_linkage.py) defines these fields,
+and [`commit_linkage_verify.py`](../src/brigade/commit_linkage_verify.py) checks
+the local tree and run bindings.
 
 | Field | Type | Required | Notes |
 | --- | --- | --- | --- |
@@ -1608,12 +1626,12 @@ Predicate carried by the commit-linkage statement.
 | `run` | object | yes | `{"id", "journalChainHead"}` |
 | `attestedTree` | object | yes | `{"gitTree": <tree-sha>}` |
 | `commitTree` | object | yes | `{"gitTree": <tree-sha>}` |
-| `commitParents` | array of object | yes | `{"gitCommit": <sha>}` in order |
-| `commitKind` | string | yes | `root`, `linear`, or `merge` |
+| `commitParents` | array of object \| object | yes | `{"gitCommit": <sha>}` entries in order, or `{"status": "unknown"}` at a shallow boundary |
+| `commitKind` | string | yes | `root`, `linear`, `merge`, or `unknown` when parents are unknown |
 | `comparison` | object | yes | See below |
 | `equivalence` | string | yes | `exact`, `normalized`, or `none` |
 | `git` | object | yes | `{"objectFormat", "shallow"}` |
-| `baseline` | object | no | Present when `run.json` has a `baseline_commit` |
+| `baseline` | object | yes | Baseline relationship observations, including when the baseline is unknown |
 | `references` | object | yes | `{"status": "absent"}` or agent-change index reference |
 | `trailers` | object | yes | Trailer observations |
 | `forgeEvidence` | object | yes | `{"status": "not-included"}` |
@@ -1646,8 +1664,8 @@ Predicate carried by the commit-linkage statement.
 
 | Field | Type | Notes |
 | --- | --- | --- |
-| `gitCommit` | string | The run's baseline commit |
-| `baselineRelation` | string | `same-as-parent`, `ancestor-of-parent`, `unrelated`, `unknown`, or `unavailable` |
+| `gitCommit` | string | The run's baseline commit. Omitted when unavailable |
+| `baselineRelation` | string | `same-as-parent`, `ancestor-of-parent`, `unrelated`, or `unknown` |
 | `baselineMoved` | boolean \| null | Whether the first parent is not the baseline |
 
 **`references` object**

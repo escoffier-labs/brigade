@@ -3,8 +3,9 @@
 The first retention slice of issue #1407 exports one Brigade verify run as a
 self-contained directory that a WORM store, SIEM batch, or auditor can ingest.
 It is **not** a signed attestation, a legal-hold receipt, or an acknowledgement
-of retention. Those are later slices. The package only proves that the copied
-files still match the manifest that was written when the package was created.
+of retention. Destination acknowledgement has a separate
+[offline acceptance contract](evidence-ack-acceptance.md). The package checks
+that the copied files still match its manifest.
 
 ## Commands
 
@@ -52,7 +53,9 @@ With `--json` the output is a sorted object with schema
 }
 ```
 
-Neither output mode prints file contents or absolute paths beyond the run id.
+Human-readable output prints the run id and entry count. JSON also echoes `out`
+as supplied, which may be an absolute path. Neither mode prints file contents
+([export implementation](../src/brigade/evidence_package.py)).
 
 ### `brigade receipts verify-package`
 

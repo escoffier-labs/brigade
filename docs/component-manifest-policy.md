@@ -107,7 +107,8 @@ Layout:
 
 - `<data-root>/brigade/components/` - component metadata directory
 - `<data-root>/brigade/bin/<executable>` - managed executables
-- `<data-root>/brigade/installed.json` - install state (future phases)
+- `<data-root>/brigade/installed.json` - installed component state written by setup
+  ([writer](../src/brigade/component_install.py), [schema](../src/brigade/component_state.py))
 - `<cache-root>/brigade/components/<sha256>/<asset_name>` - verified download cache
 
 Brigade does not relocate `.graphtrail/graphtrail.db` or MiseLedger archive paths.

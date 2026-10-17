@@ -1045,6 +1045,7 @@ def dispatch(
             resume_session_id: str | None = None,
         ) -> agents.AgentResult:
             """Record transport facts around exactly one real external call."""
+            proc.check_cancellation(process_registry)
             blocked = _selected_agent_preflight(
                 selected_agent,
                 roster=roster,
@@ -1371,17 +1372,21 @@ def dispatch(
                         ok=False,
                         detail=str(exc)[:200],
                     )
-        except KeyboardInterrupt:
+        except KeyboardInterrupt as exc:
             try:
                 if on_interrupt is not None:
                     on_interrupt()
             finally:
                 cancel_active_work(future_to_index)
                 executor.shutdown(wait=True, cancel_futures=True)
+                runguard.raise_if_retained_run_lock(exc)
+                _raise_retained_future_error(future_to_index, exc)
             raise
-        except BaseException:
+        except BaseException as exc:
             cancel_active_work(future_to_index)
             executor.shutdown(wait=True, cancel_futures=True)
+            if not isinstance(exc, runguard.RetainRunLockError):
+                _raise_retained_future_error(future_to_index, exc)
             raise
         else:
             executor.shutdown(wait=True)
@@ -1390,6 +1395,17 @@ def dispatch(
         if fail_fast and any(not result.ok for result in stage_results):
             abort_after_stage = stage
     return all_results
+
+
+def _raise_retained_future_error(futures: dict[Any, int], interrupt: BaseException) -> None:
+    """Do not discard worker cleanup failures when interrupting the scheduler."""
+    for future in futures:
+        if future.done() and not future.cancelled():
+            error = future.exception()
+            retained = runguard.retained_run_lock_error(error) if error is not None else None
+            if retained is not None:
+                retained.__context__ = interrupt
+                raise retained
 
 
 def _dag_placement_error(
@@ -1603,17 +1619,21 @@ def _dag_dispatch(
                 results[i] = finished
             if finished.ok:
                 completed_ok.append(finished)
-    except KeyboardInterrupt:
+    except KeyboardInterrupt as exc:
         try:
             if on_interrupt is not None:
                 on_interrupt()
         finally:
             cancel_active_work(future_to_index)
             executor.shutdown(wait=True, cancel_futures=True)
+            runguard.raise_if_retained_run_lock(exc)
+            _raise_retained_future_error(future_to_index, exc)
         raise
-    except BaseException:
+    except BaseException as exc:
         cancel_active_work(future_to_index)
         executor.shutdown(wait=True, cancel_futures=True)
+        if not isinstance(exc, runguard.RetainRunLockError):
+            _raise_retained_future_error(future_to_index, exc)
         raise
     else:
         executor.shutdown(wait=True)
