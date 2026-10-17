@@ -217,6 +217,7 @@ class SessionDirectory:
         data = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
         temporary = f".{dirfd.validate_component(name)}.{uuid.uuid4().hex}.tmp"
         created = False
+        published = False
         try:
             self.validate()
             flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
@@ -245,13 +246,14 @@ class SessionDirectory:
                             raise OSError(errno.EBUSY, "Windows session publication remained busy") from exc
                         time.sleep(_WINDOWS_REPLACE_BACKOFF_SECONDS)
                     else:
+                        published = True
                         break
                 self.validate_file(name, fd)
             finally:
                 os.close(fd)
             dirfd.fsync_directory(self.fd)
         finally:
-            if created:
+            if created and not published:
                 # Cleanup stays relative even when a parent was renamed.
                 primary_error = sys.exc_info()[1]
                 try:

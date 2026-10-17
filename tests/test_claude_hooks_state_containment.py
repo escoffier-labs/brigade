@@ -312,6 +312,47 @@ def test_publication_detects_substituted_temporary_entry(state_tree, monkeypatch
         runtime.write_session_state(target, "s", {"write_observed": True})
 
 
+@pytest.mark.parametrize("failure", [errno.EACCES, errno.EIO, "NTSTATUS=0xC0000043"])
+def test_successful_publication_does_not_unlink_temporary(state_tree, monkeypatch, failure) -> None:
+    target, sessions, _outside = state_tree
+
+    def unavailable(*_args, **_kwargs):
+        if isinstance(failure, int):
+            raise OSError(failure, "cleanup unavailable")
+        raise OSError(failure)
+
+    with anchored_io.session_directory(target) as anchor:
+        monkeypatch.setattr(dirfd, "unlink_child", unavailable)
+        anchor.write_json("s.json", {"generation": 2})
+        assert json.loads(anchor.read_bytes("s.json")) == {"generation": 2}
+    assert sorted(path.name for path in sessions.iterdir()) == ["s.json"]
+
+
+def test_failed_publication_cleans_up_temporary(state_tree, monkeypatch) -> None:
+    target, sessions, _outside = state_tree
+    original_unlink = dirfd.unlink_child
+    cleaned = []
+
+    def unavailable(*_args, **_kwargs):
+        raise OSError(errno.ENOSPC, "publication unavailable")
+
+    def cleanup(parent, name):
+        cleaned.append(name)
+        original_unlink(parent, name)
+
+    with anchored_io.session_directory(target) as anchor:
+        anchor.write_json("s.json", {"generation": 1})
+        monkeypatch.setattr(dirfd, "replace_children", unavailable)
+        monkeypatch.setattr(dirfd, "unlink_child", cleanup)
+        with pytest.raises(OSError, match="publication unavailable") as caught:
+            anchor.write_json("s.json", {"generation": 2})
+        assert caught.value.errno == errno.ENOSPC
+        assert json.loads(anchor.read_bytes("s.json")) == {"generation": 1}
+    assert len(cleaned) == 1
+    assert cleaned[0].endswith(".tmp")
+    assert sorted(path.name for path in sessions.iterdir()) == ["s.json"]
+
+
 @pytest.mark.parametrize("operation", ["read", "append"])
 def test_sidecar_file_swap_after_open_uses_held_descriptor(state_tree, monkeypatch, operation) -> None:
     target, sessions, outside = state_tree
@@ -476,6 +517,11 @@ def test_session_resource_errors_remain_plain_oserrors(state_tree, monkeypatch, 
                 monkeypatch.setattr(dirfd, "stat_child", unavailable)
                 anchor.validate_file("s.json", anchor.fd)
             elif operation == "cleanup":
+
+                def failed_replace(*_args, **_kwargs):
+                    raise OSError(errno.ENOSPC, "publication unavailable")
+
+                monkeypatch.setattr(dirfd, "replace_children", failed_replace)
                 monkeypatch.setattr(dirfd, "unlink_child", unavailable)
                 anchor.write_json("s.json", {})
             else:
