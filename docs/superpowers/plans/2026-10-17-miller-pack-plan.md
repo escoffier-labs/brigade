@@ -299,9 +299,9 @@ with `workload`, `override_reason` and `allow_queue` present only when given.
 
 **Files:** Modify `src/brigade/grokbot_packs.py`, `src/brigade/cli/run_cloud.py`, `tests/test_grokbot_packs.py`; create `docs/grokbot-miller.md`.
 
-- [ ] Write failing tests in `tests/test_grokbot_packs.py`: `show_pack("miller")` returns kind `connector`, bind `127.0.0.1:8779`, tools equal `brigade.miller.TOOLS`; `preview_setup(target, "miller", runtime_path=<valid>)` writes no `bearer` key; passing `bearer_file` for `miller` raises `PackError("unexpected-key")`; an instance file with a `bearer` key fails validation for `miller`; `doctor`, `canary` and `render_install_service` delegate to `brigade.miller` (monkeypatched).
-- [ ] Run, expect failures.
-- [ ] Implement in `grokbot_packs.py`:
+- [x] Write failing tests in `tests/test_grokbot_packs.py`: `show_pack("miller")` returns kind `connector`, bind `127.0.0.1:8779`, tools equal `brigade.miller.TOOLS`; `preview_setup(target, "miller", runtime_path=<valid>)` writes no `bearer` key; passing `bearer_file` for `miller` raises `PackError("unexpected-key")`; an instance file with a `bearer` key fails validation for `miller`; `doctor`, `canary` and `render_install_service` delegate to `brigade.miller` (monkeypatched).
+- [x] Run, expect failures.
+- [x] Implement in `grokbot_packs.py`:
   - `MILLER_PACK_ID = "miller"`; add `"miller": "127.0.0.1:8779"` to `CONNECTOR_DEFAULT_BINDS`; `MILLER_INSTANCE_KEYS = (INSTANCE_KEYS - {"bearer"}) | frozenset({"runtime_path"})`.
   - `_connector_tools`: `if pack_id == MILLER_PACK_ID: return miller.TOOLS`.
   - `_instance_keys`: `if pack["id"] == MILLER_PACK_ID: return MILLER_INSTANCE_KEYS`.
@@ -309,9 +309,9 @@ with `workload`, `override_reason` and `allow_queue` present only when given.
   - `_validate_instance_config`: `if "bearer" in expected_keys: _validate_bearer_reference(payload.get("bearer"))`; add `elif pack["id"] == MILLER_PACK_ID: _miller_runtime_reference(payload.get("runtime_path"))`.
   - `_miller_runtime_reference` mirrors `_t3_runtime_reference`, mapping `miller.MillerError` to `PackError("unsafe-path")`.
   - `doctor`, `canary`, `render_install_service`, `apply_install_service`: `elif pack["id"] == MILLER_PACK_ID:` branches calling `miller.doctor`, `miller.canary`, `miller.render_unit(target, python=sys.executable)`, `miller.write_unit(target, out_dir, force=force)`, adding `miller.MillerError` to the caught exception tuples next to `grokbot_t3.T3DispatchError`.
-- [ ] Implement in `run_cloud.py` the `serve --pack miller` branch next to the t3 branch at about line 1194: reject `--bearer-file`/`--bearer-env` with the existing usage error, then `config, tools, runtime = miller.build_listener_from_target(target, bind=..., allowed_hosts=..., allowed_origins=...)` and `miller.run_listener(config, tools, runtime)`; add `miller.MillerError` to the caught tuple near line 1244.
-- [ ] Write `docs/grokbot-miller.md` with the sections of `docs/grokbot-t3-dispatch.md`: purpose, runtime JSON table (from Task 3), setup commands (`pack setup miller --runtime-path ...`, `pack doctor`, `pack canary`, `pack install-service`), the watch timer, the tool table (32 tools, gated ones marked), and the security model (Access JWT at the origin, no bearer, Host/Origin allowlists, state directory checks). Placeholders only for hosts and paths.
-- [ ] Run to green: `python -m pytest tests/test_grokbot_packs.py tests/test_miller_*.py -q`, then `./scripts/verify-focused tests/test_grokbot_packs.py tests/test_miller_contracts.py`, the size ratchet test, and the guard scan on every new or changed file. Commit: `feat(miller): register the Miller connector pack`.
+- [x] Implement in `run_cloud.py` the `serve --pack miller` branch next to the t3 branch at about line 1194: reject `--bearer-file`/`--bearer-env` with the existing usage error, then `config, tools, runtime = miller.build_listener_from_target(target, bind=..., allowed_hosts=..., allowed_origins=...)` and `miller.run_listener(config, tools, runtime)`; add `miller.MillerError` to the caught tuple near line 1244.
+- [x] Write `docs/grokbot-miller.md` with the sections of `docs/grokbot-t3-dispatch.md`: purpose, runtime JSON table (from Task 3), setup commands (`pack setup miller --runtime-path ...`, `pack doctor`, `pack canary`, `pack install-service`), the watch timer, the tool table (32 tools, gated ones marked), and the security model (Access JWT at the origin, no bearer, Host/Origin allowlists, state directory checks). Placeholders only for hosts and paths.
+- [x] Run to green: `python -m pytest tests/test_grokbot_packs.py tests/test_miller_*.py -q`, then `./scripts/verify-focused tests/test_grokbot_packs.py tests/test_miller_contracts.py`, the size ratchet test, and the guard scan on every new or changed file. Commit: `feat(miller): register the Miller connector pack`.
 
 ## Task 11: cutover (operator, not a worker)
 
