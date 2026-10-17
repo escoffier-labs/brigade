@@ -178,6 +178,7 @@ def test_unvalidated_or_wrong_identity_never_reaches_app(validated, owner):
 
 
 def test_body_limit_and_schema_table_precede_sdk():
+    pytest.importorskip("mcp.server", reason="requires the grokbot extra")
     inner = AsyncMock()
     gate = m._MillerGate(inner, config(), verifier())
     assert asyncio.run(request(gate, b"x" * 32769))[0] == 413
@@ -197,6 +198,7 @@ def event_service(state):
 
 
 def test_registered_tools_match_snapshot(miller_private_dir):
+    pytest.importorskip("mcp.server", reason="requires the grokbot extra")
     from mcp.server import MCPServer
 
     captured = []
@@ -224,6 +226,7 @@ def test_registered_tools_match_snapshot(miller_private_dir):
 
 
 def test_sdk_context_events_and_exactly_one_row_per_call(miller_private_dir):
+    pytest.importorskip("mcp.server", reason="requires the grokbot extra")
     calls = []
     runtime = parse_runtime(_document())
 
@@ -370,6 +373,7 @@ def test_instance_defaults_and_overrides(configured):
 
 
 def test_canary_checks_anonymous_401_metadata_and_registry(configured):
+    pytest.importorskip("mcp.server", reason="requires the grokbot extra")
     target, runtime, _ = configured
     metadata = {"resource": runtime.auth.resource, "authorization_servers": ["https://miller.example.test"]}
     with patch.object(m, "_probe", side_effect=[(401, {}), (200, metadata)]):
@@ -386,6 +390,8 @@ def test_canary_checks_anonymous_401_metadata_and_registry(configured):
 
 @pytest.mark.parametrize("enabled", [False, True])
 def test_run_listener_exact_settings_and_state_cleanup(configured, enabled):
+    pytest.importorskip("mcp.server", reason="requires the grokbot extra")
+    pytest.importorskip("uvicorn", reason="requires the grokbot extra")
     target, runtime, _ = configured
     from dataclasses import replace
 
@@ -416,6 +422,7 @@ def test_run_listener_exact_settings_and_state_cleanup(configured, enabled):
 
 
 def test_doctor_all_checks_and_failures(configured):
+    pytest.importorskip("mcp.server", reason="requires the grokbot extra")
     target, _, _ = configured
     with (
         patch("brigade.fleet_client_message_credentials.read_message_token_file", return_value="fixture"),
@@ -445,6 +452,7 @@ def test_doctor_all_checks_and_failures(configured):
 
 
 def test_call_log_failure_and_tool_errors_are_safe(miller_private_dir):
+    pytest.importorskip("mcp.server", reason="requires the grokbot extra")
     runtime = parse_runtime(_document())
     with BridgeState(miller_private_dir) as state:
         tools = MillerTools(
@@ -512,6 +520,7 @@ def test_units_quote_and_deduplicate_writable_paths(configured):
     ],
 )
 def test_invoke_preserves_retry_guidance_and_crash_code(miller_private_dir, code, phrase):
+    pytest.importorskip("mcp.server", reason="requires the grokbot extra")
     from unittest.mock import Mock
 
     tools = SimpleNamespace(call=Mock(side_effect=MillerError(code) if code else RuntimeError("private diagnostic")))

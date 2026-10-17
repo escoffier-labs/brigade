@@ -6,6 +6,7 @@ import hashlib
 import hmac
 import json
 import time
+import importlib.util
 import unittest
 from typing import Any
 import pytest
@@ -357,6 +358,9 @@ class WebhookTransportChecks(unittest.TestCase):
         result = asyncio.run(scenario())
         return result, bytes(sent)
 
+    @unittest.skipUnless(
+        importlib.util.find_spec("anyio") and importlib.util.find_spec("h11"), "requires the grokbot extra"
+    )
     def test_real_post_sends_headers_and_reads_length_body(self):
         (status, body), sent = self.run_post(
             b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\n\r\n{"challenge":1}'
@@ -365,6 +369,9 @@ class WebhookTransportChecks(unittest.TestCase):
         self.assertIn(b"webhook-id: msg_1\r\n", sent)
         self.assertIn(b"host: connectors.api.openai.com\r\n", sent.lower())
 
+    @unittest.skipUnless(
+        importlib.util.find_spec("anyio") and importlib.util.find_spec("h11"), "requires the grokbot extra"
+    )
     def test_real_post_reads_body_ended_by_close(self):
         (status, body), _ = self.run_post(b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\n\r\n{"challenge":"x"}')
         self.assertEqual((status, body), (200, b'{"challenge":"x"}'))
