@@ -129,7 +129,7 @@ if __name__ == "__main__":
 
 **Files:** Create `src/brigade/miller/__init__.py`, `src/brigade/miller/contracts.py`, `tests/test_miller_contracts.py`.
 
-- [ ] Write the failing test:
+- [x] Write the failing test:
 
 ```python
 import json
@@ -163,8 +163,8 @@ def test_pack_constants() -> None:
     assert (c.PACK_ID, c.SERVICE_NAME, c.SERVER_VERSION, c.DEFAULT_BIND) == ("miller", "dot-t3", "0.28.0", "127.0.0.1:8779")
 ```
 
-- [ ] Run: `brigade work verify run --target . --command "python -m pytest tests/test_miller_contracts.py -q"`; expect collection error, no module `brigade.miller`.
-- [ ] Implement `contracts.py`: copy `$BRIDGE/dot_mcp.py` lines 82-132 (limits and error messages), the `ToolSchema` class (859-874) and the `TOOL_SCHEMAS` table (875-948) minus the three dropped entries and the `_choice` helper they use (`CONSUMER` at 928 stays). Add:
+- [x] Run: `brigade work verify run --target . --command "python -m pytest tests/test_miller_contracts.py -q"`; expect collection error, no module `brigade.miller`.
+- [x] Implement `contracts.py`: copy `$BRIDGE/dot_mcp.py` lines 82-132 (limits and error messages), the `ToolSchema` class (859-874) and the `TOOL_SCHEMAS` table (875-948) minus the three dropped entries and the `_choice` helper they use (`CONSUMER` at 928 stays). Add:
 
 ```python
 PACK_ID = "miller"
@@ -184,8 +184,8 @@ class MillerError(Exception):
 ```
 
 Remove every module-level path constant (`NATIVE_PYTHON`, `PILOT`, `STATE_DIRECTORY`, `PILOT_LEDGER`, `PROJECT`, `SNAPSHOT`, `T3_FLEET`, `BRIGADE`, `GIT`, `OCTOPOOL`, `GH`, `WORKSPACE`, `FLEET_CONFIG`, `DOT_NOTIFY`, `CHILD_PATH`, `DIGEST_PR_REPO`); they move to `Runtime` in Task 3. `__init__.py` exports `PACK_ID`, `TOOLS`, `MillerError` for now.
-- [ ] Run to green: same command, expect `5 passed`. Run `ruff check src/brigade/miller tests/test_miller_contracts.py` and `mypy src/brigade/miller` through verify; expect clean.
-- [ ] Commit: `feat(miller): add pack contracts and tool schemas`.
+- [x] Run to green: same command, expect `5 passed`. Run `ruff check src/brigade/miller tests/test_miller_contracts.py` and `mypy src/brigade/miller` through verify; expect clean.
+- [x] Commit: `feat(miller): add pack contracts and tool schemas`.
 
 ## Task 3: runtime config
 
