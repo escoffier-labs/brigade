@@ -4,14 +4,13 @@ from __future__ import annotations
 
 import contextlib
 import os
-import stat
 import threading
 import time
 from pathlib import Path
 from typing import Any, Callable, Iterator
 
-from .. import inbox_lock, localio
-from . import envelope
+from .. import dirfd, inbox_lock, localio
+from . import anchored_io, envelope
 
 _SESSION_STATE_PROCESS_LOCKS_GUARD = threading.Lock()
 _SESSION_STATE_PROCESS_LOCKS: dict[str, threading.Lock] = {}
@@ -97,32 +96,8 @@ def _pending_increment_path(target: Path, session_id: str) -> Path:
 
 
 def _journal_path_is_safe_without_nofollow(path: Path) -> bool:
-    """Reject links before opening when the platform lacks ``O_NOFOLLOW``."""
-    if getattr(os, "O_NOFOLLOW", 0):
-        return True
-    try:
-        info = os.lstat(path)
-    except FileNotFoundError:
-        return True
-    except OSError:
-        return False
-    return not stat.S_ISLNK(info.st_mode) and not getattr(info, "st_reparse_tag", 0)
-
-
-def _journal_fd_is_safe(fd: int, path: Path) -> bool:
-    """Accept only the single-link regular file currently named by ``path``."""
-    try:
-        path_info = os.lstat(path)
-        fd_info = os.fstat(fd)
-    except OSError:
-        return False
-    return (
-        stat.S_ISREG(fd_info.st_mode)
-        and fd_info.st_nlink == 1
-        and not stat.S_ISLNK(path_info.st_mode)
-        and not getattr(path_info, "st_reparse_tag", 0)
-        and (path_info.st_ino, path_info.st_dev) == (fd_info.st_ino, fd_info.st_dev)
-    )
+    """Require a no-follow descriptor backend, including native Windows."""
+    return dirfd.available()
 
 
 def _parse_timeout_journal(data: bytes) -> tuple[int, bool, str | None]:
@@ -154,19 +129,10 @@ def _parse_timeout_journal(data: bytes) -> tuple[int, bool, str | None]:
 
 
 def _read_sidecar_bytes(path: Path, max_bytes: int) -> bytes:
-    """Read one sidecar through the journal's O_NOFOLLOW / identity checks."""
-    try:
-        if not _journal_path_is_safe_without_nofollow(path):
-            return b""
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0))
-        try:
-            if not _journal_fd_is_safe(fd, path):
-                return b""
-            return os.read(fd, max_bytes)
-        finally:
-            os.close(fd)
-    except OSError:
+    """Read one sidecar relative to the validated sessions directory."""
+    if not _journal_path_is_safe_without_nofollow(path):
         return b""
+    return anchored_io.read_sidecar(path, max_bytes)
 
 
 def _read_timeout_journal(target: Path, session_id: str) -> tuple[int, bool, str | None]:
@@ -180,24 +146,10 @@ def _journal_timeout_count(target: Path, session_id: str) -> int:
 
 
 def _append_sidecar_line(path: Path, payload: bytes, *, max_bytes: int | None) -> bool:
-    """Append one sidecar line with O_NOFOLLOW, 0600, and identity checks."""
-    try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        if not _journal_path_is_safe_without_nofollow(path):
-            return False
-        flags = os.O_WRONLY | os.O_CREAT | os.O_APPEND | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
-        fd = os.open(path, flags, 0o600)
-        try:
-            if not _journal_fd_is_safe(fd, path):
-                return False
-            if max_bytes is not None and os.fstat(fd).st_size >= max_bytes:
-                return False
-            os.write(fd, payload)
-        finally:
-            os.close(fd)
-    except OSError:
+    """Append one sidecar line relative to its validated sessions directory."""
+    if not _journal_path_is_safe_without_nofollow(path):
         return False
-    return True
+    return anchored_io.append_sidecar(path, payload, max_bytes=max_bytes)
 
 
 def _append_journal_line(target: Path, session_id: str, payload: bytes) -> bool:
@@ -283,8 +235,8 @@ def _effective_timeout_count(state: dict[str, Any], journal_lines: int, pending_
 def _session_state_lock(target: Path, session_id: str) -> Iterator[None]:
     """Serialize one session state's read-modify-write window.
 
-    ``held_file_lock`` creates the state directory as needed, matching the
-    parent creation performed by ``write_session_state`` through ``localio``.
+    The descriptor anchor creates the state directory as needed and remains
+    bound to all state/sidecar operations until the file lock is released.
     Both the process-local lock and the file lock share one budget
     (``_SESSION_STATE_LOCK_SECONDS``), which is shorter than the outer
     ``_TIMEOUT_FOLLOWUP_SECONDS`` parent wait. Running out raises
@@ -302,8 +254,10 @@ def _session_state_lock(target: Path, session_id: str) -> Iterator[None]:
         if not acquired:
             raise inbox_lock.InboxLockTimeout(f"session state lock busy past {budget:.3f}s: {state_path}")
         remaining = max(deadline - time.monotonic(), 0.0)
-        with inbox_lock.held_file_lock(Path(f"{state_path}.lock"), deadline_seconds=remaining):
-            yield
+        with anchored_io.session_directory(target, create=True) as anchor:
+            remaining = max(deadline - time.monotonic(), 0.0)
+            with anchor.held_lock(f"{state_path.name}.lock", deadline_seconds=remaining):
+                yield
     finally:
         if acquired:
             process_lock.release()

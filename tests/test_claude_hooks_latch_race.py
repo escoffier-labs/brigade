@@ -66,12 +66,13 @@ def test_session_state_helpers_resolve_runtime_primitives_at_call_time(tmp_path:
 def test_lock_gap_does_not_leak_process_lock(tmp_path: Path, monkeypatch) -> None:
     from brigade.claude_hooks import session_state
 
-    @contextlib.contextmanager
     def failing_file_lock(*_args, **_kwargs):
         raise RuntimeError("file lock entry failed")
-        yield
 
-    monkeypatch.setattr(inbox_lock, "held_file_lock", failing_file_lock)
+    from brigade import dirfd
+
+    opener = "open_child_lock_file" if os.name == "nt" else "open_child_file"
+    monkeypatch.setattr(dirfd, opener, failing_file_lock)
 
     with pytest.raises(RuntimeError, match="file lock entry failed"):
         with session_state._session_state_lock(tmp_path, "s"):
