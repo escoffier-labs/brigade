@@ -941,6 +941,32 @@ def test_overlay_preserves_non_legacy_metadata_including_cost_class():
     assert merged["bindings"]["brigade"]["model"] == "native-a"
 
 
+def test_overlay_merges_current_native_fields_over_the_imported_group():
+    mapped = {
+        "provider": "provider-a",
+        "model": "model-a-1",
+        "concurrency": 1,
+        "enabled": True,
+        "bindings": {
+            "brigade": {"cli": "cli-alpha"},
+            "t3_fleet": {"instance_id": "inst-alpha", "service_tier": None},
+            "native": {"instance_id": "inst-alpha", "model": "provider-a/native-a"},
+        },
+        "pinned": False,
+        "training_allowed": False,
+    }
+    current = {
+        "provider": "provider-a",
+        "model": "model-a-1",
+        "bindings": {"native": {"instance_id": "inst-current", "model": None}},
+    }
+    merged = fleet_policy_migration._overlay_current_seat(mapped, current)
+    assert merged["bindings"]["native"] == {"instance_id": "inst-current", "model": "provider-a/native-a"}
+    keep_model = {**current, "bindings": {"native": {"instance_id": "inst-current", "model": "provider-a/own"}}}
+    merged = fleet_policy_migration._overlay_current_seat(mapped, keep_model)
+    assert merged["bindings"]["native"] == {"instance_id": "inst-current", "model": "provider-a/own"}
+
+
 def test_classification_overlay_requires_exact_provider_model_identity(conn):
     _set_seat(conn, seat=SEAT_ALPHA, provider=PROVIDER_A, model=MODEL_A)
     trained = _authority_document()

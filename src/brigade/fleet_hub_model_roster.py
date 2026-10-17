@@ -652,7 +652,8 @@ def _write_default(conn: sqlite3.Connection, raw: Any) -> dict[str, Any]:
         raise FleetHubError("model policy field 'consumer' must be brigade-run or t3-fleet")
     seat = fleet_hub._model_policy_name(raw.get("seat"), "seat")
     row = conn.execute(
-        "SELECT provider, model, enabled, brigade_cli, t3_instance_id, brigade_model FROM model_policy WHERE seat=?",
+        "SELECT provider, model, enabled, brigade_cli, t3_instance_id, brigade_model, t3_model "
+        "FROM model_policy WHERE seat=?",
         (seat,),
     ).fetchone()
     if row is None:
@@ -662,7 +663,7 @@ def _write_default(conn: sqlite3.Connection, raw: Any) -> dict[str, Any]:
         enabled=bool(row[2]),
         retired=any(
             fleet_model_roster.retired_reason(str(row[0]), str(identity), _retired_rows(conn)) is not None
-            for identity in (row[1], row[5])
+            for identity in (row[1], row[5], row[6])
         ),
         brigade_cli=str(row[3] or ""),
         t3_instance_id=str(row[4] or ""),

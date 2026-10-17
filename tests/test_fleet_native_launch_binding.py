@@ -915,3 +915,63 @@ def test_client_preserves_and_clears_the_t3_model(monkeypatch):
         PROVIDER, CANONICAL, SEAT, enabled=True, t3_model="opencode/replacement", expected_revision=4
     )
     assert posted[-1]["t3_model"] == "opencode/replacement"
+
+
+# --- Review follow-ups ----------------------------------------------------
+
+
+def _plan_from_legacy_roster(conn, monkeypatch, consumer: str) -> dict[str, object]:
+    roster = fleet_hub_model_roster.project_roster(conn, audience_node_id=NODE_A)
+    assert "consumer_launch_bindings" not in roster
+    monkeypatch.setattr(
+        fleet_model_admission,
+        "fetch_versioned_roster",
+        lambda **kwargs: fleet_model_admission.ModelAdmissionDecision(True, 0, "hub", {**roster, "source": "hub"}),
+    )
+    decision = fleet_model_admission.plan_model(consumer=consumer, seat=SEAT)
+    assert decision.ok, decision.payload
+    return decision.payload["binding"]
+
+
+def test_legacy_plan_picks_the_launch_model_by_consumer(conn, monkeypatch):
+    other = "opencode/t3-only-native"
+    _set_seat(conn, brigade_model=NATIVE, t3_model=other)
+    assert _plan_from_legacy_roster(conn, monkeypatch, "brigade-run") == {
+        "instance_id": "opencode",
+        "service_tier": None,
+        "model": NATIVE,
+    }
+    assert _plan_from_legacy_roster(conn, monkeypatch, "t3-fleet")["model"] == other
+
+
+def test_legacy_brigade_run_plan_never_gets_the_t3_model(conn, monkeypatch):
+    _set_seat(conn, brigade_model="", t3_model=NATIVE)
+    assert _plan_from_legacy_roster(conn, monkeypatch, "brigade-run") == {
+        "instance_id": "opencode",
+        "service_tier": None,
+    }
+    assert _plan_from_legacy_roster(conn, monkeypatch, "t3-fleet")["model"] == NATIVE
+
+
+def test_set_default_refuses_a_seat_whose_t3_model_was_retired(conn):
+    body = {
+        "action": "set",
+        "expected_revision": 1,
+        "seat": "gpt-seat",
+        "provider": "openai",
+        "model": "current-model",
+        "reasoning": "high",
+        "enabled": True,
+        "t3_instance_id": "openai",
+        "t3_model": "gpt-5.6-high",
+    }
+    status, payload = fleet_hub_model_roster.handle_model_policy(conn, body)
+    assert status == 200, payload
+    status, payload = fleet_hub_model_roster.handle_model_policy(
+        conn, {"action": "retire", "expected_revision": 2, "provider": "openai", "family": "gpt-5.6"}
+    )
+    assert status == 200, payload
+    status, denied = fleet_hub_model_roster.handle_model_policy(
+        conn, {"action": "set-default", "expected_revision": 3, "consumer": "t3-fleet", "seat": "gpt-seat"}
+    )
+    assert status == 409 and denied["error"] == "retired-model"

@@ -264,7 +264,15 @@ def _overlay_current_seat(mapped: dict[str, Any], current: Mapping[str, Any] | N
         native_copy = dict(native)
         if not same_identity:
             native_copy.pop("model", None)
-        if native_copy:
+        mapped_native = bindings.get("native")
+        if isinstance(mapped_native, Mapping) and mapped_native:
+            # Imported fields survive unless the current policy sets them to a value.
+            merged_native = dict(mapped_native)
+            for key, value in native_copy.items():
+                if value is not None and value != "":
+                    merged_native[key] = copy.deepcopy(value)
+            bindings["native"] = merged_native
+        elif native_copy:
             bindings["native"] = copy.deepcopy(native_copy)
     brigade_current = current_bindings.get("brigade")
     if same_identity and isinstance(brigade_current, Mapping):
