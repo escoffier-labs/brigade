@@ -221,10 +221,10 @@ Runtime JSON shape (all keys required unless marked optional):
 
 **Files:** Create `src/brigade/miller/access_auth.py`, `tests/test_miller_access_auth.py`.
 
-- [ ] Port tests from `$BRIDGE/tests/test_legacy_dot_auth.py` classes `PublicKeyTransportChecks`, `SignatureChecks` and `CompositionChecks` (lines 65-271, 272-430, 492-end). Replace the hard-coded issuer, email, resource and team host with values from a test `AuthConfig` (`team.example.test`, `miller@example.test`). Drop `ConfigurationChecks` (431-491); Task 3 covers config validation.
-- [ ] Run, expect failures.
-- [ ] Implement by copying `$BRIDGE/dot_auth.py` lines 140-308 (key transport, JWKS cache, `verify`), with these exact edits: the constructor takes `AuthConfig`; `ISSUER`, `EMAIL`, `RESOURCE`, `AUTHORIZATION_SERVER` and the team host at line 151 read from it; `import jwt` moves inside the function that first needs it and raises `grokbot_mcp.OptionalDependencyError` on `ImportError`; delete `validate_config` and `validate_hub_token_file` (Task 3 owns config). Keep RS256-only, 300 s cache, `type == "app"`, exact email match.
-- [ ] Run to green; ruff and mypy clean. Commit: `feat(miller): verify Cloudflare Access tokens at the origin`.
+- [x] Port tests from `$BRIDGE/tests/test_legacy_dot_auth.py` classes `PublicKeyTransportChecks`, `SignatureChecks` and `CompositionChecks` (lines 65-271, 272-430, 492-end). Replace the hard-coded issuer, email, resource and team host with values from a test `AuthConfig` (`team.example.test`, `miller@example.test`). Drop `ConfigurationChecks` (431-491); Task 3 covers config validation.
+- [x] Run, expect failures.
+- [x] Implement by copying `$BRIDGE/dot_auth.py` lines 140-308 (key transport, JWKS cache, `verify`), with these exact edits: the constructor takes `AuthConfig`; `ISSUER`, `EMAIL`, `RESOURCE`, `AUTHORIZATION_SERVER` and the team host at line 151 read from it; `import jwt` moves inside the function that first needs it and raises `grokbot_mcp.OptionalDependencyError` on `ImportError`; delete `validate_config` and `validate_hub_token_file` (Task 3 owns config). Keep RS256-only, 300 s cache, `type == "app"`, exact email match.
+- [x] Run to green; ruff and mypy clean. Commit: `feat(miller): verify Cloudflare Access tokens at the origin`.
 
 ## Task 5: safe state and bridge state
 
