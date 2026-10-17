@@ -81,22 +81,24 @@ def test_per_node_retirement_quota_isolates_abusive_free_target_releases(authori
     assert request(conn, "release", node="fake-neighbor", holder="fake-fresh")[0] == 200
 
 
-def test_prune_leaves_unretirable_unrelated_target_in_place(authority, monkeypatch):
+def test_prune_leaves_unretirable_unrelated_target_in_place_for_live_retry(authority, monkeypatch):
     from brigade import fleet_hub_claims
 
     conn, _, clock = authority
     request(conn, ttl_seconds=1)
     request(conn, "release", target="fake-other-history")
-    monkeypatch.setattr(fleet_hub_claims, "MAX_RETIRED_HOLDERS_PER_NODE", 1, raising=False)
+    request(conn, target="fake-neighbor", node="fake-neighbor")
+    monkeypatch.setattr(fleet_hub_claims, "MAX_RETIRED_HOLDERS", 1)
     clock["now"] += 1
     assert request(conn, target="fake-neighbor", node="fake-neighbor")[0] == 200
     assert conn.execute("SELECT 1 FROM claims WHERE target='fake-target'").fetchone()
     assert fence(conn) == 1
-    with pytest.raises(hub.FleetHubError, match="quota"):
+    with pytest.raises(hub.FleetHubError, match="capacity"):
         request(conn, holder="fake-new-holder")
 
 
-def test_refused_cleanup_also_refuses_late_generationless_acquire(authority, monkeypatch):
+@pytest.mark.parametrize("extra", [{}, {"generation": 0}], ids=["legacy", "generation"])
+def test_refused_cleanup_also_refuses_late_acquire(authority, monkeypatch, extra):
     from brigade import fleet_hub_claims
 
     conn, _, _ = authority
@@ -106,7 +108,7 @@ def test_refused_cleanup_also_refuses_late_generationless_acquire(authority, mon
     with pytest.raises(hub.FleetHubError, match="capacity"):
         request(conn, "release")
     with pytest.raises(hub.FleetHubError, match="capacity"):
-        request(conn)
+        request(conn, **extra)
     assert snapshot(conn) == before
 
 
@@ -454,7 +456,7 @@ def http_claim(address, method, target="fake-target"):
 
 @pytest.mark.parametrize("method", ["GET", "POST"])
 @pytest.mark.parametrize("damage", ["missing", "negative", "text", "real"])
-def test_http_fence_refusal_is_structured_503_without_mutation(http_authority, method, damage):
+def test_http_fence_refusal_is_structured_409_without_mutation(http_authority, method, damage):
     conn, _, address = http_authority
     request(conn)
     conn.execute("PRAGMA ignore_check_constraints=ON")
@@ -467,14 +469,14 @@ def test_http_fence_refusal_is_structured_503_without_mutation(http_authority, m
     conn.commit()
     before = snapshot(conn)
     assert http_claim(address, method) == (
-        503,
-        {"error": "claim generation fence is missing or corrupt", "reason": "claim-fence-refused"},
+        409,
+        {"error": "claim generation fence is missing or corrupt", "reason": "claim-fence-refused", "owner": {}},
     )
     assert snapshot(conn) == before
 
 
 @pytest.mark.parametrize("refusal", ["capacity", "exhausted"])
-def test_http_storage_limits_are_503_and_roll_back_pruning(http_authority, monkeypatch, refusal):
+def test_http_storage_limits_are_409_and_roll_back_pruning(http_authority, monkeypatch, refusal):
     from brigade import fleet_hub_claims
 
     conn, clock, address = http_authority
@@ -487,7 +489,10 @@ def test_http_storage_limits_are_503_and_roll_back_pruning(http_authority, monke
     clock["now"] += 2
     before = snapshot(conn)
     error = "claim generation fence capacity exceeded" if refusal == "capacity" else "claim generation fence exhausted"
-    assert http_claim(address, "POST", target="fake-new") == (503, {"error": error, "reason": "claim-fence-refused"})
+    assert http_claim(address, "POST", target="fake-new") == (
+        409,
+        {"error": error, "reason": "claim-fence-refused", "owner": {}},
+    )
     assert snapshot(conn) == before
 
 
@@ -795,7 +800,7 @@ def test_migration_preserves_oversize_legacy_target_and_its_operability(authorit
 
 
 @pytest.mark.parametrize("path", ["/view/machines", "/view/repos", "/", "/deck", "/deck/repos"])
-def test_authenticated_html_fence_refusal_is_structured_503(http_authority, path):
+def test_authenticated_html_fence_refusal_is_structured_409(http_authority, path):
     conn, _, address = http_authority
     request(conn)
     conn.execute("DELETE FROM claim_fences")
@@ -805,10 +810,11 @@ def test_authenticated_html_fence_refusal_is_structured_503(http_authority, path
     try:
         client.request("GET", path, headers={"Authorization": "Bearer fake-admin-token"})
         response = client.getresponse()
-        assert response.status == 503
+        assert response.status == 409
         assert json.loads(response.read()) == {
             "error": "claim generation fence is missing or corrupt",
             "reason": "claim-fence-refused",
+            "owner": {},
         }
     finally:
         client.close()
@@ -1059,3 +1065,147 @@ def test_schema_upgrade_between_preflight_and_write_lock_refuses(authority, monk
     assert reads == []
     assert snapshot(conn) == before
     assert conn.execute("PRAGMA user_version").fetchone()[0] == hub.SCHEMA_VERSION + 1
+
+
+@pytest.mark.parametrize("ending", ["expiry", "holder", "node", "force", "supersede"])
+def test_live_retirements_are_exempt_from_node_quota(authority, monkeypatch, ending):
+    from brigade import fleet_hub_claims
+
+    conn, _, clock = authority
+    request(conn, ttl_seconds=1, lock={"token": "fake-lock"})
+    request(conn, "release", target="fake-history")
+    monkeypatch.setattr(fleet_hub_claims, "MAX_RETIRED_HOLDERS_PER_NODE", 1)
+    if ending == "expiry":
+        clock["now"] += 1
+        assert request(conn, node="fake-neighbor", holder="fake-next")[0] == 200
+    elif ending == "supersede":
+        assert request(conn, holder="fake-next", scope="node", supersede={"token": "fake-lock"})[0] == 200
+    else:
+        assert request(conn, "release", scope=ending, acquired_at=hub.list_claims(conn)[0]["acquired_at"])[0] == 200
+    assert conn.execute("SELECT COUNT(*) FROM claim_retired_holders").fetchone()[0] == 2
+    assert request(conn, "renew")[1]["reason"] == "stale-holder"
+
+
+@pytest.mark.parametrize("extra", [{}, {"generation": 0}], ids=["legacy", "generation"])
+def test_fresh_acquire_checks_node_quota_with_or_without_generation(authority, monkeypatch, extra):
+    from brigade import fleet_hub_claims
+
+    conn, _, _ = authority
+    request(conn, "release", target="fake-history")
+    monkeypatch.setattr(fleet_hub_claims, "MAX_RETIRED_HOLDERS_PER_NODE", 1)
+    before = snapshot(conn)
+    with pytest.raises(hub.FleetHubError, match="quota"):
+        request(conn, **extra)
+    assert snapshot(conn) == before
+
+
+def test_supersede_keeps_global_retirement_cap(authority, monkeypatch):
+    from brigade import fleet_hub_claims
+
+    conn, _, _ = authority
+    request(conn, lock={"token": "fake-lock"})
+    request(conn, "release", target="fake-history")
+    monkeypatch.setattr(fleet_hub_claims, "MAX_RETIRED_HOLDERS", 1)
+    before = snapshot(conn)
+    with pytest.raises(hub.FleetHubError, match="capacity"):
+        request(conn, holder="fake-next", scope="node", supersede={"token": "fake-lock"})
+    assert snapshot(conn) == before
+
+
+def test_expiry_pruning_is_bounded_and_always_handles_requested_target(authority):
+    conn, _, clock = authority
+    for index in range(40):
+        assert request(conn, target=f"fake-unrelated-{index:02}", ttl_seconds=1)[0] == 200
+    assert request(conn, target="fake-z-requested", ttl_seconds=1)[0] == 200
+    clock["now"] += 1
+    assert request(conn, target="fake-z-requested", node="fake-neighbor", holder="fake-next")[0] == 200
+    assert fence(conn, "fake-z-requested") == 3
+    assert conn.execute("SELECT COUNT(*) FROM claims WHERE expires_at <= ?", (clock["now"],)).fetchone()[0] == 8
+    assert conn.execute("SELECT COUNT(*) FROM claim_retired_holders").fetchone()[0] == 33
+
+
+@pytest.mark.parametrize("damage", ["target-capacity", "retired-capacity", "corrupt"])
+def test_new_hub_refusal_is_terminal_under_base_client_handling(http_authority, monkeypatch, damage):
+    from brigade import fleet_hub_claims
+
+    conn, _, address = http_authority
+    request(conn, "release", target="fake-history")
+    if damage == "target-capacity":
+        monkeypatch.setattr(fleet_hub_claims, "MAX_CLAIM_TARGETS", 1)
+    elif damage == "retired-capacity":
+        monkeypatch.setattr(fleet_hub_claims, "MAX_RETIRED_HOLDERS", 1)
+    else:
+        conn.execute("DROP TABLE claim_fences")
+        conn.commit()
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.example.invalid"})
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda base_path=None: "fake-node")
+    monkeypatch.setattr(fleet_client, "_schedule_orphan_release", lambda *a, **kw: pytest.fail("local fallback"))
+    responses = []
+
+    def base_acquire(*args, **kwargs):
+        # Pre-fencing _claim_op (5527ed8e) ignores reason. An owner-less
+        # 409 is 'missing', which repo_claim retries and then fails open.
+        status, payload = http_claim(address, "POST")
+        responses.append((status, payload))
+        owner = payload.get("owner") if isinstance(payload.get("owner"), dict) else None
+        reason = ("held" if owner is not None else "missing") if status in (200, 409) else "hub-unavailable"
+        return fleet_client.ClaimDecision(False, reason, owner=owner)
+
+    monkeypatch.setattr(fleet_client, "acquire_claim", base_acquire)
+    with pytest.raises(fleet_client.FleetClaimHeldError):
+        with fleet_client.repo_claim("fake-target"):
+            pytest.fail("base client admitted local-only work")
+    assert len(responses) == 1
+    assert responses[0][0] == 409
+    assert responses[0][1]["reason"] == "claim-fence-refused"
+
+
+@pytest.mark.parametrize("recovers", [False, True])
+def test_orphan_cleanup_retries_fence_refusal_until_success_or_deadline(monkeypatch, recovers):
+    now, sleeps, attempts = [0.0], [], []
+
+    class InlineThread:
+        def __init__(self, *, target, **kwargs):
+            self.target = target
+
+        def start(self):
+            self.target()
+
+    def release(*args, **kwargs):
+        attempts.append(now[0])
+        return fleet_client.ClaimDecision(
+            recovers and len(attempts) == 3, "ok" if recovers and len(attempts) == 3 else "claim-fence-refused"
+        )
+
+    def sleep(seconds):
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    monkeypatch.setattr(fleet_client.threading, "Thread", InlineThread)
+    monkeypatch.setattr(fleet_client.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(fleet_client.time, "sleep", sleep)
+    monkeypatch.setattr(fleet_client, "release_claim", release)
+    monkeypatch.setattr(fleet_client, "ORPHAN_RELEASE_RETRY_SECONDS", 2)
+    fleet_client._schedule_orphan_release(
+        "fake-target", node_id="fake-node", holder="fake-holder", conductor=None, ttl_seconds=5
+    )
+    assert attempts == [0.0, 2.0, 4.0]
+    assert sleeps == ([2, 2] if recovers else [2, 2, 1])
+
+
+def test_ambiguous_acquire_then_fence_refusal_schedules_cleanup_without_admission(monkeypatch):
+    attempts, cleanup = [], []
+
+    def acquire(*args, **kwargs):
+        attempts.append(kwargs["holder"])
+        return fleet_client.ClaimDecision(False, "hub-unavailable" if len(attempts) == 1 else "claim-fence-refused")
+
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.example.invalid"})
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda base_path=None: "fake-node")
+    monkeypatch.setattr(fleet_client, "acquire_claim", acquire)
+    monkeypatch.setattr(fleet_client, "_schedule_orphan_release", lambda *a, **kw: cleanup.append(kw["holder"]))
+    with pytest.raises(fleet_client.FleetClaimHeldError, match="claim-fence-refused"):
+        with fleet_client.repo_claim("fake-target"):
+            pytest.fail("refused admission")
+    assert len(attempts) == 2 and attempts[0] == attempts[1]
+    assert cleanup == [attempts[0]]

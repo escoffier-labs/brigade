@@ -71,15 +71,19 @@ maximum claim TTL of 86,400 seconds plus a queueing margin of 518,400 seconds
 (6 days). A retirement exactly H seconds old remains protected. Rows strictly
 older than H may be evicted. Each write transaction opportunistically deletes
 at most 256 rows per eviction batch through an age index. Capacity checks reclaim
-another bounded batch before refusal. A transaction that retires many expired
-claims can need several batches. The per-target `claim_fences` are never evicted.
+another bounded batch before refusal. An acquire prunes at most 32 unrelated
+expired claims plus the requested target, which is always checked regardless
+of its position in the backlog. The per-target `claim_fences` are never evicted.
 
 Retirement storage allows 1,000,000 rows globally and 100,000 in-horizon rows
-per retiring node. An index on `(owner_node, retired_at)` supports the node quota.
-The transaction counts global rows once and caches each node's indexed count.
+per node for missing-row holder releases and fresh-acquire admission.
+An index on `(owner_node, retired_at)` supports the node quota. The transaction
+counts global rows once and caches each checked node's indexed count.
 A node that repeatedly releases fresh holders on a free target reaches its own
 quota before it can fill the global budget. Updates to an existing in-horizon
-marker require no new row. Force release charges the deleted holder's node.
+marker require no new row. Expiry, live-holder release, node release, force
+release, and supersede retirements are exempt from the per-node quota because
+they are bounded by live claims. The global cap applies to every retirement.
 
 At 1 retirement per second, the former lifetime cap of 100,000 lasted 27.8 hours.
 With seven-day retention, that rate retains at most 604,801 rows globally when
@@ -98,19 +102,25 @@ space for WAL, backups, and filesystem overhead, and measure the actual database
 
 When a new marker cannot fit, that retiring operation rolls back. An unrelated
 expired claim that cannot be retired stays in place and does not block another
-node's acquire. An acquire on that expired target still refuses. A fresh
-generation-less acquire also requires retirement capacity, so a delayed acquire
-cannot slip through while its missing-holder cleanup is refused for capacity.
+node's live retry. An acquire on that expired target still refuses. A fresh
+acquire requires retirement capacity regardless of whether it supplies a
+generation, so a delayed acquire cannot slip through while its missing-holder
+cleanup is refused for capacity.
 Existing live-holder retries and renewals keep their normal behavior.
 
-Global capacity refuses only after out-of-horizon rows have been reclaimed and
-the remaining budget is occupied by in-horizon rows. No in-horizon marker is
-evicted to admit a request. Corrupt or missing current-schema storage refuses
-without repair. Fencing failures return HTTP 503 with
-`reason: "claim-fence-refused"`. This is a terminal authority refusal. The client
+Capacity checks reclaim a bounded batch of out-of-horizon rows before refusing.
+A large expired backlog may require several transactions to reclaim. No
+in-horizon marker is evicted to admit a request. Corrupt or missing current-schema storage refuses
+without repair. Fencing failures return HTTP 409 with
+`reason: "claim-fence-refused"` and `owner: {}`. The empty owner object carries
+no ownership identity. It makes pre-fencing clients classify the refusal as
+`held`, since an owner-less 409 maps to `missing` and can permit local-only work
+after a retry. This is a terminal authority refusal. The client
 raises from `repo_claim` instead of admitting work under only the local lock,
 and a heartbeat treats it as terminal ownership loss. Transport outages retain
-their existing handling.
+their existing handling. Orphan cleanup retries `claim-fence-refused` with
+backoff until its TTL deadline. An ambiguous initial acquire followed by this
+refusal schedules cleanup without admitting work.
 
 `GET /status` includes `claim_fencing.retired_holder_rows` and
 `claim_fencing.retired_holder_horizon_seconds`. On refusal, stop the source of
@@ -125,14 +135,27 @@ retirement records to clear an error.
 ## Finite-horizon residual
 
 A generation-less request from a holder retired more than H seconds ago is
-treated as a fresh holder. A late acquire can therefore create an orphan bounded
-by its TTL, at most 86,400 seconds. Delayed renew or release finds no claim row
-and does not renew or delete ownership. Missing-holder release still records a
-new cleanup marker. Target generation fences are never evicted, so requests with
-an obsolete explicit generation remain refused after holder history ages out.
-Protection against requests delayed arbitrarily long belongs to #1737's v2
-protocol. Fresh legacy holders and current live holders retain their behavior
-within this compatibility decision.
+treated as a fresh holder. A delayed acquire can recreate that holder's claim.
+Later delayed renewals with the same target, node, and holder can repeatedly
+extend it, and a delayed holder release can delete it. The residual has no
+one-TTL bound. Reusing those same identities after marker eviction also permits
+same-holder ABA: an older generation-less renew or release can affect the new
+tenure. Missing-holder release records a new cleanup marker, but cannot provide
+protection against arbitrary replay after that marker also ages out.
+
+Target generation fences are never evicted, so requests with an obsolete
+explicit generation remain refused after holder history ages out. Protection
+against requests delayed arbitrarily long belongs to #1737's v2 protocol.
+
+The horizon depends on the hub wall clock. This implementation trusts clock
+integrity rather than comparing ages to the newest marker, which may itself be
+written after a forward jump. A forward jump beyond seven days can evict fresh
+markers and enable the replay sequence above. A backward jump retains markers
+longer and can exhaust capacity. Before relying on the horizon, check the hub's
+UTC time against an independent trusted clock and verify time synchronization
+with `timedatectl status` or the platform equivalent. Monitor for clock steps.
+If a jump occurs, pause claim writers and investigate the clock and consistent
+database backups. Correcting the clock cannot reconstruct evicted history.
 
 ## Upgrade and rollback
 
@@ -143,6 +166,11 @@ the upgrade time and retains it conservatively for another full horizon. An
 unmigrated v32 export validates its target fences without requiring retirement
 storage. The hub continues refusing newer schemas. Upgrade cannot reconstruct
 holders retired before retirement storage existed.
+
+Upgrade clients before relying on capacity fail-closed. The 409 plus empty
+owner compatibility response prevents fallback in the base client tested here,
+but older hubs and other client versions may still fall back to local-only work.
+Verify the deployed client behavior and the hub clock before rollout.
 
 Before upgrade, stop writers and take a consistent SQLite backup. Keep the hub
 binary and database backup together. For rollback from v33 or v34 to a v32 hub,

@@ -20,6 +20,7 @@ MAX_RETIRED_HOLDERS_PER_NODE = 100_000
 # Seven days includes the maximum one-day TTL plus six days of queueing.
 RETIRED_HOLDER_HORIZON_SECONDS = 7 * 86400
 RETIRED_HOLDER_EVICTION_BATCH = 256
+EXPIRED_CLAIM_PRUNE_BATCH = 32
 MAX_CLAIM_TARGET_BYTES = 1024
 MAX_GENERATION = 2**63 - 1
 CLAIM_COLUMNS = (
@@ -301,7 +302,7 @@ class _RetirementBudget:
         # Only out-of-horizon rows were removed, so cached in-horizon node
         # counts remain valid. Target generation fences are never touched.
 
-    def check(self, target: str, node: str, holder: str) -> tuple[bool, bool]:
+    def check(self, target: str, node: str, holder: str, *, enforce_node_quota: bool = False) -> tuple[bool, bool]:
         old = self.conn.execute(
             "SELECT generation, retired_at FROM claim_retired_holders "
             "WHERE target = ? AND owner_node = ? AND holder_token = ?",
@@ -312,27 +313,28 @@ class _RetirementBudget:
         active = old is not None and _checked_retired_at(old[1]) >= self.cutoff
         if active:
             return False, False
-        if node not in self.nodes:
+        if enforce_node_quota and node not in self.nodes:
             self.nodes[node] = self.conn.execute(
                 "SELECT COUNT(*) FROM claim_retired_holders WHERE owner_node = ? AND retired_at >= ?",
                 (node, self.cutoff),
             ).fetchone()[0]
         # Reclaim a bounded batch before every capacity refusal, including a
         # node refusal. Re-read the key because eviction may have removed it.
-        if self.nodes[node] >= MAX_RETIRED_HOLDERS_PER_NODE or (old is None and self.count >= MAX_RETIRED_HOLDERS):
+        node_full = enforce_node_quota and self.nodes[node] >= MAX_RETIRED_HOLDERS_PER_NODE
+        if node_full or (old is None and self.count >= MAX_RETIRED_HOLDERS):
             self._evict()
             old = self.conn.execute(
                 "SELECT 1 FROM claim_retired_holders WHERE target = ? AND owner_node = ? AND holder_token = ?",
                 (target, node, holder),
             ).fetchone()
-        if self.nodes[node] >= MAX_RETIRED_HOLDERS_PER_NODE:
+        if node_full:
             raise _RetirementCapacityError("claim retired-holder fence per-node quota exceeded")
         if old is None and self.count >= MAX_RETIRED_HOLDERS:
             raise _RetirementCapacityError("claim retired-holder fence capacity exceeded")
         return old is None, True
 
-    def retire(self, target: str, node: str, holder: str, current: int) -> None:
-        new_row, new_active = self.check(target, node, holder)
+    def retire(self, target: str, node: str, holder: str, current: int, *, enforce_node_quota: bool = False) -> None:
+        new_row, new_active = self.check(target, node, holder, enforce_node_quota=enforce_node_quota)
         self.conn.execute(
             "INSERT INTO claim_retired_holders (target, owner_node, holder_token, generation, retired_at) "
             "VALUES (?, ?, ?, ?, ?) ON CONFLICT(target, owner_node, holder_token) DO UPDATE SET "
@@ -340,7 +342,7 @@ class _RetirementBudget:
             (target, node, holder, current, self.now),
         )
         self.count += int(new_row)
-        if new_active:
+        if new_active and node in self.nodes:
             self.nodes[node] += 1
 
 
@@ -416,22 +418,29 @@ def fetch_claim(conn: sqlite3.Connection, target: str) -> tuple[Any, ...] | None
 
 
 def _prune(conn: sqlite3.Connection, now: float, budget: _RetirementBudget, requested_target: str) -> None:
+    # Always process the requested target first, even beyond the unrelated
+    # batch. Keep retirement work under the write lock independent of backlog.
     targets = conn.execute(
-        "SELECT target, owner_node, holder_token FROM claims WHERE expires_at <= ? LIMIT ?",
-        (now, MAX_CLAIM_TARGETS + 1),
+        "SELECT target, owner_node, holder_token FROM claims WHERE target = ? AND expires_at <= ?",
+        (requested_target, now),
     ).fetchall()
-    if len(targets) > MAX_CLAIM_TARGETS:
-        raise ClaimFenceError("claim generation fence capacity exceeded")
+    targets += conn.execute(
+        "SELECT target, owner_node, holder_token FROM claims WHERE expires_at <= ? AND target != ? LIMIT ?",
+        (now, requested_target, EXPIRED_CLAIM_PRUNE_BATCH),
+    ).fetchall()
     for target, node, holder in targets:
+        current = generation(conn, target, has_claim=True)
+        if current == MAX_GENERATION:
+            raise ClaimFenceError("claim generation fence exhausted")
         try:
-            budget.check(target, node, holder)
+            # A refused unrelated retirement must leave both its claim and
+            # target fence untouched. Check and write the marker only once.
+            budget.retire(target, node, holder, current + 1)
         except _RetirementCapacityError:
             if target == requested_target:
                 raise
             continue
-        current = generation(conn, target, has_claim=True)
-        ended = _advance(conn, target, current)
-        budget.retire(target, node, holder, ended)
+        _advance(conn, target, current)
         conn.execute("DELETE FROM claims WHERE target = ?", (target,))
 
 
@@ -459,10 +468,10 @@ def _acquire(
         if request["scope"] == "node" and prior[1] == node:
             error += " under another lease than the reconciled dead run's (not superseded)"
         return 409, {"granted": False, "error": error, "owner": hub._claim_payload(prior)}
-    if not retry and request["generation"] is None:
+    if not retry and not replace:
         # A refused missing-holder cleanup must not be followed by an
         # unfenced late admission while that retirement budget remains full.
-        budget.check(target, node, holder)
+        budget.check(target, node, holder, enforce_node_quota=True)
     if not retry:
         started = _advance(conn, target, current)
         if prior is not None:
@@ -562,7 +571,7 @@ def _decide(conn: sqlite3.Connection, request: dict[str, Any], now: float) -> tu
         if row is not None:
             budget.retire(target, row[1], row[11], ended)
         elif scope == "holder":
-            budget.retire(target, node, holder, ended)
+            budget.retire(target, node, holder, ended, enforce_node_quota=True)
         conn.execute("DELETE FROM claims WHERE target = ?", (target,))
         released: dict[str, Any] = {"released": row is not None}
         if scope == "holder" and row is None:

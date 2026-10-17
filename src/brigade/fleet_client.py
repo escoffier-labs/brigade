@@ -1746,6 +1746,10 @@ def repo_claim(
         yield decision
         return
     if not decision.granted:
+        if decision.reason == "claim-fence-refused" and ambiguous_initial_acquire:
+            _schedule_orphan_release(
+                target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds
+            )
         if decision.reason in ("stale-holder", "stale-generation", "claim-fence-refused"):
             raise FleetClaimHeldError(f"fleet claim on {target!r} refused: {decision.reason}", owner=decision.owner)
         owner = decision.owner or {}

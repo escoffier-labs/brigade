@@ -59,7 +59,7 @@ remain operable. Invalid UTF-8 refuses cleanly. An overlong new target returns
 HTTP 422 with an `invalid-field` error naming `target`, `limit: 1024`, and
 `unit: utf8-bytes`, without echoing the submitted value.
 
-A new target at capacity fails closed with structured HTTP 503 and the static
+A new target at capacity fails closed with structured HTTP 409 and the static
 message `claim generation fence capacity exceeded`, while existing targets
 remain usable. Migration exceeding the row bound refuses without changing the
 old schema or its claims. Capacity, signed-64-bit exhaustion, byte-limit
@@ -81,7 +81,8 @@ reach the whole fleet: startup validation prevents the hub from starting,
 claim listings fail in dashboards and routing occupancy, and a corrupt expired
 claim can block acquisition of other targets during global pruning. The
 `/claims`, authenticated HTML dashboard, and Command Deck readers return
-structured, sanitized HTTP 503 for fence refusal. SQLite lock and I/O errors
+structured, sanitized HTTP 409 with `reason: "claim-fence-refused"` and
+`owner: {}` for fence refusal. SQLite lock and I/O errors
 retain their SQLite error classification and existing startup retry policy.
 
 Startup validates current-schema fencing state without recreating it. An
@@ -112,9 +113,13 @@ dashboard session API, the roster and policy form pages, observed work, the
 work queue, and the `/work/` routes, are not mapped by this slice and still
 return their generic database error.
 
-Legacy clients still treat HTTP 503 as a hub-unavailable outcome and may fall
-back to a local-only lock. That fallback does not provide cross-machine
-exclusion. Explicit client handling of these refusal responses remains open.
+Fence refusals use HTTP 409. An empty `owner` object keeps the base legacy
+client on its terminal `held` path. Without it, that client treats an owner-less
+409 as `missing`, retries, and admits local-only work. Current clients preserve
+`claim-fence-refused` as terminal. Upgrade clients before relying on capacity
+fail-closed and verify the deployed versions. HTTP 503 for unsupported newer
+schemas still permits legacy local fallback and provides no cross-machine
+exclusion.
 
 At the storage-prerequisite checkpoint, these generations alone did not fix delayed legacy acquire, same-holder ABA,
 or backup restore and rollback. A missing release can advance the fence and a

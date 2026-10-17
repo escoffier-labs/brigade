@@ -1213,6 +1213,7 @@ def _release_session(
                 {
                     "target": target,
                     "released": decision.granted,
+                    "reason": decision.reason,
                     "forced": False,
                     "claim": decision.claim,
                     "owner": decision.owner,

@@ -209,7 +209,7 @@ def _schedule_orphan_release(
         deadline = started + ttl_seconds
         while _client().time.monotonic() < deadline:
             outcome = _client().release_claim(target, node_id=node_id, holder=holder, conductor=conductor)
-            if outcome.reason == "hub-unavailable":
+            if outcome.reason in ("hub-unavailable", "claim-fence-refused"):
                 _client().time.sleep(
                     min(_client().ORPHAN_RELEASE_RETRY_SECONDS, max(0.0, deadline - _client().time.monotonic()))
                 )

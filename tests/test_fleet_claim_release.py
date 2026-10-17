@@ -544,7 +544,9 @@ class TestReleaseCli:
         capsys.readouterr()
         assert cli.main(args) == 1
         output = capsys.readouterr()
-        assert json.loads(output.out)["released"] is False
+        payload = json.loads(output.out)
+        assert payload["released"] is False
+        assert payload["reason"] == "stale-holder"
         assert "stale-holder" in output.err
 
     @pytest.mark.parametrize("reason", ["stale-holder", "stale-generation", "future-refusal"])
