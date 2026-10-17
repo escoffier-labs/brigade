@@ -101,7 +101,7 @@ def test_claim_cardinality_preserves_existing_claims(tmp_path):
         before = _claim_snapshot(conn)
         with pytest.raises(ClaimCardinalityError, match="active claims per node exceed limit") as caught:
             fleet_hub.handle_claim(conn, _claim(target="overflow"))
-        assert caught.value.payload()["reason"] == "claim_cardinality_exceeded"
+        assert caught.value.payload()["reason"] == "claim-cardinality-exceeded"
         assert not conn.in_transaction
         assert _claim_snapshot(conn) == before
         assert fleet_hub.handle_claim(conn, _claim(target="repo-0000"))[0] == 200
@@ -119,7 +119,7 @@ def test_http_claim_cardinality_refusal_preserves_existing_claims(hub):
     status, payload = _post(url, token, _claim(target="overflow"))
     assert status == 409
     assert payload["granted"] is False
-    assert payload["reason"] == "claim_cardinality_exceeded"
+    assert payload["reason"] == "claim-cardinality-exceeded"
     assert payload["limit"] == MAX_ACTIVE_CLAIMS_PER_NODE
     assert "active claims per node exceed limit" in payload["error"]
     with fleet_hub.open_db(db) as conn:

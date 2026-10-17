@@ -16,7 +16,7 @@ class ClaimCardinalityError(fleet_hub.FleetHubError):
     def payload(self) -> dict[str, Any]:
         return {
             "granted": False,
-            "reason": "claim_cardinality_exceeded",
+            "reason": "claim-cardinality-exceeded",
             # Base clients classify a 409 without a dict owner as missing,
             # then admit local-only work. No target holder exists here.
             "owner": {},

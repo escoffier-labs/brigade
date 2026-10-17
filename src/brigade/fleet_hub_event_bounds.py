@@ -16,6 +16,7 @@ journal line bound is the tightest limit no valid envelope can exceed.
 
 from __future__ import annotations
 
+import re
 from typing import Any, Mapping
 
 from .run_events import MAX_LINE_BYTES, MAX_PAYLOAD_STR_LEN
@@ -44,11 +45,17 @@ def oversized_event_field(field: str, value: Any) -> str | None:
 
 # Apply to every JSON container, including fields a domain validator ignores.
 MAX_JSON_DEPTH = 32
+# Keep at least fleet_model_inventory.MAX_MODELS_COUNT so inventories fit.
 MAX_JSON_CONTAINER_ITEMS = 1000
 MAX_JSON_CONTAINERS = 32768
-MAX_JSON_ITEMS = 65536
+# Covers 500 Worklore observations with 50 two-field dependencies each.
+MAX_JSON_ITEMS = 131072
 WORKLORE_BODY_BYTES = 262144
 WORKLORE_IMPORT_BODY_BYTES = 1048576
+# Consume an unterminated string too, so escaped quotes cannot trigger a
+# quadratic restart at each quote. The JSON decoder still rejects it.
+_JSON_STRINGS = re.compile(rb'"[^"\\]*(?:\\.[^"\\]*)*(?:"|\\?\Z)', re.DOTALL)
+_JSON_PUNCTUATION = re.compile(rb"[\[\]{},:]")
 
 
 class RequestBoundsError(ValueError):
@@ -60,46 +67,48 @@ class RequestBoundsError(ValueError):
 
 
 def _scan_json(raw: bytes) -> None:
-    """Bound decoded object growth in one byte pass with a depth-bounded stack.
+    """Bound decoded object growth with C-speed scans and a depth-bounded stack.
 
     Each nonempty container contributes its first item and each comma adds
     another. Object members count once, including duplicate keys. Quoted
     punctuation and escaped quotes cannot consume the structural budgets.
     The decoder remains responsible for JSON syntax validation.
     """
+    # Replace strings with a scalar marker, preserving even empty keys/values
+    # while removing quoted punctuation. Long string and numeric tokens are
+    # traversed by regex/bytes operations rather than a Python byte loop.
+    structural = _JSON_STRINGS.sub(b"0", raw)
     empty: list[bool] = []
     containers = items = 0
-    quoted = escaped = False
-    for byte in raw:
-        if quoted:
-            if escaped:
-                escaped = False
-            elif byte == 92:
-                escaped = True
-            elif byte == 34:
-                quoted = False
-        else:
-            if byte in (9, 10, 13, 32):
-                continue
-            if byte in (93, 125):
-                if empty:
-                    empty.pop()
-                continue
-            if byte == 44 or (empty and empty[-1] and byte != 58):
+    position = 0
+    for match in _JSON_PUNCTUATION.finditer(structural):
+        byte = structural[match.start()]
+        if empty and empty[-1] and structural[position : match.start()].strip():
+            items += 1
+            empty[-1] = False
+        if byte == 44:
+            items += 1
+            if empty:
+                empty[-1] = False
+        elif byte in (91, 123):
+            if empty and empty[-1]:
                 items += 1
-                if items > MAX_JSON_ITEMS:
-                    raise RequestBoundsError(f"JSON aggregate items exceed {MAX_JSON_ITEMS}")
-                if empty:
-                    empty[-1] = False
-            if byte == 34:
-                quoted = True
-            elif byte in (91, 123):
-                containers += 1
-                if containers > MAX_JSON_CONTAINERS:
-                    raise RequestBoundsError(f"JSON containers exceed {MAX_JSON_CONTAINERS}")
-                empty.append(True)
-                if len(empty) > MAX_JSON_DEPTH:
-                    raise RequestBoundsError(f"JSON nesting exceeds {MAX_JSON_DEPTH}")
+                empty[-1] = False
+            containers += 1
+            if containers > MAX_JSON_CONTAINERS:
+                raise RequestBoundsError(f"JSON containers exceed {MAX_JSON_CONTAINERS}")
+            empty.append(True)
+            if len(empty) > MAX_JSON_DEPTH:
+                raise RequestBoundsError(f"JSON nesting exceeds {MAX_JSON_DEPTH}")
+        elif byte in (93, 125) and empty:
+            empty.pop()
+        if items > MAX_JSON_ITEMS:
+            raise RequestBoundsError(f"JSON aggregate items exceed {MAX_JSON_ITEMS}")
+        position = match.end()
+    if empty and empty[-1] and structural[position:].strip():
+        items += 1
+    if items > MAX_JSON_ITEMS:
+        raise RequestBoundsError(f"JSON aggregate items exceed {MAX_JSON_ITEMS}")
 
 
 def bounded_json_loads(raw: bytes, **kwargs: Any) -> Any:

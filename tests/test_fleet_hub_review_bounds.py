@@ -17,7 +17,7 @@ from brigade import worklore_http
 from tests.test_fleet_hub_request_bounds import _claim_snapshot, hub as hub
 from tests.test_fleet_claims import NODE_A, _claim, _plant_home_identity
 
-_MAX_BODY_SCAN_CPU_SECONDS = 5.0
+_MAX_BODY_SCAN_CPU_SECONDS = 1.0
 
 
 def test_complexity_attack_is_refused_before_decoding(monkeypatch):
@@ -54,7 +54,7 @@ def _item_document(total):
 
 
 @pytest.mark.parametrize(
-    "kind,budget,document", [("containers", 32768, _container_document), ("items", 65536, _item_document)]
+    "kind,budget,document", [("containers", 32768, _container_document), ("items", 131072, _item_document)]
 )
 def test_aggregate_complexity_boundary(monkeypatch, kind, budget, document):
     raw = document(budget)
@@ -77,19 +77,84 @@ def test_complexity_scan_counts_duplicate_keys_and_ignores_quoted_punctuation(mo
     decoder.assert_not_called()
 
 
-def test_full_body_scan_cost_is_recorded(record_property):
-    # A valid, string-heavy 8 MiB body must traverse the entire byte scan.
-    raw = b'"' + b"x" * (fleet_hub.MAX_BODY_BYTES - 2) + b'"'
+@pytest.mark.parametrize("kind", ["string", "digits"])
+def test_full_body_scan_cost_is_recorded(record_property, kind):
+    # Both bodies require scanning all 8 MiB, including a long numeric token.
+    raw = (
+        b'"' + b"x" * (fleet_hub.MAX_BODY_BYTES - 2) + b'"'
+        if kind == "string"
+        else b"[" + b"1" * (fleet_hub.MAX_BODY_BYTES - 2) + b"]"
+    )
     samples = []
     for _ in range(5):
         started = time.process_time()
         bounds._scan_json(raw)
         samples.append(time.process_time() - started)
     record_property("body_scan_cpu_seconds", samples)
-    print(f"8 MiB pre-decode scan CPU seconds: {samples}")
-    # CPU time avoids contention-based wall-clock failures. The measured
-    # baseline is about 0.13 seconds, leaving ample room on slower runners.
+    print(f"8 MiB {kind} pre-decode scan CPU seconds: {samples}")
+    # CPU time avoids contention-based wall-clock failures and leaves room
+    # above the regex scanner's measured cost on slower runners.
     assert max(samples) < _MAX_BODY_SCAN_CPU_SECONDS
+
+
+@pytest.mark.parametrize("tail", [b"", b"\\"])
+def test_unterminated_escaped_string_is_refused_without_quadratic_scan(tail):
+    raw = b'"' + b'\\"' * 16384 + tail
+    started = time.process_time()
+    with pytest.raises(bounds.RequestBoundsError, match="body is not valid JSON"):
+        bounds.bounded_json_loads(raw)
+    assert time.process_time() - started < _MAX_BODY_SCAN_CPU_SECONDS
+
+
+def test_brigade_worklore_contract_batch_fits_request_bounds(hub, monkeypatch):
+    from brigade.worklore_brigade import normalize_task
+    from brigade.worklore_brigade_sync import BATCH_SIZE
+    from brigade.worklore_validate import ACCEPTANCE_MAX_ITEMS, DEPENDENCIES_MAX_ITEMS
+
+    observations = []
+    for index in range(BATCH_SIZE):
+        task_id = f"t{index}"
+        observations.append(
+            normalize_task(
+                {
+                    "id": task_id,
+                    "text": "task",
+                    "status": "todo",
+                    "acceptance": ["ok"] * ACCEPTANCE_MAX_ITEMS,
+                    "updated_at": "2026-01-01T00:00:00Z",
+                    "metadata": {"verify_run_id": "v1", "receipt_id": "r1"},
+                },
+                identity="example/repo",
+                edges=[
+                    {"source": task_id, "type": "blocks", "target": f"d{dep}"} for dep in range(DEPENDENCIES_MAX_ITEMS)
+                ],
+            )
+        )
+    envelope = {
+        "adapter_id": "brigade:example/repo",
+        "source_type": "brigade",
+        "idempotency_key": "contract-batch",
+        "observations": observations,
+    }
+    raw = json.dumps(envelope, separators=(",", ":")).encode()
+    assert len(raw) < bounds.WORKLORE_IMPORT_BODY_BYTES
+    handled = []
+    monkeypatch.setattr(worklore_http, "enabled", lambda: True)
+    monkeypatch.setattr(worklore_http, "handle", lambda conn, request: (handled.append(request.body) or 200, {}))
+    url, token, _db = hub
+    request = urllib.request.Request(
+        url + "/work/imports", data=raw, headers={"Authorization": f"Bearer {token}"}, method="POST"
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        assert response.status == 200
+    assert handled == [envelope]
+
+
+def test_inventory_model_limit_fits_hub_container_budget():
+    from brigade.fleet_model_inventory import MAX_MODELS_COUNT
+
+    # A valid inventory must fit the hub's generic per-container bound.
+    assert MAX_MODELS_COUNT <= bounds.MAX_JSON_CONTAINER_ITEMS
 
 
 @pytest.mark.parametrize(
@@ -193,7 +258,7 @@ def claim_client(tmp_path, monkeypatch):
 
 
 def _quota_payload():
-    return {"granted": False, "reason": "claim_cardinality_exceeded", "error": "active claim quota exceeded"}
+    return {"granted": False, "reason": "claim-cardinality-exceeded", "error": "active claim quota exceeded"}
 
 
 def test_http_quota_is_a_definite_client_refusal(claim_client, monkeypatch):
@@ -221,6 +286,39 @@ def test_initial_quota_never_yields_or_retries(claim_client, monkeypatch):
             pytest.fail("quota refusal admitted unprotected work")
     assert post.call_count == 1
     orphan.assert_not_called()
+
+
+def test_ambiguous_acquire_then_quota_schedules_fenced_orphan_cleanup(claim_client, monkeypatch):
+    post = Mock(side_effect=[TimeoutError("lost first acquire response"), (409, _quota_payload())])
+    orphan = Mock()
+    monkeypatch.setattr(fleet_client, "_post_claim_blocking", post)
+    monkeypatch.setattr(fleet_client, "_schedule_orphan_release", orphan)
+    with pytest.raises(fleet_client.FleetClaimQuotaError, match="quota"):
+        with fleet_client.repo_claim("fake-repo", conductor="test", ttl_seconds=60):
+            pytest.fail("quota refusal admitted unprotected work")
+    assert post.call_count == 2
+    first, retry = [call.args[2] for call in post.call_args_list]
+    assert first["holder"] == retry["holder"]
+    orphan.assert_called_once_with(
+        "fake-repo", node_id=NODE_A, holder=first["holder"], conductor="test", ttl_seconds=60
+    )
+
+
+@pytest.mark.parametrize("as_json", [False, True])
+def test_cli_quota_refusal_names_reason(claim_client, monkeypatch, capsys, as_json):
+    from brigade import cli
+
+    monkeypatch.setattr(fleet_client, "_post_claim_blocking", Mock(return_value=(409, _quota_payload())))
+    argv = ["fleet", "claims", "--acquire", "fake-repo", "--harness", "test", "--session", "s1"]
+    assert cli.main(argv + (["--json"] if as_json else [])) == 1
+    output = capsys.readouterr()
+    if as_json:
+        payload = json.loads(output.out)
+        assert payload["reason"] == "quota"
+        assert payload["granted"] is False
+    else:
+        assert "quota" in output.err
+        assert "held by node" not in output.err
 
 
 def test_heartbeat_quota_terminates_the_lease(claim_client, monkeypatch):
