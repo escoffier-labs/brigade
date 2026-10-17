@@ -93,6 +93,10 @@ def register(sub: argparse._SubParsersAction) -> None:
 
     register_dot(fleet_sub)
 
+    from .fleet_events import register as register_events
+
+    register_events(fleet_sub)
+
     from .fleet_campaign import register as register_campaign
 
     register_campaign(fleet_sub)

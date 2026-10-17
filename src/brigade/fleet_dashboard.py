@@ -51,16 +51,18 @@ _AWAITING_STATES = frozenset({"run.paused", "approval.requested", "approval.held
 BUCKET_RANK = {
     "failed": 0,
     "awaiting approval": 1,
+    "unknown": 2,
     "stale": 2,
     "running": 3,
     "queued": 4,
     "interrupted": 5,
     "succeeded": 6,
 }
-NEEDS_ATTENTION = frozenset({"failed", "awaiting approval", "stale"})
+NEEDS_ATTENTION = frozenset({"failed", "awaiting approval", "stale", "unknown"})
 _BUCKET_ICON = {
     "failed": "×",
     "awaiting approval": "?",
+    "unknown": "?",
     "stale": "⌛",
     "running": "●",
     "queued": "○",
@@ -100,6 +102,7 @@ class RunRow:
     age_seconds: float | None
     started_epoch: float | None
     elapsed_seconds: float | None
+    context: dict[str, Any] | None = None
 
     @property
     def live(self) -> bool:
@@ -107,7 +110,7 @@ class RunRow:
 
     @property
     def active(self) -> bool:
-        return self.live and self.bucket != "stale"
+        return self.live and self.bucket not in {"stale", "unknown"}
 
     @property
     def seat_label(self) -> str:
@@ -153,6 +156,8 @@ def _parse_stamp(value: object) -> datetime | None:
 
 def bucket_for(state: str, *, age_seconds: float | None, exit_status: int | None = None) -> str:
     """Map a run_event type plus its age to an attention bucket."""
+    if state == "external.unknown":
+        return "unknown"
     if state == "run.stale":
         return "stale"
     if state == "run.orphaned":
@@ -216,6 +221,7 @@ def build_rows(
                 age_seconds=age,
                 started_epoch=started.timestamp() if started is not None and live else None,
                 elapsed_seconds=elapsed,
+                context=run.get("context"),
             )
         )
     return rows
@@ -243,7 +249,7 @@ def filter_rows(rows: list[RunRow], query: DashboardQuery) -> list[RunRow]:
     if query.include_all:
         kept = rows
     elif query.attention_only:
-        kept = [row for row in rows if row.active or row.bucket == "stale"]
+        kept = [row for row in rows if row.active or row.bucket in {"stale", "unknown"}]
     else:
         kept = [row for row in rows if row.active]
     return [row for row in kept if row_matches(row, query)]
@@ -472,6 +478,17 @@ def _controls(query: DashboardQuery) -> str:
     )
 
 
+def _execution_context(context: dict[str, Any] | None) -> str:
+    if not context:
+        return ""
+    initiator = context.get("initiator", {})
+    parts = [f"initiator (reported): {initiator.get('label') or 'unknown'}"]
+    for field, label in (("target_host", "target"), ("request_id", "request")):
+        if context.get(field):
+            parts.append(f"{label}: {context[field]}")
+    return '<small class="fleet-execution-context">' + esc(" · ".join(parts)) + "</small>"
+
+
 def _run_table(rows: list[RunRow], table_id: str, *, with_node: bool) -> str:
     headers = ["Run", "Repo", "Seat/harness", "State", "Elapsed", "Last event"]
     if with_node:
@@ -480,7 +497,7 @@ def _run_table(rows: list[RunRow], table_id: str, *, with_node: bool) -> str:
     body = []
     for row in rows:
         cells = [
-            f'<td class="fleet-run-id" title="{esc(row.run_id)}">{esc(row.run_id)}</td>',
+            f'<td class="fleet-run-id" title="{esc(row.run_id)}">{esc(row.run_id)}{_execution_context(row.context)}</td>',
             f"<td>{esc(row.repo or '-')}</td>",
             f"<td>{esc(row.seat_label)}</td>",
             f"<td>{_run_badge(row)}</td>",
@@ -756,7 +773,7 @@ def _repo_board(entries: list[_RepoEntry], sort: str) -> str:
         if entry.live:
             where = "".join(
                 f"<li>{_node_label(row.node_id)} · {esc(row.seat_label)} · {_run_badge(row)} · {_elapsed_cell(row)}"
-                f' <span class="fleet-run-id" title="{esc(row.run_id)}">{esc(row.run_id)}</span></li>'
+                f' <span class="fleet-run-id" title="{esc(row.run_id)}">{esc(row.run_id)}</span>{_execution_context(row.context)}</li>'
                 for row in sort_rows(entry.live, sort)
             )
             where = f'<ul class="fleet-where">{where}</ul>'
@@ -906,6 +923,7 @@ table.data-table th:nth-child(n) { width: auto; }
 .fleet-run-id, .fleet-node { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; word-break: break-all; }
 .fleet-where { margin: 0; padding-left: 1.1rem; }
 .fleet-state { display: inline-block; border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; font-size: 11px; font-weight: 700; white-space: nowrap; color: var(--ink); }
+.fleet-execution-context { display: block; color: var(--muted); }
 .fleet-state-running { border-color: var(--signal); color: var(--signal); }
 .fleet-state-succeeded { border-color: var(--ok); color: var(--ok); }
 .fleet-state-awaiting-approval { border-color: var(--signal); background: var(--signal-quiet); }

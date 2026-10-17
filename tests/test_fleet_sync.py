@@ -1668,3 +1668,31 @@ def test_fleet_sessions_text_renders_remaining_ttl_not_raw_epoch(monkeypatch, ca
     out = capsys.readouterr().out
     assert "1700000900" not in out
     assert "900s" in out or "15m" in out or "expired" in out
+
+
+def test_v31_to_v32_preserves_event_history(tmp_path):
+    db = tmp_path / "v31.db"
+    conn = fleet_hub.init_db(db)
+    if "context" in {row[1] for row in conn.execute("PRAGMA table_info(events)")}:
+        conn.execute("ALTER TABLE events DROP COLUMN context")
+    conn.execute(
+        "INSERT INTO events (node_id,run_id,sequence,digest,state,ts,received_at) VALUES ('node-test','old',1,'digest-test','run.completed','2026-10-17T12:00:00Z','2026-10-17T12:00:00Z')"
+    )
+    conn.execute("PRAGMA user_version=31")
+    conn.commit()
+    conn.close()
+    conn = fleet_hub.init_db(db)
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 32
+        assert "context" in {row[1] for row in conn.execute("PRAGMA table_info(events)")}
+        row = fleet_hub.latest_status(conn, include_all=True)[0]
+        assert (row["run_id"], row["digest"], row["state"], row["context"]) == (
+            "old",
+            "digest-test",
+            "run.completed",
+            None,
+        )
+        fleet_hub.store_events(conn, _event())
+        assert len(fleet_hub.latest_status(conn, include_all=True)) == 2
+    finally:
+        conn.close()

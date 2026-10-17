@@ -106,6 +106,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from . import fleet_command_deck, fleet_hub_preference, worklore_store
+from .fleet_execution_context import serialize_context
 from .fleet_hub_event_bounds import oversized_event_field
 from .fleet_hub_server import BoundedThreadingHTTPServer
 from .fleet_hub_status import (
@@ -116,7 +117,7 @@ from .fleet_hub_status import (
     latest_status as latest_status,
 )
 
-SCHEMA_VERSION = 31
+SCHEMA_VERSION = 32
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
@@ -218,6 +219,7 @@ CREATE TABLE IF NOT EXISTS events (
     exit_status INTEGER,
     capability_fingerprint TEXT,
     repo_identity TEXT,
+    context TEXT,
     received_at TEXT NOT NULL,
     PRIMARY KEY (node_id, run_id, sequence, digest)
 );
@@ -260,7 +262,7 @@ _CLAIMS_ADDITIVE_COLUMNS = (
     "lock_acquired_at",
     "lock_run_dir",
 )
-_EVENTS_ADDITIVE_COLUMNS = ("exit_status", "capability_fingerprint", "repo_identity")
+_EVENTS_ADDITIVE_COLUMNS = ("exit_status", "capability_fingerprint", "repo_identity", "context")
 
 # Per-node credentials (schema v4, issue #1150): node_id -> SHA-256 of the
 # node's bearer token. The plaintext token is returned once by the add
@@ -844,9 +846,17 @@ def _validate_event(raw: Any) -> dict[str, Any]:
         event[field] = cleaned
     for field in OPTIONAL_EVENT_INT_FIELDS:
         value = raw.get(field)
-        if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 0):
-            raise FleetHubError(f"event field {field!r} must be a non-negative integer")
+        if value is not None and (
+            not isinstance(value, int) or isinstance(value, bool) or not -(2**63) <= value < 2**63
+        ):
+            raise FleetHubError(f"event field {field!r} must be a signed 64-bit integer")
         event[field] = value
+    from .fleet_execution_context import ExecutionContextError, validate_context
+
+    try:
+        event["context"] = validate_context(raw["context"]) if raw.get("context") is not None else None
+    except ExecutionContextError as exc:
+        raise FleetHubUnprocessable(str(exc)) from None
     return event
 
 
@@ -882,7 +892,7 @@ def store_events(conn: sqlite3.Connection, raw_events: Any, *, caller_node: str 
         cursor = conn.execute(
             "INSERT OR IGNORE INTO events "
             "(node_id, run_id, sequence, digest, repo, seat, harness, state, ts, exit_status, "
-            "capability_fingerprint, repo_identity, received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "capability_fingerprint, repo_identity, context, received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 event["node_id"],
                 event["run_id"],
@@ -896,6 +906,7 @@ def store_events(conn: sqlite3.Connection, raw_events: Any, *, caller_node: str 
                 event["exit_status"],
                 event["capability_fingerprint"],
                 event["repo_identity"],
+                serialize_context(event["context"]) if event["context"] is not None else None,
                 received_at,
             ),
         )

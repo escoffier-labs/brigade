@@ -7,12 +7,14 @@ authority for active TTL and stale-history aging.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from typing import Any, Callable
 
 from . import fleet_command_deck
+from .fleet_event_freshness import observation_state
 
 ACTIVE_EVENT_TTL_SECONDS = 30 * 60
 STALE_HISTORY_AFTER_SECONDS = 24 * 60 * 60
@@ -23,11 +25,11 @@ MACHINE_PAGE_RUN_LIMIT = 2_000
 
 _LATEST_COLUMNS = (
     "node_id, run_id, repo, seat, harness, state, ts, sequence, digest, "
-    "exit_status, capability_fingerprint, repo_identity, received_at"
+    "exit_status, capability_fingerprint, repo_identity, received_at, context"
 )
 _LATEST_PARTITION = (
     "SELECT e.node_id, e.run_id, e.repo, e.seat, e.harness, e.state, e.ts, e.sequence, "
-    "e.digest, e.exit_status, e.capability_fingerprint, e.repo_identity, e.received_at, "
+    "e.digest, e.exit_status, e.capability_fingerprint, e.repo_identity, e.received_at, e.context, "
     "ROW_NUMBER() OVER ("
     "  PARTITION BY CASE WHEN e.harness = 'grokbot' THEN 'grokbot' ELSE 'node:' || e.node_id END, e.run_id "
     "  ORDER BY e.sequence DESC, e.received_at DESC, e.digest DESC"
@@ -169,15 +171,16 @@ def latest_status(
             or not _received_at_is_active(row[12], now=current, ttl_seconds=active_ttl_seconds)
         ):
             continue
-        result.append(
-            _status_entry(
-                conn,
-                row,
-                now=current,
-                age_stale=include_all,
-                stale_history_after_seconds=stale_history_after_seconds,
-            )
+        entry = _status_entry(
+            conn,
+            row,
+            now=current,
+            age_stale=include_all,
+            stale_history_after_seconds=stale_history_after_seconds,
         )
+        if not include_all and entry["state"] == "run.stale":
+            continue
+        result.append(entry)
     return result
 
 
@@ -362,8 +365,8 @@ def _status_entry(
     resolve_started_at: bool = False,
 ) -> dict[str, Any]:
     state = row[5]
-    seat = row[13] if resolve_last_known_seat and len(row) > 13 else row[3]
-    if resolve_last_known_seat and len(row) <= 13:
+    seat = row[14] if resolve_last_known_seat and len(row) > 14 else row[3]
+    if resolve_last_known_seat and len(row) <= 14:
         seat = _last_known_seat(conn, row[0], row[1], row[3], harness=row[4])
     entry = {
         "node_id": row[0],
@@ -379,10 +382,16 @@ def _status_entry(
         "capability_fingerprint": row[10],
         "repo_identity": row[11],
         "received_at": row[12],
+        "context": json.loads(row[13]) if row[13] is not None else None,
     }
     if resolve_started_at:
         entry["started_at"] = row[-1]
-    if age_stale and not fleet_command_deck.is_terminal_state(state):
+    if not fleet_command_deck.is_terminal_state(state):
+        projected = observation_state(state, row[4], row[6], now=now)
+        if projected != state:
+            entry["original_state"] = state
+            entry["state"] = projected
+    if age_stale and state != "external.unknown" and not fleet_command_deck.is_terminal_state(state):
         age = _received_at_age_seconds(row[12], now=now)
         if age is not None and age > stale_history_after_seconds:
             entry["original_state"] = state

@@ -96,7 +96,10 @@ from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
 from uuid import uuid4
+
+from .fleet_event_report import report_event_detailed as report_event_detailed
 
 if TYPE_CHECKING:
     from .fleet_session_presence import SessionSnapshot
@@ -766,6 +769,8 @@ def _flush_locked(
     max_batches: int | None,
     timeout: float,
     dir_fd: int | None = None,
+    preserve_poison: bool = False,
+    on_delivered: Callable[[list[dict[str, Any]]], None] | None = None,
 ) -> int:
     events = _read_spool(path, dir_fd=dir_fd)
     if not events:
@@ -785,6 +790,8 @@ def _flush_locked(
         try:
             _post_events(hub, token, batch, timeout=timeout)
         except _PoisonResponse as exc:
+            if preserve_poison:
+                break
             _LOG.warning("fleet spool %s: dropping %d event(s): %s", path, len(batch), exc)
             index += len(batch)
             batches += 1
@@ -793,6 +800,8 @@ def _flush_locked(
             break
         index += len(batch)
         delivered += len(batch)
+        if on_delivered is not None:
+            on_delivered(batch)
         batches += 1
     if index == 0:
         return 0
@@ -829,82 +838,17 @@ def flush_spool(
 # --- reporting ---------------------------------------------------------------
 
 
-def report_event(
-    event: dict[str, Any],
-    *,
-    base_path: Path | None = None,
-    node_id: str | None = None,
-) -> bool:
-    """Report one event to the hub. Returns True when delivered.
+def report_event(event: dict[str, Any], *, base_path: Path | None = None, node_id: str | None = None) -> bool:
+    """Report with local identity and durable spool, preserving the public bool API.
 
-    The event is always stamped with this machine's identity
-    (``resolve_node_id``): a ``node_id`` already present in the payload, or
-    passed as the ``node_id`` keyword kept for source compatibility, is
-    ignored unconditionally and never sent (#1161). Best-effort by contract:
-    no hub configured → False without side effects; delivery failure → the
-    event lands in the local spool and False returns. When a spool already
-    exists the new event is appended to it and the spool is flushed in order
-    (one request, short deadline) so the hub never sees this node's events
-    out of sequence. Exactly one HTTP request is made per call, bounded by
-    ``REPORT_TIMEOUT_SECONDS`` end to end.
-
-    ``Exception`` never escapes. ``KeyboardInterrupt``/``SystemExit`` are
-    re-raised after a best-effort attempt to preserve the event in the spool.
-
-    ``base_path`` is ignored; identity is resolved independently of request origin (#1161).
+    Origin overrides remain ignored. Interrupts propagate only after a
+    best-effort spool write. One request per call, with a bounded deadline.
+    ``report_event_detailed`` captures the durable outcome for receipt callers
+    without changing this established signature or return type.
     """
-    try:
-        config = load_fleet_config()
-        hub = config["hub_url"]
-        if not hub:
-            return False
-        resolved_node_id = resolve_node_id()
-        event = {**event, "node_id": resolved_node_id}
-        token = config["token"]
-        spool = spool_path(resolved_node_id)
-    except Exception:
-        return False
+    from .fleet_event_report import report
 
-    interrupted: BaseException | None = None
-    delivered = False
-    try:
-        if spool.is_file():
-            with _spool_lock(spool) as dir_fd:
-                appended = _spool_append_locked(spool, event, dir_fd=dir_fd)
-                if appended:
-                    try:
-                        _flush_locked(spool, hub, token, max_batches=1, timeout=REPORT_TIMEOUT_SECONDS, dir_fd=dir_fd)
-                    except (KeyboardInterrupt, SystemExit) as exc:
-                        interrupted = exc
-            delivered = appended and not spool.is_file()
-        else:
-            try:
-                _post_events(hub, token, event, timeout=REPORT_TIMEOUT_SECONDS)
-                delivered = True
-            except (KeyboardInterrupt, SystemExit) as exc:
-                interrupted = exc
-            except Exception:
-                pass
-            if not delivered:
-                with _spool_lock(spool) as dir_fd:
-                    if not _spool_append_locked(spool, event, dir_fd=dir_fd) and interrupted is None:
-                        return False
-    except (KeyboardInterrupt, SystemExit) as exc:
-        # Preserve the event after interrupted spool bookkeeping, then propagate.
-        interrupted = exc
-        if not delivered:
-            try:
-                with _spool_lock(spool) as dir_fd:
-                    if event not in _read_spool(spool, dir_fd=dir_fd):
-                        if not _spool_append_locked(spool, event, dir_fd=dir_fd):
-                            _LOG.warning("interrupted fleet event could not be persisted to the spool")
-            except Exception as exc:
-                _LOG.warning("interrupted fleet event could not be made durable in the spool: %s", exc)
-    except Exception as exc:
-        _LOG.warning("fleet event was not delivered and could not be spooled: %s", exc)
-    if interrupted is not None:
-        raise interrupted
-    return delivered
+    return report(event) == "delivered"
 
 
 def report_journal_event(
