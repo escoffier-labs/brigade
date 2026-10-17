@@ -249,7 +249,7 @@ Runtime JSON shape (all keys required unless marked optional):
 
 **Files:** Create `src/brigade/miller/fleet_tools.py`, `tests/test_miller_fleet_tools.py`.
 
-- [ ] Port tests from `test_bridge_v2.py` `FleetArgvChecks` (317-482), `EnrolledSubmitChecks` (483-504), `DispatchGateChecks` (284-307) and `test_bridge_v6.py` `CompletionChecks` (650-697). Rewrite every argv assertion as an assertion on the JSON payload the fake runner receives. The fake replaces `FleetRunner._run` (see `tests/test_grokbot_t3_fleet.py` for the pattern). For `fleet_submit` the payload must equal:
+- [x] Port tests from `test_bridge_v2.py` `FleetArgvChecks` (317-482), `EnrolledSubmitChecks` (483-504), `DispatchGateChecks` (284-307) and `test_bridge_v6.py` `CompletionChecks` (650-697). Rewrite every argv assertion as an assertion on the JSON payload the fake runner receives. The fake replaces `FleetRunner._run` (see `tests/test_grokbot_t3_fleet.py` for the pattern). For `fleet_submit` the payload must equal:
 
 ```python
 {"schema": "t3-fleet.request.v1", "action": "submit", "host": "rocinante", "repository": "brigade",
@@ -259,9 +259,9 @@ Runtime JSON shape (all keys required unless marked optional):
 ```
 
 with `workload`, `override_reason` and `allow_queue` present only when given.
-- [ ] Run, expect failures.
-- [ ] Implement from `$BRIDGE/dot_mcp.py` 1538-1712 (`_fleet`, submit, status, wait, recent, `_control`). Each call becomes `runner.call(action, payload, timeout=...)` on a `FleetRunner(runtime.paths.bin.t3_fleet, runtime.paths.bin.git, runtime_mode="full-access")`. Keep the source revision resolution (1581-1600) using `runtime.paths.bin.git` and `runtime.paths.fleet_config`. Keep the bridge's result shapes from `$BRIDGE/dot_mcp.py:1538-1556`: success is `{"ok": True, "result": value}`; `FleetCallError` becomes `{"error": "fleet_error", "fleet": {"code": err.code, "reason": err.reason}}` (drop `reason` when it is `None`) plus `request_id` when the error carries one; `FleetTimeout` becomes `{"error": "fleet_uncertain", "next": "Do not resubmit. Check fleet_recent and fleet_status for the request."}` for mutating calls (submit, followup, answer, approve, interrupt) and `{"error": "fleet_timeout"}` otherwise; `FleetProtocolError` becomes `{"error": "fleet_unavailable"}`. The t3-fleet error message text is no longer available through `FleetRunner`, so the operations journal records the code instead of the message.
-- [ ] Run to green. Commit: `feat(miller): drive t3-fleet through FleetRunner`.
+- [x] Run, expect failures.
+- [x] Implement from `$BRIDGE/dot_mcp.py` 1538-1712 (`_fleet`, submit, status, wait, recent, `_control`). Each call becomes `runner.call(action, payload, timeout=...)` on a `FleetRunner(runtime.paths.bin.t3_fleet, runtime.paths.bin.git, runtime_mode="full-access")`. Keep the source revision resolution (1581-1600) using `runtime.paths.bin.git` and `runtime.paths.fleet_config`. Keep the bridge's result shapes from `$BRIDGE/dot_mcp.py:1538-1556`: success is `{"ok": True, "result": value}`; `FleetCallError` becomes `{"error": "fleet_error", "fleet": {"code": err.code, "reason": err.reason}}` (drop `reason` when it is `None`) plus `request_id` when the error carries one; `FleetTimeout` becomes `{"error": "fleet_uncertain", "next": "Do not resubmit. Check fleet_recent and fleet_status for the request."}` for mutating calls (submit, followup, answer, approve, interrupt) and `{"error": "fleet_timeout"}` otherwise; `FleetProtocolError` becomes `{"error": "fleet_unavailable"}`. The t3-fleet error message text is no longer available through `FleetRunner`, so the operations journal records the code instead of the message.
+- [x] Run to green. Commit: `feat(miller): drive t3-fleet through FleetRunner`.
 
 ## Task 8: hub, memory and inbox tools
 
