@@ -233,7 +233,7 @@ def test_render_intake_units(tmp_path, monkeypatch):
     service, timer = lifecycle.render_intake_units(tmp_path, python="/venv/bin/python")
     assert f"ExecStart=/venv/bin/python -m brigade.grokbot_t3 intake --target {tmp_path}\n" in service
     assert "Description=Brigade Grok Bot t3-dispatch issue intake\n" in service
-    assert "Type=oneshot\n" in service and "TimeoutStartSec=300\n" in service
+    assert "Type=oneshot\n" in service and "TimeoutStartSec=900\n" in service
     assert "ProtectSystem=strict\n" in service
     assert f"ReadWritePaths={tmp_path / 'state'} /srv/t3/state\n" in service
     assert "OnBootSec=5min\n" in timer and "OnUnitActiveSec=15min\n" in timer

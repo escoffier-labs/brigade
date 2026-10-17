@@ -16,7 +16,8 @@ from typing import Any, Callable, Mapping
 from .. import grokbot_mcp, grokbot_ops
 from . import contracts as c
 from .fleet import FleetCallError, FleetRunner, FleetTimeout
-from .intake import run_intake_once
+from .intake import GH_TIMEOUT_SECONDS, run_intake_once
+from .intake import UNIT_TIMEOUT_SECONDS as INTAKE_UNIT_TIMEOUT_SECONDS
 from .ledger import Ledger
 from .runtime_config import Runtime, load_runtime, validate_runtime_reference
 from .tools import T3DispatchTools
@@ -335,7 +336,7 @@ def intake_once(target: Path) -> dict[str, Any]:
                 capture_output=True,
                 text=True,
                 shell=False,
-                timeout=60,
+                timeout=GH_TIMEOUT_SECONDS,
                 check=False,
                 stdin=subprocess.DEVNULL,
             )
@@ -548,7 +549,7 @@ def render_intake_units(target: Path, *, python: str | None = None) -> tuple[str
         "[Service]\n"
         "Type=oneshot\n"
         f"ExecStart={exec_start}\n"
-        "TimeoutStartSec=300\n"
+        f"TimeoutStartSec={INTAKE_UNIT_TIMEOUT_SECONDS}\n"
         f"{_hardening(runtime)}"
     )
     timer = (

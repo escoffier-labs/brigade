@@ -42,7 +42,7 @@ def snapshot_payload(**overrides):
         "body": "Approved body",
         "state": "OPEN",
         "lastEditedAt": None,
-        "labels": {"nodes": [{"name": "grokbot-build-approved"}]},
+        "labels": {"pageInfo": {"hasNextPage": False}, "nodes": [{"name": "grokbot-build-approved"}]},
         "comments": {"pageInfo": {"hasNextPage": False}, "nodes": [comment()]},
         "timelineItems": {
             "nodes": [
@@ -113,11 +113,13 @@ def test_headroom_rechecked_between_submissions(make):
 def test_snapshot_filters_comments_using_latest_matching_approval(make):
     tools, runner, _ = make()
     payload = snapshot_payload(
-        lastEditedAt=APPROVED_AT,
+        lastEditedAt=BEFORE,
         comments={
             "pageInfo": {"hasNextPage": False},
             "nodes": [
-                comment("Member text", "MEMBER", APPROVED_AT, APPROVED_AT),
+                comment("Member text", "MEMBER", BEFORE, BEFORE),
+                comment("Same-second text", "OWNER", APPROVED_AT),
+                comment("Same-second edit", "OWNER", BEFORE, APPROVED_AT),
                 comment("Untrusted text", "NONE"),
                 comment("Late text", created=AFTER),
                 comment("Edited text", edited=AFTER),
@@ -137,7 +139,7 @@ def test_snapshot_filters_comments_using_latest_matching_approval(make):
     assert result["errors"] == []
     prompt = runner.submits[0]["prompt"]
     assert "Member text\n\n---\n\nCollaborator text\n\n---\n\nOwner text" in prompt
-    for text in ("Untrusted text", "Late text", "Edited text"):
+    for text in ("Untrusted text", "Late text", "Edited text", "Same-second text", "Same-second edit"):
         assert text not in prompt
 
 
@@ -146,7 +148,12 @@ def test_snapshot_filters_comments_using_latest_matching_approval(make):
     [
         ({"lastEditedAt": AFTER}, "edited-after-approval"),
         ({"state": "CLOSED"}, "issue-closed"),
-        ({"labels": {"nodes": [{"name": "other-label"}]}}, "approval-revoked"),
+        ({"labels": {"pageInfo": {"hasNextPage": False}, "nodes": [{"name": "other-label"}]}}, "approval-revoked"),
+        (
+            {"labels": {"pageInfo": {"hasNextPage": True}, "nodes": [{"name": "grokbot-build-approved"}]}},
+            "too-many-labels",
+        ),
+        ({"lastEditedAt": APPROVED_AT}, "edited-after-approval"),
         ({"comments": {"pageInfo": {"hasNextPage": True}, "nodes": [comment()]}}, "too-many-comments"),
         (
             {
@@ -222,6 +229,8 @@ def test_snapshot_failure_releases_claim(make, response):
         (("lastEditedAt",), "2026-10-16T11:00:00"),
         (("state",), 5),
         (("labels",), None),
+        (("labels", "pageInfo"), None),
+        (("labels", "pageInfo", "hasNextPage"), 1),
         (("labels", "nodes"), {}),
         (("labels", "nodes", 0, "name"), 7),
         (("comments", "pageInfo"), None),
@@ -376,7 +385,7 @@ def test_limit_and_ascending_issue_order(make):
 
 def seat_snapshot(*labels):
     nodes = [{"name": name} for name in ("grokbot-build-approved", *labels)]
-    return (0, json.dumps(snapshot_payload(labels={"nodes": nodes})))
+    return (0, json.dumps(snapshot_payload(labels={"pageInfo": {"hasNextPage": False}, "nodes": nodes})))
 
 
 def test_seat_label(make):
@@ -478,3 +487,68 @@ def test_repository_failure_continues_without_exposing_output(make, failure, err
     assert result["errors"] == [{"repository": "brigade", "error": error}]
     assert result["submitted"][0]["issue"] == "other#42"
     assert len(runner.submits) == 1
+
+
+def test_rename_in_approval_second_is_refused(make):
+    tools, runner, _ = make()
+    nodes = [
+        {"__typename": "LabeledEvent", "createdAt": APPROVED_AT, "label": {"name": "grokbot-build-approved"}},
+        {"__typename": "RenamedTitleEvent", "createdAt": APPROVED_AT},
+    ]
+    payload = snapshot_payload(timelineItems={"nodes": nodes})
+    result = run(tools, FakeGh((0, json.dumps([issue()])), snapshots=[(0, json.dumps(payload))]))
+    assert result["errors"] == [{"issue": "brigade#42", "error": "edited-after-approval"}]
+    assert runner.submits == []
+
+
+class FakeClock:
+    def __init__(self):
+        self.now = 0.0
+
+    def __call__(self):
+        return self.now
+
+
+def test_deadline_stops_before_claiming_an_issue_that_cannot_finish(make):
+    from brigade.grokbot_t3.intake import ISSUE_WORST_SECONDS, GH_TIMEOUT_SECONDS, run_intake_once
+
+    tools, runner, ledger = make(policy={"max_per_pass": 5})
+    clock = FakeClock()
+
+    class SlowGh(FakeGh):
+        def __call__(self, argv):
+            clock.now += 40
+            return super().__call__(argv)
+
+    budget = GH_TIMEOUT_SECONDS + ISSUE_WORST_SECONDS + 5
+    gh = SlowGh((0, json.dumps([issue(1), issue(2)])), (0, ""), (0, ""), snapshots=None)
+    result = run_intake_once(
+        policy=tools.runtime.intake,
+        runtime=tools.runtime,
+        tools=tools,
+        gh=gh,
+        now=NOW,
+        clock=clock,
+        budget_seconds=budget,
+    )
+    assert result["reason"] == "deadline"
+    assert [row["issue"] for row in result["submitted"]] == ["brigade#1"]
+    assert ledger.claim_intake("brigade#2", NOW)
+
+
+def test_deadline_skips_listing_without_time_for_one_issue(make):
+    from brigade.grokbot_t3.intake import ISSUE_WORST_SECONDS, run_intake_once
+
+    tools, runner, _ = make()
+    gh = FakeGh()
+    result = run_intake_once(
+        policy=tools.runtime.intake,
+        runtime=tools.runtime,
+        tools=tools,
+        gh=gh,
+        now=NOW,
+        clock=FakeClock(),
+        budget_seconds=ISSUE_WORST_SECONDS,
+    )
+    assert result == {"reason": "deadline", "submitted": [], "held": [], "errors": []}
+    assert gh.calls == []

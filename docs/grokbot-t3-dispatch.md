@@ -228,7 +228,7 @@ systemctl --user enable --now brigade-grokbot-t3-intake.timer
 Create both labels in each repository and authenticate `gh` as the service user
 with permission to list issues and edit their labels. The timer starts five
 minutes after boot and runs every fifteen minutes. Its oneshot service has a
-300-second timeout and the listener's filesystem hardening. Installation writes
+900-second timeout and the listener's filesystem hardening. Installation writes
 `brigade-grokbot-t3-intake.service` and `.timer`; use `--force` to replace changed
 units.
 
@@ -244,12 +244,17 @@ labels or an unknown seat produce `bad-seat-label` without submitting.
 The worker receives a snapshot of the title, body, and comments from owners,
 members, and collaborators written before the latest approval label event.
 Comments by others, added after approval, or edited after approval are dropped.
+Timestamps have one-second resolution, so a comment, body edit, or title rename
+stamped in the same second as the approval counts as after it.
 An issue whose body was edited or title renamed after approval is refused with `edited-after-approval`;
 re-apply the label to approve the new text. Missing approval events produce
 `approval-not-found`, and failed or malformed snapshots produce `snapshot-failed`.
 The snapshot rechecks that the issue is still open (`issue-closed`) and that the
 approval label is still on it (`approval-revoked` if it was removed after listing), and an issue with more than
-100 comments is refused with `too-many-comments` rather than truncated.
+100 comments or more than 100 labels is refused with `too-many-comments` or
+`too-many-labels` rather than truncated. A pass starts new work only while the
+worst case for one more issue still fits before the unit timeout, and otherwise
+ends with reason `deadline`, so systemd never stops it partway through an issue.
 The worker follows the snapshot without fetching the issue or comments again,
 implements and tests the change, and opens a pull request without merging.
 Issue titles, bodies, and comments never enter intake's ledger or summary.

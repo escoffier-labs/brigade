@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import time
 from datetime import datetime
 from typing import Any, Callable
 
@@ -10,13 +11,21 @@ from . import contracts
 from .runtime_config import IntakePolicy, Runtime
 from .tools import T3DispatchTools
 
+GH_TIMEOUT_SECONDS = 60
+# Worst case for one issue: snapshot (gh), revision resolve, capacity, submit plus one fallback submit, label swap.
+ISSUE_WORST_SECONDS = GH_TIMEOUT_SECONDS + 20 + 30 + 2 * 60 + GH_TIMEOUT_SECONDS
+UNIT_TIMEOUT_SECONDS = 900
+# New work starts only while the rest of it still fits before systemd stops the unit, so a claim is never
+# left half-written by a kill. The margin covers interpreter startup and shutdown.
+PASS_BUDGET_SECONDS = float(UNIT_TIMEOUT_SECONDS - 30)
+
 
 SNAPSHOT_QUERY = """
 query($owner: String!, $name: String!, $number: Int!) {
   repository(owner: $owner, name: $name) {
     issue(number: $number) {
       title body state lastEditedAt
-      labels(first: 100) { nodes { name } }
+      labels(first: 100) { pageInfo { hasNextPage } nodes { name } }
       comments(first: 100) {
         pageInfo { hasNextPage }
         nodes { body authorAssociation createdAt lastEditedAt }
@@ -76,6 +85,9 @@ def fetch_snapshot(gh: Callable[[list[str]], tuple[int, str]], slug: str, number
             raise ValueError
         edited = issue["lastEditedAt"]
         edited_at = timestamp(edited) if edited is not None else None
+        more_labels = issue["labels"]["pageInfo"]["hasNextPage"]
+        if not isinstance(more_labels, bool):
+            raise ValueError
         current_labels = issue["labels"]["nodes"]
         if not isinstance(current_labels, list):
             raise ValueError
@@ -118,6 +130,9 @@ def fetch_snapshot(gh: Callable[[list[str]], tuple[int, str]], slug: str, number
     # The issue list is also from that earlier call; the issue may have been closed since.
     if state != "OPEN":
         raise IntakeError("issue-closed")
+    # Seat labels are read from this list, so a truncated list is refused.
+    if more_labels:
+        raise IntakeError("too-many-labels")
     if label not in names:
         raise IntakeError("approval-revoked")
     # The worker is told the snapshot is the whole task, so a truncated comment list is refused, not dropped.
@@ -126,8 +141,9 @@ def fetch_snapshot(gh: Callable[[list[str]], tuple[int, str]], slug: str, number
     if not approvals:
         raise IntakeError("approval-not-found")
     approval = max(approvals)
-    # lastEditedAt covers only the body; a title rename is a separate timeline event.
-    if (edited_at is not None and edited_at > approval) or any(renamed > approval for renamed in renames):
+    # lastEditedAt covers only the body; a title rename is a separate timeline event. Timestamps have
+    # one-second resolution, so a change stamped the same second as the approval counts as after it.
+    if (edited_at is not None and edited_at >= approval) or any(renamed >= approval for renamed in renames):
         raise IntakeError("edited-after-approval")
     return {
         "title": title,
@@ -137,8 +153,8 @@ def fetch_snapshot(gh: Callable[[list[str]], tuple[int, str]], slug: str, number
             text
             for text, association, created, comment_edited_at in parsed_comments
             if association in {"OWNER", "MEMBER", "COLLABORATOR"}
-            and created <= approval
-            and (comment_edited_at is None or comment_edited_at <= approval)
+            and created < approval
+            and (comment_edited_at is None or comment_edited_at < approval)
         ],
     }
 
@@ -187,7 +203,10 @@ def run_intake_once(
     tools: T3DispatchTools,
     gh: Callable[[list[str]], tuple[int, str]],
     now: datetime,
+    clock: Callable[[], float] = time.monotonic,
+    budget_seconds: float = PASS_BUDGET_SECONDS,
 ) -> dict[str, Any]:
+    deadline = clock() + budget_seconds
     summary: dict[str, Any] = {"reason": "ok", "submitted": [], "held": [], "errors": []}
     if runtime.intake is None or not runtime.enabled or policy is None:
         summary["reason"] = "disabled"
@@ -202,6 +221,9 @@ def run_intake_once(
         return summary
     submitted = 0
     for repo_id, slug in policy.repositories:
+        if deadline - clock() < GH_TIMEOUT_SECONDS + ISSUE_WORST_SECONDS:
+            summary["reason"] = "deadline"
+            return summary
         code, stdout = gh(
             [
                 "issue",
@@ -233,6 +255,9 @@ def run_intake_once(
                 summary["reason"] = "no-headroom"
                 return summary
             if submitted == policy.max_per_pass:
+                return summary
+            if deadline - clock() < ISSUE_WORST_SECONDS:
+                summary["reason"] = "deadline"
                 return summary
             number = issue["number"]
             key = f"{repo_id}#{number}"
