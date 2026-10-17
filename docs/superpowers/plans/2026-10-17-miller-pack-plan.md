@@ -212,10 +212,10 @@ Runtime JSON shape (all keys required unless marked optional):
 
 `paths.bin.octopool` is optional. `notify_command` is optional (watch alerts are skipped when absent).
 
-- [ ] Write failing tests: a valid document parses to `Runtime` with each field; each of these raises `MillerError("invalid_config")`: unknown top-level key, missing `auth.approved_email`, relative path anywhere in `paths`, `audience` not 64 lowercase hex, `poll_seconds` 9 and 301, 17 recipients, recipient value not matching `^(agent:[a-z][a-z0-9._-]{0,62}|[0-9a-f-]{36})$`, `principal` not starting `agent:`, `callback_hosts` empty, file mode 0644 (via `load_runtime`), symlinked file. Write the document with `os.open(..., 0o600)` inside `miller_private_dir`.
-- [ ] Run, expect failures (module missing).
-- [ ] Implement `parse_runtime(payload) -> Runtime` and `load_runtime(path) -> Runtime` (reads with `brigade.grokbot_t3.runtime_config.read_owner_file(path, max_bytes=65_536)`, maps its `T3DispatchError` to `MillerError("invalid_config")`), and `validate_runtime_reference(value) -> str` (absolute path, loads it, returns it unchanged). `Runtime` is a frozen dataclass with fields named after the JSON keys, nested `AuthConfig`, `PathsConfig`, `HubConfig` dataclasses, and `__repr__` that omits `owner_authorization.text` and the token file path.
-- [ ] Run to green; ruff and mypy clean. Commit: `feat(miller): parse the owner-only runtime config`.
+- [x] Write failing tests: a valid document parses to `Runtime` with each field; each of these raises `MillerError("invalid_config")`: unknown top-level key, missing `auth.approved_email`, relative path anywhere in `paths`, `audience` not 64 lowercase hex, `poll_seconds` 9 and 301, 17 recipients, recipient value not matching `^(agent:[a-z][a-z0-9._-]{0,62}|[0-9a-f-]{36})$`, `principal` not starting `agent:`, `callback_hosts` empty, file mode 0644 (via `load_runtime`), symlinked file. Write the document with `os.open(..., 0o600)` inside `miller_private_dir`.
+- [x] Run, expect failures (module missing).
+- [x] Implement `parse_runtime(payload) -> Runtime` and `load_runtime(path) -> Runtime` (reads with `brigade.grokbot_t3.runtime_config.read_owner_file(path, max_bytes=65_536)`, maps its `T3DispatchError` to `MillerError("invalid_config")`), and `validate_runtime_reference(value) -> str` (absolute path, loads it, returns it unchanged). `Runtime` is a frozen dataclass with fields named after the JSON keys, nested `AuthConfig`, `PathsConfig`, `HubConfig` dataclasses, and `__repr__` that omits `owner_authorization.text` and the token file path.
+- [x] Run to green; ruff and mypy clean. Commit: `feat(miller): parse the owner-only runtime config`.
 
 ## Task 4: Access JWT verifier
 
