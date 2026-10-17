@@ -938,15 +938,10 @@ def fetch_status(*, hub_url: str | None = None, include_all: bool = False) -> li
     hub = hub_url or config["hub_url"]
     if not hub:
         raise FleetClientError("no fleet hub configured (~/.brigade/fleet.toml [fleet] hub_url)")
-    url = hub.rstrip("/") + ("/status?all=1" if include_all else "/status")
-    request = urllib.request.Request(url, headers={"Authorization": f"Bearer {config['token']}"})
-    try:
-        with _hub_open(request, timeout=REPORT_TIMEOUT_SECONDS) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except Exception as exc:
-        raise FleetClientError(f"fleet hub status failed: {exc}") from exc
-    runs = payload.get("runs") if isinstance(payload, dict) else None
-    return list(runs) if isinstance(runs, list) else []
+    from .fleet_client_pagination import fetch_list
+
+    path = "/status?all=1" if include_all else "/status"
+    return fetch_list(hub, config["token"], path, "runs")
 
 
 def fetch_run_preference(*, hub_url: str | None = None) -> dict[str, Any]:
@@ -1435,19 +1430,11 @@ def fetch_sessions(*, hub_url: str | None = None, include_all: bool = False) -> 
     hub = hub_url or config["hub_url"]
     if not hub:
         raise FleetClientError("no fleet hub configured (~/.brigade/fleet.toml [fleet] hub_url)")
-    url = hub.rstrip("/") + ("/sessions?all=1" if include_all else "/sessions")
-    request = urllib.request.Request(url, headers={"Authorization": f"Bearer {config['token']}"})
-    try:
-        with _hub_open(request, timeout=REPORT_TIMEOUT_SECONDS) as response:
-            limit = MAX_SESSION_HISTORY_RESPONSE_BYTES if include_all else MAX_ACTIVE_SESSIONS_RESPONSE_BYTES
-            raw = _read_bounded_response(response, limit=limit)
-            payload = json.loads(raw.decode("utf-8"))
-    except FleetClientError:
-        raise
-    except Exception as exc:
-        raise FleetClientError(f"fleet hub sessions failed: {type(exc).__name__}") from exc
-    sessions = payload.get("sessions") if isinstance(payload, dict) else None
-    return list(sessions) if isinstance(sessions, list) else []
+    from .fleet_client_pagination import fetch_list
+
+    path = "/sessions?all=1" if include_all else "/sessions"
+    limit = MAX_SESSION_HISTORY_RESPONSE_BYTES if include_all else MAX_ACTIVE_SESSIONS_RESPONSE_BYTES
+    return fetch_list(hub, config["token"], path, "sessions", response_limit=limit)
 
 
 def fetch_claims(*, hub_url: str | None = None, include_all: bool = False) -> list[dict[str, Any]]:
@@ -1456,18 +1443,10 @@ def fetch_claims(*, hub_url: str | None = None, include_all: bool = False) -> li
     hub = hub_url or config["hub_url"]
     if not hub:
         raise FleetClientError("no fleet hub configured (~/.brigade/fleet.toml [fleet] hub_url)")
-    url = hub.rstrip("/") + ("/claims?all=1" if include_all else "/claims")
-    request = urllib.request.Request(url, headers={"Authorization": f"Bearer {config['token']}"})
-    try:
-        with _hub_open(request, timeout=REPORT_TIMEOUT_SECONDS) as response:
-            payload = json.loads(response.read().decode("utf-8"))
-    except Exception as exc:
-        raise FleetClientError(f"fleet hub claims failed: {exc}") from exc
-    claims = payload.get("claims") if isinstance(payload, dict) else None
-    return list(claims) if isinstance(claims, list) else []
+    from .fleet_client_pagination import fetch_list
 
-
-# --- per-node credentials (issue #1150): admin-token control plane ----------
+    path = "/claims?all=1" if include_all else "/claims"
+    return fetch_list(hub, config["token"], path, "claims")
 
 
 def _admin_request(path: str, body: dict[str, Any] | None, *, what: str) -> dict[str, Any]:
@@ -1520,8 +1499,9 @@ def revoke_node(node_id: str) -> dict[str, Any]:
 
 def fetch_nodes() -> list[dict[str, Any]]:
     """GET /nodes from the hub (admin token); raises FleetClientError when refused or unreachable."""
-    nodes = _admin_request("/nodes", None, what="nodes").get("nodes")
-    return list(nodes) if isinstance(nodes, list) else []
+    from .fleet_client_pagination import collect_pages
+
+    return collect_pages(lambda path: _admin_request(path, None, what="nodes"), "/nodes", "nodes")
 
 
 def _claim_renew_interval(ttl_seconds: int) -> float:

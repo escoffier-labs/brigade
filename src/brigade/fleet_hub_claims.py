@@ -10,6 +10,7 @@ import sqlite3
 from typing import Any
 
 from . import fleet_hub as hub
+from . import fleet_hub_claim_cardinality
 
 # Fences are never evicted. At capacity, existing targets remain usable but
 # an unseen target must fail closed, including a missing legacy release.
@@ -213,6 +214,8 @@ def _acquire(conn: sqlite3.Connection, request: dict[str, Any], now: float) -> t
         if request["scope"] == "node" and prior[1] == node:
             error += " under another lease than the reconciled dead run's (not superseded)"
         return 409, {"granted": False, "error": error, "owner": hub._claim_payload(prior)}
+    if prior is None:
+        fleet_hub_claim_cardinality.check_new_claim(conn, node, now)
     if not retry:
         _advance(conn, target, current)
     lock = request["lock"] or {"token": None, "acquired_at": None, "run_dir": None}

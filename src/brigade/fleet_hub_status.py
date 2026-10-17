@@ -414,3 +414,42 @@ def _last_known_seat(conn: sqlite3.Connection, node_id: str, run_id: str, latest
         params,
     ).fetchone()
     return row[0] if row else latest
+
+
+def status_page(
+    conn: sqlite3.Connection,
+    *,
+    include_all: bool,
+    limit: int,
+    offset: int,
+    stale_history_after_seconds: int = STALE_HISTORY_AFTER_SECONDS,
+) -> dict[str, Any]:
+    """Bound the SQL materialization, including lookahead, before hydration.
+
+    Cursors count scanned latest rows. Filtering terminal or stale rows may
+    produce a short page with a continuation, which clients must still follow.
+    """
+    from datetime import timedelta
+
+    current = datetime.now(timezone.utc)
+    windowed = not include_all
+    args: list[Any] = []
+    if windowed:
+        cutoff = (current - timedelta(seconds=ACTIVE_EVENT_TTL_SECONDS)).isoformat()
+        args.extend((cutoff, cutoff))
+    rows = conn.execute(
+        f"{_latest_sql(received_after=windowed)} ORDER BY node_id, run_id LIMIT ? OFFSET ?",
+        (*args, limit + 1, offset),
+    ).fetchall()
+    more = len(rows) > limit
+    result = []
+    for row in rows[:limit]:
+        if not include_all and fleet_command_deck.is_terminal_state(row[5]):
+            continue
+        entry = _status_entry(
+            conn, row, now=current, age_stale=include_all, stale_history_after_seconds=stale_history_after_seconds
+        )
+        if not include_all and entry["state"] == "run.stale":
+            continue
+        result.append(entry)
+    return {"runs": result, "truncated": more, "next_cursor": str(offset + limit) if more else None}

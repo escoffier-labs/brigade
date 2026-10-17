@@ -707,3 +707,50 @@ Hub-arbitrated repo claims (`POST /claims`, `GET /claims`,
   intent that keeps honest clients from stealing each other's claims, not
   an authorization — any enrolled node may still `--force`, attributed to
   its own `node_id`.
+
+### Hub request and result bounds
+
+The Hub checks declared request length before reading or parsing a JSON body.
+Bodies above 8 MiB return HTTP 413. Missing, ambiguous, or invalid body framing
+returns HTTP 400. Worklore retains its smaller 256 KiB body limit and 1 MiB import
+limit. Dashboard enrollment retains its 16 KiB body limit.
+
+Every JSON object or array accepts at most 1000 items. JSON nesting accepts at
+most 32 containers, counting the root container. Structural violations return
+HTTP 400 before domain ingestion starts. An invalid item rejects the entire
+event batch. Existing event string bounds still apply.
+
+Each node may hold at most 1024 active claims. A new acquisition beyond that
+limit returns HTTP 429 with `code=claim_cardinality_exceeded`. Existing claims
+remain held. Retry, renewal, release, and replacement of an existing target stay
+available. The quota check shares the acquisition write transaction. Expired
+claims do not consume the active quota.
+
+`GET /status`, `/claims`, `/nodes`, and `/sessions` accept `limit` from 1 through
+200. `cursor` is a decimal offset from the preceding response's `next_cursor`.
+The maximum offset is 1000000. Preserve `all=1` on each request when reading
+history. Responses retain their existing `runs`, `claims`, `nodes`, or `sessions`
+array. A response with more rows includes `truncated: true` and `next_cursor`.
+Requests with an explicit limit or cursor also include `truncated: false` and
+`next_cursor: null` on the last page. Small default responses retain their
+previous shape.
+
+Follow a continuation even when its array is empty. Status cursors count scanned
+latest rows before terminal-state filtering. Fleet client list functions collect
+all pages and reject missing, invalid, repeated, or excessive continuations.
+Pages are live views. Concurrent inserts or removals can shift offsets, so they
+do not provide a stable historical snapshot.
+
+Other GET projections hydrate at most 1000 rows per SQL cursor. This includes
+ancillary dashboard reads, cloud status, policy status, inventory, and model
+rosters. The Machines board streams run rows under its existing per-node and
+2000-run page caps. Its streaming queries count at most 1000 distinct node
+identities instead of individual run rows. A projection requiring more rows returns HTTP 413 with
+`code=result_limit_exceeded` and `truncated: true`. Caught HTML failures carry
+`X-Brigade-Truncated: true` instead of a JSON body. The Hub refuses the whole
+projection because partial occupancy counts or a signed partial roster could
+mislead consumers. This bound limits materialized rows. It does not bound the
+SQLite work required to sort or aggregate the underlying table.
+
+Retention, POST throttling, per-node fairness behind a proxy, and the fronting
+proxy runbook are deferred to the 0.29.0 follow-up.
