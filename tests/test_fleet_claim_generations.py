@@ -187,6 +187,37 @@ def test_status_exposes_retired_history_budget(http_authority):
         client.close()
 
 
+@pytest.mark.parametrize("damage", ["orphaned", "invalid-generation", "missing-table"])
+def test_status_refuses_corrupt_retirement_storage(http_authority, damage):
+    conn, _, address = http_authority
+    request(conn, "release")
+    if damage == "orphaned":
+        conn.execute("DELETE FROM claim_fences")
+    elif damage == "invalid-generation":
+        conn.execute("PRAGMA ignore_check_constraints=ON")
+        conn.execute("UPDATE claim_retired_holders SET generation = -1")
+    else:
+        conn.execute("DROP TABLE claim_retired_holders")
+    conn.commit()
+    client = HTTPConnection(*address, timeout=5)
+    try:
+        client.request("GET", "/status", headers={"Authorization": "Bearer fake-admin-token"})
+        response = client.getresponse()
+        payload = json.loads(response.read())
+        assert response.status == 503
+        assert payload == {
+            "error": (
+                "claim retired-holder fence storage is missing or corrupt"
+                if damage == "missing-table"
+                else "claim retired-holder fence is missing or corrupt"
+            ),
+            "reason": "claim-fence-refused",
+            "owner": {},
+        }
+    finally:
+        client.close()
+
+
 def test_fence_refusal_never_admits_local_only_work(http_authority, monkeypatch):
     conn, _, address = http_authority
     conn.execute("DROP TABLE claim_fences")

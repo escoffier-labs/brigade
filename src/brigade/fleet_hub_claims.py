@@ -362,6 +362,7 @@ class _RetirementBudget:
 
 
 def status(conn: sqlite3.Connection) -> dict[str, Any]:
+    _validate_retired(conn)
     return {
         "retired_holder_rows": conn.execute("SELECT COUNT(*) FROM claim_retired_holders").fetchone()[0],
         "retired_holder_horizon_seconds": RETIRED_HOLDER_HORIZON_SECONDS,
