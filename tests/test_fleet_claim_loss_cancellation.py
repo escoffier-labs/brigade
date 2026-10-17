@@ -21,6 +21,34 @@ from tests._posix import requires_process_groups
 from tests.test_fleet_claims import NODE_A, NODE_B, _plant_home_identity
 
 
+def _mock_claim_loss(monkeypatch, pid_file, lost, loss_time):
+    def post(_hub, _token, body, *, timeout):
+        if body["action"] == "acquire":
+            return 200, {"granted": True, "claim": {"target": body["target"], "owner_node": NODE_A}}
+        if body["action"] == "release":
+            return 200, {"released": True}
+        deadline = time.monotonic() + 10
+        while not pid_file.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        if not pid_file.exists():
+            return 200, {"granted": True}
+        return 409, {"granted": False, "error": "held", "owner": {"owner_node": NODE_B, "expires_at": "soon"}}
+
+    renew = fleet_client.renew_claim
+
+    def observed_renewal(*args, **kwargs):
+        outcome = renew(*args, **kwargs)
+        # Only the heartbeat's consumed decision may start the cancellation clock.
+        # Abandoned HTTP threads can finish later without revoking ownership.
+        if outcome.reason == "held":
+            loss_time.append(time.monotonic())
+            lost.set()
+        return outcome
+
+    monkeypatch.setattr(fleet_client, "renew_claim", observed_renewal)
+    monkeypatch.setattr(fleet_client, "_post_claim_blocking", post)
+
+
 @requires_process_groups
 @pytest.mark.parametrize("transport", ["local", "t3"])
 def test_claim_loss_stops_silent_worker_without_main_interrupt(tmp_path: Path, monkeypatch, transport):
@@ -67,20 +95,6 @@ def _exercise_blocked_child(tmp_path: Path, monkeypatch, transport):
     lost = threading.Event()
     finished = threading.Event()
     loss_time = []
-
-    def post(_hub, _token, body, *, timeout):
-        if body["action"] == "acquire":
-            return 200, {"granted": True, "claim": {"target": body["target"], "owner_node": NODE_A}}
-        if body["action"] == "release":
-            return 200, {"released": True}
-        deadline = time.monotonic() + 10
-        while not pid_file.exists() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        if not pid_file.exists():
-            return 200, {"granted": True}
-        loss_time.append(time.monotonic())
-        lost.set()
-        return 409, {"granted": False, "error": "held", "owner": {"owner_node": NODE_B, "expires_at": "soon"}}
 
     def kill_worker():
         if pid_file.exists():
@@ -130,7 +144,7 @@ def _exercise_blocked_child(tmp_path: Path, monkeypatch, transport):
         )
         return build(**kwargs)
 
-    monkeypatch.setattr(fleet_client, "_post_claim_blocking", post)
+    _mock_claim_loss(monkeypatch, pid_file, lost, loss_time)
     monkeypatch.setattr(agents, "run_agent", run_agent)
     monkeypatch.setattr(t3, "build_source_transport", source_transport)
     monkeypatch.setattr(t3, "immutable_source_revision", lambda cwd, **kwargs: REVISION)
@@ -188,3 +202,35 @@ def test_claim_loss_before_dispatch_does_not_start_worker(tmp_path, monkeypatch)
     assert dispatched == []
     receipt = json.loads(next((ws / ".brigade" / "runs").glob("*/run.json")).read_text())
     assert receipt["failure"]["kind"] == "fleet-claim-lost"
+
+
+def test_mock_claim_loss_ignores_abandoned_renewal(tmp_path, monkeypatch):
+    pid_file = tmp_path / "worker.pid"
+    lost = threading.Event()
+    loss_time = []
+    _mock_claim_loss(monkeypatch, pid_file, lost, loss_time)
+    post = fleet_client._post_claim_blocking
+    completed = threading.Event()
+
+    def tracked_post(*args, **kwargs):
+        try:
+            return post(*args, **kwargs)
+        finally:
+            completed.set()
+
+    monkeypatch.setattr(fleet_client, "_post_claim_blocking", tracked_post)
+    monkeypatch.setattr(fleet_client, "CLAIM_TIMEOUT_SECONDS", 0.05)
+    kwargs = dict(holder="test-holder", node_id=NODE_A, hub_url="http://hub.example.test", token="test-token")
+    outcome = fleet_client.renew_claim("test-target", **kwargs)
+    assert outcome.reason == "hub-unavailable"
+    assert not completed.is_set(), "the renewal must expire before worker startup"
+    pid_file.touch()
+    assert completed.wait(2), "the abandoned request must finish before checking loss"
+    assert not lost.is_set(), "an abandoned response must not publish claim loss"
+    assert loss_time == []
+
+    monkeypatch.setattr(fleet_client, "CLAIM_TIMEOUT_SECONDS", 2.5)
+    outcome = fleet_client.renew_claim("test-target", **kwargs)
+    assert outcome.reason == "held"
+    assert lost.is_set()
+    assert len(loss_time) == 1
