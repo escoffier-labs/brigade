@@ -187,3 +187,75 @@ systemctl --user stop brigade-grokbot-t3-dispatch.service cloudflared-grokbot-t3
 ## Security
 
 The owner accepted free-form dispatch: an outside bot writes prompts that run with `full-access` on owner machines. The controls are the repository, host, and seat allowlists; `max_open` and `daily_limit`; the kill switch; Access service token plus origin bearer; Host and Origin allowlisting; the ledger restricting steering to the pack's own requests; and a prompt hash audit trail. Prompts never reach logs, the ledger, wake bodies, or the Fleet Hub.
+
+## Issue intake
+
+The optional top-level `intake` object enables a one-shot pass that submits open
+GitHub issues carrying an approval label. Omitting it disables intake. All other
+runtime keys stay required, and unknown keys are rejected. For example, add this
+object to the runtime JSON:
+
+```json
+"intake": {
+  "label": "grokbot-build-approved",
+  "queued_label": "grokbot-build-queued",
+  "repositories": ["example-repo"],
+  "caller": "Builder",
+  "gh_bin": "/usr/bin/gh",
+  "max_per_pass": 1,
+  "headroom": 2
+}
+```
+
+Each listed repository must already appear in the runtime's `repositories` map
+with an HTTPS GitHub remote such as `https://github.com/example/example-repo.git`.
+Repository ids must be unique. Both labels must be different, begin with a
+letter or digit, contain only letters, digits, `.`, `_`, `:`, or `-`, and be at
+most 50 characters. `caller` follows the existing caller rules. `gh_bin` must
+be absolute. `max_per_pass` accepts 1 through 5, and `headroom` accepts 0 through
+`max_open - 1`.
+
+Run a pass or write its systemd user units:
+
+```bash
+python -m brigade.grokbot_t3 intake --target <queue-workspace>
+python -m brigade.grokbot_t3 install-intake --target <queue-workspace> --out-dir <unit-directory>
+systemctl --user daemon-reload
+systemctl --user enable --now brigade-grokbot-t3-intake.timer
+```
+
+Create both labels in each repository and authenticate `gh` as the service user
+with permission to list issues and edit their labels. The timer starts five
+minutes after boot and runs every fifteen minutes. Its oneshot service has a
+300-second timeout and the listener's filesystem hardening. Installation writes
+`brigade-grokbot-t3-intake.service` and `.timer`; use `--force` to replace changed
+units.
+
+Intake uses no Grok calls. It lists at most 50 labeled open issues per repository,
+processes repositories in configured order and issues by ascending number, and
+submits at most `max_per_pass`. It skips the pass when fewer than `headroom + 1`
+open slots remain. The existing dispatch limits and default/fallback seat rules
+still apply. One `t3-seat:<seat>` label selects an allowlisted seat. Multiple seat
+labels or an unknown seat produce `bad-seat-label` without submitting.
+
+The worker prompt contains only the repository, issue number, and default
+branch. The worker reads the issue and comments itself, implements and tests the
+change, and opens a pull request without merging. Issue titles, bodies, and
+comments never enter intake's prompt, ledger, or summary. The existing wake
+watcher reports the thread result to `caller`.
+
+After a successful submit, intake removes the approval label and adds the queued
+label. A failed label swap leaves a persistent claim, shown as `held` on later
+passes, to prevent another launch. An uncertain submit also retains its claim
+and stops the pass. Claims do not expire. Before clearing one, an operator must
+inspect the request and issue labels, then call `Ledger.release_intake` with its
+`<repository-id>#<number>` key. Clearing an unresolved claim can launch the same
+issue again. Definite submit errors release the claim; capacity, daily-limit,
+unavailable, and disabled errors stop the pass.
+
+The command prints a JSON summary with `reason`, `submitted`, `held`, and
+`errors`. GitHub failures report stable codes without command output. A failed
+label swap adds `"label_swap": "failed"` to the submitted record. Exit status is
+1 when `errors` is nonempty and 0 otherwise, including held claims and failed
+label swaps. Invalid configuration exits 2. Setting `enabled` to false also
+disables intake.
