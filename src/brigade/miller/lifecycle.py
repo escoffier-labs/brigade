@@ -65,11 +65,10 @@ class _MillerGate:
             origins = [v.decode("ascii") for k, v in headers if k.lower() == b"origin"]
             if len(hosts) != 1 or len(origins) > 1 or not _valid_host(hosts[0]):
                 return False
-            host = urlsplit("//" + hosts[0]).hostname
-            allowed = {urlsplit("//" + entry.casefold()).hostname for entry in self.config.allowed_hosts}
+            allowed = {entry.casefold() for entry in self.config.allowed_hosts}
             if grokbot_mcp._is_loopback(self.config.bind_host):
-                allowed.update({"localhost", "127.0.0.1", "::1"})
-            return bool(host and host in allowed and (not origins or origins[0] in self.config.allowed_origins))
+                allowed.update({f"localhost:{self.config.bind_port}", f"127.0.0.1:{self.config.bind_port}"})
+            return hosts[0] in allowed and (not origins or origins[0] in self.config.allowed_origins)
         except Exception:
             return False
 
@@ -198,7 +197,12 @@ def _server(config: MillerListenerConfig, tools: MillerTools) -> Any:
 
 
 def build_app(
-    config: MillerListenerConfig, tools: MillerTools, service: EventService, verifier: AccessVerifier
+    config: MillerListenerConfig,
+    tools: MillerTools,
+    service: EventService,
+    verifier: AccessVerifier,
+    *,
+    events_enabled: bool = True,
 ) -> Callable[..., Any]:
     _, _, _, TransportSecuritySettings = grokbot_mcp._load_mcp()
     c.require(verifier.validated is True, "authentication_inactive")
@@ -216,7 +220,9 @@ def build_app(
             allowed_hosts=allowed, allowed_origins=list(config.allowed_origins)
         ),
     )
-    return _MillerGate(EventsApp(app, service), config, verifier, getattr(tools, "record_call", None))
+    return _MillerGate(
+        EventsApp(app, service, enabled=events_enabled), config, verifier, getattr(tools, "record_call", None)
+    )
 
 
 def _valid_host(value: object) -> bool:
@@ -286,7 +292,7 @@ def run_listener(config: MillerListenerConfig, tools: MillerTools, runtime: Runt
             hub_poll_seconds=runtime.hub.poll_seconds,
             callback_hosts=frozenset(runtime.callback_hosts),
         )
-        app = build_app(config, tools, service, AccessVerifier(runtime.auth))
+        app = build_app(config, tools, service, AccessVerifier(runtime.auth), events_enabled=runtime.events_enabled)
         uvicorn.run(
             app,
             host=config.bind_host,
@@ -349,6 +355,8 @@ def doctor(target: Path) -> list[dict[str, str]]:
     except Exception:
         return checks + [{"check": "config", "status": "fail"}]
 
+    checks.append({"check": "writable-paths", "status": "ok" if runtime.writable_paths else "warn"})
+
     def state_check() -> None:
         with BridgeState(runtime.paths.state_dir):
             pass
@@ -400,8 +408,8 @@ def canary(target: Path) -> dict[str, Any]:
 
 
 def _hardening(runtime: Runtime) -> str:
-    paths = [runtime.paths.state_dir, runtime.paths.workspace / ".codex" / "memory-handoffs"]
-    writable = " ".join(grokbot_ops._systemd_quote(str(p)) for p in paths)
+    paths = [runtime.paths.state_dir, runtime.paths.workspace / ".codex" / "memory-handoffs", *runtime.writable_paths]
+    writable = " ".join(grokbot_ops._systemd_quote(str(p)) for p in dict.fromkeys(paths))
     return (
         "NoNewPrivileges=yes\nPrivateTmp=yes\nProtectSystem=strict\nProtectHome=read-only\n"
         f"UMask=0077\nReadWritePaths={writable}\n"

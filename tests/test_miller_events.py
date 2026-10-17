@@ -463,3 +463,59 @@ def test_gone_subscription_and_thirty_day_pruning(miller_private_dir):
                 assert c.execute("SELECT count(*) FROM event_deliveries").fetchone()[0] == 0
 
     asyncio.run(scenario())
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_events_switch_controls_rpc_capabilities_and_workers(miller_private_dir, enabled):
+    from unittest.mock import AsyncMock
+    from brigade.miller.events import EventsApp
+
+    async def scenario():
+        service = AsyncMock()
+        passed = []
+
+        async def inner(scope, receive, send):
+            message = await receive()
+            passed.append((scope, message))
+            if scope["type"] == "lifespan":
+                await send({"type": "lifespan.startup.complete"})
+                await asyncio.sleep(0)
+                await send({"type": "lifespan.shutdown.complete"})
+            else:
+                method = json.loads(message["body"])["method"]
+                reply = (
+                    {"result": {"capabilities": {"tools": {}}}}
+                    if method == "initialize"
+                    else {"error": {"code": -32601}}
+                )
+                await send({"type": "http.response.start", "status": 200, "headers": []})
+                await send({"type": "http.response.body", "body": json.dumps(reply).encode()})
+
+        app = EventsApp(inner, service, enabled=enabled)
+        send = AsyncMock()
+        receive = AsyncMock(return_value={"type": "lifespan.startup"})
+        await app({"type": "lifespan"}, receive, send)
+        assert service.run.call_count == int(enabled)
+        for method in ("initialize", "server/discover", "events/list", "events/subscribe", "events/unsubscribe"):
+            passed.clear()
+            send.reset_mock()
+            message = {
+                "type": "http.request",
+                "body": json.dumps({"jsonrpc": "2.0", "id": 1, "method": method}).encode(),
+            }
+            receive = AsyncMock(return_value=message)
+            service.rpc.return_value = {"events": []}
+            await app({"type": "http", "headers": []}, receive, send)
+            response = json.loads(send.call_args_list[-1].args[0]["body"])
+            if method == "initialize":
+                assert ("events" in response["result"]["capabilities"]) is enabled
+            elif enabled:
+                assert "result" in response
+                assert passed == []
+            else:
+                assert response == {"error": {"code": -32601}}
+            if not enabled:
+                assert passed == [({"type": "http", "headers": []}, message)]
+        assert service.rpc.call_count == (3 if enabled else 0)
+
+    asyncio.run(scenario())

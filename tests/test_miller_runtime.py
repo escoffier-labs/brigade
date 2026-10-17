@@ -187,3 +187,76 @@ def test_runtime_repr_redacts_authorization_text_and_token_path() -> None:
 
     assert "Owner approved Miller automation." not in repr(runtime)
     assert "/srv/miller/secrets/message-token" not in repr(runtime)
+
+
+@pytest.mark.parametrize("paths", [[], ["/srv/fleet", "/srv/ssh"], [f"/srv/write-{i}" for i in range(8)]])
+def test_writable_paths_are_optional_absolute_paths(paths):
+    data = _document()
+    assert parse_runtime(data).writable_paths == ()
+    data["writable_paths"] = paths
+    assert parse_runtime(data).writable_paths == tuple(Path(item) for item in paths)
+
+
+@pytest.mark.parametrize("paths", [None, "path", ["relative"], ["/srv/write"] * 9])
+def test_invalid_writable_paths_are_refused(paths):
+    data = _document()
+    data["writable_paths"] = paths
+    with pytest.raises(MillerError, match="^invalid_config$"):
+        parse_runtime(data)
+
+
+@pytest.mark.parametrize(
+    "issuer", ["https://other.example.test", "https://team.example.test/", "https://team.example.test:443"]
+)
+def test_issuer_must_equal_team_domain_origin(issuer):
+    data = _document()
+    data["auth"]["issuer"] = issuer
+    with pytest.raises(MillerError, match="^invalid_config$"):
+        parse_runtime(data)
+
+
+@pytest.mark.parametrize("version", ["a" * 65, "has\nnewline", "é", "\x7f"])
+def test_authorization_version_is_bounded_printable_ascii(version):
+    data = _document()
+    data["owner_authorization"]["version"] = version
+    with pytest.raises(MillerError, match="^invalid_config$"):
+        parse_runtime(data)
+
+
+def test_authorization_text_uses_bridge_byte_limit():
+    data = _document()
+    data["owner_authorization"] = {"version": "v" * 64, "text": "é" * 2048}
+    assert parse_runtime(data).owner_authorization.text == "é" * 2048
+    data["owner_authorization"]["text"] += "é"
+    with pytest.raises(MillerError, match="^invalid_config$"):
+        parse_runtime(data)
+
+
+@pytest.mark.parametrize("unsafe", ["read-only", "executable", "hardlink", "parent", "ancestor", "symlink-parent"])
+def test_runtime_requires_exact_private_file_and_directory_walk(miller_private_dir, unsafe):
+    root = miller_private_dir.parent
+    parent = root / "config"
+    parent.mkdir(mode=0o700)
+    path = parent / "runtime.json"
+    _write_private(path, json.dumps(_document()).encode())
+    assert load_runtime(path) == parse_runtime(_document())
+    if unsafe == "read-only":
+        path.chmod(0o400)
+    elif unsafe == "executable":
+        path.chmod(0o700)
+    elif unsafe == "hardlink":
+        os.link(path, parent / "alias.json")
+    elif unsafe == "parent":
+        parent.chmod(0o750)
+    elif unsafe == "ancestor":
+        root.chmod(0o770)
+    else:
+        link = root / "alias"
+        link.symlink_to(parent, target_is_directory=True)
+        path = link / path.name
+    try:
+        with pytest.raises(MillerError, match="^invalid_config$"):
+            load_runtime(path)
+    finally:
+        root.chmod(0o700)
+        parent.chmod(0o700)

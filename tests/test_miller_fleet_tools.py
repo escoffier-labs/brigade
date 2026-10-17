@@ -9,10 +9,9 @@ from unittest.mock import patch
 
 import pytest
 
-from brigade.grokbot_t3.fleet import FleetRunner
 from brigade.miller.contracts import MAX_PROMPT_BYTES, MillerError
 from brigade.miller.events import EventService
-from brigade.miller.fleet_tools import FleetTools, load_fleet_config
+from brigade.miller.fleet_tools import FleetTools, _MillerFleetRunner, load_fleet_config
 from brigade.miller.process import CommandResult, CommandRunner
 from brigade.miller.runtime_config import parse_runtime
 from brigade.miller.state import BridgeState
@@ -78,7 +77,7 @@ def fleet(miller_private_dir):
         tools = FleetTools(
             runtime,
             state,
-            runner=FleetRunner(runtime.paths.bin.t3_fleet, runtime.paths.bin.git, run=run),
+            runner=_MillerFleetRunner(runtime.paths.bin.t3_fleet, runtime.paths.bin.git, run=run),
             commands=commands,
             clock=lambda: NOW,
         )
@@ -301,18 +300,32 @@ def test_error_envelope_and_journal_code(fleet):
         {
             "schema": "t3-fleet.error.v1",
             "request_id": REQUEST,
-            "error": {"code": "policy_rejected", "reason": "admission-required", "message": "private"},
+            "error": {
+                "code": "policy_rejected",
+                "reason": "admission-required",
+                "message": "private",
+                "detail": {"retry": False},
+            },
         }
     )
     result = tools.fleet_followup(REQUEST, "go")
-    assert result["fleet"] == {"code": "policy_rejected", "reason": "admission-required"}
-    assert result["request_id"] == REQUEST and result["error"] == "fleet_error"
-    assert "exit_code" not in result
+    assert result == {
+        "error": "fleet_error",
+        "fleet": {
+            "code": "policy_rejected",
+            "reason": "admission-required",
+            "message": "private",
+            "detail": {"retry": False},
+        },
+        "request_id": REQUEST,
+        "exit_code": 3,
+        "operation_id": 1,
+    }
     recent = tools.fleet_recent()["operations"][0]
     assert recent["outcome"] == "fleet_error:policy_rejected"
-    assert recent["summary"]["error_message"] == "policy_rejected"
+    assert recent["summary"]["error_message"] == "private"
     run.output = json.dumps({"schema": "t3-fleet.error.v1", "error": {"code": "target_busy"}})
-    assert tools.fleet_status(REQUEST) == {"error": "fleet_error", "fleet": {"code": "target_busy"}}
+    assert tools.fleet_status(REQUEST) == {"error": "fleet_error", "fleet": {"code": "target_busy"}, "exit_code": 3}
 
 
 @pytest.mark.parametrize(
@@ -436,9 +449,9 @@ def test_poller_reconciles_every_twenty_and_flushes_after_outage(fleet):
     assert (sync.call_count, reconcile.call_count, flush.call_count) == (20, 1, 20)
 
 
-def test_journal_error_code_keeps_bridge_bound(fleet):
+def test_journal_error_message_keeps_bridge_bound(fleet):
     tools, run, _ = fleet
-    code = "a" * 400
-    run.output = json.dumps({"schema": "t3-fleet.error.v1", "error": {"code": code}})
+    message = "a" * 400
+    run.output = json.dumps({"schema": "t3-fleet.error.v1", "error": {"code": "failed", "message": message}})
     tools.fleet_interrupt(REQUEST)
-    assert tools.fleet_recent()["operations"][0]["summary"]["error_message"] == code[:300]
+    assert tools.fleet_recent()["operations"][0]["summary"]["error_message"] == message[:300]

@@ -4,13 +4,25 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import os
+import json
+import subprocess
 from pathlib import Path
 import re
 import stat
 import tomllib
 from typing import Any, cast
 
-from brigade.grokbot_t3.fleet import FleetCallError, FleetProtocolError, FleetRunner, FleetTimeout
+from brigade.grokbot_t3.fleet import (
+    ERROR_SCHEMA,
+    MAX_OUTPUT_BYTES,
+    REQUEST_SCHEMA,
+    RESULT_SCHEMA,
+    FleetCallError,
+    FleetProtocolError,
+    FleetRunner,
+    FleetTimeout,
+    child_env,
+)
 
 from .contracts import MAX_PROMPT_BYTES, MillerError, require
 from .process import CommandRunner, child_environment, child_path
@@ -24,6 +36,60 @@ FLEET_CONTROL_TIMEOUT = 120
 FLEET_READ_TIMEOUT = 60
 FLEET_DOCTOR_TIMEOUT = 90
 GIT_TIMEOUT = 20
+
+
+class _FleetErrorResult(FleetCallError):
+    def __init__(self, error: dict[str, Any], exit_code: int, request_id: str | None):
+        code = error.get("code")
+        super().__init__(code if isinstance(code, str) else "internal_error", request_id=request_id)
+        self.error, self.exit_code = error, exit_code
+
+
+class _MillerFleetRunner(FleetRunner):
+    """Preserve Miller's error envelope without changing the shared dispatch runner."""
+
+    def call(self, action: str, payload: dict[str, Any], *, timeout: float) -> dict[str, Any]:
+        body = json.dumps({"schema": REQUEST_SCHEMA, "action": action, **payload}, separators=(",", ":"))
+        try:
+            proc = self._run(
+                [self.t3_fleet_bin, action],
+                input=body,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=child_env(),
+                check=False,
+            )
+        except subprocess.TimeoutExpired as exc:
+            raise FleetTimeout(action) from exc
+        except OSError as exc:
+            raise FleetCallError("internal_error") from exc
+        except UnicodeDecodeError as exc:
+            # Undecodable output may follow an accepted submit, so it is in doubt like any malformed result.
+            raise FleetProtocolError("internal_error") from exc
+        output = proc.stdout or proc.stderr or ""
+        if len(output.encode("utf-8")) > MAX_OUTPUT_BYTES:
+            raise FleetProtocolError("internal_error")
+        try:
+            result = json.loads(output)
+        except json.JSONDecodeError as exc:
+            raise FleetProtocolError("internal_error") from exc
+        if not isinstance(result, dict):
+            raise FleetProtocolError("internal_error")
+        if result.get("schema") == ERROR_SCHEMA:
+            raw_error = result.get("error")
+            error: dict[str, Any] = raw_error if isinstance(raw_error, dict) else {}
+            request_id = result.get("request_id")
+            raise _FleetErrorResult(error, proc.returncode, request_id if isinstance(request_id, str) else None)
+        if result.get("schema") != RESULT_SCHEMA or proc.returncode != 0:
+            request_id = result.get("request_id") if result.get("schema") == RESULT_SCHEMA else None
+            raise FleetProtocolError("internal_error", None, request_id if isinstance(request_id, str) else None)
+        nested = result.get("result")
+        if isinstance(nested, dict):
+            flattened = {key: value for key, value in result.items() if key != "result"}
+            flattened.update(nested)
+            return flattened
+        return result
 
 
 @dataclass(frozen=True)
@@ -107,7 +173,7 @@ class FleetTools:
         self.runner = (
             runner
             if runner is not None
-            else FleetRunner(runtime.paths.bin.t3_fleet, runtime.paths.bin.git, runtime_mode="full-access")
+            else _MillerFleetRunner(runtime.paths.bin.t3_fleet, runtime.paths.bin.git, runtime_mode="full-access")
         )
         self.commands = commands if commands is not None else CommandRunner()
         self.environment = child_environment(child_path(runtime.paths.bin))
@@ -124,11 +190,16 @@ class FleetTools:
             return {"error": "fleet_timeout"}
         except FleetProtocolError:
             return {"error": "fleet_unavailable"}
+        except _FleetErrorResult as error:
+            result: dict[str, Any] = {"error": "fleet_error", "fleet": error.error, "exit_code": error.exit_code}
+            if error.request_id is not None:
+                result["request_id"] = error.request_id
+            return result
         except FleetCallError as error:
             fleet = {"code": error.code}
             if error.reason is not None:
                 fleet["reason"] = error.reason
-            result: dict[str, Any] = {"error": "fleet_error", "fleet": fleet}
+            result = {"error": "fleet_error", "fleet": fleet}
             if error.request_id is not None:
                 result["request_id"] = error.request_id
             return result
@@ -283,8 +354,8 @@ class FleetTools:
     @staticmethod
     def _error_message(result: dict[str, Any]) -> str | None:
         fleet = result.get("fleet") if result.get("error") == "fleet_error" else None
-        code = fleet.get("code") if isinstance(fleet, dict) else None
-        return redact_credentials(code)[:300] if isinstance(code, str) and code else None
+        message = fleet.get("message") if isinstance(fleet, dict) else None
+        return redact_credentials(message)[:300] if isinstance(message, str) and message else None
 
     @staticmethod
     def _outcome(result: dict[str, Any]) -> str:

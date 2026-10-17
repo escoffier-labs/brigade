@@ -252,12 +252,20 @@ class DispatchGateChecks(Fixture):
         self.assertEqual(self.runner.calls, [])
         self.assertEqual(self.state.operations(50), [])
 
+    def test_followup_refusal_logs_argument_request_id(self):
+        with self.assertRaisesRegex(MillerError, "^dispatch_disabled$"):
+            self.call("fleet_followup", request_id=REQUEST, message="follow up")
+        with self.state.transaction() as connection:
+            row = connection.execute("SELECT * FROM call_log ORDER BY id DESC LIMIT 1").fetchone()
+        self.assertEqual(row["request_id"], REQUEST)
+        self.assertEqual(row["error_code"], "dispatch_disabled")
+
     def test_read_tools_still_work_when_dispatch_disabled(self):
         self.assertTrue(self.call("fleet_status", request_id=REQUEST)["ok"])
         capabilities = self.call("dot_t3_capabilities")
         self.assertFalse(capabilities["dispatch_enabled"])
         self.assertEqual(set(capabilities["tools"]), set(TOOLS))
-        self.assertIn("dot-notify --from", capabilities["inbox"]["usage"])
+        self.assertIn("python -m brigade.miller notify --from", capabilities["inbox"]["usage"])
 
 
 class AdapterIntegration(Fixture):

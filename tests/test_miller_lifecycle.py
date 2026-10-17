@@ -131,6 +131,11 @@ def test_only_two_routes_admitted(path, method, extra):
     "headers",
     [
         [(b"host", b"foreign.invalid")],
+        [(b"host", b"miller.example.test:443")],
+        [(b"host", b"localhost:9999")],
+        [(b"host", b"127.0.0.1:9999")],
+        [(b"host", b"localhost")],
+        [(b"host", b"127.0.0.1")],
         [(b"host", b"user@miller.example.test")],
         [(b"host", b"miller.example.test/path")],
         [(b"host", b"miller.example.test"), (b"origin", b"https://foreign.invalid")],
@@ -379,8 +384,12 @@ def test_canary_checks_anonymous_401_metadata_and_registry(configured):
         assert m.canary(target)["reason"] == "inventory-mismatch"
 
 
-def test_run_listener_exact_settings_and_state_cleanup(configured):
+@pytest.mark.parametrize("enabled", [False, True])
+def test_run_listener_exact_settings_and_state_cleanup(configured, enabled):
     target, runtime, _ = configured
+    from dataclasses import replace
+
+    runtime = replace(runtime, events_enabled=enabled)
     cfg, tools, _ = m.build_listener_from_target(target)
     with patch("uvicorn.run") as run, patch.object(m, "build_app", return_value="app") as build:
         m.run_listener(cfg, tools, runtime)
@@ -400,7 +409,8 @@ def test_run_listener_exact_settings_and_state_cleanup(configured):
             limit_concurrency=16,
             h11_max_incomplete_event_size=32768,
         )
-        assert build.call_args.args[2].hub is None
+        assert build.call_args.kwargs["events_enabled"] is enabled
+        assert (build.call_args.args[2].hub is not None) is enabled
     with BridgeState(runtime.paths.state_dir) as state:
         assert state.hub_get("inbox_backend") == "hub"
 
@@ -416,13 +426,15 @@ def test_doctor_all_checks_and_failures(configured):
     assert [c["check"] for c in checks] == [
         "dependency",
         "config",
+        "writable-paths",
         "state",
         "access-config",
         "hub-token",
         "t3-fleet",
         "endpoint",
     ]
-    assert all(c["status"] == "ok" for c in checks)
+    assert {c["check"]: c["status"] for c in checks}["writable-paths"] == "warn"
+    assert all(c["status"] == "ok" for c in checks if c["check"] != "writable-paths")
     with (
         patch("brigade.fleet_client_message_credentials.read_message_token_file", side_effect=ValueError("private")),
         patch("brigade.miller.fleet_tools.FleetTools.fleet_capacity", return_value={"error": "fleet_error"}),
@@ -465,3 +477,84 @@ def test_call_log_failure_and_tool_errors_are_safe(miller_private_dir):
 
         with patch.object(state, "log_call", side_effect=MillerError("unsafe_state")):
             asyncio.run(scenario())
+
+
+def test_units_quote_and_deduplicate_writable_paths(configured):
+    target, runtime, instance = configured
+    path = Path(json.loads(instance.read_text())["runtime_path"])
+    data = json.loads(path.read_text())
+    data["writable_paths"] = [str(runtime.paths.state_dir), "/srv/fleet state", "/srv/ssh", "/srv/brigade", "/srv/ssh"]
+    path.write_text(json.dumps(data))
+    expected = "ReadWritePaths=" + " ".join(
+        m.grokbot_ops._systemd_quote(str(p))
+        for p in [
+            runtime.paths.state_dir,
+            runtime.paths.workspace / ".codex/memory-handoffs",
+            "/srv/fleet state",
+            "/srv/ssh",
+            "/srv/brigade",
+        ]
+    )
+    for text in (m.render_unit(target), m.render_watch_units(target)[0]):
+        assert expected in text.splitlines()
+        assert "ProtectSystem=strict" in text and "ProtectHome=read-only" in text
+    assert next(c for c in m.doctor(target) if c["check"] == "writable-paths")["status"] == "ok"
+
+
+@pytest.mark.parametrize(
+    "code,phrase",
+    [
+        ("recipient_not_permitted", "send grants"),
+        ("recipient_quota", "quota"),
+        ("hub_credential_invalid", "local setup fault"),
+        ("client_id_conflict", "different content"),
+        (None, None),
+    ],
+)
+def test_invoke_preserves_retry_guidance_and_crash_code(miller_private_dir, code, phrase):
+    from unittest.mock import Mock
+
+    tools = SimpleNamespace(call=Mock(side_effect=MillerError(code) if code else RuntimeError("private diagnostic")))
+    with BridgeState(miller_private_dir) as state:
+        app = m.build_app(config(), tools, event_service(state), verifier())
+
+        async def scenario():
+            async with app.app.router.lifespan_context(app.app):
+                _, _, body = await request(
+                    app,
+                    dict(
+                        jsonrpc="2.0",
+                        id=1,
+                        method="tools/call",
+                        params={"name": "inbox_reply", "arguments": {"msg_id": 1, "body": "reply"}},
+                    ),
+                )
+                return json.loads(body["result"]["content"][0]["text"])
+
+        result = asyncio.run(scenario())
+    assert result["error"] == (code or "adapter_unavailable")
+    if phrase:
+        assert phrase in result["message"]
+        assert "\u2014" not in result["message"]
+    else:
+        assert result == {"error": "adapter_unavailable"}
+
+
+@pytest.mark.parametrize("host", [b"localhost:8779", b"127.0.0.1:8779", b"MILLER.EXAMPLE.TEST"])
+def test_host_allowlist_accepts_exact_value_case_insensitively(host):
+    gate = m._MillerGate(AsyncMock(), config(), verifier())
+    assert asyncio.run(request(gate, path=METADATA_PATH, method="GET", headers=[(b"host", host)]))[0] == 200
+
+
+def test_public_host_allowlist_preserves_explicit_port():
+    from dataclasses import replace
+
+    cfg = replace(config(), allowed_hosts=("MILLER.EXAMPLE.TEST:8443",))
+    gate = m._MillerGate(AsyncMock(), cfg, verifier())
+    assert (
+        asyncio.run(request(gate, path=METADATA_PATH, method="GET", headers=[(b"host", b"miller.example.test:8443")]))[
+            0
+        ]
+        == 200
+    )
+    assert asyncio.run(request(gate, headers=[(b"host", b"miller.example.test")]))[0] == 403

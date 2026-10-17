@@ -83,11 +83,15 @@ class MillerTools:
             error_code = error.code
             raise
         except Exception:
-            error_code = "bridge_unavailable"
+            error_code = "adapter_unavailable"
             raise
         finally:
             nested = result.get("result")
-            request_id = result.get("request_id") or (nested.get("request_id") if isinstance(nested, dict) else None)
+            request_id = arguments.get("request_id")
+            if request_id is None:
+                request_id = result.get("request_id") or (
+                    nested.get("request_id") if isinstance(nested, dict) else None
+                )
             self.record_call(
                 name,
                 error_code is None,
@@ -188,7 +192,7 @@ class MillerTools:
                     "message_status checks sent messages. message_send accepts these names in to: "
                     + ", ".join(sorted(self.runtime.hub.recipients))
                     + ". "
-                    "Fleet agents use dot-notify --from <agent> or brigade fleet msg send --to agent:miller. "
+                    "Fleet agents use python -m brigade.miller notify --from <agent> or brigade fleet msg send --to agent:miller. "
                     "Hub history is retained for 90 days."
                 ),
                 trust=INBOX_TRUST_NOTICE,

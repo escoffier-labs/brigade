@@ -1832,11 +1832,10 @@ def test_t3_dispatch_setup_requires_runtime_path(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def miller_runtime(tmp_path):
+def miller_runtime(miller_private_dir):
     from tests.test_miller_runtime import _document, _write_private
 
-    tmp_path.chmod(0o700)
-    runtime = tmp_path / "runtime.json"
+    runtime = miller_private_dir.parent / "runtime.json"
     _write_private(runtime, json.dumps(_document()).encode())
     return runtime
 

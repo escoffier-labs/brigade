@@ -8,8 +8,9 @@ public host and route `/mcp` through Cloudflare Access to this listener.
 ## Runtime JSON
 
 The instance stores `runtime_path`, an absolute reference to an owner-only
-regular JSON file. Use mode `0600`, no symlinks, and owner-only parent
-directories. Paths must already be absolute. Variables are not expanded.
+regular JSON file with exactly one link. Use mode `0600`, no symlinks,
+and a mode `0700` parent directory with safe ancestors. Paths must already be
+absolute. Variables are not expanded.
 Unknown keys are rejected. All fields below are required except those marked
 optional. Replace placeholders with the deployment's configured values.
 
@@ -17,7 +18,7 @@ optional. Replace placeholders with the deployment's configured values.
 |---|---|---|
 | `schema` | string | Exactly `brigade.miller.runtime.v1`. |
 | `auth` | object | Cloudflare Access identity settings. |
-| `auth.issuer` | HTTPS URL | Expected JWT issuer. |
+| `auth.issuer` | HTTPS URL | Exactly `https://` followed by `auth.team_domain`. |
 | `auth.team_domain` | hostname | Cloudflare Access team host used to fetch signing keys. |
 | `auth.audience` | string | Application audience, 64 lowercase hexadecimal characters. |
 | `auth.approved_email` | string | Only identity admitted by the origin. |
@@ -39,13 +40,14 @@ optional. Replace placeholders with the deployment's configured values.
 | `hub.poll_seconds` | integer | Hub poll interval, 10 through 300 seconds. |
 | `hub.recipients` | object | Up to 16 aliases mapped to agent principals or node UUIDs. |
 | `dispatch_enabled` | boolean | Gate for the six dispatch/message tools marked below. |
-| `events_enabled` | boolean | Enable Hub-backed event polling. |
+| `events_enabled` | boolean | Enable event capabilities, RPCs, workers, fleet polling, and webhooks. When false, pass requests straight to MCP. |
 | `digest_pr_repo` | string | Repository for digest PR queries, formatted `owner/repo`. |
 | `callback_hosts` | string array | Nonempty allowlist of callback hostnames. |
+| `writable_paths` | absolute path array | Optional, at most 8 entries, defaults to empty. Extra directories writable by the listener and watcher. |
 | `notify_command` | string array | Optional notification argv. The first item is an absolute executable path. |
 | `owner_authorization` | object | Owner's recorded automation authorization. |
-| `owner_authorization.version` | string | Nonempty authorization version. |
-| `owner_authorization.text` | string | Nonempty authorization text, at most 8192 UTF-8 bytes. |
+| `owner_authorization.version` | string | Nonempty printable ASCII authorization version, at most 64 characters. |
+| `owner_authorization.text` | string | Nonempty authorization text, at most 4096 UTF-8 bytes. |
 
 ## Setup and service units
 
@@ -66,6 +68,7 @@ brigade run cloud grokbot pack install-service --id miller --target <workspace> 
 The last command writes `brigade-miller.service`. It does not start the service.
 There are no bearer flags. Doctor checks dependencies, runtime, state, Access
 settings, Hub credential, fleet capacity, and rejection of unauthenticated MCP.
+The `writable-paths` check warns when no extra writable directories are configured.
 Canary checks unauthenticated rejection, discovery metadata, and tool inventory.
 
 The watch service and timer are rendered separately by
@@ -81,7 +84,11 @@ python -m brigade.miller watch --target <workspace>
 Review the generated units, then install and enable them through the deployment's
 service manager. Unit rendering and pack setup never start, stop, or reload a
 service. The listener and watcher restrict writable paths to the state directory
-and the workspace's `.codex/memory-handoffs` directory.
+and the workspace's `.codex/memory-handoffs` directory, plus `writable_paths`.
+List the t3-fleet state directory, the SSH directory used for known hosts and
+control sockets, and the Brigade home used for the Hub offline spool in
+`writable_paths`. Entries are de-duplicated and quoted for systemd.
+`ProtectSystem=strict` and `ProtectHome=read-only` remain enabled.
 
 ## Tools
 
@@ -129,6 +136,8 @@ Miller verifies the Cloudflare Access JWT at the origin, including the signature
 issuer, audience, expiry, and approved email. It has no static origin bearer.
 Signing keys come from the configured team host over verified TLS with bounded
 responses and refreshes. Host and Origin allowlists apply before authentication.
+Host entries match the full header case-insensitively, including its port. A loopback bind also
+accepts exactly `127.0.0.1:<bind-port>` and `localhost:<bind-port>`.
 Only `POST /mcp` and `GET /.well-known/oauth-protected-resource/mcp` are admitted.
 Queries and alternate routes are rejected. Discovery metadata is public, while
 MCP requests require the approved Access identity.

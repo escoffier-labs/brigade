@@ -25,7 +25,7 @@ These come from the fleet plan and need no re-approval:
 
 ## Decisions made in this design
 
-1. **Drop the three legacy review tools** (`dot_t3_submit_review`, `dot_t3_job_status`, `dot_t3_job_result`). The bridge's own call log shows no call to any of them in the last 30 days. They drive a private sender script that lives outside any repository and pin a project id and commit. `dot_t3_capabilities` stays, because Miller reads it as its usage guide; its text is rewritten to stop advertising the dropped tools.
+1. **Drop the three legacy review tools** (`dot_t3_submit_review`, `dot_t3_job_status`, `dot_t3_job_result`). The bridge's own call log shows no call to any of them in the last 30 days. They drive a private sender script that lives outside any repository and pin a project id and commit. `dot_t3_capabilities` stays, because Miller reads it as its usage guide. its text is rewritten to stop advertising the dropped tools.
 2. **Drop the local inbox backend.** The bridge runs in hub mode. The local sqlite inbox and the one-shot `dot-hub-migrate` script exist only for the migration that already ran.
 3. **Use the hub message Python API** (`brigade.fleet_client_messages`) instead of shelling out to `brigade fleet msg`. Same calls, same token file, no argv exposure of message bodies.
 4. **Use `brigade.grokbot_t3.fleet.FleetRunner` for every t3-fleet call.** It sends the request as JSON on stdin, so prompts and titles never reach argv. The bridge currently builds argv flags. The initiator label stays `agent`/`miller`.
@@ -34,7 +34,7 @@ These come from the fleet plan and need no re-approval:
 
 ## Architecture
 
-New package `src/brigade/miller/`. Every module stays well under the 2000-line ceiling; the targets below are budgets, not estimates to grow into.
+New package `src/brigade/miller/`. Every module stays well under the 2000-line ceiling. the targets below are budgets, not estimates to grow into.
 
 | Module | Job | Budget |
 |---|---|---|
@@ -44,6 +44,7 @@ New package `src/brigade/miller/`. Every module stays well under the 2000-line c
 | `safe_state.py` | Private directory walk, private file checks, flock-guarded sqlite opened through the directory fd | 250 |
 | `state.py` | Hub inbox cache, replies, operations journal, call log with 30-day retention | 450 |
 | `events.py` | MCP `events/*` RPC: subscribe, unsubscribe, list, and the hub poller | 450 |
+| `event_app.py` | Optional ASGI event transport, capability injection, and worker lifecycle | 150 |
 | `webhooks.py` | Standard Webhooks signing and bounded delivery to the allowed callback host | 350 |
 | `fleet_tools.py` | `fleet_*` t3-fleet tools over `FleetRunner`, source revision resolution, dispatch gate | 500 |
 | `hub_tools.py` | Hub reads (`fleet_sessions`, `fleet_work_*`, `fleet_models`, `fleet_cloud`, `fleet_hub_policy`), `fleet_overview`, `fleet_digest` | 550 |
@@ -58,7 +59,7 @@ New package `src/brigade/miller/`. Every module stays well under the 2000-line c
 ### Request path
 
 1. cloudflared forwards the public hostname to the pack's loopback bind.
-2. The gate admits only `GET /.well-known/oauth-protected-resource/mcp` and `POST /mcp`; anything else is 404.
+2. The gate admits only `GET /.well-known/oauth-protected-resource/mcp` and `POST /mcp`. anything else is 404.
 3. The gate checks Host and Origin against the instance allowlists, then verifies the `Cf-Access-Jwt-Assertion` header. A failure returns 401 with a `www-authenticate` header naming the resource metadata, as today.
 4. The MCP SDK (`mcp.server.MCPServer`, streamable HTTP, stateless) dispatches the tool. Gated tools raise `dispatch_disabled` unless the runtime config enables dispatch.
 5. Each call is recorded in the call log with a bounded argument summary and no prompt text.
@@ -70,9 +71,14 @@ The pack instance file (`.brigade/grokbot/packs/miller.json`) holds `bind`, `all
 - `auth`: `issuer`, `team_domain`, `audience`, `approved_email`, `resource`.
 - `paths`: `state_dir`, `workspace`, `fleet_config`, plus optional binary overrides for `t3-fleet`, `brigade`, `git`, `gh` and `octopool`.
 - `hub`: `principal`, `node_id`, `message_token_file`, `poll_seconds` (10 to 300), `recipients` (alias to node id or `agent:` principal, at most 16).
+- Optional `writable_paths`: up to eight absolute directories added to the state and handoff directories in systemd `ReadWritePaths`. Configure fleet state, SSH state and the Brigade home for the Hub spool. Doctor warns when empty.
 - `dispatch_enabled`, `events_enabled`, `digest_pr_repo`, `callback_hosts`, `notify_command` (for `watch` alerts), `owner_authorization` (`version`, `text`).
 
-Every host name, path, email, port, node id and organization name in today's code moves into this file. Nothing private is tracked in the repository.
+The issuer must equal `https://` plus `auth.team_domain`. Runtime loading requires a single-link mode-0600 file under a mode-0700 parent reached through safe ancestors. Owner authorization text is limited to 4096 UTF-8 bytes and its version to 64 printable ASCII characters.
+
+When `events_enabled` is false, the event transport is a pure MCP passthrough with no event capabilities, RPC interception or workers.
+
+Every host name, path, email, port, node id and organization name in the bridge moves into this file. Nothing private is tracked in the repository.
 
 ### Registry changes (`brigade.grokbot_packs`)
 
@@ -85,8 +91,9 @@ Add `miller` to `CONNECTOR_DEFAULT_BINDS` with default bind `127.0.0.1:8779`, pl
 - Missing `mcp` or PyJWT: `doctor` reports the dependency check failed and `serve` exits with `OptionalDependencyError`, as other packs do.
 - JWKS fetch failure: 401 for that request, logged without the token. The cached key set keeps serving until its 300 s expiry.
 - Unsafe state directory, database or runtime file: `serve` refuses to start and `doctor` names the failing check.
-- Hub unreachable: inbox tools keep today's behavior and serve the hub cache; `send` and `reply` spool through the client's durable offline queue.
-- t3-fleet errors pass through as structured `fleet_error` results, unchanged from today.
+- Hub unreachable: inbox tools keep today's behavior and serve the hub cache. `send` and `reply` spool through the client's durable offline queue.
+- t3-fleet errors pass through as `fleet_error` results containing the complete `fleet` error object and `exit_code`, plus `request_id` when present. The operation journal keeps the redacted message, truncated to 300 characters.
+- Hub refusal codes retain the bridge's fixed retry guidance. Unexpected invoke exceptions return `adapter_unavailable`.
 
 ## Testing
 

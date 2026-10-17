@@ -13,6 +13,18 @@ MAX_HANDOFF_BYTES = 16384
 MAX_MESSAGE_BYTES = 8192
 
 
+ERROR_MESSAGES = {
+    "recipient_not_permitted": "The recipient is outside Miller's send grants. Nothing was sent or queued, "
+    "and retrying will not help.",
+    "recipient_quota": "Miller's send quota for this recipient is exhausted. Nothing was sent or queued; "
+    "do not retry in a loop.",
+    "hub_credential_invalid": "The bridge's Fleet Hub credential file is unusable. This is a local setup fault, "
+    "not a hub outage. Nothing was sent or queued, and retrying will not help.",
+    "client_id_conflict": "This client_id is already queued with different content. Nothing new was queued; "
+    "use a new client_id for a different message.",
+}
+
+
 class MillerError(Exception):
     def __init__(self, code: str):
         super().__init__(code)

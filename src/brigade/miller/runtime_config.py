@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -11,10 +12,8 @@ from typing import Mapping
 from urllib.parse import urlsplit
 from uuid import UUID
 
-from brigade.grokbot_t3.runtime_config import read_owner_file
-from brigade.grokbot_t3.contracts import T3DispatchError
-
 from .contracts import MillerError
+from .safe_state import private_directory, private_file
 
 RUNTIME_SCHEMA = "brigade.miller.runtime.v1"
 MAX_RUNTIME_BYTES = 65_536
@@ -64,21 +63,11 @@ class HubConfig:
     poll_seconds: int
     recipients: Mapping[str, str]
 
-    def __repr__(self) -> str:
-        return (
-            f"HubConfig(principal={self.principal!r}, node_id={self.node_id!r}, "
-            f"message_token_file=<redacted>, poll_seconds={self.poll_seconds!r}, "
-            f"recipients={dict(self.recipients)!r})"
-        )
-
 
 @dataclass(frozen=True)
 class OwnerAuthorization:
     version: str
     text: str = field(repr=False)
-
-    def __repr__(self) -> str:
-        return f"OwnerAuthorization(version={self.version!r}, text=<redacted>)"
 
 
 @dataclass(frozen=True)
@@ -92,15 +81,7 @@ class Runtime:
     callback_hosts: tuple[str, ...]
     notify_command: tuple[str, ...] | None
     owner_authorization: OwnerAuthorization = field(repr=False)
-
-    def __repr__(self) -> str:
-        return (
-            "Runtime("
-            f"auth={self.auth!r}, paths={self.paths!r}, hub={self.hub!r}, "
-            f"dispatch_enabled={self.dispatch_enabled!r}, events_enabled={self.events_enabled!r}, "
-            f"digest_pr_repo={self.digest_pr_repo!r}, callback_hosts={self.callback_hosts!r}, "
-            f"notify_command={self.notify_command!r}, owner_authorization=<redacted>)"
-        )
+    writable_paths: tuple[Path, ...] = ()
 
 
 def _invalid() -> MillerError:
@@ -167,7 +148,7 @@ def parse_runtime(payload: object) -> Runtime:
             "callback_hosts",
             "owner_authorization",
         },
-        optional={"notify_command"},
+        optional={"notify_command", "writable_paths"},
     )
     if root["schema"] != RUNTIME_SCHEMA:
         raise _invalid()
@@ -175,6 +156,8 @@ def parse_runtime(payload: object) -> Runtime:
     auth_data = _object(root["auth"], {"issuer", "team_domain", "audience", "approved_email", "resource"})
     issuer = _https_url(auth_data["issuer"])
     team_domain = _hostname(auth_data["team_domain"])
+    if issuer != "https://" + team_domain:
+        raise _invalid()
     audience = _string(auth_data["audience"])
     approved_email = _string(auth_data["approved_email"])
     resource = _https_url(auth_data["resource"])
@@ -251,11 +234,18 @@ def parse_runtime(payload: object) -> Runtime:
         if not Path(notify_command[0]).is_absolute():
             raise _invalid()
 
+    writable_data = root.get("writable_paths", [])
+    if not isinstance(writable_data, list) or len(writable_data) > 8:
+        raise _invalid()
+    writable_paths = tuple(_absolute_path(item) for item in writable_data)
+
     owner_data = _object(root["owner_authorization"], {"version", "text"})
     version = _string(owner_data["version"])
+    if len(version) > 64 or any(not " " <= char <= "~" for char in version):
+        raise _invalid()
     authorization_text = _string(owner_data["text"])
     try:
-        if len(authorization_text.encode("utf-8")) > 8192:
+        if len(authorization_text.encode("utf-8")) > 4096:
             raise _invalid()
     except UnicodeError:
         raise _invalid() from None
@@ -271,14 +261,32 @@ def parse_runtime(payload: object) -> Runtime:
         callback_hosts=callback_hosts,
         notify_command=notify_command,
         owner_authorization=owner_authorization,
+        writable_paths=writable_paths,
     )
 
 
 def load_runtime(path: Path) -> Runtime:
+    directory = descriptor = None
     try:
-        payload = json.loads(read_owner_file(path, max_bytes=MAX_RUNTIME_BYTES).decode("utf-8"))
-    except (T3DispatchError, OSError, UnicodeError, json.JSONDecodeError):
+        directory = private_directory(path.parent)
+        descriptor = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=directory)
+        private_file(os.fstat(descriptor))
+        if os.fstat(descriptor).st_size > MAX_RUNTIME_BYTES:
+            raise _invalid()
+        with os.fdopen(descriptor, "rb") as stream:
+            descriptor = None
+            raw = stream.read(MAX_RUNTIME_BYTES + 1)
+            private_file(os.fstat(stream.fileno()))
+        if len(raw) > MAX_RUNTIME_BYTES:
+            raise _invalid()
+        payload = json.loads(raw.decode("utf-8"))
+    except (MillerError, OSError, UnicodeError, ValueError):
         raise _invalid() from None
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+        if directory is not None:
+            os.close(directory)
     return parse_runtime(payload)
 
 

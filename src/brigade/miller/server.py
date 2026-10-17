@@ -5,7 +5,7 @@ from typing import Any
 
 from brigade.grokbot_mcp import OptionalDependencyError
 from .adapter import MillerTools
-from .contracts import MillerError, TOOL_SCHEMAS
+from .contracts import ERROR_MESSAGES, MillerError, TOOL_SCHEMAS
 from .events import IDENTITY
 from .safe_state import identity
 
@@ -23,9 +23,12 @@ def register_tools(server: Any, tools: MillerTools) -> None:
         try:
             return await asyncio.to_thread(tools.call, identity(IDENTITY.get()), name, arguments)
         except MillerError as error:
-            return {"error": error.code}
+            result = {"error": error.code}
+            if error.code in ERROR_MESSAGES:
+                result["message"] = ERROR_MESSAGES[error.code]
+            return result
         except Exception:
-            return {"error": "bridge_unavailable"}
+            return {"error": "adapter_unavailable"}
 
     def annotations(name: str) -> Any:
         schema = TOOL_SCHEMAS[name]
