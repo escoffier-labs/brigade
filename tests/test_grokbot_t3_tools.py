@@ -63,7 +63,8 @@ class FakeRunner:
         self.waited = timeout_s
         return dict(self.status_result, request_id=request_id)
 
-    def followup(self, request_id, prompt):
+    def followup(self, request_id, prompt, interaction_mode="default"):
+        self.followed_mode = interaction_mode
         self.followed = prompt
         return dict(self.status_result, request_id=request_id)
 
@@ -349,3 +350,54 @@ def test_admission_error_with_handle_never_falls_back(make):
     assert len(runner.submits) == 1
     assert result["error"]["code"] == "submit-unknown"
     assert ledger.get("r9")["last_state"] == "unknown"
+
+
+@pytest.mark.parametrize("action", ["submit", "followup"])
+def test_contended_dispatch_returns_unavailable_without_launching(make, action):
+    from threading import Thread
+    from time import monotonic
+
+    tools, runner, ledger = make()
+    if action == "followup":
+        _submit(tools)
+    before = len(runner.submits)
+    attempts = ledger.attempts_since(NOW.replace(hour=0))
+    results = []
+
+    def call():
+        started = monotonic()
+        result = (
+            _submit(tools)
+            if action == "submit"
+            else tools.call_tool("t3_followup", {"request_id": "r1", "message": "more"})
+        )
+        results.append((result, monotonic() - started))
+
+    tools._dispatch_lock.acquire()
+    thread = Thread(target=call)
+    try:
+        thread.start()
+        thread.join(timeout=5.8)
+        finished_while_locked = not thread.is_alive()
+    finally:
+        tools._dispatch_lock.release()
+        thread.join(timeout=2)
+    assert finished_while_locked
+    assert results[0][0]["error"]["code"] == "unavailable"
+    assert results[0][1] < 5.8
+    assert len(runner.submits) == before
+    assert not hasattr(runner, "followed")
+    assert ledger.attempts_since(NOW.replace(hour=0)) == attempts
+
+
+@pytest.mark.parametrize("mode", ["default", "plan"])
+def test_followup_preserves_submitted_interaction_mode_after_reopen(make, mode):
+    tools, runner, ledger = make()
+    _submit(tools, interaction_mode=mode)
+    ledger.close()
+    tools.ledger = Ledger(tools.runtime.ledger_path)
+    result = tools.call_tool("t3_followup", {"request_id": "r1", "message": "more"})
+    assert result["state"] == "running"
+    assert runner.followed_mode == mode
+    assert tools.ledger.get("r1")["interaction_mode"] == mode
+    tools.ledger.close()

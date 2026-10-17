@@ -320,3 +320,157 @@ def test_multiple_targets_retry_only_failed_delivery_and_reset_on_state_change(s
     watch.run_watch_once(**kwargs)
     assert len(post.calls) == 5
     assert post.calls[0][0] == post.calls[3][0]
+
+
+def test_garbage_http_wake_is_bounded_and_later_rows_continue(setup):
+    import socketserver
+    from threading import Thread
+
+    class Garbage(socketserver.BaseRequestHandler):
+        def handle(self):
+            self.request.recv(16384)
+            self.request.sendall(b"GARBAGE\r\n")
+
+    tmp_path, targets, ledger = setup
+    _record(ledger, "bad", state="succeeded")
+    _record(ledger, "later", caller="Other", state="succeeded")
+    with socketserver.TCPServer(("127.0.0.1", 0), Garbage) as server:
+        thread = Thread(target=server.serve_forever)
+        thread.start()
+        try:
+            targets["Builder"][0]["url"] = f"http://127.0.0.1:{server.server_address[1]}/wake"
+            assert watch.post_wake(targets["Builder"][0]["url"], "test-key", {}) == 0
+
+            def post(url, key, body):
+                return watch.post_wake(url, key, body) if body["request_id"] == "bad" else 200
+
+            for _ in range(31):
+                watch.run_watch_once(
+                    runner=Runner({}),
+                    ledger=ledger,
+                    wake_targets=targets,
+                    log_path=tmp_path / "w.jsonl",
+                    now=lambda: NOW,
+                    post=post,
+                )
+            assert ledger.get("bad")["wake_attempts"] == 30
+            assert ledger.get("bad")["notified_state"] == "succeeded"
+            assert ledger.get("later")["notified_state"] == "succeeded"
+        finally:
+            server.shutdown()
+            thread.join()
+
+
+def test_unexpected_row_failure_is_counted_and_later_rows_continue(setup):
+    tmp_path, targets, ledger = setup
+    _record(ledger, "bad", state="succeeded")
+    _record(ledger, "later", state="succeeded")
+
+    def post(url, key, body):
+        if body["request_id"] == "bad":
+            raise RuntimeError("unexpected transport failure")
+        return 200
+
+    summary = watch.run_watch_once(
+        runner=Runner({}),
+        ledger=ledger,
+        wake_targets=targets,
+        log_path=tmp_path / "w.jsonl",
+        now=lambda: NOW,
+        post=post,
+    )
+    assert summary == {"checked": 0, "woken": 1, "failed": 1}
+    assert ledger.get("bad")["wake_attempts"] == 1
+    assert ledger.get("later")["notified_state"] == "succeeded"
+
+
+def test_exhausted_unknown_rows_recover_every_fifteenth_tick_across_restarts(setup):
+    tmp_path, targets, ledger = setup
+    _record(ledger, "r1")
+    states = {"r1": FleetTimeout("status")}
+    kwargs = dict(
+        runner=Runner(states),
+        ledger=ledger,
+        wake_targets=targets,
+        log_path=tmp_path / "w.jsonl",
+        now=lambda: NOW,
+        post=Post([]),
+    )
+    for _ in range(30):
+        watch.run_watch_once(**kwargs)
+    assert ledger.get("r1")["status_failures"] == 30
+    assert ledger.open_count() == 1
+    states["r1"] = "succeeded"
+    for tick in range(15):
+        ledger.close()
+        ledger = Ledger(tmp_path / "ledger.sqlite3")
+        kwargs["ledger"] = ledger
+        summary = watch.run_watch_once(**kwargs)
+        assert summary["checked"] == (1 if tick == 14 else 0)
+    assert ledger.open_count() == 0
+    assert ledger.get("r1")["status_failures"] == 0
+    assert ledger.get("r1")["notified_state"] == "succeeded"
+
+
+def test_delivered_targets_store_only_url_hashes(setup):
+    import hashlib
+
+    tmp_path, targets, ledger = setup
+    _record(ledger, "r1", state="succeeded")
+    watch.run_watch_once(
+        runner=Runner({}),
+        ledger=ledger,
+        wake_targets=targets,
+        log_path=tmp_path / "w.jsonl",
+        now=lambda: NOW,
+        post=Post([]),
+    )
+    stored = ledger.get("r1")["delivered_targets"]
+    assert json.loads(stored) == [hashlib.sha256(targets["Builder"][0]["url"].encode()).hexdigest()]
+    assert targets["Builder"][0]["key_file"] not in stored
+
+
+def test_unexpected_wake_failure_preserves_delivered_targets_and_retry_cap(setup):
+    tmp_path, targets, ledger = setup
+    first_url = targets["Builder"][0]["url"]
+    targets["Builder"].append({**targets["Builder"][0], "url": "https://example.com/second"})
+    _record(ledger, "r1", state="succeeded")
+    calls = []
+
+    def post(url, key, body):
+        calls.append(url)
+        if url != first_url:
+            raise RuntimeError("unexpected transport failure")
+        return 200
+
+    for _ in range(31):
+        watch.run_watch_once(
+            runner=Runner({}),
+            ledger=ledger,
+            wake_targets=targets,
+            log_path=tmp_path / "w.jsonl",
+            now=lambda: NOW,
+            post=post,
+        )
+    assert calls.count(first_url) == 1
+    assert len(calls) == 31
+    assert ledger.get("r1")["wake_attempts"] == 30
+    assert ledger.get("r1")["notified_state"] == "succeeded"
+
+
+def test_row_log_failure_cannot_bypass_wake_retry_cap(setup):
+    tmp_path, targets, ledger = setup
+    _record(ledger, "r1", state="succeeded")
+    post = Post([500] * 31)
+    for _ in range(31):
+        summary = watch.run_watch_once(
+            runner=Runner({}),
+            ledger=ledger,
+            wake_targets=targets,
+            log_path=tmp_path,
+            now=lambda: NOW,
+            post=post,
+        )
+    assert len(post.calls) == 30
+    assert ledger.get("r1")["notified_state"] == "succeeded"
+    assert summary == {"checked": 0, "woken": 0, "failed": 0}

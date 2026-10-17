@@ -156,8 +156,12 @@ class T3DispatchTools:
             raise c.T3DispatchError("daily-limit")
 
     def submit(self, args: dict[str, Any]) -> dict[str, Any]:
-        with self._dispatch_lock:
+        if not self._dispatch_lock.acquire(timeout=5):
+            raise c.T3DispatchError("unavailable")
+        try:
             return self._submit_locked(args)
+        finally:
+            self._dispatch_lock.release()
 
     def _submit_locked(self, args: dict[str, Any]) -> dict[str, Any]:
         self._require_enabled()
@@ -233,6 +237,7 @@ class T3DispatchTools:
             prompt_sha256=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
             state=state,
             now=now,
+            interaction_mode=args["interaction_mode"],
         )
         if state == "unknown":
             raise c.T3DispatchError("submit-unknown", request_id=request_id)
@@ -257,8 +262,12 @@ class T3DispatchTools:
         return project_status(result)
 
     def followup(self, args: dict[str, Any]) -> dict[str, Any]:
-        with self._dispatch_lock:
+        if not self._dispatch_lock.acquire(timeout=5):
+            raise c.T3DispatchError("unavailable")
+        try:
             return self._followup_locked(args)
+        finally:
+            self._dispatch_lock.release()
 
     def _followup_locked(self, args: dict[str, Any]) -> dict[str, Any]:
         self._require_enabled()
@@ -269,7 +278,7 @@ class T3DispatchTools:
             raise c.T3DispatchError("prompt-too-large")
         self._check_daily_limit()
         self.ledger.record_attempt(self.now())
-        result = self._fleet(self.runner.followup, args["request_id"], args["message"])
+        result = self._fleet(self.runner.followup, args["request_id"], args["message"], row["interaction_mode"])
         self._record_state(args["request_id"], result)
         return project_status(result)
 

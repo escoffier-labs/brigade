@@ -132,3 +132,64 @@ def test_existing_parent_must_be_owned_by_current_user(tmp_path, monkeypatch):
     monkeypatch.setattr(os, "getuid", lambda: tmp_path.stat().st_uid + 1)
     with pytest.raises(T3DispatchError, match="Dispatch is unavailable"):
         Ledger(tmp_path / "ledger.sqlite3")
+
+
+def test_update_state_resets_status_failures_even_without_a_transition(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    _record(ledger, "r1", state="running")
+    ledger.record_status_poll("r1", failed=True)
+    ledger.update_state("r1", "running", T0)
+    assert ledger.get("r1")["status_failures"] == 0
+
+
+def test_stale_notification_cannot_mark_a_newer_state(tmp_path):
+    ledger = Ledger(tmp_path / "ledger.sqlite3")
+    _record(ledger, "r1", state="needs_attention")
+    ledger.update_state("r1", "running", T0)
+    ledger.mark_notified("r1", "needs_attention", T0)
+    assert ledger.get("r1")["notified_state"] is None
+    assert ledger.get("r1")["notified_at"] is None
+    ledger.update_state("r1", "needs_attention", T0)
+    assert [row["request_id"] for row in ledger.pending_notifications()] == ["r1"]
+
+
+def test_existing_delivery_identifiers_are_hashed_once_on_open(tmp_path):
+    import hashlib
+    import json
+    import sqlite3
+
+    path = tmp_path / "ledger.sqlite3"
+    ledger = Ledger(path)
+    _record(ledger, "r1", state="succeeded")
+    ledger.close()
+    url = "https://example.com/wake/opaque-token"
+    other_url = "https://example.com/other"
+    already_hashed = "a" * 64
+    with sqlite3.connect(path) as connection:
+        connection.execute(
+            "UPDATE requests SET delivered_targets = ? WHERE request_id = ?",
+            (json.dumps([json.dumps([url, "/srv/keys/wake"]), other_url, already_hashed]), "r1"),
+        )
+    expected = {hashlib.sha256(value.encode()).hexdigest() for value in (url, other_url)} | {already_hashed}
+    for _ in range(2):
+        ledger = Ledger(path)
+        stored = ledger.get("r1")["delivered_targets"]
+        assert set(json.loads(stored)) == expected
+        assert "https://" not in stored and "/srv/keys/wake" not in stored
+        ledger.close()
+
+
+def test_legacy_requests_default_to_default_interaction_mode(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "ledger.sqlite3"
+    ledger = Ledger(path)
+    _record(ledger, "r1")
+    ledger.close()
+    with sqlite3.connect(path) as connection:
+        columns = [row[1] for row in connection.execute("PRAGMA table_info(requests)")]
+        if "interaction_mode" in columns:
+            connection.execute("ALTER TABLE requests DROP COLUMN interaction_mode")
+    ledger = Ledger(path)
+    assert ledger.get("r1")["interaction_mode"] == "default"
+    ledger.close()

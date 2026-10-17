@@ -134,6 +134,29 @@ def test_authenticated_mcp_submit_and_recent_cross_threads(tmp_path):
         )
         assert response.status_code == 200
         assert "error" not in response.json()
+        authorization = client.headers.pop("authorization")
+        try:
+            response = client.post(
+                "/mcp",
+                json={
+                    "jsonrpc": "2.0",
+                    "id": 4,
+                    "method": "tools/call",
+                    "params": {
+                        "name": "t3_submit",
+                        "arguments": {
+                            "repository": "brigade",
+                            "prompt": "p",
+                            "title": "t",
+                            "caller": "Builder",
+                        },
+                    },
+                },
+            )
+            assert response.status_code == 401
+            assert ledger.open_count() == 0
+        finally:
+            client.headers["authorization"] = authorization
         for index, name, arguments in [
             (2, "t3_submit", {"repository": "brigade", "prompt": "p", "title": "t", "caller": "Builder"}),
             (3, "t3_recent", {}),
@@ -189,3 +212,16 @@ def test_doctor_checks_wake_ledger_and_explicit_write_paths(tmp_path, monkeypatc
     assert checks["wake-config"] == ("ok" if wake_valid else "fail")
     assert checks["ledger"] == ("ok" if ledger_valid else "fail")
     assert checks["writable-paths"] == ("ok" if paths else "warn")
+
+
+def test_tools_factory_explicitly_selects_full_access(tmp_path, monkeypatch):
+    from functools import partial
+    from brigade.grokbot_t3.runtime_config import load_runtime
+
+    runtime = load_runtime(write_runtime(tmp_path))
+    monkeypatch.setattr(lifecycle, "FleetRunner", partial(lifecycle.FleetRunner, runtime_mode="read-only"))
+    tools = lifecycle._tools_for(runtime)
+    try:
+        assert tools.runner.runtime_mode == "full-access"
+    finally:
+        tools.ledger.close()

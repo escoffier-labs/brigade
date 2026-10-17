@@ -271,7 +271,7 @@ def _load_validated_instance(target: Path) -> dict[str, Any]:
 def _tools_for(runtime: Runtime) -> T3DispatchTools:
     return T3DispatchTools(
         runtime=runtime,
-        runner=FleetRunner(runtime.t3_fleet_bin, runtime.git_bin),
+        runner=FleetRunner(runtime.t3_fleet_bin, runtime.git_bin, runtime_mode="full-access"),
         ledger=Ledger(runtime.ledger_path),
     )
 
