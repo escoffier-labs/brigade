@@ -29,9 +29,8 @@ Contract (the journal writer depends on every line of this):
   than retried forever. 401 (bad token), 5xx, and network failures keep the
   spool for a later flush.
 - **Never raises.** ``report_event`` swallows ``Exception``.
-  ``KeyboardInterrupt``/``SystemExit`` are re-raised only after the event
-  has been made durable in the spool, so an interrupt never loses an event
-  that the journal already committed.
+  ``KeyboardInterrupt``/``SystemExit`` are re-raised after a best-effort
+  attempt to preserve the event in the spool; persistence can fail.
 
 Configuration (never stores secrets): ``~/.brigade/fleet.toml``::
 
@@ -97,13 +96,20 @@ from datetime import datetime, timezone
 from hashlib import sha256
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
+
 from uuid import uuid4
+
+from .fleet_event_report import report_event_detailed as report_event_detailed
 
 if TYPE_CHECKING:
     from .fleet_session_presence import SessionSnapshot
 
 from . import fleet_claim_lifecycle as _claim_lifecycle
 from . import fleet_claim_target as _claim_target
+from .fleet_client_spool import append_record as _append_spool_record
+from .fleet_client_spool import ensure_directory as _ensure_spool_directory
+from .fleet_client_spool import fsync_parent as _fsync_spool_parent
+from .fleet_client_spool import parse_records as _parse_spool_records
 from . import toml_compat as tomllib
 from .fleet_claim_lifecycle import _ConfirmedClaimLease as _ConfirmedClaimLease
 
@@ -396,7 +402,7 @@ def _same_origin(first: str, second: str) -> bool:
 
 class _HubRedirectHandler(urllib.request.HTTPRedirectHandler):
     def redirect_request(self, req, fp, code, msg, headers, newurl):
-        if not _same_origin(req.full_url, newurl):
+        if req.get_method() != "GET" or not _same_origin(req.full_url, newurl):
             return None
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
@@ -501,26 +507,15 @@ def _dir_fd_supported() -> bool:
 
 
 def _ensure_private_dir(path: Path) -> int | None:
-    """Create ``path`` (and parents), enforce 0700 through a directory
-    descriptor, and return that descriptor for ``dir_fd`` use.
+    """Create a durable private directory and return its safe dir_fd if supported.
 
-    Privacy is proven through the descriptor, not the path (#1157 round 2):
-    the directory is opened ``O_DIRECTORY|O_NOFOLLOW`` so a symlink swapped
-    in after any earlier check fails the open instead of redirecting every
-    write below it, forced to 0700 via ``fchmod``, and re-stat'ed through
-    the same descriptor to verify the bits landed. When privacy cannot be
-    enforced or verified, writing is refused (``FleetClientError``) rather
-    than warned about. The caller must close the returned descriptor when it
-    has finished opening files beneath the directory.
-
-    On platforms without descriptor-relative APIs (Windows: ``dir_fd`` is
-    unsupported per ``os.supports_dir_fd``, which also rules out
-    ``os.fchmod``), returns ``None`` so callers take their path-based
-    fallback: a symlinked spool directory is still refused, privacy is a
-    best-effort path ``chmod`` whose failure only warns — the documented
-    platform gap (#1157 round 3).
+    POSIX verifies privacy through a no-follow descriptor. Windows uses the
+    documented path-based chmod fallback because ``dir_fd`` is unsupported.
     """
-    path.mkdir(parents=True, exist_ok=True)
+    try:
+        _ensure_spool_directory(path)
+    except OSError as exc:
+        raise FleetClientError("fleet spool directory could not be persisted") from exc
     if not _dir_fd_supported():
         if os.path.islink(path):
             raise FleetClientError(f"fleet spool directory {path} is a symlink")
@@ -593,14 +588,9 @@ def _open_private(path: Path, flags: int, *, dir_fd: int | None = None) -> int:
 
 @contextmanager
 def _spool_lock(path: Path) -> Iterator[int | None]:
-    """Cross-process + cross-thread guard for one node's spool.
+    """Guard a spool across processes and threads.
 
-    Mirrors ``run_journal._append_critical_section``'s lock-file shape
-    (``fcntl.flock`` on an adjacent lock file) with an ``msvcrt.locking``
-    branch so the same guarantee holds on Windows. Yields the spool
-    directory descriptor validated by ``_ensure_private_dir`` (POSIX) so
-    the guarded operations open their files ``dir_fd``, or ``None`` where
-    that hardening is unavailable (Windows).
+    Yields a validated directory descriptor for relative I/O, or None on Windows.
     """
     dir_fd = _ensure_private_dir(path.parent)
     lock_name = path.name + ".lock"
@@ -642,49 +632,40 @@ def _encode(event: dict[str, Any]) -> str:
     return json.dumps(event, sort_keys=True)
 
 
-def _read_spool(path: Path, *, dir_fd: int | None = None) -> list[dict[str, Any]]:
+def _read_spool(path: Path, *, dir_fd: int | None = None, strict: bool = False) -> list[dict[str, Any]]:
     events: list[dict[str, Any]] = []
     try:
         fd = _open_private(path, os.O_RDONLY, dir_fd=dir_fd)
         with os.fdopen(fd, encoding="utf-8") as handle:
             text = handle.read()
-    except (OSError, FleetClientError):
+    except FileNotFoundError:
         return events
-    for line in text.splitlines():
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            parsed = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(parsed, dict):
-            events.append(parsed)
-    return events
+    except (OSError, UnicodeError, FleetClientError) as exc:
+        raise FleetClientError(f"fleet spool could not be read: {type(exc).__name__}") from exc
+    try:
+        return _parse_spool_records(text, strict=strict)
+    except ValueError as exc:
+        raise FleetClientError(str(exc)) from None
 
 
 def _write_spool_atomic(path: Path, events: list[dict[str, Any]], *, dir_fd: int | None = None) -> None:
-    """Replace the spool contents atomically; remove it when empty.
-
-    The temp file is created exclusive with an unpredictable name in the
-    spool directory (#1154), never a predictable ``.tmp`` path a local
-    attacker could pre-create or symlink to. The final ``os.replace`` is a
-    rename: it swaps the directory entry itself and never follows a symlink
-    planted at the destination. When a validated directory descriptor is
-    available, both the temp creation and the replace address it by name
-    relative to that descriptor (#1157 round 3) — ``tempfile.mkstemp``
-    cannot target a descriptor, so the temp is opened here with
-    ``O_CREAT|O_EXCL|O_NOFOLLOW`` and 0600 — so a directory swapped in
-    under the old path cannot redirect the rewrite.
-    """
+    """Atomically replace a spool, sync its contents and directory, or remove it."""
     if not events:
         if dir_fd is not None:
+            removed = False
             try:
                 os.unlink(path.name, dir_fd=dir_fd)
+                removed = True
             except FileNotFoundError:
                 pass
         else:
-            path.unlink(missing_ok=True)
+            try:
+                path.unlink()
+                removed = True
+            except FileNotFoundError:
+                removed = False
+        if removed:
+            _fsync_spool_parent(path, dir_fd)
         return
     if dir_fd is None:
         fd, tmp_name = tempfile.mkstemp(dir=path.parent, prefix=f".{path.name}.", suffix=".tmp")
@@ -695,6 +676,7 @@ def _write_spool_atomic(path: Path, events: list[dict[str, Any]], *, dir_fd: int
                 handle.flush()
                 os.fsync(handle.fileno())
             os.replace(tmp, path)
+            _fsync_spool_parent(path, dir_fd)
         except BaseException:
             tmp.unlink(missing_ok=True)
             raise
@@ -724,6 +706,7 @@ def _write_spool_atomic(path: Path, events: list[dict[str, Any]], *, dir_fd: int
             handle.flush()
             os.fsync(handle.fileno())
         os.replace(tmp_name, path.name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+        _fsync_spool_parent(path, dir_fd)
     except BaseException:
         if tmp_name:
             try:
@@ -733,12 +716,10 @@ def _write_spool_atomic(path: Path, events: list[dict[str, Any]], *, dir_fd: int
         raise
 
 
-def _spool_append_locked(path: Path, event: dict[str, Any], *, dir_fd: int | None = None) -> None:
-    """Append under the caller's lock, enforcing ``MAX_SPOOL_BYTES``.
-
-    When the append would exceed the cap, the oldest events are dropped until
-    the newest half of the cap remains, and the drop is logged.
-    """
+def _spool_append_locked(
+    path: Path, event: dict[str, Any], *, dir_fd: int | None = None, evict_oldest: bool = True
+) -> bool:
+    """Append under lock; event callers may evict, durable callers refuse overflow."""
     line = _encode(event) + "\n"
     try:
         if dir_fd is not None:
@@ -748,6 +729,11 @@ def _spool_append_locked(path: Path, event: dict[str, Any], *, dir_fd: int | Non
     except OSError:
         current = 0
     if current + len(line.encode("utf-8")) > MAX_SPOOL_BYTES:
+        if not evict_oldest:
+            return False
+        if len(line.encode("utf-8")) > MAX_SPOOL_BYTES // 2:
+            _LOG.warning("fleet spool %s cannot retain the newest event within its overflow budget", path)
+            return False
         events = _read_spool(path, dir_fd=dir_fd)
         events.append(event)
         kept: list[dict[str, Any]] = []
@@ -762,14 +748,17 @@ def _spool_append_locked(path: Path, event: dict[str, Any], *, dir_fd: int | Non
         dropped = len(events) - len(kept)
         _LOG.warning("fleet spool %s exceeded %d bytes; dropped %d oldest event(s)", path, MAX_SPOOL_BYTES, dropped)
         _write_spool_atomic(path, kept, dir_fd=dir_fd)
-        return
+        return True
     try:
-        fd = _open_private(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, dir_fd=dir_fd)
-        with os.fdopen(fd, "a", encoding="utf-8") as handle:
-            handle.write(line)
-    except FleetClientError:
-        _LOG.warning("fleet spool %s refused: not a regular file", path)
-        return
+        fd = _open_private(path, os.O_RDWR | os.O_APPEND | os.O_CREAT, dir_fd=dir_fd)
+        try:
+            _append_spool_record(fd, line.encode("utf-8"), path, dir_fd)
+        finally:
+            os.close(fd)
+    except (FleetClientError, OSError) as exc:
+        _LOG.warning("fleet spool %s refused: %s", path, type(exc).__name__)
+        return False
+    return True
 
 
 def _flush_locked(
@@ -780,6 +769,8 @@ def _flush_locked(
     max_batches: int | None,
     timeout: float,
     dir_fd: int | None = None,
+    preserve_poison: bool = False,
+    on_delivered: Callable[[list[dict[str, Any]]], None] | None = None,
 ) -> int:
     events = _read_spool(path, dir_fd=dir_fd)
     if not events:
@@ -799,6 +790,8 @@ def _flush_locked(
         try:
             _post_events(hub, token, batch, timeout=timeout)
         except _PoisonResponse as exc:
+            if preserve_poison:
+                break
             _LOG.warning("fleet spool %s: dropping %d event(s): %s", path, len(batch), exc)
             index += len(batch)
             batches += 1
@@ -807,6 +800,8 @@ def _flush_locked(
             break
         index += len(batch)
         delivered += len(batch)
+        if on_delivered is not None:
+            on_delivered(batch)
         batches += 1
     if index == 0:
         return 0
@@ -843,85 +838,17 @@ def flush_spool(
 # --- reporting ---------------------------------------------------------------
 
 
-def report_event(
-    event: dict[str, Any],
-    *,
-    base_path: Path | None = None,
-    node_id: str | None = None,
-) -> bool:
-    """Report one event to the hub. Returns True when delivered.
+def report_event(event: dict[str, Any], *, base_path: Path | None = None, node_id: str | None = None) -> bool:
+    """Report with local identity and durable spool, preserving the public bool API.
 
-    The event is always stamped with this machine's identity
-    (``resolve_node_id``): a ``node_id`` already present in the payload, or
-    passed as the ``node_id`` keyword kept for source compatibility, is
-    ignored unconditionally and never sent (#1161). Best-effort by contract:
-    no hub configured → False without side effects; delivery failure → the
-    event lands in the local spool and False returns. When a spool already
-    exists the new event is appended to it and the spool is flushed in order
-    (one request, short deadline) so the hub never sees this node's events
-    out of sequence. Exactly one HTTP request is made per call, bounded by
-    ``REPORT_TIMEOUT_SECONDS`` end to end.
-
-    ``Exception`` never escapes. ``KeyboardInterrupt``/``SystemExit`` are
-    re-raised, but only after the event is durable in the spool.
-
-    ``base_path`` (e.g. the journal path) is accepted and ignored: identity
-    resolution never depends on where a request originated (#1161).
+    Origin overrides remain ignored. Interrupts propagate only after a
+    best-effort spool write. One request per call, with a bounded deadline.
+    ``report_event_detailed`` captures the durable outcome for receipt callers
+    without changing this established signature or return type.
     """
-    try:
-        config = load_fleet_config()
-        hub = config["hub_url"]
-        if not hub:
-            return False
-        resolved_node_id = resolve_node_id()
-        event = {**event, "node_id": resolved_node_id}
-        token = config["token"]
-        spool = spool_path(resolved_node_id)
-    except Exception:
-        return False
+    from .fleet_event_report import report
 
-    interrupted: BaseException | None = None
-    delivered = False
-    try:
-        if spool.is_file():
-            with _spool_lock(spool) as dir_fd:
-                _spool_append_locked(spool, event, dir_fd=dir_fd)
-                try:
-                    _flush_locked(spool, hub, token, max_batches=1, timeout=REPORT_TIMEOUT_SECONDS, dir_fd=dir_fd)
-                except (KeyboardInterrupt, SystemExit) as exc:
-                    interrupted = exc
-            delivered = not spool.is_file()
-        else:
-            try:
-                _post_events(hub, token, event, timeout=REPORT_TIMEOUT_SECONDS)
-                delivered = True
-            except (KeyboardInterrupt, SystemExit) as exc:
-                interrupted = exc
-            except Exception:
-                pass
-            if not delivered:
-                with _spool_lock(spool) as dir_fd:
-                    _spool_append_locked(spool, event, dir_fd=dir_fd)
-    except (KeyboardInterrupt, SystemExit) as exc:
-        # Interrupt during spool bookkeeping: the append/replace steps are
-        # atomic, so the spool is consistent; make a last attempt to keep the
-        # event, then propagate.
-        interrupted = exc
-        if not delivered:
-            try:
-                with _spool_lock(spool) as dir_fd:
-                    if event not in _read_spool(spool, dir_fd=dir_fd):
-                        _spool_append_locked(spool, event, dir_fd=dir_fd)
-            except Exception as exc:
-                _LOG.warning("interrupted fleet event could not be made durable in the spool: %s", exc)
-    except Exception as exc:
-        # A failed spool write must never be silent (#1157): whatever broke
-        # it, say why before giving up on the undelivered event.
-        _LOG.warning("fleet event was not delivered and could not be spooled: %s", exc)
-        return False
-    if interrupted is not None:
-        raise interrupted
-    return delivered
+    return report(event) == "delivered"
 
 
 def report_journal_event(

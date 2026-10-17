@@ -52,6 +52,7 @@ uses `brigade.grokbot.connector-instance.v1` and lives at
 | `wazuh-triage` | connector | `127.0.0.1:8774` | none | `wazuh_action_status`, `wazuh_alert_status`, `wazuh_classify`, `wazuh_incident_bundle`, `wazuh_ingest`, `wazuh_propose_remediation` |
 | `n8n-operator` | connector | `127.0.0.1:8775` | none | `n8n_action_status`, `n8n_execute_action`, `n8n_execution_bundle`, `n8n_overview`, `n8n_propose_action`, `n8n_workflow_status` |
 | `operations-relay` | connector | `127.0.0.1:8777` | none | `automation_finding_status`, `submit_automation_finding` |
+| `t3-dispatch` | connector | `127.0.0.1:8778` | none | `t3_answer`, `t3_approve`, `t3_capacity`, `t3_followup`, `t3_interrupt`, `t3_recent`, `t3_status`, `t3_submit`, `t3_wait` |
 
 `obsidian-operator` is the only pack with a public route. Port `8776` is
 unallocated. Registry validation rejects duplicate ids, duplicate ports,

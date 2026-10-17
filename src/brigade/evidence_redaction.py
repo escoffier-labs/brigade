@@ -36,7 +36,7 @@ SOURCE_ORIGINS: dict[str, str] = {
     "code-review": "workspace",
     "context-pack": "workspace",
     "handoff-ingest": "agent-session",
-    "learning-loop": "workspace",
+    "learning-loop": "external-web",
     "memory-care": "workspace",
     "memory-refresh": "workspace",
     "project-consolidation": "workspace",

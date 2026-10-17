@@ -1,0 +1,26 @@
+[Unit]
+Description=Brigade Fleet Hub
+After=network-online.target
+Wants=network-online.target
+
+[Container]
+Image=localhost/brigade-fleet-hub@REPLACE_WITH_RECORDED_DIGEST
+Pull=never
+ContainerName=brigade-fleet-hub
+PublishPort=127.0.0.1:3774:3774
+Volume=brigade-fleet.volume:/var/lib/brigade
+Secret=brigade-fleet-admin-token,target=admin_token
+HealthCmd=python -c "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3774/health', timeout=2).read()"
+HealthInterval=30s
+HealthTimeout=3s
+HealthRetries=3
+HealthOnFailure=kill
+Notify=healthy
+
+[Service]
+TimeoutStartSec=120
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target

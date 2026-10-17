@@ -1,0 +1,24 @@
+FROM python:3.12.14-slim-bookworm@sha256:392307d22300de8b5986851a12d9176dfc0fc073e65bf6523ebd7dcbeb23564e
+
+ARG BRIGADE_REF=e6009f6969dc6e45db2ab93790aa3e407c791409
+ARG BRIGADE_SHA256=68014a8e99c61f5e547d8bf223a5f3ad7ea31f60355a4c30356bffd78e15c168
+LABEL org.opencontainers.image.source="https://github.com/escoffier-labs/brigade" \
+      org.opencontainers.image.version="0.28.0" \
+      org.opencontainers.image.revision="${BRIGADE_REF}" \
+      org.opencontainers.image.description="Brigade Fleet Hub"
+
+RUN python -m pip install --no-cache-dir setuptools==75.8.0 wheel==0.45.1 \
+    && python -c "import hashlib, urllib.request; data = urllib.request.urlopen('https://github.com/escoffier-labs/brigade/archive/${BRIGADE_REF}.tar.gz').read(); assert hashlib.sha256(data).hexdigest() == '${BRIGADE_SHA256}', 'Brigade source archive checksum mismatch'; open('/tmp/brigade.tar.gz', 'wb').write(data)" \
+    && python -m pip install --no-cache-dir --no-build-isolation /tmp/brigade.tar.gz \
+    && rm /tmp/brigade.tar.gz \
+    && groupadd --gid 10001 brigade \
+    && useradd --uid 10001 --gid 10001 --no-create-home --home-dir /var/lib/brigade brigade \
+    && install -d -o 10001 -g 10001 -m 0700 /var/lib/brigade
+
+USER 10001:10001
+VOLUME ["/var/lib/brigade"]
+EXPOSE 3774
+HEALTHCHECK --interval=30s --timeout=3s --start-period=5s --retries=3 \
+    CMD ["python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3774/health', timeout=2).read()"]
+ENTRYPOINT ["brigade", "fleet", "serve"]
+CMD ["--host", "0.0.0.0", "--port", "3774", "--db", "/var/lib/brigade/fleet-hub.db", "--token-file", "/run/secrets/admin_token"]

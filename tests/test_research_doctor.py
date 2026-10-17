@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from brigade.research.doctor import doctor_payload
 from brigade.roster import Agent, Roster
 
@@ -435,6 +437,85 @@ def test_doctor_does_not_project_installed_browser_as_ready(monkeypatch, tmp_pat
     assert browser["status"] == "warn"
     assert browser["browser_preflight"]["status"] == "unverified"
     assert browser["browser_preflight"]["blocker"] == "missing-readiness-evidence"
+
+
+@pytest.mark.parametrize("profile", ["browser-ai", "luna-only"])
+@pytest.mark.parametrize(
+    ("condition", "expected_status", "expected_exit"),
+    [
+        ("missing-evidence", "warn", 0),
+        ("ownership-conflict", "fail", 1),
+        ("model-mismatch", "fail", 1),
+        ("mode-unavailable", "fail", 1),
+        ("missing-executable", "fail", 1),
+        ("unauthenticated", "fail", 1),
+        ("browser-auth", "fail", 1),
+    ],
+)
+def test_doctor_required_oracle_readiness_status(
+    monkeypatch, tmp_path: Path, capsys, profile: str, condition: str, expected_status: str, expected_exit: int
+) -> None:
+    from dataclasses import replace
+    from functools import partial
+
+    from brigade.cli import main
+
+    (tmp_path / ".brigade").mkdir()
+    (tmp_path / ".brigade" / "research.toml").write_text(
+        '[profiles.luna-only]\nsynthesizer = ["gemini_browser"]\nreviewer = ["gemini_browser"]\n',
+        encoding="utf-8",
+    )
+    roster = doctor_roster()
+    oracle = roster.agents["gemini_browser"]
+    roster.agents[oracle.name] = replace(oracle, capabilities=(*oracle.capabilities, "research.review"))
+    monkeypatch.setattr(
+        "brigade.research.doctor.shutil.which",
+        lambda name: None if name == "oracle" and condition == "missing-executable" else f"/usr/bin/{name}",
+    )
+
+    def probe(agent: Agent) -> dict[str, object]:
+        result: dict[str, object] = {"auth_status": "authenticated", "detail": "ok"}
+        if agent.cli != "oracle":
+            return result
+        if condition == "unauthenticated":
+            result["auth_status"] = "unauthenticated"
+        elif condition == "browser-auth":
+            result["failure_kind"] = "browser-auth"
+        elif condition in {"ownership-conflict", "model-mismatch", "mode-unavailable"}:
+            result["browser_preflight"] = {
+                "browser_identity": "research-browser",
+                "lane": agent.name,
+                "owner": "other-runner" if condition == "ownership-conflict" else "research-runner",
+                "expected_owner": "research-runner",
+                "login_status": "authenticated",
+                "mode": "chat" if condition == "mode-unavailable" else "deep-research",
+                "model": "other-model" if condition == "model-mismatch" else agent.model,
+                "collector_status": "available",
+            }
+        return result
+
+    monkeypatch.setattr("brigade.research.doctor.doctor_payload", partial(doctor_payload, roster=roster, probe=probe))
+    exit_code = main(["research", "doctor", "--target", str(tmp_path), "--profile", profile, "--json"])
+    payload = json.loads(capsys.readouterr().out)
+    assert exit_code == expected_exit
+    assert payload["status"] == expected_status
+    capabilities = (
+        {"research.browser-discover"} if profile == "browser-ai" else {"research.synthesize", "research.review"}
+    )
+    checked_lanes = [lane for lane in payload["lanes"] if lane["capability"] in capabilities]
+    assert {lane["capability"] for lane in checked_lanes} == capabilities
+    for lane in checked_lanes:
+        assert lane["seat"] == "gemini_browser"
+        assert lane["status"] == expected_status
+        projection = lane["browser_preflight"]
+        if condition == "missing-evidence":
+            assert lane["auth_status"] == "authenticated"
+            assert lane["executable"]
+            assert projection["status"] == "unverified"
+            assert projection["blocker"] == "missing-readiness-evidence"
+        elif condition in {"ownership-conflict", "model-mismatch", "mode-unavailable"}:
+            assert projection["status"] == "blocked"
+            assert projection["blocker"] == condition
 
 
 def test_doctor_projects_named_browser_preflight_states(monkeypatch, tmp_path: Path) -> None:

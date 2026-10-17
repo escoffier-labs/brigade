@@ -26,6 +26,7 @@ PACK_IDS = (
     "operations-relay",
     "operator",
     "repository-scout",
+    "t3-dispatch",
     "wazuh-triage",
 )
 CEREBRO_TOOLS = (
@@ -78,6 +79,17 @@ N8N_TOOLS = (
 OPERATIONS_RELAY_TOOLS = (
     "automation_finding_status",
     "submit_automation_finding",
+)
+T3_DISPATCH_TOOLS = (
+    "t3_answer",
+    "t3_approve",
+    "t3_capacity",
+    "t3_followup",
+    "t3_interrupt",
+    "t3_recent",
+    "t3_status",
+    "t3_submit",
+    "t3_wait",
 )
 
 
@@ -160,6 +172,11 @@ def test_registry_is_closed_deterministic_and_exact_key_validated():
             assert pack["kind"] == "connector"
             assert shown["tools"] == list(OPERATIONS_RELAY_TOOLS)
             assert shown["default_bind"] == "127.0.0.1:8777"
+            assert shown["public_route"] == ""
+        elif pack["id"] == "t3-dispatch":
+            assert pack["kind"] == "connector"
+            assert shown["tools"] == list(T3_DISPATCH_TOOLS)
+            assert shown["default_bind"] == "127.0.0.1:8778"
             assert shown["public_route"] == ""
         else:
             assert pack["kind"] == "connector"
@@ -247,6 +264,7 @@ def test_first_party_queue_packs_keep_isolated_ports_tools_and_credentials():
     assert grokbot_mcp.parse_bind(packs["n8n-operator"]["default_bind"])[1] == 8775
     assert grokbot_mcp.parse_bind(packs["operations-relay"]["default_bind"])[1] == 8777
     assert packs["operations-relay"]["default_bind"] == "127.0.0.1:8777"
+    assert grokbot_mcp.parse_bind(packs["t3-dispatch"]["default_bind"])[1] == 8778
     assert packs["operator"]["tools"] == _queue_tools("operator")
     assert packs["repository-scout"]["tools"] == _queue_tools("repository-scout")
     assert packs["implementation-worker"]["tools"] == _queue_tools("implementation-worker")
@@ -1779,3 +1797,27 @@ def test_pack_list_json_exposes_reachability(tmp_path: Path, monkeypatch, capsys
     assert SECRET not in dumped
     assert PUBLIC_HOST not in dumped
     assert str(tmp_path) not in dumped
+
+
+def test_t3_dispatch_setup_requires_runtime_path(tmp_path, monkeypatch):
+    from tests.test_grokbot_t3_runtime import write_runtime
+
+    monkeypatch.setenv("TEST_GROKBOT_BEARER", "x" * 40)
+    runtime = write_runtime(tmp_path)
+    with _reject("missing-path-reference"):
+        grokbot_packs.preview_setup(tmp_path, "t3-dispatch", bearer_env="TEST_GROKBOT_BEARER")
+    with _reject("unexpected-key"):
+        grokbot_packs.preview_setup(
+            tmp_path, "t3-dispatch", bearer_env="TEST_GROKBOT_BEARER", runtime_path=str(runtime), workdir=str(tmp_path)
+        )
+    result = grokbot_packs.apply_setup(
+        tmp_path,
+        "t3-dispatch",
+        bearer_env="TEST_GROKBOT_BEARER",
+        runtime_path=str(runtime),
+        allowed_hosts=["t3-dispatch.brigade.tools"],
+    )
+    assert result["bind"] == "127.0.0.1:8778"
+    config = json.loads(grokbot_packs.instance_config_path(tmp_path, "t3-dispatch").read_text())
+    assert config["runtime_path"] == str(runtime)
+    assert config["allowed_hosts"] == ["t3-dispatch.brigade.tools"]

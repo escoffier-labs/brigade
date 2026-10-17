@@ -294,7 +294,7 @@ def mkdir_child(parent: int, name: str) -> None:
         api.CloseHandle(handle)
 
 
-def reopen_directory_writable(parent: int) -> int:
+def reopen_directory_writable(parent: int, *, modify: bool = False) -> int:
     """Reopen the held directory handle itself with mutation access.
 
     ``NtCreateFile`` with ``RootDirectory`` set to the held descriptor and an
@@ -317,9 +317,10 @@ def reopen_directory_writable(parent: int) -> int:
     obj.SecurityQualityOfService = None
     handle = ctypes.c_void_p()
     iosb = api.IO_STATUS_BLOCK()
+    access = _DIRECTORY_MODIFY_ACCESS if modify else _DIRECTORY_MKDIR_ACCESS
     status = api.NtCreateFile(
         ctypes.byref(handle),
-        _DIRECTORY_MKDIR_ACCESS,
+        access,
         ctypes.byref(obj),
         ctypes.byref(iosb),
         None,

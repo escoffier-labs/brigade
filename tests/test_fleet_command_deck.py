@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS events (
     repo_identity TEXT,
     exit_status INTEGER,
     capability_fingerprint TEXT,
+    context TEXT,
     PRIMARY KEY (node_id, run_id, sequence, digest)
 );
 """

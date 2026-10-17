@@ -161,6 +161,10 @@ def _nt_mkdir_child(parent: int, name: str) -> None:
     _nt_dirfd().mkdir_child(parent, name)
 
 
+def _nt_reopen_directory_writable(parent: int, *, modify: bool = False) -> int:
+    return _nt_dirfd().reopen_directory_writable(parent, modify=modify)
+
+
 def _posix_open_child_file(parent: int, name: str, flags: int, mode: int) -> int:
     if flags & os.O_CREAT:
         return os.open(name, flags, mode, dir_fd=parent)
@@ -173,12 +177,23 @@ def _nt_open_child_file(parent: int, name: str, flags: int, mode: int, *, share_
     return _nt_dirfd().open_file(parent, name, flags, mode, share_write=False)
 
 
-def _posix_replace_children(parent: int, source: str, destination: str) -> None:
-    os.replace(source, destination, src_dir_fd=parent, dst_dir_fd=parent)
+def _posix_replace_children(parent: int, source: str, destination: str, *, replace: bool = True) -> None:
+    if replace:
+        os.replace(source, destination, src_dir_fd=parent, dst_dir_fd=parent)
+    else:
+        os.link(source, destination, src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
+        os.unlink(source, dir_fd=parent)
 
 
-def _nt_replace_children(parent: int, source: str, destination: str) -> None:
-    _nt_dirfd().replace_children(parent, source, destination)
+def _posix_link_child(parent: int, source: str, destination: str) -> None:
+    os.link(source, destination, src_dir_fd=parent, dst_dir_fd=parent, follow_symlinks=False)
+
+
+def _nt_replace_children(parent: int, source: str, destination: str, *, replace: bool = True) -> None:
+    if replace:
+        _nt_dirfd().replace_children(parent, source, destination)
+    else:
+        _nt_dirfd().replace_children(parent, source, destination, replace=False)
 
 
 def _posix_unlink_child(parent: int, name: str) -> None:
@@ -204,6 +219,37 @@ def open_directory_nofollow(path: Path, *, writable: bool = True) -> int:
     if nt_available():
         return _nt_open_directory(path) if writable else _nt_dirfd().open_root_directory(path, writable=False)
     raise unavailable("directory operations")
+
+
+def open_directory_chain(path: Path, *, create: bool = False, writable: bool = True) -> int:
+    """Walk an absolute directory path from its anchor without following links."""
+    path = Path(path)
+    if not path.is_absolute():
+        raise OSError("directory path must be absolute")
+    descriptor = open_directory_nofollow(Path(path.anchor), writable=False)
+    try:
+        for name in path.parts[1:]:
+            _validate_child_component(name)
+            try:
+                child = open_child_directory(descriptor, name, writable=False)
+            except FileNotFoundError:
+                if not create:
+                    raise
+                try:
+                    mkdir_child(descriptor, name)
+                except FileExistsError:
+                    pass
+                child = open_child_directory(descriptor, name, writable=False)
+            os.close(descriptor)
+            descriptor = child
+        if writable and nt_available():
+            writable_descriptor = _nt_reopen_directory_writable(descriptor, modify=True)
+            os.close(descriptor)
+            descriptor = writable_descriptor
+        return descriptor
+    except BaseException:
+        os.close(descriptor)
+        raise
 
 
 def open_file_nofollow(path: Path, flags: int, mode: int = 0o600) -> int:
@@ -235,7 +281,11 @@ def mkdir_child(parent: int, name: str, mode: int = 0o700) -> None:
         _posix_mkdir_child(parent, name, mode)
         return
     if nt_available():
-        _nt_mkdir_child(parent, name)
+        writable_parent = _nt_reopen_directory_writable(parent)
+        try:
+            _nt_mkdir_child(writable_parent, name)
+        finally:
+            os.close(writable_parent)
         return
     raise unavailable("directory operations")
 
@@ -260,16 +310,26 @@ def open_child_lock_file(parent: int, name: str, mode: int = 0o600) -> int:
     raise unavailable("sibling lock operations")
 
 
-def replace_children(parent: int, source: str, destination: str) -> None:
+def replace_children(parent: int, source: str, destination: str, *, replace: bool = True) -> None:
     _validate_child_component(source)
     _validate_child_component(destination)
     if posix_available():
-        _posix_replace_children(parent, source, destination)
+        _posix_replace_children(parent, source, destination, replace=replace)
         return
     if nt_available():
-        _nt_replace_children(parent, source, destination)
+        _nt_replace_children(parent, source, destination, replace=replace)
         return
     raise unavailable("import inbox operations")
+
+
+def link_child(parent: int, source: str, destination: str) -> None:
+    """Create a no-follow hard link under a held POSIX directory."""
+    _validate_child_component(source)
+    _validate_child_component(destination)
+    if posix_available():
+        _posix_link_child(parent, source, destination)
+        return
+    raise unavailable("hard-link operations")
 
 
 def unlink_child(parent: int, name: str, *, allow_reparse: bool = False) -> None:

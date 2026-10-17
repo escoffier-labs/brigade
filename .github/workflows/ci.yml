@@ -4,6 +4,8 @@ on:
   push:
     branches: [main]
   pull_request:
+  merge_group:
+    types: [checks_requested]
 
 permissions:
   contents: read
@@ -19,12 +21,14 @@ jobs:
       contents: read
       pull-requests: read
     outputs:
-      code_graph: ${{ steps.filter.outputs.code_graph }}
-      evidence_ledger: ${{ steps.filter.outputs.evidence_ledger }}
-      notify: ${{ steps.filter.outputs.notify }}
+      code_graph: ${{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.code_graph }}
+      evidence_ledger: ${{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.evidence_ledger }}
+      notify: ${{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.notify }}
+      fleet_hub_container: ${{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.fleet_hub_container }}
     steps:
       - uses: actions/checkout@v7
       - uses: dorny/paths-filter@v4
+        if: ${{ github.event_name != 'merge_group' }}
         id: filter
         with:
           filters: |
@@ -41,6 +45,12 @@ jobs:
               - 'src/brigade/templates/components/manifest-v1.json'
               - '.github/workflows/ci.yml'
 
+            fleet_hub_container:
+              - '.dockerignore'
+              - 'ops/fleet-hub/**'
+              - 'tests/fleet_hub_container_smoke.py'
+              - '.github/workflows/ci.yml'
+
   code-graph-msrv:
     name: MSRV (Rust 1.85)
     needs: changes
@@ -51,7 +61,7 @@ jobs:
         working-directory: engines/code-graph
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: 1.85.0
       - uses: Swatinem/rust-cache@v2
@@ -70,7 +80,7 @@ jobs:
         working-directory: engines/code-graph
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: stable
           components: rustfmt, clippy
@@ -112,7 +122,7 @@ jobs:
         working-directory: engines/code-graph
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@v2
@@ -131,7 +141,7 @@ jobs:
         working-directory: engines/code-graph
     steps:
       - uses: actions/checkout@v7
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@v2
@@ -341,6 +351,25 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
 
+  fleet-hub-container:
+    needs: changes
+    if: ${{ needs.changes.outputs.fleet_hub_container == 'true' }}
+    name: Fleet Hub container (${{ matrix.platform }})
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        platform: [linux/amd64, linux/arm64]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - uses: docker/setup-qemu-action@v4
+      - uses: docker/setup-buildx-action@v4
+      - name: Build and exercise the container image
+        run: python tests/fleet_hub_container_smoke.py --platform "${{ matrix.platform }}"
+
   coverage:
     needs: test-shards
     runs-on: ubuntu-latest
@@ -368,7 +397,7 @@ jobs:
 
   test:
     name: test (${{ matrix.python }})
-    needs: [test-shards, coverage, cosign-integration]
+    needs: [changes, test-shards, coverage, cosign-integration, fleet-hub-container]
     if: ${{ always() }}
     runs-on: ubuntu-latest
     strategy:
@@ -377,13 +406,26 @@ jobs:
     steps:
       - name: Require shards, coverage, and cosign integration
         env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
           SHARDS_RESULT: ${{ needs.test-shards.result }}
           COVERAGE_RESULT: ${{ needs.coverage.result }}
           COSIGN_RESULT: ${{ needs.cosign-integration.result }}
+          FLEET_HUB_RESULT: ${{ needs.fleet-hub-container.result }}
+          FLEET_HUB_REQUIRED: ${{ needs.changes.outputs.fleet_hub_container == 'true' }}
         run: |
-          if [ "$SHARDS_RESULT" != "success" ] || [ "$COVERAGE_RESULT" != "success" ] || [ "$COSIGN_RESULT" != "success" ]; then
-            echo "test-shards=$SHARDS_RESULT coverage=$COVERAGE_RESULT cosign-integration=$COSIGN_RESULT"
+          if [ "$CHANGES_RESULT" != "success" ]; then
+            echo "changes=$CHANGES_RESULT"
             exit 1
+          fi
+          if [ "$SHARDS_RESULT" != "success" ] || [ "$COVERAGE_RESULT" != "success" ] || [ "$COSIGN_RESULT" != "success" ]; then
+            echo "test-shards=$SHARDS_RESULT coverage=$COVERAGE_RESULT cosign-integration=$COSIGN_RESULT fleet-hub-container=$FLEET_HUB_RESULT"
+            exit 1
+          fi
+          if [ "$FLEET_HUB_RESULT" != "success" ]; then
+            if [ "$FLEET_HUB_RESULT" != "skipped" ] || [ "$FLEET_HUB_REQUIRED" != "false" ]; then
+              echo "fleet-hub-container=$FLEET_HUB_RESULT required=$FLEET_HUB_REQUIRED"
+              exit 1
+            fi
           fi
 
   # Shadow aggregate: keep all existing required checks and matrix names.
@@ -397,6 +439,7 @@ jobs:
       - test-shards
       - coverage
       - cosign-integration
+      - fleet-hub-container
       - component-manifest-provenance
       - content-guard
       - repo-metadata
@@ -408,16 +451,18 @@ jobs:
       - name: Require all protected jobs and their dependencies
         env:
           NEEDS_JSON: ${{ toJSON(needs) }}
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           python3 - <<'PY'
           import json
           import os
 
           # Shadow policy: every current required job and dependency must
-          # succeed. No job in this closure has an intentional job-level skip.
+          # succeed, except a container explicitly classified as unchanged.
+          # Merge groups require all components, regardless of path filtering.
           mandatory = {
               "changes", "lint", "test", "test-shards", "coverage",
-              "cosign-integration", "component-manifest-provenance",
+              "cosign-integration", "fleet-hub-container", "component-manifest-provenance",
               "content-guard", "repo-metadata", "install-from-source",
               "quickstart-smoke", "windows-native-acceptance",
           }
@@ -428,13 +473,21 @@ jobs:
                   f"DAG mismatch: missing={mandatory - set(needs)}, "
                   f"extra={set(needs) - mandatory}"
               )
+          changes = needs.get("changes", {})
+          container_skip_allowed = (
+              changes.get("result") == "success"
+              and changes.get("outputs", {}).get("fleet_hub_container") == "false"
+              and os.environ["EVENT_NAME"] != "merge_group"
+          )
           for name in sorted(mandatory):
               result = needs.get(name, {}).get("result")
+              if name == "fleet-hub-container" and result == "skipped" and container_skip_allowed:
+                  continue
               if result != "success":
                   errors.append(f"{name}: required success, got {result!r}")
           if errors:
               raise SystemExit("\n".join(errors))
-          print("All protected CI jobs and dependencies succeeded")
+          print("All protected CI jobs and dependencies satisfied the shadow policy")
           PY
 
   component-manifest-provenance:
@@ -683,6 +736,31 @@ jobs:
           if (-not (Test-Path (Join-Path $target "INSTALL_FOR_AGENTS.md"))) { throw "missing full-kit guide" }
           if (-not (Test-Path (Join-Path $target "rules/issue-tdd-loop.md"))) { throw "missing issue/TDD rule" }
 
+  # Optional capacity probe. Existing protected checks remain hosted.
+  trusted-runner-canary:
+    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && vars.BRIGADE_SELF_HOSTED == 'on' }}
+    runs-on:
+      group: brigade-trusted
+      labels: [self-hosted, linux, x64]
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+      - name: Smoke source CLI in a temporary workspace
+        shell: bash
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="$GITHUB_WORKSPACE/src"
+          python3 -m brigade --version
+          target="$(mktemp -d)"
+          trap 'rm -rf "$target"' EXIT
+          git init -q -b main "$target"
+          python3 -m brigade init --target "$target" --depth workspace --harnesses claude,codex
+          python3 -m brigade doctor --target "$target"
+
   windows-native-acceptance:
     name: windows-native-acceptance
     runs-on: windows-latest
@@ -720,7 +798,7 @@ jobs:
           sys.exit(1 if guard.skipped else int(result))
           '@ | & $python -
           if ($LASTEXITCODE -ne 0) { throw "native containment failed or skipped" }
-      - uses: dtolnay/rust-toolchain@e2a55d2ffb04f378e9626c28d38b36d230d1e12f # master
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: stable
       - uses: Swatinem/rust-cache@v2

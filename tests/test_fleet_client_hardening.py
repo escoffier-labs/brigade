@@ -94,6 +94,127 @@ class TestProxyDisabledTransport:
 
 
 class TestSpoolPrivacy:
+    def test_flush_preserves_spool_when_read_fails(self, home, monkeypatch):
+        spool = _spool()
+        spool.parent.mkdir(parents=True, exist_ok=True)
+        spool.write_text(json.dumps({"run_id": "keep"}) + "\n", encoding="utf-8")
+        original = spool.read_bytes()
+
+        def fail_read(path, _flags, *, dir_fd=None):
+            if path == spool:
+                raise PermissionError("temporarily unreadable")
+            return real_open(path, _flags, dir_fd=dir_fd)
+
+        real_open = fleet_client._open_private
+        monkeypatch.setattr(fleet_client, "_open_private", fail_read)
+
+        with pytest.raises(fleet_client.FleetClientError, match="could not be read"):
+            fleet_client.flush_spool(fleet_client.resolve_node_id(), hub_url="http://127.0.0.1:9", token="token")
+
+        assert spool.read_bytes() == original
+
+    @pytest.mark.parametrize("bad_record", [b'{"run_id":\n', b'{"run_id":', b"[]\n"])
+    def test_flush_delivers_valid_events_around_malformed_records(self, home, monkeypatch, bad_record):
+        spool = _spool()
+        spool.parent.mkdir(parents=True, exist_ok=True)
+        spool.write_bytes(b'{"run_id":"keep"}\n' + bad_record)
+        delivered = []
+        monkeypatch.setattr(
+            fleet_client, "_post_events_blocking", lambda _hub, _token, events, **kw: delivered.extend(events)
+        )
+
+        assert (
+            fleet_client.flush_spool(fleet_client.resolve_node_id(), hub_url="http://127.0.0.1:9", token="token") == 1
+        )
+        assert delivered == [{"run_id": "keep"}]
+        assert not spool.exists()
+
+    def test_report_event_after_torn_tail_delivers_old_and_new_events(self, home, monkeypatch):
+        spool = _spool()
+        spool.parent.mkdir(parents=True, exist_ok=True)
+        spool.write_bytes(b'{"run_id":"old"}\n{"run_id":')
+        delivered = []
+        monkeypatch.setattr(
+            fleet_client, "_post_events_blocking", lambda _hub, _token, events, **kw: delivered.extend(events)
+        )
+
+        assert fleet_client.report_event({"run_id": "new"})
+        assert [event["run_id"] for event in delivered] == ["old", "new"]
+        assert not spool.exists()
+
+    def test_flush_preserves_spool_with_invalid_utf8(self, home):
+        spool = _spool()
+        spool.parent.mkdir(parents=True, exist_ok=True)
+        original = b"\xff\n"
+        spool.write_bytes(original)
+
+        with pytest.raises(fleet_client.FleetClientError, match="could not be read"):
+            fleet_client.flush_spool(fleet_client.resolve_node_id(), hub_url="http://127.0.0.1:9", token="token")
+
+        assert spool.read_bytes() == original
+
+    @pytest.mark.skipif(os.name != "posix", reason="directory durability is POSIX-specific")
+    def test_spool_mutations_sync_file_and_directory(self, home, monkeypatch):
+        spool = _spool()
+        real_fsync = os.fsync
+        synced_modes = []
+
+        def record_fsync(fd):
+            synced_modes.append(stat.S_IFMT(os.fstat(fd).st_mode))
+            real_fsync(fd)
+
+        monkeypatch.setattr(fleet_client.os, "fsync", record_fsync)
+        with fleet_client._spool_lock(spool) as dir_fd:
+            assert fleet_client._spool_append_locked(spool, {"run_id": "append"}, dir_fd=dir_fd)
+            fleet_client._write_spool_atomic(spool, [{"run_id": "replace"}], dir_fd=dir_fd)
+            fleet_client._write_spool_atomic(spool, [], dir_fd=dir_fd)
+
+        assert synced_modes.count(stat.S_IFREG) >= 2
+        assert synced_modes.count(stat.S_IFDIR) >= 3
+
+    @pytest.mark.skipif(os.name != "posix", reason="directory durability is POSIX-specific")
+    def test_first_spool_creation_syncs_each_new_directory_entry(self, home, monkeypatch):
+        spool = _spool()
+        real_fsync = os.fsync
+        synced_modes = []
+
+        def record_fsync(fd):
+            synced_modes.append(stat.S_IFMT(os.fstat(fd).st_mode))
+            real_fsync(fd)
+
+        monkeypatch.setattr(fleet_client.os, "fsync", record_fsync)
+        assert fleet_client.report_event({"run_id": "r1", "state": "run.started"}) is False
+        assert spool.is_file()
+        assert synced_modes.count(stat.S_IFDIR) >= 3
+
+    @pytest.mark.skipif(os.name != "posix", reason="directory durability is POSIX-specific")
+    def test_existing_execute_only_ancestor_does_not_block_spool_setup(self, tmp_path):
+        root = tmp_path / "execute-only"
+        root.mkdir(mode=0o700)
+        home = root / "home"
+        home.mkdir(mode=0o700)
+        spool_dir = home / "fleet-spool"
+        os.chmod(root, 0o111)
+        try:
+            descriptor = fleet_client._ensure_private_dir(spool_dir)
+            assert descriptor is not None
+            os.close(descriptor)
+            assert stat.S_IMODE(os.stat(spool_dir).st_mode) == 0o700
+        finally:
+            os.chmod(root, 0o700)
+
+    def test_oversized_new_event_preserves_existing_spool(self, home, monkeypatch):
+        spool = _spool()
+        spool.parent.mkdir(parents=True, exist_ok=True)
+        fleet_client._write_spool_atomic(spool, [{"run_id": "old", "body": "o" * 50}])
+        original = spool.read_text(encoding="utf-8")
+        monkeypatch.setattr(fleet_client, "MAX_SPOOL_BYTES", 120)
+
+        assert fleet_client._spool_append_locked(spool, {"run_id": "new", "body": "n" * 40}) is False
+
+        assert spool.read_text(encoding="utf-8") == original
+        assert [event["run_id"] for event in fleet_client._read_spool(spool)] == ["old"]
+
     @pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
     def test_spool_dir_and_file_are_private(self, home):
         assert fleet_client.report_event({"run_id": "r1", "state": "run.started"}) is False
@@ -312,3 +433,24 @@ class TestSpoolPathFallbackWithoutDirFd:
             record.levelno == logging.WARNING and "could not be opened safely" in record.getMessage()
             for record in caplog.records
         ), "a failed spool write was swallowed silently"
+
+    def test_report_event_propagates_interrupt_when_spooling_fails(self, home, monkeypatch):
+        def interrupt(*_args, **_kwargs):
+            raise KeyboardInterrupt
+
+        monkeypatch.setattr(fleet_client, "_post_events", interrupt)
+        monkeypatch.setattr(fleet_client, "_spool_append_locked", lambda *_args, **_kwargs: False)
+        with pytest.raises(KeyboardInterrupt):
+            fleet_client.report_event({"run_id": "r1", "state": "run.started"})
+
+    def test_report_event_propagates_interrupt_when_spool_setup_fails(self, home, monkeypatch):
+        def interrupt(*_args, **_kwargs):
+            raise KeyboardInterrupt
+
+        def fail_spool_setup(*_args, **_kwargs):
+            raise fleet_client.FleetClientError("simulated spool setup failure")
+
+        monkeypatch.setattr(fleet_client, "_post_events", interrupt)
+        monkeypatch.setattr(fleet_client, "_ensure_private_dir", fail_spool_setup)
+        with pytest.raises(KeyboardInterrupt):
+            fleet_client.report_event({"run_id": "r1", "state": "run.started"})

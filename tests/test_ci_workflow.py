@@ -33,9 +33,11 @@ def test_ci_workflow_path_filter_has_valid_structure_and_engine_paths():
     assert "jobs:\n  changes:" in text
     assert "runs-on: ubuntu-latest" in changes
     assert "uses: dorny/paths-filter@v4" in changes
-    assert "code_graph: ${{ steps.filter.outputs.code_graph }}" in changes
-    assert "evidence_ledger: ${{ steps.filter.outputs.evidence_ledger }}" in changes
-    assert "notify: ${{ steps.filter.outputs.notify }}" in changes
+    for flag in ("code_graph", "evidence_ledger", "notify", "fleet_hub_container"):
+        assert (
+            f"{flag}: ${{{{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.{flag} }}}}" in changes
+        )
+    assert "if: ${{ github.event_name != 'merge_group' }}" in changes
     assert "code-graph:" not in changes
     assert "evidence-ledger:" not in changes
     assert "stations/notify:" not in changes
@@ -452,13 +454,16 @@ def test_ci_workflow_combines_python312_coverage_and_preserves_required_checks()
     assert "python -m coverage combine .coverage-data" in coverage
     assert "python -m coverage report --fail-under=78" in coverage
     assert "name: test (${{ matrix.python }})" in protected
-    assert "needs: [test-shards, coverage, cosign-integration]" in protected
+    assert "needs: [changes, test-shards, coverage, cosign-integration, fleet-hub-container]" in protected
     assert 'python: ["3.10", "3.11", "3.12"]' in protected
     assert "if: ${{ always() }}" in protected
+    assert "CHANGES_RESULT: ${{ needs.changes.result }}" in protected
     assert "SHARDS_RESULT: ${{ needs.test-shards.result }}" in protected
     assert "COVERAGE_RESULT: ${{ needs.coverage.result }}" in protected
     assert "COSIGN_RESULT: ${{ needs.cosign-integration.result }}" in protected
+    assert "FLEET_HUB_RESULT: ${{ needs.fleet-hub-container.result }}" in protected
     assert '[ "$COSIGN_RESULT" != "success" ]' in protected
+    assert '[ "$FLEET_HUB_RESULT" != "success" ]' in protected
     assert (
         '[ "$SHARDS_RESULT" != "success" ] || [ "$COVERAGE_RESULT" != "success" ] || [ "$COSIGN_RESULT" != "success" ]'
         in protected
@@ -485,10 +490,99 @@ def test_ci_workflow_shadow_gate_covers_required_jobs_and_their_dependencies():
         "quickstart-smoke",
         "windows-native-acceptance",
     }
-    assert needs == required_jobs | {"test-shards", "coverage", "cosign-integration"}
+    assert needs == required_jobs | {"test-shards", "coverage", "cosign-integration", "fleet-hub-container"}
     for name in needs:
         _workflow_job_section(text, name)
     assert "actions/checkout" not in gate
+
+
+@pytest.mark.parametrize("event", ["pull_request", "merge_group"])
+@pytest.mark.parametrize("flag", ["true", "false", "", None])
+@pytest.mark.parametrize("changes_result", ["success", "failure", "cancelled", "skipped"])
+@pytest.mark.parametrize("container_result", ["success", "skipped", "failure", "cancelled"])
+def test_ci_shadow_gate_accepts_only_classified_container_skips(event, flag, changes_result, container_result):
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    gate = _workflow_job_section(text, "ci-gate")
+    needs_block = gate.split("    needs:\n", 1)[1].split("    runs-on:", 1)[0]
+    needs = {name: {"result": "success"} for name in re.findall(r"^      - ([a-z0-9-]+)$", needs_block, re.MULTILINE)}
+    needs["changes"] = {"result": changes_result, "outputs": {"fleet_hub_container": flag}}
+    needs["fleet-hub-container"] = {"result": container_result}
+    script = textwrap.dedent(gate.split("        run: |\n", 1)[1])
+    result = subprocess.run(
+        ["bash", "-c", script],
+        env=dict(os.environ, NEEDS_JSON=json.dumps(needs), EVENT_NAME=event),
+        capture_output=True,
+        text=True,
+    )
+    expected = changes_result == "success" and (
+        container_result == "success" or (container_result == "skipped" and flag == "false" and event != "merge_group")
+    )
+    assert (result.returncode == 0) is expected, result.stdout + result.stderr
+
+
+def test_ci_workflow_filters_container_builds_without_scheduling_the_required_matrix():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    changes = _workflow_job_section(text, "changes")
+    container = _workflow_job_section(text, "fleet-hub-container")
+    assert (
+        "fleet_hub_container: ${{ github.event_name == 'merge_group' && 'true' || "
+        "steps.filter.outputs.fleet_hub_container }}" in changes
+    )
+    paths = changes.split("            fleet_hub_container:\n", 1)[1]
+    for path in (".dockerignore", "ops/fleet-hub/**", "tests/fleet_hub_container_smoke.py", ".github/workflows/ci.yml"):
+        assert f"- '{path}'" in paths
+    assert "schedule:" not in text[: text.index("jobs:")]
+    assert "github.event_name == 'schedule'" not in text
+    assert "needs: changes" in container
+    assert "if: ${{ needs.changes.outputs.fleet_hub_container == 'true' }}" in container
+    assert "platform: [linux/amd64, linux/arm64]" in container
+
+
+def test_nightly_container_workflow_runs_only_the_container_smoke():
+    ci = (ROOT / ".github/workflows/ci.yml").read_text()
+    text = (ROOT / ".github/workflows/fleet-hub-container-nightly.yml").read_text()
+    header, jobs = text.split("jobs:\n", 1)
+    assert "name: fleet-hub-container-nightly\n" in header
+    assert re.search(r"^  schedule:\n    - cron: ['\"]0 3 \* \* \*['\"]$", header, re.MULTILINE)
+    assert "workflow_dispatch:" in header
+    assert "pull_request:" not in header
+    assert "push:" not in header
+    assert "permissions:\n  contents: read" in header
+    assert "group: fleet-hub-container-nightly-main" in header
+    assert "cancel-in-progress: false" in header
+    assert re.findall(r"^  ([a-z0-9][a-z0-9-]*):$", jobs, re.MULTILINE) == ["fleet-hub-container"]
+    container = _workflow_job_section(text, "fleet-hub-container")
+    assert "if: ${{ github.ref == 'refs/heads/main' }}" in container
+    assert "needs:" not in container
+    assert "continue-on-error" not in text
+    ci_container = _workflow_job_section(ci, "fleet-hub-container")
+    assert container[container.index("    name:") :].strip() == ci_container[ci_container.index("    name:") :].strip()
+
+
+@pytest.mark.parametrize("required", ["true", "false"])
+@pytest.mark.parametrize("container_result", ["success", "skipped", "failure", "cancelled"])
+@pytest.mark.parametrize("changes_result", ["success", "failure", "cancelled", "skipped"])
+def test_ci_workflow_required_test_gate_accepts_only_intentional_container_skips(
+    required, container_result, changes_result
+):
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    protected = _workflow_job_section(text, "test")
+    assert "FLEET_HUB_REQUIRED: ${{ needs.changes.outputs.fleet_hub_container == 'true' }}" in protected
+    shell = textwrap.dedent(protected.split("        run: |\n", 1)[1])
+    env = dict(
+        os.environ,
+        CHANGES_RESULT=changes_result,
+        SHARDS_RESULT="success",
+        COVERAGE_RESULT="success",
+        COSIGN_RESULT="success",
+        FLEET_HUB_RESULT=container_result,
+        FLEET_HUB_REQUIRED=required,
+    )
+    result = subprocess.run(["bash", "-c", shell], env=env, capture_output=True, text=True)
+    expected = changes_result == "success" and (
+        container_result == "success" or (container_result == "skipped" and required == "false")
+    )
+    assert (result.returncode == 0) is expected, result.stdout + result.stderr
 
 
 def test_ci_workflow_caches_pip_for_jobs_that_install_dev_extras():
@@ -961,12 +1055,14 @@ def test_windows_native_acceptance_miseledger_marker_is_in_verify_command_filena
     assert 'print("{0}")' not in section
 
 
-def test_hyperv_acceptance_is_a_tracked_maintainer_contract_not_a_self_hosted_job():
+def test_hyperv_acceptance_is_a_tracked_maintainer_contract_and_native_windows_stays_hosted():
     workflow = (ROOT / ".github/workflows/ci.yml").read_text()
     orchestrator = (ROOT / "scripts/hyper-v-native-acceptance.ps1").read_text()
     runbook = (ROOT / "docs/runbooks/hyper-v-native-acceptance.md").read_text()
 
-    assert "self-hosted" not in workflow
+    native_windows = _workflow_job_section(workflow, "windows-native-acceptance")
+    assert "runs-on: windows-latest" in native_windows
+    assert "self-hosted" not in native_windows
     assert "Restore-VMSnapshot" in orchestrator
     assert '"clean"' in orchestrator
     assert "-BrigadeVersion" in orchestrator
@@ -1281,3 +1377,145 @@ def test_windows_native_acceptance_has_no_global_editable_install_before_accepta
         r"\s+install\b[^\n]*(?:\s-e(?:\s|$)|\s--editable(?:[=\s]|$))"
     )
     assert global_editable_install.search(before_acceptance) is None
+
+
+# These are compatibility contracts for the existing protected checks and CI
+# coverage. The canary adds capacity evidence without replacing any of them.
+EXISTING_CI_JOBS = {
+    "changes": None,
+    "code-graph-msrv": "MSRV (Rust 1.85)",
+    "code-graph-build-and-test": "build-and-test",
+    "code-graph-feature-configurations": "Feature configuration (${{ matrix.name }})",
+    "code-graph-windows": "Windows (stable, default features)",
+    "evidence-ledger-test": None,
+    "notify-build-and-test": "notify-build-and-test (ubuntu-latest)",
+    "notify-windows": "notify-build-and-test (windows-latest)",
+    "lint": None,
+    "test-shards": "test shard (${{ matrix.python }}, ${{ matrix.shard }})",
+    "fleet-hub-container": "Fleet Hub container (${{ matrix.platform }})",
+    "coverage": None,
+    "test": "test (${{ matrix.python }})",
+    "component-manifest-provenance": None,
+    "cosign-integration": "cosign (${{ matrix.cosign }})",
+    "content-guard": None,
+    "repo-metadata": None,
+    "install-from-source": None,
+    "quickstart-smoke": "quickstart-smoke (${{ matrix.os }})",
+    "windows-native-acceptance": "windows-native-acceptance",
+}
+
+
+def test_ci_migration_preserves_existing_job_names_and_hosted_routing():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    jobs = text.split("jobs:\n", 1)[1]
+    assert set(re.findall(r"^  ([a-z0-9-]+):$", jobs, re.MULTILINE)) == set(EXISTING_CI_JOBS) | {
+        "trusted-runner-canary",
+        "ci-gate",
+    }
+    for job, name in EXISTING_CI_JOBS.items():
+        section = _workflow_job_section(text, job)
+        names = re.findall(r"^    name: (.+)$", section, re.MULTILINE)
+        assert names == ([] if name is None else [name]), job
+        if job in {"code-graph-windows", "notify-windows", "windows-native-acceptance"}:
+            runner = "windows-latest"
+        elif job == "quickstart-smoke":
+            runner = "${{ matrix.os }}"
+        else:
+            runner = "ubuntu-latest"
+        assert re.findall(r"^    runs-on: (.+)$", section, re.MULTILINE) == [runner], job
+        assert "self-hosted" not in section
+        assert "continue-on-error" not in section
+
+
+def test_ci_migration_preserves_complete_matrices():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    for job, axis in (
+        ("test-shards", 'python: ["3.10", "3.11", "3.12"]'),
+        ("test-shards", "shard: [0, 1, 2, 3]"),
+        ("test", 'python: ["3.10", "3.11", "3.12"]'),
+        ("cosign-integration", 'cosign: ["v2.6.5", "v3.1.3"]'),
+        ("fleet-hub-container", "platform: [linux/amd64, linux/arm64]"),
+        ("quickstart-smoke", "os: [ubuntu-latest, macos-latest, windows-latest]"),
+    ):
+        assert axis in _workflow_job_section(text, job)
+    features = _workflow_job_section(text, "code-graph-feature-configurations")
+    assert re.findall(r"^          - name: (.+)$", features, re.MULTILINE) == [
+        "no-default",
+        "default",
+        "watch-only",
+        "codesearch-only",
+        "miseledger-only",
+        "all-features",
+    ]
+    installers = _workflow_job_section(text, "install-from-source")
+    assert re.findall(r'          - name: "(.+)"\n            flags: "(.+)"', installers) == [
+        ("repo+claude", "--depth repo --harnesses claude"),
+        ("repo+codex", "--depth repo --harnesses codex"),
+        ("workspace+claude+openclaw", "--depth workspace --harnesses claude,openclaw"),
+        ("workspace+codex+openclaw", "--depth workspace --harnesses codex,openclaw"),
+        ("workspace+hermes", "--depth workspace --harnesses hermes"),
+        ("kitchen-sink", "--depth workspace --harnesses claude,codex,openclaw,hermes"),
+        ("workspace+none", "--depth workspace --harnesses none"),
+        ("repo+claude+publisher", "--depth repo --harnesses claude --include publisher"),
+    ]
+
+
+def test_ci_merge_groups_request_all_component_checks_without_path_filter():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    header = text.split("jobs:\n", 1)[0]
+    assert "  merge_group:\n    types: [checks_requested]\n" in header
+    assert "  push:\n    branches: [main]\n  pull_request:\n" in header
+    assert "pull_request_target:" not in header
+    changes = _workflow_job_section(text, "changes")
+    filter_step = changes[changes.index("      - uses: dorny/paths-filter@v4") :]
+    assert "        if: ${{ github.event_name != 'merge_group' }}\n" in filter_step
+    for flag in ("code_graph", "evidence_ledger", "notify", "fleet_hub_container"):
+        assert (
+            f"      {flag}: ${{{{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.{flag} }}}}\n"
+            in changes
+        )
+
+
+def test_ci_canary_is_one_opt_in_trusted_main_job_with_minimal_permissions():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    canary = _workflow_job_section(text, "trusted-runner-canary")
+    assert (
+        "    if: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && "
+        "vars.BRIGADE_SELF_HOSTED == 'on' }}\n" in canary
+    )
+    assert "    runs-on:\n      group: brigade-trusted\n      labels: [self-hosted, linux, x64]\n" in canary
+    assert "    permissions:\n      contents: read\n" in canary
+    timeout = re.search(r"^    timeout-minutes: (\d+)$", canary, re.MULTILINE)
+    assert timeout is not None and 0 < int(timeout[1]) <= 15
+    assert "strategy:" not in canary
+    assert "needs:" not in canary
+    assert "continue-on-error" not in canary
+    assert re.findall(r"uses: (.+)", canary) == ["actions/checkout@v7"]
+    assert "        with:\n          persist-credentials: false\n" in canary
+    for forbidden in ("sudo", "setup-python", "pip ", "curl ", "wget ", "download-artifact", "printenv"):
+        assert forbidden not in canary
+    assert 'export PYTHONPATH="$GITHUB_WORKSPACE/src"' in canary
+    for command in (
+        "python3 -m brigade --version",
+        'target="$(mktemp -d)"',
+        'git init -q -b main "$target"',
+        'python3 -m brigade init --target "$target" --depth workspace --harnesses claude,codex',
+        'python3 -m brigade doctor --target "$target"',
+    ):
+        assert command in canary
+
+
+def test_ci_canary_smoke_executes_from_outside_checkout(tmp_path):
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    canary = _workflow_job_section(text, "trusted-runner-canary")
+    shell = textwrap.dedent(canary.split("        run: |\n", 1)[1])
+    result = subprocess.run(
+        ["bash", "-euo", "pipefail", "-c", shell],
+        cwd=tmp_path,
+        env=dict(os.environ, GITHUB_WORKSPACE=str(ROOT), PYTHONPATH=""),
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "0 failed" in result.stdout

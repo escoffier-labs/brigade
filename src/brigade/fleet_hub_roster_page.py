@@ -52,6 +52,7 @@ class SeatRow:
     brigade_model: str
     t3_instance_id: str
     t3_service_tier: str
+    t3_model: str
     notes: str | None
     retired: bool
 
@@ -137,7 +138,7 @@ def load_view(
     seats: list[SeatRow] = []
     for row in conn.execute(
         "SELECT seat, provider, model, reasoning, enabled, limit_count, brigade_cli, t3_instance_id, "
-        "t3_service_tier, notes, brigade_model FROM model_policy ORDER BY seat"
+        "t3_service_tier, notes, brigade_model, t3_model FROM model_policy ORDER BY seat"
     ).fetchall():
         seats.append(
             SeatRow(
@@ -151,10 +152,11 @@ def load_view(
                 brigade_model=str(row[10] or ""),
                 t3_instance_id=str(row[7] or ""),
                 t3_service_tier=str(row[8] or ""),
+                t3_model=str(row[11] or ""),
                 notes=row[9],
                 retired=any(
                     fleet_model_roster.retired_reason(str(row[1]), str(identity), retired_rows) is not None
-                    for identity in (row[2], row[10] or "")
+                    for identity in (row[2], row[10] or "", row[11] or "")
                 ),
             )
         )
@@ -748,6 +750,7 @@ def apply(
                     "brigade_model": row.brigade_model,
                     "t3_instance_id": row.t3_instance_id,
                     "t3_service_tier": row.t3_service_tier,
+                    "t3_model": row.t3_model,
                     "notes": row.notes,
                 },
             )

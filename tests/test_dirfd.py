@@ -69,6 +69,49 @@ def test_child_directory_and_file_round_trip(tmp_path: Path) -> None:
         os.close(parent)
 
 
+@pytest.mark.skipif(not dirfd.available(), reason="descriptor-relative directory operations required")
+def test_open_directory_chain_creates_nested_directories(tmp_path: Path) -> None:
+    target = tmp_path / "first" / "second"
+    descriptor = dirfd.open_directory_chain(target, create=True)
+    try:
+        assert target.is_dir()
+        assert os.fstat(descriptor).st_ino == target.stat().st_ino
+    finally:
+        os.close(descriptor)
+
+
+@pytest.mark.skipif(not dirfd.available(), reason="descriptor-relative directory operations required")
+def test_replace_children_without_replacement_preserves_destination(tmp_path: Path) -> None:
+    parent = dirfd.open_directory_nofollow(tmp_path)
+    try:
+        for name, content in (("source", b"source"), ("destination", b"destination")):
+            descriptor = dirfd.open_child_file(parent, name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            try:
+                os.write(descriptor, content)
+            finally:
+                os.close(descriptor)
+        with pytest.raises(FileExistsError):
+            dirfd.replace_children(parent, "source", "destination", replace=False)
+        assert (tmp_path / "source").read_bytes() == b"source"
+        assert (tmp_path / "destination").read_bytes() == b"destination"
+    finally:
+        os.close(parent)
+
+
+@pytest.mark.skipif(not dirfd.posix_available(), reason="POSIX dir_fd plus O_NOFOLLOW required")
+def test_link_child_preserves_existing_destination(tmp_path: Path) -> None:
+    (tmp_path / "source").write_bytes(b"source")
+    (tmp_path / "destination").write_bytes(b"destination")
+    parent = dirfd.open_directory_nofollow(tmp_path)
+    try:
+        with pytest.raises(FileExistsError):
+            dirfd.link_child(parent, "source", "destination")
+    finally:
+        os.close(parent)
+    assert (tmp_path / "source").read_bytes() == b"source"
+    assert (tmp_path / "destination").read_bytes() == b"destination"
+
+
 def test_validate_component_rejects_empty_dot_dotdot_separators_and_nul() -> None:
     assert dirfd.validate_component("run.json") == "run.json"
     assert dirfd.validate_component("recovery-checkpoints") == "recovery-checkpoints"
@@ -206,11 +249,16 @@ def test_dirfd_public_api_delegates_to_nt_when_posix_unavailable(
         calls.append(("mkdir", name))
         os.mkdir(name, 0o700, dir_fd=parent)
 
+    def reopen_writable(parent: int, *, modify: bool = False) -> int:
+        calls.append(("reopen", modify))
+        return os.dup(parent)
+
     monkeypatch.setattr(dirfd, "posix_available", lambda: False)
     monkeypatch.setattr(dirfd, "nt_available", lambda: True)
     monkeypatch.setattr(nt_dirfd, "open_root_directory", open_root)
     monkeypatch.setattr(nt_dirfd, "open_child_directory", open_child)
     monkeypatch.setattr(nt_dirfd, "mkdir_child", mkdir_child)
+    monkeypatch.setattr(nt_dirfd, "reopen_directory_writable", reopen_writable)
 
     parent = dirfd.open_directory_nofollow(tmp_path)
     child = -1
@@ -219,6 +267,7 @@ def test_dirfd_public_api_delegates_to_nt_when_posix_unavailable(
         child = dirfd.open_child_directory(parent, "events")
         assert ("root", os.fspath(tmp_path)) in calls
         assert ("mkdir", "events") in calls
+        assert ("reopen", False) in calls
         assert ("child", "events") in calls
     finally:
         if child != -1:

@@ -1,0 +1,30 @@
+services:
+  hub:
+    build:
+      context: ../..
+      dockerfile: ops/fleet-hub/Containerfile
+      args:
+        BRIGADE_REF: e6009f6969dc6e45db2ab93790aa3e407c791409
+    image: localhost/brigade-fleet-hub:0.28.0-e6009f6
+    restart: unless-stopped
+    init: true
+    ports:
+      - "127.0.0.1:3774:3774"
+    secrets:
+      - source: admin_token
+        target: admin_token
+    volumes:
+      - brigade-state:/var/lib/brigade
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:3774/health', timeout=2).read()"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+
+secrets:
+  admin_token:
+    file: ./secrets/admin-token.txt
+
+volumes:
+  brigade-state:

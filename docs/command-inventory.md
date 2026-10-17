@@ -28,7 +28,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade dogfood` (extras): 1 command path(s)
 - `brigade evidence`: 12 command path(s)
 - `brigade extras`: 3 command path(s)
-- `brigade fleet`: 60 command path(s)
+- `brigade fleet`: 72 command path(s)
 - `brigade friction` (extras): 3 command path(s)
 - `brigade governance`: 1 command path(s)
 - `brigade guard`: 1 command path(s)
@@ -51,7 +51,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade profiles`: 2 command path(s)
 - `brigade projection`: 1 command path(s)
 - `brigade projects` (extras): 10 command path(s)
-- `brigade receipts`: 17 command path(s)
+- `brigade receipts`: 18 command path(s)
 - `brigade reconfigure`: 1 command path(s)
 - `brigade release` (extras): 23 command path(s)
 - `brigade repos` (extras): 74 command path(s)
@@ -199,6 +199,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade fleet cloud set`
 - `brigade fleet dot report`
 - `brigade fleet enroll`
+- `brigade fleet events report`
 - `brigade fleet export`
 - `brigade fleet flush`
 - `brigade fleet grokbot enroll-actor`
@@ -211,6 +212,16 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade fleet models reconcile`
 - `brigade fleet models retire`
 - `brigade fleet models set`
+- `brigade fleet msg ack`
+- `brigade fleet msg flush`
+- `brigade fleet msg list`
+- `brigade fleet msg principals add`
+- `brigade fleet msg principals grants`
+- `brigade fleet msg principals revoke`
+- `brigade fleet msg principals show`
+- `brigade fleet msg reply`
+- `brigade fleet msg send`
+- `brigade fleet msg sent`
 - `brigade fleet nodes add`
 - `brigade fleet nodes list`
 - `brigade fleet nodes revoke`
@@ -236,6 +247,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade fleet preference get`
 - `brigade fleet preference pull`
 - `brigade fleet preference set`
+- `brigade fleet roster validate`
 - `brigade fleet serve`
 - `brigade fleet sessions`
 - `brigade fleet sink`
@@ -411,6 +423,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade receipts export agent-change`
 - `brigade receipts export attestation`
 - `brigade receipts export commit-linkage`
+- `brigade receipts export derivative`
 - `brigade receipts export journal`
 - `brigade receipts export miseledger`
 - `brigade receipts export openinference`

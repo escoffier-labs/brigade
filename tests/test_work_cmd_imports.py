@@ -450,6 +450,75 @@ def test_work_import_ingest_dedupes_canonical_existing_row_without_scanner_recei
     assert duplicate["skipped"] == 1
 
 
+@pytest.mark.parametrize("dismiss", [False, True], ids=["pending", "dismissed"])
+def test_work_import_ingest_preserves_identity_after_text_redaction(tmp_path, capsys, dismiss):
+    _init_git_repo(tmp_path)
+    sensitive = "person@private.example"  # <!-- content-guard: allow email --> synthetic fixture
+    import_file = tmp_path / "imports.jsonl"
+    import_file.write_text(json.dumps({"text": f"Contact {sensitive}", "kind": "finding"}) + "\n")
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert first["created"] == 1
+    original = first["imports"][0]
+    assert sensitive not in json.dumps(original)
+    if dismiss:
+        assert work_cmd.import_dismiss(target=tmp_path, import_id=original["id"], reason="already reviewed") == 0
+        capsys.readouterr()
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    repeated = json.loads(capsys.readouterr().out)
+    assert repeated["created"] == 0
+    assert repeated["dismissed" if dismiss else "skipped"] == 1
+    assert work_cmd.import_list(target=tmp_path, all_imports=True, json_output=True) == 0
+    stored = json.loads(capsys.readouterr().out)["imports"]
+    assert len(stored) == 1
+    assert stored[0]["id"] == original["id"]
+    assert stored[0]["metadata"]["source_fingerprint"] == original["metadata"]["source_fingerprint"]
+    assert stored[0]["status"] == ("dismissed" if dismiss else "pending")
+    if dismiss:
+        assert stored[0]["dismiss_reason"] == "already reviewed"
+    inbox_directory = tmp_path / ".brigade" / "work" / "imports"
+    for path in inbox_directory.rglob("*"):
+        if path.is_file():
+            assert sensitive.encode() not in path.read_bytes()
+
+
+def test_work_import_ingest_keeps_distinct_raw_identities_after_redaction(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    import_file = tmp_path / "imports.jsonl"
+    imported = []
+    for email in (
+        "first@private.example",  # <!-- content-guard: allow email --> synthetic fixture
+        "second@private.example",  # <!-- content-guard: allow email --> synthetic fixture
+    ):
+        import_file.write_text(json.dumps({"text": f"Contact {email}", "kind": "finding"}) + "\n")
+        assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+        result = json.loads(capsys.readouterr().out)
+        assert result["created"] == 1
+        imported.append(result["imports"][0])
+    assert imported[0]["text"] == imported[1]["text"]
+    assert imported[0]["metadata"]["source_fingerprint"] != imported[1]["metadata"]["source_fingerprint"]
+
+
+def test_work_import_ingest_redacted_identity_requires_persisted_proof(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    import_file = tmp_path / "imports.jsonl"
+    text = "Contact person@private.example"  # <!-- content-guard: allow email --> synthetic fixture
+    import_file.write_text(json.dumps({"text": text, "kind": "finding"}) + "\n")
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    first = json.loads(capsys.readouterr().out)
+    proof_name = work_cmd.ledger._import_proof_name(first["imports"][0]["id"])
+    assert proof_name is not None
+    (tmp_path / ".brigade" / "work" / "imports" / "proofs" / proof_name).unlink()
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    repeated = json.loads(capsys.readouterr().out)
+    assert repeated["created"] == 1
+    assert repeated["skipped"] == 0
+    assert repeated["dismissed"] == 0
+
+
 def test_unsigned_dedupe_downgrade_suppresses_in_non_isolated_workspace(tmp_path, monkeypatch, capsys):
     """#881 posture split: without ``authority_store.isolation = "external-key"``
     no verifier-signed store can exist, so canonical dedupe suppression falls
@@ -631,7 +700,7 @@ def test_work_import_ingest_makes_forged_trusted_source_non_authoritative(tmp_pa
     assert item["metadata"]["declared_source"] == "security-scan"
     envelope = item["metadata"]["provenance"]
     assert envelope["source"]["kind"] == "learning-loop"
-    assert envelope["origin"] == "workspace"
+    assert envelope["origin"] == "external-web"
     assert envelope["modality"] == "tool-output"
 
 

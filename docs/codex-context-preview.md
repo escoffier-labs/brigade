@@ -195,5 +195,30 @@ slot and have their own approximate token bound. See pinned
 [global provider tests](https://github.com/openai/codex/blob/a956835d020762cb2b570053af06f643a11c0ecc/codex-rs/codex-home/src/instructions/tests.rs),
 and [marker search](https://github.com/openai/codex/blob/a956835d020762cb2b570053af06f643a11c0ecc/codex-rs/file-system/src/find_up.rs).
 
-This bounded preview addresses part of issue #1564. Existing-session consumption
-and automatic effective-config observation remain outside this slice.
+## Doctor integration
+
+When the codex harness is selected, `brigade doctor` adds an
+`instruction-chain: codex` check. It runs this preview with stated assumptions:
+Codex 0.160.0 contract, trust `trusted`, read access `full`, cwd equal to the
+doctor target, Codex defaults for omitted settings, and no global scope. The
+detail labels the result `estimate, not observed` and names the cap source,
+which is `default-assumption`. Doctor reads no Codex configuration, so it does
+not apply a configured `project_doc_max_bytes`. `WARN` and `MANUAL` results
+print a preview command for rerunning with effective settings, except when the
+platform lacks the required POSIX nofollow capabilities. In that case, including
+native Windows, doctor reports `MANUAL` with `posix_nofollow_required`, states
+that preview is unsupported on this platform, and offers no rerun command.
+The command spells out the target only when the path has no control characters
+or backticks.
+
+Each selected file shows its byte count, contribution and Brigade advisory
+budget, and the detail repeats that the consumer cap is separate from those
+budgets. The check reports `OK` within the cap, `WARN` when a selected file is
+truncated or cap-exhausted, and `MANUAL` with reason codes when the preview is
+not evaluated, for example when no `.git` marker exists at the target. Doctor
+inspects only the target directory, so nested chains below it need the preview
+command with an explicit `--cwd`. Bodies are never included in the detail.
+
+This bounded preview and doctor check address part of issue #1564.
+Existing-session consumption and automatic effective-config observation remain
+outside these slices.

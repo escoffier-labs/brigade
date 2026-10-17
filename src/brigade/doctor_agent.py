@@ -73,6 +73,11 @@ _EXPLANATIONS: tuple[tuple[str, str], ...] = (
         "truncate context or leave the agent without Brigade guidance.",
     ),
     (
+        "instruction-chain:",
+        "Estimated harness instruction chain and consumer truncation cap, kept "
+        "separate from Brigade's advisory per-file bootstrap budgets.",
+    ),
+    (
         "agents-quality:",
         "AGENTS.md quality so agents see an explicit definition of done and a memory-handoff path.",
     ),
@@ -171,7 +176,8 @@ def extract_commands(detail: str) -> list[str]:
 
     for match in _RUN_PREFIX_RE.finditer(detail):
         _add(match.group(1))
-    for match in _FIX_PREFIX_RE.finditer(detail):
+    # Prose prefixes inside a backtick command are argument text, not remediation.
+    for match in _FIX_PREFIX_RE.finditer(_COMMAND_RE.sub(" ", detail)):
         _add(match.group(1))
     for match in _COMMAND_RE.finditer(detail):
         _add(match.group(1))

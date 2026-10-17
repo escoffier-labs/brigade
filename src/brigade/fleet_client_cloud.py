@@ -103,6 +103,7 @@ _MODEL_POLICY_FIELDS = frozenset(
         "brigade_model",
         "t3_instance_id",
         "t3_service_tier",
+        "t3_model",
     }
 )
 
@@ -224,6 +225,9 @@ def _preserved_field(
             brigade = bindings.get("brigade")
             nested = "cli" if key == "brigade_cli" else "model"
             bound = brigade.get(nested) if isinstance(brigade, dict) else None
+        elif key == "t3_model":
+            native = bindings.get("native")
+            bound = native.get("model") if isinstance(native, dict) else None
         elif key in {"t3_instance_id", "t3_service_tier"}:
             t3_fleet = bindings.get("t3_fleet")
             nested_key = "instance_id" if key == "t3_instance_id" else "service_tier"
@@ -510,6 +514,7 @@ def set_model_policy(
     brigade_model: str | None = None,
     t3_instance_id: str | None = None,
     t3_service_tier: str | None = None,
+    t3_model: str | None = None,
     expected_revision: int,
 ) -> dict[str, Any]:
     """Set one seat's provider/model policy with the configured admin token."""
@@ -536,6 +541,7 @@ def set_model_policy(
         resolved_launch_model = _preserved_field(brigade_model, existing, "brigade_model")
         resolved_t3 = _preserved_field(t3_instance_id, existing, "t3_instance_id")
         resolved_tier = _preserved_field(t3_service_tier, existing, "t3_service_tier")
+        resolved_t3_model = _preserved_field(t3_model, existing, "t3_model")
         body = {
             "action": "set",
             "provider": provider,
@@ -549,6 +555,7 @@ def set_model_policy(
             "brigade_model": resolved_launch_model,
             "t3_instance_id": resolved_t3,
             "t3_service_tier": resolved_tier,
+            "t3_model": resolved_t3_model,
             "expected_revision": revision,
         }
         status, payload = _run_with_deadline(

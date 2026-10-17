@@ -33,6 +33,7 @@ from .fleet_command_deck import is_terminal_state
 from . import ui_theme
 
 REFRESH_SECONDS = 10
+MACHINE_CARD_LIMIT = 200
 # A non-terminal run whose latest event is older than this has no heartbeat
 # reaching the hub; it needs a human look.
 STALE_AFTER_SECONDS = 30 * 60
@@ -50,16 +51,18 @@ _AWAITING_STATES = frozenset({"run.paused", "approval.requested", "approval.held
 BUCKET_RANK = {
     "failed": 0,
     "awaiting approval": 1,
+    "unknown": 2,
     "stale": 2,
     "running": 3,
     "queued": 4,
     "interrupted": 5,
     "succeeded": 6,
 }
-NEEDS_ATTENTION = frozenset({"failed", "awaiting approval", "stale"})
+NEEDS_ATTENTION = frozenset({"failed", "awaiting approval", "stale", "unknown"})
 _BUCKET_ICON = {
     "failed": "×",
     "awaiting approval": "?",
+    "unknown": "?",
     "stale": "⌛",
     "running": "●",
     "queued": "○",
@@ -99,6 +102,7 @@ class RunRow:
     age_seconds: float | None
     started_epoch: float | None
     elapsed_seconds: float | None
+    context: dict[str, Any] | None = None
 
     @property
     def live(self) -> bool:
@@ -106,7 +110,7 @@ class RunRow:
 
     @property
     def active(self) -> bool:
-        return self.live and self.bucket != "stale"
+        return self.live and self.bucket not in {"stale", "unknown"}
 
     @property
     def seat_label(self) -> str:
@@ -152,6 +156,8 @@ def _parse_stamp(value: object) -> datetime | None:
 
 def bucket_for(state: str, *, age_seconds: float | None, exit_status: int | None = None) -> str:
     """Map a run_event type plus its age to an attention bucket."""
+    if state == "external.unknown":
+        return "unknown"
     if state == "run.stale":
         return "stale"
     if state == "run.orphaned":
@@ -194,7 +200,7 @@ def build_rows(
         last_ts = str(run.get("ts") or "")
         last = _parse_stamp(run.get("received_at")) or _parse_stamp(last_ts)
         age = max(0.0, (now - last).total_seconds()) if last is not None else None
-        started = _parse_stamp(started_at.get((node_id, run_id)))
+        started = _parse_stamp(started_at.get((node_id, run_id)) or run.get("started_at"))
         live = not is_terminal_state(state)
         elapsed: float | None = None
         if started is not None:
@@ -215,6 +221,7 @@ def build_rows(
                 age_seconds=age,
                 started_epoch=started.timestamp() if started is not None and live else None,
                 elapsed_seconds=elapsed,
+                context=run.get("context"),
             )
         )
     return rows
@@ -242,7 +249,7 @@ def filter_rows(rows: list[RunRow], query: DashboardQuery) -> list[RunRow]:
     if query.include_all:
         kept = rows
     elif query.attention_only:
-        kept = [row for row in rows if row.active or row.bucket == "stale"]
+        kept = [row for row in rows if row.active or row.bucket in {"stale", "unknown"}]
     else:
         kept = [row for row in rows if row.active]
     return [row for row in kept if row_matches(row, query)]
@@ -471,6 +478,17 @@ def _controls(query: DashboardQuery) -> str:
     )
 
 
+def _execution_context(context: dict[str, Any] | None) -> str:
+    if not context:
+        return ""
+    initiator = context.get("initiator", {})
+    parts = [f"initiator (reported): {initiator.get('label') or 'unknown'}"]
+    for field, label in (("target_host", "target"), ("request_id", "request")):
+        if context.get(field):
+            parts.append(f"{label}: {context[field]}")
+    return '<small class="fleet-execution-context">' + esc(" · ".join(parts)) + "</small>"
+
+
 def _run_table(rows: list[RunRow], table_id: str, *, with_node: bool) -> str:
     headers = ["Run", "Repo", "Seat/harness", "State", "Elapsed", "Last event"]
     if with_node:
@@ -479,7 +497,7 @@ def _run_table(rows: list[RunRow], table_id: str, *, with_node: bool) -> str:
     body = []
     for row in rows:
         cells = [
-            f'<td class="fleet-run-id" title="{esc(row.run_id)}">{esc(row.run_id)}</td>',
+            f'<td class="fleet-run-id" title="{esc(row.run_id)}">{esc(row.run_id)}{_execution_context(row.context)}</td>',
             f"<td>{esc(row.repo or '-')}</td>",
             f"<td>{esc(row.seat_label)}</td>",
             f"<td>{_run_badge(row)}</td>",
@@ -526,6 +544,8 @@ def _machine_card(
     *,
     now: datetime,
     sort: str,
+    unread_count: int = 0,
+    truncated_history: bool = False,
 ) -> str:
     last_seen = _parse_stamp((node_info or {}).get("last_received_at"))
     last_age = (now - last_seen).total_seconds() if last_seen is not None else None
@@ -534,10 +554,17 @@ def _machine_card(
     events = (node_info or {}).get("events")
     if isinstance(events, int):
         meta.append(f"{events} events")
+    if unread_count:
+        meta.append(f"{unread_count} unread message{'s' if unread_count != 1 else ''}")
     holds = ""
     if held:
         items = "".join(f"<li>{esc(claim.target)}: {esc(_claim_text(claim))}</li>" for claim in held)
         holds = f'<div class="fleet-holds">{esc("holds")}<ul>{items}</ul></div>'
+    history_note = (
+        f'<p class="fleet-history-truncated">{esc("older runs omitted; showing a bounded recent history")}</p>'
+        if truncated_history
+        else ""
+    )
     table = _run_table(sort_rows(rows, sort), f"node-{short_node(node_id)}", with_node=False)
     return (
         f'<article class="machine-card" data-node="{esc(node_id)}">'
@@ -546,8 +573,70 @@ def _machine_card(
         f'<h2 class="machine-card-title" title="{esc(node_id)}">{esc(short_node(node_id))}</h2>'
         f'<div class="machine-card-line">{esc(" · ".join(meta))}</div>'
         f"{_count_strip(rows)}</div></header>"
-        f"{holds}{table}</article>"
+        f"{holds}{history_note}{table}</article>"
     )
+
+
+def _machine_base_node_ids(
+    rows: list[RunRow], nodes: list[dict[str, Any]], claims: list[ClaimRow], query: DashboardQuery
+) -> set[str]:
+    node_ids = {row.node_id for row in rows}
+    info_ids = {str(node.get("node_id") or "") for node in nodes}
+    claim_ids = {claim.owner_node for claim in claims if claim.owner_node and not claim.expired}
+    if not query.node and not query.attention_only and not query.seat and not query.state and not query.repo:
+        node_ids |= {node_id for node_id in info_ids if node_id}
+        node_ids |= claim_ids
+    elif query.node:
+        node_ids |= {node_id for node_id in info_ids if node_id and _contains(node_id, query.node)}
+        node_ids |= {node_id for node_id in claim_ids if _contains(node_id, query.node)}
+    return node_ids
+
+
+def _machine_unread_candidates(
+    query: DashboardQuery, unread_counts: dict[str, int], *, excluded_node_ids: set[str] | None = None
+) -> list[str]:
+    if query.attention_only or query.seat or query.state or query.repo:
+        return []
+    excluded_node_ids = excluded_node_ids or set()
+    return sorted(
+        node_id
+        for node_id, count in unread_counts.items()
+        if count > 0 and node_id not in excluded_node_ids and (not query.node or _contains(node_id, query.node))
+    )
+
+
+def _machine_unread_exclusions(
+    query: DashboardQuery, current_base_node_ids: set[str], complete_base_node_ids: set[str]
+) -> set[str]:
+    excluded = set(current_base_node_ids)
+    if not query.node and not query.attention_only and not query.seat and not query.state and not query.repo:
+        excluded |= complete_base_node_ids
+    elif query.node:
+        excluded |= {node_id for node_id in complete_base_node_ids if _contains(node_id, query.node)}
+    return excluded
+
+
+def machine_sort_key(node_id: str, rows: list[RunRow], query: DashboardQuery) -> tuple[Any, ...]:
+    """Use the most urgent matching run to order a machine before pagination."""
+    keys: list[tuple[Any, ...]] = []
+    for row in rows:
+        if not (row.live or query.include_all):
+            continue
+        if query.sort == "age":
+            keys.append((_elapsed_key(row), _rank(row)))
+        elif query.sort == "state":
+            keys.append((_rank(row), row.state, _elapsed_key(row)))
+        elif query.sort == "attention":
+            keys.append((_rank(row), _elapsed_key(row)))
+    if not keys:
+        if query.sort == "age":
+            return (1.0, _IDLE_RANK, node_id)
+        if query.sort == "state":
+            return (_IDLE_RANK, "", 1.0, node_id)
+        if query.sort == "attention":
+            return (_IDLE_RANK, 1.0, node_id)
+        return (0, node_id)
+    return (*min(keys), node_id)
 
 
 def _machine_board(
@@ -557,29 +646,42 @@ def _machine_board(
     query: DashboardQuery,
     *,
     now: datetime,
+    unread_counts: dict[str, int] | None = None,
+    unread_offset: int = 0,
+    unread_only_page: bool = False,
+    complete_base_node_ids: set[str] | None = None,
+    truncated_node_ids: set[str] | None = None,
 ) -> str:
     info = {str(node.get("node_id") or ""): node for node in nodes}
     by_node: dict[str, list[RunRow]] = {}
     for row in rows:
         by_node.setdefault(row.node_id, []).append(row)
-    node_ids = set(by_node)
-    claim_nodes = {claim.owner_node for claim in claims if claim.owner_node and not claim.expired}
-    if not query.node and not query.attention_only and not query.seat and not query.state and not query.repo:
-        node_ids |= {node_id for node_id in info if node_id}
-        node_ids |= claim_nodes
-    elif query.node:
-        node_ids |= {node_id for node_id in info if node_id and _contains(node_id, query.node)}
-        node_ids |= {node_id for node_id in claim_nodes if _contains(node_id, query.node)}
+    unread_counts = unread_counts or {}
+    base_node_ids = _machine_base_node_ids(rows, nodes, claims, query)
 
-    def card_key(node_id: str) -> tuple[int, str]:
-        worst = min((_rank(row) for row in by_node.get(node_id, []) if row.live), default=_IDLE_RANK)
-        return (worst if query.sort in ("attention", "state", "age") else 0, node_id)
+    node_ids = set() if unread_only_page else base_node_ids
+    room = max(0, MACHINE_CARD_LIMIT - len(node_ids))
+    excluded_ids = _machine_unread_exclusions(query, base_node_ids, complete_base_node_ids or set())
+    unread_ids = _machine_unread_candidates(query, unread_counts, excluded_node_ids=excluded_ids)
+    node_ids.update(unread_ids[unread_offset : unread_offset + room])
+
+    def card_key(node_id: str) -> tuple[Any, ...]:
+        return machine_sort_key(node_id, by_node.get(node_id, []), query)
 
     cards = []
-    for node_id in sorted(node_ids, key=card_key):
+    for node_id in sorted(node_ids, key=card_key)[:MACHINE_CARD_LIMIT]:
         held = [claim for claim in claims if claim.owner_node == node_id and not claim.expired]
         cards.append(
-            _machine_card(node_id, by_node.get(node_id, []), info.get(node_id), held, now=now, sort=query.sort)
+            _machine_card(
+                node_id,
+                by_node.get(node_id, []),
+                info.get(node_id),
+                held,
+                now=now,
+                sort=query.sort,
+                unread_count=unread_counts.get(node_id, 0),
+                truncated_history=node_id in (truncated_node_ids or set()),
+            )
         )
     if not cards:
         return f'<p class="machine-empty">{esc("No machines match.")}</p>'
@@ -671,7 +773,7 @@ def _repo_board(entries: list[_RepoEntry], sort: str) -> str:
         if entry.live:
             where = "".join(
                 f"<li>{_node_label(row.node_id)} · {esc(row.seat_label)} · {_run_badge(row)} · {_elapsed_cell(row)}"
-                f' <span class="fleet-run-id" title="{esc(row.run_id)}">{esc(row.run_id)}</span></li>'
+                f' <span class="fleet-run-id" title="{esc(row.run_id)}">{esc(row.run_id)}</span>{_execution_context(row.context)}</li>'
                 for row in sort_rows(entry.live, sort)
             )
             where = f'<ul class="fleet-where">{where}</ul>'
@@ -697,6 +799,24 @@ def _repo_board(entries: list[_RepoEntry], sort: str) -> str:
     )
 
 
+def _agent_board(unread_counts: dict[str, int], more: bool = False) -> str:
+    rows = "".join(
+        f'<tr data-principal="{esc(principal)}"><td class="fleet-node">{esc(principal)}</td>'
+        f"<td>{count} unread message{'s' if count != 1 else ''}</td></tr>"
+        for principal, count in sorted(unread_counts.items())
+        if count > 0
+    )
+    if not rows:
+        return ""
+    note = '<p class="fleet-more">More agents have unread messages than are shown.</p>' if more else ""
+    return (
+        '<section aria-label="Agents"><h2>Agents</h2>'
+        '<div class="table-wrap"><table class="data-table"><thead><tr>'
+        '<th scope="col">Principal</th><th scope="col">Inbox</th></tr></thead>'
+        f"<tbody>{rows}</tbody></table></div>{note}</section>"
+    )
+
+
 # --- page ------------------------------------------------------------------
 
 
@@ -711,6 +831,13 @@ def render_page(
     nonce: str,
     now: datetime | None = None,
     more_href: str | None = None,
+    unread_counts: dict[str, int] | None = None,
+    agent_unread_counts: dict[str, int] | None = None,
+    agent_unread_more: bool = False,
+    unread_offset: int = 0,
+    unread_only_page: bool = False,
+    complete_base_node_ids: set[str] | None = None,
+    truncated_node_ids: set[str] | None = None,
 ) -> str:
     """Render the full dashboard document for one board.
 
@@ -726,13 +853,26 @@ def render_page(
         {str(node.get("node_id") or "") for node in nodes}
         | {row.node_id for row in all_rows}
         | {claim.owner_node for claim in claim_rows if claim.owner_node and not claim.expired}
+        | {node_id for node_id, count in (unread_counts or {}).items() if count > 0}
     )
     node_ids = [node_id for node_id in node_ids if node_id]
     if query.view == "repos":
         board = _repo_board(_repo_entries(all_rows, claim_rows, query), query.sort)
         title = "Fleet: Repos"
     else:
-        board = _machine_board(visible, nodes, claim_rows, query, now=current)
+        board = _machine_board(
+            visible,
+            nodes,
+            claim_rows,
+            query,
+            now=current,
+            unread_counts=unread_counts,
+            unread_offset=unread_offset,
+            unread_only_page=unread_only_page,
+            complete_base_node_ids=complete_base_node_ids,
+            truncated_node_ids=truncated_node_ids,
+        )
+        board += _agent_board(agent_unread_counts or {}, agent_unread_more)
         title = "Fleet: Machines"
     stamp = current.astimezone(timezone.utc).strftime("%H:%M:%S UTC")
     more = f'<p class="fleet-more"><a href="{esc(more_href)}">{esc("more")}</a></p>' if more_href else ""
@@ -783,6 +923,7 @@ table.data-table th:nth-child(n) { width: auto; }
 .fleet-run-id, .fleet-node { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; word-break: break-all; }
 .fleet-where { margin: 0; padding-left: 1.1rem; }
 .fleet-state { display: inline-block; border: 1px solid var(--line); border-radius: 999px; padding: 2px 8px; font-size: 11px; font-weight: 700; white-space: nowrap; color: var(--ink); }
+.fleet-execution-context { display: block; color: var(--muted); }
 .fleet-state-running { border-color: var(--signal); color: var(--signal); }
 .fleet-state-succeeded { border-color: var(--ok); color: var(--ok); }
 .fleet-state-awaiting-approval { border-color: var(--signal); background: var(--signal-quiet); }

@@ -29,6 +29,7 @@ from . import (
     grokbot_obsidian,
     grokbot_operations_relay,
     grokbot_ops,
+    grokbot_t3,
     grokbot_wazuh,
 )
 
@@ -74,12 +75,14 @@ CONNECTOR_DEFAULT_BINDS = {
     "n8n-operator": "127.0.0.1:8775",
     "obsidian-operator": "127.0.0.1:8773",
     "operations-relay": "127.0.0.1:8777",
+    "t3-dispatch": "127.0.0.1:8778",
     "wazuh-triage": "127.0.0.1:8774",
 }
 STEWARD_PACK_IDS = frozenset({"backup-steward", "fleet-steward", "wazuh-triage"})
 OBSIDIAN_PACK_ID = "obsidian-operator"
 N8N_PACK_ID = "n8n-operator"
 OPERATIONS_RELAY_PACK_ID = "operations-relay"
+T3_DISPATCH_PACK_ID = "t3-dispatch"
 FLEET_INSTANCE_KEYS = INSTANCE_KEYS | frozenset(
     {
         "runtime_path",
@@ -107,6 +110,7 @@ N8N_INSTANCE_KEYS = INSTANCE_KEYS | frozenset(
     }
 )
 OPERATIONS_RELAY_INSTANCE_KEYS = INSTANCE_KEYS | frozenset({"owner_workspace"})
+T3_DISPATCH_INSTANCE_KEYS = INSTANCE_KEYS | frozenset({"runtime_path"})
 CONNECTOR_INSTANCE_KEYS = INSTANCE_KEYS | frozenset({"cli_executable", "workdir"})
 VERSION_RE = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 PACK_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,62}$")
@@ -148,6 +152,8 @@ def _connector_tools(pack_id: str) -> frozenset[str]:
         return grokbot_n8n.TOOLS
     if pack_id == OPERATIONS_RELAY_PACK_ID:
         return grokbot_operations_relay.TOOLS
+    if pack_id == T3_DISPATCH_PACK_ID:
+        return grokbot_t3.TOOLS
     if pack_id == "wazuh-triage":
         return grokbot_wazuh.TOOLS
     return frozenset()
@@ -349,6 +355,8 @@ def doctor(target: Path, pack_id: str, *, service_result: bool = False) -> list[
         checks = grokbot_n8n.doctor(target)
     elif pack["id"] == OPERATIONS_RELAY_PACK_ID:
         checks = grokbot_operations_relay.doctor(target)
+    elif pack["id"] == T3_DISPATCH_PACK_ID:
+        checks = grokbot_t3.doctor(target)
     else:
         checks = grokbot_cerebro.doctor(target)
     checks.extend(_installed_bind_checks(target, pack))
@@ -374,6 +382,8 @@ def canary(target: Path, pack_id: str) -> dict[str, Any]:
         return grokbot_n8n.canary(target)
     if pack["id"] == OPERATIONS_RELAY_PACK_ID:
         return grokbot_operations_relay.canary(target)
+    if pack["id"] == T3_DISPATCH_PACK_ID:
+        return grokbot_t3.canary(target)
     return grokbot_cerebro.canary(target)
 
 
@@ -395,6 +405,8 @@ def render_install_service(target: Path, pack_id: str) -> str:
             return grokbot_n8n.render_unit(target, python=sys.executable)
         if pack["id"] == OPERATIONS_RELAY_PACK_ID:
             return grokbot_operations_relay.render_unit(target, python=sys.executable)
+        if pack["id"] == T3_DISPATCH_PACK_ID:
+            return grokbot_t3.render_unit(target, python=sys.executable)
         return grokbot_cerebro.render_unit(target, python=sys.executable)
     except PackError:
         raise
@@ -410,6 +422,7 @@ def render_install_service(target: Path, pack_id: str) -> str:
                 grokbot_n8n.N8nError,
                 grokbot_obsidian.ObsidianError,
                 grokbot_operations_relay.OperationsRelayError,
+                grokbot_t3.T3DispatchError,
                 grokbot_wazuh.WazuhError,
             ),
         ):
@@ -441,6 +454,8 @@ def apply_install_service(
             path = grokbot_n8n.write_unit(target, out_dir, force=force)
         elif pack["id"] == OPERATIONS_RELAY_PACK_ID:
             path = grokbot_operations_relay.write_unit(target, out_dir, force=force)
+        elif pack["id"] == T3_DISPATCH_PACK_ID:
+            path = grokbot_t3.write_unit(target, out_dir, force=force)
         else:
             path = grokbot_cerebro.write_unit(target, out_dir, force=force)
     except PackError:
@@ -457,6 +472,7 @@ def apply_install_service(
                 grokbot_n8n.N8nError,
                 grokbot_obsidian.ObsidianError,
                 grokbot_operations_relay.OperationsRelayError,
+                grokbot_t3.T3DispatchError,
                 grokbot_wazuh.WazuhError,
             ),
         ):
@@ -573,6 +589,19 @@ def _setup(
         ):
             raise PackError("unexpected-key")
         payload["owner_workspace"] = _operations_relay_owner_reference(owner_workspace)
+    elif pack["id"] == T3_DISPATCH_PACK_ID:
+        if (
+            cli_executable is not None
+            or workdir is not None
+            or owner_workspace is not None
+            or ledger_path is not None
+            or action_state_path is not None
+            or approval_dir is not None
+            or any(path is not None for path in obsidian_paths)
+            or any(field is not None for field in upstream_fields)
+        ):
+            raise PackError("unexpected-key")
+        payload["runtime_path"] = _t3_runtime_reference(runtime_path)
     else:
         if (
             owner_workspace is not None
@@ -994,6 +1023,8 @@ def _validate_instance_config(payload: Mapping[str, Any], pack_id: str) -> dict[
             payload.get("action_state_path"),
             payload.get("approval_dir"),
         )
+    elif pack["id"] == T3_DISPATCH_PACK_ID:
+        _t3_runtime_reference(payload.get("runtime_path"))
     elif pack["kind"] == "connector":
         _connector_path_reference(payload.get("cli_executable"), kind="executable")
         workdir = _connector_path_reference(payload.get("workdir"), kind="directory")
@@ -1043,6 +1074,8 @@ def _instance_keys(pack: Mapping[str, Any]) -> frozenset[str]:
         return OBSIDIAN_INSTANCE_KEYS
     if pack["id"] == OPERATIONS_RELAY_PACK_ID:
         return OPERATIONS_RELAY_INSTANCE_KEYS
+    if pack["id"] == T3_DISPATCH_PACK_ID:
+        return T3_DISPATCH_INSTANCE_KEYS
     if pack["id"] == N8N_PACK_ID:
         return N8N_INSTANCE_KEYS
     if pack["id"] in STEWARD_PACK_IDS:
@@ -1056,6 +1089,15 @@ def _operations_relay_owner_reference(owner_workspace: object) -> str:
     try:
         return grokbot_operations_relay.validate_owner_workspace(owner_workspace)
     except grokbot_operations_relay.OperationsRelayError as exc:
+        raise PackError("unsafe-path") from exc
+
+
+def _t3_runtime_reference(runtime_path: object) -> str:
+    if runtime_path is None:
+        raise PackError("missing-path-reference")
+    try:
+        return grokbot_t3.validate_runtime_reference(str(runtime_path))
+    except grokbot_t3.T3DispatchError as exc:
         raise PackError("unsafe-path") from exc
 
 

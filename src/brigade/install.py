@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import json
 import os
-import shutil
 import sys
 from pathlib import Path
 from typing import List, Tuple
@@ -17,6 +16,7 @@ from typing import List, Tuple
 from .config import Config, write_config
 from .selection import Selection, SurfaceInstallRefusal, SurfaceRecord, WRITER_INBOXES
 from .templates import (
+    canonical_template_bytes,
     harness_memory_owner,
     is_text,
     load_depth_manifest,
@@ -414,9 +414,9 @@ def install_selection(
             continue
         dst.parent.mkdir(parents=True, exist_ok=True)
         if is_text(entry["src"]):
-            dst.write_text(render(src.read_text(encoding="utf-8"), context), encoding="utf-8")
+            dst.write_text(render(src.read_text(encoding="utf-8"), context), encoding="utf-8", newline="\n")
         else:
-            shutil.copyfile(src, dst)
+            dst.write_bytes(canonical_template_bytes(src))
         mode_str = entry.get("mode")
         if mode_str:
             os.chmod(dst, int(mode_str, 8))

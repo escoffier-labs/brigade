@@ -93,6 +93,10 @@ def register(sub: argparse._SubParsersAction) -> None:
 
     register_dot(fleet_sub)
 
+    from .fleet_events import register as register_events
+
+    register_events(fleet_sub)
+
     from .fleet_campaign import register as register_campaign
 
     register_campaign(fleet_sub)
@@ -199,6 +203,10 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_flush = fleet_sub.add_parser("flush", help="Re-POST locally spooled events to the fleet hub.")
     p_flush.set_defaults(func=_dispatch_flush)
 
+    from .fleet_messages import register as register_messages
+
+    register_messages(fleet_sub)
+
     p_cloud = fleet_sub.add_parser("cloud", help="Read the fleet hub's sanitized cloud lease snapshot.")
     p_cloud.add_argument("--all", action="store_true", help="Include released and expired cloud leases.")
     p_cloud.add_argument("--json", action="store_true", help="Emit JSON instead of a table.")
@@ -251,6 +259,22 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     p_models_set.add_argument(
         "--t3-service-tier", default=None, dest="t3_service_tier", help="Optional T3 service tier."
+    )
+    t3_launch_model = p_models_set.add_mutually_exclusive_group()
+    t3_launch_model.add_argument(
+        "--t3-model",
+        default=None,
+        dest="t3_model",
+        help=(
+            "Exact native model id T3 launches (e.g. opencode/deepseek-v4.1-flash-free). "
+            "Requires a T3 instance binding."
+        ),
+    )
+    t3_launch_model.add_argument(
+        "--clear-t3-model",
+        action="store_true",
+        dest="clear_t3_model",
+        help="Drop the native T3 launch model so the canonical model is launched.",
     )
     p_models_set.add_argument(
         "--expect-revision", type=int, required=True, dest="expect_revision", help="Current hub roster revision."
@@ -475,6 +499,10 @@ def register(sub: argparse._SubParsersAction) -> None:
     from .fleet_policy import register as register_policy
 
     register_policy(fleet_sub)
+
+    from .fleet_roster import register as register_roster
+
+    register_roster(fleet_sub)
 
 
 def _dispatch_serve(args: argparse.Namespace, *, environ: Mapping[str, str] | None = None) -> int:
@@ -1484,6 +1512,10 @@ def _dispatch_models_set(args: argparse.Namespace) -> int:
             kwargs["t3_instance_id"] = args.t3_instance_id
         if args.t3_service_tier is not None:
             kwargs["t3_service_tier"] = args.t3_service_tier
+        if args.clear_t3_model:
+            kwargs["t3_model"] = ""
+        elif args.t3_model is not None:
+            kwargs["t3_model"] = args.t3_model
         kwargs["expected_revision"] = args.expect_revision
         policy = fleet_client.set_model_policy(args.provider, args.model, args.seat, **kwargs)
     except fleet_client.FleetClientError as exc:
@@ -1499,6 +1531,9 @@ def _dispatch_models_set(args: argparse.Namespace) -> int:
     launch = policy.get("brigade_model")
     if isinstance(launch, str) and launch:
         line += f"; brigade launch model {launch}"
+    t3_launch = policy.get("t3_model")
+    if isinstance(t3_launch, str) and t3_launch:
+        line += f"; t3 launch model {t3_launch}"
     print(line)
     return 0
 
@@ -1667,12 +1702,33 @@ def _dispatch_models_default_set(args: argparse.Namespace) -> int:
 
 
 def _dispatch_flush(args: argparse.Namespace) -> int:
-    from .. import fleet_client
+    from .. import fleet_client, fleet_client_messages
 
     node_id = fleet_client.resolve_node_id()
-    flushed = fleet_client.flush_spool(node_id)
-    print(f"flushed {flushed} spooled event(s) for node {node_id}")
-    return 0
+    event_error: fleet_client.FleetClientError | OSError | None = None
+    try:
+        events = fleet_client.flush_spool(node_id)
+    except (fleet_client.FleetClientError, OSError) as exc:
+        events = 0
+        event_error = exc
+    message_error: fleet_client.FleetClientError | OSError | None = None
+    try:
+        messages = fleet_client_messages.flush(node_id)
+    except (fleet_client.FleetClientError, OSError) as exc:
+        messages = 0
+        message_error = exc
+    if event_error is not None:
+        print(f"flushed {messages} message(s) for node {node_id}")
+    else:
+        if messages:
+            print(f"flushed {events} spooled event(s) and {messages} message(s) for node {node_id}")
+        else:
+            print(f"flushed {events} spooled event(s) for node {node_id}")
+    if event_error is not None:
+        print(f"warning: could not flush fleet events: {_safe_table_cell(event_error)}", file=sys.stderr)
+    if message_error is not None:
+        print(f"warning: could not flush fleet messages: {_safe_table_cell(message_error)}", file=sys.stderr)
+    return 1 if event_error is not None or message_error is not None else 0
 
 
 def _print_work_payload(payload: object, *, json_output: bool) -> int:

@@ -685,7 +685,7 @@ class TestServerStartupMigration:
 
     def _pre_holder_token_db(self, db: Path) -> None:
         """An early-v2 database: a claims table predating holder tokens."""
-        db.parent.mkdir(parents=True, exist_ok=True)
+        db.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
         conn = sqlite3.connect(str(db))
         try:
             conn.execute("CREATE TABLE claims (target TEXT PRIMARY KEY, node_id TEXT, expires_at TEXT)")
@@ -872,3 +872,199 @@ class TestOpenDbSideEffectFree:
         finally:
             blocker.rollback()
             blocker.close()
+
+
+def test_execution_context_roundtrip_and_node_binding(hub):
+    from datetime import datetime, timezone
+
+    url, db = hub
+    token = _enroll(url, NODE_A)
+    context = {
+        "schema": "brigade.t3_execution_context.v1",
+        "request_id": "request-test",
+        "thread_id": "thread-test",
+        "turn_ref": "turn-test",
+        "controller_id": "controller-test",
+        "origin_node": "node-origin",
+        "target_host": "node-target",
+        "initiator": {"kind": "harness", "label": "<codex>"},
+        "work_id": "work-test",
+        "issue_url": "https://github.com/example/repo/issues/1",
+        "policy": {
+            "session_id": "session-test",
+            "decision_id": "decision-test",
+            "reservation_id": "reservation-test",
+            "delegation_id": "delegation-test",
+        },
+    }
+    event = {**_event(), "ts": datetime.now(timezone.utc).isoformat(), "harness": "t3-fleet", "context": context}
+    assert _request(url, "/events", token, {**event, "node_id": NODE_B})[0] == 403
+    assert _event_count(db, NODE_A) == _event_count(db, NODE_B) == 0
+    assert _request(url, "/events", token, event) == (200, {"accepted": 1, "duplicate": 0})
+    assert _request(url, "/events", token, event) == (200, {"accepted": 0, "duplicate": 1})
+    assert _request(url, "/status", token)[1]["runs"][0]["context"] == context
+    for view in ("machines", "repos"):
+        request = urllib.request.Request(url + "/view/" + view, headers={"Authorization": f"Bearer {ADMIN}"})
+        with urllib.request.urlopen(request, timeout=5) as response:
+            page = response.read().decode()
+        assert "reported" in page and "&lt;codex&gt;" in page
+        assert "node-target" in page and "request-test" in page
+        assert "<codex>" not in page
+
+
+def test_unknown_and_delayed_t3_observations_do_not_look_running(tmp_path):
+    from datetime import datetime, timedelta, timezone
+    from brigade import fleet_dashboard, fleet_hub_status, fleet_command_deck
+
+    now = datetime.now(timezone.utc)
+    conn = fleet_hub.init_db(tmp_path / "hub.db")
+    try:
+        fleet_hub.store_events(
+            conn,
+            [
+                {**_event(run_id="unknown"), "state": "external.unknown", "ts": now.isoformat(), "harness": "t3-fleet"},
+                {**_event(run_id="delayed"), "ts": (now - timedelta(hours=2)).isoformat(), "harness": "t3-fleet"},
+            ],
+        )
+        runs = fleet_hub.latest_status(conn, now=now)
+        assert {run["run_id"]: run["state"] for run in runs} == {"unknown": "external.unknown"}
+        board = fleet_hub_status.board_status(conn, now=now)
+        states = {run["run_id"]: run["state"] for run in board.runs}
+        assert states == {"unknown": "external.unknown", "delayed": "run.stale"}
+        rows = fleet_dashboard.build_rows(board.runs, {}, now=now)
+        assert {row.run_id: row.bucket for row in rows} == {"unknown": "unknown", "delayed": "stale"}
+        assert not any(row.active for row in rows)
+        assert fleet_command_deck.bucket_for("external.unknown", age_seconds=0, stale_after_seconds=1800) == "unknown"
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize(
+    "observed, expected",
+    [
+        ("not-a-time", "external.unknown"),
+        ("2026-10-17T13:00:00Z", "external.unknown"),
+        ("2026-10-17T11:58:00Z", "run.started"),
+        ("2026-10-17T11:00:00Z", "run.stale"),
+    ],
+)
+def test_deck_t3_source_observation_freshness(tmp_path, observed, expected):
+    from datetime import datetime, timezone
+    from brigade import fleet_command_deck
+
+    now = datetime(2026, 10, 17, 12, tzinfo=timezone.utc)
+    conn = fleet_hub.init_db(tmp_path / "hub.db")
+    try:
+        fleet_hub.store_events(conn, {**_event(), "harness": "t3-fleet", "ts": observed})
+        conn.execute("UPDATE events SET received_at = ?", (now.isoformat(),))
+        runs = fleet_command_deck.fetch_live_runs(conn, now=now, stale_after_seconds=1800)
+        assert len(runs) == 1
+        assert runs[0].state == expected
+        if expected != "run.started":
+            assert runs[0].bucket in {"unknown", "stale"}
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("old_hub", [False, True])
+def test_cli_replay_dedupes_with_mixed_hub_versions(hub, tmp_path, monkeypatch, capsys, old_hub):
+    from datetime import datetime, timezone
+    from brigade.cli import main
+
+    url, db = hub
+    token = _enroll(url, NODE_A)
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": url, "token": token})
+    monkeypatch.setattr(fleet_client, "spool_path", lambda _node: tmp_path / "spool" / "node.jsonl")
+    if old_hub:
+        validate = fleet_hub._validate_event
+
+        def old_validate(raw):
+            event = validate(raw)
+            event["context"] = None
+            return event
+
+        monkeypatch.setattr(fleet_hub, "_validate_event", old_validate)
+    context = {"schema": "brigade.t3_execution_context.v1", "request_id": "request-test"}
+    context_file = tmp_path / "context.json"
+    context_file.write_text(json.dumps(context))
+    args = [
+        "fleet",
+        "events",
+        "report",
+        "--run-id",
+        "t3f:request-test",
+        "--state",
+        "run.started",
+        "--ts",
+        datetime.now(timezone.utc).isoformat(),
+        "--sequence",
+        "1",
+        "--context-file",
+        str(context_file),
+        "--json",
+    ]
+    receipts = []
+    for _ in range(2):
+        assert main(args) == 0
+        receipts.append(json.loads(capsys.readouterr().out))
+    assert receipts[0] == receipts[1]
+    assert receipts[0]["result"] == "delivered"
+    assert _event_count(db, NODE_A) == 1
+    run = _request(url, "/status", token)[1]["runs"][0]
+    assert run["context"] == (None if old_hub else context)
+
+
+@pytest.mark.parametrize("view", ["machines", "repos"])
+def test_unknown_t3_runs_remain_visible_in_attention_view(hub, view):
+    from datetime import datetime, timezone
+
+    url, _db = hub
+    token = _enroll(url, NODE_A)
+    event = {
+        **_event(run_id="unknown-t3"),
+        "state": "external.unknown",
+        "harness": "t3-fleet",
+        "ts": datetime.now(timezone.utc).isoformat(),
+    }
+    assert _request(url, "/events", token, event)[0] == 200
+    request = urllib.request.Request(
+        url + "/view/" + view + "?attention=1", headers={"Authorization": f"Bearer {ADMIN}"}
+    )
+    with urllib.request.urlopen(request, timeout=5) as response:
+        page = response.read().decode()
+    assert "unknown-t3" in page
+    assert "external.unknown" in page
+    assert 'data-bucket="running"' not in page
+
+
+@pytest.mark.parametrize("future", [False, True])
+def test_unknown_source_time_stays_unknown_in_history(hub, future):
+    from datetime import datetime, timedelta, timezone
+
+    url, db = hub
+    token = _enroll(url, NODE_A)
+    now = datetime.now(timezone.utc)
+    event = {
+        **_event(run_id="unknown-source-history"),
+        "harness": "t3-fleet",
+        "ts": (now + timedelta(days=1)).isoformat() if future else "not-a-time",
+    }
+    assert _request(url, "/events", token, event)[0] == 200
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("UPDATE events SET received_at = ?", ((now - timedelta(days=2)).isoformat(),))
+        conn.commit()
+        assert conn.execute("SELECT state FROM events").fetchone()[0] == "run.started"
+    finally:
+        conn.close()
+    run = _request(url, "/status?all=1", token)[1]["runs"][0]
+    assert run["state"] == "external.unknown"
+    assert run["original_state"] == "run.started"
+    for view in ("machines", "repos"):
+        request = urllib.request.Request(url + "/view/" + view + "?all=1", headers={"Authorization": f"Bearer {ADMIN}"})
+        with urllib.request.urlopen(request, timeout=5) as response:
+            page = response.read().decode()
+        assert "unknown-source-history" in page
+        assert "external.unknown" in page
+        assert 'data-bucket="stale"' not in page

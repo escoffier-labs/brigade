@@ -526,7 +526,7 @@ _IMPORT_SOURCE_ORIGIN_MODALITY: dict[str, tuple[str, str]] = {
     "code-review": ("workspace", "tool-output"),
     "context-pack": ("workspace", "tool-output"),
     "handoff-ingest": ("agent-session", "mixed"),
-    "learning-loop": ("workspace", "tool-output"),
+    "learning-loop": ("external-web", "tool-output"),
     "memory-care": ("workspace", "tool-output"),
     "memory-refresh": ("workspace", "tool-output"),
     "project-consolidation": ("workspace", "tool-output"),
@@ -1181,6 +1181,7 @@ def _append_import_records_locked(
         if legacy_identity is not None and not import_model._has_canonical_untrusted_import_identity(item):
             legacy_by_source_content[legacy_identity] = item
     imported: list[dict[str, Any]] = []
+    batch_item_ids: set[int] = set()
     skipped: list[dict[str, Any]] = []
     skipped_dismissed: list[dict[str, Any]] = []
     rejected: list[str] = []
@@ -1203,8 +1204,29 @@ def _append_import_records_locked(
                 canonical_existing_proof = descriptor_anchors._has_persisted_import_proof(existing_item, target=target)
             else:
                 canonical_existing_proof = False
+            # Rows made by this transaction have no persisted proof yet. Track
+            # object identity so loaded rows still require their existing proof.
+            trusted_existing_row = canonical_existing_proof or id(existing_item) in batch_item_ids
             canonical_existing_row = import_model._has_canonical_untrusted_import_identity(existing_item)
             canonical_incoming_row = import_model._has_canonical_untrusted_import_identity(record)
+            if (
+                not canonical_existing_row
+                and canonical_incoming_row
+                and trusted_existing_row
+                and _metadata(existing_item).get("source_item_key") == _metadata(record).get("source_item_key")
+                and _import_fingerprint(existing_item) == _import_fingerprint(record)
+            ):
+                # The proof or this transaction binds the raw-derived identity.
+                # Reproduce the writer's text transformation before comparing
+                # immutable content, so unrelated legacy rows cannot suppress it.
+                source = _resolve_import_provenance_source(record, provenance_source)
+                origin, _modality = _import_origin_modality(source, kind=str(record["kind"]))
+                persisted_text, _redaction, failed = evidence_redaction.apply_and_record(
+                    str(record["text"]), origin=origin
+                )
+                canonical_existing_row = not failed and import_model._untrusted_import_canonical_hash(
+                    existing_item
+                ) == import_model._untrusted_import_canonical_hash({**record, "text": persisted_text})
             canonical_migration = migrate_untrusted_identities and canonical_incoming_row and not canonical_existing_row
             existing_migration_proof = (
                 authority_record is not None
@@ -1214,7 +1236,7 @@ def _append_import_records_locked(
                 and descriptor_anchors._import_content_identity(existing_item)
                 == descriptor_anchors._import_content_identity(record)
             )
-            if canonical_existing_row and canonical_incoming_row and not canonical_existing_proof:
+            if canonical_existing_row and canonical_incoming_row and not trusted_existing_row:
                 pass
             elif canonical_migration and not existing_migration_proof:
                 pass
@@ -1262,6 +1284,7 @@ def _append_import_records_locked(
             rejected.append(_IMPORT_PROVENANCE_REJECTION_REASON)
             continue
         imported.append(item)
+        batch_item_ids.add(id(item))
         existing.add(key)
         if identity is not None:
             existing_by_source[identity] = item

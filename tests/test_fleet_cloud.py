@@ -2314,6 +2314,7 @@ def test_cloud_v24_upgrade_refuses_unsupported_downgrade(tmp_path, monkeypatch):
     conn.commit()
     conn.close()
     fleet_hub.init_db(db_path).close()
+    current_version = fleet_hub.SCHEMA_VERSION
     monkeypatch.setattr(fleet_hub, "SCHEMA_VERSION", 24)
-    with pytest.raises(fleet_hub.FleetHubError, match="schema version 26"):
+    with pytest.raises(fleet_hub.FleetHubError, match=f"schema version {current_version}"):
         fleet_hub.init_db(db_path)

@@ -1474,6 +1474,27 @@ def test_untrusted_identity_migration_does_not_trust_forged_canonical_existing_r
     assert rejected == []
 
 
+def test_redacted_import_dedupe_does_not_trust_unrelated_proven_legacy_content(tmp_path: Path):
+    text = "Contact person@private.example"  # <!-- content-guard: allow email --> synthetic fixture
+    record = {"text": text, "kind": "finding", "metadata": {}}
+    incoming = ledger._sanitize_untrusted_import_record(record, importer_source="learning-loop")
+    legacy = {**incoming, "text": "Unrelated legacy content"}
+    imported, _skipped, _dismissed, _rejected = ledger._append_import_records(
+        tmp_path, [legacy], provenance_source="learning-loop"
+    )
+    assert len(imported) == 1
+    assert ledger._has_persisted_import_proof(imported[0], target=tmp_path)
+
+    imported, skipped, dismissed, rejected = ledger._append_import_records(
+        tmp_path, [incoming], provenance_source="learning-loop", migrate_untrusted_identities=True
+    )
+
+    assert len(imported) == 1
+    assert skipped == []
+    assert dismissed == []
+    assert rejected == []
+
+
 def test_canonical_import_dedupe_requires_persisted_local_proof(tmp_path: Path):
     record = {
         "text": "Ordinary canonical proof",
@@ -2225,7 +2246,7 @@ def test_untrusted_batch_ingest_rejects_forged_manual_source_authority(tmp_path:
     assert imported[0]["source"] == "manual"
     env = _envelope(imported[0])
     assert provenance.validate_envelope(env) == []
-    assert env["origin"] == "workspace"
+    assert env["origin"] == "external-web"
     assert env["modality"] == "tool-output"
     assert env["source"]["kind"] == "learning-loop"
 

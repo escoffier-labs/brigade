@@ -96,6 +96,10 @@ def core_station_checks(ctx: DoctorContext) -> List[CheckResult]:
         checks.extend(_operator_check(status, name, detail) for status, name, detail in _check_openclaw())
     if "hermes" in ctx.harnesses:
         checks.extend(_check_hermes(ctx.target))
+    if "codex" in ctx.harnesses:
+        from .doctor_instruction_chain import check_codex_instruction_chain
+
+        checks.append(check_codex_instruction_chain(ctx.target))
     checks.extend(_check_orphan_inboxes(ctx.target, ctx.harnesses))
     checks.append(_check_recovery_checkpoints(ctx.target))
     checks.append(_check_unreconciled_run_lock(ctx.target))

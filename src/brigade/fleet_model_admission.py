@@ -1120,6 +1120,9 @@ def _map_hub_admission(status: int, payload: Any) -> ModelAdmissionDecision:
 def _plan_binding(consumer: str, seat: Mapping[str, Any]) -> dict[str, Any] | None:
     binding = _binding_for(consumer, seat)
     payload = dict(binding) if isinstance(binding, dict) else {}
+    if consumer != "t3-fleet":
+        # brigade-run launches only the brigade group's model (or the canonical one).
+        return payload or None
     bindings = seat.get("bindings") if isinstance(seat.get("bindings"), Mapping) else {}
     native = bindings.get("native") if isinstance(bindings, Mapping) else None
     native_model = native.get("model") if isinstance(native, Mapping) else None

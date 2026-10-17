@@ -18,6 +18,7 @@ _ROSTER_COLUMNS = (
     "brigade_model TEXT NOT NULL DEFAULT ''",
     "t3_instance_id TEXT NOT NULL DEFAULT ''",
     "t3_service_tier TEXT NOT NULL DEFAULT ''",
+    "t3_model TEXT NOT NULL DEFAULT ''",
 )
 _META_SCHEMA = """
 CREATE TABLE IF NOT EXISTS model_roster_meta (
@@ -81,6 +82,7 @@ _SET_FIELDS = frozenset(
         "brigade_model",
         "t3_instance_id",
         "t3_service_tier",
+        "t3_model",
     }
 )
 _DEFAULT_FIELDS = frozenset({"action", "expected_revision", "consumer", "seat"})
@@ -301,23 +303,36 @@ def _consumer_defaults(conn: sqlite3.Connection) -> dict[str, str | None]:
 def raw_seats(conn: sqlite3.Connection) -> list[dict[str, Any]]:
     rows = conn.execute(
         "SELECT seat, provider, model, reasoning, enabled, limit_count, "
-        "brigade_cli, t3_instance_id, t3_service_tier, brigade_model FROM model_policy ORDER BY seat"
+        "brigade_cli, t3_instance_id, t3_service_tier, brigade_model, t3_model FROM model_policy ORDER BY seat"
     ).fetchall()
-    return [
-        {
-            "seat": row[0],
-            "enabled": bool(row[4]),
-            "provider": row[1],
-            "model": row[2],
-            "reasoning": row[3],
-            "limit": row[5],
-            "bindings": {
-                "brigade": _brigade_binding(row[6], row[9]),
-                "t3_fleet": {"instance_id": row[7] or "", "service_tier": row[8] or None},
-            },
+    seats: list[dict[str, Any]] = []
+    for row in rows:
+        bindings: dict[str, Any] = {
+            "brigade": _brigade_binding(row[6], row[9]),
+            "t3_fleet": {"instance_id": row[7] or "", "service_tier": row[8] or None},
         }
-        for row in rows
-    ]
+        native = _native_binding(row[7], row[10])
+        if native is not None:
+            bindings["native"] = native
+        seats.append(
+            {
+                "seat": row[0],
+                "enabled": bool(row[4]),
+                "provider": row[1],
+                "model": row[2],
+                "reasoning": row[3],
+                "limit": row[5],
+                "bindings": bindings,
+            }
+        )
+    return seats
+
+
+def _native_binding(instance_id: Any, launch_model: Any) -> dict[str, Any] | None:
+    """Native T3 launch group. Present only when the row binds a T3 instance and a launch model."""
+    if isinstance(instance_id, str) and instance_id and isinstance(launch_model, str) and launch_model:
+        return {"instance_id": instance_id, "model": launch_model}
+    return None
 
 
 def _brigade_binding(cli: Any, launch_model: Any) -> dict[str, Any]:
@@ -533,6 +548,10 @@ def _validate_set(raw: Any) -> dict[str, Any]:
     if "reasoning" not in raw or raw.get("reasoning") is None:
         raise FleetHubError("model policy field 'reasoning' is required")
     reasoning = raw.get("reasoning")
+    t3_instance_id = _optional_binding(raw.get("t3_instance_id"), "t3_instance_id")
+    t3_model = _optional_launch_identity(raw.get("t3_model"), "t3_model")
+    if t3_model and not t3_instance_id:
+        raise FleetHubError("model policy field 't3_model' requires a 't3_instance_id' binding")
     return {
         "seat": fleet_hub._model_policy_name(raw.get("seat"), "seat"),
         "provider": fleet_hub._cloud_provider(raw.get("provider")),
@@ -543,8 +562,9 @@ def _validate_set(raw: Any) -> dict[str, Any]:
         "reasoning": fleet_hub._model_policy_name(reasoning, "reasoning"),
         "brigade_cli": _optional_binding(raw.get("brigade_cli"), "brigade_cli"),
         "brigade_model": _optional_launch_identity(raw.get("brigade_model"), "brigade_model"),
-        "t3_instance_id": _optional_binding(raw.get("t3_instance_id"), "t3_instance_id"),
+        "t3_instance_id": t3_instance_id,
         "t3_service_tier": _optional_binding(raw.get("t3_service_tier"), "t3_service_tier"),
+        "t3_model": t3_model,
     }
 
 
@@ -557,19 +577,20 @@ def _retired_conflict(conn: sqlite3.Connection, provider: str, model: str) -> di
 def _write_set(conn: sqlite3.Connection, request: dict[str, Any]) -> dict[str, Any]:
     _require_legacy_writable(conn)
     if request["enabled"]:
-        for identity in (request["model"], request["brigade_model"]):
+        for identity in (request["model"], request["brigade_model"], request["t3_model"]):
             denied = _retired_conflict(conn, str(request["provider"]), str(identity))
             if denied is not None:
                 return denied
     conn.execute(
         "INSERT INTO model_policy "
         "(seat, provider, model, reasoning, enabled, limit_count, brigade_cli, brigade_model, t3_instance_id, "
-        "t3_service_tier, notes, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "t3_service_tier, t3_model, notes, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) "
         "ON CONFLICT(seat) DO UPDATE SET provider=excluded.provider, model=excluded.model, "
         "reasoning=excluded.reasoning, enabled=excluded.enabled, limit_count=excluded.limit_count, "
         "brigade_cli=excluded.brigade_cli, brigade_model=excluded.brigade_model, "
         "t3_instance_id=excluded.t3_instance_id, "
-        "t3_service_tier=excluded.t3_service_tier, notes=excluded.notes, updated_at=excluded.updated_at",
+        "t3_service_tier=excluded.t3_service_tier, t3_model=excluded.t3_model, "
+        "notes=excluded.notes, updated_at=excluded.updated_at",
         (
             request["seat"],
             request["provider"],
@@ -581,6 +602,7 @@ def _write_set(conn: sqlite3.Connection, request: dict[str, Any]) -> dict[str, A
             request["brigade_model"],
             request["t3_instance_id"],
             request["t3_service_tier"],
+            request["t3_model"],
             request["notes"],
             _utc_now(),
         ),
@@ -599,6 +621,7 @@ def _write_set(conn: sqlite3.Connection, request: dict[str, Any]) -> dict[str, A
             "brigade_model": request["brigade_model"] or None,
             "t3_instance_id": request["t3_instance_id"],
             "t3_service_tier": request["t3_service_tier"] or None,
+            "t3_model": request["t3_model"] or None,
         },
     }
 
@@ -629,7 +652,8 @@ def _write_default(conn: sqlite3.Connection, raw: Any) -> dict[str, Any]:
         raise FleetHubError("model policy field 'consumer' must be brigade-run or t3-fleet")
     seat = fleet_hub._model_policy_name(raw.get("seat"), "seat")
     row = conn.execute(
-        "SELECT provider, model, enabled, brigade_cli, t3_instance_id, brigade_model FROM model_policy WHERE seat=?",
+        "SELECT provider, model, enabled, brigade_cli, t3_instance_id, brigade_model, t3_model "
+        "FROM model_policy WHERE seat=?",
         (seat,),
     ).fetchone()
     if row is None:
@@ -639,7 +663,7 @@ def _write_default(conn: sqlite3.Connection, raw: Any) -> dict[str, Any]:
         enabled=bool(row[2]),
         retired=any(
             fleet_model_roster.retired_reason(str(row[0]), str(identity), _retired_rows(conn)) is not None
-            for identity in (row[1], row[5])
+            for identity in (row[1], row[5], row[6])
         ),
         brigade_cli=str(row[3] or ""),
         t3_instance_id=str(row[4] or ""),

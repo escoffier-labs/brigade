@@ -305,6 +305,7 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
             "n8n-operator",
             "obsidian-operator",
             "operations-relay",
+            "t3-dispatch",
             "wazuh-triage",
             "n8n-operator",
         ),
@@ -1189,6 +1190,11 @@ def _dispatch_grokbot(args, target: Path) -> int:
                         target, **listener_kwargs
                     )
                     grokbot_operations_relay.run_listener(operations_config, operations_tools)
+                elif args.pack == "t3-dispatch":
+                    from .. import grokbot_t3
+
+                    t3_config, t3_tools = grokbot_t3.build_listener_from_target(target, **listener_kwargs)
+                    grokbot_t3.run_listener(t3_config, t3_tools)
                 else:
                     cerebro_config, cerebro_tools = grokbot_cerebro.build_listener_from_target(
                         target, **listener_kwargs
@@ -1221,6 +1227,7 @@ def _dispatch_grokbot(args, target: Path) -> int:
                 grokbot_obsidian,
                 grokbot_operations_relay,
                 grokbot_packs,
+                grokbot_t3,
                 grokbot_wazuh,
             )
 
@@ -1234,6 +1241,7 @@ def _dispatch_grokbot(args, target: Path) -> int:
                     grokbot_obsidian.ObsidianError,
                     grokbot_operations_relay.OperationsRelayError,
                     grokbot_packs.PackError,
+                    grokbot_t3.T3DispatchError,
                     grokbot_wazuh.WazuhError,
                 ),
             ):

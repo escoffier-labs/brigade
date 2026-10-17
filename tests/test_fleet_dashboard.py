@@ -5,6 +5,8 @@ from __future__ import annotations
 import argparse
 import hashlib
 import hmac
+import html
+import re
 import http.client
 import json
 import threading
@@ -12,7 +14,15 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from brigade import fleet_client, fleet_dashboard, fleet_hub, fleet_hub_grokbot, fleet_hub_sessions, fleet_hub_status
+from brigade import (
+    fleet_client,
+    fleet_dashboard,
+    fleet_hub,
+    fleet_hub_grokbot,
+    fleet_hub_http,
+    fleet_hub_sessions,
+    fleet_hub_status,
+)
 
 NODE_A = "11111111-1111-4111-8111-111111111111"
 NODE_B = "22222222-2222-4222-8222-222222222222"
@@ -179,6 +189,22 @@ class TestDashboardAuth:
         )
         assert status == 401
 
+    def test_readonly_dashboard_does_not_scan_or_show_unread_totals(self, hub, monkeypatch):
+        calls = []
+
+        def unread_counts(_conn):
+            calls.append(True)
+            return {NODE_A: 3}
+
+        monkeypatch.setattr(fleet_hub_http.fleet_hub_messages, "unread_counts", unread_counts)
+        cookie = _login_cookie(hub)
+
+        status, _headers, page = _request(hub, "GET", "/view/machines", headers={"Cookie": cookie})
+
+        assert status == 200
+        assert "unread messages" not in page
+        assert calls == []
+
     def test_legacy_derived_cookie_is_refused(self, hub):
         value = hmac.new(TOKEN.encode(), b"brigade-fleet-dashboard-cookie-v1", hashlib.sha256).hexdigest()
         assert _request(hub, "GET", "/deck", headers={"Cookie": f"{fleet_hub.DASHBOARD_COOKIE}={value}"})[0] == 401
@@ -340,6 +366,53 @@ class TestBoards:
         assert "succeeded" in all_text
         assert "holder-secret" not in all_text
 
+    def test_machine_page_does_not_resurrect_old_grokbot_revision(self, hub):
+        stamp = datetime.now(timezone.utc).isoformat()
+        old_stamp = (datetime.now(timezone.utc) - timedelta(days=2)).isoformat()
+        events = [
+            _event(NODE_A, "stable-machine-run", 1, "run.started", repo="repo", harness="codex", ts=stamp),
+            _event(NODE_A, "shared-grok", 1, "external.queued", repo="repo", harness="grokbot", ts=stamp),
+            _event(NODE_B, "shared-grok", 2, "external.completed", repo="repo", harness="grokbot", ts=old_stamp),
+        ]
+        status, _headers, text = _request(hub, "POST", "/events", headers=_bearer(), body=events)
+        assert status == 200, text
+        conn = fleet_hub.open_db(hub[2])
+        try:
+            conn.execute(
+                "UPDATE events SET received_at = ? WHERE run_id = ? AND sequence = 2", (old_stamp, "shared-grok")
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        _status, _headers, page = _request(hub, "GET", "/view/machines", headers=_bearer())
+
+        assert "shared-grok" not in page
+
+    def test_grokbot_last_known_seat_is_global_across_nodes(self, hub):
+        stamp = datetime.now(timezone.utc).isoformat()
+        events = [
+            {
+                **_event(NODE_A, "cross-node-seat", 1, "external.claimed", repo="repo", harness="grokbot", ts=stamp),
+                "seat": "implementation-worker",
+            },
+            {
+                **_event(NODE_B, "cross-node-seat", 2, "external.completed", repo="repo", harness="grokbot", ts=stamp),
+                "seat": "-",
+            },
+        ]
+        status, _headers, text = _request(hub, "POST", "/events", headers=_bearer(), body=events)
+        assert status == 200, text
+
+        status, _headers, page = _request(
+            hub, "GET", "/view/machines?all=1&seat=implementation-worker", headers=_bearer()
+        )
+
+        assert status == 200
+        assert f'data-node="{NODE_B}"' in page
+        assert 'title="cross-node-seat"' in page
+        assert "implementation-worker" in page
+
     def test_finished_verify_buckets_use_exit_status(self, hub):
         now = datetime.now(timezone.utc).isoformat()
         events = [
@@ -398,6 +471,45 @@ class TestBoards:
 
 
 class TestSortAndFilter:
+    def test_machine_start_lookup_seeks_the_node_run_index(self, hub):
+        conn = fleet_hub.open_db(hub[2])
+        try:
+            sql = fleet_hub_status._latest_sql(resolve_started_at=True)
+            plan = [row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + sql)]
+        finally:
+            conn.close()
+        # The generic start lookup runs once per latest run. A scan here makes
+        # a machine-board request grow with runs times journal history.
+        assert any("SEARCH e2 USING INDEX events_run_seq (node_id=? AND run_id=?)" in detail for detail in plan)
+
+    @pytest.mark.parametrize("upgrade_from_v29", [False, True], ids=["fresh", "v29-upgrade"])
+    def test_grokbot_start_lookup_seeks_without_sorting(self, tmp_path, upgrade_from_v29):
+        db = tmp_path / "fleet.db"
+        conn = fleet_hub.init_db(db)
+        try:
+            _insert_event(conn, NODE_A, "grokbot-run", 1, "external.created", "2026-09-07T12:00:00Z", harness="grokbot")
+            conn.commit()
+            if upgrade_from_v29:
+                conn.execute("DROP INDEX IF EXISTS events_grokbot_run_seq")
+                conn.execute("PRAGMA user_version=29")
+                conn.commit()
+                conn.close()
+                conn = fleet_hub.init_db(db)
+            assert conn.execute("SELECT run_id FROM events").fetchall() == [("grokbot-run",)]
+            sql = fleet_hub_status._latest_sql(resolve_started_at=True)
+            plan = conn.execute("EXPLAIN QUERY PLAN " + sql).fetchall()
+            grokbot_searches = [
+                row for row in plan if "SEARCH e2 USING INDEX events_grokbot_run_seq (run_id=?)" in row[3]
+            ]
+            assert grokbot_searches, plan
+            # The index must also satisfy the tie-break order for LIMIT 1.
+            subquery_id = grokbot_searches[0][1]
+            assert not any(row[1] == subquery_id and "TEMP B-TREE" in row[3] for row in plan)
+            assert not any("SCAN e2" in row[3] for row in plan)
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
+        finally:
+            conn.close()
+
     def test_node_filter(self, hub):
         _seed(hub)
         _status, _headers, text = _request(hub, "GET", "/view/machines?node=1111", headers=_bearer())
@@ -434,6 +546,58 @@ class TestSortAndFilter:
         _status, _headers, text = _request(hub, "GET", "/view/machines?sort=node", headers=_bearer())
         assert text.index(f'data-node="{NODE_A}"') < text.index(f'data-node="{NODE_B}"')
         assert '<option value="node" selected>' in text
+
+    def test_attention_sort_paginates_nodes_after_priority(self, hub):
+        node_ids = [f"00000000-0000-4000-8000-{index:012d}" for index in range(fleet_hub.BOARD_LIMIT)]
+        failed_node = "ffffffff-ffff-4fff-8fff-000000000001"
+        stamp = datetime.now(timezone.utc).isoformat()
+        events = [
+            _event(node_id, f"run-{index}", 1, "run.started", repo="repo", harness="codex", ts=stamp)
+            for index, node_id in enumerate(node_ids)
+        ]
+        events.append(_event(failed_node, "failed", 1, "run.failed", repo="repo", harness="codex", ts=stamp))
+        status, _headers, text = _request(hub, "POST", "/events", headers=_bearer(), body=events)
+        assert status == 200, text
+
+        _status, _headers, first = _request(hub, "GET", "/view/machines?all=1&sort=attention", headers=_bearer())
+
+        assert f'data-node="{failed_node}"' in first
+        assert first.index(f'data-node="{failed_node}"') < first.index(f'data-node="{node_ids[0]}"')
+
+    @pytest.mark.parametrize("sort", ["attention", "age", "state"])
+    def test_machine_page_matches_full_order_within_one_bucket(self, hub, sort):
+        node_ids = [f"00000000-0000-4000-8000-{index:012d}" for index in range(fleet_hub.BOARD_LIMIT + 1)]
+        now = datetime.now(timezone.utc)
+        events = []
+        for index, node_id in enumerate(node_ids):
+            # All runs share a bucket. Age and state order oppose node-ID order.
+            start = (now - timedelta(minutes=index + 1)).isoformat()
+            state = "run.dispatch.observed" if index % 2 else "run.started"
+            events.extend(
+                [
+                    _event(node_id, f"run-{index}", 1, "run.created", repo="repo", harness="codex", ts=start),
+                    _event(node_id, f"run-{index}", 2, state, repo="repo", harness="codex", ts=now.isoformat()),
+                ]
+            )
+        status, _headers, text = _request(hub, "POST", "/events", headers=_bearer(), body=events)
+        assert status == 200, text
+        expected = sorted(
+            range(len(node_ids)),
+            key=lambda index: (
+                (("run.dispatch.observed" if index % 2 else "run.started"), -index) if sort == "state" else (-index,)
+            ),
+        )
+
+        status, _headers, first = _request(hub, "GET", f"/view/machines?sort={sort}", headers=_bearer())
+        assert status == 200
+        assert re.findall(r'data-node="([^"]+)"', first) == [
+            node_ids[index] for index in expected[: fleet_hub.BOARD_LIMIT]
+        ]
+        more = re.search(r'class="fleet-more"><a href="([^"]+)"', first)
+        assert more
+        status, _headers, second = _request(hub, "GET", html.unescape(more[1]), headers=_bearer())
+        assert status == 200
+        assert re.findall(r'data-node="([^"]+)"', second) == [node_ids[expected[-1]]]
 
     def test_sort_orders_repo_rows(self, hub):
         _seed(hub)
@@ -670,6 +834,23 @@ def test_boards_render_through_the_shared_deck_shell():
     assert '<a href="/view/machines" aria-current="page">machines board</a>' in page
     assert "Command Deck &middot; Machines" in page
     assert "background: #fff" not in page
+
+
+def test_machine_summary_counts_nodes_with_only_unread_messages():
+    page = fleet_dashboard.render_page(
+        view="machines",
+        query_string="",
+        runs=[],
+        claims=[],
+        nodes=[{"node_id": NODE_A}],
+        started_at={},
+        nonce="abc",
+        unread_counts={NODE_B: 3},
+    )
+
+    assert "2 machines" in page
+    assert f'data-node="{NODE_A}"' in page
+    assert f'data-node="{NODE_B}"' in page
 
 
 def test_interactive_sessions_stay_off_legacy_boards_and_station_capacity(tmp_path):
@@ -1043,24 +1224,529 @@ class TestBoardBounds:
         _status, _headers, all_repos = _request(hub, "GET", "/view/repos?all=1", headers=_bearer())
         assert "repo-old" in all_repos
 
-    def test_all_board_paginates_with_more_link(self, hub):
+    def test_unread_candidates_do_not_repeat_across_event_pages(self, hub, monkeypatch):
         now = datetime.now(timezone.utc).isoformat()
+        node_ids = [f"00000000-0000-4000-8000-{index:012d}" for index in range(fleet_hub.BOARD_LIMIT + 1)]
         events = [
-            _event(NODE_A, f"page-{index}", 1, "run.completed", repo=f"repo-{index}", harness="claude", ts=now)
-            for index in range(fleet_hub.BOARD_LIMIT + 1)
+            _event(node_id, f"run-{index}", 1, "run.dispatch.observed", repo="repo", harness="codex", ts=now)
+            for index, node_id in enumerate(node_ids)
         ]
         status, _headers, text = _request(hub, "POST", "/events", headers=_bearer(), body=events)
         assert status == 200, text
-        _status, _headers, first = _request(hub, "GET", "/view/machines?all=1", headers=_bearer())
-        assert 'class="fleet-more"' in first
+        monkeypatch.setattr(
+            fleet_hub_http.fleet_hub_messages,
+            "unread_counts",
+            lambda _conn: {node_id: 1 for node_id in node_ids},
+        )
+
+        _status, _headers, first = _request(hub, "GET", "/view/machines", headers=_bearer())
         assert "offset=200" in first
-        first_ids = {f"page-{index}" for index in range(fleet_hub.BOARD_LIMIT + 1) if f'title="page-{index}"' in first}
+        _status, _headers, second = _request(hub, "GET", "/view/machines?offset=200", headers=_bearer())
+        first_ids = {node_id for node_id in node_ids if f'data-node="{node_id}"' in first}
+        second_ids = {node_id for node_id in node_ids if f'data-node="{node_id}"' in second}
         assert len(first_ids) == fleet_hub.BOARD_LIMIT
-        _status, _headers, second = _request(hub, "GET", "/view/machines?all=1&offset=200", headers=_bearer())
-        assert 'class="fleet-more"' not in second
-        second_ids = {
-            f"page-{index}" for index in range(fleet_hub.BOARD_LIMIT + 1) if f'title="page-{index}"' in second
-        }
         assert len(second_ids) == 1
         assert first_ids.isdisjoint(second_ids)
-        assert len(first_ids | second_ids) == fleet_hub.BOARD_LIMIT + 1
+        assert first_ids | second_ids == set(node_ids)
+
+    def test_machine_event_page_uses_same_unread_exclusions_as_pagination(self, hub, monkeypatch):
+        stamp = datetime.now(timezone.utc).isoformat()
+        monkeypatch.setattr(fleet_dashboard, "MACHINE_CARD_LIMIT", 4)
+        event_node_ids = ["00000000-0000-4000-8000-000000000000"]
+        claim_node_id = "ffffffff-ffff-4fff-8fff-000000000001"
+        events = [
+            _event(node_id, f"event-{index}", 1, "run.started", repo="repo", harness="codex", ts=stamp)
+            for index, node_id in enumerate(event_node_ids)
+        ]
+        status, _headers, text = _request(hub, "POST", "/events", headers=_bearer(), body=events)
+        assert status == 200, text
+        status, _headers, text = _request(
+            hub,
+            "POST",
+            "/claims",
+            headers=_bearer(),
+            body={
+                "action": "acquire",
+                "target": "repo",
+                "node_id": claim_node_id,
+                "holder": HOLDER_TOKEN,
+                "conductor": "test",
+            },
+        )
+        assert status == 200, text
+        unread_node_ids = [f"unread-only-{index:03d}" for index in range(3)]
+        unread = {claim_node_id: 1, **dict.fromkeys(unread_node_ids, 1)}
+        monkeypatch.setattr(fleet_hub_http.fleet_hub_messages, "unread_counts", lambda _conn: unread)
+
+        status, _headers, first = _request(hub, "GET", "/view/machines", headers=_bearer())
+
+        assert status == 200
+        assert f'data-node="{claim_node_id}"' not in first
+        assert all(f'data-node="{node_id}"' in first for node_id in event_node_ids + unread_node_ids)
+        more = re.search(r'class="fleet-more"><a href="([^"]+)"', first)
+        assert more
+        next_path = html.unescape(more[1])
+        status, _headers, second = _request(hub, "GET", next_path, headers=_bearer())
+
+        assert status == 200
+        assert f'data-node="{claim_node_id}"' in second
+
+    def test_terminal_only_node_with_unread_message_gets_supplemental_card(self, hub, monkeypatch):
+        now = datetime.now(timezone.utc).isoformat()
+        status, _headers, text = _request(
+            hub,
+            "POST",
+            "/events",
+            headers=_bearer(),
+            body=[_event(NODE_A, "finished", 1, "run.completed", repo="repo", harness="codex", ts=now)],
+        )
+        assert status == 200, text
+        monkeypatch.setattr(fleet_hub_http.fleet_hub_messages, "unread_counts", lambda _conn: {NODE_A: 1})
+
+        status, _headers, page = _request(hub, "GET", "/view/machines", headers=_bearer())
+
+        assert status == 200
+        assert f'data-node="{NODE_A}"' in page
+        assert "1 unread message</div>" in page
+
+    def test_machine_pages_bound_runs_per_node_without_splitting_machine(self, hub, monkeypatch):
+        run_ids = [f"run-{index:03d}" for index in range(201)]
+        stamp = datetime.now(timezone.utc).isoformat()
+        events = [
+            _event(NODE_A, run_id, 1, "run.completed", repo="repo", harness="codex", ts=stamp) for run_id in run_ids
+        ]
+        for start in range(0, len(events), 1000):
+            status, _headers, text = _request(
+                hub, "POST", "/events", headers=_bearer(), body=events[start : start + 1000]
+            )
+            assert status == 200, text
+
+        node_queries = []
+        original_node_query = fleet_hub_status.board_machine_page
+
+        def count_node_queries(*args, **kwargs):
+            node_queries.append(True)
+            return original_node_query(*args, **kwargs)
+
+        page_queries = []
+        original_page_query = fleet_hub_status.board_status_for_nodes
+
+        def count_page_queries(conn, node_ids, **kwargs):
+            page_queries.append(node_ids)
+            return original_page_query(conn, node_ids, **kwargs)
+
+        monkeypatch.setattr(fleet_hub_status, "board_machine_page", count_node_queries)
+        monkeypatch.setattr(fleet_hub_status, "board_status_for_nodes", count_page_queries)
+        status, _headers, page = _request(hub, "GET", "/view/machines?all=1", headers=_bearer())
+
+        assert status == 200
+        assert page.count(f'data-node="{NODE_A}"') == 1
+        assert 'class="fleet-more"' not in page
+        shown_run_ids = {run_id for run_id in run_ids if f'title="{run_id}"' in page}
+        assert len(shown_run_ids) == 100
+        assert "older runs omitted" in page
+        assert node_queries == [True]
+        assert page_queries == [[NODE_A]]
+
+    def test_machine_page_keeps_run_that_matched_before_history_cap(self, hub):
+        old_stamp = (datetime.now(timezone.utc) - timedelta(minutes=5)).isoformat()
+        recent_stamp = datetime.now(timezone.utc).isoformat()
+        events = [
+            _event(NODE_A, "matching-active", 1, "run.started", repo="repo", harness="codex", ts=old_stamp),
+            _event(NODE_A, "matching-terminal", 1, "run.completed", repo="repo", harness="codex", ts=old_stamp),
+        ]
+        events.extend(
+            _event(
+                NODE_A,
+                f"newer-terminal-{index:03d}",
+                1,
+                "run.completed",
+                repo="other",
+                harness="codex",
+                ts=recent_stamp,
+            )
+            for index in range(100)
+        )
+        status, _headers, text = _request(hub, "POST", "/events", headers=_bearer(), body=events)
+        assert status == 200, text
+        conn = fleet_hub.open_db(hub[2])
+        try:
+            conn.execute(
+                "UPDATE events SET received_at = ? WHERE run_id IN (?, ?)",
+                (old_stamp, "matching-active", "matching-terminal"),
+            )
+            conn.execute("UPDATE events SET received_at = ? WHERE run_id LIKE 'newer-terminal-%'", (recent_stamp,))
+            conn.commit()
+        finally:
+            conn.close()
+
+        status, _headers, default_page = _request(hub, "GET", "/view/machines", headers=_bearer())
+        assert status == 200
+        assert 'title="matching-active"' in default_page
+
+        status, _headers, filtered_page = _request(hub, "GET", "/view/machines?all=1&repo=repo", headers=_bearer())
+        assert status == 200
+        assert 'title="matching-active"' in filtered_page
+        assert 'title="matching-terminal"' in filtered_page
+
+    def test_machine_page_global_cap_keeps_all_matching_runs_first(self, hub):
+        stamp = datetime.now(timezone.utc).isoformat()
+        node_ids = [f"00000000-0000-4000-8000-{index:012d}" for index in range(21)]
+        matching_run_ids = [f"matching-{index:03d}" for index in range(100)]
+        events = []
+        for node_index, node_id in enumerate(node_ids):
+            for run_index in range(100):
+                matches = node_index == 0 or run_index == 0
+                run_id = matching_run_ids[run_index] if node_index == 0 else f"node-{node_index:02d}-{run_index:03d}"
+                events.append(
+                    _event(
+                        node_id,
+                        run_id,
+                        1,
+                        "run.completed",
+                        repo="matched" if matches else "other",
+                        harness="codex",
+                        ts=stamp,
+                    )
+                )
+
+        for start in range(0, len(events), 1000):
+            status, _headers, text = _request(
+                hub, "POST", "/events", headers=_bearer(), body=events[start : start + 1000]
+            )
+            assert status == 200, text
+
+        status, _headers, page = _request(hub, "GET", "/view/machines?all=1&repo=matched", headers=_bearer())
+
+        assert status == 200
+        assert all(f'title="{run_id}"' in page for run_id in matching_run_ids)
+
+    def test_machine_page_caps_total_runs_and_marks_truncation(self, hub):
+        node_ids = [f"00000000-0000-4000-8000-{index:012d}" for index in range(21)]
+        stamp = datetime.now(timezone.utc).isoformat()
+        events = [
+            _event(
+                node_id,
+                f"n{node_index:02d}-r{run_index:03d}",
+                1,
+                "run.completed",
+                repo="repo",
+                harness="codex",
+                ts=stamp,
+            )
+            for node_index, node_id in enumerate(node_ids)
+            for run_index in range(100)
+        ]
+        for start in range(0, len(events), 1000):
+            status, _headers, text = _request(
+                hub, "POST", "/events", headers=_bearer(), body=events[start : start + 1000]
+            )
+            assert status == 200, text
+
+        status, _headers, page = _request(hub, "GET", "/view/machines?all=1", headers=_bearer())
+
+        assert status == 200
+        assert page.count("<tr data-bucket=") == 2000
+        assert "older runs omitted" in page
+
+    def test_machine_pages_resolve_history_seats_without_per_run_queries(self, hub, monkeypatch):
+        stamp = datetime.now(timezone.utc).isoformat()
+        events = [
+            _event(NODE_A, "historical-seat", 1, "run.started", repo="repo", harness="codex", ts=stamp),
+            _event(NODE_A, "historical-seat", 2, "run.completed", repo="repo", harness="codex", ts=stamp),
+        ]
+        events[1]["seat"] = "-"
+        status, _headers, text = _request(hub, "POST", "/events", headers=_bearer(), body=events)
+        assert status == 200, text
+        statements = []
+        original_open_db = fleet_hub_http.open_db
+
+        def trace_open_db(*args, **kwargs):
+            conn = original_open_db(*args, **kwargs)
+            conn.set_trace_callback(statements.append)
+            return conn
+
+        monkeypatch.setattr(fleet_hub_http, "open_db", trace_open_db)
+
+        status, _headers, filtered_page = _request(hub, "GET", "/view/machines?all=1&seat=worker", headers=_bearer())
+
+        assert status == 200
+        assert "historical-seat" in filtered_page
+        assert "worker/codex" in filtered_page
+        status, _headers, unfiltered_page = _request(hub, "GET", "/view/machines?all=1", headers=_bearer())
+        assert status == 200
+        assert "historical-seat" in unfiltered_page
+        assert "worker/codex" in unfiltered_page
+        assert not any("SELECT seat FROM events WHERE node_id" in statement for statement in statements)
+
+    def test_machine_page_resolves_seat_when_latest_event_has_no_harness(self, hub):
+        stamp = datetime.now(timezone.utc).isoformat()
+        events = [
+            _event(NODE_A, "nullable-harness-seat", 1, "run.started", repo="repo", harness="codex", ts=stamp),
+            _event(NODE_A, "nullable-harness-seat", 2, "run.completed", repo="repo", harness="codex", ts=stamp),
+        ]
+        events[1]["harness"] = None
+        events[1]["seat"] = None
+        status, _headers, text = _request(hub, "POST", "/events", headers=_bearer(), body=events)
+        assert status == 200, text
+
+        status, _headers, page = _request(hub, "GET", "/view/machines?all=1&seat=worker", headers=_bearer())
+
+        assert status == 200
+        assert "nullable-harness-seat" in page
+        assert ">worker<" in page
+
+    def test_claim_only_machine_cards_are_bounded_and_paginated(self, hub, monkeypatch):
+        node_ids = [f"00000000-0000-4000-8000-{index:012d}" for index in range(fleet_hub.BOARD_LIMIT + 1)]
+        stamp = datetime.now(timezone.utc).isoformat()
+        expires = datetime.now(timezone.utc).timestamp() + 3600
+        conn = fleet_hub.open_db(hub[2])
+        try:
+            conn.executemany(
+                "INSERT INTO claims "
+                "(target, owner_node, holder_token, acquired_at, renewed_at, ttl_seconds, expires_at) "
+                "VALUES (?, ?, 'test-holder-token', ?, ?, 3600, ?)",
+                [(f"repo-{index:03d}", node_id, stamp, stamp, expires) for index, node_id in enumerate(node_ids)],
+            )
+            conn.executemany(
+                "INSERT INTO claim_fences (target, generation) VALUES (?, 1)",
+                [(f"repo-{index:03d}",) for index in range(len(node_ids))],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+
+        monkeypatch.setattr(fleet_hub_http.fleet_hub_messages, "unread_counts", lambda _conn: {node_ids[-1]: 7})
+        _status, _headers, first = _request(hub, "GET", "/view/machines", headers=_bearer())
+        assert "claim_only=1" in first
+        assert "claim_offset=200" in first
+        _status, _headers, second = _request(
+            hub, "GET", "/view/machines?claim_only=1&claim_offset=200", headers=_bearer()
+        )
+        first_ids = {node_id for node_id in node_ids if f'data-node="{node_id}"' in first}
+        second_ids = {node_id for node_id in node_ids if f'data-node="{node_id}"' in second}
+        assert len(first_ids) == fleet_hub.BOARD_LIMIT
+        assert len(second_ids) == 1
+        assert first_ids.isdisjoint(second_ids)
+        assert first_ids | second_ids == set(node_ids)
+        assert "7 unread messages" in second
+
+    def test_final_claim_only_page_resumes_remaining_event_pages(self, hub):
+        event_ids = [f"33333333-3333-4333-8333-{index:012d}" for index in range(fleet_hub.BOARD_LIMIT + 1)]
+        stamp = datetime.now(timezone.utc).isoformat()
+        events = [
+            _event(node_id, f"resume-event-{index}", 1, "run.dispatch.observed", repo="repo", harness="codex", ts=stamp)
+            for index, node_id in enumerate(event_ids)
+        ]
+        status, _headers, text = _request(hub, "POST", "/events", headers=_bearer(), body=events)
+        assert status == 200, text
+
+        claim_id = "44444444-4444-4444-8444-000000000001"
+        expires = datetime.now(timezone.utc).timestamp() + 3600
+        conn = fleet_hub.open_db(hub[2])
+        try:
+            conn.execute(
+                "INSERT INTO claims "
+                "(target, owner_node, holder_token, acquired_at, renewed_at, ttl_seconds, expires_at) "
+                "VALUES (?, ?, 'test-holder-token', ?, ?, 3600, ?)",
+                ("claim-only", claim_id, stamp, stamp, expires),
+            )
+            conn.execute("INSERT INTO claim_fences (target, generation) VALUES ('claim-only', 1)")
+            conn.commit()
+        finally:
+            conn.close()
+
+        _status, _headers, claim_page = _request(
+            hub, "GET", "/view/machines?claim_only=1&claim_offset=0", headers=_bearer()
+        )
+        assert f'data-node="{claim_id}"' in claim_page
+        more = re.search(r'class="fleet-more"><a href="([^"]+)"', claim_page)
+        assert more
+        next_path = html.unescape(more[1])
+        assert "offset=200" in next_path
+
+        status, _headers, event_page = _request(hub, "GET", next_path, headers=_bearer())
+        assert status == 200
+        assert f'data-node="{event_ids[-1]}"' in event_page
+
+    def test_more_links_cover_events_and_claim_only_nodes_once(self, hub, monkeypatch):
+        count = fleet_hub.BOARD_LIMIT * 2 + 1
+        event_ids = [f"11111111-1111-4111-8111-{index:012d}" for index in range(count)]
+        claim_ids = [f"22222222-2222-4222-8222-{index:012d}" for index in range(count)]
+        stamp = datetime.now(timezone.utc).isoformat()
+        events = [
+            _event(node, f"event-{index}", 1, "run.dispatch.observed", repo="events", harness="codex", ts=stamp)
+            for index, node in enumerate(event_ids)
+        ]
+        status, _headers, text = _request(hub, "POST", "/events", headers=_bearer(), body=events)
+        assert status == 200, text
+        conn = fleet_hub.open_db(hub[2])
+        try:
+            conn.executemany(
+                "INSERT INTO claims "
+                "(target, owner_node, holder_token, acquired_at, renewed_at, ttl_seconds, expires_at) "
+                "VALUES (?, ?, 'test-holder-token', ?, ?, 3600, ?)",
+                [
+                    (f"claim-{index}", node, stamp, stamp, datetime.now(timezone.utc).timestamp() + 3600)
+                    for index, node in enumerate(claim_ids)
+                ],
+            )
+            conn.executemany(
+                "INSERT INTO claim_fences (target, generation) VALUES (?, 1)",
+                [(f"claim-{index}",) for index in range(count)],
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        unread_ids = {"unread-only-fixture": 1}
+        monkeypatch.setattr(fleet_hub_http.fleet_hub_messages, "unread_counts", lambda _conn: unread_ids)
+        path = "/view/machines"
+        visited = set()
+        seen = set()
+        while path:
+            assert path not in visited, "pagination repeated a more link"
+            visited.add(path)
+            status, _headers, page = _request(hub, "GET", path, headers=_bearer())
+            assert status == 200, page
+            page_ids = set(re.findall(r'data-node="([^"]+)"', page))
+            assert page_ids
+            assert len(page_ids) <= fleet_dashboard.MACHINE_CARD_LIMIT
+            assert seen.isdisjoint(page_ids), "pagination repeated machine cards"
+            seen.update(page_ids)
+            match = re.search(r'class="fleet-more"><a href="([^"]+)"', page)
+            path = html.unescape(match[1]) if match else ""
+        assert seen == set(event_ids) | set(claim_ids) | set(unread_ids)
+
+    def test_repo_view_skips_complete_machine_node_query(self, hub, monkeypatch):
+        _seed(hub)
+
+        calls = []
+        original_query = fleet_hub_status.board_machine_page
+
+        def complete_node_query(*args, **kwargs):
+            calls.append(args)
+            return original_query(*args, **kwargs)
+
+        monkeypatch.setattr(fleet_hub_status, "board_machine_page", complete_node_query)
+        status, _headers, page = _request(hub, "GET", "/view/repos", headers=_bearer())
+        assert status == 200
+        assert "repo-a" in page
+        assert calls == []
+
+    def test_repo_view_skips_unread_message_scan(self, hub, monkeypatch):
+        calls = []
+        original_query = fleet_hub_http.fleet_hub_messages.unread_counts
+
+        def unread_scan(conn):
+            calls.append(conn)
+            return original_query(conn)
+
+        monkeypatch.setattr(fleet_hub_http.fleet_hub_messages, "unread_counts", unread_scan)
+
+        status, _headers, page = _request(hub, "GET", "/view/repos", headers=_bearer())
+
+        assert status == 200
+        assert "Fleet: Repos" in page
+        assert calls == []
+
+    def test_unread_only_machine_cards_are_bounded_and_paginated(self):
+        unread = {f"unread-node-{index:03d}": 1 for index in range(300)}
+        existing_nodes = [{"node_id": f"existing-node-{index:03d}"} for index in range(100)]
+
+        def render(offset):
+            return fleet_dashboard.render_page(
+                view="machines",
+                query_string="",
+                runs=[],
+                claims=[],
+                nodes=existing_nodes,
+                started_at={},
+                nonce="test",
+                unread_counts=unread,
+                unread_offset=offset,
+            )
+
+        first = render(0)
+        second = render(100)
+        third = render(200)
+        first_ids = {node_id for node_id in unread if f'data-node="{node_id}"' in first}
+        second_ids = {node_id for node_id in unread if f'data-node="{node_id}"' in second}
+        third_ids = {node_id for node_id in unread if f'data-node="{node_id}"' in third}
+
+        assert len(first_ids) == 100
+        assert len(second_ids) == 100
+        assert len(third_ids) == 100
+        assert first_ids.isdisjoint(second_ids)
+        assert second_ids.isdisjoint(third_ids)
+        assert first_ids | second_ids | third_ids == set(unread)
+
+    def test_unread_more_link_advances_by_unread_cards_consumed(self, hub, monkeypatch):
+        now = datetime.now(timezone.utc).isoformat()
+        events = [
+            _event(
+                f"33333333-3333-4333-8333-{index:012d}",
+                f"unread-page-{index}",
+                1,
+                "run.started",
+                repo=f"repo-{index}",
+                harness="claude",
+                ts=now,
+            )
+            for index in range(100)
+        ]
+        status, _headers, text = _request(hub, "POST", "/events", headers=_bearer(), body=events)
+        assert status == 200, text
+        unread = {f"unread-node-{index:03d}": 1 for index in range(300)}
+        monkeypatch.setattr(fleet_hub_http.fleet_hub_messages, "unread_counts", lambda _conn: unread)
+
+        _status, _headers, page = _request(hub, "GET", "/view/machines", headers=_bearer())
+
+        assert "unread_offset=100" in page
+        assert "unread_only=1" in page
+        assert 'class="fleet-more"' in page
+
+    def test_full_machine_page_links_to_unread_only_cards(self, hub, monkeypatch):
+        now = datetime.now(timezone.utc).isoformat()
+        known_node_ids = [f"44444444-4444-4444-8444-{index:012d}" for index in range(fleet_hub.BOARD_LIMIT)]
+        events = [
+            _event(
+                node_id,
+                f"full-page-{index}",
+                1,
+                "run.dispatch.observed",
+                repo=f"repo-{index}",
+                harness="claude",
+                ts=now,
+            )
+            for index, node_id in enumerate(known_node_ids)
+        ]
+        status, _headers, text = _request(hub, "POST", "/events", headers=_bearer(), body=events)
+        assert status == 200, text
+        monkeypatch.setattr(
+            fleet_hub_http.fleet_hub_messages,
+            "unread_counts",
+            lambda _conn: {**dict.fromkeys(known_node_ids, 1), "unread-only-node": 1},
+        )
+
+        _status, _headers, first = _request(hub, "GET", "/view/machines", headers=_bearer())
+        assert "unread_only=1" in first
+        _status, _headers, second = _request(hub, "GET", "/view/machines?unread_only=1", headers=_bearer())
+        assert 'data-node="unread-only-node"' in second
+        assert second.count('class="machine-card"') == 1
+        assert 'class="fleet-more"' not in second
+
+    def test_node_filter_paginates_more_than_two_hundred_unread_cards(self, hub, monkeypatch):
+        unread = {f"filtered-target-{index:03d}": 1 for index in range(fleet_hub.BOARD_LIMIT + 1)}
+        monkeypatch.setattr(fleet_hub_http.fleet_hub_messages, "unread_counts", lambda _conn: unread)
+
+        _status, _headers, first = _request(hub, "GET", "/view/machines?node=filtered-target", headers=_bearer())
+        assert "unread_offset=200" in first
+        assert "node=filtered-target" in first
+        _status, _headers, second = _request(
+            hub,
+            "GET",
+            "/view/machines?node=filtered-target&unread_offset=200&unread_only=1",
+            headers=_bearer(),
+        )
+        assert 'data-node="filtered-target-200"' in second
+        assert 'class="fleet-more"' not in second

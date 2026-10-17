@@ -96,6 +96,7 @@ import os
 import re
 import secrets
 import sqlite3
+import stat
 import sys
 import threading
 import time
@@ -105,6 +106,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from . import fleet_command_deck, fleet_hub_preference, worklore_store
+from .fleet_execution_context import serialize_context
 from .fleet_hub_event_bounds import oversized_event_field
 from .fleet_hub_server import BoundedThreadingHTTPServer
 from .fleet_hub_status import (
@@ -115,7 +117,7 @@ from .fleet_hub_status import (
     latest_status as latest_status,
 )
 
-SCHEMA_VERSION = 26
+SCHEMA_VERSION = 32
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
@@ -217,6 +219,7 @@ CREATE TABLE IF NOT EXISTS events (
     exit_status INTEGER,
     capability_fingerprint TEXT,
     repo_identity TEXT,
+    context TEXT,
     received_at TEXT NOT NULL,
     PRIMARY KEY (node_id, run_id, sequence, digest)
 );
@@ -259,7 +262,22 @@ _CLAIMS_ADDITIVE_COLUMNS = (
     "lock_acquired_at",
     "lock_run_dir",
 )
-_EVENTS_ADDITIVE_COLUMNS = ("exit_status", "capability_fingerprint", "repo_identity")
+_EVENTS_ADDITIVE_COLUMNS = ("exit_status", "capability_fingerprint", "repo_identity", "context")
+# Independently developed migrations can reserve the same schema version.
+# Register nullable additions here so current-version databases self-heal too.
+_ADDITIVE_COLUMNS = (
+    ("events", "context", "ALTER TABLE events ADD COLUMN context TEXT"),
+    ("model_policy", "t3_model", "ALTER TABLE model_policy ADD COLUMN t3_model TEXT NOT NULL DEFAULT ''"),
+)
+
+
+def _missing_additive_columns(conn: sqlite3.Connection) -> list[str]:
+    return [
+        ddl
+        for table, column, ddl in _ADDITIVE_COLUMNS
+        if column not in {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    ]
+
 
 # Per-node credentials (schema v4, issue #1150): node_id -> SHA-256 of the
 # node's bearer token. The plaintext token is returned once by the add
@@ -329,6 +347,7 @@ CREATE TABLE IF NOT EXISTS model_policy (
     brigade_model TEXT NOT NULL DEFAULT '',
     t3_instance_id TEXT NOT NULL DEFAULT '',
     t3_service_tier TEXT NOT NULL DEFAULT '',
+    t3_model TEXT NOT NULL DEFAULT '',
     notes TEXT,
     updated_at TEXT NOT NULL
 );
@@ -538,6 +557,12 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     fleet_hub_claims.migrate_schema(conn)
     conn.execute("CREATE INDEX IF NOT EXISTS events_run_seq ON events (node_id, run_id, sequence)")
     conn.execute("CREATE INDEX IF NOT EXISTS events_received_at ON events (received_at)")
+    # v29 -> v30: Grokbot runs span nodes. Seek their first event without
+    # scanning the node-first index or sorting the run's history.
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS events_grokbot_run_seq "
+        "ON events (run_id, sequence, received_at, digest) WHERE harness = 'grokbot'"
+    )
     # v3 -> v4 is one additive table; v5-v8 add cloud lease and policy
     # tables only, and v9 canonicalizes provider aliases. Existing event,
     # claim, node, and active lease rows survive.
@@ -607,6 +632,14 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     from . import fleet_hub_enrollment
 
     fleet_hub_enrollment.ensure_schema(conn)
+    from . import fleet_hub_messages
+
+    # v26 -> v28 added messages and named principals; v28 -> v29 adds
+    # recoverable principal enrollment and an unacked-recipient index.
+    # v30 -> v31 adds message metadata columns and external agent send grants.
+    fleet_hub_messages.ensure_schema(conn)
+    # v31 -> v32 adds model_policy.t3_model (native T3 launch model) through
+    # fleet_hub_model_roster.ensure_schema's additive column migration.
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 
@@ -619,8 +652,8 @@ def _init_schema(conn: sqlite3.Connection, db_path: Path) -> None:
     ``database is locked``. A caller that loses the write lock treats
     "someone else already set user_version" as success.
 
-    A current ``user_version`` is accepted after a plain read so an
-    already-migrated database never takes the write lock (#1159). Request
+    A current ``user_version`` with all additive columns is accepted after
+    plain reads so a complete database never takes the write lock (#1159). Request
     handlers still use ``open_db`` (#1161); this path is for startup and
     other ``init_db`` callers (tools, tests, a first-touch storm).
     """
@@ -632,14 +665,15 @@ def _init_schema(conn: sqlite3.Connection, db_path: Path) -> None:
             current = conn.execute("PRAGMA user_version").fetchone()[0]
             if current == SCHEMA_VERSION:
                 fleet_hub_claims.validate_schema(conn)
-                return
+                if not _missing_additive_columns(conn):
+                    return
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("BEGIN IMMEDIATE")
         except sqlite3.OperationalError as exc:
             if not _locked_operational_error(exc):
                 raise
             current = conn.execute("PRAGMA user_version").fetchone()[0]
-            if current == SCHEMA_VERSION:
+            if current == SCHEMA_VERSION and not _missing_additive_columns(conn):
                 fleet_hub_claims.validate_schema(conn)
                 return
             if delay is None:
@@ -649,6 +683,8 @@ def _init_schema(conn: sqlite3.Connection, db_path: Path) -> None:
         try:
             _refuse_newer_schema(conn, db_path)
             if conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION:
+                for ddl in _missing_additive_columns(conn):
+                    conn.execute(ddl)
                 fleet_hub_claims.validate_schema(conn)
             else:
                 _apply_schema(conn)
@@ -658,7 +694,7 @@ def _init_schema(conn: sqlite3.Connection, db_path: Path) -> None:
             if not _locked_operational_error(exc):
                 raise
             current = conn.execute("PRAGMA user_version").fetchone()[0]
-            if current == SCHEMA_VERSION:
+            if current == SCHEMA_VERSION and not _missing_additive_columns(conn):
                 fleet_hub_claims.validate_schema(conn)
                 return
             if delay is None:
@@ -706,6 +742,69 @@ def open_db(db_path: Path) -> sqlite3.Connection:
     return conn
 
 
+def _secure_hub_database_storage(db_path: Path) -> None:
+    parent = db_path.parent
+    try:
+        try:
+            parent.lstat()
+            created = False
+        except FileNotFoundError:
+            created = True
+        parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        # Follow relocated data directories, but validate the final files below.
+        parent = parent.resolve()
+        db_path = parent / db_path.name
+        parent_info = parent.lstat()
+    except OSError as exc:
+        raise FleetHubError(f"could not secure fleet hub database directory: {type(exc).__name__}") from exc
+    if not stat.S_ISDIR(parent_info.st_mode) or stat.S_ISLNK(parent_info.st_mode):
+        raise FleetHubError("fleet hub database parent must be a directory")
+    if created and os.name == "posix":
+        try:
+            fd = os.open(
+                parent,
+                os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0),
+            )
+            try:
+                os.fchmod(fd, 0o700)
+                if stat.S_IMODE(os.fstat(fd).st_mode) != 0o700:
+                    raise FleetHubError("fleet hub database directory could not be made private (mode 0700)")
+            finally:
+                os.close(fd)
+        except (OSError, NotImplementedError) as exc:
+            raise FleetHubError(f"could not secure fleet hub database directory: {type(exc).__name__}") from exc
+
+    for path in (db_path, Path(f"{db_path}-wal"), Path(f"{db_path}-shm"), Path(f"{db_path}-journal")):
+        try:
+            info = path.lstat()
+        except FileNotFoundError:
+            if path != db_path:
+                continue
+            flags = os.O_RDWR | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+            try:
+                fd = os.open(path, flags, 0o600)
+            except FileExistsError:
+                info = path.lstat()
+            else:
+                os.close(fd)
+                info = path.lstat()
+        except OSError as exc:
+            raise FleetHubError(f"could not inspect fleet hub database file: {type(exc).__name__}") from exc
+        if not stat.S_ISREG(info.st_mode) or stat.S_ISLNK(info.st_mode):
+            raise FleetHubError("fleet hub database files must be regular files")
+        if os.name == "posix" and stat.S_IMODE(info.st_mode) != 0o600:
+            try:
+                fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+                try:
+                    if not stat.S_ISREG(os.fstat(fd).st_mode):
+                        raise FleetHubError("fleet hub database files must be regular files")
+                    os.fchmod(fd, 0o600)
+                finally:
+                    os.close(fd)
+            except (OSError, NotImplementedError) as exc:
+                raise FleetHubError(f"could not secure fleet hub database file: {type(exc).__name__}") from exc
+
+
 def init_db(db_path: Path) -> sqlite3.Connection:
     """Open the hub database and create/migrate its schema.
 
@@ -716,13 +815,14 @@ def init_db(db_path: Path) -> sqlite3.Connection:
     so request connections inherit it without re-issuing the pragma.
     """
     db_path = Path(db_path).expanduser()
-    db_path.parent.mkdir(parents=True, exist_ok=True)
+    _secure_hub_database_storage(db_path)
     resolved = db_path.resolve()
     conn = sqlite3.connect(str(resolved), timeout=10)
     try:
         conn.execute(f"PRAGMA busy_timeout={_INIT_BUSY_TIMEOUT_MS}")
         with _migration_lock(resolved):
             _init_schema(conn, resolved)
+        _secure_hub_database_storage(resolved)
     except BaseException:
         conn.close()
         raise
@@ -767,9 +867,17 @@ def _validate_event(raw: Any) -> dict[str, Any]:
         event[field] = cleaned
     for field in OPTIONAL_EVENT_INT_FIELDS:
         value = raw.get(field)
-        if value is not None and (not isinstance(value, int) or isinstance(value, bool) or value < 0):
-            raise FleetHubError(f"event field {field!r} must be a non-negative integer")
+        if value is not None and (
+            not isinstance(value, int) or isinstance(value, bool) or not -(2**63) <= value < 2**63
+        ):
+            raise FleetHubError(f"event field {field!r} must be a signed 64-bit integer")
         event[field] = value
+    from .fleet_execution_context import ExecutionContextError, validate_context
+
+    try:
+        event["context"] = validate_context(raw["context"]) if raw.get("context") is not None else None
+    except ExecutionContextError as exc:
+        raise FleetHubUnprocessable(str(exc)) from None
     return event
 
 
@@ -805,7 +913,7 @@ def store_events(conn: sqlite3.Connection, raw_events: Any, *, caller_node: str 
         cursor = conn.execute(
             "INSERT OR IGNORE INTO events "
             "(node_id, run_id, sequence, digest, repo, seat, harness, state, ts, exit_status, "
-            "capability_fingerprint, repo_identity, received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "capability_fingerprint, repo_identity, context, received_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 event["node_id"],
                 event["run_id"],
@@ -819,6 +927,7 @@ def store_events(conn: sqlite3.Connection, raw_events: Any, *, caller_node: str 
                 event["exit_status"],
                 event["capability_fingerprint"],
                 event["repo_identity"],
+                serialize_context(event["context"]) if event["context"] is not None else None,
                 received_at,
             ),
         )

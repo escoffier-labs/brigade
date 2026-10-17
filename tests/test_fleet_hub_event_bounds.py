@@ -123,3 +123,41 @@ def test_oversized_field_over_http_is_422_and_nothing_is_stored(tmp_path):
         assert _count(check) == 0
     finally:
         check.close()
+
+
+@pytest.mark.parametrize(
+    "context",
+    [
+        {"schema": "other"},
+        {"schema": "brigade.t3_execution_context.v1", "prompt": "text"},
+        {"schema": "brigade.t3_execution_context.v1", "request_id": "x" * 129},
+        {"schema": "brigade.t3_execution_context.v1", "initiator": {"label": "x\n"}},
+        {"schema": "brigade.t3_execution_context.v1", "initiator": {"kind": "admin"}},
+        {"schema": "brigade.t3_execution_context.v1", "policy": {"token": "test"}},
+        {"schema": "brigade.t3_execution_context.v1", "issue_url": "https://github.com/a/b/issues/1?token=example"},
+        {"schema": "brigade.t3_execution_context.v1", "issue_url": "http://github.com/a/b/pull/1"},
+        {"schema": "brigade.t3_execution_context.v1", "thread_id": "Bearer example-credential"},
+        {"schema": "brigade.t3_execution_context.v1", "thread_id": "token=example-credential"},
+        {"schema": "brigade.t3_execution_context.v1", "thread_id": "/tmp/private-file"},
+        {"schema": "brigade.t3_execution_context.v1", "thread_id": "x\u200b"},
+        {"schema": "brigade.t3_execution_context.v1", "policy": []},
+        {"schema": "brigade.t3_execution_context.v1", "thread_id": 12},
+    ],
+)
+def test_execution_context_is_closed_bounded_and_safe(conn, context):
+    with pytest.raises(fleet_hub.FleetHubUnprocessable):
+        fleet_hub.store_events(conn, _event(context=context))
+    assert _count(conn) == 0
+
+
+def test_execution_context_total_utf8_bound(conn):
+    context = {"schema": "brigade.t3_execution_context.v1"}
+    context.update(
+        {
+            key: "\U0001f600" * 128
+            for key in ("request_id", "thread_id", "turn_ref", "controller_id", "origin_node", "target_host", "work_id")
+        }
+    )
+    context["policy"] = {"session_id": "\U0001f600" * 128}
+    with pytest.raises(fleet_hub.FleetHubUnprocessable):
+        fleet_hub.store_events(conn, _event(context=context))

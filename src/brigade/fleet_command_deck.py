@@ -23,6 +23,7 @@ from brigade.fleet_deck_brands import (
     provider_brand,
 )
 
+from .fleet_event_freshness import observation_state
 from . import ui_theme
 
 CLAIM_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -53,7 +54,7 @@ ACTIVE_LIMIT, OBSERVER_LIMIT, RAIL_FAILURE_LIMIT, SESSION_LIMIT = 200, 8, 10, 50
 CLOUD_PROVIDER_LIMIT, CLOUD_LEASE_LIMIT = 8, 16
 CLOUD_TEXT_LIMIT = 256
 SESSION_REPO_IDENTITY_LIMIT, SESSION_CHECKOUT_PATH_LIMIT = 512, 1024
-BUCKET_RANK = {"failed": 0, "awaiting approval": 1, "stale": 2, "running": 3, "queued": 4}
+BUCKET_RANK = {"failed": 0, "awaiting approval": 1, "unknown": 2, "stale": 2, "running": 3, "queued": 4}
 INTERNAL_OUTCOME_STATES = frozenset({"run.dispatch.completed", "run.synthesis.completed"})
 
 _START_CHUNK = 400
@@ -561,6 +562,8 @@ def is_terminal_state(state: str) -> bool:
 def bucket_for(state: str, *, age_seconds: int | None, stale_after_seconds: int) -> str:
     # The Hub's synthetic history state is already an age verdict; bucket it
     # the same way ``fleet_dashboard.bucket_for`` does regardless of age.
+    if state == "external.unknown":
+        return "unknown"
     if state == "run.stale":
         return "stale"
     if state in AWAITING_STATES:
@@ -582,11 +585,11 @@ def collides(target: str, live_runs: Sequence[LiveRun], claims: Mapping[str, Cla
 
 _LATEST_ROWS = (
     "SELECT node_id, run_id, repo, seat, harness, state, ts, received_at, repo_identity FROM ("
-    "  SELECT e.*, ROW_NUMBER() OVER ("
+    "  SELECT node_id, run_id, sequence, digest, ROW_NUMBER() OVER ("
     "    PARTITION BY CASE WHEN harness = 'grokbot' THEN 'grokbot' ELSE 'node:' || node_id END, run_id "
     "    ORDER BY sequence DESC, received_at DESC, digest DESC"
     "  ) AS rn FROM events e"
-    ") WHERE rn = 1"
+    ") AS ranked JOIN events USING (node_id, run_id, sequence, digest) WHERE rn = 1"
 )
 
 _AWAITING_PLACEHOLDERS = ",".join("?" for _ in AWAITING_STATES)
@@ -745,6 +748,7 @@ def fetch_live_runs(conn: sqlite3.Connection, *, now: datetime, stale_after_seco
     runs: list[LiveRun] = []
     for node_id, run_id, repo, seat, harness, state, _ts, received_at, repo_identity in rows:
         age = _age_seconds(received_at, now)
+        state = observation_state(state, harness, _ts, now=now)
         runs.append(
             LiveRun(
                 node_id=node_id,
@@ -1119,7 +1123,9 @@ def build_view(
     control_plane: ControlPlane | None = None,
 ) -> DeckView:
     del now
-    active_runs = tuple(run for run in live_runs if not is_terminal_state(run.state) and run.bucket != "stale")
+    active_runs = tuple(
+        run for run in live_runs if not is_terminal_state(run.state) and run.bucket not in {"stale", "unknown"}
+    )
     claims_by_target = {claim.target: claim for claim in claims}
     display_claims = {target: _display_claim(claim, enrolled_labels) for target, claim in claims_by_target.items()}
     collision_targets = {
@@ -1157,7 +1163,7 @@ def build_view(
     rail.extend(
         RailEntry(kind=run.bucket, node_id=run.node_id, repo=run.repo, run_id=run.run_id, detail=run.state)
         for run in live_runs
-        if run.bucket in ("awaiting approval", "stale")
+        if run.bucket in ("awaiting approval", "stale", "unknown")
     )
     rail.extend(
         RailEntry(

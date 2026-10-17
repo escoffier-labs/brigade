@@ -294,3 +294,9 @@ def test_doctor_agent_extract_commands_and_harness_detection(tmp_path: Path, mon
     assert doctor_agent.extract_commands("run `brigade security init --target .` now") == [
         "brigade security init --target ."
     ]
+
+
+def test_doctor_agent_fix_prefix_ignores_text_inside_backtick_commands():
+    detail = "run `brigade context preview --target '/w/a fix: brigade foo'`"
+    assert doctor_agent.extract_commands(detail) == ["brigade context preview --target '/w/a fix: brigade foo'"]
+    assert doctor_agent.extract_commands("fix: brigade init --target .") == ["brigade init --target ."]
