@@ -99,6 +99,13 @@ def test_garbage_output_is_internal_error():
     assert info.value.code == "internal_error"
 
 
+def test_undecodable_output_is_a_protocol_error():
+    run = FakeRun(raises=UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte"))
+    with pytest.raises(fleet.FleetProtocolError) as info:
+        fleet.FleetRunner("/bin/t3-fleet", "/usr/bin/git", run=run).capacity()
+    assert info.value.code == "internal_error"
+
+
 def test_valid_result_with_nonzero_exit_keeps_request_id():
     run = FakeRun(_ok(request_id="host-a-r7", state="running"), returncode=3)
     with pytest.raises(fleet.FleetProtocolError) as info:

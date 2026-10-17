@@ -305,23 +305,22 @@ class T3DispatchTools:
         request_id = args["request_id"]
         prior = row["last_state"]
         notified = row["notified_state"]
-        reopened = False
         revision = row["state_revision"]
-        if prior in c.TERMINAL_STATES:
-            # Mark the row open before t3-fleet can reopen the work, so a crash cannot hide the new turn.
-            # A concurrent poll can rewrite the same terminal state and win the compare-and-set; retry
-            # against the fresh revision, and never launch while the row still reads terminal.
-            for _ in range(_REOPEN_ATTEMPTS):
-                reopened = self.ledger.update_state(
-                    request_id, c.REOPENING_STATE, self.now(), expected_revision=revision, owner_write=True
-                )
-                current = self._known(request_id)
-                revision = current["state_revision"]
-                if reopened or current["last_state"] not in c.TERMINAL_STATES:
-                    break
-                prior, notified = current["last_state"], current["notified_state"]
-            else:
-                raise c.T3DispatchError("unavailable")
+        # Mark the row provisional before t3-fleet accepts the turn, from any prior state: a crash cannot hide
+        # the new turn, and a poll that records the previous turn (running -> succeeded) cannot overwrite it.
+        # A concurrent poll can win the compare-and-set first; retry against the fresh revision, and never
+        # launch without the marker.
+        for _ in range(_REOPEN_ATTEMPTS):
+            reopened = self.ledger.update_state(
+                request_id, c.REOPENING_STATE, self.now(), expected_revision=revision, owner_write=True
+            )
+            current = self._known(request_id)
+            revision = current["state_revision"]
+            if reopened:
+                break
+            prior, notified = current["last_state"], current["notified_state"]
+        else:
+            raise c.T3DispatchError("unavailable")
         try:
             result = self.runner.followup(request_id, args["message"], row["interaction_mode"])
         except (FleetTimeout, FleetProtocolError) as exc:
@@ -329,9 +328,8 @@ class T3DispatchTools:
             self.ledger.update_state(request_id, "unknown", self.now(), expected_revision=revision, owner_write=True)
             raise c.T3DispatchError("submit-unknown", request_id=request_id) from exc
         except FleetCallError as exc:
-            if reopened:
-                # A definite refusal reopened nothing, so restore the terminal state and its delivered wake.
-                self.ledger.restore_terminal(request_id, prior, notified, self.now(), expected_revision=revision)
+            # A definite refusal launched nothing, so restore the prior state and its delivered wake.
+            self.ledger.restore_state(request_id, prior, notified, self.now(), expected_revision=revision)
             raise _fleet_error(exc) from exc
         if not isinstance(result.get("state"), str):
             # Accepted but state-less: the request may have reopened, so keep it open until a status call says otherwise.

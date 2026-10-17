@@ -88,6 +88,9 @@ class FleetRunner:
             raise FleetTimeout(action) from exc
         except OSError as exc:
             raise FleetCallError("internal_error") from exc
+        except UnicodeDecodeError as exc:
+            # Undecodable output may follow an accepted submit, so it is in doubt like any malformed result.
+            raise FleetProtocolError("internal_error") from exc
         output = proc.stdout or proc.stderr or ""
         if len(output.encode("utf-8")) > MAX_OUTPUT_BYTES:
             raise FleetProtocolError("internal_error")

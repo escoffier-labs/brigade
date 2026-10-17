@@ -570,6 +570,42 @@ def test_status_during_followup_cannot_clobber_the_reopen(make, monkeypatch):
     assert ledger.open_count(NOW) == 1
 
 
+def test_status_during_running_followup_cannot_clobber_the_new_turn(make, monkeypatch):
+    tools, runner, ledger = make()
+    _submit(tools)
+    ledger.update_state("r1", "running", NOW)
+
+    def racing_followup(request_id, prompt, interaction_mode="default"):
+        # The previous turn finishes and a status call records it while t3-fleet is accepting the follow-up.
+        monkeypatch.setattr(runner, "status", lambda rid: {"request_id": rid, "state": "succeeded"})
+        tools.call_tool("t3_status", {"request_id": request_id})
+        assert ledger.get(request_id)["last_state"] == "reopening"
+        return {"request_id": request_id, "state": "running"}
+
+    monkeypatch.setattr(runner, "followup", racing_followup)
+    out = tools.call_tool("t3_followup", {"request_id": "r1", "message": "again"})
+    assert out["state"] == "running"
+    assert ledger.get("r1")["last_state"] == "running"
+    assert ledger.open_count(NOW) == 1
+
+
+def test_refused_running_followup_restores_the_prior_state(make, monkeypatch):
+    tools, runner, ledger = make()
+    _submit(tools)
+    ledger.update_state("r1", "needs_attention", NOW)
+    ledger.mark_notified("r1", "needs_attention", NOW)
+
+    def refused(request_id, prompt, interaction_mode="default"):
+        raise FleetCallError("invalid_request")
+
+    monkeypatch.setattr(runner, "followup", refused)
+    out = tools.call_tool("t3_followup", {"request_id": "r1", "message": "again"})
+    assert out["error"]["code"] == "fleet-error"
+    row = ledger.get("r1")
+    assert row["last_state"] == "needs_attention"
+    assert row["notified_state"] == "needs_attention"
+
+
 def test_stale_reopening_marker_can_be_replaced_by_pollers(make):
     from datetime import timedelta
 

@@ -172,10 +172,10 @@ class Ledger:
             )
             return cursor.rowcount > 0
 
-    def restore_terminal(
+    def restore_state(
         self, request_id: str, state: str, notified_state: str | None, now: datetime, *, expected_revision: int
     ) -> bool:
-        """Undo a pre-launch reopen after a definite refusal, keeping the earlier wake as delivered."""
+        """Undo a pre-launch reopening marker after a definite refusal, keeping the earlier wake as delivered."""
         with self._lock:
             cursor = self._conn.execute(
                 "UPDATE requests SET last_state = ?, notified_state = ?, updated_at = ?, "
