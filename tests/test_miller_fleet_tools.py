@@ -18,7 +18,6 @@ from brigade.miller.runtime_config import parse_runtime
 from brigade.miller.state import BridgeState
 from tests.test_miller_events import FakeHub
 from tests.test_miller_runtime import _document
-from tests.test_miller_state import miller_private_dir as miller_private_dir
 
 SHA = "0123456789abcdef0123456789abcdef01234567"
 OTHER_SHA = "abcdef01" * 5

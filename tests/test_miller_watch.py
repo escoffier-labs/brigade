@@ -10,7 +10,7 @@ from brigade.miller import watch as w
 from brigade.miller import __main__ as cli
 from brigade.miller.contracts import MillerError
 from brigade.miller.state import BridgeState
-from tests.test_miller_state import NOW, miller_private_dir as miller_private_dir
+from tests.test_miller_state import NOW
 from tests.test_miller_lifecycle import configured as configured
 
 

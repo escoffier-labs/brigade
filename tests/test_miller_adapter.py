@@ -16,7 +16,7 @@ from brigade.miller.process import CommandResult, CommandRunner
 from brigade.miller.runtime_config import parse_runtime
 from brigade.miller.state import BridgeState
 from tests.test_miller_runtime import _document
-from tests.test_miller_state import NOW, miller_private_dir as miller_private_dir
+from tests.test_miller_state import NOW
 from tests.test_miller_inbox_tools import FakeMessages
 
 EMAIL = "miller@example.test"

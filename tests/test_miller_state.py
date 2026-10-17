@@ -12,16 +12,6 @@ NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 REQUEST = "request-example"
 
 
-@pytest.fixture
-def miller_private_dir(tmp_path: Path) -> Path:
-    """Keep the pytest root and private state parent owner-only under sticky /tmp."""
-    parent = tmp_path / "private-parent"
-    parent.mkdir(mode=0o700)
-    tmp_path.chmod(0o700)
-    child = parent / "state"
-    return child
-
-
 def rows(state: BridgeState) -> list[dict]:
     with state.transaction() as connection:
         return [dict(row) for row in connection.execute("SELECT * FROM call_log ORDER BY id")]

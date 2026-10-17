@@ -7,7 +7,6 @@ import hmac
 import json
 import time
 import unittest
-from pathlib import Path
 from typing import Any
 import pytest
 from brigade.miller.state import BridgeState
@@ -16,16 +15,6 @@ from brigade.miller.events import EventService
 OWNER = "owner-example"
 REQUEST = "request-example"
 HOSTS = frozenset({"connectors.api.openai.com"})
-
-
-@pytest.fixture
-def miller_private_dir(tmp_path: Path) -> Path:
-    """Keep the pytest root and private state parent owner-only under sticky /tmp."""
-    parent = tmp_path / "private-parent"
-    parent.mkdir(mode=0o700)
-    tmp_path.chmod(0o700)
-    child = parent / "state"
-    return child
 
 
 class FakeHub:

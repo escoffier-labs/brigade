@@ -18,7 +18,6 @@ from brigade.miller.inbox_tools import HubInbox, InboxTools
 from brigade.miller.runtime_config import HubConfig, parse_runtime
 from brigade.miller.state import BridgeState
 from tests.test_miller_runtime import _document
-from tests.test_miller_state import miller_private_dir as miller_private_dir
 
 NOW = datetime(2026, 1, 1, tzinfo=timezone.utc)
 LEGACY_KEYS = {"id", "created_at", "sender", "thread", "body", "acked_at", "priority", "subject", "ref", "kind"}

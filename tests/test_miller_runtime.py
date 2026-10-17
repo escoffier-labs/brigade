@@ -19,15 +19,6 @@ from brigade.miller.runtime_config import (
 )
 
 
-@pytest.fixture
-def miller_private_dir(tmp_path: Path) -> Path:
-    parent = tmp_path / "private-parent"
-    parent.mkdir(mode=0o700)
-    tmp_path.chmod(0o700)
-    child = parent / "state"
-    return child
-
-
 def _document() -> dict[str, object]:
     return {
         "schema": RUNTIME_SCHEMA,

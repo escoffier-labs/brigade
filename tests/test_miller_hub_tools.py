@@ -9,7 +9,6 @@ from brigade.miller import hub_tools as hub_module
 from brigade.miller.contracts import MillerError, TOOL_SCHEMAS
 from brigade.miller.process import CommandResult, child_path
 from brigade.miller.state import BridgeState
-from tests.test_miller_state import miller_private_dir as miller_private_dir
 from tests.test_miller_adapter import BRIGADE, T3, OCTOPOOL, GH, FLEET_OK, NOW, EMAIL, OTHER, Fixture
 
 

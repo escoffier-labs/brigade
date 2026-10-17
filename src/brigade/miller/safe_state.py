@@ -13,6 +13,7 @@ import stat
 from typing import Any, Iterator, TypeVar
 from uuid import UUID
 
+from .. import dirfd
 from .contracts import MillerError, require
 
 MAX_TASK_BYTES = 6144
@@ -109,7 +110,7 @@ def private_directory(directory: Path, *, create: bool = False) -> int:
     try:
         path = Path(directory)
         require(path.is_absolute() and ".." not in path.parts and len(path.parts) > 1, "unsafe_state")
-        current = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        current = os.open("/", dirfd.directory_flags())
         for index, component in enumerate(path.parts[1:]):
             last = index == len(path.parts) - 2
             if last and create:
@@ -119,7 +120,7 @@ def private_directory(directory: Path, *, create: bool = False) -> int:
                     pass
                 else:
                     os.fsync(current)
-            child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=current)
+            child = os.open(component, dirfd.directory_flags(), dir_fd=current)
             os.close(current)
             current = child
             info = os.fstat(current)
@@ -151,10 +152,10 @@ def trusted_directory(directory: Path, *, allow_group_write: bool = False, code:
     try:
         path = Path(directory)
         require(path.is_absolute() and ".." not in path.parts and len(path.parts) > 1)
-        current = os.open("/", os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+        current = os.open("/", dirfd.directory_flags())
         for index, component in enumerate(path.parts[1:]):
             last = index == len(path.parts) - 2
-            child = os.open(component, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=current)
+            child = os.open(component, dirfd.directory_flags(), dir_fd=current)
             os.close(current)
             current = child
             info = os.fstat(current)

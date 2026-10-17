@@ -7,7 +7,6 @@ from pathlib import Path
 
 from brigade.miller.contracts import MillerError
 from brigade.miller.process import CommandResult
-from tests.test_miller_state import miller_private_dir as miller_private_dir
 from tests.test_miller_adapter import BRIGADE, HANDOFF, NOW, SHA, Fixture, lint_report
 
 
