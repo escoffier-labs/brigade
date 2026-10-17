@@ -83,8 +83,9 @@ def _plain_directory(info: os.stat_result) -> bool:
 class SessionDirectory:
     """An open target root and no-follow chain down to its session directory."""
 
-    def __init__(self, target: Path, *, create: bool) -> None:
+    def __init__(self, target: Path, *, create: bool, requested: Path | None = None) -> None:
         self.target = target
+        self.requested = requested or target
         self.pid = os.getpid()
         self.chain: list[int] = []
         self.lock: tuple[str, int] | None = None
@@ -114,6 +115,12 @@ class SessionDirectory:
     @property
     def fd(self) -> int:
         return self.chain[-1]
+
+    def held_for(self, requested: Path, resolved: Path) -> bool:
+        """Match every name of the held target without trusting a re-resolved path alone."""
+        names = {self.requested, self.target}
+        # A replaced target path resolves elsewhere; route it here so validate() refuses it.
+        return requested in names or resolved in names or resolved == self.target.resolve()
 
     def close(self) -> None:
         for fd in reversed(self.chain):
@@ -324,13 +331,14 @@ def _write_all(fd: int, data: bytes) -> None:
 
 @contextlib.contextmanager
 def session_directory(target: Path, *, create: bool = False) -> Iterator[SessionDirectory]:
-    target = target.expanduser().resolve()
+    requested = Path(os.path.abspath(target.expanduser()))
+    target = requested.resolve()
     active = _ACTIVE.get()
-    if active is not None and active.target == target and active.pid == os.getpid():
+    if active is not None and active.pid == os.getpid() and active.held_for(requested, target):
         active.validate()
         yield active
         return
-    anchor = SessionDirectory(target, create=create)
+    anchor = SessionDirectory(target, create=create, requested=requested)
     try:
         yield anchor
     finally:

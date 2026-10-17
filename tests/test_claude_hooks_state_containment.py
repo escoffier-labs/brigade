@@ -80,7 +80,7 @@ def test_linked_sessions_refuses_forged_state_and_sidecars(state_tree, operation
     assert (outside / f"{name}.timeouts.pending").read_bytes() == b"forged\n"
 
 
-@pytest.mark.parametrize("component", [".brigade", "work", "claude-hooks", "sessions"])
+@pytest.mark.parametrize("component", ["repo", ".brigade", "work", "claude-hooks", "sessions"])
 @pytest.mark.parametrize("operation", ["write", "read", "journal", "pending", "list"])
 def test_parent_swap_during_locked_transaction_fails_closed(state_tree, component, operation) -> None:
     target, sessions, outside = state_tree
