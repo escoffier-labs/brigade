@@ -153,3 +153,27 @@ def test_fresh_database_owns_all_bridge_and_event_tables(miller_private_dir: Pat
         "wake_attempts",
         "tracked_requests",
     } <= tables
+
+
+def test_private_directory_rejects_overflow_uid_ancestor(miller_private_dir, monkeypatch):
+    """Namespace overflow ownership must fail closed, even for systemd sandboxes."""
+    import os
+    import stat
+
+    from brigade.miller.safe_state import private_directory
+
+    real_fstat = os.fstat
+    ancestors = []
+
+    def overflow_ancestor(descriptor):
+        info = real_fstat(descriptor)
+        values = list(info)
+        values[0] = stat.S_IFDIR | 0o755  # Isolate ownership from ancestor write permissions.
+        values[4] = 65534
+        ancestors.append(descriptor)
+        return os.stat_result(values)
+
+    monkeypatch.setattr(os, "fstat", overflow_ancestor)
+    with pytest.raises(MillerError, match="^unsafe_state$"):
+        private_directory(miller_private_dir)
+    assert len(ancestors) == 1

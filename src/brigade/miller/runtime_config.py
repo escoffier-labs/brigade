@@ -81,7 +81,6 @@ class Runtime:
     callback_hosts: tuple[str, ...]
     notify_command: tuple[str, ...] | None
     owner_authorization: OwnerAuthorization = field(repr=False)
-    writable_paths: tuple[Path, ...] = ()
 
 
 def _invalid() -> MillerError:
@@ -148,7 +147,7 @@ def parse_runtime(payload: object) -> Runtime:
             "callback_hosts",
             "owner_authorization",
         },
-        optional={"notify_command", "writable_paths"},
+        optional={"notify_command"},
     )
     if root["schema"] != RUNTIME_SCHEMA:
         raise _invalid()
@@ -234,11 +233,6 @@ def parse_runtime(payload: object) -> Runtime:
         if not Path(notify_command[0]).is_absolute():
             raise _invalid()
 
-    writable_data = root.get("writable_paths", [])
-    if not isinstance(writable_data, list) or len(writable_data) > 8:
-        raise _invalid()
-    writable_paths = tuple(_absolute_path(item) for item in writable_data)
-
     owner_data = _object(root["owner_authorization"], {"version", "text"})
     version = _string(owner_data["version"])
     if len(version) > 64 or any(not " " <= char <= "~" for char in version):
@@ -261,7 +255,6 @@ def parse_runtime(payload: object) -> Runtime:
         callback_hosts=callback_hosts,
         notify_command=notify_command,
         owner_authorization=owner_authorization,
-        writable_paths=writable_paths,
     )
 
 

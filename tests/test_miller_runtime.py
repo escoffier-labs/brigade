@@ -189,16 +189,8 @@ def test_runtime_repr_redacts_authorization_text_and_token_path() -> None:
     assert "/srv/miller/secrets/message-token" not in repr(runtime)
 
 
-@pytest.mark.parametrize("paths", [[], ["/srv/fleet", "/srv/ssh"], [f"/srv/write-{i}" for i in range(8)]])
-def test_writable_paths_are_optional_absolute_paths(paths):
-    data = _document()
-    assert parse_runtime(data).writable_paths == ()
-    data["writable_paths"] = paths
-    assert parse_runtime(data).writable_paths == tuple(Path(item) for item in paths)
-
-
-@pytest.mark.parametrize("paths", [None, "path", ["relative"], ["/srv/write"] * 9])
-def test_invalid_writable_paths_are_refused(paths):
+@pytest.mark.parametrize("paths", [[], ["/srv/fleet"], None, "path", ["relative"]])
+def test_removed_writable_paths_key_is_refused(paths):
     data = _document()
     data["writable_paths"] = paths
     with pytest.raises(MillerError, match="^invalid_config$"):

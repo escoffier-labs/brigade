@@ -71,7 +71,7 @@ The pack instance file (`.brigade/grokbot/packs/miller.json`) holds `bind`, `all
 - `auth`: `issuer`, `team_domain`, `audience`, `approved_email`, `resource`.
 - `paths`: `state_dir`, `workspace`, `fleet_config`, plus optional binary overrides for `t3-fleet`, `brigade`, `git`, `gh` and `octopool`.
 - `hub`: `principal`, `node_id`, `message_token_file`, `poll_seconds` (10 to 300), `recipients` (alias to node id or `agent:` principal, at most 16).
-- Optional `writable_paths`: up to eight absolute directories added to the state and handoff directories in systemd `ReadWritePaths`. Configure fleet state, SSH state and the Brigade home for the Hub spool. Doctor warns when empty.
+- The 2026-10-17 cutover found that user-namespace sandboxing maps ancestor owners to overflow uid 65534, so both units use `NoNewPrivileges=yes`, `UMask=0077`, `PrivateTmp=no` and the fail-closed private-directory walk, with no `writable_paths` runtime key.
 - `dispatch_enabled`, `events_enabled`, `digest_pr_repo`, `callback_hosts`, `notify_command` (for `watch` alerts), `owner_authorization` (`version`, `text`).
 
 The issuer must equal `https://` plus `auth.team_domain`. Runtime loading requires a single-link mode-0600 file under a mode-0700 parent reached through safe ancestors. Owner authorization text is limited to 4096 UTF-8 bytes and its version to 64 printable ASCII characters.

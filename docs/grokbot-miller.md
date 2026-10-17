@@ -43,7 +43,6 @@ optional. Replace placeholders with the deployment's configured values.
 | `events_enabled` | boolean | Enable event capabilities, RPCs, workers, fleet polling, and webhooks. When false, pass requests straight to MCP. |
 | `digest_pr_repo` | string | Repository for digest PR queries, formatted `owner/repo`. |
 | `callback_hosts` | string array | Nonempty allowlist of callback hostnames. |
-| `writable_paths` | absolute path array | Optional, at most 8 entries, defaults to empty. Extra directories writable by the listener and watcher. |
 | `notify_command` | string array | Optional notification argv. The first item is an absolute executable path. |
 | `owner_authorization` | object | Owner's recorded automation authorization. |
 | `owner_authorization.version` | string | Nonempty printable ASCII authorization version, at most 64 characters. |
@@ -68,7 +67,6 @@ brigade run cloud grokbot pack install-service --id miller --target <workspace> 
 The last command writes `brigade-miller.service`. It does not start the service.
 There are no bearer flags. Doctor checks dependencies, runtime, state, Access
 settings, Hub credential, fleet capacity, and rejection of unauthenticated MCP.
-The `writable-paths` check warns when no extra writable directories are configured.
 Canary checks unauthenticated rejection, discovery metadata, and tool inventory.
 
 The watch service and timer are rendered separately by
@@ -83,12 +81,10 @@ python -m brigade.miller watch --target <workspace>
 
 Review the generated units, then install and enable them through the deployment's
 service manager. Unit rendering and pack setup never start, stop, or reload a
-service. The listener and watcher restrict writable paths to the state directory
-and the workspace's `.codex/memory-handoffs` directory, plus `writable_paths`.
-List the t3-fleet state directory, the SSH directory used for known hosts and
-control sockets, and the Brigade home used for the Hub offline spool in
-`writable_paths`. Entries are de-duplicated and quoted for systemd.
-`ProtectSystem=strict` and `ProtectHome=read-only` remain enabled.
+service. The listener and watcher use `NoNewPrivileges=yes`, `UMask=0077`, and
+`PrivateTmp=no`, relying on the private-directory ownership walk for filesystem
+safety. Namespace sandboxing is omitted because it maps root-owned ancestors to
+overflow uid 65534 in user units, which the ownership walk intentionally rejects.
 
 ## Tools
 
