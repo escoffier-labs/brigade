@@ -98,10 +98,11 @@ class T3DispatchTools:
         except FleetTimeout as exc:
             raise c.T3DispatchError("unavailable") from exc
 
-    def _record_state(self, request_id: str, result: dict[str, Any]) -> None:
+    def _record_state(self, request_id: str, result: dict[str, Any], expected_revision: int | None = None) -> None:
+        """Write the reported state; with expected_revision, only if no other actor changed the row meanwhile."""
         state = result.get("state")
         if isinstance(state, str):
-            self.ledger.update_state(request_id, state, self.now())
+            self.ledger.update_state(request_id, state, self.now(), expected_revision=expected_revision)
 
     def capacity(self, _args: dict[str, Any]) -> dict[str, Any]:
         result = self._fleet(self.runner.capacity)
@@ -221,6 +222,10 @@ class T3DispatchTools:
         except FleetTimeout as exc:
             # The launch may have happened with no request id to track, so the reservation stays until it expires.
             raise c.T3DispatchError("submit-unknown") from exc
+        except c.T3DispatchError:
+            # Raised before a launch (for example the daily limit stopping the fallback attempt): nothing to hold.
+            self.ledger.release_in_doubt(reservation)
+            raise
         request_id = result.get("request_id")
         if not isinstance(request_id, str) or not c.HANDLE_RE.fullmatch(request_id):
             # A success envelope without a usable id may still mean a launch happened; keep the reservation.
@@ -259,15 +264,15 @@ class T3DispatchTools:
         }
 
     def status(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._known(args["request_id"])
+        row = self._known(args["request_id"])
         result = self._fleet(self.runner.status, args["request_id"])
-        self._record_state(args["request_id"], result)
+        self._record_state(args["request_id"], result, expected_revision=row["state_revision"])
         return project_status(result)
 
     def wait(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._known(args["request_id"])
+        row = self._known(args["request_id"])
         result = self._fleet(self.runner.wait, args["request_id"], args["timeout_s"])
-        self._record_state(args["request_id"], result)
+        self._record_state(args["request_id"], result, expected_revision=row["state_revision"])
         return project_status(result)
 
     def followup(self, args: dict[str, Any]) -> dict[str, Any]:
@@ -287,39 +292,53 @@ class T3DispatchTools:
             raise c.T3DispatchError("prompt-too-large")
         self._check_daily_limit()
         self.ledger.record_attempt(self.now())
+        request_id = args["request_id"]
+        prior = row["last_state"]
+        reopened = False
+        revision = row["state_revision"]
+        if prior in c.TERMINAL_STATES:
+            # Mark the row open before t3-fleet can reopen the work, so a crash cannot hide the new turn.
+            reopened = self.ledger.update_state(request_id, "unknown", self.now(), expected_revision=revision)
+            current = self.ledger.get(request_id)
+            revision = current["state_revision"] if current else revision
         try:
-            result = self.runner.followup(args["request_id"], args["message"], row["interaction_mode"])
+            result = self.runner.followup(request_id, args["message"], row["interaction_mode"])
         except (FleetTimeout, FleetProtocolError) as exc:
             # t3-fleet may have accepted the turn, so the request is open again until a status call says otherwise.
-            self.ledger.update_state(args["request_id"], "unknown", self.now())
-            raise c.T3DispatchError("submit-unknown", request_id=args["request_id"]) from exc
+            self.ledger.update_state(request_id, "unknown", self.now(), expected_revision=revision)
+            raise c.T3DispatchError("submit-unknown", request_id=request_id) from exc
         except FleetCallError as exc:
+            if reopened:
+                # A definite refusal reopened nothing, so restore the terminal state and its delivered wake.
+                self.ledger.restore_terminal(
+                    request_id, prior, row["notified_state"], self.now(), expected_revision=revision
+                )
             raise _fleet_error(exc) from exc
         if not isinstance(result.get("state"), str):
             # Accepted but state-less: the request may have reopened, so keep it open until a status call says otherwise.
-            self.ledger.update_state(args["request_id"], "unknown", self.now())
-            raise c.T3DispatchError("submit-unknown", request_id=args["request_id"])
-        self._record_state(args["request_id"], result)
+            self.ledger.update_state(request_id, "unknown", self.now(), expected_revision=revision)
+            raise c.T3DispatchError("submit-unknown", request_id=request_id)
+        self._record_state(request_id, result, expected_revision=revision)
         return project_status(result)
 
     def answer(self, args: dict[str, Any]) -> dict[str, Any]:
         self._require_enabled()
-        self._known(args["request_id"])
+        row = self._known(args["request_id"])
         result = self._fleet(self.runner.answer, args["request_id"], args["input_id"], args["answers"])
-        self._record_state(args["request_id"], result)
+        self._record_state(args["request_id"], result, expected_revision=row["state_revision"])
         return project_status(result)
 
     def approve(self, args: dict[str, Any]) -> dict[str, Any]:
         self._require_enabled()
-        self._known(args["request_id"])
+        row = self._known(args["request_id"])
         result = self._fleet(self.runner.approve, args["request_id"], args["approval_id"], args["decision"])
-        self._record_state(args["request_id"], result)
+        self._record_state(args["request_id"], result, expected_revision=row["state_revision"])
         return project_status(result)
 
     def interrupt(self, args: dict[str, Any]) -> dict[str, Any]:
-        self._known(args["request_id"])
+        row = self._known(args["request_id"])
         result = self._fleet(self.runner.interrupt, args["request_id"])
-        self._record_state(args["request_id"], result)
+        self._record_state(args["request_id"], result, expected_revision=row["state_revision"])
         return project_status(result)
 
     def recent(self, args: dict[str, Any]) -> dict[str, Any]:

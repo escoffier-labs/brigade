@@ -509,3 +509,43 @@ def test_stateless_followup_on_terminal_request_becomes_unknown(make, monkeypatc
     out = tools.call_tool("t3_followup", {"request_id": "r1", "message": "again"})
     assert out["error"]["code"] == "submit-unknown"
     assert ledger.get("r1")["last_state"] == "unknown"
+
+
+def test_daily_limit_on_fallback_releases_the_reservation(make):
+    tools, runner, ledger = make(daily_limit=1)
+    runner.submit_errors = [FleetCallError("policy_rejected", "model-admission-denied")]
+    assert _submit(tools)["error"]["code"] == "daily-limit"
+    assert ledger.open_count(NOW) == 0
+
+
+def test_terminal_followup_is_open_while_fleet_runs(make, monkeypatch):
+    tools, runner, ledger = make()
+    _submit(tools)
+    ledger.update_state("r1", "succeeded", NOW)
+    ledger.mark_notified("r1", "succeeded", NOW)
+    seen = []
+
+    def watching_followup(request_id, prompt, interaction_mode="default"):
+        seen.append(ledger.get(request_id)["last_state"])
+        raise FleetCallError("invalid_request")
+
+    monkeypatch.setattr(runner, "followup", watching_followup)
+    out = tools.call_tool("t3_followup", {"request_id": "r1", "message": "again"})
+    assert seen == ["unknown"]
+    assert out["error"]["code"] == "fleet-error"
+    row = ledger.get("r1")
+    assert row["last_state"] == "succeeded"
+    assert row["notified_state"] == "succeeded"
+
+
+def test_status_does_not_overwrite_a_newer_state(make, monkeypatch):
+    tools, runner, ledger = make()
+    _submit(tools)
+
+    def racing_status(request_id):
+        ledger.update_state(request_id, "needs_attention", NOW)
+        return {"request_id": request_id, "state": "succeeded"}
+
+    monkeypatch.setattr(runner, "status", racing_status)
+    tools.call_tool("t3_status", {"request_id": "r1"})
+    assert ledger.get("r1")["last_state"] == "needs_attention"

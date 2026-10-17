@@ -82,6 +82,7 @@ class Ledger:
                 "wake_attempts": "INTEGER NOT NULL DEFAULT 0",
                 "delivered_targets": "TEXT NOT NULL DEFAULT '[]'",
                 "last_polled_seq": "INTEGER NOT NULL DEFAULT 0",
+                "state_revision": "INTEGER NOT NULL DEFAULT 0",
             }.items():
                 if name not in columns:
                     self._conn.execute(f"ALTER TABLE requests ADD COLUMN {name} {definition}")
@@ -143,10 +144,10 @@ class Ledger:
         now: datetime,
         *,
         reset_status_failures: bool = True,
-        expected_state: str | None = None,
+        expected_revision: int | None = None,
     ) -> bool:
-        """Set the state; with expected_state, only if the row still holds it. Returns whether a row changed."""
-        guard = " AND last_state = ?" if expected_state is not None else ""
+        """Set state and advance its revision, optionally requiring an observed revision. Return whether applied."""
+        guard = " AND state_revision = ?" if expected_revision is not None else ""
         with self._lock:
             cursor = self._conn.execute(
                 "UPDATE requests SET notified_state = CASE WHEN last_state = ? THEN notified_state ELSE NULL END, "
@@ -154,9 +155,21 @@ class Ledger:
                 "delivered_targets = CASE WHEN last_state = ? THEN delivered_targets ELSE '[]' END, "
                 "status_failures = CASE WHEN ? THEN 0 ELSE status_failures END, "
                 "status_poll_delay = CASE WHEN ? THEN 0 ELSE status_poll_delay END, "
-                "last_state = ?, updated_at = ? WHERE request_id = ?" + guard,
+                "state_revision = state_revision + 1, last_state = ?, updated_at = ? WHERE request_id = ?" + guard,
                 (state, state, state, reset_status_failures, reset_status_failures, state, _ts(now), request_id)
-                + ((expected_state,) if expected_state is not None else ()),
+                + ((expected_revision,) if expected_revision is not None else ()),
+            )
+            return cursor.rowcount > 0
+
+    def restore_terminal(
+        self, request_id: str, state: str, notified_state: str | None, now: datetime, *, expected_revision: int
+    ) -> bool:
+        """Undo a pre-launch reopen after a definite refusal, keeping the earlier wake as delivered."""
+        with self._lock:
+            cursor = self._conn.execute(
+                "UPDATE requests SET last_state = ?, notified_state = ?, updated_at = ?, "
+                "state_revision = state_revision + 1 WHERE request_id = ? AND state_revision = ?",
+                (state, notified_state, _ts(now), request_id, expected_revision),
             )
             return cursor.rowcount > 0
 

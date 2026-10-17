@@ -203,3 +203,28 @@ def test_pending_notifications_puts_terminal_rows_first_then_least_recently_poll
     ledger.mark_polled("old-running")
     ids = [row["request_id"] for row in ledger.pending_notifications()]
     assert ids == ["done", "new-running", "old-running"]
+
+
+def test_legacy_state_revision_migrates_and_survives_reopen(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "ledger.sqlite3"
+    ledger = Ledger(path)
+    _record(ledger, "r1", state="running")
+    ledger.close()
+    with sqlite3.connect(path) as connection:
+        columns = [row[1] for row in connection.execute("PRAGMA table_info(requests)")]
+        if "state_revision" in columns:
+            connection.execute("ALTER TABLE requests DROP COLUMN state_revision")
+    ledger = Ledger(path)
+    assert ledger.get("r1")["state_revision"] == 0
+    assert ledger.update_state("r1", "running", T0, expected_revision=0)
+    ledger.close()
+    ledger = Ledger(path)
+    assert ledger.get("r1")["state_revision"] == 1
+    assert not ledger.update_state("r1", "succeeded", T0, expected_revision=0)
+    assert ledger.get("r1")["last_state"] == "running"
+    assert ledger.get("r1")["state_revision"] == 1
+    assert ledger.update_state("r1", "succeeded", T0, expected_revision=1)
+    assert ledger.get("r1")["state_revision"] == 2
+    ledger.close()

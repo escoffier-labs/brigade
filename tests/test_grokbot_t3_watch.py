@@ -538,3 +538,33 @@ def test_watcher_does_not_overwrite_a_newer_state(setup):
     )
     assert ledger.get("r1")["last_state"] == "needs_attention"
     assert post.calls == []
+
+
+@pytest.mark.parametrize("listener_states", [("running",), ("succeeded", "running")], ids=["same-state", "aba"])
+def test_stale_terminal_poll_cannot_close_a_newer_running_request(setup, listener_states):
+    tmp_path, targets, ledger = setup
+    _record(ledger, "r1")
+    listener = Ledger(tmp_path / "ledger.sqlite3")
+
+    class Racing:
+        def status(self, request_id):
+            for state in listener_states:
+                listener.update_state(request_id, state, NOW)
+            return {"schema": "t3-fleet.result.v1", "request_id": request_id, "state": "succeeded"}
+
+    post = Post([])
+    try:
+        summary = watch.run_watch_once(
+            runner=Racing(),
+            ledger=ledger,
+            wake_targets=targets,
+            log_path=tmp_path / "w.jsonl",
+            now=lambda: NOW,
+            post=post,
+        )
+    finally:
+        listener.close()
+    assert ledger.get("r1")["last_state"] == "running"
+    assert ledger.open_count(NOW) == 1
+    assert post.calls == []
+    assert summary == {"checked": 1, "woken": 0, "failed": 0}

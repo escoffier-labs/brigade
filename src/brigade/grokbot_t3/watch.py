@@ -149,7 +149,7 @@ def run_watch_once(
                         new_state,
                         clock(),
                         reset_status_failures=not status_failed,
-                        expected_state=state,
+                        expected_revision=row["state_revision"],
                     )
                     if not applied:
                         # The listener recorded a newer state while status was in flight; handle it next tick.
