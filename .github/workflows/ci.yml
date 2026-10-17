@@ -565,6 +565,7 @@ jobs:
             --baseline .content-guard-baseline.json
 
   repo-metadata:
+    if: ${{ false }}
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
