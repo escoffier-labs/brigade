@@ -388,6 +388,29 @@ def test_canary_checks_anonymous_401_metadata_and_registry(configured):
         assert m.canary(target)["reason"] == "inventory-mismatch"
 
 
+def test_run_listener_refuses_to_start_without_a_jwt_backend(configured):
+    # A missing RSA backend must fail startup, not serve a healthy-looking connector that rejects every login.
+    pytest.importorskip("uvicorn", reason="requires the grokbot extra")
+    from brigade.grokbot_mcp import OptionalDependencyError
+    from brigade.miller import access_auth
+
+    target, runtime, _ = configured
+    cfg, tools, _ = m.build_listener_from_target(target)
+
+    def missing() -> None:
+        raise OptionalDependencyError()
+
+    with (
+        patch.object(access_auth, "_jwt", missing),
+        patch("uvicorn.run") as run,
+        patch.object(m, "build_app") as build,
+    ):
+        with pytest.raises(OptionalDependencyError):
+            m.run_listener(cfg, tools, runtime)
+    run.assert_not_called()
+    build.assert_not_called()
+
+
 @pytest.mark.parametrize("enabled", [False, True])
 def test_run_listener_exact_settings_and_state_cleanup(configured, enabled):
     pytest.importorskip("mcp.server", reason="requires the grokbot extra")

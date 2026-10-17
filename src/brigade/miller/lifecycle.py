@@ -17,6 +17,7 @@ from urllib.parse import urlsplit
 from brigade import grokbot_mcp, grokbot_ops, grokbot_packs
 from brigade.grokbot_t3.lifecycle import _write_rendered
 from . import contracts as c
+from . import access_auth
 from .access_auth import AccessVerifier, METADATA_PATH, bounded_headers, unique_object
 from .adapter import MillerTools, build_tools, validate_arguments
 from .events import EventService, EventsApp, IDENTITY
@@ -281,6 +282,8 @@ def run_listener(config: MillerListenerConfig, tools: MillerTools, runtime: Runt
         import uvicorn
     except ImportError:
         raise grokbot_mcp.OptionalDependencyError() from None
+    # Fail startup when RS256 cannot be verified; otherwise every login would 401 behind a passing canary.
+    access_auth._jwt()
     try:
         try:
             tools.state.prune_call_log()
