@@ -218,6 +218,31 @@ def test_status_refuses_corrupt_retirement_storage(http_authority, damage):
         client.close()
 
 
+@pytest.mark.parametrize("damage", ["invalid-generation", "live-claim-without-fence"])
+def test_status_refuses_corrupt_generation_fences(http_authority, damage):
+    conn, _, address = http_authority
+    if damage == "invalid-generation":
+        conn.execute("PRAGMA ignore_check_constraints=ON")
+        conn.execute("INSERT INTO claim_fences (target, generation) VALUES ('fake-orphan-target', 0)")
+    else:
+        request(conn, "acquire")
+        conn.execute("DELETE FROM claim_fences WHERE target = 'fake-target'")
+    conn.commit()
+    client = HTTPConnection(*address, timeout=5)
+    try:
+        client.request("GET", "/status", headers={"Authorization": "Bearer fake-admin-token"})
+        response = client.getresponse()
+        payload = json.loads(response.read())
+        assert response.status == 503
+        assert payload == {
+            "error": "claim generation fence is missing or corrupt",
+            "reason": "claim-fence-refused",
+            "owner": {},
+        }
+    finally:
+        client.close()
+
+
 def test_fence_refusal_never_admits_local_only_work(http_authority, monkeypatch):
     conn, _, address = http_authority
     conn.execute("DROP TABLE claim_fences")
