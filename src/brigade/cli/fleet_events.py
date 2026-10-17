@@ -5,12 +5,13 @@ from __future__ import annotations
 import argparse
 import json
 import sys
-from datetime import datetime, timedelta
+from datetime import timedelta
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
 from .. import fleet_client, fleet_hub
+from ..fleet_event_freshness import parse_observation_time
 from ..fleet_execution_context import MAX_BYTES, ExecutionContextError, validate_context
 
 STATES = frozenset(
@@ -55,10 +56,11 @@ def _read_context(args: argparse.Namespace) -> dict[str, Any] | None:
     else:
         if sys.stdin is None:
             raise ValueError("execution context stdin is unavailable")
-        data = sys.stdin.read(MAX_BYTES + 1).encode("utf-8")
+        source = getattr(sys.stdin, "buffer", None)
+        data = source.read(MAX_BYTES + 1) if source is not None else sys.stdin.read(MAX_BYTES + 1).encode("utf-8")
     if len(data) > MAX_BYTES:
         raise ExecutionContextError("execution context exceeds 4096 bytes")
-    return validate_context(json.loads(data))
+    return validate_context(json.loads(data.decode("utf-8")))
 
 
 def _build_event(args: argparse.Namespace) -> dict[str, Any]:
@@ -66,7 +68,7 @@ def _build_event(args: argparse.Namespace) -> dict[str, Any]:
         raise ValueError("invalid lifecycle state or sequence")
     if not isinstance(args.ts, str) or "T" not in args.ts:
         raise ValueError("observation time requires ISO-8601 UTC")
-    stamp = datetime.fromisoformat(args.ts.replace("Z", "+00:00"))
+    stamp = parse_observation_time(args.ts)
     if stamp.tzinfo is None or stamp.utcoffset() != timedelta(0):
         raise ValueError("observation time requires ISO-8601 UTC")
     if args.exit_status is not None and not -(2**63) <= args.exit_status <= MAX_SEQUENCE:
@@ -103,4 +105,4 @@ def _report(args: argparse.Namespace) -> int:
         return 1
     payload = {"result": result, "run_id": event["run_id"], "sequence": event["sequence"], "digest": event["digest"]}
     print(json.dumps(payload, sort_keys=True) if args.json else f"{result} {event['run_id']}")
-    return 0
+    return 2 if result == "rejected" else 0

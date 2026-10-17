@@ -263,6 +263,18 @@ _CLAIMS_ADDITIVE_COLUMNS = (
     "lock_run_dir",
 )
 _EVENTS_ADDITIVE_COLUMNS = ("exit_status", "capability_fingerprint", "repo_identity", "context")
+# Independently developed migrations can reserve the same schema version.
+# Register nullable additions here so current-version databases self-heal too.
+_ADDITIVE_COLUMNS = (("events", "context", "ALTER TABLE events ADD COLUMN context TEXT"),)
+
+
+def _missing_additive_columns(conn: sqlite3.Connection) -> list[str]:
+    return [
+        ddl
+        for table, column, ddl in _ADDITIVE_COLUMNS
+        if column not in {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    ]
+
 
 # Per-node credentials (schema v4, issue #1150): node_id -> SHA-256 of the
 # node's bearer token. The plaintext token is returned once by the add
@@ -634,8 +646,8 @@ def _init_schema(conn: sqlite3.Connection, db_path: Path) -> None:
     ``database is locked``. A caller that loses the write lock treats
     "someone else already set user_version" as success.
 
-    A current ``user_version`` is accepted after a plain read so an
-    already-migrated database never takes the write lock (#1159). Request
+    A current ``user_version`` with all additive columns is accepted after
+    plain reads so a complete database never takes the write lock (#1159). Request
     handlers still use ``open_db`` (#1161); this path is for startup and
     other ``init_db`` callers (tools, tests, a first-touch storm).
     """
@@ -647,14 +659,15 @@ def _init_schema(conn: sqlite3.Connection, db_path: Path) -> None:
             current = conn.execute("PRAGMA user_version").fetchone()[0]
             if current == SCHEMA_VERSION:
                 fleet_hub_claims.validate_schema(conn)
-                return
+                if not _missing_additive_columns(conn):
+                    return
             conn.execute("PRAGMA journal_mode=WAL")
             conn.execute("BEGIN IMMEDIATE")
         except sqlite3.OperationalError as exc:
             if not _locked_operational_error(exc):
                 raise
             current = conn.execute("PRAGMA user_version").fetchone()[0]
-            if current == SCHEMA_VERSION:
+            if current == SCHEMA_VERSION and not _missing_additive_columns(conn):
                 fleet_hub_claims.validate_schema(conn)
                 return
             if delay is None:
@@ -664,6 +677,8 @@ def _init_schema(conn: sqlite3.Connection, db_path: Path) -> None:
         try:
             _refuse_newer_schema(conn, db_path)
             if conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION:
+                for ddl in _missing_additive_columns(conn):
+                    conn.execute(ddl)
                 fleet_hub_claims.validate_schema(conn)
             else:
                 _apply_schema(conn)
@@ -673,7 +688,7 @@ def _init_schema(conn: sqlite3.Connection, db_path: Path) -> None:
             if not _locked_operational_error(exc):
                 raise
             current = conn.execute("PRAGMA user_version").fetchone()[0]
-            if current == SCHEMA_VERSION:
+            if current == SCHEMA_VERSION and not _missing_additive_columns(conn):
                 fleet_hub_claims.validate_schema(conn)
                 return
             if delay is None:

@@ -138,9 +138,9 @@ def test_hub_rejection_during_backlog_is_not_reported_as_delivery(reporter, monk
         raise fleet_client._PoisonResponse("rejected")
 
     monkeypatch.setattr(fleet_client, "_post_events", rejected)
-    assert main(_args()) == 0
-    assert json.loads(capsys.readouterr().out)["result"] == "queued"
-    assert len(spool.read_text().splitlines()) == 2
+    assert main(_args()) == 2
+    assert json.loads(capsys.readouterr().out)["result"] == "rejected"
+    assert len(spool.read_text().splitlines()) == 1
 
 
 def test_delivery_receipt_survives_spool_cleanup_failure(reporter, capsys, monkeypatch):

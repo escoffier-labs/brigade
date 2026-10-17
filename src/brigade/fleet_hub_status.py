@@ -28,8 +28,7 @@ _LATEST_COLUMNS = (
     "exit_status, capability_fingerprint, repo_identity, received_at, context"
 )
 _LATEST_PARTITION = (
-    "SELECT e.node_id, e.run_id, e.repo, e.seat, e.harness, e.state, e.ts, e.sequence, "
-    "e.digest, e.exit_status, e.capability_fingerprint, e.repo_identity, e.received_at, e.context, "
+    "SELECT e.node_id, e.run_id, e.sequence, e.digest, "
     "ROW_NUMBER() OVER ("
     "  PARTITION BY CASE WHEN e.harness = 'grokbot' THEN 'grokbot' ELSE 'node:' || e.node_id END, e.run_id "
     "  ORDER BY e.sequence DESC, e.received_at DESC, e.digest DESC"
@@ -106,7 +105,10 @@ def _latest_sql(
             "AND (e2.harness IS NULL OR e2.harness != 'grokbot') "
             "ORDER BY e2.sequence ASC, e2.received_at ASC, e2.digest ASC LIMIT 1) END AS started_at"
         )
-    outer = f"SELECT {columns} FROM ({inner}) AS latest WHERE rn = 1"
+    outer = (
+        f"SELECT {columns} FROM ({inner}) AS ranked "
+        "JOIN events AS latest USING (node_id, run_id, sequence, digest) WHERE rn = 1"
+    )
     if received_after:
         outer += " AND received_at >= ?"
     if node_ids:

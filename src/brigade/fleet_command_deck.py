@@ -585,11 +585,11 @@ def collides(target: str, live_runs: Sequence[LiveRun], claims: Mapping[str, Cla
 
 _LATEST_ROWS = (
     "SELECT node_id, run_id, repo, seat, harness, state, ts, received_at, repo_identity FROM ("
-    "  SELECT e.*, ROW_NUMBER() OVER ("
+    "  SELECT node_id, run_id, sequence, digest, ROW_NUMBER() OVER ("
     "    PARTITION BY CASE WHEN harness = 'grokbot' THEN 'grokbot' ELSE 'node:' || node_id END, run_id "
     "    ORDER BY sequence DESC, received_at DESC, digest DESC"
     "  ) AS rn FROM events e"
-    ") WHERE rn = 1"
+    ") AS ranked JOIN events USING (node_id, run_id, sequence, digest) WHERE rn = 1"
 )
 
 _AWAITING_PLACEHOLDERS = ",".join("?" for _ in AWAITING_STATES)

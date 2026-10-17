@@ -5,7 +5,7 @@ from __future__ import annotations
 from contextvars import ContextVar
 from typing import Any, Literal
 
-ReportResult = Literal["delivered", "queued", "failed"]
+ReportResult = Literal["delivered", "queued", "rejected", "failed"]
 
 
 _RECEIPT: ContextVar[list[ReportResult] | None] = ContextVar("fleet_event_receipt", default=None)
@@ -65,7 +65,7 @@ def _report(event: dict[str, Any], *, detailed: bool) -> ReportResult:
         delivered = delivered or event in batch
 
     try:
-        if spool.is_file():
+        if not detailed and spool.is_file():
             with client._spool_lock(spool) as dir_fd:
                 appended = client._spool_append_locked(spool, event, dir_fd=dir_fd)
                 persisted = appended
@@ -90,6 +90,9 @@ def _report(event: dict[str, Any], *, detailed: bool) -> ReportResult:
             try:
                 client._post_events(hub, token, event, timeout=client.REPORT_TIMEOUT_SECONDS)
                 delivered = True
+            except client._PoisonResponse:
+                if detailed:
+                    return "rejected"
             except (KeyboardInterrupt, SystemExit) as exc:
                 interrupted = exc
             except Exception:
