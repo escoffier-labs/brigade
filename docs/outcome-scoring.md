@@ -1,6 +1,7 @@
 # Outcome scoring
 
-Outcome capture scores runs at read time from stored receipts. The score is not frozen when the receipt is written. Upgrading Brigade changes how `outcome capture` and `outcome rank` classify the same historical `run.json` and `worker-results.json` files.
+Outcome capture classifies runs when it reads stored receipts and persists the resulting `signal_value` in the outcome ledger. Upgrading Brigade can change a new capture of the same historical `run.json` and `worker-results.json` files. Ranking reads the stored ledger signals and also builds current verification scorecards
+([capture and ranking](../src/brigade/outcome_cmd.py), [scorecard projection](../src/brigade/scorecard.py)).
 
 This is outcome-based skill scoring, promotion, and rollback from verification evidence. It is not autonomous reflective memory learning.
 
@@ -93,7 +94,7 @@ brigade work verify run --manifest "verify/manifests/<id>.json" --capture <artif
 
 `brigade outcome capture` loads the run receipt, worker results, and any linked verify receipt, then applies the current classifier in `worker_failure.py` and `outcome_cmd.py`. The `signal_value` on the outcome record reflects that read-time classification, not the wording stamped on the receipt at run completion.
 
-Reinstalling or upgrading Brigade therefore re-scores existing history the next time capture runs or when ranking reconciles against stored runs.
+Reinstalling or upgrading Brigade applies the current classifier to later captures. Ranking does not rewrite prior ledger signals from historical run files. It canonicalizes reused verify evidence and recomputes verification scorecards under the current policy.
 
 ## Verdict rules
 
