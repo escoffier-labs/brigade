@@ -17,7 +17,7 @@ Assign every seat one job. Mixed-purpose seats make outcome capture useless beca
 
 ## Lane recipes
 
-Model IDs drift. Every ID below was verified answering on 2026-07-17, with Gemini 3.7 Flash re-verified on both Antigravity and Cursor on 2026-08-13. Antigravity 1.1.24 listed Gemini 3.8 Flash effort variants on 2026-09-02 (`gemini-3.8-flash-low` / `Gemini 3.8 Flash (Low)`); confirm against your harness's live inventory before wiring (see the validation pattern at the end, and issue #299 for making that check automatic).
+Model IDs drift. Every ID below was verified answering on 2026-07-17, with Gemini 3.7 Flash re-verified on both Antigravity and Cursor on 2026-08-13 and Gemini 4 Argon High first verified answering a headless `brigade run --worker agy_argon` dispatch on 2026-10-17. Antigravity 1.1.24 listed Gemini 3.8 Flash effort variants on 2026-09-02 (`gemini-3.8-flash-low` / `Gemini 3.8 Flash (Low)`); confirm against your harness's live inventory before wiring (see the validation pattern at the end, and issue #299 for making that check automatic).
 
 ### Codex / ChatGPT subscription
 
