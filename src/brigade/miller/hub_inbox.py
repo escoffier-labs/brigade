@@ -112,7 +112,7 @@ class HubInbox:
             if remaining <= 0:
                 return
             fetched_at = self.clock()  # A local ack after the fetch starts wins over this copy.
-            value = self._call("list_messages", after=after, unacked=unacked, agent=agent)
+            value = self._call("list_messages", after=after, unacked=unacked, agent=agent, timeout=remaining)
             rows, cursor = value.get("messages"), value.get("next_cursor")
             require(isinstance(rows, list) and type(cursor) is int, "hub_unavailable")
             previous = after
@@ -210,7 +210,7 @@ class HubInbox:
                 except (ValueError, TypeError):
                     raise MillerError("hub_inconsistent") from None
                 if row["sender"] == self.config.principal and row.get("reply_to") and old:
-                    self._call("ack", row["id"], agent=False)
+                    self._call("ack", row["id"], agent=False, timeout=max(0.1, min(2.0, deadline - time.monotonic())))
                     swept += 1
                 self.state.hub_set("node_sweep_cursor", row["id"])
                 if swept >= 5:
@@ -219,7 +219,7 @@ class HubInbox:
     def list(self, unacked_only: bool = True, limit: int = 20) -> dict[str, Any]:
         try:
             # One page and at most 0.1 s for a competing sync.
-            # The message API owns network timeouts; this deadline bounds pagination.
+            # The deadline bounds pagination and each request's transport timeout.
             self.sync(max_pages=1, timeout=1.5, lock_timeout=0.1, deadline=time.monotonic() + 1.6)
         except MillerError:
             pass

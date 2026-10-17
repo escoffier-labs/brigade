@@ -128,6 +128,13 @@ class HubFixture(unittest.TestCase):
         yield
         self.state.close()
 
+    def test_foreground_list_bounds_each_hub_request(self):
+        # inbox_list syncs one page within 1.6 s, so the transport timeout must not exceed that budget.
+        self.hub.list()
+        timeouts = [c["timeout"] for c in self.runner.calls if c["action"] == "list_messages"]
+        self.assertTrue(timeouts)
+        self.assertTrue(all(0 < value <= 1.6 for value in timeouts), timeouts)
+
     def call(self, name, **values):
         schema = TOOL_SCHEMAS[name]
         for key, value in values.items():
