@@ -361,7 +361,21 @@ def test_timeouts_and_protocol_errors(fleet, method, args):
         assert result["request_id"] is None
     run.raises = None
     run.output = "not json"
-    assert call()["error"] == "fleet_unavailable"
+    # Untrusted output after a mutating call means the side effect is unknown, as with a timeout.
+    assert call()["error"] == ("fleet_uncertain" if mutating else "fleet_unavailable")
+
+
+def test_mutating_protocol_failure_keeps_the_request_handle(fleet):
+    tools, run, _ = fleet
+    run.output = json.dumps({"schema": "t3-fleet.result.v1", "request_id": REQUEST, "state": "running"})
+    run.code = 3
+    result = submit(tools)
+    assert result["error"] == "fleet_uncertain"
+    assert result["next"] == "Do not resubmit. Check fleet_recent and fleet_status for the request."
+    assert result["request_id"] == REQUEST
+    operation = tools.fleet_recent()["operations"][0]
+    assert (operation["request_id"], operation["outcome"]) == (REQUEST, "fleet_uncertain")
+    assert tools.fleet_status(REQUEST)["error"] == "fleet_unavailable"
 
 
 @pytest.mark.parametrize("kind", ["missing", "invalid", "writable", "symlink", "oversized", "directory"])

@@ -194,17 +194,27 @@ class FleetTools:
         self.commands = commands if commands is not None else CommandRunner()
         self.environment = child_environment(child_path(runtime.paths.bin))
 
+    @staticmethod
+    def _uncertain(request_id: str | None) -> dict[str, Any]:
+        result: dict[str, Any] = {
+            "error": "fleet_uncertain",
+            "next": "Do not resubmit. Check fleet_recent and fleet_status for the request.",
+        }
+        if request_id is not None:
+            result["request_id"] = request_id
+        return result
+
     def _fleet(self, action: str, payload: dict[str, Any], *, timeout: float, mutating: bool = False) -> dict[str, Any]:
         try:
             return {"ok": True, "result": self.runner.call(action, payload, timeout=timeout)}
         except FleetTimeout:
             if mutating:
-                return {
-                    "error": "fleet_uncertain",
-                    "next": "Do not resubmit. Check fleet_recent and fleet_status for the request.",
-                }
+                return self._uncertain(None)
             return {"error": "fleet_timeout"}
-        except FleetProtocolError:
+        except FleetProtocolError as error:
+            # Untrusted output after a mutating call leaves its side effect unknown, like a timeout.
+            if mutating:
+                return self._uncertain(error.request_id)
             return {"error": "fleet_unavailable"}
         except _FleetErrorResult as error:
             result: dict[str, Any] = {"error": "fleet_error", "fleet": error.error, "exit_code": error.exit_code}
