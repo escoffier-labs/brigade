@@ -2972,7 +2972,30 @@ def test_cli_miller_serve_without_bearer(tmp_path, monkeypatch):
     monkeypatch.setattr(miller, "build_listener_from_target", build)
     monkeypatch.setattr(miller, "run_listener", lambda *args: calls.append(args))
     assert cli.main(["run", "cloud", "grokbot", "serve", "--pack", "miller", "--target", str(tmp_path)]) == 0
-    assert calls == [(tmp_path, {"bind": None, "allowed_hosts": [], "allowed_origins": []}), (config, tools, runtime)]
+    # Omitted flags must not override the allowlists stored by `pack setup`.
+    assert calls == [
+        (tmp_path, {"bind": None, "allowed_hosts": None, "allowed_origins": None}),
+        (config, tools, runtime),
+    ]
+
+
+def test_cli_miller_serve_passes_explicit_allowlists(tmp_path, monkeypatch):
+    from brigade import miller
+
+    calls = []
+
+    def build(target, **kwargs):
+        calls.append(kwargs)
+        return object(), object(), object()
+
+    monkeypatch.setattr(miller, "build_listener_from_target", build)
+    monkeypatch.setattr(miller, "run_listener", lambda *args: None)
+    argv = ["run", "cloud", "grokbot", "serve", "--pack", "miller", "--target", str(tmp_path)]
+    argv += ["--allow-host", "miller.example.test", "--allow-origin", "https://miller.example.test"]
+    assert cli.main(argv) == 0
+    assert calls == [
+        {"bind": None, "allowed_hosts": ["miller.example.test"], "allowed_origins": ["https://miller.example.test"]}
+    ]
 
 
 @pytest.mark.parametrize("command", ["serve", "setup"])

@@ -1209,7 +1209,11 @@ def _dispatch_grokbot(args, target: Path) -> int:
                     from .. import miller
 
                     miller_config, miller_tools, miller_runtime = miller.build_listener_from_target(
-                        target, bind=args.bind, allowed_hosts=args.allow_host, allowed_origins=args.allow_origin
+                        target,
+                        bind=args.bind,
+                        # Omitted flags keep the allowlists stored by `pack setup`.
+                        allowed_hosts=args.allow_host or None,
+                        allowed_origins=args.allow_origin or None,
                     )
                     miller.run_listener(miller_config, miller_tools, miller_runtime)
                 elif args.pack == "t3-dispatch":
