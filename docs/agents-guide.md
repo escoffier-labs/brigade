@@ -185,9 +185,9 @@ Issue form: https://github.com/escoffier-labs/brigade/issues/new/choose
 Report the exact commands you ran. A healthy first run should end with:
 
 ```text
-quickstart: ok
-operator doctor: ready yes
-blocking issues: 0
+status: ok
+ready: yes
+blocking_issues: 0
 ```
 
 If anything remains manual, list the remaining steps clearly and do not hide warnings.

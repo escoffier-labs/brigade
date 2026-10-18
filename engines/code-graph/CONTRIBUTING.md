@@ -21,13 +21,13 @@ GraphTrail is a local code-graph sidecar: it indexes a repository into a small S
 - Personal details, hostnames, IPs, account IDs, or live auth profiles in code, tests, or fixtures. The whole point of a public repo is to keep that out. Run `content-guard` before you push.
 - Anything that makes the default build call the network or start a daemon.
 - Anything that makes a query connection writable, allows an MCP graph write without `refresh: true`, or removes the 10-second fail-open bound.
-- AI co-authorship trailers on commits (`Co-Authored-By: <model>`). Conventional commits only.
+- Commits that do not follow the root [contributor policy](../../CONTRIBUTING.md). Use conventional commits and its in-house co-author rules.
 
 ## Local dev
 
 ```bash
-git clone https://github.com/escoffier-labs/graphtrail.git
-cd graphtrail
+git clone https://github.com/escoffier-labs/brigade.git
+cd brigade/engines/code-graph
 cargo build
 cargo test --all-features
 ```

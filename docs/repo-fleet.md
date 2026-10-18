@@ -15,6 +15,8 @@ brigade repos doctor
 brigade repos import-issues
 brigade repos discover plan
 brigade repos health-commands
+brigade repos adoption --json
+brigade repos adoption repair --state unwired
 brigade repos sweep plan
 brigade repos sweep run
 brigade repos sweep runs
@@ -108,6 +110,8 @@ Fleet release train bundles are written under:
 Fleet reports include safe repo ids, safe labels, status counts, blocker and warning counts, top pending action summaries, receipt labels, and suggested next commands. Fleet actions store local metadata only: repo id, safe label, source subsystem, source local id, status, priority or severity, safe summary, suggested command, timestamps, and source fingerprint.
 
 `brigade repos discover plan` is a dry-run discovery command for explicit `[[discovery_root]]` entries in `.brigade/repos.toml`. It scans only configured roots, applies `include`, `exclude`, `max_depth`, and `enabled`, reports safe root-local candidate labels, and never clones, writes repo config, runs git commands, or scans arbitrary home directories by default. Absolute paths and discovered private directory names are not copied into the JSON output.
+
+`brigade repos adoption` separates harness wiring from observed use for enabled repos. Repeat `--harness claude` or `--harness cursor` to select harnesses, and set `--days` for the observation window. States are `unwired`, `partial`, `advisory-only`, `enforced-idle`, `active`, `bypassed`, and `stale`. `adoption repair --state <state>` prints a filtered command plan without executing it. See [Repo Fleet Rollups](operator-center.md#repo-fleet-rollups) for the session evidence required to count as compliant use.
 
 `brigade repos sweep plan` shows which configured repos would be refreshed and which read-only local Brigade commands would run. `brigade repos sweep run` executes the configured foreground refresh for selected repos, records per-repo command summaries, and stores raw stdout and stderr only in gitignored local logs. Receipt JSON uses repo ids, safe labels, command labels, status counts, fingerprints, and local log labels. It does not store exact repo paths.
 

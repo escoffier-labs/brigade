@@ -7,12 +7,12 @@
 
 ## Project Shape
 - MiseLedger is a local-first Go CLI that imports `miseledger.adapter.v1` JSONL records into a SQLite evidence archive, then serves search, show, explain, Markdown export, evidence bundles, read-only SQL, a loopback HTTP API, and a stdio MCP server.
-- Entry point: `cmd/miseledger/main.go`. Almost all command logic lives in `internal/app` (CLI dispatch, HTTP server, MCP, watch). Supporting packages: `internal/adapter` (record contract), `internal/ingest` (importer), `internal/archive` (SQLite), `internal/sources/{codex,openclaw,claude,hermes}` (native adapters), `internal/security`, `internal/textnorm`.
+- Entry point: `cmd/miseledger/main.go`. Almost all command logic lives in `internal/app` (CLI dispatch, HTTP server, MCP, watch). Supporting packages: `internal/adapter` (record contract), `internal/ingest` (importer), `internal/archive` (SQLite), `internal/sources/` (native session, provider-export, and memory-card adapters), `internal/security`, `internal/textnorm`.
 - SQLite is pure Go via `modernc.org/sqlite`. Do not introduce cgo.
 - Docs in `docs/` cover the adapter contract, schema, MCP surface, and query cookbook. Fixtures live in `testdata/adapters` and `testdata/harnesses`.
 
 ## Verification
-- `go test ./...` runs the full suite (tests exist in `internal/app` and `internal/ingest`).
+- `go test ./...` runs the full suite across the app, archive, ingest, source adapters, and supporting packages.
 - `go vet ./...` for static checks.
 - `go build -o bin/miseledger ./cmd/miseledger` builds the CLI (`bin/` is gitignored).
 - When a change touches import, search, HTTP, or MCP behavior, run the matching smoke script. Each builds the binary if missing and runs in an isolated temp HOME:

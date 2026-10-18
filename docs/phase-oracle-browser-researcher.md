@@ -1,5 +1,7 @@
 # Oracle Browser Researcher Adapter
 
+Status (2026-10-17): shipped in #535 (ca88958ee). Browser-engine detection was corrected in #1120 (f669965f4).
+
 > This adapter phase is complete. New research orchestration work is specified
 > in `docs/phase-first-class-multi-lane-research.md`.
 

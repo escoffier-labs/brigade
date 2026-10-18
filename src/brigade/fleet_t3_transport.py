@@ -27,9 +27,12 @@ import os
 import re
 import subprocess
 import tempfile
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
+from functools import partial
 from pathlib import Path
 from typing import Any, Callable, Mapping, Sequence
+
+from . import proc
 
 SCHEMA = "brigade.fleet_t3_transport.v1"
 CONSUMER = "brigade-run"
@@ -170,7 +173,12 @@ def target_binding(document: Mapping[str, Any], seat: str) -> dict[str, Any] | N
     return fleet_model_roster.adapter_plan_binding(CONSUMER, bindings, adapter=ADAPTER)
 
 
-def immutable_source_revision(cwd: Path, *, runner: Callable[..., Any] = subprocess.run) -> str:
+def immutable_source_revision(
+    cwd: Path,
+    *,
+    runner: Callable[..., Any] | None = None,
+    process_registry: proc.ProcessRegistry | None = None,
+) -> str:
     """Return a clean 40-character HEAD, or refuse with ``remote-context-unavailable``.
 
     Dirty tracked content or relevant untracked content means the approved work
@@ -179,6 +187,12 @@ def immutable_source_revision(cwd: Path, *, runner: Callable[..., Any] = subproc
     local run. Ignored paths (local credentials, build output) are excluded by
     ``git status --porcelain`` and are never transferred.
     """
+    runner = runner or (
+        subprocess.run
+        if process_registry is None
+        else partial(_run_client, cwd=None, process_registry=process_registry)
+    )
+    proc.check_cancellation(process_registry)
     try:
         head = runner(
             ["git", "-C", str(cwd), "rev-parse", "HEAD"],
@@ -188,12 +202,15 @@ def immutable_source_revision(cwd: Path, *, runner: Callable[..., Any] = subproc
             check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
+        proc.check_cancellation(process_registry)
         raise TransportDenial("remote-context-unavailable", f"source revision is unreadable: {exc}") from exc
+    proc.check_cancellation(process_registry)
     if getattr(head, "returncode", 1) != 0:
         raise TransportDenial("remote-context-unavailable", "source checkout has no resolvable HEAD revision")
     revision = _one_line(getattr(head, "stdout", ""), 64)
     if SHA_RE.match(revision) is None:
         raise TransportDenial("remote-context-unavailable", "source HEAD is not an immutable 40-character revision")
+    proc.check_cancellation(process_registry)
     try:
         status = runner(
             ["git", "-C", str(cwd), "status", "--porcelain"],
@@ -203,7 +220,9 @@ def immutable_source_revision(cwd: Path, *, runner: Callable[..., Any] = subproc
             check=False,
         )
     except (OSError, subprocess.SubprocessError) as exc:
+        proc.check_cancellation(process_registry)
         raise TransportDenial("remote-context-unavailable", f"source cleanliness is unreadable: {exc}") from exc
+    proc.check_cancellation(process_registry)
     if getattr(status, "returncode", 1) != 0:
         raise TransportDenial("remote-context-unavailable", "source checkout cleanliness is unverifiable")
     if str(getattr(status, "stdout", "") or "").strip():
@@ -318,6 +337,31 @@ def resolve_route(
 # --- public t3-fleet client --------------------------------------------------
 
 
+def _run_client(
+    command: list[str],
+    *,
+    timeout: float,
+    cwd: str | None,
+    process_registry: proc.ProcessRegistry | None,
+    **_kwargs: Any,
+) -> subprocess.CompletedProcess[str]:
+    """Supervise only the local client group, never the delegated remote job."""
+    result = proc.run(
+        command,
+        timeout=timeout,
+        cwd=Path(cwd) if cwd is not None else None,
+        process_registry=process_registry,
+        supervise_group=True,
+    )
+    if result.code == 127 and result.stderr.startswith("command not found:"):
+        raise FileNotFoundError(result.stderr)
+    if result.code == 124 and f"timeout after {timeout}s" in result.stderr:
+        raise subprocess.TimeoutExpired(command, timeout)
+    if result.decode_failed or result.stream_limit_exceeded or result.incomplete_process_group:
+        raise subprocess.SubprocessError("local t3-fleet output or process-group cleanup was incomplete")
+    return subprocess.CompletedProcess(command, result.code, stdout=result.stdout, stderr=result.stderr)
+
+
 @dataclass
 class T3FleetClient:
     """Bounded wrapper over the public ``t3-fleet`` command surface.
@@ -330,13 +374,24 @@ class T3FleetClient:
 
     executable: str = CLIENT_EXECUTABLE
     timeout: float = DEFAULT_CALL_TIMEOUT
-    runner: Callable[..., Any] = subprocess.run
+    runner: Callable[..., Any] | None = None
     cwd: Path | None = None
+    process_registry: proc.ProcessRegistry | None = None
+
+    def check_cancellation(self) -> None:
+        if self.process_registry is not None:
+            self.process_registry.ensure_launch_allowed()
 
     def _invoke(self, argv: Sequence[str], *, timeout: float | None = None) -> dict[str, Any]:
+        self.check_cancellation()
         command = [self.executable, *argv]
         try:
-            completed = self.runner(
+            runner = self.runner or (
+                subprocess.run
+                if self.process_registry is None
+                else partial(_run_client, process_registry=self.process_registry)
+            )
+            completed = runner(
                 command,
                 capture_output=True,
                 text=True,
@@ -351,6 +406,8 @@ class T3FleetClient:
         except (OSError, subprocess.SubprocessError) as exc:
             raise TransportDenial("t3-client-error", f"t3-fleet {argv[0]} failed to run: {exc}") from exc
 
+        if argv[0] != "submit":
+            self.check_cancellation()
         stdout = _bounded(getattr(completed, "stdout", "") or "")
         stderr = _one_line(getattr(completed, "stderr", "") or "")
         code = int(getattr(completed, "returncode", 1) or 0)
@@ -610,6 +667,7 @@ def execute_remote(
     from .fleet_client_policy import FleetPolicyClientError
 
     try:
+        client.check_cancellation()
         delegation = policy_client.create_delegation(
             decision_id=resolution.decision_id,
             source_revision=revision,
@@ -636,6 +694,7 @@ def execute_remote(
     request_id: str | None = None
     try:
         _require_eligible(client)
+        client.check_cancellation()
         submitted = client.submit(
             delegation_id=delegation_id,
             title=title,
@@ -649,6 +708,7 @@ def execute_remote(
         # recovers the existing request instead of resubmitting the prompt.
         if on_handle is not None:
             on_handle(delegation_id, request_id)
+        client.check_cancellation()
         state = _state(submitted)
         if state in TERMINAL_STATES or state in ATTENTION_STATES:
             return _outcome_from(
@@ -850,14 +910,16 @@ class SourceTransport:
         )
 
     def __call__(self, seat: str, task: str, prompt: str) -> RemoteDispatch | None:
+        self.client.check_cancellation()
         resolution = self.resolve(seat)
+        self.client.check_cancellation()
         if resolution.route == ROUTE_ORIGIN:
             return None
         if resolution.route == ROUTE_BLOCKED:
             return RemoteDispatch(resolution=resolution)
         if self._revision is None:
             try:
-                self._revision = immutable_source_revision(self.cwd)
+                self._revision = immutable_source_revision(self.cwd, process_registry=self.client.process_registry)
             except TransportDenial as exc:
                 return RemoteDispatch(
                     resolution=resolution,
@@ -891,6 +953,7 @@ def build_source_transport(
     snapshot: Mapping[str, Any] | None = None,
     policy_client: Any | None = None,
     client: T3FleetClient | None = None,
+    process_registry: proc.ProcessRegistry | None = None,
     node_id: str | None = None,
     document: Mapping[str, Any] | None = None,
     machine_override: str | None = None,
@@ -924,6 +987,10 @@ def build_source_transport(
     routing = document.get("routing")
     if not isinstance(routing, Mapping) or routing.get("enabled") is not True:
         return None
+    if client is None:
+        client = T3FleetClient(cwd=cwd, process_registry=process_registry)
+    elif process_registry is not None:
+        client = replace(client, process_registry=process_registry)
     return SourceTransport(
         cwd=cwd,
         run_id=run_id,
@@ -931,7 +998,7 @@ def build_source_transport(
         node_id=node_id if node_id is not None else fleet_client.resolve_node_id(),
         document=document,
         policy_client=resolved_client,
-        client=client if client is not None else T3FleetClient(cwd=cwd),
+        client=client,
         workload=workload,
         machine_override=machine_override,
         override_reason=override_reason,

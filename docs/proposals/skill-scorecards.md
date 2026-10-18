@@ -1,6 +1,6 @@
 # Proposal: multi-dimension skill scorecards from verifier receipts (#502)
 
-Status: draft, planning pass only. Not implemented.
+Status (2026-10-17): shipped in #591 (c783d898a), including verifier-bound scorecards, exploration caps, and dual-criterion promotion.
 
 Parent issues: [#502](https://github.com/escoffier-labs/brigade/issues/502) (scorecards),
 [#503](https://github.com/escoffier-labs/brigade/issues/503) (dual-criterion promotion).

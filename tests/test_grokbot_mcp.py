@@ -2957,3 +2957,84 @@ def test_a_lease_row_from_before_the_migration_resolves_once_and_writes_back(tmp
     adapter.call_tool("grokbot_queue_fail", {"job_id": job_id, "lease_id": "lease-a"})
 
     assert {target for _kind, target in seen} == {"acme/repo"}
+
+
+def test_cli_miller_serve_without_bearer(tmp_path, monkeypatch):
+    from brigade import miller
+
+    calls = []
+    config, tools, runtime = object(), object(), object()
+
+    def build(target, **kwargs):
+        calls.append((target, kwargs))
+        return config, tools, runtime
+
+    monkeypatch.setattr(miller, "build_listener_from_target", build)
+    monkeypatch.setattr(miller, "run_listener", lambda *args: calls.append(args))
+    assert cli.main(["run", "cloud", "grokbot", "serve", "--pack", "miller", "--target", str(tmp_path)]) == 0
+    # Omitted flags must not override the allowlists stored by `pack setup`.
+    assert calls == [
+        (tmp_path, {"bind": None, "allowed_hosts": None, "allowed_origins": None}),
+        (config, tools, runtime),
+    ]
+
+
+def test_cli_miller_serve_passes_explicit_allowlists(tmp_path, monkeypatch):
+    from brigade import miller
+
+    calls = []
+
+    def build(target, **kwargs):
+        calls.append(kwargs)
+        return object(), object(), object()
+
+    monkeypatch.setattr(miller, "build_listener_from_target", build)
+    monkeypatch.setattr(miller, "run_listener", lambda *args: None)
+    argv = ["run", "cloud", "grokbot", "serve", "--pack", "miller", "--target", str(tmp_path)]
+    argv += ["--allow-host", "miller.example.test", "--allow-origin", "https://miller.example.test"]
+    assert cli.main(argv) == 0
+    assert calls == [
+        {"bind": None, "allowed_hosts": ["miller.example.test"], "allowed_origins": ["https://miller.example.test"]}
+    ]
+
+
+@pytest.mark.parametrize("command", ["serve", "setup"])
+@pytest.mark.parametrize("bearer_flag", ["--bearer-file", "--bearer-env"])
+def test_cli_miller_rejects_bearer(tmp_path, capsys, command, bearer_flag):
+    action = ["serve", "--pack"] if command == "serve" else ["pack", "setup", "--id"]
+    value = "/run/example.token" if bearer_flag == "--bearer-file" else "TEST_BEARER"
+    assert cli.main(["run", "cloud", "grokbot", *action, "miller", "--target", str(tmp_path), bearer_flag, value]) == 2
+    assert (
+        capsys.readouterr().err.strip()
+        == "error: the miller pack takes no bearer; it verifies Cloudflare Access tokens"
+    )
+
+
+@pytest.mark.parametrize(
+    "action",
+    [
+        ["serve", "--pack", "t3-dispatch"],
+        ["serve", "--instance", "operator"],
+        ["pack", "setup", "--id", "t3-dispatch"],
+        ["pack", "setup", "--id", "operator"],
+    ],
+)
+def test_cli_other_listeners_require_bearer(tmp_path, capsys, action):
+    assert cli.main(["run", "cloud", "grokbot", *action, "--target", str(tmp_path)]) == 2
+    assert capsys.readouterr().err.strip() == "error: --bearer-file or --bearer-env is required"
+
+
+def test_cli_miller_setup_without_bearer(tmp_path, monkeypatch):
+    from brigade import grokbot_packs
+
+    calls = []
+
+    def preview(target, pack_id, **kwargs):
+        calls.append((target, pack_id, kwargs))
+        return {"action": "setup", "apply": False, "pack_id": pack_id, "writes": []}
+
+    monkeypatch.setattr(grokbot_packs, "preview_setup", preview)
+    assert cli.main(["run", "cloud", "grokbot", "pack", "setup", "--id", "miller", "--target", str(tmp_path)]) == 0
+    assert calls[0][0:2] == (tmp_path, "miller")
+    assert calls[0][2]["bearer_file"] is None
+    assert calls[0][2]["bearer_env"] is None

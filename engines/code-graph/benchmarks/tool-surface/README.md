@@ -2,7 +2,7 @@
 
 Compares two MCP tool shapes for code navigation on the same corpus and query set:
 
-- **narrow tools**: GraphTrail's 14 typed tools (`search`, `callers`, `callees`,
+- **narrow tools**: the 14 typed tools in the measured GraphTrail revision (`search`, `callers`, `callees`,
   `impact`, `context`, `affected`, `explain`, ...).
 - **single search**: one general semantic-search tool that takes a natural-language
   query and returns ranked code chunks.
@@ -37,7 +37,7 @@ Two facts drove the follow-up change:
    have.
 
 The change that followed: an optional `limit` on `callers`, `callees`, and `impact`
-that truncates the edge list and marks the cut, so an agent can bound a blast-radius
+over MCP that truncates the edge list and marks the cut, so an agent can bound a blast-radius
 query the same way it bounds a search. Omitting `limit` preserves the prior output
 byte-for-byte.
 

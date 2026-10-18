@@ -20,7 +20,7 @@ This guide preserves the detailed command walkthroughs and operational notes tha
   <img src="https://img.shields.io/github/actions/workflow/status/escoffier-labs/brigade/ci.yml?branch=main&style=for-the-badge&label=ci" alt="CI status">
   <img src="https://img.shields.io/badge/python-3.10%2B-blue?style=for-the-badge&logo=python&logoColor=white" alt="Python 3.10+">
   <img src="https://img.shields.io/badge/license-MIT-green?style=for-the-badge" alt="MIT license">
-  <img src="https://img.shields.io/badge/harnesses-18-orange?style=for-the-badge" alt="18 harnesses">
+  <img src="https://img.shields.io/badge/harnesses-19-orange?style=for-the-badge" alt="19 harnesses">
 </p>
 
 <p align="center">
@@ -372,7 +372,7 @@ unless the run also passes `--sandbox`.
 `agents.<name>.model` pins the model a CLI agent runs, instead of relying on that CLI's
 global default. Brigade passes it through the adapter (`claude --model <id>`,
 `codex exec -m <id>`, `grok -m <id>`, and so on); pinning is supported for the `claude`,
-`codex`, `grok`, `opencode`, `pi`, `kimi`, `cursor`, and `antigravity` adapters. Each
+`codex`, `grok`, `opencode`, `pi`, `kimi`, `cursor`, `antigravity`, and `oracle` adapters. Each
 adapter's model flag is placed where that CLI expects it. `ollama:<model>` refs already
 name their model, including cloud models such as `ollama:qwen3-coder-next:cloud`. An
 unsupported adapter with a `model =` pin fails `brigade roster doctor` before any run
@@ -440,7 +440,7 @@ Common `brigade run` flags:
 
 - `--dry-run` prints planned assignments as JSON and stops before worker dispatch.
 - `--detach` starts the run in a child process, writes child output to `detached.log`, and returns after `run.json` appears. The child takes over a new session (`start_new_session` on POSIX, job-breakaway on Windows) and does not depend on the launching session staying alive.
-- `--wait[=SECONDS]` waits for the target's active run lock instead of failing immediately. A bare `--wait` waits up to 600 seconds. Without this flag, lock conflicts remain fail-fast.
+- `--wait[=SECONDS]` waits for the target's active run lock instead of failing immediately. A bare `--wait` has no fixed ceiling. Pass seconds to bound the wait, or `--wait=0` to fail fast. Without the flag, `.brigade/config.json` may supply `run_lock_wait_seconds`. Otherwise conflicts fail fast.
 - `--no-fleet-claim` skips the fleet hub repo claim and relies on the local run lock alone (logged once). The escape hatch when a claim left by a crashed run blocks the repo; `brigade fleet claims --release <target>` frees such a claim (`--force` for another node's).
 - `--allow-dirty` bypasses the default dirty-git-worktree guard.
 - `--worktree` runs agents in a detached git worktree and captures `changes.patch`.
@@ -630,7 +630,9 @@ brigade runs interrupt latest
 Both commands are local Unix socket requests. They refuse exec-transport runs, completed runs whose socket has been cleaned up, and app-server runs that have no active matching turn.
 
 The `cli` values are adapters for installed command-line tools:
-`codex`, `claude`, `opencode`, `antigravity`, `pi`, `cursor`, and `ollama:<model>`. Brigade shells out to those tools and keeps no provider keys.
+`codex`, `claude`, `opencode`, `antigravity`, `pi`, `cursor`, `aider`, `goose`,
+`continue`, `copilot`, `qwen`, `kimi`, `adal`, `openhands`, `grok`, `amp`, `crush`,
+`oracle`, and `ollama:<model>`. Brigade shells out to those tools and keeps no provider keys.
 A `codex-cloud:<env-id>` seat is different: it submits the task to Codex Cloud with `codex cloud exec`, polls `codex cloud status` until the task reaches a terminal state (bounded by the seat timeout), and returns the final status plus the unified diff as the worker text. The diff is never applied to the local tree. Land it deliberately with `codex cloud apply <task-id>`; the task id is recorded on the worker result. When a fleet hub is configured, Brigade admits the task before `exec`, using the hub's `codex` provider policy and a prompt-hash lease label; uncertain submits or provider state retain the lease for later inspection. Local tracking remains `codex-cloud`, and its bounded `codex cloud list --json` observation stores only task id, state, and environment id. `codex cloud list --json` omits environment ids; copy the id from the Codex Cloud workspace UI, not from task JSON. Prefer a local setup surface over putting that id in a roster:
 
 ```bash
@@ -662,7 +664,8 @@ Direct Cursor inventory is not applied to ACP seats because the two transports a
 Run `brigade roster doctor` to validate roster syntax and check which CLIs are on `PATH`.
 To decide which model belongs in which seat with receipt-backed evidence instead of reputation, see [model ratings](model-ratings.md).
 When `--roster` is omitted, `brigade run` first reads `--cwd/.brigade/roster.toml`;
-if that file is missing, it falls back to `Path.home()/.brigade/roster.toml`.
+if that file is missing in a linked git worktree, it checks the parent clone's
+`.brigade/roster.toml`, then falls back to `Path.home()/.brigade/roster.toml`.
 Passing `--roster` keeps using exactly that file.
 
 ### Model scorecard
@@ -777,7 +780,7 @@ It grounds in your trusted local sources first, for example a class corpus or a 
 Configured CLI sources can add local tool output when `research.toml` declares a `[[source]]` adapter.
 The browser/web tier is opt-in with `--web` and is treated as untrusted: fetched pages are quarantined as data, never instructions, and rendered in a separate, labeled section of the report.
 
-The loop uses the cloud `researcher` model from your `.brigade/roster.toml`; Brigade never runs a model locally.
+The loop resolves planning, extraction, synthesis, and review seats from the selected research profile and roster capabilities. Profile lane lists can pin those phases to different seats.
 Each run persists under `.brigade/research/`, is cancellable and resumable so a long run survives interruption, and emits two artifacts: a self-contained HTML report and a memory handoff that flows into the usual ingest pipeline.
 Run manifests record the corpus, source globs, configured CLI routes, web provider, and caps so `brigade research resume` keeps the original route instead of falling back to an empty run unannounced.
 Exporting the handoff is explicit. `brigade research export-handoff <run-id> --inbox codex` copies the completed run's linted handoff into a selected writer inbox such as Codex, Claude Code, OpenCode, Antigravity, Pi, Cursor, Aider, Goose, Continue, GitHub Copilot CLI, Qwen Code, Kimi Code, AdaL, OpenHands, Grok, Amp, Crush, or Hermes. Use `--handoff-inbox <path>` for a custom writer. Brigade records the export fingerprint on the run and surfaces missing, stale, or missing-path exports in `research show`, `work brief`, `center reviews`, and release readiness evidence. `brigade research handoffs doctor` gives a focused export-health check, and `brigade research handoffs import-issues` routes export repairs into the normal work inbox with stable source fingerprints.
@@ -816,7 +819,7 @@ timeout = 180
 The web tier needs the optional browser dependency, installed once:
 
 ```bash
-pip install 'brigade[research]' && playwright install chromium
+pip install 'brigade-cli[research]' && playwright install chromium
 ```
 
 PageForge can serve as the web provider when you want searches and fetched pages banked in its local SQLite cache instead of reading each page through headless Chromium:
@@ -1311,7 +1314,7 @@ The optional receipt signing tier adds one local HMAC-SHA256 over `digests.recei
 
 This HMAC tier defends against receipt-plus-digest rewrites by someone who does not have the key. It does not protect against a trusted key holder, key theft, or malware running as the operator. It is single-machine authorship evidence, not PKI and not cross-machine identity. If a signed receipt has no local key, an unreadable key, a rotated-away key, or a foreign `key_id`, verify reports `UNVERIFIABLE-SIGNATURE` without changing the exit status. `brigade receipts keygen --force --target .` rotates the key and leaves old signatures unverifiable unless the old key is supplied through `BRIGADE_RECEIPT_SIGNING_KEY_FILE`.
 
-For cross-machine trust and external distribution, `brigade receipts export attestation` supports explicit profile selection via `--profile {sshsig,cosign}`. The default remains `sshsig`, which exports a verify receipt as a detached in-toto Statement v1 inside an SSH-signed DSSE v1 envelope (`brigade.attestation.sshsig-dsse.v1`) verified offline via `brigade receipts verify-attestation` against an OpenSSH `allowed_signers` file. Keys for the SSHSIG profile are managed with `brigade receipts attestation-keygen`.
+For cross-machine trust and external distribution, `brigade receipts export attestation` supports explicit profile selection via `--profile {sshsig,cosign}`. The default remains `sshsig`, which exports a verify receipt as a detached in-toto Statement v1 inside an SSH-signed DSSE v1 envelope (`brigade.sshsig-dsse.v1`) verified offline via `brigade receipts verify-attestation` against an OpenSSH `allowed_signers` file. Keys for the SSHSIG profile are managed with `brigade receipts attestation-keygen`.
 
 The opt-in `cosign` profile signs the same in-toto Statement using a local cosign key file and produces an unwrapped standardized Sigstore bundle. The default private key is `.brigade/attestation/cosign.key`, overridable with `BRIGADE_COSIGN_KEY_FILE` or `--key`. When using password-encrypted keys (as generated by `cosign generate-key-pair`), provide the password non-interactively via the `COSIGN_PASSWORD` environment variable. Brigade enforces a safe version floor of cosign 2.6.5 or newer within major 2 and 3.1.3 or newer within major 3. External verification uses `cosign verify-blob-attestation` with `--insecure-ignore-tlog=true`:
 
@@ -1656,6 +1659,7 @@ Brigade installs material into a target directory on two independent axes. The t
 | Include | Adds |
 |---|---|
 | `publisher` | `.brigade/policies/public-content.json` + content-safety memory card + scrub-cache |
+| `repo-extras` | `INSTALL_FOR_AGENTS.md`, workflow rules, and inactive `hooks/pre-push` (also selected by `--full`) |
 
 ## Picking your harnesses
 
@@ -1715,10 +1719,10 @@ First-class station CLIs (always registered; not extras-gated):
 | Command group | Plans / health |
 |---|---|
 | `brigade evidence` | `status`, `doctor`, `crawl`, `search`, `crawl plan`, `export plan` |
-| `brigade code` | `sync`, `search`, `neighbors`, `callers`, `callees`, `impact`, `context`, `dead-code`, `cycles`, `affected`, `evaluate`, `explain`, `export`, `stats`, `doctor`, `diff` |
+| `brigade code` | `sync`, `search`, `neighbors`, `outline`, `callers`, `callees`, `impact`, `context`, `dead-code`, `cycles`, `affected`, `evaluate`, `explain`, `export`, `stats`, `doctor`, `diff` |
 | `brigade search` | `status`, `doctor`, `sync`, `context`, `impact`, `sync plan` |
 | `brigade tokens` | `status`, `doctor`, `wire plan` |
-| `brigade stations` | `list`, `discover` |
+| `brigade stations` | `list`, `discover`, `verify` |
 
 `pantry` and `notifications` remain extras-gated (`brigade extras on` or `BRIGADE_EXTRAS=1`).
 
@@ -1744,7 +1748,7 @@ For supported sources (e.g., Discord), Brigade owns crawler runtime selection an
 
 Crawl defaults to 900 seconds and can be changed with the positive finite numeric `BRIGADE_EVIDENCE_CRAWL_TIMEOUT_SECONDS`; search remains at 30 seconds. An invalid crawl timeout reports a diagnostic and exits 2 before starting MiseLedger. `brigade evidence crawl plan` still previews miseledger init/crawl/doctor commands, and `brigade evidence export plan` still previews `brigade receipts export miseledger --target . --new-only --import`. Product page: https://brigade.tools/miseledger.
 
-`code` runs the GraphTrail installed by `brigade setup` through a process boundary: `brigade code <verb> <args...>` uses safe argument forwarding and preserves engine text, JSON, and exit status. The full verb set is `sync`, `search`, `neighbors`, `callers`, `callees`, `impact`, `context`, `dead-code`, `cycles`, `affected`, `evaluate`, `explain`, `export`, `stats`, `doctor`, and `diff` (`init` stays behind `sync`; `watch` needs a streaming relay and is not exposed yet). Every verb accepts Brigade's standard `--target <dir>`, which runs the engine from that directory so its default `.graphtrail/graphtrail.db` and repo-relative file arguments resolve against that repo; all other arguments pass through unchanged. Engine `Usage: graphtrail ...` lines are rewritten to `Usage: brigade code ...` before display so errors point at the command the user typed. Sync and evaluate default to 900 seconds and can be changed with the positive finite numeric `BRIGADE_CODE_SYNC_TIMEOUT_SECONDS` and `BRIGADE_CODE_EVALUATE_TIMEOUT_SECONDS`; the query verbs remain at 30 seconds. An invalid timeout value reports a diagnostic and exits 2 before starting GraphTrail. `brigade add search` and `brigade add graphtrail` remain one-release compatibility paths for independent installations. `search` retains its `status`, `doctor`, and `sync plan` surfaces; its executable `sync`, `context`, and `impact` forms are compatibility aliases for `code` for at least two minor releases or 90 days, whichever is longer. `search` still wires optional code-search-api, and the `code-search-mcp` compatibility key points to the bridge maintained under `code-search-api/mcp`.
+`code` runs the GraphTrail installed by `brigade setup` through a process boundary: `brigade code <verb> <args...>` uses safe argument forwarding and preserves engine text, JSON, and exit status. The full verb set is `sync`, `search`, `neighbors`, `outline`, `callers`, `callees`, `impact`, `context`, `dead-code`, `cycles`, `affected`, `evaluate`, `explain`, `export`, `stats`, `doctor`, and `diff` (`init` stays behind `sync`; `watch` needs a streaming relay and is not exposed yet). Every verb accepts Brigade's standard `--target <dir>`, which runs the engine from that directory so its default `.graphtrail/graphtrail.db` and repo-relative file arguments resolve against that repo; all other arguments pass through unchanged. Engine `Usage: graphtrail ...` lines are rewritten to `Usage: brigade code ...` before display so errors point at the command the user typed. Sync and evaluate default to 900 seconds and can be changed with the positive finite numeric `BRIGADE_CODE_SYNC_TIMEOUT_SECONDS` and `BRIGADE_CODE_EVALUATE_TIMEOUT_SECONDS`; the query verbs remain at 30 seconds. An invalid timeout value reports a diagnostic and exits 2 before starting GraphTrail. `brigade add search` and `brigade add graphtrail` remain one-release compatibility paths for independent installations. `search` retains its `status`, `doctor`, and `sync plan` surfaces; its executable `sync`, `context`, and `impact` forms are compatibility aliases for `code` for at least two minor releases or 90 days, whichever is longer. `search` still wires optional code-search-api, and the `code-search-mcp` compatibility key points to the bridge maintained under `code-search-api/mcp`.
 
 `tokens` wires Token Glace (current name; TokenJuice is the old name) and optional usage-tracker spend export.
 Use `brigade tokens status` / `doctor` and review-only `brigade tokens wire plan`.
@@ -1858,14 +1862,15 @@ Anything `[warn]` is fine; `[fail]` means the install is incomplete. The `opencl
 
 ### Privacy
 
-brigade makes no network calls by default.
-It does not phone home, collect telemetry, or sync anything to a server.
-Everything happens on your local filesystem against the templates packaged with the install.
+Bootstrap templates are packaged with the install and can be applied offline.
+Configured integrations can make network calls, including Fleet Hub presence
+publication from `brigade work brief` when a Codex thread id and hub are configured.
 
 The normal exception is your own configured tooling:
 
 - the `pre-push` hook runs Brigade's embedded content guard before commits leave the machine
 - `brigade security enrich` can call MISP only when you explicitly configure and run the `misp` provider
+- `brigade setup` fetches native components, and configured model runs invoke their provider CLIs
 
 ## Maintenance and utility commands
 
@@ -1879,7 +1884,7 @@ A few commands sit outside the daily loop:
 
 ## Reference docs
 
-Each subsystem has a companion doc under [`docs/`]() with the full local contract, file layout, and safety boundary:
+Each subsystem has a companion doc under [`docs/`](.) with the full local contract, file layout, and safety boundary:
 
 - [`docs/import-schema.md`](import-schema.md) - the scanner JSONL import contract external producers target
 - [`docs/scanner-registry.md`](scanner-registry.md) - the local scanner registry, run receipts, and daily sweep

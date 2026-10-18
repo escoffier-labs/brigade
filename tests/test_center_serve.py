@@ -70,7 +70,7 @@ def no_token_server(tmp_target):
         token=None,
         allowed_hosts=None,
     )
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     thread.start()
     _wait_until_ready(server)
     yield server

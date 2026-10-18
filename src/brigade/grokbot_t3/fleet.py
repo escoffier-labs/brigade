@@ -145,6 +145,9 @@ class FleetRunner:
             "prompt": prompt,
             "runtime_mode": self.runtime_mode,
             "interaction_mode": interaction_mode,
+            # Shown as "launched by" on the Fleet Hub board.
+            "initiator_kind": "agent",
+            "initiator_label": "grokbot",
         }
         if override_reason is not None:
             payload["override_reason"] = override_reason

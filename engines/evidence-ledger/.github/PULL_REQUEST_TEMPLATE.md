@@ -19,5 +19,5 @@ Closes #
 - [ ] Added or updated tests covering the change
 - [ ] No real personal evidence in tests or fixtures (synthetic `adapter.v1` records only)
 - [ ] No new outbound network calls in the core path; nothing writes outside the data dir
-- [ ] Updated the `Unreleased` section of `CHANGELOG.md` for any user-visible effect
-- [ ] Conventional commit messages, no AI co-authorship trailers
+- [ ] Updated the `Unreleased` section of the root `CHANGELOG.md` for any user-visible effect
+- [ ] Conventional commit messages and co-author trailers follow the root contributor policy

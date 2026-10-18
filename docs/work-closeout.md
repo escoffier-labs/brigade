@@ -16,7 +16,10 @@ brigade work closeout <session-id>
 
 `verify plan` inspects the repo and proposes local verification commands. It recognizes Python test layouts and package.json projects, and it reports blockers without running anything. When the code map is installed and indexed, it also ranks affected-test candidates from changed files (`--file`, or `git diff --name-only HEAD`) with graph evidence and confidence. The ranking is advisory and the worker still chooses the command. Without the code map the plan degrades cleanly and keeps the default command list.
 
-`verify run` executes only explicit local commands, directly with `shell=False`. It supports simple leading environment assignments such as `PYTHONPATH=src`, rejects high-risk shell-like commands, captures stdout and stderr logs locally, and writes a receipt under:
+`verify run` executes commands supplied by `--command` / `--argv-json`, a selected
+`--manifest`, or discovered repo defaults when none is supplied
+([selection logic](../src/brigade/work_cmd/verification.py)). Commands run directly
+with `shell=False`. It supports simple leading environment assignments such as `PYTHONPATH=src`, rejects high-risk shell-like commands, captures stdout and stderr logs locally, and writes a receipt under:
 
 ```text
 .brigade/work/verify-runs/
@@ -71,7 +74,7 @@ A closeout is ready when:
 - the work session is ended
 - the latest verification receipt completed
 - the consumed task has acceptance criteria when task evidence is present
-- the latest scanner sweep has no unresolved review issue
+- the latest scanner sweep has not failed and has no unresolved review issue
 - code review has no unclosed review run and no unresolved imported finding
 - handoff draft health has no open issue
 

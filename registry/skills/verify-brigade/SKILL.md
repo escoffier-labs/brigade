@@ -5,10 +5,10 @@ description: "Prove a Brigade change works by driving the real `brigade` CLI aga
 
 # Verify Brigade
 
-Brigade has no server and no UI. The surface a user touches is the `brigade`
-CLI, and the only honest way to prove a change is to run that CLI against a
-target and read what it wrote. This skill drives it through one helper,
-`control-brigade.py`, so a proof is a rerunnable command instead of a story.
+This skill verifies the `brigade` CLI against a temp target. The optional Center
+dashboard is a separate surface. Run the CLI and read what it wrote. This skill
+drives it through one helper, `control-brigade.py`, so a proof is a rerunnable
+command instead of a story.
 
 Every drive happens in a temp target this skill creates. The helper enforces
 that: `--target` is accepted only when it resolves *under* `<state-root>/targets`,
@@ -277,9 +277,9 @@ present under `tests/` on this checkout.
 
 | Surface | Command | Tests |
 |---|---|---|
-| run | `brigade run` | `tests/test_run_cli.py`, `tests/test_run_lifecycle.py`, `tests/test_run_events.py`, `tests/test_run_control.py`, `tests/test_run_resume.py`, `tests/test_run_receipts.py` (32 `tests/test_run_*.py` / `tests/test_runs_*.py` files) |
+| run | `brigade run` | `tests/test_run_cli.py`, `tests/test_run_lifecycle.py`, `tests/test_run_events.py`, `tests/test_run_control.py`, `tests/test_run_resume.py`, `tests/test_run_receipts.py` (34 `tests/test_run_*.py` / `tests/test_runs_*.py` files) |
 | work verify | `brigade work verify` | `tests/test_work_cmd_verification.py`, `tests/test_work_cmd_verify_ranking.py`, `tests/test_verify_trial.py`, `tests/test_verification_contract.py`, `tests/test_verify_brigade_skill.py` |
-| fleet | `brigade fleet` | `tests/test_fleet_claims.py`, `tests/test_fleet_claim_release.py`, `tests/test_fleet_nodes.py`, `tests/test_fleet_sync.py`, `tests/test_fleet_cloud.py`, `tests/test_fleet_command_deck.py` (14 `tests/test_fleet_*.py` files) |
+| fleet | `brigade fleet` | `tests/test_fleet_claims.py`, `tests/test_fleet_claim_release.py`, `tests/test_fleet_nodes.py`, `tests/test_fleet_sync.py`, `tests/test_fleet_cloud.py`, `tests/test_fleet_command_deck.py` (58 `tests/test_fleet_*.py` files) |
 | grokbot listener | `brigade run cloud grokbot` (`serve`, `setup`, `doctor`, `canary`, queue verbs) | `tests/test_grokbot_ops.py`, `tests/test_grokbot_jobs.py`, `tests/test_grokbot_mcp.py`, `tests/test_grokbot_feed.py`, `tests/test_grokbot_packs.py` |
 | guard | `brigade guard` / `brigade scrub` | `tests/guard/test_cli.py`, `tests/guard/test_engine.py`, `tests/guard/test_rules.py`, `tests/test_scrub.py`, `tests/test_runguard.py` |
 

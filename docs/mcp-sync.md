@@ -1,14 +1,14 @@
 # MCP server config sync (`brigade mcp`)
 
 Every agent tool reads its MCP servers from a different file in a different shape. Keeping
-the same servers wired across Claude Code, Cursor, Codex, VS Code, OpenCode, and Antigravity
-means hand-editing six configs. `brigade mcp` keeps one canonical catalog and merges it into
+the same servers wired across Claude Code, Cursor, Codex, VS Code, OpenCode, Antigravity, and other harnesses
+means hand-editing multiple configs. `brigade mcp` keeps one canonical catalog and merges it into
 each tool's native config.
 
 If you are comparing approaches before adopting Brigade, start here:
 [sync MCP servers across coding agents](https://brigade.tools/compare/sync-mcp-servers-across-coding-agents).
 
-This is the one place Brigade writes runtime config into tool-owned files, so it is bounded
+MCP runtime config sync into tool-owned files is bounded
 on purpose: it is **explicit** (never runs from `doctor`/`brief`/`work run`), **dry-run by
 default**, **merges by server key** (servers you added by hand are never touched), and
 **never inlines secrets** (env values are written as `${VAR}` references). Brigade still does
@@ -60,10 +60,12 @@ receipts.
 | VS Code | `.vscode/mcp.json` | JSON `servers`; secrets become top-level `inputs[]` + `${input:VAR}` |
 | OpenCode | `opencode.json` | JSON `mcp`; `{type:"local",command:[cmd,...args],environment}` |
 | Antigravity | `~/.gemini/config/mcp_config.json` | JSON `mcpServers`; remote uses `serverUrl`. **User-scoped** (`--user-scope`) |
-| Claude user | `~/.claude.json` | JSON `mcpServers`. **User-scoped** (`--user-scope`) |
+| Claude user | `~/.claude.json` | JSON `mcpServers`. **User-scoped** (`--harness claude-user --user-scope`) |
 | Cursor user | `~/.cursor/mcp.json` | JSON `mcpServers`. **User-scoped** (`--harness cursor --user-scope`) |
-| Codex user | `~/.codex/config.toml` | TOML `[mcp_servers.<name>]`. **User-scoped** (`--user-scope`) |
-| Grok user | `~/.grok/config.toml` | TOML `[mcp_servers.<name>]`. **User-scoped** (`--user-scope`) |
+| Codex user | `~/.codex/config.toml` | TOML `[mcp_servers.<name>]`. **User-scoped** (`--harness codex-user --user-scope`) |
+| OpenCode user | `~/.config/opencode/opencode.json` | JSON `mcp`. **User-scoped** (`--harness opencode-user --user-scope`) |
+| Kimi user | `~/.kimi-code/mcp.json` (legacy root; `~/.kimi` when the capability probe selects it) | JSON `mcpServers`. **User-scoped** (`--harness kimi-user --user-scope`) |
+| Grok user | `~/.grok/config.toml` | TOML `[mcp_servers.<name>]`. **User-scoped** (`--harness grok-user --user-scope`) |
 | OpenClaw | `~/.openclaw/openclaw.json` | JSON `mcp.servers`. **User-scoped** (`--user-scope`) |
 | Hermes | `~/.hermes/config.yaml` | YAML `mcp_servers`. **User-scoped** (`--user-scope`) |
 
@@ -89,7 +91,7 @@ brigade mcp sync --write --user-scope  # also write configured user-global targe
 brigade mcp sync --harness cursor --user-scope --write  # write ~/.cursor/mcp.json
 brigade mcp verify --harness cursor --name github  # bounded runtime handshake
 brigade mcp doctor                     # validate the catalog, report unsupported tools
-brigade mcp import --harness cursor --merge   # read an existing config into the catalog
+brigade mcp import cursor --merge   # read an existing config into the catalog
 brigade operator sync-mcp --write      # validate -> sync -> summary, one receipt
 ```
 

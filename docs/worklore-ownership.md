@@ -32,6 +32,7 @@ explicit `Idempotency-Key`. Ownership revisions are separate from item versions.
 | `withdraw` | None | Admin or configured operator node | Offered to unowned |
 | `accept` | `generation` | Authenticated named target node | Offered or handoff-pending to owned |
 | `checkpoint` | `generation`, `repo_identity`, `write_scope`, `source_revision`, `next_action`, `evidence_refs` | Current holder | Owned remains owned |
+| `report` | `generation`, `report` | Current holder | Owned remains owned |
 | `handoff` | `generation`, `target_node` | Current holder | Owned to handoff-pending |
 | `release` | `generation` | Current holder | Owned or handoff-pending to unowned |
 
@@ -40,7 +41,7 @@ principal, and the operator supplies exclusions, authorization reference, and
 attempt-budget provenance. Offers and handoffs require an enrolled target with
 no revocation. An operator node can accept only when it is the named target.
 Operator privileges cannot substitute for holder authority. Admin cannot accept,
-checkpoint, hand off, or release on behalf of a holder.
+checkpoint, report, hand off, or release on behalf of a holder.
 
 Accept increments the generation. Release, withdrawal, and new offers retain
 that counter. A handoff copies the grant, exclusions, and attempt-budget metadata
@@ -51,14 +52,14 @@ node principal, not a particular process. Any process with that node's token can
 race to accept the initial offer or handoff and supply its own fresh nonce.
 
 Completed, canceled, and archived items permit release and withdrawal. They
-refuse new offers, accepts, checkpoints, and handoffs. The protocol never changes
+refuse new offers, accepts, checkpoints, reports, and handoffs. The protocol never changes
 item status, item version, attempt count, or burn eligibility. Attempt budget is
 operator-authenticated handoff metadata only. Existing attempt and burn rules
 remain authoritative.
 
 ## Nonce and replay
 
-Accept, checkpoint, handoff, and release require `X-Worklore-Holder`. Its value
+Accept, checkpoint, report, handoff, and release require `X-Worklore-Holder`. Its value
 must be the canonical unpadded base64url encoding of exactly 32 bytes. Generate
 it with `worklore_client.new_ownership_nonce()` and retain it privately. It is
 never returned by the server or automatically persisted by the client. Keep it
@@ -168,16 +169,23 @@ kind `implement`, `verify`, `await-review`, `await-checks`, `await-merge`, or
 `blocked`. It is advisory. Evidence kind is `receipt`, `github-pr`,
 `github-check-run`, or `worklore-event`.
 
-Evidence records carry references only. Outcomes, raw results, transcripts,
+Checkpoint evidence records carry references only. Outcomes, raw results, transcripts,
 execution handles, merge conclusions, and check conclusions are refused. The
 source system controls access and authority for any result behind a reference.
 Later checkpoints never rewrite older snapshots or failed, canceled, and
 superseded history.
 
+The separate `report` action accepts bounded Dot session metadata through
+`worklore_client.report_ownership`. It stores `last_report` with
+`evidence_verification: "reported-unverified"` and
+`provider_lifecycle: "unobserved"`. Reports do not establish verification or
+provider liveness. Reporter/session sequence must increase, observation time
+must not move backwards, and session linkage must remain consistent.
+
 ## Capacity and recovery
 
 Each item permits 200 ordinary ownership events, with a total maximum of 201.
-Offer and handoff require a prior count at most 197. Accept and checkpoint must
+Offer and handoff require a prior count at most 197. Accept, checkpoint, and report must
 leave the count at most 200. Release and withdrawal are safety exits that may
 append event 201. An exhausted chain cannot start another ownership cycle.
 `ownership-capacity-exhausted` requires a successor item.

@@ -35,7 +35,7 @@ and an explicitly mentioned disconnected file remains in the pack.
 Passing this corpus does not justify enabling personalization by default. It is
 a small synthetic contract suite derived from known ranking behaviors. A
 default change needs a larger labeled corpus sampled from real tasks across the
-four supported languages, measured top-k usefulness, and repeated latency runs
+supported language set, measured top-k usefulness, and repeated latency runs
 on the supported CI platforms. Keep `--personalized` and the MCP `personalized`
 argument opt-in until that evidence exists.
 

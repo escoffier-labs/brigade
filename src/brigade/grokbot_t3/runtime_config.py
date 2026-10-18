@@ -11,7 +11,7 @@ from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
 
-from .contracts import NAME_RE, REF_RE, T3DispatchError
+from .contracts import CALLER_RE, NAME_RE, REF_RE, T3DispatchError
 
 RUNTIME_SCHEMA = "brigade.grokbot.t3-dispatch-runtime.v1"
 RUNTIME_KEYS = frozenset(
@@ -47,6 +47,17 @@ class Repository:
 
 
 @dataclass(frozen=True)
+class IntakePolicy:
+    label: str
+    queued_label: str
+    repositories: tuple[tuple[str, str], ...]
+    caller: str
+    gh_bin: str
+    max_per_pass: int
+    headroom: int
+
+
+@dataclass(frozen=True)
 class Runtime:
     enabled: bool
     t3_fleet_bin: str
@@ -63,6 +74,7 @@ class Runtime:
     ledger_path: Path
     wake_path: Path
     writable_paths: tuple[str, ...]
+    intake: IntakePolicy | None = None
 
 
 def _bad() -> T3DispatchError:
@@ -143,8 +155,39 @@ def _repositories(value: object) -> Mapping[str, Repository]:
     return MappingProxyType(parsed)
 
 
+def _intake(value: object, repositories: Mapping[str, Repository], max_open: int) -> IntakePolicy:
+    keys = {"label", "queued_label", "repositories", "caller", "gh_bin", "max_per_pass", "headroom"}
+    if not isinstance(value, dict) or set(value) != keys:
+        raise _bad()
+    for key in ("label", "queued_label"):
+        if not isinstance(value[key], str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,49}", value[key]):
+            raise _bad()
+    if value["label"] == value["queued_label"]:
+        raise _bad()
+    if not isinstance(value["caller"], str) or not CALLER_RE.fullmatch(value["caller"]):
+        raise _bad()
+    pairs = []
+    for repo_id in _names(value["repositories"]):
+        repo = repositories.get(repo_id)
+        if repo is None:
+            raise _bad()
+        match = re.fullmatch(r"https://github\.com/([A-Za-z0-9_.-]+)/([A-Za-z0-9_.-]+)\.git", repo.remote)
+        if match is None:
+            raise _bad()
+        pairs.append((repo_id, f"{match[1]}/{match[2]}"))
+    return IntakePolicy(
+        label=value["label"],
+        queued_label=value["queued_label"],
+        repositories=tuple(pairs),
+        caller=value["caller"],
+        gh_bin=_abs(value["gh_bin"]),
+        max_per_pass=_int(value["max_per_pass"], 1, 5),
+        headroom=_int(value["headroom"], 1, max_open - 1),
+    )
+
+
 def parse_runtime(payload: object) -> Runtime:
-    if not isinstance(payload, dict) or set(payload) != RUNTIME_KEYS:
+    if not isinstance(payload, dict) or set(payload) - {"intake"} != RUNTIME_KEYS:
         raise _bad()
     if payload["schema"] != RUNTIME_SCHEMA:
         raise _bad()
@@ -158,22 +201,25 @@ def parse_runtime(payload: object) -> Runtime:
     writable = payload["writable_paths"]
     if not isinstance(writable, list) or len(writable) > MAX_WRITABLE_PATHS:
         raise _bad()
+    repositories = _repositories(payload["repositories"])
+    max_open = _int(payload["max_open"], 1, 20)
     return Runtime(
         enabled=_bool(payload["enabled"]),
         t3_fleet_bin=_abs(payload["t3_fleet_bin"]),
         git_bin=_abs(payload["git_bin"]),
-        repositories=_repositories(payload["repositories"]),
+        repositories=repositories,
         hosts=_names(payload["hosts"]),
         seats=seats,
         default_seat=default_seat,
         fallback_seat=fallback_seat,
         fleet_enrolled=_bool(payload["fleet_enrolled"]),
-        max_open=_int(payload["max_open"], 1, 20),
+        max_open=max_open,
         daily_limit=_int(payload["daily_limit"], 1, 200),
         prompt_max_bytes=_int(payload["prompt_max_bytes"], 1024, 32768),
         ledger_path=Path(_abs(payload["ledger_path"])),
         wake_path=Path(_abs(payload["wake_path"])),
         writable_paths=tuple(_abs(item) for item in writable),
+        intake=_intake(payload["intake"], repositories, max_open) if "intake" in payload else None,
     )
 
 

@@ -1,5 +1,7 @@
 # Worklore Brigade adapter implementation plan
 
+Status (2026-10-17): shipped in #1361 (c55a1c046).
+
 ## Goal
 
 Read explicitly configured local Brigade task ledgers through the public

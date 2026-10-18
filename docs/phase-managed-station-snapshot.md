@@ -1,5 +1,7 @@
 # Managed Station Snapshot Plan
 
+Status (2026-10-17): shipped in #233 (1e407ca2a).
+
 Goal: make the reviewed sidecar manifests the declarative runtime source for first-class managed tools while keeping Brigade offline and dependency-free.
 
 Architecture: a bundled `brigade.managed_snapshot.v1` JSON file stores the 6 reviewed manifest records with provenance and digest. Active sidecar manifests name their source revision. Content Guard is a Brigade-owned lifecycle assertion that separately records the archived repository revision it describes. A standard-library loader validates the bundle. `managed.py` keeps Python wire and doctor callables but replaces declarative fields for matching executable tools from the snapshot. A release script regenerates the bundle from explicit local manifest paths and checks the committed file without network access.

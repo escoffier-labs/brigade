@@ -4,10 +4,11 @@ The schedule belongs to the operator. Brigade only runs when invoked. Copy one
 of the recipes below into your own crontab, user timer, or CI job after
 `brigade init` wires the target, or explicitly opt in with
 `brigade care install --target .`. With the default `auto` backend it installs
-systemd user timers on Linux or launchd agents on macOS and reports an
-unsupported scheduler elsewhere. Use the manual crontab recipes on this page
+systemd user timers on Linux or launchd agents on macOS. On Windows it prints
+a Task Scheduler plan without creating tasks and exits 3. Other platforms report
+an unsupported scheduler. Use the manual crontab recipes on this page
 when cron is your trigger.
-Every registration is namespaced by a hash of the absolute target path, so
+Systemd and launchd registrations are namespaced by a hash of the absolute target path, so
 status and uninstall operate only on that target. Uninstalling a missing
 registration is a clear no-op. Brigade still does not own a daemon or
 background supervisor.

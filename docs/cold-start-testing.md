@@ -5,10 +5,14 @@ Brigade's worst bugs have been first-contact bugs: things that work on the maint
 ## The deterministic gate (every release)
 
 ```bash
-brigade runbook run docs/runbooks/cold-start-gate.json --target .
+brigade extras on
+brigade runbook plan docs/runbooks/cold-start-gate.json --target .
+brigade runbook run docs/runbooks/cold-start-gate.json --target . --approved
 ```
 
-The runbook executes the documented new-user journey literally in a throwaway sandbox with neutralized global git config: pipx install from the working tree, the README quickstart and handoff-draft blocks verbatim, the first-10-minutes health checks, and regression guards for past first-contact bugs (the gitignore clobber, the inactive-hook blocker). It is part of the pre-tag checklist in RELEASE.md. A neutral sandbox matters: the maintainer's global gitignore and hooksPath masked real clean-machine failures for weeks.
+The runbook executes the documented new-user journey in a throwaway sandbox with neutralized global git config: pipx install from the working tree, quickstart, handoff draft and lint, first-run health checks, and regression guards for past first-contact bugs (the gitignore clobber, the inactive-hook blocker). Review the plan before approving execution. It is part of the pre-tag checklist in RELEASE.md. A neutral sandbox matters: the maintainer's global gitignore and hooksPath masked real clean-machine failures for weeks.
+
+The pipx install uses the caller's pipx environment. The temporary repo and Git config are sandboxed, but the script does not set `PIPX_HOME` or `PIPX_BIN_DIR`.
 
 ## The agent scenarios (before significant releases)
 

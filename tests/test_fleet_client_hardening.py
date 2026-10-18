@@ -35,19 +35,36 @@ class TestProxyDisabledTransport:
     def test_hub_traffic_ignores_proxy_environment(self, monkeypatch):
         """A configured proxy never receives hub traffic or the bearer token."""
         import threading
+        from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
         from brigade import fleet_hub
 
+        proxy_requests = []
+
+        class Proxy(BaseHTTPRequestHandler):
+            def do_GET(self):
+                proxy_requests.append(self.path)
+                self.send_error(502)
+
+            do_POST = do_GET
+
+            def log_message(self, *_args):
+                pass
+
+        proxy = ThreadingHTTPServer(("127.0.0.1", 0), Proxy)
+        proxy_thread = threading.Thread(target=proxy.serve_forever, daemon=True)
+        proxy_thread.start()
         db = Path(tempfile.mkdtemp()) / "fleet.db"
         token = "test-token-12345"
         server = fleet_hub.make_server("127.0.0.1", 0, db, token, allow_admin_writes=True)
         thread = threading.Thread(target=server.serve_forever, daemon=True)
         thread.start()
         try:
-            # A blackholed proxy would break this delivery if it were used.
-            monkeypatch.setenv("HTTP_PROXY", "http://127.0.0.1:1")
-            monkeypatch.setenv("HTTPS_PROXY", "http://127.0.0.1:1")
-            monkeypatch.setenv("http_proxy", "http://127.0.0.1:1")
+            monkeypatch.delenv("NO_PROXY", raising=False)
+            monkeypatch.delenv("no_proxy", raising=False)
+            proxy_url = f"http://127.0.0.1:{proxy.server_address[1]}"
+            for name in ("HTTP_PROXY", "HTTPS_PROXY", "http_proxy", "https_proxy"):
+                monkeypatch.setenv(name, proxy_url)
             url = f"http://127.0.0.1:{server.server_address[1]}"
             fleet_client._post_events_blocking(
                 url,
@@ -68,9 +85,14 @@ class TestProxyDisabledTransport:
             with fleet_client._hub_open(request, timeout=5) as response:
                 payload = json.loads(response.read())
             assert [r["run_id"] for r in payload["runs"]] == ["run-1"]
+            assert proxy_requests == []
         finally:
             server.shutdown()
             server.server_close()
+            proxy.shutdown()
+            proxy.server_close()
+            thread.join(timeout=5)
+            proxy_thread.join(timeout=5)
 
     def test_events_go_through_the_hub_opener(self, monkeypatch):
         opened = []

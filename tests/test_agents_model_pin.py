@@ -182,6 +182,28 @@ def test_antigravity_maps_gemini_api_id_to_low_effort_slug():
     ]
 
 
+@pytest.mark.parametrize(
+    ("model", "expected"),
+    [
+        ("gemini-4-argon", "gemini-4-argon-low"),
+        ("gemini-4.1-argon", "gemini-4.1-argon-low"),
+        ("gemini-4-argon-high", "gemini-4-argon-high"),
+        ("gemini-3.8-flash-high", "gemini-3.8-flash-high"),
+        ("gemini-3.1-pro-high", "gemini-3.1-pro-high"),
+        ("gemini-4-unknown", "gemini-4-unknown"),
+    ],
+)
+def test_antigravity_gemini_model_family_pins(model, expected):
+    assert agents.build_argv("antigravity", "P", read_only=True, model=model) == [
+        "agy",
+        "--model",
+        expected,
+        "--sandbox",
+        "--print",
+        "P",
+    ]
+
+
 def test_ollama_cloud_ref_keeps_full_model_name():
     # A cloud model id carries its own colon; only the `ollama:` prefix is stripped.
     assert agents.build_argv("ollama:qwen3-coder-next:cloud", "P") == [

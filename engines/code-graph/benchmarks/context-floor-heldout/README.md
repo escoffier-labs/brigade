@@ -45,8 +45,8 @@ that surfaces unseen symbols gets a lower-bound precision.
 
 ```bash
 graphtrail --db /tmp/brigade.db sync /path/to/brigade
-python3 run.py --graphtrail target/release/graphtrail --db /tmp/brigade.db --relevance-floor
-python3 run.py --labels calibration-labels.json --graphtrail target/release/graphtrail --db /tmp/brigade.db --relevance-floor
+python3 benchmarks/context-floor-heldout/run.py --graphtrail target/release/graphtrail --db /tmp/brigade.db --relevance-floor
+python3 benchmarks/context-floor-heldout/run.py --labels benchmarks/context-floor-heldout/calibration-labels.json --graphtrail target/release/graphtrail --db /tmp/brigade.db --relevance-floor
 ```
 
 Scores depend on the indexed tree, so rerun against the commit you label.

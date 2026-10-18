@@ -124,9 +124,9 @@ Session start then injects the work brief. An unwired repo prints the exact `bri
 A healthy first run should end with:
 
 ```text
-quickstart: ok
-operator doctor: ready yes
-blocking issues: 0
+status: ok
+ready: yes
+blocking_issues: 0
 ```
 
 The minimum verification to report back is:

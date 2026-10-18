@@ -12,6 +12,7 @@ being a free-form note nobody can route.
 - Explicit paths lint just those files, wherever they live.
 - `--content-guard` adds a leak scan (secrets, PII) plus injection heuristics
   for instruction-shaped payloads; `--guard-policy` picks the policy.
+  Warning-level injection hits fail lint even without `--strict`. Info-only hits do not.
 - `--strict` promotes standalone-readability warnings to failures.
 - `--json` returns `valid`, `count`, `content_guard`,
   `injection_flagged_count`, `readability_flagged_count`, and a `results` array
