@@ -745,7 +745,8 @@ Hub-arbitrated repo claims (`POST /claims`, `GET /claims`,
 
 The Hub checks declared request length before reading or parsing a JSON body.
 Bodies above 8 MiB return HTTP 413. Missing, ambiguous, or invalid body framing
-returns HTTP 400 and closes the connection. Transfer-Encoding and duplicate
+returns HTTP 400 and closes the connection, except that a Worklore DELETE with
+no body still succeeds. Transfer-Encoding and duplicate
 Content-Length headers are refused. Worklore retains its smaller 256 KiB body
 limit and 1 MiB import limit. Dashboard enrollment retains its 16 KiB body limit.
 

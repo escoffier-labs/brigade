@@ -110,6 +110,19 @@ def test_claim_cardinality_preserves_existing_claims(tmp_path):
         conn.close()
 
 
+
+def test_stale_holder_refusal_precedes_claim_cardinality(tmp_path):
+    conn = fleet_hub.init_db(tmp_path / "hub.db")
+    try:
+        assert fleet_hub.handle_claim(conn, _claim(target="retired", holder="old"))[0] == 200
+        assert fleet_hub.handle_claim(conn, _claim("release", target="retired", holder="old"))[0] == 200
+        for i in range(MAX_ACTIVE_CLAIMS_PER_NODE):
+            assert fleet_hub.handle_claim(conn, _claim(target=f"repo-{i:04}"))[0] == 200
+        status, payload = fleet_hub.handle_claim(conn, _claim(target="retired", holder="old"))
+        assert (status, payload["reason"]) == (409, "stale-holder")
+    finally:
+        conn.close()
+
 def test_http_claim_cardinality_refusal_preserves_existing_claims(hub):
     url, token, db = hub
     with fleet_hub.open_db(db) as conn:
