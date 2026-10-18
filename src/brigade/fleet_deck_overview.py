@@ -21,9 +21,9 @@ from .fleet_command_deck import UNKNOWN, DeckView, LiveRun, MachineState, Statio
 _esc = deck._esc
 _UTC = timezone.utc
 
-# Staleness is the hub's verdict (it compares telemetry age to the policy TTL),
-# not a second threshold in the Deck.
+# Staleness is the hub's verdict against the policy TTL, never a second Deck threshold.
 STALE_REASONS = frozenset({"stale-telemetry", "unknown-telemetry"})
+POLICY_LIMITS = {"machine-disabled": "disabled", "machine-draining": "draining"}
 
 
 def format_age(seconds: int | None) -> str:
@@ -103,7 +103,7 @@ def station_status(station: StationView, machine: MachineState | None) -> str:
         return "stale"
     if machine.state == "offline":
         return "offline"
-    if machine.state not in ("available", UNKNOWN):
+    if machine.state not in ("available", UNKNOWN) or machine.unused_reason in POLICY_LIMITS:
         return "limited"
     return "working" if station.busy else "idle"
 
@@ -632,7 +632,7 @@ def _machine_tree(view: DeckView) -> str:
     for station in view.stations:
         machine = machine_for(view, station)
         status = station_status(station, machine)
-        machine_state = machine.state if machine is not None else UNKNOWN
+        machine_state = POLICY_LIMITS.get(machine.unused_reason, machine.state) if machine is not None else UNKNOWN
         runs = "".join(_tree_run(tile) for tile in station.tiles)
         rows.append(
             f'<li class="tree-row" data-filter-row title="{_esc(station.station.node_id)}"><div class="tree-line">'

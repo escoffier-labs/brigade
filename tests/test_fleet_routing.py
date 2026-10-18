@@ -976,3 +976,21 @@ def test_snapshot_emits_the_policy_node_id_for_every_machine(conn):
     assert {row["id"]: row["node_id"] for row in snap["machines"]} == expected
     plane = fleet_command_deck.control_plane_from_snapshot(snap)
     assert {machine.id: machine.node_id for machine in plane.machines} == expected
+
+
+@pytest.mark.parametrize(
+    ("flag", "value", "reason"), [("enabled", False, "machine-disabled"), ("draining", True, "machine-draining")]
+)
+def test_snapshot_reports_policy_disabled_and_draining_machines_as_unusable(conn, flag, value, reason):
+    _fresh_quota(conn)
+    _observe_linux_fleet(conn)
+    changed = _document()
+    changed["machines"]["worker-linux-1"][flag] = value
+    fleet_hub_policy.save_policy(conn, changed, expected_version=2, actor="operator", reason=f"set {flag}")
+    snap = fleet_hub_routing.snapshot(conn)
+    linux = next(row for row in snap["machines"] if row["id"] == "worker-linux-1")
+    assert linux["state"] == "available"
+    assert linux["available_slots"] == 0
+    assert linux["unused_reason"] == reason
+    other = next(row for row in snap["machines"] if row["id"] == "worker-linux-2")
+    assert other["unused_reason"] == "idle-capacity"

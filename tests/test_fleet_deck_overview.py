@@ -902,3 +902,15 @@ def test_the_station_card_code_is_gone_from_the_command_deck_module():
     css = deck._STYLE
     for selector in (".station-card", ".stations", ".run-stack", ".dashboard-grid", ".attention-panel", ".capacity"):
         assert selector not in css, selector
+
+
+def test_policy_disabled_and_draining_machines_are_limited_with_the_policy_word():
+    for reason, word in (("machine-disabled", "disabled"), ("machine-draining", "draining")):
+        machine = _machine("linux-a", NODE_A, state="available", unused_reason=reason, available_slots="0")
+        station = _station(NODE_A, "linux-a", 4)
+        view = _view([station], plane=_plane([machine]))
+        assert overview.station_status(station, machine) == "limited"
+        assert overview.summarize(view).idle == "0"
+        rows = _rows(overview.render_machine_table(view, NOW))
+        assert "4 unavailable" in rows[0]
+        assert f">{word}<" in overview.render_sidebar(view, "overview", NOW, worklore_enabled=False)

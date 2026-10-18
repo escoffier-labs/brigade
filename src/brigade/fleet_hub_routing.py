@@ -1682,6 +1682,10 @@ def snapshot(conn: sqlite3.Connection) -> dict[str, Any]:
                 if state == "unknown":
                     unused_reason = "unknown-telemetry"
                     available_slots = None
+                elif not record.get("enabled", True) or record.get("draining"):
+                    # Routing refuses these machines (_candidate), so no slot is usable.
+                    available_slots = 0
+                    unused_reason = "machine-disabled" if not record.get("enabled", True) else "machine-draining"
                 else:
                     available_slots = max(capacity - occupancy, 0)
                     if available_slots > 0 and state == "available":
