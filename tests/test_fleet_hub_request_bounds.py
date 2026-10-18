@@ -110,7 +110,6 @@ def test_claim_cardinality_preserves_existing_claims(tmp_path):
         conn.close()
 
 
-
 def test_stale_holder_refusal_precedes_claim_cardinality(tmp_path):
     conn = fleet_hub.init_db(tmp_path / "hub.db")
     try:
@@ -122,6 +121,7 @@ def test_stale_holder_refusal_precedes_claim_cardinality(tmp_path):
         assert (status, payload["reason"]) == (409, "stale-holder")
     finally:
         conn.close()
+
 
 def test_http_claim_cardinality_refusal_preserves_existing_claims(hub):
     url, token, db = hub
