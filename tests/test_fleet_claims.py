@@ -2549,9 +2549,15 @@ class TestExitOrphanReleaseHardening:
         monkeypatch.setattr(fleet_client, "_run_with_deadline", controlled_deadline)
 
         release_attempts = []
+        release_holders = []
+        scheduled = []
+        # Record the post-exit background cleanup instead of starting its daemon,
+        # which would outlive this test and later release with the real client.
+        monkeypatch.setattr(fleet_client, "_schedule_orphan_release", lambda *a, **kw: scheduled.append((a, kw)))
 
         def always_unavailable(target, **kwargs):
             release_attempts.append((target, reacquire_finished.is_set()))
+            release_holders.append(kwargs.get("holder"))
             return fleet_client.ClaimDecision(
                 granted=False, reason="hub-unavailable", detail="down", holder=kwargs.get("holder")
             )
@@ -2582,6 +2588,9 @@ class TestExitOrphanReleaseHardening:
         # Exit must attempt release, then exhaust both retries after the
         # abandoned acquire has committed, even though every reply is unavailable.
         assert release_attempts == [("repo-a", True)] * 3
+        # The final answer stayed hub-unavailable, so exit keeps cleanup alive for
+        # the same holder in the background (#1743).
+        assert [(a, kw["holder"]) for a, kw in scheduled] == [(("repo-a",), release_holders[-1])]
         exhausted = [r for r in caplog.records if "could not confirm" in r.message]
         assert len(exhausted) == 1, "exit cleanup exhaustion was not logged exactly once"
         # The exhaustion WARNING must name the residual exposure: the row
