@@ -306,7 +306,7 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
             "obsidian-operator",
             "operations-relay",
             "t3-dispatch",
-            "miller",
+            "dot",
             "wazuh-triage",
             "n8n-operator",
         ),
@@ -424,7 +424,7 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
         "--runtime-path",
         type=Path,
         default=None,
-        help="Absolute runtime JSON path. Required for fleet-steward, backup-steward, obsidian-operator, wazuh-triage, n8n-operator, t3-dispatch, and miller.",
+        help="Absolute runtime JSON path. Required for fleet-steward, backup-steward, obsidian-operator, wazuh-triage, n8n-operator, t3-dispatch, and dot.",
     )
     p_pack_setup.add_argument(
         "--ledger-path",
@@ -1097,9 +1097,9 @@ def _grokbot_health_reason(reason: str) -> str:
 
 def _grokbot_bearer_valid(args, pack_id: str | None) -> bool:
     has_bearer = args.bearer_file is not None or args.bearer_env is not None
-    if pack_id == "miller":
+    if pack_id == "dot":
         if has_bearer:
-            print("error: the miller pack takes no bearer; it verifies Cloudflare Access tokens", file=sys.stderr)
+            print("error: the dot pack takes no bearer; it verifies Cloudflare Access tokens", file=sys.stderr)
             return False
     elif not has_bearer:
         print("error: --bearer-file or --bearer-env is required", file=sys.stderr)
@@ -1205,17 +1205,17 @@ def _dispatch_grokbot(args, target: Path) -> int:
                         target, **listener_kwargs
                     )
                     grokbot_operations_relay.run_listener(operations_config, operations_tools)
-                elif args.pack == "miller":
-                    from .. import miller
+                elif args.pack == "dot":
+                    from .. import dot
 
-                    miller_config, miller_tools, miller_runtime = miller.build_listener_from_target(
+                    dot_config, dot_tools, dot_runtime = dot.build_listener_from_target(
                         target,
                         bind=args.bind,
                         # Omitted flags keep the allowlists stored by `pack setup`.
                         allowed_hosts=args.allow_host or None,
                         allowed_origins=args.allow_origin or None,
                     )
-                    miller.run_listener(miller_config, miller_tools, miller_runtime)
+                    dot.run_listener(dot_config, dot_tools, dot_runtime)
                 elif args.pack == "t3-dispatch":
                     from .. import grokbot_t3
 
@@ -1255,7 +1255,7 @@ def _dispatch_grokbot(args, target: Path) -> int:
                 grokbot_packs,
                 grokbot_t3,
                 grokbot_wazuh,
-                miller,
+                dot,
             )
 
             if isinstance(
@@ -1269,7 +1269,7 @@ def _dispatch_grokbot(args, target: Path) -> int:
                     grokbot_operations_relay.OperationsRelayError,
                     grokbot_packs.PackError,
                     grokbot_t3.T3DispatchError,
-                    miller.MillerError,
+                    dot.DotError,
                     grokbot_wazuh.WazuhError,
                 ),
             ):

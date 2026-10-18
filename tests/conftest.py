@@ -352,7 +352,7 @@ def _no_managed_tools_on_path(monkeypatch, request, _isolation_temp_root):
 
 
 def _private_test_root(tmp_path):
-    """Pick a parent whose ancestors pass Miller's private-directory walk.
+    """Pick a parent whose ancestors pass Dot's private-directory walk.
 
     The walk rejects any group- or world-writable ancestor unless it is
     root-owned and sticky. A developer TMPDIR such as a 0775 home temp
@@ -369,14 +369,14 @@ def _private_test_root(tmp_path):
     except OSError:
         info = None
     if info is not None and stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and info.st_mode & stat.S_ISVTX:
-        return Path(tempfile.mkdtemp(prefix="miller-test-", dir=root))
+        return Path(tempfile.mkdtemp(prefix="dot-test-", dir=root))
     tmp_path.chmod(0o700)
     return tmp_path
 
 
 @pytest.fixture
-def miller_private_dir(tmp_path):
-    """An owner-only parent directory plus a not-yet-created Miller state path inside it."""
+def dot_private_dir(tmp_path):
+    """An owner-only parent directory plus a not-yet-created Dot state path inside it."""
     import shutil
 
     base = _private_test_root(tmp_path)

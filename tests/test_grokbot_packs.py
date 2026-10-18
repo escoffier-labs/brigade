@@ -19,9 +19,9 @@ QUEUE_PACK_IDS = ("implementation-worker", "operator", "repository-scout")
 PACK_IDS = (
     "backup-steward",
     "cerebro-memory",
+    "dot",
     "fleet-steward",
     "implementation-worker",
-    "miller",
     "n8n-operator",
     "obsidian-operator",
     "operations-relay",
@@ -174,11 +174,11 @@ def test_registry_is_closed_deterministic_and_exact_key_validated():
             assert shown["tools"] == list(OPERATIONS_RELAY_TOOLS)
             assert shown["default_bind"] == "127.0.0.1:8777"
             assert shown["public_route"] == ""
-        elif pack["id"] == "miller":
-            from brigade import miller
+        elif pack["id"] == "dot":
+            from brigade import dot
 
             assert pack["kind"] == "connector"
-            assert set(shown["tools"]) == miller.TOOLS
+            assert set(shown["tools"]) == dot.TOOLS
             assert shown["default_bind"] == "127.0.0.1:8779"
             assert shown["public_route"] == ""
         elif pack["id"] == "t3-dispatch":
@@ -1832,15 +1832,15 @@ def test_t3_dispatch_setup_requires_runtime_path(tmp_path, monkeypatch):
 
 
 @pytest.fixture
-def miller_runtime(miller_private_dir):
-    from tests.test_miller_runtime import _document, _write_private
+def dot_runtime(dot_private_dir):
+    from tests.test_dot_runtime import _document, _write_private
 
-    runtime = miller_private_dir.parent / "runtime.json"
+    runtime = dot_private_dir.parent / "runtime.json"
     _write_private(runtime, json.dumps(_document()).encode())
     return runtime
 
 
-def test_miller_setup_has_runtime_without_bearer(tmp_path, miller_runtime, monkeypatch):
+def test_dot_setup_has_runtime_without_bearer(tmp_path, dot_runtime, monkeypatch):
     payloads = []
     validate = grokbot_packs._validate_instance_config
 
@@ -1849,18 +1849,18 @@ def test_miller_setup_has_runtime_without_bearer(tmp_path, miller_runtime, monke
         return validate(payload, pack_id)
 
     monkeypatch.setattr(grokbot_packs, "_validate_instance_config", capture)
-    grokbot_packs.preview_setup(tmp_path, "miller", runtime_path=miller_runtime)
-    assert payloads[-1]["runtime_path"] == str(miller_runtime)
+    grokbot_packs.preview_setup(tmp_path, "dot", runtime_path=dot_runtime)
+    assert payloads[-1]["runtime_path"] == str(dot_runtime)
     assert "bearer" not in payloads[-1]
-    assert not grokbot_packs.instance_config_path(tmp_path, "miller").exists()
-    grokbot_packs.apply_setup(tmp_path, "miller", runtime_path=miller_runtime)
-    config = grokbot_packs._load_instance_config(tmp_path, "miller")
+    assert not grokbot_packs.instance_config_path(tmp_path, "dot").exists()
+    grokbot_packs.apply_setup(tmp_path, "dot", runtime_path=dot_runtime)
+    config = grokbot_packs._load_instance_config(tmp_path, "dot")
     assert "bearer" not in config
-    assert config["runtime_path"] == str(miller_runtime)
+    assert config["runtime_path"] == str(dot_runtime)
     config["bearer"] = {"kind": "env", "name": "TEST_BEARER"}
-    grokbot_packs.instance_config_path(tmp_path, "miller").write_text(json.dumps(config))
+    grokbot_packs.instance_config_path(tmp_path, "dot").write_text(json.dumps(config))
     with _reject("unexpected-key"):
-        grokbot_packs._load_instance_config(tmp_path, "miller")
+        grokbot_packs._load_instance_config(tmp_path, "dot")
 
 
 @pytest.mark.parametrize(
@@ -1874,49 +1874,49 @@ def test_miller_setup_has_runtime_without_bearer(tmp_path, miller_runtime, monke
         {"owner_workspace": "/srv/example"},
     ],
 )
-def test_miller_setup_rejects_unexpected_fields(tmp_path, miller_runtime, kwargs):
+def test_dot_setup_rejects_unexpected_fields(tmp_path, dot_runtime, kwargs):
     with _reject("unexpected-key"):
-        grokbot_packs.preview_setup(tmp_path, "miller", runtime_path=miller_runtime, **kwargs)
+        grokbot_packs.preview_setup(tmp_path, "dot", runtime_path=dot_runtime, **kwargs)
 
 
-def test_miller_setup_validates_runtime(tmp_path):
+def test_dot_setup_validates_runtime(tmp_path):
     with _reject("missing-path-reference"):
-        grokbot_packs.preview_setup(tmp_path, "miller")
+        grokbot_packs.preview_setup(tmp_path, "dot")
     with _reject("unsafe-path"):
-        grokbot_packs.preview_setup(tmp_path, "miller", runtime_path="relative.json")
+        grokbot_packs.preview_setup(tmp_path, "dot", runtime_path="relative.json")
 
 
-def test_miller_lifecycle_delegates(tmp_path, monkeypatch):
-    from brigade import miller
+def test_dot_lifecycle_delegates(tmp_path, monkeypatch):
+    from brigade import dot
 
     calls = []
 
     def doctor(target):
         calls.append(("doctor", target))
-        return [{"check": "miller", "status": "ok"}]
+        return [{"check": "dot", "status": "ok"}]
 
     def canary(target):
         calls.append(("canary", target))
-        return {"ok": True, "pack_id": "miller"}
+        return {"ok": True, "pack_id": "dot"}
 
     def render(target, *, python):
         calls.append(("render", target, python))
-        return "miller unit"
+        return "dot unit"
 
     def write(target, out_dir, *, force):
         calls.append(("write", target, out_dir, force))
-        return out_dir / "brigade-miller.service"
+        return out_dir / "brigade-dot.service"
 
-    monkeypatch.setattr(miller, "doctor", doctor)
-    monkeypatch.setattr(miller, "canary", canary)
-    monkeypatch.setattr(miller, "render_unit", render)
-    monkeypatch.setattr(miller, "write_unit", write)
-    assert {"check": "miller", "status": "ok"} in grokbot_packs.doctor(tmp_path, "miller")
-    assert grokbot_packs.canary(tmp_path, "miller") == {"ok": True, "pack_id": "miller"}
-    assert grokbot_packs.render_install_service(tmp_path, "miller") == "miller unit"
+    monkeypatch.setattr(dot, "doctor", doctor)
+    monkeypatch.setattr(dot, "canary", canary)
+    monkeypatch.setattr(dot, "render_unit", render)
+    monkeypatch.setattr(dot, "write_unit", write)
+    assert {"check": "dot", "status": "ok"} in grokbot_packs.doctor(tmp_path, "dot")
+    assert grokbot_packs.canary(tmp_path, "dot") == {"ok": True, "pack_id": "dot"}
+    assert grokbot_packs.render_install_service(tmp_path, "dot") == "dot unit"
     assert (
-        grokbot_packs.apply_install_service(tmp_path, "miller", out_dir=tmp_path, force=True)["unit"]
-        == "brigade-miller.service"
+        grokbot_packs.apply_install_service(tmp_path, "dot", out_dir=tmp_path, force=True)["unit"]
+        == "brigade-dot.service"
     )
     import sys
 

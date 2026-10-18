@@ -13,7 +13,7 @@ This replaces the Builders' old execution path, where each job spawned a Grok Bo
 - Default seat is DeepSeek V4.1 Flash through OpenCode, with GLM 5.3 Flash second, and the Codex and Claude seats available on request (owner, 2026-10-16). It was the most-used model on OpenRouter for the week ending 2026-10-15 (37.1T tokens, first of all models), and its OpenCode free tier keeps no data.
 
 - Free-form dispatch, chosen by the owner on 2026-10-16. There is no queue job, no approval label, and no envelope. Any bot in the account can call the connector, because Grok Bot connectors are account-wide.
-- The pack builds on Brigade's Grok Bot connector-pack system (`grokbot_packs.py`, role-scoped listeners, bearer plus Cloudflare Access, `RequestGate`). The Miller dot bridge (`dot-t3-mcp`) is not reused or changed.
+- The pack builds on Brigade's Grok Bot connector-pack system (`grokbot_packs.py`, role-scoped listeners, bearer plus Cloudflare Access, `RequestGate`). The Dot dot bridge (`dot-t3-mcp`) is not reused or changed.
 - Execution goes through the local `t3-fleet` client only, following the `t3-fleet-dispatch` skill contract. The pack never talks to a T3 server, SSH, or a worktree directly.
 - Public hostname: `t3-dispatch.brigade.tools` on a new Cloudflare tunnel, `cloudflared-grokbot-t3`. All fleet endpoints stay under `brigade.tools` (owner decision 2026-10-16).
 - Merging stays with the Codex merge lanes. Dispatched threads open PRs but do not merge.
@@ -90,7 +90,7 @@ Do not merge. Stop and ask only for spending, new external accounts, publication
 - New remotely managed tunnel `grokbot-t3` in the `brigade.tools` account, token file `~/.config/grokbot-t3/cloudflare-tunnel.token`, unit `cloudflared-grokbot-t3.service` with `Wants=brigade-grokbot-t3-dispatch.service`. Ingress `t3-dispatch.brigade.tools -> http://127.0.0.1:8778`.
 - Cloudflare Access application on `t3-dispatch.brigade.tools` with a service-token policy and "Return 401 Response" set, so unauthenticated probes get 401 like the other edges.
 - Listener `--allow-host t3-dispatch.brigade.tools`, origin bearer in `~/.config/grokbot-t3/origin.bearer` (0600).
-- The existing `cloudflared-grokbot-dispatch` tunnel is not touched; it carries Miller's bridge.
+- The existing `cloudflared-grokbot-dispatch` tunnel is not touched; it carries Dot's bridge.
 
 ### 5. Grok Bot side
 
@@ -126,11 +126,11 @@ The owner accepted free-form dispatch: an outside bot writes prompts that run wi
 
 ## Later phases (combined plan)
 
-Phases 2 and 3 add Fleet Hub message tools to this pack (an `agent:grokbot` inbox that can message `agent:miller`) and let the watcher wake the Conductor on new hub messages. Phase 4 moves Miller's bridge into Brigade as a `miller` pack that imports `grokbot_t3.fleet`, so `fleet.py` must stay free of Grok-specific assumptions: no caller names, wake logic, or Grok Bot headers in that module.
+Phases 2 and 3 add Fleet Hub message tools to this pack (an `agent:grokbot` inbox that can message `agent:dot`) and let the watcher wake the Conductor on new hub messages. Phase 4 moves Dot's bridge into Brigade as a `dot` pack that imports `grokbot_t3.fleet`, so `fleet.py` must stay free of Grok-specific assumptions: no caller names, wake logic, or Grok Bot headers in that module.
 
 ## Out of scope
 
-- Changes to the Miller dot bridge or `cloudflared-grokbot-dispatch`.
+- Changes to the Dot dot bridge or `cloudflared-grokbot-dispatch`.
 - Fleet Hub enrollment of the controller (`fleet_enrolled` covers it when it lands).
 - The `t3-fleet` local queue and `tick` timer.
 - Merge automation and the Merge Shepherd bot.

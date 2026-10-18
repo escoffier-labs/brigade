@@ -660,20 +660,20 @@ def test_reply_idempotency_key_is_bound_to_original_message(message_hub):
 
 def test_named_external_principal_uses_its_own_revocable_identity(message_hub):
     base, token_a, _token_b, _db = message_hub
-    status, enrolled = _post_path(base, ADMIN, "/message-principals", {"action": "add", "name": "miller"})
+    status, enrolled = _post_path(base, ADMIN, "/message-principals", {"action": "add", "name": "dot"})
     assert status == 201
     principal = enrolled["principal"]
-    assert principal["principal_id"] == "agent:miller"
+    assert principal["principal_id"] == "agent:dot"
     token = principal["token"]
 
     sent = _request(
         base,
         token_a,
-        {"action": "send", "to": "agent:miller", "subject": "Task", "body": "Review this", "client_id": "task-1"},
+        {"action": "send", "to": "agent:dot", "subject": "Task", "body": "Review this", "client_id": "task-1"},
     )
     assert sent[0] == 201
     page = _get(base, ADMIN, "/view/machines")
-    assert 'data-node="agent:miller"' not in page
+    assert 'data-node="agent:dot"' not in page
     inbox = _request(base, token, {"action": "list", "unacked": True})
     assert inbox[0] == 200
     assert inbox[1]["messages"][0]["sender"] == NODE_A
@@ -695,7 +695,7 @@ def test_named_external_principal_uses_its_own_revocable_identity(message_hub):
         "/message-principals",
         {
             "action": "revoke",
-            "name": "miller",
+            "name": "dot",
             "expected_enrollment_id": principal["enrollment_id"],
         },
     )
@@ -705,7 +705,7 @@ def test_named_external_principal_uses_its_own_revocable_identity(message_hub):
         base,
         ADMIN,
         "/message-principals",
-        {"action": "add", "name": "miller", "expected_enrollment_id": principal["enrollment_id"]},
+        {"action": "add", "name": "dot", "expected_enrollment_id": principal["enrollment_id"]},
     )
     assert reissued[0] == 201
     new_token = reissued[1]["principal"]["token"]
@@ -2924,7 +2924,7 @@ def test_flush_discards_messages_older_than_retention(tmp_path, monkeypatch):
 def test_message_cli_registers_send_and_external_principal_commands():
     parser = cli._build_parser()
     send = parser.parse_args(["fleet", "msg", "send", "--to", NODE_B, "--subject", "Task", "--body-file", "body.txt"])
-    enroll = parser.parse_args(["fleet", "msg", "principals", "add", "miller"])
+    enroll = parser.parse_args(["fleet", "msg", "principals", "add", "dot"])
     assert send.func.__name__ == "_send"
     assert enroll.func.__name__ == "_principal_add"
 
