@@ -1845,6 +1845,8 @@ class TestDispatchWiring:
                     "holder": holder,
                     "conductor": "chef",
                     "ttl_seconds": fleet_client.DEFAULT_CLAIM_TTL_SECONDS,
+                    "hub_url": "http://127.0.0.1:9",
+                    "token": "irrelevant",
                 },
             )
         ]
@@ -2512,6 +2514,8 @@ class TestExitOrphanReleaseHardening:
 
     def test_exit_logs_when_orphan_cleanup_retries_are_exhausted(self, hub, monkeypatch, caplog):
         self._hub_env(hub, monkeypatch)
+        scheduled = []
+        monkeypatch.setattr(fleet_client, "_schedule_orphan_release", lambda *a, **kw: scheduled.append(kw))
         # Preserve the two real retry waits with a smaller request budget.
         monkeypatch.setattr(fleet_client, "CLAIM_TIMEOUT_SECONDS", 0.25)
         monkeypatch.setattr(fleet_client, "_claim_renew_interval", lambda ttl: 0.05)
@@ -2582,6 +2586,7 @@ class TestExitOrphanReleaseHardening:
         # Exit must attempt release, then exhaust both retries after the
         # abandoned acquire has committed, even though every reply is unavailable.
         assert release_attempts == [("repo-a", True)] * 3
+        assert len(scheduled) == 1, "exhausted inline cleanup must retain background cleanup"
         exhausted = [r for r in caplog.records if "could not confirm" in r.message]
         assert len(exhausted) == 1, "exit cleanup exhaustion was not logged exactly once"
         # The exhaustion WARNING must name the residual exposure: the row
