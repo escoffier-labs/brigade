@@ -1845,6 +1845,8 @@ class TestDispatchWiring:
                     "holder": holder,
                     "conductor": "chef",
                     "ttl_seconds": fleet_client.DEFAULT_CLAIM_TTL_SECONDS,
+                    "hub_url": "http://127.0.0.1:9",
+                    "token": "irrelevant",
                 },
             )
         ]

@@ -9,10 +9,96 @@ import time
 from types import SimpleNamespace
 from concurrent.futures import ThreadPoolExecutor
 from http.client import HTTPConnection
+from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import pytest
 
 from brigade import fleet_client, fleet_hub as hub
+
+
+@pytest.mark.parametrize("original_token", ["fake-original-token", ""])
+@pytest.mark.parametrize("switch_at", ["retry", "guarded-work"])
+def test_orphan_release_keeps_original_hub_and_credentials(monkeypatch, original_token, switch_at):
+    first_attempt = threading.Event()
+    resume = threading.Event()
+    retried = threading.Event()
+    requests = []
+    workers = []
+    real_thread = threading.Thread
+
+    class RecordingHandler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            if body["action"] == "acquire":
+                payload = b'{"granted": true}'
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(payload)))
+                self.end_headers()
+                self.wfile.write(payload)
+                return
+            requests.append((self.server.server_address, self.path, self.headers["Authorization"]))
+            first = len(requests) == 1
+            if first:
+                first_attempt.set()
+                assert resume.wait(5)
+            payload = json.dumps({"released": not first}).encode()
+            self.send_response(503 if first else 200)
+            self.send_header("Content-Length", str(len(payload)))
+            self.end_headers()
+            self.wfile.write(payload)
+            if not first:
+                retried.set()
+
+        def log_message(self, *args):
+            pass
+
+    def track_thread(**kwargs):
+        worker = real_thread(**kwargs)
+        if kwargs.get("name") == "brigade-fleet-claim-orphan-release":
+            workers.append(worker)
+        return worker
+
+    servers = [HTTPServer(("127.0.0.1", 0), RecordingHandler) for _ in range(2)]
+    serving = [real_thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}) for server in servers]
+    for worker in serving:
+        worker.start()
+    shim = SimpleNamespace(**{name: getattr(threading, name) for name in dir(threading)})
+    shim.Thread = track_thread
+    monkeypatch.setattr(fleet_client, "threading", shim)
+    monkeypatch.setattr(fleet_client, "ORPHAN_RELEASE_RETRY_SECONDS", 0.01)
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda base_path=None: "fake-node")
+    monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", f"http://127.0.0.1:{servers[0].server_port}")
+    monkeypatch.setenv("BRIGADE_FLEET_TOKEN", original_token)
+    try:
+
+        def switch_connection():
+            monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", f"http://127.0.0.1:{servers[1].server_port}")
+            monkeypatch.setenv("BRIGADE_FLEET_TOKEN", "fake-later-token")
+            resume.set()
+
+        if switch_at == "retry":
+            fleet_client._schedule_orphan_release(
+                "fake-target", node_id="fake-node", holder="fake-holder", conductor=None, ttl_seconds=2
+            )
+            assert first_attempt.wait(5)
+            switch_connection()
+        else:
+            with fleet_client.repo_claim("fake-target", ttl_seconds=60) as decision:
+                assert decision.granted
+                switch_connection()
+        assert retried.wait(5)
+        for worker in workers:
+            worker.join(5)
+            assert not worker.is_alive()
+        assert requests == [(servers[0].server_address, "/claims", f"Bearer {original_token}")] * 2
+    finally:
+        resume.set()
+        for worker in workers:
+            worker.join(5)
+        for server, worker in zip(servers, serving, strict=True):
+            server.shutdown()
+            server.server_close()
+            worker.join(5)
 
 
 @pytest.fixture()
@@ -1273,13 +1359,15 @@ def test_orphan_cleanup_retries_fence_refusal_until_success_or_deadline(monkeypa
             recovers and len(attempts) == 3, "ok" if recovers and len(attempts) == 3 else "claim-fence-refused"
         )
 
-    def sleep(seconds):
-        sleeps.append(seconds)
-        now[0] += seconds
+    class ClockEvent(threading.Event):
+        def wait(self, timeout=None):
+            sleeps.append(timeout)
+            now[0] += timeout
+            return self.is_set()
 
     monkeypatch.setattr(fleet_client.threading, "Thread", InlineThread)
+    monkeypatch.setattr(fleet_client.threading, "Event", ClockEvent)
     monkeypatch.setattr(fleet_client.time, "monotonic", lambda: now[0])
-    monkeypatch.setattr(fleet_client.time, "sleep", sleep)
     monkeypatch.setattr(fleet_client, "release_claim", release)
     monkeypatch.setattr(fleet_client, "ORPHAN_RELEASE_RETRY_SECONDS", 2)
     fleet_client._schedule_orphan_release(
@@ -1323,6 +1411,7 @@ def test_current_client_preserves_terminal_target_length_reason(http_authority, 
 
 @pytest.mark.parametrize("admission", ["normal", "ambiguous", "expired"])
 def test_exit_fence_refusal_schedules_cleanup_and_recovers(http_authority, monkeypatch, admission):
+    monkeypatch.setattr(fleet_client, "ORPHAN_RELEASE_RETRY_SECONDS", 0.01)
     conn, _, address = http_authority
     monkeypatch.setattr(
         fleet_client,

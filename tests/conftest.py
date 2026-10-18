@@ -2,6 +2,7 @@ import os
 import sys
 from pathlib import Path
 from tempfile import mkdtemp
+from time import monotonic
 
 import pytest
 
@@ -11,6 +12,24 @@ from tests.support import PRIVATE_DIRECTORY_MODE
 SRC = Path(__file__).resolve().parents[1] / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
+
+
+@pytest.fixture(autouse=True)
+def _drain_orphan_claim_releases(monkeypatch, request):
+    """Stop cleanup before test configuration and transport patches disappear."""
+    from brigade import fleet_claim_lifecycle, fleet_client
+
+    yield
+    with fleet_claim_lifecycle._ORPHAN_RELEASE_LOCK:
+        pending = list(fleet_claim_lifecycle._ORPHAN_RELEASES.items())
+    for _, stop in pending:
+        stop.set()
+    deadline = monotonic() + 2 * fleet_client.CLAIM_TIMEOUT_SECONDS + 1
+    for worker, _ in pending:
+        worker.join(max(0, deadline - monotonic()))
+    if pending:
+        request.node.user_properties.append(("orphan_release_threads_stopped", len(pending)))
+    assert not any(worker.is_alive() for worker, _ in pending), "orphan claim cleanup survived test teardown"
 
 
 @pytest.fixture(autouse=True)
