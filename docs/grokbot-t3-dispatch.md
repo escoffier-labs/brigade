@@ -187,3 +187,91 @@ systemctl --user stop brigade-grokbot-t3-dispatch.service cloudflared-grokbot-t3
 ## Security
 
 The owner accepted free-form dispatch: an outside bot writes prompts that run with `full-access` on owner machines. The controls are the repository, host, and seat allowlists; `max_open` and `daily_limit`; the kill switch; Access service token plus origin bearer; Host and Origin allowlisting; the ledger restricting steering to the pack's own requests; and a prompt hash audit trail. Prompts never reach logs, the ledger, wake bodies, or the Fleet Hub.
+
+## Issue intake
+
+The optional top-level `intake` object enables a one-shot pass that submits open
+GitHub issues carrying an approval label. Omitting it disables intake. All other
+runtime keys stay required, and unknown keys are rejected. For example, add this
+object to the runtime JSON:
+
+```json
+"intake": {
+  "label": "grokbot-build-approved",
+  "queued_label": "grokbot-build-queued",
+  "repositories": ["example-repo"],
+  "caller": "Builder",
+  "gh_bin": "/usr/bin/gh",
+  "max_per_pass": 1,
+  "headroom": 2
+}
+```
+
+Each listed repository must already appear in the runtime's `repositories` map
+with an HTTPS GitHub remote such as `https://github.com/example/example-repo.git`.
+Repository ids must be unique. Both labels must be different, begin with a
+letter or digit, contain only letters, digits, `.`, `_`, `:`, or `-`, and be at
+most 50 characters. `caller` follows the existing caller rules. `gh_bin` must
+be absolute. `max_per_pass` accepts 1 through 5, and `headroom` accepts 1 through
+`max_open - 1`. Intake and the listener run in separate processes, so their slot
+checks can race; a headroom of at least 1 keeps that race inside `max_open`.
+
+Run a pass or write its systemd user units:
+
+```bash
+python -m brigade.grokbot_t3 intake --target <queue-workspace>
+python -m brigade.grokbot_t3 install-intake --target <queue-workspace> --out-dir <unit-directory>
+systemctl --user daemon-reload
+systemctl --user enable --now brigade-grokbot-t3-intake.timer
+```
+
+Create both labels in each repository and authenticate `gh` as the service user
+with permission to list issues and edit their labels. The timer starts five
+minutes after boot and runs every fifteen minutes. Its oneshot service has a
+900-second timeout and the listener's filesystem hardening. Installation writes
+`brigade-grokbot-t3-intake.service` and `.timer`; use `--force` to replace changed
+units.
+
+Intake uses no Grok calls. It fetches labeled open issues oldest-first, up to 100 per repository,
+processes repositories in configured order and issues by ascending number, and
+submits at most `max_per_pass`. It checks headroom before each submit and stops
+the pass when fewer than `headroom + 1` open slots remain.
+The existing dispatch limits and default/fallback seat rules
+still apply. One `t3-seat:<seat>` label, read from the snapshot's current labels, selects an
+allowlisted seat. Multiple seat
+labels or an unknown seat produce `bad-seat-label` without submitting.
+
+The worker receives a snapshot of the title, body, and comments from owners,
+members, and collaborators written before the latest approval label event.
+Comments by others, added after approval, or edited after approval are dropped.
+Timestamps have one-second resolution, so a comment, body edit, or title rename
+stamped in the same second as the approval counts as after it.
+An issue whose body was edited or title renamed after approval is refused with `edited-after-approval`;
+re-apply the label to approve the new text. Missing approval events produce
+`approval-not-found`, and failed or malformed snapshots produce `snapshot-failed`.
+The snapshot rechecks that the issue is still open (`issue-closed`) and that the
+approval label is still on it (`approval-revoked` if it was removed after listing), and an issue with more than
+100 comments or more than 100 labels is refused with `too-many-comments` or
+`too-many-labels` rather than truncated. A pass starts new work only while the
+worst case for one more issue still fits before the unit timeout, and otherwise
+ends with reason `deadline`, so systemd never stops it partway through an issue.
+The worker follows the snapshot without fetching the issue or comments again,
+implements and tests the change, and opens a pull request without merging.
+Issue titles, bodies, and comments never enter intake's ledger or summary.
+The existing wake watcher reports the thread result to `caller`.
+
+After a successful submit, intake removes the approval label and adds the queued
+label. A failed label swap leaves a persistent claim, shown as `held` on later
+passes, to prevent another launch. An uncertain submit also retains its claim
+and stops the pass. Claims do not expire. Before clearing one, an operator must
+inspect the request and issue labels, then call `Ledger.release_intake` with its
+`<repository-id>#<number>` key. Clearing an unresolved claim can launch the same
+issue again. Definite submit errors release the claim; capacity, daily-limit,
+unavailable, disabled, and `no-eligible-host` errors stop the pass.
+
+The command prints a JSON summary with `reason`, `submitted`, `held`, and
+`errors`. GitHub failures report stable codes without command output. A failed
+label swap adds `"label_swap": "failed"` to the submitted record. Exit status is
+1 when `errors` is nonempty and 0 otherwise, including held claims and failed
+label swaps. Invalid configuration exits 2. Setting `enabled` to false also
+disables intake.

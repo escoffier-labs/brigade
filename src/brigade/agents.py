@@ -848,7 +848,7 @@ def _with_reasoning(cli_ref: str, argv: List[str], reasoning: str) -> List[str]:
 
 # agy lists Gemini models as effort-suffixed slugs (gemini-3.8-flash-low). The
 # published API id (gemini-3.8-flash) is recognized but requires --effort.
-_ANTIGRAVITY_GEMINI_BASE_RE = re.compile(r"^gemini-\d+(?:\.\d+)?-(?:flash|pro)$")
+_ANTIGRAVITY_GEMINI_BASE_RE = re.compile(r"^gemini-\d+(?:\.\d+)?-(?:flash|pro|argon)$")
 _ANTIGRAVITY_DEFAULT_EFFORT = "low"
 
 

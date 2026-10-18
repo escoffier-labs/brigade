@@ -1,4 +1,4 @@
-"""python -m brigade.grokbot_t3 watch|install-watch"""
+"""One-shot watcher and issue intake commands, with service/timer installation."""
 
 from __future__ import annotations
 
@@ -23,13 +23,24 @@ def main(argv: list[str] | None = None) -> int:
     install.add_argument("--target", type=Path, required=True)
     install.add_argument("--out-dir", type=Path, required=True)
     install.add_argument("--force", action="store_true")
+    intake = sub.add_parser("intake", help="Run one approval-label issue intake pass.")
+    intake.add_argument("--target", type=Path, required=True)
+    install_intake = sub.add_parser("install-intake", help="Write the intake service and timer units.")
+    install_intake.add_argument("--target", type=Path, required=True)
+    install_intake.add_argument("--out-dir", type=Path, required=True)
+    install_intake.add_argument("--force", action="store_true")
     args = parser.parse_args(argv)
     try:
         if args.command == "watch":
             summary = lifecycle.watch_once(args.target)
             print(json.dumps(summary, sort_keys=True))
             return 1 if summary["failed"] else 0
-        paths = lifecycle.write_watch_units(args.target, args.out_dir, force=args.force)
+        if args.command == "intake":
+            intake_summary = lifecycle.intake_once(args.target)
+            print(json.dumps(intake_summary, sort_keys=True))
+            return 1 if intake_summary["errors"] else 0
+        writer = lifecycle.write_intake_units if args.command == "install-intake" else lifecycle.write_watch_units
+        paths = writer(args.target, args.out_dir, force=args.force)
         print(json.dumps({"units": [path.name for path in paths]}))
         return 0
     except (T3DispatchError, grokbot_packs.PackError, grokbot_ops.ServiceRenderError, OSError):
