@@ -45,6 +45,7 @@ MiseLedger includes conservative native generators for local agent-session JSON 
 miseledger adapter codex <path-or-dir> --out <file|->
 miseledger adapter openclaw <path-or-dir> --out <file|->
 miseledger adapter claude <path-or-dir> --out <file|->
+miseledger adapter pi <path-or-dir> --out <file|->
 miseledger adapter hermes <path-or-dir> --out <file|->
 miseledger adapter opencode <path-or-dir> --out <file|->
 miseledger adapter cursor <path-or-dir> --out <file|->
@@ -57,6 +58,7 @@ They emit the same `miseledger.adapter.v1` JSONL contract as external tools. Nat
 miseledger import codex <path-or-dir> --json
 miseledger import openclaw <path-or-dir> --json
 miseledger import claude <path-or-dir> --json
+miseledger import pi <path-or-dir> --json
 miseledger import hermes <path-or-dir> --json
 miseledger import opencode <path-or-dir> --json
 miseledger import cursor <path-or-dir> --json
@@ -217,7 +219,7 @@ miseledger crawl chatgpt-export ~/Downloads/chatgpt-export.zip --json
 miseledger crawl claude-export ~/Downloads/claude-export.zip --json
 ```
 
-For local artifacts and git history:
+Local artifact and git-history commands below delegate to the external `sourceharvest` binary, which must be on `PATH`:
 
 ```bash
 miseledger crawl docs ./notes --json
@@ -242,7 +244,7 @@ miseledger crawl telegram --chat "MiseLedger" --json
 miseledger import adapter discrawl.adapter.jsonl --json
 ```
 
-The Discord, Slack, Granola, Notion, and Gmail wrappers consume adapter JSONL emitted by their crawler binaries. GitHub is a current-Gitcrawl compatibility route: MiseLedger calls `gitcrawl sync` and `gitcrawl threads --json`, then converts returned issue and pull-request rows locally. Telegram is also a compatibility route: MiseLedger calls `telecrawl --json messages` and converts the public message array to adapter records locally.
+The Discord, Slack, Granola, and Notion wrappers consume adapter JSONL from `export adapter`. Gmail uses `mailcrawl gmail export`. GitHub is a current-Gitcrawl compatibility route: MiseLedger calls `gitcrawl sync` and `gitcrawl threads --json`, then converts returned issue and pull-request rows locally. Telegram is also a compatibility route: MiseLedger calls `telecrawl --json messages` and converts the public message array to adapter records locally.
 
 The archived StationTrail and SourceHarvest repositories previously emitted this same adapter contract. Already-generated adapter JSONL files from those tools remain importable with `miseledger import adapter`.
 

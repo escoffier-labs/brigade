@@ -4729,9 +4729,9 @@ def test_child_writer_lock_then_task_ledger_lock_does_not_deadlock_or_fail(tmp_p
 
     With the inherited-lock inversion gone, the task-ledger lock is taken
     first by every legitimate caller, so holders never wait on inbox locks
-    and the former five-second wait/failure path is removed: a contended
-    acquisition fails closed immediately (typed ``RunLockError``, no spin),
-    and succeeds once the holder releases. The overlapping child therefore
+    and a contended scanner-child acquisition waits only until its bounded
+    deadline before failing closed with a typed ``RunLockError``. It succeeds
+    once the holder releases. The overlapping child therefore
     neither hangs nor breaks exclusion.
     """
     import os
@@ -4742,7 +4742,7 @@ def test_child_writer_lock_then_task_ledger_lock_does_not_deadlock_or_fail(tmp_p
     acquired = tmp_path / "child.writer.acquired.marker"
     parent_holding = tmp_path / "parent.task.held.marker"
     parent_released = tmp_path / "parent.task.released.marker"
-    fast_failed = tmp_path / "child.task.fastfailed.marker"
+    refused = tmp_path / "child.task.refused.marker"
     done = tmp_path / "child.task.done.marker"
     script = (
         "import sys, time\n"
@@ -4750,11 +4750,13 @@ def test_child_writer_lock_then_task_ledger_lock_does_not_deadlock_or_fail(tmp_p
         f"sys.path.insert(0, {str(src_root)!r})\n"
         "from brigade import runguard\n"
         "from brigade.work_cmd import inbox_lock, ledger\n"
+        # Scale the existing child-only deadline, keeping real lock contention.
+        "ledger.SCANNER_CHILD_TASK_LEDGER_LOCK_DEADLINE_SECONDS = 0.1\n"
         f"target = Path({str(tmp_path)!r})\n"
         f"acquired = Path({str(acquired)!r})\n"
         f"parent_holding = Path({str(parent_holding)!r})\n"
         f"parent_released = Path({str(parent_released)!r})\n"
-        f"fast_failed = Path({str(fast_failed)!r})\n"
+        f"refused = Path({str(refused)!r})\n"
         f"done = Path({str(done)!r})\n"
         "def wait_for(marker):\n"
         "    while not marker.exists():\n"
@@ -4766,7 +4768,7 @@ def test_child_writer_lock_then_task_ledger_lock_does_not_deadlock_or_fail(tmp_p
         "        with ledger._task_ledger_lock(target):\n"
         "            raise AssertionError('contended acquisition must fail')\n"
         "    except runguard.RunLockError:\n"
-        "        fast_failed.write_text('1')\n"
+        "        refused.write_text('1')\n"
         "    wait_for(parent_released)\n"
         "    with ledger._task_ledger_lock(target):\n"
         "        done.write_text('done')\n"
@@ -4784,7 +4786,7 @@ def test_child_writer_lock_then_task_ledger_lock_does_not_deadlock_or_fail(tmp_p
         with ledger_mod._task_ledger_lock(tmp_path):
             parent_holding.write_text("1")
             deadline = time.monotonic() + 10
-            while not fast_failed.exists():
+            while not refused.exists():
                 assert time.monotonic() < deadline, "child hung on the task lock instead of failing closed"
                 time.sleep(0.02)
             assert not done.exists(), "child took the task ledger lock while we held it"

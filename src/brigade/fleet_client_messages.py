@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
 import logging
 import os
 import re
@@ -135,9 +136,17 @@ def _settings(token_file: str | None = None) -> tuple[str, str, str]:
     return message_settings(token_file)
 
 
-def _online(body: dict[str, Any], *, token_file: str | None = None) -> dict[str, Any]:
+def _request_timeout(timeout: float | None) -> float | None:
+    if timeout is None:
+        return None
+    if isinstance(timeout, bool) or not isinstance(timeout, (int, float)) or not math.isfinite(timeout) or timeout <= 0:
+        raise fleet_client.FleetClientError("message request timeout must be a positive number of seconds")
+    return float(timeout)
+
+
+def _online(body: dict[str, Any], *, token_file: str | None = None, timeout: float | None = None) -> dict[str, Any]:
     hub, token, _node_id = _settings() if token_file is None else _settings(token_file)
-    status, payload = _request(hub, token, body)
+    status, payload = _request(hub, token, body, timeout=_request_timeout(timeout))
     if not 200 <= status < 300:
         raise FleetMessageHubError(
             str(payload.get("error") or f"fleet hub returned HTTP {status}"),
@@ -390,9 +399,11 @@ def send(
     return _send_ordered(message, hub, token, node_id)
 
 
-def list_messages(*, after: int = 0, unacked: bool = False, token_file: str | None = None) -> dict[str, Any]:
+def list_messages(
+    *, after: int = 0, unacked: bool = False, token_file: str | None = None, timeout: float | None = None
+) -> dict[str, Any]:
     _validate_sqlite_integer(after, "after cursor", allow_zero=True)
-    payload = _online({"action": "list", "after": after, "unacked": unacked}, token_file=token_file)
+    payload = _online({"action": "list", "after": after, "unacked": unacked}, token_file=token_file, timeout=timeout)
     return _validate_page(payload, after=after)
 
 
@@ -425,9 +436,9 @@ def _validate_page(payload: dict[str, Any], *, after: int) -> dict[str, Any]:
     return payload
 
 
-def ack(message_id: int, *, token_file: str | None = None) -> dict[str, Any]:
+def ack(message_id: int, *, token_file: str | None = None, timeout: float | None = None) -> dict[str, Any]:
     _validate_sqlite_integer(message_id, "message id")
-    payload = _online({"action": "ack", "id": message_id}, token_file=token_file)
+    payload = _online({"action": "ack", "id": message_id}, token_file=token_file, timeout=timeout)
     message = payload.get("message")
     response_id = message.get("id") if isinstance(message, dict) else None
     if isinstance(response_id, bool) or not isinstance(response_id, int) or response_id != message_id:

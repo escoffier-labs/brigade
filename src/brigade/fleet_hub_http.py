@@ -35,11 +35,13 @@ from . import fleet_hub_policy_api
 from . import fleet_hub_roster_page
 from . import fleet_hub_routing
 from . import fleet_hub_status
+from . import fleet_hub_event_bounds as request_bounds
+from .fleet_hub_claim_cardinality import ClaimCardinalityError
 from . import fleet_model_inventory
 from . import fleet_policy_page
 from . import fleet_repo_policy_page
 from . import fleet_work_page
-from .fleet_hub_claims import ClaimFenceError, ClaimTargetError
+from .fleet_hub_claims import ClaimFenceError, ClaimTargetError, status as claim_fencing_status
 from .worklore_validate import WorkloreValidationError
 from .fleet_hub import (
     DASHBOARD_COOKIE,
@@ -421,7 +423,7 @@ def make_handler(
                             raise enrollment.EnrollmentError()
                         return result
 
-                    raw = json.loads(body.decode("utf-8"), object_pairs_hook=unique)
+                    raw = request_bounds.bounded_json_loads(body, object_pairs_hook=unique)
                     if not isinstance(raw, dict):
                         raise enrollment.EnrollmentError()
                     if path == "/dashboard/enrollment":
@@ -492,22 +494,13 @@ def make_handler(
             return None
 
         def _read_worklore_body(self, path: str) -> dict[str, Any] | None:
-            try:
-                length = int(self.headers.get("Content-Length", "0"))
-            except ValueError:
-                self._send_json(400, {"error": "bad Content-Length"})
-                return None
-            limit = 1048576 if path == "/work/imports" else 262144
-            if self.command == "DELETE" and length == 0:
-                return {}
-            if length <= 0 or length > limit:
-                self._send_json(400, {"error": "missing or oversized body"})
-                return None
-            raw = self.rfile.read(length)
-            try:
-                parsed = json.loads(raw.decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError):
-                self._send_json(400, {"error": "body is not valid JSON"})
+            limit = (
+                request_bounds.WORKLORE_IMPORT_BODY_BYTES
+                if path == "/work/imports"
+                else request_bounds.WORKLORE_BODY_BYTES
+            )
+            parsed = self._read_json_body(limit, empty_delete=self.command == "DELETE")
+            if parsed is None:
                 return None
             if not isinstance(parsed, dict):
                 self._send_json(400, {"error": "body is not valid JSON"})
@@ -558,6 +551,14 @@ def make_handler(
                 conn.close()
             self._send_json(status, payload)
             return True
+
+        def _read_json_body(self, limit: int = MAX_BODY_BYTES, *, empty_delete: bool = False) -> Any:
+            try:
+                return request_bounds.read_json_body(self, limit=limit, empty_delete=empty_delete)
+            except request_bounds.RequestBoundsError as exc:
+                self.close_connection = True
+                self._send_json(exc.status, {"error": str(exc)})
+                return None
 
         def _send_json(self, status: int, payload: dict[str, Any]) -> None:
             body = json.dumps(payload).encode("utf-8")
@@ -737,7 +738,7 @@ def make_handler(
                     else ({}, False)
                 )
             except ClaimFenceError as exc:
-                self._send_json(503, {"error": str(exc)})
+                self._send_json(503, {"error": str(exc), "reason": exc.reason, "owner": {}})
                 return
             except sqlite3.Error as exc:
                 self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
@@ -979,7 +980,7 @@ def make_handler(
                         policy_error = f"the policy authority could not be read ({type(exc).__name__})"
                 control_plane = control_plane_from_hub(conn)
             except ClaimFenceError as exc:
-                self._send_json(503, {"error": str(exc)})
+                self._send_json(503, {"error": str(exc), "reason": exc.reason, "owner": {}})
                 return
             except sqlite3.Error as exc:
                 self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
@@ -1489,11 +1490,12 @@ def make_handler(
                         payload = {"nodes": list_nodes(conn)}
                     elif path == "/status":
                         payload = {
+                            "claim_fencing": claim_fencing_status(conn),
                             "runs": latest_status(
                                 conn,
                                 include_all=include_all,
                                 stale_history_after_seconds=frozen_deck.stale_history_after_seconds,
-                            )
+                            ),
                         }
                     elif path == "/cloud":
                         if parse_qs(query).get("view", [""])[0] == "capabilities":
@@ -1537,7 +1539,7 @@ def make_handler(
                     else:
                         payload = {"claims": fleet_claim_display.list_display_claims(conn, include_all=include_all)}
                 except ClaimFenceError as exc:
-                    self._send_json(503, {"error": str(exc)})
+                    self._send_json(503, {"error": str(exc), "reason": exc.reason, "owner": {}})
                     return
                 except sqlite3.Error as exc:
                     self._send_json(500, {"error": f"hub database error: {exc}"})
@@ -1574,19 +1576,8 @@ def make_handler(
                 if not is_admin:
                     self._send_json(403, {"error": "the admin token is required to set run preference"})
                     return
-                try:
-                    length = int(self.headers.get("Content-Length", "0"))
-                except ValueError:
-                    self._send_json(400, {"error": "bad Content-Length"})
-                    return
-                if length <= 0 or length > MAX_BODY_BYTES:
-                    self._send_json(400, {"error": "missing or oversized body"})
-                    return
-                raw = self.rfile.read(length)
-                try:
-                    parsed = json.loads(raw.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError):
-                    self._send_json(400, {"error": "body is not valid JSON"})
+                parsed = self._read_json_body(MAX_BODY_BYTES)
+                if parsed is None:
                     return
                 body = parsed.get("preference") if isinstance(parsed, dict) and "preference" in parsed else parsed
                 stored = set_run_preference(conn, body, updated_by="admin")
@@ -1694,19 +1685,8 @@ def make_handler(
                         },
                     )
                     return
-                try:
-                    length = int(self.headers.get("Content-Length", "0"))
-                except ValueError:
-                    self._send_json(400, {"error": "bad Content-Length"})
-                    return
-                if length <= 0 or length > MAX_BODY_BYTES:
-                    self._send_json(400, {"error": "missing or oversized body"})
-                    return
-                raw = self.rfile.read(length)
-                try:
-                    parsed = json.loads(raw.decode("utf-8"))
-                except (UnicodeDecodeError, json.JSONDecodeError):
-                    self._send_json(400, {"error": "body is not valid JSON"})
+                parsed = self._read_json_body(MAX_BODY_BYTES)
+                if parsed is None:
                     return
                 if path == "/events":
                     status, body_payload = 200, dict(store_events(conn, parsed, caller_node=caller_node))
@@ -1794,11 +1774,14 @@ def make_handler(
             except FleetHubUnsupportedSchema:
                 self._send_json(503, {"error": FleetHubUnsupportedSchema.public_message})
                 return
+            except ClaimCardinalityError as exc:
+                self._send_json(409, exc.payload())
+                return
             except ClaimTargetError as exc:
-                self._send_json(422, exc.payload())
+                self._send_json(exc.status, exc.payload())
                 return
             except ClaimFenceError as exc:
-                self._send_json(503, {"error": str(exc)})
+                self._send_json(409, {"error": str(exc), "reason": exc.reason, "owner": {}})
                 return
             except fleet_hub_policy_api.FleetPolicyApiError as exc:
                 self._send_json(exc.status, exc.payload())

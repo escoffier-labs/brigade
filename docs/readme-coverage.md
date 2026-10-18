@@ -16,7 +16,7 @@ The root README is a short landing page. Every topic that left the previous READ
 | Shell install (`pipx`, `uv tool`, `brigade setup`, quickstart) | [QUICKSTART.md](../QUICKSTART.md), [first 10 minutes](first-10-minutes.md) |
 | User-scope Claude Code work hooks | [agents guide](agents-guide.md#claude-code-user-scope-work-hooks), [agent-assisted setup](agent-assisted-setup.md#claude-code-user-scope-work-hooks) |
 | Update channels (stable vs beta) | [update channels](update-channels.md) |
-| Anonymous once-daily update check and `BRIGADE_NO_UPDATE_CHECK=1` | [update channels](update-channels.md) |
+| Best-effort update check and `BRIGADE_NO_UPDATE_CHECK=1` | [update channels](update-channels.md) |
 | Operator doctor profile, `ready: yes`, and default local footprint | [first 10 minutes](first-10-minutes.md), [new-user quickstart](new-user-quickstart.md), [agents guide](agents-guide.md) |
 | Homegrown setup adoption with `brigade operator adopt plan` | [agent-assisted setup](agent-assisted-setup.md#adapting-a-homegrown-setup), [technical guide](technical-guide.md) |
 | Contributor first-PR path and local checks | [CONTRIBUTING.md](../CONTRIBUTING.md#your-first-pr) |

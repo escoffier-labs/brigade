@@ -1,5 +1,7 @@
 # Fleet Model Roster Authority Implementation Plan
 
+Status (2026-10-17): shipped in #1332 (24ef87303).
+
 Goal: make Fleet Hub the versioned model authority used by `brigade run` and
 the pending `t3-fleet` guard, with exact provider/model/reasoning resolution,
 permanent retired-family denial, node-bound LKG validation, and pre-mutation

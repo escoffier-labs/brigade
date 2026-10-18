@@ -1,5 +1,7 @@
 # Explicit Station Status Plan
 
+Status (2026-10-17): shipped in #233 (1e407ca2a).
+
 Goal: replace top-level `empty` and `issues` states with the approved six-state vocabulary while keeping summary probes read-only and bounded.
 
 Architecture: `status.py` projects existing station payloads into one public vocabulary. Built-in stations still use their existing doctor checks. Optional sidecar stations use their existing status payloads, except MiseLedger summary mode skips doctor and uses only bounded `status --json`. The detailed station commands keep their current payload vocabulary for compatibility.

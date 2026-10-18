@@ -810,7 +810,7 @@ def _check_claude_work_loop(target: Path) -> CheckResult | None:
     payload = classify(target)
     if payload is None:
         return None
-    status = OK if payload["state"] == "enforced" else WARN
+    status = FAIL if payload["state"] == "error" else OK if payload["state"] == "enforced" else WARN
     detail = str(payload["detail"])
     hooks = payload.get("hooks") or {}
     hook_error = hooks.get("error")

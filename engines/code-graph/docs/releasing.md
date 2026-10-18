@@ -1,28 +1,17 @@
 # Releasing GraphTrail
 
-GraphTrail publishes an existing Git tag through `.github/workflows/publish.yml`. The workflow is manual, runs in the `release` environment, packages the exact tagged source before requesting credentials, and uses crates.io Trusted Publishing for a short-lived token. Ordinary pull-request CI never receives publication credentials.
+GraphTrail ships as an engine in Brigade's unified release. The root `.github/workflows/publish.yml` builds `graphtrail` and `graphtrail-mcp` from `engines/code-graph`, includes them in the release assets and verified engine manifest, and publishes the Brigade package. The nested workflow in this engine directory is a historical standalone workflow and does not run as a Brigade workflow.
 
 ## One-time setup
 
-1. Create a protected GitHub environment named `release` and limit deployments to the default branch.
-2. In the `graphtrail` crate settings on crates.io, add a GitHub Trusted Publishing configuration for owner `escoffier-labs`, repository `graphtrail`, workflow `publish.yml`, and environment `release`.
-3. Keep the workflow filename and environment aligned with that crates.io configuration. No long-lived registry token is needed.
+Use Brigade's root release configuration. The standalone GraphTrail repository is archived, and crates.io is frozen at 0.4.0 with no further releases, per the [compatibility policy](../../../docs/phase-4a-compatibility-and-archive.md#graphtrail-cratesio-policy).
 
 ## Publish a tag
 
-Before creating a tag, set the package version in `Cargo.toml`, add the matching `CHANGELOG.md` section, run the full repository gate, and merge the release commit. Create the version tag on that exact commit, then dispatch the workflow from the default branch:
-
-```bash
-gh workflow run publish.yml --ref master -f tag=vX.Y.Z
-```
-
-The workflow refuses a tag that disagrees with the manifest or changelog, refuses a checkout not pointed to by that tag, runs `cargo package --locked`, publishes, and polls crates.io until the exact version is visible. For the existing v0.3.0 GitHub release, dispatch `tag=v0.3.0`; the workflow packages the tagged commit rather than current `master`.
+Run the root full verification gate and required CI, keep Brigade version fields synchronized, and tag the approved release commit as `vX.Y.Z`. The root [publish workflow](../../../.github/workflows/publish.yml) starts on exact stable tags and validates the version fields before building the engines. Use the [release-readiness guide](../../../docs/release-readiness.md) for the local evidence gate. Do not dispatch the archived repository's standalone crates.io publisher.
 
 ## Recovery after a partial release
 
-If package publication fails after the tag or GitHub release exists, do not move or recreate the tag. Released source identity is immutable.
+Inspect the root publish workflow's failed job and release assets before rerunning it. Do not move or recreate an existing release tag or reuse a version for different source.
 
-- If the exact version is absent from crates.io, correct the environment or Trusted Publishing configuration and rerun the workflow with the same tag.
-- If the exact version is present on crates.io, do not publish again. Confirm the registry response and treat the failed verification step as recovered.
-
-Never reuse a version for different source. If tagged source itself is wrong, leave the tag and release as historical records, fix forward with a new patch version, and document the superseding release.
+The archived standalone workflow used crates.io Trusted Publishing. For an existing standalone release, do not move or recreate the tag. If the exact version is absent from crates.io, that standalone publication did not complete. If the exact version is present, do not publish it again. These historical rules do not authorize a new standalone release.

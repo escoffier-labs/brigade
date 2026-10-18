@@ -63,6 +63,7 @@ UNSUPPORTED_HARNESSES = frozenset(
 
 MAX_PAYLOAD_BYTES = 256 * 1024  # 256 KiB
 MAX_STDOUT_BYTES = 64 * 1024  # 64 KiB accepted inventory output after proc's 1 MiB capture cap
+# Must fit fleet_hub_event_bounds.MAX_JSON_CONTAINER_ITEMS on ingestion.
 MAX_MODELS_COUNT = 1000
 MAX_STRING_LENGTH = 1024
 MAX_JSON_DEPTH = 8

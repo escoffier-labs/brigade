@@ -106,7 +106,7 @@ def _message_options(parser: argparse.ArgumentParser, *, metadata: bool = False)
         parser.add_argument("--client-id", help="Stable idempotency key for retries.")
 
 
-def _token_kwargs(args: argparse.Namespace) -> dict[str, str]:
+def _token_kwargs(args: argparse.Namespace) -> dict[str, Any]:
     return {"token_file": args.token_file} if args.token_file is not None else {}
 
 

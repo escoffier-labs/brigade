@@ -1,5 +1,7 @@
 # Fleet work ownership read view
 
+Status (2026-10-17): shipped in #1613 (7015e9fd6).
+
 Refs #1595. This first slice adds `brigade fleet work ownership show <id>`
 with optional `--json`, composing the existing Worklore item and ownership
 GET projections. It introduces no new authority or persistence.

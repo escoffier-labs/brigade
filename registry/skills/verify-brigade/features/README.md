@@ -25,7 +25,7 @@ copy agents should cite.
 |---|---|---|
 | run | `brigade run` | `tests/test_run_cli.py`, `tests/test_run_lifecycle.py`, `tests/test_run_events.py`, `tests/test_run_control.py`, `tests/test_run_resume.py`, `tests/test_run_receipts.py` |
 | work verify | `brigade work verify` | `tests/test_work_cmd_verification.py`, `tests/test_work_cmd_verify_ranking.py`, `tests/test_verify_trial.py`, `tests/test_verification_contract.py`, `tests/test_verify_brigade_skill.py` |
-| fleet | `brigade fleet` | `tests/test_fleet_*.py` (14 files; start with `tests/test_fleet_claims.py`, `tests/test_fleet_nodes.py`, `tests/test_fleet_sync.py`) |
+| fleet | `brigade fleet` | `tests/test_fleet_*.py` (58 files; start with `tests/test_fleet_claims.py`, `tests/test_fleet_nodes.py`, `tests/test_fleet_sync.py`) |
 | grokbot listener | `brigade run cloud grokbot` | `tests/test_grokbot_ops.py`, `tests/test_grokbot_jobs.py`, `tests/test_grokbot_mcp.py`, `tests/test_grokbot_feed.py`, `tests/test_grokbot_packs.py` |
 | guard | `brigade guard` / `brigade scrub` | `tests/guard/test_cli.py`, `tests/guard/test_engine.py`, `tests/guard/test_rules.py`, `tests/test_scrub.py`, `tests/test_runguard.py` |
 

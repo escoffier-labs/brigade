@@ -5,6 +5,7 @@
 ## Commands
 
 ```bash
+brigade extras on
 brigade release plan
 brigade release doctor
 brigade release run

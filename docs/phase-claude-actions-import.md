@@ -1,5 +1,7 @@
 # Bounded Actions read importer, issue #1602
 
+Status (2026-10-17): bounded read importer shipped in #1626 (da3d4db6d). Broader Actions integration remains outside this slice.
+
 This slice adds a pure reader in `src/brigade/claude_actions_import.py`,
 owner-boundary regressions in `tests/test_claude_actions_import.py`, and this
 acceptance record. Issue #1602 remains open.

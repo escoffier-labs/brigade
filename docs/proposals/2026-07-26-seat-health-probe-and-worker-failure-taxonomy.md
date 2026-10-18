@@ -1,6 +1,6 @@
 # Proposal: seat health probes and typed worker failures
 
-Status: proposed for issue #474. Planning only, no implementation.
+Status (2026-10-17): shipped across #589, #590, #685, #688, #791, and #827 (fc5b641dd), which closed #474.
 
 ## Decision summary
 

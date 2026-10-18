@@ -80,11 +80,11 @@ For the short operational checklist, see [OpenClaw Memory Ingest Checklist](open
 
 `brigade handoff show <handoff-id-or-path>` prints the same detail for one draft. `brigade handoff archive <handoff-id-or-path>` moves one draft into `.brigade/handoffs/archive/` and appends a closeout record under `.brigade/handoffs/archive.jsonl`. `brigade handoff archive --all-reviewed` archives lint-valid drafts only, leaving invalid drafts in place for repair.
 
-The draft queue is review visibility only. Brigade does not run the canonical ingestor, route the draft into canonical memory, edit `MEMORY.md`, or mutate memory cards.
+The draft queue is review visibility only. These queue commands do not run the canonical ingestor, route drafts into canonical memory, edit `MEMORY.md`, or mutate memory cards. Separately, explicit `brigade ingest --promote-cards --route-documents` can file handoffs into the target's canonical stores when Brigade is the chosen ingestor.
 
 ## Ingestion Receipt Visibility
 
-Canonical memory ingestion stays outside Brigade, but Brigade can read local receipt summaries that the ingestor or wrapper leaves behind under `.brigade/handoffs/ingest-runs/`. A receipt records the run id, timestamps, source root, inbox paths, processed handoff paths, promoted card targets, routed document targets, skipped paths, failed paths, warning count, safe summary, and local log path.
+When an external memory owner performs ingestion, Brigade can read local receipt summaries that the ingestor or wrapper leaves behind under `.brigade/handoffs/ingest-runs/`. A receipt records the run id, timestamps, source root, inbox paths, processed handoff paths, promoted card targets, routed document targets, skipped paths, failed paths, warning count, safe summary, and local log path.
 
 `brigade handoff runs` lists those receipts. `brigade handoff run-show <run-id>` shows the full normalized receipt and outcome summary. `brigade handoff list` and `brigade handoff show` include the latest known ingestion status for each draft when a receipt references it.
 
@@ -96,4 +96,4 @@ Normalized receipts preserve warning events, malformed handoff paths, unreachabl
 
 Source coverage issues for uncovered writer inboxes include stable source keys and fingerprints. If an operator dismisses an unchanged uncovered-inbox import, Brigade does not recreate it; when the pending inbox coverage state changes, the source fingerprint changes and the repair import can resurface.
 
-This is observability only. Brigade does not run the ingestor, edit canonical memory, promote cards, route documents, or summarize draft content.
+This receipt surface is observability only. It does not run the ingestor, edit canonical memory, promote cards, route documents, or summarize draft content.

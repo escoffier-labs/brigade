@@ -66,12 +66,13 @@ def test_session_state_helpers_resolve_runtime_primitives_at_call_time(tmp_path:
 def test_lock_gap_does_not_leak_process_lock(tmp_path: Path, monkeypatch) -> None:
     from brigade.claude_hooks import session_state
 
-    @contextlib.contextmanager
     def failing_file_lock(*_args, **_kwargs):
         raise RuntimeError("file lock entry failed")
-        yield
 
-    monkeypatch.setattr(inbox_lock, "held_file_lock", failing_file_lock)
+    from brigade import dirfd
+
+    opener = "open_child_lock_file" if os.name == "nt" else "open_child_file"
+    monkeypatch.setattr(dirfd, opener, failing_file_lock)
 
     with pytest.raises(RuntimeError, match="file lock entry failed"):
         with session_state._session_state_lock(tmp_path, "s"):
@@ -79,6 +80,34 @@ def test_lock_gap_does_not_leak_process_lock(tmp_path: Path, monkeypatch) -> Non
 
     state_path = runtime._state_path(tmp_path.expanduser().resolve(), "s")
     assert session_state._session_state_process_lock(state_path).locked() is False
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX open-file-description lock lifetime")
+def test_session_lock_unlocks_before_closing_even_with_duplicate(tmp_path: Path) -> None:
+    from brigade.claude_hooks import anchored_io
+
+    with anchored_io.session_directory(tmp_path, create=True) as anchor:
+        with anchor.held_lock("state.lock", deadline_seconds=1):
+            assert anchor.lock is not None
+            duplicate = os.dup(anchor.lock[1])
+        try:
+            with anchor.held_lock("state.lock", deadline_seconds=0.05):
+                pass
+        finally:
+            os.close(duplicate)
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory mode contract")
+def test_session_directory_keeps_shared_ancestor_modes(tmp_path: Path) -> None:
+    previous = os.umask(0o022)
+    try:
+        runtime.write_session_state(tmp_path, "s", {})
+    finally:
+        os.umask(previous)
+    parent = tmp_path
+    for name in (".brigade", "work", "claude-hooks", "sessions"):
+        parent /= name
+        assert parent.stat().st_mode & 0o777 == (0o700 if name == "sessions" else 0o755)
 
 
 def test_persistent_lock_timeout_still_latches(tmp_path: Path, monkeypatch) -> None:
@@ -178,7 +207,7 @@ def test_clear_consumes_journal_without_truncating(tmp_path: Path) -> None:
 
 
 def test_journal_refuses_hardlink_and_caps_growth(tmp_path: Path) -> None:
-    from brigade.claude_hooks import session_state
+    from brigade.claude_hooks import anchored_io, session_state
 
     target = _wired_claude(tmp_path)
     assert session_state._append_timeout_marker(target, "hardlink") == 1
@@ -190,8 +219,10 @@ def test_journal_refuses_hardlink_and_caps_growth(tmp_path: Path) -> None:
         if os.name != "nt":
             raise
     else:
-        assert session_state._journal_timeout_count(target, "hardlink") == 0
-        assert session_state._append_timeout_marker(target, "hardlink") == 0
+        with pytest.raises(anchored_io.SessionIntegrityError):
+            session_state._journal_timeout_count(target, "hardlink")
+        with pytest.raises(anchored_io.SessionIntegrityError):
+            session_state._append_timeout_marker(target, "hardlink")
 
     for _ in range(session_state._TIMEOUT_JOURNAL_MAX_LINES + 5):
         session_state._append_timeout_marker(target, "capped")
@@ -215,8 +246,8 @@ def test_journal_read_is_bounded_and_append_stops_at_byte_cap(tmp_path: Path) ->
 
 
 @pytest.mark.skipif(os.name == "nt", reason="POSIX symlink semantics required")
-def test_journal_refuses_symlink_after_open_identity_check(tmp_path: Path, monkeypatch) -> None:
-    from brigade.claude_hooks import session_state
+def test_journal_refuses_unavailable_nofollow_backend(tmp_path: Path, monkeypatch) -> None:
+    from brigade.claude_hooks import anchored_io, session_state
 
     target = _wired_claude(tmp_path)
     journal = session_state._journal_path(target, "symlink")
@@ -225,12 +256,37 @@ def test_journal_refuses_symlink_after_open_identity_check(tmp_path: Path, monke
     outside.write_bytes(b"outside\n")
     journal.symlink_to(outside)
     monkeypatch.setattr(os, "O_NOFOLLOW", 0, raising=False)
-    # Simulate the path swap after the pre-open refusal check.
-    monkeypatch.setattr(session_state, "_journal_path_is_safe_without_nofollow", lambda _path: True)
-
-    assert session_state._journal_timeout_count(target, "symlink") == 0
-    assert session_state._append_timeout_marker(target, "symlink") == 0
+    with pytest.raises(OSError, match="unavailable") as caught:
+        session_state._journal_timeout_count(target, "symlink")
+    assert not isinstance(caught.value, anchored_io.SessionIntegrityError)
+    with pytest.raises(OSError, match="unavailable") as caught:
+        session_state._append_timeout_marker(target, "symlink")
+    assert not isinstance(caught.value, anchored_io.SessionIntegrityError)
     assert outside.read_bytes() == b"outside\n"
+
+
+def test_timeout_followup_integrity_refusal_blocks_without_rebuilding(tmp_path: Path, monkeypatch, capsys) -> None:
+    from brigade.claude_hooks import session_state
+
+    target = _wired_claude(tmp_path)
+    runtime.write_session_state(target, "s", {"write_observed": True})
+    before = runtime._state_path(target, "s").read_bytes()
+    journal = session_state._journal_path(target, "s")
+    journal.mkdir()
+
+    def timed_out(*_args, **_kwargs):
+        raise runtime.HookDegraded("hook operation timed out", log_target=target)
+
+    monkeypatch.setattr(runtime, "_run_timed_handle_payload", timed_out)
+    capsys.readouterr()
+    assert (
+        runtime.hook_run(
+            event="Stop", package=PACKAGE_REF, stdin_text=json.dumps(_payload(target, "Stop", session_id="s"))
+        )
+        == 0
+    )
+    assert json.loads(capsys.readouterr().out)["decision"] == "block"
+    assert runtime._state_path(target, "s").read_bytes() == before
 
 
 def test_clear_after_journal_latch_keeps_latch(tmp_path: Path) -> None:

@@ -13,10 +13,10 @@ pipx install brigade-cli --verbose
 brigade --version
 ```
 
-If `brigade --version` is not available after install, also include your OS and shell. Expected current version is:
+If `brigade --version` is not available after install, also include your OS and shell. Compare the installed version with the latest stable release on PyPI. The output has this form:
 
 ```text
-brigade 0.8.1
+brigade X.Y.Z
 ```
 
 ## Quickstart Warned Or Failed
@@ -29,7 +29,7 @@ brigade operator doctor --target . --profile local-operator --json
 brigade handoff doctor --target . --json
 ```
 
-If you selected a different harness list, use that same `--harnesses` value in the rerun. Quickstart should only watch the writer harnesses you selected, so missing unwired side-harness folders should not warn on `0.8.1`.
+If you selected a different harness list, use that same `--harnesses` value in the rerun. Quickstart should only watch the writer harnesses you selected, so missing unwired side-harness folders should not warn.
 
 ## Doctor Not Ready
 
