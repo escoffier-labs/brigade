@@ -1683,7 +1683,7 @@ def test_v31_to_v32_preserves_event_history(tmp_path):
     conn.close()
     conn = fleet_hub.init_db(db)
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 32
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
         assert "context" in {row[1] for row in conn.execute("PRAGMA table_info(events)")}
         row = fleet_hub.latest_status(conn, include_all=True)[0]
         assert (row["run_id"], row["digest"], row["state"], row["context"]) == (

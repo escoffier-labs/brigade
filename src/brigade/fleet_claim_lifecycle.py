@@ -8,10 +8,17 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from types import ModuleType
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     import threading
+
+
+CLAIM_FENCE_REFUSALS = ("claim-fence-refused", "claim-target-too-long")
+STALE_CLAIM_REFUSALS = ("stale-holder", "stale-generation")
+TERMINAL_CLAIM_REFUSALS = STALE_CLAIM_REFUSALS + CLAIM_FENCE_REFUSALS
+CLEANUP_RETRY_REASONS = ("hub-unavailable", "claim-fence-refused")
+UNCERTAIN_CLEANUP_REASONS = CLEANUP_RETRY_REASONS + ("missing",)
 
 
 def _client() -> ModuleType:
@@ -19,6 +26,22 @@ def _client() -> ModuleType:
     from . import fleet_client
 
     return fleet_client
+
+
+def _force_release(target: str, *, holder: str | None, acquired_at: str | None, **kwargs: Any) -> Any:
+    """Fence operator force to inspection, retaining old-hub compatibility."""
+    inspected = _client().inspect_claim(target, **kwargs)
+    if not inspected.granted:
+        return inspected
+    return _client()._claim_op(
+        "release",
+        target,
+        holder=holder,
+        scope="force",
+        acquired_at=acquired_at,
+        generation=inspected.generation if inspected.generation is not None else 0,
+        **kwargs,
+    )
 
 
 class _ConfirmedClaimLease:
@@ -193,7 +216,7 @@ def _schedule_orphan_release(
         deadline = started + ttl_seconds
         while _client().time.monotonic() < deadline:
             outcome = _client().release_claim(target, node_id=node_id, holder=holder, conductor=conductor)
-            if outcome.reason == "hub-unavailable":
+            if outcome.reason in CLEANUP_RETRY_REASONS:
                 _client().time.sleep(
                     min(_client().ORPHAN_RELEASE_RETRY_SECONDS, max(0.0, deadline - _client().time.monotonic()))
                 )
