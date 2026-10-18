@@ -1671,9 +1671,13 @@ def snapshot(conn: sqlite3.Connection) -> dict[str, Any]:
         else:
             last_observed_at = telemetry.get("observed_at")
             load = telemetry.get("load")
-            ttl = int(document.get("routing", {}).get("telemetry_ttl_seconds") or 300)
+            # Same freshness rule as _candidate: the shorter of the policy and reporter TTLs.
+            ttl = int(
+                document.get("routing", {}).get("telemetry_ttl_seconds") or fleet_policy.DEFAULT_TELEMETRY_TTL_SECONDS
+            )
+            ttl = min(ttl, int(telemetry.get("ttl_seconds") or ttl))
             observed_at = _parse_stamp(last_observed_at)
-            stale = observed_at is None or (now - observed_at).total_seconds() > ttl
+            stale = observed_at is None or (now - observed_at).total_seconds() >= ttl
             if stale:
                 state = "unknown"
                 unused_reason = "stale-telemetry"
@@ -1682,10 +1686,17 @@ def snapshot(conn: sqlite3.Connection) -> dict[str, Any]:
                 if state == "unknown":
                     unused_reason = "unknown-telemetry"
                     available_slots = None
-                elif not record.get("enabled", True) or record.get("draining"):
-                    # Routing refuses these machines (_candidate), so no slot is usable.
+                elif (
+                    not document.get("routing", {}).get("enabled")
+                    or not record.get("enabled", True)
+                    or record.get("draining")
+                ):
+                    # Routing refuses these machines (route, _candidate), so no slot is usable.
                     available_slots = 0
-                    unused_reason = "machine-disabled" if not record.get("enabled", True) else "machine-draining"
+                    if not document.get("routing", {}).get("enabled"):
+                        unused_reason = "routing-disabled"
+                    else:
+                        unused_reason = "machine-disabled" if not record.get("enabled", True) else "machine-draining"
                 else:
                     available_slots = max(capacity - occupancy, 0)
                     if available_slots > 0 and state == "available":

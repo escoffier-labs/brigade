@@ -1511,6 +1511,7 @@ def _policy_machines():
         "seats": {"seat-alpha": {"provider": "provider-a", "model": "model-a-1"}},
         "consumers": {},
         "repositories": {},
+        "routing": {"enabled": True},
     }
 
 

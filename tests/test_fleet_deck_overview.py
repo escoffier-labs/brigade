@@ -929,7 +929,11 @@ def test_the_station_card_code_is_gone_from_the_command_deck_module():
 
 
 def test_policy_disabled_and_draining_machines_are_limited_with_the_policy_word():
-    for reason, word in (("machine-disabled", "disabled"), ("machine-draining", "draining")):
+    for reason, word in (
+        ("machine-disabled", "disabled"),
+        ("machine-draining", "draining"),
+        ("routing-disabled", "routing off"),
+    ):
         machine = _machine("linux-a", NODE_A, state="available", unused_reason=reason, available_slots="0")
         station = _station(NODE_A, "linux-a", 4)
         view = _view([station], plane=_plane([machine]))
