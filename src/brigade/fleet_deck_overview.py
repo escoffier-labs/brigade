@@ -86,7 +86,10 @@ def is_stale(station: StationView, machine: MachineState | None) -> bool:
 
 
 def station_status(station: StationView, machine: MachineState | None) -> str:
-    """``offline``, ``stale``, ``limited``, ``working``, or ``idle``. Drives dots and card counts.
+    """``offline``, ``stale``, ``limited``, ``unknown``, ``working``, or ``idle``. Drives dots and card counts.
+
+    ``unknown`` is an enrolled station with no matching hub machine: its seats
+    are neither idle nor offline, so it adds to neither the Idle nor Offline card.
 
     ``limited`` is a fresh machine whose state is neither ``available`` nor
     unreported (busy, draining, unavailable): it is not offline, but it takes no
@@ -94,11 +97,13 @@ def station_status(station: StationView, machine: MachineState | None) -> str:
     """
     if not station.enrolled:
         return "offline"
+    if machine is None:
+        return "unknown"
     if is_stale(station, machine):
         return "stale"
-    if machine is not None and machine.state == "offline":
+    if machine.state == "offline":
         return "offline"
-    if machine is not None and machine.state not in ("available", UNKNOWN):
+    if machine.state not in ("available", UNKNOWN):
         return "limited"
     return "working" if station.busy else "idle"
 
@@ -330,34 +335,52 @@ def render_work_lists(view: DeckView) -> str:
 SEGMENT_LIMIT = 16
 
 
+def scaled_segments(counts: tuple[int, int, int], capacity: int) -> tuple[int, int, int]:
+    """Spread (busy, idle, off) seat counts over SEGMENT_LIMIT segments.
+
+    Largest remainder of ``count * SEGMENT_LIMIT / capacity``, ties broken in
+    category order. A category that has seats always keeps at least one segment,
+    taken from the largest category, so a claimed or busy seat never looks free.
+    """
+    if capacity <= 0:
+        return (0, 0, 0)
+    exact = [count * SEGMENT_LIMIT / capacity for count in counts]
+    units = [int(value) for value in exact]
+    order = sorted(range(3), key=lambda index: (-(exact[index] - units[index]), index))
+    for index in order[: SEGMENT_LIMIT - sum(units)]:
+        units[index] += 1
+    for index in range(3):
+        if counts[index] > 0 and units[index] == 0:
+            donor = max(range(3), key=lambda other: (units[other], -other))
+            units[donor] -= 1
+            units[index] += 1
+    return (units[0], units[1], units[2])
+
+
 def _seats_html(station: StationView, machine: MachineState | None, status: str) -> str:
     capacity = station.station.capacity
-    busy = station.busy
-    # Seats on a stale, offline, or limited machine cannot take work, so they
-    # are unavailable, never idle. The idle count is the Idle card's own formula.
-    unavailable = status in ("stale", "offline", "limited")
-    claimed = 0
-    if unavailable:
-        idle = max(capacity - busy, 0)
-        text = f"{busy} busy, {idle} unavailable" if busy else f"{idle} unavailable"
+    # Seats on a stale, offline, limited, or unknown machine cannot be offered
+    # as idle. The idle count is the Idle card's own formula.
+    idle = 0
+    off = max(capacity - station.busy, 0)
+    if status in ("stale", "offline", "limited", "unknown"):
+        word = "unknown" if status == "unknown" else "unavailable"
+        text = f"{station.busy} busy, {off} {word}" if station.busy else f"{off} {word}"
     else:
         idle = free_seats(station, machine)
-        claimed = max(capacity - busy - idle, 0)
-        text = f"{busy} busy, {idle} idle" + (f", {claimed} claimed" if claimed else "")
-    if capacity <= SEGMENT_LIMIT:
-        free_class = "seg--off" if unavailable else "seg--free"
-        segments = (
-            '<span class="seg seg--busy"></span>' * min(busy, capacity)
-            + f'<span class="seg {free_class}"></span>' * idle
-            + '<span class="seg seg--off"></span>' * claimed
-        )
-        bar = f'<span class="seats" role="img" aria-label="{_esc(text)}">{segments}</span>'
-    else:
-        wide_class = "seats-wide seats-wide--off" if unavailable else "seats-wide"
-        bar = (
-            f'<progress class="{wide_class}" value="{min(busy, capacity)}" max="{capacity}" '
-            f'aria-label="{_esc(text)}"></progress>'
-        )
+        off -= idle
+        text = f"{station.busy} busy, {idle} idle" + (f", {off} claimed" if off else "")
+    counts = (min(station.busy, capacity), idle, off)
+    wrapper = "seats"
+    if capacity > SEGMENT_LIMIT:
+        counts = scaled_segments(counts, capacity)
+        wrapper = "seats seats--scaled"
+    segments = (
+        '<span class="seg seg--busy"></span>' * counts[0]
+        + '<span class="seg seg--free"></span>' * counts[1]
+        + '<span class="seg seg--off"></span>' * counts[2]
+    )
+    bar = f'<span class="{wrapper}" role="img" aria-label="{_esc(text)}">{segments}</span>'
     return f'{bar}<span class="seat-text">{_esc(text)}</span>'
 
 
@@ -588,6 +611,8 @@ def _tree_summary(station: StationView, status: str, machine_state: str = UNKNOW
         return "stale"
     if status == "limited":
         return machine_state
+    if status == "unknown":
+        return "unknown"
     return f"{station.busy} busy" if station.busy else "idle"
 
 

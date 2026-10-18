@@ -904,7 +904,7 @@ def test_station_order_labels_capacity_and_timeline_bounds(tmp_path):
         assert heading in body and "BravoBox" in body
         assert "not enrolled" not in body
         # Capacity and busy counts.
-        assert "1 busy, 0 idle" in body and "1 busy, 1 idle" in body
+        assert "1 busy, 0 unknown" in body and "1 busy, 1 unknown" in body
         # Terminal-only timeline, bounded by outcome_window.
         assert "Recent outcomes" in body
         assert body.count("run.completed") <= 2

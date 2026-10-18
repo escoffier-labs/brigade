@@ -190,6 +190,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: 1; }
 .dot--stale { background: var(--signal); }
 .dot--offline { background: var(--offline); }
 .dot--limited { background: var(--offline); }
+.dot--unknown { background: var(--faint); }
 @media (max-width: 900px) {
   .shell { grid-template-columns: 1fr; }
   .shell-sidebar { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--line-quiet); }
@@ -264,9 +265,7 @@ progress::-moz-progress-bar { background: var(--working); }
 .seg--busy { background: var(--working); }
 .seg--free { background: var(--idle); }
 .seg--off { background: var(--bar-track); }
-.seats-wide { background: var(--idle); }
-.seats-wide::-webkit-progress-bar { background: var(--idle); }
-.seats-wide--off, .seats-wide--off::-webkit-progress-bar { background: var(--bar-track); }
+.seats--scaled { gap: 1px; }
 .seat-text { color: var(--muted); }
 @media (max-width: 900px) {
   .page-head { flex-direction: column; }

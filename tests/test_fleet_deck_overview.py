@@ -165,7 +165,7 @@ def test_station_status_precedence():
     unenrolled = _station(NODE_A, "a", 2, enrolled=False)
     assert overview.station_status(busy, fresh) == "working"
     assert overview.station_status(idle, fresh) == "idle"
-    assert overview.station_status(idle, None) == "idle"
+    assert overview.station_status(idle, None) == "unknown"
     assert overview.station_status(idle, stale) == "stale"
     assert overview.station_status(busy, never) == "stale"
     assert overview.station_status(idle, gone) == "offline"
@@ -470,7 +470,8 @@ def test_seat_bar_text_equals_its_segments():
     for capacity, busy in ((10, 2), (4, 4), (16, 0), (3, 5)):
         runs = [_run(NODE_A, f"r{index}", "x") for index in range(busy)]
         station = _station(NODE_A, "linux-a", capacity, runs)
-        html = overview.render_machine_table(_view([station]), NOW)
+        plane = _plane([_machine("linux-a", NODE_A, available_slots=str(capacity))])
+        html = overview.render_machine_table(_view([station], plane=plane), NOW)
         idle = max(capacity - busy, 0)
         assert f"{busy} busy, {idle} idle" in html
         assert html.count("seg--busy") == min(busy, capacity)
@@ -487,12 +488,14 @@ def test_stale_and_offline_machines_show_unavailable_seats_not_idle():
     assert stale.count("seg--off") == capacity
 
 
-def test_wide_machines_use_one_proportional_bar_instead_of_segments():
+def test_wide_machines_scale_to_a_fixed_number_of_segments():
     station = _station(NODE_A, "linux-a", 17, [_run(NODE_A, "r1", "x"), _run(NODE_A, "r2", "x")])
-    html = overview.render_machine_table(_view([station]), NOW)
-    assert "seg--busy" not in html
-    assert '<progress class="seats-wide" value="2" max="17"' in html
-    assert "2 busy, 15 idle" in html
+    plane = _plane([_machine("linux-a", NODE_A, available_slots="15")])
+    html = overview.render_machine_table(_view([station], plane=plane), NOW)
+    assert "seats-wide" not in html and '<progress class="seats' not in html
+    assert html.count('class="seg ') == overview.SEGMENT_LIMIT
+    assert html.count("seg--busy") >= 1
+    assert "seats--scaled" in html and "2 busy, 15 idle" in html
 
 
 def _seat_view(machine_slots: str, runs: int = 2, capacity: int = 10, **machine_fields) -> deck.DeckView:
@@ -566,13 +569,68 @@ def test_the_limited_summary_escapes_the_machine_state():
     assert HOSTILE not in html and "&lt;script&gt;" in html
 
 
-def test_wide_machines_ignore_unavailability_with_an_off_bar():
+def test_wide_machines_scale_unavailable_seats_to_off_segments():
     stale = _machine("linux-b", NODE_B, state="unknown", unused_reason="stale-telemetry", available_slots="unknown")
     view = _view([_station(NODE_B, "linux-b", 64)], plane=_plane([stale]))
     (row,) = _rows(overview.render_machine_table(view, NOW))
-    assert "seats-wide--off" in row and "64 unavailable" in row
+    assert row.count("seg--off") == overview.SEGMENT_LIMIT and "64 unavailable" in row
+    assert "seg--free" not in row and '<progress class="seats-wide' not in row
     fresh = _view([_station(NODE_A, "linux-a", 64)], plane=_plane([_machine("linux-a", NODE_A, available_slots="64")]))
-    assert "seats-wide--off" not in overview.render_machine_table(fresh, NOW)
+    fresh_row = overview.render_machine_table(fresh, NOW)
+    assert "seg--off" not in fresh_row and fresh_row.count("seg--free") == overview.SEGMENT_LIMIT
+
+
+def test_wide_machines_with_claimed_seats_keep_an_off_segment():
+    runs = [_run(NODE_A, "r1", "x"), _run(NODE_A, "r2", "x")]
+    view = _view(
+        [_station(NODE_A, "linux-a", 20, runs)], plane=_plane([_machine("linux-a", NODE_A, available_slots="10")])
+    )
+    (row,) = _rows(overview.render_machine_table(view, NOW))
+    assert "2 busy, 10 idle, 8 claimed" in row
+    assert row.count('class="seg ') == overview.SEGMENT_LIMIT
+    assert row.count("seg--busy") >= 1 and row.count("seg--off") >= 1
+
+
+def test_scaled_segments_sum_to_the_limit_and_keep_every_present_category():
+    for counts, capacity in (((2, 15, 0), 17), ((0, 60, 4), 64), ((64, 0, 0), 64), ((1, 0, 63), 64), ((1, 1, 62), 64)):
+        busy, free, off = overview.scaled_segments(counts, capacity)
+        assert busy + free + off == overview.SEGMENT_LIMIT, counts
+        for count, units in zip(counts, (busy, free, off), strict=True):
+            assert (units >= 1) == (count > 0), counts
+    assert overview.scaled_segments((64, 0, 0), 64) == (16, 0, 0)
+    assert overview.scaled_segments((2, 15, 0), 17)[0] >= 1
+    assert overview.scaled_segments((0, 60, 4), 64)[2] >= 1
+    assert overview.scaled_segments((1, 0, 63), 64)[0] == 1
+
+
+def test_an_enrolled_station_without_a_machine_is_unknown_not_idle():
+    station = _station(NODE_A, "linux-a", 4)
+    assert overview.station_status(station, None) == "unknown"
+    gone = _station(NODE_C, "win-a", 4, enrolled=False, heard=None)
+    assert overview.station_status(gone, None) == "offline"
+
+
+def test_unmatched_station_row_is_unknown_and_adds_no_idle_or_offline():
+    stations = (_station(NODE_A, "linux-a", 4), _station(NODE_B, "linux-b", 8))
+    view = _view(stations, plane=_plane([_machine("linux-b", NODE_B, available_slots="8")]))
+    rows = _rows(overview.render_machine_table(view, NOW))
+    unmatched = rows[0]
+    assert 'data-status="unknown"' in unmatched and "dot--unknown" in unmatched
+    assert "4 unknown" in unmatched and "seg--free" not in unmatched and "seg--busy" not in unmatched
+    assert unmatched.count("seg--off") == 4 and " idle<" not in unmatched
+    idle = sum(int(m.group(1)) for row in rows for m in re.finditer(r'seat-text">[^<]*?(\d+) idle', row))
+    summary = overview.render_summary(view)
+    assert idle == 8 and _card_value(summary, "idle") == str(idle)
+    assert _card_value(summary, "offline") == "0"
+    sidebar = overview.render_sidebar(view, "overview", NOW, worklore_enabled=True)
+    assert 'class="tree-meta">unknown<' in sidebar and "dot--unknown" in sidebar
+
+
+def test_unknown_station_with_busy_runs_reports_busy_and_unknown_seats():
+    station = _station(NODE_A, "linux-a", 4, [_run(NODE_A, "r1", "x")])
+    (row,) = _rows(overview.render_machine_table(_view([station]), NOW))
+    assert "1 busy, 3 unknown" in row
+    assert row.count("seg--busy") == 1 and row.count("seg--off") == 3 and "seg--free" not in row
 
 
 def test_load_cell_handles_unparseable_and_out_of_range_values():
