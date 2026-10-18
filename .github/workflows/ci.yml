@@ -795,7 +795,7 @@ jobs:
               def pytest_collectreport(self, report):
                   self.skipped |= report.skipped
           guard = NoNativeSkips()
-          result = pytest.main(["-q", "-ra", "-o", "addopts=", "tests/test_windows_job.py::TestNativeContainment", "tests/test_skills_state_windows.py", "tests/test_fleet_claim_loss_cancellation.py::test_native_windows_claim_loss_stops_silent_worker"], plugins=[guard])
+          result = pytest.main(["-q", "-ra", "-o", "addopts=", "tests/test_windows_job.py::TestNativeContainment", "tests/test_skills_state_windows.py", "tests/test_claude_hooks_state_containment.py", "tests/test_dirfd.py::test_fsync_directory_accepts_native_windows_directory_handles", "tests/test_fleet_claim_loss_cancellation.py::test_native_windows_claim_loss_stops_silent_worker"], plugins=[guard])
           sys.exit(1 if guard.skipped else int(result))
           '@ | & $python -
           if ($LASTEXITCODE -ne 0) { throw "native containment failed or skipped" }

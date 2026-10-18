@@ -1386,6 +1386,7 @@ def test_native_windows_containment_is_required_and_rejects_selected_skips():
     assert 'assert os.name == "nt"' in probe
     assert '"tests/test_windows_job.py::TestNativeContainment"' in probe
     assert '"tests/test_skills_state_windows.py"' in probe
+    assert '"tests/test_dirfd.py::test_fsync_directory_accepts_native_windows_directory_handles"' in probe
     assert "pytest_runtest_logreport" in probe and "pytest_collectreport" in probe
     assert "self.skipped |= report.skipped" in probe
     assert "sys.exit(1 if guard.skipped else int(result))" in probe

@@ -11,6 +11,7 @@ from typing import Any
 from .. import __version__, cursor_user_cmd, localio
 from ..claude_hooks import classify as claude_classify
 from ..claude_hooks import runtime as claude_runtime
+from ..claude_hooks.anchored_io import SessionIntegrityError
 from ..config import load_config
 from ..receipts_cmd import _receipt_hash
 from ..selection import WRITER_INBOXES
@@ -257,9 +258,18 @@ def _claude_row(entry: constants.RepoEntry, *, window_start: datetime) -> dict[s
         "mcp": "not-required",
         "version": "current" if hook_status.get("current") else "unknown",
     }
-    use = _claude_use(target, window_start=window_start)
     classified_state = str(classification.get("state") or "partial")
-    if any(value == "stale" for value in wiring.values()):
+    try:
+        use = _claude_use(target, window_start=window_start)
+    except SessionIntegrityError as exc:
+        issue = fleet._safe_text(f"session directory integrity refused: {exc}", target, entry.repo_id, entry.label)
+        if issue not in issues:
+            issues.append(issue)
+        use = _empty_use()
+        classified_state = "error"
+    if classified_state == "error":
+        state = "partial"
+    elif any(value == "stale" for value in wiring.values()):
         state = "stale"
     elif classified_state == "advisory-only":
         state = "advisory-only"
