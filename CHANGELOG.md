@@ -2054,7 +2054,8 @@ Initial release.
 - OpenClaw adapter fragments and harness-aware doctor checks.
 - Experimental Hermes adapter fragments.
 
-[Unreleased]: https://github.com/escoffier-labs/brigade/compare/v0.28.0...HEAD
+[Unreleased]: https://github.com/escoffier-labs/brigade/compare/v0.29.0...HEAD
+[0.29.0]: https://github.com/escoffier-labs/brigade/compare/v0.28.0...v0.29.0
 [0.28.0]: https://github.com/escoffier-labs/brigade/compare/v0.27.0...v0.28.0
 [0.27.0]: https://github.com/escoffier-labs/brigade/compare/v0.26.1...v0.27.0
 [0.26.1]: https://github.com/escoffier-labs/brigade/compare/v0.26.0...v0.26.1
