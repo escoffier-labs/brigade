@@ -23,7 +23,7 @@
   <img src="https://shieldcn.dev/badge/license-MIT-4e7247.svg?size=xs" alt="MIT license">
 </p>
 
-Published **v0.28.0** is the stable install (`brigade-cli==0.28.0`). It hardens fleet claims with claim-loss cancellation, generation fencing for older clients, and bounded Fleet Hub requests, keeps hook session state inside validated directories, and adds the dot connector pack. v0.27.0 added per-repo parallel-safe work waves, cross-repo ready-work campaigns, Memory Operations, an optional fleet hub, care-managed memory jobs, cloud seats with receipts, vault projection, run lineage, code-graph views, bounded recall, declared budgets, and a machine-readable control crosswalk. Main is now the **0.29 beta** line.
+Published **v0.28.0** is the stable install (`brigade-cli==0.28.0`). It hardens fleet claims with claim-loss cancellation, generation fences that reject stale claim holders and operations, and bounded Fleet Hub requests, keeps hook session state inside validated directories, and adds the dot connector pack. v0.27.0 added per-repo parallel-safe work waves, cross-repo ready-work campaigns, Memory Operations, an optional fleet hub, care-managed memory jobs, cloud seats with receipts, vault projection, run lineage, code-graph views, bounded recall, declared budgets, and a machine-readable control crosswalk. Main is now the **0.29 beta** line.
 
 ## What it does
 
