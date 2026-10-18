@@ -253,7 +253,7 @@ async function main() {
   receipt.runtime={uvVersion:runtime.uvVersion,pythonVersion:runtime.pythonVersion,pythonBuild:runtime.pythonBuild,brigadeVersion:runtime.version};
   receipt.pathExcludesPythonAndUv=true;
   receipt.path=env.PATH;
-  receipt.pathEntries=env.PATH.split(path.delimiter).flatMap(dir=>fs.readdirSync(dir)).filter(name=>/^(python|uv)|^py\.exe$/i.test(name));
+  receipt.pathEntries=env.PATH.split(path.delimiter).flatMap(dir=>fs.readdirSync(dir)).filter(name=>/^(?:pythonw?(?:\d+(?:\.\d+)*[dmtu]*)?|pyw?|uv[wx]?)(?:\.(?:exe|com|cmd|bat|ps1))?$/i.test(name));
   assert.deepEqual(receipt.pathEntries,[],'PATH must exclude Python, py.exe and uv');
   const cold=await call('cold-version',['--version']);versionOK(cold);
   const toolReceipt=path.join(contract.runtimeEnvironment(env,runtime).UV_TOOL_DIR,'brigade-cli','uv-receipt.toml');

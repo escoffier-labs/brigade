@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Verification reaps descendants that escape the process group on macOS when a run is canceled or times out.
+
 - Claude hook state reads retain the opened snapshot when atomic replacement unlinks it before the first metadata check, preventing retry starvation while preserving observed writes and containment checks.
 
 - Declared version and beta preview base move to 0.29.0 after the v0.28.0 tag so publish-dev wheels sort above stable. (#1787)

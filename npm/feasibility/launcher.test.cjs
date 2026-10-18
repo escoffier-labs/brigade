@@ -35,8 +35,8 @@ if(process.argv[4]?.includes('sysconfig.get_path')) {
   fs.writeFileSync(process.env.TRANSPORT_READY,'ready');
   setInterval(() => {}, 1000);
 } else if (['wait','slow-wait'].includes(${JSON.stringify(mode)})) {
-  console.log(JSON.stringify({pid:process.pid}));
   let signals=0;for(const signal of ['SIGINT','SIGTERM']) process.on(signal, () => { signals++;setTimeout(()=>{fs.writeFileSync(process.env.TRANSPORT_DONE,signals===1?'terminated':'duplicate');process.exit(0);},${mode === 'slow-wait' ? 800 : 0}); });
+  console.log(JSON.stringify({pid:process.pid}));
   setInterval(() => {}, 1000);
 } else if (${JSON.stringify(mode)} === 'other-signal') {
   process.kill(process.pid,'SIGUSR2');
