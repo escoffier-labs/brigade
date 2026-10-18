@@ -87,7 +87,7 @@ uv tool install brigade-cli
 brigade setup
 ```
 
-For an intentional Brigade development machine on the `0.28` preview line:
+For an intentional Brigade development machine on the `0.29` preview line:
 
 ```bash
 brigade update --channel beta

@@ -23,7 +23,7 @@
   <img src="https://shieldcn.dev/badge/license-MIT-4e7247.svg?size=xs" alt="MIT license">
 </p>
 
-Published **v0.27.0** is the stable install (`brigade-cli==0.27.0`). It adds per-repo parallel-safe work waves, cross-repo ready-work campaigns, Memory Operations, an optional fleet hub, care-managed memory jobs, cloud seats with receipts, vault projection, run lineage, code-graph views, bounded recall, declared budgets, and a machine-readable control crosswalk. Main is now the **0.28 beta** line.
+Published **v0.28.0** is the stable install (`brigade-cli==0.28.0`). It hardens fleet claims with claim-loss cancellation, generation fencing for older clients, and bounded Fleet Hub requests, keeps hook session state inside validated directories, and adds the dot connector pack. v0.27.0 added per-repo parallel-safe work waves, cross-repo ready-work campaigns, Memory Operations, an optional fleet hub, care-managed memory jobs, cloud seats with receipts, vault projection, run lineage, code-graph views, bounded recall, declared budgets, and a machine-readable control crosswalk. Main is now the **0.29 beta** line.
 
 ## What it does
 
@@ -39,7 +39,7 @@ Learning in Brigade is outcome-based skill scoring, promotion, and rollback from
 
 Install with `pipx install brigade-cli` or `uv tool install brigade-cli`, then follow the [install guide](https://brigade.tools/docs/getting-started/install), [QUICKSTART.md](QUICKSTART.md), or give [first 10 minutes](docs/first-10-minutes.md) and [docs/agents-guide.md](docs/agents-guide.md) to your coding agent.
 
-Stable channel: published v0.27.0. Preview channel: `brigade update --channel beta` for `0.28.0.devYYYYMMDD` wheels. Details: [update channels](docs/update-channels.md).
+Stable channel: published v0.28.0. Preview channel: `brigade update --channel beta` for `0.29.0.devYYYYMMDD` wheels. Details: [update channels](docs/update-channels.md).
 
 ## How it compares
 

@@ -84,8 +84,8 @@ Assess each role separately; one entity may have several roles:
 This worksheet does not conclude that Brigade is regulated AI or that generated
 code necessarily constitutes an AI system.
 
-**Support question remains open:** [README](../README.md) describes stable 0.27
-and main 0.28 beta, while [SECURITY](../SECURITY.md#supported-versions) says
+**Support question remains open:** [README](../README.md) describes stable 0.28
+and main 0.29 beta, while [SECURITY](../SECURITY.md#supported-versions) says
 alpha and latest-minor-on-main security fixes. Record the exact release and
 applicable published statements; ask the owner to reconcile them. This worksheet
 creates no support promise or support period. SECURITY's 72-hour acknowledgement
