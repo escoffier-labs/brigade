@@ -1020,9 +1020,13 @@ def test_collect_does_not_poll_overflow_at_fixed_interval(monkeypatch):
 
     observed_timeouts: list[float | None] = []
     real_wait = threading.Event.wait
+    caller = threading.get_ident()
 
     def tracking_wait(self, timeout=None):
-        observed_timeouts.append(timeout)
+        # The collector waits on the calling thread. Background threads left by
+        # other tests may wait on their own short intervals; ignore them.
+        if threading.get_ident() == caller:
+            observed_timeouts.append(timeout)
         return real_wait(self, timeout)
 
     monkeypatch.setattr(threading.Event, "wait", tracking_wait)
@@ -1030,6 +1034,7 @@ def test_collect_does_not_poll_overflow_at_fixed_interval(monkeypatch):
     result = proc.run([sys.executable, "-c", "pass"], timeout=10.0)
 
     assert result.code == 0
+    assert observed_timeouts, "the collector never waited on the calling thread"
     assert all(t is None or t > 0.05 for t in observed_timeouts), observed_timeouts
 
 
