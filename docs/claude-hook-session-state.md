@@ -10,7 +10,7 @@ The session-directory operations are:
 
 | Operation | Containment |
 | --- | --- |
-| JSON read | Open the known name relative to the held sessions directory and validate the held file as regular with one link. Trust its contents and revalidate the directory chain after reading. POSIX permits concurrent atomic replacement. Windows can delay publication until the reader closes. An inode already unlinked before its initial check triggers a bounded open retry. |
+| JSON read | Open the known name relative to the held sessions directory and validate the held file as regular with zero or one links. Read the opened snapshot and revalidate the directory chain after reading. POSIX permits concurrent atomic replacement, including unlinking the held inode before its initial check. Windows can delay publication until the reader closes. Writes and locks still require a single-link file with matching named and held identities. |
 | JSON write | Create an exclusive sibling temporary file with mode `0600`, write and fsync it, revalidate, replace the known name relative to the same directory, compare the published name with the held temporary fd, and sync the directory. Temporary cleanup also uses the held directory. |
 | Timeout journal and pending increments | Read or append the known sidecar name relative to the held directory with the existing byte limits. |
 | Session lock | Open a known sibling name relative to the held directory and use the existing deadline-bounded flock or Windows byte lock. Check the held lock identity before protected access. |

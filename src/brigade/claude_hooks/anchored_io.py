@@ -177,32 +177,30 @@ class SessionDirectory:
         flags |= getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
         flags |= getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_BINARY", 0)
         reading = not flags & (os.O_WRONLY | os.O_RDWR)
-        for _ in range(8 if reading else 1):
-            try:
-                fd = dirfd.open_child_file(self.fd, name, flags, 0o600)
-            except FileNotFoundError:
-                self.validate()
-                raise
-            except OSError as exc:
-                _raise_integrity_error(exc)
-                raise
-            try:
-                if reading:
-                    held = os.fstat(fd)
-                    if stat.S_ISREG(held.st_mode) and held.st_nlink == 0:
-                        # Atomic replace won the open-to-fstat window. Retry
-                        # the known name, without reporting missing state.
-                        continue
-                    if not stat.S_ISREG(held.st_mode) or held.st_nlink != 1:
-                        raise SessionIntegrityError("Claude hook session file is not a single-link regular file")
-                else:
-                    self.validate_file(name, fd)
-                self.validate()
-                yield fd
-                return
-            finally:
-                os.close(fd)
-        raise SessionIntegrityError("Claude hook session file changed repeatedly while opening")
+        try:
+            fd = dirfd.open_child_file(self.fd, name, flags, 0o600)
+        except FileNotFoundError:
+            self.validate()
+            raise
+        except OSError as exc:
+            _raise_integrity_error(exc)
+            raise
+        try:
+            if reading:
+                held = os.fstat(fd)
+                # Atomic replacement can unlink a held reader before fstat.
+                # Zero links leaves no outside name; trust this read-only fd
+                # just as when replacement follows the initial check.
+                if not stat.S_ISREG(held.st_mode) or held.st_nlink not in {0, 1}:
+                    raise SessionIntegrityError(
+                        "Claude hook session file is not a single-link or unlinked regular file"
+                    )
+            else:
+                self.validate_file(name, fd)
+            self.validate()
+            yield fd
+        finally:
+            os.close(fd)
 
     def read_bytes(self, name: str, max_bytes: int | None = None) -> bytes:
         with self.open_file(name, os.O_RDONLY) as fd:
