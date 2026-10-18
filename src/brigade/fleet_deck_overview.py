@@ -208,14 +208,17 @@ def page_alerts(view: DeckView, now: datetime) -> tuple[Alert, ...]:
             reason = deck._cp_text(blocked.get("reason"))
             attention.append(Alert("blocked", deck._cp_text(blocked.get("id")), reason, _first_observed(None)))
     stale: list[Alert] = []
+    coverage: list[Alert] = []
     for station in view.stations:
         machine = machine_for(view, station)
         if machine is not None and is_stale(station, machine):
             seen = seconds_since(machine.last_observed_at, now)
             since = "no telemetry received" if seen is None else f"last telemetry {format_age(seen)} ago"
             stale.append(Alert("stale telemetry", station.label, machine.unused_reason, since))
+        elif machine is None and station.enrolled and plane is not None and "machines" in plane.present:
+            # A failed node_id join leaves the station's telemetry unknown, so it can never be all clear.
+            coverage.append(Alert("no telemetry row", station.label, "node not in the routing snapshot", "ongoing"))
     gaps = deck.coverage_gaps(plane)
-    coverage: list[Alert] = []
     if gaps:
         title = "Control-plane snapshot missing" if plane is None else "Telemetry coverage gaps"
         coverage.append(Alert("coverage", title, "no telemetry for: " + ", ".join(gaps), "ongoing"))
@@ -251,9 +254,15 @@ def _plural(count: int, word: str) -> str:
 
 def verdict_text(view: DeckView, now: datetime) -> str:
     """The Deck verdict, counting stale telemetry alongside the attention items."""
-    stale = sum(1 for alert in page_alerts(view, now) if alert.kind == "stale telemetry")
+    alerts = page_alerts(view, now)
+    stale = sum(1 for alert in alerts if alert.kind == "stale telemetry")
     count = len(deck.attention_items(view)) + stale
-    return f"NEEDS ATTENTION ({count})" if count else deck.deck_verdict(view)
+    if count:
+        return f"NEEDS ATTENTION ({count})"
+    unknown = sum(1 for alert in alerts if alert.kind == "no telemetry row") + len(
+        deck.coverage_gaps(view.control_plane)
+    )
+    return f"COVERAGE UNKNOWN ({unknown})" if unknown else deck.deck_verdict(view)
 
 
 def render_header(view: DeckView, now: datetime) -> str:

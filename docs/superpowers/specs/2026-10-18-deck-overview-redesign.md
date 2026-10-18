@@ -129,7 +129,7 @@ Staleness comes from the hub, not a second threshold in the deck. A machine is s
 
 ## Code layout
 
-- **New `src/brigade/fleet_deck_overview.py`** holds the page renderers: `render_sidebar(view, active, now)`, `render_summary(view)`, `render_alerts(view, now)`, `render_work_lists(view)`, `render_machine_table(view, now)`, `collapse_outcomes(outcomes)` and `format_age(seconds)`. It is pure functions over `DeckView` with no database access. Target under 700 lines.
+- **New `src/brigade/fleet_deck_overview.py`** holds the page renderers: `render_sidebar(view, active, now)`, `render_summary(view)`, `render_alerts(view, now)`, `render_work_lists(view)`, `render_machine_table(view, now)`, `collapse_outcomes(outcomes)` and `format_age(seconds)`. It is pure functions over `DeckView` with no database access. Target under 750 lines.
 - **New `src/brigade/fleet_deck_shell.py`** holds `deck_page(title, active, sidebar_html, body_html, nonce)`: the two-column shell for `/deck`, `/deck/repos`, `/deck/work`, `/deck/roster` and `/deck/policy`. Those pages keep their current bodies inside the new shell. Target under 250 lines.
 - **`fleet_command_deck.render_deck`** shrinks to assembling the new sections. The old station cards and inline sections move out, which lowers the file below its current 1,953 lines; the ratchet only allows shrinking.
 - **`ui_theme.py`** gets the light tokens and the shared shell CSS.

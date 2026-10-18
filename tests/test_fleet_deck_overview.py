@@ -236,6 +236,7 @@ def _alert_view() -> deck.DeckView:
     )
     plane = deck.ControlPlane(
         machines=(
+            _machine("linux-a", NODE_A),
             _machine(
                 "linux-b", NODE_B, state="unknown", last_observed_at=_stamp(3600), unused_reason="stale-telemetry"
             ),
@@ -378,6 +379,29 @@ def test_verdict_falls_back_to_the_deck_verdict_when_nothing_needs_attention():
     )
     assert overview.verdict_text(_view(plane=full), NOW) == "ALL CLEAR"
     assert "verdict-pill--clear" in overview.render_header(_view(plane=full), NOW)
+
+
+def test_an_enrolled_station_missing_from_the_machines_snapshot_is_never_all_clear():
+    full = deck.control_plane_from_snapshot(
+        {
+            "policy": {"version": "1"},
+            "sessions": [],
+            "machines": [],
+            "quota": [],
+            "quota_effective": [],
+            "routes": [],
+            "queue": {"eligible_count": 0, "queued_count": 0, "blocked": []},
+            "integrations": [],
+            "authority": {"active": True, "status": "active"},
+        }
+    )
+    view = _view([_station(NODE_A, "linux-a", 4)], plane=full)
+    assert overview.verdict_text(view, NOW) == "COVERAGE UNKNOWN (1)"
+    alerts = [alert for alert in overview.page_alerts(view, NOW) if alert.kind == "no telemetry row"]
+    assert [alert.title for alert in alerts] == ["linux-a"]
+    assert "no telemetry row" in overview.render_alerts(view, NOW)
+    not_enrolled = _view([_station(NODE_A, "linux-a", 4, enrolled=False)], plane=full)
+    assert overview.verdict_text(not_enrolled, NOW) == "ALL CLEAR"
 
 
 # --- working now and queued -----------------------------------------------------------------
@@ -891,7 +915,7 @@ def test_deck_modules_stay_inside_their_size_budgets():
         return len((source / name).read_text(encoding="utf-8").splitlines())
 
     assert lines("fleet_command_deck.py") < 1953
-    assert lines("fleet_deck_overview.py") < 700
+    assert lines("fleet_deck_overview.py") < 750
     assert lines("fleet_deck_shell.py") < 250
 
 
