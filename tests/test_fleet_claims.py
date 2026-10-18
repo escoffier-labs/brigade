@@ -1579,9 +1579,13 @@ class TestDispatchWiring:
         ws, roster_path = workspace
         monkeypatch.setattr(fleet_client, "_claim_renew_interval", lambda ttl: 0)
 
+        dispatch_started = threading.Event()
+
         def post(hub_url, tok, body, *, timeout):
             if body["action"] == "acquire":
                 return 200, {"granted": True, "claim": {"target": body["target"], "owner_node": NODE_A}}
+            if body["action"] == "renew":
+                assert dispatch_started.wait(30), "dispatch never started"
             return 409, {
                 "granted": False,
                 "error": "held",
@@ -1589,8 +1593,17 @@ class TestDispatchWiring:
             }
 
         monkeypatch.setattr(fleet_client, "_post_claim_blocking", post)
-        dispatched = []
-        monkeypatch.setattr(aboyeur, "run", lambda *a, **kw: dispatched.append(1) or time.sleep(30))
+
+        def run(*a, **kw):
+            dispatch_started.set()
+            # Poll the real cancellation channel while the heartbeat loses the claim.
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                kw["check_cancellation"]()
+                time.sleep(0.01)
+            pytest.fail("claim loss did not cancel dispatch")
+
+        monkeypatch.setattr(aboyeur, "run", run)
         assert self._run(ws, roster_path) == 2
         err = capsys.readouterr().err
         assert "fleet claim" in err and "was lost" in err
@@ -1638,9 +1651,13 @@ class TestDispatchWiring:
         ws, roster_path = workspace
         monkeypatch.setattr(fleet_client, "_claim_renew_interval", lambda ttl: 0)
 
+        dispatch_started = threading.Event()
+
         def post(hub_url, tok, body, *, timeout):
             if body["action"] == "acquire":
                 return 200, {"granted": True, "claim": {"target": body["target"], "owner_node": NODE_A}}
+            if body["action"] == "renew":
+                assert dispatch_started.wait(30), "dispatch never started"
             return 409, {
                 "granted": False,
                 "error": "held",
@@ -1656,7 +1673,17 @@ class TestDispatchWiring:
             return real_record(output_dir, **kwargs)
 
         monkeypatch.setattr(aboyeur, "record_run_termination", failing_off_main)
-        monkeypatch.setattr(aboyeur, "run", lambda *a, **kw: time.sleep(30))
+
+        def run(*a, **kw):
+            dispatch_started.set()
+            # Keep dispatch responsive without manufacturing the loss or its kind.
+            deadline = time.monotonic() + 30
+            while time.monotonic() < deadline:
+                kw["check_cancellation"]()
+                time.sleep(0.01)
+            pytest.fail("claim loss did not cancel dispatch")
+
+        monkeypatch.setattr(aboyeur, "run", run)
         assert self._run(ws, roster_path) == 2
         receipt = json.loads((next((ws / ".brigade" / "runs").iterdir()) / "run.json").read_text(encoding="utf-8"))
         assert receipt["status"] == "failed"
@@ -2406,6 +2433,8 @@ class TestExitOrphanReleaseHardening:
 
     def test_exit_logs_when_orphan_cleanup_retries_are_exhausted(self, hub, monkeypatch, caplog):
         self._hub_env(hub, monkeypatch)
+        # Preserve the two real retry waits with a smaller request budget.
+        monkeypatch.setattr(fleet_client, "CLAIM_TIMEOUT_SECONDS", 0.25)
         monkeypatch.setattr(fleet_client, "_claim_renew_interval", lambda ttl: 0.05)
         real_post = fleet_client._post_claim_blocking
         real_deadline = fleet_client._run_with_deadline
@@ -2440,7 +2469,10 @@ class TestExitOrphanReleaseHardening:
         monkeypatch.setattr(fleet_client, "_post_claim_blocking", blocked_reacquire)
         monkeypatch.setattr(fleet_client, "_run_with_deadline", controlled_deadline)
 
+        release_attempts = []
+
         def always_unavailable(target, **kwargs):
+            release_attempts.append((target, reacquire_finished.is_set()))
             return fleet_client.ClaimDecision(
                 granted=False, reason="hub-unavailable", detail="down", holder=kwargs.get("holder")
             )
@@ -2468,20 +2500,21 @@ class TestExitOrphanReleaseHardening:
                         assert timeout_observed.wait(30)
                         allow_reacquire.set()
                         assert reacquire_finished.wait(30)
+        # Exit must attempt release, then exhaust both retries after the
+        # abandoned acquire has committed, even though every reply is unavailable.
+        assert release_attempts == [("repo-a", True)] * 3
         exhausted = [r for r in caplog.records if "could not confirm" in r.message]
         assert len(exhausted) == 1, "exit cleanup exhaustion was not logged exactly once"
         # The exhaustion WARNING must name the residual exposure: the row
         # lives until its TTL expires (original-review findings 2 and 3
         # keep the timing approach; this residual is documented, not fixed).
         assert "TTL expires" in exhausted[0].getMessage()
-        # Documented residual (#1157): a commit landing AFTER the final exit
-        # retry can no longer be released by this process — it leaks until
-        # the hub's TTL expiry. The test pins that window so a future change
-        # to the timing approach cannot silently widen it.
+        # Every cleanup release failed, so the reacquired row remains until
+        # the hub expires its TTL. Exhaustion must warn about that residual.
         allow_reacquire.set()
         assert reacquire_finished.wait(10), "late re-acquire never committed"
         leaked = [c for c in fleet_client.fetch_claims(include_all=True) if c["target"] == "repo-a"]
-        assert len(leaked) == 1, "expected exactly the post-final-retry commit to leak as the documented residual"
+        assert len(leaked) == 1, "expected the reacquired row to remain after release retries were exhausted"
 
 
 def _schema_13_database(tmp_path: Path) -> Path:
