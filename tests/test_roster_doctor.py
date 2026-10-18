@@ -63,6 +63,8 @@ def _pid_alive(pid: int) -> bool:
 def test_roster_doctor_bounds_hanging_probe_and_reaps_its_tree(monkeypatch, tmp_target, tmp_path, capsys):
     # Keep the developer machine's real user roster out of the probe path.
     monkeypatch.setattr(Path, "home", lambda: tmp_path / "empty-home")
+    # Exercise the real timeout and tree reap without waiting the inventory default.
+    monkeypatch.setattr(model_inventory, "_INVENTORY_TIMEOUT_SECONDS", 1.0)
     pid_file = tmp_path / "grandchild.pid"
     _write_hanging_cursor_roster(tmp_target, pid_file)
     # The suite pins proc.which to a bare host; resolve only the injected
