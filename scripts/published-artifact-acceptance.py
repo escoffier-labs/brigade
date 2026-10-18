@@ -710,19 +710,36 @@ def assert_no_poison_invocation(marker: Path) -> None:
         raise AcceptanceError(f"poison component binary was invoked: {marker.read_text().strip()}")
 
 
-def build_go_free_path(original_path: str, poison_dir: Path, pipx_bin: Path) -> str:
+GO_TOOLS = frozenset({"go", "gofmt"})
+
+
+def build_go_free_path(original_path: str, poison_dir: Path, pipx_bin: Path, mirror_root: Path) -> str:
     """Build a Unix PATH that keeps the poison and pipx entries plus every system
-    directory from ``original_path`` while dropping any directory that ships a
-    ``go`` binary. Managed setup must download release assets instead of building
-    the Go components from source, so the toolchain has to be unreachable.
+    directory from ``original_path`` while making ``go`` unreachable. Managed setup
+    must download release assets instead of building the Go components from source,
+    so the toolchain has to be unreachable.
+
+    A directory that ships ``go`` is replaced by a mirror under ``mirror_root`` that
+    links every other entry. Runner images that install Go into ``/usr/bin`` still
+    need ``git`` and the rest of that directory.
     """
     entries: list[str] = [str(poison_dir), str(pipx_bin)]
-    for entry in original_path.split(os.pathsep):
+    for index, entry in enumerate(original_path.split(os.pathsep)):
         if not entry or entry in entries:
             continue
-        if (Path(entry) / "go").exists():
+        directory = Path(entry)
+        if not (directory / "go").exists():
+            entries.append(entry)
             continue
-        entries.append(entry)
+        mirror = mirror_root / f"path-{index}"
+        mirror.mkdir(parents=True, exist_ok=True)
+        for child in directory.iterdir():
+            if child.name in GO_TOOLS:
+                continue
+            link = mirror / child.name
+            if not link.exists() and not link.is_symlink():
+                link.symlink_to(child)
+        entries.append(str(mirror))
     return os.pathsep.join(entries)
 
 
@@ -771,7 +788,7 @@ def run_acceptance(version: str, *, runner: Runner = subprocess.run, rosetta_dar
                 "XDG_CACHE_HOME": str(root / "xdg-cache"),
                 "PIPX_HOME": str(pipx_home),
                 "PIPX_BIN_DIR": str(pipx_bin),
-                "PATH": build_go_free_path(env.get("PATH", ""), poison_dir, pipx_bin),
+                "PATH": build_go_free_path(env.get("PATH", ""), poison_dir, pipx_bin, root / "go-free-path"),
             }
         )
         managed_brigade = pipx_bin / "brigade"
