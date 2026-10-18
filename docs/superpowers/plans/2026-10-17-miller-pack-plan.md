@@ -54,7 +54,7 @@ Spec: `docs/superpowers/specs/2026-10-17-miller-pack-design.md` (approved 2026-1
 - Instance config keys: `MILLER_INSTANCE_KEYS = (INSTANCE_KEYS - {"bearer"}) | {"runtime_path"}`. Miller has no bearer reference.
 - Runtime schema id `brigade.miller.runtime.v1`; max size 65,536 bytes; read through `brigade.grokbot_t3.runtime_config.read_owner_file`.
 - Unit names: `brigade-miller.service` (listener), `brigade-miller-watch.service` and `brigade-miller-watch.timer` (every 5 minutes, `OnBootSec=5min`, `AccuracySec=30s`).
-- The unit runs with `ProtectHome=read-only` plus `ReadWritePaths=` the state directory and the workspace handoff directory, `NoNewPrivileges=yes`, `UMask=0077`. `PrivateTmp=yes`.
+- The 2026-10-17 cutover found overflow uid 65534 breaks ancestor ownership checks under user-namespace sandboxing, so both units use `NoNewPrivileges=yes`, `UMask=0077`, `PrivateTmp=no` and the fail-closed private-directory walk.
 - Every temporary directory in tests comes from a `miller_private_dir` fixture. Each test module defines it locally, exactly as below, because the repository keeps pack fixtures per test file.
 
 ```python

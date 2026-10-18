@@ -34,7 +34,7 @@ def message_hub(tmp_path):
     finally:
         conn.close()
     server = fleet_hub.make_server("127.0.0.1", 0, db, ADMIN)
-    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
     thread.start()
     yield f"http://127.0.0.1:{server.server_address[1]}", token_a, token_b, db
     server.shutdown()

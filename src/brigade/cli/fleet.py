@@ -872,6 +872,9 @@ def _print_claim_failure(decision, *, what: str) -> bool:
     if decision.reason == "invalid":
         print(f"error: {decision.detail}", file=sys.stderr)
         return True
+    if not decision.granted and decision.reason not in ("held", "missing"):
+        print(f"error: fleet hub claim {what} refused: {decision.reason}", file=sys.stderr)
+        return True
     return False
 
 
@@ -1193,7 +1196,7 @@ def _release_session(
         return 2
     harness, role, job, session = labels["harness"], labels["role"], labels["job"], labels["session"]
     decision = fleet_client.release_claim(target, holder=holder)
-    if _print_claim_failure(decision, what="release"):
+    if not (as_json and decision.reason == "stale-holder") and _print_claim_failure(decision, what="release"):
         return 1
     published = None
     if decision.granted and outcome is not None:
@@ -1210,6 +1213,7 @@ def _release_session(
                 {
                     "target": target,
                     "released": decision.granted,
+                    "reason": decision.reason,
                     "forced": False,
                     "claim": decision.claim,
                     "owner": decision.owner,
@@ -1219,6 +1223,8 @@ def _release_session(
                 sort_keys=True,
             )
         )
+    if as_json and decision.reason == "stale-holder":
+        _print_claim_failure(decision, what="release")
     if decision.granted:
         if not as_json:
             print(f"released claim on {target!r}")

@@ -296,7 +296,7 @@ def test_sdk_context_events_and_exactly_one_row_per_call(miller_private_dir):
 
 
 def test_render_unit(configured):
-    target, runtime, _ = configured
+    target, _, _ = configured
     text = m.render_unit(target, python="/usr/bin/python-example")
     assert "-m brigade run cloud grokbot serve --pack miller --target" in text
     assert "--allow-host miller.example.test" in text
@@ -305,15 +305,12 @@ def test_render_unit(configured):
     assert "bearer" not in text
     for line in [
         "NoNewPrivileges=yes",
-        "PrivateTmp=yes",
-        "ProtectSystem=strict",
-        "ProtectHome=read-only",
+        "PrivateTmp=no",
         "UMask=0077",
         "Restart=on-failure",
+        "RestartSec=5",
     ]:
         assert line in text
-    assert str(runtime.paths.state_dir) in text
-    assert str(runtime.paths.workspace / ".codex/memory-handoffs") in text
     assert "runtime.json" not in repr(config())
 
 
@@ -456,15 +453,13 @@ def test_doctor_all_checks_and_failures(configured):
     assert [c["check"] for c in checks] == [
         "dependency",
         "config",
-        "writable-paths",
         "state",
         "access-config",
         "hub-token",
         "t3-fleet",
         "endpoint",
     ]
-    assert {c["check"]: c["status"] for c in checks}["writable-paths"] == "warn"
-    assert all(c["status"] == "ok" for c in checks if c["check"] != "writable-paths")
+    assert all(c["status"] == "ok" for c in checks)
     with (
         patch("brigade.fleet_client_message_credentials.read_message_token_file", side_effect=ValueError("private")),
         patch("brigade.miller.fleet_tools.FleetTools.fleet_capacity", return_value={"error": "fleet_error"}),
@@ -510,26 +505,14 @@ def test_call_log_failure_and_tool_errors_are_safe(miller_private_dir):
             asyncio.run(scenario())
 
 
-def test_units_quote_and_deduplicate_writable_paths(configured):
-    target, runtime, instance = configured
-    path = Path(json.loads(instance.read_text())["runtime_path"])
-    data = json.loads(path.read_text())
-    data["writable_paths"] = [str(runtime.paths.state_dir), "/srv/fleet state", "/srv/ssh", "/srv/brigade", "/srv/ssh"]
-    path.write_text(json.dumps(data))
-    expected = "ReadWritePaths=" + " ".join(
-        m.grokbot_ops._systemd_quote(str(p))
-        for p in [
-            runtime.paths.state_dir,
-            runtime.paths.workspace / ".codex/memory-handoffs",
-            "/srv/fleet state",
-            "/srv/ssh",
-            "/srv/brigade",
-        ]
-    )
-    for text in (m.render_unit(target), m.render_watch_units(target)[0]):
-        assert expected in text.splitlines()
-        assert "ProtectSystem=strict" in text and "ProtectHome=read-only" in text
-    assert next(c for c in m.doctor(target) if c["check"] == "writable-paths")["status"] == "ok"
+@pytest.mark.parametrize("watch", [False, True])
+def test_units_preserve_private_directory_ownership_checks(configured, watch):
+    target, _, _ = configured
+    text = m.render_watch_units(target)[0] if watch else m.render_unit(target)
+    for forbidden in ("ProtectSystem", "ProtectHome", "ReadWritePaths", "PrivateUsers", "PrivateTmp=yes"):
+        assert forbidden not in text
+    for required in ("NoNewPrivileges=yes", "UMask=0077", "PrivateTmp=no"):
+        assert required in text.splitlines()
 
 
 @pytest.mark.parametrize(

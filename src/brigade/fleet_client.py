@@ -111,7 +111,14 @@ from .fleet_client_spool import ensure_directory as _ensure_spool_directory
 from .fleet_client_spool import fsync_parent as _fsync_spool_parent
 from .fleet_client_spool import parse_records as _parse_spool_records
 from . import toml_compat as tomllib
-from .fleet_claim_lifecycle import _ConfirmedClaimLease as _ConfirmedClaimLease
+from .fleet_claim_lifecycle import (
+    CLAIM_FENCE_REFUSALS,
+    CLEANUP_RETRY_REASONS,
+    STALE_CLAIM_REFUSALS,
+    TERMINAL_CLAIM_REFUSALS,
+    UNCERTAIN_CLEANUP_REASONS,
+    _ConfirmedClaimLease as _ConfirmedClaimLease,
+)
 
 try:
     import fcntl
@@ -1068,6 +1075,7 @@ class ClaimDecision:
     superseded: dict[str, Any] | None = None
     lock_run_dir: str | None = None
     cancel_event: threading.Event | None = None
+    generation: int | None = None
 
 
 class FleetClaimHeldError(FleetClientError):
@@ -1114,7 +1122,7 @@ def _post_claim_blocking(hub_url: str, token: str, body: dict[str, Any], *, time
         with _hub_open(request, timeout=timeout) as response:
             return response.status, json.loads(response.read().decode("utf-8"))
     except urllib.error.HTTPError as exc:
-        if exc.code in (400, 401, 403, 409):
+        if exc.code in (400, 401, 403, 409, 503):
             # A held/expired refusal is an answer, not a transport failure;
             # a 400 carries the hub's validation message (e.g. an older hub
             # that does not know a request field), a 403 names the node the
@@ -1162,6 +1170,7 @@ def _claim_op(
     lock: Mapping[str, str] | None = None,
     supersede: Mapping[str, str] | None = None,
     acquired_at: str | None = None,
+    generation: int | None = None,
     harness: str | None = None,
     role: str | None = None,
     job: str | None = None,
@@ -1199,6 +1208,8 @@ def _claim_op(
             body["supersede"] = dict(supersede)
         if acquired_at is not None:
             body["acquired_at"] = acquired_at
+        if generation is not None:
+            body["generation"] = generation
         if conductor:
             body["conductor"] = conductor
         try:
@@ -1225,17 +1236,26 @@ def _claim_op(
         return ClaimDecision(
             granted=False, reason="auth-failed", detail=detail or f"hub returned HTTP {status}", holder=holder
         )
+    if payload.get("reason") in CLAIM_FENCE_REFUSALS:
+        return ClaimDecision(granted=False, reason=payload["reason"], detail=detail, holder=holder)
     if status == 200 and payload.get(_CLAIM_OK_KEYS[action]) is True:
         claim = payload.get("claim") if isinstance(payload.get("claim"), dict) else None
         superseded = payload.get("superseded") if isinstance(payload.get("superseded"), dict) else None
         run_dir = payload.get("lock_run_dir") if isinstance(payload.get("lock_run_dir"), str) else None
         return ClaimDecision(
-            granted=True, reason="ok", claim=claim, holder=holder, superseded=superseded, lock_run_dir=run_dir
+            granted=True,
+            reason="ok",
+            claim=claim,
+            holder=holder,
+            superseded=superseded,
+            lock_run_dir=run_dir,
+            generation=payload.get("generation", claim.get("generation") if claim else None),
         )
     if status in (200, 409):
-        return ClaimDecision(
-            granted=False, reason="held" if owner is not None else "missing", owner=owner, detail=detail, holder=holder
-        )
+        reason = payload.get("reason")
+        if reason not in STALE_CLAIM_REFUSALS:
+            reason = "held" if owner is not None else "missing"
+        return ClaimDecision(granted=False, reason=reason, owner=owner, detail=detail, holder=holder)
     return ClaimDecision(
         granted=False, reason="hub-unavailable", detail=detail or f"hub returned HTTP {status}", holder=holder
     )
@@ -1301,6 +1321,9 @@ def release_claim(
     ``held``). The deleted row comes back as ``ClaimDecision.claim``.
     """
     kwargs.pop("ttl_seconds", None)
+    if force and kwargs.get("generation") is None:
+        kwargs.pop("generation", None)
+        return _claim_lifecycle._force_release(target, holder=holder, acquired_at=acquired_at, **kwargs)
     scope = "force" if force else ("holder" if holder is not None else "node")
     return _claim_op("release", target, holder=holder, scope=scope, acquired_at=acquired_at, **kwargs)
 
@@ -1730,6 +1753,12 @@ def repo_claim(
         yield decision
         return
     if not decision.granted:
+        if decision.reason == "claim-fence-refused" and ambiguous_initial_acquire:
+            _schedule_orphan_release(
+                target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds
+            )
+        if decision.reason in TERMINAL_CLAIM_REFUSALS:
+            raise FleetClaimHeldError(f"fleet claim on {target!r} refused: {decision.reason}", owner=decision.owner)
         owner = decision.owner or {}
         held_by = owner.get("owner_node") or "another node"
         until = owner.get("expires_at") or "its TTL expires"
@@ -1756,7 +1785,7 @@ def repo_claim(
     def _release_on_exit(*, admission_refused: bool = False) -> None:
         release_outcome = release_claim(target, holder=holder, node_id=node_id, conductor=conductor)
         if ambiguous_initial_acquire or (
-            pending_orphan_release.is_set() and release_outcome.reason in ("hub-unavailable", "missing")
+            pending_orphan_release.is_set() and release_outcome.reason in UNCERTAIN_CLEANUP_REASONS
         ):
             # Inline cleanup survives imminent CLI exit: two further calls,
             # each spaced by one request timeout and bounded by that timeout.
@@ -1767,16 +1796,18 @@ def repo_claim(
             for _ in range(EXIT_ORPHAN_RELEASE_RETRIES):
                 time.sleep(CLAIM_TIMEOUT_SECONDS)
                 release_outcome = release_claim(target, holder=holder, node_id=node_id, conductor=conductor)
-                if not ambiguous_initial_acquire and release_outcome.reason not in ("hub-unavailable", "missing"):
+                if not ambiguous_initial_acquire and release_outcome.reason not in UNCERTAIN_CLEANUP_REASONS:
                     break
-            if release_outcome.reason in ("hub-unavailable", "missing"):
+            if release_outcome.reason in UNCERTAIN_CLEANUP_REASONS:
                 _LOG.warning(
                     "fleet claim on %s: exit cleanup could not confirm the orphaned claim's release "
                     "(last answer: %s); the row lives until its TTL expires",
                     target,
                     release_outcome.reason,
                 )
-        if release_outcome.reason == "hub-unavailable" and (admission_refused or ambiguous_initial_acquire):
+        if release_outcome.reason in CLEANUP_RETRY_REASONS:
+            # A refused release has not retired this holder. Keep cleanup
+            # alive after both ordinary exit and rejected admission.
             _schedule_orphan_release(
                 target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds
             )
@@ -1836,7 +1867,7 @@ def repo_claim(
 
     def _release_rejected_grant() -> None:
         release_outcome = release_claim(target, holder=holder, node_id=node_id, conductor=conductor)
-        if release_outcome.reason == "hub-unavailable":
+        if release_outcome.reason in CLEANUP_RETRY_REASONS:
             _schedule_orphan_release(
                 target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds
             )
@@ -1888,7 +1919,7 @@ def repo_claim(
                     except Exception:
                         _LOG.warning("fleet credential-failure callback raised; the run keeps unwinding", exc_info=True)
                 return
-            if outcome.reason == "held":
+            if outcome.reason == "held" or outcome.reason in TERMINAL_CLAIM_REFUSALS:
                 lease.terminate(outcome.reason, notify=True)
                 return
             if lease.terminate(outcome.reason):
