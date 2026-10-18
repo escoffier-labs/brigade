@@ -300,7 +300,13 @@ def test_ambiguous_acquire_then_quota_schedules_fenced_orphan_cleanup(claim_clie
     first, retry = [call.args[2] for call in post.call_args_list]
     assert first["holder"] == retry["holder"]
     orphan.assert_called_once_with(
-        "fake-repo", node_id=NODE_A, holder=first["holder"], conductor="test", ttl_seconds=60
+        "fake-repo",
+        node_id=NODE_A,
+        holder=first["holder"],
+        conductor="test",
+        ttl_seconds=60,
+        hub_url="http://hub.invalid",
+        token="fake-token",
     )
 
 
