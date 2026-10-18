@@ -8,6 +8,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - The Command Deck opens on a Fleet overview: a left sidebar with the page nav, a machine tree, and cloud providers; four summary cards; an alerts strip with first-observed times; working and queued lists; and a machines table with seat and load bars. Deck pages and the fleet boards follow the system light or dark scheme. The routing snapshot gains an additive `node_id` per machine so stations join to machines by node id. Center stays dark for now.
+
+## [0.28.0] - 2026-10-18
+
+- Background cleanup of an orphaned fleet claim keeps using the hub URL and token of the claim that scheduled it. Before, each retry re-read the fleet configuration, so a process whose configuration changed could send the cleanup request, with the new token, to a different hub. Renewal and exit release use the same bound connection. (Fixes #1778)
+
 - Deck, fleet boards, and Center use shared spacing tokens derived from one scale while preserving existing layout sizes. Center navigation explicitly uses the shared Deck nav class. (#1495)
 - The dot connector pack connects a ChatGPT dot to T3 fleet dispatch, Brigade memory and the Fleet Hub inbox, with Cloudflare Access authentication and operator checks for setup and service health. (Refs #1765)
 
@@ -2037,7 +2042,8 @@ Initial release.
 - OpenClaw adapter fragments and harness-aware doctor checks.
 - Experimental Hermes adapter fragments.
 
-[Unreleased]: https://github.com/escoffier-labs/brigade/compare/v0.27.0...HEAD
+[Unreleased]: https://github.com/escoffier-labs/brigade/compare/v0.28.0...HEAD
+[0.28.0]: https://github.com/escoffier-labs/brigade/compare/v0.27.0...v0.28.0
 [0.27.0]: https://github.com/escoffier-labs/brigade/compare/v0.26.1...v0.27.0
 [0.26.1]: https://github.com/escoffier-labs/brigade/compare/v0.26.0...v0.26.1
 [0.26.0]: https://github.com/escoffier-labs/brigade/compare/v0.25.0...v0.26.0
