@@ -1439,7 +1439,7 @@ def test_center_pages_render_through_the_shared_deck_shell():
     assert '<body class="deck"' in html
     assert '<p class="eyebrow">Center</p>' in html
     assert "<h1>Status</h1>" in html
-    assert '<nav aria-label="Center">' in html
+    assert '<nav class="deck-nav" aria-label="Center">' in html
     assert '<a href="/view/status" aria-current="page">Status</a>' in html
     assert "location.reload" in html
     assert "background: #fff" not in html and "#0066cc" not in html

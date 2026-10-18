@@ -1,0 +1,1901 @@
+{
+  "schema": "brigade.deck_spacing_browser_evidence.v1",
+  "baseline": "a4ef0b6e666a2253900042ad93cc09a2053fd568",
+  "method": "Actual Python renderers, synthetic fixtures, nonce CSP, refresh tags and reload scripts removed for capture, T3 Chromium preview",
+  "before": [
+    {
+      "route": "/deck",
+      "viewport": {
+        "width": 1280,
+        "height": 900
+      },
+      "documentWidth": 1280,
+      "panels": [
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel attention-panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        }
+      ],
+      "helperGaps": [],
+      "actions": [],
+      "nav": [
+        {
+          "class": "deck-nav",
+          "rect": {
+            "x": 20,
+            "y": 130.5390625,
+            "width": 1240,
+            "height": 36
+          }
+        }
+      ],
+      "tables": [],
+      "refreshTags": 0
+    },
+    {
+      "route": "/deck/repos",
+      "viewport": {
+        "width": 1280,
+        "height": 900
+      },
+      "documentWidth": 1280,
+      "panels": [
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "repo-panel",
+          "padding": "16px"
+        }
+      ],
+      "helperGaps": [],
+      "actions": [],
+      "nav": [
+        {
+          "class": "deck-nav",
+          "rect": {
+            "x": 20,
+            "y": 101.140625,
+            "width": 1240,
+            "height": 36
+          }
+        }
+      ],
+      "tables": [],
+      "refreshTags": 0
+    },
+    {
+      "route": "/deck/roster",
+      "viewport": {
+        "width": 1280,
+        "height": 900
+      },
+      "documentWidth": 1280,
+      "panels": [
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        }
+      ],
+      "helperGaps": [],
+      "actions": [
+        {
+          "text": "Save",
+          "height": 40,
+          "buttonInside": true,
+          "captionInside": true,
+          "captionGap": null
+        }
+      ],
+      "nav": [
+        {
+          "class": "deck-nav",
+          "rect": {
+            "x": 20,
+            "y": 118.5390625,
+            "width": 1240,
+            "height": 36
+          }
+        }
+      ],
+      "tables": [
+        {
+          "clientWidth": 1206,
+          "scrollWidth": 1206
+        },
+        {
+          "clientWidth": 1206,
+          "scrollWidth": 1206
+        }
+      ],
+      "refreshTags": 0
+    },
+    {
+      "route": "/deck/policy",
+      "viewport": {
+        "width": 1280,
+        "height": 900
+      },
+      "documentWidth": 1280,
+      "panels": [
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel banner",
+          "padding": "12px 16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        }
+      ],
+      "helperGaps": [
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        11,
+        11,
+        11,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        11,
+        11,
+        11,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        11,
+        11,
+        11,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8
+      ],
+      "actions": [
+        {
+          "text": "Preview change",
+          "height": 40,
+          "buttonInside": true,
+          "captionInside": true,
+          "captionGap": 8
+        },
+        {
+          "text": "Preview change",
+          "height": 40,
+          "buttonInside": true,
+          "captionInside": false,
+          "captionGap": 8
+        },
+        {
+          "text": "Preview change",
+          "height": 40,
+          "buttonInside": true,
+          "captionInside": false,
+          "captionGap": 8
+        },
+        {
+          "text": "Preview change",
+          "height": 40,
+          "buttonInside": true,
+          "captionInside": false,
+          "captionGap": 8
+        },
+        {
+          "text": "Preview change",
+          "height": 40,
+          "buttonInside": true,
+          "captionInside": false,
+          "captionGap": 8
+        },
+        {
+          "text": "Preview change",
+          "height": 40,
+          "buttonInside": true,
+          "captionInside": false,
+          "captionGap": 8
+        },
+        {
+          "text": "Preview change",
+          "height": 40,
+          "buttonInside": true,
+          "captionInside": false,
+          "captionGap": 8
+        },
+        {
+          "text": "Preview change",
+          "height": 40,
+          "buttonInside": true,
+          "captionInside": false,
+          "captionGap": 8
+        },
+        {
+          "text": "Preview change",
+          "height": 40,
+          "buttonInside": true,
+          "captionInside": true,
+          "captionGap": 8
+        }
+      ],
+      "nav": [
+        {
+          "class": "deck-nav",
+          "rect": {
+            "x": 20,
+            "y": 118.5390625,
+            "width": 1240,
+            "height": 36
+          }
+        }
+      ],
+      "tables": [
+        {
+          "clientWidth": 1206,
+          "scrollWidth": 1206
+        },
+        {
+          "clientWidth": 1206,
+          "scrollWidth": 1206
+        },
+        {
+          "clientWidth": 1206,
+          "scrollWidth": 1206
+        }
+      ],
+      "refreshTags": 0
+    },
+    {
+      "route": "/view/machines",
+      "viewport": {
+        "width": 1280,
+        "height": 900
+      },
+      "documentWidth": 1280,
+      "panels": [
+        {
+          "class": "machine-card",
+          "padding": "16px"
+        },
+        {
+          "class": "machine-card",
+          "padding": "16px"
+        }
+      ],
+      "helperGaps": [],
+      "actions": [],
+      "nav": [
+        {
+          "class": "deck-nav",
+          "rect": {
+            "x": 20,
+            "y": 118.5390625,
+            "width": 1240,
+            "height": 36
+          }
+        }
+      ],
+      "tables": [
+        {
+          "clientWidth": 578,
+          "scrollWidth": 578
+        },
+        {
+          "clientWidth": 578,
+          "scrollWidth": 578
+        }
+      ],
+      "refreshTags": 0
+    },
+    {
+      "route": "/view/repos",
+      "viewport": {
+        "width": 1280,
+        "height": 900
+      },
+      "documentWidth": 1280,
+      "panels": [],
+      "helperGaps": [],
+      "actions": [],
+      "nav": [
+        {
+          "class": "deck-nav",
+          "rect": {
+            "x": 20,
+            "y": 118.5390625,
+            "width": 1240,
+            "height": 36
+          }
+        }
+      ],
+      "tables": [
+        {
+          "clientWidth": 1240,
+          "scrollWidth": 1240
+        }
+      ],
+      "refreshTags": 0
+    },
+    {
+      "route": "/view/outcomes",
+      "viewport": {
+        "width": 1280,
+        "height": 900
+      },
+      "documentWidth": 1280,
+      "panels": [
+        {
+          "class": "panel",
+          "padding": "16px"
+        }
+      ],
+      "helperGaps": [],
+      "actions": [],
+      "nav": [
+        {
+          "class": "",
+          "rect": {
+            "x": 20,
+            "y": 101.140625,
+            "width": 1240,
+            "height": 36
+          }
+        }
+      ],
+      "tables": [],
+      "refreshTags": 0
+    },
+    {
+      "route": "/deck",
+      "viewport": {
+        "width": 320,
+        "height": 900
+      },
+      "documentWidth": 320,
+      "panels": [
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel attention-panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        }
+      ],
+      "helperGaps": [],
+      "actions": [],
+      "nav": [
+        {
+          "class": "deck-nav",
+          "rect": {
+            "x": 12,
+            "y": 179.1328125,
+            "width": 296,
+            "height": 80
+          }
+        }
+      ],
+      "tables": [],
+      "refreshTags": 0
+    },
+    {
+      "route": "/deck/repos",
+      "viewport": {
+        "width": 320,
+        "height": 900
+      },
+      "documentWidth": 320,
+      "panels": [
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "repo-panel",
+          "padding": "16px"
+        }
+      ],
+      "helperGaps": [],
+      "actions": [],
+      "nav": [
+        {
+          "class": "deck-nav",
+          "rect": {
+            "x": 12,
+            "y": 129.4375,
+            "width": 296,
+            "height": 80
+          }
+        }
+      ],
+      "tables": [],
+      "refreshTags": 0
+    },
+    {
+      "route": "/deck/roster",
+      "viewport": {
+        "width": 320,
+        "height": 900
+      },
+      "documentWidth": 320,
+      "panels": [
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        }
+      ],
+      "helperGaps": [],
+      "actions": [
+        {
+          "text": "Save",
+          "height": 40,
+          "buttonInside": true,
+          "captionInside": true,
+          "captionGap": null
+        }
+      ],
+      "nav": [
+        {
+          "class": "deck-nav",
+          "rect": {
+            "x": 12,
+            "y": 164.234375,
+            "width": 296,
+            "height": 80
+          }
+        }
+      ],
+      "tables": [
+        {
+          "clientWidth": 262,
+          "scrollWidth": 262
+        },
+        {
+          "clientWidth": 262,
+          "scrollWidth": 262
+        }
+      ],
+      "refreshTags": 0
+    },
+    {
+      "route": "/deck/policy",
+      "viewport": {
+        "width": 320,
+        "height": 900
+      },
+      "documentWidth": 320,
+      "panels": [
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel banner",
+          "padding": "12px 16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        }
+      ],
+      "helperGaps": [
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        11,
+        11,
+        11,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        11,
+        11,
+        11,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        11,
+        11,
+        11,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8
+      ],
+      "actions": [
+        {
+          "text": "Preview change",
+          "height": 40,
+          "buttonInside": true,
+          "captionInside": true,
+          "captionGap": 8
+        },
+        {
+          "text": "Preview change",
+          "height": 40,
+          "buttonInside": true,
+          "captionInside": false,
+          "captionGap": 8
+        },
+        {
+          "text": "Preview change",
+          "height": 40,
+          "buttonInside": true,
+          "captionInside": false,
+          "captionGap": 8
+        },
+        {
+          "text": "Preview change",
+          "height": 40,
+          "buttonInside": true,
+          "captionInside": false,
+          "captionGap": 8
+        },
+        {
+          "text": "Preview change",
+          "height": 40,
+          "buttonInside": true,
+          "captionInside": false,
+          "captionGap": 8
+        },
+        {
+          "text": "Preview change",
+          "height": 40,
+          "buttonInside": true,
+          "captionInside": false,
+          "captionGap": 8
+        },
+        {
+          "text": "Preview change",
+          "height": 40,
+          "buttonInside": true,
+          "captionInside": false,
+          "captionGap": 8
+        },
+        {
+          "text": "Preview change",
+          "height": 40,
+          "buttonInside": true,
+          "captionInside": false,
+          "captionGap": 8
+        },
+        {
+          "text": "Preview change",
+          "height": 40,
+          "buttonInside": true,
+          "captionInside": true,
+          "captionGap": 8
+        }
+      ],
+      "nav": [
+        {
+          "class": "deck-nav",
+          "rect": {
+            "x": 12,
+            "y": 164.234375,
+            "width": 296,
+            "height": 80
+          }
+        }
+      ],
+      "tables": [
+        {
+          "clientWidth": 262,
+          "scrollWidth": 262
+        },
+        {
+          "clientWidth": 262,
+          "scrollWidth": 262
+        },
+        {
+          "clientWidth": 262,
+          "scrollWidth": 262
+        }
+      ],
+      "refreshTags": 0
+    },
+    {
+      "route": "/view/machines",
+      "viewport": {
+        "width": 320,
+        "height": 900
+      },
+      "documentWidth": 320,
+      "panels": [
+        {
+          "class": "machine-card",
+          "padding": "16px"
+        },
+        {
+          "class": "machine-card",
+          "padding": "16px"
+        }
+      ],
+      "helperGaps": [],
+      "actions": [],
+      "nav": [
+        {
+          "class": "deck-nav",
+          "rect": {
+            "x": 12,
+            "y": 146.8359375,
+            "width": 296,
+            "height": 80
+          }
+        }
+      ],
+      "tables": [
+        {
+          "clientWidth": 262,
+          "scrollWidth": 319
+        },
+        {
+          "clientWidth": 262,
+          "scrollWidth": 319
+        }
+      ],
+      "refreshTags": 0
+    },
+    {
+      "route": "/view/repos",
+      "viewport": {
+        "width": 320,
+        "height": 900
+      },
+      "documentWidth": 320,
+      "panels": [],
+      "helperGaps": [],
+      "actions": [],
+      "nav": [
+        {
+          "class": "deck-nav",
+          "rect": {
+            "x": 12,
+            "y": 146.8359375,
+            "width": 296,
+            "height": 80
+          }
+        }
+      ],
+      "tables": [
+        {
+          "clientWidth": 296,
+          "scrollWidth": 393
+        }
+      ],
+      "refreshTags": 0
+    },
+    {
+      "route": "/view/outcomes",
+      "viewport": {
+        "width": 320,
+        "height": 900
+      },
+      "documentWidth": 320,
+      "panels": [
+        {
+          "class": "panel",
+          "padding": "16px"
+        }
+      ],
+      "helperGaps": [],
+      "actions": [],
+      "nav": [
+        {
+          "class": "",
+          "rect": {
+            "x": 12,
+            "y": 129.4375,
+            "width": 296,
+            "height": 124
+          }
+        }
+      ],
+      "tables": [],
+      "refreshTags": 0
+    }
+  ],
+  "after": [
+    {
+      "route": "/deck",
+      "viewport": {
+        "width": 1280,
+        "height": 900
+      },
+      "documentWidth": 1280,
+      "panels": [
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel attention-panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        }
+      ],
+      "helperGaps": [],
+      "actions": [],
+      "nav": [
+        {
+          "class": "deck-nav",
+          "rect": {
+            "x": 20,
+            "y": 130.5390625,
+            "width": 1240,
+            "height": 36
+          }
+        }
+      ],
+      "tables": [],
+      "refreshTags": 0
+    },
+    {
+      "route": "/deck/repos",
+      "viewport": {
+        "width": 1280,
+        "height": 900
+      },
+      "documentWidth": 1280,
+      "panels": [
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "repo-panel",
+          "padding": "16px"
+        }
+      ],
+      "helperGaps": [],
+      "actions": [],
+      "nav": [
+        {
+          "class": "deck-nav",
+          "rect": {
+            "x": 20,
+            "y": 101.140625,
+            "width": 1240,
+            "height": 36
+          }
+        }
+      ],
+      "tables": [],
+      "refreshTags": 0
+    },
+    {
+      "route": "/deck/roster",
+      "viewport": {
+        "width": 1280,
+        "height": 900
+      },
+      "documentWidth": 1280,
+      "panels": [
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        }
+      ],
+      "helperGaps": [],
+      "actions": [
+        {
+          "text": "Save",
+          "height": 40,
+          "buttonInside": true,
+          "captionInside": true,
+          "captionGap": null
+        }
+      ],
+      "nav": [
+        {
+          "class": "deck-nav",
+          "rect": {
+            "x": 20,
+            "y": 118.5390625,
+            "width": 1240,
+            "height": 36
+          }
+        }
+      ],
+      "tables": [
+        {
+          "clientWidth": 1206,
+          "scrollWidth": 1206
+        },
+        {
+          "clientWidth": 1206,
+          "scrollWidth": 1206
+        }
+      ],
+      "refreshTags": 0
+    },
+    {
+      "route": "/deck/policy",
+      "viewport": {
+        "width": 1280,
+        "height": 900
+      },
+      "documentWidth": 1280,
+      "panels": [
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel banner",
+          "padding": "12px 16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        }
+      ],
+      "helperGaps": [
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        11,
+        11,
+        11,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        11,
+        11,
+        11,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        11,
+        11,
+        11,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8
+      ],
+      "actions": [
+        {
+          "text": "Preview change",
+          "height": 40,
+          "buttonInside": true,
+          "captionInside": true,
+          "captionGap": 8
+        },
+        {
+          "text": "Preview change",
+          "height": 40,
+          "buttonInside": true,
+          "captionInside": false,
+          "captionGap": 8
+        },
+        {
+          "text": "Preview change",
+          "height": 40,
+          "buttonInside": true,
+          "captionInside": false,
+          "captionGap": 8
+        },
+        {
+          "text": "Preview change",
+          "height": 40,
+          "buttonInside": true,
+          "captionInside": false,
+          "captionGap": 8
+        },
+        {
+          "text": "Preview change",
+          "height": 40,
+          "buttonInside": true,
+          "captionInside": false,
+          "captionGap": 8
+        },
+        {
+          "text": "Preview change",
+          "height": 40,
+          "buttonInside": true,
+          "captionInside": false,
+          "captionGap": 8
+        },
+        {
+          "text": "Preview change",
+          "height": 40,
+          "buttonInside": true,
+          "captionInside": false,
+          "captionGap": 8
+        },
+        {
+          "text": "Preview change",
+          "height": 40,
+          "buttonInside": true,
+          "captionInside": false,
+          "captionGap": 8
+        },
+        {
+          "text": "Preview change",
+          "height": 40,
+          "buttonInside": true,
+          "captionInside": true,
+          "captionGap": 8
+        }
+      ],
+      "nav": [
+        {
+          "class": "deck-nav",
+          "rect": {
+            "x": 20,
+            "y": 118.5390625,
+            "width": 1240,
+            "height": 36
+          }
+        }
+      ],
+      "tables": [
+        {
+          "clientWidth": 1206,
+          "scrollWidth": 1206
+        },
+        {
+          "clientWidth": 1206,
+          "scrollWidth": 1206
+        },
+        {
+          "clientWidth": 1206,
+          "scrollWidth": 1206
+        }
+      ],
+      "refreshTags": 0
+    },
+    {
+      "route": "/view/machines",
+      "viewport": {
+        "width": 1280,
+        "height": 900
+      },
+      "documentWidth": 1280,
+      "panels": [
+        {
+          "class": "machine-card",
+          "padding": "16px"
+        },
+        {
+          "class": "machine-card",
+          "padding": "16px"
+        }
+      ],
+      "helperGaps": [],
+      "actions": [],
+      "nav": [
+        {
+          "class": "deck-nav",
+          "rect": {
+            "x": 20,
+            "y": 118.5390625,
+            "width": 1240,
+            "height": 36
+          }
+        }
+      ],
+      "tables": [
+        {
+          "clientWidth": 578,
+          "scrollWidth": 578
+        },
+        {
+          "clientWidth": 578,
+          "scrollWidth": 578
+        }
+      ],
+      "refreshTags": 0
+    },
+    {
+      "route": "/view/repos",
+      "viewport": {
+        "width": 1280,
+        "height": 900
+      },
+      "documentWidth": 1280,
+      "panels": [],
+      "helperGaps": [],
+      "actions": [],
+      "nav": [
+        {
+          "class": "deck-nav",
+          "rect": {
+            "x": 20,
+            "y": 118.5390625,
+            "width": 1240,
+            "height": 36
+          }
+        }
+      ],
+      "tables": [
+        {
+          "clientWidth": 1240,
+          "scrollWidth": 1240
+        }
+      ],
+      "refreshTags": 0
+    },
+    {
+      "route": "/view/outcomes",
+      "viewport": {
+        "width": 1280,
+        "height": 900
+      },
+      "documentWidth": 1280,
+      "panels": [
+        {
+          "class": "panel",
+          "padding": "16px"
+        }
+      ],
+      "helperGaps": [],
+      "actions": [],
+      "nav": [
+        {
+          "class": "deck-nav",
+          "rect": {
+            "x": 20,
+            "y": 101.140625,
+            "width": 1240,
+            "height": 36
+          }
+        }
+      ],
+      "tables": [],
+      "refreshTags": 0
+    },
+    {
+      "route": "/deck",
+      "viewport": {
+        "width": 320,
+        "height": 900
+      },
+      "documentWidth": 320,
+      "panels": [
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel attention-panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        }
+      ],
+      "helperGaps": [],
+      "actions": [],
+      "nav": [
+        {
+          "class": "deck-nav",
+          "rect": {
+            "x": 12,
+            "y": 179.1328125,
+            "width": 296,
+            "height": 80
+          }
+        }
+      ],
+      "tables": [],
+      "refreshTags": 0
+    },
+    {
+      "route": "/deck/repos",
+      "viewport": {
+        "width": 320,
+        "height": 900
+      },
+      "documentWidth": 320,
+      "panels": [
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "repo-panel",
+          "padding": "16px"
+        }
+      ],
+      "helperGaps": [],
+      "actions": [],
+      "nav": [
+        {
+          "class": "deck-nav",
+          "rect": {
+            "x": 12,
+            "y": 129.4375,
+            "width": 296,
+            "height": 80
+          }
+        }
+      ],
+      "tables": [],
+      "refreshTags": 0
+    },
+    {
+      "route": "/deck/roster",
+      "viewport": {
+        "width": 320,
+        "height": 900
+      },
+      "documentWidth": 320,
+      "panels": [
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        }
+      ],
+      "helperGaps": [],
+      "actions": [
+        {
+          "text": "Save",
+          "height": 40,
+          "buttonInside": true,
+          "captionInside": true,
+          "captionGap": null
+        }
+      ],
+      "nav": [
+        {
+          "class": "deck-nav",
+          "rect": {
+            "x": 12,
+            "y": 164.234375,
+            "width": 296,
+            "height": 80
+          }
+        }
+      ],
+      "tables": [
+        {
+          "clientWidth": 262,
+          "scrollWidth": 262
+        },
+        {
+          "clientWidth": 262,
+          "scrollWidth": 262
+        }
+      ],
+      "refreshTags": 0
+    },
+    {
+      "route": "/deck/policy",
+      "viewport": {
+        "width": 320,
+        "height": 900
+      },
+      "documentWidth": 320,
+      "panels": [
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel banner",
+          "padding": "12px 16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        },
+        {
+          "class": "panel",
+          "padding": "16px"
+        }
+      ],
+      "helperGaps": [
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        11,
+        11,
+        11,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        11,
+        11,
+        11,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        11,
+        11,
+        11,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8,
+        8
+      ],
+      "actions": [
+        {
+          "text": "Preview change",
+          "height": 40,
+          "buttonInside": true,
+          "captionInside": true,
+          "captionGap": 8
+        },
+        {
+          "text": "Preview change",
+          "height": 40,
+          "buttonInside": true,
+          "captionInside": false,
+          "captionGap": 8
+        },
+        {
+          "text": "Preview change",
+          "height": 40,
+          "buttonInside": true,
+          "captionInside": false,
+          "captionGap": 8
+        },
+        {
+          "text": "Preview change",
+          "height": 40,
+          "buttonInside": true,
+          "captionInside": false,
+          "captionGap": 8
+        },
+        {
+          "text": "Preview change",
+          "height": 40,
+          "buttonInside": true,
+          "captionInside": false,
+          "captionGap": 8
+        },
+        {
+          "text": "Preview change",
+          "height": 40,
+          "buttonInside": true,
+          "captionInside": false,
+          "captionGap": 8
+        },
+        {
+          "text": "Preview change",
+          "height": 40,
+          "buttonInside": true,
+          "captionInside": false,
+          "captionGap": 8
+        },
+        {
+          "text": "Preview change",
+          "height": 40,
+          "buttonInside": true,
+          "captionInside": false,
+          "captionGap": 8
+        },
+        {
+          "text": "Preview change",
+          "height": 40,
+          "buttonInside": true,
+          "captionInside": true,
+          "captionGap": 8
+        }
+      ],
+      "nav": [
+        {
+          "class": "deck-nav",
+          "rect": {
+            "x": 12,
+            "y": 164.234375,
+            "width": 296,
+            "height": 80
+          }
+        }
+      ],
+      "tables": [
+        {
+          "clientWidth": 262,
+          "scrollWidth": 262
+        },
+        {
+          "clientWidth": 262,
+          "scrollWidth": 262
+        },
+        {
+          "clientWidth": 262,
+          "scrollWidth": 262
+        }
+      ],
+      "refreshTags": 0
+    },
+    {
+      "route": "/view/machines",
+      "viewport": {
+        "width": 320,
+        "height": 900
+      },
+      "documentWidth": 320,
+      "panels": [
+        {
+          "class": "machine-card",
+          "padding": "16px"
+        },
+        {
+          "class": "machine-card",
+          "padding": "16px"
+        }
+      ],
+      "helperGaps": [],
+      "actions": [],
+      "nav": [
+        {
+          "class": "deck-nav",
+          "rect": {
+            "x": 12,
+            "y": 146.8359375,
+            "width": 296,
+            "height": 80
+          }
+        }
+      ],
+      "tables": [
+        {
+          "clientWidth": 262,
+          "scrollWidth": 319
+        },
+        {
+          "clientWidth": 262,
+          "scrollWidth": 319
+        }
+      ],
+      "refreshTags": 0
+    },
+    {
+      "route": "/view/repos",
+      "viewport": {
+        "width": 320,
+        "height": 900
+      },
+      "documentWidth": 320,
+      "panels": [],
+      "helperGaps": [],
+      "actions": [],
+      "nav": [
+        {
+          "class": "deck-nav",
+          "rect": {
+            "x": 12,
+            "y": 146.8359375,
+            "width": 296,
+            "height": 80
+          }
+        }
+      ],
+      "tables": [
+        {
+          "clientWidth": 296,
+          "scrollWidth": 393
+        }
+      ],
+      "refreshTags": 0
+    },
+    {
+      "route": "/view/outcomes",
+      "viewport": {
+        "width": 320,
+        "height": 900
+      },
+      "documentWidth": 320,
+      "panels": [
+        {
+          "class": "panel",
+          "padding": "16px"
+        }
+      ],
+      "helperGaps": [],
+      "actions": [],
+      "nav": [
+        {
+          "class": "deck-nav",
+          "rect": {
+            "x": 12,
+            "y": 129.4375,
+            "width": 296,
+            "height": 124
+          }
+        }
+      ],
+      "tables": [],
+      "refreshTags": 0
+    }
+  ],
+  "scaleControls": [
+    {
+      "phase": "before",
+      "route": "/deck",
+      "baseline": "16px",
+      "overridden": "16px",
+      "restored": "16px"
+    },
+    {
+      "phase": "before",
+      "route": "/view/machines",
+      "baseline": "16px",
+      "overridden": "16px",
+      "restored": "16px"
+    },
+    {
+      "phase": "before",
+      "route": "/view/outcomes",
+      "baseline": "16px",
+      "overridden": "16px",
+      "restored": "16px"
+    },
+    {
+      "phase": "after",
+      "route": "/deck",
+      "baseline": "16px",
+      "overridden": "24px",
+      "restored": "16px"
+    },
+    {
+      "phase": "after",
+      "route": "/view/machines",
+      "baseline": "16px",
+      "overridden": "24px",
+      "restored": "16px"
+    },
+    {
+      "phase": "after",
+      "route": "/view/outcomes",
+      "baseline": "16px",
+      "overridden": "24px",
+      "restored": "16px"
+    }
+  ]
+}

@@ -1,5 +1,6 @@
 """Shared fleet shell/navigation contracts at the actual renderer boundary."""
 
+import re
 from datetime import datetime, timezone
 from html.parser import HTMLParser
 from urllib.parse import parse_qs, urlencode, urlsplit
@@ -182,6 +183,30 @@ def test_all_fleet_renderers_use_one_shared_shell_and_navigation(fleet_pages):
         assert "/" in routes or "/deck" in routes, route
 
 
+def test_renderer_documents_resolve_shared_spacing_and_color_properties(fleet_pages):
+    from brigade.center_cmd.dashboard import render
+    from brigade.center_cmd.dashboard.views import render_nav, status_grid
+
+    pages = {
+        **fleet_pages,
+        "/center/status": render.page(
+            "Status",
+            "integration-nonce",
+            render_nav("status"),
+            status_grid.render({"pending_tasks": []}, nonce="integration-nonce"),
+        ),
+    }
+    for route, rendered in pages.items():
+        markup = Markup(rendered)
+        stylesheet = "\n".join(markup.text[index] for index, (tag, _) in enumerate(markup.tags) if tag == "style")
+        declarations = re.findall(r"(--[\w-]+)\s*:", stylesheet)
+        references = set(re.findall(r"var\(\s*(--[\w-]+)", rendered))
+        assert "var(--space-" in stylesheet, route
+        assert references <= set(declarations), (route, references - set(declarations))
+        for index in range(1, 9):
+            assert declarations.count(f"--space-{index}") == 1, route
+
+
 @pytest.mark.parametrize("view, table_count", [("machines", 2), ("repos", 1)])
 def test_populated_board_tables_keep_rows_semantics_and_individual_scroll_wrappers(fleet_pages, view, table_count):
     markup = Markup(fleet_pages["/view/" + view])
@@ -344,4 +369,5 @@ def test_populated_deck_separates_station_grid_from_following_panel():
     assert [attrs["class"] for attrs in markup.top_sections[:2]] == ["stations", "panel"]
     assert markup.top_sections[1]["aria-labelledby"] == "control-plane"
     stylesheet = rendered.split('<style nonce="spacing-nonce">', 1)[1].split("</style>", 1)[0]
-    assert ".stations + .panel { margin-top: 16px; }" in stylesheet
+    # The shared 16px step still separates the grid from its following panel.
+    assert ".stations + .panel { margin-top: var(--space-4); }" in stylesheet

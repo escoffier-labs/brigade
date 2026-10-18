@@ -60,12 +60,12 @@ def table(headers: Sequence[str], rows: Sequence[Sequence[str]]) -> str:
 _CENTER_CSS = """
 table details { margin: 0; padding: 0; border: 0; background: transparent; }
 table summary { font-weight: 600; }
-.panel-title { margin: 0 0 12px; font-size: 15px; }
+.panel-title { margin: 0 0 var(--space-3); font-size: 15px; }
 .panel-body p { margin: 0; }
 p.error { color: var(--bad); }
 table.data-table { table-layout: auto; }
 table.data-table th:nth-child(n) { width: auto; }
-.center-freshness { margin: 4px 0 0; color: var(--muted); font-size: 12px; }
+.center-freshness { margin: var(--space-1) 0 0; color: var(--muted); font-size: 12px; }
 """
 
 _CENTER_SCRIPT = """(function () {
