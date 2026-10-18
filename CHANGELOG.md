@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.29.0] - 2026-10-18
+
 ### Changed
 
 - Verification reaps descendants that escape the process group on macOS when a run is canceled or times out.
