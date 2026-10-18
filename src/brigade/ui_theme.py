@@ -36,6 +36,8 @@ _DARK_COLORS = """  --canvas: #111617;
   --surface-inset: #141b1c;
   --error-line: #b0553a;
   --on-accent: #ffffff;
+  --on-signal: #111617;
+  --control-line: #687879;
 """
 
 _LIGHT_COLORS = """    --canvas: #f6f7f8;
@@ -59,6 +61,8 @@ _LIGHT_COLORS = """    --canvas: #f6f7f8;
     --surface-inset: #eef1f2;
     --error-line: #c0472a;
     --on-accent: #ffffff;
+    --on-signal: #ffffff;
+    --control-line: #7d878d;
 """
 
 _SPACE_TOKENS = "".join(f"  --space-{index}: {pixels}px;\n" for index, pixels in enumerate(SPACING, 1))
@@ -150,7 +154,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: 1; }
 .roster-form label { display: grid; gap: 6px; min-width: 0; color: var(--muted); font-size: 12px; text-transform: uppercase; }
 .roster-form label > .hint { grid-row: 3; margin-top: 2px; }
 .roster-form input, .roster-form select, .roster-form textarea { min-width: 0; text-transform: none; }
-.roster-form select, .roster-form textarea, .roster-form input[type="text"], .roster-form input[type="search"], .roster-form input[type="number"] { width: 100%; min-height: 36px; padding: var(--space-2) 10px; border: 1px solid var(--line); background: var(--surface-raised); color: var(--ink); font: inherit; }
+.roster-form select, .roster-form textarea, .roster-form input[type="text"], .roster-form input[type="search"], .roster-form input[type="number"] { width: 100%; min-height: 36px; padding: var(--space-2) 10px; border: 1px solid var(--control-line); background: var(--surface-raised); color: var(--ink); font: inherit; }
 .roster-form textarea { min-height: 72px; }
 .roster-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: var(--space-3) var(--space-4); }
 .roster-grid + .roster-grid, .roster-grid + p, .roster-form > p { margin-top: var(--space-3); }
@@ -171,7 +175,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: 1; }
 .shell-sidebar .deck-nav a { justify-content: space-between; border-color: transparent; text-transform: capitalize; }
 .shell-sidebar .deck-nav a[aria-current="page"] { border-color: var(--line); background: var(--surface-raised); color: var(--ink); }
 .nav-count { margin-left: var(--space-2); color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
-.tree-filter input { width: 100%; min-height: 36px; padding: var(--space-2) 10px; border: 1px solid var(--line); background: var(--surface-raised); color: var(--ink); font: inherit; }
+.tree-filter input { width: 100%; min-height: 36px; padding: var(--space-2) 10px; border: 1px solid var(--control-line); background: var(--surface-raised); color: var(--ink); font: inherit; }
 .tree-heading { display: flex; justify-content: space-between; margin: var(--space-4) 0 var(--space-2); color: var(--muted); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
 .tree-list, .tree-children { margin: 0; padding: 0; list-style: none; }
 .tree-row[hidden] { display: none; }
@@ -233,7 +237,7 @@ progress::-moz-progress-bar { background: var(--working); }
 .bar--thin { height: 4px; margin-top: var(--space-1); }
 .alerts { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
 .alert { display: flex; gap: var(--space-3); padding: var(--space-3); border: 1px solid var(--warn-line); background: var(--warn-surface); }
-.alert-icon { flex: 0 0 auto; width: 20px; height: 20px; border-radius: 999px; background: var(--signal); color: var(--on-accent); font-weight: 800; line-height: 20px; text-align: center; }
+.alert-icon { flex: 0 0 auto; width: 20px; height: 20px; border-radius: 999px; background: var(--signal); color: var(--on-signal); font-weight: 800; line-height: 20px; text-align: center; }
 .alert-body { min-width: 0; }
 .alert-title, .alert-detail, .alert-since { margin: 0; }
 .alert-kind { color: var(--signal); font-size: 11px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
@@ -264,7 +268,7 @@ progress::-moz-progress-bar { background: var(--working); }
 .seg { width: 8px; height: 12px; border-radius: 2px; }
 .seg--busy { background: var(--working); }
 .seg--free { background: var(--idle); }
-.seg--off { background: var(--bar-track); }
+.seg--off { background: transparent; box-shadow: inset 0 0 0 1px var(--offline); }
 .seats--scaled { gap: 1px; }
 .seat-text { color: var(--muted); }
 @media (max-width: 900px) {

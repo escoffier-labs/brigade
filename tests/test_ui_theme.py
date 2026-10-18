@@ -29,6 +29,8 @@ COLOR_TOKENS = (
     "--surface-inset",
     "--error-line",
     "--on-accent",
+    "--on-signal",
+    "--control-line",
 )
 
 
@@ -56,6 +58,41 @@ def test_light_palette_follows_the_design():
         "--warn-line: #e8cfa4;",
     ):
         assert declaration in light, declaration
+
+
+def _luminance(hex_color: str) -> float:
+    channels = [int(hex_color[i : i + 2], 16) / 255 for i in (0, 2, 4)]
+    linear = [c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4 for c in channels]
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+
+def _contrast(first: str, second: str) -> float:
+    a, b = sorted((_luminance(first), _luminance(second)), reverse=True)
+    return (a + 0.05) / (b + 0.05)
+
+
+def _palette(block: str) -> dict[str, str]:
+    return dict(re.findall(r"(--[\w-]+):\s*#([0-9a-f]{6});", block))
+
+
+@pytest.mark.parametrize("scheme", ["dark", "light"])
+def test_icons_controls_and_off_seats_clear_the_graphics_contrast_floor(scheme):
+    dark, light = ui_theme.TOKENS.split("@media (prefers-color-scheme: light)")
+    colors = {**_palette(dark), **_palette(light)} if scheme == "light" else _palette(dark)
+    assert _contrast(colors["--on-signal"], colors["--signal"]) >= 4.5
+    for field in ("--surface", "--surface-raised", "--canvas"):
+        assert _contrast(colors["--control-line"], colors[field]) >= 3, field
+    assert _contrast(colors["--offline"], colors["--surface"]) >= 3
+
+
+def test_alert_icon_controls_and_off_seats_use_their_tokens():
+    css = ui_theme.BASE_CSS + ui_theme.OVERVIEW_CSS
+    icon = re.search(r"\.alert-icon \{[^}]*\}", css).group(0)
+    assert "color: var(--on-signal)" in icon
+    assert re.search(r"\.tree-filter input \{[^}]*border: 1px solid var\(--control-line\)", css)
+    assert re.search(r'input\[type="text"\][^{]*\{[^}]*border: 1px solid var\(--control-line\)', css)
+    off = re.search(r"\.seg--off \{[^}]*\}", css).group(0)
+    assert "inset 0 0 0 1px var(--offline)" in off
 
 
 def test_dark_tokens_pin_a_page_to_dark():
