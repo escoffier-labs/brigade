@@ -1690,6 +1690,7 @@ def snapshot(conn: sqlite3.Connection) -> dict[str, Any]:
         machines.append(
             {
                 "id": name,
+                "node_id": node_id,
                 "os": record.get("os"),
                 "state": state,
                 "last_observed_at": last_observed_at,

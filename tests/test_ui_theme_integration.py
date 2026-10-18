@@ -173,7 +173,7 @@ def test_all_fleet_renderers_use_one_shared_shell_and_navigation(fleet_pages):
     for route, rendered in fleet_pages.items():
         markup = Markup(rendered)
         assert len(markup.elements("html")) == len(markup.elements("body")) == len(markup.elements("main")) == 1, route
-        assert rendered.count("--canvas:") == 1, route
+        assert rendered.count("--canvas:") == 2, route  # dark :root plus the light media override
         for tag in ["style", "script"]:
             assert len(markup.elements(tag)) == 1, route
             assert markup.elements(tag)[0]["nonce"] == "integration-nonce", route
@@ -312,7 +312,7 @@ def test_board_navigation_and_filters_preserve_query_state(view):
 def test_badge_palette_uses_nonce_stylesheet_without_inline_styles():
     import re
 
-    from brigade.fleet_deck_brands import harness_brand, provider_brand
+    from brigade.fleet_deck_brands import harness_brand
 
     hostile = '"><img src=x onerror="alert(1)">'
     names = ["claude", "codex", "cursor", "opencode", "google", "t3-fleet", "grok", "grok-bot", "anthropic", hostile]
@@ -346,28 +346,80 @@ def test_badge_palette_uses_nonce_stylesheet_without_inline_styles():
     assert markup.elements("style") == [{"nonce": "badge-nonce"}]
     stylesheet = rendered.split('<style nonce="badge-nonce">', 1)[1].split("</style>", 1)[0]
     badges = [attrs for attrs in markup.elements("span") if "badge" in attrs.get("class", "").split()]
-    assert len(badges) == 2 * len(names)
-    for attrs, brand in zip(
-        badges, [brand for name in names for brand in (harness_brand(name), provider_brand(name))], strict=True
-    ):
+    assert len(badges) == len(names)
+    for attrs, brand in zip(badges, [harness_brand(name) for name in names], strict=True):
         assert any(
             re.search(
                 r"\." + re.escape(cls) + r"\s*\{[^}]*background:\s*" + re.escape(brand.accent) + r"\s*;", stylesheet
             )
             for cls in attrs["class"].split()
         )
-    assert [attrs["title"] for attrs in badges[-2:]] == [hostile, hostile]
+    assert [attrs["title"] for attrs in badges[-1:]] == [hostile]
 
 
-def test_populated_deck_separates_station_grid_from_following_panel():
+def test_populated_deck_orders_summary_alerts_work_and_machines():
     station = deck.StationView(
         deck.StationConfig("fixture-node", "Example", 2), "Example", True, 0, NOW.isoformat(), ()
     )
     view = deck.DeckView(stations=(station,), rail=(), repos=(), outcomes=(), observers=())
     rendered = deck.render_deck(view, nonce="spacing-nonce", now=NOW)
-    markup = Markup(rendered)
-    assert [attrs["class"] for attrs in markup.top_sections[:2]] == ["stations", "panel"]
-    assert markup.top_sections[1]["aria-labelledby"] == "control-plane"
+    markers = [
+        'aria-label="Fleet summary"',
+        'id="alerts"',
+        'aria-labelledby="working-title"',
+        'id="machines-table"',
+    ]
+    positions = [rendered.index(marker) for marker in markers]
+    assert positions == sorted(positions)
     stylesheet = rendered.split('<style nonce="spacing-nonce">', 1)[1].split("</style>", 1)[0]
-    # The shared 16px step still separates the grid from its following panel.
-    assert ".stations + .panel { margin-top: var(--space-4); }" in stylesheet
+    # The shared 16px step still separates the sections of the main column.
+    assert ".overview > * + * { margin-top: var(--space-4); }" in stylesheet
+
+
+def _document_css(rendered: str) -> str:
+    """The document stylesheet: the first style element, which is the one in the head."""
+    match = re.search(r'<style nonce="[^"]*">(.*?)</style>', rendered, re.DOTALL)
+    assert match
+    return match.group(1)
+
+
+def _center_status_page() -> str:
+    from brigade.center_cmd.dashboard import render
+    from brigade.center_cmd.dashboard.views import render_nav, status_grid
+
+    return render.page(
+        "Status",
+        "integration-nonce",
+        render_nav("status"),
+        status_grid.render({"pending_tasks": []}, nonce="integration-nonce"),
+    )
+
+
+def test_boards_and_deck_pages_follow_the_system_scheme_and_center_stays_dark(fleet_pages):
+    for route, rendered in fleet_pages.items():
+        css = _document_css(rendered)
+        assert "color-scheme: light dark;" in css, route
+        assert "@media (prefers-color-scheme: light)" in css, route
+    center = _document_css(_center_status_page())
+    assert "color-scheme: dark;" in center and "prefers-color-scheme" not in center
+    assert "--canvas: #111617;" in center
+
+
+_LITERAL_COLOR = re.compile(r"#[0-9a-fA-F]{3,8}\b|\b(?:rgb|rgba|hsl|hsla)\(", re.IGNORECASE)
+# Vendor brand fills are fixed marks that must not change with the scheme.
+_BRAND_RULE = re.compile(r"\.badge-color-[0-9a-f]+\s*\{[^}]*\}")
+
+
+def test_page_css_has_no_literal_colors_outside_the_token_block(fleet_pages):
+    pages = {**fleet_pages, "/center/status": _center_status_page()}
+    for route, rendered in pages.items():
+        css = _document_css(rendered).replace(ui_theme.TOKENS, "").replace(ui_theme.DARK_TOKENS, "")
+        css = _BRAND_RULE.sub("", css)
+        assert _LITERAL_COLOR.findall(css) == [], route
+
+
+def test_token_block_is_where_the_literals_live():
+    assert _LITERAL_COLOR.search(ui_theme.TOKENS)
+    assert _LITERAL_COLOR.search(ui_theme.DARK_TOKENS)
+    assert not _LITERAL_COLOR.search(ui_theme.BASE_CSS)
+    assert not _LITERAL_COLOR.search(ui_theme.OVERVIEW_CSS)

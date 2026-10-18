@@ -24,7 +24,7 @@ from brigade.fleet_deck_brands import (
 )
 
 from .fleet_event_freshness import observation_state
-from . import ui_theme
+from . import fleet_deck_shell, ui_theme
 
 CLAIM_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _CONTROL_RE = re.compile(r"[\x00-\x1f\x7f-\x9f]")
@@ -187,6 +187,7 @@ class RailEntry:
     repo: str
     run_id: str
     detail: str
+    age_seconds: int | None = None
 
 
 @dataclass(frozen=True)
@@ -299,6 +300,9 @@ class MachineState:
     available_slots: str = UNKNOWN
     eligible_queued_work: str = UNKNOWN
     unused_reason: str = UNKNOWN
+    # The enrolled node this policy machine runs on. Additive: snapshots from
+    # before the key existed parse with ``unknown`` and join to no station.
+    node_id: str = UNKNOWN
 
 
 @dataclass(frozen=True)
@@ -846,7 +850,7 @@ def fetch_failed_outcomes(
         f") ORDER BY received_at DESC, run_id DESC LIMIT {RAIL_FAILURE_LIMIT}",
         (cutoff, *TERMINAL_STATES, stale_cutoff, *_INTERNAL_OUTCOME_PARAMS),
     ).fetchall()
-    return _enrich_runs(conn, [_live_run_from_row(row, bucket="failed") for row in rows])
+    return _enrich_runs(conn, [_live_run_from_row(row, bucket="failed", now=now) for row in rows])
 
 
 def cloud_workers_from_snapshot(snapshot: Mapping[str, object]) -> tuple[CloudWorker, ...]:
@@ -933,7 +937,7 @@ def fetch_observers(conn: sqlite3.Connection, configured: frozenset[str]) -> lis
     return [(row[0], row[1]) for row in conn.execute(query, tuple(configured)).fetchall()]
 
 
-def _live_run_from_row(row: tuple, *, bucket: str | None = None) -> LiveRun:
+def _live_run_from_row(row: tuple, *, bucket: str | None = None, now: datetime | None = None) -> LiveRun:
     return LiveRun(
         node_id=row[0],
         run_id=row[1],
@@ -942,7 +946,7 @@ def _live_run_from_row(row: tuple, *, bucket: str | None = None) -> LiveRun:
         harness=row[4] or "",
         state=row[5],
         bucket=row[5] if bucket is None else bucket,
-        age_seconds=None,
+        age_seconds=_age_seconds(row[7] or "", now) if now is not None and len(row) > 7 else None,
         elapsed_seconds=None,
         repo_identity=(row[8] or "") if len(row) > 8 else "",
     )
@@ -1157,11 +1161,25 @@ def build_view(
             )
         )
     rail: list[RailEntry] = [
-        RailEntry(kind="failed", node_id=run.node_id, repo=run.repo, run_id=run.run_id, detail=run.state)
+        RailEntry(
+            kind="failed",
+            node_id=run.node_id,
+            repo=run.repo,
+            run_id=run.run_id,
+            detail=run.state,
+            age_seconds=run.age_seconds,
+        )
         for run in failed_outcomes
     ]
     rail.extend(
-        RailEntry(kind=run.bucket, node_id=run.node_id, repo=run.repo, run_id=run.run_id, detail=run.state)
+        RailEntry(
+            kind=run.bucket,
+            node_id=run.node_id,
+            repo=run.repo,
+            run_id=run.run_id,
+            detail=run.state,
+            age_seconds=run.age_seconds,
+        )
         for run in live_runs
         if run.bucket in ("awaiting approval", "stale", "unknown")
     )
@@ -1293,6 +1311,7 @@ def control_plane_from_snapshot(raw: Mapping[str, object] | None) -> ControlPlan
                 available_slots=_cp_text(item.get("available_slots")),
                 eligible_queued_work=_cp_text(item.get("eligible_queued_work")),
                 unused_reason=_cp_text(item.get("unused_reason")),
+                node_id=_cp_text(item.get("node_id")),
             )
         )
 
@@ -1607,20 +1626,9 @@ _STYLE = (
         for accent in sorted({brand.accent for brand in BRANDS.values()} | {UNKNOWN_BRAND.accent})
     )
     + """
-.stations { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-4); align-items: start; }
-.stations + .panel { margin-top: var(--space-4); }
-.station-card { min-width: 0; padding: var(--space-4); border: 1px solid var(--line-quiet); background: var(--surface); }
-.station-card > header { display: flex; align-items: start; justify-content: space-between; gap: var(--space-3); padding-bottom: var(--space-3); border-bottom: 1px solid var(--line-quiet); }
-.capacity { color: var(--signal); font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; text-align: right; white-space: nowrap; }
-.not-enrolled { color: var(--faint); }
-.run-stack { display: grid; gap: 10px; margin-top: var(--space-3); }
-.repo-name { margin: 0; font-weight: 750; }
-.tile-side { margin: 0; text-align: right; }
-.tile-badges { display: flex; gap: var(--space-1); justify-content: flex-end; margin: var(--space-1) 0 0; }
-.badge { display: inline-flex; align-items: center; justify-content: center; min-width: 26px; min-height: 22px; padding: 2px 6px; border-radius: 999px; color: #fff; font-size: 11px; font-weight: 800; letter-spacing: .04em; text-align: center; white-space: nowrap; }
+.badge { display: inline-flex; align-items: center; justify-content: center; min-width: 26px; min-height: 22px; padding: 2px 6px; border-radius: 999px; color: var(--on-accent); font-size: 11px; font-weight: 800; letter-spacing: .04em; text-align: center; white-space: nowrap; }
 .badge svg { width: 18px; height: 18px; display: block; }
 .badge svg mask { mask-type: alpha; }
-.tile-model { margin: var(--space-1) 0 0; color: var(--muted); font-size: 11px; overflow-wrap: anywhere; text-align: right; }
 .cloud-worker-card h3 .badge, .attention-list li .badge { margin-right: 6px; }
 .tile-facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--space-1) 10px; margin: 10px 0 0; color: var(--muted); font-size: 12px; }
 .tile-facts dt { color: var(--muted); }
@@ -1630,7 +1638,6 @@ _STYLE = (
 .work-item h3 { margin-top: var(--space-4); }
 .claim, .collision { margin: 10px 0 0; font-size: 12px; }
 .collision { color: var(--signal); font-weight: 800; }
-.dashboard-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(280px, 1fr); gap: var(--space-4); margin-top: var(--space-4); }
 .cloud-workers { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--space-4); margin-top: var(--space-4); }
 .cloud-worker-card { min-width: 0; padding: var(--space-4); border: 1px solid var(--line-quiet); background: var(--surface); }
 .cloud-worker-card > header { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-2); margin-bottom: 10px; }
@@ -1638,7 +1645,6 @@ _STYLE = (
 .cloud-state { margin: 0 0 10px; color: var(--muted); font-size: 12px; }
 .cloud-lease-list { display: grid; gap: var(--space-2); margin: 0; padding: 0; list-style: none; }
 .cloud-lease-list li { padding-top: var(--space-2); border-top: 1px solid var(--line-quiet); color: var(--muted); font-size: 12px; }
-.attention-panel { border-color: #6d5635; }
 .attention-list, .timeline, .observer-list { margin: 0; padding: 0; list-style: none; }
 .attention-list { display: grid; gap: var(--space-2); }
 .attention-list li { padding: 10px 0; border-top: 1px solid var(--line-quiet); color: var(--muted); }
@@ -1653,161 +1659,26 @@ th:nth-child(1) { width: 22%; } th:nth-child(2) { width: 20%; } th:nth-child(3) 
 .roster-table th:nth-child(n) { width: auto; }
 .seat--off td { color: var(--faint); }
 @media (max-width: 700px) {
-  .stations { grid-template-columns: 1fr; }
-  .tile { width: 100%; }
-  .station-card > header { align-items: start; flex-direction: column; }
-  .capacity { text-align: left; }
-  .dashboard-grid { grid-template-columns: 1fr; }
   .timeline li { grid-template-columns: 1fr; gap: 2px; }
 }
 """
 )
 
-_SCRIPT = (
-    "function tickElapsed() {"
-    "document.querySelectorAll('[data-elapsed]').forEach(function (el) {"
-    "var value = parseInt(el.getAttribute('data-elapsed'), 10);"
-    "if (!isNaN(value)) { el.setAttribute('data-elapsed', String(value + 10)); }"
-    "});}"
-    "setInterval(tickElapsed, 10000);"
-)
-
-
-def _empty_rail_text(view: DeckView) -> str:
-    """An empty rail with no telemetry is 'cannot see', not 'nothing is wrong'."""
-    gaps = coverage_gaps(view.control_plane)
-    if not gaps:
-        return "Nothing needs you."
-    return (
-        "No open run or claim signals. Coverage is incomplete, so this is not an all-clear: "
-        + ", ".join(gaps)
-        + " unknown."
-    )
-
 
 def render_deck(view: DeckView, *, nonce: str, now: datetime, worklore_enabled: bool = True) -> str:
-    total_capacity = sum(station.station.capacity for station in view.stations)
-    total_busy = sum(station.busy for station in view.stations)
-    verdict = deck_verdict(view)
-    parts: list[str] = [
-        '<main class="deck-shell">',
-        '<header class="masthead"><div><p class="eyebrow">Fleet operations</p><h1>Command Deck</h1>',
-        f'<p class="verdict">{_esc(verdict)}</p></div><p class="header-meta">'
-        f"{total_busy}/{total_capacity} slots busy<br>{_esc(_stamp(now))}</p></header>",
-        '<nav class="deck-nav" aria-label="Command Deck"><a href="/">deck</a> <a href="/deck/repos">repos</a> <a href="/deck/roster">roster</a> <a href="/deck/policy">policy</a> '
-        + ('<a href="/deck/work">work</a> ' if worklore_enabled else "")
-        + '<a href="/view/machines">machines board</a></nav>',
-    ]
-    if worklore_enabled and view.observed_work_groups:
-        cards = ""
-        for group in view.observed_work_groups:
-            stamp, freshness = snapshot_freshness(
-                group.snapshot_observed_at, now=now, stale_after_seconds=view.stale_after_seconds
-            )
-            cards += (
-                '<article class="panel"><h3><a href="/deck/observed/'
-                + _esc(group.key)
-                + '">'
-                + _esc(group.label)
-                + "</a></h3><p>"
-                + str(len(group.work_ids))
-                + " configured observation records</p><p>Coverage: "
-                + _esc(group.coverage)
-                + "</p><p>Configured source: "
-                + _esc(group.source_ref)
-                + "<br>Configured proxy: "
-                + _esc(group.proxy_ref)
-                + "<br>Configured parent: "
-                + _esc(group.parent_ref)
-                + "</p><p>Snapshot observation time (operator-configured metadata): "
-                + _esc(stamp)
-                + f"<br>Snapshot freshness: {freshness}. Stale after {view.stale_after_seconds} seconds.</p></article>"
-            )
-        parts.append(
-            '<section aria-label="Observed work groups"><h2>Observed work groups</h2>'
-            "<p>Retained task observations. Counts describe configured records. "
-            "Recent observation metadata does not establish live activity.</p>" + cards + "</section>"
-        )
-    if not view.stations:
-        parts.append(
-            '<section class="panel"><p class="empty">No stations configured. Start the hub with --deck-config to add them.</p></section>'
-        )
-    else:
-        station_cards: list[str] = []
-        for index, station in enumerate(view.stations):
-            enrol = "" if station.enrolled else " (not enrolled)"
-            cls = "" if station.enrolled else ' class="not-enrolled"'
-            tiles_html = "".join(_tile_html(tile) for tile in station.tiles)
-            tiles_html = tiles_html or '<p class="empty">No active runs.</p>'
-            heard = f"heard {heard_age(station.last_heard)} ago" if station.last_heard else "never heard"
-            station_cards.append(
-                f'<section aria-labelledby="station-{index}" class="station-card"><header><div><h2 id="station-{index}"'
-                f' title="{_esc(station.station.node_id)}"{cls}>{_esc(station.label)}{enrol}</h2>'
-                f'<p class="station-meta">{_esc(heard)}</p></div><p class="capacity">'
-                f'{station.busy}/{station.station.capacity} busy</p></header><div class="run-stack">{tiles_html}</div></section>'
-            )
-        parts.append('<section class="stations" aria-label="Fleet stations">' + "".join(station_cards) + "</section>")
-    parts.append(render_control_plane(view.control_plane))
-    cloud_cards = "".join(_cloud_worker_html(worker) for worker in view.cloud_workers)
-    parts.append(
-        '<section class="panel" aria-labelledby="cloud-workers"><header><h2 id="cloud-workers">Cloud workers</h2>'
-        f'<p class="panel-count">{len(view.cloud_workers)} provider(s)</p></header>'
-        + (
-            f'<div class="cloud-workers">{cloud_cards}</div>'
-            if cloud_cards
-            else '<p class="empty">No cloud providers configured.</p>'
-        )
-        + "</section>"
+    # Imported here because fleet_deck_overview imports this module for its types.
+    from . import fleet_deck_overview
+
+    body = fleet_deck_overview.render_overview(view, now, worklore_enabled=worklore_enabled)
+    return _document(
+        body,
+        nonce=nonce,
+        now=now,
+        active="overview",
+        view=view,
+        worklore_enabled=worklore_enabled,
+        extra_css=ui_theme.OVERVIEW_CSS,
     )
-    session_items = "".join(_interactive_session_html(session) for session in view.interactive_sessions)
-    parts.append(
-        '<section class="panel" aria-labelledby="interactive-sessions"><header>'
-        '<h2 id="interactive-sessions">Interactive sessions</h2>'
-        f'<p class="panel-count">{len(view.interactive_sessions)} session(s)</p></header>'
-        + (
-            f'<ul class="attention-list">{session_items}</ul>'
-            if session_items
-            else '<p class="empty">No interactive sessions.</p>'
-        )
-        + "</section>"
-    )
-    rail_items = "".join(
-        f'<li><span class="attention-kind">{_esc(entry.kind)}</span> &middot; {_esc(entry.repo)} &middot; '
-        f'{_esc(entry.node_id[:12])} &middot; <span title="{_esc(entry.run_id or entry.node_id)}">'
-        f"{_esc((entry.run_id or entry.node_id)[:12])}</span> &middot; {_esc(entry.detail)}</li>"
-        for entry in view.rail
-    )
-    timeline = "".join(
-        '<li><span class="timeline-state">'
-        f"{_esc(run.state)}</span><span>{_esc(run.repo)} &middot; {_esc(run.node_id[:12])}</span>"
-        f'<span title="{_esc(run.run_id)}">{_esc(run.run_id[:12])}</span></li>'
-        for run in view.outcomes
-    )
-    parts.append(
-        '<div class="dashboard-grid"><section class="panel attention-panel" aria-labelledby="rail"><header><h2 id="rail">Needs you</h2>'
-        f'<p class="panel-count">{len(view.rail)} item(s)</p></header>'
-        + (
-            f'<ul class="attention-list">{rail_items}</ul>'
-            if rail_items
-            else f'<p class="empty">{_esc(_empty_rail_text(view))}</p>'
-        )
-        + '</section><section class="panel" aria-labelledby="timeline"><header><h2 id="timeline">Recent outcomes</h2>'
-        f'<p class="panel-count">{len(view.outcomes)} shown</p></header>'
-        + (f'<ul class="timeline">{timeline}</ul>' if timeline else '<p class="empty">No recent outcomes.</p>')
-        + "</section></div>"
-    )
-    observer_items = "".join(
-        f'<li><span title="{_esc(node)}">{_esc(node[:12])}</span> &middot; heard {heard_age(received)} ago</li>'
-        for node, received in view.observers
-    )
-    summary = f"Other observers ({len(view.observers)})"
-    parts.append(
-        f'<details><summary>{_esc(summary)}</summary><ul class="observer-list">{observer_items}</ul></details>'
-    )
-    parts.append(
-        '<footer><a href="/view/machines">machines board</a> <a href="/view/repos">repos board</a></footer></main>'
-    )
-    return _document("\n".join(parts), nonce=nonce, now=now)
 
 
 def repo_coordination_table(view: DeckView) -> str:
@@ -1830,54 +1701,6 @@ def repo_coordination_table(view: DeckView) -> str:
     )
 
 
-def _tile_html(tile: Tile) -> str:
-    claim_html = ""
-    if tile.claim is not None:
-        conductor = f" &middot; {_esc(tile.claim.owner_conductor)}" if tile.claim.owner_conductor else ""
-        claim_html = (
-            f'<p class="claim">claim: {_esc(tile.claim.owner_node[:12])}{conductor} &middot; '
-            f"{tile.claim.ttl_remaining}s left</p>"
-        )
-    collision_html = '<p class="collision">! collision</p>' if tile.collision else ""
-    elapsed = f"{tile.run.elapsed_seconds}s" if tile.run.elapsed_seconds is not None else "&mdash;"
-    tile_class = tile.run.bucket.replace(" ", "-")
-    # The claim line knows the seat even when the latest event row does not:
-    # fall back to the claim conductor before admitting unknown.
-    seat = tile.run.seat or (tile.claim.owner_conductor if tile.claim is not None else "") or UNKNOWN
-    harness = tile.run.harness or UNKNOWN
-    model_text = tile.run.launch_model or tile.run.model or UNKNOWN
-    badges = harness_badge_html(tile.run.harness) + provider_badge_html(tile.run.provider)
-    return (
-        f'<article class="tile tile--{_esc(tile_class)}" data-elapsed="{_esc(str(tile.run.elapsed_seconds or 0))}">'
-        f'<header class="tile-head"><p class="repo-name">{_esc(tile.run.repo)}</p>'
-        f'<div class="tile-side"><p class="state">{_esc(tile.run.bucket)}</p>'
-        f'<p class="tile-badges">{badges}</p>'
-        f'<p class="tile-model">{_esc(model_text)}</p></div></header><dl class="tile-facts">'
-        f"<dt>seat</dt><dd>{_esc(seat)}/{_esc(harness)}</dd>"
-        f"<dt>model</dt><dd>{_esc(model_text)}</dd>"
-        f'<dt>elapsed</dt><dd class="elapsed">{elapsed}</dd>'
-        f'<dt>run</dt><dd class="run-id" title="{_esc(tile.run.run_id)}">{_esc(tile.run.run_id[:12])}</dd></dl>'
-        + claim_html
-        + collision_html
-        + "</article>"
-    )
-
-
-def _interactive_session_html(session: InteractiveSession) -> str:
-    dirty = f"{len(session.dirty_paths)}+" if session.dirty_truncated else str(len(session.dirty_paths))
-    branch = session.branch or "-"
-    badge = harness_badge_html(session.harness)
-    return (
-        "<li>"
-        f"{badge} "
-        f"{_esc(session.repo_label or session.repo_identity)} &middot; "
-        f"{_esc(session.harness or UNKNOWN)}/{_esc(session.session_id)} &middot; "
-        f"{_esc(session.checkout_path)} &middot; "
-        f"{_esc(branch)} &middot; {_esc(dirty)} dirty"
-        "</li>"
-    )
-
-
 def _repo_flags(row: RepoRow) -> str:
     flags: list[str] = []
     if row.collision:
@@ -1885,43 +1708,6 @@ def _repo_flags(row: RepoRow) -> str:
     if row.interactive_overlap:
         flags.append("! overlap")
     return " ".join(flags)
-
-
-def _cloud_worker_html(worker: CloudWorker) -> str:
-    lease_items = "".join(
-        "<li>"
-        f"<strong>{_esc(lease.label or lease.provider_task_id or 'active lease')}</strong><br>"
-        f"{_esc(lease.repo)} &middot; {_esc(lease.state)}"
-        + (f'<br><span title="task id">{_esc(lease.provider_task_id)}</span>' if lease.provider_task_id else "")
-        + (f'<br><span title="artifact">{_esc(lease.artifact_ref)}</span>' if lease.artifact_ref else "")
-        + "</li>"
-        for lease in worker.leases
-    )
-    return (
-        '<article class="cloud-worker-card"><header>'
-        f"<h3>{provider_badge_html(worker.provider)} {_esc(worker.provider)}</h3>"
-        f'<p class="cloud-capacity">{worker.used}/{worker.limit}</p>'
-        f'</header><p class="cloud-state">circuit: {_esc(worker.circuit_state)}</p>'
-        + (
-            f'<ul class="cloud-lease-list">{lease_items}</ul>'
-            if lease_items
-            else '<p class="empty">No active leases.</p>'
-        )
-        + "</article>"
-    )
-
-
-def heard_age(received_at: str | None) -> str:
-    if received_at is None:
-        return "unknown"
-    try:
-        moment = datetime.fromisoformat(received_at)
-    except ValueError:
-        return "unknown"
-    if moment.tzinfo is None:
-        moment = moment.replace(tzinfo=_UTC)
-    seconds = max(0, int((datetime.now(_UTC) - moment).total_seconds()))
-    return f"{seconds}s"
 
 
 def _owner_text(claim: Claim | None) -> str:
@@ -1941,13 +1727,38 @@ def _esc(value: object) -> str:
     return html.escape(str(value), quote=True)
 
 
-def _document(body: str, *, nonce: str, now: datetime, title: str = "Command Deck", refresh: bool = True) -> str:
-    return ui_theme.document(
+def _document(
+    body: str,
+    *,
+    nonce: str,
+    now: datetime,
+    title: str = "Command Deck",
+    refresh: bool = True,
+    active: str = "overview",
+    view: DeckView | None = None,
+    worklore_enabled: bool | None = None,
+    extra_css: str = "",
+) -> str:
+    """Every Deck page: its body inside the shared two-column shell.
+
+    *view* feeds the sidebar machine tree; pages that never build a
+    ``DeckView`` pass ``None`` and get the navigation only.
+    """
+    # Imported here because fleet_deck_overview imports this module for its types.
+    from . import fleet_deck_overview
+
+    if worklore_enabled is None:
+        from . import worklore_http
+
+        worklore_enabled = worklore_http.enabled()
+    sidebar = fleet_deck_overview.render_sidebar(view, active, now, worklore_enabled=worklore_enabled)
+    return fleet_deck_shell.deck_page(
         title,
-        nonce,
+        active,
+        sidebar,
         body,
+        nonce,
         as_of=_stamp(now),
         refresh_seconds=10 if refresh else None,
-        extra_css=_STYLE,
-        script=_SCRIPT,
+        extra_css=_STYLE + extra_css,
     )

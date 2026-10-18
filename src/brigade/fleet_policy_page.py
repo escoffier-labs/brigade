@@ -1869,11 +1869,6 @@ def render(
         f"{_esc(view.actor or 'unknown')}</p></div>"
         f'<p class="header-meta">{_esc(fleet_command_deck._stamp(now))}</p></header>'
     )
-    parts.append(
-        '<nav class="deck-nav" aria-label="Command Deck"><a href="/">deck</a> <a href="/deck/repos">repos</a> '
-        '<a href="/deck/roster">roster</a> <a href="/deck/policy">policy</a> '
-        '<a href="/view/machines">machines board</a></nav>'
-    )
     if banner:
         parts.append(f'<p class="banner">{_esc(banner)}</p>')
     if error:
@@ -1896,4 +1891,6 @@ def render(
     parts.append(_sessions_section(view))
     parts.append(_history_section(view, editable=editable, csrf=csrf))
     parts.append("</main>")
-    return fleet_command_deck._document("\n".join(parts), nonce=nonce, now=now, title="Policy", refresh=False)
+    return fleet_command_deck._document(
+        "\n".join(parts), nonce=nonce, now=now, title="Policy", refresh=False, active="policy"
+    )

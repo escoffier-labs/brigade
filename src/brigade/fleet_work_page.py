@@ -149,9 +149,6 @@ def render(page: Mapping[str, Any], *, nonce: str, now: datetime) -> str:
         '<main class="deck-shell"><header class="masthead"><div><p class="eyebrow">Fleet operations</p>'
         "<h1>Command Deck &middot; Worklore</h1></div>"
         f'<p class="header-meta">{deck._esc(deck._stamp(now))}</p></header>'
-        '<nav class="deck-nav" aria-label="Command Deck"><a href="/">deck</a> <a href="/deck/repos">repos</a> '
-        '<a href="/deck/roster">roster</a> <a href="/deck/policy">policy</a> '
-        '<a href="/deck/work" aria-current="page">work</a> <a href="/view/machines">machines board</a></nav>'
         '<section class="panel"><h2>Stored tasks</h2>'
         "<p>Read-only view of stored Worklore tasks. captured / manual / burn_eligible=false records describe captured work "
         "configured for manual execution and excluded from burn selection. Execution state is not inferred "
@@ -164,7 +161,9 @@ def render(page: Mapping[str, Any], *, nonce: str, now: datetime) -> str:
         + pagination
         + "</main>"
     )
-    return deck._document(body, nonce=nonce, now=now, title="Worklore", refresh=False)
+    return deck._document(
+        body, nonce=nonce, now=now, title="Worklore", refresh=False, active="work", worklore_enabled=True
+    )
 
 
 def load_observed_group(conn: sqlite3.Connection, group: deck.ObservedWorkGroup) -> dict[str, Any]:
@@ -205,8 +204,7 @@ def render_observed_group(page: Mapping[str, Any], *, nonce: str, now: datetime,
         '<main class="deck-shell"><header class="masthead"><div><p class="eyebrow">Observed work</p><h1>'
         + _text(group.label)
         + "</h1></div></header>"
-        '<nav class="deck-nav" aria-label="Command Deck"><a href="/deck">deck</a>'
-        '<a href="/deck/work">work</a></nav><section class="panel"><h2>Retained task observations</h2>'
+        '<section class="panel"><h2>Retained task observations</h2>'
         + f"<p>{len(group.work_ids)} configured observation records</p><p>Coverage: "
         + _text(group.coverage)
         + "</p><p>Configured source: "
@@ -223,4 +221,6 @@ def render_observed_group(page: Mapping[str, Any], *, nonce: str, now: datetime,
         "snapshot observation time.</p><p>Task previews and stored references are bounded. Truncation is marked.</p>"
         "</section>" + blocks + "</main>"
     )
-    return deck._document(body, nonce=nonce, now=now, title=group.label, refresh=False)
+    return deck._document(
+        body, nonce=nonce, now=now, title=group.label, refresh=False, active="work", worklore_enabled=True
+    )

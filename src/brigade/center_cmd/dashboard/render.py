@@ -115,4 +115,5 @@ def page(title: str, nonce: str, nav: str, body: str, *, reload_ms: int = 15000)
         as_of=stamp,
         extra_css=_CENTER_CSS,
         script=_CENTER_SCRIPT % reload_delay,
+        scheme="dark",
     )

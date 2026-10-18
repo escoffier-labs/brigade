@@ -960,3 +960,19 @@ def test_active_legacy_lease_counts_against_shared_seat_capacity(conn):
     conn.commit()
     freed = _route(conn, session_id="session-2")
     assert freed["selected"] is not None, freed
+
+
+def test_snapshot_emits_the_policy_node_id_for_every_machine(conn):
+    from brigade import fleet_command_deck
+
+    snap = fleet_hub_routing.snapshot(conn)
+    expected = {
+        "worker-linux-1": NODE_LINUX,
+        "worker-linux-2": NODE_LINUX_2,
+        "worker-windows-1": NODE_WINDOWS,
+        "worker-cloud-1": NODE_CLOUD,
+        "origin-windows-1": CONTROLLER,
+    }
+    assert {row["id"]: row["node_id"] for row in snap["machines"]} == expected
+    plane = fleet_command_deck.control_plane_from_snapshot(snap)
+    assert {machine.id: machine.node_id for machine in plane.machines} == expected
