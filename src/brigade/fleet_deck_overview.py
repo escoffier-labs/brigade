@@ -282,7 +282,10 @@ def render_header(view: DeckView, now: datetime) -> str:
 def _working_row(station: StationView, tile: Tile) -> str:
     run = tile.run
     seat = run.seat or (tile.claim.owner_conductor if tile.claim is not None else "") or UNKNOWN
-    href = "/view/machines?" + urlencode({"node": run.node_id, "repo": run.repo[:128]})
+    params = {"node": run.node_id, "repo": run.repo[:128]}
+    if run.bucket in ("stale", "unknown"):
+        params["attention"] = "1"  # the board hides these buckets unless attention is on
+    href = "/view/machines?" + urlencode(params)
     flag = ' <span class="flag">! collision</span>' if tile.collision else ""
     state = "" if run.bucket == "running" else f' <span class="chip chip-muted">{_esc(run.bucket)}</span>'
     model = run.launch_model or run.model

@@ -383,6 +383,16 @@ def test_verdict_falls_back_to_the_deck_verdict_when_nothing_needs_attention():
 # --- working now and queued -----------------------------------------------------------------
 
 
+def test_stale_and_unknown_working_rows_link_to_the_attention_board():
+    for bucket in ("stale", "unknown"):
+        run = _run(NODE_A, "r1", "skillet", bucket=bucket)
+        html = overview.render_work_lists(_view([_station(NODE_A, "linux-a", 4, [run])]))
+        assert "repo=skillet&amp;attention=1" in html, bucket
+    running = _run(NODE_A, "r2", "skillet")
+    html = overview.render_work_lists(_view([_station(NODE_A, "linux-a", 4, [running])]))
+    assert "attention=1" not in html
+
+
 def test_working_rows_show_repo_badge_seat_machine_elapsed_and_a_board_link():
     html = overview.render_work_lists(_mixed_view())
     assert "Working now (2)" in html
