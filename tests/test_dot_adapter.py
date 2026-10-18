@@ -339,3 +339,10 @@ class MessagingAdapter(Fixture):
             self.assertIn(needle, result["operating_instructions"])
         self.assertIn("hub", result["inbox"]["usage"])
         self.assertEqual(result["inbox"]["cli"], "brigade fleet msg send")
+
+    def test_capabilities_name_the_configured_inbox_principal(self):
+        self.runtime = replace(self.runtime, hub=replace(self.runtime.hub, principal="agent:example-planner"))
+        self.adapter = self.make_adapter(self.dispatch)
+        usage = self.call("dot_t3_capabilities")["inbox"]["usage"]
+        self.assertIn("brigade fleet msg send --to agent:example-planner.", usage)
+        self.assertNotIn("--to agent:dot", usage)

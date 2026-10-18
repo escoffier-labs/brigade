@@ -14,9 +14,9 @@ MAX_MESSAGE_BYTES = 8192
 
 
 ERROR_MESSAGES = {
-    "recipient_not_permitted": "The recipient is outside Dot's send grants. Nothing was sent or queued, "
+    "recipient_not_permitted": "The recipient is outside the dot's send grants. Nothing was sent or queued, "
     "and retrying will not help.",
-    "recipient_quota": "Dot's send quota for this recipient is exhausted. Nothing was sent or queued; "
+    "recipient_quota": "The dot's send quota for this recipient is exhausted. Nothing was sent or queued; "
     "do not retry in a loop.",
     "hub_credential_invalid": "The bridge's Fleet Hub credential file is unusable. This is a local setup fault, "
     "not a hub outage. Nothing was sent or queued, and retrying will not help.",
