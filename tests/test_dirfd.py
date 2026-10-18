@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import os
 import stat
 import sys
@@ -554,3 +555,38 @@ def test_nt_stat_child_refuses_unsafe_or_failed_metadata_without_leaks(
     finally:
         os.close(parent)
     assert len(kernel.closed) == len(set(kernel.closed))
+
+
+@pytest.mark.parametrize("kind", ["directory", "file", "closed"])
+def test_fsync_directory_tolerates_refused_windows_flush_only_on_a_held_directory(tmp_path, monkeypatch, kind):
+    def refused_flush(descriptor):
+        raise OSError(errno.EBADF, "Bad file descriptor")
+
+    if kind == "file":
+        descriptor = os.open(tmp_path / "held", os.O_CREAT | os.O_RDWR, 0o600)
+    else:
+        descriptor = dirfd.open_directory_nofollow(tmp_path, writable=False)
+    if kind == "closed":
+        os.close(descriptor)
+    monkeypatch.setattr(dirfd.sys, "platform", "win32")
+    monkeypatch.setattr(dirfd.os, "fsync", refused_flush)
+    try:
+        if kind == "directory":
+            dirfd.fsync_directory(descriptor)
+        else:
+            with pytest.raises(OSError) as raised:
+                dirfd.fsync_directory(descriptor)
+            assert raised.value.errno == errno.EBADF
+    finally:
+        if kind != "closed":
+            os.close(descriptor)
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires a native Windows directory handle")
+@pytest.mark.parametrize("writable", [True, False])
+def test_fsync_directory_accepts_native_windows_directory_handles(tmp_path, writable):
+    descriptor = dirfd.open_directory_nofollow(tmp_path, writable=writable)
+    try:
+        dirfd.fsync_directory(descriptor)
+    finally:
+        os.close(descriptor)

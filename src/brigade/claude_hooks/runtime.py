@@ -20,7 +20,7 @@ from typing import Any, BinaryIO, Callable, Iterator
 from .. import localio
 from ..component_paths import cache_root
 from ..wiring import expand_user_path, resolve_wired_target
-from . import compaction_marker, envelope, heartbeat, presence
+from . import anchored_io, compaction_marker, envelope, heartbeat, presence
 from .fingerprint import repo_worktree_fingerprint
 from .package import PACKAGE_REF
 from .paths import is_operator_home, resolved_path
@@ -165,11 +165,11 @@ def _task_epoch_for_event(event: str, payload: dict[str, Any], session_id: str) 
 
 
 def read_session_state(target: Path, session_id: str) -> dict[str, Any] | None:
-    return localio.read_json_dict(_state_path(target.expanduser().resolve(), session_id))
+    return anchored_io.read_json(target, _state_path(target, session_id).name)
 
 
 def write_session_state(target: Path, session_id: str, payload: dict[str, Any]) -> None:
-    localio.write_json(_state_path(target.expanduser().resolve(), session_id), payload)
+    anchored_io.write_json(target, _state_path(target, session_id).name, payload)
 
 
 def iter_session_states(
@@ -178,26 +178,7 @@ def iter_session_states(
     modified_since: datetime | None = None,
     limit: int | None = None,
 ) -> Iterator[dict[str, Any]]:
-    root = _sessions_root(target.expanduser().resolve())
-    if not root.is_dir():
-        return
-    candidates: list[tuple[float, Path]] = []
-    threshold = modified_since.timestamp() if modified_since is not None else None
-    for path in root.glob("*.json"):
-        try:
-            modified = path.stat().st_mtime
-        except OSError:
-            continue
-        if threshold is not None and modified < threshold:
-            continue
-        candidates.append((modified, path))
-    candidates.sort(key=lambda item: (item[0], item[1].name), reverse=True)
-    if limit is not None:
-        candidates = candidates[: max(limit, 0)]
-    for _, path in candidates:
-        state = localio.read_json_dict(path)
-        if isinstance(state, dict):
-            yield state
+    yield from anchored_io.iter_states(target, modified_since=modified_since, limit=limit)
 
 
 def _advance_quote_state(text: str, quote: str | None) -> str | None:
@@ -2665,6 +2646,28 @@ def _hook_run_body(
     pin_target: Path | None,
     on_prologue: Callable[[dict[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
+    """Keep integrity refusals distinct across both worker transports."""
+    try:
+        return _hook_run_body_unchecked(event, payload, pin_target=pin_target, on_prologue=on_prologue)
+    except anchored_io.SessionIntegrityError:
+        # Return a normal worker outcome so Windows serialization cannot turn
+        # this refusal into a generic fail-open exception in the parent.
+        return {
+            "kind": "ok",
+            "result": anchored_io.integrity_envelope(event, stop_hook_active=payload.get("stop_hook_active") is True),
+            "log_target": None,
+            "claim_path": None,
+            "session_id": _session_id_from_payload(payload),
+        }
+
+
+def _hook_run_body_unchecked(
+    event: str,
+    payload: dict[str, Any],
+    *,
+    pin_target: Path | None,
+    on_prologue: Callable[[dict[str, Any]], None] | None = None,
+) -> dict[str, Any]:
     """Run every filesystem-touching ``hook_run`` step.
 
     The parent process must not call this. Pin resolution, target discovery,
@@ -3147,6 +3150,7 @@ def hook_run(
     log_target: Path | None = None
     session_id = "unknown"
     result: dict[str, Any] | None = None
+    payload: dict[str, Any] = {}
     try:
         payload, raw = _load_hook_stdin(stdin_text=stdin_text)
         session_id = _session_id_from_payload(payload)
@@ -3169,6 +3173,11 @@ def hook_run(
         followup_target = exc.log_target if exc.log_target is not None else log_target
         if followup_target is not None and _is_timeout_degraded(exc):
             followup = _bounded_timeout_followup(event, followup_target, session_id, exc)
+            if followup == "integrity_refused":
+                envelope.emit_stdout(
+                    anchored_io.integrity_envelope(event, stop_hook_active=payload.get("stop_hook_active") is True)
+                )
+                return 0
             if followup == "latched":
                 envelope.emit_stdout(envelope.latched_envelope(event))
                 return 0

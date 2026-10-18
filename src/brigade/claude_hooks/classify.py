@@ -11,6 +11,7 @@ from .. import localio
 from ..config import load_config
 from ..templates import template_root
 from .install_cmd import status_payload
+from .anchored_io import SessionIntegrityError
 from .runtime import (
     MAX_RECENT_SESSION_STATES,
     _receipt_since,
@@ -87,7 +88,12 @@ def classify(target: Path) -> dict[str, Any] | None:
     hook_status = status_payload(target)
     skill_present, skill_current = _skill_current(target)
     instruction_current = _instruction_import_current(target)
-    dormant = _recent_write_without_receipt(target)
+    integrity_issue = None
+    try:
+        dormant = _recent_write_without_receipt(target)
+    except SessionIntegrityError as exc:
+        dormant = False
+        integrity_issue = f"session directory integrity refused: {exc}"
 
     issues: list[str] = []
     if not instruction_current:
@@ -108,7 +114,10 @@ def classify(target: Path) -> dict[str, Any] | None:
     elif not hook_status.get("current"):
         issues.append("stale hook package")
 
-    if dormant:
+    if integrity_issue is not None:
+        state = "error"
+        issues.append(integrity_issue)
+    elif dormant:
         state = "dormant"
         issues.append("recent work has no verification receipt")
     elif instruction_current and skill_current and hook_status.get("current"):
@@ -125,5 +134,6 @@ def classify(target: Path) -> dict[str, Any] | None:
         "skill_present": skill_present,
         "skill_current": skill_current,
         "hooks": hook_status,
-        "detail": f"state={state}; " + ("; ".join(issues) if issues else "current guidance, skill, and hooks"),
+        "detail": integrity_issue
+        or f"state={state}; " + ("; ".join(issues) if issues else "current guidance, skill, and hooks"),
     }

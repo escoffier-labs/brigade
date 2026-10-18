@@ -318,6 +318,27 @@ def test_adoption_scrubs_private_repo_path_from_claude_classifier_issues(tmp_pat
     assert any("service repo/.claude/settings.json" in issue for issue in payload["rows"][0]["issues"])
 
 
+def test_adoption_keeps_other_rows_when_session_integrity_is_refused(tmp_path, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    bad = _wired_repo(workspace, "bad", "claude")
+    good = _wired_repo(workspace, "good", "claude")
+    sessions = runtime._sessions_root(bad)
+    sessions.parent.mkdir(parents=True, exist_ok=True)
+    sessions.write_text("not a directory")
+    _fleet_config(workspace, [("bad", bad), ("good", good)])
+    capsys.readouterr()
+
+    assert repos_cmd.adoption_report(target=workspace, harnesses=["claude"], json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    rows = {row["repo_id"]: row for row in payload["rows"]}
+
+    assert rows["bad"]["state"] == "partial"
+    assert any("session directory integrity refused:" in issue for issue in rows["bad"]["issues"])
+    assert rows["good"]["state"] == "enforced-idle"
+    assert str(bad) not in json.dumps(payload)
+
+
 def test_adoption_repair_is_read_only_and_cli_dispatches_with_options_after_subcommand(tmp_path, capsys):
     workspace = tmp_path / "workspace"
     workspace.mkdir()

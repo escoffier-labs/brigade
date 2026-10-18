@@ -8,8 +8,10 @@ the implementation, and ``authority_store`` re-branches on its own names.
 
 from __future__ import annotations
 
+import errno
 import importlib
 import os
+import stat
 import sys
 from pathlib import Path
 from typing import Any
@@ -389,9 +391,21 @@ def fsync_directory(descriptor: int) -> None:
     try:
         os.fsync(descriptor)
     except OSError as exc:
-        if sys.platform == "win32" and getattr(exc, "winerror", None) in {1, 5}:
+        if sys.platform == "win32" and (
+            getattr(exc, "winerror", None) in {1, 5} or _refused_windows_directory_flush(descriptor, exc)
+        ):
             return
         raise
+
+
+def _refused_windows_directory_flush(descriptor: int, exc: OSError) -> bool:
+    """The CRT reports a refused directory flush as EBADF with no winerror; only a held directory qualifies."""
+    if exc.errno != errno.EBADF:
+        return False
+    try:
+        return stat.S_ISDIR(os.fstat(descriptor).st_mode)
+    except OSError:
+        return False
 
 
 def child_names(parent: int, limit: int) -> list[str]:

@@ -40,6 +40,18 @@ def test_doctor_reports_enforced_current_package(tmp_path: Path, capsys):
     assert "enforced" in check["detail"]
 
 
+def test_doctor_reports_session_integrity_refusal_without_crashing(tmp_path: Path, capsys):
+    target = _wired(tmp_path)
+    sessions = target / ".brigade" / "work" / "claude-hooks" / "sessions"
+    sessions.parent.mkdir(parents=True, exist_ok=True)
+    sessions.write_text("not a directory")
+
+    check = _loop_check(target, capsys, expect_rc=1)
+
+    assert check["status"] == "FAIL"
+    assert "session directory integrity refused:" in check["detail"]
+
+
 def test_doctor_reports_advisory_only_without_hooks(tmp_path: Path, capsys):
     target = _wired(tmp_path)
     assert hooks_uninstall(target=target) == 0
@@ -362,7 +374,7 @@ def test_doctor_reports_normal_state_when_no_legacy_handler(tmp_path: Path, caps
 
 def test_doctor_skips_old_state_files_and_caps_recent_candidates(tmp_path: Path, capsys, monkeypatch):
     target = _wired(tmp_path)
-    from brigade.claude_hooks import runtime
+    from brigade.claude_hooks import anchored_io, runtime
 
     root = target / ".brigade" / "work" / "claude-hooks" / "sessions"
     root.mkdir(parents=True, exist_ok=True)
@@ -373,17 +385,16 @@ def test_doctor_skips_old_state_files_and_caps_recent_candidates(tmp_path: Path,
     for index in range(runtime.MAX_RECENT_SESSION_STATES + 8):
         (root / f"recent-{index:04d}.json").write_text("{}\n")
 
-    original = localio.read_json_dict
-    session_reads: list[Path] = []
+    original = anchored_io.SessionDirectory.read_bytes
+    session_reads: list[str] = []
 
-    def tracked(path: Path):
-        if path.parent == root:
-            assert path != old
-            session_reads.append(path)
-        return original(path)
+    def tracked(anchor, name, max_bytes=None):
+        assert name != old.name
+        session_reads.append(name)
+        return original(anchor, name, max_bytes)
 
-    monkeypatch.setattr(localio, "read_json_dict", tracked)
+    monkeypatch.setattr(anchored_io.SessionDirectory, "read_bytes", tracked)
     check = _loop_check(target, capsys)
 
     assert check["status"] == "OK"
-    assert len(session_reads) <= runtime.MAX_RECENT_SESSION_STATES
+    assert len(session_reads) == runtime.MAX_RECENT_SESSION_STATES
