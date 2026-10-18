@@ -25,7 +25,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
-from . import __version__, component_paths, localio
+from . import __version__, component_paths, distribution, localio
 
 CHECK_URL = "https://check.brigade.tools/v1/version"
 CHECK_INTERVAL_SECONDS = 24 * 60 * 60
@@ -62,7 +62,7 @@ def available_update(*, env: Mapping[str, str] | None = None, now: float | None 
     """
     try:
         environment = os.environ if env is None else env
-        if environment.get("BRIGADE_NO_UPDATE_CHECK"):
+        if distribution.is_npm() or environment.get("BRIGADE_NO_UPDATE_CHECK"):
             return None
 
         path = cache_path(environment)
@@ -83,7 +83,7 @@ def available_update(*, env: Mapping[str, str] | None = None, now: float | None 
 
 
 def _notice_gated(argv: list[str], exit_code: int, env: Mapping[str, str], stderr: Any) -> bool:
-    if env.get("BRIGADE_NO_UPDATE_CHECK") or env.get("CI"):
+    if distribution.is_npm() or env.get("BRIGADE_NO_UPDATE_CHECK") or env.get("CI"):
         return True
     if exit_code != 0:
         return True
@@ -94,7 +94,7 @@ def _notice_gated(argv: list[str], exit_code: int, env: Mapping[str, str], stder
 
 
 def _refresh_gated(argv: list[str], env: Mapping[str, str]) -> bool:
-    if env.get("BRIGADE_NO_UPDATE_CHECK") or env.get("CI"):
+    if distribution.is_npm() or env.get("BRIGADE_NO_UPDATE_CHECK") or env.get("CI"):
         return True
     if argv and argv[0] in _SKIP_COMMANDS:
         return True
@@ -176,7 +176,7 @@ def maybe_notify(
 def run_refresh(*, env: Mapping[str, str] | None = None, now: float | None = None) -> int:
     """Fetch the latest version into the cache. Exit 0 no matter what."""
     environment = os.environ if env is None else env
-    if environment.get("BRIGADE_NO_UPDATE_CHECK") or environment.get("CI"):
+    if distribution.is_npm() or environment.get("BRIGADE_NO_UPDATE_CHECK") or environment.get("CI"):
         return 0
     current_time = time.time() if now is None else now
     path = cache_path(environment)

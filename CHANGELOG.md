@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Claude hook state reads retain the opened snapshot when atomic replacement unlinks it before the first metadata check, preventing retry starvation while preserving observed writes and containment checks.
 
 - Declared version and beta preview base move to 0.29.0 after the v0.28.0 tag so publish-dev wheels sort above stable. (#1787)
+- Add an unpublished 0.29.0 npm/npx distribution candidate that bundles Brigade's wheel and provisions pinned uv and managed Python on Node-only machines. Candidate CI defines native acceptance jobs for Linux, macOS and Windows. Registry publication remains a separate step.
+- Preserve canceled verification receipts, neutral outcome capture and the first interruption signal across command startup, process cleanup and receipt finalization. Canceled verification skips optional code-graph work.
 
 - The Command Deck opens on a Fleet overview: a left sidebar with the page nav, a machine tree, and cloud providers; four summary cards; an alerts strip with first-observed times; working and queued lists; and a machines table with seat and load bars. Deck pages and the fleet boards follow the system light or dark scheme. The routing snapshot gains an additive `node_id` per machine so stations join to machines by node id. Center stays dark for now.
 

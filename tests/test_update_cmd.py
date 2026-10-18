@@ -1029,3 +1029,73 @@ def test_dry_run_does_not_write_manifest_cache_or_state(tmp_path):
     )
     assert not paths.data_root.exists()
     assert not paths.cache_root.exists()
+
+
+@pytest.mark.parametrize("channel,dry_run", [("stable", False), ("beta", False), ("stable", True)])
+@pytest.mark.parametrize("provided_paths", [False, True])
+def test_npm_update_refuses_before_side_effects(tmp_path, monkeypatch, capsys, channel, dry_run, provided_paths):
+    from brigade import distribution
+
+    monkeypatch.setattr(distribution, "_name", "npm")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("npm update crossed the side-effect boundary")
+
+    paths = update_cmd.UpdatePaths(tmp_path / "data", tmp_path / "cache", tmp_path / "brigade")
+    for name in (
+        "default_paths",
+        "_DefaultHttp",
+        "_UpdateLock",
+        "load_update_state",
+        "_cache_manifest",
+        "write_update_state",
+    ):
+        monkeypatch.setattr(update_cmd, name, forbidden)
+    monkeypatch.setattr(update_cmd.component_paths, "update_state_path", forbidden)
+    monkeypatch.setattr(update_cmd.component_paths, "update_lock_path", forbidden)
+    http = _Http({}, b"")
+    monkeypatch.setattr(http, "json", forbidden)
+    monkeypatch.setattr(http, "bytes", forbidden)
+    assert (
+        update_cmd.run_update(
+            channel=channel,
+            dry_run=dry_run,
+            switch_channel=True,
+            paths=paths if provided_paths else None,
+            http=http,
+            runner=forbidden,
+            now=forbidden,
+        )
+        != 0
+    )
+    assert not list(tmp_path.iterdir())
+    message = capsys.readouterr().err.lower()
+    assert "npm" in message and "npm install" in message and "npx" in message
+
+
+def test_distribution_identity_is_process_local_and_ignores_environment(monkeypatch):
+    import os
+    import subprocess
+    import sys
+
+    from brigade import distribution
+
+    monkeypatch.setenv("BRIGADE_DISTRIBUTION", "npm")
+    assert distribution._name is None
+    assert distribution.is_npm() is False
+    for name in ("pipx", "NPM", "npm"):
+        monkeypatch.setattr(distribution, "_name", name)
+        assert distribution.is_npm() is (name == "npm")
+    # Exec starts a fresh interpreter with the caller's environment unchanged.
+    result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from brigade import distribution as d; assert d._name is None; assert d.is_npm() is False",
+        ],
+        env=os.environ.copy(),
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert result.returncode == 0, result.stderr

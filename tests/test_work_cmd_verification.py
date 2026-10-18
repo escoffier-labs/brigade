@@ -95,9 +95,9 @@ def test_verify_run_reports_canceled_completion_as_interrupted_exit(tmp_path, mo
     monkeypatch.setattr(fleet_client, "report_event", lambda event, **_kwargs: reported.append(event) or True)
 
     def interrupted_child_runner(execution_argv, *, cwd, env, timeout):
-        return verify_mod._VERIFY_INTERRUPTED_COMMAND_STATUS, None, "", ""
+        return verify_mod.verify_runtime._VERIFY_INTERRUPTED_COMMAND_STATUS, None, "", ""
 
-    monkeypatch.setattr(verify_mod, "_run_verify_child_process", interrupted_child_runner)
+    monkeypatch.setattr(verify_mod.verify_runtime, "_run_verify_child_process", interrupted_child_runner)
     rc = work_cmd.verify_run(
         target=tmp_path,
         commands=[[sys.executable, "-c", "print(1)"]],
@@ -2577,7 +2577,7 @@ def test_work_verify_run_terminalizes_keyboard_interrupt(tmp_path, capsys, monke
     child_processes: list[subprocess.Popen[bytes]] = []
 
     def interrupted_child_runner(execution_argv, *, cwd, env, timeout):
-        popen_kwargs = verify_mod._verify_child_popen_kwargs()
+        popen_kwargs = verify_mod.verify_runtime._verify_child_popen_kwargs()
         process = subprocess.Popen(
             execution_argv,
             cwd=cwd,
@@ -2589,10 +2589,10 @@ def test_work_verify_run_terminalizes_keyboard_interrupt(tmp_path, capsys, monke
             **popen_kwargs,
         )
         child_processes.append(process)
-        verify_mod.proc._terminate_processes((process,), terminate_grace=0.5, kill_grace=0.5)
-        return verify_mod._VERIFY_INTERRUPTED_COMMAND_STATUS, None, "partial-out", ""
+        verify_mod.verify_runtime.proc._terminate_processes((process,), terminate_grace=0.5, kill_grace=0.5)
+        return verify_mod.verify_runtime._VERIFY_INTERRUPTED_COMMAND_STATUS, None, "partial-out", ""
 
-    monkeypatch.setattr(verify_mod, "_run_verify_child_process", interrupted_child_runner)
+    monkeypatch.setattr(verify_mod.verify_runtime, "_run_verify_child_process", interrupted_child_runner)
 
     rc = work_cmd.verify_run(
         target=tmp_path,
@@ -2608,18 +2608,18 @@ def test_work_verify_run_terminalizes_keyboard_interrupt(tmp_path, capsys, monke
     assert all(process.poll() is not None for process in child_processes)
 
     receipt = json.loads(captured.out)
-    assert receipt["status"] == verify_mod._VERIFY_CANCELED_RECEIPT_STATUS
+    assert receipt["status"] == verify_mod.verify_runtime._VERIFY_CANCELED_RECEIPT_STATUS
     assert receipt["status"] != "failed"
     assert receipt["status"] != "running"
     assert receipt["completed_at"]
     assert receipt["interruption"]["kind"] == "keyboard-interrupt"
-    assert receipt["commands"][0]["status"] == verify_mod._VERIFY_INTERRUPTED_COMMAND_STATUS
+    assert receipt["commands"][0]["status"] == verify_mod.verify_runtime._VERIFY_INTERRUPTED_COMMAND_STATUS
     assert receipt["commands"][0]["status"] != "failed"
 
     receipt_path = Path(receipt["path"]) / "receipt.json"
     assert receipt_path.is_file()
     persisted = json.loads(receipt_path.read_text())
-    assert persisted["status"] == verify_mod._VERIFY_CANCELED_RECEIPT_STATUS
+    assert persisted["status"] == verify_mod.verify_runtime._VERIFY_CANCELED_RECEIPT_STATUS
 
     from brigade import outcome_cmd
 
@@ -2649,13 +2649,13 @@ def test_work_verify_run_canceled_status_is_neutral_not_a_regression_signal(tmp_
     assert outcome_cmd.capture(target=tmp_path, artifact_id="brigade-work", json_output=True) == 0
     failed_record = json.loads(capsys.readouterr().out)["record"]
     assert failed_record["signal_value"] == -1
-    assert verify_mod._VERIFY_CANCELED_RECEIPT_STATUS != failed_receipt["status"]
+    assert verify_mod.verify_runtime._VERIFY_CANCELED_RECEIPT_STATUS != failed_receipt["status"]
 
 
 def test_run_verify_child_process_catches_keyboard_interrupt(tmp_path, monkeypatch):
     from brigade.work_cmd import verification as verify_mod
 
-    real_popen = verify_mod.subprocess.Popen
+    real_popen = verify_mod.verify_runtime.subprocess.Popen
     child_processes: list[subprocess.Popen[bytes]] = []
 
     def interrupting_popen(*args, **kwargs):
@@ -2674,16 +2674,16 @@ def test_run_verify_child_process_catches_keyboard_interrupt(tmp_path, monkeypat
         process.communicate = communicate  # type: ignore[method-assign]
         return process
 
-    monkeypatch.setattr(verify_mod.subprocess, "Popen", interrupting_popen)
+    monkeypatch.setattr(verify_mod.verify_runtime.subprocess, "Popen", interrupting_popen)
 
-    status, exit_code, stdout, stderr = verify_mod._run_verify_child_process(
+    status, exit_code, stdout, stderr = verify_mod.verify_runtime._run_verify_child_process(
         [sys.executable, "-c", "import time; time.sleep(3600)"],
         cwd=tmp_path,
         env=os.environ.copy(),
         timeout=30,
     )
 
-    assert status == verify_mod._VERIFY_INTERRUPTED_COMMAND_STATUS
+    assert status == verify_mod.verify_runtime._VERIFY_INTERRUPTED_COMMAND_STATUS
     assert exit_code is None
     assert child_processes
     assert all(process.poll() is not None for process in child_processes)
@@ -3755,7 +3755,7 @@ def test_work_verify_run_timeout_reaps_descendants_and_records_receipt(tmp_path,
     wrapper.chmod(0o755)
 
     assert (
-        verification._run_verify_child_process(
+        verification.verify_runtime._run_verify_child_process(
             [str(wrapper)],
             cwd=tmp_path,
             env=os.environ.copy(),
@@ -3770,3 +3770,1400 @@ def test_work_verify_run_timeout_reaps_descendants_and_records_receipt(tmp_path,
         time.sleep(0.2)
         probe = subprocess.run(["pgrep", "-f", marker], stdout=subprocess.PIPE, check=False)
     assert probe.returncode != 0, f"descendant survived timeout: {probe.stdout.decode()}"
+
+
+# These helpers are also embedded in the disposable verifier interpreter.
+_VERIFY_SIGNAL_IDENTITY_SOURCE = """
+def identity(pid):
+    fields = Path(f'/proc/{pid}/stat').read_text().rsplit(')', 1)[1].split()
+    return {'pid': pid, 'ppid': int(fields[1]), 'start': fields[19]}
+
+def exited(fd, milliseconds=0):
+    watcher = select.poll()
+    watcher.register(fd, select.POLLIN)
+    return bool(watcher.poll(milliseconds))
+"""
+
+_VERIFY_SIGNAL_CHILD_SOURCE = (
+    """
+import json, os, select, signal, time
+from pathlib import Path
+"""
+    + _VERIFY_SIGNAL_IDENTITY_SOURCE
+    + """
+# OWNER was captured by the verifier before launching this command. Opening a
+# handle first and checking identity afterward rejects exit/reuse during open.
+owner_fd = os.pidfd_open(OWNER['pid'])
+if (os.getppid() != OWNER['pid'] or identity(OWNER['pid']) != OWNER
+        or exited(owner_fd)):
+    raise SystemExit('verifier identity changed before child launch')
+
+def register_process(name, pid):
+    record = identity(pid)
+    path = Path(name + '-pid')
+    temporary = path.with_suffix('.tmp')
+    temporary.write_text(json.dumps(record))
+    temporary.replace(path)
+
+def signal_owner(signum):
+    # The controller must bind every reported descendant before any signal.
+    deadline = time.monotonic() + 10
+    while not Path('probe-ready').exists():
+        if (os.getppid() != OWNER['pid'] or exited(owner_fd)
+                or time.monotonic() >= deadline):
+            raise SystemExit('verifier lost before ownership handshake')
+        time.sleep(.01)
+    if (os.getppid() != OWNER['pid'] or identity(OWNER['pid']) != OWNER
+            or exited(owner_fd)):
+        raise SystemExit('verifier ancestry or identity changed')
+    # If exit/reparenting races the check, this still addresses ONLY the pinned
+    # original verifier, never an adopted parent or a reused numeric PID.
+    try:
+        signal.pidfd_send_signal(owner_fd, signum)
+    except ProcessLookupError:
+        raise SystemExit('verifier exited')
+"""
+)
+
+
+@pytest.fixture
+def verify_signal_probe(tmp_path):
+    """Real-signal probes require an approved disposable PID namespace/subreaper."""
+    import select
+    import signal
+    import textwrap
+    import time
+
+    if os.environ.get("BRIGADE_DISPOSABLE_SIGNAL_TESTS") != "approved":
+        pytest.skip("requires separately approved disposable signal-test environment")
+    if not hasattr(os, "pidfd_open") or not hasattr(signal, "pidfd_send_signal"):
+        pytest.fail("isolated regression coverage requires Linux pidfd support")
+
+    # Supplied by the approved external supervisor, never by a test child.
+    # This contract is operational evidence; it is not a security boundary.
+    attestation_path = os.environ.get("BRIGADE_SIGNAL_SUPERVISOR_ATTESTATION")
+    if not attestation_path:
+        pytest.fail("opted-in probes require externally owned namespace teardown")
+    attestation = json.loads(Path(attestation_path).read_text())
+    if not (
+        attestation.get("parent_approval")
+        and attestation.get("externally_owned_teardown") is True
+        and attestation.get("desktop_exposure") is False
+        and attestation.get("pid_namespace") == os.readlink("/proc/self/ns/pid")
+    ):
+        pytest.fail("invalid isolated supervisor attestation")
+
+    def identity(pid):
+        fields = Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()
+        return {"pid": pid, "ppid": int(fields[1]), "start": fields[19]}
+
+    def exited(fd, milliseconds=0):
+        watcher = select.poll()
+        watcher.register(fd, select.POLLIN)
+        return bool(watcher.poll(milliseconds))
+
+    def note_failure(original, detail):
+        # Python 3.10 has no BaseException.add_note. Diagnostics must never
+        # replace the binding/probe exception, even if reporting itself fails.
+        try:
+            note = getattr(original, "add_note", None)
+            if callable(note):
+                note(detail)
+            else:
+                sys.stderr.write(detail + "\n")
+        except BaseException:
+            pass
+
+    def pin(record, parent):
+        # PID-file content alone is never authority to signal a process.
+        fd = os.pidfd_open(record["pid"])
+        try:
+            if (
+                identity(record["pid"]) != record
+                or record["ppid"] != parent["pid"]
+                or identity(parent["pid"]) != parent
+                or exited(fd)
+            ):
+                raise AssertionError("probe ownership changed during registration")
+            return fd
+        except BaseException as original:
+            try:
+                os.close(fd)
+            except BaseException as cleanup_error:
+                note_failure(original, f"failed registration handle close: {cleanup_error!r}")
+            raise
+
+    _init_git_repo(tmp_path)
+
+    def run(setup="", child="print('ok')", invocation="", timeout=20, descendants=()):
+        source = "\n".join(
+            [
+                "import json, os, signal, sys, threading, time",
+                "from pathlib import Path",
+                "from brigade import fleet_client, graphtrail_delta, outcome_cmd, localio",
+                "from brigade.work_cmd import verification as v",
+                f"target = Path({str(tmp_path)!r})",
+                "events = []",
+                "fleet_client.report_event = lambda event, **kw: events.append(event) or True",
+                "def before(target, run_dir, **kw):",
+                "    snapshot = run_dir / graphtrail_delta.SNAPSHOT_NAME",
+                "    snapshot.write_text('snapshot')",
+                "    return {'ok': True, 'before_snapshot_path': str(snapshot)}",
+                "def after(*args, **kw):",
+                "    (target / 'after-called').touch()",
+                "    return {'status': 'unavailable'}",
+                "graphtrail_delta.capture_before = before",
+                "graphtrail_delta.capture_after_and_diff = after",
+                _VERIFY_SIGNAL_IDENTITY_SOURCE,
+                "owner = identity(os.getpid())",
+                f"child_source = 'OWNER = ' + repr(owner) + '\\n' + {_VERIFY_SIGNAL_CHILD_SOURCE!r} + {child!r}",
+                "command = [sys.executable, '-S', '-c', child_source]",
+                textwrap.dedent(setup),
+                "handlers = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}",
+                textwrap.dedent(invocation)
+                or "rc = v.verify_run(target=target, commands=[command], reuse=False, capture='brigade-work')",
+                "assert all(signal.getsignal(s) == h for s, h in handlers.items())",
+                "records = outcome_cmd.load_records(target)",
+                "(target / 'result.json').write_text(json.dumps({'rc': rc, 'events': events,",
+                "    'signals': [r.signal_value for r in records]}))",
+                "sys.exit(rc)",
+            ]
+        )
+        env = {**os.environ, "PYTHONPATH": str(Path(__file__).resolve().parents[1] / "src")}
+        with (tmp_path / "probe-out").open("w+") as out, (tmp_path / "probe-err").open("w+") as err:
+            process = subprocess.Popen([sys.executable, "-S", "-c", source], env=env, stdout=out, stderr=err)
+            owner_fd = None
+            owned = {}
+            try:
+                # Popen retains this unreaped child PID until wait/poll; pin it
+                # immediately, before waiting for a descendant registration.
+                owner_fd = os.pidfd_open(process.pid)
+                owner = identity(process.pid)
+                assert owner["ppid"] == os.getpid()
+                deadline = time.monotonic() + timeout
+                while process.poll() is None:
+                    child_path = tmp_path / "child-pid"
+                    grandchild_path = tmp_path / "grandchild-pid"
+                    for name, path in (("child", child_path), ("grandchild", grandchild_path)):
+                        if name in owned or not path.exists():
+                            continue
+                        if name == "grandchild" and "child" not in owned:
+                            continue  # registration can become visible between reads
+                        parent = owner if name == "child" else owned["child"][0]
+                        record = json.loads(path.read_text())
+                        owned[name] = (record, pin(record, parent))
+                    if descendants and all(name in owned for name in descendants):
+                        (tmp_path / "probe-ready").touch()
+                    if time.monotonic() >= deadline:
+                        raise subprocess.TimeoutExpired(process.args, timeout)
+                    time.sleep(0.01)
+                process.wait()
+                assert set(owned) == set(descendants), "probe exited before ownership handshake"
+                out.seek(0)
+                err.seek(0)
+                diagnostics = out.read() + err.read()
+                alive = []
+                for record, fd in owned.values():
+                    for _ in range(100):
+                        if exited(fd, 10):
+                            break
+                    else:
+                        alive.append(record["pid"])
+                receipts = list((tmp_path / ".brigade/work/verify-runs").glob("*/receipt.json"))
+                latest = max(receipts, key=lambda path: path.stat().st_mtime_ns) if receipts else None
+                receipt = json.loads(latest.read_text()) if latest else None
+                result_path = tmp_path / "result.json"
+                result = json.loads(result_path.read_text()) if result_path.exists() else None
+                return process.returncode, receipt, result, alive, diagnostics
+            finally:
+                # Observe production survival before fixture teardown. Returned
+                # 'alive' was captured above and cannot be cleared by cleanup.
+                original_failure = sys.exc_info()[1]
+                cleanup_errors = []
+                handles = [fd for _, fd in owned.values()]
+                if owner_fd is not None:
+                    handles.append(owner_fd)
+                else:
+                    cleanup_errors.append("owner handle unavailable: external namespace teardown required")
+                # Every delivery, wait and close is independent. No numeric PID
+                # fallback, including when the initial pidfd acquisition fails.
+                for fd in handles:
+                    try:
+                        signal.pidfd_send_signal(fd, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                    except BaseException as error:
+                        cleanup_errors.append(f"delivery fd={fd}: {error!r}")
+                try:
+                    process.wait(timeout=5)
+                except BaseException as error:
+                    cleanup_errors.append(f"owner wait: {error!r}")
+                for fd in handles:
+                    try:
+                        os.close(fd)
+                    except BaseException as error:
+                        cleanup_errors.append(f"close fd={fd}: {error!r}")
+                if cleanup_errors:
+                    detail = "; ".join(cleanup_errors)
+                    if original_failure is not None:
+                        note_failure(original_failure, "fixture cleanup: " + detail)
+                    else:
+                        raise AssertionError("fixture cleanup: " + detail)
+
+    return run
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX signal cancellation")
+@pytest.mark.parametrize("signal_name,burst", [("SIGTERM", False), ("SIGHUP", False), ("SIGTERM", True)])
+def test_verify_run_owned_signal_cancellation(verify_signal_probe, tmp_path, signal_name, burst):
+    child = (
+        "import os, signal, subprocess, sys, time; from pathlib import Path; "
+        "register_process('child', os.getpid()); "
+        "p = subprocess.Popen([sys.executable, '-S', '-c', 'import time; time.sleep(60)']); "
+        "register_process('grandchild', p.pid); "
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); "
+        f"signal_owner(signal.{signal_name}); "
+        + (f"time.sleep(.01); signal_owner(signal.{signal_name}); " * 2 if burst else "")
+        + "time.sleep(60)"
+    )
+    rc, receipt, result, alive, diagnostics = verify_signal_probe(child=child, descendants=("child", "grandchild"))
+    assert rc == 130, diagnostics
+    assert not alive
+    assert receipt["status"] == "canceled"
+    assert receipt["interruption"] == {
+        "kind": "signal",
+        "signal": signal_name,
+        "detail": f"verification canceled by {signal_name}",
+    }
+    assert receipt["commands"][0]["status"] == "interrupted"
+    assert receipt["code_graph_delta"]["status"] == "unavailable"
+    assert not (tmp_path / "after-called").exists()
+    assert not (Path(receipt["path"]) / graphtrail_delta.SNAPSHOT_NAME).exists()
+    assert receipt["digests"]["receipt_sha256"] == localio.canonical_json_digest(receipt, exclude_keys={"digests"})
+    assert result["signals"] == [0]
+    assert result["events"][0]["exit_status"] == 130
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX signal cancellation")
+@pytest.mark.parametrize("swallow", [False, True])
+def test_verify_run_signal_during_finalization(verify_signal_probe, swallow):
+    setup = """
+    original_write = v.helpers._write_json
+    sent = False
+    def write(path, payload):
+        global sent
+        if path.name == 'receipt.json' and payload.get('status') == 'completed' and not sent:
+            sent = True
+            os.kill(os.getpid(), signal.SIGHUP)
+        return original_write(path, payload)
+    v.helpers._write_json = write
+    """
+    if swallow:
+        setup += """
+    original_safe = v._safe_finalize_verify_receipt
+    def swallowed(*args, **kw):
+        try:
+            return v._finalize_verify_receipt(*args, **kw)
+        except BaseException:
+            return args[2], kw['rc']
+    v._safe_finalize_verify_receipt = swallowed
+    """
+    rc, receipt, result, alive, diagnostics = verify_signal_probe(setup=setup)
+    assert rc == 130, diagnostics
+    assert receipt["status"] == "canceled"
+    assert receipt["interruption"]["signal"] == "SIGHUP"
+    assert receipt["digests"]["receipt_sha256"] == localio.canonical_json_digest(receipt, exclude_keys={"digests"})
+    assert result["signals"] == [0]
+    assert result["events"][0]["exit_status"] == 130
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX signal cancellation")
+@pytest.mark.parametrize("snapshot", [1, 2])
+def test_verify_run_snapshot_interrupt_still_cleans_group(verify_signal_probe, snapshot):
+    setup = f"""
+    collect = v.verify_runtime.verify_reaper._collect_descendants
+    calls = 0
+    def interrupted(pid):
+        global calls
+        calls += 1
+        if calls == {snapshot}:
+            raise KeyboardInterrupt
+        return collect(pid)
+    v.verify_runtime.verify_reaper._collect_descendants = interrupted
+    """
+    child = (
+        "import os, signal, time; from pathlib import Path; "
+        "register_process('child', os.getpid()); "
+        + (
+            "import subprocess, sys; "
+            "p = subprocess.Popen([sys.executable, '-S', '-c', 'import time; time.sleep(60)'], "
+            "start_new_session=True); register_process('grandchild', p.pid); "
+            if snapshot == 2
+            else ""
+        )
+        + "signal_owner(signal.SIGINT); time.sleep(60)"
+    )
+    # A known escaped group leader survives the first group kill. Interrupting
+    # the second snapshot must not discard the first snapshot's ownership set.
+    descendants = ("child", "grandchild") if snapshot == 2 else ("child",)
+    rc, receipt, result, alive, diagnostics = verify_signal_probe(setup=setup, child=child, descendants=descendants)
+    assert rc == 130, diagnostics
+    assert not alive
+    assert receipt["status"] == "canceled"
+    assert receipt["interruption"]["kind"] == "keyboard-interrupt"
+
+
+@pytest.mark.parametrize("signal_name", ["SIGTERM", "SIGHUP", "SIGINT"])
+@pytest.mark.parametrize("disposition", ["ignored", "custom"])
+def test_verify_run_preserves_signal_disposition(verify_signal_probe, tmp_path, signal_name, disposition):
+    handler = "signal.SIG_IGN" if disposition == "ignored" else "lambda *args: (target / 'custom-called').touch()"
+    setup = f"signal.signal(signal.{signal_name}, {handler})"
+    child = f"register_process('child', os.getpid()); signal_owner(signal.{signal_name}); print('ok')"
+    rc, receipt, result, alive, diagnostics = verify_signal_probe(setup=setup, child=child, descendants=("child",))
+    assert rc == 0, diagnostics
+    assert receipt["status"] == "completed"
+    assert not alive
+    assert (tmp_path / "custom-called").exists() == (disposition == "custom")
+
+
+@pytest.mark.parametrize("signal_name", ["SIGTERM", "SIGINT"])
+@pytest.mark.parametrize("launch", ["owned", "failed"])
+def test_verify_run_signal_at_spawn_ownership(verify_signal_probe, launch, signal_name):
+    setup = f"""
+    original_popen = v.verify_runtime.subprocess.Popen
+    def popen(argv, **kw):
+        if argv != command:
+            return original_popen(argv, **kw)
+        if {launch == "owned"!r}:
+            process = original_popen(argv, **kw)
+            deadline = time.monotonic() + 10
+            while not (target / 'probe-ready').exists():
+                assert time.monotonic() < deadline
+                time.sleep(.01)
+            os.kill(os.getpid(), signal.{signal_name})
+            return process
+        os.kill(os.getpid(), signal.{signal_name})
+        raise OSError('launch failed after cancellation')
+    v.verify_runtime.subprocess.Popen = popen
+    """
+    child = "register_process('child', os.getpid()); time.sleep(60)" if launch == "owned" else "print('ok')"
+    descendants = ("child",) if launch == "owned" else ()
+    rc, receipt, result, alive, diagnostics = verify_signal_probe(setup=setup, child=child, descendants=descendants)
+    assert rc == 130, diagnostics
+    assert not alive
+    assert receipt["status"] == "canceled"
+    if signal_name == "SIGINT":
+        assert receipt["interruption"] == {"kind": "keyboard-interrupt", "detail": "verification canceled by user"}
+    else:
+        assert receipt["interruption"]["signal"] == signal_name
+    assert result["signals"] == [0]
+    assert not any(command["status"] == "failed" for command in receipt["commands"])
+
+
+@pytest.mark.parametrize("signal_name", ["SIGTERM", "SIGINT"])
+def test_verify_run_nested_signal_state_is_restored(verify_signal_probe, signal_name):
+    setup = """
+    original_runner = v.verify_runtime._run_verify_child_process
+    nested = False
+    def run_child(*args, **kw):
+        global nested
+        if nested:
+            return original_runner(*args, **kw)
+        nested = True
+        try:
+            assert v.verify_run(target=target, commands=[command], reuse=False, capture='brigade-work') == 130
+        finally:
+            nested = False
+        return 'completed', 0, 'outer completed', ''
+    v.verify_runtime._run_verify_child_process = run_child
+    """
+    child = f"register_process('child', os.getpid()); signal_owner(signal.{signal_name}); time.sleep(60)"
+    rc, receipt, result, alive, diagnostics = verify_signal_probe(setup=setup, child=child, descendants=("child",))
+    assert rc == 0, diagnostics
+    assert not alive
+    assert receipt["status"] == "completed"
+    assert result["signals"] == [0, 1]
+    assert [event["exit_status"] for event in result["events"]] == [130, 0]
+
+
+@pytest.mark.parametrize("signal_name", ["SIGHUP", "SIGINT"])
+def test_verify_run_thread_does_not_inherit_signal_cancellation(verify_signal_probe, signal_name):
+    setup = """
+    original_write = v.helpers._write_json
+    sent = False
+    def write(path, payload):
+        global sent
+        if path.name == 'receipt.json' and payload.get('status') == 'completed' and not sent:
+            sent = True
+            try:
+                os.kill(os.getpid(), getattr(signal, 'SIGNAL_NAME'))
+            except KeyboardInterrupt:
+                pass
+            thread_target = target / 'thread'
+            thread_target.mkdir()
+            values = []
+            errors = []
+            def in_thread():
+                try:
+                    values.append(v.verify_run(target=thread_target,
+                        commands=[[sys.executable, '-c', "print('thread')"]], reuse=False))
+                except BaseException as exc:
+                    errors.append(repr(exc))
+            worker = threading.Thread(target=in_thread)
+            worker.start()
+            worker.join(timeout=10)
+            assert values == [0] and not errors, (values, errors)
+        return original_write(path, payload)
+    v.helpers._write_json = write
+    """
+    rc, receipt, result, alive, diagnostics = verify_signal_probe(setup=setup.replace("SIGNAL_NAME", signal_name))
+    assert rc == 130, diagnostics
+    assert receipt["status"] == "canceled"
+    assert result["signals"] == [0]
+    assert [event["exit_status"] for event in result["events"]] == [0, 130]
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_verify_run_hung_up_console_preserves_neutral_capture(verify_signal_probe, json_output):
+    setup = """
+    import errno
+    class HungUp:
+        def write(self, text):
+            raise OSError(errno.EIO, 'console hung up')
+        def flush(self):
+            pass
+    """
+    invocation = f"""
+    original_stdout = sys.stdout
+    sys.stdout = HungUp()
+    try:
+        rc = v.verify_run(target=target, commands=[command], reuse=False,
+            capture='brigade-work', json_output={json_output!r})
+    finally:
+        sys.stdout = original_stdout
+    """
+    child = "register_process('child', os.getpid()); signal_owner(signal.SIGHUP); time.sleep(60)"
+    rc, receipt, result, alive, diagnostics = verify_signal_probe(
+        setup=setup, invocation=invocation, child=child, descendants=("child",)
+    )
+    assert rc == 130, diagnostics
+    assert not alive
+    assert receipt["status"] == "canceled"
+    assert result["signals"] == [0]
+
+
+def test_verify_run_reused_receipt_terminalizes_swallowed_signal(verify_signal_probe):
+    setup = """
+    import subprocess
+    (target / '.gitignore').write_text('.brigade/\\nprobe-*\\nafter-called\\n')
+    subprocess.run(['git', 'add', '.gitignore'], cwd=target, check=True)
+    subprocess.run(['git', '-c', 'user.name=Test User', '-c', 'user.email=test@example.invalid',
+        'commit', '-m', 'initial'], cwd=target, check=True, stdout=subprocess.DEVNULL)
+    original_write = v.helpers._write_json
+    sent = False
+    def write(path, payload):
+        global sent
+        if path.name == 'receipt.json' and payload.get('reused_from') and not sent:
+            sent = True
+            try:
+                os.kill(os.getpid(), signal.SIGTERM)
+            except BaseException:
+                pass
+        return original_write(path, payload)
+    v.helpers._write_json = write
+    """
+    invocation = """
+    assert v.verify_run(target=target, commands=[command], reuse=False) == 0
+    rc = v.verify_run(target=target, commands=[command], reuse=True, capture='brigade-work')
+    """
+    rc, receipt, result, alive, diagnostics = verify_signal_probe(setup=setup, invocation=invocation)
+    assert rc == 130, diagnostics
+    assert receipt.get("reused_from"), diagnostics
+    assert receipt["digests"]["logs"] == {}
+    assert receipt["status"] == "canceled"
+    assert receipt["interruption"]["signal"] == "SIGTERM"
+    assert receipt["digests"]["receipt_sha256"] == localio.canonical_json_digest(receipt, exclude_keys={"digests"})
+    assert result["signals"] == [0]
+    assert [event["exit_status"] for event in result["events"]] == [0, 130]
+
+
+def test_verify_run_signal_during_timeout_cleanup_is_interrupted(verify_signal_probe):
+    setup = """
+    collect = v.verify_runtime.verify_reaper._collect_descendants
+    sent = False
+    def collect_with_signal(pid):
+        global sent
+        if not sent:
+            sent = True
+            os.kill(os.getpid(), signal.SIGTERM)
+        return collect(pid)
+    v.verify_runtime.verify_reaper._collect_descendants = collect_with_signal
+    """
+    invocation = "rc = v.verify_run(target=target, commands=[command], timeout=1, reuse=False, capture='brigade-work')"
+    child = "register_process('child', os.getpid()); time.sleep(60)"
+    rc, receipt, result, alive, diagnostics = verify_signal_probe(
+        setup=setup, child=child, invocation=invocation, descendants=("child",)
+    )
+    assert rc == 130, diagnostics
+    assert not alive
+    assert receipt["status"] == "canceled"
+    assert receipt["commands"][0]["status"] == "interrupted"
+    assert receipt["interruption"]["signal"] == "SIGTERM"
+    assert result["signals"] == [0]
+
+
+@pytest.mark.parametrize("boundary", ["before_commit", "inside_append", "after_append"])
+def test_verify_run_signal_completion_has_one_digest_and_event(verify_signal_probe, boundary):
+    setup = f"""
+    sent = False
+    boundary = {boundary!r}
+    finalize = v._finalize_verify_receipt
+    def final(*args, **kw):
+        global sent
+        value = finalize(*args, **kw)
+        if boundary == 'before_commit' and not sent:
+            sent = True
+            os.kill(os.getpid(), signal.SIGHUP)
+        return value
+    v._finalize_verify_receipt = final
+    def append(event, **kw):
+        global sent
+        if boundary == 'inside_append' and not sent:
+            sent = True
+            os.kill(os.getpid(), signal.SIGHUP)
+        events.append(dict(event))
+        if boundary == 'after_append' and not sent:
+            sent = True
+            os.kill(os.getpid(), signal.SIGHUP)
+        return True
+    fleet_client.report_event = append
+    """
+    rc, receipt, result, alive, diagnostics = verify_signal_probe(setup=setup)
+    assert rc == 130, diagnostics
+    assert len(result["events"]) == 1, result
+    event = result["events"][0]
+    assert event["digest"] == receipt["digests"]["receipt_sha256"]
+    assert event["digest"] == localio.canonical_json_digest(receipt, exclude_keys={"digests"})
+    assert receipt["status"] == ("canceled" if boundary == "before_commit" else "completed")
+    assert event["exit_status"] == (130 if boundary == "before_commit" else 0)
+    assert result["signals"] == ([0] if boundary == "before_commit" else [])
+
+
+@pytest.mark.parametrize("window", ["identity", "evidence"])
+def test_verify_run_signal_before_receipt_has_no_phantom_outcome(verify_signal_probe, window):
+    setup = f"""
+    def interrupted(*args, **kw):
+        os.kill(os.getpid(), signal.SIGHUP)
+    v.{"_capture_verify_identity" if window == "identity" else "_verification_evidence_payload"} = interrupted
+    """
+    rc, receipt, result, alive, diagnostics = verify_signal_probe(setup=setup)
+    assert rc == 130, diagnostics
+    assert receipt is None
+    assert result == {"rc": 130, "events": [], "signals": []}
+    assert "verification canceled by SIGHUP" in diagnostics
+
+
+@pytest.mark.parametrize("stream_error", ["pipe", "tty"])
+def test_verify_run_real_failed_console_exits_130_and_captures(verify_signal_probe, stream_error):
+    setup = f"""
+    import io, pty
+    if {stream_error!r} == 'pipe':
+        read_fd, write_fd = os.pipe()
+        os.close(read_fd)
+        sys.stdout = io.TextIOWrapper(io.BufferedWriter(io.FileIO(write_fd, 'w')))
+    else:
+        master, slave = pty.openpty()
+        os.close(master)
+        sys.stdout = io.TextIOWrapper(io.BufferedWriter(io.FileIO(slave, 'w')))
+    """
+    child = "register_process('child', os.getpid()); signal_owner(signal.SIGHUP); time.sleep(60)"
+    rc, receipt, result, alive, diagnostics = verify_signal_probe(setup=setup, child=child, descendants=("child",))
+    assert rc == 130, diagnostics
+    assert not alive
+    assert receipt["status"] == "canceled"
+    assert result["signals"] == [0]
+
+
+def test_verify_run_capture_storage_eio_is_visible(verify_signal_probe):
+    setup = """
+    import errno
+    def capture(**kw):
+        raise OSError(errno.EIO, 'capture storage failed')
+    outcome_cmd.capture = capture
+    """
+    child = "register_process('child', os.getpid()); signal_owner(signal.SIGHUP); time.sleep(60)"
+    rc, receipt, result, alive, diagnostics = verify_signal_probe(setup=setup, child=child, descendants=("child",))
+    assert rc == 1, diagnostics
+    assert "capture storage failed" in diagnostics
+    assert receipt["status"] == "canceled"
+    assert result is None
+    assert not alive
+
+
+def test_verify_run_signal_at_first_timeout_teardown_cleans_owned_child(verify_signal_probe):
+    setup = """
+    terminate = v.verify_runtime._terminate_verify_child
+    sent = False
+    def first(process):
+        global sent
+        if not sent:
+            sent = True
+            os.kill(os.getpid(), signal.SIGTERM)
+        return terminate(process)
+    v.verify_runtime._terminate_verify_child = first
+    """
+    invocation = "rc = v.verify_run(target=target, commands=[command], timeout=1, reuse=False, capture='brigade-work')"
+    child = "register_process('child', os.getpid()); time.sleep(60)"
+    rc, receipt, result, alive, diagnostics = verify_signal_probe(
+        setup=setup, invocation=invocation, child=child, descendants=("child",)
+    )
+    assert rc == 130, diagnostics
+    assert not alive
+    assert receipt["commands"][0]["status"] == "interrupted"
+
+
+def test_verify_run_term_during_sigint_cleanup_preserves_first_interruption(verify_signal_probe):
+    setup = """
+    terminate = v.verify_runtime._terminate_verify_child
+    sent = False
+    def first(process):
+        global sent
+        if not sent:
+            sent = True
+            os.kill(os.getpid(), signal.SIGTERM)
+        return terminate(process)
+    v.verify_runtime._terminate_verify_child = first
+    """
+    child = "register_process('child', os.getpid()); signal_owner(signal.SIGINT); time.sleep(60)"
+    rc, receipt, result, alive, diagnostics = verify_signal_probe(setup=setup, child=child, descendants=("child",))
+    assert rc == 130, diagnostics
+    assert not alive
+    assert receipt["interruption"]["kind"] == "keyboard-interrupt"
+    assert "signal" not in receipt["interruption"]
+    assert result["signals"] == [0]
+
+
+def test_verify_run_signal_during_handler_restore_stays_inside_boundary(verify_signal_probe):
+    setup = """
+    install = signal.signal
+    sent = False
+    def restore(signum, handler):
+        global sent
+        if handler == signal.SIG_DFL and not sent:
+            sent = True
+            os.kill(os.getpid(), signal.SIGHUP)
+        return install(signum, handler)
+    signal.signal = restore
+    """
+    rc, receipt, result, alive, diagnostics = verify_signal_probe(setup=setup)
+    assert rc == 130, diagnostics
+    assert receipt["status"] == "completed"
+    assert len(result["events"]) == 1
+    assert result["events"][0]["digest"] == receipt["digests"]["receipt_sha256"]
+    # Restoration now follows capture. The pinned late-signal policy retains
+    # this completed outcome, then returns 130 without changing its evidence.
+    assert result["signals"] == [1]
+
+
+def test_verify_run_canceled_receipt_finalizes_once(verify_signal_probe):
+    setup = """
+    final = v._finalize_verify_receipt
+    calls = 0
+    def finalize(*args, **kw):
+        global calls
+        calls += 1
+        return final(*args, **kw)
+    v._finalize_verify_receipt = finalize
+    """
+    invocation = """
+    rc = v.verify_run(target=target, commands=[command], reuse=False, capture='brigade-work')
+    assert calls == 1, calls
+    """
+    child = "register_process('child', os.getpid()); signal_owner(signal.SIGHUP); time.sleep(60)"
+    rc, receipt, result, alive, diagnostics = verify_signal_probe(
+        setup=setup, invocation=invocation, child=child, descendants=("child",)
+    )
+    assert rc == 130, diagnostics
+    assert not alive
+
+
+def test_verify_run_sigint_fallback_drops_obsolete_digest(tmp_path, monkeypatch):
+    from brigade.work_cmd import verification as v
+
+    _init_git_repo(tmp_path)
+    final = v._finalize_verify_receipt
+
+    def interrupted(*args, **kw):
+        # Persist a completed digest first. Fallback must cancel this payload,
+        # invalidating the old digest rather than deleting a valid canceled one.
+        completed, _ = final(*args, **{**kw, "canceled": False, "rc": 0})
+        assert completed["status"] == "completed"
+        assert completed["digests"]["receipt_sha256"] == localio.canonical_json_digest(
+            completed, exclude_keys={"digests"}
+        )
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(v, "_finalize_verify_receipt", interrupted)
+    monkeypatch.setattr(v.verify_runtime, "_run_verify_child_process", lambda *a, **kw: ("interrupted", None, "", ""))
+    assert v.verify_run(target=tmp_path, commands=["true"], reuse=False) == 130
+    receipt = v._verify_receipts(tmp_path)[0]
+    assert receipt["status"] == "canceled"
+    assert "digests" not in receipt
+
+
+@pytest.mark.parametrize("signal_name", ["SIGTERM", "SIGHUP"])
+def test_verify_run_real_cli_signal_and_receipt_consumers(verify_signal_probe, signal_name):
+    invocation = """
+    from brigade import cli, receipts_cmd
+    rc = cli.main(['work', 'verify', 'run', '--target', str(target), '--argv-json',
+        json.dumps(command), '--no-reuse', '--capture', 'brigade-work'])
+    receipt = v._verify_receipts(target)[0]
+    checks = receipts_cmd._verify_receipt(Path(receipt['path']) / 'receipt.json',
+        artifact_type='work-verify-receipt', log_type='work-verify-log', target=target)
+    assert checks and all(item['status'] == receipts_cmd.OK for item in checks), checks
+    assert v.verify_show(target=target, run_id=receipt['run_id'], json_output=True) == 0
+    assert v.acceptance(target=target, json_output=True) == 0
+    """
+    child = f"register_process('child', os.getpid()); signal_owner(signal.{signal_name}); time.sleep(60)"
+    rc, receipt, result, alive, diagnostics = verify_signal_probe(
+        invocation=invocation, child=child, descendants=("child",)
+    )
+    assert rc == 130, diagnostics
+    assert not alive
+    assert receipt["interruption"]["signal"] == signal_name
+    assert result["signals"] == [0]
+
+
+@pytest.mark.parametrize("repeat_signal", ["SIGHUP", "SIGINT"])
+def test_verify_run_repeat_signal_after_canceled_commit_keeps_neutral_capture(verify_signal_probe, repeat_signal):
+    setup = """
+    run = v._run_verify_commands
+    def repeated(*args, **kw):
+        value = run(*args, **kw)
+        os.kill(os.getpid(), getattr(signal, 'REPEAT_SIGNAL'))
+        return value
+    v._run_verify_commands = repeated
+    """
+    child = "register_process('child', os.getpid()); signal_owner(signal.SIGTERM); time.sleep(60)"
+    rc, receipt, result, alive, diagnostics = verify_signal_probe(
+        setup=setup.replace("REPEAT_SIGNAL", repeat_signal), child=child, descendants=("child",)
+    )
+    assert rc == 130, diagnostics
+    assert not alive
+    assert receipt["interruption"]["signal"] == "SIGTERM"
+    assert result["signals"] == [0]
+    assert len(result["events"]) == 1
+    assert result["events"][0]["digest"] == receipt["digests"]["receipt_sha256"]
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+@pytest.mark.parametrize(
+    "window", ["deferred_commit", "timeout_return", "canceled_capture", "completed_commit", "completed_capture"]
+)
+def test_verify_run_late_signal_windows_preserve_committed_evidence(verify_signal_probe, window, json_output):
+    # Real signals at release/capture boundaries detect missing neutral capture,
+    # missing interrupted commands, repeated delivery and relabeling after commit.
+    setup = f"""
+    window = {window!r}
+    sent = False
+    final = v._finalize_verify_receipt
+    def finalize(*args, **kw):
+        global sent
+        value = final(*args, **kw)
+        if window == 'deferred_commit' and not sent:
+            sent = True
+            os.kill(os.getpid(), signal.SIGTERM)
+        return value
+    v._finalize_verify_receipt = finalize
+    commit = v._commit_verify_receipt
+    def committed(*args, **kw):
+        value = commit(*args, **kw)
+        if window in ('deferred_commit', 'completed_commit'):
+            os.kill(os.getpid(), signal.SIGHUP)
+        return value
+    v._commit_verify_receipt = committed
+    terminate = v.verify_runtime._terminate_verify_child
+    def teardown(process):
+        global sent
+        if window == 'timeout_return' and not sent:
+            sent = True
+            os.kill(os.getpid(), signal.SIGTERM)
+        return terminate(process)
+    v.verify_runtime._terminate_verify_child = teardown
+    child_runner = v.verify_runtime._run_verify_child_process
+    def child_returned(*args, **kw):
+        value = child_runner(*args, **kw)
+        if window == 'timeout_return':
+            os.kill(os.getpid(), signal.SIGHUP)
+        return value
+    v.verify_runtime._run_verify_child_process = child_returned
+    capture = outcome_cmd.capture
+    def capturing(**kw):
+        if window in ('canceled_capture', 'completed_capture'):
+            os.kill(os.getpid(), signal.SIGHUP)
+        return capture(**kw)
+    outcome_cmd.capture = capturing
+    """
+    invocation = f"""
+    import io
+    from contextlib import redirect_stdout
+    output = io.StringIO()
+    with redirect_stdout(output):
+        rc = v.verify_run(target=target, commands=[command], timeout=1, reuse=False,
+            capture='brigade-work', json_output={json_output!r})
+    if {json_output!r}:
+        payload = json.loads(output.getvalue())
+        assert payload['run_id'] == v._verify_receipts(target)[0]['run_id']
+    """
+    child = "print('ok')"
+    descendants = ()
+    if window in ("timeout_return", "canceled_capture"):
+        child = "register_process('child', os.getpid()); "
+        if window == "canceled_capture":
+            child += "signal_owner(signal.SIGTERM); "
+        child += "time.sleep(60)"
+        descendants = ("child",)
+    rc, receipt, result, alive, diagnostics = verify_signal_probe(
+        setup=setup, invocation=invocation, child=child, descendants=descendants
+    )
+    assert rc == 130, diagnostics
+    assert not alive
+    canceled = window not in ("completed_commit", "completed_capture")
+    assert receipt["status"] == ("canceled" if canceled else "completed")
+    digest = receipt["digests"]["receipt_sha256"]
+    assert digest == localio.canonical_json_digest(receipt, exclude_keys={"digests"})
+    assert len(result["events"]) == 1, result
+    assert result["events"][0]["digest"] == digest
+    assert result["events"][0]["exit_status"] == (130 if canceled else 0)
+    assert result["signals"] == ([0] if canceled else [1] if window == "completed_capture" else [])
+    if canceled:
+        assert receipt["interruption"]["signal"] == "SIGTERM"
+    if descendants:
+        assert receipt["commands"][0]["status"] == "interrupted"
+
+
+@pytest.mark.parametrize("interruption", ["timeout", "sigint"])
+def test_verify_run_term_at_handler_entry_cleans_owned_child(verify_signal_probe, tmp_path, interruption):
+    setup = f"""
+    import subprocess
+    pending = False
+    sent = False
+    expected = subprocess.TimeoutExpired if {interruption!r} == 'timeout' else KeyboardInterrupt
+    owner_code = v.verify_runtime._run_verify_child_process.__code__
+    def trace(frame, event, arg):
+        global pending, sent
+        if frame.f_code is owner_code and not sent:
+            if event == 'exception' and isinstance(arg[1], expected):
+                pending = True
+            elif event == 'line' and pending and isinstance(sys.exc_info()[1], expected):
+                # First body line of the handler, before its cleanup deferral.
+                sent = True
+                (target / 'handler-entry-fired').touch()
+                os.kill(os.getpid(), signal.SIGTERM)
+        return trace
+    sys.settrace(trace)
+    """
+    invocation = """
+    try:
+        rc = v.verify_run(target=target, commands=[command], timeout=1, reuse=False, capture='brigade-work')
+    finally:
+        sys.settrace(None)
+    assert sent
+    """
+    child = "register_process('child', os.getpid()); "
+    if interruption == "sigint":
+        child += "signal_owner(signal.SIGINT); "
+    else:
+        child += "signal_owner(0); "  # Wait for pinned ownership before timeout.
+    child += "time.sleep(60)"
+    rc, receipt, result, alive, diagnostics = verify_signal_probe(
+        setup=setup, invocation=invocation, child=child, descendants=("child",)
+    )
+    assert (tmp_path / "handler-entry-fired").exists(), diagnostics
+    assert rc == 130, diagnostics
+    assert not alive, f"owned child survived handler entry: {alive}\n{diagnostics}"
+    assert receipt["commands"][0]["status"] == "interrupted"
+    if interruption == "sigint":
+        assert receipt["interruption"]["kind"] == "keyboard-interrupt"
+        assert "signal" not in receipt["interruption"]
+    else:
+        assert receipt["interruption"]["signal"] == "SIGTERM"
+    digest = receipt["digests"]["receipt_sha256"]
+    assert digest == localio.canonical_json_digest(receipt, exclude_keys={"digests"})
+    assert result["signals"] == [0]
+    assert len(result["events"]) == 1
+    assert result["events"][0]["digest"] == digest
+    assert result["events"][0]["exit_status"] == 130
+
+
+def test_verify_run_sigint_fallback_retains_valid_signed_digest(tmp_path, monkeypatch):
+    from brigade import receipt_signing
+    from brigade.work_cmd import verification as v
+
+    _init_git_repo(tmp_path)
+    receipt_signing.generate_key(tmp_path)
+    final = v._finalize_verify_receipt
+    original_digest = {}
+    events = []
+
+    def interrupted(*args, **kw):
+        receipt, _ = final(*args, **kw)
+        original_digest.update(receipt["digests"])
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(v, "_finalize_verify_receipt", interrupted)
+    monkeypatch.setattr(v.verify_runtime, "_run_verify_child_process", lambda *a, **kw: ("interrupted", None, "", ""))
+    monkeypatch.setattr(fleet_client, "report_event", lambda event, **kw: events.append(event))
+    assert v.verify_run(target=tmp_path, commands=["true"], reuse=False, capture="brigade-work") == 130
+    receipt = v._verify_receipts(tmp_path)[0]
+    assert receipt["status"] == "canceled"
+    assert receipt["digests"] == original_digest
+    assert "signature" in original_digest
+    assert original_digest["receipt_sha256"] == localio.canonical_json_digest(receipt, exclude_keys={"digests"})
+    assert len(events) == 1
+    assert events[0]["digest"] == original_digest["receipt_sha256"]
+    from brigade import outcome_cmd
+
+    assert [record.signal_value for record in outcome_cmd.load_records(tmp_path)] == [0]
+
+
+def test_verify_run_cli_capture_error_keeps_separate_informational_streams(tmp_path, monkeypatch, capsys):
+    import errno
+    from brigade import outcome_cmd
+
+    _init_git_repo(tmp_path)
+
+    def failing_capture(**kw):
+        print("capture progress")
+        print("capture warning", file=sys.stderr)
+        raise OSError(errno.EIO, "capture storage failed")
+
+    from brigade.work_cmd import verification as v
+    import signal
+
+    handlers = {signum: signal.getsignal(signum) for signum in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}
+    monkeypatch.setattr(outcome_cmd, "capture", failing_capture)
+    with pytest.raises(OSError, match="capture storage failed"):
+        cli.main(
+            [
+                "work",
+                "verify",
+                "run",
+                "--target",
+                str(tmp_path),
+                "--command",
+                "true",
+                "--no-reuse",
+                "--capture",
+                "brigade-work",
+            ]
+        )
+    assert all(signal.getsignal(signum) == handler for signum, handler in handlers.items())
+    assert v.verify_runtime._ACTIVE_VERIFY_CANCEL.get() is None
+    output = capsys.readouterr()
+    assert "capture progress" in output.out
+    assert "capture progress" not in output.err
+    assert "capture warning" in output.err
+    assert "capture warning" not in output.out
+
+
+def test_verify_run_signal_during_manifest_binding_completes_scoring_identity(verify_signal_probe, tmp_path):
+    manifest_id = _register_tracked_verify_manifest(tmp_path)
+    setup = """
+    build = v._build_subject_binding
+    def binding(*args, **kw):
+        os.kill(os.getpid(), signal.SIGTERM)
+        return build(*args, **kw)
+    v._build_subject_binding = binding
+    """
+    invocation = f"rc = v.verify_run(target=target, manifest_id={manifest_id!r}, reuse=False, capture='demo')"
+    rc, receipt, result, alive, diagnostics = verify_signal_probe(setup=setup, invocation=invocation)
+    assert rc == 130, diagnostics
+    assert receipt["status"] == "canceled"
+    assert receipt["verify_manifest_id"] == manifest_id
+    assert receipt["commands"][0]["check_id"] == "eff-1"
+    assert receipt["subject_binding"]["artifact_id"] == "demo"
+    digest = receipt["digests"]["receipt_sha256"]
+    assert digest == localio.canonical_json_digest(receipt, exclude_keys={"digests"})
+    assert len(result["events"]) == 1
+    assert result["events"][0]["digest"] == digest
+    assert result["events"][0]["exit_status"] == 130
+    assert result["signals"] == [0]
+
+
+@pytest.mark.parametrize("first_status", ["completed", "timed_out"])
+@pytest.mark.parametrize("boundary", ["final_poll", "bookkeeping"])
+def test_verify_run_cancellation_keeps_finished_command_and_stops_next(
+    verify_signal_probe, tmp_path, first_status, boundary
+):
+    setup = f"""
+    import inspect
+    sent = False
+    boundary = {boundary!r}
+    poll = v.verify_runtime.subprocess.Popen.poll
+    def final_poll(process):
+        global sent
+        caller = inspect.currentframe().f_back
+        if boundary == 'final_poll' and caller.f_code is v.verify_runtime._run_verify_child_process.__code__ and not sent:
+            sent = True
+            os.kill(os.getpid(), signal.SIGTERM)
+        return poll(process)
+    v.verify_runtime.subprocess.Popen.poll = final_poll
+    write = Path.write_text
+    def bookkeeping(path, data, *args, **kw):
+        global sent
+        if boundary == 'bookkeeping' and path.name == 'command-1-stdout.log' and not sent:
+            sent = True
+            os.kill(os.getpid(), signal.SIGTERM)
+        return write(path, data, *args, **kw)
+    Path.write_text = bookkeeping
+    """
+    invocation = f"""
+    first = [sys.executable, '-S', '-c', {"print('first output', flush=True); import time; time.sleep(60)" if first_status == "timed_out" else "print('first output', flush=True)"!r}]
+    rc = v.verify_run(target=target, commands=[first, command], timeout=1,
+        reuse=False, capture='brigade-work')
+    assert sent
+    """
+    child = "Path('second-started').touch(); print('second')"
+    rc, receipt, result, alive, diagnostics = verify_signal_probe(setup=setup, invocation=invocation, child=child)
+    assert rc == 130, diagnostics
+    assert not alive, diagnostics
+    assert not (tmp_path / "second-started").exists(), "second command ran after cancellation"
+    assert receipt["status"] == "canceled"
+    assert receipt["interruption"]["signal"] == "SIGTERM"
+    assert len(receipt["commands"]) == 1, receipt["commands"]
+    command = receipt["commands"][0]
+    assert command["status"] == first_status
+    assert command["exit_code"] == (0 if first_status == "completed" else None)
+    assert Path(command["stdout_log_path"]).read_text() == "first output\n"
+    for key in ("stdout_log_path", "stderr_log_path"):
+        path = Path(command[key])
+        assert receipt["digests"]["logs"][path.name] == localio.file_sha256(path)
+    digest = receipt["digests"]["receipt_sha256"]
+    assert digest == localio.canonical_json_digest(receipt, exclude_keys={"digests"})
+    assert result["signals"] == [0]
+    assert len(result["events"]) == 1
+    assert result["events"][0]["digest"] == digest
+    assert result["events"][0]["exit_status"] == 130
+
+
+@pytest.mark.parametrize("boundary", ["manifest_stamp", "finalize", "fleet_append", "capture"])
+@pytest.mark.parametrize("json_output", [False, True])
+def test_verify_run_repeated_sigint_at_owner_boundary_preserves_neutral_evidence(
+    verify_signal_probe, tmp_path, boundary, json_output
+):
+    manifest_id = _register_tracked_verify_manifest(tmp_path) if boundary == "manifest_stamp" else None
+    setup = f"""
+    import io
+    from contextlib import redirect_stdout
+    boundary = {boundary!r}
+    manifest_id = {manifest_id!r}
+    if manifest_id:
+        manifest_path = target / 'verify/manifests' / (manifest_id + '.json')
+        payload = json.loads(manifest_path.read_text())
+        payload['checks'][0]['command'] = command
+        manifest_path.write_text(json.dumps(payload))
+        v.subprocess.run(['git', 'add', str(manifest_path)], cwd=target, check=True)
+        v.subprocess.run(['git', '-c', 'user.name=Test User', '-c', 'user.email=test@example.invalid',
+            'commit', '-m', 'signal command'], cwd=target, check=True, stdout=v.subprocess.DEVNULL)
+    interrupted = []
+    child_code = v.verify_runtime._run_verify_child_process.__code__
+    def trace(frame, event, arg):
+        if frame.f_code is child_code and event == 'exception' and isinstance(arg[1], KeyboardInterrupt):
+            interrupted.append(type(arg[1]))
+        return trace
+    sys.settrace(trace)
+    terminate = v.verify_runtime._terminate_verify_child
+    slow = False
+    def cleanup(process):
+        global slow
+        if not slow:
+            slow = True
+            time.sleep(1.6)
+            (target / 'slow-cleanup-finished').touch()
+        return terminate(process)
+    v.verify_runtime._terminate_verify_child = cleanup
+    repeated = False
+    def repeat():
+        global repeated
+        if not repeated:
+            repeated = True
+            assert (target / 'slow-cleanup-finished').exists()
+            os.kill(os.getpid(), signal.SIGINT)
+            os.kill(os.getpid(), signal.SIGTERM)
+            os.kill(os.getpid(), signal.SIGHUP)
+    binding = v._build_subject_binding
+    def stamp(*args, **kw):
+        if boundary == 'manifest_stamp':
+            repeat()
+        return binding(*args, **kw)
+    v._build_subject_binding = stamp
+    finalize = v._finalize_verify_receipt
+    def final(*args, **kw):
+        if boundary == 'finalize':
+            repeat()
+        return finalize(*args, **kw)
+    v._finalize_verify_receipt = final
+    def append(event, **kw):
+        if boundary == 'fleet_append':
+            repeat()
+        events.append(dict(event))
+        return True
+    fleet_client.report_event = append
+    capture = outcome_cmd.capture
+    def capturing(**kw):
+        if boundary == 'capture':
+            repeat()
+        return capture(**kw)
+    outcome_cmd.capture = capturing
+    """
+    invocation = f"""
+    output = io.StringIO()
+    try:
+        with redirect_stdout(output):
+            rc = v.verify_run(target=target, commands=None if manifest_id else [command],
+                manifest_id=manifest_id, reuse=False, capture='demo' if manifest_id else 'brigade-work',
+                json_output={json_output!r})
+    finally:
+        sys.settrace(None)
+    assert repeated
+    assert interrupted and interrupted[0] is KeyboardInterrupt, interrupted
+    if {json_output!r}:
+        payload = json.loads(output.getvalue())
+        assert payload['status'] == 'canceled'
+        assert payload['run_id'] == v._verify_receipts(target)[0]['run_id']
+    """
+    child = "register_process('child', os.getpid()); signal_owner(signal.SIGINT); time.sleep(60)"
+    rc, receipt, result, alive, diagnostics = verify_signal_probe(
+        setup=setup, invocation=invocation, child=child, descendants=("child",)
+    )
+    assert rc == 130, diagnostics
+    assert not alive, f"owned child survived repeat: {alive}\n{diagnostics}"
+    assert receipt["status"] == "canceled", diagnostics
+    assert receipt["commands"][0]["status"] == "interrupted"
+    assert receipt["interruption"] == {"kind": "keyboard-interrupt", "detail": "verification canceled by user"}
+    assert not (tmp_path / "after-called").exists(), "canceled SIGINT must skip graph work"
+    if manifest_id:
+        assert receipt["verify_manifest_id"] == manifest_id
+        assert receipt["commands"][0]["check_id"] == "eff-1"
+        assert receipt["subject_binding"]["artifact_id"] == "demo"
+    digest = receipt["digests"]["receipt_sha256"]
+    assert digest == localio.canonical_json_digest(receipt, exclude_keys={"digests"})
+    for key in ("stdout_log_path", "stderr_log_path"):
+        path = Path(receipt["commands"][0][key])
+        assert receipt["digests"]["logs"][path.name] == localio.file_sha256(path)
+    assert result["signals"] == [0], result
+    assert len(result["events"]) == 1, result
+    assert result["events"][0]["digest"] == digest
+    assert result["events"][0]["exit_status"] == 130
+
+
+@pytest.mark.parametrize("first_path", ["child", "graph"])
+def test_verify_run_sigint_skips_optional_graph_without_repeat(verify_signal_probe, tmp_path, first_path):
+    setup = f"""
+    graph_calls = 0
+    interrupted = []
+    def trace(frame, event, arg):
+        if event == 'exception' and isinstance(arg[1], KeyboardInterrupt):
+            interrupted.append(type(arg[1]))
+        return trace
+    sys.settrace(trace)
+    def slow_after(target, run_dir, *args, **kw):
+        global graph_calls
+        graph_calls += 1
+        (target / 'graph-called').touch()
+        (run_dir / graphtrail_delta.SNAPSHOT_AFTER_NAME).write_text('partial')
+        (run_dir / graphtrail_delta.SIDECAR_NAME).write_text('untrusted partial sidecar')
+        if {first_path!r} == 'graph' and graph_calls == 1:
+            os.kill(os.getpid(), signal.SIGINT)
+        time.sleep(5)
+        return {{'status': 'complete'}}
+    graphtrail_delta.capture_after_and_diff = slow_after
+    """
+    invocation = """
+    try:
+        rc = v.verify_run(target=target, commands=[command], reuse=False, capture='brigade-work')
+    finally:
+        sys.settrace(None)
+    assert interrupted and interrupted[0] is KeyboardInterrupt, interrupted
+    assert graph_calls == (1 if (target / 'graph-called').exists() else 0), graph_calls
+    """
+    child = "print('done')"
+    descendants = ()
+    if first_path == "child":
+        child = "register_process('child', os.getpid()); signal_owner(signal.SIGINT); time.sleep(60)"
+        descendants = ("child",)
+    rc, receipt, result, alive, diagnostics = verify_signal_probe(
+        setup=setup, invocation=invocation, child=child, descendants=descendants
+    )
+    assert rc == 130, diagnostics
+    assert not alive, diagnostics
+    assert (tmp_path / "graph-called").exists() == (first_path == "graph"), diagnostics
+    assert receipt["status"] == "canceled"
+    assert receipt["interruption"] == {"kind": "keyboard-interrupt", "detail": "verification canceled by user"}
+    assert receipt["code_graph_delta"]["status"] == "unavailable"
+    assert "canceled" in receipt["code_graph_delta"]["summary"]
+    run_dir = Path(receipt["path"])
+    assert not (run_dir / graphtrail_delta.SNAPSHOT_NAME).exists()
+    assert not (run_dir / graphtrail_delta.SNAPSHOT_AFTER_NAME).exists()
+    assert "sidecar_path" not in receipt["code_graph_delta"]
+    assert graphtrail_delta.SIDECAR_NAME not in receipt["digests"]["logs"]
+    digest = receipt["digests"]["receipt_sha256"]
+    assert digest == localio.canonical_json_digest(receipt, exclude_keys={"digests"})
+    assert result["signals"] == [0]
+    assert len(result["events"]) == 1
+    assert result["events"][0]["exit_status"] == 130
+    assert result["events"][0]["digest"] == digest
+
+
+@pytest.mark.parametrize("boundary", ["final_poll", "bookkeeping"])
+@pytest.mark.parametrize("json_output", [False, True])
+def test_verify_run_final_command_sigint_skips_graph(verify_signal_probe, tmp_path, boundary, json_output):
+    setup = f"""
+    import inspect, io
+    from contextlib import redirect_stdout
+    sent = False
+    boundary = {boundary!r}
+    poll = v.verify_runtime.subprocess.Popen.poll
+    def final_poll(process):
+        global sent
+        caller = inspect.currentframe().f_back
+        if boundary == 'final_poll' and caller.f_code is v.verify_runtime._run_verify_child_process.__code__ and not sent:
+            sent = True
+            os.kill(os.getpid(), signal.SIGINT)
+        return poll(process)
+    v.verify_runtime.subprocess.Popen.poll = final_poll
+    write = Path.write_text
+    def bookkeeping(path, data, *args, **kw):
+        global sent
+        if boundary == 'bookkeeping' and path.name == 'command-1-stdout.log' and not sent:
+            sent = True
+            os.kill(os.getpid(), signal.SIGINT)
+        return write(path, data, *args, **kw)
+    Path.write_text = bookkeeping
+    """
+    invocation = f"""
+    output = io.StringIO()
+    with redirect_stdout(output):
+        rc = v.verify_run(target=target, commands=[command], reuse=False,
+            capture='brigade-work', json_output={json_output!r})
+    assert sent
+    if {json_output!r}:
+        payload = json.loads(output.getvalue())
+        assert payload['status'] == 'canceled'
+        assert payload['run_id'] == v._verify_receipts(target)[0]['run_id']
+    """
+    rc, receipt, result, alive, diagnostics = verify_signal_probe(
+        setup=setup, invocation=invocation, child="print('finished output', flush=True)"
+    )
+    assert rc == 130, diagnostics
+    assert not alive, diagnostics
+    assert not (tmp_path / "after-called").exists(), "latched final-command SIGINT entered graph work"
+    assert receipt["status"] == "canceled"
+    assert receipt["interruption"] == {"kind": "keyboard-interrupt", "detail": "verification canceled by user"}
+    assert receipt["code_graph_delta"]["status"] == "unavailable"
+    assert not (Path(receipt["path"]) / graphtrail_delta.SNAPSHOT_NAME).exists()
+    assert len(receipt["commands"]) == 1
+    command = receipt["commands"][0]
+    assert command["status"] == "completed" and command["exit_code"] == 0
+    assert Path(command["stdout_log_path"]).read_text() == "finished output\n"
+    for key in ("stdout_log_path", "stderr_log_path"):
+        path = Path(command[key])
+        assert receipt["digests"]["logs"][path.name] == localio.file_sha256(path)
+    digest = receipt["digests"]["receipt_sha256"]
+    assert digest == localio.canonical_json_digest(receipt, exclude_keys={"digests"})
+    assert result["signals"] == [0]
+    assert len(result["events"]) == 1
+    assert result["events"][0]["digest"] == digest
+    assert result["events"][0]["exit_status"] == 130
+
+
+@pytest.mark.parametrize("repeat_signal", ["SIGINT", "SIGTERM"])
+def test_verify_run_repeat_during_actual_slow_child_cleanup_keeps_evidence(
+    verify_signal_probe, tmp_path, repeat_signal
+):
+    setup = f"""
+    interrupted = []
+    child_code = v.verify_runtime._run_verify_child_process.__code__
+    def trace(frame, event, arg):
+        if frame.f_code is child_code and event == 'exception' and isinstance(arg[1], KeyboardInterrupt):
+            interrupted.append(type(arg[1]))
+        return trace
+    sys.settrace(trace)
+    terminate = v.verify_runtime.proc._terminate_processes
+    cleanup_entered = threading.Event()
+    cleanup_finished = threading.Event()
+    repeater = None
+    main_thread = threading.get_ident()
+    observed_trace = trace
+    def trace(frame, event, arg):
+        if frame.f_code is terminate.__code__ and event == 'call':
+            cleanup_entered.set()
+        return observed_trace(frame, event, arg) and trace
+    sys.settrace(trace)
+    def slow_termination(processes, **kw):
+        global repeater
+        if repeater is None:
+            def repeat():
+                assert cleanup_entered.wait(timeout=5), 'actual cleanup never entered'
+                sent = 0
+                while not cleanup_finished.is_set():
+                    frame = sys._current_frames()[main_thread]
+                    codes = []
+                    while frame is not None:
+                        codes.append(frame.f_code)
+                        frame = frame.f_back
+                    if v.verify_runtime._terminate_verify_child.__code__ in codes and terminate.__code__ in codes:
+                        os.kill(os.getpid(), signal.{repeat_signal})
+                        sent += 1
+                        (target / 'actual-cleanup-repeat-fired').write_text(str(sent))
+                    cleanup_finished.wait(.02)
+                assert sent, 'repeat missed actual cleanup ownership'
+            repeater = threading.Thread(target=repeat)
+            repeater.start()
+            # Keep the existing test-only grace. The TERM-ignoring owned child
+            # forces real termination; the event replaces a startup-based timer.
+            kw['terminate_grace'] = 2.0
+            try:
+                return terminate(processes, **kw)
+            finally:
+                cleanup_finished.set()
+        return terminate(processes, **kw)
+    v.verify_runtime.proc._terminate_processes = slow_termination
+    def slow_after(*args, **kw):
+        time.sleep(5)
+        (target / 'after-called').touch()
+        return {{'status': 'complete'}}
+    graphtrail_delta.capture_after_and_diff = slow_after
+    """
+    invocation = """
+    try:
+        rc = v.verify_run(target=target, commands=[command], reuse=False, capture='brigade-work')
+    finally:
+        sys.settrace(None)
+        cleanup_finished.set()
+        if repeater is not None:
+            repeater.join(timeout=3)
+            assert not repeater.is_alive()
+    assert interrupted and interrupted[0] is KeyboardInterrupt, interrupted
+    """
+    child = (
+        "signal.signal(signal.SIGTERM, signal.SIG_IGN); register_process('child', os.getpid()); "
+        "signal_owner(signal.SIGINT); time.sleep(60)"
+    )
+    rc, receipt, result, alive, diagnostics = verify_signal_probe(
+        setup=setup, invocation=invocation, child=child, descendants=("child",)
+    )
+    assert int((tmp_path / "actual-cleanup-repeat-fired").read_text()) > 0, diagnostics
+    assert not (tmp_path / "after-called").exists(), "latched cleanup repeats must not lead to graph work"
+    assert rc == 130, diagnostics
+    assert not alive, diagnostics
+    assert receipt["status"] == "canceled"
+    assert receipt["commands"][0]["status"] == "interrupted"
+    assert receipt["interruption"] == {"kind": "keyboard-interrupt", "detail": "verification canceled by user"}
+    digest = receipt["digests"]["receipt_sha256"]
+    assert digest == localio.canonical_json_digest(receipt, exclude_keys={"digests"})
+    assert result["signals"] == [0]
+    assert len(result["events"]) == 1
+    assert result["events"][0]["exit_status"] == 130
+    assert result["events"][0]["digest"] == digest

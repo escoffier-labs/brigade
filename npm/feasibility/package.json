@@ -1,0 +1,27 @@
+{
+  "name": "@solomonneas/brigade",
+  "version": "0.29.0-dev.1",
+  "private": true,
+  "description": "Unpublished Brigade bundled-wheel candidate launcher",
+  "license": "MIT",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "brigade": "launcher.cjs"
+  },
+  "files": [
+    "launcher.cjs",
+    "runtime.json",
+    "README.md",
+    "LICENSE",
+    "wheel/"
+  ],
+  "optionalDependencies": {
+    "@solomonneas/brigade-uv-linux-x64": "0.29.0-dev.1",
+    "@solomonneas/brigade-uv-linux-arm64": "0.29.0-dev.1",
+    "@solomonneas/brigade-uv-darwin-x64": "0.29.0-dev.1",
+    "@solomonneas/brigade-uv-darwin-arm64": "0.29.0-dev.1",
+    "@solomonneas/brigade-uv-win32-x64": "0.29.0-dev.1"
+  }
+}

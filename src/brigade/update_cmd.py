@@ -17,7 +17,7 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlparse
 
-from brigade import component_manifest, component_paths, localio
+from brigade import component_manifest, component_paths, distribution, localio
 
 REPOSITORY = "escoffier-labs/brigade"
 STATE_SCHEMA_VERSION = 1
@@ -608,6 +608,13 @@ def run_update(
     pid_alive: Callable[[int], bool] | None = None,
 ) -> int:
     """Update CLI, then publish state after native component setup succeeds."""
+    if distribution.is_npm():
+        print(
+            "brigade update: this installation is managed by npm. "
+            "Install a different exact version with npm install or npx.",
+            file=sys.stderr,
+        )
+        return 1
     if channel not in {"stable", "beta"}:
         raise UpdateError("channel must be stable or beta")
     selected_paths = paths or default_paths()

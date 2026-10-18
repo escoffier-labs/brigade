@@ -1,0 +1,275 @@
+name: Unreleased npm candidate CI
+
+on:
+  push:
+    branches: [main, feat/npm-ready-20261018]
+    paths:
+      - '.github/workflows/npm-feasibility.yml'
+      - '.github/workflows/ci.yml'
+      - 'npm/feasibility/**'
+      - 'src/brigade/work_cmd/verif*.py'
+      - 'src/brigade/proc.py'
+      - 'src/brigade/distribution.py'
+      - 'src/brigade/update_*.py'
+      - 'src/brigade/cli/work/**'
+      - 'tests/test_work_cmd_verification.py'
+      - 'tests/test_proc.py'
+      - 'tests/test_update_*.py'
+      - 'tests/test_npm_feasibility_prepare.py'
+      - 'tests/test_ci_workflow.py'
+      - 'tests/test_test_fixture_contract.py'
+      - 'tests/test_published_artifact_acceptance.py'
+      - 'tests/conftest.py'
+      - 'scripts/verify*'
+      - 'scripts/prepare_dev_wheel.py'
+      - 'scripts/published-artifact-acceptance.py'
+      - 'pyproject.toml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.12'
+      - name: Build six unreleased candidate archives once from clean source
+        run: |
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain --untracked-files=all)"
+          argv=$(node -e 'process.stdout.write(JSON.stringify(["python","npm/feasibility/prepare.py","--out",process.env.RUNNER_TEMP+"/npm-artifacts"]))')
+          PYTHONPATH=src python -m brigade work verify run --target . --argv-json "$argv" --timeout 600 --capture brigade-work
+      - name: Verify exact candidate archives against clean checked-out source
+        shell: bash
+        run: |
+          python - <<'PYCODE'
+          import hashlib, json, os, runpy
+          from pathlib import Path
+          source = runpy.run_path('npm/feasibility/prepare.py')['source_snapshot'](False)[0]
+          assert source['sourceCommit'] == os.environ['GITHUB_SHA'], 'checkout/event SHA mismatch'
+          root = Path(os.environ['RUNNER_TEMP']) / 'npm-artifacts'
+          metadata = json.loads((root / 'artifacts.json').read_text())
+          for key in ('sourceCommit', 'sourceTree', 'sourceIdentity', 'sourceSha256', 'sourceDateEpoch'):
+              assert metadata[key] == source[key], 'candidate source mismatch: ' + key
+          runtime = json.loads((root / 'runtime.json').read_text())
+          assert runtime == metadata['runtime'], 'runtime metadata mismatch'
+          assert runtime['version'] == '0.29.0-dev.1' and runtime['payloadVersion'] == '0.29.0.dev1'
+          for key in ('sourceCommit', 'sourceTree', 'sourceIdentity'):
+              assert runtime['payload'][key] == source[key], 'wheel source mismatch: ' + key
+          archives = metadata['artifacts']
+          names = [a['filename'] for a in archives]
+          assert len(names) == len(set(names)) == 6, 'exactly six distinct archives required'
+          assert {a['platform'] for a in archives if 'platform' in a} == set(runtime['platforms'])
+          assert sum('platform' not in a for a in archives) == 1
+          assert {p.name for p in root.glob('*.tgz')} == set(names), 'archive set mismatch'
+          for archive in archives:
+              name = archive['filename']
+              assert Path(name).name == name and name.endswith('.tgz') and '/' not in name and '\\' not in name
+              path = root / name
+              assert path.is_file() and not path.is_symlink()
+              assert path.stat().st_size == archive['bytes']
+              assert hashlib.sha256(path.read_bytes()).hexdigest() == archive['sha256'], 'archive hash mismatch'
+          print('Six archives verified against clean checkout and event SHA', source['sourceCommit'])
+          PYCODE
+      # One-day artifacts in this public repository are public, not confidential.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: unreleased-npm-candidate-archives
+          path: |
+            ${{ runner.temp }}/npm-artifacts/*.tgz
+            ${{ runner.temp }}/npm-artifacts/artifacts.json
+            ${{ runner.temp }}/npm-artifacts/runtime.json
+          retention-days: 1
+          if-no-files-found: error
+      - name: Upload bounded package verification receipts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: unreleased-npm-candidate-package-receipts
+          path: |
+            .brigade/work/verify-runs/*/receipt.json
+            .brigade/work/verify-runs/*/command-*-stdout.log
+            .brigade/work/verify-runs/*/command-*-stderr.log
+          retention-days: 1
+          if-no-files-found: warn
+
+  acceptance:
+    needs: package
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: ubuntu-24.04, platform: linux-x64}
+          - {os: ubuntu-24.04-arm, platform: linux-arm64}
+          - {os: windows-2022, platform: win32-x64}
+          - {os: macos-15-intel, platform: darwin-x64}
+          - {os: macos-15, platform: darwin-arm64}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '22'
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.12'
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8
+        with:
+          name: unreleased-npm-candidate-archives
+          path: ${{ runner.temp }}/npm-artifacts
+      - name: Verify exact candidate archives against clean checked-out source
+        shell: bash
+        run: |
+          python - <<'PYCODE'
+          import hashlib, json, os, runpy
+          from pathlib import Path
+          source = runpy.run_path('npm/feasibility/prepare.py')['source_snapshot'](False)[0]
+          assert source['sourceCommit'] == os.environ['GITHUB_SHA'], 'checkout/event SHA mismatch'
+          root = Path(os.environ['RUNNER_TEMP']) / 'npm-artifacts'
+          metadata = json.loads((root / 'artifacts.json').read_text())
+          for key in ('sourceCommit', 'sourceTree', 'sourceIdentity', 'sourceSha256', 'sourceDateEpoch'):
+              assert metadata[key] == source[key], 'candidate source mismatch: ' + key
+          runtime = json.loads((root / 'runtime.json').read_text())
+          assert runtime == metadata['runtime'], 'runtime metadata mismatch'
+          assert runtime['version'] == '0.29.0-dev.1' and runtime['payloadVersion'] == '0.29.0.dev1'
+          for key in ('sourceCommit', 'sourceTree', 'sourceIdentity'):
+              assert runtime['payload'][key] == source[key], 'wheel source mismatch: ' + key
+          archives = metadata['artifacts']
+          names = [a['filename'] for a in archives]
+          assert len(names) == len(set(names)) == 6, 'exactly six distinct archives required'
+          assert {a['platform'] for a in archives if 'platform' in a} == set(runtime['platforms'])
+          assert sum('platform' not in a for a in archives) == 1
+          assert {p.name for p in root.glob('*.tgz')} == set(names), 'archive set mismatch'
+          for archive in archives:
+              name = archive['filename']
+              assert Path(name).name == name and name.endswith('.tgz') and '/' not in name and '\\' not in name
+              path = root / name
+              assert path.is_file() and not path.is_symlink()
+              assert path.stat().st_size == archive['bytes']
+              assert hashlib.sha256(path.read_bytes()).hexdigest() == archive['sha256'], 'archive hash mismatch'
+          print('Six archives verified against clean checkout and event SHA', source['sourceCommit'])
+          PYCODE
+      - name: Full native npm and npx acceptance with fresh private HOME and Node-only PATH
+        run: |
+          argv=$(node -e 'process.stdout.write(JSON.stringify(["node","npm/feasibility/acceptance.cjs","--artifacts",process.env.RUNNER_TEMP+"/npm-artifacts","--out",process.env.RUNNER_TEMP+"/npm-receipts","--expected-platform","${{ matrix.platform }}"]))')
+          PYTHONPATH=src python -m brigade work verify run --target . --argv-json "$argv" --timeout 900 --capture brigade-work
+          python - <<'PYCODE'
+          import json, os
+          from pathlib import Path
+          result = json.loads((Path(os.environ['RUNNER_TEMP']) / 'npm-receipts/acceptance.json').read_text())
+          assert result['status'] == result['cancellationGate'] == 'passed'
+          assert result['platform'] == result['expectedPlatform']
+          assert result['acceptanceMode'] == 'native-default'
+          if result['platform'] != 'win32-x64':
+              assert len(result['cancellationModes']) == 6
+              assert {m['signal'] for m in result['cancellationModes']} == {'SIGINT', 'SIGTERM', 'SIGHUP'}
+              assert {m['scope'] for m in result['cancellationModes']} == {'pid', 'group'}
+          assert result['pathExcludesPythonAndUv'] and result['pathEntries'] == []
+          if result['platform'] == 'win32-x64':
+              print('Windows forced taskkill tree proof is separate; console Ctrl+C remains unproved.')
+          PYCODE
+      - name: Upload bounded native acceptance receipts
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: unreleased-npm-candidate-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/npm-receipts/acceptance.json
+            .brigade/work/verify-runs/*/receipt.json
+            .brigade/work/verify-runs/*/command-*-stdout.log
+            .brigade/work/verify-runs/*/command-*-stderr.log
+          retention-days: 1
+          if-no-files-found: warn
+
+  isolated-signals:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {python: '3.10', mode: core}
+          - {python: '3.12', mode: core}
+          - {python: '3.12', mode: transport}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.12'
+      - name: Install pinned pytest for harmless runner owner cases
+        if: matrix.mode == 'transport'
+        run: |
+          python -m pip install --isolated --require-hashes --only-binary=:all: -r npm/feasibility/signal-tests/owner-requirements.txt
+      - name: Run harmless runner owner cases once on the host
+        if: matrix.mode == 'transport'
+        run: |
+          PYTHONPATH=src python -m brigade work verify run --target . --argv-json '["python","-m","pytest","-q","npm/feasibility/signal-tests/test_runner.py"]' --timeout 60 --capture brigade-work
+      - name: Build tracked image and execute only in a strict disposable PID namespace
+        env:
+          SIGNAL_PYTHON: ${{ matrix.python }}
+          SIGNAL_MODE: ${{ matrix.mode }}
+        run: |
+          argv=$(python -c 'import json,os;print(json.dumps(["python","npm/feasibility/signal-tests/run.py","--python",os.environ["SIGNAL_PYTHON"],"--mode",os.environ["SIGNAL_MODE"],"--out",os.environ["RUNNER_TEMP"]+"/signal-proof"]))')
+          PYTHONPATH=src python -m brigade work verify run --target . --argv-json "$argv" --timeout 320 --capture brigade-work
+      - name: Upload bounded namespace and teardown evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: unreleased-npm-candidate-signals-${{ matrix.python }}-${{ matrix.mode }}
+          path: |
+            ${{ runner.temp }}/signal-proof/receipt.json
+            ${{ runner.temp }}/signal-proof/runtime.log
+            ${{ runner.temp }}/signal-proof/build.log
+            ${{ runner.temp }}/signal-proof/image-id.txt
+            .brigade/work/verify-runs/*/receipt.json
+            .brigade/work/verify-runs/*/command-*-stdout.log
+            .brigade/work/verify-runs/*/command-*-stderr.log
+          retention-days: 1
+          if-no-files-found: warn
+
+  candidate-gate:
+    if: always()
+    needs: [package, acceptance, isolated-signals]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Require all five native jobs and isolated signal jobs
+        env:
+          PACKAGE_RESULT: ${{ needs.package.result }}
+          ACCEPTANCE_RESULT: ${{ needs.acceptance.result }}
+          SIGNAL_RESULT: ${{ needs.isolated-signals.result }}
+        run: |
+          test "$PACKAGE_RESULT" = success
+          test "$ACCEPTANCE_RESULT" = success
+          test "$SIGNAL_RESULT" = success

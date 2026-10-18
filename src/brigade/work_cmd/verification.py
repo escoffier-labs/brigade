@@ -3,6 +3,7 @@
 from __future__ import annotations
 import copy
 import hashlib
+import io
 import json
 import os
 import re
@@ -11,6 +12,7 @@ import shutil
 import stat
 import subprocess
 import sys
+from contextlib import redirect_stderr, redirect_stdout
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -20,7 +22,6 @@ from .. import (
     generated_patch_quarantine,
     graphtrail_delta,
     localio,
-    proc,
     receipt_schema,
     receipt_signing,
     runguard,
@@ -29,9 +30,16 @@ from .. import verification_contract, verify_manifest, verify_trial
 from . import constants, helpers, ledger as ledger_mod
 from . import reviews as reviews_mod
 from . import scanners as scanners_mod
-from . import verify_ranking
-from . import verify_reaper
+from . import verify_ranking, verify_runtime
 from .verify_scoreability import _print_graph_impact, _print_scoreability_notice, _scoreability_notice
+
+
+def _cancel_verify_graph(receipt: dict[str, Any], run_dir: Path) -> None:
+    receipt["code_graph_delta"] = graphtrail_delta._status(
+        "unavailable", "code graph delta unavailable: verification canceled"
+    )
+    graphtrail_delta._delete_snapshot(run_dir / graphtrail_delta.SNAPSHOT_NAME)
+    graphtrail_delta._delete_snapshot(run_dir / graphtrail_delta.SNAPSHOT_AFTER_NAME)
 
 
 def _verification_is_windows() -> bool:
@@ -325,92 +333,6 @@ def _verify_execution_argv(argv: list[str], target: Path) -> list[str]:
     return execution_argv
 
 
-_VERIFY_CANCELED_RC = 130
-_VERIFY_INTERRUPTED_COMMAND_STATUS = "interrupted"
-_VERIFY_CANCELED_RECEIPT_STATUS = "canceled"
-
-
-def _verify_child_popen_kwargs() -> dict[str, Any]:
-    if os.name == "posix":
-        return {"start_new_session": True}
-    return {"creationflags": proc._WINDOWS_NEW_PROCESS_GROUP}
-
-
-def _decode_verify_child_output(stdout: str | bytes | None, stderr: str | bytes | None) -> tuple[str, str]:
-    stdout_text = stdout.decode("utf-8", errors="replace") if isinstance(stdout, bytes) else (stdout or "")
-    stderr_text = stderr.decode("utf-8", errors="replace") if isinstance(stderr, bytes) else (stderr or "")
-    return stdout_text, stderr_text
-
-
-def _terminate_verify_child(process: subprocess.Popen[bytes]) -> None:
-    b = verify_reaper._collect_descendants(process.pid)
-    try:
-        proc._terminate_processes((process,), terminate_grace=0.5, kill_grace=0.5)
-    except KeyboardInterrupt:
-        try:
-            proc._terminate_processes((process,), terminate_grace=0.0, kill_grace=0.0)
-        except KeyboardInterrupt:
-            pass
-    survivors = tuple(verify_reaper._survivor_mocks(b | verify_reaper._collect_descendants(process.pid)))
-    if survivors:
-        try:
-            proc._terminate_processes(survivors, terminate_grace=0.5, kill_grace=0.5)  # type: ignore
-        except KeyboardInterrupt:
-            try:
-                proc._terminate_processes(survivors, terminate_grace=0.0, kill_grace=0.0)  # type: ignore
-            except KeyboardInterrupt:
-                pass
-
-
-def _run_verify_child_process(
-    execution_argv: list[str],
-    *,
-    cwd: Path,
-    env: dict[str, str],
-    timeout: int,
-) -> tuple[str, int | None, str, str]:
-    """Run one verify child in its own process group; return (status, exit_code, stdout, stderr)."""
-    popen_kwargs = _verify_child_popen_kwargs()
-    try:
-        process = subprocess.Popen(
-            execution_argv,
-            cwd=cwd,
-            env=env,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            stdin=subprocess.DEVNULL,
-            shell=False,
-            **popen_kwargs,
-        )
-    except OSError as exc:
-        return "failed", 127, "", str(exc)
-    try:
-        stdout, stderr = process.communicate(timeout=timeout)
-        stdout_text, stderr_text = _decode_verify_child_output(stdout, stderr)
-        if process.returncode == 0:
-            return "completed", 0, stdout_text, stderr_text
-        return "failed", process.returncode, stdout_text, stderr_text
-    except KeyboardInterrupt:
-        _terminate_verify_child(process)
-        stdout_text, stderr_text = "", ""
-        try:
-            stdout, stderr = process.communicate(timeout=proc._TIMED_OUT_DRAIN_SECONDS)
-            stdout_text, stderr_text = _decode_verify_child_output(stdout, stderr)
-        except KeyboardInterrupt:
-            _terminate_verify_child(process)
-        except subprocess.TimeoutExpired as exc:
-            stdout_text, stderr_text = _decode_verify_child_output(exc.output, exc.stderr)
-        return _VERIFY_INTERRUPTED_COMMAND_STATUS, None, stdout_text, stderr_text
-    except subprocess.TimeoutExpired as exc:
-        _terminate_verify_child(process)
-        stdout_text, stderr_text = _decode_verify_child_output(exc.stdout, exc.stderr)
-        try:
-            process.communicate(timeout=proc._TIMED_OUT_DRAIN_SECONDS)
-        except subprocess.TimeoutExpired:
-            pass
-        return "timed_out", None, stdout_text, stderr_text
-
-
 def _active_work_session_id(target: Path) -> str | None:
     current = helpers._current_path(target)
     if not current.is_file():
@@ -581,13 +503,11 @@ def _finalize_verify_receipt(
     completed_at = helpers._now()
     receipt["completed_at"] = completed_at.isoformat()
     receipt["duration_seconds"] = (completed_at - started).total_seconds()
+    canceled = canceled or verify_runtime._verify_signal_received()
     if canceled:
-        receipt["status"] = _VERIFY_CANCELED_RECEIPT_STATUS
-        receipt.setdefault(
-            "interruption",
-            {"kind": "keyboard-interrupt", "detail": "verification canceled by user"},
-        )
-        rc = _VERIFY_CANCELED_RC
+        receipt["status"] = verify_runtime._VERIFY_CANCELED_RECEIPT_STATUS
+        receipt.setdefault("interruption", verify_runtime._verify_interruption_record())
+        rc = verify_runtime._VERIFY_CANCELED_RC
     else:
         command_statuses = [c.get("status") for c in receipt["commands"] if isinstance(c, dict)]
         if rc == 0:
@@ -610,7 +530,7 @@ def _finalize_verify_receipt(
     except Exception:
         pass
     log_digests: dict[str, str] = {}
-    for command in receipt["commands"]:
+    for command in [] if receipt.get("reused_from") else receipt["commands"]:
         if not isinstance(command, dict):
             continue
         for key in ("stdout_log_path", "stderr_log_path"):
@@ -677,16 +597,33 @@ def _safe_finalize_verify_receipt(
     try:
         return _finalize_verify_receipt(target, run_dir, receipt, started=started, rc=rc, canceled=canceled)
     except BaseException:
-        if canceled:
-            receipt["status"] = _VERIFY_CANCELED_RECEIPT_STATUS
+        if verify_runtime._verify_signal_received():
+            _cancel_verify_graph(receipt, run_dir)
+            # A broad finalization helper may have swallowed the one handler
+            # exception. Retry through the normal digest/signing lifecycle.
+            try:
+                return _finalize_verify_receipt(
+                    target, run_dir, receipt, started=started, rc=verify_runtime._VERIFY_CANCELED_RC, canceled=True
+                )
+            except BaseException:
+                pass
+        if canceled or verify_runtime._verify_signal_received():
+            receipt["status"] = verify_runtime._VERIFY_CANCELED_RECEIPT_STATUS
             receipt.setdefault(
                 "interruption",
-                {"kind": "keyboard-interrupt", "detail": "verification canceled by user"},
+                verify_runtime._verify_interruption_record(),
             )
-            rc = _VERIFY_CANCELED_RC
+            rc = verify_runtime._VERIFY_CANCELED_RC
         elif receipt.get("status") == "running":
             receipt["status"] = "failed"
         receipt.setdefault("completed_at", helpers._now().isoformat())
+        # Keep a valid digest/signature if fallback did not change the payload.
+        # A completed digest must never authenticate a newly canceled receipt.
+        digests = receipt.get("digests")
+        if not isinstance(digests, dict) or digests.get("receipt_sha256") != localio.canonical_json_digest(
+            receipt, exclude_keys={"digests"}
+        ):
+            receipt.pop("digests", None)
         try:
             helpers._write_json(run_dir / "receipt.json", receipt)
         except OSError:
@@ -721,6 +658,45 @@ def _report_fleet_completion(target: Path, receipt: dict[str, Any], rc: int) -> 
         )
     except Exception:
         return
+
+
+def _commit_verify_receipt(
+    target: Path,
+    run_dir: Path,
+    receipt: dict[str, Any],
+    *,
+    started,
+    rc: int,
+    canceled: bool,
+    finalized: bool = False,
+    manifest: verify_manifest.VerifyManifest | None = None,
+) -> tuple[dict[str, Any], int]:
+    with verify_runtime._defer_verify_signal():
+        if manifest is not None:
+            _apply_manifest_scoring_fields(target, receipt, manifest, run_dir)
+        if not finalized:
+            receipt, rc = _safe_finalize_verify_receipt(
+                target, run_dir, receipt, started=started, rc=rc, canceled=canceled
+            )
+        if (
+            verify_runtime._verify_signal_received()
+            and receipt.get("status") != verify_runtime._VERIFY_CANCELED_RECEIPT_STATUS
+        ):
+            _cancel_verify_graph(receipt, run_dir)
+            receipt, rc = _safe_finalize_verify_receipt(
+                target, run_dir, receipt, started=started, rc=verify_runtime._VERIFY_CANCELED_RC, canceled=True
+            )
+        # Commit before calling the append boundary. Later signals may change
+        # the process exit status, but cannot rewrite or report this run again.
+        state = verify_runtime._ACTIVE_VERIFY_CANCEL.get()
+        if state is not None:
+            state.owned_receipt = None
+        _report_fleet_completion(target, receipt, rc)
+        if state is not None:
+            # Terminal evidence owns the first signal even when it was deferred.
+            # From here through output/capture, handlers only latch new signals.
+            state.raised = True
+    return receipt, rc
 
 
 VERIFY_RUNS_KEEP = config.DEFAULT_VERIFY_RUNS_KEEP
@@ -1560,7 +1536,6 @@ def _run_verify_commands(
     graph_delta_before: dict[str, Any] | None = None
     rc = 0
     canceled = False
-    finalized = False
     try:
         run_dir.mkdir(parents=True, exist_ok=False)
         identity = _capture_verify_identity(target, run_dir)
@@ -1576,6 +1551,9 @@ def _run_verify_commands(
             "planned_commands": _planned_commands_display(commands),
         }
         receipt.update(identity)
+        state = verify_runtime._ACTIVE_VERIFY_CANCEL.get()
+        if state is not None:
+            state.owned_receipt = (target, run_dir, receipt, started)
         receipt_schema.stamp_optional_producer_run_id(receipt)
         _stamp_verify_causal_receipt(receipt)
         _stamp_harness_session(receipt)
@@ -1584,13 +1562,17 @@ def _run_verify_commands(
             graph_delta_before = graphtrail_delta.capture_before(target, run_dir, timeout=graphtrail_timeout)
         except KeyboardInterrupt:
             canceled = True
-            rc = _VERIFY_CANCELED_RC
+            rc = verify_runtime._VERIFY_CANCELED_RC
             receipt.setdefault(
                 "interruption",
-                {"kind": "keyboard-interrupt", "detail": "verification canceled by user"},
+                verify_runtime._verify_interruption_record(),
             )
         if not canceled:
             for index, command in enumerate(commands, start=1):
+                if verify_runtime._verify_signal_received():
+                    canceled = True
+                    rc = verify_runtime._VERIFY_CANCELED_RC
+                    break
                 if isinstance(command, list):
                     argv, env_assignments, error = _verify_parse_argv(command, target)
                     display_command = shlex.join(command)
@@ -1625,87 +1607,73 @@ def _run_verify_commands(
                 run_env.update(env_assignments)
                 execution_argv = _verify_execution_argv(argv, target)
                 command_started = helpers._now()
-                status, exit_code, stdout, stderr = _run_verify_child_process(
+                status, exit_code, stdout, stderr = verify_runtime._run_verify_child_process(
                     execution_argv,
                     cwd=target,
                     env=run_env,
                     timeout=timeout,
                 )
-                command_completed = helpers._now()
-                stdout_path.write_text(stdout)
-                stderr_path.write_text(stderr)
-                command_result.update(
-                    {
-                        "status": status,
-                        "exit_code": exit_code,
-                        "completed_at": command_completed.isoformat(),
-                        "duration_seconds": (command_completed - command_started).total_seconds(),
-                        "argv": argv,
-                        "stdout_summary": scanners_mod._scanner_run_summary(stdout),
-                        "stderr_summary": scanners_mod._scanner_run_summary(stderr),
-                        "stdout_log_path": str(stdout_path),
-                        "stderr_log_path": str(stderr_path),
-                    }
-                )
-                if status == _VERIFY_INTERRUPTED_COMMAND_STATUS:
-                    canceled = True
-                    rc = _VERIFY_CANCELED_RC
+                # A first signal in the return-to-bookkeeping bytecode window
+                # can still omit this finished command before deferral begins.
+                with verify_runtime._defer_verify_signal():
+                    command_completed = helpers._now()
+                    stdout_path.write_text(stdout)
+                    stderr_path.write_text(stderr)
+                    command_result.update(
+                        {
+                            "status": status,
+                            "exit_code": exit_code,
+                            "completed_at": command_completed.isoformat(),
+                            "duration_seconds": (command_completed - command_started).total_seconds(),
+                            "argv": argv,
+                            "stdout_summary": scanners_mod._scanner_run_summary(stdout),
+                            "stderr_summary": scanners_mod._scanner_run_summary(stderr),
+                            "stdout_log_path": str(stdout_path),
+                            "stderr_log_path": str(stderr_path),
+                        }
+                    )
+                    if status == verify_runtime._VERIFY_INTERRUPTED_COMMAND_STATUS:
+                        canceled = True
+                        rc = verify_runtime._VERIFY_CANCELED_RC
+                        receipt["commands"].append(command_result)
+                        break
+                    if status == "timed_out":
+                        rc = 124
+                    elif status == "failed" and exit_code is not None and rc == 0:
+                        rc = exit_code
+                    elif status == "failed" and rc == 0:
+                        rc = 127
                     receipt["commands"].append(command_result)
-                    break
-                if status == "timed_out":
-                    rc = 124
-                elif status == "failed" and exit_code is not None and rc == 0:
-                    rc = exit_code
-                elif status == "failed" and rc == 0:
-                    rc = 127
-                receipt["commands"].append(command_result)
-            if canceled and "code_graph_delta" not in receipt:
-                try:
-                    receipt["code_graph_delta"] = graphtrail_delta.capture_after_and_diff(
-                        target, run_dir, graph_delta_before, timeout=graphtrail_timeout
-                    )
-                except (Exception, KeyboardInterrupt):
-                    receipt["code_graph_delta"] = graphtrail_delta._status(
-                        "unavailable",
-                        "code graph delta unavailable: verification canceled before graph capture completed",
-                    )
-            elif not canceled:
-                receipt["code_graph_delta"] = graphtrail_delta.capture_after_and_diff(
-                    target, run_dir, graph_delta_before, timeout=graphtrail_timeout
-                )
+                    state = verify_runtime._ACTIVE_VERIFY_CANCEL.get()
+                    if state is not None and state.received is not None:
+                        state.raised = True
+        if canceled or verify_runtime._verify_signal_received():
+            canceled = True
+            rc = verify_runtime._VERIFY_CANCELED_RC
+            _cancel_verify_graph(receipt, run_dir)
+        else:
+            receipt["code_graph_delta"] = graphtrail_delta.capture_after_and_diff(
+                target, run_dir, graph_delta_before, timeout=graphtrail_timeout
+            )
     except KeyboardInterrupt:
+        if receipt is None:
+            # Like a crash, pre-receipt cancellation can leave an empty directory
+            # or changes.patch. Preserve those remnants for inspection.
+            raise
         canceled = True
-        rc = _VERIFY_CANCELED_RC
+        rc = verify_runtime._VERIFY_CANCELED_RC
         if receipt is not None:
             receipt.setdefault(
                 "interruption",
-                {"kind": "keyboard-interrupt", "detail": "verification canceled by user"},
+                verify_runtime._verify_interruption_record(),
             )
-            if "code_graph_delta" not in receipt and graph_delta_before is not None:
-                try:
-                    receipt["code_graph_delta"] = graphtrail_delta.capture_after_and_diff(
-                        target, run_dir, graph_delta_before, timeout=graphtrail_timeout
-                    )
-                except (Exception, KeyboardInterrupt):
-                    receipt["code_graph_delta"] = graphtrail_delta._status(
-                        "unavailable",
-                        "code graph delta unavailable: verification canceled before graph capture completed",
-                    )
+            _cancel_verify_graph(receipt, run_dir)
     finally:
-        if receipt is not None and not finalized:
-            if manifest is not None:
-                _apply_manifest_scoring_fields(target, receipt, manifest, run_dir)
-            receipt, rc = _safe_finalize_verify_receipt(
-                target,
-                run_dir,
-                receipt,
-                started=started,
-                rc=rc,
-                canceled=canceled,
+        if receipt is not None:
+            receipt, rc = _commit_verify_receipt(
+                target, run_dir, receipt, started=started, rc=rc, canceled=canceled, manifest=manifest
             )
-            finalized = True
     assert receipt is not None
-    _report_fleet_completion(target, receipt, rc)
     return receipt, rc
 
 
@@ -1738,6 +1706,9 @@ def _write_reused_receipt(
         "planned_commands": planned_display,
     }
     receipt.update(identity)
+    state = verify_runtime._ACTIVE_VERIFY_CANCEL.get()
+    if state is not None:
+        state.owned_receipt = (target, run_dir, receipt, started)
     receipt_schema.stamp_optional_producer_run_id(receipt)
     _stamp_verify_causal_receipt(receipt)
     _stamp_harness_session(receipt)
@@ -1764,8 +1735,7 @@ def _write_reused_receipt(
         _prune_verify_runs(target)
     except Exception:
         pass
-    _report_fleet_completion(target, receipt, 0)
-    return receipt, 0
+    return _commit_verify_receipt(target, run_dir, receipt, started=started, rc=0, canceled=False, finalized=True)
 
 
 def _resolve_closeout_session(target: Path, session_id: str) -> tuple[Path | None, dict[str, Any] | None, str | None]:
@@ -1986,34 +1956,36 @@ def verify_run(
 ) -> int:
     target = target.expanduser().resolve()
     if not target.is_dir():
-        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        verify_runtime._print_verify_console(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
     if timeout < 1:
-        print("error: --timeout must be a positive integer", file=sys.stderr)
+        verify_runtime._print_verify_console("error: --timeout must be a positive integer", file=sys.stderr)
         return 2
     manifest: verify_manifest.VerifyManifest | None = None
     if manifest_id:
         manifest, error = verify_manifest.resolve_manifest(target, manifest_id)
         if manifest is None:
-            print(f"error: {error}", file=sys.stderr)
+            verify_runtime._print_verify_console(f"error: {error}", file=sys.stderr)
             return 1 if error and "not found" in error else 2
         planned = manifest.planned_commands
     else:
         planned = commands if commands is not None else _default_verify_commands(target)
     if not planned:
-        print("error: no verification commands found; pass --command or --manifest", file=sys.stderr)
+        verify_runtime._print_verify_console(
+            "error: no verification commands found; pass --command or --manifest", file=sys.stderr
+        )
         return 2
     try:
         effective_graphtrail_timeout = config.resolve_graphtrail_delta_timeout(target, graphtrail_timeout)
     except ValueError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        verify_runtime._print_verify_console(f"error: {exc}", file=sys.stderr)
         return 2
     planned_display = _planned_commands_display(planned)
     planned_identity = _planned_commands_identity(planned)
     try:
         capture_before_retry = config.resolve_capture_before_retry(target)
     except ValueError as exc:
-        print(f"error: {exc}", file=sys.stderr)
+        verify_runtime._print_verify_console(f"error: {exc}", file=sys.stderr)
         return 2
     blocked_rc = _enforce_capture_before_retry(
         target,
@@ -2023,85 +1995,115 @@ def verify_run(
     )
     if blocked_rc is not None:
         return blocked_rc
-    try:
-        receipt = None
-        if reuse and manifest is None:
-            fingerprint = localio.tree_fingerprint(target)
-            latest = _latest_verify_receipt(target)
-            if (
-                fingerprint is not None
-                and latest is not None
-                and latest.get("status") == "completed"
-                and latest.get("tree_fingerprint") == fingerprint
-                and latest.get("planned_commands") == planned_display
-            ):
-                receipt, rc = _write_reused_receipt(
+    receipt = None
+    with verify_runtime._verify_cancellation_signals() as cancellation:
+        try:
+            if reuse and manifest is None:
+                fingerprint = localio.tree_fingerprint(target)
+                latest = _latest_verify_receipt(target)
+                if (
+                    fingerprint is not None
+                    and latest is not None
+                    and latest.get("status") == "completed"
+                    and latest.get("tree_fingerprint") == fingerprint
+                    and latest.get("planned_commands") == planned_display
+                ):
+                    receipt, rc = _write_reused_receipt(
+                        target,
+                        latest,
+                        planned_display,
+                        timeout,
+                        capture=capture,
+                        capture_kind=capture_kind,
+                    )
+            if receipt is None:
+                receipt, rc = _run_verify_commands(
                     target,
-                    latest,
-                    planned_display,
+                    planned,
                     timeout,
+                    graphtrail_timeout=effective_graphtrail_timeout,
+                    manifest=manifest,
                     capture=capture,
                     capture_kind=capture_kind,
                 )
-        if receipt is None:
-            receipt, rc = _run_verify_commands(
-                target,
-                planned,
-                timeout,
-                graphtrail_timeout=effective_graphtrail_timeout,
-                manifest=manifest,
-                capture=capture,
-                capture_kind=capture_kind,
-            )
-    except KeyboardInterrupt:
-        print("error: verification canceled by user", file=sys.stderr)
-        return _VERIFY_CANCELED_RC
-    if json_output:
-        if capture:
-            # Record the outcome in the same command (closes the loop without a
-            # second manual step) while keeping stdout valid JSON.
-            import contextlib
-            import io
-
-            from .. import outcome_cmd
-
-            scoreability = _scoreability_notice(target, receipt)
-            sink = io.StringIO()
-            with contextlib.redirect_stdout(sink), contextlib.redirect_stderr(sink):
-                outcome_cmd.capture(
-                    target=target,
-                    artifact_id=capture,
-                    artifact_kind=capture_kind,
-                    run_id=receipt["run_id"],
-                    json_output=False,
+        except KeyboardInterrupt:
+            cancellation.raised = True
+            if cancellation.received is None or cancellation.owned_receipt is None:
+                verify_runtime._print_verify_console(
+                    f"error: {verify_runtime._verify_interruption_record()['detail']}", file=sys.stderr
                 )
-            receipt["outcome_scoreability"] = scoreability
-            _attach_miseledger_indexing(receipt, target=target, json_output=True)
-        print(json.dumps(receipt, indent=2, sort_keys=True))
-        return rc
-    print(f"work verify run: {target}")
-    print(f"run: {receipt['run_id']}")
-    print(f"status: {receipt['status']}")
-    print(f"commands: {len(receipt['commands'])}")
-    for command in receipt["commands"]:
-        if isinstance(command, dict):
-            print(f"- {command.get('command')} [{command.get('status')}] exit={command.get('exit_code')}")
-    print(f"receipt: {Path(str(receipt['path'])) / 'receipt.json'}")
-    if capture:
-        from .. import outcome_cmd
+                return verify_runtime._VERIFY_CANCELED_RC
+            owned_target, run_dir, receipt, started = cancellation.owned_receipt
+            _cancel_verify_graph(receipt, run_dir)
+            receipt, rc = _commit_verify_receipt(
+                owned_target,
+                run_dir,
+                receipt,
+                started=started,
+                rc=verify_runtime._VERIFY_CANCELED_RC,
+                canceled=True,
+                manifest=manifest,
+            )
+        cancellation.raised = True
+        # Committed receipt/Fleet evidence is immutable. A first late signal
+        # returns 130 and skips completed capture if observed before it starts.
+        # Once capture starts, finish and retain it. Canceled receipts always
+        # receive their one neutral capture, including after repeated signals.
+        if json_output:
+            if capture:
+                from .. import outcome_cmd
 
-        scoreability = _scoreability_notice(target, receipt)
-        outcome_cmd.capture(
-            target=target,
-            artifact_id=capture,
-            artifact_kind=capture_kind,
-            run_id=receipt["run_id"],
-            json_output=False,
-        )
-        receipt["outcome_scoreability"] = scoreability
-        _attach_miseledger_indexing(receipt, target=target, json_output=False)
-        _print_scoreability_notice(scoreability)
-    return rc
+                scoreability = _scoreability_notice(target, receipt)
+                if (
+                    receipt.get("status") == verify_runtime._VERIFY_CANCELED_RECEIPT_STATUS
+                    or cancellation.received is None
+                ):
+                    sink = io.StringIO()
+                    with redirect_stdout(sink), redirect_stderr(sink):
+                        outcome_cmd.capture(
+                            target=target,
+                            artifact_id=capture,
+                            artifact_kind=capture_kind,
+                            run_id=receipt["run_id"],
+                            json_output=False,
+                        )
+                    receipt["outcome_scoreability"] = scoreability
+                    _attach_miseledger_indexing(receipt, target=target, json_output=True)
+            verify_runtime._print_verify_console(json.dumps(receipt, indent=2, sort_keys=True))
+        else:
+            verify_runtime._print_verify_console(f"work verify run: {target}")
+            verify_runtime._print_verify_console(f"run: {receipt['run_id']}")
+            verify_runtime._print_verify_console(f"status: {receipt['status']}")
+            verify_runtime._print_verify_console(f"commands: {len(receipt['commands'])}")
+            for command in receipt["commands"]:
+                if isinstance(command, dict):
+                    verify_runtime._print_verify_console(
+                        f"- {command.get('command')} [{command.get('status')}] exit={command.get('exit_code')}"
+                    )
+            verify_runtime._print_verify_console(f"receipt: {Path(str(receipt['path'])) / 'receipt.json'}")
+            if capture:
+                from .. import outcome_cmd
+
+                scoreability = _scoreability_notice(target, receipt)
+                if (
+                    receipt.get("status") == verify_runtime._VERIFY_CANCELED_RECEIPT_STATUS
+                    or cancellation.received is None
+                ):
+                    with verify_runtime._verify_console_output():
+                        outcome_cmd.capture(
+                            target=target,
+                            artifact_id=capture,
+                            artifact_kind=capture_kind,
+                            run_id=receipt["run_id"],
+                            json_output=False,
+                        )
+                    receipt["outcome_scoreability"] = scoreability
+                    with verify_runtime._verify_console_output():
+                        _attach_miseledger_indexing(receipt, target=target, json_output=False)
+                    with verify_runtime._verify_console_output():
+                        _print_scoreability_notice(scoreability)
+    # A signal latched during disposition restoration still determines rc.
+    return verify_runtime._VERIFY_CANCELED_RC if cancellation.received is not None else rc
 
 
 def verify_runs(*, target: Path, json_output: bool = False, limit: int = 20) -> int:
