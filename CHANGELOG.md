@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.28.0] - 2026-10-18
+
+- Background cleanup of an orphaned fleet claim keeps using the hub URL and token of the claim that scheduled it. Before, each retry re-read the fleet configuration, so a process whose configuration changed could send the cleanup request, with the new token, to a different hub. Renewal and exit release use the same bound connection. (Fixes #1778)
+
 - The dot connector pack connects a ChatGPT dot to T3 fleet dispatch, Brigade memory and the Fleet Hub inbox, with Cloudflare Access authentication and operator checks for setup and service health. (Refs #1765)
 
 - Fleet Hub refuses oversized or ambiguously framed JSON bodies, documents above the nesting and aggregate complexity budgets, and new acquisitions above 1024 active claims per node. Clients report claim quota refusals as definite failures, terminate the lease, and schedule fenced cleanup after an ambiguous acquire. The JSON complexity budget accepts producer-shaped Worklore import batches, with regex scans for string and numeric bodies. The claim count uses an index repaired on current-version databases without a schema version bump. Result-set bounds move to #1738. (#1151)
@@ -2035,7 +2039,8 @@ Initial release.
 - OpenClaw adapter fragments and harness-aware doctor checks.
 - Experimental Hermes adapter fragments.
 
-[Unreleased]: https://github.com/escoffier-labs/brigade/compare/v0.27.0...HEAD
+[Unreleased]: https://github.com/escoffier-labs/brigade/compare/v0.28.0...HEAD
+[0.28.0]: https://github.com/escoffier-labs/brigade/compare/v0.27.0...v0.28.0
 [0.27.0]: https://github.com/escoffier-labs/brigade/compare/v0.26.1...v0.27.0
 [0.26.1]: https://github.com/escoffier-labs/brigade/compare/v0.26.0...v0.26.1
 [0.26.0]: https://github.com/escoffier-labs/brigade/compare/v0.25.0...v0.26.0
