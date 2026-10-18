@@ -2566,13 +2566,16 @@ class TestExitOrphanReleaseHardening:
         # always fail so exit cleanup exhausts its retry budget.
         with caplog.at_level("WARNING", logger="brigade.fleet"):
             with pytest.MonkeyPatch.context() as mp:
-                mp.setattr(
-                    fleet_client,
-                    "renew_claim",
-                    lambda t, **kw: fleet_client.ClaimDecision(
-                        granted=False, reason="missing", holder=kw.get("holder")
-                    ),
-                )
+                renew_reasons = iter(["missing"])
+
+                def renew_missing_once(target, **kw):
+                    # One "missing" starts the abandoned re-acquire. Later heartbeats
+                    # see an unavailable hub and send no further acquires, so no
+                    # rejected grant can add a release while exit cleanup runs.
+                    reason = next(renew_reasons, "hub-unavailable")
+                    return fleet_client.ClaimDecision(granted=False, reason=reason, holder=kw.get("holder"))
+
+                mp.setattr(fleet_client, "renew_claim", renew_missing_once)
                 mp.setattr(fleet_client, "release_claim", always_unavailable)
                 with fleet_client.repo_claim("repo-a", ttl_seconds=60):
                     conn = fleet_hub.init_db(hub[2])
