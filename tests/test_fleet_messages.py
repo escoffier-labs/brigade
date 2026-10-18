@@ -3302,3 +3302,23 @@ def test_principal_revoke_requires_matching_success_identity(payload, monkeypatc
     monkeypatch.setattr(fleet_client, "_hub_open", hub_open)
     with pytest.raises(fleet_client.FleetClientError, match="did not confirm the revoked principal generation"):
         fleet_client_messages.manage_principal("revoke", name="researcher")
+
+
+def test_message_reads_forward_explicit_timeouts(monkeypatch):
+    seen = []
+
+    def request(hub, token, body, *, timeout=None):
+        seen.append((body["action"], timeout))
+        if body["action"] == "ack":
+            return 200, {"message": {"id": body["id"]}}
+        return 200, {"messages": [], "next_cursor": body.get("after", 0)}
+
+    monkeypatch.setattr(fleet_client_messages, "_request", request)
+    monkeypatch.setattr(
+        fleet_client_messages, "_settings", lambda token_file=None: ("https://hub.example.test", "token", "node")
+    )
+    fleet_client_messages.list_messages(after=0, timeout=1.5)
+    fleet_client_messages.ack(7, timeout=0.5)
+    fleet_client_messages.list_messages(after=0)
+    # Omitting the timeout keeps the client's default transport timeout.
+    assert seen == [("list", 1.5), ("ack", 0.5), ("list", None)]

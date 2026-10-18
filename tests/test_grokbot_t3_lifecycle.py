@@ -225,3 +225,96 @@ def test_tools_factory_explicitly_selects_full_access(tmp_path, monkeypatch):
         assert tools.runner.runtime_mode == "full-access"
     finally:
         tools.ledger.close()
+
+
+def test_render_intake_units(tmp_path, monkeypatch):
+    runtime = write_runtime(tmp_path, writable_paths=["/srv/t3/state"])
+    monkeypatch.setattr(lifecycle, "_load_validated_instance", lambda target: {"runtime_path": str(runtime)})
+    service, timer = lifecycle.render_intake_units(tmp_path, python="/venv/bin/python")
+    assert f"ExecStart=/venv/bin/python -m brigade.grokbot_t3 intake --target {tmp_path}\n" in service
+    assert "Description=Brigade Grok Bot t3-dispatch issue intake\n" in service
+    assert "Type=oneshot\n" in service and "TimeoutStartSec=900\n" in service
+    assert "ProtectSystem=strict\n" in service
+    assert f"ReadWritePaths={tmp_path / 'state'} /srv/t3/state\n" in service
+    assert "OnBootSec=5min\n" in timer and "OnUnitActiveSec=15min\n" in timer
+    assert "Unit=brigade-grokbot-t3-intake.service\n" in timer
+    assert "Description=Run the t3-dispatch issue intake every 15 minutes\n" in timer
+    assert "WantedBy=timers.target\n" in timer
+
+
+def test_write_intake_units_refuses_overwrite(tmp_path, monkeypatch):
+    from brigade import grokbot_ops
+
+    monkeypatch.setattr(lifecycle, "render_intake_units", lambda target, python=None: ("svc\n", "timer\n"))
+    paths = lifecycle.write_intake_units(tmp_path, tmp_path)
+    assert [path.name for path in paths] == ["brigade-grokbot-t3-intake.service", "brigade-grokbot-t3-intake.timer"]
+    assert lifecycle.write_intake_units(tmp_path, tmp_path) == paths
+    monkeypatch.setattr(lifecycle, "render_intake_units", lambda target, python=None: ("changed\n", "timer\n"))
+    with pytest.raises(grokbot_ops.ServiceRenderError):
+        lifecycle.write_intake_units(tmp_path, tmp_path)
+    assert lifecycle.write_intake_units(tmp_path, tmp_path, force=True) == paths
+
+
+@pytest.mark.parametrize("failure,expected", [(None, 0), ("timeout", 124), ("oserror", 127)])
+def test_intake_once_wires_bounded_gh_runner(tmp_path, monkeypatch, failure, expected):
+    import subprocess
+    from datetime import datetime, timezone
+    from tests.test_grokbot_t3_runtime import intake_payload
+
+    runtime = write_runtime(tmp_path, intake=intake_payload())
+    monkeypatch.setattr(lifecycle, "_load_validated_instance", lambda target: {"runtime_path": str(runtime)})
+    tools = object()
+    monkeypatch.setattr(lifecycle, "_tools_for", lambda runtime: tools)
+    calls = []
+
+    def fake_process(argv, **kwargs):
+        calls.append((argv, kwargs))
+        if failure == "timeout":
+            raise subprocess.TimeoutExpired(argv, 60, output="private output")
+        if failure == "oserror":
+            raise OSError("private error")
+        return subprocess.CompletedProcess(argv, 0, stdout="[]", stderr="private stderr")
+
+    monkeypatch.setattr(subprocess, "run", fake_process)
+
+    def fake_intake(*, policy, runtime, tools: object, gh, now):
+        assert tools is not None and policy is runtime.intake
+        assert now.tzinfo == timezone.utc and abs((datetime.now(timezone.utc) - now).total_seconds()) < 5
+        assert gh(["issue", "list"]) == (expected, "[]" if expected == 0 else "")
+        return {"reason": "ok", "submitted": [], "held": [], "errors": []}
+
+    monkeypatch.setattr(lifecycle, "run_intake_once", fake_intake)
+    assert lifecycle.intake_once(tmp_path)["reason"] == "ok"
+    assert calls == [
+        (
+            ["/usr/bin/gh", "issue", "list"],
+            {
+                "capture_output": True,
+                "text": True,
+                "shell": False,
+                "timeout": 60,
+                "check": False,
+                "stdin": subprocess.DEVNULL,
+            },
+        )
+    ]
+
+
+@pytest.mark.parametrize("errors,expected", [([], 0), ([{"repository": "example", "error": "gh-failed"}], 1)])
+def test_intake_cli_prints_summary(tmp_path, monkeypatch, capsys, errors, expected):
+    from brigade.grokbot_t3.__main__ import main
+
+    summary = {"reason": "ok", "submitted": [], "held": [], "errors": errors}
+    monkeypatch.setattr(lifecycle, "intake_once", lambda target: summary)
+    assert main(["intake", "--target", str(tmp_path)]) == expected
+    assert capsys.readouterr().out == json.dumps(summary, sort_keys=True) + "\n"
+
+
+def test_install_intake_cli(tmp_path, monkeypatch, capsys):
+    from brigade.grokbot_t3.__main__ import main
+
+    monkeypatch.setattr(lifecycle, "render_intake_units", lambda target, python=None: ("svc\n", "timer\n"))
+    assert main(["install-intake", "--target", str(tmp_path), "--out-dir", str(tmp_path)]) == 0
+    assert json.loads(capsys.readouterr().out) == {
+        "units": ["brigade-grokbot-t3-intake.service", "brigade-grokbot-t3-intake.timer"]
+    }

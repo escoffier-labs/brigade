@@ -65,6 +65,10 @@ class Ledger:
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS in_doubt (caller TEXT NOT NULL, created_at TEXT NOT NULL, expires_at TEXT NOT NULL)"
         )
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS intake_claims "
+            "(issue_key TEXT PRIMARY KEY, request_id TEXT, claimed_at TEXT NOT NULL)"
+        )
         # Seed legacy rows once, atomically with creation of the attempt ledger.
         with self._conn:
             self._conn.execute("BEGIN IMMEDIATE")
@@ -105,6 +109,21 @@ class Ledger:
     def close(self) -> None:
         with self._lock:
             self._conn.close()
+
+    def claim_intake(self, issue_key: str, now: datetime) -> bool:
+        with self._lock:
+            cursor = self._conn.execute(
+                "INSERT OR IGNORE INTO intake_claims (issue_key, claimed_at) VALUES (?, ?)", (issue_key, _ts(now))
+            )
+            return cursor.rowcount > 0
+
+    def attach_intake(self, issue_key: str, request_id: str) -> None:
+        with self._lock:
+            self._conn.execute("UPDATE intake_claims SET request_id = ? WHERE issue_key = ?", (request_id, issue_key))
+
+    def release_intake(self, issue_key: str) -> None:
+        with self._lock:
+            self._conn.execute("DELETE FROM intake_claims WHERE issue_key = ?", (issue_key,))
 
     def record_submit(
         self,

@@ -317,3 +317,41 @@ def _no_managed_tools_on_path(monkeypatch, request, tmp_path_factory):
 
     monkeypatch.setattr(component_bins, "resolve", bare_host_resolve)
     monkeypatch.setattr(managed.proc, "which", lambda cmd: None)
+
+
+def _private_test_root(tmp_path):
+    """Pick a parent whose ancestors pass Miller's private-directory walk.
+
+    The walk rejects any group- or world-writable ancestor unless it is
+    root-owned and sticky. A developer TMPDIR such as a 0775 home temp
+    directory fails that rule, so prefer a root-owned sticky /tmp when present.
+    """
+    import os
+    import stat
+    import tempfile
+    from pathlib import Path
+
+    root = Path("/tmp")
+    try:
+        info = os.lstat(root)
+    except OSError:
+        info = None
+    if info is not None and stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and info.st_mode & stat.S_ISVTX:
+        return Path(tempfile.mkdtemp(prefix="miller-test-", dir=root))
+    tmp_path.chmod(0o700)
+    return tmp_path
+
+
+@pytest.fixture
+def miller_private_dir(tmp_path):
+    """An owner-only parent directory plus a not-yet-created Miller state path inside it."""
+    import shutil
+
+    base = _private_test_root(tmp_path)
+    parent = base / "private-parent"
+    parent.mkdir(mode=0o700)
+    try:
+        yield parent / "state"
+    finally:
+        if base != tmp_path:
+            shutil.rmtree(base, ignore_errors=True)

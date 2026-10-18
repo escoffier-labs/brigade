@@ -256,3 +256,22 @@ def test_record_submit_converts_the_reservation_atomically(tmp_path):
     # The insert rolled back with the failed release: the slot is counted once, as the reservation.
     assert ledger.get("r1") is None
     assert ledger.open_count(T0) == 1
+
+
+def test_intake_claim_is_exclusive_and_releasable_across_connections(tmp_path):
+    import sqlite3
+
+    path = tmp_path / "state" / "ledger.sqlite3"
+    first = Ledger(path)
+    second = Ledger(path)
+    assert first.claim_intake("brigade#42", T0) is True
+    assert second.claim_intake("brigade#42", T0) is False
+    first.attach_intake("brigade#42", "r1")
+    with sqlite3.connect(path) as connection:
+        assert connection.execute("SELECT * FROM intake_claims").fetchall() == [
+            ("brigade#42", "r1", T0.isoformat(timespec="seconds"))
+        ]
+    second.release_intake("brigade#42")
+    assert first.claim_intake("brigade#42", T0) is True
+    first.close()
+    second.close()

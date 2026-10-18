@@ -99,3 +99,69 @@ def test_validate_runtime_reference_returns_path(tmp_path):
     assert rc.validate_runtime_reference(str(path)) == str(path)
     with pytest.raises(c.T3DispatchError):
         rc.validate_runtime_reference("relative.json")
+
+
+def intake_payload(**overrides):
+    policy = {
+        "label": "grokbot-build-approved",
+        "queued_label": "grokbot-build-queued",
+        "repositories": ["brigade"],
+        "caller": "Builder",
+        "gh_bin": "/usr/bin/gh",
+        "max_per_pass": 1,
+        "headroom": 2,
+    }
+    policy.update(overrides)
+    return policy
+
+
+def test_intake_is_optional(tmp_path):
+    assert rc.parse_runtime(runtime_payload(tmp_path)).intake is None
+
+
+def test_intake_policy_preserves_repository_order(tmp_path):
+    payload = runtime_payload(tmp_path, intake=intake_payload(repositories=["other", "brigade"]))
+    payload["repositories"]["other"] = {"remote": "https://github.com/example/other.git", "default_branch": "main"}
+    policy = rc.parse_runtime(payload).intake
+    assert policy.repositories == (("other", "example/other"), ("brigade", "escoffier-labs/brigade"))
+    assert (policy.label, policy.queued_label, policy.caller, policy.gh_bin, policy.max_per_pass, policy.headroom) == (
+        "grokbot-build-approved",
+        "grokbot-build-queued",
+        "Builder",
+        "/usr/bin/gh",
+        1,
+        2,
+    )
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"extra": 1},
+        {"label": "grokbot-build-queued"},
+        {"label": "bad label"},
+        {"queued_label": ""},
+        {"repositories": ["missing"]},
+        {"repositories": []},
+        {"repositories": ["brigade", "brigade"]},
+        {"headroom": 6},
+        {"headroom": -1},
+        {"headroom": 0},
+        {"max_per_pass": 0},
+        {"max_per_pass": 6},
+        {"max_per_pass": True},
+        {"gh_bin": "relative/gh"},
+        {"caller": "bad:caller"},
+    ],
+)
+def test_rejects_invalid_intake(tmp_path, overrides):
+    with pytest.raises(c.T3DispatchError) as error:
+        rc.parse_runtime(runtime_payload(tmp_path, intake=intake_payload(**overrides)))
+    assert error.value.code == "invalid_request"
+
+
+def test_intake_rejects_non_github_remote(tmp_path):
+    payload = runtime_payload(tmp_path, intake=intake_payload())
+    payload["repositories"]["brigade"]["remote"] = "https://example.com/team/brigade.git"
+    with pytest.raises(c.T3DispatchError):
+        rc.parse_runtime(payload)

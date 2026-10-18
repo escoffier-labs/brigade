@@ -306,6 +306,7 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
             "obsidian-operator",
             "operations-relay",
             "t3-dispatch",
+            "miller",
             "wazuh-triage",
             "n8n-operator",
         ),
@@ -315,7 +316,7 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
     )
     p_grokbot_serve.add_argument("--allow-host", action="append", default=[], help="Explicit allowed Host value.")
     p_grokbot_serve.add_argument("--allow-origin", action="append", default=[], help="Explicit allowed Origin value.")
-    secret_group = p_grokbot_serve.add_mutually_exclusive_group(required=True)
+    secret_group = p_grokbot_serve.add_mutually_exclusive_group(required=False)
     secret_group.add_argument("--bearer-file", type=Path, help="Protected file containing the listener bearer.")
     secret_group.add_argument("--bearer-env", help="Environment variable name containing the listener bearer.")
     p_grokbot_serve.add_argument(
@@ -404,7 +405,7 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
     p_pack_setup.add_argument("--bind", default=None, help="Listener host:port. Defaults to the pack loopback port.")
     p_pack_setup.add_argument("--allow-host", action="append", default=[], help="Explicit allowed Host value.")
     p_pack_setup.add_argument("--allow-origin", action="append", default=[], help="Explicit allowed Origin value.")
-    pack_secret = p_pack_setup.add_mutually_exclusive_group(required=True)
+    pack_secret = p_pack_setup.add_mutually_exclusive_group(required=False)
     pack_secret.add_argument("--bearer-file", type=Path, help="Path of a protected bearer file (reference only).")
     pack_secret.add_argument("--bearer-env", help="Name of the environment variable holding the bearer.")
     p_pack_setup.add_argument(
@@ -423,7 +424,7 @@ def add_cloud_subcommands(parser: argparse.ArgumentParser) -> None:
         "--runtime-path",
         type=Path,
         default=None,
-        help="Absolute runtime JSON path. Required for fleet-steward, backup-steward, obsidian-operator, wazuh-triage, and n8n-operator.",
+        help="Absolute runtime JSON path. Required for fleet-steward, backup-steward, obsidian-operator, wazuh-triage, n8n-operator, t3-dispatch, and miller.",
     )
     p_pack_setup.add_argument(
         "--ledger-path",
@@ -1094,6 +1095,18 @@ def _grokbot_health_reason(reason: str) -> str:
     return reason
 
 
+def _grokbot_bearer_valid(args, pack_id: str | None) -> bool:
+    has_bearer = args.bearer_file is not None or args.bearer_env is not None
+    if pack_id == "miller":
+        if has_bearer:
+            print("error: the miller pack takes no bearer; it verifies Cloudflare Access tokens", file=sys.stderr)
+            return False
+    elif not has_bearer:
+        print("error: --bearer-file or --bearer-env is required", file=sys.stderr)
+        return False
+    return True
+
+
 def _dispatch_grokbot(args, target: Path) -> int:
     """Dispatch local queue operations without loading envelopes into CLI arguments."""
     from .. import grokbot_jobs, grokbot_mcp
@@ -1120,6 +1133,8 @@ def _dispatch_grokbot(args, target: Path) -> int:
     if command == "relay-findings":
         return _dispatch_grokbot_relay_findings(args, target)
     if command == "serve":
+        if not _grokbot_bearer_valid(args, getattr(args, "pack", None)):
+            return 2
         from .. import grokbot_mcp
 
         try:
@@ -1190,6 +1205,17 @@ def _dispatch_grokbot(args, target: Path) -> int:
                         target, **listener_kwargs
                     )
                     grokbot_operations_relay.run_listener(operations_config, operations_tools)
+                elif args.pack == "miller":
+                    from .. import miller
+
+                    miller_config, miller_tools, miller_runtime = miller.build_listener_from_target(
+                        target,
+                        bind=args.bind,
+                        # Omitted flags keep the allowlists stored by `pack setup`.
+                        allowed_hosts=args.allow_host or None,
+                        allowed_origins=args.allow_origin or None,
+                    )
+                    miller.run_listener(miller_config, miller_tools, miller_runtime)
                 elif args.pack == "t3-dispatch":
                     from .. import grokbot_t3
 
@@ -1229,6 +1255,7 @@ def _dispatch_grokbot(args, target: Path) -> int:
                 grokbot_packs,
                 grokbot_t3,
                 grokbot_wazuh,
+                miller,
             )
 
             if isinstance(
@@ -1242,6 +1269,7 @@ def _dispatch_grokbot(args, target: Path) -> int:
                     grokbot_operations_relay.OperationsRelayError,
                     grokbot_packs.PackError,
                     grokbot_t3.T3DispatchError,
+                    miller.MillerError,
                     grokbot_wazuh.WazuhError,
                 ),
             ):
@@ -1594,6 +1622,8 @@ def _dispatch_grokbot_pack(args, target: Path) -> int:
         elif command == "show":
             result = grokbot_packs.show_pack(args.pack_id)
         elif command == "setup":
+            if not _grokbot_bearer_valid(args, args.pack_id):
+                return 2
             setup_kwargs = {
                 "bind": args.bind,
                 "allowed_hosts": args.allow_host,
