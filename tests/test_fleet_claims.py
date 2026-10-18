@@ -2514,8 +2514,6 @@ class TestExitOrphanReleaseHardening:
 
     def test_exit_logs_when_orphan_cleanup_retries_are_exhausted(self, hub, monkeypatch, caplog):
         self._hub_env(hub, monkeypatch)
-        scheduled = []
-        monkeypatch.setattr(fleet_client, "_schedule_orphan_release", lambda *a, **kw: scheduled.append(kw))
         # Preserve the two real retry waits with a smaller request budget.
         monkeypatch.setattr(fleet_client, "CLAIM_TIMEOUT_SECONDS", 0.25)
         monkeypatch.setattr(fleet_client, "_claim_renew_interval", lambda ttl: 0.05)
@@ -2553,9 +2551,15 @@ class TestExitOrphanReleaseHardening:
         monkeypatch.setattr(fleet_client, "_run_with_deadline", controlled_deadline)
 
         release_attempts = []
+        release_holders = []
+        scheduled = []
+        # Record the post-exit background cleanup instead of starting its daemon,
+        # which would outlive this test and later release with the real client.
+        monkeypatch.setattr(fleet_client, "_schedule_orphan_release", lambda *a, **kw: scheduled.append((a, kw)))
 
         def always_unavailable(target, **kwargs):
             release_attempts.append((target, reacquire_finished.is_set()))
+            release_holders.append(kwargs.get("holder"))
             return fleet_client.ClaimDecision(
                 granted=False, reason="hub-unavailable", detail="down", holder=kwargs.get("holder")
             )
@@ -2564,13 +2568,16 @@ class TestExitOrphanReleaseHardening:
         # always fail so exit cleanup exhausts its retry budget.
         with caplog.at_level("WARNING", logger="brigade.fleet"):
             with pytest.MonkeyPatch.context() as mp:
-                mp.setattr(
-                    fleet_client,
-                    "renew_claim",
-                    lambda t, **kw: fleet_client.ClaimDecision(
-                        granted=False, reason="missing", holder=kw.get("holder")
-                    ),
-                )
+                renew_reasons = iter(["missing"])
+
+                def renew_missing_once(target, **kw):
+                    # One "missing" starts the abandoned re-acquire. Later heartbeats
+                    # see an unavailable hub and send no further acquires, so no
+                    # rejected grant can add a release while exit cleanup runs.
+                    reason = next(renew_reasons, "hub-unavailable")
+                    return fleet_client.ClaimDecision(granted=False, reason=reason, holder=kw.get("holder"))
+
+                mp.setattr(fleet_client, "renew_claim", renew_missing_once)
                 mp.setattr(fleet_client, "release_claim", always_unavailable)
                 with fleet_client.repo_claim("repo-a", ttl_seconds=60):
                     conn = fleet_hub.init_db(hub[2])
@@ -2586,7 +2593,9 @@ class TestExitOrphanReleaseHardening:
         # Exit must attempt release, then exhaust both retries after the
         # abandoned acquire has committed, even though every reply is unavailable.
         assert release_attempts == [("repo-a", True)] * 3
-        assert len(scheduled) == 1, "exhausted inline cleanup must retain background cleanup"
+        # The final answer stayed hub-unavailable, so exit keeps cleanup alive for
+        # the same holder in the background (#1743).
+        assert [(a, kw["holder"]) for a, kw in scheduled] == [(("repo-a",), release_holders[-1])]
         exhausted = [r for r in caplog.records if "could not confirm" in r.message]
         assert len(exhausted) == 1, "exit cleanup exhaustion was not logged exactly once"
         # The exhaustion WARNING must name the residual exposure: the row
