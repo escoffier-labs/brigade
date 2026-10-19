@@ -1,16 +1,23 @@
 """Hub ownership map: policy charters joined to what each owner holds right now.
 
-Read-only. ``attribute`` is a pure matcher over plain dataclasses, so it is
-tested without a database. Nothing here enforces a charter: an item no charter
-matches lands in ``unassigned``, and an item two charters match is listed under
-both and reported in ``overlaps``.
+Read-only. ``load_view`` reads the current policy revision's ``owners`` section
+and four live sources the hub already keeps (repo claims, Grok Bot jobs,
+interactive sessions, policy delegations). ``attribute`` is a pure matcher over
+plain dataclasses, so it is tested without a database. Nothing here enforces a
+charter: an item no charter matches lands in ``unassigned``, and an item two
+charters match is listed under both and reported in ``overlaps``.
 """
 
 from __future__ import annotations
 
-from collections.abc import Mapping, Sequence
+import sqlite3
+from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
+
+from . import fleet_hub_claims, fleet_hub_grokbot, fleet_hub_policy, fleet_hub_sessions, fleet_policy_owners
+from .fleet_hub import FleetHubError
 
 SCHEMA = "brigade.fleet_owners.v1"
 SOURCE_LIMIT = 500
@@ -47,6 +54,18 @@ class Holding:
 class Overlap:
     item: Holding
     owners: tuple[str, ...]
+
+
+@dataclass(frozen=True)
+class OwnersView:
+    policy_version: int | None
+    policy_error: str | None
+    charters: Mapping[str, Mapping[str, Any]]
+    by_owner: Mapping[str, Sequence[Holding]]
+    unassigned: Sequence[Holding]
+    overlaps: Sequence[Overlap]
+    enrolled_principals: frozenset[str]
+    unknown_sources: tuple[str, ...]
 
 
 def _matches(match: Mapping[str, Any], item: Holding) -> bool:
@@ -87,3 +106,198 @@ def attribute(
         if len(owners) > 1:
             overlaps.append(Overlap(item=item, owners=tuple(owners)))
     return by_owner, unassigned, overlaps
+
+
+def charter_only(match: Mapping[str, Any]) -> bool:
+    """True when a charter carries no selector of any kind (principals included)."""
+    return not any(match.get(key) for key in fleet_policy_owners.MATCH_KEYS)
+
+
+def _label(labels: Mapping[str, str], node_id: str | None) -> str:
+    if not node_id:
+        return ""
+    return labels.get(node_id) or node_id[:8]
+
+
+def _node_labels(conn: sqlite3.Connection) -> dict[str, str]:
+    """Cosmetic only: a failed read falls back to short node ids."""
+    try:
+        rows = conn.execute("SELECT node_id, label FROM nodes WHERE label IS NOT NULL AND label != ''").fetchall()
+    except sqlite3.Error:
+        return {}
+    return {str(node_id): str(label) for node_id, label in rows}
+
+
+def _claims(conn: sqlite3.Connection, labels: Mapping[str, str]) -> list[Holding]:
+    return [
+        Holding(
+            kind="claim",
+            ref=claim["target"],
+            repo=claim["target"],
+            node_label=_label(labels, claim["owner_node"]),
+            detail=" ".join(part for part in (claim.get("role"), claim.get("harness")) if part) or "claim",
+            since=claim["acquired_at"],
+            nodes=(claim["owner_node"],),
+            harness=claim.get("harness") or "",
+            conductor=claim.get("owner_conductor") or "",
+        )
+        for claim in fleet_hub_claims.list_claims(conn)
+        if not claim["expired"]
+    ][:SOURCE_LIMIT]
+
+
+def _grokbot_jobs(conn: sqlite3.Connection, labels: Mapping[str, str]) -> list[Holding]:
+    states = sorted(fleet_hub_grokbot.WORK_STATES)
+    rows = conn.execute(
+        "SELECT job_id, repository, role, state, claimant_node, queued_at, claimed_at FROM grokbot_jobs "
+        f"WHERE state IN ({', '.join('?' for _ in states)}) ORDER BY updated_at DESC, job_id LIMIT ?",
+        (*states, SOURCE_LIMIT),
+    ).fetchall()
+    return [
+        Holding(
+            kind="grokbot-job",
+            ref=job_id,
+            repo=repository,
+            node_label=_label(labels, claimant),
+            detail=f"{role} {state}",
+            since=claimed_at or queued_at,
+            nodes=(claimant,) if claimant else (),
+        )
+        for job_id, repository, role, state, claimant, queued_at, claimed_at in rows
+    ]
+
+
+def _sessions(conn: sqlite3.Connection, labels: Mapping[str, str], now_epoch: float) -> list[Holding]:
+    return [
+        Holding(
+            kind="session",
+            ref=str(session["session_id"]),
+            repo=str(session.get("repo_identity") or session.get("repo_label") or ""),
+            node_label=_label(labels, str(session["node_id"])),
+            detail=" ".join(part for part in (str(session["harness"]), str(session.get("branch") or "")) if part),
+            since=str(session["started_at"]),
+            nodes=(str(session["node_id"]),),
+            session_harness=str(session["harness"]),
+        )
+        for session in fleet_hub_sessions.list_sessions(conn, now_epoch=now_epoch)
+    ][:SOURCE_LIMIT]
+
+
+def _parse_instant(raw: str) -> datetime | None:
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+
+
+def _delegations(conn: sqlite3.Connection, labels: Mapping[str, str], now_epoch: float) -> list[Holding]:
+    """Delegations whose reservation is unreleased and whose expiry is in the future."""
+    rows = conn.execute(
+        "SELECT d.delegation_id, d.origin_node, d.target_node, d.adapter, d.repo_identity, d.seat, d.workload, "
+        "d.created_at, d.expires_at FROM fleet_policy_delegations d "
+        "JOIN fleet_reservations r ON r.reservation_id = d.reservation_id "
+        "WHERE r.state != 'released' ORDER BY d.created_at DESC, d.delegation_id LIMIT ?",
+        (SOURCE_LIMIT,),
+    ).fetchall()
+    holdings = []
+    for delegation_id, origin, target, adapter, repo, seat, workload, created_at, expires_at in rows:
+        expiry = _parse_instant(str(expires_at))
+        if expiry is None or expiry.timestamp() <= now_epoch:
+            continue
+        holdings.append(
+            Holding(
+                kind="delegation",
+                ref=delegation_id,
+                repo=repo,
+                node_label=_label(labels, target),
+                detail=f"{seat} {workload}".strip(),
+                since=created_at,
+                nodes=(origin, target),
+                adapter=adapter,
+            )
+        )
+    return holdings
+
+
+def _enrolled_principals(conn: sqlite3.Connection) -> frozenset[str]:
+    rows = conn.execute("SELECT name FROM fleet_message_principals WHERE revoked_at IS NULL").fetchall()
+    return frozenset(str(name) for (name,) in rows)
+
+
+def load_view(conn: sqlite3.Connection, *, now_epoch: float) -> OwnersView:
+    """Read charters and live holdings. A failing source degrades, it never raises."""
+    policy_version: int | None = None
+    policy_error: str | None = None
+    charters: Mapping[str, Mapping[str, Any]] = {}
+    try:
+        current = fleet_hub_policy.current_policy(conn)
+        policy_version = int(current["revision"])
+        charters = current["document"].get("owners") or {}
+    except (FleetHubError, sqlite3.Error) as exc:
+        policy_error = f"policy read failed: {type(exc).__name__}"
+    labels = _node_labels(conn)
+    unknown: list[str] = []
+    items: list[Holding] = []
+    loaders: tuple[tuple[str, Callable[[], list[Holding]]], ...] = (
+        ("claims", lambda: _claims(conn, labels)),
+        ("grokbot-jobs", lambda: _grokbot_jobs(conn, labels)),
+        ("sessions", lambda: _sessions(conn, labels, now_epoch)),
+        ("delegations", lambda: _delegations(conn, labels, now_epoch)),
+    )
+    for name, loader in loaders:
+        try:
+            items.extend(loader())
+        except (FleetHubError, sqlite3.Error):
+            unknown.append(name)
+    enrolled: frozenset[str] = frozenset()
+    try:
+        enrolled = _enrolled_principals(conn)
+    except sqlite3.Error:
+        unknown.append("principals")
+    by_owner, unassigned, overlaps = attribute(charters, items)
+    return OwnersView(
+        policy_version=policy_version,
+        policy_error=policy_error,
+        charters=charters,
+        by_owner=by_owner,
+        unassigned=unassigned,
+        overlaps=overlaps,
+        enrolled_principals=enrolled,
+        unknown_sources=tuple(unknown),
+    )
+
+
+def view_payload(view: OwnersView) -> dict[str, Any]:
+    """The ``brigade.fleet_owners.v1`` JSON body served by ``GET /owners``."""
+    owners = []
+    for name in sorted(view.charters):
+        charter = view.charters[name]
+        match = charter.get("match") or {}
+        owners.append(
+            {
+                "name": name,
+                "label": charter.get("label"),
+                "summary": charter.get("summary"),
+                "owns": list(charter.get("owns") or []),
+                "never": list(charter.get("never") or []),
+                "intake": list(charter.get("intake") or []),
+                "contact": charter.get("contact"),
+                "match": dict(match),
+                "charter_only": charter_only(match),
+                "principals": [
+                    {"name": principal, "enrolled": principal in view.enrolled_principals}
+                    for principal in match.get("principals") or []
+                ],
+                "holdings": [item.public() for item in view.by_owner.get(name, ())],
+            }
+        )
+    return {
+        "schema": SCHEMA,
+        "policy_version": view.policy_version,
+        "policy_error": view.policy_error,
+        "owners": owners,
+        "unassigned": [item.public() for item in view.unassigned],
+        "overlaps": [{**overlap.item.public(), "owners": list(overlap.owners)} for overlap in view.overlaps],
+        "unknown_sources": list(view.unknown_sources),
+    }
