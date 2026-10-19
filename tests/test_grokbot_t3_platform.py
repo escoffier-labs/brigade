@@ -78,3 +78,17 @@ def test_windows_public_cli_explains_platform(tmp_path, monkeypatch, capsys, com
     output = capsys.readouterr()
     assert "unsupported on Windows" in output.out + output.err
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("apply", [False, True])
+def test_windows_install_service_keeps_the_platform_error(tmp_path, monkeypatch, apply):
+    from brigade import grokbot_packs
+
+    monkeypatch.setattr(rc, "sys", SimpleNamespace(platform="win32"))
+    out_dir = tmp_path / "units"
+    with pytest.raises(grokbot_packs.PackError, match="unsupported on Windows"):
+        if apply:
+            grokbot_packs.apply_install_service(tmp_path, grokbot_packs.T3_DISPATCH_PACK_ID, out_dir=out_dir)
+        else:
+            grokbot_packs.render_install_service(tmp_path, grokbot_packs.T3_DISPATCH_PACK_ID)
+    assert not out_dir.exists()
