@@ -391,3 +391,168 @@ def test_download_bound_applies_before_use_including_cached_bytes(tmp_path, monk
     monkeypatch.setattr(prepare, "MAX_DOWNLOAD", 8)
     with pytest.raises(ValueError, match="bound"):
         prepare.download(source.as_uri(), destination, hashlib.sha256(source.read_bytes()).hexdigest())
+
+
+@pytest.mark.parametrize(
+    "selection,expected_version,error",
+    [
+        ("path-first", "91.92.93", None),
+        ("path-first-unpaired", "81.82.83", None),
+        ("explicit", "71.72.73", None),
+        ("explicit-missing", None, "npm_execpath"),
+        ("explicit-unpaired", None, "npm_execpath"),
+        ("explicit-failed-version", None, "npm CLI version probe failed"),
+        ("explicit-invalid-version", None, "npm CLI version probe failed"),
+    ],
+)
+def test_acceptance_uses_first_usable_npm_client_before_artifact_validation(
+    tmp_path, selection, expected_version, error
+):
+    import json
+    import os
+    import shutil
+
+    node = shutil.which("node")
+    assert node, "acceptance regression requires Node"
+    node = subprocess.check_output([node, "-p", "process.execPath"], text=True).strip()
+    log = tmp_path / "clients.jsonl"
+
+    def client(name, version):
+        directory = tmp_path / name
+        cli = directory / "node_modules/npm/bin/npm-cli.js"
+        cli.parent.mkdir(parents=True)
+        script = (
+            f"#!{node}\n"
+            "const fs=require('node:fs');fs.appendFileSync("
+            + json.dumps(str(log))
+            + ",JSON.stringify({client:"
+            + json.dumps(name)
+            + ",args:process.argv.slice(2)})+'\\n');"
+            + "if(process.argv[2]!=='--version') process.exit(79);"
+            + "console.log("
+            + json.dumps(version)
+            + ");"
+        )
+        cli.write_text(script)
+        cli.chmod(0o755)
+        (cli.parent / "npx-cli.js").write_text(script)
+        command = directory / ("npm.cmd" if os.name == "nt" else "npm")
+        if os.name == "nt":
+            command.write_text('@echo off\r\n"%~dp0node_modules\\npm\\bin\\npm-cli.js" %*\r\n')
+        else:
+            command.symlink_to(cli)
+        return directory, cli
+
+    first, first_cli = client("first", "91.92.93")
+    last, last_cli = client("last", "81.82.83")
+    override, override_cli = client("override", "71.72.73")
+    utilities = tmp_path / "utilities"
+    utilities.mkdir()
+    if os.name == "nt":
+        git = shutil.which("git")
+        assert git, "acceptance setup requires Git"
+        utility_paths = [str(Path(os.environ["SystemRoot"]) / "System32"), str(Path(git).parent)]
+    else:
+        for utility in (
+            "sh",
+            "dirname",
+            "realpath",
+            "git",
+            "uname",
+            *(("sysctl",) if sys.platform == "darwin" else ()),
+        ):
+            executable = shutil.which(utility)
+            assert executable, "acceptance setup requires " + utility
+            (utilities / utility).symlink_to(Path(executable).resolve())
+        utility_paths = [str(utilities)]
+    env = {key: value for key, value in os.environ.items() if key.lower() != "npm_execpath"}
+    env["PATH"] = os.pathsep.join([str(first), *utility_paths, str(last)])
+    if selection == "path-first-unpaired":
+        (first_cli.parent / "npx-cli.js").unlink()
+    elif selection.startswith("explicit"):
+        env["npm_execpath"] = str(override_cli)
+        if selection == "explicit-missing":
+            env["npm_execpath"] = str(override / "missing.js")
+        elif selection == "explicit-unpaired":
+            (override_cli.parent / "npx-cli.js").unlink()
+        elif selection == "explicit-failed-version":
+            override_cli.write_text("process.exit(9);")
+        elif selection == "explicit-invalid-version":
+            override_cli.write_text("console.log('untrusted-version-output');")
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "artifacts.json").write_text("{}")
+    out = tmp_path / "receipt"
+    result = subprocess.run(
+        [node, str(SOURCE.parent / "acceptance.cjs"), "--artifacts", str(artifacts), "--out", str(out)],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    receipt = json.loads((out / "acceptance.json").read_text())
+    try:
+        assert result.returncode == 1 and receipt["status"] == "failed"
+        assert receipt["npmVersion"] == expected_version
+        if error:
+            assert error in receipt["error"]
+        else:
+            assert "packed artifacts must identify final source" in receipt["error"]
+            expected_cli = (
+                override_cli
+                if selection == "explicit"
+                else last_cli
+                if selection == "path-first-unpaired"
+                else first_cli
+            )
+            assert Path(receipt["npxCli"]) == expected_cli.parent / "npx-cli.js"
+        assert "untrusted-version-output" not in receipt["error"]
+        assert not receipt["checks"], "stop before npx, npm install, runtime bootstrap or signal fixtures"
+        if log.exists():
+            calls = [json.loads(line) for line in log.read_text().splitlines()]
+            assert all(call["args"] == ["--version"] for call in calls)
+    finally:
+        shutil.rmtree(receipt["root"])
+
+
+@pytest.mark.parametrize("workflow,guard_count", [("npm-feasibility.yml", 1), ("npm-publish.yml", 2)])
+@pytest.mark.parametrize("wrong_version", [None, "nodeVersion", "npmVersion"])
+def test_native_acceptance_receipt_guards_require_pinned_clients(tmp_path, workflow, guard_count, wrong_version):
+    import json
+    import os
+    import re
+    import textwrap
+
+    source = (SOURCE.parents[2] / ".github/workflows" / workflow).read_text()
+    blocks = re.findall(r"python - <<'PYCODE'\n(.*?)^\s*PYCODE$", source, flags=re.MULTILINE | re.DOTALL)
+    guards = [textwrap.dedent(block) for block in blocks if "result['acceptanceMode']" in block]
+    assert len(guards) == guard_count, "packed and registry receipt guards must both be exercised"
+    receipt = {
+        "status": "passed",
+        "cancellationGate": "passed",
+        "platform": "win32-x64",
+        "expectedPlatform": "win32-x64",
+        "acceptanceMode": "native-default",
+        "nodeVersion": "v24.22.0",
+        "npmVersion": "11.19.1",
+        "distributionMode": "registry",
+        "checks": [{"name": "npm-audit-signatures"}],
+        "pathExcludesPythonAndUv": True,
+        "pathEntries": [],
+    }
+    if wrong_version:
+        receipt[wrong_version] = "v22.0.0" if wrong_version == "nodeVersion" else "10.9.9"
+    output = tmp_path / "npm-receipts"
+    output.mkdir()
+    (output / "acceptance.json").write_text(json.dumps(receipt))
+    for guard in guards:
+        result = subprocess.run(
+            [sys.executable, "-c", guard],
+            env={**os.environ, "RUNNER_TEMP": str(tmp_path)},
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert (result.returncode == 0) == (wrong_version is None), (
+            "receipt guard must reject a different client version"
+        )

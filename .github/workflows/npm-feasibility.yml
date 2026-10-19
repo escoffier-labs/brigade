@@ -148,6 +148,8 @@ jobs:
           assert result['status'] == result['cancellationGate'] == 'passed'
           assert result['platform'] == result['expectedPlatform']
           assert result['acceptanceMode'] == 'native-default'
+          assert result['nodeVersion'] == 'v24.22.0'
+          assert result['npmVersion'] == '11.19.1'
           if result['platform'] != 'win32-x64':
               assert len(result['cancellationModes']) == 6
               assert {m['signal'] for m in result['cancellationModes']} == {'SIGINT', 'SIGTERM', 'SIGHUP'}

@@ -60,25 +60,42 @@ function usage(dir) {
 }
 function size(dir) { return usage(dir).uniqueFileBytes; }
 function resolveNpm() {
-  if(process.env.npm_execpath && fs.existsSync(process.env.npm_execpath)) return process.env.npm_execpath;
-  const candidates=[path.join(path.dirname(process.execPath),'node_modules','npm','bin','npm-cli.js'),path.join(path.dirname(process.execPath),'..','lib','node_modules','npm','bin','npm-cli.js')];
-  for(const dir of (process.env.PATH || '').split(path.delimiter)) {
-    const npm=path.join(dir,process.platform==='win32'?'npm.cmd':'npm');
-    if(fs.existsSync(npm)) {
-      const real=fs.realpathSync(npm);
-      if(real.endsWith('.js')) candidates.unshift(real);
-      candidates.push(path.join(dir,'node_modules','npm','bin','npm-cli.js'));
-    }
+  function installed(cli) {
+    try {
+      const real=fs.realpathSync(cli);
+      if(fs.statSync(real).isFile() && fs.statSync(path.join(path.dirname(real),'npx-cli.js')).isFile()) return real;
+    } catch {}
+    return null;
   }
-  const found=candidates.find(p=>fs.existsSync(p));
-  if(!found) throw new Error('Cannot locate npm CLI JavaScript. Set npm_execpath to the installed npm-cli.js.');
-  return found;
+  if(process.env.npm_execpath) {
+    const explicit=installed(process.env.npm_execpath);
+    if(!explicit) throw new Error('npm_execpath must select an npm CLI file with a sibling npx-cli.js.');
+    return explicit;
+  }
+  for(const dir of (process.env.PATH || '').split(path.delimiter)) {
+    const command=path.join(dir,process.platform==='win32'?'npm.cmd':'npm');
+    try {
+      if(!fs.statSync(command).isFile()) continue;
+      if(process.platform!=='win32') fs.accessSync(command,fs.constants.X_OK);
+      const real=fs.realpathSync(command);
+      // POSIX symlinks identify the CLI directly; npm.cmd uses the adjacent tree.
+      const candidates=[...(real.endsWith('.js')?[real]:[]),path.join(path.dirname(real),'node_modules','npm','bin','npm-cli.js'),path.join(dir,'node_modules','npm','bin','npm-cli.js')];
+      for(const cli of candidates) {const found=installed(cli);if(found) return found;}
+    } catch {}
+  }
+  for(const cli of [path.join(path.dirname(process.execPath),'node_modules','npm','bin','npm-cli.js'),path.join(path.dirname(process.execPath),'..','lib','node_modules','npm','bin','npm-cli.js')]) {
+    const found=installed(cli);if(found) return found;
+  }
+  throw new Error('Cannot locate npm CLI JavaScript. Set npm_execpath to the installed npm-cli.js.');
 }
 let npmCli,npxCli,npxEnv,npxPackages,home,prefix,bin,env,gitTemplate,gitDir;
 function setup() {
 npmCli=resolveNpm();
 npxCli=path.join(path.dirname(npmCli),'npx-cli.js');assert.ok(fs.existsSync(npxCli));receipt.npxCli=npxCli;
-receipt.npmVersion=spawnSync(process.execPath,[npmCli,'--version'],{encoding:'utf8'}).stdout.trim();
+const versionProbe=spawnSync(process.execPath,[npmCli,'--version'],{encoding:'utf8',timeout:10000,maxBuffer:64000});
+const npmVersion=(versionProbe.stdout || '').trim();
+if(versionProbe.status!==0 || !/^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/.test(npmVersion)) throw new Error('Selected npm CLI version probe failed.');
+receipt.npmVersion=npmVersion;
 const expectedIndex=args.indexOf('--expected-platform');
 receipt.expectedPlatform=expectedIndex>=0?args[expectedIndex+1]:receipt.platform;
 assert.equal(receipt.platform,receipt.expectedPlatform,'native matrix platform must match');
