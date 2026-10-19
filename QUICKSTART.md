@@ -4,7 +4,7 @@ Five minutes from install to a working agent kitchen.
 
 ## 1. Install
 
-Brigade supports Linux, macOS, and Windows. Pick one route: npm if Node.js and npm are already installed, or Python 3.10 or newer with pipx or uv.
+Brigade supports Linux, macOS, and Windows. Pick one route: npm on glibc Linux x64/ARM64, macOS x64/ARM64, or Windows x64 if Node.js 22+ and npm are already installed, or Python 3.10 or newer with pipx or uv. Other targets, including musl Linux (such as Alpine) and Windows ARM64, use the Python route.
 
 ### npm
 

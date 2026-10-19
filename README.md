@@ -74,7 +74,7 @@ brigade mcp sync --write                    # merge into each harness's native c
 
 ## Install
 
-If you have Node.js 22 or newer and npm, install the [npm package](https://www.npmjs.com/package/@escoffier-labs/brigade). This route does not need Python or pipx first:
+If Node.js 22 or newer and npm are installed on glibc Linux x64/ARM64, macOS x64/ARM64, or Windows x64, install the [npm package](https://www.npmjs.com/package/@escoffier-labs/brigade). This route does not need Python or pipx first:
 
 ```bash
 npm install --global @escoffier-labs/brigade@0.29.0
