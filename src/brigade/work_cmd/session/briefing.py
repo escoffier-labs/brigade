@@ -48,7 +48,7 @@ def _workflow_rule_health(target: Path) -> dict[str, Any]:
         "detail": (
             "repo-shareable workflow rules installed"
             if not missing
-            else f"missing {', '.join(missing)}; run `brigade init --target {target} --depth repo` to install the missing templates"
+            else f"missing {', '.join(missing)}; run `brigade init --target {target} --depth repo --full` to install the missing templates"
         ),
         "missing": missing,
     }
