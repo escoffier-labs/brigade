@@ -1445,6 +1445,7 @@ def test_ci_migration_preserves_existing_job_names_and_hosted_routing():
     assert set(re.findall(r"^  ([a-z0-9-]+):$", jobs, re.MULTILINE)) == set(EXISTING_CI_JOBS) | {
         "trusted-runner-canary",
         "ci-gate",
+        "windows-affected-tests",
     }
     for job, name in EXISTING_CI_JOBS.items():
         section = _workflow_job_section(text, job)
@@ -1553,3 +1554,147 @@ def test_ci_canary_smoke_executes_from_outside_checkout(tmp_path):
     )
     assert result.returncode == 0, result.stdout + result.stderr
     assert "0 failed" in result.stdout
+
+
+def test_windows_affected_job_selects_before_install_and_preserves_driver_policy():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    job = _workflow_job_section(text, "windows-affected-tests")
+    assert "name: windows-affected-tests" in job
+    assert "github.event_name == 'pull_request' || github.event_name == 'merge_group'" in job
+    assert "runs-on: windows-latest" in job
+    assert "timeout-minutes: 30" in job
+    assert "fetch-depth: 0" in job
+    assert "persist-credentials: false" in job
+    assert "github.event.pull_request.base.sha || github.event.merge_group.base_sha" in job
+    assert "git fetch --no-tags --depth=1 origin $env:BASE_SHA" in job
+    assert job.index("scripts/windows_affected_tests.py") < job.index("actions/setup-python")
+    assert job.count("if: ${{ steps.selection.outputs.count != '0' }}") == 3
+    assert "Skip empty selection" in job
+    for option in (
+        "--files-from",
+        "--record",
+        "--base-ref",
+        "--job-started-at",
+        "--job-limit 1800",
+        "--startup-reserve 120",
+        "--finalize-reserve 300",
+        "--job-timeout 1380",
+        "--serial test_runs_serve.py",
+        "--serial test_aboyeur.py",
+    ):
+        assert option in job
+    assert "if: ${{ always() }}" in job
+    assert "actions/upload-artifact@v7" in job
+    assert "issues: write" not in text
+
+
+def test_windows_nightly_issue_write_permission_is_isolated():
+    text = (ROOT / ".github/workflows/windows-observe.yml").read_text()
+    observe = _workflow_job_section(text, "windows-pytest")
+    alert = _workflow_job_section(text, "nightly-alert")
+    assert "issues: write" not in observe
+    assert text.count("issues: write") == 1
+    assert "issues: write" in alert
+    assert "needs: windows-pytest" in alert
+    assert "always()" in alert
+    assert "steps.observe.outcome" in observe
+    assert "record.status === 'complete'" in observe
+    assert "['failed', 'timeout'].includes(row.status) && !allowed.has(row.name)" in observe
+    assert "windows-nightly" in alert
+    assert "github.rest.issues.createLabel" in alert
+    assert "github.paginate" in alert
+    assert "state: 'closed'" in alert
+
+
+@pytest.mark.parametrize(
+    "clean,existing,expected",
+    [(False, False, "create"), (False, True, "update"), (True, True, "close"), (True, False, "none")],
+)
+def test_windows_nightly_issue_lifecycle(tmp_path, clean, existing, expected):
+    if not __import__("shutil").which("node"):
+        pytest.skip("Node is required to exercise the github-script lifecycle")
+    text = (ROOT / ".github/workflows/windows-observe.yml").read_text()
+    alert = _workflow_job_section(text, "nightly-alert")
+    script = textwrap.dedent(alert.split("          script: |\n", 1)[1])
+    harness = """
+    const calls = [];
+    const context = {repo: {owner: 'example', repo: 'project'}, serverUrl: 'https://github.com', runId: 123, sha: 'abc'};
+    const github = {rest: {issues: {
+      getLabel: async () => { throw {status: 404}; },
+      createLabel: async data => calls.push(['label', data]),
+      listForRepo: () => {},
+      create: async data => calls.push(['create', data]),
+      update: async data => calls.push([data.state === 'closed' ? 'close' : 'update', data]),
+      createComment: async data => calls.push(['comment', data]),
+    }}, paginate: async () => EXISTING ? [{number: 9}] : []};
+    (async () => { SCRIPT })().then(() => console.log(JSON.stringify(calls))).catch(e => { console.error(e); process.exit(1); });
+    """.replace("EXISTING", json.dumps(existing)).replace("SCRIPT", script)
+    report = {
+        "clean": clean,
+        "summary": "windows pytest: files=1 regressions=" + str(int(not clean)),
+        "regressed": [] if clean else ["test_new.py"],
+    }
+    result = subprocess.run(
+        ["node", "-e", harness],
+        env={**os.environ, "REPORT": json.dumps(report)},
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    calls = json.loads(result.stdout)
+    assert calls[0][0] == "label"
+    actions = [call[0] for call in calls[1:]]
+    assert actions == ([] if expected == "none" else ["comment", "close"] if expected == "close" else [expected])
+    if expected != "none":
+        body = calls[1][1]["body"]
+        assert "https://github.com/example/project/actions/runs/123" in body
+        assert "Commit: abc" in body
+        assert report["summary"] in body
+        if not clean:
+            assert "test_new.py" in body
+
+
+@pytest.mark.parametrize(
+    "outcome,status,failed,expected_clean",
+    [
+        ("success", "complete", False, True),
+        ("failure", "complete", True, False),
+        ("failure", "incomplete", False, False),
+        ("skipped", "complete", False, False),
+    ],
+)
+def test_windows_nightly_report_uses_driver_policy(outcome, status, failed, expected_clean):
+    if not __import__("shutil").which("node"):
+        pytest.skip("Node is required for the nightly report contract")
+    text = (ROOT / ".github/workflows/windows-observe.yml").read_text()
+    step = _workflow_step_section(text, "windows-pytest", "Collect nightly report")
+    script = textwrap.dedent(step.split("          script: |\n", 1)[1])
+    record = {
+        "status": status,
+        "results": [
+            {"name": "test_known.py", "status": "failed"},
+            {"name": "test_new.py", "status": "timeout" if failed else "passed"},
+        ],
+    }
+    harness = (
+        """
+    const realRequire = require;
+    const record = RECORD;
+    const summary = 'windows pytest: files=2 regressions=COUNT';
+    const fakeRequire = name => name === 'fs' ? {readFileSync: file => {
+      if (file.endsWith('summary.json')) return JSON.stringify(record);
+      if (file.endsWith('driver.txt')) return 'output\\n' + summary + '\\n';
+      return JSON.stringify({known_failures: ['test_known.py'], known_timeouts: []});
+    }} : realRequire(name);
+    const core = {warning: () => {}, setOutput: (name, value) => console.log(value)};
+    new Function('require', 'core', 'process', SCRIPT)(fakeRequire, core, {env: {RUNNER_TEMP: 'temp', OBSERVE_OUTCOME: __OUTCOME_VALUE__}});
+    """.replace("RECORD", json.dumps(record))
+        .replace("COUNT", str(int(failed)))
+        .replace("SCRIPT", json.dumps(script))
+        .replace("__OUTCOME_VALUE__", json.dumps(outcome))
+    )
+    result = subprocess.run(["node", "-e", harness], capture_output=True, text=True, check=True)
+    report = json.loads(result.stdout)
+    assert report["clean"] is expected_clean
+    assert report["regressed"] == (["test_new.py"] if failed else [])
+    assert report["summary"].startswith("windows pytest: files=2 regressions=")

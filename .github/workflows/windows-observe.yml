@@ -16,6 +16,8 @@ jobs:
   windows-pytest:
     if: ${{ github.ref == 'refs/heads/main' }}
     runs-on: windows-latest
+    outputs:
+      report: ${{ steps.report.outputs.report }}
     timeout-minutes: 90
     defaults:
       run:
@@ -39,8 +41,14 @@ jobs:
           python -m pip install --upgrade pip || exit /b 1
           python -m pip install -e ".[dev]"
       - name: Observe full Windows suite
+        id: observe
         timeout-minutes: 85
-        run: python scripts/windows_pytest.py --record "%RUNNER_TEMP%\windows-pytest-results\summary.json" --job-started-at "%WINDOWS_PYTEST_JOB_STARTED_AT%" --job-limit 5400 --startup-reserve 120 --finalize-reserve 300 --job-timeout 5100 --serial test_runs_serve.py --serial test_aboyeur.py
+        run: |
+          mkdir "%RUNNER_TEMP%\windows-pytest-results"
+          python scripts/windows_pytest.py --record "%RUNNER_TEMP%\windows-pytest-results\summary.json" --job-started-at "%WINDOWS_PYTEST_JOB_STARTED_AT%" --job-limit 5400 --startup-reserve 120 --finalize-reserve 300 --job-timeout 5100 --serial test_runs_serve.py --serial test_aboyeur.py > "%RUNNER_TEMP%\windows-pytest-results\driver.txt" 2>&1
+          set "RESULT=%ERRORLEVEL%"
+          type "%RUNNER_TEMP%\windows-pytest-results\driver.txt"
+          exit /b %RESULT%
       - name: Upload per-file pytest results
         if: ${{ always() }}
         uses: actions/upload-artifact@v7
@@ -49,3 +57,68 @@ jobs:
           path: ${{ runner.temp }}/windows-pytest-results
           if-no-files-found: warn
           retention-days: 7
+      - name: Collect nightly report
+        id: report
+        if: ${{ always() }}
+        uses: actions/github-script@v8
+        env:
+          OBSERVE_OUTCOME: ${{ steps.observe.outcome }}
+        with:
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+            const root = path.join(process.env.RUNNER_TEMP, 'windows-pytest-results');
+            let summary = 'Windows driver summary unavailable (setup or driver failure).';
+            let regressed = [];
+            let clean = false;
+            try {
+              const record = JSON.parse(fs.readFileSync(path.join(root, 'summary.json'), 'utf8'));
+              const allowlist = JSON.parse(fs.readFileSync('tests/windows_pytest_allowlist.json', 'utf8'));
+              const allowed = new Set([...allowlist.known_failures, ...allowlist.known_timeouts]);
+              regressed = record.results.filter(row => ['failed', 'timeout'].includes(row.status) && !allowed.has(row.name)).map(row => row.name).sort();
+              const output = fs.readFileSync(path.join(root, 'driver.txt'), 'utf8');
+              summary = output.split(/\r?\n/).find(line => line.startsWith('windows pytest:')) || summary;
+              clean = process.env.OBSERVE_OUTCOME === 'success' && record.status === 'complete' && regressed.length === 0;
+            } catch (error) {
+              core.warning(String(error));
+            }
+            core.setOutput('report', JSON.stringify({summary, regressed, clean}));
+
+  nightly-alert:
+    needs: windows-pytest
+    if: ${{ always() && needs.windows-pytest.result != 'skipped' && needs.windows-pytest.result != 'cancelled' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      issues: write
+    steps:
+      - name: Update Windows nightly tracking issue
+        uses: actions/github-script@v8
+        env:
+          REPORT: ${{ needs.windows-pytest.outputs.report }}
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const label = 'windows-nightly';
+            try {
+              await github.rest.issues.getLabel({owner, repo, name: label});
+            } catch (error) {
+              if (error.status !== 404) throw error;
+              await github.rest.issues.createLabel({owner, repo, name: label, color: 'D93F0B', description: 'Open Windows nightly regression tracker'});
+            }
+            const issues = await github.paginate(github.rest.issues.listForRepo, {owner, repo, state: 'open', labels: label, per_page: 100});
+            const issue = issues.find(item => !item.pull_request);
+            const report = process.env.REPORT ? JSON.parse(process.env.REPORT) : {clean: false, summary: 'Windows driver report unavailable.', regressed: []};
+            const run = `${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}`;
+            const files = report.regressed.length ? report.regressed.map(name => `- ${name}`).join('\n') : 'No measured regressions. Inspect driver infrastructure failures if this run failed.';
+            const body = `Run: ${run}\nCommit: ${context.sha}\n\n${report.summary}\n\nRegressed files:\n${files}`;
+            if (report.clean) {
+              if (issue) {
+                await github.rest.issues.createComment({owner, repo, issue_number: issue.number, body: `Windows nightly is clean.\n\n${body}`});
+                await github.rest.issues.update({owner, repo, issue_number: issue.number, state: 'closed', state_reason: 'completed'});
+              }
+            } else if (issue) {
+              await github.rest.issues.update({owner, repo, issue_number: issue.number, body});
+            } else {
+              await github.rest.issues.create({owner, repo, title: 'Windows nightly regressions', labels: [label], body});
+            }
