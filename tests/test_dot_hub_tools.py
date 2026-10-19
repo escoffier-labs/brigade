@@ -1,5 +1,7 @@
 """Bridge behavior ported to isolated Dot tools."""
 
+from tests.dot_support import requires_local_state
+
 from dataclasses import replace
 import json
 import time
@@ -13,6 +15,7 @@ from tests.test_dot_adapter import BRIGADE, T3, OCTOPOOL, GH, FLEET_OK, NOW, EMA
 
 
 class OverviewChecks(Fixture):
+    @requires_local_state
     def test_overview_runs_two_bounded_commands_and_summarizes(self):
         runs = [
             {
@@ -48,6 +51,7 @@ class OverviewChecks(Fixture):
         self.assertEqual(self.runner.argvs()[0], [BRIGADE, "fleet", "status", "--json", "--all"])
         self.assertEqual(self.runner.calls[0]["max_output"], hub_module.MAX_STATUS_ALL_CAPTURE)
 
+    @requires_local_state
     def test_overview_partial_failure(self):
         def handler(argv, stdin):
             if argv[1:3] == ["fleet", "status"]:
@@ -114,11 +118,13 @@ def reply(value, code=0):
 
 
 class V4Schema(Fixture):
+    @requires_local_state
     def test_all_v4_tools_are_read_only_and_ungated(self):
         for name in V4_TOOLS:
             self.assertTrue(TOOL_SCHEMAS[name].read_only, name)
             self.assertFalse(TOOL_SCHEMAS[name].gated, name)
 
+    @requires_local_state
     def test_invalid_arguments_never_spawn(self):
         cases = [
             ("fleet_sessions", {"limit": 101}),
@@ -145,6 +151,7 @@ class V4Schema(Fixture):
                     self.adapter.call(EMAIL, name, arguments)
         self.assertEqual(self.runner.calls, [])
 
+    @requires_local_state
     def test_works_with_dispatch_disabled(self):
         adapter = self.make_adapter(False)
         self.runner.handler = reply({"consumer": "brigade-run", "roster_revision": 1, "seats": []})
@@ -152,6 +159,7 @@ class V4Schema(Fixture):
 
 
 class V4Behavior(Fixture):
+    @requires_local_state
     def test_sessions_argv_sorting_projection_and_bounds(self):
         sessions = [
             {
@@ -179,6 +187,7 @@ class V4Behavior(Fixture):
         self.assertEqual(self.runner.argvs(), [[BRIGADE, "fleet", "sessions", "--all", "--json"]])
         self.assertEqual(self.runner.calls[0]["max_output"], hub_module.MAX_FLEET_CAPTURE)
 
+    @requires_local_state
     def test_work_list_filters_in_process(self):
         items = [dict(WORK_ITEM, work_id=f"wl-{i:024x}", status="ready" if i < 3 else "captured") for i in range(10)]
         self.runner.handler = reply({"items": items, "next_cursor": "abc"})
@@ -190,6 +199,7 @@ class V4Behavior(Fixture):
         self.assertEqual(result["items"][0]["links"], ["example/brigade#1"])
         self.assertNotIn("description", result["items"][0])
 
+    @requires_local_state
     def test_work_show_and_hub_error_envelope(self):
         self.runner.handler = reply({"item": WORK_ITEM})
         result = self.call("fleet_work_show", work_id=WORK_ITEM["work_id"])
@@ -200,6 +210,7 @@ class V4Behavior(Fixture):
         self.assertEqual(result["error"], "hub_error")
         self.assertEqual(result["code"], "not-found")
 
+    @requires_local_state
     def test_work_next_is_dry_run_argv(self):
         considered = [{"bucket": "not-ready", "work_id": f"wl-{i:06x}"} for i in range(30)]
         self.runner.handler = reply(
@@ -224,6 +235,7 @@ class V4Behavior(Fixture):
             [[BRIGADE, "fleet", "work", "next", "--consumer", "t3-fleet", "--workload", "review", "--json"]],
         )
 
+    @requires_local_state
     def test_work_burn_pages_with_cursor(self):
         self.runner.handler = reply({"exclusions": {"not-ready": 4}, "items": [WORK_ITEM], "next_cursor": "eyJr"})
         result = self.call("fleet_work_burn", cursor="eyJraW5k", limit=5)
@@ -233,6 +245,7 @@ class V4Behavior(Fixture):
         self.assertEqual(result["next_cursor"], "eyJr")
         self.assertEqual(result["exclusions"], {"not-ready": 4})
 
+    @requires_local_state
     def test_models_uses_list_subcommand_only(self):
         self.runner.handler = reply(
             {
@@ -248,6 +261,7 @@ class V4Behavior(Fixture):
         self.assertEqual(result["seats"][0]["model"], "opus")
         self.assertNotIn("secret_extra", result["seats"][0])
 
+    @requires_local_state
     def test_cloud_sorts_and_limits_leases(self):
         leases = [
             {"lease_id": f"l{i}", "state": "pending", "admitted_at": f"2026-10-0{i + 1}T00:00:00Z"} for i in range(5)
@@ -258,6 +272,7 @@ class V4Behavior(Fixture):
         self.assertEqual([lease["lease_id"] for lease in result["leases"]], ["l4", "l3"])
         self.assertEqual(result["lease_count"], 5)
 
+    @requires_local_state
     def test_hub_policy_reads_show_and_status_only(self):
         def handler(argv, stdin):
             if argv[3] == "show":
@@ -273,6 +288,7 @@ class V4Behavior(Fixture):
         self.assertEqual(result["policy"]["version"], 7)
         self.assertEqual(result["status"], {"error": "brigade_unavailable"})
 
+    @requires_local_state
     def test_failures_map_to_fixed_codes(self):
         for result, code in (
             (CommandResult(0, b"", timed_out=True), "brigade_timeout"),
@@ -282,11 +298,13 @@ class V4Behavior(Fixture):
             self.runner.handler = lambda argv, stdin, result=result: result
             self.assertEqual(self.call("fleet_cloud"), {"error": code})
 
+    @requires_local_state
     def test_credentials_are_redacted(self):
         self.runner.handler = reply({"item": dict(WORK_ITEM, description="token=abcdefghijklmnopqrstuv")})
         result = self.call("fleet_work_show", work_id=WORK_ITEM["work_id"])
         self.assertNotIn("abcdefghijklmnopqrstuv", json.dumps(result))
 
+    @requires_local_state
     def test_no_v4_call_uses_a_write_verb(self):
         self.runner.handler = reply({})
         for name in V4_TOOLS:
@@ -297,6 +315,7 @@ class V4Behavior(Fixture):
             self.assertEqual(argv[-1], "--json")
             self.assertFalse(WRITE_VERBS & set(argv[2:4]), argv)
 
+    @requires_local_state
     def test_capabilities_point_dot_at_fleet_awareness(self):
         capabilities = self.call("dot_t3_capabilities")
         self.assertEqual(capabilities["bridge_version"], "6")  # v5 bumped it
@@ -457,6 +476,7 @@ class V5Digest(Fixture):
     def digest(self):
         return self.adapter.call(EMAIL, "fleet_digest", {})
 
+    @requires_local_state
     def test_happy_path_is_compact_and_uses_octopool(self):
         self.runner.handler = Hub()
         for index in range(7):
@@ -528,6 +548,7 @@ class V5Digest(Fixture):
         )
         self.assertTrue(all(call["timeout"] == hub_module.DIGEST_BRIGADE_TIMEOUT for call in brigade_calls))
 
+    @requires_local_state
     def test_octopool_env_sets_no_fallback(self):
         seen = {}
 
@@ -542,6 +563,7 @@ class V5Digest(Fixture):
         self.assertEqual(seen["env"]["OCTOPOOL_NO_FALLBACK"], "1")
         self.assertEqual(seen["env"]["PATH"], child_path(self.runtime.paths.bin))
 
+    @requires_local_state
     def test_whoami_failure_uses_plain_gh_and_is_cached(self):
         self.runner.handler = Hub(whoami=CommandResult(1, b""))
         first, second = self.digest(), self.digest()
@@ -550,11 +572,13 @@ class V5Digest(Fixture):
         self.assertEqual(sum(call["argv"] == [OCTOPOOL, "whoami"] for call in self.runner.calls), 1)
         self.assertFalse(any(call["argv"][:2] == [OCTOPOOL, "gh"] for call in self.runner.calls))
 
+    @requires_local_state
     def test_octopool_read_failure_falls_back_to_gh(self):
         self.runner.handler = Hub(**{"octopool-pr": CommandResult(3, b"refused")})
         prs = self.digest()["brigade_prs"]
         self.assertEqual((prs["via"], prs["octopool_error"], prs["count"]), ("gh", "gh_unavailable", 4))
 
+    @requires_local_state
     def test_failing_sections_do_not_fail_the_call(self):
         self.runner.handler = Hub(
             status=CommandResult(None, b"", timed_out=True),
@@ -572,6 +596,7 @@ class V5Digest(Fixture):
         self.assertEqual(digest["inbox"]["unacked"], 0)
         self.assertEqual(digest["section_errors"], ["brigade_prs", "fleet_work_next"])
 
+    @requires_local_state
     def test_exceptions_and_deadline_are_per_section(self):
         def boom(argv, stdin):
             raise RuntimeError("unexpected")
@@ -591,6 +616,7 @@ class V5Digest(Fixture):
         self.assertEqual(digest["inbox"]["unacked"], 0)
         time.sleep(1.2)  # let the slow fake finish before tearDown removes the state dir
 
+    @requires_local_state
     def test_state_failure_is_reported_in_section(self):
         self.runner.handler = Hub()
         with patch.object(BridgeState, "subscription_count", side_effect=DotError("state_unavailable")):
@@ -598,6 +624,7 @@ class V5Digest(Fixture):
         self.assertEqual(digest["subscriptions"], {"error": "state_unavailable"})
         self.assertIn("subscriptions", digest["section_errors"])
 
+    @requires_local_state
     def test_works_with_dispatch_disabled_and_is_bounded(self):
         adapter = self.make_adapter(False)
         self.runner.handler = Hub()
@@ -607,6 +634,7 @@ class V5Digest(Fixture):
 
 
 class DigestRoutes(Fixture):
+    @requires_local_state
     def test_optional_octopool_skips_probe(self):
         runtime = replace(
             self.runtime, paths=replace(self.runtime.paths, bin=replace(self.runtime.paths.bin, octopool=None))
@@ -616,6 +644,7 @@ class DigestRoutes(Fixture):
         self.assertEqual(self.call("fleet_digest")["brigade_prs"]["via"], "gh")
         self.assertFalse(any(call["argv"][0] == OCTOPOOL for call in self.runner.calls))
 
+    @requires_local_state
     def test_route_cache_expires_after_ten_minutes(self):
         self.runner.handler = Hub()
         with patch.object(hub_module.time, "monotonic", return_value=1000):
@@ -626,6 +655,7 @@ class DigestRoutes(Fixture):
             self.adapter.hub._github_cli()
         self.assertEqual(self.runner.argvs(), [[OCTOPOOL, "whoami"], [OCTOPOOL, "whoami"]])
 
+    @requires_local_state
     def test_digest_rejects_arguments(self):
         with self.assertRaisesRegex(DotError, "invalid_request"):
             self.call("fleet_digest", repo="other")

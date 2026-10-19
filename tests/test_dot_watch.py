@@ -1,5 +1,7 @@
 """Watch deduplication, read-only state and operator entry point regressions."""
 
+from tests.dot_support import requires_local_state
+
 import json
 from datetime import timedelta
 from unittest.mock import patch
@@ -35,6 +37,7 @@ def run(configured, now, **kw):
         return w.run_watch_once(target, now=now, **kw)
 
 
+@requires_local_state
 def test_watch_fresh_stale_dedupe_and_realert(configured):
     _, runtime, _ = configured
     with BridgeState(runtime.paths.state_dir) as state:
@@ -52,6 +55,7 @@ def test_watch_fresh_stale_dedupe_and_realert(configured):
     assert path.stat().st_mode & 0o777 == 0o600
 
 
+@requires_local_state
 def test_watch_failed_send_retries_and_dry_run(configured):
     _, runtime, _ = configured
     with BridgeState(runtime.paths.state_dir) as state:
@@ -70,6 +74,7 @@ def test_watch_failed_send_retries_and_dry_run(configured):
         assert path.exists()
 
 
+@requires_local_state
 def test_watch_idle_credential_and_unanswered_wake(configured):
     target, runtime, _ = configured
     with BridgeState(runtime.paths.state_dir) as state:
@@ -86,6 +91,7 @@ def test_watch_idle_credential_and_unanswered_wake(configured):
         assert w.run_watch_once(target, now=NOW + timedelta(hours=4, minutes=1))["alerts"] == []
 
 
+@requires_local_state
 def test_watch_never_writes_database_and_skips_missing_notifier(configured):
     target, runtime, path = configured
     runtime_path = path.parent.parent.parent.parent / "unused"
@@ -108,6 +114,7 @@ def test_watch_never_writes_database_and_skips_missing_notifier(configured):
     assert not (runtime.paths.state_dir / "inbox-watch.json").exists()
 
 
+@requires_local_state
 def test_calls_filters_gaps_and_cli(configured, capsys):
     target, runtime, _ = configured
     with BridgeState(runtime.paths.state_dir) as state:
@@ -128,6 +135,7 @@ def test_calls_filters_gaps_and_cli(configured, capsys):
     assert [g["minutes"] for g in report["gaps"]] == [38.0, 159.0]
 
 
+@requires_local_state
 @pytest.mark.parametrize("queued", [False, True])
 def test_notify_hub_mapping_and_queued(configured, capsys, queued):
     target, _, _ = configured
@@ -140,6 +148,7 @@ def test_notify_hub_mapping_and_queued(configured, capsys, queued):
         assert value["queued"] and len(value["client_id"]) == 32
 
 
+@requires_local_state
 @pytest.mark.parametrize(
     "responses,code,error",
     [
@@ -156,6 +165,7 @@ def test_notify_wait_and_timeout(configured, capsys, responses, code, error):
     assert value.get("error") == error
 
 
+@requires_local_state
 def test_notify_wait_passes_its_deadline(configured, capsys):
     import time
 
@@ -174,6 +184,7 @@ def test_notify_wait_passes_its_deadline(configured, capsys):
     capsys.readouterr()
 
 
+@requires_local_state
 def test_probe_route_failures_are_bounded(configured):
     target, runtime, _ = configured
     from brigade.dot.lifecycle import _load_config
@@ -184,6 +195,7 @@ def test_probe_route_failures_are_bounded(configured):
         assert probe.call_count == 2
 
 
+@requires_local_state
 def test_send_stdin_and_no_output(configured):
     _, runtime, _ = configured
     with patch.object(w.subprocess, "run") as execute:
@@ -193,6 +205,7 @@ def test_send_stdin_and_no_output(configured):
     assert json.loads(execute.call_args.kwargs["input"])["body"] == "message"
 
 
+@requires_local_state
 def test_notify_requires_message_without_reading_tty(configured, capsys):
     target, _, _ = configured
     with patch.object(cli.sys, "stdin") as stdin:
@@ -202,6 +215,7 @@ def test_notify_requires_message_without_reading_tty(configured, capsys):
     assert json.loads(capsys.readouterr().out)["error"] == "message_required"
 
 
+@requires_local_state
 def test_notify_transient_wait_recovers(configured, capsys):
     target, _, _ = configured
     elapsed = [0]

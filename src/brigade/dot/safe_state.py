@@ -9,6 +9,7 @@ from pathlib import Path
 import re
 import sqlite3
 import stat
+import sys
 from typing import Any, Iterator, TypeVar
 from uuid import UUID
 
@@ -94,7 +95,13 @@ def redact_credentials(text: str) -> str:
     return text
 
 
+def require_local_platform() -> None:
+    """The local bridge store requires flock and descriptor-pinned SQLite."""
+    require(sys.platform != "win32", "unsupported_on_windows")
+
+
 def private_file(info: os.stat_result) -> None:
+    require_local_platform()
     require(os.name == "posix", "unsafe_state")
     require(
         stat.S_ISREG(info.st_mode)
@@ -106,6 +113,7 @@ def private_file(info: os.stat_result) -> None:
 
 
 def private_directory(directory: Path, *, create: bool = False) -> int:
+    require_local_platform()
     require(os.name == "posix", "unsafe_state")
     current = None
     try:
@@ -195,6 +203,7 @@ class PrivateDatabase:
     LOCK = "store.lock"
 
     def __init__(self, directory: Path) -> None:
+        require_local_platform()
         self.fd: int | None = None
         self.directory = Path(directory)
         try:

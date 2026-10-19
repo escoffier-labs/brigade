@@ -5,6 +5,22 @@ and the Fleet Hub inbox. It exposes 32 closed tool contracts. Its default bind
 is `127.0.0.1:8779`. Its registry `public_route` is empty. Configure a dedicated
 public host and route `/mcp` through Cloudflare Access to this listener.
 
+## Platform support
+
+The local listener, runtime-file loading, SQLite state, watcher, notification
+and call-log commands require Linux. The bridge keeps its existing `flock`
+locking and opens SQLite through `/proc/self/fd` to pin the private directory.
+These operations refuse Windows with `unsupported_on_windows` before opening
+local configuration or creating state. This preserves the non-POSIX refusal
+introduced in #1765. Brigade's other commands remain available on Windows.
+Imports, runtime-document parsing, authentication and HTTP protocol validation
+are portable. Dot's bounded command runner uses Brigade's owned job objects
+on Windows.
+
+The shared NT private-file helpers do not provide a descriptor-pinned SQLite
+connection. Windows state support needs that storage contract before the
+listener can safely run there.
+
 ## Runtime JSON
 
 The instance stores `runtime_path`, an absolute reference to an owner-only

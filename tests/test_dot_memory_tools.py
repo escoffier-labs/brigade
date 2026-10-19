@@ -1,5 +1,7 @@
 """Bridge behavior ported to isolated Dot tools."""
 
+from tests.dot_support import requires_local_state
+
 import hashlib
 import json
 import os
@@ -11,6 +13,7 @@ from tests.test_dot_adapter import BRIGADE, HANDOFF, NOW, SHA, Fixture, lint_rep
 
 
 class MemoryChecks(Fixture):
+    @requires_local_state
     def test_memory_search_argv_and_shape(self):
         reply = {
             "match_count": 2,
@@ -49,6 +52,7 @@ class MemoryChecks(Fixture):
         self.assertEqual(result["matches"][0]["path"], "memory/cards/c.md")
         self.assertNotIn("body", result["matches"][0])
 
+    @requires_local_state
     def test_memory_card_reads_chunks_and_rejects_links(self):
         text = "---\ntitle: big\n---\n" + "abcdefghij" * 7000
         (self.cards / "big-card.md").write_text(text)
@@ -79,6 +83,7 @@ class HandoffChecks(Fixture):
     def expected_name(self, slug):
         return f"{NOW.astimezone():%Y-%m-%d-%H%M}-dot-{slug}.md"
 
+    @requires_local_state
     def test_write_lints_private_copy_then_never_overwrites(self):
         seen = []
 
@@ -104,6 +109,7 @@ class HandoffChecks(Fixture):
         self.assertEqual((self.inbox / name).read_text(), HANDOFF)
         self.assertEqual(len(self.runner.calls), 1)
 
+    @requires_local_state
     def test_link_race_and_symlink_destination_never_overwrite(self):
         self.runner.handler = lambda argv, stdin: (
             (self.inbox / self.expected_name("raced")).symlink_to(self.root / "target"),
@@ -114,6 +120,7 @@ class HandoffChecks(Fixture):
         self.assertFalse((self.root / "target").exists())
         self.assertEqual(sorted(path.name for path in self.inbox.iterdir()), [self.expected_name("raced")])
 
+    @requires_local_state
     def test_invalid_lint_and_credentials_publish_nothing(self):
         self.runner.handler = lambda argv, stdin: CommandResult(1, lint_report(False))
         result = self.call("handoff_write", slug="bad-one", content=HANDOFF)
@@ -126,6 +133,7 @@ class HandoffChecks(Fixture):
         self.assertEqual(list(self.inbox.iterdir()), [])
         self.assertEqual([path.name for path in self.private.iterdir() if "handoff-lint" in path.name], [])
 
+    @requires_local_state
     def test_untrusted_inbox_refused(self):
         os.chmod(self.inbox, 0o777)
         with self.assertRaisesRegex(DotError, "^handoff_unavailable$"):
@@ -144,6 +152,7 @@ class PolicyAndSkills(Fixture):
             )
         return paths
 
+    @requires_local_state
     def test_policy_is_workspace_scoped_hashed_and_compacted(self):
         paths = self.policy_files()
         result = self.call("fleet_policy")
@@ -156,6 +165,7 @@ class PolicyAndSkills(Fixture):
         paths[0].write_text("updated")
         self.assertTrue(self.call("fleet_policy", since_hash=result["hash"])["changed"])
 
+    @requires_local_state
     def test_policy_symlink_cannot_read_outside_workspace(self):
         paths = self.policy_files()
         outside = self.root / "outside-policy.md"
@@ -165,6 +175,7 @@ class PolicyAndSkills(Fixture):
         with self.assertRaises((DotError, OSError)):
             self.call("fleet_policy")
 
+    @requires_local_state
     def test_skill_search_and_anchored_resource_paging(self):
         self.runner.handler = lambda argv, stdin: CommandResult(0, b'{"skills":[{"id":"example"}],"count":1}')
         self.assertEqual(self.call("skill_search", query="fleet", limit=1), {"skills": [{"id": "example"}], "count": 1})
