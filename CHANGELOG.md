@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A fleet ownership map. The policy document gains an optional `owners` section of charters that say what each agent or surface owns, must never touch, and how work reaches it. The Command Deck page `/deck/owners` shows each charter beside its live claims, Grok Bot jobs, sessions, and delegations, with an Unassigned list for work no charter matches. `GET /owners` and `brigade fleet owners show` return the same view as JSON. Charters describe responsibility and do not block any claim, dispatch, or merge.
+
 - Stable npm publishing support for `@escoffier-labs/brigade@0.29.0` and five public platform companions, using the pinned official PyPI wheel, tag-based payload auditing, immutable archive retries, hosted provenance and native registry acceptance gates. Registry publication is tracked by the release workflow.
 
 ## [0.29.0] - 2026-10-18
