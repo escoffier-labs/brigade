@@ -8,6 +8,7 @@ carry machine-readable detail instead.
 from __future__ import annotations
 
 import json
+import shlex
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -90,9 +91,35 @@ def test_task_done_open_children_refusal_is_structured_without_force(tmp_path, m
 def test_workflow_rules_missing_templates_remediation_omits_force(tmp_path):
     detail = briefing_mod._workflow_rule_health(tmp_path)["detail"]
     assert "brigade init --target" in detail
-    assert "--depth repo" in detail
+    assert "--depth repo --full" in detail
     assert "missing" in detail
     _assert_no_bypass_tokens(detail)
+
+
+@pytest.mark.parametrize("existing_rule", [None, "rules/issue-tdd-loop.md"])
+def test_workflow_rules_repair_command_installs_missing_templates(tmp_path, existing_rule):
+    _init_git_repo(tmp_path)
+    assert cli.main(["init", "--target", str(tmp_path), "--depth", "repo", "--harnesses", "none"]) == 0
+    if existing_rule is not None:
+        rule = tmp_path / existing_rule
+        rule.parent.mkdir(parents=True, exist_ok=True)
+        rule.write_text("# Existing workflow rule\n", encoding="utf-8")
+
+    health = briefing_mod._workflow_rule_health(tmp_path)
+    assert health["status"] == "warn"
+    assert len(health["missing"]) == (2 if existing_rule is None else 1)
+    command = health["detail"].split("`")[1]
+    prefix = f"brigade init --target {tmp_path} "
+    assert command.startswith(prefix)
+    _assert_no_bypass_tokens(health["detail"])
+
+    assert cli.main(["init", "--target", str(tmp_path), *shlex.split(command[len(prefix) :])]) == 0
+    repaired = briefing_mod._workflow_rule_health(tmp_path)
+    assert repaired["status"] == "ok"
+    assert repaired["missing"] == []
+    assert repaired["detail"] == "repo-shareable workflow rules installed"
+    if existing_rule is not None:
+        assert (tmp_path / existing_rule).read_text(encoding="utf-8") == "# Existing workflow rule\n"
 
 
 def test_mcp_user_scope_stdio_gate_omits_allow_flag(tmp_path, monkeypatch, capsys):
