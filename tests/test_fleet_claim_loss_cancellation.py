@@ -77,6 +77,8 @@ def _exercise_blocked_child(tmp_path: Path, monkeypatch, transport, *, refusal="
     monkeypatch.setenv("BRIGADE_HOME", str(home))
     monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "http://hub.example.test")
     monkeypatch.setenv("BRIGADE_FLEET_TOKEN", "test-token")
+    # Keep event delivery and spooling outside this cancellation check.
+    monkeypatch.setattr(fleet_client, "report_event", lambda event, **kwargs: False)
     monkeypatch.setattr(fleet_client, "_claim_renew_interval", lambda ttl: 0.01)
     monkeypatch.setattr(fleet_client, "load_model_policy_snapshot", lambda: {"state": "unconfigured", "models": []})
     monkeypatch.setattr(fleet_session_bootstrap, "ensure_prompt", lambda prompt, **kwargs: prompt)
