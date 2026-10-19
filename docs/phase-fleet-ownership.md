@@ -183,9 +183,8 @@ database `query_only`, call `fleet_owners.load_view`, and render.
   attributed through `adapters: ["t3-fleet"]` delegations and by node.
   Distinguishing T3-hosted interactive sessions needs the session report to
   carry its host app, filed as a follow-up.
-- OpenClaw (clawchat, the gateway's scheduled jobs) has no hub feed. Its
-  charter renders with no holdings. A follow-up can register it as a message
-  principal or session reporter.
+- OpenClaw has no hub feed until slice 2 (section 10) ships. Until then its
+  charter renders with no holdings.
 
 ## 8. Testing
 
@@ -210,3 +209,66 @@ database `query_only`, call `fleet_owners.load_view`, and render.
    repository.
 3. Review the Unassigned list for a week, editing charters until it is empty or
    every remaining item is understood.
+
+## 10. Slice 2: OpenClaw reporting
+
+The operator is moving day-to-day agent work from Discord to clawchat, so the
+OpenClaw gateway becomes a first-class owner with live holdings. Slice 1 (the
+page) ships first and does not wait on this.
+
+### Mapping
+
+An OpenClaw workspace plugin, `fleet-presence`, reports through the existing
+`brigade work presence-hook` command, which already publishes to
+`POST /sessions` with the host's enrolled node token. The hub accepts any
+opaque harness string, so `openclaw` needs no allowlist change.
+
+| OpenClaw hook | Presence call |
+|---|---|
+| `session_start` | `--event start --harness openclaw --session <sessionKey>` |
+| `agent_end`, `message_received` | `--event heartbeat`, throttled to one per session per 60 s |
+| `session_end`, `subagent_ended` | `--event end` |
+| `cron_changed` status `started` | `--event start --session cron:<jobId> --kind cron --label <job name>` |
+| `cron_changed` status `finished` | `--event end --session cron:<jobId>` |
+| `gateway_stop` | `--event end` for every session the plugin started |
+
+The plugin spawns the command without a shell and does not await it, so a slow
+or unreachable hub never delays a chat turn. `--target` is the OpenClaw
+workspace checkout, which gives a stable fleet-scoped repo identity. Session
+keys keep their `agent:<agent>:<surface>:<id>` form, so the page can group by
+surface (clawchat, discord, cron, subagent) without a lookup.
+
+The OpenClaw charter matches with `session_harnesses: ["openclaw"]`.
+
+### Brigade changes
+
+1. `interactive_sessions` gains two nullable columns: `label` (text, at most
+   `MAX_TEXT`) and `kind` (name pattern, for example `chat`, `cron`,
+   `subagent`). Additive columns go in `_ADDITIVE_COLUMNS` and
+   `SCHEMA_VERSION` goes from 32 to 33, as the hub schema rules require.
+2. `_UPSERT_FIELDS` accepts `label` and `kind`. Both are optional and
+   validated. Older clients that omit them are unaffected.
+3. `brigade work presence-hook` gains `--label` and `--kind`, passed through
+   to the upsert.
+4. `fleet_deck_brands.py` gains an `openclaw` brand so these rows stop
+   rendering as the grey unknown badge.
+5. The owners page shows `label` when present and groups OpenClaw holdings by
+   session-key surface.
+
+### OpenClaw changes (outside this repository)
+
+The plugin lives in the operator's OpenClaw workspace extensions directory
+with `package.json` (`openclaw.extensions`), `openclaw.plugin.json` and
+`index.ts`. It is listed in both `plugins.allow` and `plugins.load.paths`.
+It reads metadata only, so it does not request conversation access. Enabling
+it needs one gateway restart.
+
+### Testing
+
+- Brigade: upsert round-trips `label` and `kind`. It rejects an over-long
+  label and a `kind` outside the name pattern. A v32 database migrates to v33
+  with existing rows intact, and presence-hook passes both flags through.
+- Plugin: a dry-run mode logs the command lines it would spawn. Verify with
+  one clawchat message and one forced cron run, then confirm both rows appear
+  in `brigade fleet sessions --json` and end on schedule.
+
