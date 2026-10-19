@@ -327,3 +327,24 @@ def test_long_holding_lists_are_capped_with_a_note():
     body = _render(view)
     assert f"Showing {fleet_owners_page.DISPLAY_LIMIT} of {len(items)} items." in body
     assert "example/repo-049" in body and "example/repo-050" not in body
+
+
+def test_owners_link_is_in_the_navigation_of_every_deck_page_and_board(tmp_path, monkeypatch):
+    monkeypatch.setenv("BRIGADE_WORKLORE_ENABLED", "1")
+    with _hub(tmp_path) as (hub, _db):
+        for path in (
+            "/deck",
+            "/deck/repos",
+            "/deck/roster",
+            "/deck/policy",
+            "/deck/work",
+            "/deck/owners",
+            "/view/machines",
+            "/view/repos",
+        ):
+            status, _, body = _request(hub, path, headers=_bearer())
+            assert status == 200, path
+            assert 'href="/deck/owners"' in body, path
+        _, _, body = _request(hub, "/deck/owners", headers=_bearer())
+        assert '<a href="/deck/owners" aria-current="page">owners</a>' in body
+        assert '<a href="/deck" aria-current="page">' not in body
