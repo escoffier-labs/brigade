@@ -39,6 +39,7 @@ from . import fleet_hub_event_bounds as request_bounds
 from .fleet_hub_claim_cardinality import ClaimCardinalityError
 from . import fleet_model_inventory
 from . import fleet_owners
+from . import fleet_owners_page
 from . import fleet_policy_page
 from . import fleet_repo_policy_page
 from . import fleet_work_page
@@ -1100,6 +1101,31 @@ def make_handler(
             )
             self._send_html(200, body, nonce=nonce)
 
+        def _serve_owners_page(self, query: str) -> None:
+            plain = "text/plain; charset=utf-8"
+            authorized, _editable = self._roster_auth()
+            if not authorized:
+                self._send_html(
+                    401, "Unauthorized: use brigade fleet enroll for read-only dashboard access.\n", content_type=plain
+                )
+                return
+            if query:
+                self._send_html(400, "Invalid owners page query.\n", content_type=plain)
+                return
+            try:
+                conn = open_db(Path(db_path))
+                try:
+                    conn.execute("PRAGMA query_only=ON")
+                    view = fleet_owners.load_view(conn, now_epoch=_hub._now_epoch())
+                finally:
+                    conn.close()
+            except (FleetHubError, sqlite3.Error):
+                self._send_html(500, "Ownership view unavailable.\n", content_type=plain)
+                return
+            nonce = secrets.token_urlsafe(16)
+            page = fleet_owners_page.render(view, nonce=nonce, now=datetime.now(timezone.utc))
+            self._send_html(200, page, nonce=nonce)
+
         def _serve_work(self, query: str) -> None:
             plain = "text/plain; charset=utf-8"
             if not worklore_http.enabled():
@@ -1443,6 +1469,9 @@ def make_handler(
                 return
             if path == "/deck/work":
                 self._serve_work(query)
+                return
+            if path == "/deck/owners":
+                self._serve_owners_page(query)
                 return
             if path == "/" or path in ("/deck", "/deck/repos") or path.startswith("/deck/"):
                 self._serve_deck(path, query)

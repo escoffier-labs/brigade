@@ -6,8 +6,11 @@ import http.client
 import json
 import threading
 from contextlib import contextmanager
+from datetime import datetime, timezone
+from html.parser import HTMLParser
 
-from brigade import fleet_hub, fleet_hub_policy, fleet_policy
+from brigade import fleet_hub, fleet_hub_policy, fleet_owners_page, fleet_policy
+from brigade.fleet_owners import Holding, Overlap, OwnersView
 
 TOKEN = "test-admin-token-owners"  # content-guard: allow api-key-assignment
 LOOPBACK = "127.0.0.1"  # content-guard: allow loopback-ipv4
@@ -136,3 +139,191 @@ def test_owners_json_lists_live_claims_and_reads_without_writing(tmp_path):
             assert list(conn.iterdump()) == before
         finally:
             conn.close()
+
+
+NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+ATTACK = '<img src=x onerror="alert(1)">'
+
+
+def _match(**selectors):
+    record = {
+        "nodes": [],
+        "harnesses": [],
+        "conductors": [],
+        "session_harnesses": [],
+        "adapters": [],
+        "principals": [],
+        "grokbot_jobs": False,
+    }
+    record.update(selectors)
+    return record
+
+
+def _holding(ref="example/repo", kind="claim", **fields):
+    return Holding(
+        kind=kind,
+        ref=ref,
+        repo="example/repo",
+        node_label="Node A",
+        detail="impl claude",
+        since="2026-01-01T00:00:00+00:00",
+        **fields,
+    )
+
+
+def _view(**fields):
+    base = {
+        "policy_version": 3,
+        "policy_error": None,
+        "charters": {},
+        "by_owner": {},
+        "unassigned": [],
+        "overlaps": [],
+        "enrolled_principals": frozenset(),
+        "unknown_sources": (),
+    }
+    base.update(fields)
+    return OwnersView(**base)
+
+
+def _render(view):
+    return fleet_owners_page.render(view, nonce="test-nonce", now=NOW)
+
+
+class _Tags(HTMLParser):
+    def __init__(self, body):
+        super().__init__()
+        self.tags = []
+        self.feed(body)
+
+    def handle_starttag(self, tag, attrs):
+        self.tags.append(tag)
+
+
+def test_page_requires_dashboard_access_and_is_read_only(tmp_path):
+    with _hub(tmp_path, trust_tailscale_identity=False) as (hub, db):
+        status, _, body = _request(hub, "/deck/owners")
+        assert status == 401 and "brigade fleet enroll" in body
+        assert _request(hub, "/deck/owners", headers=_bearer(_node_token(db)))[0] == 401
+        for headers in (_bearer(), _cookie(hub)):
+            status, response_headers, body = _request(hub, "/deck/owners", headers=headers)
+            assert status == 200
+            assert "Content-Security-Policy" in response_headers
+            assert response_headers["Cache-Control"] == "no-store"
+            assert "No charters declared" in body
+            assert not {"form", "input", "button"} & set(_Tags(body).tags)
+        assert _request(hub, "/deck/owners?cursor=1", headers=_bearer())[0] == 400
+
+
+def test_page_shows_charters_beside_live_holdings_and_unassigned_items(tmp_path):
+    with _hub(tmp_path, allow_admin_writes=True) as (hub, db):
+        _seed_owners(
+            db,
+            {
+                "alpha": {
+                    "label": "Alpha Agent",
+                    "summary": "Builds things.",
+                    "owns": ["Approved issues"],
+                    "never": ["Deploys"],
+                    "intake": ["Approval label"],
+                    "contact": "agent:alpha",
+                    "match": {"harnesses": ["claude"]},
+                },
+                "quiet": {"label": "Quiet Gateway"},
+            },
+        )
+        for target, harness in (("example/held", "claude"), ("example/loose", "codex")):
+            claim = {
+                "action": "acquire",
+                "target": target,
+                "node_id": "node-a-0001",
+                "holder": "h1",
+                "harness": harness,
+            }
+            status, _, text = _request(
+                hub,
+                "/claims",
+                method="POST",
+                headers={**_bearer(), "Content-Type": "application/json"},
+                body=json.dumps(claim),
+            )
+            assert status == 200, text
+        status, _, body = _request(hub, "/deck/owners", headers=_bearer())
+        assert status == 200
+        for text in ("Alpha Agent", "Builds things.", "Approved issues", "Deploys", "Approval label", "agent:alpha"):
+            assert text in body
+        assert "Quiet Gateway" in body and "Charter only, no live attribution." in body
+        alpha_card, _, rest = body.partition("Quiet Gateway")
+        assert "example/held" in alpha_card and "example/loose" not in alpha_card
+        unassigned = rest.partition("<h2>Unassigned</h2>")[2]
+        assert "example/loose" in unassigned and "example/held" not in unassigned
+        assert "No overlaps." in body
+
+
+def test_page_lists_overlaps_and_principal_state():
+    item = _holding()
+    view = _view(
+        charters={
+            "alpha": {"label": "Alpha", "match": _match(harnesses=["claude"], principals=["miller", "ghost"])},
+            "beta": {"label": "Beta", "match": _match(nodes=["node-a"])},
+        },
+        by_owner={"alpha": [item], "beta": [item]},
+        overlaps=[Overlap(item=item, owners=("alpha", "beta"))],
+        enrolled_principals=frozenset({"miller"}),
+    )
+    body = _render(view)
+    assert "claim example/repo: alpha, beta" in body
+    assert "miller: enrolled" in body and "ghost: not enrolled" in body
+    assert "revision 3" in body
+
+
+def test_policy_failure_banner_still_lists_live_items_as_unassigned():
+    view = _view(policy_version=None, policy_error="policy read failed: FleetHubError", unassigned=[_holding()])
+    body = _render(view)
+    assert "Policy unavailable" in body and "policy read failed: FleetHubError" in body
+    assert "revision unknown" in body
+    assert "No charters declared" not in body
+    assert "Unassigned" in body and "example/repo" in body
+
+
+def test_unknown_source_is_called_out_instead_of_shown_as_empty():
+    view = _view(
+        charters={"alpha": {"label": "Alpha", "match": _match(harnesses=["claude"])}},
+        by_owner={"alpha": []},
+        unknown_sources=("claims", "sessions"),
+    )
+    body = _render(view)
+    assert "Holdings unknown: could not read claims, sessions." in body
+    assert "Could not read: claims, sessions." in body
+    assert "Nothing held right now." not in body
+
+
+def test_stored_text_is_escaped_everywhere():
+    evil = _holding(ref=ATTACK)
+    view = _view(
+        charters={
+            "alpha": {
+                "label": ATTACK,
+                "summary": ATTACK,
+                "owns": [ATTACK],
+                "never": [ATTACK],
+                "intake": [ATTACK],
+                "contact": ATTACK,
+                "match": _match(harnesses=["claude"], principals=[ATTACK]),
+            }
+        },
+        by_owner={"alpha": [evil]},
+        unassigned=[evil],
+        overlaps=[Overlap(item=evil, owners=("alpha", ATTACK))],
+    )
+    body = _render(view)
+    assert ATTACK not in body
+    assert "&lt;img src=x onerror=&quot;alert(1)&quot;&gt;" in body
+
+
+def test_long_holding_lists_are_capped_with_a_note():
+    items = [_holding(ref=f"example/repo-{index:03}") for index in range(fleet_owners_page.DISPLAY_LIMIT + 1)]
+    view = _view(unassigned=items)
+    body = _render(view)
+    assert f"Showing {fleet_owners_page.DISPLAY_LIMIT} of {len(items)} items." in body
+    assert "example/repo-049" in body and "example/repo-050" not in body
