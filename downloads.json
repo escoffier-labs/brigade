@@ -1,0 +1,21 @@
+{
+  "schemaVersion": 1,
+  "label": "downloads/month",
+  "message": "awaiting npm data",
+  "color": "lightgrey",
+  "status": "pending",
+  "total": null,
+  "sources": {
+    "pypi": {
+      "package": "brigade-cli",
+      "downloads": null,
+      "mirrors": false
+    },
+    "npm": {
+      "package": "@escoffier-labs/brigade",
+      "downloads": null
+    }
+  },
+  "period": null,
+  "updatedAt": null
+}
