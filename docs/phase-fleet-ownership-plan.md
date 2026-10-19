@@ -63,7 +63,7 @@ Size ratchet headroom (`tests/test_module_size_ratchet.py`, ceiling 2000): `flee
 - Modify: `src/brigade/fleet_policy.py` (import near line 32, `TOP_LEVEL_FIELDS` near line 62, `parse_document` near line 827)
 - Test: `tests/test_fleet_policy_owners.py`
 
-- [ ] Write the failing test
+- [x] Write the failing test
 
 **Create** `tests/test_fleet_policy_owners.py`:
 
@@ -208,9 +208,9 @@ def test_a_scoped_policy_form_edit_keeps_the_owners_section():
     assert edited["defaults"]["data"]["allow_free"] is True
 ```
 
-- [ ] Run it, watch it fail: `brigade work verify run --target . --command "python -m pytest tests/test_fleet_policy_owners.py -q" --capture brigade-work` - expect FAIL (document rejects the new key); 22 failed, every failure reads `FleetPolicyError: unknown document field(s): owners`. The pytest text is in `command-1-stdout.log` inside the receipt directory named on the `receipt:` line.
+- [x] Run it, watch it fail: `brigade work verify run --target . --command "python -m pytest tests/test_fleet_policy_owners.py -q" --capture brigade-work` - expect FAIL (document rejects the new key); 22 failed, every failure reads `FleetPolicyError: unknown document field(s): owners`. The pytest text is in `command-1-stdout.log` inside the receipt directory named on the `receipt:` line.
 
-- [ ] Implement the validator module
+- [x] Implement the validator module
 
 **Create** `src/brigade/fleet_policy_owners.py`:
 
@@ -299,7 +299,7 @@ def _parse_match(raw: Any, where: str) -> dict[str, Any]:
 
 `fleet_policy` imports this module, so this module imports `fleet_policy` lazily inside its functions to avoid a cycle.
 
-- [ ] Wire it into `parse_document`: three edits to `src/brigade/fleet_policy.py`
+- [x] Wire it into `parse_document`: three edits to `src/brigade/fleet_policy.py`
 
 **Edit** `src/brigade/fleet_policy.py`, replace this:
 
@@ -348,11 +348,11 @@ with this:
     rendered = canonical_json(document)
 ```
 
-- [ ] Run to green: same command - expect PASS, 22 passed.
+- [x] Run to green: same command - expect PASS, 22 passed.
 
-- [ ] Run the neighbouring policy suites to prove nothing else moved: `brigade work verify run --target . --command "python -m pytest tests/test_fleet_policy.py tests/test_fleet_hub_policy.py tests/test_fleet_policy_cli.py tests/test_fleet_policy_page.py tests/test_fleet_roster_page.py tests/test_fleet_policy_core_completion.py -q" --capture brigade-work` - expect PASS, 242 passed.
+- [x] Run the neighbouring policy suites to prove nothing else moved: `brigade work verify run --target . --command "python -m pytest tests/test_fleet_policy.py tests/test_fleet_hub_policy.py tests/test_fleet_policy_cli.py tests/test_fleet_policy_page.py tests/test_fleet_roster_page.py tests/test_fleet_policy_core_completion.py -q" --capture brigade-work` - expect PASS, 242 passed.
 
-- [ ] Commit:
+- [x] Commit:
 
 ```bash
 git add src/brigade/fleet_policy_owners.py src/brigade/fleet_policy.py tests/test_fleet_policy_owners.py
@@ -365,7 +365,7 @@ git commit -m "feat(fleet): add the owners charter section to the policy documen
 - Create: `src/brigade/fleet_owners.py` (matcher half; Task 3 completes it)
 - Test: `tests/test_fleet_owners.py`
 
-- [ ] Write the failing test
+- [x] Write the failing test
 
 **Create** `tests/test_fleet_owners.py`:
 
@@ -496,9 +496,9 @@ def test_public_shape_omits_selector_fields():
     }
 ```
 
-- [ ] Run it, watch it fail: `brigade work verify run --target . --command "python -m pytest tests/test_fleet_owners.py -q" --capture brigade-work` - expect FAIL (module missing); 1 error at collection, `ModuleNotFoundError: No module named 'brigade.fleet_owners'`. The pytest text is in `command-1-stdout.log` inside the receipt directory named on the `receipt:` line.
+- [x] Run it, watch it fail: `brigade work verify run --target . --command "python -m pytest tests/test_fleet_owners.py -q" --capture brigade-work` - expect FAIL (module missing); 1 error at collection, `ModuleNotFoundError: No module named 'brigade.fleet_owners'`. The pytest text is in `command-1-stdout.log` inside the receipt directory named on the `receipt:` line.
 
-- [ ] Implement the dataclasses and the matcher
+- [x] Implement the dataclasses and the matcher
 
 **Create** `src/brigade/fleet_owners.py`:
 
@@ -594,9 +594,9 @@ def attribute(
     return by_owner, unassigned, overlaps
 ```
 
-- [ ] Run to green: same command - expect PASS, 9 passed.
+- [x] Run to green: same command - expect PASS, 9 passed.
 
-- [ ] Commit:
+- [x] Commit:
 
 ```bash
 git add src/brigade/fleet_owners.py tests/test_fleet_owners.py
@@ -609,7 +609,7 @@ git commit -m "feat(fleet): attribute live items to owner charters" -m "Co-Autho
 - Modify: `src/brigade/fleet_owners.py` (full replacement below; the matcher section is the Task 2 code, unchanged)
 - Test: `tests/test_fleet_owners_view.py`
 
-- [ ] Write the failing test
+- [x] Write the failing test
 
 **Create** `tests/test_fleet_owners_view.py`:
 
@@ -852,9 +852,9 @@ def test_payload_is_the_v1_json_shape(conn):
     assert payload["unknown_sources"] == []
 ```
 
-- [ ] Run it, watch it fail: `brigade work verify run --target . --command "python -m pytest tests/test_fleet_owners_view.py -q" --capture brigade-work` - expect FAIL (`load_view` and `view_payload` are not defined); 8 failed, each `AttributeError: module 'brigade.fleet_owners' has no attribute 'load_view'` (or `view_payload`). The pytest text is in `command-1-stdout.log` inside the receipt directory named on the `receipt:` line.
+- [x] Run it, watch it fail: `brigade work verify run --target . --command "python -m pytest tests/test_fleet_owners_view.py -q" --capture brigade-work` - expect FAIL (`load_view` and `view_payload` are not defined); 8 failed, each `AttributeError: module 'brigade.fleet_owners' has no attribute 'load_view'` (or `view_payload`). The pytest text is in `command-1-stdout.log` inside the receipt directory named on the `receipt:` line.
 
-- [ ] Replace `src/brigade/fleet_owners.py` with the complete module
+- [x] Replace `src/brigade/fleet_owners.py` with the complete module
 
 **Create** `src/brigade/fleet_owners.py`:
 
@@ -1164,11 +1164,11 @@ def view_payload(view: OwnersView) -> dict[str, Any]:
     }
 ```
 
-- [ ] Run to green: same command - expect PASS, 8 passed.
+- [x] Run to green: same command - expect PASS, 8 passed.
 
-- [ ] Run the suites that share this module, so the replaced matcher is checked against the Task 2 tests: `brigade work verify run --target . --command "python -m pytest tests/test_fleet_owners.py -q" --capture brigade-work` - expect PASS, 9 passed.
+- [x] Run the suites that share this module, so the replaced matcher is checked against the Task 2 tests: `brigade work verify run --target . --command "python -m pytest tests/test_fleet_owners.py -q" --capture brigade-work` - expect PASS, 9 passed.
 
-- [ ] Commit:
+- [x] Commit:
 
 ```bash
 git add src/brigade/fleet_owners.py tests/test_fleet_owners_view.py
@@ -1181,7 +1181,7 @@ git commit -m "feat(fleet): load live holdings for the ownership view" -m "Co-Au
 - Modify: `src/brigade/fleet_hub_http.py` (import block near line 41, the bearer GET path tuple near line 1457, the `elif` chain near line 1520)
 - Test: `tests/test_fleet_owners_page.py`
 
-- [ ] Write the failing test (HTTP helpers and the three JSON tests; Task 5 and Task 6 append to this file)
+- [x] Write the failing test (HTTP helpers and the three JSON tests; Task 5 and Task 6 append to this file)
 
 **Create** `tests/test_fleet_owners_page.py`:
 
@@ -1326,9 +1326,9 @@ def test_owners_json_lists_live_claims_and_reads_without_writing(tmp_path):
             conn.close()
 ```
 
-- [ ] Run it, watch it fail: `brigade work verify run --target . --command "python -m pytest tests/test_fleet_owners_page.py -q" --capture brigade-work` - expect FAIL (route answers 404); 3 failed, the route answers 404 where 401 or 200 is expected (`assert 404 == 200`). The pytest text is in `command-1-stdout.log` inside the receipt directory named on the `receipt:` line.
+- [x] Run it, watch it fail: `brigade work verify run --target . --command "python -m pytest tests/test_fleet_owners_page.py -q" --capture brigade-work` - expect FAIL (route answers 404); 3 failed, the route answers 404 where 401 or 200 is expected (`assert 404 == 200`). The pytest text is in `command-1-stdout.log` inside the receipt directory named on the `receipt:` line.
 
-- [ ] Add the route: three edits to `src/brigade/fleet_hub_http.py`
+- [x] Add the route: three edits to `src/brigade/fleet_hub_http.py`
 
 **Edit** `src/brigade/fleet_hub_http.py`, replace this:
 
@@ -1379,9 +1379,9 @@ with this:
                         payload = fleet_owners.view_payload(fleet_owners.load_view(conn, now_epoch=_hub._now_epoch()))
 ```
 
-- [ ] Run to green: same command - expect PASS, 3 passed.
+- [x] Run to green: same command - expect PASS, 3 passed.
 
-- [ ] Commit:
+- [x] Commit:
 
 ```bash
 git add src/brigade/fleet_hub_http.py tests/test_fleet_owners_page.py
@@ -1395,7 +1395,7 @@ git commit -m "feat(fleet): serve the ownership map as JSON at GET /owners" -m "
 - Modify: `src/brigade/fleet_hub_http.py` (import, new `_serve_owners_page` method before `_serve_work`, route after the `/deck/work` route in `do_GET`)
 - Test: `tests/test_fleet_owners_page.py`
 
-- [ ] Write the failing tests: first widen the imports at the top of the test file
+- [x] Write the failing tests: first widen the imports at the top of the test file
 
 **Edit** `tests/test_fleet_owners_page.py`, replace this:
 
@@ -1609,9 +1609,9 @@ def test_long_holding_lists_are_capped_with_a_note():
     assert "example/repo-049" in body and "example/repo-050" not in body
 ```
 
-- [ ] Run it, watch it fail: `brigade work verify run --target . --command "python -m pytest tests/test_fleet_owners_page.py -q" --capture brigade-work` - expect FAIL (`fleet_owners_page` does not exist yet); 1 error at collection, `ImportError: cannot import name 'fleet_owners_page' from 'brigade'`. The pytest text is in `command-1-stdout.log` inside the receipt directory named on the `receipt:` line.
+- [x] Run it, watch it fail: `brigade work verify run --target . --command "python -m pytest tests/test_fleet_owners_page.py -q" --capture brigade-work` - expect FAIL (`fleet_owners_page` does not exist yet); 1 error at collection, `ImportError: cannot import name 'fleet_owners_page' from 'brigade'`. The pytest text is in `command-1-stdout.log` inside the receipt directory named on the `receipt:` line.
 
-- [ ] Implement the page module
+- [x] Implement the page module
 
 **Create** `src/brigade/fleet_owners_page.py`:
 
@@ -1754,7 +1754,7 @@ def render(view: OwnersView, *, nonce: str, now: datetime) -> str:
     return deck._document(body, nonce=nonce, now=now, title="Owners", refresh=False, active="owners")
 ```
 
-- [ ] Add the route: three edits to `src/brigade/fleet_hub_http.py`
+- [x] Add the route: three edits to `src/brigade/fleet_hub_http.py`
 
 **Edit** `src/brigade/fleet_hub_http.py`, replace this:
 
@@ -1827,9 +1827,9 @@ with this:
                 return
 ```
 
-- [ ] Run to green: same command - expect PASS, 10 passed.
+- [x] Run to green: same command - expect PASS, 10 passed.
 
-- [ ] Commit:
+- [x] Commit:
 
 ```bash
 git add src/brigade/fleet_owners_page.py src/brigade/fleet_hub_http.py tests/test_fleet_owners_page.py
@@ -1843,7 +1843,7 @@ git commit -m "feat(fleet): add the read-only /deck/owners page" -m "Co-Authored
 - Modify: `src/brigade/fleet_dashboard.py:436-445` (`_nav`)
 - Test: `tests/test_fleet_owners_page.py`
 
-- [ ] Write the failing test
+- [x] Write the failing test
 
 **Append** to `tests/test_fleet_owners_page.py` (after two blank lines):
 
@@ -1869,9 +1869,9 @@ def test_owners_link_is_in_the_navigation_of_every_deck_page_and_board(tmp_path,
         assert '<a href="/deck" aria-current="page">' not in body
 ```
 
-- [ ] Run it, watch it fail: `brigade work verify run --target . --command "python -m pytest tests/test_fleet_owners_page.py -q" --capture brigade-work` - expect FAIL (the `/deck` page has no owners link); 1 failed, 10 passed; the failure is `AssertionError: /deck` on the missing `href="/deck/owners"`. The pytest text is in `command-1-stdout.log` inside the receipt directory named on the `receipt:` line.
+- [x] Run it, watch it fail: `brigade work verify run --target . --command "python -m pytest tests/test_fleet_owners_page.py -q" --capture brigade-work` - expect FAIL (the `/deck` page has no owners link); 1 failed, 10 passed; the failure is `AssertionError: /deck` on the missing `href="/deck/owners"`. The pytest text is in `command-1-stdout.log` inside the receipt directory named on the `receipt:` line.
 
-- [ ] Add the link to both nav definitions
+- [x] Add the link to both nav definitions
 
 **Edit** `src/brigade/fleet_deck_overview.py`, replace this:
 
@@ -1899,11 +1899,11 @@ with this:
         ("/deck/owners", "owners"),
 ```
 
-- [ ] Run to green: same command - expect PASS, 11 passed.
+- [x] Run to green: same command - expect PASS, 11 passed.
 
-- [ ] Run the suites that assert on deck navigation: `brigade work verify run --target . --command "python -m pytest tests/test_fleet_deck_overview.py tests/test_fleet_dashboard.py tests/test_fleet_command_deck.py tests/test_fleet_work_page.py tests/test_fleet_repo_policy_page.py -q" --capture brigade-work` - expect PASS, 305 passed.
+- [x] Run the suites that assert on deck navigation: `brigade work verify run --target . --command "python -m pytest tests/test_fleet_deck_overview.py tests/test_fleet_dashboard.py tests/test_fleet_command_deck.py tests/test_fleet_work_page.py tests/test_fleet_repo_policy_page.py -q" --capture brigade-work` - expect PASS, 305 passed.
 
-- [ ] Commit:
+- [x] Commit:
 
 ```bash
 git add src/brigade/fleet_deck_overview.py src/brigade/fleet_dashboard.py tests/test_fleet_owners_page.py
@@ -1919,7 +1919,7 @@ git commit -m "feat(fleet): link the owners page from deck navigation" -m "Co-Au
 - Regenerate: `docs/command-inventory.md`
 - Test: `tests/test_fleet_owners_cli.py`
 
-- [ ] Write the failing test
+- [x] Write the failing test
 
 **Create** `tests/test_fleet_owners_cli.py`:
 
@@ -1997,9 +1997,9 @@ def test_an_older_hub_without_the_route_maps_to_policy_unsupported(monkeypatch):
         raise AssertionError("expected FleetPolicyClientError")
 ```
 
-- [ ] Run it, watch it fail: `brigade work verify run --target . --command "python -m pytest tests/test_fleet_owners_cli.py -q" --capture brigade-work` - expect FAIL (`fleet owners` is not a command and `show_owners` is missing); 5 failed: `--help` exits 2 because `owners` is not a command, and the other four raise `AttributeError` for the missing `show_owners`. The pytest text is in `command-1-stdout.log` inside the receipt directory named on the `receipt:` line.
+- [x] Run it, watch it fail: `brigade work verify run --target . --command "python -m pytest tests/test_fleet_owners_cli.py -q" --capture brigade-work` - expect FAIL (`fleet owners` is not a command and `show_owners` is missing); 5 failed: `--help` exits 2 because `owners` is not a command, and the other four raise `AttributeError` for the missing `show_owners`. The pytest text is in `command-1-stdout.log` inside the receipt directory named on the `receipt:` line.
 
-- [ ] Add the client call
+- [x] Add the client call
 
 **Edit** `src/brigade/fleet_client_policy.py`, replace this:
 
@@ -2019,7 +2019,7 @@ def show_owners() -> dict[str, Any]:
 def history_policy(*, limit: int = 50) -> dict[str, Any]:
 ```
 
-- [ ] Add the command group
+- [x] Add the command group
 
 **Create** `src/brigade/cli/fleet_owners.py`:
 
@@ -2051,7 +2051,7 @@ def _dispatch_show(args: argparse.Namespace) -> int:
     return _emit(payload, json_out=True)
 ```
 
-- [ ] Register it from the policy group (not from `cli/fleet.py`, which is at the size ceiling)
+- [x] Register it from the policy group (not from `cli/fleet.py`, which is at the size ceiling)
 
 **Edit** `src/brigade/cli/fleet_policy.py`, replace this:
 
@@ -2071,15 +2071,15 @@ with this:
     register_owners(fleet_sub)
 ```
 
-- [ ] Run to green: same command - expect PASS, 5 passed.
+- [x] Run to green: same command - expect PASS, 5 passed.
 
-- [ ] Run it, watch it fail: `brigade work verify run --target . --command "python -m pytest tests/test_cli_inventory_contract.py tests/test_roadmap_inventory_cmd.py -q" --capture brigade-work` - expect FAIL (the generated inventory does not list the new path); 1 failed, 11 passed; the failure is `test_parser_inventory_and_missing_cli_agree_after_alias_normalization`, with `brigade fleet owners show` listed as an extra parser path. The pytest text is in `command-1-stdout.log` inside the receipt directory named on the `receipt:` line.
+- [x] Run it, watch it fail: `brigade work verify run --target . --command "python -m pytest tests/test_cli_inventory_contract.py tests/test_roadmap_inventory_cmd.py -q" --capture brigade-work` - expect FAIL (the generated inventory does not list the new path); 1 failed, 11 passed; the failure is `test_parser_inventory_and_missing_cli_agree_after_alias_normalization`, with `brigade fleet owners show` listed as an extra parser path. The pytest text is in `command-1-stdout.log` inside the receipt directory named on the `receipt:` line.
 
-- [ ] Regenerate the inventory (extras must be on for the generator; `XDG_CONFIG_HOME` points at an empty directory so no local config leaks in): `mkdir -p /tmp/brigade-empty-xdg && BRIGADE_EXTRAS=1 XDG_CONFIG_HOME=/tmp/brigade-empty-xdg PYTHONPATH=src python -m brigade roadmap commands --write`. The only diff in `docs/command-inventory.md` must be the `brigade fleet` count going from 72 to 73 command paths and one new line, `` - `brigade fleet owners show` ``. Check with `git diff --stat docs/command-inventory.md` (expect 2 insertions, 1 deletion, so 3 lines changed) before continuing.
+- [x] Regenerate the inventory (extras must be on for the generator; `XDG_CONFIG_HOME` points at an empty directory so no local config leaks in): `mkdir -p /tmp/brigade-empty-xdg && BRIGADE_EXTRAS=1 XDG_CONFIG_HOME=/tmp/brigade-empty-xdg PYTHONPATH=src python -m brigade roadmap commands --write`. The only diff in `docs/command-inventory.md` must be the `brigade fleet` count going from 72 to 73 command paths and one new line, `` - `brigade fleet owners show` ``. Check with `git diff --stat docs/command-inventory.md` (expect 2 insertions, 1 deletion, so 3 lines changed) before continuing.
 
-- [ ] Run to green: same command - expect PASS, 12 passed.
+- [x] Run to green: same command - expect PASS, 12 passed.
 
-- [ ] Commit:
+- [x] Commit:
 
 ```bash
 git add src/brigade/cli/fleet_owners.py src/brigade/cli/fleet_policy.py src/brigade/fleet_client_policy.py docs/command-inventory.md tests/test_fleet_owners_cli.py
@@ -2091,7 +2091,7 @@ git commit -m "feat(fleet): add brigade fleet owners show" -m "Co-Authored-By: C
 **Files:**
 - Modify: `CHANGELOG.md` (the `### Added` list under `## [Unreleased]`)
 
-- [ ] Add the changelog entry
+- [x] Add the changelog entry
 
 **Edit** `CHANGELOG.md`, replace this:
 
@@ -2111,9 +2111,9 @@ with this:
 - A fleet ownership map. The policy document gains an optional `owners` section of charters that say what each agent or surface owns, must never touch, and how work reaches it. The Command Deck page `/deck/owners` shows each charter beside its live claims, Grok Bot jobs, sessions, and delegations, with an Unassigned list for work no charter matches. `GET /owners` and `brigade fleet owners show` return the same view as JSON. Charters describe responsibility and do not block any claim, dispatch, or merge.
 ```
 
-- [ ] Set up the virtualenv the focused gate needs (skip if `.venv/` already exists; it is ignored by git): `python -m venv .venv && .venv/bin/pip install -e ".[dev]"`. `scripts/verify_env.py` refuses an interpreter that imports Brigade from another checkout, which is why the borrowed repository virtualenv cannot be used here.
+- [x] Set up the virtualenv the focused gate needs (skip if `.venv/` already exists; it is ignored by git): `python -m venv .venv && .venv/bin/pip install -e ".[dev]"`. `scripts/verify_env.py` refuses an interpreter that imports Brigade from another checkout, which is why the borrowed repository virtualenv cannot be used here.
 
-- [ ] Run the focused gate over every test file this plan added or relies on (ruff lint, ruff format check, version sync, managed snapshot, template-profile snapshot, mypy, then the named tests):
+- [x] Run the focused gate over every test file this plan added or relies on (ruff lint, ruff format check, version sync, managed snapshot, template-profile snapshot, mypy, then the named tests):
 
 
 ```bash
@@ -2122,9 +2122,9 @@ brigade work verify run --target . --argv-json '["./scripts/verify-focused","tes
 
 Expect `status: completed` and exit 0. If ruff format reports a file, run `.venv/bin/ruff format <file>` and re-run. A failure in a test this plan did not touch is a real regression from a plan edit: fix the cause, never the test.
 
-- [ ] Scan the changed markdown for leaks (one path per invocation): `brigade guard scan CHANGELOG.md --policy src/brigade/guard/policies/public-repo.json` - expect exit 0 with `blocked=false` and exactly three WARN findings that already exist in the file (two loopback addresses and one port reference, none on the new bullet).
+- [x] Scan the changed markdown for leaks (one path per invocation): `brigade guard scan CHANGELOG.md --policy src/brigade/guard/policies/public-repo.json` - expect exit 0 with `blocked=false` and exactly three WARN findings that already exist in the file (two loopback addresses and one port reference, none on the new bullet).
 
-- [ ] Commit:
+- [x] Commit:
 
 ```bash
 git add CHANGELOG.md
