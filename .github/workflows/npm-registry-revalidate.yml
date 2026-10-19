@@ -1,0 +1,225 @@
+name: Supplemental original npm registry validation
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: npm-original-registry-revalidation
+  cancel-in-progress: false
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  PACKAGING_SHA: '26eb95cd19beacc9750811613e68cc7a2c82d229'
+  ORIGINAL_RUN_ID: '39256315934'
+  ORIGINAL_ARTIFACT_ID: '12188086054'
+  ORIGINAL_ARTIFACT_NAME: stable-npm-release-archives
+  ORIGINAL_ZIP_SHA256: '73f0bf768ce1a60a5adbd4d0b38448de74772f72ca8d621da9b2fec6bed4ac2a'
+
+jobs:
+  registry-acceptance:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - {os: macos-15, platform: darwin-arm64}
+          - {os: macos-15-intel, platform: darwin-x64}
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ env.PACKAGING_SHA }}
+          path: payload-source
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          ref: ${{ github.sha }}
+          path: validation-harness
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '24.22.0'
+      - name: Pin npm archive and provenance toolchain
+        run: |
+          npm install --global npm@11.19.1 --ignore-scripts
+          test "$(node --version)" = v24.22.0
+          test "$(npm --version)" = 11.19.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.12'
+      - name: Record independent clean source identities
+        run: |
+          python - <<'PYCODE'
+          import hashlib, json, os, re, subprocess
+          from pathlib import Path
+          workspace = Path(os.environ['GITHUB_WORKSPACE']).resolve()
+          proof = Path(os.environ['RUNNER_TEMP']) / 'npm-revalidation'
+          proof.mkdir(exist_ok=True)
+          assert os.environ['GITHUB_REPOSITORY'] == 'escoffier-labs/brigade'
+          assert os.environ['GITHUB_REF'] == 'refs/heads/main'
+          assert os.environ['GITHUB_WORKFLOW_REF'] == 'escoffier-labs/brigade/.github/workflows/npm-registry-revalidate.yml@' + os.environ['GITHUB_REF']
+          identities = {}
+          for role, directory, expected in [('packaging', 'payload-source', os.environ['PACKAGING_SHA']), ('validation', 'validation-harness', os.environ['GITHUB_SHA'])]:
+              assert re.fullmatch('[a-f0-9]{40}', expected), 'invalid source SHA'
+              checkout = workspace / directory
+              sha = subprocess.check_output(['git', '-C', str(checkout), 'rev-parse', 'HEAD'], text=True).strip()
+              status = subprocess.check_output(['git', '-C', str(checkout), 'status', '--porcelain', '--untracked-files=all'], text=True)
+              assert sha == expected, role + ' checkout HEAD mismatch'
+              assert not status, role + ' checkout must be clean'
+              hashes = {name: hashlib.sha256((checkout / 'npm/feasibility' / name).read_bytes()).hexdigest() for name in ['acceptance.cjs', 'provenance.cjs', 'prepare.py']}
+              identities[role] = {'sha': sha, 'cleanStatus': status, 'path': str(checkout), 'sha256': hashes}
+          assert identities['packaging']['sha256']['provenance.cjs'] == identities['validation']['sha256']['provenance.cjs'], 'provenance verifier must remain byte-identical'
+          identities['workflow'] = {key: os.environ.get(key) for key in ['GITHUB_SHA', 'GITHUB_REF', 'GITHUB_WORKFLOW_REF', 'GITHUB_WORKFLOW_SHA', 'GITHUB_RUN_ID', 'GITHUB_RUN_ATTEMPT', 'RUNNER_OS', 'RUNNER_ARCH', 'ImageOS', 'ImageVersion']}
+          identities['versions'] = {name: subprocess.check_output(argv, text=True).strip() for name, argv in [('node', ['node', '--version']), ('npm', ['npm', '--version']), ('python', ['python', '--version'])]}
+          assert identities['versions']['node'] == 'v24.22.0'
+          assert identities['versions']['npm'] == '11.19.1'
+          assert identities['versions']['python'].startswith('Python 3.12.')
+          (proof / 'identities.json').write_text(json.dumps(identities, indent=2) + '\n')
+          PYCODE
+      - name: Fetch original artifact and API metadata
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/npm-revalidation"
+          gh api "repos/escoffier-labs/brigade/actions/runs/$ORIGINAL_RUN_ID" > "$RUNNER_TEMP/npm-revalidation/original-run-api.json"
+          gh api "repos/escoffier-labs/brigade/actions/artifacts/$ORIGINAL_ARTIFACT_ID" > "$RUNNER_TEMP/npm-revalidation/artifact-api.json"
+          gh api "repos/escoffier-labs/brigade/actions/artifacts/$ORIGINAL_ARTIFACT_ID/zip" > "$RUNNER_TEMP/npm-revalidation/original-archives.zip"
+      - name: Verify original pins and safely extract
+        run: |
+          python - <<'PYCODE'
+          import hashlib, json, os, re, stat, zipfile
+          from datetime import datetime, timezone
+          from pathlib import Path
+          proof = Path(os.environ['RUNNER_TEMP']) / 'npm-revalidation'
+          metadata = json.loads((proof / 'artifact-api.json').read_text())
+          run = json.loads((proof / 'original-run-api.json').read_text())
+          packaging = os.environ['PACKAGING_SHA']
+          expected_digest = os.environ['ORIGINAL_ZIP_SHA256']
+          assert re.fullmatch('[a-f0-9]{40}', packaging)
+          assert re.fullmatch('[a-f0-9]{64}', expected_digest)
+          assert metadata['id'] == int(os.environ['ORIGINAL_ARTIFACT_ID'])
+          assert metadata['name'] == os.environ['ORIGINAL_ARTIFACT_NAME']
+          assert metadata['expired'] is False
+          assert datetime.fromisoformat(metadata['expires_at'].replace('Z', '+00:00')) > datetime.now(timezone.utc)
+          assert run['id'] == metadata['workflow_run']['id'] == int(os.environ['ORIGINAL_RUN_ID'])
+          assert run['head_sha'] == metadata['workflow_run']['head_sha'] == packaging
+          assert run['repository']['full_name'] == run['head_repository']['full_name'] == 'escoffier-labs/brigade'
+          assert run['repository']['id'] == run['head_repository']['id'] == metadata['workflow_run']['repository_id'] == metadata['workflow_run']['head_repository_id']
+          assert run['event'] == 'workflow_dispatch' and run['path'] == '.github/workflows/npm-publish.yml'
+          assert metadata['digest'] == 'sha256:' + expected_digest
+          archive = proof / 'original-archives.zip'
+          digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+          assert digest == expected_digest, 'original ZIP digest mismatch'
+          expected = {'artifacts.json', 'runtime.json', 'escoffier-labs-brigade-0.29.0.tgz'} | {f'escoffier-labs-brigade-uv-{p}-0.29.0.tgz' for p in ['linux-x64', 'linux-arm64', 'darwin-x64', 'darwin-arm64', 'win32-x64']}
+          output = Path(os.environ['RUNNER_TEMP']) / 'npm-artifacts'
+          assert not output.exists(), 'original archive destination must be fresh'
+          with zipfile.ZipFile(archive) as z:
+              entries = z.infolist()
+              assert len(entries) == len(expected) and {e.filename for e in entries} == expected, 'exact safe eight-file inventory required'
+              assert all(not e.is_dir() and not e.flag_bits & 1 and stat.S_IFMT(e.external_attr >> 16) in (0, stat.S_IFREG) for e in entries), 'regular unencrypted files required'
+              assert sum(e.file_size for e in entries) < 512 * 1024 * 1024, 'bounded ZIP required'
+              output.mkdir()
+              for entry in entries:
+                  (output / entry.filename).write_bytes(z.read(entry))
+          hashes = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in output.iterdir()}
+          (proof / 'artifact-verification.json').write_text(json.dumps({'originalRunId': run['id'], 'originalArtifactId': metadata['id'], 'packagingSha': packaging, 'zipSha256': digest, 'filesSha256': hashes}, indent=2) + '\n')
+          PYCODE
+      - name: Verify original archives against original clean source
+        working-directory: payload-source
+        run: |
+          argv=$(node -e 'process.stdout.write(JSON.stringify(["python","npm/feasibility/prepare.py","--verify-artifacts",process.env.RUNNER_TEMP+"/npm-artifacts"]))')
+          PYTHONPATH=src python -m brigade work verify run --target . --argv-json "$argv" --timeout 120 --capture brigade-work
+      - name: Full native registry acceptance with separately pinned harness
+        working-directory: payload-source
+        env:
+          EXPECTED_PLATFORM: ${{ matrix.platform }}
+        run: |
+          argv=$(node -e 'process.stdout.write(JSON.stringify(["node",process.env.GITHUB_WORKSPACE+"/validation-harness/npm/feasibility/acceptance.cjs","--artifacts",process.env.RUNNER_TEMP+"/npm-artifacts","--out",process.env.RUNNER_TEMP+"/npm-receipts","--expected-platform",process.env.EXPECTED_PLATFORM,"--registry-spec","@escoffier-labs/brigade@0.29.0","--expected-packaging-sha",process.env.PACKAGING_SHA]))')
+          PYTHONPATH=src python -m brigade work verify run --target . --argv-json "$argv" --timeout 900 --capture brigade-work
+      - name: Recheck original archives after acceptance
+        if: always()
+        working-directory: payload-source
+        run: |
+          argv=$(node -e 'process.stdout.write(JSON.stringify(["python","npm/feasibility/prepare.py","--verify-artifacts",process.env.RUNNER_TEMP+"/npm-artifacts"]))')
+          PYTHONPATH=src python -m brigade work verify run --target . --argv-json "$argv" --timeout 120 --capture brigade-work
+      - name: Require complete native registry receipt
+        env:
+          EXPECTED_PLATFORM: ${{ matrix.platform }}
+        run: |
+          python - <<'PYCODE'
+          import json, os
+          from pathlib import Path
+          result = json.loads((Path(os.environ['RUNNER_TEMP']) / 'npm-receipts/acceptance.json').read_text())
+          assert result['status'] == result['cancellationGate'] == 'passed'
+          assert result['platform'] == result['expectedPlatform'] == os.environ['EXPECTED_PLATFORM']
+          assert result['platform'] in {'darwin-arm64', 'darwin-x64'}
+          assert result['acceptanceMode'] == 'native-default'
+          assert result['nodeVersion'] == 'v24.22.0'
+          assert result['npmVersion'] == '11.19.1'
+          assert result['distributionMode'] == 'registry'
+          assert result['validationSha'] == os.environ['GITHUB_SHA']
+          assert result['packagingSha'] == result['source']['sourceCommit'] == os.environ['PACKAGING_SHA']
+          assert result['root'] == str(Path(result['root']).resolve())
+          assert result['pathExcludesPythonAndUv'] and result['pathEntries'] == []
+          assert result['npxFresh']['prefixExists'] is False and result['npxFresh']['cacheExists'] is False
+          modes = {(signal, scope) for signal in ['SIGINT', 'SIGTERM', 'SIGHUP'] for scope in ['pid', 'group']}
+          assert len(result['cancellationModes']) == 6
+          assert {(m['signal'], m['scope']) for m in result['cancellationModes']} == modes
+          cancellation = result['cancellation']
+          assert len(cancellation) == 6
+          assert {c['mode'] for c in cancellation} == {f'posix-{scope}-{signal}' for signal, scope in modes}
+          assert all(c['caught'] is True and c['survivors'] == 0 for c in cancellation)
+          checks = result['checks']
+          assert any(c['name'] == 'npm-audit-signatures' and c['exit'] == 0 for c in checks)
+          locks = [c for c in checks if c['name'] == 'registry-lockfile-integrity']
+          assert len(locks) == 2
+          metadata = json.loads((Path(os.environ['RUNNER_TEMP']) / 'npm-artifacts/artifacts.json').read_text())
+          chosen = [a for a in metadata['artifacts'] if not a.get('platform') or a['platform'] == result['platform']]
+          assert len(chosen) == 2
+          expected = [{'name': a['name'], 'integrity': a['integrity']} for a in chosen]
+          assert all(c['packages'] == expected for c in locks)
+          root = Path(result['root'])
+          assert Path(locks[0]['file']) == root / 'prefix/package-lock.json'
+          assert Path(locks[1]['file']).parent.parent == root / 'npx-cache/_npx'
+          assert Path(locks[1]['file']).name == 'package-lock.json'
+          for name in ['cancellation-process-proof', 'cancellation-final-no-survivors']:
+              proofs = [c for c in checks if c['name'] == name]
+              assert len(proofs) == 6 and {c['mode'] for c in proofs} == {c['mode'] for c in cancellation}
+              assert all(c['survivors'] == [] for c in proofs)
+          PYCODE
+      # Supplemental evidence for the original failed run, not a replacement producer.
+      - name: Retain bounded supplemental validation evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        with:
+          name: original-npm-registry-revalidation-${{ matrix.os }}
+          path: |
+            ${{ runner.temp }}/npm-revalidation/*.json
+            ${{ runner.temp }}/npm-artifacts/artifacts.json
+            ${{ runner.temp }}/npm-artifacts/runtime.json
+            ${{ runner.temp }}/npm-receipts/acceptance.json
+            payload-source/.brigade/work/verify-runs/*/receipt.json
+            payload-source/.brigade/work/verify-runs/*/command-*-stdout.log
+            payload-source/.brigade/work/verify-runs/*/command-*-stderr.log
+          retention-days: 14
+          if-no-files-found: warn
+
+  revalidation-gate:
+    if: always()
+    needs: registry-acceptance
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    steps:
+      - name: Require both complete native supplemental results
+        env:
+          REGISTRY_RESULT: ${{ needs.registry-acceptance.result }}
+        run: test "$REGISTRY_RESULT" = success

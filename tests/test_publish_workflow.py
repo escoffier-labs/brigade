@@ -13,6 +13,7 @@ from scripts.prepare_dev_wheel import derive_dev_version, next_minor_version, pr
 
 ROOT = Path(__file__).resolve().parents[1]
 
+
 STABLE_PUBLISH_TAG_FILTER = "v[0-9]+.[0-9]+.[0-9]+"
 STABLE_PUBLISH_TAG_GUARD = re.compile(r"v\d+\.\d+\.\d+")
 
@@ -483,3 +484,424 @@ def test_npm_release_workflow_has_dispatch_source_oidc_and_native_gates():
     assert guard["env"]["RELEASE_TAG"] == "${{ inputs.release_tag }}"
     registry = "\n".join(s.get("run", "") for s in jobs["registry-acceptance"]["steps"])
     assert "--registry-spec" in registry
+
+
+def revalidation_python(step_name):
+    """Execute the workflow-owned guard, rather than a test copy of its policy."""
+    import textwrap
+
+    workflow = _load_workflow_yaml(ROOT / ".github/workflows/npm-registry-revalidate.yml")
+    step = next(s for s in workflow["jobs"]["registry-acceptance"]["steps"] if s.get("name") == step_name)
+    return textwrap.dedent(re.search(r"python - <<'PYCODE'\n(.*?)^\s*PYCODE$", step["run"], re.M | re.S)[1])
+
+
+def test_npm_revalidation_is_read_only_and_pins_two_source_identities():
+    import json
+    import os
+    import shlex
+
+    workflow = _load_workflow_yaml(ROOT / ".github/workflows/npm-registry-revalidate.yml")
+    assert set(workflow.get("on", workflow.get(True))) == {"workflow_dispatch"}
+    assert workflow["permissions"] == {"contents": "read", "actions": "read"}
+    assert workflow["env"]["PACKAGING_SHA"] == "26eb95cd19beacc9750811613e68cc7a2c82d229"
+    assert workflow["env"]["ORIGINAL_RUN_ID"] == "39256315934"
+    assert workflow["env"]["ORIGINAL_ARTIFACT_ID"] == "12188086054"
+    assert workflow["env"]["ORIGINAL_ARTIFACT_NAME"] == "stable-npm-release-archives"
+    assert workflow["env"]["ORIGINAL_ZIP_SHA256"] == "73f0bf768ce1a60a5adbd4d0b38448de74772f72ca8d621da9b2fec6bed4ac2a"
+    jobs = workflow["jobs"]
+    assert set(jobs) == {"registry-acceptance", "revalidation-gate"}
+    native = jobs["registry-acceptance"]
+    assert native["timeout-minutes"] <= 20
+    assert native["strategy"]["fail-fast"] is False
+    assert native["strategy"]["matrix"]["include"] == [
+        {"os": "macos-15", "platform": "darwin-arm64"},
+        {"os": "macos-15-intel", "platform": "darwin-x64"},
+    ]
+    checkouts = [s["with"] for s in native["steps"] if s.get("uses", "").startswith("actions/checkout@")]
+    assert [(c["path"], c["ref"]) for c in checkouts] == [
+        ("payload-source", "${{ env.PACKAGING_SHA }}"),
+        ("validation-harness", "${{ github.sha }}"),
+    ]
+    assert all(c["persist-credentials"] is False for c in checkouts)
+    # Execute only the workflow's JS argv builder, never acceptance or prepare.
+    # Select by executable path so step names and shell variable names can change.
+    invocations = [s for s in native["steps"] if "node -e " in s.get("run", "")]
+    acceptance = [s for s in invocations if "acceptance.cjs" in s["run"]]
+    preparation = [s for s in invocations if "prepare.py" in s["run"]]
+    assert len(acceptance) == 1 and len(preparation) == 2
+    env = {
+        **os.environ,
+        "GITHUB_WORKSPACE": "/fixture/workspace",
+        "RUNNER_TEMP": "/fixture/temp",
+        "PACKAGING_SHA": workflow["env"]["PACKAGING_SHA"],
+        "EXPECTED_PLATFORM": "darwin-arm64",
+    }
+    for step in [*acceptance, *preparation]:
+        assert step["working-directory"] == "payload-source"
+        builder = re.search(r"\bnode -e ('[^']*')", step["run"])
+        assert builder, "workflow must provide an independently executable argv builder"
+        argv = json.loads(
+            subprocess.check_output(["node", "-e", shlex.split(builder[1])[0]], env=env, text=True, timeout=10)
+        )
+        if step in acceptance:
+            assert argv[:2] == ["node", "/fixture/workspace/validation-harness/npm/feasibility/acceptance.cjs"]
+            assert argv[argv.index("--expected-packaging-sha") + 1] == env["PACKAGING_SHA"]
+            assert argv[argv.index("--registry-spec") + 1] == "@escoffier-labs/brigade@0.29.0"
+        else:
+            assert argv == ["python", "npm/feasibility/prepare.py", "--verify-artifacts", "/fixture/temp/npm-artifacts"]
+    assert native["steps"].index(preparation[0]) < native["steps"].index(acceptance[0])
+    assert native["steps"].index(acceptance[0]) < native["steps"].index(preparation[1])
+    assert preparation[1]["if"] == "always()"
+    assert {"GITHUB_SHA", "GITHUB_REF"}.isdisjoint(workflow.get("env", {}))
+    for job in jobs.values():
+        assert {"GITHUB_SHA", "GITHUB_REF"}.isdisjoint(job.get("env", {}))
+        assert "environment" not in job and "permissions" not in job
+        for step in job["steps"]:
+            if "uses" in step:
+                assert re.fullmatch(r"actions/[a-z-]+@[a-f0-9]{40}", step["uses"])
+            assert {"GITHUB_SHA", "GITHUB_REF"}.isdisjoint(step.get("env", {}))
+            if "GH_TOKEN" in step.get("env", {}):
+                assert step["name"] == "Fetch original artifact and API metadata"
+            assert not re.search(
+                r"npm (?:publish|pack)|publish\.cjs|--out.*npm-artifacts|secrets\.", step.get("run", "")
+            )
+    gate = jobs["revalidation-gate"]
+    assert gate["if"] == "always()" and gate["needs"] == "registry-acceptance"
+    assert gate["steps"][0]["env"]["REGISTRY_RESULT"] == "${{ needs.registry-acceptance.result }}"
+    assert 'test "$REGISTRY_RESULT" = success' in gate["steps"][0]["run"]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        None,
+        "artifact-id",
+        "run-id",
+        "repository",
+        "source",
+        "expired",
+        "digest-metadata",
+        "digest-bytes",
+        "unsafe-name",
+        "duplicate-name",
+        "symlink",
+        "extra-file",
+    ],
+)
+def test_npm_revalidation_rejects_substituted_or_unsafe_original_artifacts(tmp_path, mutation):
+    import hashlib
+    import json
+    import os
+    import stat
+    import zipfile
+
+    workflow = _load_workflow_yaml(ROOT / ".github/workflows/npm-registry-revalidate.yml")
+    env = {**os.environ, **workflow["env"], "RUNNER_TEMP": str(tmp_path)}
+    proof = tmp_path / "npm-revalidation"
+    proof.mkdir()
+    archive = proof / "original-archives.zip"
+    names = (
+        ["escoffier-labs-brigade-0.29.0.tgz"]
+        + [
+            f"escoffier-labs-brigade-uv-{p}-0.29.0.tgz"
+            for p in ("linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64", "win32-x64")
+        ]
+        + ["artifacts.json", "runtime.json"]
+    )
+    if mutation == "unsafe-name":
+        names[-1] = "../runtime.json"
+    if mutation == "extra-file":
+        names.append("unexpected.txt")
+    with zipfile.ZipFile(archive, "w") as z:
+        for name in names:
+            if mutation == "symlink" and name == "runtime.json":
+                entry = zipfile.ZipInfo(name)
+                entry.create_system = 3
+                entry.external_attr = (stat.S_IFLNK | 0o777) << 16
+                z.writestr(entry, "elsewhere")
+            else:
+                z.writestr(name, b"original archive fixture")
+        if mutation == "duplicate-name":
+            with pytest.warns(UserWarning, match="Duplicate name"):
+                z.writestr(names[0], b"duplicate")
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    env["ORIGINAL_ZIP_SHA256"] = digest
+    metadata = {
+        "id": 12188086054,
+        "name": "stable-npm-release-archives",
+        "expired": False,
+        "expires_at": "2099-01-01T00:00:00Z",
+        "digest": "sha256:" + digest,
+        "workflow_run": {
+            "id": 39256315934,
+            "head_sha": env["PACKAGING_SHA"],
+            "repository_id": 123,
+            "head_repository_id": 123,
+        },
+    }
+    run = {
+        "id": 39256315934,
+        "head_sha": env["PACKAGING_SHA"],
+        "event": "workflow_dispatch",
+        "path": ".github/workflows/npm-publish.yml",
+        "repository": {"id": 123, "full_name": "escoffier-labs/brigade"},
+        "head_repository": {"id": 123, "full_name": "escoffier-labs/brigade"},
+    }
+    if mutation == "artifact-id":
+        metadata["id"] += 1
+    elif mutation == "run-id":
+        metadata["workflow_run"]["id"] += 1
+    elif mutation == "repository":
+        run["repository"]["full_name"] = "someone/brigade"
+    elif mutation == "source":
+        metadata["workflow_run"]["head_sha"] = "b" * 40
+    elif mutation == "expired":
+        metadata["expires_at"] = "2000-01-01T00:00:00Z"
+    elif mutation == "digest-metadata":
+        metadata["digest"] = "sha256:" + "0" * 64
+    elif mutation == "digest-bytes":
+        archive.write_bytes(archive.read_bytes() + b"changed")
+    (proof / "artifact-api.json").write_text(json.dumps(metadata))
+    (proof / "original-run-api.json").write_text(json.dumps(run))
+    result = subprocess.run(
+        [sys.executable, "-c", revalidation_python("Verify original pins and safely extract")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert (result.returncode == 0) == (mutation is None), result.stderr
+    payload = tmp_path / "npm-artifacts"
+    if mutation is None:
+        assert sorted(p.name for p in payload.iterdir()) == sorted(names)
+        assert json.loads((proof / "artifact-verification.json").read_text())["zipSha256"] == digest
+    else:
+        assert not payload.exists(), "reject the complete inventory before extracting any file"
+
+
+@pytest.mark.parametrize(
+    "mutation", [None, "harness-head", "payload-head", "dirty", "provenance", "malformed-sha", "non-main"]
+)
+def test_npm_revalidation_checks_real_clean_checkout_identities(tmp_path, mutation):
+    import json
+    import os
+
+    heads = {}
+    for name in ("payload-source", "validation-harness"):
+        repo = tmp_path / name
+        repo.mkdir()
+        subprocess.run(["git", "init", "-q", str(repo)], check=True)
+        scripts = repo / "npm/feasibility"
+        scripts.mkdir(parents=True)
+        for filename in ("provenance.cjs", "prepare.py", "acceptance.cjs"):
+            (scripts / filename).write_text("provenance" if filename == "provenance.cjs" else name)
+        subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-qm",
+                "fixture",
+            ],
+            check=True,
+        )
+        heads[name] = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    env = {
+        **os.environ,
+        "RUNNER_TEMP": str(tmp_path),
+        "GITHUB_WORKSPACE": str(tmp_path),
+        "PACKAGING_SHA": heads["payload-source"],
+        "GITHUB_SHA": heads["validation-harness"],
+        "GITHUB_REPOSITORY": "escoffier-labs/brigade",
+        "GITHUB_REF": "refs/heads/main",
+        "GITHUB_WORKFLOW_REF": "escoffier-labs/brigade/.github/workflows/npm-registry-revalidate.yml@refs/heads/main",
+    }
+    if mutation == "harness-head":
+        env["GITHUB_SHA"] = "a" * 40
+    elif mutation == "payload-head":
+        env["PACKAGING_SHA"] = "a" * 40
+    elif mutation == "non-main":
+        env["GITHUB_REF"] = "refs/heads/other"
+        env["GITHUB_WORKFLOW_REF"] = (
+            "escoffier-labs/brigade/.github/workflows/npm-registry-revalidate.yml@refs/heads/other"
+        )
+    elif mutation == "malformed-sha":
+        env["GITHUB_SHA"] = "invalid"
+    elif mutation == "dirty":
+        (tmp_path / "validation-harness/unexpected").write_text("dirty")
+    elif mutation == "provenance":
+        repo = tmp_path / "validation-harness"
+        (repo / "npm/feasibility/provenance.cjs").write_text("changed")
+        subprocess.run(["git", "-C", str(repo), "add", "."], check=True)
+        subprocess.run(
+            [
+                "git",
+                "-C",
+                str(repo),
+                "-c",
+                "user.name=Fixture",
+                "-c",
+                "user.email=fixture@example.invalid",
+                "commit",
+                "-qm",
+                "changed",
+            ],
+            check=True,
+        )
+        env["GITHUB_SHA"] = subprocess.check_output(["git", "-C", str(repo), "rev-parse", "HEAD"], text=True).strip()
+    # Toolchain provisioning is a separate workflow contract. Keep real Git I/O
+    # while supplying pinned version probes on hosts with another dev toolchain.
+    probes = """import subprocess
+original = subprocess.check_output
+def probe(argv, **kwargs):
+    versions = {'node': 'v24.22.0', 'npm': '11.19.1', 'python': 'Python 3.12.1'}
+    return versions[argv[0]] if argv[1:] == ['--version'] and argv[0] in versions else original(argv, **kwargs)
+subprocess.check_output = probe
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", probes + revalidation_python("Record independent clean source identities")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert (result.returncode == 0) == (mutation is None), result.stderr
+    if mutation is None:
+        receipt = json.loads((tmp_path / "npm-revalidation/identities.json").read_text())
+        assert receipt["packaging"]["sha"] == heads["payload-source"]
+        assert receipt["validation"]["sha"] == heads["validation-harness"]
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        None,
+        "status",
+        "cancellationGate",
+        "platform",
+        "acceptanceMode",
+        "nodeVersion",
+        "npmVersion",
+        "distributionMode",
+        "validationSha",
+        "packagingSha",
+        "pathEntries",
+        "npxFresh",
+        "missing-mode",
+        "duplicate-mode",
+        "survivor",
+        "missing-final-proof",
+        "signature-exit",
+        "lock-integrity",
+        "missing-lock",
+    ],
+)
+def test_npm_revalidation_requires_complete_native_receipt(tmp_path, mutation):
+    import json
+    import os
+
+    packaging, validation = "a" * 40, "b" * 40
+    modes = [
+        {"signal": signal, "scope": scope} for signal in ("SIGINT", "SIGTERM", "SIGHUP") for scope in ("pid", "group")
+    ]
+    cancellation = [{"mode": f"posix-{m['scope']}-{m['signal']}", "caught": True, "survivors": 0} for m in modes]
+    artifacts = [
+        {"name": "@escoffier-labs/brigade", "integrity": "sha512-launcher"},
+        {
+            "name": "@escoffier-labs/brigade-uv-darwin-arm64",
+            "platform": "darwin-arm64",
+            "integrity": "sha512-companion",
+        },
+    ]
+    packages = [{"name": a["name"], "integrity": a["integrity"]} for a in artifacts]
+    checks = (
+        [{"name": "npm-audit-signatures", "exit": 0}]
+        + [
+            {
+                "name": "registry-lockfile-integrity",
+                "file": str(tmp_path / suffix / "package-lock.json"),
+                "packages": packages,
+            }
+            for suffix in ("prefix", "npx-cache/_npx/install")
+        ]
+        + [
+            {"name": name, "mode": c["mode"], "survivors": []}
+            for name in ("cancellation-process-proof", "cancellation-final-no-survivors")
+            for c in cancellation
+        ]
+    )
+    receipt = {
+        "status": "passed",
+        "cancellationGate": "passed",
+        "platform": "darwin-arm64",
+        "expectedPlatform": "darwin-arm64",
+        "acceptanceMode": "native-default",
+        "nodeVersion": "v24.22.0",
+        "npmVersion": "11.19.1",
+        "distributionMode": "registry",
+        "validationSha": validation,
+        "packagingSha": packaging,
+        "source": {"sourceCommit": packaging},
+        "root": str(tmp_path.resolve()),
+        "pathExcludesPythonAndUv": True,
+        "pathEntries": [],
+        "npxFresh": {"prefixExists": False, "cacheExists": False},
+        "cancellationModes": modes,
+        "cancellation": cancellation,
+        "checks": checks,
+    }
+    if mutation in {
+        "status",
+        "cancellationGate",
+        "platform",
+        "acceptanceMode",
+        "nodeVersion",
+        "npmVersion",
+        "distributionMode",
+        "validationSha",
+        "packagingSha",
+    }:
+        receipt[mutation] = "wrong"
+    elif mutation == "pathEntries":
+        receipt["pathEntries"] = ["python3"]
+    elif mutation == "npxFresh":
+        receipt["npxFresh"]["cacheExists"] = True
+    elif mutation == "missing-mode":
+        modes.pop()
+    elif mutation == "duplicate-mode":
+        modes[-1] = modes[0]
+    elif mutation == "survivor":
+        cancellation[-1]["survivors"] = 1
+    elif mutation == "missing-final-proof":
+        checks.pop()
+    elif mutation == "signature-exit":
+        checks[0]["exit"] = 1
+    elif mutation == "lock-integrity":
+        checks[1]["packages"] = [{"name": a["name"], "integrity": "sha512-wrong"} for a in artifacts]
+    elif mutation == "missing-lock":
+        checks.pop(1)
+    for folder in ("npm-receipts", "npm-artifacts"):
+        (tmp_path / folder).mkdir()
+    (tmp_path / "npm-receipts/acceptance.json").write_text(json.dumps(receipt))
+    (tmp_path / "npm-artifacts/artifacts.json").write_text(json.dumps({"artifacts": artifacts}))
+    env = {
+        **os.environ,
+        "RUNNER_TEMP": str(tmp_path),
+        "EXPECTED_PLATFORM": "darwin-arm64",
+        "GITHUB_SHA": validation,
+        "PACKAGING_SHA": packaging,
+    }
+    result = subprocess.run(
+        [sys.executable, "-c", revalidation_python("Require complete native registry receipt")],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert (result.returncode == 0) == (mutation is None), result.stderr

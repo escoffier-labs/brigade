@@ -331,6 +331,14 @@ else:
         ("mismatch", "dist.integrity", 1, "sha512-wrong"),
         ("malformed", "dist.integrity", 1, "SyntaxError"),
         ("wrong-commit", "dist.attestations", 1, "Invalid registry provenance"),
+        ("explicit-commit", "dist.integrity", 1, None),
+        ("default-mismatch", "dist.integrity", 0, "artifact packaging commit must equal"),
+        ("explicit-mismatch", "dist.integrity", 0, "artifact packaging commit must equal"),
+        ("invalid-workflow-sha", "dist.integrity", 0, "GITHUB_SHA must identify"),
+        ("malformed-option", "dist.integrity", 0, "expected-packaging-sha must be 40 lowercase hex"),
+        ("missing-option", "dist.integrity", 0, "Required: --expected-packaging-sha"),
+        ("duplicate-option", "dist.integrity", 0, "Duplicate option: --expected-packaging-sha"),
+        ("packed-option", "dist.integrity", 0, "expected-packaging-sha requires --registry-spec"),
     ],
 )
 def test_registry_acceptance_retries_only_missing_metadata(tmp_path, state, field, attempts, error):
@@ -419,24 +427,47 @@ console.log(JSON.stringify(args[2]==='dist.integrity'?artifact.integrity:
     )
     (tmp_path / "npx-cli.js").write_text("console.error('registry metadata complete');process.exit(79);")
     out = tmp_path / "receipt"
+    argv = [
+        "node",
+        str(SOURCE.parent / "acceptance.cjs"),
+        "--artifacts",
+        str(tmp_path),
+        "--out",
+        str(out),
+        "--registry-spec",
+        "@escoffier-labs/brigade@0.29.0",
+    ]
+    if state.startswith("explicit"):
+        argv += ["--expected-packaging-sha", ("c" if state == "explicit-mismatch" else "a") * 40]
+    elif state in {"malformed-option", "missing-option", "duplicate-option", "packed-option"}:
+        argv += ["--expected-packaging-sha"]
+        if state != "missing-option":
+            argv += ["invalid" if state == "malformed-option" else "a" * 40]
+        if state == "duplicate-option":
+            argv += ["--expected-packaging-sha", "a" * 40]
+        if state == "packed-option":
+            del argv[argv.index("--registry-spec") : argv.index("--registry-spec") + 2]
+    physical_temp = tmp_path / "physical-temp"
+    physical_temp.mkdir()
+    alias_temp = tmp_path / "alias-temp"
+    if os.name == "nt":
+        alias_temp = physical_temp
+    else:
+        alias_temp.symlink_to(physical_temp, target_is_directory=True)
     result = subprocess.run(
-        [
-            "node",
-            str(SOURCE.parent / "acceptance.cjs"),
-            "--artifacts",
-            str(tmp_path),
-            "--out",
-            str(out),
-            "--registry-spec",
-            "@escoffier-labs/brigade@0.29.0",
-        ],
+        argv,
         env={
             **os.environ,
             "npm_execpath": str(cli),
             "PUBLISH_FIXTURE": str(tmp_path),
             "PUBLISH_STATE": state,
             "LOOKUP_FIELD": field,
-            "GITHUB_SHA": "a" * 40,
+            "GITHUB_SHA": "invalid"
+            if state == "invalid-workflow-sha"
+            else ("b" if state in {"explicit-commit", "default-mismatch"} else "a") * 40,
+            "TMPDIR": str(alias_temp),
+            "TEMP": str(alias_temp),
+            "TMP": str(alias_temp),
             "NODE_OPTIONS": "--require=" + str(SOURCE.parent / "fixtures/publisher-provenance-preload.cjs"),
         },
         capture_output=True,
@@ -446,7 +477,11 @@ console.log(JSON.stringify(args[2]==='dist.integrity'?artifact.integrity:
     receipt = json.loads((out / "acceptance.json").read_text())
     try:
         assert result.returncode == 1 and receipt["status"] == "failed"
-        calls = [json.loads(line) for line in (tmp_path / "calls.jsonl").read_text().splitlines()]
+        assert Path(receipt["root"]) == Path(receipt["root"]).resolve(), (
+            "harness must canonicalize temp root before deriving npm prefixes"
+        )
+        calls_file = tmp_path / "calls.jsonl"
+        calls = [json.loads(line) for line in calls_file.read_text().splitlines()] if calls_file.exists() else []
         first = f"{packages[0]}@0.29.0"
         lookups = [c for c in calls if c[:3] == ["view", first, field]]
         assert len(lookups) == attempts, receipt["error"]
@@ -457,6 +492,8 @@ console.log(JSON.stringify(args[2]==='dist.integrity'?artifact.integrity:
             assert not receipt["checks"], "fail before npx or runtime and signal fixtures"
             assert len(verifications) == (1 if state == "wrong-commit" else 0)
         else:
+            assert receipt["validationSha"] == ("b" if state == "explicit-commit" else "a") * 40
+            assert receipt["packagingSha"] == "a" * 40
             assert [c[1] for c in verifications] == packages
             assert "registry metadata complete" in receipt["error"]
             assert [c["name"] for c in receipt["checks"]] == ["npx-cold-version"]
