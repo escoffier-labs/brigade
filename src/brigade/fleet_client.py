@@ -143,6 +143,12 @@ CLAIM_TIMEOUT_SECONDS = 2.5
 # deadline as claims. A missing or unavailable hub is a refusal, never a
 # reason to start provider work locally.
 CLOUD_TIMEOUT_SECONDS = 2.5
+# Lease TTL a launcher requests when it binds a provider session. Admission uses a
+# short 300 second TTL because it only covers the submit round trip; once bound, the
+# session runs for hours and nothing renews the lease between manual `cloud sync`
+# runs. Six hours matches the tracker's default stale-ready threshold, so a session
+# stays visible on the Deck for as long as it can still be classified as live.
+CLOUD_BOUND_TTL_SECONDS = 6 * 60 * 60
 MAX_CLOUD_RESPONSE_BYTES = 64 * 1024
 MAX_ACTIVE_SESSIONS_RESPONSE_BYTES = 20 * 1024 * 1024
 MAX_SESSION_HISTORY_RESPONSE_BYTES = 40 * 1024 * 1024

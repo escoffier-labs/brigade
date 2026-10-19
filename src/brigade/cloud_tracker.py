@@ -1081,7 +1081,9 @@ def sync_payload(
         holder = registry_entries.get(row.get("id"), {}).get("lease_holder")
         if isinstance(match, dict) and match.get("lease_id") and isinstance(holder, str):
             try:
-                decision = fleet_client.renew_cloud(str(match["lease_id"]), holder=holder)
+                decision = fleet_client.renew_cloud(
+                    str(match["lease_id"]), holder=holder, ttl_seconds=fleet_client.CLOUD_BOUND_TTL_SECONDS
+                )
                 if decision.granted:
                     renewed.append({"id": row.get("id"), "task_id": task_id, "lease_id": match["lease_id"]})
                 else:

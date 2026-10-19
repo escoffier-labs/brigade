@@ -20,6 +20,7 @@ from . import fleet_client as _client
 FleetClientError = _client.FleetClientError
 MAX_CLOUD_RESPONSE_BYTES = _client.MAX_CLOUD_RESPONSE_BYTES
 CLOUD_TIMEOUT_SECONDS = _client.CLOUD_TIMEOUT_SECONDS
+CLOUD_BOUND_TTL_SECONDS = _client.CLOUD_BOUND_TTL_SECONDS
 
 
 def _hub_open(request: urllib.request.Request, *, timeout: float):
@@ -325,8 +326,20 @@ def admit_cloud(
 
 
 def bind_cloud(
-    lease_id: str, provider_task_id: str, *, artifact_ref: str | None = None, **kwargs: Any
+    lease_id: str,
+    provider_task_id: str,
+    *,
+    artifact_ref: str | None = None,
+    ttl_seconds: int | None = None,
+    **kwargs: Any,
 ) -> CloudDecision:
+    """Bind a provider task to a lease, optionally extending the lease TTL.
+
+    ``ttl_seconds`` is sent only when given, so a bind without it is identical on
+    the wire to what older clients sent.
+    """
+    if ttl_seconds is not None:
+        kwargs["ttl_seconds"] = ttl_seconds
     return _cloud_op("bind", lease_id=lease_id, provider_task_id=provider_task_id, artifact_ref=artifact_ref, **kwargs)
 
 

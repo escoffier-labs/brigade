@@ -551,7 +551,13 @@ def launch_agent(
         # The provider responded but did not return a usable run id. Treat as ambiguous.
         return LaunchResult(ok=False, reason="uncertain", agent_id=agent_id)
 
-    bind = fleet_client.bind_cloud(lease_id, provider_task_id=agent_id, artifact_ref=run_id, holder=holder)
+    bind = fleet_client.bind_cloud(
+        lease_id,
+        provider_task_id=agent_id,
+        artifact_ref=run_id,
+        holder=holder,
+        ttl_seconds=fleet_client.CLOUD_BOUND_TTL_SECONDS,
+    )
     if not bind.granted:
         # The agent/run exist, but the hub could not bind them. The lease is still
         # held; the operator can inspect and release manually. Do not release here
