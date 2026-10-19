@@ -14,12 +14,15 @@ from brigade.cli import main
 
 @pytest.fixture()
 def reporter(tmp_path, monkeypatch):
+    user_state = tmp_path / "LocalAppData" / "brigade"
+    user_state.mkdir(parents=True)
+    spool = user_state / "fleet-spool" / "events.jsonl"
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: "node-test")
     monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "http://hub.invalid", "token": "test"})
-    monkeypatch.setattr(fleet_client, "spool_path", lambda _node: tmp_path / "spool" / "events.jsonl")
+    monkeypatch.setattr(fleet_client, "spool_path", lambda _node: spool)
     sent = []
     monkeypatch.setattr(fleet_client, "_post_events", lambda _hub, _token, body, **_kw: sent.append(body))
-    return sent, tmp_path / "spool" / "events.jsonl"
+    return sent, spool
 
 
 def _args(*extra):

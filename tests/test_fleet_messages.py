@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 import stat
+import sys
 import threading
 import urllib.error
 import urllib.request
@@ -1251,7 +1252,16 @@ def test_send_refuses_before_post_when_full_spool_cannot_retain_retry(tmp_path, 
     assert fleet_client._read_spool(path)[0]["client_id"] == "blocked-message"
 
 
-@pytest.mark.parametrize("failed_mode", [stat.S_IFREG, stat.S_IFDIR])
+@pytest.mark.parametrize(
+    "failed_mode",
+    [
+        stat.S_IFREG,
+        pytest.param(
+            stat.S_IFDIR,
+            marks=pytest.mark.skipif(sys.platform == "win32", reason="Spool directory fsync is POSIX-only"),
+        ),
+    ],
+)
 def test_send_does_not_post_until_spool_fsync_succeeds(tmp_path, monkeypatch, failed_mode):
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
@@ -2595,6 +2605,7 @@ def test_ambiguous_reply_is_spooled_and_retried_with_same_client_id(tmp_path, mo
         (0, "Done", None, None, "normal", "message id"),
         (2**63, "Done", None, None, "normal", "message id"),
     ],
+    ids=["body-too-long", "empty-subject", "subject-too-long", "ref-too-long", "priority", "zero-id", "large-id"],
 )
 def test_invalid_offline_reply_is_not_claimed_queued(
     tmp_path, monkeypatch, message_id, body, subject, reference, priority, error
