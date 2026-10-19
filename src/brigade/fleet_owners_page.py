@@ -54,8 +54,10 @@ def _principals(match: Mapping[str, Any], enrolled: frozenset[str]) -> str:
 def _holdings(view: OwnersView, name: str, match: Mapping[str, Any]) -> str:
     if charter_only(match):
         return '<p class="station-meta">Charter only, no live attribution.</p>'
-    if view.unknown_sources:
-        sources = ", ".join(view.unknown_sources)
+    # Principals never attribute holdings, so only a holding source failure counts here.
+    holding_gaps = [source for source in view.unknown_sources if source != "principals"]
+    if holding_gaps:
+        sources = ", ".join(holding_gaps)
         return f'<p class="station-meta">Holdings unknown: could not read {deck._esc(sources)}.</p>' + _table(
             view.by_owner.get(name, ()), empty="No holdings from the sources that could be read."
         )
@@ -93,7 +95,12 @@ def _overlaps(overlaps: Sequence[Overlap]) -> str:
         + "</li>"
         for overlap in overlaps[:DISPLAY_LIMIT]
     )
-    return f'<ul class="observer-list">{entries}</ul>'
+    note = (
+        f'<p class="station-meta">Showing {DISPLAY_LIMIT} of {len(overlaps)} overlaps.</p>'
+        if len(overlaps) > DISPLAY_LIMIT
+        else ""
+    )
+    return f'<ul class="observer-list">{entries}</ul>{note}'
 
 
 def render(view: OwnersView, *, nonce: str, now: datetime) -> str:

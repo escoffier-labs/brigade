@@ -1103,7 +1103,7 @@ def make_handler(
 
         def _serve_owners_page(self, query: str) -> None:
             plain = "text/plain; charset=utf-8"
-            authorized, _editable = self._roster_auth()
+            authorized, editable = self._roster_auth()
             if not authorized:
                 self._send_html(
                     401, "Unauthorized: use brigade fleet enroll for read-only dashboard access.\n", content_type=plain
@@ -1116,7 +1116,8 @@ def make_handler(
                 conn = open_db(Path(db_path))
                 try:
                     conn.execute("PRAGMA query_only=ON")
-                    view = fleet_owners.load_view(conn, now_epoch=_hub._now_epoch())
+                    # Grok Bot job rows are admin-only, as on /cloud and /grokbot.
+                    view = fleet_owners.load_view(conn, now_epoch=_hub._now_epoch(), include_grokbot=editable)
                 finally:
                     conn.close()
             except (FleetHubError, sqlite3.Error):

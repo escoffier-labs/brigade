@@ -141,28 +141,45 @@ def test_owners_json_lists_live_claims_and_reads_without_writing(tmp_path):
             conn.close()
 
 
+def _seed_grokbot_job(db):
+    conn = fleet_hub.open_db(db)
+    try:
+        stamp = "2026-01-01T12:00:00+00:00"
+        conn.execute(
+            "INSERT INTO grokbot_jobs ("
+            "job_id, role, repository, label, task_digest, idempotency_key_hash, state, item_revision, "
+            "sequence, created_at, updated_at, queued_at, timeout_seconds, artifact_kind, owner_node"
+            ") VALUES ('grokbot-1', 'implementation-worker', 'example/repo', 'Job', ?, ?, 'queued', 1, 1, "
+            "?, ?, ?, 900, 'draft-pr', 'queue-owner')",
+            ("d" * 64, "f" * 64, stamp, stamp, stamp),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
 def test_owners_json_hides_grokbot_jobs_from_node_tokens_but_not_admin(tmp_path):
     with _hub(tmp_path) as (hub, db):
         _seed_owners(db, {"bot": {"label": "Bot", "match": {"grokbot_jobs": True}}})
-        conn = fleet_hub.open_db(db)
-        try:
-            stamp = "2026-01-01T12:00:00+00:00"
-            conn.execute(
-                "INSERT INTO grokbot_jobs ("
-                "job_id, role, repository, label, task_digest, idempotency_key_hash, state, item_revision, "
-                "sequence, created_at, updated_at, queued_at, timeout_seconds, artifact_kind, owner_node"
-                ") VALUES ('grokbot-1', 'implementation-worker', 'example/repo', 'Job', ?, ?, 'queued', 1, 1, "
-                "?, ?, ?, 900, 'draft-pr', 'queue-owner')",
-                ("d" * 64, "f" * 64, stamp, stamp, stamp),
-            )
-            conn.commit()
-        finally:
-            conn.close()
+        _seed_grokbot_job(db)
         admin = json.loads(_request(hub, "/owners", headers=_bearer())[2])
         node = json.loads(_request(hub, "/owners", headers=_bearer(_node_token(db)))[2])
         assert [item["ref"] for item in admin["owners"][0]["holdings"]] == ["grokbot-1"]
         assert node["owners"][0]["holdings"] == [] and node["unassigned"] == []
         assert node["unknown_sources"] == []
+
+
+def test_owners_page_shows_grokbot_jobs_only_to_editable_viewers(tmp_path):
+    # Grok Bot job rows are admin-only elsewhere (/cloud, /grokbot), so a read-only
+    # dashboard cookie must not see them here either.
+    with _hub(tmp_path) as (hub, db):
+        _seed_owners(db, {"bot": {"label": "Bot", "match": {"grokbot_jobs": True}}})
+        _seed_grokbot_job(db)
+        status, _, admin_body = _request(hub, "/deck/owners", headers=_bearer())
+        assert status == 200 and "grokbot-1" in admin_body
+        status, _, cookie_body = _request(hub, "/deck/owners", headers=_cookie(hub))
+        assert status == 200 and "grokbot-1" not in cookie_body
+        assert "Nothing held right now." in cookie_body
 
 
 NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
@@ -321,6 +338,24 @@ def test_unknown_source_is_called_out_instead_of_shown_as_empty():
     assert "Holdings unknown: could not read claims, sessions." in body
     assert "Could not read: claims, sessions." in body
     assert "Nothing held right now." not in body
+
+
+def test_a_principals_read_failure_does_not_mark_holdings_unknown():
+    view = _view(
+        charters={"alpha": {"label": "Alpha", "match": _match(harnesses=["claude"])}},
+        by_owner={"alpha": []},
+        unknown_sources=("principals",),
+    )
+    body = _render(view)
+    assert "Holdings unknown" not in body
+    assert "Nothing held right now." in body
+
+
+def test_long_overlap_lists_are_capped_with_a_note():
+    overlaps = [Overlap(item=_holding(ref=f"example/repo-{index}"), owners=("alpha", "beta")) for index in range(60)]
+    body = _render(_view(overlaps=overlaps))
+    assert "Showing 50 of 60 overlaps." in body
+    assert "Showing" not in _render(_view(overlaps=overlaps[:3]))
 
 
 def test_truncated_sources_are_noted_on_the_page():
