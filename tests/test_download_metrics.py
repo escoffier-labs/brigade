@@ -2,6 +2,10 @@
 
 import importlib.util
 import json
+import os
+import shlex
+import shutil
+import sys
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
 from http.client import HTTPException
@@ -13,6 +17,26 @@ import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
 NOW = datetime(2026, 6, 20, 12, tzinfo=timezone.utc)
+
+
+def _workflow_bash() -> str:
+    if os.name != "nt":
+        bash = shutil.which("bash")
+        if bash is not None:
+            return bash
+        pytest.fail("workflow shell execution requires Bash; install Bash to run these assertions")
+    # Windows' PATH may resolve bash.exe to the WSL launcher. Select Git Bash,
+    # including non-default Git installations, as in test_ci_workflow.py.
+    git = shutil.which("git")
+    roots = [Path(git).resolve().parent.parent] if git else []
+    roots.extend(Path(os.environ[key]) / "Git" for key in ("ProgramFiles", "ProgramFiles(x86)") if key in os.environ)
+    if "LOCALAPPDATA" in os.environ:
+        roots.append(Path(os.environ["LOCALAPPDATA"]) / "Programs" / "Git")
+    for root in roots:
+        bash = root / "bin" / "bash.exe"
+        if bash.is_file():
+            return str(bash)
+    pytest.fail("Install Git for Windows with Git Bash to run these assertions; WSL bash.exe is unsuitable")
 
 
 @pytest.fixture
@@ -233,7 +257,6 @@ def test_invalid_source_data_also_preserves_existing_metric(metrics, payloads, m
 
 @pytest.mark.parametrize("existing", ["absent", "owned", "unrelated"])
 def test_workflow_bootstraps_only_absent_branch_and_preserves_owned_contents(tmp_path, existing):
-    import os
     import subprocess
     import textwrap
 
@@ -265,15 +288,19 @@ def test_workflow_bootstraps_only_absent_branch_and_preserves_owned_contents(tmp
     workflow = (ROOT / ".github/workflows/download-metrics.yml").read_text()
     # Execute the shipped publishing step against an isolated local bare remote.
     shell = textwrap.dedent(workflow.split("        run: |\n", 1)[1])
+    # Git Bash need not have Python on PATH. Use this test's interpreter for
+    # both publishing and replay, with paths that Bash can interpret on Windows.
+    python = shlex.quote(Path(sys.executable).as_posix())
+    command = [_workflow_bash(), "-c", f'python() {{ {python} "$@"; }}\n' + shell]
     env = {
         **os.environ,
-        "RUNNER_TEMP": str(runner),
-        "GITHUB_SERVER_URL": str(tmp_path),
+        "RUNNER_TEMP": runner.as_posix(),
+        "GITHUB_SERVER_URL": tmp_path.as_posix(),
         "GITHUB_REPOSITORY": "remote",
         "GH_TOKEN": "",
         "GIT_CONFIG_NOSYSTEM": "1",
     }
-    result = subprocess.run(["bash", "-c", shell], env=env, cwd=tmp_path, capture_output=True, text=True)
+    result = subprocess.run(command, env=env, cwd=tmp_path, capture_output=True, text=True)
     if existing == "unrelated":
         assert result.returncode != 0
         assert "Refusing unrelated" in result.stderr
@@ -287,7 +314,7 @@ def test_workflow_bootstraps_only_absent_branch_and_preserves_owned_contents(tmp
         if existing == "owned":
             assert git("--git-dir", str(remote), "show", "download-metrics:ref") == "preserve this content\n"
         head = git("--git-dir", str(remote), "rev-parse", "download-metrics")
-        replay = subprocess.run(["bash", "-c", shell], env=env, cwd=tmp_path, capture_output=True, text=True)
+        replay = subprocess.run(command, env=env, cwd=tmp_path, capture_output=True, text=True)
         assert replay.returncode == 0, replay.stderr
         assert git("--git-dir", str(remote), "rev-parse", "download-metrics") == head
     assert git("--git-dir", str(remote), "for-each-ref", "--format=%(refname)").splitlines() == [
