@@ -115,6 +115,31 @@ Cargo to be absent.
 
 Wait for every Python published-artifact acceptance job and the published endpoint check. Pin the official PyPI wheel URL/SHA-256 and release component manifest/checksums in `npm/feasibility/runtime.json`. Keep the payload tag identity separate from the npm packaging commit. Merge the promotion only after review, security, focused/full verification, and all five native candidate jobs pass.
 
-The maintainer configures trusted publishers for the launcher and five companions under `@escoffier-labs`, naming `.github/workflows/npm-publish.yml` and environment `npm`. Dispatch that workflow on main with its exact reviewed `expected_sha` and `release_tag: v0.29.0`. It builds once with Node 24.22.0/npm 11.19.1, retains original archives for 14 days, requires native tarball acceptance, publishes companions before the launcher with explicit provenance, and requires native registry acceptance plus the final release gate.
+Before configuring trust for the first release, bootstrap all six approved names: `@escoffier-labs/brigade` and the five `platforms.*.package` entries in `npm/feasibility/runtime.json`. These names are absent at initial setup, and [npm trust requires an existing package](https://docs.npmjs.com/cli/v11/commands/npm-trust/). Use a signed-in `@escoffier-labs` organization-owner account with 2FA enabled, npm 11.15.0 or later and Node 22.14.0 or later.
+
+For each exact name, create a separate temporary folder containing only a minimal `package.json`. Use that name and version `0.0.0-bootstrap`, for example:
+
+```json
+{"name":"@escoffier-labs/brigade","version":"0.0.0-bootstrap"}
+```
+
+Stage that temporary folder, replacing the example path with its location:
+
+```sh
+npm stage publish /path/to/temporary-package --access public --tag bootstrap --ignore-scripts
+```
+
+For a new name, this creates a public `0.0.0-stage` placeholder. The staged version and its contents remain nonpublic until approval, as described in [staged publishing](https://docs.npmjs.com/staged-publishing/). Do not stage `0.29.0`: [staged and published versions share the same unique version index](https://docs.npmjs.com/cli/v11/commands/npm-stage/). Do not approve the bootstrap stage or publish real stable contents manually. Record each returned stage ID with its package name for later deliberate cleanup. Do not automatically delete or reject those stages.
+
+Once all six placeholders exist, verify each package's organization ownership. Set `package_name` to each exact approved name in turn, configure its trusted publisher, complete the 2FA prompt and read back the configuration:
+
+```sh
+npm trust github "$package_name" --repo escoffier-labs/brigade --file npm-publish.yml --env npm --allow-publish
+npm trust list "$package_name"
+```
+
+Confirm the repository, workflow, environment and publish permission for all six packages. The [npm trust `--file` flag](https://docs.npmjs.com/cli/v11/commands/npm-trust/) takes the workflow basename `npm-publish.yml`, not `.github/workflows/npm-publish.yml`.
+
+Protect the GitHub environment `npm` to allow only `main`. After merging, require the candidate gate to pass on the exact merged SHA before stable dispatch. Dispatch `npm-publish.yml` on main with that reviewed `expected_sha` and `release_tag: v0.29.0`. It builds once with Node 24.22.0/npm 11.19.1, retains original archives for 14 days, requires native tarball acceptance, publishes companions before the launcher with explicit provenance, and requires native registry acceptance plus the final release gate.
 
 For a retry, choose **Re-run failed jobs** in the same workflow run within the 14-day artifact retention to reuse the successful build job's original archives. **Re-run all jobs** and a new dispatch rebuild archives and do not reuse the originals. Preserve the original archives and inspect any partial registry publication before rebuilding. Compare registry integrity before every publish. A 404 permits publication, equal integrity skips it, and a mismatch stops permanently for that version. An uncertain response requires bounded read-back reconciliation. Recover from different published bytes with a new coordinated version, never overwrite. See [npm preparation and runtime limits](npm/feasibility/README.md).
