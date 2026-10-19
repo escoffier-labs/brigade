@@ -1258,6 +1258,9 @@ def _dispatch_grokbot(args, target: Path) -> int:
                 dot,
             )
 
+            if isinstance(exc, grokbot_t3.T3DispatchError) and exc.code == "unsupported-platform":
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
             if isinstance(
                 exc,
                 (

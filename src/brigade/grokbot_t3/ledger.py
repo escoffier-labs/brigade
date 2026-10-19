@@ -13,6 +13,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
+from . import runtime_config
 from .contracts import REOPENING_STATE, REOPENING_TTL_SECONDS, TERMINAL_STATES, T3DispatchError
 
 IN_DOUBT_TTL = timedelta(hours=2)
@@ -44,19 +45,24 @@ def wake_target_id(url: str) -> str:
     return hashlib.sha256(url.encode("utf-8")).hexdigest()
 
 
+def _prepare_storage(path: Path) -> None:
+    runtime_config.require_posix_storage()
+    try:
+        path.parent.mkdir(mode=0o700, parents=True)
+    except FileExistsError:
+        parent = path.parent.stat()
+        if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.getuid() or parent.st_mode & 0o022:
+            raise T3DispatchError("unavailable") from None
+    else:
+        os.chmod(path.parent, 0o700)
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
+    os.close(fd)
+    os.chmod(path, 0o600)
+
+
 class Ledger:
     def __init__(self, path: Path):
-        try:
-            path.parent.mkdir(mode=0o700, parents=True)
-        except FileExistsError:
-            parent = path.parent.stat()
-            if not stat.S_ISDIR(parent.st_mode) or parent.st_uid != os.getuid() or parent.st_mode & 0o022:
-                raise T3DispatchError("unavailable") from None
-        else:
-            os.chmod(path.parent, 0o700)
-        fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW, 0o600)
-        os.close(fd)
-        os.chmod(path, 0o600)
+        _prepare_storage(path)
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(str(path), timeout=10, isolation_level=None, check_same_thread=False)
         self._conn.row_factory = sqlite3.Row

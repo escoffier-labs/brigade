@@ -6,6 +6,7 @@ import json
 import os
 import re
 import stat
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from types import MappingProxyType
@@ -81,10 +82,15 @@ def _bad() -> T3DispatchError:
     return T3DispatchError("invalid_request")
 
 
+def require_posix_storage() -> None:
+    """The dispatch design requires POSIX owner-only storage, including SQLite sidecars."""
+    if sys.platform == "win32" or os.name != "posix":
+        raise T3DispatchError("unsupported-platform")
+
+
 def read_owner_file(path: Path, *, max_bytes: int) -> bytes:
     """Read a regular, owner-only, non-symlink file of bounded size."""
-    if os.name != "posix":
-        raise T3DispatchError("unavailable")
+    require_posix_storage()
     if not path.is_absolute():
         raise _bad()
     try:
@@ -233,6 +239,7 @@ def load_runtime(path: Path) -> Runtime:
 
 def validate_runtime_reference(value: object) -> str:
     """Validate an instance-config `runtime_path` reference and return it unchanged."""
+    require_posix_storage()
     reference = _abs(value)
     load_runtime(Path(reference))
     return reference

@@ -9,7 +9,7 @@ from pathlib import Path
 
 from .. import grokbot_ops
 from .contracts import T3DispatchError
-from . import lifecycle
+from . import lifecycle, runtime_config
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -31,6 +31,7 @@ def main(argv: list[str] | None = None) -> int:
     install_intake.add_argument("--force", action="store_true")
     args = parser.parse_args(argv)
     try:
+        runtime_config.require_posix_storage()
         if args.command == "watch":
             summary = lifecycle.watch_once(args.target)
             print(json.dumps(summary, sort_keys=True))
@@ -43,7 +44,11 @@ def main(argv: list[str] | None = None) -> int:
         paths = writer(args.target, args.out_dir, force=args.force)
         print(json.dumps({"units": [path.name for path in paths]}))
         return 0
-    except (T3DispatchError, grokbot_packs.PackError, grokbot_ops.ServiceRenderError, OSError):
+    except T3DispatchError as exc:
+        message = str(exc) if exc.code == "unsupported-platform" else "t3-dispatch configuration is invalid"
+        print(f"error: {message}", file=sys.stderr)
+        return 2
+    except (grokbot_packs.PackError, grokbot_ops.ServiceRenderError, OSError):
         print("error: t3-dispatch configuration is invalid", file=sys.stderr)
         return 2
 

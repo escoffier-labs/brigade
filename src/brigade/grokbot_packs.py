@@ -1138,6 +1138,8 @@ def _t3_runtime_reference(runtime_path: object) -> str:
     try:
         return grokbot_t3.validate_runtime_reference(str(runtime_path))
     except grokbot_t3.T3DispatchError as exc:
+        if exc.code == "unsupported-platform":
+            raise PackError(str(exc)) from exc
         raise PackError("unsafe-path") from exc
 
 

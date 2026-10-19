@@ -1,5 +1,17 @@
 # Grok Bot T3 dispatch pack
 
+## Platform support
+
+The dispatch runtime requires POSIX owner-only files and no-follow opens. The
+original implementation plan rejects non-POSIX owner-file reads
+([plan, line 652](superpowers/plans/2026-10-16-grokbot-t3-dispatch.md#L652)).
+On Windows, runtime reads, ledger creation, wake-log writes, and lifecycle
+commands fail before accessing private storage with
+`unsupported-platform`: "T3 dispatch is unsupported on Windows. POSIX owner-only
+storage is required". Parsing and dispatch state logic are platform independent.
+Native Windows storage can follow once the shared private-storage work in #1750
+lands and the dispatch runtime integrates it, including SQLite sidecars.
+
 ## Purpose
 
 Let Grok Bot bots launch and steer T3 Code threads on allowlisted fleet hosts through configured seats. Bots get a free-form dispatch connector: they write the prompt, pick the repository, host, and seat, and get woken when a thread finishes or asks a question.

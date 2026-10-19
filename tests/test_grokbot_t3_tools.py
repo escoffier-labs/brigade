@@ -79,7 +79,7 @@ class FakeRunner:
 
 
 @pytest.fixture
-def make(tmp_path):
+def make(tmp_path, t3_ledger_storage):
     def _make(**overrides):
         runtime = rc.parse_runtime(runtime_payload(tmp_path, **overrides))
         runner = FakeRunner()
