@@ -70,7 +70,15 @@ def _session(conn, session_id, harness="claude", node=NODE_A, expires=None):
 
 
 def _delegation(
-    conn, delegation_id, *, released=False, expires=None, reservation_expires=None, origin=NODE_A, target=NODE_B
+    conn,
+    delegation_id,
+    *,
+    released=False,
+    accepted=False,
+    expires=None,
+    reservation_expires=None,
+    origin=NODE_A,
+    target=NODE_B,
 ):
     stamp = NOW.isoformat()
     expires_at = (expires or NOW + timedelta(minutes=5)).isoformat()
@@ -78,13 +86,14 @@ def _delegation(
     conn.execute(
         "INSERT INTO fleet_reservations (reservation_id, decision_id, session_id, machine, seat, node_id, "
         "origin_node, state, accepted, expires_at, created_at, updated_at) "
-        "VALUES (?, ?, 'sess', 'machine-1', 'seat-1', ?, ?, ?, 1, ?, ?, ?)",
+        "VALUES (?, ?, 'sess', 'machine-1', 'seat-1', ?, ?, ?, ?, ?, ?, ?)",
         (
             f"res-{delegation_id}",
             f"dec-{delegation_id}",
             target,
             origin,
             "released" if released else "active",
+            1 if accepted else 0,
             reservation_expires_at,
             stamp,
             stamp,
@@ -252,6 +261,15 @@ def test_a_renewed_reservation_keeps_its_delegation_listed(conn):
     _delegation(conn, "del-lapsed", expires=NOW + timedelta(minutes=5), reservation_expires=NOW - timedelta(minutes=1))
     view = fleet_owners.load_view(conn, now_epoch=NOW.timestamp())
     assert _refs(view.unassigned) == [("delegation", "del-renewed")]
+
+
+def test_an_accepted_reservation_stays_listed_past_its_expiry(conn):
+    # Routing counts an accepted, unreleased reservation as occupying its machine
+    # whatever its expiry (fleet_hub_routing._reservation_occupies), so the map must too.
+    _delegation(conn, "del-running", accepted=True, reservation_expires=NOW - timedelta(minutes=30))
+    _delegation(conn, "del-released", accepted=True, released=True)
+    view = fleet_owners.load_view(conn, now_epoch=NOW.timestamp())
+    assert _refs(view.unassigned) == [("delegation", "del-running")]
 
 
 def test_expired_delegations_do_not_crowd_live_ones_out_of_the_source_limit(conn, monkeypatch):

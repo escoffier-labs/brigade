@@ -186,10 +186,12 @@ def _sessions(conn: sqlite3.Connection, labels: Mapping[str, str], now_epoch: fl
 
 
 def _delegations(conn: sqlite3.Connection, labels: Mapping[str, str], now_epoch: float) -> list[Holding]:
-    """Delegations whose reservation is unreleased and unexpired.
+    """Delegations whose reservation still occupies its machine.
 
-    A renewal extends the reservation, not the delegation's own copy of the
-    expiry, so liveness is read from the reservation row and filtered in SQL
+    Liveness mirrors ``fleet_hub_routing._reservation_occupies``: an unreleased
+    reservation is live once accepted, whatever its expiry, and otherwise until
+    its ``expires_at``. Renewals extend the reservation, not the delegation's
+    own copy of the expiry, so the reservation row is read and filtered in SQL
     before the limit applies. ``julianday`` parses the stored ISO text.
     """
     now = datetime.fromtimestamp(now_epoch, tz=timezone.utc).isoformat()
@@ -197,7 +199,7 @@ def _delegations(conn: sqlite3.Connection, labels: Mapping[str, str], now_epoch:
         "SELECT d.delegation_id, d.origin_node, d.target_node, d.adapter, d.repo_identity, d.seat, d.workload, "
         "d.created_at FROM fleet_policy_delegations d "
         "JOIN fleet_reservations r ON r.reservation_id = d.reservation_id "
-        "WHERE r.state != 'released' AND julianday(r.expires_at) > julianday(?) "
+        "WHERE r.state != 'released' AND (r.accepted = 1 OR julianday(r.expires_at) > julianday(?)) "
         "ORDER BY d.created_at DESC, d.delegation_id LIMIT ?",
         (now, SOURCE_LIMIT + 1),
     ).fetchall()
@@ -225,7 +227,7 @@ def load_view(conn: sqlite3.Connection, *, now_epoch: float, include_grokbot: bo
     """Read charters and live holdings. A failing source degrades, it never raises.
 
     ``include_grokbot=False`` skips the Grok Bot job source entirely, for callers
-    that must not expose it. A source that reaches ``SOURCE_LIMIT`` is listed in
+    that must not expose it. A source that exceeds ``SOURCE_LIMIT`` is listed in
     ``truncated_sources``.
     """
     policy_version: int | None = None
