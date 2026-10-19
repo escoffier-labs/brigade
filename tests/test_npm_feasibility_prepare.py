@@ -180,6 +180,18 @@ def test_stable_payload_audit_binds_tag_inventory_and_only_release_manifest(tmp_
         "wrong-commit",
         "sha-mismatch",
         "missing-sha",
+        "blank-versions-string",
+        "blank-versions-array",
+        "blank-versions-blank",
+        "blank-versions-malformed",
+        "blank-versions-error",
+        "blank-versions-present",
+        "blank-versions-null",
+        "blank-versions-empty-array",
+        "blank-versions-mixed-array",
+        "blank-versions-invalid-string",
+        "blank-versions-invalid-semver",
+        "malformed-integrity",
     ],
 )
 def test_registry_publisher_reconciles_immutable_archives_before_launcher(tmp_path, state):
@@ -220,8 +232,21 @@ args=sys.argv[1:]
 with (root/'calls.jsonl').open('a') as f: f.write(json.dumps(args)+'\\n')
 metadata=json.loads((root/'artifacts.json').read_text())
 if args[0]=='view':
-    name=args[1].rsplit('@',1)[0]; a=next(a for a in metadata['artifacts'] if a['name']==name)
+    name=args[1] if args[2]=='versions' else args[1].rsplit('@',1)[0]
+    a=next(a for a in metadata['artifacts'] if a['name']==name)
     published=(root/(a['filename']+'.published')).exists()
+    if args[2]=='versions':
+        values={'string':'0.0.0-bootstrap','array':['0.0.0-bootstrap','0.28.0'],
+                'present':['0.0.0-bootstrap','0.29.0'],'null':None,'empty-array':[],
+                'mixed-array':['0.0.0-bootstrap',None],'invalid-string':'unknown',
+                'invalid-semver':'0.0.0-01'}
+        kind=mode.removeprefix('blank-versions-')
+        if kind=='blank': sys.exit(0)
+        if kind=='malformed': print('{');sys.exit(0)
+        if kind=='error': print(json.dumps(['0.0.0-bootstrap']));sys.exit(1)
+        print(json.dumps(values[kind]));sys.exit(0)
+    if mode.startswith('blank-versions-') and not published: print('  ');sys.exit(0)
+    if mode=='malformed-integrity': print('{');sys.exit(0)
     if mode=='unavailable': print(json.dumps({'error':{'code':'E503'}}));sys.exit(1)
     if mode in ['absent','uncertain','no-attestation'] and not published:
         print(json.dumps({'error':{'code':'E404'}}));sys.exit(1)
@@ -258,32 +283,186 @@ else:
         text=True,
         timeout=90,
     )
-    assert (result.returncode == 0) == (state in {"absent", "equal", "uncertain"}), result.stderr
+    successful = {"absent", "equal", "uncertain", "blank-versions-string", "blank-versions-array"}
+    assert (result.returncode == 0) == (state in successful), result.stderr
     calls = (
         [json.loads(line) for line in (tmp_path / "calls.jsonl").read_text().splitlines()]
         if (tmp_path / "calls.jsonl").exists()
         else []
     )
     publications = [call for call in calls if call[0] == "publish"]
-    if state in {"mismatch", "unavailable", "equal"}:
+    if state in {"mismatch", "unavailable", "equal", "malformed-integrity"} or (
+        state.startswith("blank-versions-") and state not in successful
+    ):
         assert not publications
-    if state in {"absent", "uncertain"}:
+    if state in {"absent", "uncertain", "blank-versions-string", "blank-versions-array"}:
         assert [Path(call[1]).name for call in publications] == [a["filename"] for a in packages]
         assert len([call for call in calls if call[0] == "view" and call[2] == "dist.attestations"]) >= 6
     if state == "no-attestation":
         assert all(Path(call[1]).name != packages[-1]["filename"] for call in publications)
     verifications = [call for call in calls if call[0] == "verify"]
-    if state in {"absent", "equal", "uncertain"}:
+    if state in successful:
         assert [call[1] for call in verifications] == [a["name"] for a in packages]
         if publications:
             launcher_index = calls.index(publications[-1])
             assert all(calls.index(call) < launcher_index for call in verifications[:-1])
+    if state.startswith("blank-versions-"):
+        lookups = [call for call in calls if call[0] == "view" and call[2] == "versions"]
+        assert len(lookups) == (6 if state in successful else 1)
+        if state not in successful:
+            assert "Cannot establish registry state before publish" in result.stderr
+    if state == "malformed-integrity":
+        assert len(calls) == 1, "malformed integrity must not use absence fallback"
     if state == "wrong-commit":
         assert not publications and len(verifications) == 1
         assert len([call for call in calls if call[0] == "view" and call[2] == "dist.attestations"]) == 1
         assert packages[0]["name"] in result.stderr
     if state in {"sha-mismatch", "missing-sha"}:
         assert not calls, "source SHA must fail before any registry read"
+
+
+@pytest.mark.parametrize(
+    "state,field,attempts,error",
+    [
+        ("blank-once", "dist.integrity", 2, None),
+        ("blank-once", "dist.attestations", 2, None),
+        ("blank-always", "dist.integrity", 5, "registry visibility deadline"),
+        ("blank-always", "dist.attestations", 5, "registry provenance deadline"),
+        ("mismatch", "dist.integrity", 1, "sha512-wrong"),
+        ("malformed", "dist.integrity", 1, "SyntaxError"),
+        ("wrong-commit", "dist.attestations", 1, "Invalid registry provenance"),
+    ],
+)
+def test_registry_acceptance_retries_only_missing_metadata(tmp_path, state, field, attempts, error):
+    import json
+    import os
+    import shutil
+    import tarfile
+
+    platform = subprocess.check_output(["node", "-p", "process.platform+'-'+process.arch"], text=True).strip()
+    packages = [f"@escoffier-labs/brigade-uv-test-{i}" for i in range(5)] + ["@escoffier-labs/brigade"]
+    payload = b"registry-only fixture; never installed"
+    runtime = {
+        "version": "0.29.0",
+        "payloadVersion": "0.29.0",
+        "platforms": {platform: {"package": packages[0]}},
+        "payload": {
+            "version": "0.29.0",
+            "sourceCommit": "a" * 40,
+            "wheel": "fixture.whl",
+            "bytes": len(payload),
+            "sha256": hashlib.sha256(payload).hexdigest(),
+        },
+    }
+    artifacts = []
+    for i, name in enumerate(packages):
+        manifest = {
+            "name": name,
+            "version": "0.29.0",
+            "publishConfig": {"access": "public"},
+            "repository": {
+                "type": "git",
+                "url": "git+https://github.com/escoffier-labs/brigade.git",
+                "directory": "npm/feasibility",
+            },
+        }
+        files = {}
+        if i == 5:
+            manifest["optionalDependencies"] = {packages[0]: "0.29.0"}
+            files = {"runtime.json": json.dumps(runtime).encode(), "wheel/fixture.whl": payload}
+        files["package.json"] = json.dumps(manifest).encode()
+        archive = tmp_path / f"package-{i}.tgz"
+        with tarfile.open(archive, "w:gz", format=tarfile.USTAR_FORMAT) as tar:
+            for filename, data in files.items():
+                info = tarfile.TarInfo("package/" + filename)
+                info.size = len(data)
+                tar.addfile(info, io.BytesIO(data))
+        data = archive.read_bytes()
+        artifacts.append(
+            {
+                "name": name,
+                "filename": archive.name,
+                "bytes": len(data),
+                "sha256": hashlib.sha256(data).hexdigest(),
+                "shasum": hashlib.sha1(data).hexdigest(),
+                "integrity": "sha512-" + base64.b64encode(hashlib.sha512(data).digest()).decode(),
+                **({"platform": platform if i == 0 else f"test-{i}"} if i < 5 else {}),
+            }
+        )
+    (tmp_path / "artifacts.json").write_text(
+        json.dumps({"runtime": runtime, "artifacts": artifacts, "sourceCommit": "a" * 40, "sourceSha256": "b" * 64})
+    )
+    cli = tmp_path / "npm-cli.js"
+    cli.write_text(
+        r"""const fs=require('node:fs'),path=require('node:path');
+const args=process.argv.slice(2),root=process.env.PUBLISH_FIXTURE;
+if(args[0]==='--version') {console.log('11.19.1');process.exit(0);}
+const log=path.join(root,'calls.jsonl');
+const calls=fs.existsSync(log)?fs.readFileSync(log,'utf8').trim().split('\n').map(JSON.parse):[];
+fs.appendFileSync(log,JSON.stringify(args)+'\n');
+if(args[0]!=='view') throw new Error('unexpected registry write or install');
+const metadata=JSON.parse(fs.readFileSync(path.join(root,'artifacts.json')));
+if(args[2]==='dist-tags.latest') {console.log(JSON.stringify('0.29.0'));process.exit(0);}
+const name=args[1].slice(0,args[1].lastIndexOf('@'));
+const artifact=metadata.artifacts.find(a=>a.name===name);
+const count=calls.filter(c=>c[0]==='view' && c[1]===args[1] && c[2]===args[2]).length;
+if(args[2]===process.env.LOOKUP_FIELD) {
+  if(process.env.PUBLISH_STATE==='blank-always' || (process.env.PUBLISH_STATE==='blank-once' && count===0)) {
+    process.stdout.write(' \n');process.exit(0);
+  }
+  if(process.env.PUBLISH_STATE==='mismatch') {console.log(JSON.stringify('sha512-wrong'));process.exit(0);}
+  if(process.env.PUBLISH_STATE==='malformed') {console.log('{');process.exit(0);}
+}
+console.log(JSON.stringify(args[2]==='dist.integrity'?artifact.integrity:
+  {url:'https://registry.npmjs.org/-/npm/v1/attestations/'+name+'@0.29.0'}));
+"""
+    )
+    (tmp_path / "npx-cli.js").write_text("console.error('registry metadata complete');process.exit(79);")
+    out = tmp_path / "receipt"
+    result = subprocess.run(
+        [
+            "node",
+            str(SOURCE.parent / "acceptance.cjs"),
+            "--artifacts",
+            str(tmp_path),
+            "--out",
+            str(out),
+            "--registry-spec",
+            "@escoffier-labs/brigade@0.29.0",
+        ],
+        env={
+            **os.environ,
+            "npm_execpath": str(cli),
+            "PUBLISH_FIXTURE": str(tmp_path),
+            "PUBLISH_STATE": state,
+            "LOOKUP_FIELD": field,
+            "GITHUB_SHA": "a" * 40,
+            "NODE_OPTIONS": "--require=" + str(SOURCE.parent / "fixtures/publisher-provenance-preload.cjs"),
+        },
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    receipt = json.loads((out / "acceptance.json").read_text())
+    try:
+        assert result.returncode == 1 and receipt["status"] == "failed"
+        calls = [json.loads(line) for line in (tmp_path / "calls.jsonl").read_text().splitlines()]
+        first = f"{packages[0]}@0.29.0"
+        lookups = [c for c in calls if c[:3] == ["view", first, field]]
+        assert len(lookups) == attempts, receipt["error"]
+        assert all(c[0] in {"view", "verify"} for c in calls), "metadata tests must never install or publish"
+        verifications = [c for c in calls if c[0] == "verify"]
+        if error:
+            assert error in receipt["error"]
+            assert not receipt["checks"], "fail before npx or runtime and signal fixtures"
+            assert len(verifications) == (1 if state == "wrong-commit" else 0)
+        else:
+            assert [c[1] for c in verifications] == packages
+            assert "registry metadata complete" in receipt["error"]
+            assert [c["name"] for c in receipt["checks"]] == ["npx-cold-version"]
+            assert receipt["checks"][0]["exit"] == 79, "stop before runtime and signal fixtures"
+    finally:
+        shutil.rmtree(receipt["root"])
 
 
 @pytest.mark.parametrize(

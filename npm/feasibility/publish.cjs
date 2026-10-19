@@ -50,6 +50,12 @@ function integrity(a) {
     return 'equal';
   }
   if(r.status!==0 && r.json?.error?.code==='E404') return 'absent';
+  if(r.status===0 && (r.stdout || '').trim()==='') {
+    const lookup=npm(['view',a.name,'versions','--json']);
+    const versions=Array.isArray(lookup.json)?lookup.json:typeof lookup.json==='string'?[lookup.json]:[];
+    const semver=/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-(?:0|[1-9]\d*|\d*[a-zA-Z-][\da-zA-Z-]*)(?:\.(?:0|[1-9]\d*|\d*[a-zA-Z-][\da-zA-Z-]*))*)?(?:\+[\da-zA-Z-]+(?:\.[\da-zA-Z-]+)*)?$/;
+    if(lookup.status===0 && versions.length && versions.every(v=>typeof v==='string' && semver.test(v)) && !versions.includes(version)) return 'absent';
+  }
   return 'unknown';
 }
 const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));

@@ -275,14 +275,14 @@ async function main() {
       for(const delay of [0,1000,2000,4000,8000]) {
         if(delay) await new Promise(resolve=>setTimeout(resolve,delay));
         const r=await execute(process.execPath,[npmCli,'view',`${artifact.name}@${runtime.version}`,'dist.integrity','--json']);
-        if(r.exit===0) {assert.equal(JSON.parse(r.stdout),artifact.integrity);visible=true;break;}
+        if(r.exit===0 && r.stdout.trim()) {assert.equal(JSON.parse(r.stdout),artifact.integrity);visible=true;break;}
       }
       assert.ok(visible,'registry visibility deadline: '+artifact.name);
       let verified=false;
       for(const delay of [0,1000,2000,4000,8000]) {
         if(delay) await new Promise(resolve=>setTimeout(resolve,delay));
         const attestation=await execute(process.execPath,[npmCli,'view',`${artifact.name}@${runtime.version}`,'dist.attestations','--json']);
-        if(attestation.exit!==0) continue;
+        if(attestation.exit!==0 || !attestation.stdout.trim()) continue;
         const url=JSON.parse(attestation.stdout)?.url;
         if(!url) continue;
         const digest=crypto.createHash('sha512').update(fs.readFileSync(path.join(artifactsDir,artifact.filename))).digest('hex');
