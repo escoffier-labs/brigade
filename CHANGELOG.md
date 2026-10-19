@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CI runs affected test files on Windows for pull requests, and keeps one nightly tracking issue open until the full Windows suite is clean.
 
 - Stable npm publishing support for `@escoffier-labs/brigade@0.29.0` and five public platform companions, using the pinned official PyPI wheel, tag-based payload auditing, immutable archive retries, hosted provenance and native registry acceptance gates. Registry publication is tracked by the release workflow.
+- Installation guides now cover the npm and npx routes, Node.js requirements, managed Python downloads, npm-managed upgrades, and known platform limits.
 
 ### Fixed
 

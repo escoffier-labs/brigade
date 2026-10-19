@@ -25,7 +25,7 @@
 
 Brigade is a local CLI for people who point Claude Code, Codex, Cursor, and other agents at the same repos. Each harness keeps its own notes, its own MCP config, and its own idea of what "tests pass" means. Brigade gives them one ledger in the repo instead: what is ready, who claimed it, which commands actually ran and how they exited, and what the last session handed off.
 
-**Stable:** v0.29.0 (`brigade-cli==0.29.0`). **Beta:** main is the 0.30 preview line. See the [changelog](CHANGELOG.md) for what each release changed.
+**Stable:** v0.29.0 (`brigade-cli==0.29.0` on PyPI, `@escoffier-labs/brigade@0.29.0` on npm). **Beta:** main is the 0.30 preview line. See the [changelog](CHANGELOG.md) for what each release changed.
 
 ## What it does
 
@@ -74,6 +74,17 @@ brigade mcp sync --write                    # merge into each harness's native c
 
 ## Install
 
+If you have Node.js 22 or newer and npm, install the [npm package](https://www.npmjs.com/package/@escoffier-labs/brigade). This route does not need Python or pipx first:
+
+```bash
+npm install --global @escoffier-labs/brigade@0.29.0
+brigade setup
+```
+
+To try it without a global install, run each command through npx instead, for example `npx --yes @escoffier-labs/brigade@0.29.0 --version`. The package brings its own uv, through platform packages that npm installs as optional dependencies, and the published 0.29.0 wheel. Leave optional dependencies enabled. The first launch downloads a managed Python, so it needs network access. Install Git yourself for repository features. npm targets are Linux (glibc) x64 and ARM64, macOS x64 and ARM64, and Windows x64. Upgrade with npm, because `brigade update` refuses npm-managed installs. Platform details and known limits: [npm package notes](npm/feasibility/README.md).
+
+On other platforms, or to use Python 3.10 or newer directly:
+
 ```bash
 pipx install brigade-cli      # or: uv tool install brigade-cli
 brigade setup
@@ -81,7 +92,7 @@ brigade setup
 
 Then follow the [install guide](https://brigade.tools/docs/getting-started/install) or [QUICKSTART.md](QUICKSTART.md). To let your coding agent do the setup, hand it [first 10 minutes](docs/first-10-minutes.md) and the [agents guide](docs/agents-guide.md).
 
-For preview builds, run `brigade update --channel beta`. Details: [update channels](docs/update-channels.md).
+For preview builds on a pipx install, run `brigade update --channel beta`. Details: [update channels](docs/update-channels.md).
 
 ## How it compares
 
@@ -149,4 +160,4 @@ Name collisions: this is `brigade-cli` from [escoffier-labs/brigade](https://git
 
 MIT. See [LICENSE](LICENSE).
 
-Project identity: GitHub [`escoffier-labs/brigade`](https://github.com/escoffier-labs/brigade), website [brigade.tools](https://brigade.tools), PyPI [`brigade-cli`](https://pypi.org/project/brigade-cli/), command `brigade`.
+Project identity: GitHub [`escoffier-labs/brigade`](https://github.com/escoffier-labs/brigade), website [brigade.tools](https://brigade.tools), PyPI [`brigade-cli`](https://pypi.org/project/brigade-cli/), npm [`@escoffier-labs/brigade`](https://www.npmjs.com/package/@escoffier-labs/brigade), command `brigade`.

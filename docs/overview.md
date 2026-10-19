@@ -86,10 +86,12 @@ Standalone GraphTrail or MiseLedger installs are replaced by `brigade setup`. So
 Install:
 
 ```bash
-pipx install brigade-cli
-# alternative: uv tool install brigade-cli
+npm install --global @escoffier-labs/brigade@0.29.0   # needs Node.js 22+ and npm
+# alternatives: pipx install brigade-cli, or uv tool install brigade-cli
 brigade setup
 ```
+
+The npm route needs no Python first. See the [Quickstart install section](../QUICKSTART.md#1-install) for supported platforms, one-off npx use, and upgrades.
 
 Set up a repo:
 
