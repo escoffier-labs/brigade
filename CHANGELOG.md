@@ -10,6 +10,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - The README downloads badge combines PyPI downloads without mirrors and npm downloads for the main package over the same 30 completed UTC days. A daily or manual workflow updates public metric JSON on `download-metrics`, retaining the previous metric when a source fails or is stale.
+### Fixed
+
+- Test qualification: restore the normal 2.5-second HTTP budget and both real retry waits in the orphan-cleanup exhaustion test.
 
 ## [0.30.0] - 2026-10-19
 

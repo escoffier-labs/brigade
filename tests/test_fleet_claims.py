@@ -2514,8 +2514,6 @@ class TestExitOrphanReleaseHardening:
 
     def test_exit_logs_when_orphan_cleanup_retries_are_exhausted(self, hub, monkeypatch, caplog):
         self._hub_env(hub, monkeypatch)
-        # Preserve the two real retry waits with a smaller request budget.
-        monkeypatch.setattr(fleet_client, "CLAIM_TIMEOUT_SECONDS", 0.25)
         monkeypatch.setattr(fleet_client, "_claim_renew_interval", lambda ttl: 0.05)
         real_post = fleet_client._post_claim_blocking
         real_deadline = fleet_client._run_with_deadline
