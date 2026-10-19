@@ -439,6 +439,7 @@ def _nav(query: DashboardQuery) -> str:
         ("/deck/repos", "repos"),
         ("/deck/roster", "roster"),
         ("/deck/policy", "policy"),
+        ("/deck/owners", "owners"),
         (_board_href(query, "machines"), "machines board"),
         (_board_href(query, "repos"), "repos board"),
     ]

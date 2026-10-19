@@ -6,6 +6,7 @@ import json
 import os
 import sqlite3
 import stat
+import sys
 import threading
 import urllib.error
 import urllib.request
@@ -1251,7 +1252,16 @@ def test_send_refuses_before_post_when_full_spool_cannot_retain_retry(tmp_path, 
     assert fleet_client._read_spool(path)[0]["client_id"] == "blocked-message"
 
 
-@pytest.mark.parametrize("failed_mode", [stat.S_IFREG, stat.S_IFDIR])
+@pytest.mark.parametrize(
+    "failed_mode",
+    [
+        stat.S_IFREG,
+        pytest.param(
+            stat.S_IFDIR,
+            marks=pytest.mark.skipif(sys.platform == "win32", reason="Spool directory fsync is POSIX-only"),
+        ),
+    ],
+)
 def test_send_does_not_post_until_spool_fsync_succeeds(tmp_path, monkeypatch, failed_mode):
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
@@ -2401,6 +2411,7 @@ def test_reply_flushes_older_spooled_messages_first(tmp_path, monkeypatch):
     assert [message["action"] for message in attempts[1:]] == ["send", "reply"]
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="Locked directory descriptors are POSIX-only; Windows uses paths")
 def test_ordered_send_uses_the_locked_directory_descriptor(tmp_path, monkeypatch):
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
     spool = fleet_client_messages._spool_path(NODE_A, "node-secret")
@@ -2595,6 +2606,7 @@ def test_ambiguous_reply_is_spooled_and_retried_with_same_client_id(tmp_path, mo
         (0, "Done", None, None, "normal", "message id"),
         (2**63, "Done", None, None, "normal", "message id"),
     ],
+    ids=["body-too-long", "empty-subject", "subject-too-long", "ref-too-long", "priority", "zero-id", "large-id"],
 )
 def test_invalid_offline_reply_is_not_claimed_queued(
     tmp_path, monkeypatch, message_id, body, subject, reference, priority, error
@@ -2856,13 +2868,15 @@ def test_offline_send_does_not_claim_queued_when_spool_is_unsafe(tmp_path, monke
     target = tmp_path / "outside.jsonl"
     target.write_text("keep", encoding="utf-8")
     spool.symlink_to(target)
-    monkeypatch.setattr(
-        fleet_client_messages,
-        "_request",
-        lambda *_args: (_ for _ in ()).throw(fleet_client.FleetClientError("offline")),
-    )
+    attempts = []
 
-    with pytest.raises(fleet_client.FleetClientError, match="could not be persisted"):
+    def offline(*args):
+        attempts.append(args)
+        raise fleet_client.FleetClientError("offline")
+
+    monkeypatch.setattr(fleet_client_messages, "_request", offline)
+    error = "spool is not a regular file" if sys.platform == "win32" else "could not be persisted"
+    with pytest.raises(fleet_client.FleetClientError, match=error):
         fleet_client_messages.send(
             recipient=NODE_B,
             subject="Unsafe spool",
@@ -2870,6 +2884,7 @@ def test_offline_send_does_not_claim_queued_when_spool_is_unsafe(tmp_path, monke
             reference=None,
             priority="normal",
         )
+    assert attempts == []
     assert spool.is_symlink()
     assert target.read_text(encoding="utf-8") == "keep"
 

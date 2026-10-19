@@ -166,8 +166,11 @@ def target_binding(document: Mapping[str, Any], seat: str) -> dict[str, Any] | N
     """
     from . import fleet_model_roster, fleet_policy
 
+    # A newer hub may add top-level sections this install's parser rejects. Routing
+    # only reads seats, so drop sections it does not know on a copy.
+    known = {key: value for key, value in document.items() if key in fleet_policy.TOP_LEVEL_FIELDS}
     try:
-        bindings = fleet_policy.effective_seat_bindings(document, CONSUMER, seat)
+        bindings = fleet_policy.effective_seat_bindings(known, CONSUMER, seat)
     except Exception:
         return None
     return fleet_model_roster.adapter_plan_binding(CONSUMER, bindings, adapter=ADAPTER)

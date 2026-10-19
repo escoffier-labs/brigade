@@ -272,6 +272,9 @@ def test_runbook_restore_keeps_live_database_when_sqlite_backup_fails(tmp_path):
             assert connection.execute("SELECT value FROM records").fetchone() == ("live",)
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32", reason="Runbook restore executes chown inside the documented Linux container"
+)
 def test_runbook_restore_replaces_live_database_from_valid_backup(tmp_path):
     runbook = (ROOT / "docs" / "runbooks" / "fleet-hub-containers.md").read_text()
     commands = re.findall(

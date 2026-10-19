@@ -9,11 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A fleet ownership map. The policy document gains an optional `owners` section of charters that say what each agent or surface owns, must never touch, and how work reaches it. The Command Deck page `/deck/owners` shows each charter beside its live claims, Grok Bot jobs, sessions, and delegations, with an Unassigned list for work no charter matches. `GET /owners` and `brigade fleet owners show` return the same view as JSON. Charters describe responsibility and do not block any claim, dispatch, or merge.
+- CI runs affected test files on Windows for pull requests, and keeps one nightly tracking issue open until the full Windows suite is clean.
+
 - Stable npm publishing support for `@escoffier-labs/brigade@0.29.0` and five public platform companions, using the pinned official PyPI wheel, tag-based payload auditing, immutable archive retries, hosted provenance and native registry acceptance gates. Registry publication is tracked by the release workflow.
 
 ### Fixed
 
 - Keep caught verification cancellation active through the `brigade` console script and `python -m brigade` process exit so late repeated signals preserve exit status 130. Programmatic calls still restore their prior signal handlers.
+- Fleet event and message spools work on Windows when an existing drive or share root denies directory creation. Existing directories are recognized before treating a creation error as a persistence failure.
 - Cloud leases for bound Jules and Cursor sessions no longer lapse five minutes after launch. The hub `bind` action accepts an optional `ttl_seconds` (same 1 to 86400 range as `admit`) that resets the lease clock in the same update, and the Jules and Cursor launchers bind with six hours, matching the tracker's stale-ready threshold. `brigade run cloud sync` renews active leases with the same six hours instead of 900 seconds. A bind without `ttl_seconds` is unchanged, and an older hub ignores the field and keeps the admission TTL. Codex Cloud still renews in-process. Running `cloud sync` on a schedule is not part of this change. (Refs #1794)
 - Jules sessions that finish with a pull request now reach `landed` once it merges. The tracker reads the `pull_request_url` the session reports, looks that PR up directly by URL, and records its head branch on the entry, so branch names without a `jules/` prefix no longer strand a merged session at `ready-to-land` and then `stale`. Branch discovery by prefix is unchanged. (Refs #1794)
 - The npm validation harness canonicalizes its temporary root before deriving install and cache paths, preserving exact lockfile integrity checks on symlinked temporary directories. A manual read-only macOS workflow can validate the retained original release archives with separate packaging and harness identities.

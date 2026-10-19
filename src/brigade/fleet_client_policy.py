@@ -153,6 +153,12 @@ def show_policy() -> dict[str, Any]:
     return _checked(status, payload)
 
 
+def show_owners() -> dict[str, Any]:
+    hub, token = _hub_and_token(admin=False)
+    status, payload = _request("GET", "/owners", token=token, hub_url=hub)
+    return _checked(status, payload)
+
+
 def history_policy(*, limit: int = 50) -> dict[str, Any]:
     hub, token = _hub_and_token(admin=False)
     status, payload = _request("GET", f"/policy?history=1&limit={int(limit)}", token=token, hub_url=hub)

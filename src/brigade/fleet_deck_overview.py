@@ -612,6 +612,7 @@ NAV_ITEMS = (
     ("work", "/deck/work", "work"),
     ("roster", "/deck/roster", "roster"),
     ("policy", "/deck/policy", "policy"),
+    ("owners", "/deck/owners", "owners"),
     ("boards", "/view/machines", "boards"),
 )
 
