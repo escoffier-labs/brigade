@@ -833,3 +833,11 @@ def inspect_source(function) -> str:
     import inspect
 
     return inspect.getsource(function)
+
+
+def test_target_binding_ignores_top_level_keys_this_install_does_not_know():
+    document = {**_document(), "future_section": {"anything": True}}
+    expected = t3.target_binding(_document(), "coder")
+    assert expected is not None
+    assert t3.target_binding(document, "coder") == expected
+    assert "future_section" in document

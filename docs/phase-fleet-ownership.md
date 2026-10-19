@@ -121,10 +121,15 @@ other policy section does.
 
 `parse_document` rejects unknown top-level keys, so a hub older than this
 change refuses to save, roll back to, or re-parse a revision containing
-`owners`. Rollout order: deploy the new hub first, then save the first
-`owners` revision. New code treats a missing `owners` key as `{}`, so old
-documents parse unchanged. Clients never parse the document locally, so no
-client upgrade is required.
+`owners`. Clients parse the document too: T3 routing calls
+`fleet_t3_transport.target_binding`, which parses the hub policy and treats a
+parse failure as `t3-binding-missing`. An install that predates this change
+would therefore block every T3 route once an `owners` revision is live. This
+change makes `target_binding` drop top-level keys the install does not know
+before parsing, but older installs do not have that fix. Rollout order: deploy
+the new hub and upgrade every enrolled install, then save the first `owners`
+revision. New code treats a missing `owners` key as `{}`, so old documents
+parse unchanged.
 
 ## 5. Live holdings
 
@@ -203,10 +208,13 @@ database `query_only`, call `fleet_owners.load_view`, and render.
 ## 9. Rollout
 
 1. Merge and deploy the hub (Fleet Hub container) and the pipx installs.
-2. Draft the first `owners` revision from the current lane map and save it
+2. Confirm every enrolled install is upgraded (see section 4, Compatibility).
+   Draft the first `owners` revision from the current lane map and save it
    with `brigade fleet policy save --expected-version N --reason "seed owners"`.
    The real charter text lives only in the hub database, never in this
-   repository.
+   repository. Each charter edit bumps the policy revision, and prepare and
+   launch refuse a delegation whose policy version or digest changed. Edit
+   charters when no delegations are live.
 3. Review the Unassigned list for a week, editing charters until it is empty or
    every remaining item is understood.
 
