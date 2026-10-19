@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.30.0] - 2026-10-19
+
 ### Added
 
 - A fleet ownership map. The policy document gains an optional `owners` section of charters that say what each agent or surface owns, must never touch, and how work reaches it. The Command Deck page `/deck/owners` shows each charter beside its live claims, Grok Bot jobs, sessions, and delegations, with an Unassigned list for work no charter matches. `GET /owners` and `brigade fleet owners show` return the same view as JSON. Charters describe responsibility and do not block any claim, dispatch, or merge.
@@ -2073,7 +2075,8 @@ Initial release.
 - OpenClaw adapter fragments and harness-aware doctor checks.
 - Experimental Hermes adapter fragments.
 
-[Unreleased]: https://github.com/escoffier-labs/brigade/compare/v0.29.0...HEAD
+[Unreleased]: https://github.com/escoffier-labs/brigade/compare/v0.30.0...HEAD
+[0.30.0]: https://github.com/escoffier-labs/brigade/compare/v0.29.0...v0.30.0
 [0.29.0]: https://github.com/escoffier-labs/brigade/compare/v0.28.0...v0.29.0
 [0.28.0]: https://github.com/escoffier-labs/brigade/compare/v0.27.0...v0.28.0
 [0.27.0]: https://github.com/escoffier-labs/brigade/compare/v0.26.1...v0.27.0
