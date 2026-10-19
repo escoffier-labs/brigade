@@ -38,6 +38,7 @@ from . import fleet_hub_status
 from . import fleet_hub_event_bounds as request_bounds
 from .fleet_hub_claim_cardinality import ClaimCardinalityError
 from . import fleet_model_inventory
+from . import fleet_owners
 from . import fleet_policy_page
 from . import fleet_repo_policy_page
 from . import fleet_work_page
@@ -1457,6 +1458,7 @@ def make_handler(
                 "/models",
                 "/preference",
                 "/sessions",
+                "/owners",
                 "/policy",
                 "/policy/status",
                 "/policy/inventory",
@@ -1516,6 +1518,9 @@ def make_handler(
                         payload = {"preference": {key: value for key, value in pref.items() if value is not None}}
                     elif path == "/sessions":
                         payload = {"sessions": list_sessions(conn, include_all=include_all)}
+                    elif path == "/owners":
+                        conn.execute("PRAGMA query_only=ON")
+                        payload = fleet_owners.view_payload(fleet_owners.load_view(conn, now_epoch=_hub._now_epoch()))
                     elif path == "/policy/status":
                         payload = fleet_hub_policy_api.read_status(conn)
                     elif path == "/policy/inventory":
