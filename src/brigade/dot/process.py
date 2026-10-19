@@ -201,9 +201,12 @@ def _run_windows(
             env=child_environment(os.pathsep.join(_system_directories())) if env is None else env,
             **proc._process_group_kwargs(suspend=True),
         )
-    except (OSError, ValueError):
+    except BaseException as error:
+        # The job is owned here until a child is bound to it; never leak it.
         job.close()
-        raise DotError("command_unavailable") from None
+        if isinstance(error, (OSError, ValueError, TypeError)):
+            raise DotError("command_unavailable") from None
+        raise
     # On binding failure this helper kills the suspended child and closes its job.
     if proc._bind_suspended_windows_child(job, child, argv) is not None:
         if child.stdin is not None:

@@ -133,6 +133,28 @@ def test_windows_runner_refuses_launch_without_owned_job(monkeypatch):
             run_python("print('must not run')", timeout=1, max_output=100)
 
 
+@pytest.mark.parametrize(
+    ("raised", "expected"),
+    [(TypeError("environment key must be str"), DotError), (RuntimeError("unexpected launch failure"), RuntimeError)],
+)
+def test_windows_runner_closes_job_for_every_launch_exception(monkeypatch, raised, expected):
+    from types import SimpleNamespace
+
+    from brigade import proc
+    from brigade.dot import process
+
+    operations = []
+    job = SimpleNamespace(close=lambda: operations.append("close"))
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(proc, "_create_windows_child_job", lambda: job)
+    with patch.object(process.subprocess, "Popen", side_effect=raised):
+        with pytest.raises(expected) as excinfo:
+            run_python("", timeout=1, max_output=100)
+    if expected is DotError:
+        assert str(excinfo.value) == "command_unavailable"
+    assert operations == ["close"]
+
+
 def test_full_duplex_capture_preserves_bytes():
     payload = bytes(range(256)) * 256
     result = CommandRunner().run(

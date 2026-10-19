@@ -279,6 +279,8 @@ def build_listener_from_target(
 
 
 def run_listener(config: DotListenerConfig, tools: DotTools, runtime: Runtime) -> None:
+    # Exported entry point: refuse before any import or startup, whatever built the config.
+    require_local_platform()
     try:
         import uvicorn
     except ImportError:

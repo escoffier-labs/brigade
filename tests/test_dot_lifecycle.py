@@ -395,6 +395,12 @@ def test_canary_checks_anonymous_401_metadata_and_registry(configured):
 
 
 @requires_local_state
+def test_run_listener_refuses_windows_before_startup(monkeypatch):
+    monkeypatch.setattr("sys.platform", "win32")
+    with pytest.raises(DotError, match="^unsupported_on_windows$"):
+        m.run_listener(None, None, None)  # type: ignore[arg-type]
+
+
 def test_run_listener_refuses_to_start_without_a_jwt_backend(configured):
     # A missing RSA backend must fail startup, not serve a healthy-looking connector that rejects every login.
     pytest.importorskip("uvicorn", reason="requires the grokbot extra")
