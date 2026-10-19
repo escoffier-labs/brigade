@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, ContextManager
 from uuid import uuid4
 
-from . import localio
+from . import cloud_provider_pr, localio
 from .claude_cloud_identity import normalize_claude_cloud_identity
 from .inbox_lock import held_file_lock
 
@@ -562,6 +562,13 @@ def _classify_entry(
         ready_at = None
     branches = _branch_names(github)
     prs = _prs_for_branch(github, branch)
+    if provider == "jules":
+        # Jules branch names carry no recognizable prefix, so bind by the PR URL
+        # the session itself reported and adopt its head branch.
+        provider_pr = cloud_provider_pr.matching_pull_request(provider_info, github)
+        if provider_pr is not None:
+            branch = branch or provider_pr.get("head")
+            prs = [provider_pr, *(pr for pr in prs if pr is not provider_pr)]
     if provider == "claude-cloud" and entry.get("repo"):
         prefix = f"https://github.com/{entry['repo']}/pull/"
         candidates = github.get("prs")
@@ -948,6 +955,10 @@ def status_payload(
         refs["branch"]
         for row in grokbot_rows
         if isinstance((refs := row.get("artifact_refs")), dict) and isinstance(refs.get("branch"), str)
+    }
+    # A Jules head branch learned from its provider PR belongs to that session.
+    known_queue_branches |= {
+        row["branch"] for row in entries if row.get("provider") == "jules" and isinstance(row.get("branch"), str)
     }
     entries.extend(
         _orphan_branch_rows(
@@ -1790,7 +1801,12 @@ def observe_provider_details(target: Path, **_kwargs: Any) -> tuple[dict[str, Pr
             observations[provider] = observe_provider(provider, target)
         except Exception:  # noqa: BLE001 - observation must stay bounded
             observations[provider] = ProviderObservation(True, False, "transport-failure", {})
-    return observations, observe_github(target)
+    github = observe_github(target)
+    registered = {
+        str(e["task_id"]) for e in load_registry(target)["entries"] if e.get("provider") == "jules" and e.get("task_id")
+    }
+    cloud_provider_pr.resolve_pull_requests(target, observations["jules"].tasks, registered, github, _run_text)
+    return observations, github
 
 
 def _legacy_provider_tasks(observations: dict[str, ProviderObservation]) -> dict[str, Any]:
