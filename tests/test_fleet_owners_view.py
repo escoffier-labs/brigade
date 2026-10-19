@@ -10,6 +10,7 @@ import pytest
 
 from brigade import (
     fleet_hub,
+    fleet_client_policy,
     fleet_hub_claims,
     fleet_hub_messages,
     fleet_hub_policy,
@@ -361,3 +362,37 @@ def test_payload_caps_each_holdings_list_and_reports_the_totals():
     assert len(payload["unassigned"]) == fleet_owners.JSON_HOLDINGS_LIMIT and payload["unassigned_total"] == total
     assert len(payload["overlaps"]) == fleet_owners.JSON_HOLDINGS_LIMIT and payload["overlaps_total"] == total
     assert payload["truncated_sources"] == ["claims"]
+
+
+def test_a_full_active_session_page_is_reported_as_truncated(conn, monkeypatch):
+    # list_sessions stops at its own LIST_ACTIVE_LIMIT, so the loader never sees
+    # an extra row; a full page has to count as possibly truncated.
+    monkeypatch.setattr(fleet_hub_sessions, "LIST_ACTIVE_LIMIT", 2)
+    _session(conn, "sess-1")
+    _session(conn, "sess-2")
+    _session(conn, "sess-3")
+    view = fleet_owners.load_view(conn, now_epoch=NOW.timestamp())
+    assert view.truncated_sources == ("sessions",)
+    assert len([item for item in view.unassigned if item.kind == "session"]) == 2
+
+
+def test_payload_stays_under_the_response_budget_when_many_owners_share_holdings():
+    items = [_holding(index) for index in range(fleet_owners.JSON_HOLDINGS_LIMIT)]
+    names = [f"owner-{index:02}" for index in range(60)]
+    view = fleet_owners.OwnersView(
+        policy_version=2,
+        policy_error=None,
+        charters={name: {"label": name, "match": {"harnesses": ["claude"]}} for name in names},
+        by_owner={name: items for name in names},
+        unassigned=items,
+        overlaps=[fleet_owners.Overlap(item=item, owners=tuple(names)) for item in items],
+        enrolled_principals=frozenset(),
+        unknown_sources=(),
+        truncated_sources=(),
+    )
+    payload = fleet_owners.view_payload(view)
+    assert len(json.dumps(payload).encode()) <= fleet_owners.JSON_RESPONSE_BUDGET_BYTES
+    assert fleet_owners.JSON_RESPONSE_BUDGET_BYTES < fleet_client_policy.MAX_POLICY_RESPONSE_BYTES
+    assert len(payload["unassigned"]) == fleet_owners.JSON_HOLDINGS_LIMIT
+    assert all(owner["holdings_total"] == len(items) for owner in payload["owners"])
+    assert payload["owners"][-1]["holdings"] == []

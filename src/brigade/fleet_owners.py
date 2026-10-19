@@ -10,6 +10,7 @@ charters match is listed under both and reported in ``overlaps``.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
@@ -22,6 +23,11 @@ from .fleet_hub import FleetHubError
 SCHEMA = "brigade.fleet_owners.v1"
 SOURCE_LIMIT = 500
 JSON_HOLDINGS_LIMIT = 100
+# Response-wide bound for GET /owners. Charters alone can approach the 256 KiB
+# policy document cap and overlapping charters repeat the same holdings, so the
+# payload is filled against a byte budget kept under the client's 512 KiB
+# MAX_POLICY_RESPONSE_BYTES. The *_total counts stay exact either way.
+JSON_RESPONSE_BUDGET_BYTES = 480 * 1024
 
 
 @dataclass(frozen=True)
@@ -255,7 +261,10 @@ def load_view(conn: sqlite3.Connection, *, now_epoch: float, include_grokbot: bo
         except (FleetHubError, sqlite3.Error, ValueError):
             unknown.append(name)
             continue
-        if len(loaded) > SOURCE_LIMIT:
+        # list_sessions stops at its own LIST_ACTIVE_LIMIT, so a full page there
+        # counts as possibly truncated; the other loaders fetch one extra row.
+        full_session_page = name == "sessions" and len(loaded) >= fleet_hub_sessions.LIST_ACTIVE_LIMIT
+        if len(loaded) > SOURCE_LIMIT or full_session_page:
             truncated.append(name)
         items.extend(loaded[:SOURCE_LIMIT])
     enrolled: frozenset[str] = frozenset()
@@ -277,13 +286,21 @@ def load_view(conn: sqlite3.Connection, *, now_epoch: float, include_grokbot: bo
     )
 
 
+def _size(value: Any) -> int:
+    return len(json.dumps(value, separators=(", ", ": ")).encode()) + 2
+
+
 def view_payload(view: OwnersView) -> dict[str, Any]:
-    """The ``brigade.fleet_owners.v1`` JSON body served by ``GET /owners``."""
-    owners = []
+    """The ``brigade.fleet_owners.v1`` JSON body served by ``GET /owners``.
+
+    Each list is capped at ``JSON_HOLDINGS_LIMIT`` and the whole body at
+    ``JSON_RESPONSE_BUDGET_BYTES``: unassigned items fill first, then overlaps,
+    then owner holdings in name order, each only while the budget lasts.
+    """
+    owners: list[dict[str, Any]] = []
     for name in sorted(view.charters):
         charter = view.charters[name]
         match = charter.get("match") or {}
-        held = view.by_owner.get(name, ())
         owners.append(
             {
                 "name": name,
@@ -299,21 +316,38 @@ def view_payload(view: OwnersView) -> dict[str, Any]:
                     {"name": principal, "enrolled": principal in view.enrolled_principals}
                     for principal in match.get("principals") or []
                 ],
-                "holdings": [item.public() for item in held[:JSON_HOLDINGS_LIMIT]],
-                "holdings_total": len(held),
+                "holdings": [],
+                "holdings_total": len(view.by_owner.get(name, ())),
             }
         )
-    return {
+    payload: dict[str, Any] = {
         "schema": SCHEMA,
         "policy_version": view.policy_version,
         "policy_error": view.policy_error,
         "owners": owners,
-        "unassigned": [item.public() for item in view.unassigned[:JSON_HOLDINGS_LIMIT]],
+        "unassigned": [],
         "unassigned_total": len(view.unassigned),
-        "overlaps": [
-            {**overlap.item.public(), "owners": list(overlap.owners)} for overlap in view.overlaps[:JSON_HOLDINGS_LIMIT]
-        ],
+        "overlaps": [],
         "overlaps_total": len(view.overlaps),
         "unknown_sources": list(view.unknown_sources),
         "truncated_sources": list(view.truncated_sources),
     }
+    remaining = JSON_RESPONSE_BUDGET_BYTES - _size(payload)
+
+    def fill(target: list[dict[str, Any]], rows: Sequence[dict[str, Any]]) -> None:
+        nonlocal remaining
+        for row in rows[:JSON_HOLDINGS_LIMIT]:
+            cost = _size(row)
+            if cost > remaining:
+                return
+            target.append(row)
+            remaining -= cost
+
+    fill(payload["unassigned"], [item.public() for item in view.unassigned[:JSON_HOLDINGS_LIMIT]])
+    fill(
+        payload["overlaps"],
+        [{**overlap.item.public(), "owners": list(overlap.owners)} for overlap in view.overlaps[:JSON_HOLDINGS_LIMIT]],
+    )
+    for owner in owners:
+        fill(owner["holdings"], [item.public() for item in view.by_owner.get(owner["name"], ())[:JSON_HOLDINGS_LIMIT]])
+    return payload
