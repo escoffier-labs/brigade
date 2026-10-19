@@ -9,11 +9,6 @@ from unittest.mock import patch
 
 import pytest
 
-pytest.importorskip("cryptography")
-
-from cryptography.hazmat.primitives.asymmetric import rsa
-import jwt
-
 from brigade.dot.access_auth import (
     AccessVerifier,
     AuthError,
@@ -40,6 +35,7 @@ AUTH = AuthConfig(
 
 class PublicKeyTransportChecks(unittest.TestCase):
     def test_import_and_verifier_construction_are_inert(self):
+        pytest.importorskip("anyio")
         import runpy
 
         with (
@@ -151,6 +147,8 @@ class PublicKeyTransportChecks(unittest.TestCase):
         return result, stream
 
     def test_pinned_tls_request_and_supported_framing(self):
+        pytest.importorskip("anyio")
+        pytest.importorskip("h11")
         body = b'{"keys":[]}'
         responses = [
             b"HTTP/1.1 200 OK\r\nContent-Length: 11\r\n\r\n" + body,
@@ -171,6 +169,8 @@ class PublicKeyTransportChecks(unittest.TestCase):
         asyncio.run(scenario())
 
     def test_status_encoding_and_declared_length_fail_closed(self):
+        pytest.importorskip("anyio")
+        pytest.importorskip("h11")
         responses = [
             b"HTTP/1.1 302 Found\r\nLocation: https://foreign.invalid/\r\n\r\n",
             b"HTTP/1.1 500 Error\r\n\r\n",
@@ -200,6 +200,8 @@ class PublicKeyTransportChecks(unittest.TestCase):
         asyncio.run(scenario())
 
     def test_malformed_truncated_and_surplus_framing_fail_closed(self):
+        pytest.importorskip("anyio")
+        pytest.importorskip("h11")
         responses = [
             b"not HTTP\r\n\r\n",
             b"HTTP/1.1 200 OK\r\nX: incomplete",
@@ -228,6 +230,8 @@ class PublicKeyTransportChecks(unittest.TestCase):
         asyncio.run(scenario())
 
     def test_complete_incomplete_header_and_body_bounds(self):
+        pytest.importorskip("anyio")
+        pytest.importorskip("h11")
         prefix = b"HTTP/1.1 200 OK\r\nX: "
         at_limit = prefix + b"x" * (32768 - len(prefix) - 4) + b"\r\n\r\n"
 
@@ -253,6 +257,8 @@ class PublicKeyTransportChecks(unittest.TestCase):
         asyncio.run(scenario())
 
     def test_wire_limit_counts_chunk_extensions(self):
+        pytest.importorskip("anyio")
+        pytest.importorskip("h11")
         prefix = b"HTTP/1.1 200 OK\r\nTransfer-Encoding: chunked\r\n\r\n"
 
         def response(total):
@@ -272,6 +278,9 @@ class PublicKeyTransportChecks(unittest.TestCase):
         asyncio.run(scenario())
 
     def test_io_failures_and_whole_operation_deadline(self):
+        pytest.importorskip("anyio")
+        pytest.importorskip("h11")
+
         async def scenario():
             await self.exchange(b"", reject=True, receive_error=OSError("synthetic upstream private text"))
             with patch("anyio.connect_tcp", side_effect=OSError("synthetic TLS failure")) as connector:
@@ -320,10 +329,15 @@ class PublicKeyTransportChecks(unittest.TestCase):
 class SignatureChecks(unittest.TestCase):
     @classmethod
     def setUpClass(cls):
+        pytest.importorskip("cryptography")
+        pytest.importorskip("anyio")
+        from cryptography.hazmat.primitives.asymmetric import rsa
+
+        cls.jwt = pytest.importorskip("jwt")
         # Isolated ephemeral test signing keys. Never persisted or printed.
         cls.key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
         cls.other_key = rsa.generate_private_key(public_exponent=65537, key_size=2048)
-        public = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(cls.key.public_key()))
+        public = json.loads(cls.jwt.algorithms.RSAAlgorithm.to_jwk(cls.key.public_key()))
         cls.public = dict(kid="fixture", kty=public["kty"], alg="RS256", use="sig", n=public["n"], e=public["e"])
 
     def token(self, *, changes=None, remove=(), key=None, algorithm="RS256", kid="fixture"):
@@ -341,7 +355,7 @@ class SignatureChecks(unittest.TestCase):
         claims.update(changes or {})
         for name in remove:
             claims.pop(name)
-        return jwt.encode(claims, self.key if key is None else key, algorithm=algorithm, headers={"kid": kid})
+        return self.jwt.encode(claims, self.key if key is None else key, algorithm=algorithm, headers={"kid": kid})
 
     def verifier(self, payload=None, *, clock=None):
         calls = []
@@ -431,7 +445,7 @@ class SignatureChecks(unittest.TestCase):
             ):
                 with self.assertRaises(AuthError):
                     await verifier.verify({"headers": headers})
-            remote = jwt.encode(
+            remote = self.jwt.encode(
                 dict(iss=AUTH.issuer),
                 self.key,
                 algorithm="RS256",
@@ -511,7 +525,7 @@ class SignatureChecks(unittest.TestCase):
             self.assertEqual(owners, [AUTH.approved_email] * 4)
             self.assertEqual(len(calls), 1)
             now[0] += REFRESH_INTERVAL
-            public = json.loads(jwt.algorithms.RSAAlgorithm.to_jwk(self.other_key.public_key()))
+            public = json.loads(self.jwt.algorithms.RSAAlgorithm.to_jwk(self.other_key.public_key()))
             payload[0] = {
                 "keys": [dict(kid="rotated", kty=public["kty"], alg="RS256", use="sig", n=public["n"], e=public["e"])]
             }
@@ -531,6 +545,9 @@ class CompositionChecks(unittest.TestCase):
         self.assertEqual(verifier.metadata_url, verifier.authorization_server + METADATA_PATH)
 
     def test_unauthenticated_request_denied_without_fetch(self):
+        pytest.importorskip("cryptography")
+        pytest.importorskip("jwt")
+
         async def forbidden():
             raise AssertionError("unauthenticated request fetched keys")
 
