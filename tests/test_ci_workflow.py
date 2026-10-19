@@ -1560,9 +1560,10 @@ def test_windows_affected_job_selects_before_install_and_preserves_driver_policy
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     job = _workflow_job_section(text, "windows-affected-tests")
     assert "name: windows-affected-tests" in job
-    assert "github.event_name == 'pull_request' || github.event_name == 'merge_group'" in job
+    assert "if: ${{ github.event_name == 'pull_request' }}" in job
     assert "runs-on: windows-latest" in job
-    assert "timeout-minutes: 30" in job
+    assert "timeout-minutes: 50" in job
+    assert "timeout-minutes: 45" in job
     assert "fetch-depth: 0" in job
     assert "persist-credentials: false" in job
     assert "github.event.pull_request.base.sha || github.event.merge_group.base_sha" in job
@@ -1575,10 +1576,10 @@ def test_windows_affected_job_selects_before_install_and_preserves_driver_policy
         "--record",
         "--base-ref",
         "--job-started-at",
-        "--job-limit 1800",
+        "--job-limit 2700",
         "--startup-reserve 120",
         "--finalize-reserve 300",
-        "--job-timeout 1380",
+        "--job-timeout 2280",
         "--serial test_runs_serve.py",
         "--serial test_aboyeur.py",
     ):

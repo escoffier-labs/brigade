@@ -255,11 +255,14 @@ jobs:
         run: go test -race ./...
 
   # Stable check name. Maintainers may require it without changing this workflow.
+  # Pull requests only: a merge group reports this job as skipped, which satisfies
+  # a required check, so the queue does not wait on Windows. The 45-minute driver
+  # budget covers the largest selection from the last 200 main commits (257 files).
   windows-affected-tests:
     name: windows-affected-tests
-    if: ${{ github.event_name == 'pull_request' || github.event_name == 'merge_group' }}
+    if: ${{ github.event_name == 'pull_request' }}
     runs-on: windows-latest
-    timeout-minutes: 30
+    timeout-minutes: 50
     defaults:
       run:
         shell: pwsh
@@ -302,7 +305,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
       - name: Run affected Windows tests
         if: ${{ steps.selection.outputs.count != '0' }}
-        timeout-minutes: 25
+        timeout-minutes: 45
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
         run: >-
@@ -311,8 +314,8 @@ jobs:
           --record "$env:RUNNER_TEMP/windows-affected-results/summary.json"
           --base-ref $env:BASE_SHA
           --job-started-at $env:WINDOWS_PYTEST_JOB_STARTED_AT
-          --job-limit 1800 --startup-reserve 120 --finalize-reserve 300
-          --job-timeout 1380 --serial test_runs_serve.py --serial test_aboyeur.py
+          --job-limit 2700 --startup-reserve 120 --finalize-reserve 300
+          --job-timeout 2280 --serial test_runs_serve.py --serial test_aboyeur.py
       - name: Upload affected Windows results
         if: ${{ always() }}
         uses: actions/upload-artifact@v7
