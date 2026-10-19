@@ -261,5 +261,19 @@ def main(argv=None) -> int:
     return exit_code
 
 
+def process_main() -> None:
+    """Own process-only exit. Final shutdown callbacks must not spawn children."""
+    from ..work_cmd.verify_runtime import _verify_process_signals
+
+    with _verify_process_signals() as owner:
+        exit_code = main()
+        if owner.handlers:
+            for stream in (sys.stdout, sys.stderr):
+                if stream is not None:
+                    stream.flush()
+        owner.finish()
+    raise SystemExit(exit_code)
+
+
 if __name__ == "__main__":  # pragma: no cover
-    sys.exit(main())
+    process_main()

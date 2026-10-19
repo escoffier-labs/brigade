@@ -2045,6 +2045,10 @@ def verify_run(
                 manifest=manifest,
             )
         cancellation.raised = True
+        if receipt.get("status") == verify_runtime._VERIFY_CANCELED_RECEIPT_STATUS and cancellation.received is None:
+            # An interrupted nested result propagates its caught signal only
+            # when this verification also ends canceled, never from rc alone.
+            cancellation.received = cancellation.nested_signal
         # Committed receipt/Fleet evidence is immutable. A first late signal
         # returns 130 and skips completed capture if observed before it starts.
         # Once capture starts, finish and retain it. Canceled receipts always

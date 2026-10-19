@@ -31,6 +31,7 @@ class _VerifySignalCancel(KeyboardInterrupt):
 class _VerifyCancellation:
     def __init__(self) -> None:
         self.received: int | None = None
+        self.nested_signal: int | None = None
         self.raised = False
         self.deferred = 0
         self.interruption: dict[str, str] | None = None
@@ -47,8 +48,51 @@ class _VerifyCancellation:
 _ACTIVE_VERIFY_CANCEL: ContextVar[_VerifyCancellation | None] = ContextVar("verify_cancellation", default=None)
 
 
+class _VerifyProcessSignals:
+    """Retain caught cancellation only for an explicitly owned CLI lifetime."""
+
+    def __init__(self) -> None:
+        self.handlers: dict[int, tuple[Any, Any]] = {}
+        self.ignored: set[int] = set()
+        self.finished = False
+
+    def finish(self) -> None:
+        # CPython resets Python handlers to SIG_DFL during finalization, but
+        # preserves SIG_IGN. Do this only after main and its spawn work finish.
+        # Final shutdown callbacks must not spawn children after this boundary.
+        for signum, (_, handler) in self.handlers.items():
+            if signal.getsignal(signum) is handler:
+                signal.signal(signum, signal.SIG_IGN)
+                self.ignored.add(signum)
+        self.finished = True
+
+    def restore(self) -> None:
+        if not self.finished:
+            for signum, (previous, handler) in self.handlers.items():
+                current = signal.getsignal(signum)
+                if current is handler or (signum in self.ignored and current == signal.SIG_IGN):
+                    signal.signal(signum, previous)
+
+
+_ACTIVE_VERIFY_PROCESS: ContextVar[_VerifyProcessSignals | None] = ContextVar("verify_process", default=None)
+
+
+@contextmanager
+def _verify_process_signals():
+    owner = _VerifyProcessSignals()
+    token = _ACTIVE_VERIFY_PROCESS.set(owner)
+    try:
+        yield owner
+    finally:
+        try:
+            owner.restore()
+        finally:
+            _ACTIVE_VERIFY_PROCESS.reset(token)
+
+
 @contextmanager
 def _verify_cancellation_signals():
+    parent = _ACTIVE_VERIFY_CANCEL.get()
     state = _VerifyCancellation()
     token = _ACTIVE_VERIFY_CANCEL.set(state)
     previous = {}
@@ -75,9 +119,23 @@ def _verify_cancellation_signals():
     finally:
         # Restoration must not deliver a new exception outside verify_run.
         state.raised = True
+        owner = _ACTIVE_VERIFY_PROCESS.get()
         for signum, disposition in previous.items():
-            signal.signal(signum, disposition)
+            if owner is None or state.received is None:
+                signal.signal(signum, disposition)
+        if owner is not None and state.received is not None:
+            # A first signal can arrive after an earlier slot was restored.
+            # Reclaim those slots too, without replacing a new custom handler.
+            for signum, disposition in previous.items():
+                if signal.getsignal(signum) == disposition:
+                    signal.signal(signum, cancel)
+                if signal.getsignal(signum) is cancel:
+                    owner.handlers[signum] = (disposition, cancel)
         _ACTIVE_VERIFY_CANCEL.reset(token)
+        if parent is not None and state.received is not None:
+            # Provenance alone does not cancel the parent. Its terminal result
+            # must explicitly propagate cancellation before it can retain.
+            parent.nested_signal = state.received
 
 
 @contextmanager
