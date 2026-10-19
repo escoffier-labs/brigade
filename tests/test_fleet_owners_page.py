@@ -141,6 +141,30 @@ def test_owners_json_lists_live_claims_and_reads_without_writing(tmp_path):
             conn.close()
 
 
+def test_owners_json_hides_grokbot_jobs_from_node_tokens_but_not_admin(tmp_path):
+    with _hub(tmp_path) as (hub, db):
+        _seed_owners(db, {"bot": {"label": "Bot", "match": {"grokbot_jobs": True}}})
+        conn = fleet_hub.open_db(db)
+        try:
+            stamp = "2026-01-01T12:00:00+00:00"
+            conn.execute(
+                "INSERT INTO grokbot_jobs ("
+                "job_id, role, repository, label, task_digest, idempotency_key_hash, state, item_revision, "
+                "sequence, created_at, updated_at, queued_at, timeout_seconds, artifact_kind, owner_node"
+                ") VALUES ('grokbot-1', 'implementation-worker', 'example/repo', 'Job', ?, ?, 'queued', 1, 1, "
+                "?, ?, ?, 900, 'draft-pr', 'queue-owner')",
+                ("d" * 64, "f" * 64, stamp, stamp, stamp),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        admin = json.loads(_request(hub, "/owners", headers=_bearer())[2])
+        node = json.loads(_request(hub, "/owners", headers=_bearer(_node_token(db)))[2])
+        assert [item["ref"] for item in admin["owners"][0]["holdings"]] == ["grokbot-1"]
+        assert node["owners"][0]["holdings"] == [] and node["unassigned"] == []
+        assert node["unknown_sources"] == []
+
+
 NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 ATTACK = '<img src=x onerror="alert(1)">'
 
@@ -181,6 +205,7 @@ def _view(**fields):
         "overlaps": [],
         "enrolled_principals": frozenset(),
         "unknown_sources": (),
+        "truncated_sources": (),
     }
     base.update(fields)
     return OwnersView(**base)
@@ -296,6 +321,12 @@ def test_unknown_source_is_called_out_instead_of_shown_as_empty():
     assert "Holdings unknown: could not read claims, sessions." in body
     assert "Could not read: claims, sessions." in body
     assert "Nothing held right now." not in body
+
+
+def test_truncated_sources_are_noted_on_the_page():
+    body = _render(_view(unassigned=[_holding()], truncated_sources=("claims", "sessions")))
+    assert "Truncated at the source limit: claims, sessions." in body
+    assert "Truncated at the source limit" not in _render(_view(unassigned=[_holding()]))
 
 
 def test_stored_text_is_escaped_everywhere():

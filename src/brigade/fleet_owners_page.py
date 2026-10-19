@@ -116,6 +116,10 @@ def render(view: OwnersView, *, nonce: str, now: datetime) -> str:
         f'<p class="station-meta">Could not read: {deck._esc(", ".join(view.unknown_sources))}.</p>'
         if view.unknown_sources
         else ""
+    ) + (
+        f'<p class="station-meta">Truncated at the source limit: {deck._esc(", ".join(view.truncated_sources))}.</p>'
+        if view.truncated_sources
+        else ""
     )
     body = (
         '<main class="deck-shell"><header class="masthead"><div><p class="eyebrow">Fleet operations</p>'

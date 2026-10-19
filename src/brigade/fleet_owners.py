@@ -21,6 +21,7 @@ from .fleet_hub import FleetHubError
 
 SCHEMA = "brigade.fleet_owners.v1"
 SOURCE_LIMIT = 500
+JSON_HOLDINGS_LIMIT = 100
 
 
 @dataclass(frozen=True)
@@ -66,6 +67,7 @@ class OwnersView:
     overlaps: Sequence[Overlap]
     enrolled_principals: frozenset[str]
     unknown_sources: tuple[str, ...]
+    truncated_sources: tuple[str, ...] = ()
 
 
 def _matches(match: Mapping[str, Any], item: Holding) -> bool:
@@ -143,7 +145,7 @@ def _claims(conn: sqlite3.Connection, labels: Mapping[str, str]) -> list[Holding
         )
         for claim in fleet_hub_claims.list_claims(conn)
         if not claim["expired"]
-    ][:SOURCE_LIMIT]
+    ]
 
 
 def _grokbot_jobs(conn: sqlite3.Connection, labels: Mapping[str, str]) -> list[Holding]:
@@ -151,7 +153,7 @@ def _grokbot_jobs(conn: sqlite3.Connection, labels: Mapping[str, str]) -> list[H
     rows = conn.execute(
         "SELECT job_id, repository, role, state, claimant_node, queued_at, claimed_at FROM grokbot_jobs "
         f"WHERE state IN ({', '.join('?' for _ in states)}) ORDER BY updated_at DESC, job_id LIMIT ?",
-        (*states, SOURCE_LIMIT),
+        (*states, SOURCE_LIMIT + 1),
     ).fetchall()
     return [
         Holding(
@@ -180,44 +182,38 @@ def _sessions(conn: sqlite3.Connection, labels: Mapping[str, str], now_epoch: fl
             session_harness=str(session["harness"]),
         )
         for session in fleet_hub_sessions.list_sessions(conn, now_epoch=now_epoch)
-    ][:SOURCE_LIMIT]
-
-
-def _parse_instant(raw: str) -> datetime | None:
-    try:
-        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError:
-        return None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    ]
 
 
 def _delegations(conn: sqlite3.Connection, labels: Mapping[str, str], now_epoch: float) -> list[Holding]:
-    """Delegations whose reservation is unreleased and whose expiry is in the future."""
+    """Delegations whose reservation is unreleased and unexpired.
+
+    A renewal extends the reservation, not the delegation's own copy of the
+    expiry, so liveness is read from the reservation row and filtered in SQL
+    before the limit applies. ``julianday`` parses the stored ISO text.
+    """
+    now = datetime.fromtimestamp(now_epoch, tz=timezone.utc).isoformat()
     rows = conn.execute(
         "SELECT d.delegation_id, d.origin_node, d.target_node, d.adapter, d.repo_identity, d.seat, d.workload, "
-        "d.created_at, d.expires_at FROM fleet_policy_delegations d "
+        "d.created_at FROM fleet_policy_delegations d "
         "JOIN fleet_reservations r ON r.reservation_id = d.reservation_id "
-        "WHERE r.state != 'released' ORDER BY d.created_at DESC, d.delegation_id LIMIT ?",
-        (SOURCE_LIMIT,),
+        "WHERE r.state != 'released' AND julianday(r.expires_at) > julianday(?) "
+        "ORDER BY d.created_at DESC, d.delegation_id LIMIT ?",
+        (now, SOURCE_LIMIT + 1),
     ).fetchall()
-    holdings = []
-    for delegation_id, origin, target, adapter, repo, seat, workload, created_at, expires_at in rows:
-        expiry = _parse_instant(str(expires_at))
-        if expiry is None or expiry.timestamp() <= now_epoch:
-            continue
-        holdings.append(
-            Holding(
-                kind="delegation",
-                ref=delegation_id,
-                repo=repo,
-                node_label=_label(labels, target),
-                detail=f"{seat} {workload}".strip(),
-                since=created_at,
-                nodes=(origin, target),
-                adapter=adapter,
-            )
+    return [
+        Holding(
+            kind="delegation",
+            ref=delegation_id,
+            repo=repo,
+            node_label=_label(labels, target),
+            detail=f"{seat} {workload}".strip(),
+            since=created_at,
+            nodes=(origin, target),
+            adapter=adapter,
         )
-    return holdings
+        for delegation_id, origin, target, adapter, repo, seat, workload, created_at in rows
+    ]
 
 
 def _enrolled_principals(conn: sqlite3.Connection) -> frozenset[str]:
@@ -225,8 +221,13 @@ def _enrolled_principals(conn: sqlite3.Connection) -> frozenset[str]:
     return frozenset(str(name) for (name,) in rows)
 
 
-def load_view(conn: sqlite3.Connection, *, now_epoch: float) -> OwnersView:
-    """Read charters and live holdings. A failing source degrades, it never raises."""
+def load_view(conn: sqlite3.Connection, *, now_epoch: float, include_grokbot: bool = True) -> OwnersView:
+    """Read charters and live holdings. A failing source degrades, it never raises.
+
+    ``include_grokbot=False`` skips the Grok Bot job source entirely, for callers
+    that must not expose it. A source that reaches ``SOURCE_LIMIT`` is listed in
+    ``truncated_sources``.
+    """
     policy_version: int | None = None
     policy_error: str | None = None
     charters: Mapping[str, Mapping[str, Any]] = {}
@@ -234,22 +235,27 @@ def load_view(conn: sqlite3.Connection, *, now_epoch: float) -> OwnersView:
         current = fleet_hub_policy.current_policy(conn)
         policy_version = int(current["revision"])
         charters = current["document"].get("owners") or {}
-    except (FleetHubError, sqlite3.Error) as exc:
+    except (FleetHubError, sqlite3.Error, ValueError) as exc:
         policy_error = f"policy read failed: {type(exc).__name__}"
     labels = _node_labels(conn)
     unknown: list[str] = []
+    truncated: list[str] = []
     items: list[Holding] = []
     loaders: tuple[tuple[str, Callable[[], list[Holding]]], ...] = (
         ("claims", lambda: _claims(conn, labels)),
-        ("grokbot-jobs", lambda: _grokbot_jobs(conn, labels)),
+        *((("grokbot-jobs", lambda: _grokbot_jobs(conn, labels)),) if include_grokbot else ()),
         ("sessions", lambda: _sessions(conn, labels, now_epoch)),
         ("delegations", lambda: _delegations(conn, labels, now_epoch)),
     )
     for name, loader in loaders:
         try:
-            items.extend(loader())
-        except (FleetHubError, sqlite3.Error):
+            loaded = loader()
+        except (FleetHubError, sqlite3.Error, ValueError):
             unknown.append(name)
+            continue
+        if len(loaded) > SOURCE_LIMIT:
+            truncated.append(name)
+        items.extend(loaded[:SOURCE_LIMIT])
     enrolled: frozenset[str] = frozenset()
     try:
         enrolled = _enrolled_principals(conn)
@@ -265,6 +271,7 @@ def load_view(conn: sqlite3.Connection, *, now_epoch: float) -> OwnersView:
         overlaps=overlaps,
         enrolled_principals=enrolled,
         unknown_sources=tuple(unknown),
+        truncated_sources=tuple(truncated),
     )
 
 
@@ -274,6 +281,7 @@ def view_payload(view: OwnersView) -> dict[str, Any]:
     for name in sorted(view.charters):
         charter = view.charters[name]
         match = charter.get("match") or {}
+        held = view.by_owner.get(name, ())
         owners.append(
             {
                 "name": name,
@@ -289,7 +297,8 @@ def view_payload(view: OwnersView) -> dict[str, Any]:
                     {"name": principal, "enrolled": principal in view.enrolled_principals}
                     for principal in match.get("principals") or []
                 ],
-                "holdings": [item.public() for item in view.by_owner.get(name, ())],
+                "holdings": [item.public() for item in held[:JSON_HOLDINGS_LIMIT]],
+                "holdings_total": len(held),
             }
         )
     return {
@@ -297,7 +306,12 @@ def view_payload(view: OwnersView) -> dict[str, Any]:
         "policy_version": view.policy_version,
         "policy_error": view.policy_error,
         "owners": owners,
-        "unassigned": [item.public() for item in view.unassigned],
-        "overlaps": [{**overlap.item.public(), "owners": list(overlap.owners)} for overlap in view.overlaps],
+        "unassigned": [item.public() for item in view.unassigned[:JSON_HOLDINGS_LIMIT]],
+        "unassigned_total": len(view.unassigned),
+        "overlaps": [
+            {**overlap.item.public(), "owners": list(overlap.owners)} for overlap in view.overlaps[:JSON_HOLDINGS_LIMIT]
+        ],
+        "overlaps_total": len(view.overlaps),
         "unknown_sources": list(view.unknown_sources),
+        "truncated_sources": list(view.truncated_sources),
     }

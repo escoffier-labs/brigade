@@ -8,7 +8,15 @@ from datetime import datetime, timedelta, timezone
 
 import pytest
 
-from brigade import fleet_hub, fleet_hub_claims, fleet_hub_messages, fleet_hub_policy, fleet_owners, fleet_policy
+from brigade import (
+    fleet_hub,
+    fleet_hub_claims,
+    fleet_hub_messages,
+    fleet_hub_policy,
+    fleet_hub_sessions,
+    fleet_owners,
+    fleet_policy,
+)
 
 NOW = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 NODE_A = "node-a-0001"
@@ -61,9 +69,12 @@ def _session(conn, session_id, harness="claude", node=NODE_A, expires=None):
     )
 
 
-def _delegation(conn, delegation_id, *, released=False, expires=None, origin=NODE_A, target=NODE_B):
+def _delegation(
+    conn, delegation_id, *, released=False, expires=None, reservation_expires=None, origin=NODE_A, target=NODE_B
+):
     stamp = NOW.isoformat()
     expires_at = (expires or NOW + timedelta(minutes=5)).isoformat()
+    reservation_expires_at = (reservation_expires or expires or NOW + timedelta(minutes=5)).isoformat()
     conn.execute(
         "INSERT INTO fleet_reservations (reservation_id, decision_id, session_id, machine, seat, node_id, "
         "origin_node, state, accepted, expires_at, created_at, updated_at) "
@@ -74,7 +85,7 @@ def _delegation(conn, delegation_id, *, released=False, expires=None, origin=NOD
             target,
             origin,
             "released" if released else "active",
-            expires_at,
+            reservation_expires_at,
             stamp,
             stamp,
         ),
@@ -234,3 +245,101 @@ def test_payload_is_the_v1_json_shape(conn):
         {**alpha["holdings"][0], "owners": ["alpha", "beta"]},
     ]
     assert payload["unknown_sources"] == []
+
+
+def test_a_renewed_reservation_keeps_its_delegation_listed(conn):
+    _delegation(conn, "del-renewed", expires=NOW - timedelta(minutes=1), reservation_expires=NOW + timedelta(minutes=5))
+    _delegation(conn, "del-lapsed", expires=NOW + timedelta(minutes=5), reservation_expires=NOW - timedelta(minutes=1))
+    view = fleet_owners.load_view(conn, now_epoch=NOW.timestamp())
+    assert _refs(view.unassigned) == [("delegation", "del-renewed")]
+
+
+def test_expired_delegations_do_not_crowd_live_ones_out_of_the_source_limit(conn, monkeypatch):
+    monkeypatch.setattr(fleet_owners, "SOURCE_LIMIT", 2)
+    for index in range(3):
+        _delegation(conn, f"del-dead-{index}", expires=NOW - timedelta(minutes=1))
+    _delegation(conn, "del-live", expires=NOW + timedelta(minutes=5))
+    view = fleet_owners.load_view(conn, now_epoch=NOW.timestamp())
+    assert _refs(view.unassigned) == [("delegation", "del-live")]
+    assert view.truncated_sources == ()
+
+
+def test_grokbot_jobs_are_skipped_entirely_without_the_grokbot_flag(conn, monkeypatch):
+    _job(conn, "grokbot-1", "running")
+    _session(conn, "sess-1")
+
+    def broken(*_args):
+        raise AssertionError("the grokbot source must not be read")
+
+    monkeypatch.setattr(fleet_owners, "_grokbot_jobs", broken)
+    view = fleet_owners.load_view(conn, now_epoch=NOW.timestamp(), include_grokbot=False)
+    assert _refs(view.unassigned) == [("session", "sess-1")]
+    assert view.unknown_sources == ()
+
+
+def test_corrupt_stored_json_degrades_instead_of_raising(conn, monkeypatch):
+    _claim(conn)
+
+    def corrupt_policy(_conn):
+        raise json.JSONDecodeError("Expecting value", "{", 1)
+
+    def corrupt_sessions(_conn, **_kwargs):
+        raise json.JSONDecodeError("Expecting value", "{", 1)
+
+    monkeypatch.setattr(fleet_hub_policy, "current_policy", corrupt_policy)
+    monkeypatch.setattr(fleet_hub_sessions, "list_sessions", corrupt_sessions)
+    view = fleet_owners.load_view(conn, now_epoch=NOW.timestamp())
+    assert view.policy_error == "policy read failed: JSONDecodeError"
+    assert view.unknown_sources == ("sessions",)
+    assert _refs(view.unassigned) == [("claim", "example/repo")]
+
+
+def test_a_source_that_reaches_the_limit_is_reported_as_truncated(conn, monkeypatch):
+    monkeypatch.setattr(fleet_owners, "SOURCE_LIMIT", 2)
+    for index in range(3):
+        _claim(conn, target=f"example/repo-{index}", node=f"node-{index}-0001")
+    for index in range(3):
+        _job(conn, f"grokbot-{index}", "queued")
+    _session(conn, "sess-1")
+    _session(conn, "sess-2")
+    view = fleet_owners.load_view(conn, now_epoch=NOW.timestamp())
+    assert view.truncated_sources == ("claims", "grokbot-jobs")
+    assert len([item for item in view.unassigned if item.kind == "claim"]) == 2
+    assert len([item for item in view.unassigned if item.kind == "grokbot-job"]) == 2
+    assert len([item for item in view.unassigned if item.kind == "session"]) == 2
+
+
+def _holding(index):
+    return fleet_owners.Holding(
+        kind="claim",
+        ref=f"example/repo-{index:03}",
+        repo="example/repo",
+        node_label="Node A",
+        detail="",
+        since=NOW.isoformat(),
+        harness="claude",
+    )
+
+
+def test_payload_caps_each_holdings_list_and_reports_the_totals():
+    total = fleet_owners.JSON_HOLDINGS_LIMIT + 5
+    items = [_holding(index) for index in range(total)]
+    overlaps = [fleet_owners.Overlap(item=item, owners=("alpha", "beta")) for item in items]
+    view = fleet_owners.OwnersView(
+        policy_version=2,
+        policy_error=None,
+        charters={"alpha": {"match": {"harnesses": ["claude"]}}, "beta": {"match": {"harnesses": ["claude"]}}},
+        by_owner={"alpha": items, "beta": items[:3]},
+        unassigned=items,
+        overlaps=overlaps,
+        enrolled_principals=frozenset(),
+        unknown_sources=(),
+        truncated_sources=("claims",),
+    )
+    payload = fleet_owners.view_payload(view)
+    alpha, beta = payload["owners"]
+    assert len(alpha["holdings"]) == fleet_owners.JSON_HOLDINGS_LIMIT and alpha["holdings_total"] == total
+    assert len(beta["holdings"]) == 3 and beta["holdings_total"] == 3
+    assert len(payload["unassigned"]) == fleet_owners.JSON_HOLDINGS_LIMIT and payload["unassigned_total"] == total
+    assert len(payload["overlaps"]) == fleet_owners.JSON_HOLDINGS_LIMIT and payload["overlaps_total"] == total
+    assert payload["truncated_sources"] == ["claims"]

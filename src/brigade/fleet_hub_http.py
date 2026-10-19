@@ -1549,7 +1549,8 @@ def make_handler(
                         payload = {"sessions": list_sessions(conn, include_all=include_all)}
                     elif path == "/owners":
                         conn.execute("PRAGMA query_only=ON")
-                        payload = fleet_owners.view_payload(fleet_owners.load_view(conn, now_epoch=_hub._now_epoch()))
+                        view = fleet_owners.load_view(conn, now_epoch=_hub._now_epoch(), include_grokbot=is_admin)
+                        payload = fleet_owners.view_payload(view)
                     elif path == "/policy/status":
                         payload = fleet_hub_policy_api.read_status(conn)
                     elif path == "/policy/inventory":
