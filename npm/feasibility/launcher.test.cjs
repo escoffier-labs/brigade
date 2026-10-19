@@ -63,7 +63,7 @@ console.error('provisioning stderr');
   fs.mkdirSync(path.join(pkg,'wheel'));
   const wheel=Buffer.from('transport payload');fs.writeFileSync(path.join(pkg,'wheel','brigade_cli-0.29.0.dev1-py3-none-any.whl'),wheel);
   const payload={wheel:'brigade_cli-0.29.0.dev1-py3-none-any.whl',version:'0.29.0.dev1',distribution:'brigade-cli',sha256:crypto.createHash('sha256').update(wheel).digest('hex'),bytes:wheel.length,sourceCommit:'a'.repeat(40),sourceTree:'dirty'};
-  fs.writeFileSync(path.join(pkg, 'runtime.json'), JSON.stringify({payload,version:'0.29.0-dev.1',uvVersion:'0.12.23',pythonVersion:'3.12.12',pythonBuild:'20260101',platforms:{[`${process.platform}-${process.arch}`]:{package:'@example/uv',executable:'uv',binarySha256:sha}}}));
+  fs.writeFileSync(path.join(pkg, 'runtime.json'), JSON.stringify({payload,payloadVersion:'0.29.0.dev1',version:'0.29.0-dev.1',uvVersion:'0.12.23',pythonVersion:'3.12.12',pythonBuild:'20260101',platforms:{[`${process.platform}-${process.arch}`]:{package:'@example/uv',executable:'uv',binarySha256:sha}}}));
   return {root,pkg,companion, launcher:path.join(pkg,'launcher.cjs')};
 }
 function run(f,args=[],env={}) {
@@ -433,3 +433,15 @@ for(const key of ['UV_PYTHON_INSTALL_DIR','UV_PYTHON_BIN_DIR','UV_PYTHON_CACHE_D
   }
  });
 }
+
+for (const variant of ['valid','filename-mismatch','missing-version']) test(`stable wheel exact runtime filename (${variant})`,posix,t=>{
+  const f=fixture(t);const file=path.join(f.pkg,'runtime.json');const r=JSON.parse(fs.readFileSync(file));
+  r.payloadVersion=r.payload.version='0.29.0';
+  const old=path.join(f.pkg,'wheel',r.payload.wheel);r.payload.wheel='brigade_cli-0.29.0-py3-none-any.whl';
+  fs.renameSync(old,path.join(f.pkg,'wheel',r.payload.wheel));
+  if(variant==='filename-mismatch') r.payload.wheel='brigade_cli-0.29.1-py3-none-any.whl';
+  if(variant==='missing-version') delete r.payloadVersion;
+  fs.writeFileSync(file,JSON.stringify(r));const result=run(f,['--version']);
+  assert.equal(result.status,variant==='valid'?0:1,result.stderr);
+  if(variant!=='valid') assert.match(result.stderr,/manifest invalid/);
+});

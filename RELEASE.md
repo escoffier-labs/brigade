@@ -110,3 +110,11 @@ Hosted Windows amd64 acceptance runs in GitHub Actions. For a clean Windows chec
 maintainer-operated PowerShell Direct contract, never a self-hosted GitHub runner. Restore the
 `clean` checkpoint before every run, record the exact release tag, allow Git, and require Go and
 Cargo to be absent.
+
+## 8. Coordinated stable npm promotion
+
+Wait for every Python published-artifact acceptance job and the published endpoint check. Pin the official PyPI wheel URL/SHA-256 and release component manifest/checksums in `npm/feasibility/runtime.json`. Keep the payload tag identity separate from the npm packaging commit. Merge the promotion only after review, security, focused/full verification, and all five native candidate jobs pass.
+
+The maintainer configures trusted publishers for the launcher and five companions under `@escoffier-labs`, naming `.github/workflows/npm-publish.yml` and environment `npm`. Dispatch that workflow on main with its exact reviewed `expected_sha` and `release_tag: v0.29.0`. It builds once with Node 24.22.0/npm 11.19.1, retains original archives for 14 days, requires native tarball acceptance, publishes companions before the launcher with explicit provenance, and requires native registry acceptance plus the final release gate.
+
+For a retry, choose **Re-run failed jobs** in the same workflow run within the 14-day artifact retention to reuse the successful build job's original archives. **Re-run all jobs** and a new dispatch rebuild archives and do not reuse the originals. Preserve the original archives and inspect any partial registry publication before rebuilding. Compare registry integrity before every publish. A 404 permits publication, equal integrity skips it, and a mismatch stops permanently for that version. An uncertain response requires bounded read-back reconciliation. Recover from different published bytes with a new coordinated version, never overwrite. See [npm preparation and runtime limits](npm/feasibility/README.md).

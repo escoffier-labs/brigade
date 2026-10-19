@@ -2,7 +2,7 @@ name: Unreleased npm candidate CI
 
 on:
   push:
-    branches: [main, feat/npm-ready-20261018]
+    branches: [main]
     paths:
       - '.github/workflows/npm-feasibility.yml'
       - '.github/workflows/ci.yml'
@@ -45,51 +45,35 @@ jobs:
           GIT_CONFIG_VALUE_0: 'false'
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          node-version: '22'
+          node-version: '24.22.0'
+      - name: Pin npm archive and provenance toolchain
+        run: |
+          npm install --global npm@11.19.1 --ignore-scripts
+          test "$(node --version)" = v24.22.0
+          test "$(npm --version)" = 11.19.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: '3.12'
-      - name: Build six unreleased candidate archives once from clean source
+      - name: Build six stable payload archives once from clean source
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
           test -z "$(git status --porcelain --untracked-files=all)"
           argv=$(node -e 'process.stdout.write(JSON.stringify(["python","npm/feasibility/prepare.py","--out",process.env.RUNNER_TEMP+"/npm-artifacts"]))')
           PYTHONPATH=src python -m brigade work verify run --target . --argv-json "$argv" --timeout 600 --capture brigade-work
-      - name: Verify exact candidate archives against clean checked-out source
-        shell: bash
+      - name: Verify stable payload and packaging identities against clean source
         run: |
-          python - <<'PYCODE'
-          import hashlib, json, os, runpy
-          from pathlib import Path
-          source = runpy.run_path('npm/feasibility/prepare.py')['source_snapshot'](False)[0]
-          assert source['sourceCommit'] == os.environ['GITHUB_SHA'], 'checkout/event SHA mismatch'
-          root = Path(os.environ['RUNNER_TEMP']) / 'npm-artifacts'
-          metadata = json.loads((root / 'artifacts.json').read_text())
-          for key in ('sourceCommit', 'sourceTree', 'sourceIdentity', 'sourceSha256', 'sourceDateEpoch'):
-              assert metadata[key] == source[key], 'candidate source mismatch: ' + key
-          runtime = json.loads((root / 'runtime.json').read_text())
-          assert runtime == metadata['runtime'], 'runtime metadata mismatch'
-          assert runtime['version'] == '0.29.0-dev.1' and runtime['payloadVersion'] == '0.29.0.dev1'
-          for key in ('sourceCommit', 'sourceTree', 'sourceIdentity'):
-              assert runtime['payload'][key] == source[key], 'wheel source mismatch: ' + key
-          archives = metadata['artifacts']
-          names = [a['filename'] for a in archives]
-          assert len(names) == len(set(names)) == 6, 'exactly six distinct archives required'
-          assert {a['platform'] for a in archives if 'platform' in a} == set(runtime['platforms'])
-          assert sum('platform' not in a for a in archives) == 1
-          assert {p.name for p in root.glob('*.tgz')} == set(names), 'archive set mismatch'
-          for archive in archives:
-              name = archive['filename']
-              assert Path(name).name == name and name.endswith('.tgz') and '/' not in name and '\\' not in name
-              path = root / name
-              assert path.is_file() and not path.is_symlink()
-              assert path.stat().st_size == archive['bytes']
-              assert hashlib.sha256(path.read_bytes()).hexdigest() == archive['sha256'], 'archive hash mismatch'
-          print('Six archives verified against clean checkout and event SHA', source['sourceCommit'])
-          PYCODE
-      # One-day artifacts in this public repository are public, not confidential.
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          argv=$(node -e 'process.stdout.write(JSON.stringify(["python","npm/feasibility/prepare.py","--verify-artifacts",process.env.RUNNER_TEMP+"/npm-artifacts"]))')
+          PYTHONPATH=src python -m brigade work verify run --target . --argv-json "$argv" --timeout 120 --capture brigade-work
+      - name: Verify release-generated manifest attestation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh attestation verify "$RUNNER_TEMP/npm-artifacts/build/component-manifest-v1.json" --repo escoffier-labs/brigade --signer-workflow escoffier-labs/brigade/.github/workflows/publish.yml
+      # Retained artifacts in this public repository are public, not confidential.
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         with:
           name: unreleased-npm-candidate-archives
@@ -97,7 +81,7 @@ jobs:
             ${{ runner.temp }}/npm-artifacts/*.tgz
             ${{ runner.temp }}/npm-artifacts/artifacts.json
             ${{ runner.temp }}/npm-artifacts/runtime.json
-          retention-days: 1
+          retention-days: 14
           if-no-files-found: error
       - name: Upload bounded package verification receipts
         if: always()
@@ -108,7 +92,7 @@ jobs:
             .brigade/work/verify-runs/*/receipt.json
             .brigade/work/verify-runs/*/command-*-stdout.log
             .brigade/work/verify-runs/*/command-*-stderr.log
-          retention-days: 1
+          retention-days: 14
           if-no-files-found: warn
 
   acceptance:
@@ -132,9 +116,15 @@ jobs:
           GIT_CONFIG_VALUE_0: 'false'
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
-          node-version: '22'
+          node-version: '24.22.0'
+      - name: Pin npm archive and provenance toolchain
+        run: |
+          npm install --global npm@11.19.1 --ignore-scripts
+          test "$(node --version)" = v24.22.0
+          test "$(npm --version)" = 11.19.1
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: '3.12'
@@ -142,38 +132,11 @@ jobs:
         with:
           name: unreleased-npm-candidate-archives
           path: ${{ runner.temp }}/npm-artifacts
-      - name: Verify exact candidate archives against clean checked-out source
-        shell: bash
+      - name: Verify stable payload and packaging identities against clean source
         run: |
-          python - <<'PYCODE'
-          import hashlib, json, os, runpy
-          from pathlib import Path
-          source = runpy.run_path('npm/feasibility/prepare.py')['source_snapshot'](False)[0]
-          assert source['sourceCommit'] == os.environ['GITHUB_SHA'], 'checkout/event SHA mismatch'
-          root = Path(os.environ['RUNNER_TEMP']) / 'npm-artifacts'
-          metadata = json.loads((root / 'artifacts.json').read_text())
-          for key in ('sourceCommit', 'sourceTree', 'sourceIdentity', 'sourceSha256', 'sourceDateEpoch'):
-              assert metadata[key] == source[key], 'candidate source mismatch: ' + key
-          runtime = json.loads((root / 'runtime.json').read_text())
-          assert runtime == metadata['runtime'], 'runtime metadata mismatch'
-          assert runtime['version'] == '0.29.0-dev.1' and runtime['payloadVersion'] == '0.29.0.dev1'
-          for key in ('sourceCommit', 'sourceTree', 'sourceIdentity'):
-              assert runtime['payload'][key] == source[key], 'wheel source mismatch: ' + key
-          archives = metadata['artifacts']
-          names = [a['filename'] for a in archives]
-          assert len(names) == len(set(names)) == 6, 'exactly six distinct archives required'
-          assert {a['platform'] for a in archives if 'platform' in a} == set(runtime['platforms'])
-          assert sum('platform' not in a for a in archives) == 1
-          assert {p.name for p in root.glob('*.tgz')} == set(names), 'archive set mismatch'
-          for archive in archives:
-              name = archive['filename']
-              assert Path(name).name == name and name.endswith('.tgz') and '/' not in name and '\\' not in name
-              path = root / name
-              assert path.is_file() and not path.is_symlink()
-              assert path.stat().st_size == archive['bytes']
-              assert hashlib.sha256(path.read_bytes()).hexdigest() == archive['sha256'], 'archive hash mismatch'
-          print('Six archives verified against clean checkout and event SHA', source['sourceCommit'])
-          PYCODE
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          argv=$(node -e 'process.stdout.write(JSON.stringify(["python","npm/feasibility/prepare.py","--verify-artifacts",process.env.RUNNER_TEMP+"/npm-artifacts"]))')
+          PYTHONPATH=src python -m brigade work verify run --target . --argv-json "$argv" --timeout 120 --capture brigade-work
       - name: Full native npm and npx acceptance with fresh private HOME and Node-only PATH
         run: |
           argv=$(node -e 'process.stdout.write(JSON.stringify(["node","npm/feasibility/acceptance.cjs","--artifacts",process.env.RUNNER_TEMP+"/npm-artifacts","--out",process.env.RUNNER_TEMP+"/npm-receipts","--expected-platform","${{ matrix.platform }}"]))')
@@ -203,7 +166,7 @@ jobs:
             .brigade/work/verify-runs/*/receipt.json
             .brigade/work/verify-runs/*/command-*-stdout.log
             .brigade/work/verify-runs/*/command-*-stderr.log
-          retention-days: 1
+          retention-days: 14
           if-no-files-found: warn
 
   isolated-signals:
@@ -224,6 +187,7 @@ jobs:
           GIT_CONFIG_VALUE_0: 'false'
         with:
           persist-credentials: false
+          fetch-depth: 0
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: '3.12'
@@ -255,7 +219,7 @@ jobs:
             .brigade/work/verify-runs/*/receipt.json
             .brigade/work/verify-runs/*/command-*-stdout.log
             .brigade/work/verify-runs/*/command-*-stderr.log
-          retention-days: 1
+          retention-days: 14
           if-no-files-found: warn
 
   candidate-gate:

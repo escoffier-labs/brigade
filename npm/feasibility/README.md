@@ -1,27 +1,43 @@
-# Unpublished bundled-wheel npm candidate
+# Brigade npm distribution
 
-This directory prepares six private npm tarballs at `0.29.0-dev.1`. The launcher contains one Brigade `0.29.0.dev1` pure Python wheel built from this checkout. Source versions remain `0.29.0`. The published 0.28.0 wheel lacks this candidate's npm identity and cancellation controller. This candidate targets 0.29.0 and differs from published PyPI release bytes. Package names under `@solomonneas` remain provisional. No package publication, release, tag or attestation is performed here.
+The approved stable package set is `@escoffier-labs/brigade@0.29.0` and five exact-version uv companions. The launcher bundles the official published `brigade-cli==0.29.0` wheel, unchanged. Runtime installation uses that wheel without a PyPI fallback.
+
+```sh
+npx --yes @escoffier-labs/brigade@0.29.0 --version
+npm install --global @escoffier-labs/brigade@0.29.0
+brigade --version
+```
+
+The explicit package form also works: `npx --yes --package=@escoffier-labs/brigade@0.29.0 -- brigade --version`. Installing with `--omit=optional` prevents startup. Reinstall with optional dependencies enabled. Linux glibc x64/ARM64, macOS x64/ARM64 and Windows x64 are supported targets. Unsupported platforms should use the Python installation route. Global npm bins can overlap existing pipx or uv installations, so inspect command resolution after installation.
 
 ## Preparation and local evaluation
 
-Preparation requires Python 3.10+, Node 22+ and npm. It creates an isolated temporary build venv outside the checkout and installs the hash-pinned tools in `build-requirements.txt`. It stamps only a temporary source copy, sets `SOURCE_DATE_EPOCH` from the source commit and records the actual build-tool versions. It validates the pure wheel's metadata, license, extra-only dependencies, archive paths and RECORD hashes before packing.
+Preparation requires Python 3.10+, Node 24.22.0 and npm 11.19.1. It downloads the exact wheel URL and SHA-256 in `runtime.json`, with a 64 MiB download bound and hash verification before use. It validates metadata, WHEEL tags, MIT license, extra-only dependencies, archive paths and RECORD hashes.
+
+Every Brigade package member must match the `v0.29.0` tag at `19d293f5648e27ccd39856348f8769eb88f6a021`. The sole exception is `brigade/templates/components/manifest-v1.json`: it must equal the pinned release asset and its checksum, with the exact release version and component revisions. A reference build from the tag with `build-requirements.txt` enforces reverse package coverage. That build checks the inventory and does not replace the published wheel. Hosted CI also verifies the manifest's GitHub attestation.
 
 ```sh
-python3 npm/feasibility/prepare.py --out /tmp/brigade-npm-candidate
+python3 npm/feasibility/prepare.py --out /tmp/brigade-npm-artifacts
 ```
 
-Default preparation refuses tracked and nonignored untracked changes. Local iteration can use `--allow-dirty`, which records `sourceTree: dirty` and a file-hash source identity. Such artifacts cannot establish a clean-commit build. Generated packages, build environments, caches and receipts stay outside the checkout. The hosted gate must build a clean reviewed commit.
+Default preparation refuses tracked and nonignored untracked changes. Local iteration can use `--allow-dirty`, which records `sourceTree: dirty` and a file-hash packaging identity. The stable payload retains its separate tag identity. Such artifacts cannot establish a clean-commit build. Generated packages, reference build environments, caches and receipts stay outside the checkout. Hosted gates require a clean reviewed commit.
 
-All six manifests retain `private: true`. Preparation checks the unchanged official uv 0.12.23 archive, executable and license hashes. Five companions contain only the matching uv executable, manifest and uv MIT/Apache licenses. The platform-independent launcher contains the validated wheel, runtime manifest and Brigade MIT license. npm packing disables lifecycle scripts.
+All six manifests use public access and repository metadata. Five companions contain only the matching uv 0.12.23 executable, manifest and uv MIT/Apache licenses. Preparation verifies official uv archive, executable and license hashes. The launcher contains the validated wheel, runtime manifest and Brigade MIT license. npm packing disables lifecycle scripts and retains SHA-256, npm SHA-512 integrity and shasum for every original archive.
 
-For unpublished evaluation, select the launcher tarball and your platform's companion from `artifacts.json`:
+For local packed evaluation, select the launcher tarball and your platform's companion from `artifacts.json`:
 
 ```sh
 npm install --offline --ignore-scripts --prefix /tmp/brigade-evaluation /absolute/launcher.tgz /absolute/companion.tgz
 npx --offline --yes --package /absolute/launcher.tgz --package /absolute/companion.tgz -- brigade --version
 ```
 
-Those filenames are placeholders for the exact locally prepared tarballs. Installing with `--omit=optional` prevents startup. Reinstall with optional dependencies enabled. Linux glibc x64/ARM64, macOS x64/ARM64 and Windows x64 are the candidate targets. Unsupported platforms should use the Python installation route. Global npm bins can overlap existing pipx or uv installations, so inspect command resolution when evaluating them.
+Those filenames are placeholders for the exact locally prepared tarballs.
+
+## Publication and retry behavior
+
+`npm-publish.yml` accepts only an explicit dispatch at the expected clean main SHA and release tag. It builds once with the pinned Node/npm toolchain, retains original archives for 14 days, and requires five native packed acceptance jobs before the npm environment's OIDC publish job. The publisher verifies original archive hashes, publishes and verifies each companion first, then publishes the launcher with mandatory provenance.
+
+Before each publish, a registry 404 permits publication, equal integrity permits a skip, and different integrity stops the run. Unknown registry state stops before writing. Every publish response, including an error or timeout, requires bounded read-back reconciliation. For a retry, choose **Re-run failed jobs** in the same workflow run within the 14-day artifact retention. This reuses the successful build job's original archives. **Re-run all jobs** and a new dispatch rebuild archives and do not reuse the originals. Preserve the original archives and inspect any partial registry publication before rebuilding. An immutable-version mismatch requires a new coordinated version, never an overwrite. All six versions must expose provenance attestations. Five native registry acceptance jobs and the final release gate follow publication.
 
 ## Runtime and private state
 
@@ -45,10 +61,12 @@ The user-selected cache root may have a symlinked ancestor or alias. On POSIX, t
 
 Run repository checks through Brigade's verification capture. `launcher.test.cjs` uses subprocess stand-ins for transport and lifecycle boundaries. `acceptance.cjs` installs the exact tarballs under a temporary HOME with a fresh npm cache and a PATH containing Node, Git and required OS utilities, with Python and uv absent. The approved disposable Docker route confines Linux process signals to its own PID namespace and removes the container on exit.
 
-Acceptance exercises the actual cold npx CLI with local offline package inputs before any prefix installation. It retains direct and npm exec checks, argv/nonzero behavior, concurrency, initialization recovery, optional-companion omission, integrity rejection, offline restrictions and cached-Python reinstall. Installed `__init__.py` and `verify_runtime.py` must match the bundled wheel and RECORD. Private-interpreter respawns exercise update refusal and passive gates under seeded cache state and deterministic side-effect sentinels. Receipts include actual artifact hashes, source identity, runtime versions, timings and disk usage. Managed Python network transfer bytes are not metered.
+Acceptance exercises the actual cold npx CLI before any prefix installation. Packed mode uses local offline inputs. `--registry-spec @escoffier-labs/brigade@0.29.0` uses a fresh online npm cache, HOME and empty npmrc against the public registry. Only the launcher is requested, so npm resolves its companion through optional dependencies. Registry mode compares both installed lockfile integrities, including the npx cache installation, to the original archive receipt and runs `npm audit signatures`. It retains direct and npm exec checks, argv/nonzero behavior, concurrency, initialization recovery, optional-companion omission, integrity rejection, offline restrictions and cached-Python reinstall. Installed `__init__.py` and `verify_runtime.py` must match the bundled wheel and RECORD. Private-interpreter respawns exercise update refusal and passive gates under seeded cache state and deterministic side-effect sentinels. Receipts include actual artifact hashes, source identity, runtime versions, timings and disk usage. Managed Python network transfer bytes are not metered.
 
 Catchable POSIX INT, TERM and HUP tests target both the launcher PID and process group while a real verification command owns a detached grandchild. Acceptance fails nonzero on surviving test descendants or missing/invalid canonical canceled receipts. Cleanup must finish before the launcher's 20-second forced termination. Repeated application cancellation forwards the original signal without resetting that deadline. Provisioning repeats can force termination.
 
+Linux and Darwin descendant tracking retains a low residual risk from numeric PID reuse. Detached or reparented orphans outside the tracked identities can escape cleanup. Darwin timeout cleanup still requires native qualification separate from catchable cancellation.
+
 SIGKILL, OOM termination and the launcher's forced deadline cannot run user-space cleanup. Detached verification processes can survive those cases. Default native acceptance runs only the six catchable POSIX cases. The deliberate SIGKILL case requires `--contained-linux-uncatchable` in a disposable Linux PID namespace, an externally observed distinct host namespace and bounded external teardown. That contained case records and cleans only its pinned test identities. No OOM test is run. Windows external `taskkill /T /F` proves forced tree termination separately from console Ctrl+C, which remains unproved. Killing only the Windows launcher cannot guarantee cleanup without a job object.
 
-Hashes stored beside payloads detect corruption and mixed installs. They do not authenticate a replaced tarball whose manifests were also replaced. `artifacts.json` records build provenance and exact transferred archive hashes. Future registry integrity and publication provenance require a separately approved release. Public CI artifacts are downloadable by signed-in GitHub users during their retention period, even though package manifests are private. Local Linux acceptance does not establish native macOS, Windows or ARM behavior. Final clean-source builds, CI and independent reviews remain separate gates.
+Hashes stored beside payloads detect corruption and mixed installs. They do not authenticate a replaced tarball whose manifests were also replaced. `artifacts.json` records build provenance and exact transferred archive hashes. Registry acceptance verifies immutable archive integrity and publication provenance separately. Public CI artifacts are downloadable by signed-in GitHub users during their retention period. Local Linux acceptance does not establish native macOS, Windows or ARM behavior. Final clean-source builds, CI and independent reviews remain separate gates.

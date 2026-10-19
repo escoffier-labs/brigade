@@ -429,3 +429,57 @@ def test_publish_workflow_verifies_version_check_endpoint_after_pypi_upload():
     assert (
         "https://check.brigade.tools/v1/version" in (ROOT / "scripts" / "verify_version_check_endpoint.py").read_text()
     )
+
+
+def test_npm_release_workflow_has_dispatch_source_oidc_and_native_gates():
+    workflow = _load_workflow_yaml(ROOT / ".github/workflows/npm-publish.yml")
+    trigger = workflow.get("on", workflow.get(True))
+    assert set(trigger) == {"workflow_dispatch"}
+    assert set(trigger["workflow_dispatch"]["inputs"]) == {"expected_sha", "release_tag"}
+    assert workflow["permissions"] == {"contents": "read"}
+    assert workflow["concurrency"]["cancel-in-progress"] is False
+    jobs = workflow["jobs"]
+    assert set(jobs) == {"build", "acceptance", "publish", "registry-acceptance", "release-gate"}
+    assert set(jobs["publish"]["needs"]) == {"build", "acceptance"}
+    assert jobs["publish"]["environment"] == "npm"
+    assert jobs["publish"]["permissions"] == {"contents": "read", "id-token": "write"}
+    assert jobs["registry-acceptance"]["needs"] == "publish"
+    assert set(jobs["release-gate"]["needs"]) == set(jobs) - {"release-gate"}
+    for name, job in jobs.items():
+        if name != "publish":
+            assert "id-token" not in job.get("permissions", {})
+            assert "environment" not in job
+        for step in job["steps"]:
+            if "uses" not in step:
+                continue
+            assert re.fullmatch(r"actions/[a-z-]+@[a-f0-9]{40}", step["uses"])
+            if step["uses"].startswith("actions/checkout@"):
+                assert step["with"]["persist-credentials"] is False
+            if step["uses"].startswith("actions/setup-node@"):
+                assert step["with"]["node-version"] == "24.22.0"
+            if step["uses"].startswith("actions/upload-artifact@"):
+                assert step["with"]["retention-days"] >= 14
+    for name in ("acceptance", "registry-acceptance"):
+        matrix = jobs[name]["strategy"]["matrix"]["include"]
+        assert {row["platform"] for row in matrix} == {
+            "linux-x64",
+            "linux-arm64",
+            "darwin-x64",
+            "darwin-arm64",
+            "win32-x64",
+        }
+        assert all("self-hosted" not in row["os"] for row in matrix)
+    build = "\n".join(s.get("run", "") for s in jobs["build"]["steps"])
+    assert "refs/heads/main" in build and "EXPECTED_SHA" in build and "RELEASE_TAG" in build
+    assert "gh attestation verify" in build
+    publish = "\n".join(s.get("run", "") for s in jobs["publish"]["steps"])
+    assert "publish.cjs" in publish
+    assert 'test "$GITHUB_REF" = refs/heads/main' in publish
+    assert 'test "$GITHUB_SHA" = "$EXPECTED_SHA"' in publish
+    assert 'test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"' in publish
+    assert 'test "$RELEASE_TAG" = v0.29.0' in publish
+    guard = next(step for step in jobs["publish"]["steps"] if "EXPECTED_SHA" in step.get("env", {}))
+    assert guard["env"]["EXPECTED_SHA"] == "${{ inputs.expected_sha }}"
+    assert guard["env"]["RELEASE_TAG"] == "${{ inputs.release_tag }}"
+    registry = "\n".join(s.get("run", "") for s in jobs["registry-acceptance"]["steps"])
+    assert "--registry-spec" in registry

@@ -46,32 +46,33 @@ function resolveRuntime(runtime) {
   const manifest=JSON.parse(fs.readFileSync(manifestPath,'utf8'));
   if (manifest.version!==runtime.version || manifest.uvVersion!==runtime.uvVersion ||
       manifest.executable!==platform.executable || manifest.sha256!==platform.binarySha256) {
-    throw new Error('Companion integrity manifest mismatch. Reinstall the exact private artifacts.');
+    throw new Error('Companion integrity manifest mismatch. Reinstall the exact package version.');
   }
   const binary=path.join(path.dirname(manifestPath),platform.executable);
   try {
     if (!fs.lstatSync(binary).isFile()) throw new Error('Companion integrity: expected a regular executable.');
   } catch(error) {
-    if(error.code==='ENOENT') throw new Error('Companion executable missing. Reinstall the exact private artifacts with optional dependencies enabled.');
+    if(error.code==='ENOENT') throw new Error('Companion executable missing. Reinstall the exact package version with optional dependencies enabled.');
     throw error;
   }
   const hash=crypto.createHash('sha256').update(fs.readFileSync(binary)).digest('hex');
-  if (hash!==platform.binarySha256) throw new Error('Companion integrity SHA-256 mismatch. Reinstall the exact private artifacts.');
+  if (hash!==platform.binarySha256) throw new Error('Companion integrity SHA-256 mismatch. Reinstall the exact package version.');
   return binary;
 }
 function payloadWheel(runtime) {
   const p=runtime.payload;
   if(!p || !/^[a-f0-9]{64}$/.test(p.sha256) || !Number.isSafeInteger(p.bytes) || p.bytes<=0 ||
-     p.distribution!=='brigade-cli' || p.version!==runtime.payloadVersion && runtime.payloadVersion!==undefined ||
-     typeof p.wheel!=='string' || !/^brigade_cli-[0-9.]+dev[0-9]+-py3-none-any\.whl$/.test(p.wheel)) {
-    throw new Error('Bundled wheel integrity manifest invalid. Reinstall the exact private artifacts.');
+     p.distribution!=='brigade-cli' || p.version!==runtime.payloadVersion ||
+     typeof p.wheel!=='string' || !/^brigade_cli-\d+\.\d+\.\d+(?:\.dev\d+)?-py3-none-any\.whl$/.test(p.wheel) ||
+     p.wheel!==`brigade_cli-${runtime.payloadVersion}-py3-none-any.whl`) {
+    throw new Error('Bundled wheel integrity manifest invalid. Reinstall the exact package version.');
   }
   const directory=path.join(__dirname,'wheel');
   const wheel=path.join(directory,p.wheel);
   if(!fs.lstatSync(directory).isDirectory() || fs.lstatSync(directory).isSymbolicLink() ||
      !fs.lstatSync(wheel).isFile() || fs.realpathSync(wheel)!==path.join(fs.realpathSync(directory),p.wheel) ||
      fs.statSync(wheel).size!==p.bytes || sha256(fs.readFileSync(wheel))!==p.sha256) {
-    throw new Error('Bundled wheel integrity SHA-256 or size mismatch. Reinstall the exact private artifacts.');
+    throw new Error('Bundled wheel integrity SHA-256 or size mismatch. Reinstall the exact package version.');
   }
   return wheel;
 }

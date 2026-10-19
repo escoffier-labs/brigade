@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build private npm tarballs from pinned, verified official uv assets."""
+"""Build public npm tarballs from pinned official wheel and uv release bytes."""
 
 from __future__ import annotations
 
@@ -10,7 +10,6 @@ import email.parser
 import io
 import os
 import re
-import sys
 import venv
 import hashlib
 import json
@@ -34,12 +33,13 @@ def digest(data: bytes) -> str:
 
 def download(url: str, destination: Path, expected: str) -> bytes:
     if destination.exists():
-        data = destination.read_bytes()
+        with destination.open("rb") as cached:
+            data = cached.read(MAX_DOWNLOAD + 1)
     else:
         with urllib.request.urlopen(url, timeout=60) as response:
             data = response.read(MAX_DOWNLOAD + 1)
-        if len(data) > MAX_DOWNLOAD:
-            raise ValueError(f"download exceeds bound: {url}")
+    if len(data) > MAX_DOWNLOAD:
+        raise ValueError(f"download exceeds bound: {url}")
     if digest(data) != expected:
         raise ValueError(f"SHA-256 mismatch: {url}; no substitute permitted")
     destination.write_bytes(data)
@@ -118,6 +118,8 @@ def pack(directory: Path, output: Path) -> dict[str, object]:
         "filename": artifact.name,
         "sha256": digest(artifact.read_bytes()),
         "bytes": artifact.stat().st_size,
+        "integrity": metadata["integrity"],
+        "shasum": metadata["shasum"],
         "unpackedBytes": metadata["unpackedSize"],
     }
 
@@ -228,24 +230,86 @@ def validate_wheel(wheel: Path, version: str) -> dict:
     }
 
 
+def audit_stable_payload(wheel: Path, reference: Path, source: Path, manifest: Path, version: str, commit: str) -> dict:
+    """Audit all package bytes and reverse coverage against a tag reference build."""
+
+    def members(path: Path) -> dict[str, bytes]:
+        with zipfile.ZipFile(path) as archive:
+            return {name: archive.read(name) for name in archive.namelist() if name.startswith("brigade/")}
+
+    actual, expected = members(wheel), members(reference)
+    if set(actual) != set(expected):
+        raise ValueError("tag reference package inventory mismatch")
+    generated = "brigade/templates/components/manifest-v1.json"
+    data = manifest.read_bytes()
+    release = json.loads(data)
+    if (
+        release["brigade_version"] != version
+        or release["manifest_revision"] != f"v{version}+{commit}"
+        or not release["components"]
+        or any(item["component_revision"] != commit for item in release["components"].values())
+    ):
+        raise ValueError("release component manifest revision mismatch")
+    if actual.get(generated) != data:
+        raise ValueError("wheel release component manifest mismatch")
+    for name, content in actual.items():
+        if name == generated:
+            continue
+        tag_file = source / "src" / name
+        if not tag_file.is_file() or tag_file.is_symlink() or tag_file.read_bytes() != content:
+            raise ValueError(f"wheel differs from tag source: {name}")
+    return {"packageEntries": len(actual), "componentManifestSha256": digest(data)}
+
+
 def build_payload(output: Path, runtime: dict, identity: dict, paths: list[str]) -> tuple[Path, dict]:
+    # The packaging snapshot never substitutes for the stable payload's tag identity.
+    pin = runtime.get("payloadWheel")
+    if not pin:
+        raise ValueError("verified published stable wheel pin required")
+    version = runtime["payloadVersion"]
+    tag = f"v{version}"
+    if pin["releaseTag"] != tag or not re.fullmatch(r"\d+\.\d+\.\d+", version):
+        raise ValueError("stable release tag/version mismatch")
+
+    def git(*args: str) -> bytes:
+        return subprocess.check_output(["git", "-C", str(REPO), *args])
+
+    commit = git("rev-parse", f"{tag}^{{commit}}").decode().strip()
+    if commit != pin["sourceCommit"] or not re.fullmatch(r"[a-f0-9]{40}", commit):
+        raise ValueError("stable release tag commit mismatch")
     build = output / "build"
     build.mkdir(exist_ok=False)
     source = build / "source"
-    for name in paths:
-        origin = REPO / name
-        if not origin.is_file() or digest(origin.read_bytes()) != identity["sourceSha256"][name]:
-            raise ValueError(f"source changed during build: {name}")
+    hashes = {}
+    for entry in git("ls-tree", "-rz", "--full-tree", commit).split(b"\0"):
+        if not entry:
+            continue
+        header, raw_name = entry.split(b"\t", 1)
+        mode, kind, oid = header.split()
+        name = raw_name.decode()
+        if mode not in {b"100644", b"100755"} or kind != b"blob":
+            raise ValueError(f"tag source must be regular files: {name}")
+        content = git("cat-file", "blob", oid.decode())
+        hashes[name] = digest(content)
         dest = source / name
         dest.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(origin, dest)
-    project = (source / "pyproject.toml").read_text().split("[project.optional-dependencies]")[0]
-    if not re.search(r"(?m)^dependencies = \[\]$", project):
-        raise ValueError("source project must declare dependencies = []")
-    version = runtime["payloadVersion"]
-    subprocess.run(
-        [sys.executable, str(source / "scripts/prepare_dev_wheel.py"), version, "--root", str(source)], check=True
-    )
+        dest.write_bytes(content)
+    wheel = build / f"brigade_cli-{version}-py3-none-any.whl"
+    if not pin["url"].startswith("https://files.pythonhosted.org/") or not pin["url"].endswith("/" + wheel.name):
+        raise ValueError("official published wheel URL required")
+    download(pin["url"], wheel, pin["sha256"])
+    payload = validate_wheel(wheel, version)
+    component = pin["componentManifest"]
+    base = f"https://github.com/escoffier-labs/brigade/releases/download/{tag}/"
+    manifest = build / "component-manifest-v1.json"
+    if component["url"] != base + manifest.name or component["checksumsUrl"] != base + "checksums.txt":
+        raise ValueError("exact release manifest/checksums URLs required")
+    download(component["url"], manifest, component["sha256"])
+    checksums = download(component["checksumsUrl"], build / "checksums.txt", component["checksumsSha256"])
+    matches = [line.split() for line in checksums.decode().splitlines() if line.split()[-1:] == [manifest.name]]
+    if matches != [[component["sha256"], manifest.name]]:
+        raise ValueError("release manifest checksum mismatch")
+    (source / "src/brigade/templates/components/manifest-v1.json").write_bytes(manifest.read_bytes())
     builder = build / "venv"
     venv.EnvBuilder(with_pip=True).create(builder)
     python = builder / ("Scripts/python.exe" if os.name == "nt" else "bin/python")
@@ -263,8 +327,8 @@ def build_payload(output: Path, runtime: dict, identity: dict, paths: list[str])
             ]
         )
     )
-    wheel_dir = build / "dist"
-    env = {**os.environ, "SOURCE_DATE_EPOCH": str(identity["sourceDateEpoch"])}
+    wheel_dir = build / "reference"
+    epoch = int(git("show", "-s", "--format=%ct", commit))
     subprocess.run(
         [
             str(python),
@@ -279,27 +343,92 @@ def build_payload(output: Path, runtime: dict, identity: dict, paths: list[str])
             str(wheel_dir),
             str(source),
         ],
-        env=env,
+        env={**os.environ, "SOURCE_DATE_EPOCH": str(epoch)},
         check=True,
     )
-    wheels = list(wheel_dir.iterdir())
-    if len(wheels) != 1:
-        raise ValueError("build must produce exactly one wheel")
-    payload = validate_wheel(wheels[0], version)
-    payload.update({key: identity[key] for key in ("sourceCommit", "sourceTree", "sourceIdentity")})
+    references = list(wheel_dir.glob("*.whl"))
+    if len(references) != 1:
+        raise ValueError("tag reference must produce exactly one wheel")
+    validate_wheel(references[0], version)
+    audit = audit_stable_payload(wheel, references[0], source, manifest, version, commit)
+    payload.update(
+        sourceCommit=commit,
+        sourceTree="clean",
+        sourceTreeSha=git("rev-parse", f"{commit}^{{tree}}").decode().strip(),
+        sourceIdentity=digest(json.dumps(hashes, sort_keys=True).encode()),
+        releaseTag=tag,
+        **audit,
+    )
     runtime["payload"] = payload
-    return wheels[0], {
-        "versions": tools,
-        "requirementsSha256": digest(requirements.read_bytes()),
-        "sourceDateEpoch": identity["sourceDateEpoch"],
-    }
+    return wheel, {"versions": tools, "requirementsSha256": digest(requirements.read_bytes()), "sourceDateEpoch": epoch}
+
+
+def verify_artifacts(output: Path) -> dict:
+    """Bind the original archives to clean packaging source and the stable pin."""
+    metadata = json.loads((output / "artifacts.json").read_text())
+    source = source_snapshot(False)[0]
+    for key in ("sourceCommit", "sourceTree", "sourceIdentity", "sourceSha256", "sourceDateEpoch"):
+        if metadata.get(key) != source[key]:
+            raise ValueError(f"packaging source mismatch: {key}")
+    runtime = metadata["runtime"]
+    reviewed = json.loads((SOURCE / "runtime.json").read_text())
+    if {key: value for key, value in runtime.items() if key != "payload"} != reviewed:
+        raise ValueError("runtime differs from reviewed source")
+    if json.loads((output / "runtime.json").read_text()) != runtime:
+        raise ValueError("runtime receipt mismatch")
+    pin, payload = reviewed["payloadWheel"], runtime["payload"]
+    if (
+        runtime["version"] != "0.29.0"
+        or runtime["payloadVersion"] != "0.29.0"
+        or payload["sourceCommit"] != pin["sourceCommit"]
+        or payload["releaseTag"] != pin["releaseTag"]
+        or payload["sha256"] != pin["sha256"]
+        or payload["componentManifestSha256"] != pin["componentManifest"]["sha256"]
+        or payload["wheel"] != f"brigade_cli-{runtime['payloadVersion']}-py3-none-any.whl"
+    ):
+        raise ValueError("stable payload pin identity mismatch")
+    artifacts = metadata["artifacts"]
+    names = [item["filename"] for item in artifacts]
+    platforms = runtime["platforms"]
+    if (
+        len(names) != len(set(names))
+        or len(names) != 6
+        or {a["platform"] for a in artifacts if "platform" in a} != set(platforms)
+        or sum("platform" not in a for a in artifacts) != 1
+        or {a["name"] for a in artifacts} != {"@escoffier-labs/brigade", *(p["package"] for p in platforms.values())}
+        or {p.name for p in output.glob("*.tgz")} != set(names)
+    ):
+        raise ValueError("exact six-archive inventory required")
+    for item in artifacts:
+        name = item["filename"]
+        if Path(name).name != name or "/" in name or "\\" in name or not name.endswith(".tgz"):
+            raise ValueError("unsafe artifact filename")
+        archive = output / name
+        if not archive.is_file() or archive.is_symlink():
+            raise ValueError("artifact must be regular file")
+        data = archive.read_bytes()
+        if (
+            len(data) != item["bytes"]
+            or digest(data) != item["sha256"]
+            or hashlib.sha1(data).hexdigest() != item["shasum"]
+            or "sha512-" + base64.b64encode(hashlib.sha512(data).digest()).decode() != item["integrity"]
+        ):
+            raise ValueError(f"original archive integrity mismatch: {name}")
+    return metadata
 
 
 def main() -> None:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--out", type=Path)
+    parser.add_argument("--verify-artifacts", type=Path)
     parser.add_argument("--allow-dirty", action="store_true", help="local evidence only, records dirty provenance")
     args = parser.parse_args()
+    if args.verify_artifacts:
+        metadata = verify_artifacts(args.verify_artifacts.resolve())
+        print(json.dumps({"status": "verified", "sourceCommit": metadata["sourceCommit"], "archives": 6}))
+        return
+    if args.out is None:
+        parser.error("--out or --verify-artifacts required")
     output = args.out.resolve()
     if output == REPO or REPO in output.parents:
         parser.error("generated artifacts must be outside the source checkout")
@@ -347,7 +476,12 @@ def main() -> None:
         manifest = {
             "name": pin["package"],
             "version": runtime["version"],
-            "private": True,
+            "publishConfig": {"access": "public"},
+            "repository": {
+                "type": "git",
+                "url": "git+https://github.com/escoffier-labs/brigade.git",
+                "directory": "npm/feasibility",
+            },
             "license": "MIT OR Apache-2.0",
             "os": [system],
             "cpu": [cpu],

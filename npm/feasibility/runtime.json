@@ -1,5 +1,5 @@
 {
-  "version": "0.29.0-dev.1",
+  "version": "0.29.0",
   "uvVersion": "0.12.23",
   "pythonVersion": "3.12.15",
   "pythonBuild": "20261003",
@@ -9,40 +9,52 @@
   },
   "platforms": {
     "linux-x64": {
-      "package": "@solomonneas/brigade-uv-linux-x64",
+      "package": "@escoffier-labs/brigade-uv-linux-x64",
       "asset": "uv-x86_64-unknown-linux-gnu.tar.gz",
       "archiveSha256": "9167d72b3319674b6303c4cbe071854bba13ebdf3d76b1a7cbdc175471fb66d6",
       "executable": "uv",
       "binarySha256": "abdc39eab8b4ad341dca91f3823a23a343fae94bdb22ebdd9e91694415206f2f"
     },
     "linux-arm64": {
-      "package": "@solomonneas/brigade-uv-linux-arm64",
+      "package": "@escoffier-labs/brigade-uv-linux-arm64",
       "asset": "uv-aarch64-unknown-linux-gnu.tar.gz",
       "archiveSha256": "6524bd338177ed50d035d39354e12545e993bbeba2ecbddf0480c5b3a81d313f",
       "executable": "uv",
       "binarySha256": "ed797a095bf9aea58135fa7081c290e51a14cfd3a7b1f24e55cb1d1a0c1007b0"
     },
     "darwin-x64": {
-      "package": "@solomonneas/brigade-uv-darwin-x64",
+      "package": "@escoffier-labs/brigade-uv-darwin-x64",
       "asset": "uv-x86_64-apple-darwin.tar.gz",
       "archiveSha256": "960da44cb4b73685206ddd250b19e0a117fa41095710c1038f081f5cb613efb4",
       "executable": "uv",
       "binarySha256": "566a27247ff63f72260ed10c241fe4cf815b6c1b9439e17bdc808cf2d1c0d80f"
     },
     "darwin-arm64": {
-      "package": "@solomonneas/brigade-uv-darwin-arm64",
+      "package": "@escoffier-labs/brigade-uv-darwin-arm64",
       "asset": "uv-aarch64-apple-darwin.tar.gz",
       "archiveSha256": "50487ae565ccd96e499056b4674d438f4c53170202617b4c759defe0c6a1b544",
       "executable": "uv",
       "binarySha256": "2f7be1879e3337eef20875c0f80ef033337305d0405efc5d72642d6292f66b3b"
     },
     "win32-x64": {
-      "package": "@solomonneas/brigade-uv-win32-x64",
+      "package": "@escoffier-labs/brigade-uv-win32-x64",
       "asset": "uv-x86_64-pc-windows-msvc.zip",
       "archiveSha256": "75d05de6762778c31ee183398de7dd15093fad0ed90b1f236d8205ea5ec00c90",
       "executable": "uv.exe",
       "binarySha256": "70742ae9bd9f64f984fd69126662cfda5c03558bcb40075b2263833e4075f744"
     }
   },
-  "payloadVersion": "0.29.0.dev1"
+  "payloadVersion": "0.29.0",
+  "payloadWheel": {
+    "url": "https://files.pythonhosted.org/packages/09/2f/273f58a5c1dde4ae5677efafbfa3107169d8dd3451f31e2e80734df14ca8/brigade_cli-0.29.0-py3-none-any.whl",
+    "sha256": "a6d3a942a9c23660bb43c0f85198c969fe86daf27ebcacdddf959abb69fdfe38",
+    "releaseTag": "v0.29.0",
+    "sourceCommit": "19d293f5648e27ccd39856348f8769eb88f6a021",
+    "componentManifest": {
+      "url": "https://github.com/escoffier-labs/brigade/releases/download/v0.29.0/component-manifest-v1.json",
+      "sha256": "b9dd5d0f776919dcc953938f1862fc786d0a344c629064d58e2285e246533b69",
+      "checksumsUrl": "https://github.com/escoffier-labs/brigade/releases/download/v0.29.0/checksums.txt",
+      "checksumsSha256": "326a26cf7c29ec16329940029c4b8be76d3e4a922145b945c763ae3963e9a5e8"
+    }
+  }
 }

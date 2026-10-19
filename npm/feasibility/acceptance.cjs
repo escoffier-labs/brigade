@@ -10,6 +10,9 @@ const {performance}=require('node:perf_hooks');
 
 const args=process.argv.slice(2);
 function option(name) { const i=args.indexOf(name); if(i<0 || !args[i+1]) throw new Error(`Required: ${name}`); return path.resolve(args[i+1]); }
+const registryIndex=args.indexOf('--registry-spec');
+const registrySpec=registryIndex<0?null:args[registryIndex+1];
+const registryMode=registrySpec!==null;
 const containedUncatchable=args.includes('--contained-linux-uncatchable');
 const pidNamespace=process.platform==='linux'?fs.readlinkSync('/proc/self/ns/pid'):null;
 const externalHostNamespace=process.env.BRIGADE_NPM_EXTERNAL_HOST_PID_NAMESPACE || null;
@@ -22,6 +25,7 @@ fs.mkdirSync(out,{recursive:true});
 const root=fs.mkdtempSync(path.join(os.tmpdir(),'brigade-npm-acceptance-'));
 const receipt={schema:1,startedAt:new Date().toISOString(),platform:`${process.platform}-${process.arch}`,nodeVersion:process.version,npmVersion:null,osRelease:os.release(),machine:process.platform==='win32'?process.env.PROCESSOR_ARCHITECTURE:spawnSync('uname',['-m'],{encoding:'utf8'}).stdout.trim(),rosetta:process.platform==='darwin'?spawnSync('sysctl',['-n','sysctl.proc_translated'],{encoding:'utf8'}).stdout.trim() || 'unavailable':null,status:'running',root,checks:[],artifacts:[],limitations:['Hosted coverage requires separate native jobs.','Managed Python network transfer bytes are not metered.']};
 // Namespace metadata records the external runner's operation, not a security boundary.
+receipt.distributionMode=registryMode?'registry':'packed';
 receipt.acceptanceMode=containedUncatchable?'contained-linux-uncatchable':'native-default';
 receipt.pidNamespace=pidNamespace;receipt.externalHostPidNamespace=externalHostNamespace;
 const reportPath=path.join(out,'acceptance.json');
@@ -98,7 +102,9 @@ else {
   }
 }
 // Node and required OS utilities are on the acceptance PATH. No Python/uv.
-env={...process.env,HOME:home,USERPROFILE:home,APPDATA:path.join(home,'appdata'),LOCALAPPDATA:path.join(home,'local'),XDG_CONFIG_HOME:path.join(home,'config'),XDG_CACHE_HOME:path.join(home,'cache'),PATH:bin+(process.platform==='win32'?path.delimiter+path.join(process.env.SystemRoot || 'C:\\Windows','System32')+path.delimiter+gitDir:''),BRIGADE_NPM_CACHE:path.join(root,'warm-state'),npm_config_cache:path.join(root,'npm-cache'),npm_config_offline:'true',npm_config_audit:'false',npm_config_fund:'false',npm_config_userconfig:path.join(home,'empty-npmrc'),npm_config_globalconfig:path.join(home,'empty-global-npmrc')};
+const inherited={...process.env};
+for(const key of Object.keys(inherited)) if(/^npm_/i.test(key) || /^(NODE_AUTH_TOKEN|NPM_TOKEN)$/i.test(key)) delete inherited[key];
+env={...inherited,HOME:home,USERPROFILE:home,APPDATA:path.join(home,'appdata'),LOCALAPPDATA:path.join(home,'local'),XDG_CONFIG_HOME:path.join(home,'config'),XDG_CACHE_HOME:path.join(home,'cache'),PATH:bin+(process.platform==='win32'?path.delimiter+path.join(process.env.SystemRoot || 'C:\\Windows','System32')+path.delimiter+gitDir:''),BRIGADE_NPM_CACHE:path.join(root,'warm-state'),npm_config_cache:path.join(root,'npm-cache'),npm_config_offline:registryMode?'false':'true',npm_config_registry:'https://registry.npmjs.org/',npm_config_audit:'false',npm_config_fund:'false',npm_config_userconfig:path.join(home,'empty-npmrc'),npm_config_globalconfig:path.join(home,'empty-global-npmrc')};
 for(const key of Object.keys(env)) if(key.startsWith('BRIGADE_') && key!=='BRIGADE_NPM_CACHE') delete env[key];
 for(const key of Object.keys(env)) if(key.toUpperCase().startsWith('GIT_')) delete env[key];
 const gitConfig=path.join(home,'empty-gitconfig');fs.writeFileSync(gitConfig,'');
@@ -135,7 +141,7 @@ async function call(name,argv,extra={}) {
   const result=await execute(process.execPath,[launcher,...argv],extra);
   record(name,result,{args:argv.map(redact)}); return result;
 }
-function versionOK(result) {assert.equal(result.exit,0,result.stderr);assert.match(result.stdout,/0\.29\.0\.dev1/);}
+function versionOK(result) {assert.equal(result.exit,0,result.stderr);assert.equal(result.stdout.trim(),'brigade '+runtime.payloadVersion);}
 function hash(bytes) {return crypto.createHash('sha256').update(bytes).digest('hex');}
 function tarFiles(bytes) {
   const tar=zlib.gunzipSync(bytes),files=new Map();
@@ -148,7 +154,7 @@ function tarFiles(bytes) {
   return files;
 }
 async function npxCall(name,argv) {
-  const result=await execute(process.execPath,[npxCli,'--offline','--yes',...npxPackages,'--','brigade',...argv],{env:npxEnv});
+  const result=await execute(process.execPath,registryMode?[npxCli,'--yes',registrySpec,...argv]:[npxCli,'--offline','--yes',...npxPackages,'--','brigade',...argv],{env:npxEnv});
   record(name,result,{args:argv});return result;
 }
 async function proveInstalledWheel(privateEnv) {
@@ -211,6 +217,9 @@ async function main() {
   const metadata=JSON.parse(fs.readFileSync(path.join(artifactsDir,'artifacts.json'),'utf8'));
   receipt.sourceSha256=metadata.sourceSha256;
   assert.ok(receipt.sourceSha256,'packed artifacts must identify final source');
+  runtime=metadata.runtime;
+  const launcherArtifact=metadata.artifacts.find(a=>!a.platform);
+  if(registryMode) assert.equal(registrySpec,`${launcherArtifact.name}@${runtime.version}`,'registry spec must pin reviewed launcher');
   const platform=receipt.platform;
   const chosen=metadata.artifacts.filter(a=>a.platform===platform || !a.platform);
   assert.equal(chosen.length,2,'launcher plus compatible companion required');
@@ -218,6 +227,8 @@ async function main() {
     const data=fs.readFileSync(path.join(artifactsDir,artifact.filename));
     const sha=crypto.createHash('sha256').update(data).digest('hex');
     assert.equal(sha,artifact.sha256);assert.equal(data.length,artifact.bytes);
+    assert.equal('sha512-'+crypto.createHash('sha512').update(data).digest('base64'),artifact.integrity);
+    assert.equal(crypto.createHash('sha1').update(data).digest('hex'),artifact.shasum);
     receipt.artifacts.push({filename:artifact.filename,sha256:sha,bytes:data.length,unpackedBytes:artifact.unpackedBytes,installed:chosen.includes(artifact)});
   }
   assert.equal(metadata.artifacts.length,6);
@@ -225,15 +236,33 @@ async function main() {
   for(const artifact of metadata.artifacts) {
     const files=tarFiles(fs.readFileSync(path.join(artifactsDir,artifact.filename)));
     const manifest=JSON.parse(files.get('package/package.json'));
-    assert.equal(manifest.private,true);assert.equal(manifest.version,'0.29.0-dev.1');
+    assert.equal(manifest.private,undefined);assert.equal(manifest.version,metadata.runtime.version);
+    assert.equal(manifest.publishConfig.access,'public');
+    assert.deepEqual(manifest.repository,{type:'git',url:'git+https://github.com/escoffier-labs/brigade.git',directory:'npm/feasibility'});
+    if(!artifact.platform) assert.deepEqual(manifest.optionalDependencies,Object.fromEntries(Object.values(metadata.runtime.platforms).map(p=>[p.package,metadata.runtime.version])));
     if(!artifact.platform) {
       const packed=JSON.parse(files.get('package/runtime.json'));
-      assert.deepEqual(packed,metadata.runtime);assert.equal(packed.payload.version,'0.29.0.dev1');
+      assert.deepEqual(packed,metadata.runtime);assert.equal(packed.payload.version,metadata.runtime.payloadVersion);
       assert.match(packed.payload.sourceCommit,/^[a-f0-9]{40}$/);
       const wheel=files.get('package/wheel/'+packed.payload.wheel);
       assert.equal(hash(wheel),packed.payload.sha256);assert.equal(wheel.length,packed.payload.bytes);
       assert.equal([...files.keys()].filter(n=>n.startsWith('package/wheel/')).length,1);
     }
+  }
+  if(registryMode) {
+    for(const artifact of metadata.artifacts) {
+      let visible=false;
+      for(const delay of [0,1000,2000,4000,8000]) {
+        if(delay) await new Promise(resolve=>setTimeout(resolve,delay));
+        const r=await execute(process.execPath,[npmCli,'view',`${artifact.name}@${runtime.version}`,'dist.integrity','--json']);
+        if(r.exit===0) {assert.equal(JSON.parse(r.stdout),artifact.integrity);visible=true;break;}
+      }
+      assert.ok(visible,'registry visibility deadline: '+artifact.name);
+      const attestation=await execute(process.execPath,[npmCli,'view',`${artifact.name}@${runtime.version}`,'dist.attestations','--json']);
+      assert.equal(attestation.exit,0);assert.ok(JSON.parse(attestation.stdout)?.url,'provenance attestation required');
+    }
+    const latest=await execute(process.execPath,[npmCli,'view',launcherArtifact.name,'dist-tags.latest','--json']);
+    assert.equal(latest.exit,0);assert.equal(JSON.parse(latest.stdout),runtime.version);
   }
   npxEnv={...env,HOME:path.join(root,'npx-home'),USERPROFILE:path.join(root,'npx-home'),BRIGADE_NPM_CACHE:path.join(root,'npx-state'),npm_config_cache:path.join(root,'npx-cache')};
   fs.mkdirSync(npxEnv.HOME);npxPackages=chosen.flatMap(a=>['--package',path.join(artifactsDir,a.filename)]);
@@ -243,9 +272,25 @@ async function main() {
   assert.equal((await npxCall('npx-help',['--help'])).exit,0);
   const npxInvalid=await npxCall('npx-nonzero',['not-a-command']);assert.equal(npxInvalid.exit,2);
   save();
-  const install=await execute(process.execPath,[npmCli,'install','--offline','--ignore-scripts','--no-audit','--no-fund','--prefix',prefix,...chosen.map(a=>path.join(artifactsDir,a.filename))]);
+  const install=await execute(process.execPath,[npmCli,'install',...(registryMode?[]:['--offline']),'--ignore-scripts','--no-audit','--no-fund','--prefix',prefix,...(registryMode?[registrySpec]:chosen.map(a=>path.join(artifactsDir,a.filename)))]);
   record('install-local-tarballs',install);assert.equal(install.exit,0,install.stderr);
-  launcher=path.join(prefix,'node_modules','@solomonneas','brigade','launcher.cjs');
+  launcher=path.join(prefix,'node_modules',...launcherArtifact.name.split('/'),'launcher.cjs');
+  if(registryMode) {
+    function verifyLock(file) {
+      const lock=JSON.parse(fs.readFileSync(file));
+      for(const a of chosen) {
+        const installed=lock.packages['node_modules/'+a.name];
+        assert.ok(installed,'optional companion must resolve from registry: '+a.name);
+        assert.equal(installed.integrity,a.integrity);assert.equal(installed.version,runtime.version);
+      }
+      record('registry-lockfile-integrity',{file,packages:chosen.map(a=>({name:a.name,integrity:a.integrity}))});
+    }
+    verifyLock(path.join(prefix,'package-lock.json'));
+    const npxInstalls=fs.readdirSync(path.join(npxEnv.npm_config_cache,'_npx'));
+    assert.equal(npxInstalls.length,1);verifyLock(path.join(npxEnv.npm_config_cache,'_npx',npxInstalls[0],'package-lock.json'));
+    const signatures=await execute(process.execPath,[npmCli,'audit','signatures'],{cwd:prefix});
+    record('npm-audit-signatures',signatures);assert.equal(signatures.exit,0,signatures.stderr);
+  }
   contract=require(launcher);
   runtime=require(path.join(path.dirname(launcher),'runtime.json'));
   uv=contract.resolveRuntime(runtime);
@@ -425,10 +470,9 @@ async function main() {
   }
   receipt.cancellation=cancellationResults;
   const omittedPrefix=path.join(root,'omitted-prefix');
-  const launcherArtifact=chosen.find(a=>!a.platform);
-  const omittedInstall=await execute(process.execPath,[npmCli,'install','--offline','--ignore-scripts','--omit=optional','--prefix',omittedPrefix,path.join(artifactsDir,launcherArtifact.filename)]);
+  const omittedInstall=await execute(process.execPath,[npmCli,'install',...(registryMode?[]:['--offline']),'--ignore-scripts','--omit=optional','--prefix',omittedPrefix,registryMode?registrySpec:path.join(artifactsDir,launcherArtifact.filename)]);
   record('launcher-only-omit-optional-install',omittedInstall);assert.equal(omittedInstall.exit,0,omittedInstall.stderr);
-  const omitted=await execute(process.execPath,[path.join(omittedPrefix,'node_modules','@solomonneas','brigade','launcher.cjs'),'--version']);
+  const omitted=await execute(process.execPath,[path.join(omittedPrefix,'node_modules',...launcherArtifact.name.split('/'),'launcher.cjs'),'--version']);
   record('launcher-only-omit-optional-start',omitted);assert.equal(omitted.exit,1);assert.match(omitted.stderr,/--omit=optional/);
   const pin=runtime.platforms[platform];
   const binary=uv;

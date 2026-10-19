@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Stable npm publishing support for `@escoffier-labs/brigade@0.29.0` and five public platform companions, using the pinned official PyPI wheel, tag-based payload auditing, immutable archive retries, hosted provenance and native registry acceptance gates. Registry publication is tracked by the release workflow.
+
 ## [0.29.0] - 2026-10-18
 
 ### Changed
