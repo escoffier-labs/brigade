@@ -1635,7 +1635,7 @@ _STYLE = (
 .tile-facts dd { min-width: 0; margin: 0; }
 .work-text { white-space: pre-wrap; overflow-wrap: anywhere; }
 .work-item h2, .work-item li { overflow-wrap: anywhere; }
-.work-item h3 { margin-top: var(--space-4); }
+.work-item h3, .owner-card h3 { margin-top: var(--space-4); }
 .claim, .collision { margin: 10px 0 0; font-size: 12px; }
 .collision { color: var(--signal); font-weight: 800; }
 .cloud-workers { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--space-4); margin-top: var(--space-4); }
@@ -1656,7 +1656,8 @@ _STYLE = (
 .timeline-state { color: var(--ink); font-weight: 700; }
 .observer-list { display: grid; gap: var(--space-2); margin-top: var(--space-3); font-size: 12px; }
 th:nth-child(1) { width: 22%; } th:nth-child(2) { width: 20%; } th:nth-child(3) { width: 13%; } th:nth-child(4) { width: 34%; } th:nth-child(5) { width: 11%; }
-.roster-table th:nth-child(n) { width: auto; }
+.roster-table th:nth-child(n), .owners-table th:nth-child(n) { width: auto; }
+.owners-table { min-width: 640px; }
 .seat--off td { color: var(--faint); }
 @media (max-width: 700px) {
   .timeline li { grid-template-columns: 1fr; gap: 2px; }

@@ -36,7 +36,7 @@ def _table(items: Sequence[Holding], *, empty: str) -> str:
         else ""
     )
     return (
-        '<div class="table-wrap"><table><thead><tr><th>Kind</th><th>Item</th><th>Repository</th><th>Node</th>'
+        '<div class="table-wrap"><table class="owners-table"><thead><tr><th>Kind</th><th>Item</th><th>Repository</th><th>Node</th>'
         f"<th>Detail</th><th>Since</th></tr></thead><tbody>{rows}</tbody></table></div>{note}"
     )
 
