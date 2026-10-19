@@ -29,6 +29,7 @@ import math
 import re
 from typing import Any, Iterable, Mapping
 
+from . import fleet_policy_owners
 from .fleet_model_inventory import DEFAULT_ALLOWED_SOURCES
 from .fleet_model_roster import canonical_json
 
@@ -59,7 +60,9 @@ OPENCODE_MUSE_SPARK_1_3_IDS = frozenset(
     }
 )
 
-TOP_LEVEL_FIELDS = frozenset({"schema", "defaults", "machines", "seats", "consumers", "repositories", "routing"})
+TOP_LEVEL_FIELDS = frozenset(
+    {"schema", "defaults", "machines", "seats", "consumers", "repositories", "routing", "owners"}
+)
 DEFAULT_TELEMETRY_TTL_SECONDS = 300
 DEFAULT_RESERVATION_TTL_SECONDS = 300
 DEFAULT_QUOTA_RESERVE_PERCENT = 4
@@ -823,6 +826,10 @@ def parse_document(raw: Any) -> dict[str, Any]:
         },
         "routing": parse_routing(body.get("routing")),
     }
+    # Omitted when empty so every pre-owners revision keeps its stored digest.
+    owners = fleet_policy_owners.parse_owners(body.get("owners"))
+    if owners:
+        document["owners"] = owners
     rendered = canonical_json(document)
     if len(rendered.encode("ascii")) > MAX_DOCUMENT_BYTES:
         raise FleetPolicyError(f"fleet policy document must be at most {MAX_DOCUMENT_BYTES} bytes")
