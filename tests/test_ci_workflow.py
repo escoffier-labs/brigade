@@ -4,10 +4,41 @@ import os
 import textwrap
 import re
 import subprocess
+import shutil
+import shlex
+import sys
 
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
+
+
+def _workflow_bash() -> str:
+    if os.name != "nt":
+        bash = shutil.which("bash")
+        if bash is not None:
+            return bash
+        pytest.skip("workflow shell execution requires Bash")
+    # Windows' PATH may resolve bash.exe to the WSL launcher. Use Git for
+    # Windows' shell explicitly, including non-default Git installations.
+    git = shutil.which("git")
+    roots = [Path(git).resolve().parent.parent] if git else []
+    roots.extend(Path(os.environ[key]) / "Git" for key in ("ProgramFiles", "ProgramFiles(x86)") if key in os.environ)
+    if "LOCALAPPDATA" in os.environ:
+        roots.append(Path(os.environ["LOCALAPPDATA"]) / "Programs" / "Git")
+    for root in roots:
+        bash = root / "bin" / "bash.exe"
+        if bash.is_file():
+            return str(bash)
+    pytest.skip("portable workflow shell execution on Windows requires Git Bash (WSL bash.exe is unsuitable)")
+
+
+def _workflow_bash_command(script: str, *options: str) -> list[str]:
+    # The Ubuntu workflow uses python3. Bind that command to the interpreter
+    # running the test, since Git Bash need not have a python3 executable.
+    python = shlex.quote(Path(sys.executable).as_posix())
+    prelude = f'python3() {{ {python} "$@"; }}\n'
+    return [_workflow_bash(), *options, "-c", prelude + script]
 
 
 def _workflow_job_section(text: str, job_name: str) -> str:
@@ -404,7 +435,9 @@ def test_required_lint_allowlist_step_fails_closed_before_checking(tmp_path, bas
         )
         stub.chmod(0o755)
     env = {**os.environ, "BASE_SHA": base, "COMMAND_LOG": str(command_log), "PATH": f"{bin_dir}:{os.environ['PATH']}"}
-    result = subprocess.run(["bash", "-e", "-o", "pipefail", "-c", script], env=env, capture_output=True, text=True)
+    result = subprocess.run(
+        _workflow_bash_command(script, "-e", "-o", "pipefail"), env=env, capture_output=True, text=True
+    )
     lines = command_log.read_text().splitlines() if command_log.exists() else []
     assert [line for line in lines if line in {"git", "python"}] == expected_commands
     if expected_commands == ["git", "python"]:
@@ -510,7 +543,7 @@ def test_ci_shadow_gate_accepts_only_classified_container_skips(event, flag, cha
     needs["fleet-hub-container"] = {"result": container_result}
     script = textwrap.dedent(gate.split("        run: |\n", 1)[1])
     result = subprocess.run(
-        ["bash", "-c", script],
+        _workflow_bash_command(script),
         env=dict(os.environ, NEEDS_JSON=json.dumps(needs), EVENT_NAME=event),
         capture_output=True,
         text=True,
@@ -518,7 +551,9 @@ def test_ci_shadow_gate_accepts_only_classified_container_skips(event, flag, cha
     expected = changes_result == "success" and (
         container_result == "success" or (container_result == "skipped" and flag == "false" and event != "merge_group")
     )
-    assert (result.returncode == 0) is expected, result.stdout + result.stderr
+    assert result.returncode == (0 if expected else 1), result.stdout + result.stderr
+    if not expected:
+        assert "required success, got" in result.stderr, result.stdout + result.stderr
 
 
 @pytest.mark.parametrize("mutation", ["failure", "cancelled", "skipped", "missing", "extra"])
@@ -536,12 +571,14 @@ def test_ci_shadow_gate_rejects_bad_results_and_dependency_mismatches(mutation):
         else:
             needs[name] = {"result": "success" if mutation == "extra" else mutation}
         result = subprocess.run(
-            ["bash", "-c", script],
+            _workflow_bash_command(script),
             env=dict(os.environ, NEEDS_JSON=json.dumps(needs), EVENT_NAME="pull_request"),
             capture_output=True,
             text=True,
         )
-        assert result.returncode != 0, (name, mutation, result.stdout, result.stderr)
+        assert result.returncode == 1, (name, mutation, result.stdout, result.stderr)
+        diagnostic = "DAG mismatch:" if mutation in {"missing", "extra"} else "required success, got"
+        assert diagnostic in result.stderr, (name, mutation, result.stdout, result.stderr)
 
 
 def test_ci_workflow_filters_container_builds_without_scheduling_the_required_matrix():
@@ -602,11 +639,11 @@ def test_ci_workflow_required_test_gate_accepts_only_intentional_container_skips
         FLEET_HUB_RESULT=container_result,
         FLEET_HUB_REQUIRED=required,
     )
-    result = subprocess.run(["bash", "-c", shell], env=env, capture_output=True, text=True)
+    result = subprocess.run(_workflow_bash_command(shell), env=env, capture_output=True, text=True)
     expected = changes_result == "success" and (
         container_result == "success" or (container_result == "skipped" and required == "false")
     )
-    assert (result.returncode == 0) is expected, result.stdout + result.stderr
+    assert result.returncode == (0 if expected else 1), result.stdout + result.stderr
 
 
 def test_ci_workflow_caches_pip_for_jobs_that_install_dev_extras():
@@ -1540,12 +1577,15 @@ def test_ci_canary_is_one_opt_in_trusted_main_job_with_minimal_permissions():
         assert command in canary
 
 
+@pytest.mark.skipif(
+    os.name == "nt", reason="trusted-runner-canary exercises the Linux-only self-hosted runner bootstrap"
+)
 def test_ci_canary_smoke_executes_from_outside_checkout(tmp_path):
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     canary = _workflow_job_section(text, "trusted-runner-canary")
     shell = textwrap.dedent(canary.split("        run: |\n", 1)[1])
     result = subprocess.run(
-        ["bash", "-euo", "pipefail", "-c", shell],
+        _workflow_bash_command(shell, "-euo", "pipefail"),
         cwd=tmp_path,
         env=dict(os.environ, GITHUB_WORKSPACE=str(ROOT), PYTHONPATH=""),
         capture_output=True,
