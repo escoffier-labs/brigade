@@ -1,0 +1,84 @@
+name: Download metrics
+
+on:
+  schedule:
+    - cron: '23 12 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: download-metrics
+  cancel-in-progress: false
+
+jobs:
+  refresh:
+    if: github.repository == 'escoffier-labs/brigade' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.12'
+      - name: Generate validated metric
+        run: python scripts/download_metrics.py "$RUNNER_TEMP/downloads.json"
+      - name: Publish metric branch
+        env:
+          GH_TOKEN: ${{ github.token }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          # Supply credentials in memory, never in remote URLs or persisted checkout config.
+          export GIT_CONFIG_COUNT=1
+          export GIT_CONFIG_KEY_0=credential.helper
+          # Expand the token only when Git invokes the in-memory helper.
+          # shellcheck disable=SC2016
+          export GIT_CONFIG_VALUE_0='!f() { printf "%s\n" "username=x-access-token" "password=$GH_TOKEN"; }; f'
+          export GIT_TERMINAL_PROMPT=0
+          remote="$GITHUB_SERVER_URL/$GITHUB_REPOSITORY.git"
+          branch=download-metrics
+          metric="$RUNNER_TEMP/downloads.json"
+          work=$(mktemp -d "$RUNNER_TEMP/metrics-branch.XXXXXX")
+          trap 'rm -rf "$work"' EXIT
+          git init -q "$work"
+          cd "$work"
+          git remote add origin "$remote"
+          if git ls-remote --exit-code --heads origin "refs/heads/$branch" > /dev/null; then
+            git fetch --depth=1 origin "refs/heads/$branch"
+            git checkout -q -b "$branch" FETCH_HEAD
+            # Refuse an unrelated branch. Once established, preserve all other contents.
+            python - <<'PY'
+          import json
+          from pathlib import Path
+          path = Path('downloads.json')
+          if path.is_symlink() or not path.is_file():
+              raise SystemExit('Refusing unrelated download-metrics branch')
+          data = json.loads(path.read_text())
+          if (data.get('schemaVersion') != 1 or data.get('label') != 'downloads/month'
+              or data.get('sources', {}).get('pypi', {}).get('package') != 'brigade-cli'
+              or data.get('sources', {}).get('npm', {}).get('package') != '@escoffier-labs/brigade'):
+              raise SystemExit('Refusing unrelated download-metrics branch')
+          PY
+          else
+            status=$?
+            if [ "$status" -ne 2 ]; then
+              echo 'Could not determine metric branch existence' >&2
+              exit "$status"
+            fi
+            git checkout -q --orphan "$branch"
+          fi
+          cp "$metric" downloads.json
+          git add -- downloads.json
+          if git diff --cached --quiet; then
+            exit 0
+          fi
+          git -c user.name='github-actions[bot]' -c user.email='41898282+github-actions[bot]@users.noreply.github.com' \
+            commit -q -m 'chore: refresh combined download metric'
+          # Normal fast-forward push also refuses concurrent creation or modification.
+          git push origin "HEAD:refs/heads/$branch"
