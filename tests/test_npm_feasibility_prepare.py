@@ -168,7 +168,20 @@ def test_stable_payload_audit_binds_tag_inventory_and_only_release_manifest(tmp_
         assert result["componentManifestSha256"] == hashlib.sha256(data).hexdigest()
 
 
-@pytest.mark.parametrize("state", ["absent", "equal", "mismatch", "uncertain", "unavailable", "no-attestation"])
+@pytest.mark.parametrize(
+    "state",
+    [
+        "absent",
+        "equal",
+        "mismatch",
+        "uncertain",
+        "unavailable",
+        "no-attestation",
+        "wrong-commit",
+        "sha-mismatch",
+        "missing-sha",
+    ],
+)
 def test_registry_publisher_reconciles_immutable_archives_before_launcher(tmp_path, state):
     import json
     import os
@@ -189,7 +202,11 @@ def test_registry_publisher_reconciles_immutable_archives_before_launcher(tmp_pa
         if i < 5:
             artifact["platform"] = f"test-{i}"
         packages.append(artifact)
-    metadata = {"runtime": {"version": "0.29.0", "payloadVersion": "0.29.0"}, "artifacts": packages}
+    metadata = {
+        "runtime": {"version": "0.29.0", "payloadVersion": "0.29.0"},
+        "sourceCommit": "a" * 40,
+        "artifacts": packages,
+    }
     (tmp_path / "artifacts.json").write_text(json.dumps(metadata))
     npm = tmp_path / "npm-fixture.py"
     npm.write_text(
@@ -209,7 +226,7 @@ if args[0]=='view':
     if mode in ['absent','uncertain','no-attestation'] and not published:
         print(json.dumps({'error':{'code':'E404'}}));sys.exit(1)
     if args[2]=='dist.integrity': print(json.dumps('sha512-wrong' if mode=='mismatch' else a['integrity']))
-    elif args[2]=='dist.attestations': print(json.dumps(None if mode=='no-attestation' else {'url':'https://registry.npmjs.org/attestation'}))
+    elif args[2]=='dist.attestations': print(json.dumps(None if mode=='no-attestation' else {'url':'https://registry.npmjs.org/-/npm/v1/attestations/'+name+'@0.29.0'}))
     elif args[2]=='dist-tags.latest': print(json.dumps('0.29.0'))
 else:
     assert args[0]=='publish' and '--provenance' in args and '--access' in args and 'public' in args
@@ -234,13 +251,19 @@ else:
             "PUBLISH_FIXTURE": str(tmp_path),
             "PUBLISH_STATE": state,
             "npm_execpath": str(cli),
+            "NODE_OPTIONS": "--require=" + str(SOURCE.parent / "fixtures/publisher-provenance-preload.cjs"),
+            "GITHUB_SHA": "" if state == "missing-sha" else "b" * 40 if state == "sha-mismatch" else "a" * 40,
         },
         capture_output=True,
         text=True,
         timeout=90,
     )
     assert (result.returncode == 0) == (state in {"absent", "equal", "uncertain"}), result.stderr
-    calls = [json.loads(line) for line in (tmp_path / "calls.jsonl").read_text().splitlines()]
+    calls = (
+        [json.loads(line) for line in (tmp_path / "calls.jsonl").read_text().splitlines()]
+        if (tmp_path / "calls.jsonl").exists()
+        else []
+    )
     publications = [call for call in calls if call[0] == "publish"]
     if state in {"mismatch", "unavailable", "equal"}:
         assert not publications
@@ -249,6 +272,18 @@ else:
         assert len([call for call in calls if call[0] == "view" and call[2] == "dist.attestations"]) >= 6
     if state == "no-attestation":
         assert all(Path(call[1]).name != packages[-1]["filename"] for call in publications)
+    verifications = [call for call in calls if call[0] == "verify"]
+    if state in {"absent", "equal", "uncertain"}:
+        assert [call[1] for call in verifications] == [a["name"] for a in packages]
+        if publications:
+            launcher_index = calls.index(publications[-1])
+            assert all(calls.index(call) < launcher_index for call in verifications[:-1])
+    if state == "wrong-commit":
+        assert not publications and len(verifications) == 1
+        assert len([call for call in calls if call[0] == "view" and call[2] == "dist.attestations"]) == 1
+        assert packages[0]["name"] in result.stderr
+    if state in {"sha-mismatch", "missing-sha"}:
+        assert not calls, "source SHA must fail before any registry read"
 
 
 @pytest.mark.parametrize(
@@ -556,3 +591,18 @@ def test_native_acceptance_receipt_guards_require_pinned_clients(tmp_path, workf
         assert (result.returncode == 0) == (wrong_version is None), (
             "receipt guard must reject a different client version"
         )
+
+
+def test_source_provenance_crypto_gate_cannot_be_skipped_or_env_configured():
+    root = SOURCE.parents[2]
+    for filename, job in (("npm-feasibility.yml", "package"), ("npm-publish.yml", "build")):
+        text = (root / ".github/workflows" / filename).read_text()
+        build = text.split("  " + job + ":", 1)[1].split("\n  acceptance:", 1)[0]
+        gate = build.index("npm/feasibility/provenance.test.cjs")
+        assert build.index("python-version:") < gate < build.index("Build six stable payload archives")
+        assert "NODE_OPTIONS" not in text
+    import re
+
+    for filename, allowed in (("publish.cjs", {"GITHUB_SHA"}), ("provenance.cjs", {"npm_execpath", "PATH"})):
+        text = (SOURCE.parent / filename).read_text()
+        assert set(re.findall(r"process\.env\.([A-Za-z_][A-Za-z_0-9]*)", text)) <= allowed

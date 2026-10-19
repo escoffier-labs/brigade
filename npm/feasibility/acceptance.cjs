@@ -267,6 +267,9 @@ async function main() {
     }
   }
   if(registryMode) {
+    assert.match(process.env.GITHUB_SHA || '',/^[a-f0-9]{40}$/,'GITHUB_SHA must identify the packaging commit');
+    assert.equal(metadata.sourceCommit,process.env.GITHUB_SHA,'artifact packaging commit must equal GITHUB_SHA');
+    const verifier=require('./provenance.cjs').createVerifier(npmCli,path.join(root,'provenance-tuf'));
     for(const artifact of metadata.artifacts) {
       let visible=false;
       for(const delay of [0,1000,2000,4000,8000]) {
@@ -275,8 +278,24 @@ async function main() {
         if(r.exit===0) {assert.equal(JSON.parse(r.stdout),artifact.integrity);visible=true;break;}
       }
       assert.ok(visible,'registry visibility deadline: '+artifact.name);
-      const attestation=await execute(process.execPath,[npmCli,'view',`${artifact.name}@${runtime.version}`,'dist.attestations','--json']);
-      assert.equal(attestation.exit,0);assert.ok(JSON.parse(attestation.stdout)?.url,'provenance attestation required');
+      let verified=false;
+      for(const delay of [0,1000,2000,4000,8000]) {
+        if(delay) await new Promise(resolve=>setTimeout(resolve,delay));
+        const attestation=await execute(process.execPath,[npmCli,'view',`${artifact.name}@${runtime.version}`,'dist.attestations','--json']);
+        if(attestation.exit!==0) continue;
+        const url=JSON.parse(attestation.stdout)?.url;
+        if(!url) continue;
+        const digest=crypto.createHash('sha512').update(fs.readFileSync(path.join(artifactsDir,artifact.filename))).digest('hex');
+        try {
+          if(await verifier.verifyRegistry(url,digest,{
+            purl:verifier.purl(artifact.name,runtime.version),sourceCommit:metadata.sourceCommit,
+            repository:'https://github.com/escoffier-labs/brigade',workflow:'.github/workflows/npm-publish.yml',ref:'refs/heads/main',
+            san:'https://github.com/escoffier-labs/brigade/.github/workflows/npm-publish.yml@refs/heads/main',
+            issuer:'https://token.actions.githubusercontent.com',builder:'https://github.com/actions/runner/github-hosted',
+          })) {verified=true;break;}
+        } catch(error) {throw new Error(`Invalid registry provenance: ${artifact.name}: ${error.message}`,{cause:error});}
+      }
+      assert.ok(verified,'registry provenance deadline: '+artifact.name);
     }
     const latest=await execute(process.execPath,[npmCli,'view',launcherArtifact.name,'dist-tags.latest','--json']);
     assert.equal(latest.exit,0);assert.equal(JSON.parse(latest.stdout),runtime.version);

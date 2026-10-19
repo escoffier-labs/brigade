@@ -59,6 +59,12 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: '3.12'
+      - name: Verify real source provenance cryptography
+        shell: bash
+        run: >-
+          PYTHONPATH=src python -m brigade work verify run --target .
+          --argv-json '["node","--test","npm/feasibility/provenance.test.cjs"]'
+          --timeout 300 --capture brigade-work
       - name: Build six stable payload archives once from clean source
         run: |
           test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
