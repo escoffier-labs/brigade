@@ -139,21 +139,35 @@ def _read_json(path: Path) -> tuple[dict[str, Any], str]:
 
 def _git(target: Path, *args: str) -> proc.Result:
     return proc.run(
-        ["git", "--no-optional-locks", *args], cwd=target, timeout=10, env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"}
+        ["git", "--no-optional-locks", *args],
+        cwd=target,
+        timeout=10,
+        env={**os.environ, "GIT_OPTIONAL_LOCKS": "0", "LC_ALL": "C"},
     )
 
 
-def _linked_worktrees(target: Path, limit: int) -> tuple[set[Path], str | None]:
+def _linked_worktrees(target: Path, limit: int) -> tuple[set[Path], str | None, bool]:
+    """Return workspace roots, any inventory error, and whether they use Git."""
     result = _git(target, "worktree", "list", "--porcelain", "-z")
     if result.code != 0 or result.output_limit_exceeded:
-        return set(), "linked worktrees unavailable"
+        # A supported non-Git target is its own workspace. Other Git failures
+        # must stay unknown, including corrupt repositories and access errors.
+        probe = _git(target, "rev-parse", "--is-inside-work-tree")
+        if (
+            not result.output_limit_exceeded
+            and not probe.output_limit_exceeded
+            and probe.code != 0
+            and probe.stderr.startswith("fatal: not a git repository")
+        ):
+            return {target}, None, False
+        return set(), "linked worktrees unavailable", True
     paths = [Path(part[9:]).resolve() for part in result.stdout.split("\0") if part.startswith("worktree ")]
     if len(paths) > limit:
-        return set(paths[:limit]), "linked worktree limit exceeded"
-    return set(paths), None
+        return set(paths[:limit]), "linked worktree limit exceeded", True
+    return set(paths), None, True
 
 
-def _worktree_progress(lane: Lane, now: datetime) -> None:
+def _worktree_progress(lane: Lane, now: datetime, git_root: Path | None) -> None:
     path = lane.worktree
     if path is None:
         return
@@ -165,7 +179,14 @@ def _worktree_progress(lane: Lane, now: datetime) -> None:
         lane.worktree_missing = True
         lane.evidence.append(Evidence("worktree", now, "recorded path missing"))
         return
-    result = _git(path, "status", "--porcelain=v1", "-z", "--untracked-files=all")
+    if not path.is_dir() or not os.access(path, os.R_OK | os.X_OK):
+        lane.progress_errors.append("worktree is not a readable directory")
+        return
+    if git_root is None:
+        lane.evidence.append(Evidence("worktree", now, "non-Git workspace, no Git progress signal"))
+        return
+    # Porcelain paths are root-relative even when a run's cwd is a subdirectory.
+    result = _git(git_root, "status", "--porcelain=v1", "-z", "--untracked-files=all")
     if result.code != 0 or result.output_limit_exceeded:
         lane.progress_errors.append("worktree status unavailable")
         return
@@ -185,13 +206,13 @@ def _worktree_progress(lane: Lane, now: datetime) -> None:
     lane.dirty = bool(paths)
     newest: datetime | None = None
     for name in paths:
-        candidate = path / name
+        candidate = git_root / name
         try:
             # Never follow a changed symlink or a parent outside this worktree.
             info = candidate.lstat()
             if stat.S_ISLNK(info.st_mode):
                 continue
-            if not candidate.parent.resolve().is_relative_to(path.resolve()):
+            if not candidate.parent.resolve().is_relative_to(git_root):
                 raise ValueError("changed path outside worktree")
             stamp = datetime.fromtimestamp(info.st_mtime, timezone.utc)
             newest = max(newest, stamp) if newest else stamp
@@ -210,6 +231,7 @@ def _observe_worktree(
     worktrees: set[Path],
     worktree_error: str | None,
     cache: dict[Path, Lane],
+    git_workspace: bool,
 ) -> None:
     path = lane.worktree
     if path is None:
@@ -219,11 +241,16 @@ def _observe_worktree(
     if path not in cache:
         observation = Lane("worktree", worktree=path)
         try:
-            if path.exists() and path.resolve() not in worktrees:
+            root = max(
+                (root for root in worktrees if path.resolve().is_relative_to(root)),
+                key=lambda root: len(root.parts),
+                default=None,
+            )
+            if path.exists() and root is None:
                 observation.progress_errors.append(worktree_error or "worktree is not linked to target")
                 observation.evidence.append(Evidence("worktree", now, "link unavailable"))
             else:
-                _worktree_progress(observation, now)
+                _worktree_progress(observation, now, root if git_workspace else None)
         except (OSError, ValueError, RuntimeError, RecursionError, OverflowError) as exc:
             observation.progress_errors.append(str(exc)[:160])
             observation.evidence.append(Evidence("worktree", now, "evidence unavailable"))
@@ -387,6 +414,7 @@ def _collect_run(
     worktree_error: str | None,
     cache: dict[Path, Lane],
     lock_cache: dict[Path, _LockObservation],
+    git_workspace: bool,
 ) -> Lane:
     lane = Lane(child.name, run_dir=child)
     bound = run_reap._bind_contained_run_dir(child)
@@ -424,7 +452,7 @@ def _collect_run(
             source = "roster.json"
             _timeout(lane, now)
             source = "worktree"
-            _observe_worktree(lane, now, worktrees, worktree_error, cache)
+            _observe_worktree(lane, now, worktrees, worktree_error, cache, git_workspace)
     except (OSError, ValueError, RuntimeError, RecursionError, OverflowError) as exc:
         lane.errors.append(str(exc)[:160])
         lane.evidence.append(Evidence(source, now, "evidence unavailable"))
@@ -447,7 +475,7 @@ def collect_lanes(target: Path, *, now: datetime | None = None, limit: int = 50)
         raise ValueError("target is not a readable directory")
     clock = run_reap._utc_now(now)
     lanes = Lanes()
-    worktrees, worktree_error = _linked_worktrees(target, WORKTREE_SCAN_LIMIT)
+    worktrees, worktree_error, git_workspace = _linked_worktrees(target, WORKTREE_SCAN_LIMIT)
     lanes.truncated = worktree_error == "linked worktree limit exceeded"
     cache: dict[Path, Lane] = {}
     lock_cache: dict[Path, _LockObservation] = {}
@@ -472,7 +500,9 @@ def collect_lanes(target: Path, *, now: datetime | None = None, limit: int = 50)
         scan_full = len(newest) > RUN_SCAN_LIMIT
         lanes.truncated |= scan_full
         for _, name in newest[:RUN_SCAN_LIMIT]:
-            lanes.append(_collect_run(root / name, target, clock, worktrees, worktree_error, cache, lock_cache))
+            lanes.append(
+                _collect_run(root / name, target, clock, worktrees, worktree_error, cache, lock_cache, git_workspace)
+            )
     ledger_path = target / ".brigade/work/tasks.json"
     if ledger_path.parent.is_symlink():
         raise ValueError("ledger directory must not be symlinked")
@@ -518,7 +548,7 @@ def collect_lanes(target: Path, *, now: datetime | None = None, limit: int = 50)
                             matches[0].errors.append("invalid task worktree")
                         else:
                             matches[0].worktree = Path(recorded)
-                            _observe_worktree(matches[0], clock, worktrees, worktree_error, cache)
+                            _observe_worktree(matches[0], clock, worktrees, worktree_error, cache, git_workspace)
                 for lane in matches:
                     lane.task, lane.claim = task, claim
                     lane.evidence.append(

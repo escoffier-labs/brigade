@@ -26,6 +26,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Patrol accepts run subdirectories within linked worktrees and valid non-Git targets, while preserving unknown results for unverifiable workspaces.
 - Patrol excludes finished task claims, checks dead owners before waiting, keeps slow scans fresh, and reports unmatched claims as unknown.
 
 - Scanner children run with `BRIGADE_NO_UPDATE_CHECK=1`. The detached update refresh a child started outlived its throwaway sandbox and recreated it when writing `update-notify.json`, leaving one `brigade-scanner-child-*` directory in the temp dir per scanner run.

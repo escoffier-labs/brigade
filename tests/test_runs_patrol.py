@@ -411,6 +411,88 @@ def test_worktree_changes_supply_progress_without_event_files(tmp_path, monkeypa
     )
 
 
+@pytest.mark.parametrize(
+    "workspace,signal",
+    [
+        ("subdirectory", "events"),
+        ("subdirectory", "changes"),
+        ("linked-subdirectory", "events"),
+        ("linked-subdirectory", "changes"),
+        ("non-git", "events"),
+    ],
+)
+def test_patrol_accepts_supported_workspaces(tmp_path, capsys, monkeypatch, workspace, signal):
+    from brigade import proc, run_reap
+
+    if workspace == "non-git":
+        repo = tmp_path / "repo"
+        repo.mkdir()
+        cwd = repo
+    else:
+        repo = _repo(tmp_path)
+        root = repo
+        if workspace == "linked-subdirectory":
+            root = tmp_path / "linked"
+            result = proc.run(["git", "worktree", "add", "--detach", str(root)], cwd=repo)
+            assert result.code == 0, result.stderr
+        cwd = root / "subdir"
+        cwd.mkdir()
+    run_dir = _write_run(repo, "20260820-120000-patrol01", extra={"cwd": str(cwd)})
+    _write_stale_lock(repo, run_dir)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: True)
+    monkeypatch.setattr(run_reap, "_utc_now", lambda now=None: NOW)
+    if signal == "events":
+        (run_dir / "events").mkdir()
+        progress = run_dir / "events/worker.jsonl"
+    else:
+        progress = cwd / "changed.txt"
+    progress.write_text("{}\n")
+    os.utime(progress, (NOW.timestamp() - 10, NOW.timestamp() - 10))
+    before = _snapshot(repo)
+    assert cli.main(["runs", "patrol", "--target", str(repo), "--json", "--fail-on", "unknown"]) == 0
+    row = json.loads(capsys.readouterr().out)["lanes"][0]
+    assert row["state"] == "working", row["reason"]
+    if signal == "changes":
+        assert any(item["source"] == "worktree:git-status" and item["timestamp"] for item in row["evidence"])
+    assert _snapshot(repo) == before
+
+
+@pytest.mark.parametrize("workspace", ["unrelated-git", "unrelated-non-git", "inventory-error", "invalid-git"])
+def test_patrol_keeps_unverified_workspaces_unknown(tmp_path, monkeypatch, workspace):
+    from brigade import proc, run_lane_state
+
+    repo = _repo(tmp_path)
+    cwd = repo
+    if workspace.startswith("unrelated"):
+        cwd = tmp_path / "repo-other"
+        cwd.mkdir()
+        if workspace == "unrelated-git":
+            assert proc.run(["git", "init"], cwd=cwd).code == 0
+    elif workspace == "invalid-git":
+        repo = tmp_path / "broken"
+        repo.mkdir()
+        (repo / ".git").write_text("invalid gitfile\n")
+        cwd = repo
+    else:
+        real_git = run_lane_state._git
+
+        def git(path, *args):
+            if args[:2] == ("worktree", "list"):
+                return proc.Result(1, "", "inventory unavailable")
+            return real_git(path, *args)
+
+        monkeypatch.setattr(run_lane_state, "_git", git)
+    run_dir = _write_run(repo, "20260820-120000-patrol01", extra={"cwd": str(cwd)})
+    _write_stale_lock(repo, run_dir)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: True)
+    (run_dir / "events").mkdir()
+    progress = run_dir / "events/worker.jsonl"
+    progress.write_text("{}\n")
+    os.utime(progress, (NOW.timestamp() - 10, NOW.timestamp() - 10))
+    lane = run_lane_state.collect_lanes(repo, now=NOW)[0]
+    assert run_lane_state.classify(lane, NOW, run_lane_state.Thresholds()).state == "unknown"
+
+
 @pytest.mark.parametrize("worktree", ["non-git", "subdirectory", "unreadable", "git-error"])
 @pytest.mark.parametrize("live,expected", [(False, "dead"), (True, "stalled")])
 def test_worktree_problems_do_not_mask_lock_or_timeout(tmp_path, monkeypatch, worktree, live, expected):
