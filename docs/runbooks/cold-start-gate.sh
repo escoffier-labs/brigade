@@ -18,6 +18,12 @@ export GIT_CONFIG_SYSTEM=/dev/null
 git config --file "$GIT_CONFIG_GLOBAL" user.email "cold-start@example.invalid"
 git config --file "$GIT_CONFIG_GLOBAL" user.name "cold-start-gate"
 
+# Install into a throwaway pipx so the gate never replaces the caller's own
+# brigade install (or drops its injected packages).
+export PIPX_HOME="$SANDBOX/pipx-home"
+export PIPX_BIN_DIR="$SANDBOX/pipx-bin"
+export PIPX_MAN_DIR="$SANDBOX/pipx-man"
+export PATH="$PIPX_BIN_DIR:$PATH"
 pipx install --force "$REPO_DIR" >/dev/null
 echo "installed: $(brigade --version)"
 
@@ -49,11 +55,11 @@ refuse() {
   fi
 }
 
-# README install block, verbatim shape
+# quickstart, as documented in docs/first-10-minutes.md
 expect "status: ok" brigade operator quickstart --target . --harnesses codex,claude
 expect "ready: yes" brigade operator doctor --target . --profile local-operator
 
-# README handoff example, verbatim shape
+# handoff draft and lint (the flow docs/first-10-minutes.md walks through)
 expect "lint: ok" brigade handoff draft --target . --inbox codex \
   --title "What changed" \
   --summary "Short note future agents should know." \
