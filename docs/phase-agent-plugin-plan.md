@@ -1802,7 +1802,7 @@ if __name__ == "__main__":
 - Modify: `tests/test_version_sync_script.py:20`
 - Test: `tests/test_agent_plugin.py`
 
-- [ ] Write the failing test `tests/test_agent_plugin.py`:
+- [x] Write the failing test `tests/test_agent_plugin.py`:
 
 ```python
 """Agent plugin package: manifests, pins, skill drift, and the SessionStart hook."""
@@ -1896,8 +1896,8 @@ def test_hook_prints_brief_in_wired_repo_and_skips_when_enforced(tmp_path: Path)
     assert _run_hook(tmp_path, project, [bin_dir]).stdout == ""
 ```
 
-- [ ] Run, watch it fail: `PY -m pytest tests/test_agent_plugin.py -q -p no:cacheprovider`. Expect FAIL with `FileNotFoundError` for `plugins/brigade/.claude-plugin/plugin.json`.
-- [ ] Create `plugins/brigade/.claude-plugin/plugin.json`:
+- [x] Run, watch it fail: `PY -m pytest tests/test_agent_plugin.py -q -p no:cacheprovider`. Expect FAIL with `FileNotFoundError` for `plugins/brigade/.claude-plugin/plugin.json`.
+- [x] Create `plugins/brigade/.claude-plugin/plugin.json`:
 
 ```json
 {
@@ -1914,7 +1914,7 @@ def test_hook_prints_brief_in_wired_repo_and_skips_when_enforced(tmp_path: Path)
 }
 ```
 
-- [ ] Create `plugins/brigade/.codex-plugin/plugin.json`:
+- [x] Create `plugins/brigade/.codex-plugin/plugin.json`:
 
 ```json
 {
@@ -1944,7 +1944,7 @@ def test_hook_prints_brief_in_wired_repo_and_skips_when_enforced(tmp_path: Path)
 }
 ```
 
-- [ ] Create `plugins/brigade/.mcp.json`:
+- [x] Create `plugins/brigade/.mcp.json`:
 
 ```json
 {
@@ -1957,8 +1957,8 @@ def test_hook_prints_brief_in_wired_repo_and_skips_when_enforced(tmp_path: Path)
 }
 ```
 
-- [ ] Create `plugins/brigade/codex.mcp.json` with the same content, except the last argument is `"codex"`.
-- [ ] Create `plugins/brigade/hooks/hooks.json`:
+- [x] Create `plugins/brigade/codex.mcp.json` with the same content, except the last argument is `"codex"`.
+- [x] Create `plugins/brigade/hooks/hooks.json`:
 
 ```json
 {
@@ -1978,7 +1978,7 @@ def test_hook_prints_brief_in_wired_repo_and_skips_when_enforced(tmp_path: Path)
 }
 ```
 
-- [ ] Create `plugins/brigade/hooks/session-start.sh` and run `chmod 755 plugins/brigade/hooks/session-start.sh`:
+- [x] Create `plugins/brigade/hooks/session-start.sh` and run `chmod 755 plugins/brigade/hooks/session-start.sh`:
 
 ```bash
 #!/usr/bin/env bash
@@ -2021,7 +2021,7 @@ echo "Brigade memory is available through the brigade-memory MCP tools (search_c
 exit 0
 ```
 
-- [ ] Create `plugins/brigade/skills/enforce/SKILL.md`:
+- [x] Create `plugins/brigade/skills/enforce/SKILL.md`:
 
 ```markdown
 ---
@@ -2043,7 +2043,7 @@ The Brigade plugin starts in memory-first mode. This skill wires the current rep
 5. Tell the user the enforced hooks take effect in the next session.
 ```
 
-- [ ] Create `plugins/brigade/README.md`:
+- [x] Create `plugins/brigade/README.md`:
 
 ```markdown
 # Brigade plugin
@@ -2055,7 +2055,7 @@ The MCP server runs `npx -y @escoffier-labs/brigade@<version> memory serve-mcp -
 `skills/brigade-work/SKILL.md` is generated. Edit `src/brigade/templates/skills/brigade-work/SKILL.md` and run `scripts/sync_plugin_skills.py --write`.
 ```
 
-- [ ] In `scripts/version_sync.py`, add below `RECORDINGS = [...]`:
+- [x] In `scripts/version_sync.py`, add below `RECORDINGS = [...]`:
 
 ```python
 # The agent plugin manifests and the npm pin their MCP configs launch.
@@ -2068,10 +2068,10 @@ PLUGIN_LOCATIONS = [
 ```
 
   and in `_locations()`, add `locs.extend(PLUGIN_LOCATIONS)` after `locs.extend(RECORDINGS)`.
-- [ ] In `tests/test_version_sync_script.py`, add `module.PLUGIN_LOCATIONS = []` on the line after `module.RECORDINGS = []`.
-- [ ] Run to green: `PY -m pytest tests/test_agent_plugin.py tests/test_version_sync_script.py tests/test_release_version_sync.py -q -p no:cacheprovider`. Expect all PASS. Then `PY scripts/version_sync.py --check`. Expect `version=0.29.0 checked=17 locations` and exit 0.
-- [ ] Validate the Claude plugin: `claude plugin validate plugins/brigade`. Expect a success line and no errors. Fix any reported manifest error, then rerun.
-- [ ] Commit: `git add plugins/brigade scripts/version_sync.py tests/test_version_sync_script.py tests/test_agent_plugin.py && git commit -m "feat(plugin): package Brigade memory as a Claude Code and Codex plugin"`
+- [x] In `tests/test_version_sync_script.py`, add `module.PLUGIN_LOCATIONS = []` on the line after `module.RECORDINGS = []`.
+- [x] Run to green: `PY -m pytest tests/test_agent_plugin.py tests/test_version_sync_script.py tests/test_release_version_sync.py -q -p no:cacheprovider`. Expect all PASS. Then `PY scripts/version_sync.py --check`. Expect `version=0.29.0 checked=17 locations` and exit 0.
+- [x] Validate the Claude plugin: `claude plugin validate plugins/brigade`. Expect a success line and no errors. Fix any reported manifest error, then rerun.
+- [x] Commit: `git add plugins/brigade scripts/version_sync.py tests/test_version_sync_script.py tests/test_agent_plugin.py && git commit -m "feat(plugin): package Brigade memory as a Claude Code and Codex plugin"`
 
 ---
 

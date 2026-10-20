@@ -53,6 +53,13 @@ RECORDINGS = [
     ("docs/assets/quickstart.cast", r"brigade (\d+\.\d+\.\d+)"),
     ("docs/assets/quickstart.svg", r">brigade</text><text[^>]*>(\d+\.\d+\.\d+)</text>"),
 ]
+# The agent plugin manifests and the npm pin their MCP configs launch.
+PLUGIN_LOCATIONS = [
+    ("plugins/brigade/.claude-plugin/plugin.json", r'"version"\s*:\s*"([^"]+)"'),
+    ("plugins/brigade/.codex-plugin/plugin.json", r'"version"\s*:\s*"([^"]+)"'),
+    ("plugins/brigade/.mcp.json", r'"@escoffier-labs/brigade@([^"]+)"'),
+    ("plugins/brigade/codex.mcp.json", r'"@escoffier-labs/brigade@([^"]+)"'),
+]
 # ---------------------------------------------------------------------------
 
 
@@ -68,6 +75,7 @@ def _locations() -> list[tuple[str, str]]:
         if '"_brigade_version"' in path.read_text():
             locs.append((path.relative_to(ROOT).as_posix(), TEMPLATE_PATTERN))
     locs.extend(RECORDINGS)
+    locs.extend(PLUGIN_LOCATIONS)
     return locs
 
 
