@@ -69,8 +69,15 @@ INVALID_SOURCE_CONFIG = 3
 SKIP_NO_HANDOFF_INBOX = "no handoff inbox"
 SKIP_INVALID_SOURCE_CONFIG = "invalid handoff source config"
 
-# Git state that would point `git -C <inbox>` at some other repository.
-_GIT_LOCATION_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")
+# Git state that would point `git -C <inbox>` at some other repository or
+# stop discovery short of the one that owns the inbox.
+_GIT_LOCATION_ENV = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_CEILING_DIRECTORIES",
+)
 _TRACKED_SKIP_REASON = "tracked by git or tracking unverifiable; left in place"
 
 

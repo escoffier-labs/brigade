@@ -1571,3 +1571,16 @@ def test_ingest_leaves_inbox_in_place_when_tracking_check_fails(tmp_target: Path
     err = capsys.readouterr().err
     assert "git tracking check failed" in err
     assert "dubious ownership" in err
+
+
+def test_archive_ignores_git_ceiling_directories(tmp_path: Path, monkeypatch):
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    _git(tmp_path, "init", "-q")
+    tracked = _write_handoff(inbox, "tracked.md", _PLAIN_HANDOFF)
+    _git(tmp_path, "add", "--", "inbox/tracked.md")
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+
+    with pytest.raises(ingest_mod.TrackedHandoffError):
+        ingest_mod._archive(tracked, inbox / "processed")
+    assert tracked.is_file()
