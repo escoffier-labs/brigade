@@ -1245,3 +1245,93 @@ def test_derivative_rejects_output_inside_source_by_directory_identity(tmp_path:
             necessity="review",
         )
     assert sorted(entry.name for entry in source.iterdir()) == before
+
+
+def _export_into(source: Path, out: Path) -> evidence_derivative.DerivativeReport:
+    return evidence_derivative.export_derivative(
+        source=source,
+        out=out,
+        recipient="recipient-42",
+        authority="approved-case-7",
+        lawful_basis="contract",
+        necessity="review",
+    )
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or not hasattr(os, "O_PATH") or os.geteuid() == 0,
+    reason="unreadable ancestor needs Linux O_PATH and a non-root user",
+)
+def test_derivative_publishes_under_traverse_only_ancestor(tmp_path: Path) -> None:
+    _, receipt = _fabricated_run_dir(tmp_path)
+    source = tmp_path / "source"
+    assert evidence_package.export_package(target=tmp_path, run_id=str(receipt["run_id"]), out_str=str(source)) == 0
+    ancestor = tmp_path / "traverse-only"
+    ancestor.mkdir()
+    (ancestor / "outputs").mkdir()
+    ancestor.chmod(0o311)
+    try:
+        _export_into(source, ancestor / "outputs" / "derivative")
+        assert (ancestor / "outputs" / "derivative" / "derivative.json").is_file()
+    finally:
+        ancestor.chmod(0o700)
+
+
+def _swap_created_output(monkeypatch, populate) -> list[Path]:
+    mkdir_child = evidence_derivative.dirfd.mkdir_child
+    displaced: list[Path] = []
+
+    def swap_after_mkdir(parent: int, name: str, mode: int = 0o700) -> None:
+        mkdir_child(parent, name, mode)
+        parent_path = Path(os.readlink(f"/proc/self/fd/{parent}"))
+        moved = parent_path / f"{name}-ours"
+        (parent_path / name).rename(moved)
+        displaced.append(moved)
+        (parent_path / name).mkdir()
+        populate(parent_path / name)
+
+    monkeypatch.setattr(evidence_derivative.dirfd, "mkdir_child", swap_after_mkdir)
+    return displaced
+
+
+@pytest.mark.skipif(not Path("/proc/self/fd").is_dir(), reason="needs /proc fd paths to stage the swap")
+def test_derivative_rejects_swapped_in_nonempty_output_directory(tmp_path: Path, monkeypatch) -> None:
+    _, receipt = _fabricated_run_dir(tmp_path)
+    source = tmp_path / "source"
+    assert evidence_package.export_package(target=tmp_path, run_id=str(receipt["run_id"]), out_str=str(source)) == 0
+    out = tmp_path / "destination" / "derivative"
+    _swap_created_output(monkeypatch, lambda path: (path / "planted.txt").write_bytes(b"planted"))
+    open_child_file = evidence_derivative.dirfd.open_child_file
+    created_names: list[str] = []
+
+    def record_creates(parent: int, name: str, flags: int, *args: Any, **kwargs: Any) -> int:
+        if flags & os.O_CREAT:
+            created_names.append(name)
+        return open_child_file(parent, name, flags, *args, **kwargs)
+
+    monkeypatch.setattr(evidence_derivative.dirfd, "open_child_file", record_creates)
+
+    with pytest.raises(evidence_derivative.DerivativeExportError, match="output directory changed"):
+        _export_into(source, out)
+
+    assert created_names == []
+    assert sorted(entry.name for entry in out.iterdir()) == ["planted.txt"]
+
+
+@pytest.mark.skipif(
+    os.name != "posix" or not Path("/proc/self/fd").is_dir(), reason="needs POSIX ownership and /proc fd paths"
+)
+def test_derivative_rejects_output_directory_owned_by_another_user(tmp_path: Path, monkeypatch) -> None:
+    _, receipt = _fabricated_run_dir(tmp_path)
+    source = tmp_path / "source"
+    assert evidence_package.export_package(target=tmp_path, run_id=str(receipt["run_id"]), out_str=str(source)) == 0
+    out = tmp_path / "destination" / "derivative"
+    real_euid = os.geteuid()
+    monkeypatch.setattr(evidence_derivative.os, "geteuid", lambda: real_euid + 1)
+
+    with pytest.raises(evidence_derivative.DerivativeExportError, match="not owned by the current user"):
+        _export_into(source, out)
+
+    # A rejected directory may belong to someone else, so cleanup must leave it alone.
+    assert out.is_dir()
+    assert list(out.iterdir()) == []

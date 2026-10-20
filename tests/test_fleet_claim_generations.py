@@ -298,7 +298,6 @@ def test_status_refuses_corrupt_retirement_storage(http_authority, damage):
                 else "claim retired-holder fence is missing or corrupt"
             ),
             "reason": "claim-fence-refused",
-            "owner": {},
         }
     finally:
         client.close()
@@ -323,7 +322,6 @@ def test_status_refuses_corrupt_generation_fences(http_authority, damage):
         assert payload == {
             "error": "claim generation fence is missing or corrupt",
             "reason": "claim-fence-refused",
-            "owner": {},
         }
     finally:
         client.close()
@@ -616,9 +614,9 @@ def test_http_fence_refusal_status_depends_on_mutation(http_authority, method, a
         )
     conn.commit()
     before = snapshot(conn)
+    expected = {"error": "claim generation fence is missing or corrupt", "reason": "claim-fence-refused"}
     assert http_claim(address, method, action=action) == (
-        503 if method == "GET" else 409,
-        {"error": "claim generation fence is missing or corrupt", "reason": "claim-fence-refused", "owner": {}},
+        (503, expected) if method == "GET" else (409, {**expected, "owner": {}})
     )
     assert snapshot(conn) == before
 
@@ -965,7 +963,6 @@ def test_authenticated_html_fence_refusal_is_structured_503(http_authority, path
         assert json.loads(response.read()) == {
             "error": "claim generation fence is missing or corrupt",
             "reason": "claim-fence-refused",
-            "owner": {},
         }
     finally:
         client.close()
@@ -1488,6 +1485,8 @@ def test_free_target_stale_holder_heartbeat_is_terminal_under_base_client_handli
     def base_decision(status, payload, key):
         # The deployed base client ignores fencing reasons. It maps a 409
         # with a non-dict owner to missing, allowing local-lock continuation.
+        # This runs that mapping through the current repo_claim loop rather than
+        # the base loop, which is valid because the base "held" branch is identical.
         owner = payload.get("owner") if isinstance(payload.get("owner"), dict) else None
         granted = status == 200 and payload.get(key) is True
         reason = "ok" if granted else "held" if owner is not None else "missing"
@@ -1522,3 +1521,25 @@ def test_free_target_stale_holder_heartbeat_is_terminal_under_base_client_handli
     assert responses[0][0] == 409
     assert responses[0][1]["reason"] == "stale-holder"
     assert responses[0][1]["owner"] == {}
+
+
+def test_target_too_long_handler_precedes_generic_unprocessable():
+    # ClaimTargetTooLongError is a FleetHubUnprocessable (422) that must report 409
+    # with an owner. Deployed base clients treat a 422 as non-terminal and fall back
+    # to the local lock, so the ClaimTargetError handler has to stay ahead of the
+    # generic FleetHubUnprocessable handler in the POST dispatch.
+    import ast
+    import inspect
+
+    from brigade import fleet_hub_claims, fleet_hub_http
+
+    assert issubclass(fleet_hub_claims.ClaimTargetTooLongError, hub.FleetHubUnprocessable)
+    tree = ast.parse(inspect.getsource(fleet_hub_http))
+    orders = []
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.Try):
+            continue
+        names = [handler.type.id for handler in node.handlers if isinstance(handler.type, ast.Name)]
+        if "ClaimTargetError" in names and "FleetHubUnprocessable" in names:
+            orders.append(names.index("ClaimTargetError") < names.index("FleetHubUnprocessable"))
+    assert orders == [True]

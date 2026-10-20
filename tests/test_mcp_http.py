@@ -1,4 +1,4 @@
-"""Tests for the loopback Streamable HTTP transport of the read-only MCP servers."""
+"""Tests for the loopback Streamable HTTP transport of the memory and skills MCP servers."""
 
 from __future__ import annotations
 
@@ -106,12 +106,12 @@ def test_memory_http_roundtrip(memory_station: _Station) -> None:
     assert headers["content-type"] == "application/json"
     init = _json(body)["result"]
     assert init["protocolVersion"] == "2025-03-26"
-    assert init["serverInfo"]["name"] == "brigade-memory-readonly"
+    assert init["serverInfo"]["name"] == "brigade-memory"
 
     status, _, body = memory_station.rpc({"jsonrpc": "2.0", "id": 2, "method": "tools/list"})
     assert status == 200
     names = {tool["name"] for tool in _json(body)["result"]["tools"]}
-    assert names == {"list_cards", "get_card", "search_cards"}
+    assert names == {"list_cards", "get_card", "search_cards", "memory_status", "work_brief", "write_handoff"}
 
     status, _, body = memory_station.rpc(
         {
@@ -399,7 +399,7 @@ def test_startup_line_reports_actual_port(tmp_path: Path, monkeypatch: pytest.Mo
     gen = _start(monkeypatch, lambda: memory_cmd.serve_mcp(target=tmp_path, http=True, port=0))
     station = next(gen)
     try:
-        expected = f"brigade memory-readonly MCP listening on http://127.0.0.1:{station.port}/mcp"
+        expected = f"brigade memory MCP listening on http://127.0.0.1:{station.port}/mcp"
         err = ""
         for _ in range(100):  # the line prints just after the socket binds
             err += capsys.readouterr().err
