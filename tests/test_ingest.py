@@ -1557,7 +1557,8 @@ def test_tracking_check_supports_gitdir_files(tmp_path: Path, gitdir_kind):
     repo = tmp_path / "repo"
     repo.mkdir()
     if gitdir_kind != "linked":
-        _git(repo, "init", "-q", "--separate-git-dir", str(tmp_path / "metadata"))
+        _git(repo, "init", "-q")
+        (repo / ".git").rename(tmp_path / "metadata")
         (repo / ".git").write_text("gitdir: ../metadata\n", encoding="utf-8")
         if gitdir_kind == "configured-root":
             _git(repo, "config", "core.worktree", str(tmp_path))
@@ -1676,7 +1677,7 @@ def test_ingest_rechecks_tracking_before_document_append(tmp_target: Path, monke
     inbox = _seed(tmp_target)
     _git(tmp_target, "init", "-q")
     dest = tmp_target / "TOOLS.md"
-    dest.write_text("# TOOLS.md\n\nExisting runbook.\n", encoding="utf-8")
+    dest.write_bytes(b"# TOOLS.md\n\nExisting runbook.\n")
     before = dest.read_bytes()
     handoff = _write_handoff(
         inbox,
@@ -1727,7 +1728,8 @@ def test_ingest_rechecks_tracking_before_document_append(tmp_target: Path, monke
         _git(tmp_target, "rm", "--cached", "-f", "--", str(handoff.relative_to(tmp_target)))
     retry_stats = ingest_mod.IngestStats()
     assert ingest_mod.ingest_into(source=tmp_target, owner=tmp_target, stats=retry_stats, route_documents=True) == 0
-    assert dest.read_bytes() == before + b"\n\n- Run the weekly check.\n"
+    appended = b"\n\n- Run the weekly check.\n".replace(b"\n", os.linesep.encode("ascii"))
+    assert dest.read_bytes() == before + appended
     assert retry_stats.routed == 1
     assert retry_stats.skipped == retry_stats.inboxed == 0
     assert not handoff.exists()
@@ -1857,6 +1859,8 @@ def test_tracked_check_matches_by_file_identity_not_spelling(tmp_path: Path, mon
     inbox = tmp_path / "inbox"
     inbox.mkdir()
     handoff = _write_handoff(inbox, "tracked.md", _PLAIN_HANDOFF)
+    if (inbox / "Tracked.md").exists():
+        pytest.skip("hardlink stand-in requires case-sensitive paths; this filesystem already aliases case")
     os.link(handoff, inbox / "Tracked.md")
     monkeypatch.setattr(ingest_mod, "_git_tracked_names", lambda directory: {"Tracked.md"})
 
