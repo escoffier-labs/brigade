@@ -134,9 +134,10 @@ def _wake_hub_inbox(
             try:
                 # Each endpoint discovers independently, so a failed endpoint can retain its
                 # bounded batch without blocking healthy endpoints at the same old ids.
-                for page, _ in hub.pages(after=after):
+                for page, _ in hub.pages(after=after, scope=scope):
                     if any(len(row["sender"].encode("utf-8")) > 256 for row in page):
                         raise c.T3DispatchError("hub-error")
+                    hub.require_notification_scope(scope)
                     ledger.queue_hub_wake(scope, target_id, page)
                     pending = ledger.pending_hub_wake(scope, target_id)
                     if len(pending) >= HUB_PENDING_LIMIT:
@@ -155,7 +156,9 @@ def _wake_hub_inbox(
             "sender_ids": sorted({row["sender"] for row in pending}),
         }
         try:
-            code = post(target["url"], read_key(target["key_file"]), body)
+            key = read_key(target["key_file"])
+            hub.require_notification_scope(scope)
+            code = post(target["url"], key, body)
         except Exception:
             code = 0
         if code == 200:

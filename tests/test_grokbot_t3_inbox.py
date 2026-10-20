@@ -594,3 +594,187 @@ def test_hub_success_cursor_and_batch_retirement_are_atomic(hub):
     ledger.mark_hub_notified("synthetic-scope", "synthetic-target", 1)
     ledger.queue_hub_wake("synthetic-scope", "synthetic-target", rows)
     assert ledger.pending_hub_wake("synthetic-scope", "synthetic-target") == rows[1:]
+
+
+@pytest.mark.parametrize("rotate_at,fail_fetch", [(1, False), (2, False), (2, True)])
+def test_security_rotation_discards_foreground_scan(hub, monkeypatch, caplog, rotate_at, fail_fetch):
+    tools, _, row, token, token_file, ledger = hub
+    replacement = "y" * 64
+    fetched = 0
+
+    def request(hub_url, credential, body, *, timeout=None):
+        nonlocal fetched
+        fetched += 1
+        if fetched == rotate_at:
+            token_file.write_text(replacement)
+            if fail_fetch:
+                raise FleetMessageHubError(replacement, code="hub_unavailable")
+        ident = body["after"] + 1
+        return 200, {"messages": [dict(row, id=ident)], "next_cursor": ident}
+
+    monkeypatch.setattr(messages, "_request", request)
+    result = tools.call_tool("inbox_list", {})
+    assert result.get("error", {}).get("code") == "hub-error"
+    assert fetched == rotate_at
+    public = json.dumps(result) + caplog.text + "\n".join(ledger._conn.iterdump())
+    assert token not in public and replacement not in public
+
+
+@pytest.mark.usefixtures("t3_owner_reads", "t3_watch_log")
+@pytest.mark.parametrize("rotate_at", ["first-fetch", "second-fetch", "before-persist", "before-post"])
+def test_security_rotation_keeps_wake_scope_consistent(hub, tmp_path, monkeypatch, caplog, rotate_at):
+    from brigade.grokbot_t3 import watch
+    from brigade.grokbot_t3.inbox import HubInbox
+    from brigade.grokbot_t3.ledger import wake_target_id
+    from tests.test_grokbot_t3_watch import Post
+
+    tools, _, row, token, token_file, ledger = hub
+    replacement = "y" * 64
+    scope = HubInbox(token_file=str(token_file)).notification_scope()
+    key = tmp_path / "wake.key"
+    key.write_text("synthetic-wake-key")
+    key.chmod(0o600)
+    url = "https://wake.example.test/inbox"
+    target_id = wake_target_id(url)
+    fetched = 0
+
+    def request(hub_url, credential, body, *, timeout=None):
+        nonlocal fetched
+        fetched += 1
+        if fetched == (1 if rotate_at == "first-fetch" else 2) and rotate_at.endswith("fetch"):
+            token_file.write_text(replacement)
+        ident = body["after"] + 1
+        sender = "host-b" if token_file.read_text() == replacement else row["sender"]
+        return 200, {"messages": [dict(row, id=ident, sender=sender)], "next_cursor": ident}
+
+    if rotate_at == "before-persist":
+        original_pages = HubInbox.pages
+
+        def pages(self, **kwargs):
+            for page in original_pages(self, **kwargs):
+                token_file.write_text(replacement)
+                yield page
+
+        monkeypatch.setattr(HubInbox, "pages", pages)
+    if rotate_at == "before-post":
+        original_read_key = watch.read_key
+
+        def read_key(path):
+            value = original_read_key(path)
+            token_file.write_text(replacement)
+            return value
+
+        monkeypatch.setattr(watch, "read_key", read_key)
+    monkeypatch.setattr(messages, "_request", request)
+    post = Post([])
+    kwargs = dict(
+        runner=tools.runner,
+        runtime=tools.runtime,
+        ledger=ledger,
+        post=post,
+        wake_targets={"default": [{"url": url, "key_file": str(key)}]},
+        log_path=tmp_path / "wake.jsonl",
+    )
+    watch.run_watch_once(**kwargs)
+    assert post.calls == []
+    assert ledger.hub_wake_cursor(scope, target_id) == 0
+    pending = ledger.pending_hub_wake(scope, target_id)
+    if rotate_at in {"first-fetch", "before-persist"}:
+        assert pending == []
+    else:
+        assert pending and all(item["sender"] == "host-a" for item in pending)
+    # The next tick starts a fresh scope and leaves the old scope pending for retry.
+    new_scope = HubInbox(token_file=str(token_file)).notification_scope()
+    assert new_scope != scope
+    assert watch.run_watch_once(**kwargs)["woken"] == 1
+    assert post.calls[0][2]["sender_ids"] == ["host-b"]
+    assert ledger.hub_wake_cursor(new_scope, target_id) > 0
+    assert ledger.hub_wake_cursor(scope, target_id) == 0
+    public = caplog.text + (tmp_path / "wake.jsonl").read_text() + "\n".join(ledger._conn.iterdump())
+    assert token not in public and replacement not in public
+
+
+@pytest.mark.parametrize("failure", ["deadline", "timeout", "grant"])
+def test_security_ack_deadline_preserves_confirmed_results(hub, monkeypatch, caplog, failure):
+    from types import SimpleNamespace
+    from brigade.grokbot_t3 import inbox
+
+    tools, _, row, token, _, ledger = hub
+    elapsed = 0.0
+    calls = []
+
+    def request(hub_url, credential, body, *, timeout=None):
+        nonlocal elapsed
+        calls.append((dict(body), timeout))
+        if body["action"] == "list":
+            return 200, {"messages": [], "next_cursor": body["after"]}
+        elapsed += min(4.0, timeout or 4.0)
+        if body.get("id") == 2:
+            raise FleetMessageHubError(token, status=404, code="message_not_found")
+        if body.get("id") == 3 and failure != "deadline":
+            raise FleetMessageHubError(token, status=403 if failure == "grant" else None, code="hub_unavailable")
+        return 200, {"message": dict(row, id=body["id"])}
+
+    monkeypatch.setattr(inbox, "time", SimpleNamespace(monotonic=lambda: elapsed))
+    monkeypatch.setattr(messages, "_request", request)
+    result = tools.call_tool("inbox_ack", {"ids": [1, 2, 3, 4]})
+    assert result.get("acked") == ([1, 3] if failure == "deadline" else [1])
+    assert result["not_pending"] == [2]
+    assert result["incomplete"] is True
+    assert result["remaining_ids"] == ([4] if failure == "deadline" else [3, 4])
+    assert result["unacked_total"] is None and result["has_more"] is True
+    assert [body["id"] for body, _ in calls] == [1, 2, 3]
+    assert [timeout for _, timeout in calls] == [5.0, 5.0, 2.0]
+    public = json.dumps(result) + caplog.text + "\n".join(ledger._conn.iterdump())
+    assert token not in public
+
+
+@pytest.mark.parametrize("setup_delay", [0.0, 0.25])
+def test_security_ack_recount_shares_batch_deadline(hub, monkeypatch, setup_delay):
+    from types import SimpleNamespace
+    from brigade.grokbot_t3 import inbox
+
+    tools, _, row, _, _, _ = hub
+    elapsed = 0.0
+    calls = []
+    original_scope = inbox.HubInbox.notification_scope
+    scope_reads = 0
+
+    def scope(self):
+        nonlocal elapsed, scope_reads
+        if scope_reads == 0:
+            elapsed += setup_delay
+        scope_reads += 1
+        return original_scope(self)
+
+    def request(hub_url, credential, body, *, timeout=None):
+        nonlocal elapsed
+        calls.append((body["action"], timeout))
+        if body["action"] == "ack":
+            elapsed += 4.75
+            return 200, {"message": dict(row, id=body["id"])}
+        assert timeout is not None and timeout <= 10.0 - elapsed
+        elapsed += timeout
+        return 200, {"messages": [row], "next_cursor": row["id"]}
+
+    monkeypatch.setattr(inbox.HubInbox, "notification_scope", scope)
+    monkeypatch.setattr(inbox, "time", SimpleNamespace(monotonic=lambda: elapsed))
+    monkeypatch.setattr(messages, "_request", request)
+    result = tools.call_tool("inbox_ack", {"ids": [1, 2]})
+    assert result["acked"] == [1, 2]
+    assert result["has_more"] is True
+    assert calls == [("ack", 5.0), ("ack", 5.0), ("list", 0.5 - setup_delay)]
+    assert elapsed == 10.0
+
+
+@pytest.mark.parametrize("status", [401, 403])
+def test_security_first_ack_refusal_stays_closed(hub, monkeypatch, status):
+    tools, _, _, token, _, _ = hub
+
+    def refused(*args, **kwargs):
+        raise FleetMessageHubError(token, status=status, code="message_recipient_not_permitted")
+
+    monkeypatch.setattr(messages, "ack", refused)
+    result = tools.call_tool("inbox_ack", {"ids": [1, 2]})
+    assert result["error"]["code"] == "hub-error"
+    assert "acked" not in result and token not in json.dumps(result)

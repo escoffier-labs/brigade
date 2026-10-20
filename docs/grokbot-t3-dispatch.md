@@ -196,7 +196,11 @@ messages or the Hub is unavailable. Cursor advancement and removal of delivered
 metadata share one transaction. A crash after HTTP 200 but before that transaction
 can repeat the wake. Pending batches have no request wake retry cap. The cursor
 is scoped to the credential value, so any token rotation starts a fresh scan,
-even for the same principal. The watcher never acknowledges messages. Hub or
+even for the same principal. The watcher checks that scope before and after
+each page fetch, before retaining metadata, and immediately before delivery.
+Rotation stops delivery for that scan. Pending metadata from the old scope
+stays in that scope, and the next tick scans under the new credential.
+The watcher never acknowledges messages. Hub or
 log-write failures do not stop later targets or request wakes. A missing configured
 target reports a failure and waits for configuration to be corrected.
 
@@ -205,7 +209,7 @@ target reports a failure and waits for configuration to be corrected.
 | Tool | Arguments | Does |
 |---|---|---|
 | `inbox_list` | Optional `unacked_only` (default `true`), `limit` (1 through 50, default 20) | Read the principal inbox. Marks message content as untrusted. Scans the oldest up to 300 retained ids within 3 seconds. Returns fewer messages when the requested limit or the 131072-byte public JSON limit requires it, with `has_more: true`. `unacked_total` counts fetched messages when the scan is incomplete. Orders unacknowledged mail oldest first. With `unacked_only: false`, incomplete scans report `order: "newest first within oldest fetched window"`. |
-| `inbox_ack` | `ids` (1 through 100 unique positive integers) | Acknowledge inbox messages. Missing ids appear in `not_pending`. |
+| `inbox_ack` | `ids` (1 through 100 unique positive integers) | Acknowledge inbox messages within a shared 10-second deadline, including recount. Missing ids appear in `not_pending`. |
 | `inbox_reply` | `msg_id`, `body` | Reply without acknowledging the original message. Body limit: 8192 UTF-8 bytes. |
 | `message_send` | `to`, `subject`, `body`, optional `ref`, `priority`, `thread`, `kind`, `client_id` | Send within principal grants to a node name such as `host-a`, a node id, or `agent:example`. Subject limit: 200 UTF-8 bytes. Body limit: 8192 UTF-8 bytes. Priority: `low`, `normal` (default), `high`, `urgent`. Kind: `message` (default), `question`, `completion`. Supply a stable `client_id` when retrying the same send. |
 | `message_status` | `ids` (1 through 50 unique positive integers) | Read acknowledgement status for sent messages. Omits bodies. |
@@ -219,14 +223,22 @@ target reports a failure and waits for configuration to be corrected.
 | `t3_interrupt` | `request_id` | `t3-fleet interrupt`. |
 | `t3_recent` | `caller` optional, `limit` (max 20) | Ledger rows for this pack: request, caller, repository, host, seat, state, times. Read-only. |
 
-A later-page failure preserves messages already fetched and sets `has_more: true`.
+A later-page outage preserves messages already fetched and sets `has_more: true`.
+Credential rotation or an invalid credential closes the whole foreground scan
+with `hub-error`, discarding earlier rows.
 A first-page failure returns the closed `hub-error`. Acknowledge fetched oldest
 unacknowledged messages to progress through a larger backlog. If acknowledgement
 succeeds but its recount fails, `inbox_ack` still returns `acked` and `not_pending`,
 with `unacked_total: null` and `has_more: true`. Repeating an acknowledgement of
 an existing message is idempotent and reports it in `acked`. `not_pending` covers
-messages the Hub reports missing. If a later acknowledgement in a batch fails,
-retrying the same ids is safe because acknowledgement is idempotent.
+messages the Hub reports missing. Each acknowledgement gets at most 5 seconds
+and the time remaining in the batch's 10-second deadline. If that deadline
+expires or a later acknowledgement fails, the result preserves confirmed
+`acked` and `not_pending` ids and adds `incomplete: true` and `remaining_ids`.
+The remaining ids include an uncertain acknowledgement, which is safe to retry.
+Incomplete batches skip recount and return `unacked_total: null` and
+`has_more: true`. A first-call authentication or grant refusal stays a closed
+`hub-error`.
 
 Hub tools use Dot's argument validators and message projections. A send without
 `client_id` derives one from its content and a ten-minute time bucket. Reusing
