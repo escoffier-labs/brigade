@@ -56,17 +56,32 @@ def run_hook(event: str | None) -> None:
         return
     if any(ord(ch) < 0x20 for ch in session):
         return
-    if not isinstance(roots, list) or not roots or not isinstance(roots[0], str) or not roots[0]:
-        return
-    workspace = Path(roots[0])
-    if not workspace.is_absolute():
+    if not isinstance(roots, list):
         return
     home = Path.home().resolve()
-    if workspace.resolve() == home:
-        return
-    target = resolve_wired_target(str(workspace), harness="antigravity")
-    if target is None or target.resolve() == home:
-        return
+    seen: set[Path] = set()
+    for root in roots:
+        if not isinstance(root, str) or not root:
+            continue
+        try:
+            workspace = Path(root)
+            if not workspace.is_absolute() or workspace.resolve() == home:
+                continue
+            target = resolve_wired_target(str(workspace), harness="antigravity")
+            if target is None:
+                continue
+            target = target.resolve()
+            if target == home or target in seen:
+                continue
+            seen.add(target)
+            _spawn_publisher(target, session, event)
+        except (OSError, RuntimeError, ValueError):
+            # One invalid workspace or failed spawn must not hide the others.
+            continue
+
+
+def _spawn_publisher(target: Path, session: str, event: str) -> None:
+    """Launch one publisher without waiting or sharing agy's standard streams."""
     argv = [
         sys.executable,
         "-m",

@@ -291,3 +291,31 @@ def test_hook_process_returns_while_detached_publisher_is_blocked(workspace, tmp
         deadline = time.monotonic() + 10
         while started.exists() and not finished.exists() and time.monotonic() < deadline:
             time.sleep(0.01)
+
+
+def test_hook_finds_unique_wired_workspaces_after_unwired_roots(workspace, tmp_path, monkeypatch, capsys):
+    unwired = tmp_path / "unwired"
+    unwired.mkdir()
+    other = tmp_path / "other-project"
+    other.mkdir()
+    write_config(
+        other, Config(version=1, selection=Selection(depth="repo", harnesses=["antigravity"], owner="antigravity"))
+    )
+    launches = []
+    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kw: launches.append(argv) or object())
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(
+            json.dumps(
+                {
+                    "conversationId": "conversation-1",
+                    "workspacePaths": [str(unwired), str(workspace), str(workspace), str(other)],
+                }
+            )
+        ),
+    )
+    assert cli.main(["work", "presence-hook", "--harness", "antigravity", "--stdin", "--event", "start"]) == 0
+    assert [argv[argv.index("--target") + 1] for argv in launches] == [str(workspace.resolve()), str(other.resolve())]
+    captured = capsys.readouterr()
+    assert captured.out == captured.err == ""
