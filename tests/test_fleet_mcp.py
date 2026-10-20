@@ -465,7 +465,7 @@ def test_ack_returns_results_for_each_id(stations):
 def test_old_hub_reports_ignored_reply_and_unsupported_reads(stations, monkeypatch):
     original = fleet_hub_messages.handle
 
-    def old_hub(conn, raw, *, caller):
+    def old_hub(conn, raw, *, caller, **_new_hub_kwargs):
         if raw.get("action") in ("who", "claims"):
             raise fleet_hub_messages.MessageError("unsupported action")
         return original(conn, {k: v for k, v in raw.items() if k != "reply_to"}, caller=caller)

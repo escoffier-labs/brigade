@@ -508,18 +508,25 @@ def list_messages(
     *,
     after: int = 0,
     unacked: bool = False,
+    wait_ms: int = 0,
     token_file: str | None = None,
     timeout: float | None = None,
     authority: MessageAuthority | None = None,
     expected_scope: str | None = None,
 ) -> dict[str, Any]:
     _validate_sqlite_integer(after, "after cursor", allow_zero=True)
+    try:
+        wait_ms = _message_limits._validate_wait_ms(wait_ms)
+    except _message_limits.MessageError as exc:
+        raise fleet_client.FleetClientError(str(exc)) from exc
     authority = _authority(authority, token_file, expected_scope)
-    payload = _online(
-        {"action": "list", "after": after, "unacked": unacked},
-        authority=authority,
-        timeout=timeout,
-    )
+    body: dict[str, Any] = {"action": "list", "after": after, "unacked": unacked}
+    effective_timeout = _request_timeout(timeout)
+    if wait_ms > 0:
+        body["wait_ms"] = wait_ms
+        min_timeout = wait_ms / 1000.0 + fleet_client.FLUSH_TIMEOUT_SECONDS
+        effective_timeout = min_timeout if effective_timeout is None else max(effective_timeout, min_timeout)
+    payload = _online(body, authority=authority, timeout=effective_timeout)
     return _validate_page(payload, after=after)
 
 

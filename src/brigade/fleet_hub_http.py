@@ -1756,7 +1756,13 @@ def make_handler(
                 elif path == "/sessions":
                     status, body_payload = handle_session(conn, parsed, caller_node=caller_node)
                 elif path == "/messages":
-                    status, body_payload = fleet_hub_messages.handle(conn, parsed, caller=caller_node)
+                    status, body_payload = fleet_hub_messages.handle(
+                        conn,
+                        parsed,
+                        caller=caller_node,
+                        open_conn=lambda: open_db(Path(db_path)),
+                        source_ip=self.client_address[0],
+                    )
                 elif path == "/message-principals":
                     status, body_payload = fleet_hub_messages.handle_principal_admin(conn, parsed)
                 elif path == "/cloud":
