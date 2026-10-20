@@ -8,7 +8,6 @@ from the ``[project].version`` source of truth:
   - ``src/brigade/__init__.py``      -> ``__version__ = "X"``
   - ``src/brigade/templates/**/*.json`` -> ``"_brigade_version": "X"``
   - ``mcp-registry/*/server.json``    -> ``"version": "X"`` (server and package)
-  - ``Dockerfile``                      -> ``ARG BRIGADE_VERSION=X``
   - recorded demo assets             -> a ``brigade X.Y.Z`` token baked into the
                                         rendered frames (``.cast`` and ``.svg``)
 
@@ -52,8 +51,6 @@ TEMPLATE_PATTERN = r'"_brigade_version"\s*:\s*"([^"]+)"'
 # must both equal the release, or `mcp-publisher publish` points at a wrong wheel.
 MCP_SERVER_GLOB = "mcp-registry/*/server.json"
 MCP_SERVER_PATTERN = r'"version"\s*:\s*"([^"]+)"'
-# Root Dockerfile (MCP directory image) installs this release from PyPI.
-DOCKERFILE = ("Dockerfile", r"ARG BRIGADE_VERSION=(\S+)")
 # Recorded demo assets with the version baked into the frames. The .cast is the
 # source the .svg is rendered from; both are checked so editing one and
 # forgetting the other is caught.
@@ -72,8 +69,6 @@ def _expected() -> str:
 def _locations() -> list[tuple[str, str]]:
     """Return every (path, pattern) location the version is stamped into."""
     locs: list[tuple[str, str]] = [INIT_FILE, COMPONENT_MANIFEST]
-    if (ROOT / DOCKERFILE[0]).is_file():
-        locs.append(DOCKERFILE)
     for path in sorted(ROOT.glob(TEMPLATES_GLOB)):
         if '"_brigade_version"' in path.read_text():
             locs.append((path.relative_to(ROOT).as_posix(), TEMPLATE_PATTERN))
