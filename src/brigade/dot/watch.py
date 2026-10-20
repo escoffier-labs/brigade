@@ -13,7 +13,7 @@ from typing import Any
 from .access_auth import METADATA_PATH
 from .contracts import DotError
 from .hub_inbox import sender_name
-from brigade.fleet_client_message_credentials import message_scope, message_settings
+from brigade.fleet_client_message_credentials import FleetMessageHubError, message_scope, message_settings
 from .lifecycle import DotListenerConfig, _base, _load_config, _probe
 from .runtime_config import Runtime
 
@@ -205,12 +205,57 @@ def send(command: tuple[str, ...], alert: dict[str, Any]) -> int | None:
         return None
 
 
+def _credential_health(runtime: Runtime, now: datetime, dry_run: bool) -> dict[str, Any]:
+    """Report unusable credentials without reading any message-derived state."""
+    path = runtime.paths.state_dir / "inbox-watch-health.json"
+    previous = None
+    try:
+        value = json.loads(path.read_text())
+        if isinstance(value, dict) and isinstance(value.get("last_credential_alert"), str):
+            previous = parse_time(value["last_credential_alert"])
+    except (OSError, ValueError):
+        pass
+    alerts, notes = [], []
+    failed = False
+    if previous is not None and timedelta(0) <= now - previous < REALERT_AFTER:
+        notes.append("hub_credential_invalid deduped")
+    else:
+        alert = {
+            "kind": "hub_credential_invalid",
+            "key": "last_credential_alert",
+            "title": "Dot bridge: hub credential invalid",
+            "text": "The hub message token file is unusable. Inbox sync is failing until it is repaired.",
+        }
+        if dry_run or runtime.notify_command is None:
+            alert["result"] = "would_send" if dry_run else "skipped"
+        else:
+            code = send(runtime.notify_command, alert)
+            failed = code != 0
+            alert["result"] = "sent" if code == 0 else f"send_failed:{code}"
+            if not failed:
+                save_state(path, {"last_credential_alert": now.isoformat()})
+        alerts.append(alert)
+    return {
+        "ok": not failed,
+        "dry_run": dry_run,
+        "now": now.isoformat(),
+        "credential_health_only": True,
+        "alerts": alerts,
+        "notes": notes,
+    }
+
+
 def run_watch_once(target: Path, *, now: datetime | None = None, dry_run: bool = False) -> dict[str, Any]:
     now = now or datetime.now(timezone.utc)
     try:
         config, runtime = _load_config(target)
-        scope = message_scope(*message_settings(str(runtime.hub.message_token_file))[:2])
-        unacked, last_call, pending, sync_at, credential, last_wake = read_bridge(runtime, scope=scope)
+        try:
+            scope = message_scope(*message_settings(str(runtime.hub.message_token_file))[:2])
+        except FleetMessageHubError as error:
+            if error.code not in {"token_file_invalid", "admin_token_refused"}:
+                raise
+            return _credential_health(runtime, now, dry_run)
+        return _run_scoped_watch(config, runtime, scope, now, dry_run)
     except DotError as error:
         return {
             "ok": False,
@@ -218,6 +263,12 @@ def run_watch_once(target: Path, *, now: datetime | None = None, dry_run: bool =
         }
     except Exception:
         return {"ok": False, "error": "bridge_state_unavailable"}
+
+
+def _run_scoped_watch(
+    config: DotListenerConfig, runtime: Runtime, scope: str, now: datetime, dry_run: bool
+) -> dict[str, Any]:
+    unacked, last_call, pending, sync_at, credential, last_wake = read_bridge(runtime, scope=scope)
     state_path = runtime.paths.state_dir / ("inbox-watch-" + scope + ".json")
     state = load_state(state_path)
     alerts, notes, stale = decide(now, unacked, last_call, pending, state)

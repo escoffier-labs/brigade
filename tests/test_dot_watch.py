@@ -119,6 +119,74 @@ def test_watch_idle_credential_and_unanswered_wake(configured, scoped_hub):
 
 
 @requires_local_state
+@pytest.mark.parametrize("missing", [False, True])
+def test_watch_invalid_agent_file_alerts_without_message_authority(configured, scoped_hub, missing):
+    target, runtime, _ = configured
+    active_runtime = w._load_config(target)[1]
+    token_file = active_runtime.hub.message_token_file
+    with BridgeState(runtime.paths.state_dir) as state:
+        insert(state, scoped_hub, age=-60, ident=50)
+        state.hub_set("last_sync_ok_at", NOW.isoformat(), scope=scoped_hub)
+        state.hub_set("last_sync_error", "hub_credential_invalid", scope=scoped_hub)
+    database = runtime.paths.state_dir / "bridge.sqlite3"
+    before = database.read_bytes()
+    old_state = runtime.paths.state_dir / ("inbox-watch-" + scoped_hub + ".json")
+    old_state.write_text(json.dumps({"sync": {"last_credential_alert": NOW.isoformat()}}))
+    legacy = runtime.paths.state_dir / "inbox-watch.json"
+    legacy.write_text(old_state.read_text())
+    if missing:
+        token_file.unlink()
+    else:
+        token_file.write_text("malformed credential material")
+    # Actual credential loading must fail before any message or route state is read.
+    with (
+        patch.object(w, "read_bridge", side_effect=AssertionError("unproven inbox read")),
+        patch.object(w, "probe_route", side_effect=AssertionError("unproven route state")),
+        patch.object(w, "send", return_value=0) as send,
+    ):
+        first = w.run_watch_once(target, now=NOW)
+        assert [a["kind"] for a in first.get("alerts", [])] == ["hub_credential_invalid"]
+        assert first["ok"] and first["alerts"][0]["result"] == "sent"
+        text = json.dumps(first)
+        for private in (str(token_file), "malformed credential material", "SECRET", "question", "#50"):
+            assert private not in text
+        assert "Last successful sync" not in text
+        assert w.run_watch_once(target, now=NOW + timedelta(minutes=1))["alerts"] == []
+        assert len(w.run_watch_once(target, now=NOW + timedelta(hours=2))["alerts"]) == 1
+        assert send.call_count == 2
+    assert database.read_bytes() == before
+    assert old_state.read_bytes() == legacy.read_bytes()
+    health = runtime.paths.state_dir / "inbox-watch-health.json"
+    assert json.loads(health.read_text()) == {"last_credential_alert": (NOW + timedelta(hours=2)).isoformat()}
+    assert health.stat().st_mode & 0o777 == 0o600
+
+
+@requires_local_state
+@pytest.mark.parametrize("mode", ["dry_run", "send_failed", "no_notifier"])
+def test_watch_invalid_agent_file_does_not_dedupe_unsent_health_alert(configured, mode):
+    target, runtime, instance = configured
+    active_runtime = w._load_config(target)[1]
+    active_runtime.hub.message_token_file.unlink()
+    if mode == "no_notifier":
+        from pathlib import Path
+
+        runtime_path = Path(json.loads(instance.read_text())["runtime_path"])
+        document = json.loads(runtime_path.read_text())
+        document.pop("notify_command")
+        runtime_path.write_text(json.dumps(document))
+    with patch.object(w, "send", return_value=4) as send:
+        report = w.run_watch_once(target, now=NOW, dry_run=mode == "dry_run")
+        assert report.get("alerts"), report
+        assert (
+            report["alerts"][0]["result"]
+            == {"dry_run": "would_send", "send_failed": "send_failed:4", "no_notifier": "skipped"}[mode]
+        )
+        assert report["ok"] is (mode != "send_failed")
+        assert send.call_count == (1 if mode == "send_failed" else 0)
+    assert not (runtime.paths.state_dir / "inbox-watch-health.json").exists()
+
+
+@requires_local_state
 def test_watch_never_writes_database_and_skips_missing_notifier(configured, scoped_hub):
     target, runtime, path = configured
     runtime_path = path.parent.parent.parent.parent / "unused"
@@ -296,8 +364,10 @@ def test_watch_does_not_send_cached_ids_after_scope_changes_in_probe(configured,
         return []
 
     with patch.object(w, "send") as send, patch.object(w, "probe_route", side_effect=switch):
-        with pytest.raises(DotError, match="hub_credential_changed"):
-            w.run_watch_once(target, now=NOW + timedelta(hours=1))
+        assert w.run_watch_once(target, now=NOW + timedelta(hours=1)) == {
+            "ok": False,
+            "error": "bridge_state_unavailable",
+        }
         send.assert_not_called()
 
 
@@ -313,8 +383,10 @@ def test_watch_rejects_partial_result_if_endpoint_changes_in_send(configured, sc
         return 0
 
     with patch.object(w, "send", side_effect=switch), patch.object(w, "probe_route", return_value=[]):
-        with pytest.raises(DotError, match="hub_credential_changed"):
-            w.run_watch_once(target, now=NOW + timedelta(hours=1))
+        assert w.run_watch_once(target, now=NOW + timedelta(hours=1)) == {
+            "ok": False,
+            "error": "bridge_state_unavailable",
+        }
 
 
 @requires_local_state

@@ -218,7 +218,9 @@ class TestHubInbox(HubFixture):
     def test_fetch_after_ack_still_reopens_false_ack(self):
         self.runner.add()
         self.hub.sync()
-        self.state.hub_mark_acked([1], clock=lambda: NOW - timedelta(seconds=5))
+        self.assertIsNone(self.rows("hub_inbox")[0]["acked_at"])
+        self.state.hub_mark_acked([1], clock=lambda: NOW - timedelta(seconds=5), scope=self.hub.scope())
+        self.assertIsNotNone(self.rows("hub_inbox")[0]["acked_at"])
         self.hub.reconcile()
         self.assertIsNone(self.rows("hub_inbox")[0]["acked_at"])
 
