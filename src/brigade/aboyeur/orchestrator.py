@@ -1616,6 +1616,7 @@ def run(
                 output_dir=output_dir,
                 model_lease=lease_model_agent,
                 remote_transport=remote_transport,
+                codex_transport=transport_for_payload,
             )
             check_cancellation()
         except runguard.RetainRunLockError:

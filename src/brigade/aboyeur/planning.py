@@ -1232,6 +1232,7 @@ def dispatch(
     output_dir: Path | None = None,
     model_lease: Callable[[Agent], ContextManager[str | None]] | None = None,
     remote_transport: Any | None = None,
+    codex_transport: str | None = None,
 ) -> list[WorkerResult]:
     from .. import run_transport
 
@@ -1280,4 +1281,5 @@ def dispatch(
         output_dir=output_dir,
         model_lease=model_lease,
         remote_transport=remote_transport,
+        codex_transport=codex_transport,
     )

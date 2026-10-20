@@ -503,10 +503,10 @@ Set `"run": {"record": "auto"}` in `.brigade/config.json` for the default policy
 `metadata-only` to omit private result bodies, or `off` to disable recording.
 Keys use seat identity and the coordinator-owned prompt fingerprint. Injected
 brief changes affect only the exact-prompt digest. Prompt text is never stored.
-Single-seat calls through `SeatInvoker` also key on a digest of the full
-coordinator-owned prompt, so different prompts within one phase stay distinct.
-The key uses the configured seat transport and Codex transport policy, including
-when a worker falls back to exec. Scrubbed metadata reports the observed transport.
+Single-seat calls through `SeatInvoker` retain the exact coordinator prompt digest
+as informational metadata only. The key uses the configured seat transport and
+effective run-level Codex transport policy, including CLI overrides. A worker's
+transport fallback does not change the key. Scrubbed metadata reports the observed transport.
 Private bodies contain the terminal result after retries and fallback, already
 persisted in `worker-results.json`, with resolved `_REF` secrets scrubbed again
 at write time. Literal env overrides remain intact. Scrubbed metadata and

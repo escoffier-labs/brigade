@@ -589,6 +589,7 @@ def dispatch(
     model_lease: Callable[[Agent], Any] | None = None,
     remote_transport: RemoteTransport | None = None,
     coordinator_prompt_sha256: str | None = None,
+    codex_transport: str | None = None,
 ) -> list[WorkerResult]:
     """Dispatch staged assignments while keeping transport policy in one module.
 
@@ -606,7 +607,6 @@ def dispatch(
     ``quarantine_state`` / ``reprobe_seat`` implement the #474 same-seat-once
     retry bound: persist the failed attempt, re-probe, then allow at most one
     same-seat retry before quarantining the seat for the rest of the run.
-
     ``remote_transport`` resolves the central fleet route for a seat *before*
     the ``model_lease`` context is entered. When policy selected another
     machine the work is delegated there and no local lease or provider call is
@@ -1306,7 +1306,7 @@ def dispatch(
             coordinator_prompt_sha256=coordinator_prompt_sha256,
             run_dir=output_dir,
             cwd=cwd,
-            codex_transport=roster.codex_transport,
+            codex_transport=codex_transport or roster.codex_transport,
             agent=lambda: recording_agent,
             prompt=lambda: sent_prompt[0],
             task=assignment.task,

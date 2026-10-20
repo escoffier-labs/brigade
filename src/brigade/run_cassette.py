@@ -345,7 +345,6 @@ def _record_result(
             **({"codex_transport": codex_transport} if agent.cli == "codex" else {}),
         },
         "coordinator_prompt_fingerprint": fingerprint,
-        **({"coordinator_prompt_sha256": coordinator_prompt_sha256} if coordinator_prompt_sha256 is not None else {}),
     }
     key = hashlib.sha256(run_events.canonical_bytes(identity)).hexdigest()
     observed = not remote and transport in OBSERVED_TRANSPORTS and result.failure_phase != "preflight"

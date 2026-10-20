@@ -8,9 +8,11 @@ from threading import Event, Thread
 
 import pytest
 
-from brigade import agents, fleet_session_bootstrap, proc, run_journal, run_transport
+from brigade import aboyeur, agents, fleet_session_bootstrap, proc, run_journal, run_transport
 from brigade.roster import Agent, Roster
 from brigade.run_seat import SeatInvoker
+from tests.run_test_helpers import run_aboyeur_guarded
+from tests.test_aboyeur import _IntentOnlyAppServer
 from tests.test_run_cassette import _documents
 
 
@@ -148,6 +150,56 @@ def test_appserver_digest_is_exact_prompt_including_transport_suffix(tmp_path, m
     manifest = next(d for d in _documents(run_dir) if d["privacy_class"] == "public-metadata")
     assert manifest["full_prompt_sha256"] == hashlib.sha256(seen[0].encode()).hexdigest()
     assert "Approval correlation" not in json.dumps(_documents(run_dir))
+
+
+def test_run_transport_override_keys_the_effective_worker_transport(tmp_path, monkeypatch):
+    observed = []
+
+    def exec_worker(*args, **kwargs):
+        observed.append("exec")
+        return agents.AgentResult(text="completed answer", ok=True, transport="exec")
+
+    def appserver_worker(*args, **kwargs):
+        observed.append("app-server")
+        return agents.AgentResult(text="completed answer", ok=True, transport="codex-app-server")
+
+    def no_control_socket(self):
+        raise aboyeur.run_control.ControlError("control socket unavailable under test")
+
+    monkeypatch.setattr(agents, "run_agent", exec_worker)
+    monkeypatch.setattr(aboyeur, "_run_codex_appserver_worker", appserver_worker)
+    monkeypatch.setattr(aboyeur.codex_appserver, "AppServer", _IntentOnlyAppServer)
+    monkeypatch.setattr(aboyeur.run_control.ControlServer, "start", no_control_socket)
+    keys = []
+    for i, (default, override) in enumerate((("exec", "app-server"), ("app-server", None), ("exec", None))):
+        run = tmp_path / ".brigade" / "runs" / f"run-{i}"
+        roster = Roster(
+            orchestrator="chef",
+            agents={
+                "chef": Agent(name="chef", cli="claude", role="plan"),
+                "worker": Agent(name="worker", cli="codex", role="research"),
+            },
+            codex_transport=default,
+        )
+        assert (
+            run_aboyeur_guarded(
+                "coordinator task",
+                roster,
+                worker="worker",
+                codex_transport=override,
+                cwd=tmp_path,
+                output_dir=run,
+                read_only=True,
+                route_enabled=False,
+                code_graph_enabled=False,
+            )
+            == 0
+        )
+        manifest = next(d for d in _documents(run) if d["privacy_class"] == "public-metadata")
+        keys.append(manifest["key"])
+    assert observed == ["app-server", "app-server", "exec"]
+    assert keys[0] == keys[1]
+    assert keys[0] != keys[2]
 
 
 def test_late_result_does_not_append_to_a_terminal_run(tmp_path, monkeypatch):
