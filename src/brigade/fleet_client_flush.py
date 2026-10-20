@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import hashlib
 import os
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -30,6 +31,7 @@ DEAD_LETTER_MAX_RECORDS = 200
 # Events larger than this keep their identity fields but not their body.
 DEAD_LETTER_MAX_EVENT_BYTES = 16 * 1024
 REASON_MAX_CHARS = 200
+_monotonic = time.monotonic
 _IDENTITY_FIELDS = ("node_id", "run_id", "sequence", "digest", "ts", "state")
 
 
@@ -132,8 +134,15 @@ def flush_locked(
     dir_fd: int | None = None,
     preserve_poison: bool = False,
     on_delivered: Callable[[list[dict[str, Any]]], None] | None = None,
+    bisect_budget: float | None = None,
 ) -> int:
-    """Flush a locked spool in order; return the number of delivered events."""
+    """Flush a locked spool in order; return the number of delivered events.
+
+    ``bisect_budget`` caps the wall-clock seconds all bisection posts in this
+    flush may share, for callers with a latency contract (``report_event``).
+    Isolation that runs out of budget stops like a transport failure, so the
+    unprocessed events stay queued for the next flush. ``None`` is unbounded.
+    """
     from . import fleet_client as client
 
     events = client._read_spool(path, dir_fd=dir_fd)
@@ -150,6 +159,17 @@ def flush_locked(
     def post(batch: list[dict[str, Any]]) -> None:
         client._post_events(hub, token, batch, timeout=timeout)
 
+    deadline: float | None = None
+
+    def bisect_post(batch: list[dict[str, Any]]) -> None:
+        if deadline is None:
+            post(batch)
+            return
+        remaining = deadline - _monotonic()
+        if remaining <= 0:
+            raise TimeoutError("fleet spool poison isolation exceeded its budget")
+        client._post_events(hub, token, batch, timeout=min(timeout, remaining))
+
     index = 0
     delivered = 0
     batches = 0
@@ -162,8 +182,10 @@ def flush_locked(
         except client._PoisonResponse as exc:
             if preserve_poison:
                 break
+            if bisect_budget is not None and deadline is None:
+                deadline = _monotonic() + bisect_budget
             outcome = _Bisection()
-            _bisect(batch, exc, post, client._PoisonResponse, on_delivered, outcome)
+            _bisect(batch, exc, bisect_post, client._PoisonResponse, on_delivered, outcome)
             index += outcome.handled
             delivered += outcome.delivered
             rejected.extend(outcome.rejected)

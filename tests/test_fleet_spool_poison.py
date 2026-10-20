@@ -234,3 +234,48 @@ def test_preserve_poison_still_stops_without_bisecting(monkeypatch):
     assert _flush(hub, monkeypatch, preserve_poison=True) == 0
     assert hub.calls == [[1, 2, 3]]
     assert _sequences(path) == [1, 2, 3]
+
+
+def test_report_path_bounds_poison_isolation_to_its_budget(tmp_path, monkeypatch):
+    """Codex P1 on #1831: report_event keeps its bounded latency while isolating poison."""
+    from brigade import node as node_mod
+
+    home = tmp_path / "brigade-home"
+    identity = node_mod.NodeIdentity(node_id=NODE, hostname="fleet-test", roles=(), platform="test")
+    node_mod.node_path(home).parent.mkdir(parents=True, exist_ok=True)
+    node_mod.node_path(home).write_text(node_mod._format_node_toml(identity), encoding="utf-8")
+    monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", HUB)
+    monkeypatch.setenv("BRIGADE_FLEET_TOKEN", "token")
+    path = _spool([_event(seq, poison=True) for seq in range(1, 9)])
+    now = [0.0]
+    hub = FakeHub()
+    real_post = hub.post
+
+    def slow_post(hub_url, token, body, *, timeout):
+        assert timeout > 0
+        now[0] += 1.0
+        return real_post(hub_url, token, body, timeout=timeout)
+
+    monkeypatch.setattr(fleet_client_flush, "_monotonic", lambda: now[0])
+    monkeypatch.setattr(fleet_client, "_post_events", slow_post)
+    fleet_client.report_event(_event(9))
+    # One batch post plus at most REPORT_TIMEOUT_SECONDS of one-second bisection posts.
+    assert len(hub.calls) <= 1 + int(fleet_client.REPORT_TIMEOUT_SECONDS)
+    assert now[0] <= 2 * fleet_client.REPORT_TIMEOUT_SECONDS
+    assert len(_sequences(path)) + len(_dead_letters(path)) == 9
+
+
+def test_explicit_flush_bisects_without_a_budget(monkeypatch):
+    now = [0.0]
+    hub = FakeHub()
+    real_post = hub.post
+
+    def slow_post(hub_url, token, body, *, timeout):
+        now[0] += 10.0
+        return real_post(hub_url, token, body, timeout=timeout)
+
+    monkeypatch.setattr(fleet_client_flush, "_monotonic", lambda: now[0])
+    path = _spool([_event(seq, poison=seq == 4) for seq in range(1, 9)])
+    monkeypatch.setattr(hub, "post", slow_post)
+    assert _flush(hub, monkeypatch) == 7
+    assert [r["sequence"] for r in _dead_letters(path)] == [4]
