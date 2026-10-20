@@ -9,6 +9,7 @@ import pytest
 
 from brigade import fleet_command_deck as deck
 from brigade import fleet_deck_brands as brands
+from brigade import fleet_deck_overview as overview
 
 NODE_A = "11111111-1111-4111-8111-111111111111"
 NOW = datetime(2026, 9, 6, 12, 0, 0, tzinfo=timezone.utc)
@@ -177,18 +178,37 @@ def test_worker_run_seat_backfilled_from_dispatch_event(conn: sqlite3.Connection
     assert run.launch_model == "opencode/muse-spark-1.3-contributor-free"
 
 
+def _station_view(*tiles: deck.Tile) -> deck.DeckView:
+    station = deck.StationView(
+        station=deck.StationConfig(NODE_A, "Example", 4),
+        label="Example",
+        enrolled=True,
+        busy=len(tiles),
+        last_heard=None,
+        tiles=tiles,
+    )
+    return deck.DeckView(stations=(station,), rail=(), repos=(), outcomes=(), observers=())
+
+
+def _working_row(tile: deck.Tile) -> str:
+    html = overview.render_work_lists(_station_view(tile))
+    match = re.search(r'<li class="row".*?</li>', html, re.DOTALL)
+    assert match
+    return match.group(0)
+
+
 def test_genuinely_absent_fields_stay_unknown(conn: sqlite3.Connection) -> None:
     _event(conn, "ghost-1", 1, "run.started")
     (run,) = deck.fetch_live_runs(conn, now=NOW, stale_after_seconds=1800)
     assert run.seat == ""
     assert run.harness == ""
     assert run.provider == ""
-    html = deck._tile_html(deck.Tile(run=run, claim=None, collision=False))
+    html = _working_row(deck.Tile(run=run, claim=None, collision=False))
     assert "unknown" in html
-    assert ">/" not in html.replace("load/capacity", "")
+    assert ">/" not in html
 
 
-def test_tile_falls_back_to_claim_conductor_for_seat() -> None:
+def test_row_falls_back_to_claim_conductor_for_seat() -> None:
     run = deck.LiveRun(
         node_id=NODE_A,
         run_id="worker-9",
@@ -201,12 +221,12 @@ def test_tile_falls_back_to_claim_conductor_for_seat() -> None:
         elapsed_seconds=10,
     )
     claim = deck.Claim(target="repo", owner_node="node-label", owner_conductor="muse13", ttl_remaining=887)
-    html = deck._tile_html(deck.Tile(run=run, claim=claim, collision=False))
+    html = _working_row(deck.Tile(run=run, claim=claim, collision=False))
     assert "muse13" in html
     assert "seat /" not in html
 
 
-def test_card_renders_both_badges_and_model_text() -> None:
+def test_row_renders_the_harness_badge_and_keeps_the_model_in_a_tooltip() -> None:
     run = deck.LiveRun(
         node_id=NODE_A,
         run_id="run-claude-1",
@@ -221,18 +241,15 @@ def test_card_renders_both_badges_and_model_text() -> None:
         model="opus",
         launch_model="opus",
     )
-    html = deck._tile_html(deck.Tile(run=run, claim=None, collision=False))
-    assert html.count("<svg") == 2
+    html = _working_row(deck.Tile(run=run, claim=None, collision=False))
+    assert html.count("<svg") == 1
     assert 'title="claude"' in html and 'aria-label="Claude"' in html
-    assert 'title="anthropic"' in html and 'aria-label="Anthropic"' in html
-    assert "opus" in html
+    assert 'title="anthropic"' not in html
+    assert '<p class="row-meta" title="opus">' in html
     assert "claude_standby" in html
-    # Model name sits in the right-hand column beneath the badges.
-    assert html.index("tile-model") < html.index("tile-facts")
-    assert '<p class="tile-model">opus</p>' in html
 
 
-def test_card_snapshot() -> None:
+def test_row_snapshot() -> None:
     run = deck.LiveRun(
         node_id=NODE_A,
         run_id="run-muse13-1",
@@ -247,31 +264,24 @@ def test_card_snapshot() -> None:
         model="opencode-muse-spark-1.3-contributor-free",
         launch_model="opencode/muse-spark-1.3-contributor-free",
     )
-    html = deck._tile_html(deck.Tile(run=run, claim=None, collision=False))
+    html = _working_row(deck.Tile(run=run, claim=None, collision=False))
     oc = deck.harness_brand("opencode")
     assert oc.svg != ""
     assert html == (
-        '<article class="tile tile--running" data-elapsed="10">'
-        '<header class="tile-head"><p class="repo-name">repo</p>'
-        '<div class="tile-side"><p class="state">running</p>'
-        '<p class="tile-badges">'
-        '<span class="badge badge-color-2b6cb0" title="opencode" aria-label="OpenCode">' + oc.svg + "</span>"
-        '<span class="badge badge-color-2b6cb0" title="opencode" aria-label="OpenCode">' + oc.svg + "</span>"
-        "</p>"
-        '<p class="tile-model">opencode/muse-spark-1.3-contributor-free</p>'
-        "</div></header>"
-        '<dl class="tile-facts">'
-        "<dt>seat</dt><dd>muse13/opencode</dd>"
-        "<dt>model</dt><dd>opencode/muse-spark-1.3-contributor-free</dd>"
-        '<dt>elapsed</dt><dd class="elapsed">10s</dd>'
-        '<dt>run</dt><dd class="run-id" title="run-muse13-1">run-muse13-1</dd>'
-        "</dl></article>"
+        '<li class="row" title="run-muse13-1"><span class="dot dot--working" aria-hidden="true"></span>'
+        '<div class="row-body"><p class="row-title">'
+        f'<a href="/view/machines?node={NODE_A}&amp;repo=repo">repo</a></p>'
+        '<p class="row-meta" title="opencode/muse-spark-1.3-contributor-free">'
+        '<span class="badge badge-color-2b6cb0" title="opencode" aria-label="OpenCode">' + oc.svg + "</span> "
+        "muse13 · Example</p></div>"
+        '<span class="row-time">10s</span></li>'
     )
 
 
 def test_cloud_and_session_badges() -> None:
     worker = deck.CloudWorker(provider="cursor", used=1, limit=3, circuit_state="closed", leases=())
-    html = deck._cloud_worker_html(worker)
+    view = deck.DeckView(stations=(), rail=(), repos=(), outcomes=(), observers=(), cloud_workers=(worker,))
+    html = overview.render_cloud_workers(view)
     assert 'title="cursor"' in html and 'aria-label="Cursor"' in html and "<svg" in html
     session = deck.InteractiveSession(
         node_id=NODE_A,
@@ -285,8 +295,6 @@ def test_cloud_and_session_badges() -> None:
         dirty_paths=("src/a.py",),
         dirty_truncated=False,
     )
-    session_html = deck._interactive_session_html(session)
-    assert "<svg" in session_html and 'aria-label="Claude"' in session_html
     unknown_session = deck.InteractiveSession(
         node_id=NODE_A,
         harness="",
@@ -299,5 +307,9 @@ def test_cloud_and_session_badges() -> None:
         dirty_paths=(),
         dirty_truncated=False,
     )
-    unknown_html = deck._interactive_session_html(unknown_session)
-    assert ">??<" in unknown_html
+    sessions = deck.DeckView(
+        stations=(), rail=(), repos=(), outcomes=(), observers=(), interactive_sessions=(session, unknown_session)
+    )
+    session_html = overview.render_sessions(sessions)
+    assert "<svg" in session_html and 'aria-label="Claude"' in session_html
+    assert ">??<" in session_html

@@ -1339,6 +1339,15 @@ def _validate_cloud_request(raw: Any) -> dict[str, Any]:
     elif action == "bind":
         request["provider_task_id"] = _safe_cloud_text(raw.get("provider_task_id"), "provider_task_id", required=True)
         request["artifact_ref"] = _safe_cloud_text(raw.get("artifact_ref"), "artifact_ref")
+        if "ttl_seconds" in raw:
+            # Optional: a launcher extends the lease to the provider's expected run
+            # length at bind time. Absent keeps the admission TTL untouched.
+            ttl = raw["ttl_seconds"]
+            if type(ttl) is not int or not CLOUD_TTL_MIN_SECONDS <= ttl <= CLOUD_TTL_MAX_SECONDS:
+                raise FleetHubError(
+                    f"cloud field 'ttl_seconds' must be an integer in [{CLOUD_TTL_MIN_SECONDS}, {CLOUD_TTL_MAX_SECONDS}]"
+                )
+            request["ttl_seconds"] = ttl
     elif action == "renew":
         ttl = raw.get("ttl_seconds", DEFAULT_CLOUD_TTL_SECONDS)
         if type(ttl) is not int or not CLOUD_TTL_MIN_SECONDS <= ttl <= CLOUD_TTL_MAX_SECONDS:
@@ -1551,10 +1560,13 @@ def handle_cloud(
             conn.rollback()
             raise
     if action == "bind":
+        bind_ttl = request.get("ttl_seconds")
+        extend_sql = ", renewed_at=?, ttl_seconds=?, expires_at=?" if bind_ttl is not None else ""
+        extend_args = (now_iso, bind_ttl, now + bind_ttl) if bind_ttl is not None else ()
         cursor = conn.execute(
-            "UPDATE cloud_leases SET provider_task_id=?, artifact_ref=?, state='bound' "
+            "UPDATE cloud_leases SET provider_task_id=?, artifact_ref=?, state='bound'" + extend_sql + " "
             "WHERE lease_id=? AND owner_node=? AND holder_token=? AND released_at IS NULL AND expires_at > ?",
-            (request["provider_task_id"], request["artifact_ref"], lease_id, node, holder, now),
+            (request["provider_task_id"], request["artifact_ref"], *extend_args, lease_id, node, holder, now),
         )
         conn.commit()
         if cursor.rowcount != 1:

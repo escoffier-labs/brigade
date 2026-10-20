@@ -900,6 +900,13 @@ class TestLaunchGate:
         assert body["requirePlanApproval"] is True
         assert "automationMode" not in body
 
+    def test_bind_extends_the_lease_to_the_bound_ttl(self, monkeypatch):
+        opener = _launch_opener(_json_response({"id": "sess-ttl", "state": "QUEUED"}))
+        recorded = _grant_hub(monkeypatch)
+        result = jules_cloud.launch_agent(_FAKE_KEY, repo="owner/repo", prompt="hi", opener=opener.open)
+        assert result.ok
+        assert recorded["bind"][0]["kwargs"]["ttl_seconds"] == fleet_client.CLOUD_BOUND_TTL_SECONDS
+
     def test_source_probe_precedes_admission_and_post(self, monkeypatch):
         order: list[str] = []
         opener = FakeOpener([_json_response(_sources_page(_source())), _json_response({"id": "sess-order"})])

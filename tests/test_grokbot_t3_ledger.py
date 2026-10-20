@@ -4,7 +4,10 @@ from __future__ import annotations
 
 import os
 import stat
+import sys
 from datetime import datetime, timedelta, timezone
+
+import pytest
 
 from brigade.grokbot_t3.ledger import Ledger
 
@@ -25,6 +28,10 @@ def _record(ledger, request_id, *, caller="Builder", state="dispatching", at=T0)
     )
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX ledger ownership: docs/superpowers/plans/2026-10-16-grokbot-t3-dispatch.md:652",
+)
 def test_file_is_owner_only_and_round_trips(tmp_path):
     path = tmp_path / "state" / "ledger.sqlite3"
     ledger = Ledger(path)
@@ -36,6 +43,7 @@ def test_file_is_owner_only_and_round_trips(tmp_path):
     assert ledger.get("missing") is None
 
 
+@pytest.mark.usefixtures("t3_ledger_storage")
 def test_open_count_and_daily_count(tmp_path):
     ledger = Ledger(tmp_path / "l.sqlite3")
     _record(ledger, "r1")
@@ -45,6 +53,7 @@ def test_open_count_and_daily_count(tmp_path):
     assert ledger.submits_since(T0.replace(hour=0)) == 2
 
 
+@pytest.mark.usefixtures("t3_ledger_storage")
 def test_state_change_clears_notification(tmp_path):
     ledger = Ledger(tmp_path / "l.sqlite3")
     _record(ledger, "r1", state="needs_attention")
@@ -56,6 +65,7 @@ def test_state_change_clears_notification(tmp_path):
     assert ledger.get("r1")["notified_state"] is None
 
 
+@pytest.mark.usefixtures("t3_ledger_storage")
 def test_pending_notifications(tmp_path):
     ledger = Ledger(tmp_path / "l.sqlite3")
     _record(ledger, "running", state="running")
@@ -66,6 +76,7 @@ def test_pending_notifications(tmp_path):
     assert ids == ["done-unnotified", "running"]
 
 
+@pytest.mark.usefixtures("t3_ledger_storage")
 def test_recent_projection(tmp_path):
     ledger = Ledger(tmp_path / "l.sqlite3")
     _record(ledger, "r1", caller="Builder", at=T0)
@@ -86,6 +97,7 @@ def test_recent_projection(tmp_path):
     assert [row["request_id"] for row in ledger.recent("Builder", 10)] == ["r1"]
 
 
+@pytest.mark.usefixtures("t3_ledger_storage")
 def test_existing_requests_seed_attempt_count_once(tmp_path):
     import sqlite3
 
@@ -104,6 +116,10 @@ def test_existing_requests_seed_attempt_count_once(tmp_path):
     ledger.close()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX ledger ownership: docs/superpowers/plans/2026-10-16-grokbot-t3-dispatch.md:652",
+)
 def test_existing_parent_mode_is_preserved(tmp_path):
     parent = tmp_path / "shared"
     parent.mkdir(mode=0o750)
@@ -112,6 +128,10 @@ def test_existing_parent_mode_is_preserved(tmp_path):
     ledger.close()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX ledger ownership: docs/superpowers/plans/2026-10-16-grokbot-t3-dispatch.md:652",
+)
 def test_existing_writable_parent_is_rejected_without_chmod(tmp_path):
     import pytest
     from brigade.grokbot_t3.contracts import T3DispatchError
@@ -125,6 +145,10 @@ def test_existing_writable_parent_is_rejected_without_chmod(tmp_path):
     assert not (parent / "ledger.sqlite3").exists()
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX ledger ownership: docs/superpowers/plans/2026-10-16-grokbot-t3-dispatch.md:652",
+)
 def test_existing_parent_must_be_owned_by_current_user(tmp_path, monkeypatch):
     import pytest
     from brigade.grokbot_t3.contracts import T3DispatchError
@@ -134,6 +158,7 @@ def test_existing_parent_must_be_owned_by_current_user(tmp_path, monkeypatch):
         Ledger(tmp_path / "ledger.sqlite3")
 
 
+@pytest.mark.usefixtures("t3_ledger_storage")
 def test_update_state_resets_status_failures_even_without_a_transition(tmp_path):
     ledger = Ledger(tmp_path / "ledger.sqlite3")
     _record(ledger, "r1", state="running")
@@ -142,6 +167,7 @@ def test_update_state_resets_status_failures_even_without_a_transition(tmp_path)
     assert ledger.get("r1")["status_failures"] == 0
 
 
+@pytest.mark.usefixtures("t3_ledger_storage")
 def test_stale_notification_cannot_mark_a_newer_state(tmp_path):
     ledger = Ledger(tmp_path / "ledger.sqlite3")
     _record(ledger, "r1", state="needs_attention")
@@ -153,6 +179,7 @@ def test_stale_notification_cannot_mark_a_newer_state(tmp_path):
     assert [row["request_id"] for row in ledger.pending_notifications()] == ["r1"]
 
 
+@pytest.mark.usefixtures("t3_ledger_storage")
 def test_existing_delivery_identifiers_are_hashed_once_on_open(tmp_path):
     import hashlib
     import json
@@ -179,6 +206,7 @@ def test_existing_delivery_identifiers_are_hashed_once_on_open(tmp_path):
         ledger.close()
 
 
+@pytest.mark.usefixtures("t3_ledger_storage")
 def test_legacy_requests_default_to_default_interaction_mode(tmp_path):
     import sqlite3
 
@@ -195,6 +223,7 @@ def test_legacy_requests_default_to_default_interaction_mode(tmp_path):
     ledger.close()
 
 
+@pytest.mark.usefixtures("t3_ledger_storage")
 def test_pending_notifications_puts_terminal_rows_first_then_least_recently_polled(tmp_path):
     ledger = Ledger(tmp_path / "l.sqlite3")
     _record(ledger, "old-running", state="running")
@@ -205,6 +234,7 @@ def test_pending_notifications_puts_terminal_rows_first_then_least_recently_poll
     assert ids == ["done", "new-running", "old-running"]
 
 
+@pytest.mark.usefixtures("t3_ledger_storage")
 def test_legacy_state_revision_migrates_and_survives_reopen(tmp_path):
     import sqlite3
 
@@ -230,6 +260,7 @@ def test_legacy_state_revision_migrates_and_survives_reopen(tmp_path):
     ledger.close()
 
 
+@pytest.mark.usefixtures("t3_ledger_storage")
 def test_record_submit_converts_the_reservation_atomically(tmp_path):
     import sqlite3
 
@@ -258,6 +289,7 @@ def test_record_submit_converts_the_reservation_atomically(tmp_path):
     assert ledger.open_count(T0) == 1
 
 
+@pytest.mark.usefixtures("t3_ledger_storage")
 def test_intake_claim_is_exclusive_and_releasable_across_connections(tmp_path):
     import sqlite3
 

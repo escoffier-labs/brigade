@@ -52,7 +52,12 @@ def ensure_directory(path: Path) -> None:
 def _create_directory(path: Path) -> bool:
     try:
         path.mkdir(mode=0o700)
-    except FileExistsError:
+    except OSError:
+        # Windows mkdir on an existing drive/share root may return access
+        # denied instead of EEXIST. Accept only a confirmed directory, as
+        # pathlib's mkdir(exist_ok=True) does, and preserve other failures.
+        if not path.is_dir():
+            raise
         return False
     return os.name == "posix"
 

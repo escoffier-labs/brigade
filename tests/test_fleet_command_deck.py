@@ -1,6 +1,7 @@
 """Tests for the fleet command deck module (config, projections, bounded reads)."""
 
 import json
+import re
 import sqlite3
 from datetime import datetime, timedelta, timezone
 
@@ -834,9 +835,9 @@ def test_command_deck_is_root_and_legacy_boards_stay_under_view(tmp_path):
         assert "Command Deck" in root and "Alpha" in root
         assert "Command Deck" in alias and "Alpha" in alias
         assert 'href="/view/machines"' in root and 'href="/view/repos"' in root
-        # Root is the deck itself, so href="/" is the valid self-link here; what
+        # Root is the deck itself, so the sidebar marks Overview current; what
         # must not exist is a legacy board served from root.
-        assert '<a href="/">deck</a>' in root
+        assert '<a href="/deck" aria-current="page">overview <span class="nav-count">' in root
         assert 'href="/machines"' not in root and 'href="/repos"' not in root
         for path, title in (
             ("/view/machines", "Fleet: Machines"),
@@ -856,7 +857,8 @@ def test_headers_secrets_and_responsive_css(tmp_path):
         assert "overflow-wrap: anywhere" in body
         assert "table-layout: fixed" in body
         assert "@media (max-width: 700px)" in body
-        assert ".stations { grid-template-columns: 1fr; }" in body
+        assert "@media (max-width: 900px)" in body
+        assert ".shell-sidebar" in body
 
 
 def test_invalid_config_refused_at_make_server(tmp_path):
@@ -902,7 +904,7 @@ def test_station_order_labels_capacity_and_timeline_bounds(tmp_path):
         assert heading in body and "BravoBox" in body
         assert "not enrolled" not in body
         # Capacity and busy counts.
-        assert "1/1 busy" in body and "1/2 busy" in body
+        assert "1 busy, 0 unknown" in body and "1 busy, 1 unknown" in body
         # Terminal-only timeline, bounded by outcome_window.
         assert "Recent outcomes" in body
         assert body.count("run.completed") <= 2
@@ -927,8 +929,8 @@ def test_collision_markers_and_observers_and_expired_claims(tmp_path):
         time.sleep(1.5)
         _status, _headers, deck_body = _request(hub, "GET", "/deck", headers=_bearer())
         assert deck_body.count("! collision") >= 1
-        assert "collision" in deck_body.split('id="rail"')[1].split("</section>")[0]
-        rail = deck_body.split('id="rail"')[1].split("</section>")[0]
+        assert "collision" in deck_body.split('id="alerts"')[1].split("</section>")[0]
+        rail = deck_body.split('id="alerts"')[1].split("</section>")[0]
         assert "shared" in rail and "held by Alpha" in rail
         assert f"held by {NODE_A}" not in rail
         _status, _headers, repos_body = _request(hub, "GET", "/deck/repos", headers=_bearer())
@@ -937,7 +939,7 @@ def test_collision_markers_and_observers_and_expired_claims(tmp_path):
         # Expired claims are absent.
         assert "gone" not in repos_body
         # Observers are excluded from station totals.
-        assert "observer-repo" not in deck_body.split('id="rail"')[1]
+        assert "observer-repo" not in deck_body.split('id="alerts"')[1]
         assert "Other observers" in deck_body and NODE_C[:12] in deck_body
 
 
@@ -1004,7 +1006,7 @@ def test_cloud_workers_render_safe_active_leases_without_using_station_capacity(
         assert " cursor</h3>" in body and ">1/3<" in body
         assert "closed" in body
         assert " codex</h3>" in body and ">0/2<" in body and "No active leases." in body
-        assert "1/4 busy" in body
+        assert "1 busy, 3 unavailable" in body
         assert "&lt;task &amp; &quot;one&quot;&gt;" in body
         assert "&lt;repo &amp; &quot;one&quot;&gt;" in body
         assert "&lt;task-id &amp; &quot;one&quot;&gt;" in body
@@ -1509,6 +1511,7 @@ def _policy_machines():
         "seats": {"seat-alpha": {"provider": "provider-a", "model": "model-a-1"}},
         "consumers": {},
         "repositories": {},
+        "routing": {"enabled": True},
     }
 
 
@@ -1604,3 +1607,80 @@ def test_deck_http_projects_fake_activated_authority(tmp_path):
             assert int(fleet_hub_policy.current_policy(conn)["revision"]) == revision
         finally:
             conn.close()
+
+
+def test_control_plane_adapter_reads_node_id_and_tolerates_snapshots_without_it():
+    snapshot = _control_plane_snapshot()
+    legacy = deck.control_plane_from_snapshot(snapshot)
+    assert legacy.machines[0].node_id == deck.UNKNOWN
+    snapshot["machines"][0]["node_id"] = NODE_A
+    assert deck.control_plane_from_snapshot(snapshot).machines[0].node_id == NODE_A
+    snapshot["machines"][0]["node_id"] = None
+    assert deck.control_plane_from_snapshot(snapshot).machines[0].node_id == deck.UNKNOWN
+    snapshot["machines"][0]["node_id"] = "<script>alert(1)</script>"
+    html = deck.render_deck(_empty_view(deck.control_plane_from_snapshot(snapshot)), nonce="nonce", now=NOW)
+    assert "<script>alert(1)</script>" not in html
+
+
+def test_failed_outcomes_and_rail_entries_carry_the_receipt_age(conn):
+    _insert(conn, NODE_A, "failure.new", 1, "run.dispatch.failed", ts=_ts(60), repo="same-repo")
+    (failed,) = _failed(conn)
+    assert failed.age_seconds == 60
+    stale = deck.LiveRun(
+        node_id=NODE_A,
+        run_id="ghost",
+        repo="stale-only",
+        seat="seat",
+        harness="claude",
+        state="run.started",
+        bucket="stale",
+        age_seconds=3600,
+        elapsed_seconds=3600,
+    )
+    view = deck.build_view(
+        deck.DeckConfig(stations=(deck.StationConfig(NODE_A, "Alpha", 2),)),
+        live_runs=[stale],
+        claims=[],
+        enrolled_labels={NODE_A: "Alpha"},
+        last_heard={},
+        outcomes=[],
+        failed_outcomes=[failed],
+        observers=[],
+        now=NOW,
+    )
+    assert [(entry.kind, entry.age_seconds) for entry in view.rail] == [("failed", 60), ("stale", 3600)]
+
+
+def test_deck_http_joins_stations_to_telemetry_by_node_id(tmp_path):
+    with _start_hub(tmp_path, CONFIG) as (hub, db):
+        for node_id, label in ((NODE_A, "Alpha"), (NODE_B, "Beta")):
+            body = {"action": "add", "node_id": node_id, "label": label}
+            assert _request(hub, "POST", "/nodes", headers=_bearer(), body=body)[0] == 200
+        conn = fleet_hub.open_db(db)
+        try:
+            fleet_hub_policy.save_policy(
+                conn, _policy_machines(), expected_version=1, actor="operator", reason="seed machines"
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        now = datetime.now(timezone.utc).replace(microsecond=0)
+        _insert_telemetry(db, NODE_A, observed_at=now.isoformat())
+        _insert_telemetry(db, NODE_B, observed_at=(now - timedelta(hours=2)).isoformat())
+        status, _headers, page = _request(hub, "GET", "/deck", headers=_bearer())
+        assert status == 200, page
+
+        def card(name: str) -> str:
+            found = re.search(rf'data-card="{name}">.*?class="card-value">([^<]*)<', page, re.S)
+            assert found, name
+            return found.group(1)
+
+        assert card("working") == "0"
+        assert card("idle") == "4"
+        assert card("offline") == "1"
+        rows = re.findall(r"<tr data-status=.*?</tr>", page, re.S)
+        alpha = next(row for row in rows if ">Alpha<" in row)
+        beta = next(row for row in rows if ">Beta<" in row)
+        assert "idle-capacity" in alpha and "stale-telemetry" not in alpha
+        assert "stale-telemetry" in beta and "dot--stale" in beta
+        assert 'class="alert-kind">stale telemetry<' in page

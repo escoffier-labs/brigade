@@ -681,8 +681,9 @@ def test_doctor_and_canary_are_sanitized_and_unit_uses_brigade_cli(tmp_path: Pat
     assert canary["ok"] is False
 
     unit = grokbot_packs.render_install_service(tmp_path, "cerebro-memory")
-    assert "-m" in unit
-    assert "brigade" in unit
+    exec_start = [line for line in unit.splitlines() if line.startswith("ExecStart=")]
+    assert len(exec_start) == 1
+    assert exec_start[0].startswith(f"ExecStart={grokbot_ops._systemd_quote(sys.executable)} -m brigade run ")
     assert "run" in unit
     assert "cloud" in unit
     assert "grokbot" in unit
@@ -692,8 +693,6 @@ def test_doctor_and_canary_are_sanitized_and_unit_uses_brigade_cli(tmp_path: Pat
     assert "127.0.0.1:8770" in unit
     assert str(executable) not in unit
     assert "not-a-real-token" not in unit
-    assert "node" not in unit.lower()
-    assert "npm" not in unit.lower()
 
 
 def _runner_request(

@@ -375,3 +375,45 @@ def test_main_invokes_notify_after_command(monkeypatch):
     monkeypatch.setattr(cli, "_build_parser", fake_build_parser)
     assert cli.main(["notify-probe"]) == 7
     assert seen == {"argv": ["notify-probe"], "exit_code": 7}
+
+
+@pytest.mark.parametrize(
+    "gate,entry",
+    [
+        ("npm", "available"),
+        ("npm", "notice"),
+        ("npm", "refresh"),
+        ("optout", "available"),
+        ("optout", "notice"),
+        ("optout", "refresh"),
+        ("ci", "notice"),
+        ("ci", "refresh"),
+    ],
+)
+def test_disabled_updates_do_no_state_io_spawn_or_fetch(tmp_path, monkeypatch, gate, entry):
+    from brigade import distribution
+
+    monkeypatch.setattr(distribution, "_name", "npm" if gate == "npm" else None)
+    environment = _env(tmp_path)
+    if gate == "optout":
+        environment["BRIGADE_NO_UPDATE_CHECK"] = "caller-optout"
+    elif gate == "ci":
+        environment["CI"] = "true"
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("disabled updates accessed state, spawned, or fetched")
+
+    monkeypatch.setattr(update_notify, "cache_path", forbidden)
+    monkeypatch.setattr(update_notify.localio, "read_json_dict", forbidden)
+    monkeypatch.setattr(update_notify.localio, "write_json", forbidden)
+    monkeypatch.setattr(update_notify.subprocess, "Popen", forbidden)
+    monkeypatch.setattr(update_notify.urllib.request, "urlopen", forbidden)
+    err = _Tty()
+    if entry == "available":
+        assert update_notify.available_update(env=environment) is None
+    elif entry == "notice":
+        update_notify.maybe_notify(["work"], 0, env=environment, now=1.0, stderr=err, spawn=forbidden)
+    else:
+        assert update_notify.run_refresh(env=environment, now=1.0) == 0
+    assert err.getvalue() == ""
+    assert not list(tmp_path.iterdir())

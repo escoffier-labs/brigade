@@ -376,9 +376,6 @@ def render(
         '<main class="deck-shell"><header class="masthead"><div><p class="eyebrow">Fleet operations</p>'
         "<h1>Command Deck &middot; Repos</h1></div>"
         f'<p class="header-meta">{_esc(fleet_command_deck._stamp(now))}</p></header>'
-        '<nav class="deck-nav" aria-label="Command Deck"><a href="/">deck</a> <a href="/deck/repos">repos</a> '
-        '<a href="/deck/roster">roster</a> <a href="/deck/policy">policy</a> '
-        '<a href="/view/machines">machines board</a></nav>'
         '<section class="panel" aria-labelledby="repo-policy"><header>'
         '<h2 id="repo-policy">Repository policy</h2>'
         f'<p class="panel-count">{len(rows)} target(s)</p></header>'
@@ -391,4 +388,6 @@ def render(
     )
     # No meta refresh: a 10-second reload would collapse every open repository
     # while an operator is reading it.
-    return fleet_command_deck._document(body, nonce=nonce, now=now, title="Repos", refresh=False)
+    return fleet_command_deck._document(
+        body, nonce=nonce, now=now, title="Repos", refresh=False, active="repos", view=view
+    )

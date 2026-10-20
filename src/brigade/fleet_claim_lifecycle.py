@@ -7,6 +7,7 @@ can replace its clock, threading namespace, transport, and interrupt hooks.
 from __future__ import annotations
 
 from collections.abc import Callable
+from threading import Lock
 from types import ModuleType
 from typing import TYPE_CHECKING, Any
 
@@ -19,6 +20,8 @@ STALE_CLAIM_REFUSALS = ("stale-holder", "stale-generation")
 TERMINAL_CLAIM_REFUSALS = STALE_CLAIM_REFUSALS + CLAIM_FENCE_REFUSALS
 CLEANUP_RETRY_REASONS = ("hub-unavailable", "claim-fence-refused")
 UNCERTAIN_CLEANUP_REASONS = CLEANUP_RETRY_REASONS + ("missing",)
+_ORPHAN_RELEASE_LOCK = Lock()
+_ORPHAN_RELEASES: dict[threading.Thread, threading.Event] = {}
 
 
 def _client() -> ModuleType:
@@ -198,7 +201,14 @@ class _ConfirmedClaimLease:
 
 
 def _schedule_orphan_release(
-    target: str, *, node_id: str, holder: str, conductor: str | None, ttl_seconds: int
+    target: str,
+    *,
+    node_id: str,
+    holder: str,
+    conductor: str | None,
+    ttl_seconds: int,
+    hub_url: str | None = None,
+    token: str | None = None,
 ) -> None:
     """Best-effort background cleanup after a lost acquire response.
 
@@ -211,15 +221,22 @@ def _schedule_orphan_release(
     response must release before process exit kills this daemon thread.
     """
 
-    def _loop() -> None:
+    # Resolve before starting the daemon. A later environment/configuration
+    # change must never redirect this holder or its credential to another hub.
+    config = _client().load_fleet_config() if hub_url is None or token is None else {}
+    hub_url = config.get("hub_url", "") if hub_url is None else hub_url
+    token = config.get("token", "") if token is None else token
+    stop = _client().threading.Event()
+
+    def _retry() -> None:
         started = _client().time.monotonic()
         deadline = started + ttl_seconds
-        while _client().time.monotonic() < deadline:
-            outcome = _client().release_claim(target, node_id=node_id, holder=holder, conductor=conductor)
+        while not stop.is_set() and _client().time.monotonic() < deadline:
+            outcome = _client().release_claim(
+                target, node_id=node_id, holder=holder, conductor=conductor, hub_url=hub_url, token=token
+            )
             if outcome.reason in CLEANUP_RETRY_REASONS:
-                _client().time.sleep(
-                    min(_client().ORPHAN_RELEASE_RETRY_SECONDS, max(0.0, deadline - _client().time.monotonic()))
-                )
+                stop.wait(min(_client().ORPHAN_RELEASE_RETRY_SECONDS, max(0.0, deadline - _client().time.monotonic())))
                 continue
             if (
                 outcome.reason == "missing"
@@ -228,11 +245,26 @@ def _schedule_orphan_release(
                 # Not definitive yet (#1157): the acquire whose response we
                 # lost may still commit its row after this "missing". Keep
                 # retrying until the uncertainty window closes.
-                _client().time.sleep(min(0.5, max(0.0, deadline - _client().time.monotonic())))
+                stop.wait(min(0.5, max(0.0, deadline - _client().time.monotonic())))
                 continue
             return
 
-    _client().threading.Thread(target=_loop, name="brigade-fleet-claim-orphan-release", daemon=True).start()
+    def _loop() -> None:
+        try:
+            _retry()
+        finally:
+            with _ORPHAN_RELEASE_LOCK:
+                _ORPHAN_RELEASES.pop(worker, None)
+
+    worker = _client().threading.Thread(target=_loop, name="brigade-fleet-claim-orphan-release", daemon=True)
+    with _ORPHAN_RELEASE_LOCK:
+        _ORPHAN_RELEASES[worker] = stop
+    try:
+        worker.start()
+    except BaseException:
+        with _ORPHAN_RELEASE_LOCK:
+            _ORPHAN_RELEASES.pop(worker, None)
+        raise
 
 
 def _abort_claim_owner(

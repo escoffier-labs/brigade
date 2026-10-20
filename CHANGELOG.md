@@ -7,7 +7,66 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `brigade memory serve-mcp --http` and `brigade skills serve-mcp --http` serve the read-only MCP tools over a stateless loopback Streamable HTTP endpoint (`POST /mcp`, `GET /healthz`) for MCP hosts that cannot spawn a stdio process. The server binds only `127.0.0.1` or `::1`, requires a bearer token from `BRIGADE_MCP_HTTP_TOKEN` (32 characters or more, never a flag), rejects non-loopback `Host` and `Origin` headers, and caps request bodies at 1 MiB. `--stdio` is unchanged.
+- MCP registry metadata for the two read-only servers: `mcp-registry/memory/server.json` (`io.github.escoffier-labs/brigade-memory`) and `mcp-registry/skills/server.json` (`io.github.escoffier-labs/brigade-skills`), with matching `mcp-name` markers in the README. `scripts/version_sync.py` keeps both manifests on the release version.
+- A `brigade-cli` console script alias, so `uvx brigade-cli memory serve-mcp --stdio` works without a global install.
+- A root `Dockerfile` that runs the memory MCP server over stdio as a non-root user, plus `glama.json`; the image installs the latest `brigade-cli` release from PyPI (`--build-arg BRIGADE_VERSION=X.Y.Z` pins one), so MCP directories that build and introspect a repo image can list the servers.
+
+### Changed
+
+- The memory and skills MCP tools describe what they return and when to use them, and their input fields carry descriptions, so MCP clients and directories can pick the right tool.
+- The read-only MCP servers negotiate the protocol version (`2024-11-05`, `2025-03-26`, or `2025-06-18`) instead of always answering `2024-11-05`, answer `ping` with an empty result, return `-32600` for malformed requests, and report the Brigade version in `serverInfo`.
+- The npm package `@escoffier-labs/brigade@0.30.0` bundles the published `brigade-cli==0.30.0` wheel. Its launcher runs `brigade.cli:process_main`, the same entry point as the `brigade` console script, so npm installs keep exit status 130 when a verification is cancelled.
+
+### Fixed
+
 - Scanner children run with `BRIGADE_NO_UPDATE_CHECK=1`. The detached update refresh a child started outlived its throwaway sandbox and recreated it when writing `update-notify.json`, leaving one `brigade-scanner-child-*` directory in the temp dir per scanner run.
+
+## [0.30.0] - 2026-10-20
+
+### Added
+
+- A fleet ownership map. The policy document gains an optional `owners` section of charters that say what each agent or surface owns, must never touch, and how work reaches it. The Command Deck page `/deck/owners` shows each charter beside its live claims, Grok Bot jobs, sessions, and delegations, with an Unassigned list for work no charter matches. `GET /owners` and `brigade fleet owners show` return the same view as JSON. Charters describe responsibility and do not block any claim, dispatch, or merge.
+- CI runs affected test files on Windows for pull requests, and keeps one nightly tracking issue open until the full Windows suite is clean.
+
+- Stable npm publishing support for `@escoffier-labs/brigade@0.29.0` and five public platform companions, using the pinned official PyPI wheel, tag-based payload auditing, immutable archive retries, hosted provenance and native registry acceptance gates. Registry publication is tracked by the release workflow.
+- Installation guides now cover the npm and npx routes, Node.js requirements, managed Python downloads, npm-managed upgrades, and known platform limits.
+- The README downloads badge combines PyPI downloads without mirrors and npm downloads for the main package over the same 30 completed UTC days. A daily or manual workflow updates public metric JSON on `download-metrics`, retaining the previous metric when a source fails or is stale.
+
+### Fixed
+
+- Keep caught verification cancellation active through the `brigade` console script and `python -m brigade` process exit so late repeated signals preserve exit status 130. Programmatic calls still restore their prior signal handlers.
+- The workflow-rules repair hint includes the full repo kit (`--full`), so following it installs the missing rule templates and keeps rule files that already exist. (Fixes #1762)
+- Fleet event and message spools work on Windows when an existing drive or share root denies directory creation. Existing directories are recognized before treating a creation error as a persistence failure.
+- Dot reports `unsupported_on_windows` for its Linux-only local runtime and state operations. Portable auth/config tests now use native absolute paths, and the bounded command runner uses Brigade's owned Windows job objects and pipe readers.
+- T3 dispatch now reports an explicit unsupported-platform error on Windows before opening private runtime, ledger, or wake-log files. Its existing POSIX owner-only storage requirement is documented.
+- Cloud leases for bound Jules and Cursor sessions no longer lapse five minutes after launch. The hub `bind` action accepts an optional `ttl_seconds` (same 1 to 86400 range as `admit`) that resets the lease clock in the same update, and the Jules and Cursor launchers bind with six hours, matching the tracker's stale-ready threshold. `brigade run cloud sync` renews active leases with the same six hours instead of 900 seconds. A bind without `ttl_seconds` is unchanged, and an older hub ignores the field and keeps the admission TTL. Codex Cloud still renews in-process. Running `cloud sync` on a schedule is not part of this change. (Refs #1794)
+- Jules sessions that finish with a pull request now reach `landed` once it merges. The tracker reads the `pull_request_url` the session reports, looks that PR up directly by URL, and records its head branch on the entry, so branch names without a `jules/` prefix no longer strand a merged session at `ready-to-land` and then `stale`. Branch discovery by prefix is unchanged. (Refs #1794)
+- The npm validation harness canonicalizes its temporary root before deriving install and cache paths, preserving exact lockfile integrity checks on symlinked temporary directories. A manual read-only macOS workflow can validate the retained original release archives with separate packaging and harness identities.
+
+## [0.29.0] - 2026-10-18
+
+### Changed
+
+- Verification reaps descendants that escape the process group on macOS when a run is canceled or times out.
+
+- Claude hook state reads retain the opened snapshot when atomic replacement unlinks it before the first metadata check, preventing retry starvation while preserving observed writes and containment checks.
+
+- Declared version and beta preview base move to 0.29.0 after the v0.28.0 tag so publish-dev wheels sort above stable. (#1787)
+- Add an unpublished 0.29.0 npm/npx distribution candidate that bundles Brigade's wheel and provisions pinned uv and managed Python on Node-only machines. Candidate CI defines native acceptance jobs for Linux, macOS and Windows. Registry publication remains a separate step.
+- Preserve canceled verification receipts, neutral outcome capture and the first interruption signal across command startup, process cleanup and receipt finalization. Canceled verification skips optional code-graph work.
+
+- The Command Deck opens on a Fleet overview: a left sidebar with the page nav, a machine tree, and cloud providers; four summary cards; an alerts strip with first-observed times; working and queued lists; and a machines table with seat and load bars. Deck pages and the fleet boards follow the system light or dark scheme. The routing snapshot gains an additive `node_id` per machine so stations join to machines by node id. Center stays dark for now.
+
+## [0.28.0] - 2026-10-18
+
+- Background cleanup of an orphaned fleet claim keeps using the hub URL and token of the claim that scheduled it. Before, each retry re-read the fleet configuration, so a process whose configuration changed could send the cleanup request, with the new token, to a different hub. Renewal and exit release use the same bound connection. (Fixes #1778)
+
+- Deck, fleet boards, and Center use shared spacing tokens derived from one scale while preserving existing layout sizes. Center navigation explicitly uses the shared Deck nav class. (#1495)
+- The dot connector pack connects a ChatGPT dot to T3 fleet dispatch, Brigade memory and the Fleet Hub inbox, with Cloudflare Access authentication and operator checks for setup and service health. (Refs #1765)
+
 - Fleet Hub refuses oversized or ambiguously framed JSON bodies, documents above the nesting and aggregate complexity budgets, and new acquisitions above 1024 active claims per node. Clients report claim quota refusals as definite failures, terminate the lease, and schedule fenced cleanup after an ambiguous acquire. The JSON complexity budget accepts producer-shaped Worklore import batches, with regex scans for string and numeric bodies. The claim count uses an index repaired on current-version databases without a schema version bump. Result-set bounds move to #1738. (#1151)
 - Claude hook session state, timeout journals, pending increments, locks, and recent-state reads use validated directory descriptors on POSIX and native handles on Windows. POSIX reads preserve held-fd contents across atomic replacement. Windows publication retries open-handle contention for a bounded interval. Integrity refusals preserve observed writes and stop repeated Stop attempts safely. Ordinary resource errors retain fail-open behavior. Doctor and adoption report unsafe session storage without aborting their reports. (#1238)
 - Fleet claims reject stale holders within a durable seven-day retirement horizon, bounded by a 1,000,000-row global budget and a 100,000-row per-node quota on free-target cleanup and every non-retry admission, including superseding replacements. Live-claim retirement is exempt from the node quota, and expiry pruning handles at most 32 unrelated claims per acquire. Target generation fences are never evicted. Optional `generation` on `/claims` and inspected force release fence obsolete operations with `stale-generation`. Schema 34 preserves live claims and v33 retirement history while adding age indexes. Claim mutation fencing failures return HTTP 409 with terminal `claim-fence-refused` and an empty owner object to prevent base-client local fallback. Read-only fencing failures return HTTP 503 for monitoring. Oversized new targets return terminal HTTP 409 with `claim-target-too-long`. Exit and rejected-grant cleanup retry fencing refusals until their deadline. Missing-row holder release stays HTTP 200 with `stale-holder`, and the CLI preserves JSON and exits 1. Fresh legacy holders and current live holders remain compatible. See [claim fencing](docs/fleet-claim-fencing.md) for the finite-horizon residual and rollback procedure. (#1189)
@@ -2034,7 +2093,10 @@ Initial release.
 - OpenClaw adapter fragments and harness-aware doctor checks.
 - Experimental Hermes adapter fragments.
 
-[Unreleased]: https://github.com/escoffier-labs/brigade/compare/v0.27.0...HEAD
+[Unreleased]: https://github.com/escoffier-labs/brigade/compare/v0.30.0...HEAD
+[0.30.0]: https://github.com/escoffier-labs/brigade/compare/v0.29.0...v0.30.0
+[0.29.0]: https://github.com/escoffier-labs/brigade/compare/v0.28.0...v0.29.0
+[0.28.0]: https://github.com/escoffier-labs/brigade/compare/v0.27.0...v0.28.0
 [0.27.0]: https://github.com/escoffier-labs/brigade/compare/v0.26.1...v0.27.0
 [0.26.1]: https://github.com/escoffier-labs/brigade/compare/v0.26.0...v0.26.1
 [0.26.0]: https://github.com/escoffier-labs/brigade/compare/v0.25.0...v0.26.0

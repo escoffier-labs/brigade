@@ -285,6 +285,32 @@ class TestLaunchGate:
         assert bind_calls
         assert bind_calls[0]["provider_task_id"] == "agent-new"
 
+    def test_bind_extends_the_lease_to_the_bound_ttl(self, monkeypatch):
+        opener = FakeOpener(
+            [
+                _json_response(
+                    {
+                        "agent": {"id": "agent-ttl", "latestRunId": "run-ttl", "repos": [{"url": "owner/repo"}]},
+                        "run": {"id": "run-ttl", "status": "CREATING"},
+                    }
+                ),
+            ]
+        )
+        bind_calls = []
+        monkeypatch.setattr(
+            fleet_client,
+            "admit_cloud",
+            lambda *a, **k: fleet_client.CloudDecision(True, "ok", lease={"lease_id": "lease-1"}, holder="h1"),
+        )
+        monkeypatch.setattr(
+            fleet_client,
+            "bind_cloud",
+            lambda *a, **k: bind_calls.append(k) or fleet_client.CloudDecision(True, "ok"),
+        )
+        result = cursor_cloud.launch_agent(_FAKE_KEY, repo="owner/repo", prompt="hi", opener=opener.open)
+        assert result.ok
+        assert bind_calls[0]["ttl_seconds"] == fleet_client.CLOUD_BOUND_TTL_SECONDS
+
     def test_submit_failure_releases_unbound_lease(self, monkeypatch):
         opener = FakeOpener([_error_response(500, {"message": "boom"})])
         release_calls = []

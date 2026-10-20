@@ -36,7 +36,11 @@ When a human pastes a short job into Claude Code, Codex, Cursor, OpenClaw, or an
 
 ```text
 Read https://github.com/escoffier-labs/brigade and follow docs/agents-guide.md.
-Install brigade-cli with pipx if missing (or uv tool install brigade-cli).
+If brigade is missing, install it with npm install --global
+@escoffier-labs/brigade@0.30.0 only when Node.js 22+ and npm are present and
+the target is glibc Linux x64/ARM64, macOS x64/ARM64, or Windows x64.
+Otherwise use pipx install brigade-cli (or uv tool install brigade-cli),
+including on musl Linux (such as Alpine) and Windows ARM64.
 Run operator quickstart with --dry-run first and show the plan. Then apply,
 run brigade operator doctor, and report ready: yes. Keep existing memory
 layout. Do not touch remotes, do not commit, stop before anything destructive.
@@ -46,15 +50,15 @@ Brigade is local-first workspace wiring. Local-first means data on the operator-
 
 ## Installing for a user (you run this)
 
-Platform: Linux, macOS, or native Windows PowerShell with Python 3.10 or newer. If `pipx` is missing, use the platform package instructions in [`QUICKSTART.md`](../QUICKSTART.md#1-install). Do not assume WSL is required.
+Platform: Linux, macOS, or native Windows PowerShell. Use the npm package only when Node.js 22 or newer and npm are already present and the target is glibc Linux x64/ARM64, macOS x64/ARM64, or Windows x64. It needs no Python first and fetches a managed Python on first launch. On other targets, including musl Linux (such as Alpine) and Windows ARM64, or without Node.js 22+ and npm, use Python 3.10 or newer with pipx or uv. If `pipx` is missing, use the platform package instructions in [`QUICKSTART.md`](../QUICKSTART.md#1-install). Do not assume WSL is required. On an npm install, upgrade with npm, not `brigade update`.
 
 Work in the **target** directory (the repo or operator workspace the user named), not the Brigade source tree unless they asked to develop Brigade.
 
 Always dry-run before write. Then apply. Then doctor.
 
 ```bash
-pipx install brigade-cli
-# alternative: uv tool install brigade-cli
+npm install --global @escoffier-labs/brigade@0.30.0
+# alternatives: pipx install brigade-cli, or uv tool install brigade-cli
 brigade setup
 brigade --version
 brigade operator quickstart --target . --harnesses <harness> --dry-run

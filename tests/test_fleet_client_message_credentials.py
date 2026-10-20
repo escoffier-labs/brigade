@@ -14,6 +14,10 @@ from tests.test_fleet_message_grants import enroll
 
 pytest_plugins = ["tests._fleet_message_fixtures"]
 
+POSIX_MODE = pytest.mark.skipif(sys.platform == "win32", reason="Credential POSIX mode checks do not apply on Windows")
+POSIX_OWNER = pytest.mark.skipif(sys.platform == "win32", reason="Windows has no POSIX credential owner UID")
+POSIX_FIFO = pytest.mark.skipif(sys.platform == "win32", reason="Windows has no POSIX mkfifo credential fixture")
+
 
 def token_file(tmp_path, name="agent", value=None):
     path = tmp_path / name
@@ -52,7 +56,18 @@ def test_credential_precedence_and_spool_scope(configured, tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize(
-    "invalid", ["symlink", "mode", "owner", "oversize", "charset", "newline", "directory", "fifo", "admin"]
+    "invalid",
+    [
+        "symlink",
+        pytest.param("mode", marks=POSIX_MODE),
+        pytest.param("owner", marks=POSIX_OWNER),
+        "oversize",
+        "charset",
+        "newline",
+        "directory",
+        pytest.param("fifo", marks=POSIX_FIFO),
+        "admin",
+    ],
 )
 def test_invalid_credential_files_are_secret_safe(configured, tmp_path, monkeypatch, caplog, invalid):
     sentinel = "SENTINEL_SECRET_NEVER_ECHO_" * 2
@@ -327,7 +342,9 @@ def test_cli_agent_reply_list_and_ack(hub, tmp_path, monkeypatch, capsys):
     assert error == {"error": "message not found", "status": 404, "code": None}
 
 
-@pytest.mark.parametrize("invalid", [None, "mode", "newline", "symlink", "oversize", "charset", "directory"])
+@pytest.mark.parametrize(
+    "invalid", [None, pytest.param("mode", marks=POSIX_MODE), "newline", "symlink", "oversize", "charset", "directory"]
+)
 def test_token_file_without_geteuid_keeps_other_checks(configured, tmp_path, monkeypatch, invalid):
     path = token_file(tmp_path)
     if invalid == "mode":
@@ -573,8 +590,7 @@ def test_windows_skips_posix_mode_and_owner_bits_only(configured, tmp_path, monk
     elif invalid == "directory":
         path.unlink()
         path.mkdir(mode=0o700)
-    owner = os.geteuid()
-    monkeypatch.setattr(os, "geteuid", lambda: owner + 1)
+    monkeypatch.setattr(os, "geteuid", lambda: -1, raising=False)
     monkeypatch.setattr(sys, "platform", "win32")
     if invalid is None:
         assert credentials.read_message_token_file(str(path)) == path.read_text()

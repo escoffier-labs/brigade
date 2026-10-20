@@ -15,6 +15,7 @@ from typing import Any, Callable, Mapping
 
 from .. import grokbot_mcp, grokbot_ops
 from . import contracts as c
+from . import runtime_config
 from .fleet import FleetCallError, FleetRunner, FleetTimeout
 from .intake import GH_TIMEOUT_SECONDS, run_intake_once
 from .intake import UNIT_TIMEOUT_SECONDS as INTAKE_UNIT_TIMEOUT_SECONDS
@@ -264,6 +265,7 @@ def _require_isolated_bearer(bearer: str) -> str:
 
 
 def _load_validated_instance(target: Path) -> dict[str, Any]:
+    runtime_config.require_posix_storage()
     from .. import grokbot_packs
 
     payload = grokbot_packs._load_instance_config(target, c.PACK_ID)
@@ -371,6 +373,10 @@ def _load_runtime_config(target: Path) -> tuple[T3DispatchListenerConfig, str, R
 def doctor(target: Path, *, timeout: int | None = None) -> list[dict[str, str]]:
     from .. import grokbot_packs
 
+    try:
+        runtime_config.require_posix_storage()
+    except c.T3DispatchError as exc:
+        return [{"check": str(exc), "status": "fail", "reason": exc.code}]
     checks: list[dict[str, str]] = []
 
     def record(name: str, ok: bool) -> None:
@@ -417,6 +423,10 @@ def doctor(target: Path, *, timeout: int | None = None) -> list[dict[str, str]]:
 
 def canary(target: Path, *, timeout: int | None = None) -> dict[str, Any]:
     result: dict[str, Any] = {"ok": False, "pack_id": c.PACK_ID}
+    try:
+        runtime_config.require_posix_storage()
+    except c.T3DispatchError as exc:
+        return {**result, "reason": str(exc), "code": exc.code}
     try:
         config, bearer, _ = _load_runtime_config(target)
     except Exception:

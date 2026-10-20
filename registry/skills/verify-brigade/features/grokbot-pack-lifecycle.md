@@ -14,7 +14,7 @@ it, canary it, remove it. No step here needs a real credential.
   `.brigade/grokbot/<id>.json`. Optional `--bind`, `--allow-host`,
   `--allow-origin`, and pack-specific paths (`--runtime-path`, `--ledger-path`,
   `--action-state-path`, `--approval-dir`, ...). The bearer is stored as a
-  *reference*, never a value. The `miller` pack takes neither bearer flag because
+  *reference*, never a value. The `dot` pack takes neither bearer flag because
   it verifies Cloudflare Access tokens at the origin. It stores `runtime_path`.
 - `pack doctor --id` - sanitized checks: `dependency`, `config`, `permissions`,
   `queue`, `host-wide-feed-authority`, `endpoint`. Details never carry credentials or job
@@ -82,7 +82,7 @@ be the bug.
 
 ## Gotchas
 
-- `pack setup` requires exactly one of `--bearer-file` / `--bearer-env`, except the `miller` pack, which takes neither because it verifies Cloudflare Access tokens at the origin.
+- `pack setup` requires exactly one of `--bearer-file` / `--bearer-env`, except the `dot` pack, which takes neither because it verifies Cloudflare Access tokens at the origin.
   The CLI rejects missing bearer flags for other packs before setup runs.
 - For packs using a bearer, `pack doctor`'s `config` check *resolves* the bearer reference, so it fails
   when the named env var is unset - which looks like a config bug and is not.
@@ -96,7 +96,7 @@ be the bug.
   wait for a detail string that explains the failure; there is none by design.
 - Several packs need more than a bearer (`--runtime-path`, `--ledger-path`,
   `--action-state-path`, `--approval-dir`, and for `cerebro-memory`,
-  `--cli-executable` plus `--workdir`). `miller` requires only `--runtime-path`
+  `--cli-executable` plus `--workdir`). `dot` requires only `--runtime-path`
   and takes neither bearer flag because it verifies Cloudflare Access tokens at the origin. `implementation-worker` needs only the
   bearer reference, which is why it is the default pack to drive.
 - Ports are fixed per pack in `grokbot_packs.py`. If a real listener is already

@@ -748,15 +748,22 @@ def test_timeout_followup_does_not_hide_latch_behind_log_stall(tmp_path: Path, m
     assert first.get("hook_latched") is not True
 
     release_log = threading.Event()
+    log_started = threading.Event()
+    workers: list[threading.Thread] = []
 
     def hang_log(*_args, **_kwargs):
-        release_log.wait(timeout=5)
+        log_started.set()
+        thread_sync.wait_for_event(release_log, description="release stalled hook log")
+
+    def abandon_at_log(fn, *, timeout, default, on_abandon=None):
+        # Drive abandonment only after persistence reaches the log append.
+        # A real 0.5s wait can expire before that point under I/O or CPU load.
+        workers.append(thread_sync.start_thread(fn))
+        thread_sync.wait_for_event(log_started, description="timeout follow-up reached hook log")
+        return default
 
     monkeypatch.setattr(envelope, "append_log", hang_log)
-    # The follow-up publishes the latch only after the session-state write
-    # (two fsyncs plus the announce claim). Keep the budget far above that
-    # cost: a 50ms budget raced the state write and returned 'degraded'.
-    monkeypatch.setattr(runtime, "_TIMEOUT_FOLLOWUP_SECONDS", 0.5)
+    monkeypatch.setattr(runtime, "_run_best_effort_bounded", abandon_at_log)
 
     try:
         outcome = runtime._bounded_timeout_followup(
@@ -769,6 +776,8 @@ def test_timeout_followup_does_not_hide_latch_behind_log_stall(tmp_path: Path, m
         assert runtime._read_hook_latch(target, "s")[0] is True
     finally:
         release_log.set()
+        for worker in workers:
+            thread_sync.join_thread(worker, description="timeout follow-up after releasing hook log")
 
 
 def test_timeout_followup_claims_announce_in_journal_not_state(tmp_path: Path, monkeypatch) -> None:

@@ -17,14 +17,14 @@ from pathlib import Path
 from typing import Any, Protocol
 from urllib.parse import urlparse
 
-from brigade import component_manifest, component_paths, localio
+from brigade import component_manifest, component_paths, distribution, localio
 
 REPOSITORY = "escoffier-labs/brigade"
 STATE_SCHEMA_VERSION = 1
 MANIFEST_ASSET = "component-manifest-v1.json"
 PYPI_PROJECT = "brigade-cli"
 PYPI_PROJECT_JSON_URL = f"https://pypi.org/pypi/{PYPI_PROJECT}/json"
-BETA_PREVIEW_BASE = "0.28.0"
+BETA_PREVIEW_BASE = "0.29.0"
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SHA = re.compile(r"^[0-9a-f]{40}$")
 _SEMVER = re.compile(r"^(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
@@ -468,7 +468,7 @@ def _cache_manifest(paths: UpdatePaths, release: ResolvedRelease) -> Path:
 
 
 def _parse_beta_dev_version(version: Any) -> str | None:
-    """Return YYYYMMDD when version is exactly ``0.28.0.devYYYYMMDD``."""
+    """Return YYYYMMDD when version is exactly ``0.29.0.devYYYYMMDD``."""
     if not isinstance(version, str):
         return None
     match = _BETA_DEV_VERSION.fullmatch(version)
@@ -490,11 +490,11 @@ def _beta_version_has_installable_wheel(files: Any) -> bool:
 
 
 def resolve_beta_cli_version(http: UpdateHttp) -> str:
-    """Select the newest non-yanked ``0.28.0.devYYYYMMDD`` wheel from PyPI.
+    """Select the newest non-yanked ``0.29.0.devYYYYMMDD`` wheel from PyPI.
 
     Resolution scans the project JSON ``releases`` map only. PyPI's
     ``info.version`` field reports the latest *stable* release (for example
-    ``0.27.0`` while a ``0.28.0.devYYYYMMDD`` wheel is present) and is never
+    ``0.28.0`` while a ``0.29.0.devYYYYMMDD`` wheel is present) and is never
     used as the beta candidate.
 
     Unrelated preview lines, malformed versions, yanked files, sdists-only
@@ -608,6 +608,13 @@ def run_update(
     pid_alive: Callable[[int], bool] | None = None,
 ) -> int:
     """Update CLI, then publish state after native component setup succeeds."""
+    if distribution.is_npm():
+        print(
+            "brigade update: this installation is managed by npm. "
+            "Install a different exact version with npm install or npx.",
+            file=sys.stderr,
+        )
+        return 1
     if channel not in {"stable", "beta"}:
         raise UpdateError("channel must be stable or beta")
     selected_paths = paths or default_paths()

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import os
+import sys
 from pathlib import Path
 
 import pytest
@@ -16,8 +17,8 @@ def runtime_payload(tmp_path: Path, **overrides):
     payload = {
         "schema": rc.RUNTIME_SCHEMA,
         "enabled": True,
-        "t3_fleet_bin": "/usr/bin/t3-fleet",
-        "git_bin": "/usr/bin/git",
+        "t3_fleet_bin": str(tmp_path / "t3-fleet"),
+        "git_bin": str(tmp_path / "git"),
         "repositories": {
             "brigade": {"remote": "https://github.com/escoffier-labs/brigade.git", "default_branch": "main"},
         },
@@ -44,6 +45,10 @@ def write_runtime(tmp_path: Path, mode: int = 0o600, **overrides) -> Path:
     return path
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX owner-only runtime files: docs/superpowers/plans/2026-10-16-grokbot-t3-dispatch.md:652",
+)
 def test_loads_valid_runtime(tmp_path):
     runtime = rc.load_runtime(write_runtime(tmp_path))
     assert runtime.enabled is True
@@ -54,11 +59,19 @@ def test_loads_valid_runtime(tmp_path):
     assert runtime.ledger_path == tmp_path / "state" / "ledger.sqlite3"
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX owner-only runtime files: docs/superpowers/plans/2026-10-16-grokbot-t3-dispatch.md:652",
+)
 def test_rejects_group_readable_file(tmp_path):
     with pytest.raises(c.T3DispatchError):
         rc.load_runtime(write_runtime(tmp_path, mode=0o640))
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX owner-only runtime files: docs/superpowers/plans/2026-10-16-grokbot-t3-dispatch.md:652",
+)
 def test_rejects_symlink(tmp_path):
     real = write_runtime(tmp_path)
     link = tmp_path / "link.json"
@@ -87,13 +100,25 @@ def test_rejects_symlink(tmp_path):
 )
 def test_rejects_invalid_runtime(tmp_path, overrides):
     with pytest.raises(c.T3DispatchError):
-        rc.load_runtime(write_runtime(tmp_path, **overrides))
+        if sys.platform == "win32":
+            rc.parse_runtime(runtime_payload(tmp_path, **overrides))
+        else:
+            rc.load_runtime(write_runtime(tmp_path, **overrides))
 
 
 def test_fallback_seat_may_be_null(tmp_path):
-    assert rc.load_runtime(write_runtime(tmp_path, fallback_seat=None)).fallback_seat is None
+    runtime = (
+        rc.parse_runtime(runtime_payload(tmp_path, fallback_seat=None))
+        if sys.platform == "win32"
+        else rc.load_runtime(write_runtime(tmp_path, fallback_seat=None))
+    )
+    assert runtime.fallback_seat is None
 
 
+@pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="POSIX owner-only runtime files: docs/superpowers/plans/2026-10-16-grokbot-t3-dispatch.md:652",
+)
 def test_validate_runtime_reference_returns_path(tmp_path):
     path = write_runtime(tmp_path)
     assert rc.validate_runtime_reference(str(path)) == str(path)
@@ -107,7 +132,7 @@ def intake_payload(**overrides):
         "queued_label": "grokbot-build-queued",
         "repositories": ["brigade"],
         "caller": "Builder",
-        "gh_bin": "/usr/bin/gh",
+        "gh_bin": str(Path("/usr/bin/gh").absolute()),
         "max_per_pass": 1,
         "headroom": 2,
     }
@@ -128,7 +153,7 @@ def test_intake_policy_preserves_repository_order(tmp_path):
         "grokbot-build-approved",
         "grokbot-build-queued",
         "Builder",
-        "/usr/bin/gh",
+        str(Path("/usr/bin/gh").absolute()),
         1,
         2,
     )

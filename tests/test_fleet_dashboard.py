@@ -900,7 +900,7 @@ def test_interactive_sessions_stay_off_legacy_boards_and_station_capacity(tmp_pa
         assert "Interactive sessions" in deck_body
         assert "&lt;script&gt;alert(1)&lt;/script&gt;" in deck_body
         assert "<script>alert(1)</script>" not in deck_body
-        assert "0/10 busy" in deck_body
+        assert "10 unavailable" in deck_body
         status, _headers, machines = _request(hub, "GET", "/view/machines", headers=_bearer())
         assert status == 200
         assert "sess-board" not in machines

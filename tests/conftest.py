@@ -2,6 +2,7 @@ import os
 import sys
 from pathlib import Path
 from tempfile import mkdtemp
+from time import monotonic
 
 import pytest
 
@@ -11,6 +12,24 @@ from tests.support import PRIVATE_DIRECTORY_MODE
 SRC = Path(__file__).resolve().parents[1] / "src"
 if str(SRC) not in sys.path:
     sys.path.insert(0, str(SRC))
+
+
+@pytest.fixture(autouse=True)
+def _drain_orphan_claim_releases(monkeypatch, request):
+    """Stop cleanup before test configuration and transport patches disappear."""
+    from brigade import fleet_claim_lifecycle, fleet_client
+
+    yield
+    with fleet_claim_lifecycle._ORPHAN_RELEASE_LOCK:
+        pending = list(fleet_claim_lifecycle._ORPHAN_RELEASES.items())
+    for _, stop in pending:
+        stop.set()
+    deadline = monotonic() + 2 * fleet_client.CLAIM_TIMEOUT_SECONDS + 1
+    for worker, _ in pending:
+        worker.join(max(0, deadline - monotonic()))
+    if pending:
+        request.node.user_properties.append(("orphan_release_threads_stopped", len(pending)))
+    assert not any(worker.is_alive() for worker, _ in pending), "orphan claim cleanup survived test teardown"
 
 
 @pytest.fixture(autouse=True)
@@ -333,7 +352,7 @@ def _no_managed_tools_on_path(monkeypatch, request, _isolation_temp_root):
 
 
 def _private_test_root(tmp_path):
-    """Pick a parent whose ancestors pass Miller's private-directory walk.
+    """Pick a parent whose ancestors pass Dot's private-directory walk.
 
     The walk rejects any group- or world-writable ancestor unless it is
     root-owned and sticky. A developer TMPDIR such as a 0775 home temp
@@ -350,14 +369,14 @@ def _private_test_root(tmp_path):
     except OSError:
         info = None
     if info is not None and stat.S_ISDIR(info.st_mode) and info.st_uid == 0 and info.st_mode & stat.S_ISVTX:
-        return Path(tempfile.mkdtemp(prefix="miller-test-", dir=root))
+        return Path(tempfile.mkdtemp(prefix="dot-test-", dir=root))
     tmp_path.chmod(0o700)
     return tmp_path
 
 
 @pytest.fixture
-def miller_private_dir(tmp_path):
-    """An owner-only parent directory plus a not-yet-created Miller state path inside it."""
+def dot_private_dir(tmp_path):
+    """An owner-only parent directory plus a not-yet-created Dot state path inside it."""
     import shutil
 
     base = _private_test_root(tmp_path)
@@ -368,3 +387,49 @@ def miller_private_dir(tmp_path):
     finally:
         if base != tmp_path:
             shutil.rmtree(base, ignore_errors=True)
+
+
+@pytest.fixture
+def t3_ledger_storage(monkeypatch):
+    """Exercise real SQLite transitions without claiming POSIX filesystem security on NT."""
+    if sys.platform == "win32":
+        from brigade.grokbot_t3 import ledger
+
+        monkeypatch.setattr(ledger, "_prepare_storage", lambda path: path.parent.mkdir(parents=True, exist_ok=True))
+
+
+@pytest.fixture
+def t3_owner_reads(monkeypatch):
+    """Isolate owner-file authorization from parsing and orchestration unit tests on NT."""
+    if sys.platform == "win32":
+        from brigade.grokbot_t3 import runtime_config, watch
+
+        def read(path, *, max_bytes):
+            with path.open("rb") as stream:
+                return stream.read(max_bytes + 1)
+
+        monkeypatch.setattr(runtime_config, "read_owner_file", read)
+        monkeypatch.setattr(watch, "read_owner_file", read)
+
+
+@pytest.fixture
+def t3_watch_log(monkeypatch):
+    """Keep watcher delivery and retry assertions independent of POSIX log opens."""
+    if sys.platform == "win32":
+        import json
+        from brigade.grokbot_t3 import watch
+
+        def append(path, record):
+            with path.open("a", encoding="utf-8") as stream:
+                stream.write(json.dumps(record, separators=(",", ":"), sort_keys=True) + "\n")
+
+        monkeypatch.setattr(watch, "_append_log", append)
+
+
+@pytest.fixture
+def t3_platform_admission(monkeypatch):
+    """Control-flow unit tests supply storage doubles instead of testing platform admission."""
+    if sys.platform == "win32":
+        from brigade.grokbot_t3 import runtime_config
+
+        monkeypatch.setattr(runtime_config, "require_posix_storage", lambda: None)

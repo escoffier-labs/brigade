@@ -187,11 +187,12 @@ def _observe(
     running: dict | None = None,
     active_claims: list | None = None,
     usable_seats: list[str] | None = None,
+    ttl_seconds: int = 300,
 ) -> dict:
     body = {
         "node_id": node_id,
         "observed_at": observed_at or _iso(),
-        "ttl_seconds": 300,
+        "ttl_seconds": ttl_seconds,
         "status": status,
         "load": load,
         "running": running or {"session_ids": [], "run_ids": []},
@@ -960,3 +961,67 @@ def test_active_legacy_lease_counts_against_shared_seat_capacity(conn):
     conn.commit()
     freed = _route(conn, session_id="session-2")
     assert freed["selected"] is not None, freed
+
+
+def test_snapshot_emits_the_policy_node_id_for_every_machine(conn):
+    from brigade import fleet_command_deck
+
+    snap = fleet_hub_routing.snapshot(conn)
+    expected = {
+        "worker-linux-1": NODE_LINUX,
+        "worker-linux-2": NODE_LINUX_2,
+        "worker-windows-1": NODE_WINDOWS,
+        "worker-cloud-1": NODE_CLOUD,
+        "origin-windows-1": CONTROLLER,
+    }
+    assert {row["id"]: row["node_id"] for row in snap["machines"]} == expected
+    plane = fleet_command_deck.control_plane_from_snapshot(snap)
+    assert {machine.id: machine.node_id for machine in plane.machines} == expected
+
+
+@pytest.mark.parametrize(
+    ("flag", "value", "reason"), [("enabled", False, "machine-disabled"), ("draining", True, "machine-draining")]
+)
+def test_snapshot_reports_policy_disabled_and_draining_machines_as_unusable(conn, flag, value, reason):
+    _fresh_quota(conn)
+    _observe_linux_fleet(conn)
+    changed = _document()
+    changed["machines"]["worker-linux-1"][flag] = value
+    fleet_hub_policy.save_policy(conn, changed, expected_version=2, actor="operator", reason=f"set {flag}")
+    snap = fleet_hub_routing.snapshot(conn)
+    linux = next(row for row in snap["machines"] if row["id"] == "worker-linux-1")
+    assert linux["state"] == "available"
+    assert linux["available_slots"] == 0
+    assert linux["unused_reason"] == reason
+    other = next(row for row in snap["machines"] if row["id"] == "worker-linux-2")
+    assert other["unused_reason"] == "idle-capacity"
+
+
+def test_snapshot_expires_telemetry_at_the_shorter_reporter_ttl_like_routing(conn):
+    _fresh_quota(conn)
+    two_minutes_ago = _iso(fleet_hub_routing._now() - timedelta(seconds=120))
+    _observe(conn, NODE_LINUX, observed_at=two_minutes_ago, ttl_seconds=60)
+    _observe(conn, NODE_LINUX_2, load=0.0)
+    _observe(conn, NODE_CLOUD, load=0.0)
+    _observe(conn, NODE_WINDOWS, load=0.0, usable_seats=[])
+    snap = fleet_hub_routing.snapshot(conn)
+    linux = next(row for row in snap["machines"] if row["id"] == "worker-linux-1")
+    assert linux["unused_reason"] == "stale-telemetry"
+    assert linux["available_slots"] is None
+    decision = _route(conn, session_id="session-short-ttl")
+    candidate = next(row for row in decision["candidates"] if row["machine"] == "worker-linux-1")
+    assert "machine-stale-telemetry" in candidate["reasons"]
+
+
+def test_snapshot_reports_no_usable_slots_while_routing_is_disabled(conn):
+    _fresh_quota(conn)
+    _observe_linux_fleet(conn)
+    disabled = _document()
+    disabled["routing"]["enabled"] = False
+    fleet_hub_policy.save_policy(conn, disabled, expected_version=2, actor="operator", reason="pause routing")
+    snap = fleet_hub_routing.snapshot(conn)
+    fresh = [row for row in snap["machines"] if row["state"] == "available"]
+    assert fresh
+    for row in fresh:
+        assert row["available_slots"] == 0, row["id"]
+        assert row["unused_reason"] == "routing-disabled", row["id"]

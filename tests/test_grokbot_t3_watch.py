@@ -23,7 +23,7 @@ def _owner_file(path, text):
 
 
 @pytest.fixture
-def setup(tmp_path):
+def setup(tmp_path, t3_ledger_storage, t3_owner_reads, t3_watch_log):
     key = _owner_file(tmp_path / "builder.key", "wake-key-value\n")
     wake = _owner_file(
         tmp_path / "wake.json",
@@ -185,9 +185,9 @@ def test_unknown_caller_uses_default_and_status_failure_counts(setup):
         {"Builder": []},
     ],
 )
-def test_rejects_bad_wake_config(tmp_path, targets):
+def test_rejects_bad_wake_config(tmp_path, targets, t3_owner_reads):
     # Keep the default valid so each case still reaches its own invalid field.
-    targets = {"default": [{"url": "https://example.com/wake", "key_file": "/srv/keys/wake"}], **targets}
+    targets = {"default": [{"url": "https://example.com/wake", "key_file": str(tmp_path / "wake.key")}], **targets}
     path = _owner_file(tmp_path / "wake.json", json.dumps({"schema": watch.WAKE_SCHEMA, "targets": targets}))
     with pytest.raises(c.T3DispatchError):
         watch.load_wake_config(path)
@@ -234,13 +234,13 @@ def test_post_wake_refuses_redirect_and_proxy(monkeypatch):
         server.server_close()
 
 
-def test_wake_config_requires_default_target(tmp_path):
+def test_wake_config_requires_default_target(tmp_path, t3_owner_reads):
     path = _owner_file(
         tmp_path / "wake.json",
         json.dumps(
             {
                 "schema": watch.WAKE_SCHEMA,
-                "targets": {"Builder": [{"url": "https://example.com/wake", "key_file": "/srv/keys/wake"}]},
+                "targets": {"Builder": [{"url": "https://example.com/wake", "key_file": str(tmp_path / "wake.key")}]},
             }
         ),
     )

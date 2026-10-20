@@ -975,18 +975,29 @@ def test_ec12_rejects_entry_changed_after_staging(tmp_path, monkeypatch):
     package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
     _write_strict_package(package_dir)
     entry_path = package_dir / "changes.patch"
+    original_bytes = entry_path.read_bytes()
     original_copy = control_crosswalk._AssessmentReader.copy
 
     def copy_then_rewrite(reader, path, *args, **kwargs):
         result = original_copy(reader, path, *args, **kwargs)
         if path == entry_path:
-            entry_path.write_text("changed after staging", encoding="utf-8")
+            if os.name == "nt":
+                with pytest.raises(PermissionError):
+                    entry_path.write_text("changed after staging", encoding="utf-8")
+                assert entry_path.read_bytes() == original_bytes
+            else:
+                entry_path.write_text("changed after staging", encoding="utf-8")
         return result
 
     monkeypatch.setattr(control_crosswalk._AssessmentReader, "copy", copy_then_rewrite)
 
     readiness = _assess(target, "EC-12")
 
+    if os.name == "nt":
+        assert readiness["outcome"] == "validated"
+        assert readiness["artifacts"][0]["outcome"] == "validated"
+        assert entry_path.read_bytes() == original_bytes
+        return
     assert readiness["outcome"] == "rejected"
     assert readiness["reason"] == "package_snapshot_mismatch"
     assert readiness["artifacts"][0]["outcome"] == "rejected"
@@ -1021,19 +1032,34 @@ def test_ec12_rejects_package_directory_replaced_while_staging(tmp_path, monkeyp
     _write_strict_package(package_dir)
     displaced_dir = package_dir.with_name("pkg-1-original")
     manifest_path = package_dir / "manifest.json"
+    original_manifest = manifest_path.read_bytes()
     original_copy = control_crosswalk._AssessmentReader.copy
 
     def copy_then_replace_directory(reader, path, *args, **kwargs):
         result = original_copy(reader, path, *args, **kwargs)
         if path == manifest_path:
-            package_dir.rename(displaced_dir)
-            package_dir.mkdir()
+            if os.name == "nt":
+                # NTFS refuses to rename a directory with an open file inside.
+                # This is independent of the directory handle's _SHARE_ALL mask.
+                with pytest.raises(PermissionError):
+                    package_dir.rename(displaced_dir)
+                assert not displaced_dir.exists()
+                assert manifest_path.read_bytes() == original_manifest
+            else:
+                package_dir.rename(displaced_dir)
+                package_dir.mkdir()
         return result
 
     monkeypatch.setattr(control_crosswalk._AssessmentReader, "copy", copy_then_replace_directory)
 
     readiness = _assess(target, "EC-12")
 
+    if os.name == "nt":
+        assert readiness["outcome"] == "validated"
+        assert readiness["artifacts"][0]["outcome"] == "validated"
+        assert not displaced_dir.exists()
+        assert manifest_path.read_bytes() == original_manifest
+        return
     assert readiness["outcome"] == "unavailable"
     assert readiness["reason"] == "verifier_error"
     assert readiness["artifacts"][0]["outcome"] == "unavailable"
@@ -1070,18 +1096,29 @@ def test_ec12_rejects_manifest_changed_after_its_initial_read(tmp_path, monkeypa
     package_dir = target / ".brigade" / "evidence-packages" / "pkg-1"
     _write_strict_package(package_dir)
     manifest_path = package_dir / "manifest.json"
+    original_bytes = manifest_path.read_bytes()
     original_copy = control_crosswalk._AssessmentReader.copy
 
     def copy_then_rewrite_manifest(reader, path, *args, **kwargs):
         result = original_copy(reader, path, *args, **kwargs)
         if path == manifest_path:
-            manifest_path.write_text(manifest_path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+            if os.name == "nt":
+                with pytest.raises(PermissionError):
+                    manifest_path.write_text(manifest_path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
+                assert manifest_path.read_bytes() == original_bytes
+            else:
+                manifest_path.write_text(manifest_path.read_text(encoding="utf-8") + "\n", encoding="utf-8")
         return result
 
     monkeypatch.setattr(control_crosswalk._AssessmentReader, "copy", copy_then_rewrite_manifest)
 
     readiness = _assess(target, "EC-12")
 
+    if os.name == "nt":
+        assert readiness["outcome"] == "validated"
+        assert readiness["artifacts"][0]["outcome"] == "validated"
+        assert manifest_path.read_bytes() == original_bytes
+        return
     assert readiness["outcome"] == "rejected"
     assert readiness["reason"] == "package_snapshot_mismatch"
     assert readiness["artifacts"][0]["outcome"] == "rejected"

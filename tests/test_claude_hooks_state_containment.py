@@ -200,6 +200,41 @@ def test_read_during_atomic_replace_never_loses_state(state_tree) -> None:
     assert failures == []
 
 
+def test_read_trusts_held_file_replaced_before_initial_fstat(state_tree, monkeypatch) -> None:
+    target, _sessions, _outside = state_tree
+    runtime.write_session_state(target, "s", {"write_observed": True, "generation": 0})
+    name = runtime._state_path(target, "s").name
+    original_open = dirfd.open_child_file
+    replacements = 0
+    opens = 0
+
+    def racing_open(parent, child, flags, *args, **kwargs):
+        nonlocal replacements, opens
+        fd = original_open(parent, child, flags, *args, **kwargs)
+        if child == name and not flags & (os.O_WRONLY | os.O_RDWR):
+            opens += 1
+            try:
+                # Replace on every open, so a reader retry cannot escape the race.
+                runtime.write_session_state(target, "s", {"write_observed": True, "generation": opens})
+            except OSError as exc:
+                # Classic Windows rename can refuse replacement of a held reader.
+                assert os.name == "nt" and exc.errno == errno.EBUSY
+                assert not isinstance(exc, anchored_io.SessionIntegrityError)
+            else:
+                replacements += 1
+        return fd
+
+    with monkeypatch.context() as patch:
+        patch.setattr(dirfd, "open_child_file", racing_open)
+        assert runtime.read_session_state(target, "s") == {"write_observed": True, "generation": 0}
+    assert opens == 1
+    if replacements == 0:
+        assert os.name == "nt"
+    else:
+        assert replacements == 1
+    assert runtime.read_session_state(target, "s") == {"write_observed": True, "generation": replacements}
+
+
 def test_read_trusts_held_file_after_atomic_replace(state_tree, monkeypatch) -> None:
     target, _sessions, _outside = state_tree
     runtime.write_session_state(target, "s", {"write_observed": True, "generation": 1})
