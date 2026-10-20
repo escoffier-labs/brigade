@@ -1054,7 +1054,7 @@ _UNTRUSTED_IMPORT_OPERATIONAL_METADATA_KEYS = frozenset(
         "promoted_from",
     }
 )
-_UNTRUSTED_IMPORT_IDENTITY_METADATA_KEYS = (
+_UNTRUSTED_IMPORT_IDENTITY_METADATA_KEYS: tuple[str, ...] = (
     "source_item_key",
     "source_item_id",
     "scanner_item_id",

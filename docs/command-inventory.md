@@ -75,7 +75,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade untrusted` (extras): 2 command path(s)
 - `brigade update`: 1 command path(s)
 - `brigade version`: 1 command path(s)
-- `brigade work`: 156 command path(s)
+- `brigade work`: 157 command path(s)
 - `brigade workflow` (extras): 3 command path(s)
 
 ## Commands
@@ -800,6 +800,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade work brief`
 - `brigade work claim`
 - `brigade work closeout`
+- `brigade work dispatch`
 - `brigade work doctor`
 - `brigade work end`
 - `brigade work hook-run`

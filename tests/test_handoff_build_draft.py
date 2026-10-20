@@ -11,6 +11,12 @@ import pytest
 from brigade.handoff_cmd import drafts
 
 
+def _assert_mode(path: Path, mode: int) -> None:
+    # Windows chmod only toggles the read-only bit, so permission bits are POSIX-only.
+    if os.name == "posix":
+        assert path.stat().st_mode & 0o777 == mode
+
+
 def _freeze(monkeypatch: pytest.MonkeyPatch) -> None:
     frozen = time.struct_time((2026, 10, 19, 12, 0, 0, 0, 292, 0))
     monkeypatch.setattr(drafts.time, "gmtime", lambda *args: frozen)
@@ -48,7 +54,7 @@ def test_build_draft_creates_private_file_without_following_symlinks(tmp_path: P
     inbox.mkdir()
     kwargs = dict(target=tmp_path, title="Same", summary="S.", content="Body.", inbox=str(inbox))
     first = drafts.build_draft(**kwargs)
-    assert Path(first["path"]).stat().st_mode & 0o777 == 0o600
+    _assert_mode(Path(first["path"]), 0o600)
     Path(first["path"]).unlink()
     victim = tmp_path / "victim.md"
     Path(first["path"]).symlink_to(victim)
@@ -64,10 +70,10 @@ def test_forced_draft_stays_private_and_refuses_a_planted_symlink(tmp_path: Path
     kwargs = dict(target=tmp_path, title="Same", summary="S.", content="Body.", inbox=str(inbox), force=True)
     first = drafts.build_draft(**kwargs)
     path = Path(first["path"])
-    assert path.stat().st_mode & 0o777 == 0o600
+    _assert_mode(path, 0o600)
     path.chmod(0o644)
     drafts.build_draft(**kwargs)
-    assert path.stat().st_mode & 0o777 == 0o600
+    _assert_mode(path, 0o600)
     path.unlink()
     victim = tmp_path / "victim.md"
     victim.write_text("keep", encoding="utf-8")
@@ -109,5 +115,23 @@ def test_forced_draft_never_writes_through_a_symlink_planted_after_the_check(tmp
     drafts.build_draft(**kwargs)
     assert victim.read_text(encoding="utf-8") == "keep"
     assert path.is_file() and not os.path.islink(path)
-    assert path.stat().st_mode & 0o777 == 0o600
+    _assert_mode(path, 0o600)
+    assert sorted(p.name for p in inbox.iterdir()) == [path.name]
+
+
+def test_draft_without_o_nofollow_refuses_a_dangling_symlink(tmp_path: Path, monkeypatch):
+    _freeze(monkeypatch)
+    monkeypatch.delattr(drafts.os, "O_NOFOLLOW", raising=False)
+    inbox = tmp_path / "in"
+    inbox.mkdir()
+    kwargs = dict(target=tmp_path, title="Same", summary="S.", content="Body.", inbox=str(inbox))
+    path = Path(drafts.build_draft(**kwargs)["path"])
+    assert path.read_text(encoding="utf-8").startswith("# Memory Handoff")
+    _assert_mode(path, 0o600)
+    path.unlink()
+    victim = tmp_path / "victim.md"
+    path.symlink_to(victim)
+    with pytest.raises(ValueError, match="already exists"):
+        drafts.build_draft(**kwargs)
+    assert not victim.exists()
     assert sorted(p.name for p in inbox.iterdir()) == [path.name]
