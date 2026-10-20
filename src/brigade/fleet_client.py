@@ -106,6 +106,7 @@ if TYPE_CHECKING:
 
 from . import fleet_claim_lifecycle as _claim_lifecycle
 from . import fleet_claim_target as _claim_target
+from .fleet_client_flush import flush_locked as _flush_locked
 from .fleet_client_spool import append_record as _append_spool_record
 from .fleet_client_spool import ensure_directory as _ensure_spool_directory
 from .fleet_client_spool import fsync_parent as _fsync_spool_parent
@@ -774,54 +775,6 @@ def _spool_append_locked(
     return True
 
 
-def _flush_locked(
-    path: Path,
-    hub: str,
-    token: str,
-    *,
-    max_batches: int | None,
-    timeout: float,
-    dir_fd: int | None = None,
-    preserve_poison: bool = False,
-    on_delivered: Callable[[list[dict[str, Any]]], None] | None = None,
-) -> int:
-    events = _read_spool(path, dir_fd=dir_fd)
-    if not events:
-        if dir_fd is not None:
-            try:
-                os.unlink(path.name, dir_fd=dir_fd)
-            except FileNotFoundError:
-                pass
-        else:
-            path.unlink(missing_ok=True)
-        return 0
-    index = 0
-    delivered = 0
-    batches = 0
-    while index < len(events) and (max_batches is None or batches < max_batches):
-        batch = events[index : index + FLUSH_BATCH_SIZE]
-        try:
-            _post_events(hub, token, batch, timeout=timeout)
-        except _PoisonResponse as exc:
-            if preserve_poison:
-                break
-            _LOG.warning("fleet spool %s: dropping %d event(s): %s", path, len(batch), exc)
-            index += len(batch)
-            batches += 1
-            continue
-        except Exception:
-            break
-        index += len(batch)
-        delivered += len(batch)
-        if on_delivered is not None:
-            on_delivered(batch)
-        batches += 1
-    if index == 0:
-        return 0
-    _write_spool_atomic(path, events[index:], dir_fd=dir_fd)
-    return delivered
-
-
 def flush_spool(
     node_id: str,
     *,
@@ -832,9 +785,10 @@ def flush_spool(
 ) -> int:
     """Re-POST spooled events in order, ``FLUSH_BATCH_SIZE`` per request.
 
-    Delivered (or poison-dropped) events are removed from the spool via an
-    atomic rewrite; undelivered ones keep their order so the next flush
-    resumes where this one stopped. A flush that makes no progress leaves
+    Delivered events are removed from the spool via an atomic rewrite. A
+    rejected batch is bisected so only the rejected events move to the
+    bounded dead letter (``fleet_client_flush``); undelivered ones keep their
+    order so the next flush resumes where this one stopped. A flush that makes no progress leaves
     the file untouched. Returns the number of delivered events. Never raises
     for network failures.
     """
