@@ -1,0 +1,414 @@
+"""Read-only lane classification and the patrol command contract."""
+
+from __future__ import annotations
+
+import json
+import os
+from datetime import timedelta
+
+import pytest
+
+from brigade import cli, runguard
+from tests.test_run_reap import NOW, OLD_STARTED, _repo, _write_run, _write_stale_lock
+
+
+def _snapshot(root):
+    return {
+        str(path.relative_to(root)): (path.stat().st_mtime_ns, path.read_bytes() if path.is_file() else None)
+        for path in root.rglob("*")
+        if not path.is_symlink()
+    }
+
+
+def test_default_patrol_is_read_only(tmp_path, capsys, monkeypatch):
+    repo = _repo(tmp_path)
+    run_dir = _write_run(repo, "20260820-120000-patrol01")
+    _write_stale_lock(repo, run_dir)
+    ledger = repo / ".brigade/work/tasks.json"
+    ledger.parent.mkdir()
+    ledger.write_text(json.dumps({"tasks": []}))
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+    before = _snapshot(repo)
+    assert cli.main(["runs", "patrol", "--target", str(repo), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["schema"] == "brigade.runs_patrol.v1"
+    assert payload["lanes"][0]["state"] == "dead"
+    assert payload["actions"] == []
+    assert payload["lanes"][0]["intent"] is None
+    assert all(item["source"] and item["observed_at"] for item in payload["lanes"][0]["evidence"])
+    assert _snapshot(repo) == before
+
+
+@pytest.mark.parametrize(
+    ("status", "live", "progress_age", "extra", "expected"),
+    [
+        ("ok", False, None, {"finished_at": OLD_STARTED}, "complete"),
+        ("failed", False, None, {"finished_at": OLD_STARTED}, "failed"),
+        ("orphaned", False, None, {"finished_at": OLD_STARTED}, "orphaned"),
+        ("dispatching", False, None, {}, "dead"),
+        ("dispatching", True, 60, {}, "working"),
+        ("dispatching", True, 1000, {}, "idle"),
+        ("dispatching", True, 2000, {}, "stalled"),
+        ("paused", True, 4000, {"approval_reference": {"decision_state": "pending"}}, "waiting"),
+        ("artifact-collection", True, 4000, {}, "waiting"),
+        ("dispatching", True, None, {}, "unknown"),
+    ],
+)
+def test_lane_states(tmp_path, monkeypatch, status, live, progress_age, extra, expected):
+    from brigade.run_lane_state import Thresholds, classify, collect_lanes
+
+    repo = _repo(tmp_path)
+    run_dir = _write_run(repo, "20260820-120000-patrol01", status=status, extra=extra)
+    if status not in {"ok", "failed"}:
+        _write_stale_lock(repo, run_dir)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: live)
+    if progress_age is not None:
+        events = run_dir / "events"
+        events.mkdir()
+        signal = events / "worker.jsonl"
+        signal.write_text("{}\n")
+        stamp = (NOW - timedelta(seconds=progress_age)).timestamp()
+        os.utime(signal, (stamp, stamp))
+    lanes = collect_lanes(repo, now=NOW)
+    result = classify(lanes[0], NOW, Thresholds())
+    assert result.state == expected
+    assert result.evidence
+
+
+def test_corrupt_journal_is_unknown_even_with_live_progress(tmp_path, monkeypatch):
+    from brigade.run_lane_state import Thresholds, classify, collect_lanes
+
+    repo = _repo(tmp_path)
+    run_dir = _write_run(repo, "20260820-120000-patrol01", extra={"lifecycle_journal_requested": True})
+    _write_stale_lock(repo, run_dir)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: True)
+    events = run_dir / "events"
+    events.mkdir()
+    (events / "lifecycle.jsonl").write_text("corrupt\n")
+    assert classify(collect_lanes(repo, now=NOW)[0], NOW, Thresholds()).state == "unknown"
+
+
+@pytest.mark.parametrize(
+    ("live", "finished_age", "expected"), [(True, 61, "zombie"), (True, 30, "complete"), (False, 61, "complete")]
+)
+def test_terminal_owner_grace(tmp_path, monkeypatch, live, finished_age, expected):
+    from brigade.run_lane_state import Thresholds, classify, collect_lanes
+
+    repo = _repo(tmp_path)
+    finished = (NOW - timedelta(seconds=finished_age)).isoformat()
+    run_dir = _write_run(repo, "20260820-120000-patrol01", status="ok", extra={"finished_at": finished})
+    if live:
+        _write_stale_lock(repo, run_dir)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: live)
+    assert classify(collect_lanes(repo, now=NOW)[0], NOW, Thresholds()).state == expected
+
+
+def _ledger(repo, *, worktree=None):
+    task = {
+        "id": "task-1",
+        "status": "in_progress",
+        "claim": {"claim_id": "claim-1", "actor": "worker", "claimed_at": OLD_STARTED},
+    }
+    if worktree is not None:
+        task["worktree"] = str(worktree)
+    path = repo / ".brigade/work/tasks.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"tasks": [task]}))
+    return path
+
+
+@pytest.mark.parametrize(
+    ("kind", "expected"), [("claim", "claim-without-run"), ("dirty", "stranded"), ("missing", "lost-worktree")]
+)
+def test_claim_and_worktree_lanes(tmp_path, kind, expected):
+    from brigade.run_lane_state import Thresholds, classify, collect_lanes
+
+    repo = _repo(tmp_path)
+    _ledger(repo, worktree=repo / "gone" if kind == "missing" else repo if kind == "dirty" else None)
+    if kind == "dirty":
+        (repo / "tracked.txt").write_text("unlanded work\n")
+        stamp = (NOW - timedelta(days=2)).timestamp()
+        os.utime(repo / "tracked.txt", (stamp, stamp))
+    lanes = collect_lanes(repo, now=NOW)
+    assert len(lanes) == 1
+    assert classify(lanes[0], NOW, Thresholds()).state == expected
+
+
+def test_recorded_missing_run_worktree(tmp_path, monkeypatch):
+    from brigade.run_lane_state import Thresholds, classify, collect_lanes
+
+    repo = _repo(tmp_path)
+    run_dir = _write_run(repo, "20260820-120000-patrol01", extra={"worktree": str(repo / "gone")})
+    _write_stale_lock(repo, run_dir)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: True)
+    assert classify(collect_lanes(repo, now=NOW)[0], NOW, Thresholds()).state == "lost-worktree"
+
+
+def test_receipt_and_fail_on(tmp_path, capsys, monkeypatch):
+    from brigade.runs_patrol import patrol
+
+    repo = _repo(tmp_path)
+    run_dir = _write_run(repo, "20260820-120000-patrol01")
+    _write_stale_lock(repo, run_dir)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+    before = _snapshot(repo / ".brigade/runs")
+    assert patrol(target=repo, now=NOW, receipt=True, json_output=True, fail_on="dead,stalled") == 1
+    payload = json.loads(capsys.readouterr().out)
+    stored = json.loads((repo / payload["receipt"]).read_text())
+    assert stored == payload
+    assert stored["thresholds"]["idle_after"] == 900
+    assert stored["exit_code"] == 1
+    assert _snapshot(repo / ".brigade/runs") == before
+
+
+@pytest.mark.parametrize(
+    "options", [["--limit", "0"], ["--idle-after", "0s"], ["--stall-after", "1m"], ["--fail-on", "nonsense"]]
+)
+def test_usage_errors(tmp_path, capsys, options):
+    assert cli.main(["runs", "patrol", "--target", str(tmp_path), *options]) == 2
+    assert "error:" in capsys.readouterr().err
+    assert not (tmp_path / ".brigade").exists()
+
+
+def test_scan_is_bounded_and_skips_symlinked_and_malformed_dirs(tmp_path, monkeypatch):
+    from brigade.run_lane_state import collect_lanes
+
+    repo = _repo(tmp_path)
+    run_dir = _write_run(repo, "20260820-120000-patrol01")
+    _write_run(repo, "20260820-120000-patrol02")
+    root = run_dir.parent
+    (root / "bad name").mkdir()
+    (root / "20260820-120000-linked01").symlink_to(run_dir, target_is_directory=True)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+    assert len(collect_lanes(repo, now=NOW, limit=1)) <= 1
+    assert {lane.lane_id for lane in collect_lanes(repo, now=NOW)} == {
+        "20260820-120000-patrol01",
+        "20260820-120000-patrol02",
+    }
+
+
+@pytest.mark.parametrize(
+    "bad_input", ["run", "owner", "journal-missing", "ledger", "oversized", "owner-foreign", "owner-symlink"]
+)
+def test_unverifiable_evidence_is_unknown(tmp_path, monkeypatch, bad_input):
+    from brigade.run_lane_state import FILE_BYTE_CAP, Thresholds, classify, collect_lanes
+
+    repo = _repo(tmp_path)
+    run_dir = _write_run(repo, "20260820-120000-patrol01")
+    lock = _write_stale_lock(repo, run_dir)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: True)
+    if bad_input == "run":
+        (run_dir / "run.json").write_text("corrupt")
+    elif bad_input == "owner":
+        (lock / "owner.json").write_text("corrupt")
+    elif bad_input == "owner-foreign":
+        owner = json.loads((lock / "owner.json").read_text())
+        owner["run_dir"] = str(repo / "other")
+        (lock / "owner.json").write_text(json.dumps(owner))
+    elif bad_input == "owner-symlink":
+        (lock / "owner.json").rename(lock / "other.json")
+        (lock / "owner.json").symlink_to(lock / "other.json")
+    elif bad_input == "journal-missing":
+        meta = json.loads((run_dir / "run.json").read_text())
+        meta["lifecycle_journal_requested"] = True
+        (run_dir / "run.json").write_text(json.dumps(meta))
+    elif bad_input == "ledger":
+        _ledger(repo).write_text("corrupt")
+    else:
+        (run_dir / "run.json").write_bytes(b"x" * (FILE_BYTE_CAP + 1))
+    assert classify(collect_lanes(repo, now=NOW)[0], NOW, Thresholds()).state == "unknown"
+
+
+def test_timeout_uses_injected_clock_and_overrides_recent_progress(tmp_path, monkeypatch):
+    from brigade.run_lane_state import Thresholds, classify, collect_lanes
+
+    repo = _repo(tmp_path)
+    run_dir = _write_run(
+        repo,
+        "20260820-120000-patrol01",
+        extra={"worker": "worker", "status_started_at": (NOW - timedelta(seconds=61)).isoformat()},
+    )
+    _write_stale_lock(repo, run_dir)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: True)
+    (run_dir / "roster.json").write_text(json.dumps({"agents": {"worker": {"timeout_seconds": 60}}}))
+    events = run_dir / "events"
+    events.mkdir()
+    signal = events / "worker.jsonl"
+    signal.write_text("{}\n")
+    os.utime(signal, (NOW.timestamp(), NOW.timestamp()))
+    lane = collect_lanes(repo, now=NOW)[0]
+    assert classify(lane, NOW, Thresholds()).state == "stalled"
+    assert classify(lane, NOW + timedelta(minutes=2), Thresholds()).state == "unknown"
+
+
+def test_unchanged_evidence_keeps_classification_digest(tmp_path, capsys, monkeypatch):
+    from brigade.runs_patrol import patrol
+
+    repo = _repo(tmp_path)
+    run_dir = _write_run(repo, "20260820-120000-patrol01")
+    _write_stale_lock(repo, run_dir)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+    assert patrol(target=repo, now=NOW, json_output=True) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert patrol(target=repo, now=NOW + timedelta(seconds=1), json_output=True) == 0
+    second = json.loads(capsys.readouterr().out)
+    assert first["lanes"][0]["classification_digest"] == second["lanes"][0]["classification_digest"]
+
+
+@pytest.mark.parametrize(
+    ("event_type", "payload", "expected"),
+    [
+        ("run.completed", {"status": "ok"}, "complete"),
+        ("run.paused", {"approval_id": "approval-1", "reason": "pending"}, "waiting"),
+    ],
+)
+def test_journal_wins_over_stale_snapshot(tmp_path, monkeypatch, event_type, payload, expected):
+    from brigade import run_journal
+    from brigade.run_lane_state import Thresholds, classify, collect_lanes
+
+    repo = _repo(tmp_path)
+    run_dir = _write_run(repo, "20260820-120000-patrol01", extra={"lifecycle_journal_requested": True})
+    if expected == "waiting":
+        _write_stale_lock(repo, run_dir)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: True)
+    run_journal.append_event(
+        run_dir / "events/lifecycle.jsonl",
+        run_id=run_dir.name,
+        event_type=event_type,
+        payload=payload,
+        idempotency_key="event-1",
+        expected_previous_sequence=0,
+        recorded_at="2026-08-28T17:59:00.000000Z",
+    )
+    assert classify(collect_lanes(repo, now=NOW)[0], NOW, Thresholds()).state == expected
+
+
+def test_worktree_changes_supply_progress_without_event_files(tmp_path, monkeypatch):
+    from brigade.run_lane_state import Thresholds, classify, collect_lanes
+
+    repo = _repo(tmp_path)
+    run_dir = _write_run(repo, "20260820-120000-patrol01")
+    _write_stale_lock(repo, run_dir)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: True)
+    tracked = repo / "tracked.txt"
+    tracked.write_text("progress\n")
+    os.utime(tracked, (NOW.timestamp() - 10, NOW.timestamp() - 10))
+    assert classify(collect_lanes(repo, now=NOW)[0], NOW, Thresholds()).state == "working"
+
+
+def test_claim_joins_run_by_task_id(tmp_path, monkeypatch):
+    from brigade.run_lane_state import Thresholds, classify, collect_lanes
+
+    repo = _repo(tmp_path)
+    _ledger(repo)
+    run_dir = _write_run(repo, "20260820-120000-patrol01", extra={"task_id": "task-1"})
+    _write_stale_lock(repo, run_dir)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+    lanes = collect_lanes(repo, now=NOW)
+    assert len(lanes) == 1
+    assert lanes[0].claim["claim_id"] == "claim-1"
+    assert classify(lanes[0], NOW, Thresholds()).state == "dead"
+
+
+def test_claim_is_unknown_when_run_scan_is_incomplete(tmp_path, monkeypatch):
+    from brigade.run_lane_state import Thresholds, classify, collect_lanes
+
+    repo = _repo(tmp_path)
+    _ledger(repo)
+    root = repo / ".brigade/runs"
+    root.mkdir()
+    # The scan budget is spent on malformed entries before any run is read.
+    (root / "bad first").mkdir()
+    _write_run(repo, "20260820-120000-patrol01", extra={"task_id": "task-1"})
+    lanes = collect_lanes(repo, now=NOW, limit=1)
+    assert len(lanes) == 1
+    assert classify(lanes[0], NOW, Thresholds()).state == "unknown"
+
+
+def test_receipt_refuses_symlinked_destination(tmp_path, capsys):
+    from brigade.runs_patrol import patrol
+
+    repo = _repo(tmp_path)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (repo / ".brigade").mkdir()
+    (repo / ".brigade/patrol").symlink_to(outside, target_is_directory=True)
+    assert patrol(target=repo, receipt=True, now=NOW) == 2
+    assert "symlinked" in capsys.readouterr().err
+    assert list(outside.iterdir()) == []
+
+
+def test_missing_target_and_unsupported_apply(tmp_path, capsys):
+    assert cli.main(["runs", "patrol", "--target", str(tmp_path / "missing")]) == 2
+    capsys.readouterr()
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["runs", "patrol", "--target", str(tmp_path), "--apply", "reap"])
+    assert exc.value.code == 2
+
+
+def test_terminal_stale_lock_is_zombie_after_grace(tmp_path, monkeypatch):
+    from brigade.run_lane_state import Thresholds, classify, collect_lanes
+
+    repo = _repo(tmp_path)
+    run_dir = _write_run(repo, "20260820-120000-patrol01", status="ok", extra={"finished_at": OLD_STARTED})
+    _write_stale_lock(repo, run_dir)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+    assert classify(collect_lanes(repo, now=NOW)[0], NOW, Thresholds()).state == "zombie"
+
+
+def test_terminal_run_does_not_own_newer_runs_lock(tmp_path, monkeypatch):
+    from brigade.run_lane_state import Thresholds, classify, collect_lanes
+
+    repo = _repo(tmp_path)
+    _write_run(repo, "20260820-120000-patrol01", status="ok", extra={"finished_at": OLD_STARTED})
+    newer = _write_run(repo, "20260820-120000-patrol02")
+    _write_stale_lock(repo, newer)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: True)
+    lanes = collect_lanes(repo, now=NOW)
+    first = next(lane for lane in lanes if lane.lane_id.endswith("patrol01"))
+    assert classify(first, NOW, Thresholds()).state == "complete"
+
+
+def test_failed_contract_includes_infrastructure_flag(tmp_path, capsys):
+    from brigade.runs_patrol import patrol
+
+    repo = _repo(tmp_path)
+    _write_run(
+        repo,
+        "20260820-120000-patrol01",
+        status="failed",
+        extra={"failure": {"kind": "transport-error", "phase": "dispatch"}},
+    )
+    assert patrol(target=repo, now=NOW, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["lanes"][0]["state"] == "failed"
+    assert payload["lanes"][0]["infrastructure_failure"] is True
+
+
+@pytest.mark.parametrize("source", ["ledger-id", "dangling-events"])
+def test_malformed_join_sources_never_report_healthy(tmp_path, monkeypatch, source):
+    from brigade.run_lane_state import Thresholds, classify, collect_lanes
+
+    repo = _repo(tmp_path)
+    run_dir = _write_run(repo, "20260820-120000-patrol01", status="ok", extra={"finished_at": OLD_STARTED})
+    if source == "ledger-id":
+        ledger = _ledger(repo)
+        payload = json.loads(ledger.read_text())
+        del payload["tasks"][0]["id"]
+        ledger.write_text(json.dumps(payload))
+    else:
+        (run_dir / "events").symlink_to(repo / "missing", target_is_directory=True)
+    assert classify(collect_lanes(repo, now=NOW)[0], NOW, Thresholds()).state == "unknown"
+
+
+def test_corrupt_source_is_named_in_evidence(tmp_path):
+    from brigade.run_lane_state import collect_lanes
+
+    repo = _repo(tmp_path)
+    run_dir = _write_run(repo, "20260820-120000-patrol01")
+    (run_dir / "events").mkdir()
+    (run_dir / "events/lifecycle.jsonl").write_text("corrupt\n")
+    lane = collect_lanes(repo, now=NOW)[0]
+    assert any(
+        item.source == "events/lifecycle.jsonl" and item.detail == "evidence unavailable" for item in lane.evidence
+    )
