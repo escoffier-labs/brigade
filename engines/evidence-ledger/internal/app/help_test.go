@@ -3,6 +3,7 @@ package app
 import (
 	"errors"
 	"os"
+	"reflect"
 	"strings"
 	"testing"
 
@@ -95,11 +96,23 @@ func TestHelpFlagNamesTheSubcommandUsage(t *testing.T) {
 	}
 }
 
-func TestHelpFlagAfterDoubleDashIsNotHelp(t *testing.T) {
+func TestHelpFlagAfterDoubleDashIsALiteralArgument(t *testing.T) {
 	withTempHome(t)
-	code, stdout, _ := run("search", "--", "--help")
-	if strings.HasPrefix(stdout, "usage: miseledger") && code == 0 {
+	runOK(t, "init")
+	code, stdout, stderr := run("search", "--", "--help")
+	if code != 0 {
+		t.Fatalf("search -- --help exit %d, want a literal search: stderr %q", code, stderr)
+	}
+	if strings.HasPrefix(stdout, "usage: miseledger") {
 		t.Fatalf("search -- --help printed usage instead of searching for the literal term: %q", stdout)
+	}
+
+	_, _, rest, err := splitFlags([]string{"--json", "--", "--help", "-h", "--"}, nil, map[string]bool{"json": true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if want := []string{"--help", "-h", "--"}; !reflect.DeepEqual(rest, want) {
+		t.Fatalf("splitFlags rest after terminator = %#v, want %#v", rest, want)
 	}
 }
 

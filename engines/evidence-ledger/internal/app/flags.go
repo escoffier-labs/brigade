@@ -11,7 +11,11 @@ func splitFlags(args []string, valueFlags, boolFlags map[string]bool) (map[strin
 	var rest []string
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
-		if !strings.HasPrefix(arg, "--") || arg == "--" {
+		if arg == "--" {
+			rest = append(rest, args[i+1:]...)
+			break
+		}
+		if !strings.HasPrefix(arg, "--") {
 			rest = append(rest, arg)
 			continue
 		}
