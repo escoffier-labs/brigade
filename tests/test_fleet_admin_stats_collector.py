@@ -209,7 +209,10 @@ def test_fixed_sql_runs_on_local_fixture_and_excludes_internal_observations(monk
     conn.close()
 
 
-def test_oldest_truncated_week_is_partial(monkeypatch):
+@pytest.mark.parametrize(
+    "now", [datetime(2026, 10, 20, tzinfo=timezone.utc), datetime(2026, 10, 18, 23, 59, 30, tzinfo=timezone.utc)]
+)
+def test_oldest_truncated_week_is_partial(monkeypatch, now):
     from brigade import fleet_admin_stats_collector as collector
 
     def runner(argv, **kwargs):
@@ -221,8 +224,9 @@ def test_oldest_truncated_week_is_partial(monkeypatch):
         return [{"success": True, "results": rows}]
 
     monkeypatch.setattr(collector, "run_wrangler", runner)
-    value = collector.collect({"database": "example-db"}, now=datetime(2026, 10, 20, tzinfo=timezone.utc))
-    assert value["weeks"][0]["partial"] is True  # 90-day window starts midweek.
+    value = collector.collect({"database": "example-db"}, now=now)
+    # Include the boundary Monday because D1 may evaluate after UTC midnight.
+    assert value["weeks"][0]["partial"] is True
 
 
 def test_wrangler_account_setting_is_environment_only(monkeypatch):
@@ -242,7 +246,8 @@ def test_wrangler_account_setting_is_environment_only(monkeypatch):
     ]
 
 
-def test_collector_filters_invalid_cells_and_keeps_other_sources(monkeypatch):
+@pytest.mark.parametrize("malformed", [False, True])
+def test_collector_hides_invalid_histograms_and_keeps_other_sources(monkeypatch, malformed):
     from brigade import fleet_admin_stats_collector as collector
 
     def runner(argv, **kwargs):
@@ -251,12 +256,16 @@ def test_collector_filters_invalid_cells_and_keeps_other_sources(monkeypatch):
         elif argv[-1] == collector.QUERIES["versions"]:
             rows = [
                 {"week": "2026-W43", "version": version, "active_sources": 8}
-                for version in ("dev", "0.28.0+local", "0.28.0-beta.1", "0.31.0.dev20260808")
+                for version in (
+                    ("dev", "0.28.0+local", "0.28.0-beta.1", "0.31.0.dev20260808")
+                    if malformed
+                    else ("0.31.0.dev20260808",)
+                )
             ]
         else:
             rows = [
                 {"week": "2026-W43", "from_version": version, "to_version": "0.31.0.dev20260808", "active_sources": 8}
-                for version in ("dev", "0.28.0")
+                for version in (("dev", "0.28.0") if malformed else ("0.28.0",))
             ]
         return [{"success": True, "results": rows}]
 
@@ -275,11 +284,70 @@ def test_collector_filters_invalid_cells_and_keeps_other_sources(monkeypatch):
         now=datetime(2026, 10, 20, tzinfo=timezone.utc),
     )
     assert value["source_set"] == ["d1", "downloads"]
-    assert value["weeks"][0]["versions"] == [{"version": "0.31.0.dev20260808", "active_sources": 8}]
-    assert value["weeks"][0]["upgrades"] == [
-        {"from_version": "0.28.0", "to_version": "0.31.0.dev20260808", "active_sources": 8}
-    ]
+    assert value["weeks"][0]["versions"] == (
+        [] if malformed else [{"version": "0.31.0.dev20260808", "active_sources": 8}]
+    )
+    assert value["weeks"][0]["upgrades"] == (
+        [] if malformed else [{"from_version": "0.28.0", "to_version": "0.31.0.dev20260808", "active_sources": 8}]
+    )
     assert value["downloads"] == {"pypi": 12, "npm": 8}
+
+
+@pytest.mark.parametrize("counts", [(10, 6, 4), (8, 9, 3)])
+def test_rejected_version_cannot_disclose_small_remainder(monkeypatch, counts):
+    from brigade import fleet_admin_stats_collector as collector
+
+    def runner(argv, **kwargs):
+        if argv[-1] == collector.QUERIES["weekly"]:
+            rows = [{"week": "2026-W43", "active_sources": 20, "retained_2d_sources": 20, "retained_3d_sources": 20}]
+        elif argv[-1] == collector.QUERIES["versions"]:
+            rows = [
+                {"week": "2026-W43", "version": version, "active_sources": count}
+                for version, count in zip(("0.27.0", "0.28.0", "dev"), counts, strict=True)
+            ]
+        else:
+            rows = []
+        return [{"success": True, "results": rows}]
+
+    monkeypatch.setattr(collector, "run_wrangler", runner)
+    value = collector.collect({"database": "example-db"}, now=datetime(2026, 10, 20, tzinfo=timezone.utc))
+    assert value["weeks"][0]["active_sources"] == 20
+    assert value["weeks"][0]["versions"] == []
+
+
+@pytest.mark.parametrize("kind,limit", [("versions", 6000), ("upgrades", 12000)])
+@pytest.mark.parametrize("at_limit", [False, True])
+def test_global_histogram_limit_cannot_expose_truncated_week(monkeypatch, kind, limit, at_limit):
+    from brigade import fleet_admin_stats_collector as collector
+
+    def cell(week, index):
+        return {
+            "week": week,
+            "active_sources": 10,
+            **(
+                {"version": f"0.28.{index}"}
+                if kind == "versions"
+                else {"from_version": "0.27.0", "to_version": f"0.28.{index}"}
+            ),
+        }
+
+    def runner(argv, **kwargs):
+        if argv[-1] == collector.QUERIES["weekly"]:
+            rows = [{"week": "2026-W42", "active_sources": 20, "retained_2d_sources": 20, "retained_3d_sources": 20}]
+        elif argv[-1] == collector.QUERIES[kind]:
+            # The global SQL limit can cut off an older week's small group,
+            # even though that week has fewer cells than its per-week cap.
+            rows = [cell("2026-W43", i) for i in range(limit - (1 if at_limit else 2))]
+            rows.append(cell("2026-W42", 0))
+        else:
+            rows = []
+        return [{"success": True, "results": rows}]
+
+    monkeypatch.setattr(collector, "run_wrangler", runner)
+    value = collector.collect({"database": "example-db"}, now=datetime(2026, 10, 20, tzinfo=timezone.utc))
+    assert value["source_set"] == ["d1"]
+    expected = [] if at_limit else [{key: val for key, val in cell("2026-W42", 0).items() if key != "week"}]
+    assert value["weeks"][0][kind] == expected
 
 
 @pytest.mark.parametrize("kind,limit", [("versions", 100), ("upgrades", 200)])

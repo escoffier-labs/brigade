@@ -89,6 +89,67 @@ def test_migration_retention_and_idempotent_snapshot(tmp_path):
     conn.close()
 
 
+@pytest.mark.parametrize("phase", ["startup", "periodic"])
+def test_hub_physically_expires_stats_without_a_later_post(tmp_path, monkeypatch, phase):
+    import threading
+    import time
+    from datetime import timedelta
+    from brigade import fleet_admin_stats as stats
+
+    clock = [NOW]
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock[0]
+
+    monkeypatch.setattr(stats, "datetime", Clock)
+    monkeypatch.setattr(stats, "RETENTION_INTERVAL_SECONDS", 0.01, raising=False)
+    db = tmp_path / "hub.db"
+    conn = fleet_hub.init_db(db)
+    taken = NOW - timedelta(days=401 if phase == "startup" else 399)
+    year, week, _ = taken.isocalendar()
+    row = snapshot()["weeks"][0]
+    row.update(week=f"{year}-W{week:02}", partial=True)
+    value = stats.snapshot(
+        taken_at=taken, source_set=["d1"], weeks=[row], daily=[], downloads={"pypi": None, "npm": None}
+    )
+    stats.store(conn, value, now=taken)
+
+    def counts():
+        return tuple(
+            conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0]
+            for table in ("admin_stats_snapshots", "admin_stats_weeks")
+        )
+
+    assert counts() == (1, 1)
+
+    class Server:
+        server_address = ("example-host", 0)
+        closed = False
+
+        def serve_forever(self):
+            if phase == "periodic":
+                assert counts() == (1, 1)
+                clock[0] += timedelta(days=2)
+                deadline = time.monotonic() + 2
+                while counts() != (0, 0) and time.monotonic() < deadline:
+                    threading.Event().wait(0.01)
+            assert counts() == (0, 0)
+
+        def server_close(self):
+            self.closed = True
+
+    server = Server()
+    monkeypatch.setattr(fleet_hub, "BoundedThreadingHTTPServer", lambda *a, **k: server)
+    monkeypatch.setattr(fleet_hub, "_load_token", lambda args: "example-admin")
+    try:
+        assert fleet_hub.run(host="localhost", port=0, db_path=db, token_file=None) == 0
+        assert server.closed
+    finally:
+        conn.close()
+
+
 def handler(tmp_path, *, path, bearer=None, cookie=None, body=None):
     db = tmp_path / "hub.db"
     fleet_hub.init_db(db).close()
@@ -158,6 +219,15 @@ def test_page_unknown_partial_privacy_and_docs():
         listed = Path(doc).read_text().split("expose these fields:\n\n", 1)[1].split("\n\n", 1)[0]
         assert set(re.findall(r"`([^`]+)`", listed)) == set(stats.FIELD_PATHS)
     assert "unknown" in page.render({"latest": None, "weeks": []}, nonce="example", now=NOW)
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_stats_page_preserves_worklore_navigation(monkeypatch, enabled):
+    from brigade import fleet_admin_stats_page as page, worklore_http
+
+    monkeypatch.setattr(worklore_http, "enabled", lambda: enabled)
+    html = page.render({"latest": None, "weeks": []}, nonce="example", now=NOW)
+    assert ('href="/deck/work"' in html) is enabled
 
 
 @pytest.mark.parametrize(

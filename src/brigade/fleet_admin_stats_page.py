@@ -70,6 +70,4 @@ def render(view: dict[str, Any], *, nonce: str, now: datetime) -> str:
             body += "</div>"
         body += "</article>"
     body += "</section></main>"
-    return deck._document(
-        body, nonce=nonce, now=now, title="Statistics", refresh=False, active="stats", worklore_enabled=False
-    )
+    return deck._document(body, nonce=nonce, now=now, title="Statistics", refresh=False, active="stats")

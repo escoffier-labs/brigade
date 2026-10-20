@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Add `/deck/stats` with aggregate adoption snapshots and `brigade fleet stats collect` for fixed read-only D1, Analytics and public download reads. Suppress source cells below 5 and restrict ingestion to configured collector nodes. (#1875)
+- Add `/deck/stats` with aggregate adoption snapshots and `brigade fleet stats collect` for fixed read-only D1, Analytics and public download reads, including D1 Read tokens. Suppress source cells below 5 and incomplete histograms, preserve complete weekly history and fuller daily snapshots, and bound storage and collector output. Worker counts cover completed UTC days. Restrict ingestion to configured collector nodes. (#1875)
 
 - `brigade memory serve-mcp --http` and `brigade skills serve-mcp --http` serve the read-only MCP tools over a stateless loopback Streamable HTTP endpoint (`POST /mcp`, `GET /healthz`) for MCP hosts that cannot spawn a stdio process. The server binds only `127.0.0.1` or `::1`, requires a bearer token from `BRIGADE_MCP_HTTP_TOKEN` (32 characters or more, never a flag), rejects non-loopback `Host` and `Origin` headers, and caps request bodies at 1 MiB. `--stdio` is unchanged.
 - MCP registry metadata for the two read-only servers: `mcp-registry/memory/server.json` (`io.github.escoffier-labs/brigade-memory`) and `mcp-registry/skills/server.json` (`io.github.escoffier-labs/brigade-skills`), with matching `mcp-name` markers in the README. `scripts/version_sync.py` keeps both manifests on the release version.
@@ -31,10 +31,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The beta channel moves to the 0.31 preview line. `brigade update --channel beta` resolves `0.31.0.devYYYYMMDD` wheels again, instead of older 0.29.0 development builds from before the 0.30.0 release.
 
 ### Fixed
-
-- Preserve fuller daily adoption snapshots during provider outages, prevent small-count disclosure by subtraction, and support D1 Read tokens on headless collectors. (#1875)
-
-- Preserve complete adoption weeks, bound stored snapshots and collector output, and isolate malformed version cells. Worker counts cover completed UTC days. (#1875)
 
 - Scanner children run with `BRIGADE_NO_UPDATE_CHECK=1`. The detached update refresh a child started outlived its throwaway sandbox and recreated it when writing `update-notify.json`, leaving one `brigade-scanner-child-*` directory in the temp dir per scanner run.
 

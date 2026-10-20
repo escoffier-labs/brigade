@@ -235,7 +235,7 @@ def collect(settings: dict[str, Any], *, now: datetime | None = None) -> dict[st
                 weeks.append(
                     {
                         "week": week,
-                        "partial": start + timedelta(days=7) > now.date() or start < now.date() - timedelta(days=90),
+                        "partial": start + timedelta(days=7) > now.date() or start <= now.date() - timedelta(days=90),
                         **{key: row[key] for key in stats.SOURCE_FIELDS},
                         "versions": versions,
                         "upgrades": upgrades,
@@ -274,6 +274,9 @@ def collect(settings: dict[str, Any], *, now: datetime | None = None) -> dict[st
 
 
 def _histogram(rows: list[dict[str, Any]], week: str, *, upgrades: bool) -> list[dict[str, Any]]:
+    # A global query limit can omit cells even in a small per-week histogram.
+    if len(rows) >= (12000 if upgrades else 6000):
+        return []
     fields = ("from_version", "to_version") if upgrades else ("version",)
     cells = []
     for row in rows:
@@ -287,7 +290,9 @@ def _histogram(rows: list[dict[str, Any]], week: str, *, upgrades: bool) -> list
                 continue
             cells.append({key: row[key] for key in (*fields, "active_sources")})
         except (ValueError, KeyError, TypeError):
-            continue
+            # An omitted malformed cell could disclose 1-4 sources by
+            # subtraction from the week's total. Hide the distribution.
+            return []
     # An empty array renders as unknown. Never show a truncated distribution.
     return cells if len(cells) <= (200 if upgrades else 100) else []
 

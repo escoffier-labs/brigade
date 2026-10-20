@@ -8,13 +8,16 @@ import hmac
 import json
 import re
 import sqlite3
+import threading
 from datetime import date, datetime, timedelta, timezone
+from pathlib import Path
 from typing import Any
 
 from . import fleet_client, toml_compat
 
 SCHEMA = "brigade.admin-stats.v1"
 RETENTION_DAYS = 400
+RETENTION_INTERVAL_SECONDS = 3600
 SOURCE_FIELDS = ("active_sources", "retained_2d_sources", "retained_3d_sources")
 WEEK_FIELDS = ("week", "partial", *SOURCE_FIELDS, "versions", "upgrades")
 DAILY_FIELDS = ("day", "worker_requests", "worker_errors")
@@ -286,6 +289,35 @@ def _prune(conn: sqlite3.Connection, now: datetime) -> None:
     conn.execute("DELETE FROM admin_stats_weeks WHERE taken_at < ?", (cutoff,))
     conn.execute("""DELETE FROM admin_stats_weeks WHERE week NOT IN (
         SELECT week FROM admin_stats_weeks ORDER BY week DESC LIMIT 60)""")
+
+
+def maintain(db_path: Path) -> None:
+    """Delete expired aggregates independently of collection and page reads."""
+    from . import fleet_hub
+
+    conn = fleet_hub.open_db(db_path)
+    try:
+        with conn:
+            _prune(conn, datetime.now(timezone.utc))
+    finally:
+        conn.close()
+
+
+def start_retention_sweeper(db_path: Path, *, stop: threading.Event) -> threading.Thread:
+    """Run hourly maintenance with a separate connection for each pass."""
+    from .fleet_hub import FleetHubError
+
+    def loop() -> None:
+        while not stop.wait(RETENTION_INTERVAL_SECONDS):
+            try:
+                maintain(db_path)
+            except (sqlite3.Error, FleetHubError):
+                # Retry a locked or temporarily unavailable database next tick.
+                continue
+
+    thread = threading.Thread(target=loop, name="stats-retention-sweeper", daemon=True)
+    thread.start()
+    return thread
 
 
 def load_view(conn: sqlite3.Connection, *, now: datetime | None = None) -> dict[str, Any]:

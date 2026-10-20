@@ -1851,6 +1851,9 @@ def make_server(
     else:
         deck_config = fleet_command_deck.DeckConfig()
     init_db(Path(db_path)).close()
+    from . import fleet_admin_stats
+
+    fleet_admin_stats.maintain(Path(db_path).expanduser())
     return BoundedThreadingHTTPServer(
         (host, port),
         make_handler(
@@ -1905,10 +1908,11 @@ def run(
     print(
         f"brigade fleet hub listening on {bound_host}:{bound_port} (db {Path(db_path).expanduser()}; {mode}; {tailscale_mode})"
     )
-    from . import fleet_hub_grokbot
+    from . import fleet_admin_stats, fleet_hub_grokbot
 
     sweeper_stop = threading.Event()
     sweeper_thread = fleet_hub_grokbot.start_expiry_sweeper(Path(db_path).expanduser(), stop=sweeper_stop)
+    stats_thread = fleet_admin_stats.start_retention_sweeper(Path(db_path).expanduser(), stop=sweeper_stop)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -1916,5 +1920,6 @@ def run(
     finally:
         sweeper_stop.set()
         sweeper_thread.join(timeout=5)
+        stats_thread.join(timeout=5)
         server.server_close()
     return 0
