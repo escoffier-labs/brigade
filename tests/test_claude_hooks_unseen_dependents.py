@@ -79,7 +79,7 @@ def test_explicit_write_records_unseen_callers_without_denying(target, monkeypat
     check = state["dependency_checks"][-1]
     assert check["file_path"] == "api.py"
     assert check["unseen_dependents"] == (["caller.py", "tests/test_api.py"] if seen == "unread" else [])
-    assert calls == [("sync", ()), ("affected", ("api.py",))]
+    assert calls == [("sync", ("--force",)), ("affected", ("api.py",))]
     # A subsequent event must preserve the observation rather than normalize it away.
     event(target, "PostToolUse", tool_name=tool, tool_input={key: str(target / "api.py")})
     assert runtime.read_session_state(target, "session-one")["dependency_checks"] == state["dependency_checks"]
@@ -177,3 +177,79 @@ def test_elided_graph_brief_does_not_mark_files_seen(target, monkeypatch):
     assert (
         "caller.py" in runtime.read_session_state(target, "session-one")["dependency_checks"][-1]["unseen_dependents"]
     )
+
+
+def test_dependency_check_forces_refresh_when_stat_metadata_could_be_unchanged(target, monkeypatch):
+    graph(target, monkeypatch)
+    original = graphtrail_delta._run_graphtrail
+    forced = False
+
+    def run(binary, db_path, command, *extra, **kwargs):
+        nonlocal forced
+        if command == "sync":
+            forced = "--force" in extra
+        result = original(binary, db_path, command, *extra, **kwargs)
+        # The engine may keep the old call graph if a same-size edit preserves mtime.
+        if command == "affected" and not forced:
+            report = json.loads(result["stdout"])
+            report.update(impacted_files=[], affected_tests=[])
+            result["stdout"] = json.dumps(report)
+        return result
+
+    monkeypatch.setattr(graphtrail_delta, "_run_graphtrail", run)
+    event(target, "PreToolUse", tool_name="Edit", tool_input={"file_path": "api.py"})
+    assert runtime.read_session_state(target, "session-one")["dependency_checks"][-1]["unseen_dependents"] == [
+        "caller.py",
+        "tests/test_api.py",
+    ]
+
+
+def test_native_graph_sections_mark_only_injected_paths_seen(target, monkeypatch):
+    graph(target, monkeypatch)
+    monkeypatch.setattr(
+        runtime,
+        "_run_brief",
+        lambda *args: (
+            "## Code graph context (GraphTrail, read-only)\n"
+            "Task: inspect outside.py\n"
+            "_schema v1 - 1 entry points - 0 callers - 0 callees - 1 related files_\n"
+            "## Entry points\n- caller - caller.py:2\n"
+            "## Related files\n- tests/test_api.py\n"
+            "## Next task\n- outside.py\n"
+        ),
+    )
+    event(target, "SessionStart")
+    assert runtime.read_session_state(target, "session-one")["brief_files"] == ["caller.py", "tests/test_api.py"]
+    event(target, "PreToolUse", tool_name="Edit", tool_input={"file_path": "api.py"})
+    assert runtime.read_session_state(target, "session-one")["dependency_checks"][-1]["unseen_dependents"] == []
+
+
+@pytest.mark.parametrize("interleaving", ["read", "write", "new_task"])
+def test_graph_query_cannot_overwrite_observations_from_overlapping_hooks(target, monkeypatch, interleaving):
+    graph(target, monkeypatch)
+    event(target, "SessionStart", source="startup")
+    original = graphtrail_delta._run_graphtrail
+    interleaved = False
+
+    def run(binary, db_path, command, *extra, **kwargs):
+        nonlocal interleaved
+        if command == "affected" and not interleaved:
+            interleaved = True
+            if interleaving == "read":
+                event(target, "PostToolUse", tool_name="Read", tool_input={"file_path": "caller.py"})
+            elif interleaving == "write":
+                event(target, "PreToolUse", tool_name="Edit", tool_input={"file_path": "caller.py"})
+            else:
+                event(target, "SessionStart", source="clear")
+        return original(binary, db_path, command, *extra, **kwargs)
+
+    monkeypatch.setattr(graphtrail_delta, "_run_graphtrail", run)
+    event(target, "PreToolUse", tool_name="Edit", tool_input={"file_path": "api.py"})
+    state = runtime.read_session_state(target, "session-one")
+    if interleaving == "read":
+        assert state["read_files"] == ["caller.py"]
+    elif interleaving == "write":
+        assert {check["file_path"] for check in state["dependency_checks"]} == {"api.py", "caller.py"}
+    else:
+        assert state["task_epoch"] == runtime._current_task_epoch("session-one")
+        assert not state.get("dependency_checks")

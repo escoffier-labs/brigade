@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from pathlib import Path
 from typing import Any
+from uuid import uuid4
 
 from .. import context_eval, graphtrail_delta, localio
 
@@ -24,6 +25,26 @@ def restore(state: dict[str, Any], persisted: dict[str, Any]) -> None:
                 if key == "dependency_checks"
                 else [item for item in value if isinstance(item, str)][:MAX_SEEN_FILES]
             )
+
+
+def merge_observations(state: dict[str, Any], current: dict[str, Any]) -> None:
+    """Merge monotonic observations while the caller holds the session lock."""
+    if state.get("task_epoch") != current.get("task_epoch"):
+        return
+    for key in ("read_files", "brief_files"):
+        files = {item for source in (current, state) for item in source.get(key, []) if isinstance(item, str)}
+        if files:
+            state[key] = sorted(files)[:MAX_SEEN_FILES]
+    checks = {}
+    for source in (current, state):
+        for check in source.get("dependency_checks", []):
+            if isinstance(check, dict):
+                key = str(check.get("check_id") or json.dumps(check, sort_keys=True))
+                checks[key] = check
+    if checks:
+        state["dependency_checks"] = sorted(checks.values(), key=lambda check: str(check.get("checked_at", "")))[
+            -MAX_CHECKS:
+        ]
 
 
 def relative_path(target: Path, raw: object, cwd: object = None) -> str | None:
@@ -57,7 +78,12 @@ def injected_brief_files(text: str) -> list[str]:
         return []
     graph_lines = []
     for line in lines[starts[-1] + 1 :]:
-        if line.startswith("## "):
+        if line.startswith("## ") and line.lower() not in {
+            "## entry points",
+            "## callers",
+            "## callees",
+            "## related files",
+        }:
             break
         graph_lines.append(line)
     return context_eval.extract_brief_files("\n".join(graph_lines))[:MAX_SEEN_FILES]
@@ -70,8 +96,9 @@ def _dependents(target: Path, path: str) -> tuple[list[str] | None, str | None]:
     binary = graphtrail_delta._graphtrail_bin()
     if binary is None:
         return None, "graph_unavailable"
-    # Refresh before the edit. A failed refresh must never certify an old graph.
-    for command, extra in (("sync", ()), ("affected", (path,))):
+    # Force content extraction: incremental sync can miss same-size edits within
+    # one mtime second. A failed refresh must never certify an old graph.
+    for command, extra in (("sync", ("--force",)), ("affected", (path,))):
         result = graphtrail_delta._run_graphtrail(
             binary, db, command, *extra, timeout=GRAPH_TIMEOUT_SECONDS, json_output=command == "affected"
         )
@@ -117,6 +144,7 @@ def record_write(target: Path, state: dict[str, Any], payload: dict[str, Any]) -
     seen = set(state.get("read_files", [])) | set(state.get("brief_files", []))
     unseen = sorted(set(dependents) - seen) if dependents is not None else None
     check = {
+        "check_id": uuid4().hex,
         "file_path": path,
         "tool_name": payload.get("tool_name"),
         "phase": "pre_write",

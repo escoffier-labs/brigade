@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from .. import inbox_lock, localio
-from . import anchored_io, envelope
+from . import anchored_io, dependencies, envelope
 
 _SESSION_STATE_PROCESS_LOCKS_GUARD = threading.Lock()
 _SESSION_STATE_PROCESS_LOCKS: dict[str, threading.Lock] = {}
@@ -283,6 +283,15 @@ def _write_session_state_preserving_latch(
             current = _rt().read_session_state(target, session_id)
             current_state = current if isinstance(current, dict) else {}
             updated = dict(state)
+            current_epoch = current_state.get("task_epoch")
+            if (
+                current_epoch is not None
+                and updated.get("task_epoch") != current_epoch
+                and current_epoch == _rt()._current_task_epoch(session_id)
+            ):
+                # A newer dispatched task completed while this hook was running.
+                return False
+            dependencies.merge_observations(updated, current_state)
             current_count = current_state.get("hook_timeout_count")
             next_count = updated.get("hook_timeout_count")
             counts = [
