@@ -1652,6 +1652,7 @@ def run(
                 )
             raise
         except TimeoutError as exc:
+            runguard.raise_if_retained_run_lock(exc)
             active_seat = active_seats[0] if len(active_seats) == 1 else None
             detail = run_io._one_line(str(exc)) or "worker dispatch timed out"
             if output_dir is not None:
@@ -1666,6 +1667,7 @@ def run(
                 )
             raise
         except Exception as exc:
+            runguard.raise_if_retained_run_lock(exc)
             active_seat = active_seats[0] if len(active_seats) == 1 else None
             detail = f"{type(exc).__name__}: {run_io._one_line(str(exc)) or 'unexpected dispatch failure'}"
             if output_dir is not None:
