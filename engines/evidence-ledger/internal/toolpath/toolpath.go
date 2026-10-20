@@ -12,7 +12,7 @@ import (
 // Install hints for known external wrappers. Keep them one-line and actionable.
 const (
 	HintStationTrail  = "install stationtrail from github.com/escoffier-labs/stationtrail and ensure it is on PATH; native imports prefer miseledger crawl sessions"
-	HintSourceHarvest = "install sourceharvest from github.com/escoffier-labs/sourceharvest and ensure it is on PATH; built-in crawls (crawl docs/files/repo/…) cover the same paths"
+	HintSourceHarvest = "install sourceharvest from github.com/escoffier-labs/sourceharvest and ensure it is on PATH; without it, import pre-exported adapter JSONL with crawl adapter"
 )
 
 // HintCrawler returns an install hint for a native crawler exporter binary.
