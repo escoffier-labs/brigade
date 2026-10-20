@@ -632,6 +632,19 @@ def _dispatch_impl(args) -> int:
             parallel_safe=args.parallel_safe,
             json_output=args.json,
         )
+    if args.work_command == "dispatch":
+        from ...work_cmd.dispatch import dispatch as plan_dispatch
+
+        return plan_dispatch(
+            target=args.target,
+            wave=args.wave,
+            max_workers=args.max_workers,
+            batch_size=args.batch_size,
+            worker=args.worker,
+            seat_map=args.seat_map,
+            dry_run=args.dry_run,
+            json_output=args.json,
+        )
     if args.work_command == "claim":
         return work_cmd.claim(
             target=args.target,
