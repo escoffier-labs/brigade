@@ -2269,8 +2269,10 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
             # Heartbeat so a concurrent session can attribute the coming write
             # to this session instead of a shared worktree delta (#959).
             state["pending_write_at"] = localio.utc_now_iso()
-            warning = dependencies.record_write(target, state, payload)
-            _write_session_state_preserving_latch(target, session_id, state, log_target=target)
+            check_id = dependencies.record_write(target, state, payload)
+            if not _write_session_state_preserving_latch(target, session_id, state, log_target=target):
+                return None
+            warning = dependencies.warning_for_check(state, check_id)
             return _additional_context(event, warning, target=target, session_id=session_id) if warning else None
         if tool_name != "Bash":
             return None

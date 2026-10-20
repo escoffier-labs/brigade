@@ -15,36 +15,72 @@ GRAPH_TIMEOUT_SECONDS = 2.0
 _STATE_KEYS = ("read_files", "brief_files", "dependency_checks")
 
 
+def _collection(source: dict[str, Any], key: str) -> list[Any]:
+    value = source.get(key)
+    return value if isinstance(value, list) else []
+
+
+def _checks(source: dict[str, Any]) -> list[dict[str, Any]]:
+    checks = []
+    for item in _collection(source, "dependency_checks"):
+        if not isinstance(item, dict) or not isinstance(item.get("checked_at"), str):
+            continue
+        unseen = item.get("unseen_dependents")
+        if unseen is None or (isinstance(unseen, list) and all(isinstance(path, str) for path in unseen)):
+            checks.append(item)
+    return checks
+
+
+def _check_key(check: dict[str, Any]) -> str:
+    return str(check.get("check_id") or json.dumps(check, sort_keys=True))
+
+
 def restore(state: dict[str, Any], persisted: dict[str, Any]) -> None:
-    """Keep observations within the task epoch selected by the runtime."""
+    """Keep validated observations within the task epoch selected by the runtime."""
     for key in _STATE_KEYS:
-        value = persisted.get(key)
-        if isinstance(value, list):
+        state.pop(key, None)
+        if isinstance(persisted.get(key), list):
             state[key] = (
-                value[-MAX_CHECKS:]
+                _checks(persisted)[-MAX_CHECKS:]
                 if key == "dependency_checks"
-                else [item for item in value if isinstance(item, str)][:MAX_SEEN_FILES]
+                else [item for item in _collection(persisted, key) if isinstance(item, str)][:MAX_SEEN_FILES]
             )
 
 
 def merge_observations(state: dict[str, Any], current: dict[str, Any]) -> None:
-    """Merge monotonic observations while the caller holds the session lock."""
+    """Merge observations and finalize new checks under the session lock."""
     if state.get("task_epoch") != current.get("task_epoch"):
         return
+    seen: set[str] = set()
     for key in ("read_files", "brief_files"):
-        files = {item for source in (current, state) for item in source.get(key, []) if isinstance(item, str)}
-        if files:
-            state[key] = sorted(files)[:MAX_SEEN_FILES]
-    checks = {}
-    for source in (current, state):
-        for check in source.get("dependency_checks", []):
-            if isinstance(check, dict):
-                key = str(check.get("check_id") or json.dumps(check, sort_keys=True))
-                checks[key] = check
-    if checks:
-        state["dependency_checks"] = sorted(checks.values(), key=lambda check: str(check.get("checked_at", "")))[
-            -MAX_CHECKS:
-        ]
+        files = {item for source in (current, state) for item in _collection(source, key) if isinstance(item, str)}
+        state[key] = sorted(files)[:MAX_SEEN_FILES]
+        seen.update(files)
+    existing = {_check_key(check): check for check in _checks(current)}
+    checks = dict(existing)
+    for check in _checks(state):
+        key = _check_key(check)
+        if key in existing:
+            continue
+        updated = dict(check)
+        unseen = updated.get("unseen_dependents")
+        if isinstance(unseen, list):
+            updated["unseen_dependents"] = sorted(set(unseen) - seen)
+        checks[key] = updated
+    state["dependency_checks"] = sorted(checks.values(), key=lambda check: check["checked_at"])[-MAX_CHECKS:]
+
+
+def warning_for_check(state: dict[str, Any], check_id: str) -> str:
+    """Render only the newly persisted check after its locked finalization."""
+    for check in _checks(state):
+        if check.get("check_id") == check_id:
+            unseen = check.get("unseen_dependents")
+            if isinstance(unseen, list) and unseen:
+                return (
+                    f"Dependency warning for {check['file_path']}: {len(unseen)} unseen dependent file(s): "
+                    + ", ".join(unseen)
+                )
+    return ""
 
 
 def relative_path(target: Path, raw: object, cwd: object = None) -> str | None:
@@ -129,7 +165,7 @@ def _dependents(target: Path, path: str) -> tuple[list[str] | None, str | None]:
 
 
 def record_write(target: Path, state: dict[str, Any], payload: dict[str, Any]) -> str:
-    """Persist an attempted write check, returning advisory context, never denial."""
+    """Prepare a write check; the locked state writer finalizes its unseen set."""
     tool_input = payload.get("tool_input")
     tool_input = tool_input if isinstance(tool_input, dict) else {}
     path = relative_path(target, tool_input.get("file_path") or tool_input.get("notebook_path"), payload.get("cwd"))
@@ -153,8 +189,4 @@ def record_write(target: Path, state: dict[str, Any], payload: dict[str, Any]) -
         "reason": reason,
     }
     state["dependency_checks"] = [*state.get("dependency_checks", []), check][-MAX_CHECKS:]
-    if unseen is None:
-        return ""
-    if unseen:
-        return f"Dependency warning for {path}: {len(unseen)} unseen dependent file(s): " + ", ".join(unseen)
-    return ""
+    return str(check["check_id"])

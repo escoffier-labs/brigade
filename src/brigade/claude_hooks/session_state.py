@@ -328,6 +328,7 @@ def _write_session_state_preserving_latch(
                 current_state.get("hook_latch_announced") is True or updated.get("hook_latch_announced") is True
             )
             _rt().write_session_state(target, session_id, updated)
+            dependencies.restore(state, updated)
             return True
     except inbox_lock.InboxLockTimeout:
         if log_target is not None:

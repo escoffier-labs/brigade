@@ -253,3 +253,33 @@ def test_graph_query_cannot_overwrite_observations_from_overlapping_hooks(target
     else:
         assert state["task_epoch"] == runtime._current_task_epoch("session-one")
         assert not state.get("dependency_checks")
+
+
+def test_read_completed_during_graph_query_is_excluded_from_record_and_warning(target, monkeypatch):
+    graph(target, monkeypatch)
+    original = graphtrail_delta._run_graphtrail
+
+    def run(binary, db_path, command, *extra, **kwargs):
+        if command == "affected":
+            event(target, "PostToolUse", tool_name="Read", tool_input={"file_path": "caller.py"})
+        return original(binary, db_path, command, *extra, **kwargs)
+
+    monkeypatch.setattr(graphtrail_delta, "_run_graphtrail", run)
+    result = event(target, "PreToolUse", tool_name="Edit", tool_input={"file_path": "api.py"})
+    check = runtime.read_session_state(target, "session-one")["dependency_checks"][-1]
+    assert check["unseen_dependents"] == ["tests/test_api.py"]
+    assert "caller.py" not in result["hookSpecificOutput"]["additionalContext"]
+    assert "tests/test_api.py" in result["hookSpecificOutput"]["additionalContext"]
+    event(target, "PostToolUse", tool_name="Read", tool_input={"file_path": "tests/test_api.py"})
+    assert runtime.read_session_state(target, "session-one")["dependency_checks"][-1] == check
+
+
+@pytest.mark.parametrize("key", ["read_files", "brief_files", "dependency_checks"])
+@pytest.mark.parametrize("malformed", [None, 17, "not-a-list", [None, 17, {}]])
+def test_hook_repairs_malformed_observation_collections(target, key, malformed):
+    runtime.write_session_state(target, "session-one", {key: malformed})
+    event(target, "PostToolUse", tool_name="Read", tool_input={"file_path": "caller.py"})
+    state = runtime.read_session_state(target, "session-one")
+    assert state["read_files"] == ["caller.py"]
+    if key != "read_files":
+        assert state.get(key, []) == []
