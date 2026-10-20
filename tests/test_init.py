@@ -394,3 +394,118 @@ def test_cli_skips_prompt_when_depth_given(monkeypatch, tmp_path):
     monkeypatch.setattr(cli, "prompt_for_selection", fail)
     rc = cli.main(["init", "--target", str(tmp_path), "--depth", "repo", "--harnesses", "claude"])
     assert rc == 0
+
+
+def test_install_preserves_existing_config_settings(tmp_target: Path):
+    import json
+
+    assert install_selection(tmp_target, _repo_sel()) == 0
+    cfg_path = tmp_target / ".brigade" / "config.json"
+    data = json.loads(cfg_path.read_text())
+    data.update(
+        {
+            "verify_runs_keep": 5,
+            "run_lock_wait_seconds": 30.0,
+            "capture_before_retry": "block",
+            "memory_recall_target": "/srv/hub",
+        }
+    )
+    cfg_path.write_text(json.dumps(data))
+
+    sel = Selection(depth="repo", harnesses=["codex"], owner="codex", includes=["repo-extras"])
+    assert install_selection(tmp_target, sel) == 0
+
+    data = json.loads(cfg_path.read_text())
+    assert data["harnesses"] == ["codex"]
+    assert data["includes"] == ["repo-extras"]
+    assert data["verify_runs_keep"] == 5
+    assert data["run_lock_wait_seconds"] == 30.0
+    assert data["capture_before_retry"] == "block"
+    assert data["memory_recall_target"] == "/srv/hub"
+
+
+def test_cli_rerun_without_harnesses_keeps_recorded_selection(tmp_path: Path):
+    import json
+
+    from brigade.cli import main
+
+    target = tmp_path / "r"
+    assert main(["init", "--target", str(target), "--depth", "repo", "--harnesses", "codex"]) == 0
+    cfg_path = target / ".brigade" / "config.json"
+    data = json.loads(cfg_path.read_text())
+    data["verify_runs_keep"] = 5
+    cfg_path.write_text(json.dumps(data))
+
+    assert main(["init", "--target", str(target), "--depth", "repo", "--full"]) == 0
+
+    data = json.loads(cfg_path.read_text())
+    assert data["harnesses"] == ["codex"]
+    assert data["owner"] == "codex"
+    assert "repo-extras" in data["includes"]
+    assert data["verify_runs_keep"] == 5
+    assert not (target / ".claude").exists()
+
+
+def test_cli_rerun_without_depth_keeps_recorded_depth_and_includes(tmp_path: Path):
+    import json
+
+    from brigade.cli import main
+
+    target = tmp_path / "ws"
+    assert (
+        main(
+            [
+                "init",
+                "--target",
+                str(target),
+                "--depth",
+                "workspace",
+                "--harnesses",
+                "none",
+                "--include",
+                "publisher",
+            ]
+        )
+        == 0
+    )
+
+    assert main(["init", "--target", str(target), "--harnesses", "none"]) == 0
+
+    data = json.loads((target / ".brigade" / "config.json").read_text())
+    assert data["depth"] == "workspace"
+    assert data["includes"] == ["publisher"]
+
+
+def test_cli_rerun_keeps_recorded_owner_override(tmp_path: Path):
+    import json
+
+    from brigade.cli import main
+
+    target = tmp_path / "r"
+    assert (
+        main(["init", "--target", str(target), "--depth", "repo", "--harnesses", "codex", "--owner", "this-repo"]) == 0
+    )
+    assert main(["init", "--target", str(target), "--depth", "repo"]) == 0
+
+    data = json.loads((target / ".brigade" / "config.json").read_text())
+    assert data["harnesses"] == ["codex"]
+    assert data["owner"] == "this-repo"
+
+
+def test_cli_rerun_replaces_config_with_wrong_typed_field(tmp_path: Path, capsys):
+    import json
+
+    from brigade.cli import main
+    from brigade.work_cmd.session import briefing
+
+    target = tmp_path / "r"
+    assert main(["init", "--target", str(target), "--depth", "repo", "--harnesses", "codex"]) == 0
+    cfg_path = target / ".brigade" / "config.json"
+    data = json.loads(cfg_path.read_text())
+    data["includes"] = 5
+    cfg_path.write_text(json.dumps(data))
+
+    assert "--depth repo --full" in briefing._workflow_rule_health(target)["detail"]
+    assert main(["init", "--target", str(target), "--depth", "repo", "--harnesses", "codex"]) == 0
+    assert "unreadable" in capsys.readouterr().err
+    assert json.loads(cfg_path.read_text())["includes"] == []

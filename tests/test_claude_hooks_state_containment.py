@@ -597,3 +597,103 @@ def test_session_resource_errors_remain_plain_oserrors(state_tree, monkeypatch, 
                         pytest.fail("lock opener unexpectedly succeeded")
         assert caught.value.errno == error_number
         assert not isinstance(caught.value, anchored_io.SessionIntegrityError)
+
+
+@pytest.mark.parametrize("substitute", ["directory", "hardlink"])
+def test_windows_publication_contention_refuses_non_regular_target(state_tree, monkeypatch, substitute) -> None:
+    target, sessions, outside = state_tree
+    published = runtime._state_path(target, "s")
+    if substitute == "directory":
+        published.mkdir()
+    else:
+        victim = outside / "victim"
+        victim.write_text('{"generation": 1}')
+        os.link(victim, published)
+    monkeypatch.setattr(anchored_io, "os", SimpleNamespace(**(vars(os) | {"name": "nt"})))
+    calls = []
+    sleeps = []
+
+    def contended(*args, **_kwargs):
+        calls.append(args)
+        raise PermissionError("path component access denied")
+
+    monkeypatch.setattr(dirfd, "replace_children", contended)
+    monkeypatch.setattr(anchored_io.time, "sleep", sleeps.append)
+    with pytest.raises(anchored_io.SessionIntegrityError):
+        runtime.write_session_state(target, "s", {"generation": 2})
+    assert len(calls) == 1
+    assert sleeps == []
+    assert not list(sessions.glob("*.tmp"))
+
+
+@pytest.mark.skipif(os.name != "nt", reason="requires the native NTFS rename refusal")
+def test_windows_directory_publish_target_is_an_integrity_refusal(state_tree, monkeypatch) -> None:
+    target, sessions, _outside = state_tree
+    published = runtime._state_path(target, "s")
+    published.mkdir()
+    sleeps = []
+    monkeypatch.setattr(anchored_io.time, "sleep", sleeps.append)
+    with pytest.raises(anchored_io.SessionIntegrityError):
+        runtime.write_session_state(target, "s", {"generation": 1})
+    assert sleeps == []
+    assert sorted(path.name for path in sessions.iterdir()) == [published.name]
+
+
+def test_cleanup_failure_keeps_the_integrity_refusal_cause(state_tree, monkeypatch) -> None:
+    target, sessions, _outside = state_tree
+    refusal = OSError(errno.ELOOP, "publication refused")
+
+    def refused(*_args, **_kwargs):
+        raise refusal
+
+    def unavailable(*_args, **_kwargs):
+        raise OSError(errno.EACCES, "cleanup unavailable")
+
+    with anchored_io.session_directory(target) as anchor:
+        monkeypatch.setattr(dirfd, "replace_children", refused)
+        monkeypatch.setattr(dirfd, "unlink_child", unavailable)
+        with pytest.raises(anchored_io.SessionIntegrityError) as caught:
+            anchor.write_json("s.json", {"generation": 1})
+    assert caught.value.__cause__ is refusal
+    assert caught.value.__context__.errno == errno.EACCES
+
+
+def test_cleanup_failure_keeps_the_contention_behind_a_target_refusal(state_tree, monkeypatch) -> None:
+    target, _sessions, _outside = state_tree
+    runtime._state_path(target, "s").mkdir()
+    monkeypatch.setattr(anchored_io, "os", SimpleNamespace(**(vars(os) | {"name": "nt"})))
+    contention = PermissionError("path component access denied")
+
+    def contended(*_args, **_kwargs):
+        raise contention
+
+    def unavailable(*_args, **_kwargs):
+        raise OSError(errno.EACCES, "cleanup unavailable")
+
+    monkeypatch.setattr(dirfd, "replace_children", contended)
+    monkeypatch.setattr(dirfd, "unlink_child", unavailable)
+    with pytest.raises(anchored_io.SessionIntegrityError) as caught:
+        runtime.write_session_state(target, "s", {"generation": 1})
+    assert caught.value.__cause__ is contention
+    assert caught.value.__context__.errno == errno.EACCES
+
+
+def test_cleanup_failure_keeps_an_uncaused_refusal_visible(state_tree, monkeypatch) -> None:
+    target, _sessions, _outside = state_tree
+    refusal = anchored_io.SessionIntegrityError("Claude hook target directory changed during session I/O")
+
+    def refused(*_args, **_kwargs):
+        raise refusal
+
+    def unavailable(*_args, **_kwargs):
+        raise OSError(errno.EACCES, "cleanup unavailable")
+
+    with anchored_io.session_directory(target) as anchor:
+        monkeypatch.setattr(dirfd, "replace_children", refused)
+        monkeypatch.setattr(dirfd, "unlink_child", unavailable)
+        with pytest.raises(anchored_io.SessionIntegrityError) as caught:
+            anchor.write_json("s.json", {"generation": 1})
+    assert caught.value is refusal
+    assert caught.value.__cause__ is None
+    assert not caught.value.__suppress_context__
+    assert caught.value.__context__.errno == errno.EACCES

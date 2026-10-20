@@ -125,7 +125,7 @@ after a retry. This is a terminal authority refusal. The client
 raises from `repo_claim` instead of admitting work under only the local lock,
 and a heartbeat treats it as terminal ownership loss. Transport outages retain
 their existing handling. Read-only dashboard, Command Deck, and API GETs return
-HTTP 503 with the same reason so uptime monitors detect corrupt fence storage.
+HTTP 503 with the same reason and no `owner` key, so uptime monitors detect corrupt fence storage.
 New targets over 1,024 UTF-8 bytes return HTTP 409 with
 `reason: "claim-target-too-long"` and `owner: {}`, preventing local fallback in
 both current and base clients. Invalid UTF-8 retains its validation refusal.
