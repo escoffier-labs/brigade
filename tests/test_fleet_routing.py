@@ -1025,3 +1025,46 @@ def test_snapshot_reports_no_usable_slots_while_routing_is_disabled(conn):
     for row in fresh:
         assert row["available_slots"] == 0, row["id"]
         assert row["unused_reason"] == "routing-disabled", row["id"]
+
+
+@pytest.mark.parametrize(
+    ("telemetry", "reason"),
+    [
+        ({"credential_state": "missing"}, "machine-stale-auth"),
+        ({"credential_state": "stale"}, "machine-stale-auth"),
+        ({"credential_state": "error"}, "machine-stale-auth"),
+        ({"usable_seats": []}, "machine-seat-unusable"),
+        ({"usable_seats": ["seat-not-in-policy"]}, "machine-seat-unusable"),
+        ({"status": "busy"}, "machine-busy"),
+        ({"status": "draining"}, "machine-draining"),
+        ({"status": "unavailable"}, "machine-unavailable"),
+    ],
+)
+def test_snapshot_and_routing_agree_on_machine_wide_rejections(conn, telemetry, reason):
+    from brigade import fleet_command_deck, fleet_deck_overview
+
+    _fresh_quota(conn)
+    _observe(conn, NODE_LINUX, **telemetry)
+    _observe(conn, NODE_LINUX_2, load=0.0)
+    _observe(conn, NODE_CLOUD, load=0.0)
+    _observe(conn, NODE_WINDOWS, load=0.0, usable_seats=[])
+    decision = _route(conn, session_id="session-machine-wide")
+    rows = [row for row in decision["candidates"] if row["machine"] == "worker-linux-1"]
+    assert rows
+    assert all(reason in row["reasons"] for row in rows), rows
+    snap = fleet_hub_routing.snapshot(conn)
+    linux = next(row for row in snap["machines"] if row["id"] == "worker-linux-1")
+    assert linux["available_slots"] == 0
+    assert linux["unused_reason"] == reason
+    plane = fleet_command_deck.control_plane_from_snapshot(snap)
+    machine = next(item for item in plane.machines if item.id == "worker-linux-1")
+    station = fleet_command_deck.StationView(
+        station=fleet_command_deck.StationConfig(NODE_LINUX, "worker-linux-1", 1),
+        label="worker-linux-1",
+        enrolled=True,
+        busy=0,
+        last_heard=None,
+        tiles=(),
+    )
+    assert fleet_deck_overview.station_status(station, machine) == "limited"
+    assert fleet_deck_overview.free_seats(station, machine) == 0

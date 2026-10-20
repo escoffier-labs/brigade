@@ -3,7 +3,7 @@
   "name": "io.github.escoffier-labs/brigade-skills",
   "title": "Brigade Skills",
   "description": "Read-only access to a local reviewed skill registry: search, read, lint, and compatibility.",
-  "version": "0.30.0",
+  "version": "0.31.0",
   "websiteUrl": "https://brigade.tools",
   "repository": {
     "url": "https://github.com/escoffier-labs/brigade",
@@ -14,7 +14,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "brigade-cli",
-      "version": "0.30.0",
+      "version": "0.31.0",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"

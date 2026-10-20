@@ -77,6 +77,16 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_init.set_defaults(func=dispatch)
 
 
+def _recorded_selection(target: Path):
+    from ..config import load_config
+
+    try:
+        cfg = load_config(target.expanduser().resolve())
+    except (ValueError, AttributeError, TypeError):
+        return None
+    return cfg.selection if cfg is not None else None
+
+
 def dispatch(args) -> int:
     profile = getattr(args, "profile", None)
     depth_arg = getattr(args, "depth", None)
@@ -137,9 +147,11 @@ def dispatch(args) -> int:
         from ..selection import Selection, KNOWN_HARNESSES, resolve_owner
         from ..install import install_selection
 
-        depth = args.depth or "repo"
+        # A re-run keeps the recorded selection for any flag it omits (#1810).
+        recorded = _recorded_selection(args.target)
+        depth = args.depth or (recorded.depth if recorded else "repo")
         if args.harnesses is None or args.harnesses == "":
-            harnesses = ["claude"]
+            harnesses = list(recorded.harnesses) if recorded else ["claude"]
         elif args.harnesses == "none":
             harnesses = []
         else:
@@ -148,12 +160,18 @@ def dispatch(args) -> int:
             if h not in KNOWN_HARNESSES:
                 print(f"error: unknown harness {h!r} (valid: {KNOWN_HARNESSES})", file=sys.stderr)
                 return 2
-        try:
-            owner = resolve_owner(harnesses, override=args.owner)
-        except ValueError as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 2
-        includes = list(args.includes)
+        if recorded and args.owner is None and harnesses == recorded.harnesses:
+            owner = recorded.owner
+        else:
+            try:
+                owner = resolve_owner(harnesses, override=args.owner)
+            except ValueError as exc:
+                print(f"error: {exc}", file=sys.stderr)
+                return 2
+        includes = list(recorded.includes) if recorded else []
+        for include in args.includes:
+            if include not in includes:
+                includes.append(include)
         if getattr(args, "full", False) and depth == "repo" and "repo-extras" not in includes:
             includes.append("repo-extras")
         sel = Selection(depth=depth, harnesses=harnesses, owner=owner, includes=includes)

@@ -189,6 +189,19 @@ def test_work_doctor_reports_workflow_rule_template_visibility(tmp_path, monkeyp
     assert "[ok] workflow_rules: repo-shareable workflow rules installed" in out
 
 
+def test_workflow_rule_repair_hint_matches_recorded_depth_and_quotes_target(tmp_path):
+    target = tmp_path / "spaced dir"
+    rc = install_selection(
+        target,
+        Selection(depth="workspace", harnesses=[], owner="this-repo", includes=[]),
+    )
+    assert rc == 0
+    (target / "rules" / "issue-tdd-loop.md").unlink()
+
+    detail = briefing._workflow_rule_health(target)["detail"]
+    assert f"brigade init --target '{target}' --depth workspace`" in detail
+
+
 def test_work_doctor_warns_when_issue_backed_task_is_closed(tmp_path, monkeypatch, capsys):
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)

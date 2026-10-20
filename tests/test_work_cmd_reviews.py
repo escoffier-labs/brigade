@@ -725,3 +725,23 @@ def test_work_review_cli(tmp_path, monkeypatch):
         ("finding-show", {"target": tmp_path, "finding_id": "finding-one", "json_output": True}),
         ("closeout", {"target": tmp_path, "run_id": "latest", "json_output": True}),
     ]
+
+
+def test_review_defaults_brigade_commands_parse(monkeypatch):
+    import shlex
+
+    from brigade.work_cmd import constants
+
+    monkeypatch.setenv("BRIGADE_EXTRAS", "1")
+    parser = cli._build_parser()
+    checked = 0
+    for reviewer in constants.REVIEW_DEFAULTS:
+        argv = shlex.split(reviewer["command"])
+        if argv[0] != "brigade":
+            continue
+        checked += 1
+        try:
+            parser.parse_args(argv[1:])
+        except SystemExit as exc:
+            raise AssertionError(f"{reviewer['id']} starter does not parse: {reviewer['command']}") from exc
+    assert checked >= 1

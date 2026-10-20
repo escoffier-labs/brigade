@@ -23,7 +23,15 @@ _UTC = timezone.utc
 
 # Staleness is the hub's verdict against the policy TTL, never a second Deck threshold.
 STALE_REASONS = frozenset({"stale-telemetry", "unknown-telemetry"})
-POLICY_LIMITS = {"machine-disabled": "disabled", "machine-draining": "draining", "routing-disabled": "routing off"}
+POLICY_LIMITS = {
+    "machine-disabled": "disabled",
+    "machine-draining": "draining",
+    "routing-disabled": "routing off",
+    "machine-stale-auth": "stale auth",
+    "machine-unknown-auth": "unknown auth",
+    "machine-unknown-inventory": "unknown inventory",
+    "machine-seat-unusable": "no usable seat",
+}
 
 
 def format_age(seconds: int | None) -> str:
