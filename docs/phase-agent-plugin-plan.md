@@ -16,7 +16,7 @@ Spec: `docs/phase-agent-plugin.md` (approved 2026-10-19).
   `brigade work verify run --target . --command "<CMD>" --capture brigade-work`
   where `<CMD>` is the command shown in the step. Expected results below describe `<CMD>`'s own output.
 - `PY` means `.venv/bin/python`.
-- Commit messages use conventional commits and end with the trailer `Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>` (or the executing agent's approved trailer).
+- Commit messages use conventional commits and end with the executing agent's approved co-author trailer.
 
 ## Spec deltas pinned by this plan
 
@@ -1246,7 +1246,7 @@ def _post(url: str, body: object, headers: dict[str, str] | None = None, method:
 def test_parse_bind_accepts_only_loopback():
     assert mcp_http.parse_bind("127.0.0.1:8790") == ("127.0.0.1", 8790)
     assert mcp_http.parse_bind("[::1]:0") == ("::1", 0)
-    for bad in ("0.0.0.0:8790", "192.168.1.5:80", "localhost:8790", "127.0.0.1", "127.0.0.1:99999"):
+    for bad in ("0.0.0.0:8790", "203.0.113.5:80", "localhost:8790", "127.0.0.1", "127.0.0.1:99999"):
         with pytest.raises(ValueError):
             mcp_http.parse_bind(bad)
 
