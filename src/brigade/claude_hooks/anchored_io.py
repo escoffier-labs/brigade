@@ -227,7 +227,7 @@ class SessionDirectory:
             self.validate()
             return b"".join(chunks)
 
-    def refuse_non_regular_target(self, name: str) -> None:
+    def refuse_non_regular_target(self, name: str, contention: OSError) -> None:
         """NTFS reports a directory or linked publish target as contention; refuse it instead."""
         try:
             info = dirfd.stat_child(self.fd, name, allow_reparse=True)
@@ -238,7 +238,7 @@ class SessionDirectory:
             # A target that cannot be inspected right now is still contention.
             return
         if not _single_link_regular(info):
-            raise SessionIntegrityError("Claude hook publish target is not a single-link regular file")
+            raise SessionIntegrityError("Claude hook publish target is not a single-link regular file") from contention
 
     def write_json(self, name: str, payload: dict[str, Any]) -> None:
         data = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
@@ -269,7 +269,7 @@ class SessionDirectory:
                         _raise_integrity_error(exc)
                         if not _windows_replace_contention(exc):
                             raise
-                        self.refuse_non_regular_target(name)
+                        self.refuse_non_regular_target(name, exc)
                         if attempt + 1 == _WINDOWS_REPLACE_ATTEMPTS:
                             raise OSError(errno.EBUSY, "Windows session publication remained busy") from exc
                         time.sleep(_WINDOWS_REPLACE_BACKOFF_SECONDS)
@@ -290,6 +290,8 @@ class SessionDirectory:
                 except OSError as exc:
                     if isinstance(primary_error, SessionIntegrityError):
                         # Keep the refusal's own cause; the cleanup failure becomes its context.
+                        if primary_error.__cause__ is None:
+                            raise primary_error  # noqa: B904 - "from None" would hide the cleanup failure
                         raise primary_error from primary_error.__cause__
                     _raise_integrity_error(exc)
                     raise
