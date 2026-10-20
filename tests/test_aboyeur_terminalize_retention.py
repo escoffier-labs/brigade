@@ -46,6 +46,88 @@ def test_planning_retention_preserves_receipt_and_lock(tmp_path, monkeypatch):
     assert runguard.lock_path(workspace).exists()
 
 
+@pytest.mark.parametrize("boundary", ["remote-transport", "budget-compatibility"])
+@pytest.mark.parametrize("cleanup_failure", ["none", "control", "app", "both"])
+def test_retention_closes_active_servers_preserving_receipt_and_lock(tmp_path, monkeypatch, boundary, cleanup_failure):
+    retained = runguard.RetainRunLockError("receipt unavailable")
+    output_dir = tmp_path / "run"
+    workspace = tmp_path / "workspace"
+    original: list[bytes] = []
+    events: list[str] = []
+
+    def close(server):
+        events.append(f"{server}-close")
+        if cleanup_failure in {server, "both"}:
+            try:
+                raise OSError(f"{server} cleanup failed") from None
+            except OSError as exc:
+                # Cleanup must preserve retention without incidental chaining.
+                exc.__context__ = None
+                raise
+
+    class AppServer:
+        def __init__(self, **kwargs):
+            pass
+
+        def start(self):
+            events.append("app-start")
+
+        def close(self):
+            close("app")
+
+    class ControlServer:
+        def __init__(self, path, registry):
+            pass
+
+        def start(self):
+            events.append("control-start")
+            return orchestrator.run_control.ControlTransport(kind="unix", path=str(output_dir / "control.sock"))
+
+        def close(self):
+            close("control")
+
+    def fail(*args, **kwargs):
+        assert events == ["app-start", "control-start"]
+        original.append((output_dir / "run.json").read_bytes())
+        try:
+            raise retained
+        except runguard.RetainRunLockError:
+            if boundary == "budget-compatibility":
+                raise run_budget.BudgetCompatibilityError("unknown budget", code="unknown-schema")  # noqa: B904
+            raise OSError("remote transport failed")  # noqa: B904
+
+    monkeypatch.setattr(orchestrator.codex_appserver, "AppServer", AppServer)
+    monkeypatch.setattr(orchestrator.run_control, "ControlServer", ControlServer)
+    if boundary == "budget-compatibility":
+        monkeypatch.setattr(orchestrator.artifacts, "_build_budget_coordinator", fail)
+    else:
+        monkeypatch.setattr(fleet_t3_transport, "build_source_transport", fail)
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "chef": Agent("chef", "codex", "plan and synthesize"),
+            "coder": Agent("coder", "codex", "write code"),
+        },
+    )
+
+    with pytest.raises(runguard.RetainRunLockError) as excinfo:
+        run_aboyeur_guarded(
+            "build feature",
+            roster,
+            worker="coder",
+            output_dir=output_dir,
+            lock_workspace=workspace,
+            codex_transport="app-server",
+            route_enabled=False,
+        )
+
+    assert excinfo.value is retained
+    assert original
+    assert (output_dir / "run.json").read_bytes() == original[0]
+    assert runguard.lock_path(workspace).exists()
+    assert events == ["app-start", "control-start", "control-close", "app-close"]
+
+
 @pytest.mark.parametrize(
     "boundary",
     [

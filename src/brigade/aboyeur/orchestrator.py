@@ -1263,10 +1263,16 @@ def run(
             close()
 
     def close_server_resources() -> None:
+        pending = sys.exc_info()[1]
         try:
-            close_control_server()
-        finally:
-            close_appserver()
+            try:
+                close_control_server()
+            finally:
+                close_appserver()
+        except BaseException:
+            if pending is not None:
+                runguard.raise_if_retained_run_lock(pending)
+            raise
 
     try:
         if effective_transport == "app-server":
@@ -1380,18 +1386,20 @@ def run(
             )
         except run_budget.BudgetCompatibilityError as exc:
             # Unknown schema/dimension must stop recovery/dispatch with a bounded diagnostic.
-            runguard.raise_if_retained_run_lock(exc)
-            active_seat = active_seats[0] if len(active_seats) == 1 else None
-            artifacts.record_run_termination(
-                output_dir,
-                status="failed",
-                failure_phase="dispatch",
-                failure_kind="unexpected-error",
-                detail=f"run budget compatibility error: {exc.diagnostic}",
-                seat=active_seat,
-                active_seats=active_seats,
-            )
-            close_server_resources()
+            try:
+                runguard.raise_if_retained_run_lock(exc)
+                active_seat = active_seats[0] if len(active_seats) == 1 else None
+                artifacts.record_run_termination(
+                    output_dir,
+                    status="failed",
+                    failure_phase="dispatch",
+                    failure_kind="unexpected-error",
+                    detail=f"run budget compatibility error: {exc.diagnostic}",
+                    seat=active_seat,
+                    active_seats=active_seats,
+                )
+            finally:
+                close_server_resources()
             return 1
 
     def stage_started(stage: int, seats: tuple[str, ...]) -> None:
@@ -1546,15 +1554,15 @@ def run(
         run_id=output_dir.name if output_dir is not None else message_envelope.IN_MEMORY_RUN_ID,
         to_seat=roster.orchestrator,
     )
-    # Worker-only: the orchestrator's own attempt keeps its local capacity and
-    # is never delegated, so a chef can never recurse into a T3 delegate.
-    remote_transport = _worker_remote_transport(
-        cwd=cwd,
-        run_id=output_dir.name if output_dir is not None else message_envelope.IN_MEMORY_RUN_ID,
-        model_policy=model_policy,
-        process_registry=claim_process_registry,
-    )
     try:
+        # Worker-only: the orchestrator's own attempt keeps its local capacity and
+        # is never delegated, so a chef can never recurse into a T3 delegate.
+        remote_transport = _worker_remote_transport(
+            cwd=cwd,
+            run_id=output_dir.name if output_dir is not None else message_envelope.IN_MEMORY_RUN_ID,
+            model_policy=model_policy,
+            process_registry=claim_process_registry,
+        )
         try:
             worker_results = planning._call_with_process_registry(
                 planning.dispatch,
