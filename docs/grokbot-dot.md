@@ -160,6 +160,18 @@ runtime. Tool schemas reject unknown arguments, and subprocess calls use fixed
 argv with bounded input and output. The dispatch gate defaults to the runtime's
 explicit boolean and does not replace fleet admission or owner authorization.
 
+Hub message state is scoped to the normalized Hub endpoint and credential together.
+This includes queued sends and replies, the inbox mirror, acknowledgement state,
+sync cursors, pending flush flags, wake events, and watcher deduplication. Agent
+and node credentials retain separate scopes. Changing endpoint or credential
+starts a separate history without assigning old message IDs to the new Hub.
+
+On upgrade, an unscoped inbox mirror is retained as `hub_inbox_legacy`. Queues and
+principal retry files without a proven originating endpoint remain untouched for
+operator reconciliation. They are never adopted from the current configuration
+or replayed to a different Hub. Existing scoped state remains available when its
+original endpoint and credential are selected again.
+
 ## Rollback
 
 Disable and stop the listener and watch timer through the service manager before

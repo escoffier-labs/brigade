@@ -91,7 +91,12 @@ credentials to resolve names. Provision the principal and its send grants on the
 Hub before enabling it. The token file contains only the token, with no trailing
 newline. Do not use an admin token. An invalid file closes messaging with
 `hub-error` and `hub_code: token_file_invalid`, while dispatch remains available.
-The underlying Fleet client keeps queued sends and replies in its credential-scoped spool.
+The underlying Fleet client keeps queued sends and replies in a spool scoped to
+the normalized Hub endpoint and credential together. A Hub switch selects a
+separate queue, and replay verifies that the queue matches the captured endpoint
+and credential. Older token-only or node-only queues have no proven endpoint.
+They remain untouched for operator reconciliation and are never replayed using
+the current Hub configuration.
 Each enabled watcher tick attempts a drain after request notifications through
 the existing client, whose network drain deadline is 12 seconds. Lock acquisition
 waits at most 1 second, capped by the remaining 300-second unit budget after
