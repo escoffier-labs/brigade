@@ -1647,6 +1647,69 @@ def test_ingest_skips_handoff_tracked_after_listing(tmp_target: Path, monkeypatc
     assert len(calls) == 2
 
 
+@pytest.mark.parametrize("tracking_change", ["tracked", "unverifiable"])
+def test_ingest_rechecks_tracking_before_document_append(tmp_target: Path, monkeypatch, tracking_change):
+    inbox = _seed(tmp_target)
+    _git(tmp_target, "init", "-q")
+    dest = tmp_target / "TOOLS.md"
+    dest.write_text("# TOOLS.md\n\nExisting runbook.\n", encoding="utf-8")
+    before = dest.read_bytes()
+    handoff = _write_handoff(
+        inbox,
+        "late-tracking.md",
+        """\
+        # Memory Handoff
+
+        ## Recommended memory action
+        no-card
+
+        ## Target document
+        TOOLS.md
+
+        ## Suggested document content
+        - Run the weekly check.
+        """,
+    )
+    original = handoff.read_bytes()
+    real_parse = ingest_mod.parse
+
+    with monkeypatch.context() as patch:
+
+        def change_tracking_after_listing(path: Path):
+            sections = real_parse(path)
+            if tracking_change == "tracked":
+                _git(tmp_target, "add", "-f", "--", str(path.relative_to(tmp_target)))
+            else:
+
+                def broken_git(cmd, **kwargs):
+                    return subprocess.CompletedProcess(cmd, 128, stdout=b"", stderr=b"fatal: index unavailable\n")
+
+                patch.setattr(ingest_mod.subprocess, "run", broken_git)
+            return sections
+
+        patch.setattr(ingest_mod, "parse", change_tracking_after_listing)
+        stats = ingest_mod.IngestStats()
+        assert ingest_mod.ingest_into(source=tmp_target, owner=tmp_target, stats=stats, route_documents=True) == 0
+
+    assert dest.read_bytes() == before
+    assert handoff.read_bytes() == original
+    assert not (inbox / "processed" / handoff.name).exists()
+    assert not list((tmp_target / "memory" / "handoff-inbox").glob("*.md"))
+    assert stats.skipped == 1
+    assert stats.routed == stats.inboxed == 0
+    assert any(handoff.name in action and "tracking unverifiable" in action for action in stats.actions)
+
+    if tracking_change == "tracked":
+        _git(tmp_target, "rm", "--cached", "-f", "--", str(handoff.relative_to(tmp_target)))
+    retry_stats = ingest_mod.IngestStats()
+    assert ingest_mod.ingest_into(source=tmp_target, owner=tmp_target, stats=retry_stats, route_documents=True) == 0
+    assert dest.read_bytes() == before + b"\n\n- Run the weekly check.\n"
+    assert retry_stats.routed == 1
+    assert retry_stats.skipped == retry_stats.inboxed == 0
+    assert not handoff.exists()
+    assert (inbox / "processed" / handoff.name).read_bytes() == original
+
+
 def test_ingest_leaves_inbox_in_place_when_tracking_check_fails(tmp_target: Path, monkeypatch, capsys):
     inbox = _seed(tmp_target)
     handoff = _write_handoff(inbox, "2026-10-20-0904-unknown.md", _PLAIN_HANDOFF)

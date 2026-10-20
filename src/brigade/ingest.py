@@ -569,6 +569,9 @@ def _execute(
     from .inbox_lock import InboxLockTimeout
 
     name = handoff_path.name
+    # Re-check before destination writes as well as at the final archive boundary.
+    if not dry_run and _is_tracked(handoff_path, _git_tracked_files(handoff_path.parent)):
+        raise TrackedHandoffError(f"refusing to ingest git-tracked handoff {handoff_path}")
 
     if outcome.kind == "promoted":
         dest = outcome.dest
