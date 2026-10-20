@@ -178,6 +178,7 @@ def test_stable_payload_audit_binds_tag_inventory_and_only_release_manifest(tmp_
         "lagging",
         "lagging-forever",
         "lagging-deadline",
+        "deadline-after-read",
         "unavailable",
         "no-attestation",
         "wrong-commit",
@@ -257,9 +258,11 @@ if args[0]=='view':
             if mode in ('lagging-forever','lagging-deadline') or n<=misses: print(json.dumps({'error':{'code':'E404'}}));sys.exit(1)
         if not published and args[2]!='dist-tags.latest': print(json.dumps({'error':{'code':'E404'}}));sys.exit(1)
         lag(name+args[2], 5)
+    if mode=='deadline-after-read' and args[2]=='dist.attestations' and name==metadata['artifacts'][0]['name']:
+        import time; time.sleep(1.1)
     if mode=='malformed-integrity': print('{');sys.exit(0)
     if mode=='unavailable': print(json.dumps({'error':{'code':'E503'}}));sys.exit(1)
-    if mode in ['absent','uncertain','no-attestation'] and not published:
+    if mode in ['absent','uncertain','no-attestation','deadline-after-read'] and not published:
         print(json.dumps({'error':{'code':'E404'}}));sys.exit(1)
     if args[2]=='dist.integrity': print(json.dumps('sha512-wrong' if mode=='mismatch' else a['integrity']))
     elif args[2]=='dist.attestations': print(json.dumps(None if mode=='no-attestation' else {'url':'https://registry.npmjs.org/-/npm/v1/attestations/'+name+'@0.30.0'}))
@@ -284,6 +287,8 @@ else:
         + (
             ["--readback-delays-ms", "[0,5000]", "--readback-budget-ms", "1000"]
             if state == "lagging-deadline"
+            else ["--readback-delays-ms", "[0,1]", "--readback-budget-ms", "1000"]
+            if state == "deadline-after-read"
             else ["--readback-delays-ms", "[0,1,1,1,1,1]"]
         ),
         env={
@@ -319,6 +324,9 @@ else:
         assert len([call for call in calls if call[0] == "view" and call[2] == "dist.integrity"]) == 2, (
             "the run deadline must stop the wait before the 5s delay elapses"
         )
+    if state == "deadline-after-read":
+        assert "Registry reconciliation incomplete" in result.stderr
+        assert [Path(call[1]).name for call in publications] == [packages[0]["filename"]]
     if state in {"absent", "uncertain", "lagging", "blank-versions-string", "blank-versions-array"}:
         assert [Path(call[1]).name for call in publications] == [a["filename"] for a in packages]
         assert len([call for call in calls if call[0] == "view" and call[2] == "dist.attestations"]) >= 6

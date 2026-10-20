@@ -71,10 +71,15 @@ function integrity(a) {
 const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 // False when waiting would pass the run deadline.
 async function wait(delay) {
-  if(!delay) return true;
-  if(Date.now()+delay>deadline) return false;
-  await pause(delay);
-  return true;
+  if(Date.now()>=deadline || Date.now()+delay>deadline) return false;
+  if(delay) await pause(delay);
+  return Date.now()<deadline;
+}
+function deadlineError(action) {
+  return new Error(`Registry reconciliation incomplete: read-back budget expired ${action}. Retain original archives and retry after inspection.`);
+}
+function requireBudget(action) {
+  if(Date.now()>=deadline) throw deadlineError(action);
 }
 async function reconcile(a,field) {
   for(const delay of delays) {
@@ -98,9 +103,11 @@ async function reconcile(a,field) {
 }
 async function main() {
   for(const a of [...companions,...launchers]) {
+    requireBudget(`before checking ${a.name}@${version}`);
     const state=integrity(a);
     if(state==='unknown') throw new Error(`Cannot establish registry state before publish: ${a.name}`);
     if(state==='absent') {
+      requireBudget(`before publishing ${a.name}@${version}`);
       const r=npm(['publish',path.join(root,a.filename),'--provenance','--access','public','--tag','latest','--ignore-scripts']);
       // Even a timeout or E403 may follow a successful registry write.
       console.log(JSON.stringify({name:a.name,publishExit:r.status,uncertain:!!r.error || r.status!==0}));
@@ -115,6 +122,7 @@ async function main() {
     latest=read(launchers[0],'dist-tags.latest');
     if(latest.status===0 && latest.json===version) break;
   }
+  if(Date.now()>=deadline) throw deadlineError('while verifying latest tag');
   assert.equal(latest?.status,0);assert.equal(latest.json,version,'latest must identify the stable launcher');
 }
 main().catch(error=>{console.error(error.message);process.exitCode=1;}).finally(()=>fs.rmSync(tufCache,{recursive:true,force:true}));
