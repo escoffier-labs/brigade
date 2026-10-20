@@ -849,9 +849,10 @@ The closed `brigade.admin-stats.v1` snapshot and page expose these fields:
 
 `weeks`, `daily`, version cells and upgrade cells are arrays. Counts are nullable
 nonnegative integers. Source counts below 5 become `null`, including zero.
-All weekly source counts are hidden together when any count is suppressed,
+All weekly source counts and categorical histogram rows are hidden together when any count is suppressed,
 subtraction between counts would reveal 1 to 4 sources, or excess version
-observations would reveal 1 to 4 sources using multiple versions. Incomplete
+observations would reveal 1 to 4 sources using multiple versions. The page groups
+hidden categories into an "other (suppressed)" row with an unknown count. Incomplete
 version or upgrade reads hide both histograms. These rules also apply to uploaded
 snapshots. Known retention counts must satisfy active >= 2+ day >= 3+ day sources.
 Each known version or upgrade count must not exceed the active-source total.
@@ -863,9 +864,12 @@ on 2+ or 3+ distinct days in the same ISO week. Possible upgrades pair versions
 observed in time order within a week, restricted to increasing numeric releases.
 The current week and the oldest week truncated by the 90-day query are labelled partial.
 Source identities rotate weekly. Worker counts cover 30 completed UTC days.
-Malformed version cells are omitted. Histograms over 100 versions or 200 upgrade
+Each malformed version or upgrade cell is omitted individually, preserving valid cells
+subject to weekly suppression. Histograms over 100 versions or 200 upgrade
 pairs render as unknown. Development versions may use eight-digit date suffixes.
 `source_set` contains only `d1`, `worker` and `downloads` for successful reads.
+Nonempty weeks require `d1`, nonempty daily data requires `worker`, and known
+download counts require `downloads` in `source_set`.
 `digest` is SHA-256 of canonical JSON without `digest` or `snapshot_id`, with
 sorted keys and compact separators. `snapshot_id` equals that digest.
 
@@ -876,3 +880,5 @@ aggregate snapshots and weekly observations for 400 days and purges older rows
 on each accepted POST. Invalid stored payloads are skipped when rendering.
 Opt-in usage aggregates are not available yet. Future opt-in counts will
 undercount usage.
+Small-cell suppression is defense in depth for screenshots and shared views, not
+protection against an enrolled viewer on the operator's own Hub who can compare snapshots.

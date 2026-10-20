@@ -298,9 +298,8 @@ def _histogram(rows: list[dict[str, Any]] | None, week: str, *, upgrades: bool) 
                 continue
             cells.append({key: row[key] for key in (*fields, "active_sources")})
         except (ValueError, KeyError, TypeError):
-            # An omitted malformed cell could disclose 1-4 sources by
-            # subtraction from the week's total. Hide the distribution.
-            return None
+            # Keep valid peers. Weekly suppression still checks their counts.
+            continue
     # An empty array renders as unknown. Never show a truncated distribution.
     return cells if len(cells) <= (200 if upgrades else 100) else None
 

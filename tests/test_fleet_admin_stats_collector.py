@@ -247,15 +247,15 @@ def test_wrangler_account_setting_is_environment_only(monkeypatch):
 
 
 @pytest.mark.parametrize("malformed", [False, True])
-def test_collector_hides_invalid_histograms_and_keeps_other_sources(monkeypatch, malformed):
+def test_collector_omits_invalid_cells_and_keeps_valid_histograms_and_other_sources(monkeypatch, malformed):
     from brigade import fleet_admin_stats_collector as collector
 
     def runner(argv, **kwargs):
         if argv[-1] == collector.QUERIES["weekly"]:
-            rows = [{"week": "2026-W43", "active_sources": 20, "retained_2d_sources": 8, "retained_3d_sources": 5}]
+            rows = [{"week": "2026-W43", "active_sources": 20, "retained_2d_sources": 20, "retained_3d_sources": 20}]
         elif argv[-1] == collector.QUERIES["versions"]:
             rows = [
-                {"week": "2026-W43", "version": version, "active_sources": 8}
+                {"week": "2026-W43", "version": version, "active_sources": 20}
                 for version in (
                     ("dev", "0.28.0+local", "0.28.0-beta.1", "0.31.0.dev20260808")
                     if malformed
@@ -264,9 +264,11 @@ def test_collector_hides_invalid_histograms_and_keeps_other_sources(monkeypatch,
             ]
         else:
             rows = [
-                {"week": "2026-W43", "from_version": version, "to_version": "0.31.0.dev20260808", "active_sources": 8}
+                {"week": "2026-W43", "from_version": version, "to_version": "0.31.0.dev20260808", "active_sources": 20}
                 for version in (("dev", "0.28.0") if malformed else ("0.28.0",))
             ]
+        if malformed and argv[-1] != collector.QUERIES["weekly"]:
+            rows.extend([{"week": "2026-W43"}, {"week": "2026-W43", "version": "0.28.0", "active_sources": "bad"}])
         return [{"success": True, "results": rows}]
 
     monkeypatch.setattr(collector, "run_wrangler", runner)
@@ -284,12 +286,10 @@ def test_collector_hides_invalid_histograms_and_keeps_other_sources(monkeypatch,
         now=datetime(2026, 10, 20, tzinfo=timezone.utc),
     )
     assert value["source_set"] == ["d1", "downloads"]
-    assert value["weeks"][0]["versions"] == (
-        [] if malformed else [{"version": "0.31.0.dev20260808", "active_sources": None}]
-    )
-    assert value["weeks"][0]["upgrades"] == (
-        [] if malformed else [{"from_version": "0.28.0", "to_version": "0.31.0.dev20260808", "active_sources": None}]
-    )
+    assert value["weeks"][0]["versions"] == [{"version": "0.31.0.dev20260808", "active_sources": 20}]
+    assert value["weeks"][0]["upgrades"] == [
+        {"from_version": "0.28.0", "to_version": "0.31.0.dev20260808", "active_sources": 20}
+    ]
     assert value["downloads"] == {"pypi": 12, "npm": 8}
 
 
@@ -311,7 +311,7 @@ def test_rejected_version_cannot_disclose_small_remainder(monkeypatch, counts):
 
     monkeypatch.setattr(collector, "run_wrangler", runner)
     value = collector.collect({"database": "example-db"}, now=datetime(2026, 10, 20, tzinfo=timezone.utc))
-    assert value["weeks"][0]["active_sources"] == 20
+    assert value["weeks"][0]["active_sources"] is None
     assert value["weeks"][0]["versions"] == []
 
 
@@ -382,7 +382,7 @@ def test_oversized_week_histogram_becomes_unknown(monkeypatch, kind, limit):
 
 
 @pytest.mark.parametrize("kind,limit", [("versions", 6000), ("upgrades", 12000)])
-@pytest.mark.parametrize("failure", ["limit", "malformed", "unavailable"])
+@pytest.mark.parametrize("failure", ["limit", "unavailable"])
 def test_incomplete_histogram_hides_both_distributions(monkeypatch, kind, limit, failure):
     from brigade import fleet_admin_stats_collector as collector
 
@@ -393,7 +393,7 @@ def test_incomplete_histogram_hides_both_distributions(monkeypatch, kind, limit,
         elif query == kind:
             if failure == "unavailable":
                 raise ValueError("unavailable")
-            rows = [{}] * limit if failure == "limit" else [{"week": "2026-W43"}]
+            rows = [{}] * limit
         elif query == "versions":
             rows = [
                 {"week": "2026-W43", "version": version, "active_sources": count}

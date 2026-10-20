@@ -19,15 +19,15 @@ def snapshot():
 
     return stats.snapshot(
         taken_at=NOW,
-        source_set=["d1"],
+        source_set=["d1", "worker", "downloads"],
         weeks=[
             {
                 "week": "2026-W43",
                 "partial": True,
                 "active_sources": 20,
-                "retained_2d_sources": 4,
-                "retained_3d_sources": None,
-                "versions": [{"version": "0.28.0", "active_sources": 12}],
+                "retained_2d_sources": 10,
+                "retained_3d_sources": 5,
+                "versions": [{"version": "0.28.0", "active_sources": 20}],
                 "upgrades": [{"from_version": "0.27.0", "to_version": "0.28.0", "active_sources": 5}],
             }
         ],
@@ -40,12 +40,31 @@ def test_snapshot_suppresses_small_cells_and_checks_digest():
     from brigade import fleet_admin_stats as stats
 
     value = snapshot()
+    value["weeks"][0].update(retained_2d_sources=4, retained_3d_sources=None)
+    value = stats.snapshot(
+        taken_at=NOW,
+        source_set=value["source_set"],
+        weeks=value["weeks"],
+        daily=value["daily"],
+        downloads=value["downloads"],
+    )
     assert value["weeks"][0]["retained_2d_sources"] is None
     assert stats.validate(value) == value
     bad = copy.deepcopy(value)
     bad["downloads"]["pypi"] = 100
     with pytest.raises(ValueError, match="digest"):
         stats.validate(bad)
+
+
+@pytest.mark.parametrize("source", ["d1", "worker", "downloads"])
+def test_snapshot_rejects_provider_data_without_its_source(source):
+    from brigade import fleet_admin_stats as stats
+
+    value = snapshot()
+    value["source_set"].remove(source)
+    value["digest"] = value["snapshot_id"] = stats._digest(value)
+    with pytest.raises(ValueError, match="source set"):
+        stats.validate(value)
 
 
 @pytest.mark.parametrize("field", ["source_hash", "install_id", "ip", "hostname"])
@@ -274,7 +293,7 @@ def test_history_prefers_complete_over_newer_truncated_week(tmp_path):
 
     conn = fleet_hub.init_db(tmp_path / "hub.db")
     week = snapshot()["weeks"][0]
-    week.update(week="2026-W30", partial=False, active_sources=50)
+    week.update(week="2026-W30", partial=False, active_sources=50, retained_2d_sources=50, retained_3d_sources=50)
     complete = stats.snapshot(
         taken_at=datetime(2026, 8, 3, tzinfo=timezone.utc),
         source_set=["d1"],
@@ -283,7 +302,7 @@ def test_history_prefers_complete_over_newer_truncated_week(tmp_path):
         downloads={"pypi": None, "npm": None},
     )
     stats.store(conn, complete, now=NOW)
-    week.update(partial=True, active_sources=5)
+    week.update(partial=True, active_sources=5, retained_2d_sources=5, retained_3d_sources=5, versions=[], upgrades=[])
     truncated = stats.snapshot(
         taken_at=NOW, source_set=["d1"], weeks=[week], daily=[], downloads={"pypi": None, "npm": None}
     )
@@ -312,7 +331,7 @@ def test_frequent_collection_bounds_snapshots_without_losing_history(tmp_path):
     for index in range(1602):
         value = stats.snapshot(
             taken_at=NOW - timedelta(seconds=1602 - index),
-            source_set=[],
+            source_set=["downloads"],
             weeks=[],
             daily=[],
             downloads={"pypi": index, "npm": None},
@@ -376,10 +395,11 @@ def test_retention_does_not_disclose_small_complements(retention):
 
 @pytest.mark.parametrize("kind", ["versions", "upgrades"])
 def test_histograms_do_not_disclose_single_suppressed_cell(kind):
-    from brigade import fleet_admin_stats as stats
+    from brigade import fleet_admin_stats as stats, fleet_admin_stats_page as page
 
     week = snapshot()["weeks"][0]
     week.update(active_sources=16, retained_2d_sources=16, retained_3d_sources=16)
+    week.update(versions=[], upgrades=[])
     week[kind] = [
         {
             **(
@@ -394,7 +414,16 @@ def test_histograms_do_not_disclose_single_suppressed_cell(kind):
     value = stats.snapshot(
         taken_at=NOW, source_set=["d1"], weeks=[week], daily=[], downloads={"pypi": None, "npm": None}
     )
-    assert [cell["active_sources"] for cell in value["weeks"][0][kind]] == [None, None]
+    assert value["weeks"][0]["versions"] == value["weeks"][0]["upgrades"] == []
+    html = page.render({"latest": value, "weeks": value["weeks"]}, nonce="example", now=NOW)
+    assert "0.28.1" not in json.dumps(value)
+    assert "0.28.1" not in html
+    assert html.count("other (suppressed)") == 2
+    # A freshly digested upload cannot keep a suppressed category's label.
+    value["weeks"][0][kind] = [{**cell, "active_sources": None} for cell in week[kind]]
+    value["digest"] = value["snapshot_id"] = stats._digest(value)
+    with pytest.raises(ValueError, match="suppression"):
+        stats.validate(value)
 
 
 @pytest.mark.parametrize("sources", [[], ["d1"], ["worker", "downloads"]])
@@ -475,9 +504,9 @@ def test_version_overlap_cannot_reconstruct_suppressed_upgrade(upgrade_count, ac
     value = stats.snapshot(
         taken_at=NOW, source_set=["d1"], weeks=[week], daily=[], downloads={"pypi": None, "npm": None}
     )
-    assert [cell["active_sources"] for cell in value["weeks"][0]["versions"]] == [None] * len(counts)
+    assert value["weeks"][0]["versions"] == []
     assert all(value["weeks"][0][field] is None for field in stats.SOURCE_FIELDS)
-    assert all(cell["active_sources"] is None for cell in value["weeks"][0]["upgrades"])
+    assert value["weeks"][0]["upgrades"] == []
     # Authorized producers cannot bypass suppression with a fresh digest.
     if upgrade_count != 1:
         value["weeks"] = [week]
@@ -504,7 +533,7 @@ def test_related_weekly_source_counts_are_suppressed_together(counts):
         taken_at=NOW, source_set=["d1"], weeks=[week], daily=[], downloads={"pypi": None, "npm": None}
     )
     assert all(value["weeks"][0][field] is None for field in stats.SOURCE_FIELDS)
-    assert value["weeks"][0]["versions"][0]["active_sources"] is None
+    assert value["weeks"][0]["versions"] == []
 
 
 @pytest.mark.parametrize(

@@ -61,7 +61,11 @@ def render(view: dict[str, Any], *, nonce: str, now: datetime) -> str:
         for field in ("versions", "upgrades"):
             body += f'<div data-field="weeks.{field}"><h4>{field.title()}</h4>'
             if not week[field]:
-                body += "<p>unknown</p>"
+                body += (
+                    "<p>other (suppressed): unknown</p>"
+                    if all(week[key] is None for key in stats.SOURCE_FIELDS)
+                    else "<p>unknown</p>"
+                )
             for cell in week[field]:
                 body += "<p>"
                 for key, value in cell.items():

@@ -167,6 +167,12 @@ def validate(value: Any) -> dict[str, Any]:
     _keys(value["downloads"], ("pypi", "npm"))
     for count in value["downloads"].values():
         _count(count)
+    if (
+        (value["weeks"] and "d1" not in sources)
+        or (value["daily"] and "worker" not in sources)
+        or (any(count is not None for count in value["downloads"].values()) and "downloads" not in sources)
+    ):
+        raise ValueError("provider data absent from source set")
     digest = _digest(value)
     if (
         not isinstance(value["digest"], str)
@@ -225,9 +231,11 @@ def _suppress_week(row: dict[str, Any]) -> None:
     if total is not None and all(count is not None for count in versions):
         hidden = hidden or 0 < sum(versions) - total < 5
     if hidden:
-        for cell, fields in cells:
-            for field in fields:
-                cell[field] = None
+        for field in SOURCE_FIELDS:
+            row[field] = None
+        # Category names also disclose the existence of a protected cohort.
+        row["versions"] = []
+        row["upgrades"] = []
 
 
 def store(conn: sqlite3.Connection, value: Any, *, now: datetime | None = None) -> None:
