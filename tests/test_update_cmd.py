@@ -379,7 +379,7 @@ def test_resolve_beta_cli_version_selects_newest_non_yanked_0_31_dev_wheel():
         "0.31.0.dev20260809": [_wheel_file("0.31.0.dev20260809")],
         "0.31.0.dev20260808": [_sdist_file("0.31.0.dev20260808")],
         "0.30.0.dev20260811": [_wheel_file("0.30.0.dev20260811")],
-        "0.30.0.dev20260811": [_wheel_file("0.30.0.dev20260811")],
+        "0.32.0.dev20260811": [_wheel_file("0.32.0.dev20260811")],
         "0.31.0.dev2026080": [_wheel_file("0.31.0.dev2026080")],
         "0.31.0.dev202608091": [_wheel_file("0.31.0.dev202608091")],
         "0.31.0a1": [_wheel_file("0.31.0a1")],

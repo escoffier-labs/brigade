@@ -4,7 +4,7 @@ Date: 2026-10-18
 
 This page backs the four README matrices. The README shows the closest neighbors for each layer. Rows marked *(docs only)* stay here for reference. Cells use "Not documented" when the capability was not found in that project's official README or docs on the dated source pass. That is not proof of absence.
 
-Brigade stable claims refer to published **v0.29.0**. Anything newer on main is labeled current main / **0.30 beta**.
+Brigade stable claims refer to published **v0.30.0**. Anything newer on main is labeled current main / **0.31 beta**.
 
 ## How to read the tables
 
@@ -96,7 +96,7 @@ Beads now documents persistent project memory (`bd remember`, `bd prime`) as of 
 
 ## Source checklist (2026-10-18)
 
-All rows were re-checked on 2026-10-18 against official READMEs and docs. Brigade cells reflect published v0.29.0. chezmoi docs were not re-read, so its row rests on the earlier pass.
+All rows were re-checked on 2026-10-18 against official READMEs and docs. Brigade cells were checked against v0.29.0 and have not been re-read for v0.30.0. chezmoi docs were not re-read, so its row rests on the earlier pass.
 
 - https://github.com/escoffier-labs/brigade
 - https://github.com/gastownhall/beads
