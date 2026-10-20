@@ -7,14 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Added
-
-- The README downloads badge combines PyPI downloads without mirrors and npm downloads for the main package over the same 30 completed UTC days. A daily or manual workflow updates public metric JSON on `download-metrics`, retaining the previous metric when a source fails or is stale.
-### Fixed
-
-- Test qualification: restore the normal 2.5-second HTTP budget and both real retry waits in the orphan-cleanup exhaustion test.
-
-## [0.30.0] - 2026-10-19
+## [0.30.0] - 2026-10-20
 
 ### Added
 
@@ -23,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Stable npm publishing support for `@escoffier-labs/brigade@0.29.0` and five public platform companions, using the pinned official PyPI wheel, tag-based payload auditing, immutable archive retries, hosted provenance and native registry acceptance gates. Registry publication is tracked by the release workflow.
 - Installation guides now cover the npm and npx routes, Node.js requirements, managed Python downloads, npm-managed upgrades, and known platform limits.
+- The README downloads badge combines PyPI downloads without mirrors and npm downloads for the main package over the same 30 completed UTC days. A daily or manual workflow updates public metric JSON on `download-metrics`, retaining the previous metric when a source fails or is stale.
 
 ### Fixed
 
