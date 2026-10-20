@@ -601,7 +601,7 @@ def build_draft(
 - Create: `src/brigade/memory_mcp_core.py`
 - Test: `tests/test_memory_mcp_core.py`
 
-- [ ] Write the failing test `tests/test_memory_mcp_core.py`:
+- [x] Write the failing test `tests/test_memory_mcp_core.py`:
 
 ```python
 """Memory MCP tool contract across the repo and user stores."""
@@ -734,8 +734,8 @@ def test_unknown_tool_is_a_tool_error(stores):
     assert json.dumps(_tools(repo).call("list_cards", {})[0]) == "[]"
 ```
 
-- [ ] Run it, watch it fail: `PY -m pytest tests/test_memory_mcp_core.py -q -p no:cacheprovider`. Expect FAIL with `ImportError: cannot import name 'memory_mcp_core'`.
-- [ ] Create `src/brigade/memory_mcp_core.py`:
+- [x] Run it, watch it fail: `PY -m pytest tests/test_memory_mcp_core.py -q -p no:cacheprovider`. Expect FAIL with `ImportError: cannot import name 'memory_mcp_core'`.
+- [x] Create `src/brigade/memory_mcp_core.py`:
 
 ```python
 """Brigade memory MCP tools, independent of transport.
@@ -987,9 +987,9 @@ class MemoryTools:
         }, False
 ```
 
-- [ ] Run to green: same command as the failing run. Expect 8 PASS.
-- [ ] Lint and type check: `PY -m ruff check src/brigade/memory_mcp_core.py src/brigade/memory_scope.py src/brigade/mcp_server.py` (expect `All checks passed!`), then `PY -m mypy src/brigade/memory_mcp_core.py src/brigade/memory_scope.py src/brigade/mcp_server.py` (expect `Success: no issues found`). The repo's ruff config does not enforce line length (`select = ["B", "E4", "E7", "E9", "F"]`).
-- [ ] Commit: `git add src/brigade/memory_mcp_core.py tests/test_memory_mcp_core.py && git commit -m "feat(memory): add memory MCP core read tools"`
+- [x] Run to green: same command as the failing run. Expect 8 PASS.
+- [x] Lint and type check: `PY -m ruff check src/brigade/memory_mcp_core.py src/brigade/memory_scope.py src/brigade/mcp_server.py` (expect `All checks passed!`), then `PY -m mypy src/brigade/memory_mcp_core.py src/brigade/memory_scope.py src/brigade/mcp_server.py` (expect `Success: no issues found`). The repo's ruff config does not enforce line length (`select = ["B", "E4", "E7", "E9", "F"]`).
+- [x] Commit: `git add src/brigade/memory_mcp_core.py tests/test_memory_mcp_core.py && git commit -m "feat(memory): add memory MCP core read tools"`
 
 ---
 
