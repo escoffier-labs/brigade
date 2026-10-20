@@ -13,10 +13,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `brigade bug report` prepares a redacted local bundle, blocks remaining scanner findings, searches fingerprints, and shares only with explicit consent. CLI failures keep a local redacted error record.
-
-- `brigade memory serve-mcp --http` and `brigade skills serve-mcp --http` serve the read-only MCP tools over a stateless loopback Streamable HTTP endpoint (`POST /mcp`, `GET /healthz`) for MCP hosts that cannot spawn a stdio process. The server binds only `127.0.0.1` or `::1`, requires a bearer token from `BRIGADE_MCP_HTTP_TOKEN` (32 characters or more, never a flag), rejects non-loopback `Host` and `Origin` headers, and caps request bodies at 1 MiB. `--stdio` is unchanged.
-- MCP registry metadata for the two read-only servers: `mcp-registry/memory/server.json` (`io.github.escoffier-labs/brigade-memory`) and `mcp-registry/skills/server.json` (`io.github.escoffier-labs/brigade-skills`), with matching `mcp-name` markers in the README. `scripts/version_sync.py` keeps both manifests on the release version.
 - Brigade agent plugin for Claude Code and Codex (`plugins/brigade/`): memory MCP tools, the `brigade-work` skill, a non-blocking SessionStart brief (Claude Code only), and an opt-in `enforce` skill.
 - Memory MCP tools `memory_status`, `work_brief`, and `write_handoff`; card tools now span the repo store and a user store under `BRIGADE_HOME`. Cards are served only when their real path stays inside the store, and `write_handoff` caps content at 256 KiB and facts and evidence at 50 items each.
 - `brigade memory serve-mcp --http` and `brigade skills serve-mcp --http` serve the MCP tools over a stateless loopback Streamable HTTP endpoint (`POST /mcp`, `GET /healthz`) for MCP hosts that cannot spawn a stdio process. The skills tools are read-only; the memory server also has `write_handoff`. The server binds only `127.0.0.1` or `::1`, requires a bearer token from `BRIGADE_MCP_HTTP_TOKEN` (32 characters or more, never a flag), rejects non-loopback `Host` and `Origin` headers, and caps request bodies at 1 MiB. `--stdio` is unchanged.
@@ -36,21 +32,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Bug reports rescan all mounted secrets, omit doctor details and roster seats, reject unsafe selected files, and normalize failing check names in fingerprints.
-
-- Bug reports support Windows submission attempt logs, redact username case variants, and skip linked or nonregular diagnostic files without blocking. The guide documents duplicate searches before consent.
-
-- Bug reports redact every GitHub token family, collect only local target checks, fence untrusted Markdown, and reject unsafe diagnostic and attempt-log files.
-
-- Bug reports count retries in an append-only attempt log, escape terminal controls before preview, and allow ordinary UI wording such as "Pressing Escape closes the prompt".
-
-- Bug reports block embedded short environment secrets during the second scan and select recent receipts by timestamp across up to 20,000 directory entries.
-
-- Prepared bug reports use the same security checks as previews, and saved CLI errors scrub parsed paths. Diagnostic read limits apply only to bug reports, preserving complete receipt exports.
-
-- Bug reports require a vulnerability check before sharing, redact hostname case variants, bound diagnostic receipt reads, record dispatch exits, and normalize paths with spaces in fingerprints.
-
-- Bug reports submit the saved preview by report ID after digest checks, preserve the original CLI diagnostic, and refuse vulnerability descriptions in titles, summaries, and selected output. Summary-file reads are bounded, and quickstart points to the redacted preview.
 - Work readiness, claim, and explicit task runs fail closed on missing blockers or ancestor parents. JSON separates unfinished and missing dependencies, and explained output names edge-removal repairs. (Fixes #1857)
 - Readiness repair commands include the repository target and preserve literal edge endpoints when a live task shares their prefix. Campaign views omit member repair commands that use synthetic IDs. (Refs #1857)
 
