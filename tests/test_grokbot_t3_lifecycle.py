@@ -344,6 +344,7 @@ def test_install_intake_cli(tmp_path, monkeypatch, capsys):
 
 
 @pytest.mark.parametrize("missing_tool", [None, "message_send"])
+@pytest.mark.usefixtures("t3_platform_admission")
 def test_canary_requires_complete_hub_tool_inventory(tmp_path, monkeypatch, missing_tool):
     from brigade import grokbot_ops
 
