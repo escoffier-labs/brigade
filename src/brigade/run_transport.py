@@ -1313,7 +1313,7 @@ def dispatch(
             task=assignment.task,
             transport=lambda: _receipt_transport(recording_agent[0], appserver=appserver),
             read_only=read_only,
-            sandbox=sandbox or roster.sandbox or ("read-only" if effective_read_only else None),
+            sandbox=sandbox or ("read-only" if effective_read_only else None),
         )
 
     if not assignments:

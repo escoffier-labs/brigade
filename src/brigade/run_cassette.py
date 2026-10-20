@@ -12,7 +12,7 @@ import os
 import stat
 import sys
 from contextlib import contextmanager, nullcontext
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass
 from pathlib import Path
 from threading import Lock
 from typing import TYPE_CHECKING, Any, Callable, Iterator, Mapping
@@ -116,6 +116,8 @@ def _scrub(value: Any, secrets: tuple[str, ...]) -> Any:
         return {k: _scrub(v, secrets) for k, v in value.items()}
     if isinstance(value, list):
         return [_scrub(v, secrets) for v in value]
+    if isinstance(value, tuple):
+        return tuple(_scrub(v, secrets) for v in value)
     return value
 
 
@@ -351,7 +353,11 @@ def _record_result(
         secrets = _secret_values(agent) if observed else ()
     except store.CassetteError:
         observed, env_unavailable, secrets = False, True, ()
-    body = _scrub(run_receipts.agent_result_payload(result), secrets) if observed else None
+    body = None
+    if observed:
+        # Receipt shaping truncates text and labels, so scrub complete values first.
+        scrubbed_result = agents.AgentResult(**_scrub(asdict(result), secrets))
+        body = _scrub(run_receipts.agent_result_payload(scrubbed_result), secrets)
     projection = None
     projection_status = "unavailable"
     appserver = observed and transport in {"app-server", "codex-app-server"}
