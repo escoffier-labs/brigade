@@ -532,6 +532,8 @@ def test_work_import_ingest_redacts_acceptance_and_metadata(tmp_path, capsys):
 
 
 def test_work_import_ingest_preserves_colliding_redacted_metadata_keys(tmp_path, capsys):
+    from brigade import evidence_redaction
+
     _init_git_repo(tmp_path)
     first = "first@private.example"  # <!-- content-guard: allow email --> synthetic fixture
     second = "second@private.example"  # <!-- content-guard: allow email --> synthetic fixture
@@ -540,6 +542,8 @@ def test_work_import_ingest_preserves_colliding_redacted_metadata_keys(tmp_path,
         second: f"second value {first}",
         "<PRIVATE_EMAIL>": "literal placeholder value",
         "<PRIVATE_EMAIL>_2": "literal suffix value",
+        "field_redaction": {"note": f"caller verdict {first}"},
+        "field_redaction_2": {"note": f"occupied verdict suffix {second}"},
     }
     import_file = tmp_path / "imports.jsonl"
     import_file.write_text(
@@ -570,6 +574,13 @@ def test_work_import_ingest_preserves_colliding_redacted_metadata_keys(tmp_path,
     }
     for record in (persisted, task):
         metadata = record["metadata"]
+        assert metadata["field_redaction_3"] == {"note": "caller verdict <PRIVATE_EMAIL>"}
+        assert metadata["field_redaction_2"] == {"note": "occupied verdict suffix <PRIVATE_EMAIL>"}
+        assert metadata["nested"]["field_redaction"] == metadata["field_redaction_3"]
+        assert metadata["nested"]["field_redaction_2"] == metadata["field_redaction_2"]
+        assert evidence_redaction.validate_redaction_record(metadata["field_redaction"]) == []
+        assert metadata["field_redaction"]["status"] == "redacted"
+        assert metadata["field_redaction"]["count"] > 0
         for mapping in (metadata, metadata["nested"]):
             retained = {key: value for key, value in mapping.items() if key.startswith("<PRIVATE_EMAIL>")}
             assert len(retained) == 4

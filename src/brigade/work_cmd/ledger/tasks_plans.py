@@ -110,7 +110,13 @@ class _ImportFieldRedaction:
             return [self.redact(item) for item in value]
         return value
 
-    def redact_mapping(self, value: Mapping[Any, Any], *, exempt_keys: frozenset[str] = frozenset()) -> dict[Any, Any]:
+    def redact_mapping(
+        self,
+        value: Mapping[Any, Any],
+        *,
+        exempt_keys: frozenset[str] = frozenset(),
+        reserved_keys: frozenset[str] = frozenset(),
+    ) -> dict[Any, Any]:
         entries = [
             (key, item)
             if key in exempt_keys
@@ -119,12 +125,12 @@ class _ImportFieldRedaction:
         ]
         # Reserve every base key, including literal placeholder/suffix keys that
         # appear later, so allocating a collision suffix cannot overwrite them.
-        reserved = {key for key, _ in entries}
+        reserved = {key for key, _ in entries} | reserved_keys
         redacted: dict[Any, Any] = {}
         for key, item in entries:
             output_key = key
             suffix = 2
-            if output_key in redacted:
+            if output_key in reserved_keys or output_key in redacted:
                 while output_key in reserved or output_key in redacted:
                     output_key = f"{key}_{suffix}"
                     suffix += 1
@@ -207,7 +213,9 @@ def _make_import(
     stamped_metadata = inbox_provenance._sanitize_import_identity_metadata(stamped_metadata)
     if field_redaction is not None:
         stamped_metadata = field_redaction.redact_mapping(
-            stamped_metadata, exempt_keys=_IMPORT_REDACTION_EXEMPT_METADATA_KEYS
+            stamped_metadata,
+            exempt_keys=_IMPORT_REDACTION_EXEMPT_METADATA_KEYS,
+            reserved_keys=frozenset({"field_redaction"}),
         )
         redaction_failed = redaction_failed or field_redaction.failed
     stamped_metadata["provenance"] = inbox_provenance._stamp_import_provenance(
