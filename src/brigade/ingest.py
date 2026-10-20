@@ -721,7 +721,16 @@ def _git_tracked_names(directory: Path) -> set[str] | None:
             worktree = (probe / discovery.stdout.decode("ascii").strip()).resolve()
             pathspec = directory.relative_to(worktree).as_posix()
             result = subprocess.run(
-                ["git", "--literal-pathspecs", "-C", str(worktree), "ls-files", "-z", "--", pathspec],
+                [
+                    "git",
+                    "--no-literal-pathspecs",
+                    "-C",
+                    str(worktree),
+                    "ls-files",
+                    "-z",
+                    "--",
+                    f":(literal,icase){pathspec}",
+                ],
                 capture_output=True,
                 env=env,
                 timeout=30,

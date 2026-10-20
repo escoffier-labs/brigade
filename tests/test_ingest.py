@@ -1629,6 +1629,38 @@ def test_tracking_check_preserves_handoffs_in_every_containing_repo(tmp_path: Pa
     assert (inbox / "processed" / untracked.name).is_file()
 
 
+@pytest.mark.parametrize("literal_env", [None, "1"])
+def test_tracking_check_matches_directory_case_alias(tmp_path: Path, monkeypatch, literal_env):
+    inbox = tmp_path / "Inbox"
+    inbox.mkdir()
+    _git(tmp_path, "init", "-q")
+    _git(tmp_path, "config", "core.ignorecase", "true")
+    _write_handoff(inbox, "tracked.md", _PLAIN_HANDOFF)
+    _git(tmp_path, "add", "--", "Inbox/tracked.md")
+    renamed = tmp_path / "inbox"
+    inbox.rename(renamed)
+    if not inbox.exists():
+        # Model case-insensitive directory lookup on case-sensitive hosts.
+        inbox.symlink_to(renamed, target_is_directory=True)
+    handoff = renamed / "tracked.md"
+    untracked = _write_handoff(renamed, "untracked.md", _PLAIN_HANDOFF)
+    if literal_env is None:
+        monkeypatch.delenv("GIT_LITERAL_PATHSPECS", raising=False)
+    else:
+        monkeypatch.setenv("GIT_LITERAL_PATHSPECS", literal_env)
+
+    handoffs, tracked = ingest_mod._list_handoffs(renamed)
+    assert handoffs == [untracked]
+    assert tracked == [handoff]
+    with pytest.raises(ingest_mod.TrackedHandoffError):
+        ingest_mod._archive(handoff, renamed / "processed")
+    assert handoff.is_file()
+    assert not (renamed / "processed").exists()
+    ingest_mod._archive(untracked, renamed / "processed")
+    assert not untracked.exists()
+    assert (renamed / "processed" / untracked.name).is_file()
+
+
 def test_tracked_check_matches_by_file_identity_not_spelling(tmp_path: Path, monkeypatch):
     # A hardlink stands in for a case-insensitive filesystem, where the index
     # spelling `Tracked.md` and the listed `tracked.md` name the same file.
