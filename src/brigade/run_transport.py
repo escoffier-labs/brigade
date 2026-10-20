@@ -1319,6 +1319,7 @@ def dispatch(
                 route_dependencies=route_dependencies or {},
                 route_held=route_held or {},
                 output_dir=output_dir,
+                cwd=cwd,
             )
         if on_scheduler_resolved is not None:
             on_scheduler_resolved("waves", placement_error)
@@ -1381,14 +1382,14 @@ def dispatch(
                 cancel_active_work(future_to_index)
                 executor.shutdown(wait=True, cancel_futures=True)
                 runguard.raise_if_retained_run_lock(exc)
-                _raise_retained_future_error(future_to_index, exc, output_dir)
+                _raise_retained_future_error(future_to_index, exc, output_dir, cwd)
             raise
         except BaseException as exc:
             cancel_active_work(future_to_index)
             executor.shutdown(wait=True, cancel_futures=True)
             if not isinstance(exc, runguard.RetainRunLockError):
-                _raise_retained_future_error(future_to_index, exc, output_dir)
-            _note_sibling_failures(future_to_index, exc, output_dir)
+                _raise_retained_future_error(future_to_index, exc, output_dir, cwd)
+            _note_sibling_failures(future_to_index, exc, output_dir, cwd)
             raise
         else:
             executor.shutdown(wait=True)
@@ -1399,7 +1400,7 @@ def dispatch(
     return all_results
 
 
-def _add_note(error: BaseException, note: str, output_dir: Path | None) -> None:
+def _add_note(error: BaseException, note: str, output_dir: Path | None, cwd: Path | None) -> None:
     # Same effect as BaseException.add_note, which is 3.11+.
     error.__dict__.setdefault("__notes__", []).append(note)
     if output_dir is None:
@@ -1407,11 +1408,26 @@ def _add_note(error: BaseException, note: str, output_dir: Path | None) -> None:
     # Workers have joined before these diagnostics are saved. Keep them out of
     # run.json so retention cannot invalidate journal/checkpoint projections.
     try:
+        run_meta = localio.read_json_dict(output_dir / "run.json") or {}
+        workspace = runguard.resolve_run_lock_workspace(run_meta, output_dir, fallback=cwd)
+        if workspace is None:
+            return
+        owner = runguard.read_lock_owner(runguard.lock_path(workspace))
+        if owner is None or owner.get("pid") != os.getpid():
+            return
+        if not runguard._owner_matches_run(owner, output_dir.expanduser().resolve()):
+            return
+        owner_token = owner.get("owner_token")
+        if not isinstance(owner_token, str) or not owner_token:
+            return
         diagnostics = [
             saved_note[: runguard.RETENTION_DIAGNOSTIC_CHAR_LIMIT]
             for saved_note in error.__dict__["__notes__"][-runguard.RETENTION_DIAGNOSTICS_LIMIT :]
         ]
-        localio.write_json(output_dir / runguard.RETENTION_DIAGNOSTICS_NAME, {"diagnostics": diagnostics})
+        localio.write_json(
+            output_dir / runguard.RETENTION_DIAGNOSTICS_NAME,
+            {"owner_token": owner_token, "diagnostics": diagnostics},
+        )
     except BaseException:
         # Even an interrupted diagnostic write must not replace retention.
         pass
@@ -1422,7 +1438,9 @@ def _describe_failure(error: BaseException) -> str:
     return f"{type(error).__name__}: {detail}" if detail else type(error).__name__
 
 
-def _raise_retained_future_error(futures: dict[Any, int], interrupt: BaseException, output_dir: Path | None) -> None:
+def _raise_retained_future_error(
+    futures: dict[Any, int], interrupt: BaseException, output_dir: Path | None, cwd: Path | None
+) -> None:
     """Do not discard worker cleanup failures when interrupting the scheduler.
 
     The retention error replaces ``interrupt``, so record it as a note and a
@@ -1436,11 +1454,13 @@ def _raise_retained_future_error(futures: dict[Any, int], interrupt: BaseExcepti
             error = future.exception()
             retained = runguard.retained_run_lock_error(error) if error is not None else None
             if retained is not None:
-                _add_note(retained, f"replaced scheduler failure: {_describe_failure(interrupt)}", output_dir)
+                _add_note(retained, f"replaced scheduler failure: {_describe_failure(interrupt)}", output_dir, cwd)
                 raise retained
 
 
-def _note_sibling_failures(futures: dict[Any, int], retained: BaseException, output_dir: Path | None) -> None:
+def _note_sibling_failures(
+    futures: dict[Any, int], retained: BaseException, output_dir: Path | None, cwd: Path | None
+) -> None:
     """Keep non-retention worker failures that finished beside a retention error."""
     retention = runguard.retained_run_lock_error(retained)
     if retention is None:
@@ -1449,7 +1469,7 @@ def _note_sibling_failures(futures: dict[Any, int], retained: BaseException, out
         if future.done() and not future.cancelled():
             error = future.exception()
             if error is not None and runguard.retained_run_lock_error(error) is None:
-                _add_note(retention, f"sibling worker failure: {_describe_failure(error)}", output_dir)
+                _add_note(retention, f"sibling worker failure: {_describe_failure(error)}", output_dir, cwd)
 
 
 def _dag_placement_error(
@@ -1538,6 +1558,7 @@ def _dag_dispatch(
     route_dependencies: dict[str, tuple[str, ...]],
     route_held: dict[str, list[str]],
     output_dir: Path | None,
+    cwd: Path | None,
 ) -> list[WorkerResult]:
     """Ready-queue scheduler keyed on Assignment.covers over the route DAG.
 
@@ -1672,14 +1693,14 @@ def _dag_dispatch(
             cancel_active_work(future_to_index)
             executor.shutdown(wait=True, cancel_futures=True)
             runguard.raise_if_retained_run_lock(exc)
-            _raise_retained_future_error(future_to_index, exc, output_dir)
+            _raise_retained_future_error(future_to_index, exc, output_dir, cwd)
         raise
     except BaseException as exc:
         cancel_active_work(future_to_index)
         executor.shutdown(wait=True, cancel_futures=True)
         if not isinstance(exc, runguard.RetainRunLockError):
-            _raise_retained_future_error(future_to_index, exc, output_dir)
-        _note_sibling_failures(future_to_index, exc, output_dir)
+            _raise_retained_future_error(future_to_index, exc, output_dir, cwd)
+        _note_sibling_failures(future_to_index, exc, output_dir, cwd)
         raise
     else:
         executor.shutdown(wait=True)

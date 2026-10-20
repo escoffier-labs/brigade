@@ -21,7 +21,7 @@ from time import monotonic_ns as _monotonic_ns
 from time import sleep as _sleep
 from uuid import uuid4
 
-from . import localio, proc, receipt_schema
+from . import dirfd, localio, proc, receipt_schema, run_dirfd
 
 # Separate from journal-owned run.json; bounded even for many failing siblings.
 RETENTION_DIAGNOSTICS_NAME = "retention-diagnostics.json"
@@ -422,6 +422,40 @@ def _build_stale_lock_recovery_receipt(
     return receipt_schema.stamp_run_receipt(payload)
 
 
+def _read_retention_diagnostics(run_dir: Path, owner_token: object) -> list[str]:
+    if not isinstance(owner_token, str) or not owner_token:
+        return []
+    # Without both a held parent and nonblocking no-follow opens, diagnostics
+    # are optional. Never substitute a blocking pathname read on that platform.
+    if not dirfd.posix_available() or not getattr(os, "O_NONBLOCK", 0):
+        return []
+    try:
+        with run_dirfd.bound_run_dir(run_dir) as bound:
+            flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+            descriptor = bound.open_file((), RETENTION_DIAGNOSTICS_NAME, flags)
+            try:
+                if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                    return []
+                diagnostic_bytes = os.read(descriptor, 65537)
+            finally:
+                os.close(descriptor)
+        if len(diagnostic_bytes) > 65536:
+            return []
+        sidecar = json.loads(diagnostic_bytes)
+        if not isinstance(sidecar, dict) or sidecar.get("owner_token") != owner_token:
+            return []
+        candidates = sidecar.get("diagnostics")
+        if isinstance(candidates, list):
+            return [
+                diagnostic[:RETENTION_DIAGNOSTIC_CHAR_LIMIT]
+                for diagnostic in candidates[:RETENTION_DIAGNOSTICS_LIMIT]
+                if isinstance(diagnostic, str) and diagnostic
+            ]
+    except (OSError, ValueError, RecursionError):
+        pass
+    return []
+
+
 def _recover_run_artifact(owner: dict[str, object] | None, *, persist_recovery_provenance: bool = False) -> str:
     if owner is None:
         return "unattributable"
@@ -465,23 +499,7 @@ def _recover_run_artifact(owner: dict[str, object] | None, *, persist_recovery_p
             prior_status = status
             if status not in _NONTERMINAL_RUN_STATUSES:
                 return "terminal"
-    retention_diagnostics: list[str] = []
-    try:
-        # The writer caps notes below 64 KiB even with JSON escaping. Never
-        # let an unavailable, malformed, or oversized sidecar block recovery.
-        with run_json.with_name(RETENTION_DIAGNOSTICS_NAME).open("rb") as handle:
-            diagnostic_bytes = handle.read(65537)
-        if len(diagnostic_bytes) <= 65536:
-            sidecar = json.loads(diagnostic_bytes)
-            candidates = sidecar.get("diagnostics") if isinstance(sidecar, dict) else None
-            if isinstance(candidates, list):
-                retention_diagnostics = [
-                    diagnostic[:RETENTION_DIAGNOSTIC_CHAR_LIMIT]
-                    for diagnostic in candidates[:RETENTION_DIAGNOSTICS_LIMIT]
-                    if isinstance(diagnostic, str) and diagnostic
-                ]
-    except (OSError, ValueError, RecursionError):
-        pass
+    retention_diagnostics = _read_retention_diagnostics(run_json.parent, owner.get("owner_token"))
     recovered_at = datetime.now(timezone.utc).isoformat()
     stamped = _build_stale_lock_recovery_receipt(
         payload,
