@@ -47,3 +47,21 @@ def test_release_checklist_documents_five_components_25_native_assets_27_release
     assert "checksums.txt" in text
     # The stale 20-asset count must be gone.
     assert "20 native assets" not in text
+
+
+def test_cold_start_gate_description_names_the_flags_that_make_it_run():
+    import json
+
+    runbook = json.loads((ROOT / "docs/runbooks/cold-start-gate.json").read_text())
+
+    assert "--approved" in runbook["description"]
+    assert "BRIGADE_EXTRAS=1" in runbook["description"]
+
+
+def test_cold_start_gate_installs_into_a_sandboxed_pipx():
+    script = (ROOT / "docs/runbooks/cold-start-gate.sh").read_text()
+
+    install = script.index("pipx install")
+    assert script.index('export PIPX_HOME="$SANDBOX/pipx-home"') < install
+    assert script.index('export PIPX_BIN_DIR="$SANDBOX/pipx-bin"') < install
+    assert script.index('export PATH="$PIPX_BIN_DIR:$PATH"') < install

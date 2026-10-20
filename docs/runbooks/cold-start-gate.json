@@ -1,6 +1,6 @@
 {
   "id": "cold-start-gate",
-  "description": "Pre-tag release gate: executes the documented new-user journey (install, quickstart, handoff draft/lint, doctors, gitignore guards) in a throwaway sandbox. Run from the repo root: brigade runbook run docs/runbooks/cold-start-gate.json",
+  "description": "Pre-tag release gate: executes the documented new-user journey (install, quickstart, handoff draft/lint, doctors, gitignore guards) in a throwaway sandbox. Run from the repo root: BRIGADE_EXTRAS=1 brigade runbook run docs/runbooks/cold-start-gate.json --target . --approved",
   "approved": true,
   "allowed_commands": ["bash"],
   "steps": [
