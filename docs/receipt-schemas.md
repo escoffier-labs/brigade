@@ -1043,6 +1043,12 @@ bounded hops, and optional `message`, `truncated`, or child-run `run_lineage`.
 Each hop exposes only its source, relation, parent identity, link, status, and
 bounded diagnostic. Status is `ok`, `broken`, or `digest_mismatch`. Legacy
 artifacts without `causal_receipt` report `no lineage recorded`.
+Handoff lookup uses writer inboxes and configured dogfood or run handoff inboxes.
+Outcome lookup streams the ledger with a 1 MiB limit per row. Worker results
+without a companion receipt resolve as leaves from their recorded worker identity,
+with a 64 MiB limit on `worker-results.json`.
+Verify receipts and parent manifests use their IDs for direct lookup.
+Text output includes diagnostics and a notice when a walk limit is reached.
 
 ## Run View read contracts (#631)
 
