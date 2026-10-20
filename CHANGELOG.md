@@ -13,9 +13,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- `brigade work import --from-bd-jsonl` stages additive Beads export snapshots through the inbox gate with dependency proposals, producer versions, digest receipts, and a dated #770 re-check.
-- `brigade memory serve-mcp --http` and `brigade skills serve-mcp --http` serve the read-only MCP tools over a stateless loopback Streamable HTTP endpoint (`POST /mcp`, `GET /healthz`) for MCP hosts that cannot spawn a stdio process. The server binds only `127.0.0.1` or `::1`, requires a bearer token from `BRIGADE_MCP_HTTP_TOKEN` (32 characters or more, never a flag), rejects non-loopback `Host` and `Origin` headers, and caps request bodies at 1 MiB. `--stdio` is unchanged.
-- MCP registry metadata for the two read-only servers: `mcp-registry/memory/server.json` (`io.github.escoffier-labs/brigade-memory`) and `mcp-registry/skills/server.json` (`io.github.escoffier-labs/brigade-skills`), with matching `mcp-name` markers in the README. `scripts/version_sync.py` keeps both manifests on the release version.
 - Brigade agent plugin for Claude Code and Codex (`plugins/brigade/`): memory MCP tools, the `brigade-work` skill, a non-blocking SessionStart brief (Claude Code only), and an opt-in `enforce` skill.
 - Memory MCP tools `memory_status`, `work_brief`, and `write_handoff`; card tools now span the repo store and a user store under `BRIGADE_HOME`. Cards are served only when their real path stays inside the store, and `write_handoff` caps content at 256 KiB and facts and evidence at 50 items each.
 - `brigade memory serve-mcp --http` and `brigade skills serve-mcp --http` serve the MCP tools over a stateless loopback Streamable HTTP endpoint (`POST /mcp`, `GET /healthz`) for MCP hosts that cannot spawn a stdio process. The skills tools are read-only; the memory server also has `write_handoff`. The server binds only `127.0.0.1` or `::1`, requires a bearer token from `BRIGADE_MCP_HTTP_TOKEN` (32 characters or more, never a flag), rejects non-loopback `Host` and `Origin` headers, and caps request bodies at 1 MiB. `--stdio` is unchanged.
@@ -35,7 +32,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Beads imports deduplicate operational-only row changes, reject misplaced parent options, and record publication exceptions as failed receipts. Content changes remain additive review candidates.
 - Work readiness, claim, and explicit task runs fail closed on missing blockers or ancestor parents. JSON separates unfinished and missing dependencies, and explained output names edge-removal repairs. (Fixes #1857)
 - Readiness repair commands include the repository target and preserve literal edge endpoints when a live task shares their prefix. Campaign views omit member repair commands that use synthetic IDs. (Refs #1857)
 
