@@ -80,6 +80,7 @@ Thumbs.db
 !/scripts/verify_component_manifest_provenance.py
 !/scripts/verify_env.py
 !/scripts/version_sync.py
+!/scripts/sync_plugin_skills.py
 /skills/
 
 # Local plan/spec scratch dirs only. Reviewed planning artifacts ARE

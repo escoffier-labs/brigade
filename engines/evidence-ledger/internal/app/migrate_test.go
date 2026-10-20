@@ -481,6 +481,20 @@ func TestMigrateCommandRegistered(t *testing.T) {
 	}
 }
 
+func TestMigrateHelpAliasAfterTerminatorIsRejectedAsOperand(t *testing.T) {
+	withTempHome(t)
+	code, stdout, stderr := run("migrate", "codex-arguments", "--", "-h")
+	if code == 0 {
+		t.Fatalf("migrate codex-arguments -- -h must reject the operand, got exit 0 and stdout %q", stdout)
+	}
+	if strings.Contains(stdout, "usage: miseledger migrate codex-arguments") {
+		t.Fatalf("migrate codex-arguments -- -h printed help for a terminated operand: %q", stdout)
+	}
+	if !strings.Contains(stderr, "usage: miseledger migrate codex-arguments") {
+		t.Fatalf("expected invalid-operand usage on stderr, got %q", stderr)
+	}
+}
+
 func TestMigrateCodexArguments_FTSDifferentRowID(t *testing.T) {
 	withTempHome(t)
 	runOK(t, "init")

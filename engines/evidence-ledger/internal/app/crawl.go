@@ -72,7 +72,7 @@ func cmdCrawlSourceHarvest(mode, defaultSource string, args []string, out, errw 
 	if len(args) == 0 {
 		return fatalf(errw, "usage: miseledger crawl %s <path> [--source KIND] [--collection ID] [--json] [--dry-run] [sourceharvest options]", mode)
 	}
-	sourcePath := firstPositional(args)
+	sourcePath := sourceHarvestPath(args)
 	if sourcePath == "" {
 		return fatalf(errw, "usage: miseledger crawl %s <path> [--source KIND] [--collection ID] [--json] [--dry-run] [sourceharvest options]", mode)
 	}
@@ -95,7 +95,42 @@ func ensureValueFlag(args []string, name, value string) []string {
 	if value == "" || hasFlag(args, name) {
 		return args
 	}
-	return append(args, "--"+name, value)
+	return insertBeforeTerminator(args, "--"+name, value)
+}
+
+func ensureBoolFlag(args []string, name string) []string {
+	if hasFlag(args, name) {
+		return args
+	}
+	return insertBeforeTerminator(args, "--"+name)
+}
+
+func insertBeforeTerminator(args []string, flags ...string) []string {
+	for i, arg := range args {
+		if arg != "--" {
+			continue
+		}
+		out := make([]string, 0, len(args)+len(flags))
+		out = append(out, args[:i]...)
+		out = append(out, flags...)
+		return append(out, args[i:]...)
+	}
+	return append(args, flags...)
+}
+
+func sourceHarvestPath(args []string) string {
+	for i, arg := range args {
+		if arg == "--" {
+			if path := firstPositional(args[:i]); path != "" {
+				return path
+			}
+			if i+1 < len(args) {
+				return args[i+1]
+			}
+			return ""
+		}
+	}
+	return firstPositional(args)
 }
 
 func defaultCollection(sourceKind, sourcePath string) string {
