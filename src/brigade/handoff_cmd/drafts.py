@@ -832,7 +832,7 @@ def build_draft(
             raise ValueError(f"handoff draft path is a symlink: {path}")
         fd, tmp_name = tempfile.mkstemp(dir=inbox_path, prefix=f".{path.name}.", suffix=".tmp")
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
                 handle.write(text)
             os.replace(tmp_name, path)
         except BaseException:
