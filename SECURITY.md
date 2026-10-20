@@ -16,6 +16,13 @@ Please **do not** open a public GitHub issue for security problems. Email **me@s
 
 You should get an acknowledgment within 72 hours. If you do not, please follow up - the mail may have been filtered.
 
+## Ordinary bug reports
+
+Use `brigade bug report --summary "What happened and what you expected" --dry-run`
+to review a redacted diagnostic bundle. Bug reports are for ordinary defects.
+Report vulnerabilities using the private instructions above. The CLI refuses
+security reports and does not upload crashes automatically.
+
 ## In scope
 
 - Code execution, path traversal, or symlink-attack flaws in `brigade init`, `doctor`, `scrub`, or the ingester.

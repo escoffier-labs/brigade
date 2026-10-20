@@ -17,6 +17,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 
 - `brigade add`: 1 command path(s)
 - `brigade budgets` (extras): 2 command path(s)
+- `brigade bug`: 1 command path(s)
 - `brigade care`: 3 command path(s)
 - `brigade center` (extras): 30 command path(s)
 - `brigade chat` (extras): 7 command path(s)
@@ -83,6 +84,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade add`
 - `brigade budgets check` (extras)
 - `brigade budgets show` (extras)
+- `brigade bug report`
 - `brigade care install`
 - `brigade care status`
 - `brigade care uninstall`
