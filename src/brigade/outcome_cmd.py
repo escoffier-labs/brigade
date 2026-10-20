@@ -2580,15 +2580,7 @@ def doctor(*, target: Path, json_output: bool = False) -> int:
             "repair_requires_operator_confirm": True,
         }
     payload["completed_ledger"] = completed_ledger
-    transitions, skipped_receipt_names = outcome_projection.load_transition_report(target)
-    decisions = _decisions_dir(target)
-    payload["status_projection"] = outcome_projection.status_projection_report(
-        transitions,
-        load_status(target),
-        decisions_exist=decisions.is_dir() and any(decisions.glob("*.json")),
-        skipped_receipt_names=skipped_receipt_names,
-        skipped_receipts=len(skipped_receipt_names),
-    )
+    payload["status_projection"] = outcome_projection.load_status_projection_report(target)
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
@@ -2599,7 +2591,7 @@ def doctor(*, target: Path, json_output: bool = False) -> int:
         "status_projection: "
         f"reproducible={projection['reproducible']} legacy={projection['legacy']} "
         f"rebuilt={projection['rebuilt_count']} persisted={projection['persisted_count']} "
-        f"skipped_receipts={projection['skipped_receipts']}"
+        f"skipped_receipts={projection['skipped_receipts']} status_valid={projection['status_valid']}"
     )
     for line in outcome_projection.status_drift_lines(projection["drift"]):
         print(line)

@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Outcome doctor marks unreadable or malformed status maps as non-reproducible and counts decision receipts with invalid transition fields as skipped.
 - Scanner children run with `BRIGADE_NO_UPDATE_CHECK=1`. The detached update refresh a child started outlived its throwaway sandbox and recreated it when writing `update-notify.json`, leaving one `brigade-scanner-child-*` directory in the temp dir per scanner run.
 
 ## [0.30.0] - 2026-10-20

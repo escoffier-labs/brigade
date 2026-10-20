@@ -21,18 +21,45 @@ def load_transition_report(target: Path) -> tuple[list[core.StatusTransition], l
         new_status = payload.get("new_status")
         created_at = payload.get("created_at")
         route_policy = payload.get("route_policy")
-        if artifact_id and new_status and created_at:
+        if (
+            isinstance(artifact_id, str)
+            and artifact_id.strip()
+            and isinstance(new_status, str)
+            and new_status.strip()
+            and isinstance(created_at, str)
+            and localio.parse_iso_datetime(created_at) is not None
+        ):
             transitions.append(
                 core.StatusTransition(
-                    str(artifact_id),
-                    str(new_status),
-                    str(created_at),
+                    artifact_id,
+                    new_status,
+                    created_at,
                     route_policy=route_policy if isinstance(route_policy, dict) else None,
                 )
             )
         else:
             skipped.append(path.name)
     return transitions, skipped
+
+
+def load_status_projection_report(target: Path) -> dict[str, Any]:
+    """Read projection inputs without treating an invalid status file as empty."""
+    status_path = target / "memory" / "outcome" / "status.json"
+    payload = localio.read_json_dict(status_path)
+    artifacts = payload.get("artifacts") if payload is not None else None
+    status_valid = not status_path.exists() or (
+        isinstance(artifacts, dict) and all(isinstance(entry, dict) for entry in artifacts.values())
+    )
+    transitions, skipped = load_transition_report(target)
+    decisions = status_path.parent / "decisions"
+    return status_projection_report(
+        transitions,
+        artifacts if status_valid and isinstance(artifacts, dict) else {},
+        decisions_exist=decisions.is_dir() and any(decisions.glob("*.json")),
+        skipped_receipt_names=skipped,
+        skipped_receipts=len(skipped),
+        status_valid=status_valid,
+    )
 
 
 def status_drift(rebuilt: dict[str, dict], persisted: dict[str, dict]) -> list[dict[str, Any]]:
@@ -67,13 +94,15 @@ def status_projection_report(
     decisions_exist: bool,
     skipped_receipt_names: list[str],
     skipped_receipts: int,
+    status_valid: bool,
 ) -> dict[str, Any]:
     """Describe whether decision receipts reproduce the persisted status map."""
     rebuilt = core.fold_status(transitions)
-    legacy = bool(persisted) and not decisions_exist
+    legacy = status_valid and bool(persisted) and not decisions_exist
     drift = [] if legacy else status_drift(rebuilt, persisted)
     return {
-        "reproducible": not drift and not legacy and skipped_receipts == 0,
+        "reproducible": status_valid and not drift and not legacy and skipped_receipts == 0,
+        "status_valid": status_valid,
         "rebuilt_count": len(rebuilt),
         "persisted_count": len(persisted),
         "drift": drift,

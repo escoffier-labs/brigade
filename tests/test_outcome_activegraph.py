@@ -120,16 +120,73 @@ def test_outcome_doctor_text_reports_status_projection(tmp_path, capsys):
     assert "status_projection: reproducible=True legacy=False" in capsys.readouterr().out
 
 
-def test_outcome_doctor_counts_and_names_malformed_decision_receipt(tmp_path, capsys):
+@pytest.mark.parametrize(
+    "contents",
+    ['{"artifacts":', "[]", "{}", '{"artifacts": []}', '{"artifacts": {"card-x": "promoted"}}'],
+    ids=["invalid-json", "non-object", "missing-artifacts", "non-object-artifacts", "non-object-entry"],
+)
+def test_outcome_doctor_rejects_invalid_status_without_decisions(tmp_path, capsys, contents):
+    status_path = tmp_path / "memory" / "outcome" / "status.json"
+    status_path.parent.mkdir(parents=True)
+    status_path.write_text(contents)
+
+    assert outcome_cmd.doctor(target=tmp_path, json_output=True) == 0
+    projection = json.loads(capsys.readouterr().out)["status_projection"]
+    assert projection["reproducible"] is False
+    assert projection["status_valid"] is False
+    assert projection["legacy"] is False
+    assert status_path.read_text() == contents
+
+    assert outcome_cmd.doctor(target=tmp_path) == 0
+    assert "status_projection: reproducible=False legacy=False" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize(
+    "receipt",
+    [
+        '{"artifact_id":',
+        *[
+            json.dumps(
+                {
+                    "artifact_id": "card-x",
+                    "new_status": "promoted",
+                    "created_at": "2026-06-20T00:00:00+00:00",
+                    field: value,
+                }
+            )
+            for field, value in [
+                ("artifact_id", 123),
+                ("new_status", ["promoted"]),
+                ("created_at", 123),
+                ("created_at", "not-a-timestamp"),
+                ("artifact_id", " "),
+                ("new_status", " "),
+            ]
+        ],
+    ],
+    ids=[
+        "invalid-json",
+        "numeric-id",
+        "list-status",
+        "numeric-timestamp",
+        "invalid-timestamp",
+        "blank-id",
+        "blank-status",
+    ],
+)
+def test_outcome_doctor_counts_and_names_malformed_decision_receipt(tmp_path, capsys, receipt):
     decisions = tmp_path / "memory" / "outcome" / "decisions"
     decisions.mkdir(parents=True)
     malformed = decisions / "broken.json"
-    malformed.write_text('{"artifact_id":')
+    malformed.write_text(receipt)
 
     assert outcome_cmd.doctor(target=tmp_path, json_output=True) == 0
     projection = json.loads(capsys.readouterr().out)["status_projection"]
     assert projection["skipped_receipts"] == 1
     assert "broken.json" in projection["skipped_receipt_names"]
+    assert projection["reproducible"] is False
+    assert projection["rebuilt_count"] == 0
+    assert projection["drift"] == []
 
     assert outcome_cmd.doctor(target=tmp_path) == 0
     assert "skipped_decision_receipts: broken.json" in capsys.readouterr().out
