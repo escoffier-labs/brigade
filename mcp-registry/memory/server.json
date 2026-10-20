@@ -1,0 +1,46 @@
+{
+  "$schema": "https://static.modelcontextprotocol.io/schemas/2025-12-11/server.schema.json",
+  "name": "io.github.escoffier-labs/brigade-memory",
+  "title": "Brigade Memory",
+  "description": "Read-only access to a repo's Brigade memory cards: list, keyword search, and read.",
+  "version": "0.30.0",
+  "websiteUrl": "https://brigade.tools",
+  "repository": {
+    "url": "https://github.com/escoffier-labs/brigade",
+    "source": "github"
+  },
+  "packages": [
+    {
+      "registryType": "pypi",
+      "registryBaseUrl": "https://pypi.org",
+      "identifier": "brigade-cli",
+      "version": "0.30.0",
+      "runtimeHint": "uvx",
+      "transport": {
+        "type": "stdio"
+      },
+      "packageArguments": [
+        {
+          "type": "positional",
+          "value": "memory"
+        },
+        {
+          "type": "positional",
+          "value": "serve-mcp"
+        },
+        {
+          "type": "positional",
+          "value": "--stdio"
+        },
+        {
+          "type": "named",
+          "name": "--target",
+          "description": "Repo or workspace whose memory cards to serve.",
+          "format": "filepath",
+          "default": ".",
+          "isRequired": false
+        }
+      ]
+    }
+  ]
+}

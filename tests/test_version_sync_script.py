@@ -46,3 +46,22 @@ def test_version_sync_checks_component_manifest_brigade_version(tmp_path):
     assert exit_code == 1
     assert manifest_rel in output
     assert "0.9.0" in output
+
+
+def test_version_sync_checks_and_rewrites_mcp_server_manifests(tmp_path, capsys):
+    repo = tmp_path / "repo"
+    (repo / "src/brigade/templates/components").mkdir(parents=True)
+    (repo / "mcp-registry/memory").mkdir(parents=True)
+    (repo / "pyproject.toml").write_text('[project]\nversion = "1.0.0"\n')
+    (repo / "src/brigade/__init__.py").write_text('__version__ = "1.0.0"\n')
+    (repo / "src/brigade/templates/components/manifest-v1.json").write_text('{"brigade_version": "1.0.0"}\n')
+    server = repo / "mcp-registry/memory/server.json"
+    server.write_text('{"version": "0.9.0", "packages": [{"identifier": "brigade-cli", "version": "1.0.0"}]}\n')
+
+    module = _load_version_sync_module(repo)
+    assert module.check("1.0.0") == 1
+    assert "mcp-registry/memory/server.json declares 0.9.0" in capsys.readouterr().err
+
+    assert module.write("1.0.0") == 0
+    assert module.check("1.0.0") == 0
+    assert server.read_text().count('"version": "1.0.0"') == 2
