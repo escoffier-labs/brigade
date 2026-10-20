@@ -249,7 +249,7 @@ def serve_stdio(
 - Create: `src/brigade/memory_scope.py`
 - Test: `tests/test_memory_scope.py`
 
-- [ ] Write the failing test `tests/test_memory_scope.py`:
+- [x] Write the failing test `tests/test_memory_scope.py`:
 
 ```python
 """Repo and user memory store resolution for the memory MCP server."""
@@ -318,8 +318,8 @@ def test_http_token_path_lives_under_brigade_home(home: Path):
     assert memory_scope.http_token_path() == (home / ".brigade").resolve() / "mcp-http.token"
 ```
 
-- [ ] Run it, watch it fail: `PY -m pytest tests/test_memory_scope.py -q -p no:cacheprovider`. Expect FAIL with `ImportError: cannot import name 'memory_scope'`.
-- [ ] Create `src/brigade/memory_scope.py`:
+- [x] Run it, watch it fail: `PY -m pytest tests/test_memory_scope.py -q -p no:cacheprovider`. Expect FAIL with `ImportError: cannot import name 'memory_scope'`.
+- [x] Create `src/brigade/memory_scope.py`:
 
 ```python
 """Resolve the memory stores an MCP session reads and writes.
@@ -398,8 +398,8 @@ def resolve(*, target: Path | None = None, cwd: Path | None = None) -> Resolutio
 
 The user store passes `BRIGADE_HOME` as the memory-care target with the default config, so its cards live at `$BRIGADE_HOME/memory/cards/` (the default `card_roots`). That is the layout the spec names.
 
-- [ ] Run to green: same command. Expect 6 PASS.
-- [ ] Commit: `git add src/brigade/memory_scope.py tests/test_memory_scope.py && git commit -m "feat(memory): resolve repo and user memory stores"`
+- [x] Run to green: same command. Expect 6 PASS.
+- [x] Commit: `git add src/brigade/memory_scope.py tests/test_memory_scope.py && git commit -m "feat(memory): resolve repo and user memory stores"`
 
 ---
 
