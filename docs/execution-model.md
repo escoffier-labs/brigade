@@ -45,7 +45,7 @@ separate Brigade stop subcommand for the foreground servers.
 | --- | --- | --- | --- |
 | Fleet hub | `brigade fleet serve --host 127.0.0.1` | Ctrl+C in the serving terminal, or stop the owning service. | Accepted events, claims, and coordination state in the hub SQLite database selected by `--db`. Local run journals remain authoritative. The hub also runs its Grok Bot expiry sweeper. |
 | Run View | `brigade runs serve` | Ctrl+C in the serving terminal. | Reads existing run artifacts and streams events. It does not write a view receipt. |
-| Center | `brigade center serve` | Ctrl+C in the serving terminal. | Reads local status and activity records. It does not write a view receipt. |
+| Center | `BRIGADE_EXTRAS=1 brigade center serve` | Ctrl+C in the serving terminal. | Reads local status and activity records. It does not write a view receipt. |
 | Managed local tool runtime | `brigade tools runtime start <runtime-id>` | `brigade tools runtime stop <runtime-id>` | PID and runtime metadata under `.brigade/tools/runtime/`, with stdout and stderr logs. Configured paths can override the PID and log locations. Stop updates metadata. |
 | Memory MCP over stdio | `brigade memory serve-mcp --stdio` | The MCP host closes stdin or terminates its child. Ctrl+C also stops an interactive process. | Read-only card responses over stdout. No per-read verification receipt. |
 | Memory MCP over HTTP | `brigade memory serve-mcp --http` | Ctrl+C, or stop the owning service. | Read-only card responses over loopback HTTP. No per-read verification receipt. |
