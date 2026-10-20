@@ -6,8 +6,9 @@ import io
 import json
 from pathlib import Path
 
-from brigade import memory_cmd
-from brigade.memory_cmd import MemoryCareConfig, _mcp_card_resources, _mcp_read_card, load_config
+import pytest
+
+from brigade import cli, memory_cmd, memory_mcp_core
 
 
 def _card(target: Path, name: str, title: str, body: str, tags: str | None = None) -> None:
@@ -163,32 +164,31 @@ def test_memory_care_status_reports_search_recall(tmp_path: Path, capsys):
     assert "search_recall: searches=2 followup_rate=0.5" in human
 
 
-def test_card_mcp_resources_and_read_are_scoped(tmp_path: Path):
+def test_card_mcp_resources_and_read_are_scoped(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("BRIGADE_HOME", str(tmp_path / "brigade-home"))
     _card(tmp_path, "a.md", "Card A", "hello world")
-    config = load_config(tmp_path) or MemoryCareConfig()
-    resources = _mcp_card_resources(tmp_path, config)
-    assert any(r["uri"] == "card://memory/cards/a.md" for r in resources)
-    text, mime = _mcp_read_card(tmp_path, config, "card://memory/cards/a.md")
+    tools = memory_mcp_core.MemoryTools(target=tmp_path)
+    assert any(r["uri"] == "card://memory/cards/a.md" for r in tools.resources())
+    text, mime = tools.read_resource("card://memory/cards/a.md")
     assert text is not None and "hello world" in text and mime == "text/markdown"
-    # path traversal outside the card roots is refused
-    assert _mcp_read_card(tmp_path, config, "card://../secret.md") == (None, None)
+    assert tools.read_resource("card://../secret.md") == (None, None)
 
 
-def test_card_mcp_read_refuses_symlink_escape(tmp_path: Path):
+def test_card_mcp_read_refuses_symlink_escape(tmp_path: Path, monkeypatch):
+    monkeypatch.setenv("BRIGADE_HOME", str(tmp_path / "brigade-home"))
     target = tmp_path / "ws"
     _card(target, "real.md", "Real", "ok content")
-    secret = tmp_path / "secret.txt"  # outside the workspace
+    secret = tmp_path / "secret.txt"
     secret.write_text("TOPSECRET")
     (target / "memory" / "cards" / "evil.md").symlink_to(secret)
-    config = load_config(target) or MemoryCareConfig()
-    # a .md symlink pointing outside the card root is not a read primitive
-    assert _mcp_read_card(target, config, "card://memory/cards/evil.md") == (None, None)
-    # the real card still reads fine
-    text, _ = _mcp_read_card(target, config, "card://memory/cards/real.md")
+    tools = memory_mcp_core.MemoryTools(target=target)
+    assert tools.read_resource("card://memory/cards/evil.md") == (None, None)
+    text, _ = tools.read_resource("card://memory/cards/real.md")
     assert text is not None and "ok content" in text
 
 
 def test_card_mcp_stdio_roundtrip(tmp_path: Path, monkeypatch, capsys):
+    monkeypatch.setenv("BRIGADE_HOME", str(tmp_path / "brigade-home"))
     _card(tmp_path, "a.md", "Card A", "hello mcp")
     requests = (
         "\n".join(
@@ -211,6 +211,33 @@ def test_card_mcp_stdio_roundtrip(tmp_path: Path, monkeypatch, capsys):
     rc = memory_cmd.serve_mcp(target=tmp_path, stdio=True)
     assert rc == 0
     responses = [json.loads(line) for line in capsys.readouterr().out.strip().splitlines()]
-    assert responses[0]["result"]["serverInfo"]["name"] == "brigade-memory-readonly"
+    assert responses[0]["result"]["serverInfo"]["name"] == "brigade-memory"
     assert any(r["uri"] == "card://memory/cards/a.md" for r in responses[1]["result"]["resources"])
     assert "hello mcp" in responses[2]["result"]["content"][0]["text"]
+
+
+def test_serve_mcp_cli_refuses_non_loopback_and_both_transports(tmp_path: Path, monkeypatch, capsys):
+    monkeypatch.setenv("BRIGADE_MCP_HTTP_TOKEN", "t" * 40)
+    assert cli.main(["memory", "serve-mcp", "--target", str(tmp_path), "--http", "--host", "0.0.0.0"]) == 2
+    assert "loopback" in capsys.readouterr().err
+    assert cli.main(["memory", "serve-mcp", "--target", str(tmp_path), "--port", "8931"]) == 2
+    assert "require --http" in capsys.readouterr().err
+    with pytest.raises(SystemExit):
+        cli.main(["memory", "serve-mcp", "--stdio", "--http"])
+
+
+def test_serve_mcp_contract_lists_six_tools(tmp_path: Path, monkeypatch, capsys):
+    monkeypatch.setenv("BRIGADE_HOME", str(tmp_path / "bh"))
+    assert cli.main(["memory", "serve-mcp", "--target", str(tmp_path), "--json"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["read_only"] is False
+    assert len(payload["tools"]) == 6
+    assert [s["origin"] for s in payload["stores"]] == ["repo", "user"]
+
+
+@pytest.mark.parametrize("mode", [[], ["--json"], ["--stdio"], ["--http"]])
+def test_serve_mcp_explicit_target_must_be_a_directory(tmp_path: Path, monkeypatch, capsys, mode):
+    monkeypatch.setenv("BRIGADE_HOME", str(tmp_path / "bh"))
+    missing = tmp_path / "missing"
+    assert cli.main(["memory", "serve-mcp", "--target", str(missing), *mode]) == 2
+    assert f"error: --target is not a directory: {missing}" in capsys.readouterr().err

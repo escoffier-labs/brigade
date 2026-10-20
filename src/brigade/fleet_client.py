@@ -106,6 +106,7 @@ if TYPE_CHECKING:
 
 from . import fleet_claim_lifecycle as _claim_lifecycle
 from . import fleet_claim_target as _claim_target
+from .fleet_client_flush import flush_locked as _flush_locked
 from .fleet_client_spool import append_record as _append_spool_record
 from .fleet_client_spool import ensure_directory as _ensure_spool_directory
 from .fleet_client_spool import fsync_parent as _fsync_spool_parent
@@ -263,8 +264,7 @@ def load_fleet_config() -> dict[str, str]:
     (``BRIGADE_FLEET_NODE_TOKEN`` / ``[fleet] node_token_file``), or, when
     none is configured, the shared admin token (``BRIGADE_FLEET_TOKEN`` /
     ``[fleet] token_file``) — the deprecated shared-token mode, logged as
-    one WARNING per process when a hub is configured. See
-    ``load_fleet_settings`` for precedence.
+    one WARNING per process when a hub is configured. See ``load_fleet_settings`` for precedence.
     """
     global _SHARED_TOKEN_WARNED
     settings = load_fleet_settings()
@@ -274,7 +274,7 @@ def load_fleet_config() -> dict[str, str]:
         if settings["hub_url"] and not _SHARED_TOKEN_WARNED:
             _SHARED_TOKEN_WARNED = True
             _LOG.warning(_SHARED_TOKEN_WARNING)
-    return {"hub_url": settings["hub_url"], "token": token}
+    return _claim_lifecycle._FleetConfig(settings, token)
 
 
 def _read_token_file(raw_path: str) -> str:
@@ -774,54 +774,6 @@ def _spool_append_locked(
     return True
 
 
-def _flush_locked(
-    path: Path,
-    hub: str,
-    token: str,
-    *,
-    max_batches: int | None,
-    timeout: float,
-    dir_fd: int | None = None,
-    preserve_poison: bool = False,
-    on_delivered: Callable[[list[dict[str, Any]]], None] | None = None,
-) -> int:
-    events = _read_spool(path, dir_fd=dir_fd)
-    if not events:
-        if dir_fd is not None:
-            try:
-                os.unlink(path.name, dir_fd=dir_fd)
-            except FileNotFoundError:
-                pass
-        else:
-            path.unlink(missing_ok=True)
-        return 0
-    index = 0
-    delivered = 0
-    batches = 0
-    while index < len(events) and (max_batches is None or batches < max_batches):
-        batch = events[index : index + FLUSH_BATCH_SIZE]
-        try:
-            _post_events(hub, token, batch, timeout=timeout)
-        except _PoisonResponse as exc:
-            if preserve_poison:
-                break
-            _LOG.warning("fleet spool %s: dropping %d event(s): %s", path, len(batch), exc)
-            index += len(batch)
-            batches += 1
-            continue
-        except Exception:
-            break
-        index += len(batch)
-        delivered += len(batch)
-        if on_delivered is not None:
-            on_delivered(batch)
-        batches += 1
-    if index == 0:
-        return 0
-    _write_spool_atomic(path, events[index:], dir_fd=dir_fd)
-    return delivered
-
-
 def flush_spool(
     node_id: str,
     *,
@@ -832,9 +784,10 @@ def flush_spool(
 ) -> int:
     """Re-POST spooled events in order, ``FLUSH_BATCH_SIZE`` per request.
 
-    Delivered (or poison-dropped) events are removed from the spool via an
-    atomic rewrite; undelivered ones keep their order so the next flush
-    resumes where this one stopped. A flush that makes no progress leaves
+    Delivered events are removed from the spool via an atomic rewrite. A
+    rejected batch is bisected so only the rejected events move to the
+    bounded dead letter (``fleet_client_flush``); undelivered ones keep their
+    order so the next flush resumes where this one stopped. A flush that makes no progress leaves
     the file untouched. Returns the number of delivered events. Never raises
     for network failures.
     """
@@ -855,8 +808,11 @@ def report_event(event: dict[str, Any], *, base_path: Path | None = None, node_i
     """Report with local identity and durable spool, preserving the public bool API.
 
     Origin overrides remain ignored. Interrupts propagate only after a
-    best-effort spool write. One request per call, with a bounded deadline.
-    ``report_event_detailed`` captures the durable outcome for receipt callers
+    best-effort spool write. Without a spool this is one request with a
+    bounded deadline. With a spool it is one batch request, plus isolation
+    of a rejected batch capped at ``REPORT_TIMEOUT_SECONDS`` in total; on a
+    hub too slow to isolate within that, the spool waits for an explicit
+    ``fleet flush``. ``report_event_detailed`` captures the durable outcome for receipt callers
     without changing this established signature or return type.
     """
     from .fleet_event_report import report
@@ -1599,6 +1555,7 @@ def _schedule_orphan_release(
     ttl_seconds: int,
     hub_url: str | None = None,
     token: str | None = None,
+    connect: Callable[[], dict[str, Any]] | None = None,
 ) -> None:
     _claim_lifecycle._schedule_orphan_release(
         target,
@@ -1608,6 +1565,7 @@ def _schedule_orphan_release(
         ttl_seconds=ttl_seconds,
         hub_url=hub_url,
         token=token,
+        connect=connect,
     )
 
 
@@ -1725,9 +1683,9 @@ def repo_claim(
     if not hub_configured:
         yield ClaimDecision(granted=False, reason="no-hub")
         return
-    # One authority and credential for the entire claim, including cleanup
-    # scheduled after guarded work has changed process configuration.
-    connection: dict[str, Any] = {"hub_url": config["hub_url"], "token": config.get("token", "")}
+    connection = _claim_lifecycle._bound_connection(
+        config["hub_url"], config.get("token", ""), shared=getattr(config, "shared_token", None)
+    )
     node_id = resolve_node_id(base_path)
     if not _node_id_is_claimable(node_id):
         _LOG.warning("no usable fleet node identity (%r); relying on the local run lock alone for %s", node_id, target)
@@ -1742,21 +1700,21 @@ def repo_claim(
         "conductor": conductor,
         "ttl_seconds": ttl_seconds,
         "lock_owner": lock_owner,
-        **connection,
+        **connection(),
     }
     request_start = time.monotonic()
     decision = acquire_claim(target, supersede_dead_owner=supersede_dead_owner, **acquire_kwargs)
     ambiguous_initial_acquire = not decision.granted and decision.reason == "hub-unavailable"
     if not decision.granted and decision.reason in ("hub-unavailable", "missing"):
-        # One retry with the same fencing token: a lost response may have
-        # committed the row (idempotent for this holder), and a 409 with no
-        # owner means the target freed mid-request.
+        # One retry, same fencing token, current credential: a lost response may have committed the row
+        # (idempotent for this holder), and a 409 with no owner means the target freed mid-request.
         request_start = time.monotonic()
+        acquire_kwargs.update(connection())
         decision = acquire_claim(target, supersede_dead_owner=supersede_dead_owner, **acquire_kwargs)
     if not decision.granted and decision.reason == "quota":
         if ambiguous_initial_acquire:
             _schedule_orphan_release(
-                target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds, **connection
+                target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds, connect=connection
             )
         raise FleetClaimQuotaError(f"fleet hub claim quota refused {target!r}: {decision.detail}")
     if not decision.granted and decision.reason == "auth-failed":
@@ -1772,7 +1730,7 @@ def repo_claim(
     if not decision.granted and decision.reason == "hub-unavailable":
         _LOG.warning("fleet hub unreachable (%s); falling back to the local run lock for %s", decision.detail, target)
         _schedule_orphan_release(
-            target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds, **connection
+            target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds, connect=connection
         )
         yield decision
         return
@@ -1786,14 +1744,14 @@ def repo_claim(
             # still in flight. Preserve degraded admission and fence any
             # later commit using the original retry holder token.
             _schedule_orphan_release(
-                target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds, **connection
+                target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds, connect=connection
             )
         yield decision
         return
     if not decision.granted:
         if decision.reason == "claim-fence-refused" and ambiguous_initial_acquire:
             _schedule_orphan_release(
-                target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds, **connection
+                target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds, connect=connection
             )
         if decision.reason in TERMINAL_CLAIM_REFUSALS:
             raise FleetClaimHeldError(f"fleet claim on {target!r} refused: {decision.reason}", owner=decision.owner)
@@ -1821,7 +1779,7 @@ def repo_claim(
         pending_orphan_release.set()
 
     def _release_on_exit(*, admission_refused: bool = False) -> None:
-        release_outcome = release_claim(target, holder=holder, node_id=node_id, conductor=conductor, **connection)
+        release_outcome = release_claim(target, holder=holder, node_id=node_id, conductor=conductor, **connection())
         if ambiguous_initial_acquire or (
             pending_orphan_release.is_set() and release_outcome.reason in UNCERTAIN_CLEANUP_REASONS
         ):
@@ -1834,7 +1792,7 @@ def repo_claim(
             for _ in range(EXIT_ORPHAN_RELEASE_RETRIES):
                 time.sleep(CLAIM_TIMEOUT_SECONDS)
                 release_outcome = release_claim(
-                    target, holder=holder, node_id=node_id, conductor=conductor, **connection
+                    target, holder=holder, node_id=node_id, conductor=conductor, **connection()
                 )
                 if not ambiguous_initial_acquire and release_outcome.reason not in UNCERTAIN_CLEANUP_REASONS:
                     break
@@ -1846,10 +1804,9 @@ def repo_claim(
                     release_outcome.reason,
                 )
         if release_outcome.reason in CLEANUP_RETRY_REASONS:
-            # A refused release has not retired this holder. Keep cleanup
-            # alive after both ordinary exit and rejected admission.
+            # Retain the bound connection while retrying refused releases after exit or rejected admission.
             _schedule_orphan_release(
-                target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds, **connection
+                target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds, connect=connection
             )
         # This window cannot fence a server request that commits beyond it
         # (#1189), even when every release received a positive acknowledgement.
@@ -1906,10 +1863,10 @@ def repo_claim(
     )
 
     def _release_rejected_grant() -> None:
-        release_outcome = release_claim(target, holder=holder, node_id=node_id, conductor=conductor, **connection)
+        release_outcome = release_claim(target, holder=holder, node_id=node_id, conductor=conductor, **connection())
         if release_outcome.reason in CLEANUP_RETRY_REASONS:
             _schedule_orphan_release(
-                target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds, **connection
+                target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds, connect=connection
             )
 
     def _renew_loop() -> None:
@@ -1920,7 +1877,7 @@ def repo_claim(
                 return
             attempt_start = time.monotonic()
             outcome = renew_claim(
-                target, holder=holder, node_id=node_id, conductor=conductor, ttl_seconds=ttl_seconds, **connection
+                target, holder=holder, node_id=node_id, conductor=conductor, ttl_seconds=ttl_seconds, **connection()
             )
             if not outcome.granted and outcome.reason == "missing":
                 # Check deadline and authority, and mark the possible orphan,
@@ -1928,7 +1885,7 @@ def repo_claim(
                 if not lease.active(pending_orphan=pending_orphan_release):
                     return
                 attempt_start = time.monotonic()
-                outcome = acquire_claim(target, **acquire_kwargs)
+                outcome = acquire_claim(target, **{**acquire_kwargs, **connection()})
             next_request = attempt_start + _claim_renew_interval(ttl_seconds)
             if outcome.granted:
                 if not lease.confirm(attempt_start, on_rejected=_release_rejected_grant):
