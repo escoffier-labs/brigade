@@ -2142,6 +2142,33 @@ Main's transport API (`src/brigade/mcp_server.py`): `handle_message(message, *, 
 
 ---
 
+### Task 14: Fixes from the Opus final review
+
+Added after an independent read-only Opus 5.5 review of `git diff origin/main...HEAD` at `a7b3bcad4` (no blockers, 7 should-fix, several nits). Each behavior fix gets a failing test first.
+
+**Files:** `src/brigade/memory_scope.py`, `src/brigade/memory_mcp_core.py`, `src/brigade/memory_cmd.py`, `plugins/brigade/hooks/session-start.sh`, `plugins/brigade/skills/enforce/SKILL.md`, `scripts/sync_plugin_skills.py`, `README.md`, `docs/technical-guide.md`, `docs/agent-plugin.md`, `docs/phase-agent-plugin.md`, `docs/phase-agent-plugin-plan.md` (Task 12 text only), `CHANGELOG.md`, and the matching tests.
+
+- [ ] R1 repo detection: with no `--target`, the walk up from the cwd also treats a directory containing `.brigade/memory-care.toml` as the repo store (still never the home directory, still stopping at the nearest marker). `repo_wired` keeps meaning `.brigade/config.json` resolved through `resolve_wired_target`. Add a test against real files (no mock) for: memory-care-only repo detected, nested repo stops at the nearest marker, home directory skipped. Update the spec's resolution paragraph.
+- [ ] R2 handoff destination: `write_handoff` picks the repo inbox whenever `resolution.repo_root` is set, even when the repo store was dropped for an invalid memory-care config. Test: wired repo plus invalid config writes to the repo inbox with `origin: repo`.
+- [ ] R3 explicit target: `serve_mcp` exits 2 with `error: --target is not a directory: <path>` when an explicit `--target` is not an existing directory (all modes).
+- [ ] R4 `work_brief`: build the four keys (`git`, `active_session`, `latest_session`, `next`) from the cheap helpers the full brief uses (for example `_git_snapshot`, `_active_session_info`, `_collect_sessions`, `_resolve_next_task`; confirm the real names and signatures in `src/brigade/work_cmd/`), so the tool never contacts the fleet hub or publishes presence. If no cheap path exists for a key, return null for it rather than calling `_brief_payload`. Separately, `MemoryTools.call()` catches any other `Exception` and returns `"<tool> failed: <ExcType>: <msg>"` as a tool error, so one bad call cannot end the stdio server.
+- [ ] R5 enforce skill and guide: the full enforced hooks (verify capture, raw-check blocking, Stop gate) are installed for Claude Code only; say what Codex gets from `brigade init` (skills and AGENTS guidance, no hooks). Remove the claim that nothing is committed; say `--git-exclude` keeps Brigade's own files out of git and that `.claude/settings.json` may be tracked in some repos.
+- [ ] R6 guide accuracy: `docs/agent-plugin.md` must not claim the `brigade-work` skill tells agents to call the `work_brief` tool. Say Codex users can call `work_brief` for the same brief. Do not edit the canonical skill.
+- [ ] R7 docs: `README.md` and `docs/technical-guide.md` no longer call the memory MCP server read-only or list three tools; the skills server stays read-only. In `docs/agent-plugin.md`, state that the marketplace install works from the release that adds the marketplace entries (0.31.0) and that until then `plugins/brigade` can be loaded locally only with the `command` swapped to a `brigade` CLI built from this branch. Document that user-store handoffs are plain files under `$BRIGADE_HOME/memory/handoffs` and can be checked with `brigade handoff lint <file>` (confirm the exact command exists first).
+- [ ] Nits:
+  - `session-start.sh`: use `${HOME:-}` so an unset HOME still exits 0.
+  - `memory_status.handoff_inbox`: report where `write_handoff` would actually write (the repo inbox alias, or the user-store path).
+  - `UNWIRED_HINT`: only say "uses the user store" when no repo store is active.
+  - Errors from `build_draft` surfaced through the tool name tool arguments (`action`, `title`, `summary`, `target_card`, `target_document`), not CLI flags.
+  - `_search_cards`: search each store with that store's own config (`store.config`), so search and `get_card` agree.
+  - `sync_plugin_skills.py`: fix the docstring to match the real flags.
+  - Stale text: spec line 3 ("will go in"), the spec's `proposals/` layout, the spec's npm 0.29.0 line, and Task 12's 0.30.0 references now say 0.31.0.
+  - Tests: `test_memory_status_reports_stores_and_config_error` adds a repo card before asserting the degraded count; `test_build_draft_creates_private_file_without_following_symlinks` drops the unasserted `force=True` tail; the CLI test drops assertions about `--print-token-path`/`--bearer-file`.
+- [ ] Run to green: the Task 13 pytest list plus `tests/test_work_cmd_session.py` if `work_brief` helpers come from there; `scripts/version_sync.py --check`; `scripts/sync_plugin_skills.py`; ruff check, ruff format --check, mypy on changed modules; `bash -n plugins/brigade/hooks/session-start.sh`.
+- [ ] Commit: `fix(memory): address final review findings for the agent plugin`
+
+---
+
 ### Task 12: Publish the marketplace entries (with the 0.30.0 release PR)
 
 Run this task inside the release PR that bumps `pyproject.toml` to the first version containing Tasks 1-9. Do not run it before.
