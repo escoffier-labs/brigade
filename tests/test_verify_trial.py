@@ -425,6 +425,14 @@ def test_project_trial_dot_directory_scope_glob_keeps_leading_dot(scoreable_targ
     assert projection.eligible is True
 
 
+@pytest.mark.parametrize("config", [("diff.mnemonicPrefix", "true"), ("diff.noprefix", "true")])
+def test_project_trial_scope_check_ignores_diff_prefix_config(scoreable_target, monkeypatch, config):
+    subprocess.run(["git", "config", *config], cwd=scoreable_target, check=True)
+    receipt = _run_scoped_patch_verify(scoreable_target, monkeypatch, scope_globs=["skills/brigade-work/**"])
+    projection = verify_trial.project_trial(receipt, target=scoreable_target)
+    assert projection.eligible is True, projection.reason
+
+
 def test_project_trial_without_scope_globs_ignores_extra_patch_paths(scoreable_target, monkeypatch):
     receipt = _run_scoped_patch_verify(
         scoreable_target, monkeypatch, scope_globs=None, extra_paths=[".vale-styles/Slop/Banlist.yml"]

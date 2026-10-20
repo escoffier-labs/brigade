@@ -1675,8 +1675,13 @@ def changes_relative_to_snapshot(cwd: Path | None, snapshot: PreRunSnapshot | No
     return changed, untracked
 
 
+# Pin a/ and b/ so diff.mnemonicPrefix or diff.noprefix cannot change the
+# header paths that eligibility and owned-delta parsing read.
+_PATCH_PREFIX_ARGS = ("--src-prefix=a/", "--dst-prefix=b/")
+
+
 def _tracked_diff(cwd: Path) -> tuple[str, int]:
-    result = _git(cwd, "diff", "--binary", "HEAD")
+    result = _git(cwd, "diff", "--binary", *_PATCH_PREFIX_ARGS, "HEAD")
     if result.code != 0:
         detail = result.stderr.strip() or result.stdout.strip()
         raise RunGuardError(f"failed to collect tracked diff: {detail}")
@@ -1718,7 +1723,9 @@ def _untracked_files(cwd: Path, *, max_bytes: int | None = None) -> list[str]:
 
 
 def _untracked_diff(cwd: Path, relpath: str) -> str:
-    result = proc.run(["git", "diff", "--no-index", "--binary", "--", "/dev/null", relpath], cwd=cwd)
+    result = proc.run(
+        ["git", "diff", "--no-index", "--binary", *_PATCH_PREFIX_ARGS, "--", "/dev/null", relpath], cwd=cwd
+    )
     if result.code not in {0, 1}:
         detail = result.stderr.strip() or result.stdout.strip()
         raise RunGuardError(f"failed to collect untracked diff for {relpath}: {detail}")
