@@ -86,6 +86,9 @@ func TestHelpFlagNamesTheSubcommandUsage(t *testing.T) {
 		{[]string{"adapter", "grok", "-h"}, "miseledger adapter grok <path-or-dir> --out <file|->"},
 		{[]string{"crawl", "docs", "--help"}, "miseledger crawl docs <path>"},
 		{[]string{"doctor", "--help"}, "[--mcp] [--archive]"},
+		{[]string{"migrate", "--help"}, "full-table LIKE scan"},
+		{[]string{"migrate", "codex-arguments", "-h"}, "full-table LIKE scan"},
+		{[]string{"explain", "-h"}, "--code-reference REF"},
 	}
 	for _, tc := range tests {
 		withTempHome(t)

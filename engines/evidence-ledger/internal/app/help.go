@@ -53,7 +53,7 @@ var helpUsage = map[string][]string{
 	"evidence":                   {"miseledger evidence <query>|show <bundle-id>|list [--json] [--markdown] [--include-related] [--include-artifact-text] [--limit N] [--source KIND] [--project NAME] [--from DATE] [--to DATE]"},
 	"evidence show":              {"miseledger evidence show <bundle-id> [--json] [--markdown]"},
 	"evidence list":              {"miseledger evidence list [--json]"},
-	"explain":                    {"miseledger explain <query> [--json] [--limit N] " + filterFlags},
+	"explain":                    {"miseledger explain <query> [--json] [--limit N] " + filterFlags + " [--code-reference REF]"},
 	"export":                     {"miseledger export markdown --out <dir>"},
 	"relations":                  {"miseledger relations backfill [--json]"},
 	"stats":                      {"miseledger stats [--json]"},
@@ -64,7 +64,6 @@ var helpUsage = map[string][]string{
 	"prune imports":              {"miseledger prune imports --before DATE [--json] [--dry-run]"},
 	"prune scans":                {"miseledger prune scans --missing [--json] [--dry-run]"},
 	"prune policy":               {"miseledger prune policy [--policy default|FILE] [--json] [--dry-run] [--apply --export PATH]"},
-	"migrate":                    {"miseledger migrate codex-arguments [--dry-run] [--apply] [--json]"},
 	"sql":                        {"miseledger sql <select> [--json]"},
 	"doctor":                     {"miseledger doctor [--json] [--mcp] [--archive]", "miseledger doctor provenance backfill [--json] [--batch N] [--after ID]"},
 	"doctor provenance":          {"miseledger doctor provenance backfill [--json] [--batch N] [--after ID]"},
@@ -76,7 +75,6 @@ var helpUsage = map[string][]string{
 	"crawl granola":              {nativeExporters["granola"].usage},
 	"crawl notion":               {nativeExporters["notion"].usage},
 	"crawl gmail":                {nativeExporters["gmail"].usage},
-	"migrate codex-arguments":    {"miseledger migrate codex-arguments [--dry-run] [--apply] [--json]"},
 	"doctor provenance backfill": {"miseledger doctor provenance backfill [--json] [--batch N] [--after ID]"},
 	"relations backfill":         {"miseledger relations backfill [--json]"},
 	"export markdown":            {"miseledger export markdown --out <dir>"},
@@ -112,6 +110,10 @@ func wantsHelp(args []string) bool {
 // writeCommandHelp prints usage for the longest command path in args. It runs
 // before dispatch so help never opens or creates the archive.
 func writeCommandHelp(w io.Writer, cmd *commandSpec, args []string) {
+	if cmd.name == "migrate" {
+		writeMigrateHelp(w)
+		return
+	}
 	path := []string{cmd.name}
 	for _, arg := range args {
 		if strings.HasPrefix(arg, "-") {
