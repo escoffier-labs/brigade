@@ -11,14 +11,14 @@ import shutil
 import subprocess
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
 from . import __version__
 from .bug_collect import collect, collect_doctor
-from .bug_redaction import Redactor, ReportBlocked, assert_clean
+from .bug_redaction import Redactor, ReportBlocked, assert_clean, assert_terminal_safe
 from .component_paths import data_root
 from .localio import canonical_json_digest, write_json, write_text_atomic
 from .inbox_lock import held_file_lock
@@ -34,8 +34,9 @@ _SECURITY = re.compile(
     r"(?:SQL|command|code|shell|LDAP|template) injection|(?:(?:remote|arbitrary) )?code execution|"
     r"(?:authentication|authorization|auth) bypass|privilege escalation|cross[- ]site (?:scripting|request forgery)|"
     r"XSS|CSRF|SSRF|RCE|XXE|insecure deserialization|directory traversal|path traversal|"
-    r"symlink\w*|TOCTOU|race|overwrite\w*|escape\w*|privilege\w*|deserialization|traversal|"
-    r"arbitrary file (?:access|read|write)|(?:read\w*|writ\w*) outside|guard bypass|"
+    r"symlink (?:race|attack|vulnerability)|TOCTOU|(?:sandbox|container) escape|"
+    r"(?:elevated|unauthorized) privileges?|"
+    r"arbitrary file (?:access|read|write|overwrite)|(?:read\w*|writ\w*) outside|guard bypass|"
     r"(?:leak\w*|expos\w*)[^.\n]{0,80}\b(?:keys?|tokens?|credentials?|secrets?|personal data)|"
     r"(?:private[- ]keys?|credentials?|tokens?|secrets?|personal data)[^.\n]{0,80}\b(?:leak\w*|expos\w*)|"
     r"buffer overflow|use[- ]after[- ]free|denial[- ]of[- ]service)\b",
@@ -169,26 +170,51 @@ def destination_link(via: str, bundle: dict[str, Any]) -> str:
     )
 
 
+def _attempts(root: Path, day: datetime) -> list[dict[str, Any]]:
+    path = root / "attempts" / f"{day.date().isoformat()}.jsonl"
+    try:
+        raw = _read_bounded(path)
+    except FileNotFoundError:
+        return []
+    lines = raw.splitlines()
+    if len(lines) > 5:
+        raise ReportBlocked("Bug report blocked: invalid submission attempt log")
+    attempts = []
+    for line in lines:
+        attempt = json.loads(line)
+        if (
+            not isinstance(attempt, dict)
+            or re.fullmatch(r"[0-9a-f]{32}", str(attempt.get("report_id"))) is None
+            or re.fullmatch(r"bf-[0-9a-f]{12}", str(attempt.get("fingerprint"))) is None
+        ):
+            raise ReportBlocked("Bug report blocked: invalid submission attempt log")
+        when = datetime.fromisoformat(str(attempt.get("attempted_at")))
+        if when.tzinfo is None or when.astimezone(timezone.utc).date() != day.date():
+            raise ReportBlocked("Bug report blocked: invalid submission attempt timestamp")
+        attempts.append(attempt)
+    return attempts
+
+
 def _limit_submissions(root: Path, fp: str, now: datetime) -> None:
-    daily = 0
-    for path in root.glob("*/receipt.json"):
-        try:
-            receipt = json.loads(path.read_text(encoding="utf-8"))
-            if not receipt.get("submitted") and receipt.get("status") != "pending":
-                continue
-            when = datetime.fromisoformat(receipt.get("attempted_at") or receipt["created_at"])
-            if when.date() == now.date():
-                daily += 1
-            if (receipt.get("fingerprint") == fp or receipt.get("status") == "pending") and (
-                now - when
-            ).total_seconds() < 300:
-                raise ReportBlocked("Bug report blocked: fingerprint cooldown is 5 minutes")
-        except (OSError, ValueError, KeyError, TypeError) as exc:
-            if isinstance(exc, ReportBlocked):
-                raise
-            continue
-    if daily >= 5:
+    # Only today's and yesterday's logs are needed, including across midnight.
+    # Each has at most five entries and a bounded byte read. Mutable receipts
+    # establish uncertain outcomes, but never determine the attempt count.
+    today = _attempts(root, now)
+    if len(today) >= 5:
         raise ReportBlocked("Bug report blocked: daily cap is 5 submissions")
+    for attempt in today + _attempts(root, now - timedelta(days=1)):
+        when = datetime.fromisoformat(str(attempt.get("attempted_at")))
+        if (now - when).total_seconds() >= 300:
+            continue
+        pending = True
+        if attempt["fingerprint"] != fp:
+            try:
+                receipt = json.loads(_read_bounded(root / attempt["report_id"] / "receipt.json"))
+                pending = not isinstance(receipt, dict) or receipt.get("status") not in {"submitted", "handoff"}
+            except (OSError, ValueError, TypeError):
+                pass
+        if attempt["fingerprint"] == fp or pending:
+            raise ReportBlocked("Bug report blocked: fingerprint cooldown is 5 minutes")
 
 
 def _output_tail(path: Path | None) -> str:
@@ -278,6 +304,7 @@ def _load_prepared(report_id: str) -> tuple[Path, dict[str, Any], str, dict[str,
         or receipt.get("preview_digest") != hashlib.sha256(markdown.encode()).hexdigest()
     ):
         raise ReportBlocked("Bug report blocked: prepared bundle digest mismatch, prepare a new preview")
+    assert_terminal_safe(bundle)
     assert_clean(json.dumps(bundle, ensure_ascii=False, sort_keys=True))
     assert_clean(markdown)
     _check_security(bundle)
@@ -419,11 +446,20 @@ def _report(args: argparse.Namespace) -> int:
         receipt.update(
             destination=via,
             status="pending",
-            attempted_at=datetime.now(timezone.utc).isoformat(),
             duplicate_choice="comment" if comment_on else "new",
         )
         with held_file_lock(root / "submission.lock", deadline_seconds=1):
-            _limit_submissions(root, bundle["fingerprint"], datetime.now(timezone.utc))
+            now = datetime.now(timezone.utc)
+            _limit_submissions(root, bundle["fingerprint"], now)
+            receipt["attempted_at"] = now.isoformat()
+            attempts = root / "attempts"
+            attempts.mkdir(mode=0o700, exist_ok=True)
+            record = {key: receipt[key] for key in ("report_id", "fingerprint", "attempted_at")}
+            # Reserve capacity durably before transport, even if the outcome is lost.
+            with (attempts / f"{now.date().isoformat()}.jsonl").open("ab") as handle:
+                handle.write((json.dumps(record, sort_keys=True) + "\n").encode("utf-8"))
+                handle.flush()
+                os.fsync(handle.fileno())
             write_json(receipt_path, receipt)
         destination_url = _submit(via, bundle, markdown, comment_on)
         receipt.update(

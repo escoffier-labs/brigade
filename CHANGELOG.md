@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Bug reports count retries in an append-only attempt log, escape terminal controls before preview, and allow ordinary UI wording such as "Pressing Escape closes the prompt".
+
 - Bug reports block embedded short environment secrets during the second scan and select recent receipts by timestamp across up to 20,000 directory entries.
 
 - Prepared bug reports use the same security checks as previews, and saved CLI errors scrub parsed paths. Diagnostic read limits apply only to bug reports, preserving complete receipt exports.

@@ -1919,14 +1919,15 @@ and the last local CLI error. Task text and worker output are excluded.
 to 200 lines and a 60 KB input read. The complete rendered bundle is capped at
 60 KB. `--summary-file FILE` reads at most 60 KB plus one byte and rejects
 oversized input before decoding it. Diagnostic receipt reads stop at 256 KB per
-file. Each run or verification reader examines at most 1,024 directory entries,
+file. Each run or verification reader examines at most 20,000 directory entries,
 reads the newest 64 directories in that window, and processes at most 512
 worker or command entries. Older or oversized receipts can be omitted.
 
 The report uses a fixed field allowlist, removes known local literals and
 credential references, applies the origin redactor with `origin=unknown`,
-and scans the final JSON and Markdown again. Any remaining finding or scanner
-error blocks the report. Review every field anyway. Redaction cannot identify
+and escapes terminal controls such as ANSI, OSC, and carriage returns before
+persistence and preview. It scans the final JSON and Markdown again. Any
+remaining finding or scanner error blocks the report. Review every field anyway. Redaction cannot identify
 every private name in free text. Use SECURITY.md for vulnerabilities.
 
 Use `--report-id REPORT_ID` to reuse the saved preview without recollecting
@@ -1969,7 +1970,11 @@ shown, and consent mode (`prompt`, `flag`, or `none`). The separate
 that this is not a vulnerability report. A pending receipt means
 the remote result is uncertain. Check it before retrying. Local controls limit
 sharing to five attempts per UTC day and one per fingerprint every five
-minutes. A pending submission also blocks retries for five minutes.
+minutes. An append-only `attempts/YYYY-MM-DD.jsonl` log under `bug-reports/`
+records each attempt before transport, including retries of the same report
+ID and failed transports. The limit reads only today's and yesterday's logs,
+at most five records and 60 KB per log. A pending submission also blocks
+retries for five minutes.
 `BRIGADE_BUG_REPORT=never` disables sharing while allowing `--dry-run` and
 `--via file`. No doctor, status command, or hook starts bug reporting.
 

@@ -18,6 +18,7 @@ from .guard.policy import Policy
 from .guard.types import GuardResult, Rule, ScanOptions
 
 _SECRET_ENV_NAME = re.compile(r"TOKEN|KEY|SECRET|PASSWORD|PASS|CREDENTIAL", re.I)
+_TERMINAL_CONTROLS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
 
 
 # Bug bundles need stricter leak detection than repository content. Keep these
@@ -59,8 +60,21 @@ class ReportBlocked(ValueError):
     """A report could not be proved safe to share."""
 
 
+def assert_terminal_safe(value: Any) -> None:
+    """Reject legacy prepared fields that could control a preview or gh output."""
+    if isinstance(value, str) and _TERMINAL_CONTROLS.search(value):
+        raise ReportBlocked("Bug report blocked: terminal controls remain, prepare a new preview")
+    if isinstance(value, dict):
+        for item in value.values():
+            assert_terminal_safe(item)
+    elif isinstance(value, list):
+        for item in value:
+            assert_terminal_safe(item)
+
+
 def assert_clean(text: str) -> None:
     """Scan the final bytes independently, ignoring embedded allow directives."""
+    assert_terminal_safe(text)
     for name, value in os.environ.items():
         if not _SECRET_ENV_NAME.search(name) or not 0 < len(value) <= 3:
             continue
@@ -136,7 +150,11 @@ class Redactor:
                 self.counts.update(f.rule_id for f in counts.findings)
             except Exception:
                 raise ReportBlocked("Bug report blocked: redaction counts unavailable") from None
-        return verdict.persisted_text
+        # Keep newlines and tabs for readable logs, but render all other C0/C1
+        # bytes visibly. Escaping ESC also neutralizes ANSI and OSC sequences.
+        text, count = _TERMINAL_CONTROLS.subn(lambda match: f"\\x{ord(match[0]):02x}", verdict.persisted_text)
+        self.counts["terminal-control"] += count
+        return text
 
     def project(self, value: Any) -> Any:
         """Scrub values of an already closed-schema projection, never its keys."""

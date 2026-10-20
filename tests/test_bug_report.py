@@ -303,21 +303,47 @@ def test_duplicate_comment_requires_shown_number(report_env, monkeypatch, capsys
     assert receipt["duplicate_choice"] == "comment"
 
 
-def test_daily_cap_refuses_sixth_attempt(report_env, capsys):
-    from datetime import datetime, timezone
+@pytest.mark.parametrize("transport_fails", [False, True])
+def test_daily_cap_counts_repeated_report_attempts(report_env, monkeypatch, capsys, transport_fails):
+    from datetime import datetime, timedelta, timezone
 
     mod, target = report_env
-    root = Path(mod.data_root()) / "brigade" / "bug-reports"
-    for i in range(5):
-        directory = root / str(i)
-        directory.mkdir(parents=True)
-        (directory / "receipt.json").write_text(
-            json.dumps(
-                {"submitted": True, "created_at": datetime.now(timezone.utc).isoformat(), "fingerprint": "bf-" + str(i)}
-            )
-        )
-    assert submit_prepared(target, capsys, "--via", "url", "--json") == 2
+    now = datetime(2026, 1, 1, 12, tzinfo=timezone.utc)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    monkeypatch.setattr(mod, "datetime", Clock)
+    calls = []
+
+    def fake(*args):
+        if args[:2] == ("search", "issues"):
+            return "[]"
+        calls.append(args)
+        if transport_fails:
+            raise OSError("response lost after submission")
+        return mod.ISSUES_URL + "/42"
+
+    monkeypatch.setattr(mod, "gh", fake)
+    assert invoke(target, "--dry-run", "--json") == 0
+    preview = result(capsys)
+    args = ["bug", "report", "--report-id", preview["report_id"], "--yes", "--not-security", "--via", "gh", "--json"]
+    for _ in range(5):
+        assert cli.main(args) == (2 if transport_fails else 0)
+        capsys.readouterr()
+        now += timedelta(minutes=6)
+    log = Path(mod.data_root()) / "brigade" / "bug-reports" / "attempts" / "2026-01-01.jsonl"
+    before = log.read_bytes()
+    attempts = [json.loads(line) for line in before.splitlines()]
+    assert len(attempts) == 5
+    assert {row["report_id"] for row in attempts} == {preview["report_id"]}
+    assert len({row["attempted_at"] for row in attempts}) == 5
+    assert cli.main(args) == 2
     assert "daily cap" in capsys.readouterr().err
+    assert len(calls) == 5
+    assert log.read_bytes() == before
 
 
 def test_oversize_bundle_refused_before_network_or_save(report_env, capsys):
@@ -726,6 +752,9 @@ def test_report_failure_preserves_previous_error(report_env, monkeypatch, capsys
         "command injection",
         "symlink race permits arbitrary file overwrite",
         "sandbox escape exposes private keys",
+        "sandbox escape",
+        "symlink race",
+        "arbitrary file overwrite",
         "TOCTOU permits arbitrary file access",
         "leak of keys or tokens",
         "profile writes outside --target",
@@ -962,3 +991,204 @@ def test_older_prepared_vulnerability_is_blocked_before_network(report_env, monk
         cli.main(["bug", "report", "--report-id", preview["report_id"], "--yes", "--not-security", "--via", "gh"]) == 2
     )
     assert "SECURITY.md" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "summary",
+    [
+        "Pressing Escape closes the prompt",
+        "The overwrite confirmation never appears",
+        "A race between progress messages makes the display flicker",
+        "The privilege column is missing from the table",
+        "Escaped quotes render incorrectly",
+        "The traversal order changes between runs",
+        "Deserialization fails on an empty receipt",
+    ],
+)
+def test_benign_ui_language_allows_report(report_env, capsys, summary):
+    _, target = report_env
+    assert invoke(target, "--summary", summary, "--dry-run", "--json") == 0
+    assert summary in result(capsys)["preview_markdown"]
+
+
+def test_terminal_controls_escaped_in_text_preview_and_submission(report_env, monkeypatch, capsys, tmp_path):
+    mod, target = report_env
+    payload = "before\x1b]52;c;Y2xpcGJvYXJk\x07after\rconcealed\x9b2J\x00"
+    summary = tmp_path / "summary.txt"
+    summary.write_text(payload, encoding="utf-8")
+    output = tmp_path / "output.txt"
+    output.write_text(payload, encoding="utf-8")
+    assert (
+        cli.main(
+            [
+                "bug",
+                "report",
+                "--target",
+                str(target),
+                "--summary-file",
+                str(summary),
+                "--title",
+                payload,
+                "--include-output",
+                str(output),
+                "--dry-run",
+            ]
+        )
+        == 0
+    )
+    text = capsys.readouterr().out
+    assert "before" in text and "after" in text
+    assert not re.search(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]", text)
+    directory = next((Path(mod.data_root()) / "brigade" / "bug-reports").glob("*/bundle.json")).parent
+    bundle = json.loads((directory / "bundle.json").read_text())
+    for value in bundle["user"].values():
+        assert not re.search(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]", value)
+    assert not re.search(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]", (directory / "bundle.md").read_text())
+    sent = []
+
+    def fake(*args):
+        if args[:2] == ("search", "issues"):
+            return "[]"
+        sent.extend([args[args.index("--title") + 1], Path(args[-1]).read_text()])
+        return mod.ISSUES_URL + "/42"
+
+    monkeypatch.setattr(mod, "gh", fake)
+    assert (
+        cli.main(
+            [
+                "bug",
+                "report",
+                "--report-id",
+                directory.name,
+                "--yes",
+                "--not-security",
+                "--via",
+                "gh",
+            ]
+        )
+        == 0
+    )
+    assert len(sent) == 2
+    assert all(not re.search(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]", value) for value in sent)
+
+
+def test_older_prepared_control_title_blocked_before_network(report_env, monkeypatch, capsys):
+    import hashlib
+
+    mod, target = report_env
+    assert invoke(target, "--dry-run", "--json") == 0
+    preview = result(capsys)
+    directory = Path(preview["preview_path"]).parent
+    bundle = json.loads((directory / "bundle.json").read_text())
+    bundle["user"]["title"] = "title\x1b]52;c;Y2xpcGJvYXJk\x07\rhidden"
+    markdown = mod.render(bundle)
+    receipt = json.loads((directory / "receipt.json").read_text())
+    receipt["bundle_digest"] = mod.canonical_json_digest(bundle)
+    receipt["preview_digest"] = hashlib.sha256(markdown.encode()).hexdigest()
+    (directory / "bundle.json").write_text(json.dumps(bundle))
+    (directory / "bundle.md").write_text(markdown)
+    (directory / "receipt.json").write_text(json.dumps(receipt))
+    monkeypatch.setattr(mod, "gh", lambda *a: pytest.fail("unsafe title reached transport"))
+    assert (
+        cli.main(
+            [
+                "bug",
+                "report",
+                "--report-id",
+                preview["report_id"],
+                "--yes",
+                "--not-security",
+                "--via",
+                "gh",
+            ]
+        )
+        == 2
+    )
+    assert "control" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("transport_fails", [False, True])
+def test_attempt_cooldown_crosses_utc_midnight(report_env, monkeypatch, capsys, transport_fails):
+    from datetime import datetime, timedelta, timezone
+
+    mod, target = report_env
+    now = datetime(2026, 1, 1, 23, 59, tzinfo=timezone.utc)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    monkeypatch.setattr(mod, "datetime", Clock)
+    monkeypatch.setattr(mod, "gh", lambda *a: (_ for _ in ()).throw(OSError("offline")))
+    assert invoke(target, "--dry-run", "--json") == 0
+    preview = result(capsys)
+    args = [
+        "bug",
+        "report",
+        "--report-id",
+        preview["report_id"],
+        "--yes",
+        "--not-security",
+        "--via",
+        "gh" if transport_fails else "url",
+        "--json",
+    ]
+    assert cli.main(args) == (2 if transport_fails else 0)
+    capsys.readouterr()
+    now += timedelta(minutes=2)
+    assert cli.main(args) == 2
+    assert "cooldown" in capsys.readouterr().err
+    now += timedelta(minutes=4)
+    assert cli.main(args) == (2 if transport_fails else 0)
+    capsys.readouterr()
+    logs = Path(mod.data_root()) / "brigade" / "bug-reports" / "attempts"
+    assert len((logs / "2026-01-01.jsonl").read_text().splitlines()) == 1
+    assert len((logs / "2026-01-02.jsonl").read_text().splitlines()) == 1
+
+
+def test_attempt_log_read_is_bounded_and_fails_closed(report_env, monkeypatch, capsys):
+    import io
+    from datetime import datetime, timezone
+
+    mod, target = report_env
+    assert invoke(target, "--dry-run", "--json") == 0
+    preview = result(capsys)
+    logs = Path(mod.data_root()) / "brigade" / "bug-reports" / "attempts"
+    logs.mkdir()
+    log = logs / f"{datetime.now(timezone.utc).date().isoformat()}.jsonl"
+    log.write_bytes(b"x" * (mod.BUNDLE_CAP + 100))
+    original_open = Path.open
+    reads = []
+
+    class BoundedInput(io.BytesIO):
+        def read(self, size=-1):
+            reads.append(size)
+            assert size == mod.BUNDLE_CAP + 1
+            return super().read(size)
+
+    def bounded_open(path, mode="r", *a, **k):
+        if path == log:
+            assert mode == "rb"
+            return BoundedInput(b"x" * (mod.BUNDLE_CAP + 100))
+        return original_open(path, mode, *a, **k)
+
+    monkeypatch.setattr(Path, "open", bounded_open)
+    assert (
+        cli.main(
+            [
+                "bug",
+                "report",
+                "--report-id",
+                preview["report_id"],
+                "--yes",
+                "--not-security",
+                "--via",
+                "url",
+                "--json",
+            ]
+        )
+        == 2
+    )
+    assert reads == [mod.BUNDLE_CAP + 1]
+    assert "60 KB" in capsys.readouterr().err
