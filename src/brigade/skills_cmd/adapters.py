@@ -279,7 +279,9 @@ def serve_mcp(
         "tools: search_skills, get_skill, get_skill_metadata, get_skill_changelog, get_skill_compatibility, get_skill_history, lint_skill"
     )
     print(f"registered_resources: {len(payload['registered_resources'])}")
-    print("transports: --stdio (default server), --http (loopback Streamable HTTP, token from BRIGADE_MCP_HTTP_TOKEN)")
+    print(
+        "transports: --stdio (stdin/stdout server), --http (loopback Streamable HTTP, token from BRIGADE_MCP_HTTP_TOKEN)"
+    )
     return 0
 
 
