@@ -1047,6 +1047,8 @@ Handoff lookup uses writer inboxes and configured dogfood or run handoff inboxes
 Outcome lookup streams the ledger with a 1 MiB limit per row. Worker results
 without a companion receipt resolve as leaves from their recorded worker identity,
 with a 64 MiB limit on `worker-results.json`.
+Worker lookup scans the first 500 results and marks the report `truncated`
+when more results exist. Receipts must match the requested subject kind and ID.
 Verify receipts and parent manifests use their IDs for direct lookup.
 Text output includes diagnostics and a notice when a walk limit is reached.
 

@@ -338,3 +338,83 @@ def _ordered_glob(monkeypatch):
     # Glob order is unspecified. Put the requested artifact after unrelated entries.
     original = Path.glob
     monkeypatch.setattr(Path, "glob", lambda root, pattern: iter(sorted(original(root, pattern))))
+
+
+@pytest.mark.parametrize("kind", sorted(causal_receipt.ARTIFACT_KINDS))
+@pytest.mark.parametrize("mismatch", ["kind", "id"])
+def test_lineage_rejects_receipts_bound_to_another_subject(tmp_path, capsys, kind, mismatch):
+    artifact_id = "run-a:w:1" if kind == "worker-result" else "artifact-a"
+    subject = {"kind": kind, "id": artifact_id}
+    subject[mismatch] = ("run" if kind == "plan" else "plan") if mismatch == "kind" else "other-id"
+    receipt = causal_receipt.build_receipt(
+        subject_kind=subject["kind"],
+        subject_id=subject["id"],
+        parents=[causal_receipt.parent_ref(relation="planned_from", kind="plan", artifact_id="witness")],
+    )
+    runs = tmp_path / ".brigade" / "runs"
+    localio.write_json(
+        runs / "witness" / "plan.json", {"causal_receipt": causal_receipt.recorded_plan(run_id="witness")}
+    )
+    payload = {"causal_receipt": receipt}
+    if kind == "worker-result":
+        path = runs / "run-a" / "worker-results.json"
+        payload = {"results": [{"worker": "w", "causal_receipt": receipt}]}
+    elif kind in {"plan", "run", "synthesis"}:
+        path = runs / artifact_id / f"{kind}.json"
+    elif kind == "verify":
+        path = tmp_path / ".brigade" / "work" / "verify-runs" / artifact_id / "receipt.json"
+    elif kind == "outcome":
+        path = tmp_path / "memory" / "outcome" / "records.jsonl"
+    else:
+        path = causal_receipt.handoff_sidecar_path(tmp_path / ".claude" / "memory-handoffs" / f"{artifact_id}.md")
+        payload = receipt
+    if kind == "outcome":
+        path.parent.mkdir(parents=True)
+        path.write_text(json.dumps(payload) + "\n")
+    else:
+        localio.write_json(path, payload)
+    probe = causal_receipt.build_receipt(
+        subject_kind="synthesis",
+        subject_id="probe",
+        parents=[causal_receipt.parent_ref(relation="synthesized_from", kind=kind, artifact_id=artifact_id)],
+    )
+    localio.write_json(runs / "probe" / "synthesis.json", {"causal_receipt": probe})
+
+    result = lineage(target=tmp_path, subject="synthesis:probe")
+
+    assert [hop["status"] for hop in result["hops"]] == ["broken"]
+    code = cli.main(["receipts", "lineage", f"{kind}:{artifact_id}", "--target", str(tmp_path), "--json"])
+    output = capsys.readouterr()
+    if code == 0:
+        assert json.loads(output.out)["hops"] == []
+    else:
+        assert code == 2
+        assert "receipt not found" in output.err
+
+
+def test_lineage_preserves_worker_prefix_above_scan_cap(tmp_path, monkeypatch):
+    run_id = "run-a"
+    run_dir = tmp_path / ".brigade" / "runs" / run_id
+    results = run_receipts.worker_payload(
+        [WorkerResult(worker="w", task="review", text="done", ok=True) for _ in range(501)]
+    )
+    parents = causal_receipt.synthesis_worker_parents(run_id, results)
+    synthesis = causal_receipt.recorded_synthesis(run_id=run_id, worker_parents=parents)
+    manifest = causal_receipt.synthesis_parent_manifest(run_id=run_id, worker_parents=parents)
+    assert manifest is not None
+    localio.write_json(run_dir / "worker-results.json", {"results": results})
+    localio.write_json(run_dir / "synthesis.json", {"causal_receipt": synthesis})
+    localio.write_json(causal_receipt.parent_manifest_path(run_dir, manifest["id"]), manifest)
+    # Expose the entire permitted scan prefix instead of the smaller default hop cap.
+    monkeypatch.setattr(receipts_lineage, "MAX_HOPS", 500)
+    before = _snapshot(tmp_path)
+
+    result = lineage(target=tmp_path, subject=f"synthesis:{run_id}")
+
+    assert [hop["id"] for hop in result["hops"]] == [f"run-a:w:{ordinal}" for ordinal in range(1, 501)]
+    assert {hop["status"] for hop in result["hops"]} == {"ok"}
+    assert result["truncated"] is True
+    # A direct lookup also exposes the scan limit even when its hop count is small.
+    worker = lineage(target=tmp_path, subject="worker-result:run-a:w:500")
+    assert worker["truncated"] is True
+    assert _snapshot(tmp_path) == before

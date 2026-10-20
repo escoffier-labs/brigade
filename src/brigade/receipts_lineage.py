@@ -95,7 +95,7 @@ def _outcome_record(target: Path, artifact_id: str) -> dict[str, Any] | None:
     return match
 
 
-def _resolver(target: Path):
+def _resolver(target: Path, *, report: dict[str, Any]):
     runs_root = target / ".brigade" / "runs"
     verify_root = target / ".brigade" / "work" / "verify-runs"
     handoff_roots: list[Path] | None = None
@@ -117,10 +117,12 @@ def _resolver(target: Path):
                 return _receipt(_read(directory / f"{kind}.json"))
             value = _read(directory / "worker-results.json", max_bytes=MAX_WORKER_RESULTS_BYTES)
             results = value.get("results") if value else None
-            if not isinstance(results, list) or len(results) > MAX_SCAN_ITEMS:
+            if not isinstance(results, list):
                 return None
+            if len(results) > MAX_SCAN_ITEMS:
+                report["truncated"] = True
             run_id = artifact_id.split(":", 1)[0]
-            for ordinal, result in enumerate(results, start=1):
+            for ordinal, result in enumerate(islice(results, MAX_SCAN_ITEMS), start=1):
                 if not isinstance(result, Mapping):
                     continue
                 worker = result.get("worker")
@@ -194,7 +196,7 @@ def lineage(*, target: Path, subject: str) -> dict[str, Any]:
                 "parent_run_id": causal_receipt._bound(str(branch.get("parent_run_id", ""))),
                 "branch_point_event_id": causal_receipt._bound(str(branch.get("branch_point_event_id", ""))),
             }
-    raw_resolve = _resolver(target)
+    raw_resolve = _resolver(target, report=result)
     resolutions = 0
 
     def resolve(parent_kind: str, parent_id: str) -> Mapping[str, Any] | None:
@@ -202,7 +204,14 @@ def lineage(*, target: Path, subject: str) -> dict[str, Any]:
         resolutions += 1
         if resolutions > MAX_RESOLUTIONS:
             return None
-        return raw_resolve(parent_kind, parent_id)
+        receipt = raw_resolve(parent_kind, parent_id)
+        if (
+            receipt is not None
+            and parent_kind != causal_receipt.PARENT_MANIFEST_KIND
+            and receipt.get("subject") != {"kind": parent_kind, "id": parent_id}
+        ):
+            return None
+        return receipt
 
     start = resolve(kind, artifact_id)
     if start is None:
