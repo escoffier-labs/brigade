@@ -795,65 +795,34 @@ def reply(conn: sqlite3.Connection, raw: dict[str, Any], *, sender: str) -> dict
     return _fetch(conn, message["id"])
 
 
-# Station claims pages are bounded by row count and by serialized size, so a
-# page always fits the client's response cap. Rows page in a fixed-length key
-# order (SHA-256 of the target, then a fingerprint of the row), because targets
-# can be long and an ordinary claim and a projected Grok Bot lease row can share
-# a target. The cursor is that key, so it has a fixed length and carries no
-# peer-chosen text back to the model. Each page is shown in target order.
+# Station claims return one page bounded by row count and by serialized size,
+# so the response always fits the client's cap. Rows sort by target. Cursor
+# paging over a live claims table is not stable without hub-side snapshots, so
+# a cut list says so with truncated and total instead (full paging: #1901).
 CLAIMS_PAGE_DEFAULT = 200
 CLAIMS_PAGE_MAX = 500
 CLAIMS_PAGE_MAX_BYTES = 4 * 1024 * 1024
-_CLAIMS_CURSOR_RE = re.compile(r"[0-9a-f]{32}\.[0-9a-f]{16}")
 
 
-# Fields that change when a claim renews or ages; leaving them out keeps a
-# claim's paging key stable between requests.
-_CLAIM_VOLATILE_FIELDS = frozenset({"acquired_at", "renewed_at", "expires_at", "generation", "ttl_seconds", "expired"})
-
-
-def _claim_key(row: dict[str, Any]) -> tuple[str, str]:
-    identity = {key: value for key, value in row.items() if key not in _CLAIM_VOLATILE_FIELDS}
-    canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"), default=str)
-    target = str(row.get("target", ""))
-    return (
-        hashlib.sha256(target.encode("utf-8")).hexdigest()[:32],
-        hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16],
-    )
-
-
-def _claims_page_args(raw: dict[str, Any]) -> tuple[int, tuple[str, str] | None]:
+def _claims_page_limit(raw: dict[str, Any]) -> int:
     limit = raw.get("limit", CLAIMS_PAGE_DEFAULT)
     if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= CLAIMS_PAGE_MAX:
         raise MessageError(f"claims limit must be an integer from 1 to {CLAIMS_PAGE_MAX}")
-    cursor = raw.get("after")
-    if cursor is None:
-        return limit, None
-    if not isinstance(cursor, str) or not _CLAIMS_CURSOR_RE.fullmatch(cursor):
-        raise MessageError("invalid claims cursor")
-    target_digest, fingerprint = cursor.split(".")
-    return limit, (target_digest, fingerprint)
+    return limit
 
 
-def _claims_page(rows: list[dict[str, Any]], *, limit: int, after: tuple[str, str] | None) -> dict[str, Any]:
-    keyed = sorted(((_claim_key(row), row) for row in rows), key=lambda item: item[0])
-    if after is not None:
-        keyed = [item for item in keyed if item[0] > after]
-    page: list[tuple[tuple[str, str], dict[str, Any]]] = []
+def _claims_page(rows: list[dict[str, Any]], *, limit: int) -> dict[str, Any]:
+    ordered = sorted(rows, key=lambda row: str(row.get("target", "")))
+    page: list[dict[str, Any]] = []
     size = 0
-    for item in keyed[:limit]:
-        row_size = len(json.dumps(item[1], separators=(",", ":"), default=str).encode("utf-8"))
-        # Always return at least one row so paging can never stall.
+    for row in ordered[:limit]:
+        row_size = len(json.dumps(row, separators=(",", ":"), default=str).encode("utf-8"))
+        # Always return at least one row.
         if page and size + row_size > CLAIMS_PAGE_MAX_BYTES:
             break
-        page.append(item)
+        page.append(row)
         size += row_size
-    next_cursor = None
-    if len(keyed) > len(page) and page:
-        target_digest, fingerprint = page[-1][0]
-        next_cursor = f"{target_digest}.{fingerprint}"
-    claims = sorted((row for _key, row in page), key=lambda row: str(row.get("target", "")))
-    return {"claims": claims, "next_cursor": next_cursor}
+    return {"claims": page, "truncated": len(page) < len(ordered), "total": len(ordered)}
 
 
 def _station_read(conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str) -> dict[str, Any]:
@@ -861,7 +830,7 @@ def _station_read(conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str)
     from . import fleet_claim_display, fleet_hub, fleet_hub_message_grants as grants, fleet_hub_sessions
 
     action = raw["action"]
-    allowed = {"action", "all", "filter"} if action == "who" else {"action", "all", "limit", "after"}
+    allowed = {"action", "all", "filter"} if action == "who" else {"action", "all", "limit"}
     include_all = raw.get("all", False)
     query = raw.get("filter", "")
     if set(raw) - allowed or not isinstance(include_all, bool) or not isinstance(query, str):
@@ -875,7 +844,7 @@ def _station_read(conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str)
         return grants.permits(patterns, caller, recipient)
 
     if action == "claims":
-        limit, after = _claims_page_args(raw)
+        limit = _claims_page_limit(raw)
         if not caller.startswith("agent:"):
             rows = fleet_claim_display.list_display_claims(conn, include_all=include_all)
         else:
@@ -884,7 +853,7 @@ def _station_read(conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str)
                 for row in fleet_hub.list_claims(conn, include_all=include_all)
                 if permitted(row["owner_node"])
             ]
-        return _claims_page(rows, limit=limit, after=after)
+        return _claims_page(rows, limit=limit)
 
     nodes = [
         {"node_id": str(row[0])}

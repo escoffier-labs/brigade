@@ -835,7 +835,7 @@ def test_station_read_loads_agent_grants_once(hub, monkeypatch):
         conn.close()
 
 
-def test_claims_are_paged_with_an_opaque_cursor(stations, hub):
+def test_claims_page_is_bounded_and_reports_truncation(stations, hub):
     _base, _ta, _tb, db = hub
     conn = fleet_hub.open_db(db)
     try:
@@ -848,95 +848,23 @@ def test_claims_are_paged_with_an_opaque_cursor(stations, hub):
             assert status == 200 and claim["granted"]
     finally:
         conn.close()
-    seen = []
-    cursor = None
-    pages = 0
-    while True:
-        args = {"limit": 2} if cursor is None else {"limit": 2, "after": cursor}
-        page = call(stations[0], "fleet_claims", **args)
-        pages += 1
-        seen.extend(unfence(row["target"]) for row in page["claims"])
-        cursor = page["next_cursor"]
-        if cursor is None:
-            break
-        assert isinstance(cursor, str) and re.fullmatch(r"[0-9a-f]{32}\.[0-9a-f]{16}", cursor)
-    page_targets = [target for target in seen if target.startswith("page-")]
-    assert sorted(page_targets) == [f"page-{index}" for index in range(5)] and len(page_targets) == 5
-    assert pages == 3
-    _payload, error = stations[0].call("fleet_claims", {"limit": 501})
-    assert error
-    _payload, error = stations[0].call("fleet_claims", {"after": "not-hex"})
-    assert error
+    page = call(stations[0], "fleet_claims", limit=2)
+    assert len(page["claims"]) == 2 and page["truncated"] is True and page["total"] >= 5
+    targets = [unfence(row["target"]) for row in page["claims"]]
+    assert targets == sorted(targets)
+    full = call(stations[0], "fleet_claims", limit=500)
+    assert full["truncated"] is False and len(full["claims"]) == full["total"]
+    for bad in ({"limit": 501}, {"after": "1"}):
+        _payload, error = stations[0].call("fleet_claims", bad)
+        assert error
 
 
-def test_claims_page_cursor_survives_shared_targets():
-    rows = [
-        {"target": "shared", "owner_node": NODE_A, "role": "claim"},
-        {"target": "shared", "owner_node": NODE_B, "role": "grokbot-lease"},
-        {"target": "zz-last", "owner_node": NODE_A, "role": "claim"},
-    ]
-    seen = []
-    after = None
-    while True:
-        page = fleet_hub_messages._claims_page(rows, limit=1, after=after)
-        seen.extend(page["claims"])
-        if page["next_cursor"] is None:
-            break
-        after = fleet_hub_messages._claims_page_args({"after": page["next_cursor"]})[1]
-    assert len(seen) == 3
-    assert {(row["target"], row["owner_node"]) for row in seen} == {
-        ("shared", NODE_A),
-        ("shared", NODE_B),
-        ("zz-last", NODE_A),
-    }
-
-
-def test_claims_cursor_is_fixed_length_for_long_targets():
-    long_target = "x" * 10_000
-    rows = [{"target": long_target, "owner_node": NODE_A}, {"target": "short", "owner_node": NODE_A}]
-    page = fleet_hub_messages._claims_page(rows, limit=1, after=None)
-    assert len(page["next_cursor"]) == 49
-    after = fleet_hub_messages._claims_page_args({"after": page["next_cursor"]})[1]
-    rest = fleet_hub_messages._claims_page(rows, limit=1, after=after)
-    assert {row["target"] for row in page["claims"] + rest["claims"]} == {long_target, "short"}
-    assert rest["next_cursor"] is None
-
-
-def test_claims_pages_stay_under_the_byte_budget(monkeypatch):
+def test_claims_page_stays_under_the_byte_budget(monkeypatch):
     monkeypatch.setattr(fleet_hub_messages, "CLAIMS_PAGE_MAX_BYTES", 3000)
     rows = [{"target": f"t{index}-" + "y" * 1000, "owner_node": NODE_A} for index in range(5)]
-    seen = []
-    after = None
-    pages = 0
-    while True:
-        page = fleet_hub_messages._claims_page(rows, limit=500, after=after)
-        pages += 1
-        size = sum(len(json.dumps(row, separators=(",", ":"))) for row in page["claims"])
-        assert page["claims"] and size <= 3000
-        seen.extend(page["claims"])
-        if page["next_cursor"] is None:
-            break
-        after = fleet_hub_messages._claims_page_args({"after": page["next_cursor"]})[1]
-    assert len(seen) == 5 and pages >= 2
+    page = fleet_hub_messages._claims_page(rows, limit=500)
+    size = sum(len(json.dumps(row, separators=(",", ":"))) for row in page["claims"])
+    assert page["claims"] and size <= 3000 and page["truncated"] and page["total"] == 5
     monkeypatch.setattr(fleet_hub_messages, "CLAIMS_PAGE_MAX_BYTES", 10)
-    single = fleet_hub_messages._claims_page(rows, limit=500, after=None)
-    assert len(single["claims"]) == 1 and single["next_cursor"] is not None
-
-
-def test_claims_cursor_key_is_stable_across_renewal():
-    before = {
-        "target": "repo-x",
-        "owner_node": NODE_A,
-        "role": "claim",
-        "expires_at": "2026-10-20T00:00:00+00:00",
-        "generation": 1,
-    }
-    after = {
-        **before,
-        "expires_at": "2026-10-20T01:00:00+00:00",
-        "renewed_at": "2026-10-20T00:30:00+00:00",
-        "generation": 2,
-    }
-    other = {**before, "owner_node": NODE_B}
-    assert fleet_hub_messages._claim_key(before) == fleet_hub_messages._claim_key(after)
-    assert fleet_hub_messages._claim_key(before) != fleet_hub_messages._claim_key(other)
+    single = fleet_hub_messages._claims_page(rows, limit=500)
+    assert len(single["claims"]) == 1 and single["truncated"]
