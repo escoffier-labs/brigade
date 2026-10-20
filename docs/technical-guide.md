@@ -1914,11 +1914,16 @@ The command prints the complete `brigade.bug-report.v1` bundle and saves
 `brigade/bug-reports/<report_id>/`. It includes the Brigade version and channel,
 Python and OS versions, doctor failures and warnings, up to five failed run
 identifiers, the latest failing verification receipt identifier and digest,
-and the last local CLI error. Task text and worker output are excluded.
+and the last local CLI error. Doctor entries contain only check names and
+statuses, with summary counts. Collection excludes general memory checks that
+can read configured external logs. Failed run entries contain only identifiers
+and failure kinds. Task text and worker output are excluded.
 `--include-output FILE` adds only a redacted tail of a file you choose, bounded
 to 200 lines and a 60 KB input read. The complete rendered bundle is capped at
-60 KB. `--summary-file FILE` reads at most 60 KB plus one byte and rejects
-oversized input before decoding it. Diagnostic receipt reads stop at 256 KB per
+60 KB. Selected inputs must be regular files, with no linked path components.
+Nonblocking reads check descriptor identity and reject files changed during
+reading. `--summary-file FILE` rejects inputs larger than 60 KB before reading
+or decoding them. Diagnostic receipt reads stop at 256 KB per
 file. Each run or verification reader examines at most 20,000 directory entries,
 reads the newest 64 directories in that window, and processes at most 512
 worker or command entries. Older or oversized receipts can be omitted.
@@ -1951,7 +1956,8 @@ brigade bug report --report-id REPORT_ID --json --yes --not-security --via gh
 `--yes` requires `--report-id`. Non-interactive submission also requires
 `--not-security`, asserting that the report does not describe a vulnerability.
 An interactive submission asks the security question even with `--yes`.
-Brigade verifies the stored JSON and Markdown digests and scans both again
+Brigade verifies the stored JSON and Markdown digests and scans both again,
+including every nonempty secret-named environment value mounted since preparation,
 before any network call. New summaries, titles,
 and output files cannot be combined with `--report-id`.
 Without a terminal and `--yes`, the command prepares local files and searches

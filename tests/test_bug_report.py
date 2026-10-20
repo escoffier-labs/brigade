@@ -280,6 +280,23 @@ def test_embedded_short_secret_blocks_report(report_env, monkeypatch, capsys, st
         assert Path(preview["receipt_path"]).read_bytes() == before
 
 
+@pytest.mark.parametrize("secret", ["qxyp", 'qx"yp', "qx\nyp", "qx\u2603yp"])
+def test_delayed_submission_blocks_new_long_environment_secret(report_env, monkeypatch, capsys, secret):
+    mod, target = report_env
+    assert invoke(target, "--summary", f"Unexpected marker {secret}", "--dry-run", "--json") == 0
+    preview = result(capsys)
+    before = Path(preview["receipt_path"]).read_bytes()
+    monkeypatch.setenv("DEPLOY_SECRET", secret)
+    monkeypatch.setattr(mod, "gh", lambda *a: pytest.fail("blocked report reached search or submission"))
+    assert (
+        cli.main(["bug", "report", "--report-id", preview["report_id"], "--yes", "--not-security", "--via", "gh"]) == 2
+    )
+    captured = capsys.readouterr()
+    assert "DEPLOY_SECRET" in captured.err
+    assert secret not in captured.out + captured.err
+    assert Path(preview["receipt_path"]).read_bytes() == before
+
+
 @pytest.mark.parametrize("stage", ["first", "second", "residual"])
 def test_scanner_failure_or_residual_blocks_all_submission(report_env, monkeypatch, capsys, stage):
     from brigade import bug_redaction
@@ -331,6 +348,22 @@ def test_fingerprint_normalizes_volatile_values(first_path, second_path):
     second = {**first, "message_head": f"failed {second_path} id ffff9876 999"}
     assert fingerprint(first, ["profile"]) == fingerprint(second, ["profile"])
     assert fingerprint(first, ["profile"]) != fingerprint(first, ["memory"])
+
+
+@pytest.mark.parametrize(
+    "first,second",
+    [
+        ("memory-card: memory/cards/client-123.md", "memory-card: memory/cards/client-999.md"),
+        ("memory-card: memory/cards/alpha.md", "memory-card: memory/cards/beta.md"),
+        ("profile: run-ab123 12", "profile: run-cd999 99"),
+        (r"memory-card: C:\Alpha One\card.md", r"memory-card: D:\Beta Two\other.md"),
+    ],
+)
+def test_fingerprint_normalizes_check_name_paths_and_ids(first, second):
+    from brigade.bug_cmd import fingerprint
+
+    assert fingerprint(None, [first]) == fingerprint(None, [second])
+    assert fingerprint(None, [first]) != fingerprint(None, ["other-check"])
 
 
 def test_noninteractive_requires_yes_and_flag_receipt(report_env, monkeypatch, capsys):
@@ -563,6 +596,36 @@ def test_closed_projection_drops_unlisted_doctor_and_last_error_fields(report_en
     assert invoke(target, "--dry-run", "--json") == 0
     out = result(capsys)
     assert "private-" not in out["preview_markdown"]
+
+
+@pytest.mark.parametrize("field", ["doctor-detail", "run-seat"])
+def test_older_prepared_diagnostic_fields_require_new_preview(report_env, monkeypatch, capsys, field):
+    import hashlib
+
+    mod, target = report_env
+    assert invoke(target, "--dry-run", "--json") == 0
+    preview = result(capsys)
+    markdown_path = Path(preview["preview_path"])
+    bundle_path = markdown_path.with_name("bundle.json")
+    receipt_path = Path(preview["receipt_path"])
+    bundle = json.loads(bundle_path.read_text())
+    if field == "doctor-detail":
+        bundle["doctor"]["checks"][0]["detail"] = "customer Example project Sample"
+    else:
+        bundle["recent_failures"]["runs"] = [{"id": "run-1", "status": "failed", "seat": "example-production"}]
+    markdown = mod.render(bundle)
+    mod.write_json(bundle_path, bundle)
+    mod.write_text_atomic(markdown_path, markdown)
+    receipt = json.loads(receipt_path.read_text())
+    receipt.update(
+        bundle_digest=mod.canonical_json_digest(bundle), preview_digest=hashlib.sha256(markdown.encode()).hexdigest()
+    )
+    mod.write_json(receipt_path, receipt)
+    monkeypatch.setattr(mod, "gh", lambda *a: pytest.fail("old diagnostic projection reached transport"))
+    assert (
+        cli.main(["bug", "report", "--report-id", preview["report_id"], "--yes", "--not-security", "--via", "gh"]) == 2
+    )
+    assert "prepare a new preview" in capsys.readouterr().err
 
 
 def test_ordinary_nonzero_records_command_without_arguments(report_env, monkeypatch):
@@ -969,31 +1032,91 @@ def test_vulnerability_narratives_refused(report_env, capsys, tmp_path, field, n
 
 
 def test_summary_file_read_is_bounded_before_decoding(report_env, monkeypatch, capsys, tmp_path):
-    import io
-
     mod, target = report_env
     summary = tmp_path / "huge.txt"
     summary.write_bytes(b"x" * (mod.BUNDLE_CAP + 1) + b"\xff")
-    original_open = Path.open
+    original_read = os.read
     reads = []
 
-    class BoundedInput(io.BytesIO):
-        def read(self, size=-1):
-            reads.append(size)
-            assert size == mod.BUNDLE_CAP + 1
-            return super().read(size)
+    def bounded_read(fd, size):
+        reads.append(size)
+        assert 0 < size <= mod.BUNDLE_CAP + 1
+        return original_read(fd, size)
 
-    def bounded_open(path, mode="r", *a, **k):
-        if path == summary:
-            if mode == "rb":
-                return BoundedInput(b"x" * (mod.BUNDLE_CAP + 1) + b"\xff")
-            pytest.fail("summary decoded before size check")
-        return original_open(path, mode, *a, **k)
-
-    monkeypatch.setattr(Path, "open", bounded_open)
+    monkeypatch.setattr(os, "read", bounded_read)
     assert cli.main(["bug", "report", "--target", str(target), "--summary-file", str(summary), "--dry-run"]) == 2
-    assert reads == [mod.BUNDLE_CAP + 1]
+    assert not reads, "oversized summary must be rejected before reading or decoding"
     assert "60 KB" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("flag", ["--summary-file", "--include-output"])
+@pytest.mark.parametrize("kind", ["symlink", "fifo", "swap"])
+@pytest.mark.parametrize("fallback", [False, True])
+def test_selected_inputs_reject_links_fifos_and_swaps(report_env, monkeypatch, capsys, tmp_path, flag, kind, fallback):
+    mod, target = report_env
+    if kind == "fifo" and not hasattr(os, "mkfifo"):
+        pytest.skip("FIFO creation requires POSIX")
+    if fallback:
+        _without_posix_io(monkeypatch)
+    selected = tmp_path / "selected.txt"
+    victim = tmp_path / "victim.txt"
+    victim.write_text("unrelated private text")
+    if kind == "symlink":
+        selected.symlink_to(victim)
+    elif kind == "fifo":
+        os.mkfifo(selected)
+    else:
+        selected.write_text("expected log")
+        original_read = os.read
+
+        def swap_after_read(fd, size):
+            raw = original_read(fd, size)
+            if raw and selected.is_file():
+                os.replace(victim, selected)
+            return raw
+
+        monkeypatch.setattr(os, "read", swap_after_read)
+    original_open = Path.open
+
+    def deny_ordinary_input_open(path, *args, **kwargs):
+        if path == selected:
+            pytest.fail("selected input used an ordinary blocking path open")
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", deny_ordinary_input_open)
+    flags = ["--target", str(target), flag, str(selected), "--dry-run", "--json"]
+    if flag == "--include-output":
+        flags += ["--summary", "Unexpected result"]
+    assert cli.main(["bug", "report", *flags]) == 2
+    captured = capsys.readouterr()
+    assert "blocked" in captured.err
+    assert "private text" not in captured.out + captured.err
+    assert not list(Path(mod.data_root()).rglob("bundle.json"))
+
+
+@pytest.mark.parametrize("fallback", [False, True])
+def test_selected_output_reads_only_bounded_tail(report_env, monkeypatch, capsys, tmp_path, fallback):
+    mod, target = report_env
+    if fallback:
+        _without_posix_io(monkeypatch)
+    selected = tmp_path / "large.log"
+    original_read = os.read
+    sizes = []
+
+    def bounded_read(fd, size):
+        assert 0 < size <= mod.BUNDLE_CAP
+        raw = original_read(fd, size)
+        sizes.append(len(raw))
+        return raw
+
+    monkeypatch.setattr(os, "read", bounded_read)
+    # Use many short lines so the resulting bundle remains below its cap.
+    selected.write_text("private initial line\n" + "line\n" * mod.BUNDLE_CAP + "final line\n")
+    assert invoke(target, "--include-output", str(selected), "--dry-run", "--json") == 0
+    preview = result(capsys)
+    assert "private initial line" not in preview["preview_markdown"]
+    assert "final line" in preview["preview_markdown"]
+    assert sum(sizes) <= mod.BUNDLE_CAP
 
 
 def test_delayed_prepared_submission_still_starts_cooldown(report_env, capsys):

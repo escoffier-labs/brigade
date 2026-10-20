@@ -76,15 +76,13 @@ def assert_clean(text: str) -> None:
     """Scan the final bytes independently, ignoring embedded allow directives."""
     assert_terminal_safe(text)
     for name, value in os.environ.items():
-        if not _SECRET_ENV_NAME.search(name) or not 0 < len(value) <= 3:
+        if not _SECRET_ENV_NAME.search(name) or not value:
             continue
         # Rendered JSON may disclose the same value with quotes, control bytes,
         # or non-ASCII characters escaped.
         variants = (value, json.dumps(value)[1:-1], json.dumps(value, ensure_ascii=False)[1:-1])
         if any(variant in text for variant in variants):
-            raise ReportBlocked(
-                f"Bug report blocked: second scan found a short secret from environment variable {name}"
-            )
+            raise ReportBlocked(f"Bug report blocked: second scan found a secret from environment variable {name}")
     try:
         result = scan_text(
             text,

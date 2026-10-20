@@ -103,3 +103,11 @@ def test_long_secret_is_scrubbed_inside_words(tmp_path, monkeypatch):
     redacted = Redactor(tmp_path).text("prefixqxyzpostfix")
     assert redacted == "prefix<local>postfix"
     assert_clean(redacted)
+
+
+@pytest.mark.parametrize("secret", ["qxyp", 'qx"yp', "qx\nyp", "qx\u2603yp"])
+def test_second_scan_checks_long_environment_secrets_and_json_variants(monkeypatch, secret):
+    monkeypatch.setenv("TEST_CREDENTIAL", secret)
+    for candidate in (secret, json.dumps(secret), json.dumps(secret, ensure_ascii=False)):
+        with pytest.raises(ReportBlocked, match="TEST_CREDENTIAL"):
+            assert_clean(candidate)

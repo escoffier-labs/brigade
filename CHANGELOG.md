@@ -32,6 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Bug reports rescan all mounted secrets, omit doctor details and roster seats, reject unsafe selected files, and normalize failing check names in fingerprints.
+
 - Bug reports support Windows submission attempt logs, redact username case variants, and skip linked or nonregular diagnostic files without blocking. The guide documents duplicate searches before consent.
 
 - Bug reports redact every GitHub token family, collect only local target checks, fence untrusted Markdown, and reject unsafe diagnostic and attempt-log files.

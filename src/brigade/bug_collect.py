@@ -84,7 +84,6 @@ def _failed_runs(target: Path) -> list[dict[str, Any]]:
                     {
                         "id": directory.name,
                         "status": "timed_out" if telemetry_export._error_type(result) == "timeout" else "failed",
-                        "seat": seat,
                     },
                 )
             )
@@ -153,9 +152,11 @@ def collect_doctor(target: Path) -> dict[str, Any]:
         *doctor._check_journal_event_headroom(ctx.target),
         doctor._check_run_lineage(ctx.target),
         *doctor._check_outcome_loop(ctx),
-        *doctor.memory_station_checks(ctx),
         *doctor.mcp_station_checks(ctx),
     ]
+    # General memory checks follow configured source roots and ingestor logs.
+    # Exclude that callback entirely, rather than reading private logs and then
+    # discarding their details after an unbounded read.
     if "claude" in ctx.harnesses:
         check = doctor._check_claude_work_loop(ctx.target)
         if check is not None:
@@ -169,13 +170,13 @@ def collect_doctor(target: Path) -> dict[str, Any]:
     else:
         if config is None:
             local.append((doctor.WARN, "security: config", "missing .brigade/security.toml"))
-    checks = [doctor._normalize_scoped_check(check) for check in local]
+    checks = [doctor._normalize_scoped_check(check) for check in local[:_PROJECTION_ROW_LIMIT]]
     counts = doctor._status_counts(list(checks))
     return {
         "target": "<target>",
         "checks": [
-            {"status": status, "name": name, "detail": detail}
-            for status, name, detail, _scope in checks
+            {"status": status, "name": name}
+            for status, name, _detail, _scope in checks
             if status in {doctor.FAIL, doctor.WARN}
         ],
         "summary": {"failed": counts[doctor.FAIL], "warn": counts[doctor.WARN]},
@@ -208,8 +209,8 @@ def collect(
         "doctor": {
             "target": "<target>",
             "checks": [
-                {"name": str(c.get("name", "")), "status": str(c.get("status", "")), "detail": str(c.get("detail", ""))}
-                for c in doctor.get("checks", [])
+                {"name": str(c.get("name", "")), "status": str(c.get("status", ""))}
+                for c in islice(doctor.get("checks", []), _PROJECTION_ROW_LIMIT)
                 if isinstance(c, dict) and c.get("status") in {"FAIL", "WARN"}
             ],
             "summary": {key: doctor.get("summary", {}).get(key, 0) for key in ("failed", "warn")},

@@ -55,21 +55,24 @@ def gh(*args: str) -> str:
     return result.stdout.strip()
 
 
-def fingerprint(last_error: dict[str, Any] | None, check_names: list[str]) -> str:
-    error = last_error or {}
-    message = str(error.get("message_head", ""))
-    message = re.sub(
+def _normalize_fingerprint(text: str) -> str:
+    text = re.sub(
         r"""["'](?:[A-Za-z]:[\\/]|/)[^"'\r\n]+["']|"""
         r"""(?:[A-Za-z]:[\\/]|/)(?:[^\r\n<>"'\\/]+[\\/])*[^\s<>"'\\/]*""",
         "<path>",
-        message,
+        text,
     )
-    message = re.sub(r"\b[\w.-]*(?:[0-9][\w.-]*)\b", "<id>", message)
+    text = re.sub(r"\b[\w.-]*(?:[0-9][\w.-]*)\b", "<id>", text)
+    return " ".join(text.split())
+
+
+def fingerprint(last_error: dict[str, Any] | None, check_names: list[str]) -> str:
+    error = last_error or {}
     identity = [
         error.get("command", ""),
         error.get("exception_type", ""),
-        sorted(check_names),
-        " ".join(message.split()),
+        sorted(_normalize_fingerprint(name) for name in check_names),
+        _normalize_fingerprint(str(error.get("message_head", ""))),
         ".".join(__version__.split(".")[:2]),
     ]
     return "bf-" + hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:12]
@@ -246,10 +249,8 @@ def _output_tail(path: Path | None) -> str:
         return ""
     # Bounded read even for a multi-gigabyte selected log. UTF-8 replacement is
     # preferable to preserving undecodable bytes from a private file.
-    with path.open("rb") as handle:
-        handle.seek(0, 2)
-        handle.seek(max(0, handle.tell() - BUNDLE_CAP))
-        return "\n".join(handle.read(BUNDLE_CAP).decode("utf-8", errors="replace").splitlines()[-200:])
+    raw = bug_io.read_tail(path, limit=BUNDLE_CAP)
+    return "\n".join(raw.decode("utf-8", errors="replace").splitlines()[-200:])
 
 
 def _submit(via: str, bundle: dict[str, Any], markdown: str, comment_on: int | None) -> str:
@@ -300,11 +301,10 @@ def report(args: argparse.Namespace) -> int:
 
 
 def _read_bounded(path: Path) -> bytes:
-    with path.open("rb") as handle:
-        value = handle.read(BUNDLE_CAP + 1)
-    if len(value) > BUNDLE_CAP:
-        raise ReportBlocked("Bug report blocked: selected input exceeds 60 KB")
-    return value
+    try:
+        return bug_io.read_bytes(path, limit=BUNDLE_CAP)
+    except ValueError:
+        raise ReportBlocked("Bug report blocked: selected input exceeds 60 KB") from None
 
 
 def _check_security(bundle: dict[str, Any]) -> None:
@@ -337,6 +337,12 @@ def _load_prepared(report_id: str) -> tuple[Path, dict[str, Any], str, dict[str,
         or receipt.get("preview_digest") != hashlib.sha256(markdown.encode()).hexdigest()
     ):
         raise ReportBlocked("Bug report blocked: prepared bundle digest mismatch, prepare a new preview")
+    for rows, keys in (
+        (bundle.get("doctor", {}).get("checks", []), {"name", "status"}),
+        (bundle.get("recent_failures", {}).get("runs", []), {"id", "status"}),
+    ):
+        if any(not isinstance(row, dict) or set(row) != keys for row in rows):
+            raise ReportBlocked("Bug report blocked: outdated diagnostic projection, prepare a new preview")
     assert_terminal_safe(bundle)
     assert_clean(json.dumps(bundle, ensure_ascii=False, sort_keys=True))
     assert_clean(markdown)

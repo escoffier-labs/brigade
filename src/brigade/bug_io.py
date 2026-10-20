@@ -67,23 +67,44 @@ def _fallback_file(path: Path, flags: int, *, private: bool = False) -> Iterator
         raise OSError("unsafe report file") from exc
 
 
-def read_bytes(path: Path, *, limit: int) -> bytes:
+@contextmanager
+def _read_file(path: Path) -> Iterator[int]:
     if _supports_dirfd():
-        return private_io.read_bytes(path, limit=limit) or b""
+        with private_io.directory(path.parent) as parent:
+            fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+            try:
+                _regular(os.fstat(fd))
+                yield fd
+                live = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+                _regular(live)
+                current = os.fstat(fd)
+                if (current.st_dev, current.st_ino) != (live.st_dev, live.st_ino):
+                    raise OSError("file changed during exact read")
+            finally:
+                os.close(fd)
+        return
     _parents(path.parent)
     with _fallback_file(path, os.O_RDONLY) as fd:
+        yield fd
+        _regular(path.lstat())
+        run_journal._verify_fd_identity(path, fd)
+
+
+def _read(path: Path, *, limit: int, tail: bool) -> bytes:
+    with _read_file(path) as fd:
         before = os.fstat(fd)
-        if before.st_size > limit:
+        if not tail and before.st_size > limit:
             raise ValueError("file size limit exceeded")
+        if tail:
+            os.lseek(fd, max(0, before.st_size - limit), os.SEEK_SET)
         raw = bytearray()
-        while chunk := os.read(fd, min(65536, limit + 1 - len(raw))):
+        read_limit = limit if tail else limit + 1
+        while len(raw) < read_limit and (chunk := os.read(fd, min(65536, read_limit - len(raw)))):
             raw.extend(chunk)
             if len(raw) > limit:
                 raise ValueError("file size limit exceeded")
         after = os.fstat(fd)
         _regular(after)
-        _regular(path.lstat())
-        run_journal._verify_fd_identity(path, fd)
         if (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
             after.st_size,
             after.st_mtime_ns,
@@ -91,6 +112,15 @@ def read_bytes(path: Path, *, limit: int) -> bytes:
         ):
             raise OSError("file changed during exact read")
         return bytes(raw)
+
+
+def read_bytes(path: Path, *, limit: int) -> bytes:
+    return _read(path, limit=limit, tail=False)
+
+
+def read_tail(path: Path, *, limit: int) -> bytes:
+    """Read at most limit bytes from the end, with the exact reader's checks."""
+    return _read(path, limit=limit, tail=True)
 
 
 def _append(fd: int, raw: bytes) -> None:

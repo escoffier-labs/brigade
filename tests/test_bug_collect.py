@@ -266,3 +266,59 @@ def test_latest_failed_verify_uses_latest_command_time(tmp_path, monkeypatch, fa
         monkeypatch.setattr(os, "supports_dir_fd", set())
         monkeypatch.setattr(run_journal, "_HAS_O_NOFOLLOW", False)
     assert bug_collect.recent_failures(tmp_path)["verify"]["id"] == "verify-first"
+
+
+def test_failed_runs_have_only_ids_and_failure_kinds(tmp_path):
+    directory = _run(tmp_path)
+    seat = "example-client-production"
+    write_json(directory / "roster.json", {"agents": {seat: {"model": "private-model"}}})
+    write_json(directory / "worker-results.json", {"results": [{"worker": seat, "ok": False}]})
+    assert bug_collect.recent_failures(tmp_path)["runs"] == [{"id": "run-1", "status": "failed"}]
+
+
+@pytest.mark.parametrize("large", [False, True])
+def test_bug_doctor_never_reads_configured_external_logs(tmp_path, monkeypatch, large):
+    from pathlib import Path
+
+    target = tmp_path / "workspace"
+    target.mkdir()
+    log = tmp_path / "external.log"
+    log.write_text("timeout for customer Example project Sample\n")
+    if large:
+        with log.open("ab") as handle:
+            handle.truncate(1 << 30)
+    write_json(
+        target / ".brigade" / "handoff-sources.json",
+        {
+            "sources": [{"root": ".", "inboxes": [".claude/memory-handoffs"]}],
+            "ingestor": {"last_run_log": str(log)},
+        },
+    )
+    original = Path.open
+
+    def deny_external_read(path, *args, **kwargs):
+        if path == log:
+            pytest.fail("bug collection read an external ingestor log")
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", deny_external_read)
+    payload = bug_collect.collect_doctor(target)
+    assert payload["checks"]
+    assert all(set(check) == {"name", "status"} for check in payload["checks"])
+    assert "Example" not in json.dumps(payload)
+    assert str(log) not in json.dumps(payload)
+
+
+def test_doctor_bundle_projection_drops_all_detail_text(tmp_path):
+    bundle = bug_collect.collect(
+        tmp_path,
+        summary="Unexpected result",
+        title="Report",
+        kind="bug",
+        output="",
+        doctor={
+            "checks": [{"name": "profile", "status": "WARN", "detail": "customer Example project Sample"}],
+            "summary": {"failed": 0, "warn": 1},
+        },
+    )
+    assert bundle["doctor"]["checks"] == [{"name": "profile", "status": "WARN"}]
