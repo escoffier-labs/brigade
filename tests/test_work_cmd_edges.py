@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+import shlex
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timezone
 from pathlib import Path
 
-from brigade import work_cmd
+import pytest
+
+from brigade import cli, work_cmd
 from brigade.work_cmd import edges as edges_mod
 
 from tests.work_cmd_test_helpers import _init_git_repo
@@ -280,27 +283,58 @@ def test_terminal_statuses_satisfy_blockers(tmp_path, monkeypatch, capsys):
     assert blocked["id"] in ready_ids
 
 
-def test_orphan_blocker_does_not_gate_ready(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("with_edge_id", [True, False])
+@pytest.mark.parametrize("missing_kind", ["blocker", "parent", "ancestor_blocker", "ancestor_parent"])
+def test_missing_dependency_gates_ready_and_names_repair(tmp_path, capsys, missing_kind, with_edge_id):
     _init_git_repo(tmp_path)
-    monkeypatch.setattr(
-        work_cmd.helpers,
-        "_now",
-        lambda: datetime(2026, 8, 9, 12, 0, 0, tzinfo=timezone.utc),
-    )
-    task = _add(tmp_path, "Orphan blocked")
+    task = _add(tmp_path, "Missing dependency consumer")
+    unfinished = _add(tmp_path, "Unfinished dependency")
     ledger = work_cmd._read_task_ledger(tmp_path)
-    edges_mod.add_edge_to_ledger(
+    dependency_target = task["id"]
+    if missing_kind.startswith("ancestor_"):
+        parent = _add(tmp_path, "Parent")
+        ledger = work_cmd._read_task_ledger(tmp_path)
+        edges_mod.add_edge_to_ledger(ledger, source=parent["id"], target=task["id"], edge_type="parent-child")
+        dependency_target = parent["id"]
+    edge = edges_mod.add_edge_to_ledger(
         ledger,
-        source="missing-blocker-id",
-        target=task["id"],
-        edge_type="blocks",
+        source="missing-dependency",
+        target=dependency_target,
+        edge_type="parent-child" if missing_kind.endswith("parent") else "blocks",
         allow_missing=True,
-    )
+    )[0]
+    if not with_edge_id:
+        for stored in ledger["edges"]:
+            if stored.get("id") == edge["id"]:
+                stored.pop("id")
+    edges_mod.add_edge_to_ledger(ledger, source=unfinished["id"], target=task["id"], edge_type="blocks")
     work_cmd._write_task_ledger(tmp_path, ledger)
-    assert work_cmd.ready(target=tmp_path, explain=True, json_output=True) == 0
+
+    # JSON includes explanations without requiring --explain.
+    assert work_cmd.ready(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert task["id"] not in {item["id"] for item in payload["ready"]}
+    blocked = next(item for item in payload["blocked"] if item["id"] == task["id"])
+    assert blocked["reason"] == "missing_dependency"
+    assert [item["id"] for item in blocked["blocking_dependencies"]] == [unfinished["id"]]
+    assert [item["id"] for item in blocked["missing_dependencies"]] == ["missing-dependency"]
+    assert blocked["blockers"] == blocked["blocking_dependencies"]
+    assert any(item["id"] == "missing-dependency" for item in payload["orphans"])
+
+    assert work_cmd.ready(target=tmp_path, explain=True) == 0
+    out = capsys.readouterr().out
+    assert f"blocking_dependency: {unfinished['id']}" in out
+    assert "missing_dependency: missing-dependency" in out
+    repair = blocked["missing_dependencies"][0]["repair_commands"][0]
+    assert repair in out
+    if with_edge_id:
+        assert repair == f"brigade work task edge remove --id {edge['id']}"
+    assert cli.main([*shlex.split(repair)[1:], "--target", str(tmp_path)]) == 0
+    assert work_cmd.task_done(target=tmp_path, task_id=unfinished["id"]) == 0
+    capsys.readouterr()
+    assert work_cmd.ready(target=tmp_path, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
     assert task["id"] in {item["id"] for item in payload["ready"]}
-    assert payload["orphan_count"] >= 1
 
 
 def test_task_add_deps_and_graph_atomic(tmp_path, monkeypatch, capsys):
