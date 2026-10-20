@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The memory MCP server reports `serverInfo.name` `brigade-memory` (was `brigade-memory-readonly`), and `serve-mcp --target` defaults to the nearest directory above the working directory holding `.brigade/config.json` or `.brigade/memory-care.toml`, never the home directory. An explicit `--target` is still used as the repo store, and one that is not an existing directory exits 2.
 - The memory `work_brief` tool builds its git, session, and next-task keys from local helpers only, so it never contacts the fleet hub. An unexpected exception in any memory tool is returned as a tool error instead of ending the server, and `write_handoff` writes to the repo inbox even when an invalid memory-care config drops the repo store from reads.
 - `brigade handoff draft` creates draft files with mode 0600 (previously the umask default).
+- The beta channel moves to the 0.31 preview line. `brigade update --channel beta` resolves `0.31.0.devYYYYMMDD` wheels again, instead of older 0.29.0 development builds from before the 0.30.0 release.
 
 ## [0.30.0] - 2026-10-20
 

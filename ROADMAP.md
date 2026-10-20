@@ -21,7 +21,7 @@ Execution model: Brigade runs only on explicit invocation. An external scheduler
 
 ## Where things stand
 
-**v0.30.x on main** is the release candidate after v0.29.0. The v0.28.0 release shipped on 2026-10-18 with the release-integrity fixes for fleet claims, hook session state, and Fleet Hub request bounds. The product core plus the provenance, dashboard, and memory work that closed through early September 2026 shipped in v0.27.0:
+**v0.31.x on main** is the preview line after v0.30.0, which shipped on 2026-10-20 on PyPI and npm with the fleet ownership map, Windows CI coverage, and the npm and npx install route. The v0.28.0 release shipped on 2026-10-18 with the release-integrity fixes for fleet claims, hook session state, and Fleet Hub request bounds. The product core plus the provenance, dashboard, and memory work that closed through early September 2026 shipped in v0.27.0:
 
 - Portable setup (`operator quickstart`), handoffs with lint and source coverage, daily operator loop, work inbox, fleet and release receipts, tool catalog, skill registry, research, runbooks, chat sweeps, backup visibility, station manifests.
 - **Receipts and learning**: verify/run receipts with digests and optional HMAC signing, code-graph deltas, outcome capture from verify and run receipts, Wilson ranking, reconcile promote/rollback, git provenance, MiseLedger export/import of receipts.
