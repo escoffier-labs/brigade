@@ -1729,3 +1729,17 @@ Machine-readable audit observations produced by the commit-linkage verifier.
 - `brigade receipts export miseledger`: adapter export (separate `miseledger.adapter.v1` envelope)
 - `brigade runs export` / `import` / `validate-archive`: portable `brigade.work-run` archives
 - `brigade outcome rebuild-status`: prove `status.json` matches decision receipts
+
+`brigade outcome doctor` includes `status_projection` in text and JSON output.
+The report contains `reproducible`, rebuilt and persisted counts, `drift`,
+`legacy`, `skipped_receipts`, and up to ten `skipped_receipt_names`.
+`reproducible` is false when drift exists, decision receipts are skipped, or a
+non-empty `status.json` has no decision receipts to reproduce it. In that last
+case, `legacy` is true and per-artifact drift is suppressed because the older
+ledger has no decision log.
+
+Projection drift kinds are `only-in-status` (persisted entry has no receipt),
+`missing-from-status` (receipt fold has no persisted entry), and `mismatch`
+(both entries exist but differ). Malformed or partial receipt files are skipped
+from the fold, counted in `skipped_receipts`, and named with a ten-file output
+limit. The report is advisory. `outcome doctor` keeps its existing exit status.

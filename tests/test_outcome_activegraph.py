@@ -82,6 +82,55 @@ def test_rebuild_status_detects_drift(tmp_path, capsys):
     assert any(d["artifact_id"] == "card-x" and d["issue"] == "mismatch" for d in payload["drift"])
 
 
+def test_rebuild_status_reports_receipt_written_before_status(tmp_path, capsys):
+    decisions = tmp_path / "memory" / "outcome" / "decisions"
+    decisions.mkdir(parents=True)
+    (decisions / "decision-1.json").write_text(
+        json.dumps(
+            {
+                "artifact_id": "card-crash",
+                "new_status": "promoted",
+                "created_at": "2026-06-20T01:00:00+00:00",
+            }
+        )
+    )
+
+    assert outcome_cmd.rebuild_status(target=tmp_path, check=True, json_output=True) == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert any(
+        item["artifact_id"] == "card-crash" and item["issue"] == "missing-from-status" for item in payload["drift"]
+    )
+
+
+def test_outcome_doctor_marks_legacy_status_without_decisions(tmp_path, capsys):
+    status_path = tmp_path / "memory" / "outcome" / "status.json"
+    status_path.parent.mkdir(parents=True)
+    status_path.write_text(json.dumps({"artifacts": {"old-card": {"status": "promoted"}}}))
+
+    assert outcome_cmd.doctor(target=tmp_path, json_output=True) == 0
+    projection = json.loads(capsys.readouterr().out)["status_projection"]
+    assert {"reproducible", "drift", "legacy", "skipped_receipts"} <= projection.keys()
+    assert projection["legacy"] is True
+    assert projection["drift"] == []
+
+
+def test_outcome_doctor_text_reports_status_projection(tmp_path, capsys):
+    assert outcome_cmd.doctor(target=tmp_path) == 0
+    assert "status_projection: reproducible=True legacy=False" in capsys.readouterr().out
+
+
+def test_outcome_doctor_counts_and_names_malformed_decision_receipt(tmp_path, capsys):
+    decisions = tmp_path / "memory" / "outcome" / "decisions"
+    decisions.mkdir(parents=True)
+    malformed = decisions / "broken.json"
+    malformed.write_text('{"artifact_id":')
+
+    assert outcome_cmd.doctor(target=tmp_path, json_output=True) == 0
+    projection = json.loads(capsys.readouterr().out)["status_projection"]
+    assert projection["skipped_receipts"] == 1
+    assert "broken.json" in projection["skipped_receipt_names"]
+
+
 def test_rebuild_status_reproduces_promoted_route_policy(tmp_path, capsys, monkeypatch):
     from tests.test_scorecard_reconcile import _stub_execute, seed_registry_skill_scorecard_promotion
     from tests.test_outcome_cmd import _write_registry_skill
