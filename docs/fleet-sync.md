@@ -792,3 +792,102 @@ Result-set bounds, keyset pagination, and a current-status projection move to
 [the 0.29.0 follow-up](https://github.com/escoffier-labs/brigade/issues/1738).
 Retention, POST throttling, per-node fairness behind a proxy, and the fronting
 proxy runbook also remain deferred to that issue.
+
+
+## Adoption statistics collector and Deck page
+
+`GET /deck/stats` uses existing read-only browser enrollment, admin bearer or
+trusted proxy identity. It renders the latest snapshot and a weekly series from
+the Hub database through the shared Deck theme. Rendering makes no provider calls.
+`POST /stats` requires an enrolled node token whose node is in
+`fleet.stats.collector_nodes`. Admin tokens are refused even with admin writes
+enabled. Replayed snapshots are ignored. `admin_stats_snapshots` keeps the snapshot with the most successful sources per
+UTC day, then prefers recency, at most 402 rows within the 400-day retention window.
+HTTP 200 acknowledges validation and processing. It does not guarantee that the
+returned `snapshot_id` remains stored after same-day compaction. Daily activity
+and downloads can therefore come from an older snapshot with more successful
+sources, while weekly observations reflect a newer upload.
+`admin_stats_weeks` keeps the best observation for each of the latest 60 weeks.
+Complete observations beat partial ones, then the newest observation wins.
+Hub schema version 36 adds `admin_stats_snapshots` and `admin_stats_weeks`
+through the normal startup migration. Startup also preserves weekly history
+from the earlier branch schema when present.
+
+Configure the collector and Hub separately in the operator's fleet.toml:
+
+```toml
+[fleet.stats]
+collector_nodes = ["example-node"]  # Set on the Hub.
+database = "example-db"            # Set on the collector.
+# Optional collector settings, supplied by the operator:
+# account = "example-account"
+# worker = "example-worker"
+# analytics_token_env = "EXAMPLE_ANALYTICS_TOKEN"
+# database_id = "example-db-id"      # Select D1 REST instead of wrangler.
+# d1_token_env = "EXAMPLE_D1_TOKEN"
+# downloads_url = "https://example.invalid/downloads.json"
+```
+
+The collector uses its existing wrangler OAuth login for D1 reads when only
+`database` is set. Setting `database_id` selects D1 REST, using the account and
+the D1 Read token in the environment variable named by `d1_token_env`. GraphQL
+requires Account Analytics Read in the variable named by `analytics_token_env`.
+Both names may reference the same account token with both read permissions,
+injected by the approved secrets render. Wrangler receives neither configured
+token variable, standard Cloudflare API token variables, nor Brigade variables.
+Credentials never enter argv, snapshots, the Hub store or tool error messages.
+Run `brigade fleet stats collect` explicitly from an authorized collector node.
+`--no-publish` prints aggregates for inspection. It still reads configured sources.
+If all sources fail or none are configured, the command exits 1 without publishing
+or printing a snapshot. Partial snapshots retain only successful sources.
+
+The closed `brigade.admin-stats.v1` snapshot and page expose these fields:
+
+- `schema`, `snapshot_id`, `taken_at`, `source_set`.
+- `weeks`, `daily`, `downloads`, `digest`.
+- `weeks.week`, `weeks.partial`, `weeks.active_sources`, `weeks.retained_2d_sources`.
+- `weeks.retained_3d_sources`, `weeks.versions`, `weeks.upgrades`, `weeks.versions.version`.
+- `weeks.versions.active_sources`, `weeks.upgrades.from_version`, `weeks.upgrades.to_version`, `weeks.upgrades.active_sources`.
+- `daily.day`, `daily.worker_requests`, `daily.worker_errors`, `downloads.pypi`.
+- `downloads.npm`.
+
+`weeks`, `daily`, version cells and upgrade cells are arrays. Counts are nullable
+nonnegative integers. Source counts below 5 become `null`, including zero.
+Gap checks compare only containing groups: active sources contain both retention
+groups and each version, 2+ day sources contain 3+ day sources, and each version
+contains its upgrade cells. A gap of 1 to 4 sources hides the week's source counts
+and both histograms. Excess version observations revealing 1 to 4 sources using
+multiple versions also hide the week, checked before and after removing small cells.
+Other small or unknown histogram cells lose their category names without hiding
+the week's totals or valid peers. The page always includes an "other (suppressed)"
+row with an unknown count in each histogram, even when no cells were omitted.
+It never reports the omitted cells' sum or whether any existed. Incomplete
+version or upgrade reads hide both histograms. These rules also apply to uploaded
+snapshots. Known retention counts must satisfy active >= 2+ day >= 3+ day sources.
+Each known version or upgrade count must not exceed the active-source total.
+The POST body ceiling is 4 MiB to cover the full 60-week schema maximum.
+The page renders `null` and missing observations as unknown. Worker request,
+Worker error and public download counts are event counts and may be zero.
+Weekly counts mean active sources, not people or installs. Retention is activity
+on 2+ or 3+ distinct days in the same ISO week. Possible upgrades pair versions
+observed in time order within a week, restricted to increasing numeric releases.
+The current week and the oldest week truncated by the 90-day query are labelled partial.
+Source identities rotate weekly. Worker counts cover 30 completed UTC days.
+Each malformed version or upgrade cell is omitted individually, preserving valid cells
+subject to weekly suppression. Histograms over 100 versions or 200 upgrade
+pairs render as unknown. Development versions may use eight-digit date suffixes.
+`source_set` contains only `d1`, `worker` and `downloads` for successful reads.
+Nonempty weeks require `d1`, nonempty daily data requires `worker`, and known
+download counts require `downloads` in `source_set`.
+`digest` is SHA-256 of canonical JSON without `digest` or `snapshot_id`, with
+sorted keys and compact separators. `snapshot_id` equals that digest.
+
+Controller and erasure contact: Solomon Neas. Contact the maintainer at the
+address in [SECURITY.md](../SECURITY.md). No hashes, install IDs, addresses,
+hostnames or deployment identifiers enter snapshots. The Hub rejects unknown fields at every depth. It keeps only
+aggregate snapshots and weekly observations for 400 days and purges older rows
+on each accepted POST. Invalid stored payloads are skipped when rendering.
+Opt-in usage aggregates are not available yet. Future opt-in counts will
+undercount usage.
+Small-cell suppression is defense in depth for screenshots and shared views, not
+protection against an enrolled viewer on the operator's own Hub who can compare snapshots.

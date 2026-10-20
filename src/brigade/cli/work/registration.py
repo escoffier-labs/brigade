@@ -501,6 +501,26 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Partition the ready set into dispatch waves by footprint intersection.",
     )
     p_work_ready.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_dispatch = work_sub.add_parser("dispatch", help="Plan one ready wave and write a dispatch receipt.")
+    p_work_dispatch.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_work_dispatch.add_argument("--wave", type=int, default=None, help="Pin a zero-based dispatch wave.")
+    p_work_dispatch.add_argument(
+        "--max", dest="max_workers", type=int, default=None, help="Worker cap, default roster limits.max_workers."
+    )
+    p_work_dispatch.add_argument(
+        "--batch-size", type=int, default=None, help="Maximum tasks to select, default worker cap."
+    )
+    routing = p_work_dispatch.add_mutually_exclusive_group()
+    routing.add_argument("--worker", default=None, help="Explicit seat for all selected tasks.")
+    routing.add_argument(
+        "--seat-map", action="append", default=[], help="Explicit CLASS=SEAT mapping. May be repeated."
+    )
+    p_work_dispatch.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="Write only session.json and plan.json. Required until launching is implemented.",
+    )
+    p_work_dispatch.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_claim = work_sub.add_parser(
         "claim",
         help="Atomically claim a ready work task (pending → in_progress with assignee).",
