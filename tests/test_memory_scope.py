@@ -7,13 +7,14 @@ from pathlib import Path
 import pytest
 
 from brigade import memory_scope
+from tests._home import set_home
 
 
 @pytest.fixture
 def home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     home = tmp_path / "home"
     home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, home)
     monkeypatch.setenv("BRIGADE_HOME", str(home / ".brigade"))
     return home
 

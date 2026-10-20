@@ -188,8 +188,12 @@ def build_server(handlers: Handlers, *, host: str, port: int, token: str) -> HTT
 
 
 def serve_http(handlers: Handlers, *, host: str, port: int, token: str) -> int:
-    server = build_server(handlers, host=host, port=port, token=token)
     shown = f"[{host}]" if ":" in host else host
+    try:
+        server = build_server(handlers, host=host, port=port, token=token)
+    except OSError as exc:
+        print(f"error: cannot listen on {shown}:{port}: {exc.strerror or exc}", file=sys.stderr)
+        return 2
     print(
         f"brigade memory MCP listening on http://{shown}:{server.server_address[1]}{MCP_PATH}",
         file=sys.stderr,

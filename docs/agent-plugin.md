@@ -20,6 +20,8 @@ codex plugin add brigade@brigade
 
 The Codex plugin ships no hook, because codex-cli 0.163.0 has no verified plugin hook contract. Codex gets the brief from the `work_brief` tool, which the `brigade-work` skill tells agents to run first.
 
+`write_handoff` is marked as a write tool, so Codex asks for approval before calling it. Under `codex exec` with the default `never` approval policy the call is rejected; pass `--approve-for-me` to route it through automatic review.
+
 ## Tools
 
 | Tool | Kind | What it does |

@@ -8,6 +8,7 @@ from pathlib import Path
 import pytest
 
 from brigade import memory_mcp_core
+from tests._home import set_home
 
 
 def _card(root: Path, name: str, title: str, body: str) -> None:
@@ -23,7 +24,7 @@ def stores(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]
     repo = tmp_path / "repo"
     repo.mkdir()
     home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, home)
     monkeypatch.setenv("BRIGADE_HOME", str(user))
     return repo, user
 

@@ -16,6 +16,7 @@ from pathlib import Path
 import pytest
 
 from brigade import mcp_http, mcp_server, memory_mcp_core
+from tests._home import set_home
 
 TOKEN = "test-token-value"
 
@@ -111,7 +112,7 @@ def test_read_token_refuses_loose_modes_and_symlinks(tmp_path: Path):
 def test_stdio_and_http_answer_identically(tmp_path: Path, monkeypatch):
     home = tmp_path / "home"
     home.mkdir()
-    monkeypatch.setenv("HOME", str(home))
+    set_home(monkeypatch, home)
     monkeypatch.setenv("BRIGADE_HOME", str(home / ".brigade"))
     repo = tmp_path / "repo"
     cards = repo / "memory" / "cards"
@@ -231,3 +232,18 @@ def test_read_token_checks_owner_and_bounds_size(tmp_path: Path, monkeypatch):
     monkeypatch.setattr(mcp_http.os, "getuid", lambda: os.stat(path).st_uid + 1)
     with pytest.raises(ValueError, match="owned by the current user"):
         mcp_http.read_token(path)
+
+
+def test_serve_http_reports_a_busy_port_without_a_traceback(capsys):
+    taken = socket.socket()
+    taken.bind(("127.0.0.1", 0))
+    taken.listen(1)
+    try:
+        port = taken.getsockname()[1]
+        rc = mcp_http.serve_http(_handlers(), host="127.0.0.1", port=port, token=TOKEN)
+    finally:
+        taken.close()
+    assert rc == 2
+    err = capsys.readouterr().err
+    assert err.startswith("error: cannot listen on 127.0.0.1:")
+    assert "Traceback" not in err
