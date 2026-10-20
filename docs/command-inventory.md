@@ -28,7 +28,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade dogfood` (extras): 1 command path(s)
 - `brigade evidence`: 12 command path(s)
 - `brigade extras`: 3 command path(s)
-- `brigade fleet`: 73 command path(s)
+- `brigade fleet`: 74 command path(s)
 - `brigade friction` (extras): 3 command path(s)
 - `brigade governance`: 1 command path(s)
 - `brigade guard`: 1 command path(s)
@@ -252,6 +252,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade fleet serve`
 - `brigade fleet sessions`
 - `brigade fleet sink`
+- `brigade fleet stats collect`
 - `brigade fleet status`
 - `brigade fleet work attempt`
 - `brigade fleet work burn`

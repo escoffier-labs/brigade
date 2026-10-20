@@ -788,3 +788,64 @@ Result-set bounds, keyset pagination, and a current-status projection move to
 [the 0.29.0 follow-up](https://github.com/escoffier-labs/brigade/issues/1738).
 Retention, POST throttling, per-node fairness behind a proxy, and the fronting
 proxy runbook also remain deferred to that issue.
+
+
+## Adoption statistics collector and Deck page
+
+`GET /deck/stats` uses existing read-only browser enrollment, admin bearer or
+trusted proxy identity. It renders the latest snapshot and a weekly series from
+the Hub database through the shared Deck theme. Rendering makes no provider calls.
+`POST /stats` requires an enrolled node token whose node is in
+`fleet.stats.collector_nodes`. Admin tokens are refused even with admin writes
+enabled. Snapshots are deduplicated by digest in `admin_stats_snapshots`.
+Hub schema version 35 adds this table through the normal startup migration.
+
+Configure the collector and Hub separately in the operator's fleet.toml:
+
+```toml
+[fleet.stats]
+collector_nodes = ["example-node"]  # Set on the Hub.
+database = "example-db"            # Set on the collector.
+# Optional collector settings, supplied by the operator:
+# account = "example-account"
+# worker = "example-worker"
+# analytics_token_env = "EXAMPLE_ANALYTICS_TOKEN"
+# downloads_url = "https://example.invalid/downloads.json"
+```
+
+The collector uses its existing wrangler OAuth login for D1 reads. API token
+variables are removed from that subprocess. GraphQL requires Account Analytics
+Read in the environment variable named by `analytics_token_env`, injected by the
+approved secrets render. Credentials never enter argv, snapshots, the Hub store
+or tool error messages. A D1 Read API-token transport is not implemented.
+Run `brigade fleet stats collect` explicitly from an authorized collector node.
+`--no-publish` prints aggregates for inspection. It still reads configured sources.
+
+The closed `brigade.admin-stats.v1` snapshot and page expose these fields:
+
+- `schema`, `snapshot_id`, `taken_at`, `source_set`.
+- `weeks`, `daily`, `downloads`, `digest`.
+- `weeks.week`, `weeks.partial`, `weeks.active_sources`, `weeks.retained_2d_sources`.
+- `weeks.retained_3d_sources`, `weeks.versions`, `weeks.upgrades`, `weeks.versions.version`.
+- `weeks.versions.active_sources`, `weeks.upgrades.from_version`, `weeks.upgrades.to_version`, `weeks.upgrades.active_sources`.
+- `daily.day`, `daily.worker_requests`, `daily.worker_errors`, `downloads.pypi`.
+- `downloads.npm`.
+
+`weeks`, `daily`, version cells and upgrade cells are arrays. Counts are nullable
+nonnegative integers. Source counts below 5 become `null`, including zero.
+The page renders `null` and missing observations as unknown. Worker request,
+Worker error and public download counts are event counts and may be zero.
+Weekly counts mean active sources, not people or installs. Retention is activity
+on 2+ or 3+ distinct days in the same ISO week. Possible upgrades pair versions
+observed in time order within a week, restricted to increasing numeric releases.
+The current week and the oldest week truncated by the 90-day query are labelled partial. Source identities rotate weekly.
+`source_set` contains only `d1`, `worker` and `downloads` for successful reads.
+`digest` is SHA-256 of canonical JSON without `digest` or `snapshot_id`, with
+sorted keys and compact separators. `snapshot_id` equals that digest.
+
+Controller and erasure contact: Solomon Neas through the project maintainer
+contact. No hashes, install IDs, addresses, hostnames or deployment identifiers
+enter snapshots. The Hub rejects unknown fields at every depth. It keeps only
+aggregate snapshots for 400 days and purges older rows on each accepted POST.
+Opt-in usage aggregates are not available yet. Future opt-in counts will
+undercount usage.
