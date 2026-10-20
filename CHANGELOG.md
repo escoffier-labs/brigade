@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The npm package `@escoffier-labs/brigade@0.30.0` bundles the published `brigade-cli==0.30.0` wheel. Its launcher runs `brigade.cli:process_main`, the same entry point as the `brigade` console script, so npm installs keep exit status 130 when a verification is cancelled.
 - The beta channel moves to the 0.31 preview line. `brigade update --channel beta` resolves `0.31.0.devYYYYMMDD` wheels again, instead of older 0.29.0 development builds from before the 0.30.0 release.
 
+### Fixed
+
+- Scanner children run with `BRIGADE_NO_UPDATE_CHECK=1`. The detached update refresh a child started outlived its throwaway sandbox and recreated it when writing `update-notify.json`, leaving one `brigade-scanner-child-*` directory in the temp dir per scanner run.
+
 ## [0.30.0] - 2026-10-20
 
 ### Added
