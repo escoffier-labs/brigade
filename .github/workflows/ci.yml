@@ -254,6 +254,77 @@ jobs:
         if: ${{ needs.changes.outputs.notify == 'true' }}
         run: go test -race ./...
 
+  # Stable check name. Maintainers may require it without changing this workflow.
+  # Pull requests only: a merge group reports this job as skipped, which satisfies
+  # a required check, so the queue does not wait on Windows. The 45-minute driver
+  # budget covers the largest selection from the last 200 main commits (257 files).
+  windows-affected-tests:
+    name: windows-affected-tests
+    if: ${{ github.event_name == 'pull_request' }}
+    runs-on: windows-latest
+    timeout-minutes: 50
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Capture job budget
+        run: |
+          "WINDOWS_PYTEST_JOB_STARTED_AT=$([DateTimeOffset]::UtcNow.ToUnixTimeSeconds())" >> $env:GITHUB_ENV
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Select affected Windows tests
+        id: selection
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: |
+          if (-not $env:BASE_SHA) { throw "Windows affected-tests base SHA is missing" }
+          git fetch --no-tags --depth=1 origin $env:BASE_SHA
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Hosted Windows includes Python. Selection uses only its standard library.
+          python scripts/windows_affected_tests.py --base $env:BASE_SHA --head HEAD --output "$env:RUNNER_TEMP/windows-affected-results/files.txt"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $count = @(Get-Content "$env:RUNNER_TEMP/windows-affected-results/files.txt").Count
+          "count=$count" >> $env:GITHUB_OUTPUT
+      - name: Skip empty selection
+        if: ${{ steps.selection.outputs.count == '0' }}
+        run: Write-Output "No affected Windows tests."
+      - uses: actions/setup-python@v7
+        if: ${{ steps.selection.outputs.count != '0' }}
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install
+        if: ${{ steps.selection.outputs.count != '0' }}
+        run: |
+          python -m pip install --upgrade pip
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python -m pip install -e ".[dev]"
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Run affected Windows tests
+        if: ${{ steps.selection.outputs.count != '0' }}
+        timeout-minutes: 45
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha }}
+        run: >-
+          python scripts/windows_pytest.py
+          --files-from "$env:RUNNER_TEMP/windows-affected-results/files.txt"
+          --record "$env:RUNNER_TEMP/windows-affected-results/summary.json"
+          --base-ref $env:BASE_SHA
+          --job-started-at $env:WINDOWS_PYTEST_JOB_STARTED_AT
+          --job-limit 2700 --startup-reserve 120 --finalize-reserve 300
+          --job-timeout 2280 --serial test_runs_serve.py --serial test_aboyeur.py
+      - name: Upload affected Windows results
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-affected-results
+          path: ${{ runner.temp }}/windows-affected-results
+          if-no-files-found: warn
+          retention-days: 7
+
   lint:
     runs-on: ubuntu-latest
     steps:

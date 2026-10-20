@@ -111,6 +111,17 @@ def discover_files(repo: Path) -> list[str]:
     return sorted(path.relative_to(tests).as_posix() for path in tests.rglob("test_*.py") if path.is_file())
 
 
+def load_selected_files(path: Path, discovered: list[str]) -> list[str]:
+    """Read portable names relative to tests/, rejecting stale or unsafe input."""
+    files = sorted({portable_test_name(line) for line in path.read_text(encoding="utf-8").splitlines() if line})
+    if not files:
+        raise ValueError("selected file list is empty; skip the driver for empty selections")
+    missing = sorted(set(files).difference(discovered))
+    if missing:
+        raise ValueError("selected files not discovered: " + ", ".join(missing))
+    return files
+
+
 def validate_allowlist(allowlist: set[str], files: list[str]) -> None:
     stale = sorted(allowlist.difference(files))
     if stale:
@@ -741,6 +752,7 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
             f"allowlist permits initial creation up to {INITIAL_ALLOWLIST_ENTRIES} historical entries"
         ),
     )
+    parser.add_argument("--files-from", type=Path, help="newline-separated portable file names relative to tests/")
     parser.add_argument("--python", type=Path, default=Path(sys.executable))
     parser.add_argument("--workers", type=int, default=DEFAULT_WORKERS)
     parser.add_argument("--timeout", type=int, default=DEFAULT_TIMEOUT_SECONDS)
@@ -822,6 +834,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         unknown_serial = sorted(serial.difference(files))
         if unknown_serial:
             raise ValueError("serial selectors not discovered: " + ", ".join(unknown_serial))
+        if args.files_from is not None:
+            files = load_selected_files(args.files_from, files)
+            serial.intersection_update(files)
         record_progress([])
         if args.base_ref:
             check_allowlist_ratchet(allowlist, load_allowlist_from_ref(repo, args.base_ref, args.allowlist))

@@ -378,8 +378,8 @@ def verify_artifacts(output: Path) -> dict:
         raise ValueError("runtime receipt mismatch")
     pin, payload = reviewed["payloadWheel"], runtime["payload"]
     if (
-        runtime["version"] != "0.29.0"
-        or runtime["payloadVersion"] != "0.29.0"
+        runtime["version"] != "0.30.0"
+        or runtime["payloadVersion"] != "0.30.0"
         or payload["sourceCommit"] != pin["sourceCommit"]
         or payload["releaseTag"] != pin["releaseTag"]
         or payload["sha256"] != pin["sha256"]

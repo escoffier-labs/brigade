@@ -397,6 +397,15 @@ def canary(target: Path, pack_id: str) -> dict[str, Any]:
     return grokbot_cerebro.canary(target)
 
 
+_PLATFORM_REFUSALS = frozenset({"unsupported-platform", "unsupported_on_windows"})
+
+
+def _raise_platform_refusal(exc: Exception) -> None:
+    """Keep an explicit platform refusal instead of folding it into unsafe-path."""
+    if isinstance(exc, (grokbot_t3.T3DispatchError, dot.DotError)) and getattr(exc, "code", None) in _PLATFORM_REFUSALS:
+        raise PackError(str(exc)) from exc
+
+
 def render_install_service(target: Path, pack_id: str) -> str:
     pack = show_pack(pack_id)
     try:
@@ -425,6 +434,7 @@ def render_install_service(target: Path, pack_id: str) -> str:
     except (grokbot_mcp.ConfigurationError, grokbot_ops.ServiceRenderError, OSError) as exc:
         raise PackError("unsafe-path") from exc
     except Exception as exc:
+        _raise_platform_refusal(exc)
         if isinstance(
             exc,
             (
@@ -478,6 +488,7 @@ def apply_install_service(
     except (grokbot_mcp.ConfigurationError, grokbot_ops.ServiceRenderError, OSError) as exc:
         raise PackError("unsafe-path") from exc
     except Exception as exc:
+        _raise_platform_refusal(exc)
         if isinstance(
             exc,
             (
@@ -1138,6 +1149,8 @@ def _t3_runtime_reference(runtime_path: object) -> str:
     try:
         return grokbot_t3.validate_runtime_reference(str(runtime_path))
     except grokbot_t3.T3DispatchError as exc:
+        if exc.code == "unsupported-platform":
+            raise PackError(str(exc)) from exc
         raise PackError("unsafe-path") from exc
 
 

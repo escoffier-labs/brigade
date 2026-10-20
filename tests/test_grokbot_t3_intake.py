@@ -59,7 +59,7 @@ def issue(number=42, *labels):
 
 
 @pytest.fixture
-def make(tmp_path):
+def make(tmp_path, t3_ledger_storage):
     def factory(*, policy=None, **overrides):
         runtime = rc.parse_runtime(runtime_payload(tmp_path, intake=intake_payload(**(policy or {})), **overrides))
         ledger = Ledger(runtime.ledger_path)

@@ -35,7 +35,8 @@ def test_state_open_fails_closed_without_posix_locking(monkeypatch, dot_private_
     monkeypatch.setitem(sys.modules, "fcntl", None)
     if non_posix:
         monkeypatch.setattr(safe_state, "os", type("Platform", (), {"name": "nt"})())
-    with pytest.raises(safe_state.DotError, match="unsafe_state"):
+    code = "unsupported_on_windows" if sys.platform == "win32" else "unsafe_state"
+    with pytest.raises(safe_state.DotError, match=code):
         BridgeState(dot_private_dir)
 
 
@@ -118,3 +119,35 @@ def test_request_body_deadline_returns_408(monkeypatch):
     scope = {"type": "http", "path": "/mcp", "method": "POST", "headers": [(b"host", b"dot.example.test")]}
     asyncio.run(gate(scope, receive, send))
     assert sent[0]["status"] == 408
+
+
+@pytest.mark.parametrize("entry", ["state", "runtime", "listener"])
+def test_windows_local_entry_points_refuse_before_io(monkeypatch, tmp_path, entry):
+    from brigade.dot import runtime_config
+    from brigade.dot.state import BridgeState
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    actions = {
+        "state": lambda: BridgeState(tmp_path / "missing"),
+        "runtime": lambda: runtime_config.load_runtime(tmp_path / "missing.json"),
+        "listener": lambda: lifecycle.build_listener_from_target(tmp_path),
+    }
+    with pytest.raises(safe_state.DotError, match="^unsupported_on_windows$"):
+        actions[entry]()
+    assert not (tmp_path / "missing").exists()
+
+
+@pytest.mark.parametrize("command", ["doctor", "canary", "watch", "notify", "calls"])
+def test_windows_operator_diagnostics_name_platform(monkeypatch, tmp_path, capsys, command):
+    from brigade.dot import __main__ as cli
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(lifecycle.grokbot_mcp, "_load_mcp", lambda: None)
+    monkeypatch.setattr(access_auth, "_jwt", lambda: None)
+    if command == "doctor":
+        assert {"check": "platform", "status": "fail", "reason": "unsupported_on_windows"} in lifecycle.doctor(tmp_path)
+    elif command == "canary":
+        assert lifecycle.canary(tmp_path)["reason"] == "unsupported_on_windows"
+    else:
+        assert cli.main([command, "--target", str(tmp_path)]) == 2
+        assert '"error": "unsupported_on_windows"' in capsys.readouterr().out

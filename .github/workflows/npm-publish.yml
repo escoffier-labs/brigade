@@ -10,14 +10,14 @@ on:
       release_tag:
         description: Qualified Python release tag
         required: true
-        default: v0.29.0
+        default: v0.30.0
         type: string
 
 permissions:
   contents: read
 
 concurrency:
-  group: stable-npm-publication-0.29.0
+  group: stable-npm-publication-0.30.0
   cancel-in-progress: false
 
 defaults:
@@ -45,8 +45,8 @@ jobs:
           test "$GITHUB_REF" = refs/heads/main
           test "$GITHUB_SHA" = "$EXPECTED_SHA"
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
-          test "$RELEASE_TAG" = v0.29.0
-          test "$(git rev-parse "$RELEASE_TAG^{commit}")" = 19d293f5648e27ccd39856348f8769eb88f6a021
+          test "$RELEASE_TAG" = v0.30.0
+          test "$(git rev-parse "$RELEASE_TAG^{commit}")" = 02270bc7ffd92640cd8debf39711eca7c8678fc0
           test -z "$(git status --porcelain --untracked-files=all)"
       - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
@@ -215,7 +215,7 @@ jobs:
           test "$GITHUB_REF" = refs/heads/main
           test "$GITHUB_SHA" = "$EXPECTED_SHA"
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
-          test "$RELEASE_TAG" = v0.29.0
+          test "$RELEASE_TAG" = v0.30.0
           argv=$(node -e 'process.stdout.write(JSON.stringify(["python","npm/feasibility/prepare.py","--verify-artifacts",process.env.RUNNER_TEMP+"/npm-artifacts"]))')
           PYTHONPATH=src python -m brigade work verify run --target . --argv-json "$argv" --timeout 120 --capture brigade-work
       - name: Publish original companions then launcher with mandatory provenance
@@ -278,7 +278,7 @@ jobs:
           PYTHONPATH=src python -m brigade work verify run --target . --argv-json "$argv" --timeout 120 --capture brigade-work
       - name: Full native npm and npx acceptance with fresh private HOME and Node-only PATH
         run: |
-          argv=$(node -e 'process.stdout.write(JSON.stringify(["node","npm/feasibility/acceptance.cjs","--artifacts",process.env.RUNNER_TEMP+"/npm-artifacts","--out",process.env.RUNNER_TEMP+"/npm-receipts","--expected-platform","${{ matrix.platform }}","--registry-spec","@escoffier-labs/brigade@0.29.0"]))')
+          argv=$(node -e 'process.stdout.write(JSON.stringify(["node","npm/feasibility/acceptance.cjs","--artifacts",process.env.RUNNER_TEMP+"/npm-artifacts","--out",process.env.RUNNER_TEMP+"/npm-receipts","--expected-platform","${{ matrix.platform }}","--registry-spec","@escoffier-labs/brigade@0.30.0"]))')
           PYTHONPATH=src python -m brigade work verify run --target . --argv-json "$argv" --timeout 900 --capture brigade-work
           python - <<'PYCODE'
           import json, os

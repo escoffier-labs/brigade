@@ -25,7 +25,7 @@ External contributions are welcome. This section is the short path; [Pull reques
 
 - Every required status check passes.
 - No review conversation is left unresolved. Branch protection enforces this.
-- Keep the branch current with `main` before merge when practical (branch protection does not require strict status checks, so GitHub does not block merge solely for being behind `main`).
+- `main` requires a merge queue. The queue tests each pull request combined with current `main` and any pull requests ahead of it, so a branch does not need to be rebased only because it is behind `main`.
 
 Satisfy the applicable branch's current approval requirements and any explicit maintainer hold before merging. Verify that any review relied on covers the current head; a green bot check alone does not establish approval.
 
@@ -41,6 +41,8 @@ gh pr view <number> --json reviewDecision,mergeStateStatus
 ```
 
 `reviewDecision` reports `REVIEW_REQUIRED`, `CHANGES_REQUESTED`, or `APPROVED`. `mergeStateStatus` reports states such as `CLEAN`, `BLOCKED`, and `BEHIND`. Neither field exposes unresolved review conversations; GitHub still blocks merge when any remain.
+
+Merging into `main` is asynchronous. `gh pr merge <number>` adds a pull request whose required checks have passed to the merge queue, or enables auto-merge if checks are still running. No merge-method flag is needed because the queue squashes. The queue reruns `ci.yml` on a `merge_group` event against the combined change and merges only if the required checks pass, so two pull requests that pass separately but conflict in behavior are caught before `main` goes red. A pull request that fails in the queue is removed from it and stays open. Merge verification means waiting until `gh pr view <number> --json state,mergeCommit` reports `MERGED`, not the exit status of `gh pr merge`. The queue ruleset has no bypass actors. Do not use `gh pr merge --admin` to skip it.
 
 For an authored or explicitly assigned PR within an authorized task, the accountable session retains ownership through implementation, applicable local verification, current-head required CI, review replies, fixes, re-review, and merge verification. A draft or opened PR is an intermediate state. Dispatched workers return the PR and evidence to that accountable session; explicit holds and required human approvals remain binding. Merge only when authorized and all applicable gates are met. External contributors without merge access hand the verified PR to a maintainer and remain available for review fixes.
 

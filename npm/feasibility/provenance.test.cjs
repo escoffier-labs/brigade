@@ -19,7 +19,7 @@ const clone=()=>JSON.parse(JSON.stringify(response));
 function bundle(r) {return r.attestations.find(a=>a.predicateType==='https://slsa.dev/provenance/v1').bundle;}
 test('real public npm bundle verifies with exact foreign source policy',async()=>{
   assert.equal(verifier.purl('sigstore','3.1.0'),expected.purl);
-  assert.equal(verifier.purl('@escoffier-labs/brigade','0.29.0'),'pkg:npm/%40escoffier-labs/brigade@0.29.0');
+  assert.equal(verifier.purl('@escoffier-labs/brigade','0.30.0'),'pkg:npm/%40escoffier-labs/brigade@0.30.0');
   const result=await verifyResponse(response,sha512,expected);
   assert.equal(result.sourceCommit,expected.sourceCommit);
 });

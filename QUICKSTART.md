@@ -4,9 +4,34 @@ Five minutes from install to a working agent kitchen.
 
 ## 1. Install
 
-Brigade supports Linux, macOS, and Windows with Python 3.10 or newer. Install `pipx` with the package manager for your OS, then install Brigade.
+Brigade supports Linux, macOS, and Windows. Pick one route: npm on glibc Linux x64/ARM64, macOS x64/ARM64, or Windows x64 if Node.js 22+ and npm are already installed, or Python 3.10 or newer with pipx or uv. Other targets, including musl Linux (such as Alpine) and Windows ARM64, use the Python route.
 
-### Linux
+### npm
+
+The npm package needs Node.js 22 or newer and npm. It does not need Python or pipx first:
+
+```bash
+npm install --global @escoffier-labs/brigade@0.30.0
+brigade --version
+brigade setup
+```
+
+For a one-off run without a global install, put npx in front of every Brigade command. No global `brigade` command exists on this route:
+
+```bash
+npx --yes @escoffier-labs/brigade@0.30.0 --version
+npx --yes @escoffier-labs/brigade@0.30.0 setup
+```
+
+The first launch downloads a managed Python, so it needs network access. Git is not included. Install it yourself for repository features. Supported npm targets are Linux (glibc) x64 and ARM64, macOS x64 and ARM64, and Windows x64. Other platforms use the Python route below. Keep npm optional dependencies enabled, because the uv binary arrives as a platform package. If pipx or uv also installed Brigade, check which `brigade` comes first on PATH.
+
+Upgrade by installing a newer exact version with npm. `brigade update` refuses npm-managed installs. Service units installed from an npm install point at that version's private Python, so reinstall them after each npm upgrade. The [npm package notes](npm/feasibility/README.md) cover the cache location, offline behavior, and known platform limits.
+
+### Python with pipx
+
+Install `pipx` with the package manager for your OS, then install Brigade.
+
+#### Linux
 
 Ubuntu 23.04+, Debian 12+, and Fedora use an externally managed system Python. Install `pipx` from the distribution package instead of using `pip install --user`:
 
@@ -21,7 +46,7 @@ sudo dnf install pipx
 pipx ensurepath
 ```
 
-#### Arch Linux and Omarchy
+##### Arch Linux and Omarchy
 
 On Arch Linux, install [the `python-pipx` package](https://archlinux.org/packages/extra/any/python-pipx/):
 
@@ -52,14 +77,14 @@ brigade --version
 
 On another distribution, use its `pipx` package when available. The [pipx install guide](https://pipx.pypa.io/latest/how-to/install-pipx.html) covers the virtual-environment fallback.
 
-### macOS
+#### macOS
 
 ```bash
 brew install pipx
 pipx ensurepath
 ```
 
-### Windows PowerShell
+#### Windows PowerShell
 
 ```powershell
 scoop install pipx
@@ -87,7 +112,7 @@ uv tool install brigade-cli
 brigade setup
 ```
 
-For an intentional Brigade development machine on the `0.29` preview line:
+For an intentional Brigade development machine with a pipx install, follow the preview line:
 
 ```bash
 brigade update --channel beta

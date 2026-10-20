@@ -22,7 +22,7 @@ if(containedUncatchable && (process.platform!=='linux' || !/^pid:\[\d+\]$/.test(
 const artifactsDir=option('--artifacts');
 const out=option('--out');
 fs.mkdirSync(out,{recursive:true});
-const root=fs.mkdtempSync(path.join(os.tmpdir(),'brigade-npm-acceptance-'));
+const root=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'brigade-npm-acceptance-')));
 const receipt={schema:1,startedAt:new Date().toISOString(),platform:`${process.platform}-${process.arch}`,nodeVersion:process.version,npmVersion:null,osRelease:os.release(),machine:process.platform==='win32'?process.env.PROCESSOR_ARCHITECTURE:spawnSync('uname',['-m'],{encoding:'utf8'}).stdout.trim(),rosetta:process.platform==='darwin'?spawnSync('sysctl',['-n','sysctl.proc_translated'],{encoding:'utf8'}).stdout.trim() || 'unavailable':null,status:'running',root,checks:[],artifacts:[],limitations:['Hosted coverage requires separate native jobs.','Managed Python network transfer bytes are not metered.']};
 // Namespace metadata records the external runner's operation, not a security boundary.
 receipt.distributionMode=registryMode?'registry':'packed';
@@ -230,6 +230,25 @@ async function proveCanceledReceipt(target,run) {
   const r=await execute(contract.toolPython(privateEnv),['-I','-c',code]);record('canonical-canceled-receipt',r);assert.equal(r.exit,0,r.stderr);
 }
 async function main() {
+  const seen=new Set();
+  const valued=new Set(['--artifacts','--out','--expected-platform','--registry-spec','--expected-packaging-sha']);
+  for(let i=0;i<args.length;i++) {
+    const name=args[i];
+    assert.ok(valued.has(name) || name==='--contained-linux-uncatchable','Unknown option: '+name);
+    assert.ok(!seen.has(name),'Duplicate option: '+name);seen.add(name);
+    if(valued.has(name)) {assert.ok(args[i+1] && !args[i+1].startsWith('--'),'Required: '+name);i++;}
+  }
+  const packagingIndex=args.indexOf('--expected-packaging-sha');
+  const expectedPackagingSha=packagingIndex<0?process.env.GITHUB_SHA:args[packagingIndex+1];
+  if(packagingIndex>=0) {
+    assert.ok(registryMode,'--expected-packaging-sha requires --registry-spec');
+    assert.match(expectedPackagingSha,/^[a-f0-9]{40}$/,'--expected-packaging-sha must be 40 lowercase hex');
+  }
+  if(registryMode) {
+    assert.match(process.env.GITHUB_SHA || '',/^[a-f0-9]{40}$/,'GITHUB_SHA must identify the validation commit');
+    receipt.validationSha=process.env.GITHUB_SHA;
+    receipt.packagingSha=expectedPackagingSha;
+  }
   setup();
   const metadata=JSON.parse(fs.readFileSync(path.join(artifactsDir,'artifacts.json'),'utf8'));
   receipt.sourceSha256=metadata.sourceSha256;
@@ -267,8 +286,7 @@ async function main() {
     }
   }
   if(registryMode) {
-    assert.match(process.env.GITHUB_SHA || '',/^[a-f0-9]{40}$/,'GITHUB_SHA must identify the packaging commit');
-    assert.equal(metadata.sourceCommit,process.env.GITHUB_SHA,'artifact packaging commit must equal GITHUB_SHA');
+    assert.equal(metadata.sourceCommit,expectedPackagingSha,'artifact packaging commit must equal expected packaging SHA (default GITHUB_SHA)');
     const verifier=require('./provenance.cjs').createVerifier(npmCli,path.join(root,'provenance-tuf'));
     for(const artifact of metadata.artifacts) {
       let visible=false;

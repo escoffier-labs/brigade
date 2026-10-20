@@ -17,6 +17,7 @@ from ..grokbot_feed import _NoRedirect
 from . import contracts as c
 from .fleet import CALL_TIMEOUT, FleetCallError, FleetTimeout
 from .ledger import Ledger, wake_target_id
+from . import runtime_config
 from .runtime_config import read_owner_file
 
 WAKE_SCHEMA = "brigade.grokbot.t3-dispatch-wake.v1"
@@ -96,6 +97,7 @@ def post_wake(url: str, key: str, body: dict[str, Any]) -> int:
 
 
 def _append_log(path: Path, record: dict[str, Any]) -> None:
+    runtime_config.require_posix_storage()
     fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW, 0o600)
     try:
         os.write(fd, (json.dumps(record, separators=(",", ":"), sort_keys=True) + "\n").encode("utf-8"))

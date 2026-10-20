@@ -1,5 +1,7 @@
 """Fleet machine-mode payloads, admission prechecks, and durable operation outcomes."""
 
+from tests.dot_support import requires_local_state
+
 import asyncio
 import json
 import subprocess
@@ -121,6 +123,7 @@ def expected_submit(**extra):
     }
 
 
+@requires_local_state
 def test_read_payloads_and_timeouts(fleet):
     tools, run, _ = fleet
     tools.fleet_capacity()
@@ -149,6 +152,7 @@ def test_read_payloads_and_timeouts(fleet):
     )
 
 
+@requires_local_state
 def test_capacity_summary_and_config_failure(fleet):
     tools, _, _ = fleet
     assert tools.fleet_capacity()["controller"] == {
@@ -161,6 +165,7 @@ def test_capacity_summary_and_config_failure(fleet):
     assert tools.fleet_capacity()["controller"] == {"error": "fleet_config_unavailable"}
 
 
+@requires_local_state
 def test_submit_exact_payload_and_journal(fleet):
     tools, run, commands = fleet
     result = submit(tools)
@@ -180,6 +185,7 @@ def test_submit_exact_payload_and_journal(fleet):
     assert "p\n\n## Owner" not in json.dumps(operation)
 
 
+@requires_local_state
 def test_controls_and_long_runtime_ids(fleet):
     tools, run, _ = fleet
     control_id = "runtime-request:provider:codex:" + "turn%3A" * 32 + ":request-1"
@@ -202,6 +208,7 @@ def test_controls_and_long_runtime_ids(fleet):
     assert all(r["request_id"] == REQUEST and r["outcome"] == "ok:running" for r in recent)
 
 
+@requires_local_state
 def test_origin_resolution_and_fallback_fail_closed(fleet):
     tools, run, commands = fleet
     result = submit(tools, source_revision=None, title="⠕ Fix issue 9")
@@ -241,6 +248,7 @@ def test_origin_resolution_and_fallback_fail_closed(fleet):
     assert len(run.calls) == calls
 
 
+@requires_local_state
 @pytest.mark.parametrize(
     ("extra", "error"),
     [
@@ -259,6 +267,7 @@ def test_legacy_refusals_before_commands_and_journal(fleet, extra, error):
     assert not run.calls and not commands.calls and not tools.fleet_recent()["operations"]
 
 
+@requires_local_state
 def test_enrolled_overrides_and_queue(fleet):
     tools, run, _ = fleet
     tools.runtime.paths.fleet_config.write_text(
@@ -275,6 +284,7 @@ def test_enrolled_overrides_and_queue(fleet):
     assert len(run.calls) == 2
 
 
+@requires_local_state
 def test_legacy_outbox_allows_queue(fleet):
     tools, run, _ = fleet
     tools.runtime.paths.fleet_config.write_text(CONFIG + "[outbox]\nenabled = true\n")
@@ -282,6 +292,7 @@ def test_legacy_outbox_allows_queue(fleet):
     assert run.bodies() == [expected_submit(allow_queue=True)]
 
 
+@requires_local_state
 @pytest.mark.parametrize("method", ["submit", "followup"])
 def test_authorization_and_byte_limit(fleet, method):
     tools, run, _ = fleet
@@ -298,6 +309,7 @@ def test_authorization_and_byte_limit(fleet, method):
     assert len(run.calls) == 2
 
 
+@requires_local_state
 def test_error_envelope_and_journal_code(fleet):
     tools, run, _ = fleet
     run.code = 3
@@ -333,6 +345,7 @@ def test_error_envelope_and_journal_code(fleet):
     assert tools.fleet_status(REQUEST) == {"error": "fleet_error", "fleet": {"code": "target_busy"}, "exit_code": 3}
 
 
+@requires_local_state
 @pytest.mark.parametrize(
     "method,args",
     [
@@ -365,6 +378,7 @@ def test_timeouts_and_protocol_errors(fleet, method, args):
     assert call()["error"] == ("fleet_uncertain" if mutating else "fleet_unavailable")
 
 
+@requires_local_state
 def test_mutating_protocol_failure_keeps_the_request_handle(fleet):
     tools, run, _ = fleet
     run.output = json.dumps({"schema": "t3-fleet.result.v1", "request_id": REQUEST, "state": "running"})
@@ -378,6 +392,7 @@ def test_mutating_protocol_failure_keeps_the_request_handle(fleet):
     assert tools.fleet_status(REQUEST)["error"] == "fleet_unavailable"
 
 
+@requires_local_state
 @pytest.mark.parametrize("kind", ["missing", "invalid", "writable", "symlink", "oversized", "directory"])
 def test_config_fails_closed(fleet, kind):
     tools, run, _ = fleet
@@ -415,6 +430,7 @@ def completion_service(tools, run):
     return service, hub
 
 
+@requires_local_state
 def test_completion_once_no_local_inbox_and_followup_reopens(fleet):
     tools, run, _ = fleet
     events, hub = completion_service(tools, run)
@@ -431,6 +447,7 @@ def test_completion_once_no_local_inbox_and_followup_reopens(fleet):
     assert len(hub.calls) == 2
 
 
+@requires_local_state
 @pytest.mark.parametrize("failure", ["raises", "false", "generation"])
 def test_completion_failure_or_race_keeps_open(fleet, failure):
     tools, run, _ = fleet
@@ -455,6 +472,7 @@ def test_completion_failure_or_race_keeps_open(fleet, failure):
         assert c.execute("SELECT completed FROM tracked_requests").fetchone()[0] == 1
 
 
+@requires_local_state
 def test_poller_reconciles_every_twenty_and_flushes_after_outage(fleet):
     tools, run, _ = fleet
     events, hub = completion_service(tools, run)
@@ -468,6 +486,7 @@ def test_poller_reconciles_every_twenty_and_flushes_after_outage(fleet):
     assert (sync.call_count, reconcile.call_count, flush.call_count) == (20, 1, 20)
 
 
+@requires_local_state
 def test_journal_error_message_keeps_bridge_bound(fleet):
     tools, run, _ = fleet
     message = "a" * 400
@@ -476,6 +495,7 @@ def test_journal_error_message_keeps_bridge_bound(fleet):
     assert tools.fleet_recent()["operations"][0]["summary"]["error_message"] == message[:300]
 
 
+@requires_local_state
 def test_runner_passes_the_validated_fleet_config(fleet):
     # Dot validates against runtime.paths.fleet_config; t3-fleet must read that same file.
     tools, run, _ = fleet
@@ -484,6 +504,7 @@ def test_runner_passes_the_validated_fleet_config(fleet):
     assert kwargs["env"]["T3_FLEET_CONFIG"] == str(tools.runtime.paths.fleet_config)
 
 
+@requires_local_state
 def test_default_runner_carries_the_configured_fleet_file(fleet):
     tools, _, _ = fleet
     default = FleetTools(tools.runtime, tools.state)

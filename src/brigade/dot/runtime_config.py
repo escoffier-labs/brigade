@@ -13,7 +13,7 @@ from urllib.parse import urlsplit
 from uuid import UUID
 
 from .contracts import DotError
-from .safe_state import private_directory, private_file
+from .safe_state import private_directory, private_file, require_local_platform
 
 RUNTIME_SCHEMA = "brigade.dot.runtime.v1"
 MAX_RUNTIME_BYTES = 65_536
@@ -259,6 +259,7 @@ def parse_runtime(payload: object) -> Runtime:
 
 
 def load_runtime(path: Path) -> Runtime:
+    require_local_platform()
     directory = descriptor = None
     try:
         directory = private_directory(path.parent)

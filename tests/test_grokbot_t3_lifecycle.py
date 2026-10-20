@@ -5,12 +5,15 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+import sys
 
 import pytest
 
 from brigade.grokbot_t3 import lifecycle
 
 from tests.test_grokbot_t3_runtime import write_runtime
+
+pytestmark = pytest.mark.usefixtures("t3_ledger_storage", "t3_owner_reads")
 
 SECRET = "not-a-real-token-value-32chars!!"
 
@@ -59,6 +62,7 @@ def test_invalid_tool_request(body, invalid):
     assert lifecycle._invalid_tool_request(json.dumps(body).encode()) is invalid
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX systemd deployment: docs/grokbot-t3-dispatch.md:95")
 def test_render_units(tmp_path, monkeypatch):
     runtime = write_runtime(tmp_path, writable_paths=["/srv/t3/state/t3-fleet"])
     monkeypatch.setattr(
@@ -185,18 +189,20 @@ def test_authenticated_mcp_submit_and_recent_cross_threads(tmp_path):
     "wake_valid,ledger_valid,paths",
     [(True, True, []), (False, True, ["/srv/t3/state"]), (True, False, ["/srv/t3/state"])],
 )
+@pytest.mark.usefixtures("t3_platform_admission")
 def test_doctor_checks_wake_ledger_and_explicit_write_paths(tmp_path, monkeypatch, wake_valid, ledger_valid, paths):
     from brigade.grokbot_t3 import contracts as c
     from brigade.grokbot_t3.runtime_config import load_runtime
     from brigade.grokbot_t3.watch import WAKE_SCHEMA
 
+    paths = [str(tmp_path / "writable") for _ in paths]
     runtime = load_runtime(write_runtime(tmp_path, writable_paths=paths))
     runtime.wake_path.parent.mkdir(mode=0o700)
     runtime.wake_path.write_text(
         json.dumps(
             {
                 "schema": WAKE_SCHEMA,
-                "targets": {"default": [{"url": "https://example.com/wake", "key_file": "/srv/keys/wake"}]},
+                "targets": {"default": [{"url": "https://example.com/wake", "key_file": str(tmp_path / "wake.key")}]},
             }
         )
         if wake_valid
@@ -227,6 +233,7 @@ def test_tools_factory_explicitly_selects_full_access(tmp_path, monkeypatch):
         tools.ledger.close()
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="POSIX systemd deployment: docs/grokbot-t3-dispatch.md:95")
 def test_render_intake_units(tmp_path, monkeypatch):
     runtime = write_runtime(tmp_path, writable_paths=["/srv/t3/state"])
     monkeypatch.setattr(lifecycle, "_load_validated_instance", lambda target: {"runtime_path": str(runtime)})
@@ -256,6 +263,7 @@ def test_write_intake_units_refuses_overwrite(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("failure,expected", [(None, 0), ("timeout", 124), ("oserror", 127)])
+@pytest.mark.usefixtures("t3_platform_admission")
 def test_intake_once_wires_bounded_gh_runner(tmp_path, monkeypatch, failure, expected):
     import subprocess
     from datetime import datetime, timezone
@@ -287,7 +295,7 @@ def test_intake_once_wires_bounded_gh_runner(tmp_path, monkeypatch, failure, exp
     assert lifecycle.intake_once(tmp_path)["reason"] == "ok"
     assert calls == [
         (
-            ["/usr/bin/gh", "issue", "list"],
+            [str(Path("/usr/bin/gh").absolute()), "issue", "list"],
             {
                 "capture_output": True,
                 "text": True,
@@ -301,6 +309,7 @@ def test_intake_once_wires_bounded_gh_runner(tmp_path, monkeypatch, failure, exp
 
 
 @pytest.mark.parametrize("errors,expected", [([], 0), ([{"repository": "example", "error": "gh-failed"}], 1)])
+@pytest.mark.usefixtures("t3_platform_admission")
 def test_intake_cli_prints_summary(tmp_path, monkeypatch, capsys, errors, expected):
     from brigade.grokbot_t3.__main__ import main
 
@@ -310,6 +319,7 @@ def test_intake_cli_prints_summary(tmp_path, monkeypatch, capsys, errors, expect
     assert capsys.readouterr().out == json.dumps(summary, sort_keys=True) + "\n"
 
 
+@pytest.mark.usefixtures("t3_platform_admission")
 def test_install_intake_cli(tmp_path, monkeypatch, capsys):
     from brigade.grokbot_t3.__main__ import main
 

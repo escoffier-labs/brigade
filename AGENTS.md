@@ -98,7 +98,7 @@ Format: trigger, then the rule, then what to do instead.
 
 ## Orientation
 
-- The CLI entry point is `brigade.cli:main` (`[project.scripts]` in `pyproject.toml`).
+- The process entry point is `brigade.cli:process_main` (`[project.scripts]` in `pyproject.toml`). `brigade.cli:main` remains the integer-returning library API.
   Command families live in `src/brigade/cli/` — one module per group (e.g. `doctor.py`,
   `operator.py`, `init.py`, `work/`); `__init__.py` builds the parser and dispatches
   to each module's `register`/`dispatch`.

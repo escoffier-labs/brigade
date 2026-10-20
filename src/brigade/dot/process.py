@@ -9,9 +9,12 @@ from pathlib import Path
 import selectors
 import signal
 import subprocess
+import sys
+import threading
 import time
 from typing import Any, Mapping
 
+from .. import proc
 from .contracts import DotError, encoded_size, require
 from .runtime_config import BinPaths
 from .safe_state import redact_credentials
@@ -42,7 +45,14 @@ def child_path(runtime_bin: BinPaths) -> str:
         for field in fields(runtime_bin)
         if (value := getattr(runtime_bin, field.name)) is not None
     ]
-    return ":".join(dict.fromkeys([*directories, "/usr/bin", "/bin"]))
+    return os.pathsep.join(dict.fromkeys([*directories, *_system_directories()]))
+
+
+def _system_directories() -> list[str]:
+    if sys.platform == "win32":
+        root = Path(os.environ.get("SystemRoot", "C:/Windows"))
+        return [str(root / "System32"), str(root)]
+    return ["/usr/bin", "/bin"]
 
 
 @dataclass(frozen=True)
@@ -55,7 +65,8 @@ class CommandResult:
 
 def child_environment(path: str, extra: Mapping[str, str] | None = None) -> dict[str, str]:
     """Minimal explicit child environment; PATH is fixed, nothing else is inherited."""
-    env = {key: os.environ[key] for key in ENV_PASSTHROUGH if key in os.environ}
+    keys = ENV_PASSTHROUGH + (("SYSTEMROOT", "WINDIR", "TEMP", "TMP") if sys.platform == "win32" else ())
+    env = {key: os.environ[key] for key in keys if key in os.environ}
     env["PATH"] = path
     env.setdefault("LANG", "C.UTF-8")
     env["PYTHONDONTWRITEBYTECODE"] = "1"
@@ -89,6 +100,8 @@ class CommandRunner:
         )
         require(isinstance(stdin, bytes) and len(stdin) <= MAX_CHILD_STDIN)
         require(isinstance(timeout, (int, float)) and 0 < timeout <= 600)
+        if sys.platform == "win32":
+            return _run_windows(argv, stdin=stdin, timeout=timeout, max_output=max_output, env=env)
         try:
             child = subprocess.Popen(
                 argv,
@@ -162,6 +175,119 @@ class CommandRunner:
             child.stdin.close()
             child.stdout.close()
         return CommandResult(child.returncode, bytes(output[:max_output]), timed_out, overflow)
+
+
+def _run_windows(
+    argv: list[str], *, stdin: bytes, timeout: float, max_output: int, env: Mapping[str, str] | None
+) -> CommandResult:
+    """Drain Windows pipes on threads under the existing owned process-tree job.
+
+    A suspended launch is bound before any child code executes. Closing the job
+    also reaps descendants after an exited leader, without targeting a reused PID.
+    """
+    job = proc._create_windows_child_job()
+    require(job is not None, "command_unavailable")
+    assert job is not None
+    try:
+        child = subprocess.Popen(
+            argv,
+            shell=False,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            close_fds=True,
+            bufsize=0,
+            cwd=Path(sys.executable).anchor,
+            env=child_environment(os.pathsep.join(_system_directories())) if env is None else env,
+            **proc._process_group_kwargs(suspend=True),
+        )
+    except BaseException as error:
+        # The job is owned here until a child is bound to it; never leak it.
+        job.close()
+        if isinstance(error, (OSError, ValueError, TypeError)):
+            raise DotError("command_unavailable") from None
+        raise
+    # On binding failure this helper kills the suspended child and closes its job.
+    if proc._bind_suspended_windows_child(job, child, argv) is not None:
+        if child.stdin is not None:
+            child.stdin.close()
+        if child.stdout is not None:
+            child.stdout.close()
+        raise DotError("command_unavailable")
+    assert child.stdin is not None and child.stdout is not None
+    child_stdin, child_stdout = child.stdin, child.stdout
+    output = bytearray()
+    done, overflow, failed = threading.Event(), threading.Event(), threading.Event()
+
+    def read() -> None:
+        try:
+            while chunk := child_stdout.read(65536):
+                remaining = max_output - len(output)
+                output.extend(chunk[:remaining])
+                if len(chunk) > remaining:
+                    overflow.set()
+                    break
+        except OSError:
+            failed.set()
+        finally:
+            done.set()
+
+    def write() -> None:
+        try:
+            remaining = memoryview(stdin)
+            while remaining:
+                count = child_stdin.write(remaining[:65536])
+                if not count:
+                    break
+                remaining = remaining[count:]
+        except (BrokenPipeError, OSError):
+            pass
+        finally:
+            child_stdin.close()
+
+    threads: list[threading.Thread] = []
+    timed_out = cleanup_failed = False
+    deadline = time.monotonic() + timeout
+    try:
+        for action in (read, write):
+            thread = threading.Thread(target=action, daemon=True)
+            thread.start()
+            threads.append(thread)
+        while not overflow.is_set() and not failed.is_set():
+            if done.is_set() and child.poll() is not None:
+                break
+            remaining_time = deadline - time.monotonic()
+            if remaining_time <= 0:
+                timed_out = True
+                break
+            time.sleep(min(0.01, remaining_time))
+    except Exception:
+        raise DotError("command_unavailable") from None
+    finally:
+        # Terminate through the held job even when the direct child has exited.
+        try:
+            job.terminate()
+            child.wait(timeout=5)
+        except (OSError, subprocess.TimeoutExpired):
+            cleanup_failed = True
+        finally:
+            # Kill-on-close is also the fallback if termination or waiting failed.
+            try:
+                job.close()
+            finally:
+                try:
+                    for thread in threads:
+                        thread.join(timeout=5)
+                finally:
+                    try:
+                        child_stdin.close()
+                    finally:
+                        child_stdout.close()
+    require(
+        not cleanup_failed and not failed.is_set() and not any(thread.is_alive() for thread in threads),
+        "command_unavailable",
+    )
+    return CommandResult(child.returncode, bytes(output), timed_out, overflow.is_set())
 
 
 def _scrub(value: Any, depth: int = 0) -> Any:

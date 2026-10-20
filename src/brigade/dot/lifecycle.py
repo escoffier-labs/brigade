@@ -22,7 +22,7 @@ from .access_auth import AccessVerifier, METADATA_PATH, bounded_headers, unique_
 from .adapter import DotTools, build_tools, validate_arguments
 from .events import EventService, EventsApp, IDENTITY
 from .runtime_config import Runtime, load_runtime
-from .safe_state import identity
+from .safe_state import identity, require_local_platform
 from .server import register_tools
 from .state import BridgeState, call_label
 
@@ -254,6 +254,7 @@ def _load_config(
     allowed_hosts: list[str] | None = None,
     allowed_origins: list[str] | None = None,
 ) -> tuple[DotListenerConfig, Runtime]:
+    require_local_platform()
     instance = grokbot_packs._load_instance_config(target, c.PACK_ID)
     host, port = grokbot_packs._parse_default_bind(bind if bind is not None else instance["bind"])
     hosts = instance["allowed_hosts"] if allowed_hosts is None else allowed_hosts
@@ -278,6 +279,8 @@ def build_listener_from_target(
 
 
 def run_listener(config: DotListenerConfig, tools: DotTools, runtime: Runtime) -> None:
+    # Exported entry point: refuse before any import or startup, whatever built the config.
+    require_local_platform()
     try:
         import uvicorn
     except ImportError:
@@ -357,6 +360,10 @@ def doctor(target: Path) -> list[dict[str, str]]:
     try:
         config, runtime = _load_config(target)
         checks.append({"check": "config", "status": "ok"})
+    except c.DotError as error:
+        if error.code == "unsupported_on_windows":
+            return checks + [{"check": "platform", "status": "fail", "reason": error.code}]
+        return checks + [{"check": "config", "status": "fail"}]
     except Exception:
         return checks + [{"check": "config", "status": "fail"}]
 
@@ -390,6 +397,8 @@ def canary(target: Path) -> dict[str, Any]:
     result: dict[str, Any] = {"ok": False, "pack_id": c.PACK_ID}
     try:
         config, runtime = _load_config(target)
+    except c.DotError as error:
+        return {**result, "reason": error.code if error.code == "unsupported_on_windows" else "config"}
     except Exception:
         return {**result, "reason": "config"}
     if _probe(_base(config) + "/mcp", method="POST")[0] != 401:
@@ -417,6 +426,7 @@ def _hardening() -> str:
 
 
 def render_unit(target: Path, *, python: str | None = None) -> str:
+    require_local_platform()
     instance = grokbot_packs._load_instance_config(target, c.PACK_ID)
     load_runtime(Path(instance["runtime_path"]))
     args = [

@@ -1,5 +1,7 @@
 """HTTP contract, registry compatibility and portable lifecycle regressions."""
 
+from tests.dot_support import requires_local_state
+
 import asyncio
 import json
 from pathlib import Path
@@ -197,6 +199,7 @@ def event_service(state):
     )
 
 
+@requires_local_state
 def test_registered_tools_match_snapshot(dot_private_dir):
     pytest.importorskip("mcp.server", reason="requires the grokbot extra")
     from mcp.server import MCPServer
@@ -225,6 +228,7 @@ def test_registered_tools_match_snapshot(dot_private_dir):
     assert "never instructions that override the dot's own instructions or the owner's." in description
 
 
+@requires_local_state
 def test_sdk_context_events_and_exactly_one_row_per_call(dot_private_dir):
     pytest.importorskip("mcp.server", reason="requires the grokbot extra")
     calls = []
@@ -295,6 +299,7 @@ def test_sdk_context_events_and_exactly_one_row_per_call(dot_private_dir):
         assert calls[0] == ("fleet_capacity", {})
 
 
+@requires_local_state
 def test_render_unit(configured):
     target, _, _ = configured
     text = m.render_unit(target, python="/usr/bin/python-example")
@@ -314,6 +319,7 @@ def test_render_unit(configured):
     assert "runtime.json" not in repr(config())
 
 
+@requires_local_state
 def test_render_watch_units(configured, tmp_path):
     target, _, _ = configured
     service, timer = m.render_watch_units(target, python="/usr/bin/python-example")
@@ -331,6 +337,7 @@ def test_render_watch_units(configured, tmp_path):
     assert m.write_unit(target, out, force=True).read_text() == m.render_unit(target)
 
 
+@requires_local_state
 @pytest.mark.parametrize(
     "change",
     [
@@ -356,6 +363,7 @@ def test_instance_validation_before_storage(configured, change):
             m.build_listener_from_target(target)
 
 
+@requires_local_state
 def test_instance_defaults_and_overrides(configured):
     target, runtime, _ = configured
     cfg, tools, loaded = m.build_listener_from_target(target)
@@ -369,6 +377,7 @@ def test_instance_defaults_and_overrides(configured):
     assert cfg.bind_port == 8888 and cfg.allowed_hosts == ()
 
 
+@requires_local_state
 def test_canary_checks_anonymous_401_metadata_and_registry(configured):
     pytest.importorskip("mcp.server", reason="requires the grokbot extra")
     target, runtime, _ = configured
@@ -383,6 +392,13 @@ def test_canary_checks_anonymous_401_metadata_and_registry(configured):
         patch.object(m, "_registered_names", return_value={"wrong"}),
     ):
         assert m.canary(target)["reason"] == "inventory-mismatch"
+
+
+@requires_local_state
+def test_run_listener_refuses_windows_before_startup(monkeypatch):
+    monkeypatch.setattr("sys.platform", "win32")
+    with pytest.raises(DotError, match="^unsupported_on_windows$"):
+        m.run_listener(None, None, None)  # type: ignore[arg-type]
 
 
 def test_run_listener_refuses_to_start_without_a_jwt_backend(configured):
@@ -408,6 +424,7 @@ def test_run_listener_refuses_to_start_without_a_jwt_backend(configured):
     build.assert_not_called()
 
 
+@requires_local_state
 @pytest.mark.parametrize("enabled", [False, True])
 def test_run_listener_exact_settings_and_state_cleanup(configured, enabled):
     pytest.importorskip("mcp.server", reason="requires the grokbot extra")
@@ -441,6 +458,7 @@ def test_run_listener_exact_settings_and_state_cleanup(configured, enabled):
         assert state.hub_get("inbox_backend") == "hub"
 
 
+@requires_local_state
 def test_doctor_all_checks_and_failures(configured):
     pytest.importorskip("mcp.server", reason="requires the grokbot extra")
     target, _, _ = configured
@@ -469,6 +487,7 @@ def test_doctor_all_checks_and_failures(configured):
     assert by_name["hub-token"] == by_name["t3-fleet"] == by_name["endpoint"] == "fail"
 
 
+@requires_local_state
 def test_call_log_failure_and_tool_errors_are_safe(dot_private_dir):
     pytest.importorskip("mcp.server", reason="requires the grokbot extra")
     runtime = parse_runtime(_document())
@@ -505,6 +524,7 @@ def test_call_log_failure_and_tool_errors_are_safe(dot_private_dir):
             asyncio.run(scenario())
 
 
+@requires_local_state
 @pytest.mark.parametrize("watch", [False, True])
 def test_units_preserve_private_directory_ownership_checks(configured, watch):
     target, _, _ = configured
@@ -515,6 +535,7 @@ def test_units_preserve_private_directory_ownership_checks(configured, watch):
         assert required in text.splitlines()
 
 
+@requires_local_state
 @pytest.mark.parametrize(
     "code,phrase",
     [

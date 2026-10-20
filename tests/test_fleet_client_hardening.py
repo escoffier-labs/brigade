@@ -31,6 +31,34 @@ def _spool() -> Path:
     return fleet_client.spool_path(fleet_client.resolve_node_id())
 
 
+@pytest.mark.parametrize("existing_directory", [True, False])
+def test_spool_creation_handles_access_denied_on_existing_ancestor(tmp_path, monkeypatch, existing_directory):
+    """Windows mkdir may deny an existing drive root, even for user-local spools."""
+    ancestor = tmp_path / "ancestor"
+    if existing_directory:
+        ancestor.mkdir()
+    else:
+        ancestor.touch()
+    path = ancestor / "LocalAppData" / "brigade" / "fleet-spool" / "node.jsonl"
+    mkdir = Path.mkdir
+
+    def windows_mkdir(directory, *args, **kwargs):
+        if directory == ancestor:
+            raise PermissionError("Access is denied")
+        return mkdir(directory, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "mkdir", windows_mkdir)
+    if existing_directory:
+        with fleet_client._spool_lock(path) as fd:
+            assert fleet_client._spool_append_locked(path, {"run_id": "offline"}, dir_fd=fd)
+        assert fleet_client._read_spool(path) == [{"run_id": "offline"}]
+    else:
+        with pytest.raises(fleet_client.FleetClientError, match="could not be persisted"):
+            with fleet_client._spool_lock(path):
+                pass
+        assert not path.exists()
+
+
 class TestProxyDisabledTransport:
     def test_hub_traffic_ignores_proxy_environment(self, monkeypatch):
         """A configured proxy never receives hub traffic or the bearer token."""

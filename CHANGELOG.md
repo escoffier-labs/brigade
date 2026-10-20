@@ -12,7 +12,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Brigade agent plugin for Claude Code and Codex (`plugins/brigade/`): memory MCP tools, the `brigade-work` skill, a non-blocking SessionStart brief (Claude Code only), and an opt-in `enforce` skill.
 - `brigade memory serve-mcp --http 127.0.0.1:<port>`: loopback Streamable HTTP with a private bearer token file, for MCP gateways that do not accept stdio servers. It checks Host and Origin, drops a stalled connection after 10 seconds, and requires the bearer file to be a regular file owned by the current user with no group or other permission bits.
 - Memory MCP tools `memory_status`, `work_brief`, and `write_handoff`; card tools now span the repo store and a user store under `BRIGADE_HOME`. Cards are served only when their real path stays inside the store, and `write_handoff` caps content at 256 KiB and facts and evidence at 50 items each.
+- `brigade memory serve-mcp --http` and `brigade skills serve-mcp --http` serve the read-only MCP tools over a stateless loopback Streamable HTTP endpoint (`POST /mcp`, `GET /healthz`) for MCP hosts that cannot spawn a stdio process. The server binds only `127.0.0.1` or `::1`, requires a bearer token from `BRIGADE_MCP_HTTP_TOKEN` (32 characters or more, never a flag), rejects non-loopback `Host` and `Origin` headers, and caps request bodies at 1 MiB. `--stdio` is unchanged.
+- MCP registry metadata for the two read-only servers: `mcp-registry/memory/server.json` (`io.github.escoffier-labs/brigade-memory`) and `mcp-registry/skills/server.json` (`io.github.escoffier-labs/brigade-skills`), with matching `mcp-name` markers in the README. `scripts/version_sync.py` keeps both manifests on the release version.
+- A `brigade-cli` console script alias, so `uvx brigade-cli memory serve-mcp --stdio` works without a global install.
+- A root `Dockerfile` that runs the memory MCP server over stdio as a non-root user, plus `glama.json`; the image installs the latest `brigade-cli` release from PyPI (`--build-arg BRIGADE_VERSION=X.Y.Z` pins one), so MCP directories that build and introspect a repo image can list the servers.
+
+### Changed
+
+- The memory and skills MCP tools describe what they return and when to use them, and their input fields carry descriptions, so MCP clients and directories can pick the right tool.
+- The read-only MCP servers negotiate the protocol version (`2024-11-05`, `2025-03-26`, or `2025-06-18`) instead of always answering `2024-11-05`, answer `ping` with an empty result, return `-32600` for malformed requests, and report the Brigade version in `serverInfo`.
+- The npm package `@escoffier-labs/brigade@0.30.0` bundles the published `brigade-cli==0.30.0` wheel. Its launcher runs `brigade.cli:process_main`, the same entry point as the `brigade` console script, so npm installs keep exit status 130 when a verification is cancelled.
+
+## [0.30.0] - 2026-10-20
+
+### Added
+
+- A fleet ownership map. The policy document gains an optional `owners` section of charters that say what each agent or surface owns, must never touch, and how work reaches it. The Command Deck page `/deck/owners` shows each charter beside its live claims, Grok Bot jobs, sessions, and delegations, with an Unassigned list for work no charter matches. `GET /owners` and `brigade fleet owners show` return the same view as JSON. Charters describe responsibility and do not block any claim, dispatch, or merge.
+- CI runs affected test files on Windows for pull requests, and keeps one nightly tracking issue open until the full Windows suite is clean.
+
 - Stable npm publishing support for `@escoffier-labs/brigade@0.29.0` and five public platform companions, using the pinned official PyPI wheel, tag-based payload auditing, immutable archive retries, hosted provenance and native registry acceptance gates. Registry publication is tracked by the release workflow.
+- Installation guides now cover the npm and npx routes, Node.js requirements, managed Python downloads, npm-managed upgrades, and known platform limits.
+- The README downloads badge combines PyPI downloads without mirrors and npm downloads for the main package over the same 30 completed UTC days. A daily or manual workflow updates public metric JSON on `download-metrics`, retaining the previous metric when a source fails or is stale.
+
+### Fixed
+
+- Keep caught verification cancellation active through the `brigade` console script and `python -m brigade` process exit so late repeated signals preserve exit status 130. Programmatic calls still restore their prior signal handlers.
+- The workflow-rules repair hint includes the full repo kit (`--full`), so following it installs the missing rule templates and keeps rule files that already exist. (Fixes #1762)
+- Fleet event and message spools work on Windows when an existing drive or share root denies directory creation. Existing directories are recognized before treating a creation error as a persistence failure.
+- Dot reports `unsupported_on_windows` for its Linux-only local runtime and state operations. Portable auth/config tests now use native absolute paths, and the bounded command runner uses Brigade's owned Windows job objects and pipe readers.
+- T3 dispatch now reports an explicit unsupported-platform error on Windows before opening private runtime, ledger, or wake-log files. Its existing POSIX owner-only storage requirement is documented.
+- Cloud leases for bound Jules and Cursor sessions no longer lapse five minutes after launch. The hub `bind` action accepts an optional `ttl_seconds` (same 1 to 86400 range as `admit`) that resets the lease clock in the same update, and the Jules and Cursor launchers bind with six hours, matching the tracker's stale-ready threshold. `brigade run cloud sync` renews active leases with the same six hours instead of 900 seconds. A bind without `ttl_seconds` is unchanged, and an older hub ignores the field and keeps the admission TTL. Codex Cloud still renews in-process. Running `cloud sync` on a schedule is not part of this change. (Refs #1794)
+- Jules sessions that finish with a pull request now reach `landed` once it merges. The tracker reads the `pull_request_url` the session reports, looks that PR up directly by URL, and records its head branch on the entry, so branch names without a `jules/` prefix no longer strand a merged session at `ready-to-land` and then `stale`. Branch discovery by prefix is unchanged. (Refs #1794)
+- The npm validation harness canonicalizes its temporary root before deriving install and cache paths, preserving exact lockfile integrity checks on symlinked temporary directories. A manual read-only macOS workflow can validate the retained original release archives with separate packaging and harness identities.
 
 ### Changed
 
@@ -2066,7 +2097,8 @@ Initial release.
 - OpenClaw adapter fragments and harness-aware doctor checks.
 - Experimental Hermes adapter fragments.
 
-[Unreleased]: https://github.com/escoffier-labs/brigade/compare/v0.29.0...HEAD
+[Unreleased]: https://github.com/escoffier-labs/brigade/compare/v0.30.0...HEAD
+[0.30.0]: https://github.com/escoffier-labs/brigade/compare/v0.29.0...v0.30.0
 [0.29.0]: https://github.com/escoffier-labs/brigade/compare/v0.28.0...v0.29.0
 [0.28.0]: https://github.com/escoffier-labs/brigade/compare/v0.27.0...v0.28.0
 [0.27.0]: https://github.com/escoffier-labs/brigade/compare/v0.26.1...v0.27.0

@@ -58,6 +58,7 @@ ERROR_MESSAGES = {
     "fleet-error": "t3-fleet refused the request",
     "submit-unknown": "Submit outcome is unknown; do not resubmit. Ask the operator to inspect t3-fleet and recover",
     "unavailable": "Dispatch is unavailable",
+    "unsupported-platform": "T3 dispatch is unsupported on Windows. POSIX owner-only storage is required",
 }
 
 

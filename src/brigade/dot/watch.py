@@ -11,6 +11,7 @@ import subprocess
 from typing import Any
 
 from .access_auth import METADATA_PATH
+from .contracts import DotError
 from .hub_inbox import sender_name
 from .lifecycle import DotListenerConfig, _base, _load_config, _probe
 from .runtime_config import Runtime
@@ -196,6 +197,11 @@ def run_watch_once(target: Path, *, now: datetime | None = None, dry_run: bool =
     try:
         config, runtime = _load_config(target)
         unacked, last_call, pending, sync_at, credential, last_wake = read_bridge(runtime)
+    except DotError as error:
+        return {
+            "ok": False,
+            "error": error.code if error.code == "unsupported_on_windows" else "bridge_state_unavailable",
+        }
     except Exception:
         return {"ok": False, "error": "bridge_state_unavailable"}
     state_path = runtime.paths.state_dir / STATE_FILE

@@ -123,7 +123,9 @@ def main(argv=None):
                     return 0
     except (DotError, OSError, ValueError, sqlite3.Error) as error:
         name = "call_log_unavailable" if args.command == "calls" else "inbox_unavailable"
-        if args.command == "notify" and isinstance(error, DotError):
+        if isinstance(error, DotError) and error.code == "unsupported_on_windows":
+            name = error.code
+        elif args.command == "notify" and isinstance(error, DotError):
             name = {"invalid_request": "invalid_request", "hub_quota": "inbox_full"}.get(error.code, name)
         value, code = {"ok": False, "error": name}, 2
     print(json.dumps(value, sort_keys=True))

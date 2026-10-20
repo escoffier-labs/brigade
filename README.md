@@ -16,7 +16,7 @@
 <p align="center">
   <img src="https://shieldcn.dev/github/ci/escoffier-labs/brigade.svg?workflow=ci.yml&branch=main&label=ci&size=xs" alt="CI status">
   <img src="https://shieldcn.dev/pypi/v/brigade-cli.svg?label=pypi&size=xs" alt="PyPI version">
-  <img src="https://shieldcn.dev/pypi/dm/brigade-cli.svg?size=xs" alt="PyPI downloads per month">
+  <img src="https://shieldcn.dev/https/raw.githubusercontent.com/escoffier-labs/brigade/download-metrics/downloads.json.svg?size=xs" alt="Combined PyPI and npm downloads per month">
   <img src="https://shieldcn.dev/badge/python-3.10+-blue.svg?logo=python&logoColor=white&size=xs" alt="Python 3.10+">
   <img src="https://shieldcn.dev/badge/rust-code_graph-b7410e.svg?logo=rust&logoColor=white&size=xs" alt="Rust: code graph engine">
   <img src="https://shieldcn.dev/badge/go-evidence_log-00add8.svg?logo=go&logoColor=white&size=xs" alt="Go: evidence log engine">
@@ -25,7 +25,9 @@
 
 Brigade is a local CLI for people who point Claude Code, Codex, Cursor, and other agents at the same repos. Each harness keeps its own notes, its own MCP config, and its own idea of what "tests pass" means. Brigade gives them one ledger in the repo instead: what is ready, who claimed it, which commands actually ran and how they exited, and what the last session handed off.
 
-**Stable:** v0.29.0 (`brigade-cli==0.29.0`). **Beta:** main is the 0.30 preview line. See the [changelog](CHANGELOG.md) for what each release changed.
+**Stable:** v0.30.0 (`brigade-cli==0.30.0` on PyPI, `@escoffier-labs/brigade@0.30.0` on npm). **Beta:** paused. Use stable: until main moves to the next version, `brigade update --channel beta` resolves older 0.29.0 development builds. See the [changelog](CHANGELOG.md) for what each release changed.
+
+The downloads badge sums `brigade-cli` on PyPI (excluding mirrors) and `@escoffier-labs/brigade` on npm over the same 30 completed UTC days. Downloads include automation and do not count unique people. The [metric JSON](https://raw.githubusercontent.com/escoffier-labs/brigade/download-metrics/downloads.json) records each source, the period, and the last successful refresh. npm platform companions are excluded. Daily refreshes retain the previous metric if a source fails validation or its latest day is more than three UTC days old.
 
 ## What it does
 
@@ -74,6 +76,17 @@ brigade mcp sync --write                    # merge into each harness's native c
 
 ## Install
 
+If Node.js 22 or newer and npm are installed on glibc Linux x64/ARM64, macOS x64/ARM64, or Windows x64, install the [npm package](https://www.npmjs.com/package/@escoffier-labs/brigade). This route does not need Python or pipx first:
+
+```bash
+npm install --global @escoffier-labs/brigade@0.30.0
+brigade setup
+```
+
+To try it without a global install, run each command through npx instead, for example `npx --yes @escoffier-labs/brigade@0.30.0 --version`. The package brings its own uv, through platform packages that npm installs as optional dependencies, and the published 0.30.0 wheel. Leave optional dependencies enabled. The first launch downloads a managed Python, so it needs network access. Install Git yourself for repository features. npm targets are Linux (glibc) x64 and ARM64, macOS x64 and ARM64, and Windows x64. Upgrade with npm, because `brigade update` refuses npm-managed installs. Platform details and known limits: [npm package notes](npm/feasibility/README.md).
+
+On other platforms, or to use Python 3.10 or newer directly:
+
 ```bash
 pipx install brigade-cli      # or: uv tool install brigade-cli
 brigade setup
@@ -81,7 +94,20 @@ brigade setup
 
 Then follow the [install guide](https://brigade.tools/docs/getting-started/install) or [QUICKSTART.md](QUICKSTART.md). To let your coding agent do the setup, hand it [first 10 minutes](docs/first-10-minutes.md) and the [agents guide](docs/agents-guide.md).
 
-For preview builds, run `brigade update --channel beta`. Details: [update channels](docs/update-channels.md).
+For preview builds on a pipx install, run `brigade update --channel beta`. Details: [update channels](docs/update-channels.md).
+
+## MCP servers
+
+`brigade-cli` includes two read-only MCP servers. `--stdio` runs them over stdin and stdout, and `--http` serves them on loopback Streamable HTTP for hosts that connect by URL ([details](docs/technical-guide.md#streamable-http-for-the-read-only-mcp-servers)).
+
+- `brigade memory serve-mcp --stdio`: the repo's memory cards, with `list_cards`, `search_cards`, and `get_card`.
+- `brigade skills serve-mcp --stdio`: the reviewed skill registry, with search, read, lint, compatibility, and install-history tools.
+
+Without a global install, `uvx --from brigade-cli brigade memory serve-mcp --stdio` runs the same server.
+
+<!-- MCP Registry ownership markers; keep each on its own line. -->
+<!-- mcp-name: io.github.escoffier-labs/brigade-memory -->
+<!-- mcp-name: io.github.escoffier-labs/brigade-skills -->
 
 ## How it compares
 
@@ -149,4 +175,4 @@ Name collisions: this is `brigade-cli` from [escoffier-labs/brigade](https://git
 
 MIT. See [LICENSE](LICENSE).
 
-Project identity: GitHub [`escoffier-labs/brigade`](https://github.com/escoffier-labs/brigade), website [brigade.tools](https://brigade.tools), PyPI [`brigade-cli`](https://pypi.org/project/brigade-cli/), command `brigade`.
+Project identity: GitHub [`escoffier-labs/brigade`](https://github.com/escoffier-labs/brigade), website [brigade.tools](https://brigade.tools), PyPI [`brigade-cli`](https://pypi.org/project/brigade-cli/), npm [`@escoffier-labs/brigade`](https://www.npmjs.com/package/@escoffier-labs/brigade), command `brigade`.

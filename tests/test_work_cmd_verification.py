@@ -3895,7 +3895,30 @@ def verify_signal_probe(tmp_path):
 
     _init_git_repo(tmp_path)
 
-    def run(setup="", child="print('ok')", invocation="", timeout=20, descendants=()):
+    def run(setup="", child="print('ok')", invocation="", timeout=20, descendants=(), process_entry=False):
+        if process_entry:
+            # Resolve the real configured process route on both sides of an
+            # entry-point rename, so baseline failure is a signal, not an import.
+            project = Path(__file__).resolve().parents[1] / "pyproject.toml"
+            entry = json.loads(
+                next(
+                    line.split("=", 1)[1].strip()
+                    for line in project.read_text().splitlines()
+                    if line.startswith("brigade = ")
+                )
+            )
+            invocation = f"""
+            import importlib
+            module, name = {entry!r}.split(':')
+            sys.argv = ['brigade', 'work', 'verify', 'run', '--target', str(target),
+                '--argv-json', json.dumps(command), '--no-reuse', '--capture', 'brigade-work']
+            sys.exit(getattr(importlib.import_module(module), name)())
+            """
+            if process_entry == "module":
+                invocation = invocation.replace(
+                    "sys.exit(getattr(importlib.import_module(module), name)())",
+                    "import runpy; runpy.run_module('brigade', run_name='__main__')",
+                )
         source = "\n".join(
             [
                 "import json, os, signal, sys, threading, time",
@@ -3918,14 +3941,16 @@ def verify_signal_probe(tmp_path):
                 "owner = identity(os.getpid())",
                 f"child_source = 'OWNER = ' + repr(owner) + '\\n' + {_VERIFY_SIGNAL_CHILD_SOURCE!r} + {child!r}",
                 "command = [sys.executable, '-S', '-c', child_source]",
+                "def write_result(rc):",
+                "    records = outcome_cmd.load_records(target)",
+                "    (target / 'result.json').write_text(json.dumps({'rc': rc, 'events': events,",
+                "        'signals': [r.signal_value for r in records]}))",
                 textwrap.dedent(setup),
                 "handlers = {s: signal.getsignal(s) for s in (signal.SIGTERM, signal.SIGHUP, signal.SIGINT)}",
                 textwrap.dedent(invocation)
                 or "rc = v.verify_run(target=target, commands=[command], reuse=False, capture='brigade-work')",
                 "assert all(signal.getsignal(s) == h for s, h in handlers.items())",
-                "records = outcome_cmd.load_records(target)",
-                "(target / 'result.json').write_text(json.dumps({'rc': rc, 'events': events,",
-                "    'signals': [r.signal_value for r in records]}))",
+                "write_result(rc)",
                 "sys.exit(rc)",
             ]
         )
@@ -3974,6 +3999,15 @@ def verify_signal_probe(tmp_path):
                 receipt = json.loads(latest.read_text()) if latest else None
                 result_path = tmp_path / "result.json"
                 result = json.loads(result_path.read_text()) if result_path.exists() else None
+                (tmp_path / "probe-observation.json").write_text(
+                    json.dumps(
+                        {
+                            "returncode": process.returncode,
+                            "alive": alive,
+                            "owned": {name: record for name, (record, _) in owned.items()},
+                        }
+                    )
+                )
                 return process.returncode, receipt, result, alive, diagnostics
             finally:
                 # Observe production survival before fixture teardown. Returned
@@ -4011,6 +4045,258 @@ def verify_signal_probe(tmp_path):
                         raise AssertionError("fixture cleanup: " + detail)
 
     return run
+
+
+@pytest.mark.parametrize("signal_name", ["SIGINT", "SIGTERM", "SIGHUP"])
+@pytest.mark.parametrize("window", ["verify_return", "notification", "atexit"])
+def test_cli_process_cancellation_survives_late_signal(verify_signal_probe, signal_name, window):
+    setup = f"""
+    import atexit
+    from brigade import work_cmd, update_notify
+    original = work_cmd.verify_run
+    def late_signal():
+        os.kill(os.getpid(), signal.{signal_name})
+    def verify(**kw):
+        rc = original(**kw)
+        write_result(rc)
+        if {window!r} == 'verify_return':
+            late_signal()
+        return rc
+    work_cmd.verify_run = verify
+    if {window!r} == 'notification':
+        update_notify.maybe_notify = lambda *args: late_signal()
+    if {window!r} == 'atexit':
+        atexit.register(late_signal)
+    """
+    child = (
+        "import subprocess, sys; register_process('child', os.getpid()); "
+        "p = subprocess.Popen([sys.executable, '-S', '-c', 'import time; time.sleep(60)'], start_new_session=True); "
+        "register_process('grandchild', p.pid); "
+        f"signal_owner(signal.{signal_name}); time.sleep(60)"
+    )
+    rc, receipt, result, alive, diagnostics = verify_signal_probe(
+        setup=setup,
+        child=child,
+        descendants=("child", "grandchild"),
+        process_entry="module" if window == "notification" else True,
+    )
+    # Check durable cancellation and cleanup even when the baseline dies late.
+    assert not alive, diagnostics
+    assert receipt["status"] == "canceled"
+    assert receipt["commands"][0]["status"] == "interrupted"
+    if signal_name == "SIGINT":
+        assert receipt["interruption"]["kind"] == "keyboard-interrupt"
+    else:
+        assert receipt["interruption"]["signal"] == signal_name
+    assert result["rc"] == 130
+    assert result["signals"] == [0]
+    assert len(result["events"]) == 1
+    event = result["events"][0]
+    assert event["exit_status"] == 130
+    assert event["digest"] == receipt["digests"]["receipt_sha256"]
+    assert event["digest"] == localio.canonical_json_digest(receipt, exclude_keys={"digests"})
+    checks = receipts_cmd._verify_receipt(
+        Path(receipt["path"]) / "receipt.json",
+        artifact_type="work-verify-receipt",
+        log_type="work-verify-log",
+        target=Path(receipt["path"]).parents[3],
+    )
+    assert checks and all(item["status"] == receipts_cmd.OK for item in checks), checks
+    assert rc == 130, diagnostics
+    assert "Traceback" not in diagnostics and "Exception ignored" not in diagnostics
+
+
+@pytest.mark.parametrize("outer_result", ["contained", "propagated", "exit130"])
+def test_cli_process_nested_cancellation_retention(verify_signal_probe, tmp_path, outer_result):
+    setup = f"""
+    from brigade import work_cmd
+    original_runner = v.verify_runtime._run_verify_child_process
+    nested = False
+    def run_child(*args, **kw):
+        global nested
+        if nested:
+            return original_runner(*args, **kw)
+        nested = True
+        try:
+            assert v.verify_run(target=target, commands=[command], reuse=False, capture='brigade-work') == 130
+        finally:
+            nested = False
+        if {outer_result!r} == 'propagated':
+            return 'interrupted', None, '', ''
+        if {outer_result!r} == 'exit130':
+            return 'failed', 130, '', 'ordinary failure'
+        return 'completed', 0, 'outer completed', ''
+    v.verify_runtime._run_verify_child_process = run_child
+    original = work_cmd.verify_run
+    def verify(**kw):
+        rc = original(**kw)
+        write_result(rc)
+        restored = all(signal.getsignal(s) == h for s, h in handlers.items())
+        (target / 'restored.json').write_text(json.dumps(restored))
+        os.kill(os.getpid(), signal.SIGHUP)
+        return rc
+    work_cmd.verify_run = verify
+    """
+    child = "register_process('child', os.getpid()); signal_owner(signal.SIGTERM); time.sleep(60)"
+    rc, receipt, result, alive, diagnostics = verify_signal_probe(
+        setup=setup, child=child, descendants=("child",), process_entry=True
+    )
+    import signal
+
+    propagated = outer_result == "propagated"
+    assert not alive, diagnostics
+    assert receipt["status"] == {"contained": "completed", "propagated": "canceled", "exit130": "failed"}[outer_result]
+    assert result["rc"] == (0 if outer_result == "contained" else 130)
+    assert result["signals"] == {"contained": [0, 1], "propagated": [0, 0], "exit130": [0, -1]}[outer_result]
+    assert [event["exit_status"] for event in result["events"]] == [130, result["rc"]]
+    assert json.loads((tmp_path / "restored.json").read_text()) is (not propagated)
+    assert rc == (130 if propagated else -signal.SIGHUP), diagnostics
+    assert "Traceback" not in diagnostics and "Exception ignored" not in diagnostics
+
+
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+def test_cli_process_cancellation_with_missing_stream(verify_signal_probe, stream):
+    setup = f"""
+    from brigade import work_cmd
+    sys.{stream} = None
+    original = work_cmd.verify_run
+    def verify(**kw):
+        rc = original(**kw)
+        write_result(rc)
+        return rc
+    work_cmd.verify_run = verify
+    """
+    child = "register_process('child', os.getpid()); signal_owner(signal.SIGHUP); time.sleep(60)"
+    rc, receipt, result, alive, diagnostics = verify_signal_probe(
+        setup=setup, child=child, descendants=("child",), process_entry=True
+    )
+    assert not alive, diagnostics
+    assert receipt["status"] == "canceled" and result["rc"] == 130
+    assert result["signals"] == [0] and len(result["events"]) == 1
+    assert rc == 130, diagnostics
+    assert "Traceback" not in diagnostics and "Exception ignored" not in diagnostics
+
+
+def test_cli_process_signal_during_partial_handler_restore(verify_signal_probe, tmp_path):
+    setup = """
+    from brigade import work_cmd
+    install = signal.signal
+    sent = False
+    def restore(signum, handler):
+        global sent
+        if signum == signal.SIGHUP and handler == signal.SIG_DFL and not sent:
+            sent = True
+            assert signal.getsignal(signal.SIGTERM) == signal.SIG_DFL
+            (target / 'term-restored-before-hup').touch()
+            os.kill(os.getpid(), signal.SIGHUP)
+        return install(signum, handler)
+    signal.signal = restore
+    original = work_cmd.verify_run
+    def verify(**kw):
+        rc = original(**kw)
+        write_result(rc)
+        retained = all(signal.getsignal(s) != h for s, h in handlers.items())
+        (target / 'retained.json').write_text(json.dumps(retained))
+        os.kill(os.getpid(), signal.SIGTERM)
+        os.kill(os.getpid(), signal.SIGHUP)
+        return rc
+    work_cmd.verify_run = verify
+    """
+    rc, receipt, result, alive, diagnostics = verify_signal_probe(setup=setup, process_entry=True)
+    assert not alive, diagnostics
+    assert (tmp_path / "term-restored-before-hup").exists()
+    assert receipt["status"] == "completed"
+    assert result["rc"] == 130 and result["signals"] == [1]
+    assert len(result["events"]) == 1 and result["events"][0]["exit_status"] == 0
+    assert json.loads((tmp_path / "retained.json").read_text()) is True
+    assert rc == 130, diagnostics
+    assert "Traceback" not in diagnostics and "Exception ignored" not in diagnostics
+
+
+def test_cli_process_uncanceled_late_signal_is_fatal(verify_signal_probe):
+    setup = """
+    from brigade import work_cmd
+    original = work_cmd.verify_run
+    def verify(**kw):
+        rc = original(**kw)
+        write_result(rc)
+        os.kill(os.getpid(), signal.SIGHUP)
+        return rc
+    work_cmd.verify_run = verify
+    """
+    rc, receipt, result, alive, diagnostics = verify_signal_probe(setup=setup, process_entry=True)
+    import signal
+
+    assert rc == -signal.SIGHUP, diagnostics
+    assert not alive
+    assert receipt["status"] == "completed"
+    assert result["rc"] == 0 and result["signals"] == [1]
+
+
+@pytest.mark.parametrize("failure", ["dispatch", "flush"])
+def test_cli_process_cancellation_does_not_mask_exception(verify_signal_probe, tmp_path, failure):
+    setup = f"""
+    import atexit
+    from brigade import work_cmd
+    original = work_cmd.verify_run
+    def final():
+        sys.stdout = sys.__stdout__
+        restored = all(signal.getsignal(s) == h for s, h in handlers.items())
+        # A later library scope must not inherit a stale process owner/latch.
+        with v.verify_runtime._verify_cancellation_signals():
+            pass
+        restored = restored and all(signal.getsignal(s) == h for s, h in handlers.items())
+        (target / 'restored.json').write_text(json.dumps(restored))
+    atexit.register(final)
+    class FailingFlush:
+        def write(self, value):
+            return sys.__stdout__.write(value)
+        def flush(self):
+            raise RuntimeError('exit flush failed')
+    def verify(**kw):
+        rc = original(**kw)
+        write_result(rc)
+        if {failure!r} == 'dispatch':
+            raise RuntimeError('dispatch failed after cancellation')
+        sys.stdout = FailingFlush()
+        return rc
+    work_cmd.verify_run = verify
+    """
+    child = "register_process('child', os.getpid()); signal_owner(signal.SIGHUP); time.sleep(60)"
+    rc, receipt, result, alive, diagnostics = verify_signal_probe(
+        setup=setup, child=child, descendants=("child",), process_entry=True
+    )
+    assert rc == 1, diagnostics
+    assert (
+        f"RuntimeError: {'dispatch failed after cancellation' if failure == 'dispatch' else 'exit flush failed'}"
+        in diagnostics
+    )
+    assert json.loads((tmp_path / "restored.json").read_text()) is True
+    assert receipt["status"] == "canceled" and result["rc"] == 130
+    assert not alive
+
+
+def test_cli_process_cancellation_preserves_custom_handler(verify_signal_probe, tmp_path):
+    setup = """
+    import atexit
+    signal.signal(signal.SIGTERM, lambda *args: (target / 'custom-called').touch())
+    atexit.register(lambda: os.kill(os.getpid(), signal.SIGTERM))
+    from brigade import work_cmd
+    original = work_cmd.verify_run
+    def verify(**kw):
+        rc = original(**kw)
+        write_result(rc)
+        return rc
+    work_cmd.verify_run = verify
+    """
+    child = "register_process('child', os.getpid()); signal_owner(signal.SIGINT); time.sleep(60)"
+    rc, receipt, result, alive, diagnostics = verify_signal_probe(
+        setup=setup, child=child, descendants=("child",), process_entry=True
+    )
+    assert rc == 130, diagnostics
+    assert (tmp_path / "custom-called").exists()
+    assert receipt["status"] == "canceled" and result["signals"] == [0]
+    assert not alive
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX signal cancellation")

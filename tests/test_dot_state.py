@@ -1,5 +1,7 @@
 """Compatibility and private-state regressions ported from the bridge."""
 
+from tests.dot_support import requires_local_state
+
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -17,6 +19,7 @@ def rows(state: BridgeState) -> list[dict]:
         return [dict(row) for row in connection.execute("SELECT * FROM call_log ORDER BY id")]
 
 
+@requires_local_state
 def test_upgrade_is_additive_and_preserves_existing_rows(dot_private_dir: Path) -> None:
     with BridgeState(dot_private_dir) as state:
         with state.transaction() as connection:
@@ -61,6 +64,7 @@ def test_upgrade_is_additive_and_preserves_existing_rows(dot_private_dir: Path) 
         assert operation
 
 
+@requires_local_state
 def test_log_call_sanitizes_every_column(dot_private_dir: Path) -> None:
     with BridgeState(dot_private_dir) as state:
         state.log_call("fleet_status", True, 12.7, request_id=REQUEST, arg_summary="x" * 500, clock=lambda: NOW)
@@ -72,6 +76,7 @@ def test_log_call_sanitizes_every_column(dot_private_dir: Path) -> None:
     assert len(second["error_code"]) == 64
 
 
+@requires_local_state
 def test_prune_keeps_thirty_days(dot_private_dir: Path) -> None:
     with BridgeState(dot_private_dir) as state:
         for days in (40, 31, 29, 0):
@@ -112,6 +117,7 @@ def test_summary_keeps_ids_and_limits_never_bodies() -> None:
     assert "ghp_" + "A" * 36 not in (summarize_arguments({"name": "ghp_" + "A" * 36}) or "")
 
 
+@requires_local_state
 def test_unsafe_directory_database_and_ancestors_rejected(dot_private_dir: Path) -> None:
     with BridgeState(dot_private_dir):
         pass
@@ -136,6 +142,7 @@ def test_unsafe_directory_database_and_ancestors_rejected(dot_private_dir: Path)
         BridgeState(dot_private_dir)
 
 
+@requires_local_state
 def test_fresh_database_owns_all_bridge_and_event_tables(dot_private_dir: Path) -> None:
     with BridgeState(dot_private_dir) as state:
         with state.transaction() as connection:
@@ -155,6 +162,7 @@ def test_fresh_database_owns_all_bridge_and_event_tables(dot_private_dir: Path) 
     } <= tables
 
 
+@requires_local_state
 def test_private_directory_rejects_overflow_uid_ancestor(dot_private_dir, monkeypatch):
     """Namespace overflow ownership must fail closed, even for systemd sandboxes."""
     import os

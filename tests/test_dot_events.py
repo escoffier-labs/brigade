@@ -1,5 +1,7 @@
 """Event protocol and webhook transport regressions ported from the bridge."""
 
+from tests.dot_support import requires_local_state
+
 import asyncio
 import base64
 import hashlib
@@ -142,6 +144,7 @@ class EventIntegrationChecks(EventFixture):
             ),
         )
 
+    @requires_local_state
     def test_unsubscribe_by_documented_key_and_categorized_failure(self):
         from brigade.dot.events import EventError
 
@@ -172,6 +175,7 @@ class EventIntegrationChecks(EventFixture):
 
         asyncio.run(scenario())
 
+    @requires_local_state
     def test_fake_subscriber_verification_idempotence_delivery_and_unsubscribe(self):
         async def scenario():
             sub = await self.subscribe()
@@ -192,6 +196,7 @@ class EventIntegrationChecks(EventFixture):
 
         asyncio.run(scenario())
 
+    @requires_local_state
     def test_hourly_cap_and_normal_debounce(self):
         async def scenario():
             await self.subscribe()
@@ -212,6 +217,7 @@ class EventIntegrationChecks(EventFixture):
 
         asyncio.run(scenario())
 
+    @requires_local_state
     def test_throttled_deliveries_are_deferred_to_the_window_end(self):
         # A throttled row must not be re-selected (and rewritten) every second until its window ends.
         def pending():
@@ -237,6 +243,7 @@ class EventIntegrationChecks(EventFixture):
 
         asyncio.run(scenario())
 
+    @requires_local_state
     def test_completion_only_for_tracked_requests_and_followup_generation(self):
         operation = self.state.begin_operation("fleet_submit", {})
         self.state.finish_operation(operation, REQUEST, "ok")
@@ -257,6 +264,7 @@ class EventIntegrationChecks(EventFixture):
 
         asyncio.run(scenario())
 
+    @requires_local_state
     def test_callback_failure_and_invalid_filters_are_refused(self):
         from brigade.dot.events import EventError
 
@@ -283,6 +291,7 @@ class EventIntegrationChecks(EventFixture):
 
         asyncio.run(scenario())
 
+    @requires_local_state
     def test_410_and_413_not_retried_transient_keeps_event_id(self):
         async def scenario():
             await self.subscribe()
@@ -316,6 +325,7 @@ class EventRotationChecks(EventFixture):
     setUp = EventIntegrationChecks.setUp
     subscribe = EventIntegrationChecks.subscribe
 
+    @requires_local_state
     def test_rotated_secret_keeps_grace_after_identical_refresh(self):
         async def scenario():
             sub = await self.subscribe()
@@ -402,6 +412,7 @@ class WebhookTransportChecks(unittest.TestCase):
         self.assertEqual((status, body), (200, b'{"challenge":"x"}'))
 
 
+@requires_local_state
 @pytest.mark.parametrize("failure", ["raises", "false"])
 def test_completion_send_failure_leaves_request_pending(dot_private_dir, failure):
     async def scenario():
@@ -431,6 +442,7 @@ def test_completion_send_failure_leaves_request_pending(dot_private_dir, failure
     asyncio.run(scenario())
 
 
+@requires_local_state
 def test_hub_poll_cadence_and_invalid_credential(dot_private_dir, caplog):
     from brigade.dot.contracts import DotError
 
@@ -455,6 +467,7 @@ def test_hub_poll_cadence_and_invalid_credential(dot_private_dir, caplog):
     asyncio.run(scenario())
 
 
+@requires_local_state
 def test_gone_subscription_and_thirty_day_pruning(dot_private_dir):
     from brigade.dot.events import enqueue
 
@@ -497,6 +510,7 @@ def test_gone_subscription_and_thirty_day_pruning(dot_private_dir):
     asyncio.run(scenario())
 
 
+@requires_local_state
 @pytest.mark.parametrize("enabled", [False, True])
 def test_events_switch_controls_rpc_capabilities_and_workers(dot_private_dir, enabled):
     from unittest.mock import AsyncMock

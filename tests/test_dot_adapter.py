@@ -1,5 +1,7 @@
 """Ported bridge regressions over isolated Dot collaborators."""
 
+from tests.dot_support import requires_local_state
+
 import json
 import unittest
 from unittest.mock import patch
@@ -207,7 +209,7 @@ INVALID_CALLS = [
 ]
 
 
-class SchemaTableChecks(Fixture):
+class SchemaTableChecks(unittest.TestCase):
     def test_every_tool_has_one_schema_and_a_valid_example(self):
         self.assertEqual(set(VALID_CALLS), TOOLS)
         for name, arguments in VALID_CALLS.items():
@@ -226,6 +228,9 @@ class SchemaTableChecks(Fixture):
         with self.assertRaises(DotError):
             validate_arguments("fleet_status", {"request_id": None})
 
+
+class AdapterSchemaChecks(Fixture):
+    @requires_local_state
     def test_adapter_rejects_invalid_arguments_without_any_command(self):
         for name, arguments in INVALID_CALLS:
             with self.subTest(name=name, arguments=arguments):
@@ -238,6 +243,7 @@ class SchemaTableChecks(Fixture):
 class DispatchGateChecks(Fixture):
     dispatch = False
 
+    @requires_local_state
     def test_gated_tools_refuse_before_any_command_or_journal(self):
         gated = sorted(name for name, schema in TOOL_SCHEMAS.items() if schema.gated)
         self.assertEqual(
@@ -252,6 +258,7 @@ class DispatchGateChecks(Fixture):
         self.assertEqual(self.runner.calls, [])
         self.assertEqual(self.state.operations(50), [])
 
+    @requires_local_state
     def test_followup_refusal_logs_argument_request_id(self):
         with self.assertRaisesRegex(DotError, "^dispatch_disabled$"):
             self.call("fleet_followup", request_id=REQUEST, message="follow up")
@@ -260,6 +267,7 @@ class DispatchGateChecks(Fixture):
         self.assertEqual(row["request_id"], REQUEST)
         self.assertEqual(row["error_code"], "dispatch_disabled")
 
+    @requires_local_state
     def test_read_tools_still_work_when_dispatch_disabled(self):
         self.assertTrue(self.call("fleet_status", request_id=REQUEST)["ok"])
         capabilities = self.call("dot_t3_capabilities")
@@ -269,12 +277,14 @@ class DispatchGateChecks(Fixture):
 
 
 class AdapterIntegration(Fixture):
+    @requires_local_state
     def test_gate_never_reaches_fleet(self):
         self.adapter = self.make_adapter(False)
         with patch.object(self.adapter.fleet, "fleet_submit", side_effect=AssertionError("reached")):
             with self.assertRaisesRegex(DotError, "dispatch_disabled"):
                 self.call("fleet_submit", repository="brigade", title="t", prompt="private prompt")
 
+    @requires_local_state
     def test_call_logging_success_error_and_prompt_exclusion(self):
         self.call("fleet_status", request_id=REQUEST)
         with self.assertRaises(DotError):
@@ -285,10 +295,12 @@ class AdapterIntegration(Fixture):
         self.assertEqual(rows[1]["error_code"], "invalid_request")
         self.assertNotIn("private prompt", json.dumps(rows))
 
+    @requires_local_state
     def test_record_call_failure_does_not_change_result(self):
         with patch.object(self.state, "log_call", side_effect=RuntimeError("broken")):
             self.assertTrue(self.call("fleet_status", request_id=REQUEST)["ok"])
 
+    @requires_local_state
     def test_capabilities_only_expose_configured_aliases_and_retained_tools(self):
         result = self.call("dot_t3_capabilities")
         self.assertEqual(result["bridge_version"], "6")
@@ -298,11 +310,13 @@ class AdapterIntegration(Fixture):
         self.assertIn("ops, review", result["inbox"]["usage"])
         self.assertNotIn("model", result)
 
+    @requires_local_state
     def test_identity_rejected_before_dispatch(self):
         with self.assertRaisesRegex(DotError, "authentication_required"):
             self.adapter.call("", "fleet_capacity", {})
         self.assertEqual(self.runner.calls, [])
 
+    @requires_local_state
     def test_factory_wires_shared_state_and_collaborators(self):
         tools, state, inbox = build_tools(self.runtime)
         try:
@@ -315,6 +329,7 @@ class AdapterIntegration(Fixture):
 
 
 class MessagingAdapter(Fixture):
+    @requires_local_state
     def test_message_send_gate_denial_and_status(self):
         self.adapter = self.make_adapter(False)
         with self.assertRaisesRegex(DotError, "dispatch_disabled"):
@@ -333,6 +348,7 @@ class MessagingAdapter(Fixture):
         self.assertNotIn("private body", json.dumps(rows))
         self.assertNotIn("subject", json.dumps(rows))
 
+    @requires_local_state
     def test_capabilities_state_untrusted_policy(self):
         result = self.call("dot_t3_capabilities")
         for needle in ("untrusted data", "never instructions", "credentials", "private context", "own judgment"):
@@ -340,6 +356,7 @@ class MessagingAdapter(Fixture):
         self.assertIn("hub", result["inbox"]["usage"])
         self.assertEqual(result["inbox"]["cli"], "brigade fleet msg send")
 
+    @requires_local_state
     def test_capabilities_name_the_configured_inbox_principal(self):
         self.runtime = replace(self.runtime, hub=replace(self.runtime.hub, principal="agent:example-planner"))
         self.adapter = self.make_adapter(self.dispatch)

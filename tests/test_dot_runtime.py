@@ -1,3 +1,5 @@
+from tests.dot_support import requires_local_state
+
 import json
 import os
 from pathlib import Path
@@ -30,20 +32,20 @@ def _document() -> dict[str, object]:
             "resource": "https://dot.example.test/mcp",
         },
         "paths": {
-            "state_dir": "/srv/dot/state",
-            "workspace": "/srv/dot/workspace",
-            "fleet_config": "/srv/dot/config.toml",
+            "state_dir": str(Path("/srv/dot/state").absolute()),
+            "workspace": str(Path("/srv/dot/workspace").absolute()),
+            "fleet_config": str(Path("/srv/dot/config.toml").absolute()),
             "bin": {
-                "t3_fleet": "/usr/bin/t3-fleet",
-                "brigade": "/usr/bin/brigade",
-                "git": "/usr/bin/git",
-                "gh": "/usr/bin/gh",
+                "t3_fleet": str(Path("/usr/bin/t3-fleet").absolute()),
+                "brigade": str(Path("/usr/bin/brigade").absolute()),
+                "git": str(Path("/usr/bin/git").absolute()),
+                "gh": str(Path("/usr/bin/gh").absolute()),
             },
         },
         "hub": {
             "principal": "agent:dot",
             "node_id": "00000000-0000-4000-8000-000000000001",
-            "message_token_file": "/srv/dot/secrets/message-token",
+            "message_token_file": str(Path("/srv/dot/secrets/message-token").absolute()),
             "poll_seconds": 30,
             "recipients": {
                 "review": "00000000-0000-4000-8000-000000000002",
@@ -54,7 +56,7 @@ def _document() -> dict[str, object]:
         "events_enabled": False,
         "digest_pr_repo": "owner/repo",
         "callback_hosts": ["connectors.api.openai.com"],
-        "notify_command": ["/usr/bin/notifier", "--hook", "custom"],
+        "notify_command": [str(Path("/usr/bin/notifier").absolute()), "--hook", "custom"],
         "owner_authorization": {"version": "1", "text": "Owner approved Dot automation."},
     }
 
@@ -80,21 +82,21 @@ def test_parse_runtime_builds_frozen_config_dataclasses() -> None:
         resource="https://dot.example.test/mcp",
     )
     assert runtime.paths == PathsConfig(
-        state_dir=Path("/srv/dot/state"),
-        workspace=Path("/srv/dot/workspace"),
-        fleet_config=Path("/srv/dot/config.toml"),
+        state_dir=Path("/srv/dot/state").absolute(),
+        workspace=Path("/srv/dot/workspace").absolute(),
+        fleet_config=Path("/srv/dot/config.toml").absolute(),
         bin=BinPaths(
-            t3_fleet="/usr/bin/t3-fleet",
-            brigade="/usr/bin/brigade",
-            git="/usr/bin/git",
-            gh="/usr/bin/gh",
+            t3_fleet=str(Path("/usr/bin/t3-fleet").absolute()),
+            brigade=str(Path("/usr/bin/brigade").absolute()),
+            git=str(Path("/usr/bin/git").absolute()),
+            gh=str(Path("/usr/bin/gh").absolute()),
             octopool=None,
         ),
     )
     assert runtime.hub == HubConfig(
         principal="agent:dot",
         node_id="00000000-0000-4000-8000-000000000001",
-        message_token_file=Path("/srv/dot/secrets/message-token"),
+        message_token_file=Path("/srv/dot/secrets/message-token").absolute(),
         poll_seconds=30,
         recipients={
             "review": "00000000-0000-4000-8000-000000000002",
@@ -105,7 +107,7 @@ def test_parse_runtime_builds_frozen_config_dataclasses() -> None:
     assert runtime.events_enabled is False
     assert runtime.digest_pr_repo == "owner/repo"
     assert runtime.callback_hosts == ("connectors.api.openai.com",)
-    assert runtime.notify_command == ("/usr/bin/notifier", "--hook", "custom")
+    assert runtime.notify_command == (str(Path("/usr/bin/notifier").absolute()), "--hook", "custom")
     assert runtime.owner_authorization == OwnerAuthorization("1", "Owner approved Dot automation.")
     assert runtime.paths.bin.octopool is None
 
@@ -153,6 +155,7 @@ def test_parse_runtime_rejects_invalid_documents(mutate) -> None:
     assert error.value.code == "invalid_config"
 
 
+@requires_local_state
 def test_load_runtime_requires_owner_only_regular_file(dot_private_dir: Path) -> None:
     insecure = dot_private_dir / "insecure.json"
     _write_private(insecure, json.dumps(_document()).encode(), mode=0o644)
@@ -163,6 +166,7 @@ def test_load_runtime_requires_owner_only_regular_file(dot_private_dir: Path) ->
     assert error.value.code == "invalid_config"
 
 
+@requires_local_state
 def test_load_runtime_rejects_symlink(dot_private_dir: Path) -> None:
     target = dot_private_dir / "target.json"
     _write_private(target, json.dumps(_document()).encode())
@@ -186,7 +190,7 @@ def test_runtime_repr_redacts_authorization_text_and_token_path() -> None:
     runtime = parse_runtime(_document())
 
     assert "Owner approved Dot automation." not in repr(runtime)
-    assert "/srv/dot/secrets/message-token" not in repr(runtime)
+    assert str(Path("/srv/dot/secrets/message-token").absolute()) not in repr(runtime)
 
 
 @pytest.mark.parametrize("paths", [[], ["/srv/fleet"], None, "path", ["relative"]])
@@ -224,6 +228,7 @@ def test_authorization_text_uses_bridge_byte_limit():
         parse_runtime(data)
 
 
+@requires_local_state
 @pytest.mark.parametrize("unsafe", ["read-only", "executable", "hardlink", "parent", "ancestor", "symlink-parent"])
 def test_runtime_requires_exact_private_file_and_directory_walk(dot_private_dir, unsafe):
     root = dot_private_dir.parent
