@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The npm package `@escoffier-labs/brigade@0.30.0` bundles the published `brigade-cli==0.30.0` wheel. Its launcher runs `brigade.cli:process_main`, the same entry point as the `brigade` console script, so npm installs keep exit status 130 when a verification is cancelled.
+
 ## [0.30.0] - 2026-10-20
 
 ### Added

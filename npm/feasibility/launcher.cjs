@@ -231,7 +231,7 @@ async function main() {
     }
     validateManagedPythonPaths();
     const callerEnv={...process.env};
-    const result=await run(toolPython(privateEnv),['-I','-c',"import sys; sys.argv[0]='brigade'; import brigade.distribution as d; d._name='npm'; from brigade.cli import main; sys.exit(main())",...process.argv.slice(2)],callerEnv);
+    const result=await run(toolPython(privateEnv),['-I','-c',"import sys; sys.argv[0]='brigade'; import brigade.distribution as d; d._name='npm'; from brigade.cli import process_main; process_main()",...process.argv.slice(2)],callerEnv);
     clearTimeout(escalation);clearTimeout(forwarding);
     for(const [signal,handler] of Object.entries(handlers)) process.removeListener(signal,handler);
     finish(result);

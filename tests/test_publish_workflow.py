@@ -478,7 +478,7 @@ def test_npm_release_workflow_has_dispatch_source_oidc_and_native_gates():
     assert 'test "$GITHUB_REF" = refs/heads/main' in publish
     assert 'test "$GITHUB_SHA" = "$EXPECTED_SHA"' in publish
     assert 'test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"' in publish
-    assert 'test "$RELEASE_TAG" = v0.29.0' in publish
+    assert 'test "$RELEASE_TAG" = v0.30.0' in publish
     guard = next(step for step in jobs["publish"]["steps"] if "EXPECTED_SHA" in step.get("env", {}))
     assert guard["env"]["EXPECTED_SHA"] == "${{ inputs.expected_sha }}"
     assert guard["env"]["RELEASE_TAG"] == "${{ inputs.release_tag }}"
@@ -546,7 +546,7 @@ def test_npm_revalidation_is_read_only_and_pins_two_source_identities():
         if step in acceptance:
             assert argv[:2] == ["node", "/fixture/workspace/validation-harness/npm/feasibility/acceptance.cjs"]
             assert argv[argv.index("--expected-packaging-sha") + 1] == env["PACKAGING_SHA"]
-            assert argv[argv.index("--registry-spec") + 1] == "@escoffier-labs/brigade@0.29.0"
+            assert argv[argv.index("--registry-spec") + 1] == "@escoffier-labs/brigade@0.30.0"
         else:
             assert argv == ["python", "npm/feasibility/prepare.py", "--verify-artifacts", "/fixture/temp/npm-artifacts"]
     assert native["steps"].index(preparation[0]) < native["steps"].index(acceptance[0])
@@ -601,9 +601,9 @@ def test_npm_revalidation_rejects_substituted_or_unsafe_original_artifacts(tmp_p
     proof.mkdir()
     archive = proof / "original-archives.zip"
     names = (
-        ["escoffier-labs-brigade-0.29.0.tgz"]
+        ["escoffier-labs-brigade-0.30.0.tgz"]
         + [
-            f"escoffier-labs-brigade-uv-{p}-0.29.0.tgz"
+            f"escoffier-labs-brigade-uv-{p}-0.30.0.tgz"
             for p in ("linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64", "win32-x64")
         ]
         + ["artifacts.json", "runtime.json"]

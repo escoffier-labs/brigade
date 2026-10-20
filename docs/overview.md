@@ -11,7 +11,7 @@ The full tour: every station, diagram, and workflow. The [README](../README.md) 
 | PyPI | [`brigade-cli`](https://pypi.org/project/brigade-cli/) |
 | Command | `brigade` |
 | Stable release | v0.28.0 |
-| Preview line | 0.29 beta (`0.29.0.devYYYYMMDD` wheels, after the post-tag bump) |
+| Preview line | 0.29 beta (`0.30.0.devYYYYMMDD` wheels, after the post-tag bump) |
 
 This Brigade is the AI-agent operator CLI from Escoffier Labs. It is not the archived CNCF/Microsoft Kubernetes Brigade, Spinabot Brigade, or the 2017 Python package that became Nornir.
 
@@ -86,7 +86,7 @@ Standalone GraphTrail or MiseLedger installs are replaced by `brigade setup`. So
 Install:
 
 ```bash
-npm install --global @escoffier-labs/brigade@0.29.0   # needs Node.js 22+ and npm
+npm install --global @escoffier-labs/brigade@0.30.0   # needs Node.js 22+ and npm
 # alternatives: pipx install brigade-cli, or uv tool install brigade-cli
 brigade setup
 ```

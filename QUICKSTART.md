@@ -11,7 +11,7 @@ Brigade supports Linux, macOS, and Windows. Pick one route: npm on glibc Linux x
 The npm package needs Node.js 22 or newer and npm. It does not need Python or pipx first:
 
 ```bash
-npm install --global @escoffier-labs/brigade@0.29.0
+npm install --global @escoffier-labs/brigade@0.30.0
 brigade --version
 brigade setup
 ```
@@ -19,8 +19,8 @@ brigade setup
 For a one-off run without a global install, put npx in front of every Brigade command. No global `brigade` command exists on this route:
 
 ```bash
-npx --yes @escoffier-labs/brigade@0.29.0 --version
-npx --yes @escoffier-labs/brigade@0.29.0 setup
+npx --yes @escoffier-labs/brigade@0.30.0 --version
+npx --yes @escoffier-labs/brigade@0.30.0 setup
 ```
 
 The first launch downloads a managed Python, so it needs network access. Git is not included. Install it yourself for repository features. Supported npm targets are Linux (glibc) x64 and ARM64, macOS x64 and ARM64, and Windows x64. Other platforms use the Python route below. Keep npm optional dependencies enabled, because the uv binary arrives as a platform package. If pipx or uv also installed Brigade, check which `brigade` comes first on PATH.

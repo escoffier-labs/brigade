@@ -17,7 +17,7 @@ const npmCli=resolveNpmCli();
 const tufCache=fs.mkdtempSync(path.join(os.tmpdir(),'brigade-publish-tuf-'));
 const verifier=createVerifier(npmCli,tufCache);
 const version=metadata.runtime.version;
-assert.equal(version,'0.29.0');assert.equal(metadata.runtime.payloadVersion,version);
+assert.equal(version,'0.30.0');assert.equal(metadata.runtime.payloadVersion,version);
 const artifacts=metadata.artifacts;
 assert.equal(artifacts.length,6);assert.equal(new Set(artifacts.map(a=>a.name)).size,6);
 const companions=artifacts.filter(a=>a.platform),launchers=artifacts.filter(a=>!a.platform);
