@@ -72,6 +72,13 @@ def hub(dispatch_make, tmp_path, monkeypatch):
     return tools, calls, row, token, token_file, ledger
 
 
+@pytest.fixture
+def hub_settings(hub, monkeypatch):
+    settings = {"hub_url": "https://hub.example.test", "node_token": "", "admin_token": ""}
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: dict(settings))
+    return settings
+
+
 @pytest.mark.parametrize("name,args", HUB_TOOLS.items())
 def test_missing_hub_config_is_closed_without_breaking_dispatch(dispatch_make, name, args):
     tools, _, _ = dispatch_make()
@@ -645,7 +652,10 @@ def test_security_rotation_discards_foreground_scan(hub, monkeypatch, caplog, ro
 
 @pytest.mark.usefixtures("t3_owner_reads", "t3_watch_log")
 @pytest.mark.parametrize("rotate_at", ["first-fetch", "second-fetch", "before-persist", "before-post"])
-def test_security_rotation_keeps_wake_scope_consistent(hub, tmp_path, monkeypatch, caplog, rotate_at):
+@pytest.mark.parametrize("change", ["token", "endpoint"])
+def test_security_rotation_keeps_wake_scope_consistent(
+    hub, hub_settings, tmp_path, monkeypatch, caplog, rotate_at, change
+):
     from brigade.grokbot_t3 import watch
     from brigade.grokbot_t3.inbox import HubInbox
     from brigade.grokbot_t3.ledger import wake_target_id
@@ -661,13 +671,19 @@ def test_security_rotation_keeps_wake_scope_consistent(hub, tmp_path, monkeypatc
     target_id = wake_target_id(url)
     fetched = 0
 
+    def rotate():
+        if change == "token":
+            token_file.write_text(replacement)
+        else:
+            hub_settings["hub_url"] = "https://other.example.test"
+
     def request(hub_url, credential, body, *, timeout=None):
         nonlocal fetched
         fetched += 1
         if fetched == (1 if rotate_at == "first-fetch" else 2) and rotate_at.endswith("fetch"):
-            token_file.write_text(replacement)
+            rotate()
         ident = body["after"] + 1
-        sender = "host-b" if token_file.read_text() == replacement else row["sender"]
+        sender = "host-b" if credential == replacement or hub_url == "https://other.example.test" else row["sender"]
         return 200, {"messages": [dict(row, id=ident, sender=sender)], "next_cursor": ident}
 
     if rotate_at == "before-persist":
@@ -675,7 +691,7 @@ def test_security_rotation_keeps_wake_scope_consistent(hub, tmp_path, monkeypatc
 
         def pages(self, **kwargs):
             for page in original_pages(self, **kwargs):
-                token_file.write_text(replacement)
+                rotate()
                 yield page
 
         monkeypatch.setattr(HubInbox, "pages", pages)
@@ -684,7 +700,7 @@ def test_security_rotation_keeps_wake_scope_consistent(hub, tmp_path, monkeypatc
 
         def read_key(path):
             value = original_read_key(path)
-            token_file.write_text(replacement)
+            rotate()
             return value
 
         monkeypatch.setattr(watch, "read_key", read_key)
@@ -903,3 +919,213 @@ def test_security_ack_rotation_during_recount_closes_result(hub, monkeypatch, ca
     assert [(credential, body["action"]) for credential, body in requests] == [(token, "ack"), (token, "list")]
     public = json.dumps(result) + caplog.text + "\n".join(ledger._conn.iterdump())
     assert token not in public and replacement not in public
+
+
+def test_notification_scope_matches_transport_endpoint_and_frames_identity(hub, hub_settings):
+    from brigade.grokbot_t3.inbox import HubInbox
+
+    _, _, _, token, token_file, _ = hub
+    inbox = HubInbox(token_file=str(token_file))
+    scope = inbox.notification_scope()
+    hub_settings["hub_url"] += "///"
+    assert inbox.notification_scope() == scope
+    hub_settings["hub_url"] = "https://other.example.test"
+    assert inbox.notification_scope() != scope
+    # These pairs collide under plain concatenation, but identify different transports.
+    hub_settings["hub_url"] = "https://hub.example.test/a"
+    token_file.write_text("b" * 64)
+    first = inbox.notification_scope()
+    hub_settings["hub_url"] += "b"
+    token_file.write_text("b" * 63)
+    assert inbox.notification_scope() != first
+    token_file.write_text(token)
+
+
+@pytest.mark.parametrize("failure", ["missing-hub", "settings-error"])
+def test_notification_scope_settings_failure_is_closed(hub, hub_settings, monkeypatch, failure):
+    from brigade.grokbot_t3.inbox import HubInbox
+    from brigade.hub_messages import HubMessageError
+
+    _, _, _, token, token_file, _ = hub
+    hub_settings["hub_url"] = ""
+    if failure == "settings-error":
+
+        def broken_settings():
+            raise fleet_client.FleetClientError(token)
+
+        monkeypatch.setattr(fleet_client, "load_fleet_settings", broken_settings)
+    with pytest.raises(HubMessageError) as caught:
+        HubInbox(token_file=str(token_file)).notification_scope()
+    assert str(caught.value) == "hub_credential_invalid"
+    assert token not in str(caught.value)
+
+
+@pytest.mark.parametrize("switch_at,outcome", [(1, "success"), (2, "success"), (2, "missing"), (2, "offline")])
+def test_security_ack_endpoint_switch_closes_batch(hub, hub_settings, monkeypatch, caplog, switch_at, outcome):
+    tools, _, row, token, _, ledger = hub
+    requests = []
+    original_hub = hub_settings["hub_url"]
+
+    def request(hub_url, credential, body, *, timeout=None):
+        requests.append((hub_url, dict(body)))
+        if body["action"] == "ack":
+            if body["id"] == switch_at:
+                hub_settings["hub_url"] = "https://other.example.test"
+                if outcome != "success":
+                    raise FleetMessageHubError(
+                        token, status=404 if outcome == "missing" else None, code="hub_unavailable"
+                    )
+            return 200, {"message": dict(row, id=body["id"])}
+        return 200, {"messages": [], "next_cursor": body["after"]}
+
+    monkeypatch.setattr(messages, "_request", request)
+    result = tools.call_tool("inbox_ack", {"ids": [1, 2, 3]})
+    assert result.get("error", {}).get("code") == "hub-error"
+    assert "acked" not in result and "not_pending" not in result
+    assert [(hub_url, body["id"]) for hub_url, body in requests] == [
+        (original_hub, ident) for ident in range(1, switch_at + 1)
+    ]
+    assert token not in json.dumps(result) + caplog.text + "\n".join(ledger._conn.iterdump())
+
+
+@pytest.mark.parametrize("restore_after_load", [False, True])
+@pytest.mark.parametrize(
+    "tool,load_at", [("inbox_ack", 1), ("inbox_ack", 2), ("inbox_ack", 3), ("inbox_list", 1), ("inbox_list", 2)]
+)
+def test_security_inbox_checks_loaded_endpoint(
+    hub, hub_settings, monkeypatch, caplog, restore_after_load, tool, load_at
+):
+    tools, _, row, token, _, ledger = hub
+    original_settings = messages._settings
+    original_hub = hub_settings["hub_url"]
+    loads = 0
+    requests = []
+
+    def settings(*args, **kwargs):
+        nonlocal loads
+        loads += 1
+        if loads == load_at:
+            hub_settings["hub_url"] = "https://other.example.test"
+        loaded = original_settings(*args, **kwargs)
+        if loads == load_at and restore_after_load:
+            hub_settings["hub_url"] = original_hub
+        return loaded
+
+    def request(hub_url, credential, body, *, timeout=None):
+        requests.append((hub_url, dict(body)))
+        if body["action"] == "ack":
+            return 200, {"message": dict(row, id=body["id"])}
+        ident = body["after"] + 1
+        return 200, {"messages": [dict(row, id=ident)], "next_cursor": ident}
+
+    monkeypatch.setattr(messages, "_settings", settings)
+    monkeypatch.setattr(messages, "_request", request)
+    result = tools.call_tool(tool, {"ids": [1, 2]} if tool == "inbox_ack" else {})
+    assert result.get("error", {}).get("code") == "hub-error"
+    assert "acked" not in result and "messages" not in result
+    assert [hub_url for hub_url, _ in requests] == [original_hub] * (load_at - 1)
+    assert token not in json.dumps(result) + caplog.text + "\n".join(ledger._conn.iterdump())
+
+
+@pytest.mark.parametrize("fail_recount", [False, True])
+def test_security_ack_endpoint_switch_during_recount(hub, hub_settings, monkeypatch, caplog, fail_recount):
+    tools, _, row, token, _, ledger = hub
+    requests = []
+    original_hub = hub_settings["hub_url"]
+
+    def request(hub_url, credential, body, *, timeout=None):
+        requests.append((hub_url, body["action"]))
+        if body["action"] == "ack":
+            return 200, {"message": row}
+        hub_settings["hub_url"] = "https://other.example.test"
+        if fail_recount:
+            raise FleetMessageHubError(token, code="hub_unavailable")
+        return 200, {"messages": [row], "next_cursor": 1}
+
+    monkeypatch.setattr(messages, "_request", request)
+    result = tools.call_tool("inbox_ack", {"ids": [1]})
+    assert result.get("error", {}).get("code") == "hub-error"
+    assert "acked" not in result and "unacked_total" not in result
+    assert requests == [(original_hub, "ack"), (original_hub, "list")]
+    assert token not in json.dumps(result) + caplog.text + "\n".join(ledger._conn.iterdump())
+
+
+@pytest.mark.parametrize("switch_at,fail_fetch", [(1, False), (2, False), (2, True)])
+def test_security_endpoint_switch_discards_list_pages(hub, hub_settings, monkeypatch, switch_at, fail_fetch):
+    tools, _, row, _, _, _ = hub
+    fetched = 0
+
+    def request(hub_url, credential, body, *, timeout=None):
+        nonlocal fetched
+        fetched += 1
+        if fetched == switch_at:
+            hub_settings["hub_url"] = "https://other.example.test"
+            if fail_fetch:
+                raise FleetMessageHubError("offline", code="hub_unavailable")
+        ident = body["after"] + 1
+        return 200, {"messages": [dict(row, id=ident)], "next_cursor": ident}
+
+    monkeypatch.setattr(messages, "_request", request)
+    result = tools.call_tool("inbox_list", {})
+    assert result.get("error", {}).get("code") == "hub-error"
+    assert "messages" not in result and fetched == switch_at
+
+
+@pytest.mark.usefixtures("t3_owner_reads", "t3_watch_log")
+@pytest.mark.parametrize("history,new_id", [("endpoint", 1), ("endpoint", 100), ("legacy-token-only", 1)])
+def test_hub_wake_endpoint_and_legacy_histories_are_isolated(hub, hub_settings, tmp_path, caplog, history, new_id):
+    import hashlib
+    from brigade.grokbot_t3 import watch
+    from brigade.grokbot_t3.inbox import HubInbox
+    from brigade.grokbot_t3.ledger import Ledger, wake_target_id
+    from tests.test_grokbot_t3_watch import Post
+
+    tools, calls, row, token, token_file, ledger = hub
+    key = tmp_path / "wake.key"
+    key.write_text("synthetic-wake-key")
+    key.chmod(0o600)
+    url = "https://wake.example.test/inbox"
+    target = wake_target_id(url)
+    inbox = HubInbox(token_file=str(token_file))
+    old_scope = (
+        hashlib.sha256(token.encode()).hexdigest() if history == "legacy-token-only" else inbox.notification_scope()
+    )
+    ledger.mark_hub_notified(old_scope, target, 100)
+    old_pending = [{"id": 101, "sender": "old-sender"}]
+    ledger.queue_hub_wake(old_scope, target, old_pending)
+    ledger.close()
+    if history == "endpoint":
+        hub_settings["hub_url"] = "https://other.example.test"
+    row.update(id=new_id, sender="new-sender")
+    new_scope = inbox.notification_scope()
+    post = Post([503, 200])
+    reopened = Ledger(tools.runtime.ledger_path)
+    try:
+        kwargs = dict(
+            runner=tools.runner,
+            runtime=tools.runtime,
+            ledger=reopened,
+            wake_targets={"default": [{"url": url, "key_file": str(key)}]},
+            log_path=tmp_path / "wake.jsonl",
+            post=post,
+        )
+        assert watch.run_watch_once(**kwargs)["failed"] == 1
+        expected = {"kind": "hub-inbox", "count": 1, "latest_id": new_id, "sender_ids": ["new-sender"]}
+        assert post.calls[0][2] == expected
+        assert calls[0]["after"] == 0
+        assert new_scope != old_scope
+        assert reopened.hub_wake_cursor(new_scope, target) == 0
+        assert reopened.pending_hub_wake(new_scope, target) == [{"id": new_id, "sender": "new-sender"}]
+        assert watch.run_watch_once(**kwargs)["woken"] == 1
+        assert post.calls[1][2] == expected
+        assert reopened.hub_wake_cursor(new_scope, target) == new_id
+        assert reopened.pending_hub_wake(new_scope, target) == []
+        assert reopened.hub_wake_cursor(old_scope, target) == 100
+        assert reopened.pending_hub_wake(old_scope, target) == old_pending
+        assert watch.run_watch_once(**kwargs)["woken"] == 0
+        assert len(post.calls) == 2
+        public = caplog.text + (tmp_path / "wake.jsonl").read_text() + "\n".join(reopened._conn.iterdump())
+        assert token not in public and row["body"] not in public and row["subject"] not in public
+        assert token not in json.dumps([body for _, _, body in post.calls])
+    finally:
+        reopened.close()

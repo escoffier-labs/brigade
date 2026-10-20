@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 import builtins
-import hashlib
 import json
 import time
 from typing import Any, Iterator
 
-from ..fleet_client_message_credentials import FleetMessageHubError, read_message_token_file
+from ..fleet_client import FleetClientError
+from ..fleet_client_message_credentials import message_scope, message_settings
 from ..hub_messages import HubMessageError, MessageOperations, inbox_page, legacy_message
 from .contracts import PUBLIC_RESULT_LIMIT
 
@@ -22,11 +22,12 @@ ACK_TIMEOUT_SECONDS = 5.0
 
 class HubInbox(MessageOperations):
     def notification_scope(self) -> str:
-        # Rotation must not reuse a different principal's notification cursor.
+        # Rotation or a Hub switch must not reuse another principal's notification cursor.
         try:
-            return hashlib.sha256(read_message_token_file(self.token_file).encode("ascii")).hexdigest()
-        except FleetMessageHubError as error:
-            raise HubMessageError("hub_credential_invalid", error.code) from None
+            hub, token, _node_id = message_settings(self.token_file)
+            return message_scope(hub, token)
+        except FleetClientError as error:
+            raise HubMessageError("hub_credential_invalid", getattr(error, "code", None)) from None
 
     def require_notification_scope(self, scope: str) -> None:
         if self.notification_scope() != scope:
@@ -53,7 +54,7 @@ class HubInbox(MessageOperations):
                 return
             try:
                 value = self._call(
-                    "list_messages", after=after, unacked=unacked, timeout=remaining, expected_token_scope=scope
+                    "list_messages", after=after, unacked=unacked, timeout=remaining, expected_scope=scope
                 )
             finally:
                 # Check failed fetches too: a changed credential invalidates earlier rows.
@@ -122,7 +123,7 @@ class HubInbox(MessageOperations):
                 break
             try:
                 try:
-                    self._call("ack", ident, timeout=min(ACK_TIMEOUT_SECONDS, remaining), expected_token_scope=scope)
+                    self._call("ack", ident, timeout=min(ACK_TIMEOUT_SECONDS, remaining), expected_scope=scope)
                 finally:
                     # Check failures too, before preserving any partial batch result.
                     self.require_notification_scope(scope)

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import hmac
 import os
 import re
@@ -87,3 +88,13 @@ def message_settings(token_file: str | None) -> tuple[str, str, str]:
     if path is not None and scope == "unknown":
         scope = "message-principal"
     return hub, token, scope
+
+
+def message_scope(hub: str, token: str) -> str:
+    """Opaque identity of a (Hub endpoint, credential) pair, framed so no two pairs collide."""
+    framed = b"brigade-message-scope-v1"
+    # The endpoint is normalized exactly as the transport builds its request URL.
+    for part in (hub.rstrip("/"), token):
+        raw = part.encode("utf-8")
+        framed += len(raw).to_bytes(4, "big") + raw
+    return hashlib.sha256(framed).hexdigest()

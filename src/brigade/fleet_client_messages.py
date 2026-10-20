@@ -19,7 +19,7 @@ from typing import Any
 from uuid import uuid4
 
 from . import fleet_client
-from .fleet_client_message_credentials import FleetMessageHubError, message_settings
+from .fleet_client_message_credentials import FleetMessageHubError, message_scope, message_settings
 from . import fleet_hub_messages as _message_limits
 
 _LOG = logging.getLogger("brigade.fleet")
@@ -149,11 +149,11 @@ def _online(
     *,
     token_file: str | None = None,
     timeout: float | None = None,
-    expected_token_scope: str | None = None,
+    expected_scope: str | None = None,
 ) -> dict[str, Any]:
     hub, token, _node_id = _settings() if token_file is None else _settings(token_file)
-    # Bind the check to the immutable credential actually passed to transport.
-    if expected_token_scope is not None and hashlib.sha256(token.encode("utf-8")).hexdigest() != expected_token_scope:
+    # Bind the check to the immutable endpoint and credential actually passed to transport.
+    if expected_scope is not None and not hmac.compare_digest(message_scope(hub, token), expected_scope):
         raise FleetMessageHubError("message credential changed", code="token_scope_changed")
     status, payload = _request(hub, token, body, timeout=_request_timeout(timeout))
     if not 200 <= status < 300:
@@ -415,14 +415,14 @@ def list_messages(
     unacked: bool = False,
     token_file: str | None = None,
     timeout: float | None = None,
-    expected_token_scope: str | None = None,
+    expected_scope: str | None = None,
 ) -> dict[str, Any]:
     _validate_sqlite_integer(after, "after cursor", allow_zero=True)
     payload = _online(
         {"action": "list", "after": after, "unacked": unacked},
         token_file=token_file,
         timeout=timeout,
-        expected_token_scope=expected_token_scope,
+        expected_scope=expected_scope,
     )
     return _validate_page(payload, after=after)
 
@@ -461,14 +461,14 @@ def ack(
     *,
     token_file: str | None = None,
     timeout: float | None = None,
-    expected_token_scope: str | None = None,
+    expected_scope: str | None = None,
 ) -> dict[str, Any]:
     _validate_sqlite_integer(message_id, "message id")
     payload = _online(
         {"action": "ack", "id": message_id},
         token_file=token_file,
         timeout=timeout,
-        expected_token_scope=expected_token_scope,
+        expected_scope=expected_scope,
     )
     message = payload.get("message")
     response_id = message.get("id") if isinstance(message, dict) else None

@@ -199,11 +199,14 @@ wakes retry on the next tick even if another consumer acknowledges those
 messages or the Hub is unavailable. Cursor advancement and removal of delivered
 metadata share one transaction. A crash after HTTP 200 but before that transaction
 can repeat the wake. Pending batches have no request wake retry cap. The cursor
-is scoped to the credential value, so any token rotation starts a fresh scan,
-even for the same principal. The watcher checks that scope before and after
-each page fetch, before retaining metadata, and immediately before delivery.
-Rotation stops delivery for that scan. Pending metadata from the old scope
-stays in that scope, and the next tick scans under the new credential.
+is scoped to the effective Hub endpoint and credential value together, so a token
+rotation or a Hub endpoint change starts a fresh scan, even for the same principal.
+A trailing slash on the Hub URL does not change the scope. The watcher checks that
+scope before and after each page fetch, before retaining metadata, and immediately
+before delivery. A change stops delivery for that scan. Pending metadata from the
+old scope stays in that scope, and the next tick scans under the new scope.
+Cursors recorded by an earlier release under a credential-only scope are ignored,
+so one upgrade can repeat a wake for messages that were still unacknowledged.
 The watcher never acknowledges messages. Hub or
 log-write failures do not stop later targets or request wakes. A missing configured
 target reports a failure and waits for configuration to be corrected.
@@ -228,8 +231,8 @@ target reports a failure and waits for configuration to be corrected.
 | `t3_recent` | `caller` optional, `limit` (max 20) | Ledger rows for this pack: request, caller, repository, host, seat, state, times. Read-only. |
 
 A later-page outage preserves messages already fetched and sets `has_more: true`.
-Credential rotation or an invalid credential closes the whole foreground scan
-with `hub-error`, discarding earlier rows.
+Credential rotation, a Hub endpoint change, or an invalid credential closes the
+whole foreground scan with `hub-error`, discarding earlier rows.
 A first-page failure returns the closed `hub-error`. Acknowledge fetched oldest
 unacknowledged messages to progress through a larger backlog. If acknowledgement
 succeeds but its recount has a transport failure or remains incomplete, `inbox_ack` still returns
@@ -244,12 +247,13 @@ Incomplete batches skip recount and return `unacked_total: null` and
 `has_more: true`. A first-call authentication or grant refusal stays a closed
 `hub-error`.
 
-Each acknowledgement batch and its recount stay bound to the initial credential.
-Rotation or an invalid credential closes the whole call with `hub-error`, stops
-further acknowledgements, and omits partial results and counts. Earlier
-acknowledgements may already have committed. Confirm the intended principal
-before retrying those ids. The transport checks its loaded credential against
-the batch scope before sending each acknowledgement or recount request.
+Each acknowledgement batch and its recount stay bound to the initial Hub endpoint
+and credential. Rotation, a Hub endpoint change, or an invalid credential closes
+the whole call with `hub-error`, stops further acknowledgements, and omits partial
+results and counts. Earlier acknowledgements may already have committed. Confirm
+the intended principal and Hub before retrying those ids. The transport checks the
+endpoint and credential it loaded against the batch scope before sending each
+acknowledgement or recount request.
 
 Hub tools use Dot's argument validators and message projections. A send without
 `client_id` derives one from its content and a ten-minute time bucket. Reusing
