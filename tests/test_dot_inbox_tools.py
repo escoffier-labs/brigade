@@ -27,6 +27,11 @@ LEGACY_KEYS = {"id", "created_at", "sender", "thread", "body", "acked_at", "prio
 
 class FakeMessages:
     def __init__(self, monkeypatch):
+        from brigade import fleet_client
+
+        self.settings = dict(hub_url="https://hub.invalid", node_token="fixture-node", admin_token="fixture-admin")
+        monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: dict(self.settings))
+        monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: "node-a")
         self.rows, self.calls, self.fail = [], [], {}
         self.queued = False
         self.page_size = 100
@@ -61,6 +66,12 @@ class FakeMessages:
         return row
 
     def call(self, action, *args, **kwargs):
+        # Explicit fixture credentials let the real Dot wrapper bind all captured state.
+        expected = kwargs.pop("expected_scope", None)
+        if expected is not None:
+            from brigade.fleet_client_message_credentials import message_scope, message_settings
+
+            assert expected == message_scope(*message_settings(kwargs["token_file"])[:2])
         self.calls.append(dict(action=action, args=args, **kwargs))
         if self.on_call:
             self.on_call(action, args, kwargs)
@@ -121,6 +132,8 @@ class HubFixture(unittest.TestCase):
     def setup_hub(self, dot_private_dir, monkeypatch):
         monkeypatch.delenv(ENV_TOKEN_FILE, raising=False)
         self.token = dot_private_dir.parent / "fake.token"
+        self.token.write_text("fixture-agent-credential-" * 2)
+        self.token.chmod(0o600)
         self.cfg = HubConfig("agent:dot", "node-a", self.token, 30, {})
         self.state = BridgeState(dot_private_dir)
         self.runner = FakeMessages(monkeypatch)
@@ -180,7 +193,7 @@ class TestHubInbox(HubFixture):
             self.assertEqual(len(self.runner.calls) - before, 1)
             with self.subTest(code=code, via="sync"), self.assertRaisesRegex(DotError, "^" + expected + "$"):
                 self.hub.sync()
-            self.assertEqual(self.state.hub_get("last_sync_error"), expected)
+            self.assertEqual(self.state.hub_get("last_sync_error", scope=self.hub.scope()), expected)
         # A transport failure with a null status and no local code stays an outage.
         self.runner.fail["list_messages"] = dict(error="offline", status=None, code="hub_unavailable")
         with self.assertRaisesRegex(DotError, "^hub_unavailable$"):
@@ -196,10 +209,10 @@ class TestHubInbox(HubFixture):
         self.runner.fail["list_messages"] = dict(error="bad token file", status=None, code="token_file_invalid")
         with self.assertRaisesRegex(DotError, "^hub_credential_invalid$"):
             self.hub.reconcile()
-        self.assertEqual(self.state.hub_get("last_reconcile_error"), "hub_credential_invalid")
+        self.assertEqual(self.state.hub_get("last_reconcile_error", scope=self.hub.scope()), "hub_credential_invalid")
         self.runner.fail.clear()
         self.hub.reconcile()
-        self.assertEqual(self.state.hub_get("last_reconcile_error"), "")
+        self.assertEqual(self.state.hub_get("last_reconcile_error", scope=self.hub.scope()), "")
 
     @requires_local_state
     def test_fetch_after_ack_still_reopens_false_ack(self):
@@ -214,7 +227,10 @@ class TestHubInbox(HubFixture):
         for cid in ("dot-migrate-1", "notify-id", "dbc-real"):
             self.runner.add(sender_label="dot-bridge", kind="completion", client_id=cid)
         self.hub.sync()
-        self.assertEqual({r["source"] for r in self.rows("event_queue")}, {"hub-inbox:1", "hub-inbox:2"})
+        self.assertEqual(
+            {r["source"] for r in self.rows("event_queue")},
+            {"hub-inbox:" + self.hub.scope() + ":" + str(i) for i in (1, 2)},
+        )
 
     @requires_local_state
     def test_reconcile_does_not_wake_acknowledged_history(self):
@@ -231,13 +247,23 @@ class TestHubInbox(HubFixture):
         self.assertEqual(self.call("inbox_ack", ids=[1, 99]), dict(acked=[1], not_pending=[99], unacked_total=1))
         self.runner.fail["ack"] = dict(error="missing", status=404, code=None)
         self.assertEqual(self.call("inbox_ack", ids=[2])["not_pending"], [2])
-        self.assertEqual(self.state.hub_messages(unacked_only=True, limit=20, node_id="node-a")["unacked_total"], 0)
+        self.assertEqual(
+            self.state.hub_messages(unacked_only=True, limit=20, node_id="node-a", scope=self.hub.scope())[
+                "unacked_total"
+            ],
+            0,
+        )
         self.runner.add()
         self.hub.sync()
         self.runner.fail["ack"] = dict(error="offline", status=None, code=None)
         with self.assertRaisesRegex(DotError, "hub_unavailable"):
             self.call("inbox_ack", ids=[3])
-        self.assertEqual(self.state.hub_messages(unacked_only=True, limit=20, node_id="node-a")["unacked_total"], 1)
+        self.assertEqual(
+            self.state.hub_messages(unacked_only=True, limit=20, node_id="node-a", scope=self.hub.scope())[
+                "unacked_total"
+            ],
+            1,
+        )
 
     @requires_local_state
     def test_ack_saves_earlier_known_ids_before_unknown_sync_fails(self):
@@ -298,7 +324,12 @@ class TestHubInbox(HubFixture):
         self.runner.rows[0]["acked_at"] = NOW.isoformat()
         self.runner.page_size = 1
         self.hub.reconcile()
-        self.assertEqual(self.state.hub_messages(unacked_only=True, limit=20, node_id="node-a")["unacked_total"], 1)
+        self.assertEqual(
+            self.state.hub_messages(unacked_only=True, limit=20, node_id="node-a", scope=self.hub.scope())[
+                "unacked_total"
+            ],
+            1,
+        )
         self.assertIsNotNone(stale["acked_at"])
         for row in (fresh, other, root):
             self.assertIsNone(row["acked_at"])
@@ -345,7 +376,7 @@ class TestHubInbox(HubFixture):
                 after = len([c for c in self.runner.calls if c["action"] == action])
                 self.assertEqual(after - before, 1)
             self.runner.fail.clear()
-        self.assertIn(self.state.hub_get("agent_spool_pending"), (None, "", "0"))
+        self.assertIn(self.state.hub_get("agent_spool_pending", scope=self.hub.scope()), (None, "", "0"))
         self.assertEqual(len(self.runner.rows), 1)  # denials create no message
 
     @requires_local_state
@@ -366,9 +397,9 @@ class TestHubInbox(HubFixture):
         self.hub.sync()
         self.hub.sync()
         self.assertEqual(len(self.rows("hub_inbox")), 2)
-        self.assertEqual({r["source"] for r in self.rows("event_queue")}, {"hub-inbox:1"})
-        self.assertEqual(self.state.hub_get("cursor"), "2")
-        self.assertIsNotNone(self.state.hub_get("last_sync_ok_at"))
+        self.assertEqual({r["source"] for r in self.rows("event_queue")}, {"hub-inbox:" + self.hub.scope() + ":1"})
+        self.assertEqual(self.state.hub_get("cursor", scope=self.hub.scope()), "2")
+        self.assertIsNotNone(self.state.hub_get("last_sync_ok_at", scope=self.hub.scope()))
         HubInbox(self.state, self.cfg, clock=lambda: NOW).sync()
         self.assertEqual(self.runner.calls[-1]["after"], 2)
 
@@ -470,13 +501,13 @@ class TestHubInbox(HubFixture):
         self.hub.flush_pending()
         flushes = [c for c in self.runner.calls if c["action"] == "flush_credential"]
         self.assertEqual([c["token_file"] for c in flushes], [str(self.token), None])
-        self.assertEqual(self.state.hub_get("node_spool_pending"), "0")
-        self.assertEqual(self.state.hub_get("agent_spool_pending"), "0")
+        self.assertEqual(self.state.hub_get("node_spool_pending", scope=self.hub.scope(agent=False)), "0")
+        self.assertEqual(self.state.hub_get("agent_spool_pending", scope=self.hub.scope()), "0")
 
     @requires_local_state
     def test_node_flush_attempted_after_agent_failure(self):
-        self.state.hub_set("agent_spool_pending", 1)
-        self.state.hub_set("node_spool_pending", 1)
+        self.state.hub_set("agent_spool_pending", 1, scope=self.hub.scope())
+        self.state.hub_set("node_spool_pending", 1, scope=self.hub.scope(agent=False))
 
         def fail_agent(action, args, kwargs):
             if action == "flush_credential" and kwargs["token_file"]:
@@ -485,8 +516,8 @@ class TestHubInbox(HubFixture):
         self.runner.on_call = fail_agent
         with self.assertRaisesRegex(DotError, "^hub_unauthorized$"):
             self.hub.flush_pending()
-        self.assertEqual(self.state.hub_get("agent_spool_pending"), "1")
-        self.assertEqual(self.state.hub_get("node_spool_pending"), "0")
+        self.assertEqual(self.state.hub_get("agent_spool_pending", scope=self.hub.scope()), "1")
+        self.assertEqual(self.state.hub_get("node_spool_pending", scope=self.hub.scope(agent=False)), "0")
 
     @requires_local_state
     def test_stray_environment_refuses_every_node_operation(self):
@@ -499,7 +530,7 @@ class TestHubInbox(HubFixture):
             ):
                 with self.assertRaisesRegex(DotError, "^hub_credential_invalid$"):
                     operation()
-            self.state.hub_set("node_spool_pending", 1)
+            self.state.hub_set("node_spool_pending", 1, scope="fixture-unavailable")
             with self.assertRaisesRegex(DotError, "^hub_credential_invalid$"):
                 self.hub.flush_pending()
         self.assertTrue(all(c["token_file"] == str(self.token) for c in self.runner.calls))
@@ -525,7 +556,7 @@ class TestHubInbox(HubFixture):
             ),
         )
         self.assertEqual(self.rows("hub_inbox")[0]["id"], row["id"])
-        self.assertIsNone(self.state.hub_get("cursor"))
+        self.assertIsNone(self.state.hub_get("cursor", scope=self.hub.scope()))
         self.runner.add(sender="agent:dot", recipient="node-a", reply_to=row["id"])
         self.runner.add(sender="agent:other", recipient="node-a", reply_to=row["id"])
         replies, cursor = self.hub.wait_replies(row["id"], 0)
@@ -584,7 +615,7 @@ class TestHubInbox(HubFixture):
                 with self.assertRaisesRegex(DotError, "^hub_inconsistent$"):
                     self.hub.sync()
             self.assertEqual(self.rows("hub_inbox"), [])
-            self.assertIsNone(self.state.hub_get("cursor"))
+            self.assertIsNone(self.state.hub_get("cursor", scope=self.hub.scope()))
 
     @requires_local_state
     def test_ack_during_fetch_wins_but_later_fetch_reopens(self):
@@ -597,7 +628,7 @@ class TestHubInbox(HubFixture):
             with self.state.transaction() as connection:
                 connection.execute("UPDATE hub_inbox SET acked_at=NULL")
             self.runner.rows[0]["acked_at"] = None
-            self.state.hub_set("reconcile_cursor", 0)
+            self.state.hub_set("reconcile_cursor", 0, scope=self.hub.scope())
             now[0] = NOW
             armed = [True]
 
@@ -624,17 +655,27 @@ class TestHubInbox(HubFixture):
             result = original(**kwargs)
             if kwargs["token_file"] and not result["messages"] and not inserted:
                 inserted.append(True)
-                self.state.hub_upsert([self.runner.add()], node_id="node-a", clock=lambda: NOW)
+                self.state.hub_upsert([self.runner.add()], node_id="node-a", scope=self.hub.scope(), clock=lambda: NOW)
             return result
 
         with patch.object(messages, "list_messages", side_effect=during_list):
             self.hub.reconcile()
-        self.assertEqual(self.state.hub_messages(unacked_only=True, limit=20, node_id="node-a")["unacked_total"], 2)
+        self.assertEqual(
+            self.state.hub_messages(unacked_only=True, limit=20, node_id="node-a", scope=self.hub.scope())[
+                "unacked_total"
+            ],
+            2,
+        )
         with patch.object(
             messages, "list_messages", side_effect=lambda **kw: dict(messages=[], next_cursor=kw["after"])
         ):
             self.hub.reconcile()
-        self.assertEqual(self.state.hub_messages(unacked_only=True, limit=20, node_id="node-a")["unacked_total"], 2)
+        self.assertEqual(
+            self.state.hub_messages(unacked_only=True, limit=20, node_id="node-a", scope=self.hub.scope())[
+                "unacked_total"
+            ],
+            2,
+        )
 
     @requires_local_state
     def test_reconciliation_and_node_sweep_do_not_hold_foreground_lock(self):
@@ -705,7 +746,7 @@ class TestHubInbox(HubFixture):
         self.runner.queued = True
         self.assertIsNone(self.hub.notify("worker", "b", None, "normal", None, None, "message", "cid"))
         self.assertEqual(self.rows("hub_inbox"), [])
-        self.assertEqual(self.state.hub_get("node_spool_pending"), "1")
+        self.assertEqual(self.state.hub_get("node_spool_pending", scope=self.hub.scope(agent=False)), "1")
 
     @requires_local_state
     def test_wait_replies_bounds_requests_by_deadline(self):
@@ -759,4 +800,4 @@ class TestHubInbox(HubFixture):
             with patch.object(messages, "send", return_value=value):
                 with self.assertRaisesRegex(DotError, "^hub_unavailable$"):
                     self.tools.message_send("node-b", "s", "b")
-        self.assertIsNone(self.state.hub_get("agent_spool_pending"))
+        self.assertIsNone(self.state.hub_get("agent_spool_pending", scope=self.hub.scope()))

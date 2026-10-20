@@ -37,7 +37,6 @@ def hub(dispatch_make, tmp_path, monkeypatch):
         lambda: {"hub_url": "https://hub.example.test", "node_token": "", "admin_token": ""},
     )
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: "node-id")
-    monkeypatch.setattr(messages, "_spool_path", lambda *args: tmp_path / "spool" / "messages.jsonl")
     monkeypatch.setattr(fleet_client, "spool_path", lambda *args: tmp_path / "spool" / "node.jsonl")
     calls = []
     row = dict(

@@ -963,8 +963,8 @@ def test_principal_add_reuses_pending_request_after_ambiguous_timeout(tmp_path, 
     stable_path = fleet_client_messages._principal_pending_path("researcher", "admin-token")
     legacy_path = stable_path.with_name(f"{NODE_A}.{stable_path.name}")
     stable_path.rename(legacy_path)
-    # Recover retry state written by the older node-scoped format even after
-    # the home node identity changes.
+    # Recover origin-bearing retry state with an obsolete node prefix even after
+    # the home node identity changes. Unproven legacy files are tested separately.
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_B)
     deferred_request_ids = []
     enrolled = fleet_client_messages.manage_principal(
@@ -1959,7 +1959,7 @@ def test_principal_management_uses_hard_wall_clock_deadline(monkeypatch):
 
 def test_spool_flush_obeys_aggregate_wall_clock_budget(tmp_path, monkeypatch):
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
-    path = fleet_client_messages._spool_path(NODE_A, "node-token")
+    path = fleet_client_messages._spool_path(NODE_A, "node-token", hub_url="https://hub.invalid")
     now = datetime.now(timezone.utc).isoformat()
     with fleet_client._spool_lock(path) as dir_fd:
         for index in range(4):
@@ -2047,7 +2047,7 @@ def test_new_send_flushes_older_spooled_messages_first(tmp_path, monkeypatch):
 
 def test_spool_flush_skips_recipient_quota_without_reordering_that_recipient(tmp_path, monkeypatch):
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
-    path = fleet_client_messages._spool_path(NODE_A, "node-token")
+    path = fleet_client_messages._spool_path(NODE_A, "node-token", hub_url="https://hub.invalid")
     now = datetime.now(timezone.utc).isoformat()
     messages = [
         {"action": "send", "to": NODE_B, "client_id": "blocked-1", "enqueued_at": now},
@@ -2079,7 +2079,7 @@ def test_spool_flush_skips_recipient_quota_without_reordering_that_recipient(tmp
 
 def test_spool_flush_resolves_reply_before_blocked_recipient_delivery(tmp_path, monkeypatch):
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
-    path = fleet_client_messages._spool_path(NODE_A, "node-token")
+    path = fleet_client_messages._spool_path(NODE_A, "node-token", hub_url="https://hub.invalid")
     now = datetime.now(timezone.utc).isoformat()
     messages = [
         {"action": "send", "to": NODE_B, "client_id": "blocked-send", "enqueued_at": now},
@@ -2113,7 +2113,7 @@ def test_spool_flush_resolves_reply_before_blocked_recipient_delivery(tmp_path, 
 def test_spool_reply_recipient_lookup_obeys_drain_deadline_and_batch_limit(tmp_path, monkeypatch):
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
     monkeypatch.setattr(fleet_client_messages, "monotonic", iter((0.0, 0.0, 0.0, 11.0)).__next__)
-    path = fleet_client_messages._spool_path(NODE_A, "node-token")
+    path = fleet_client_messages._spool_path(NODE_A, "node-token", hub_url="https://hub.invalid")
     now = datetime.now(timezone.utc).isoformat()
     messages = [
         {"action": "send", "to": NODE_B, "client_id": "blocked-send", "enqueued_at": now},
@@ -2152,7 +2152,7 @@ def test_spool_reply_recipient_lookup_obeys_drain_deadline_and_batch_limit(tmp_p
 
 def test_spool_drops_reply_when_parent_is_gone_and_continues_other_recipients(tmp_path, monkeypatch):
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
-    path = fleet_client_messages._spool_path(NODE_A, "node-token")
+    path = fleet_client_messages._spool_path(NODE_A, "node-token", hub_url="https://hub.invalid")
     now = datetime.now(timezone.utc).isoformat()
     messages = [
         {"action": "send", "to": NODE_B, "client_id": "inactive-send", "enqueued_at": now},
@@ -2415,7 +2415,7 @@ def test_reply_flushes_older_spooled_messages_first(tmp_path, monkeypatch):
 @pytest.mark.skipif(sys.platform == "win32", reason="Locked directory descriptors are POSIX-only; Windows uses paths")
 def test_ordered_send_uses_the_locked_directory_descriptor(tmp_path, monkeypatch):
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
-    spool = fleet_client_messages._spool_path(NODE_A, "node-secret")
+    spool = fleet_client_messages._spool_path(NODE_A, "node-secret", hub_url="https://hub.invalid")
     spool.parent.mkdir(parents=True)
     older = {"action": "send", "client_id": "older", "enqueued_at": datetime.now(timezone.utc).isoformat()}
     newer = {"action": "send", "client_id": "newer"}
@@ -2819,7 +2819,7 @@ def test_principal_add_retry_state_finalizes_only_after_successful_output(monkey
 
 def test_spool_rejection_log_escapes_hub_control_characters(tmp_path, monkeypatch, caplog):
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
-    path = fleet_client_messages._spool_path(NODE_A, "node-token")
+    path = fleet_client_messages._spool_path(NODE_A, "node-token", hub_url="https://hub.invalid")
     message = {
         "action": "send",
         "to": NODE_B,
@@ -3351,7 +3351,7 @@ def test_flush_credential_forwards_optional_lock_timeout(tmp_path, monkeypatch, 
         fleet_client_messages, "_settings", lambda *args: ("https://hub.example.test", "x" * 64, "node-a")
     )
     monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.example.test"})
-    monkeypatch.setattr(fleet_client_messages, "_spool_path", lambda *args: path)
+    monkeypatch.setattr(fleet_client_messages, "_spool_path", lambda *args, **kwargs: path)
     monkeypatch.setattr(fleet_client_messages, "_warn_inactive_spools", lambda *args: None)
     monkeypatch.setattr(fleet_client_messages, "_flush_locked", lambda *args, **kwargs: 7)
 

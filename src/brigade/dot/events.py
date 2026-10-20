@@ -26,6 +26,8 @@ WebhookPost = Callable[[str, bytes, dict[str, str]], Awaitable[tuple[int, bytes]
 
 
 class HubSync(Protocol):
+    def scope(self, *, agent: bool = True) -> str: ...
+    def require_scope(self, scope: str, *, agent: bool = True) -> None: ...
     def sync(self) -> None: ...
     def reconcile(self) -> None: ...
     def flush_pending(self) -> None: ...
@@ -278,6 +280,12 @@ class EventService:
 
     async def deliver(self, now: float | None = None) -> None:
         now = time.time() if now is None else now
+        active_source = ""
+        if self.hub is not None:
+            try:
+                active_source = "hub-inbox:" + self.hub.scope() + ":%"
+            except DotError:
+                pass
         with self.state.transaction() as c:
             c.execute("DELETE FROM subscriptions WHERE expires IS NOT NULL AND expires <= ?", (now,))
             c.execute("DELETE FROM wake_attempts WHERE timestamp < ?", (now - 3600,))
@@ -289,14 +297,24 @@ class EventService:
             rows = [
                 dict(r)
                 for r in c.execute(
-                    """SELECT d.*,q.name,q.data,q.priority,q.created,s.url,s.secret,s.previous_secret,s.rotate_until
+                    """SELECT d.*,q.name,q.data,q.priority,q.created,q.source,s.url,s.secret,s.previous_secret,s.rotate_until
                     FROM event_deliveries d JOIN event_queue q ON q.id=d.event_id JOIN subscriptions s ON
-                    s.id=d.subscription_id WHERE d.state='pending' AND d.next_attempt<=? ORDER BY
+                    s.id=d.subscription_id WHERE d.state='pending' AND d.next_attempt<=?
+                    AND (q.source NOT LIKE 'hub-inbox:%' OR q.source LIKE ?) ORDER BY
                     (q.priority='urgent') DESC,q.created LIMIT 100""",
-                    (now,),
+                    (now, active_source),
                 )
             ]
         for row in rows:
+            source = row["source"]
+            hub_scope = source.split(":")[1] if source.startswith("hub-inbox:") else None
+            if hub_scope is not None:
+                if self.hub is None or not hub_scope:
+                    continue
+                try:
+                    self.hub.require_scope(hub_scope)
+                except DotError:
+                    continue
             with self.state.transaction() as c:
                 current = c.execute(
                     "SELECT state FROM event_deliveries WHERE event_id=? AND subscription_id=?",
@@ -335,6 +353,9 @@ class EventService:
             ).encode()
             previous = row["previous_secret"] if row["rotate_until"] and row["rotate_until"] > now else None
             try:
+                if hub_scope is not None:
+                    assert self.hub is not None
+                    self.hub.require_scope(hub_scope)
                 status, _ = await self.post(
                     row["url"],
                     body,
@@ -342,6 +363,8 @@ class EventService:
                         row["secret"], row["event_id"], body, row["subscription_id"], now=now, previous=previous
                     ),
                 )
+            except DotError:
+                continue
             except Exception:
                 status = 503
             done = 200 <= status < 300
@@ -363,16 +386,17 @@ class EventService:
                 if done and row["priority"] == "normal":
                     c.execute(
                         """UPDATE event_deliveries SET state='coalesced' WHERE state='pending' AND subscription_id=?
-                        AND event_id IN (SELECT id FROM event_queue WHERE priority='normal' AND created<=?)""",
-                        (row["subscription_id"], now),
+                        AND event_id IN (SELECT id FROM event_queue WHERE priority='normal' AND created<=?
+                        AND (source NOT LIKE 'hub-inbox:%' OR source LIKE ?))""",
+                        (row["subscription_id"], now, "hub-inbox:" + hub_scope + ":%" if hub_scope else ""),
                     )
                 if status == 410:
                     c.execute("DELETE FROM subscriptions WHERE id=?", (row["subscription_id"],))
         with self.state.transaction() as c:
             c.execute(
                 """DELETE FROM event_queue WHERE created<? AND id NOT IN (SELECT event_id FROM event_deliveries WHERE
-                state='pending')""",
-                (now - 30 * 86400,),
+                state='pending') AND (source NOT LIKE 'hub-inbox:%' OR source LIKE ?)""",
+                (now - 30 * 86400, active_source),
             )
             c.execute(
                 """DELETE FROM event_deliveries WHERE event_id NOT IN (SELECT id FROM event_queue) OR subscription_id

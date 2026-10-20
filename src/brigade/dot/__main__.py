@@ -22,11 +22,13 @@ def _notify(args, runtime):
         hub = HubInbox(state, runtime.hub)
         if args.wait is not None:
             deadline, cursor, succeeded = time.monotonic() + args.timeout, args.wait, False
+            scope = hub.scope(agent=False)
             while True:
+                hub.require_scope(scope, agent=False)
                 try:
                     # Each poll is bounded by the CLI deadline, with at least 2 s so --timeout 0 checks once.
                     poll_deadline = max(deadline, time.monotonic() + 2.0)
-                    replies, cursor = hub.wait_replies(args.wait, cursor, deadline=poll_deadline)
+                    replies, cursor = hub.wait_replies(args.wait, cursor, deadline=poll_deadline, scope=scope)
                     succeeded = True
                 except DotError as error:
                     if error.code not in ("hub_unavailable", "hub_quota"):
@@ -51,8 +53,31 @@ def _notify(args, runtime):
                 raise DotError("invalid_request")
             message = raw.decode("utf-8").removesuffix("\n")
         cid = uuid4().hex
-        row = hub.notify(args.sender, message, args.thread, args.priority, args.subject, args.ref, args.kind, cid)
-        pending = state.hub_messages(unacked_only=True, limit=1, node_id=runtime.hub.node_id)["unacked_total"]
+        node_scope = hub.scope(agent=False)
+        try:
+            agent_scope = hub.scope()
+        except DotError:
+            agent_scope = None
+        row = hub.notify(
+            args.sender,
+            message,
+            args.thread,
+            args.priority,
+            args.subject,
+            args.ref,
+            args.kind,
+            cid,
+            node_scope=node_scope,
+        )
+        hub.require_scope(node_scope, agent=False)
+        pending = 0
+        if agent_scope is not None:
+            hub.require_scope(agent_scope)
+            pending = state.hub_messages(unacked_only=True, limit=1, node_id=runtime.hub.node_id, scope=agent_scope)[
+                "unacked_total"
+            ]
+            hub.require_scope(agent_scope)
+        hub.require_scope(node_scope, agent=False)
         result = {"ok": True, "id": row["id"] if row else None, "unacked": pending}
         if row is None:
             result.update(queued=True, client_id=cid)

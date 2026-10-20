@@ -33,21 +33,24 @@ class _UnauthorizedError(FleetMessageHubError):
     """A sender authentication failure cannot safely queue work in its scoped spool."""
 
 
-def _spool_path(node_id: str, token: str | None = None) -> Path:
-    if token is None:
-        token = fleet_client.load_fleet_settings()["node_token"]
-    # Scope queued requests to their sender, independent of mutable node identity.
-    token_scope = hashlib.sha256(token.encode("utf-8")).hexdigest()
-    return fleet_client.spool_path(node_id).with_name(f"messages-{token_scope}.jsonl")
+def _spool_path(node_id: str, token: str | None = None, *, hub_url: str | None = None) -> Path:
+    if token is None or hub_url is None:
+        settings = fleet_client.load_fleet_settings()
+        token = settings["node_token"] if token is None else token
+        hub_url = settings["hub_url"] if hub_url is None else hub_url
+    # The versioned filename proves origin; older token-only files are never adopted.
+    return fleet_client.spool_path(node_id).with_name(f"messages-v1-{message_scope(hub_url, token)}.jsonl")
 
 
 def _warn_inactive_spools(node_id: str, active_path: Path) -> None:
     directory = fleet_client.spool_path(node_id).parent
-    legacy_path = directory / f"{node_id}.messages.jsonl"
     prefix = "messages-"
     try:
-        if legacy_path.is_file() and not legacy_path.is_symlink() and legacy_path.stat().st_size:
-            _LOG.warning("legacy fleet message spool %s has no credential scope; leaving it untouched", legacy_path)
+        if any(
+            path.is_file() and not path.is_symlink() and path.stat().st_size
+            for path in directory.glob("*.messages.jsonl")
+        ):
+            _LOG.warning("legacy fleet message spool has no credential scope or proven endpoint; leaving it untouched")
         stale_count = sum(
             1
             for path in directory.iterdir()
@@ -62,7 +65,7 @@ def _warn_inactive_spools(node_id: str, active_path: Path) -> None:
         return
     if stale_count:
         _LOG.warning(
-            "%d fleet message spool(s) for other credentials remain queued and were not replayed",
+            "%d fleet message spool(s) for other credentials or unproven endpoints remain queued and were not replayed",
             stale_count,
         )
 
@@ -144,6 +147,11 @@ def _request_timeout(timeout: float | None) -> float | None:
     return float(timeout)
 
 
+def _require_scope(hub: str, token: str, expected_scope: str | None) -> None:
+    if expected_scope is not None and not hmac.compare_digest(message_scope(hub, token), expected_scope):
+        raise FleetMessageHubError("message credential changed", code="token_scope_changed")
+
+
 def _online(
     body: dict[str, Any],
     *,
@@ -152,9 +160,7 @@ def _online(
     expected_scope: str | None = None,
 ) -> dict[str, Any]:
     hub, token, _node_id = _settings() if token_file is None else _settings(token_file)
-    # Bind the check to the immutable endpoint and credential actually passed to transport.
-    if expected_scope is not None and not hmac.compare_digest(message_scope(hub, token), expected_scope):
-        raise FleetMessageHubError("message credential changed", code="token_scope_changed")
+    _require_scope(hub, token, expected_scope)
     status, payload = _request(hub, token, body, timeout=_request_timeout(timeout))
     if not 200 <= status < 300:
         raise FleetMessageHubError(
@@ -239,7 +245,7 @@ def _remove_queued_locked(path: Path, message: dict[str, Any], *, dir_fd: int | 
 
 def _send_ordered(message: dict[str, Any], hub: str, token: str, node_id: str) -> dict[str, Any]:
     fleet_client._require_encrypted_or_loopback_hub(hub)
-    path = _spool_path(node_id, token)
+    path = _spool_path(node_id, token, hub_url=hub)
     _warn_inactive_spools(node_id, path)
     try:
         with fleet_client._spool_lock(path) as dir_fd:
@@ -349,7 +355,9 @@ def _wire_metadata(**values: str | None) -> dict[str, str]:
     return raw
 
 
-def sent(*, after: int = 0, ids: list[int] | None = None, token_file: str | None = None) -> dict[str, Any]:
+def sent(
+    *, after: int = 0, ids: list[int] | None = None, token_file: str | None = None, expected_scope: str | None = None
+) -> dict[str, Any]:
     _validate_sqlite_integer(after, "after cursor", allow_zero=True)
     body: dict[str, Any] = {"action": "sent"}
     if ids is not None:
@@ -360,15 +368,18 @@ def sent(*, after: int = 0, ids: list[int] | None = None, token_file: str | None
         body["ids"] = ids
     else:
         body["after"] = after
-    payload = _validate_page(_online(body, token_file=token_file), after=after)
+    payload = _validate_page(_online(body, token_file=token_file, expected_scope=expected_scope), after=after)
     if ids is not None and any(message["id"] not in ids for message in payload["messages"]):
         raise fleet_client.FleetClientError("fleet hub returned an invalid message page")
     return payload
 
 
-def flush_credential(token_file: str | None = None, *, lock_timeout: float | None = None) -> int:
+def flush_credential(
+    token_file: str | None = None, *, lock_timeout: float | None = None, expected_scope: str | None = None
+) -> int:
     fleet_client._validate_spool_lock_timeout(lock_timeout)
     hub, token, scope = _settings() if token_file is None else _settings(token_file)
+    _require_scope(hub, token, expected_scope)
     return flush(scope, hub_url=hub, token=token, lock_timeout=lock_timeout)
 
 
@@ -384,8 +395,10 @@ def send(
     sender_label: str | None = None,
     client_id: str | None = None,
     token_file: str | None = None,
+    expected_scope: str | None = None,
 ) -> dict[str, Any]:
     hub, token, node_id = _settings() if token_file is None else _settings(token_file)
+    _require_scope(hub, token, expected_scope)
     try:
         recipient = _message_limits._text(recipient, "to", 256) or ""
         subject = _message_limits._text(subject, "subject", _message_limits.SUBJECT_LIMIT) or ""
@@ -489,8 +502,10 @@ def reply(
     sender_label: str | None = None,
     client_id: str | None = None,
     token_file: str | None = None,
+    expected_scope: str | None = None,
 ) -> dict[str, Any]:
     hub, token, node_id = _settings() if token_file is None else _settings(token_file)
+    _require_scope(hub, token, expected_scope)
     _validate_sqlite_integer(message_id, "message id")
     try:
         body = _message_limits._text(body, "body", _message_limits.BODY_LIMIT) or ""
@@ -590,7 +605,7 @@ def manage_principal(
 ) -> dict[str, Any]:
     if _defer_finalize and _deferred_request_ids is None:
         raise fleet_client.FleetClientError("deferred principal enrollment requires a request ID holder")
-    settings = fleet_client.load_fleet_settings()
+    settings = dict(fleet_client.load_fleet_settings())
     if not settings["hub_url"]:
         raise fleet_client.FleetClientError("no fleet hub configured (~/.brigade/fleet.toml [fleet] hub_url)")
     if not settings["admin_token"]:
@@ -603,7 +618,12 @@ def manage_principal(
         generation = _principal_enrollment_generation(settings["hub_url"], settings["admin_token"], name)
         body.update(
             _pending_principal_request(
-                name, settings["admin_token"], label, expected_enrollment_id=generation, may_send_to=may_send_to
+                name,
+                settings["admin_token"],
+                label,
+                expected_enrollment_id=generation,
+                may_send_to=may_send_to,
+                hub_url=settings["hub_url"],
             )
         )
         if not body.get("may_send_to"):
@@ -613,14 +633,14 @@ def manage_principal(
             f"brigade-message-principal:{name}:{body['request_id']}".encode("utf-8"),
             hashlib.sha256,
         ).hexdigest()
-        pending_path = _principal_pending_path(name, settings["admin_token"])
+        pending_path = _principal_pending_path(name, settings["admin_token"], hub_url=settings["hub_url"])
     elif action == "revoke":
-        pending_path = _principal_revocation_path(name, settings["admin_token"])
-        pending = _pending_principal_revocation_request(name, settings["admin_token"])
+        pending_path = _principal_revocation_path(name, settings["admin_token"], hub_url=settings["hub_url"])
+        pending = _pending_principal_revocation_request(name, settings["admin_token"], hub_url=settings["hub_url"])
         if pending is None:
             generation = _principal_enrollment_generation(settings["hub_url"], settings["admin_token"], name)
             pending = _pending_principal_revocation_request(
-                name, settings["admin_token"], expected_enrollment_id=generation
+                name, settings["admin_token"], expected_enrollment_id=generation, hub_url=settings["hub_url"]
             )
         if pending is None:
             raise fleet_client.FleetClientError("could not preserve pending principal revocation request")
@@ -692,7 +712,7 @@ def manage_principal(
             raise fleet_client.FleetClientError("fleet hub did not confirm the revoked principal generation")
         if revoke_pending_request_id is not None and pending_path is not None:
             _clear_principal_request(pending_path, request_id=revoke_pending_request_id)
-        add_path = _principal_pending_path(name, settings["admin_token"])
+        add_path = _principal_pending_path(name, settings["admin_token"], hub_url=settings["hub_url"])
         add_request_id = _pending_principal_request_id(add_path, name, enrollment_id=body["expected_enrollment_id"])
         if add_request_id is not None:
             _clear_principal_request(add_path, request_id=add_request_id)
@@ -712,21 +732,33 @@ def finalize_principal_add(name: str, *, request_id: str) -> None:
     settings = fleet_client.load_fleet_settings()
     if not settings["admin_token"]:
         raise fleet_client.FleetClientError("no fleet admin token configured")
-    _clear_principal_request(_principal_pending_path(name, settings["admin_token"]), request_id=request_id)
+    _clear_principal_request(
+        _principal_pending_path(name, settings["admin_token"], hub_url=settings["hub_url"]), request_id=request_id
+    )
 
 
-def _principal_pending_path(name: str, admin_token: str) -> Path:
-    token_scope = hashlib.sha256(admin_token.encode("utf-8")).hexdigest()
+def _principal_pending_path(name: str, admin_token: str, *, hub_url: str | None = None) -> Path:
+    hub = fleet_client.load_fleet_settings()["hub_url"] if hub_url is None else hub_url
+    token_scope = "v1-" + message_scope(hub, admin_token)
     name_scope = hashlib.sha256(name.encode("utf-8")).hexdigest()[:16]
     return fleet_client.brigade_home() / fleet_client.SPOOL_DIRNAME / f"principal-{name_scope}-{token_scope}.jsonl"
 
 
-def _principal_revocation_path(name: str, admin_token: str) -> Path:
-    token_scope = hashlib.sha256(admin_token.encode("utf-8")).hexdigest()
+def _principal_revocation_path(name: str, admin_token: str, *, hub_url: str | None = None) -> Path:
+    hub = fleet_client.load_fleet_settings()["hub_url"] if hub_url is None else hub_url
+    token_scope = "v1-" + message_scope(hub, admin_token)
     name_scope = hashlib.sha256(name.encode("utf-8")).hexdigest()[:16]
     return (
         fleet_client.brigade_home() / fleet_client.SPOOL_DIRNAME / f"principal-{name_scope}-{token_scope}.revoke.jsonl"
     )
+
+
+def _require_no_legacy_principal_requests(name: str, admin_token: str, active: Path) -> None:
+    name_scope = hashlib.sha256(name.encode("utf-8")).hexdigest()[:16]
+    token_scope = hashlib.sha256(admin_token.encode("utf-8")).hexdigest()
+    for candidate in active.parent.glob(f"*principal-{name_scope}-{token_scope}.*"):
+        if candidate.is_symlink() or (candidate.is_file() and candidate.stat().st_size):
+            raise fleet_client.FleetClientError("legacy principal retry has unproven endpoint scope; left untouched")
 
 
 def _pending_principal_revocation_request(
@@ -734,9 +766,11 @@ def _pending_principal_revocation_request(
     admin_token: str,
     *,
     expected_enrollment_id: str | None | object = _NOT_PROVIDED,
+    hub_url: str | None = None,
 ) -> dict[str, Any] | None:
     """Read or persist a revoke's enrollment generation across ambiguous retries."""
-    path = _principal_revocation_path(name, admin_token)
+    path = _principal_revocation_path(name, admin_token, hub_url=hub_url)
+    _require_no_legacy_principal_requests(name, admin_token, path)
     with fleet_client._spool_lock(path) as dir_fd:
         pending = fleet_client._read_spool(path, dir_fd=dir_fd, strict=True)
         for item in pending:
@@ -767,36 +801,32 @@ def _pending_principal_request(
     *,
     expected_enrollment_id: str | None = None,
     may_send_to: list[str] | None = None,
+    hub_url: str | None = None,
 ) -> dict[str, Any]:
-    path = _principal_pending_path(name, admin_token)
+    path = _principal_pending_path(name, admin_token, hub_url=hub_url)
     with fleet_client._spool_lock(path) as dir_fd:
         pending = fleet_client._read_spool(path, dir_fd=dir_fd, strict=True)
+    # Unknown-origin retries must never acquire authority from current configuration.
+    # Keep old files intact and refuse a new operation until they are reconciled.
+    _require_no_legacy_principal_requests(name, admin_token, path)
     if not pending:
-        # Migrate requests written before retry state stopped depending on the
-        # mutable node identity. Never nest spool locks: they share a process lock.
-        name_scope = hashlib.sha256(name.encode("utf-8")).hexdigest()[:16]
-        token_scope = hashlib.sha256(admin_token.encode("utf-8")).hexdigest()
-        for legacy_path in sorted(path.parent.glob(f"*.principal-{name_scope}-{token_scope}.jsonl")):
-            if legacy_path == path or legacy_path.is_symlink() or not legacy_path.is_file():
+        # Only versioned files whose filename proves this exact origin can migrate.
+        # Never hold two spool locks: they share a process lock.
+        for proven in sorted(path.parent.glob(f"*.{path.name}")):
+            if proven.is_symlink() or not proven.is_file():
                 continue
-            with fleet_client._spool_lock(legacy_path) as legacy_fd:
-                legacy_pending = fleet_client._read_spool(legacy_path, dir_fd=legacy_fd, strict=True)
-            if legacy_pending:
-                legacy_request_id = next(
-                    (
-                        item.get("request_id")
-                        for item in legacy_pending
-                        if item.get("name") == name and isinstance(item.get("request_id"), str)
-                    ),
-                    None,
-                )
+            with fleet_client._spool_lock(proven) as old_fd:
+                previous = fleet_client._read_spool(proven, dir_fd=old_fd, strict=True)
+            if previous:
                 with fleet_client._spool_lock(path) as dir_fd:
                     pending = fleet_client._read_spool(path, dir_fd=dir_fd, strict=True)
                     if not pending:
-                        pending = legacy_pending
+                        pending = previous
                         fleet_client._write_spool_atomic(path, pending, dir_fd=dir_fd)
-                if pending == legacy_pending and isinstance(legacy_request_id, str):
-                    _clear_principal_request(legacy_path, request_id=legacy_request_id)
+                if pending == previous:
+                    for item in previous:
+                        if isinstance(item.get("request_id"), str):
+                            _clear_principal_request(proven, request_id=item["request_id"])
                 break
     if not pending:
         with fleet_client._spool_lock(path) as dir_fd:
@@ -859,12 +889,12 @@ def flush(
     node_id: str, *, hub_url: str | None = None, token: str | None = None, lock_timeout: float | None = None
 ) -> int:
     fleet_client._validate_spool_lock_timeout(lock_timeout)
-    config = fleet_client.load_fleet_config()
-    hub = hub_url or config["hub_url"]
-    auth = token or fleet_client.load_fleet_settings()["node_token"]
+    settings = fleet_client.load_fleet_settings() if hub_url is None or token is None else {}
+    hub = settings["hub_url"] if hub_url is None else hub_url
+    auth = settings["node_token"] if token is None else token
     if not hub or not auth:
         return 0
-    path = _spool_path(node_id, auth)
+    path = _spool_path(node_id, auth, hub_url=hub)
     _warn_inactive_spools(node_id, path)
     if not path.is_file():
         return 0
@@ -920,6 +950,8 @@ def _reply_recipient(hub: str, token: str, message_id: int, *, timeout: float | 
 def _drain_locked(
     path: Path, hub: str, token: str, *, max_messages: int | None = None, dir_fd: int | None = None
 ) -> tuple[int, bool]:
+    if path.name != f"messages-v1-{message_scope(hub, token)}.jsonl":
+        raise FleetMessageHubError("message spool origin does not match transport", code="token_scope_changed")
     messages = fleet_client._read_spool(path, dir_fd=dir_fd, strict=True)
     deadline = monotonic() + MESSAGE_DRAIN_DEADLINE_SECONDS
     delivered = 0
