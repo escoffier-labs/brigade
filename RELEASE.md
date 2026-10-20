@@ -103,6 +103,18 @@ PY
 
 Create a Memory Handoff in `.claude/memory-handoffs/` for durable release workflow changes, root causes, or setup gotchas.
 
+## 6b. Publish the MCP Registry manifests
+
+Run this from a checkout of the release tag, only after step 6 confirms the version on PyPI. `scripts/version_sync.py` pins `mcp-registry/*/server.json` to the tagged version. The registry checks the `mcp-name` markers in the PyPI README, and clients launch the package as `uvx brigade-cli`. The first release that can be published therefore has to contain both the README markers and the `brigade-cli` console script. 0.30.0 has neither.
+
+```bash
+git checkout vX.Y.Z
+grep -q '^brigade-cli = ' pyproject.toml && grep -q 'mcp-name: io.github.escoffier-labs/brigade-memory' README.md
+mcp-publisher login github            # an escoffier-labs org member
+mcp-publisher publish mcp-registry/memory/server.json
+mcp-publisher publish mcp-registry/skills/server.json
+```
+
 ## 7. Maintainer Hyper-V clean acceptance
 
 Hosted Windows amd64 acceptance runs in GitHub Actions. For a clean Windows checkpoint run, follow
