@@ -5,6 +5,7 @@ from __future__ import annotations
 import http.client
 import io
 import json
+import os
 from urllib.parse import urlsplit
 import threading
 from pathlib import Path
@@ -13,6 +14,12 @@ import pytest
 
 from brigade import mcp_server, memory_mcp_core
 from tests._home import set_home
+
+
+def _assert_mode(path: Path, mode: int) -> None:
+    # Windows chmod only toggles the read-only bit, so permission bits are POSIX-only.
+    if os.name == "posix":
+        assert path.stat().st_mode & 0o777 == mode
 
 
 def _card(root: Path, name: str, title: str, body: str) -> None:
@@ -173,7 +180,7 @@ def test_write_handoff_without_repo_uses_user_store(stores, monkeypatch, tmp_pat
     assert failed is False and result["origin"] == "user"
     assert result["path"].startswith("memory/handoffs/")
     assert (user / result["path"]).is_file()
-    assert (user / "memory").stat().st_mode & 0o777 == 0o700
+    _assert_mode((user / "memory"), 0o700)
 
 
 def test_write_handoff_rejects_bad_input_and_removes_invalid_drafts(stores):
@@ -200,7 +207,7 @@ def test_work_brief_outside_wired_repo_points_at_user_store(stores, monkeypatch,
     monkeypatch.setattr(memory_scope, "resolve_wired_target", lambda cwd, harness=None: None)
     result, failed = memory_mcp_core.MemoryTools(cwd=tmp_path).call("work_brief", {})
     assert failed is False and result["wired"] is False
-    assert result["user_store"].endswith(".brigade/memory")
+    assert Path(result["user_store"]).parts[-2:] == (".brigade", "memory")
 
 
 def test_work_brief_in_wired_repo_uses_cheap_helpers_only(stores, monkeypatch):
@@ -329,9 +336,9 @@ def test_write_handoff_user_store_modes_are_private(stores, monkeypatch, tmp_pat
     tools = memory_mcp_core.MemoryTools(cwd=tmp_path, inbox="claude")
     result, failed = tools.call("write_handoff", {"title": "T", "summary": "S.", "content": "Body."})
     assert failed is False
-    assert (user / "memory" / "handoffs").stat().st_mode & 0o777 == 0o700
-    assert (user / result["path"]).stat().st_mode & 0o777 == 0o600
-    assert user.stat().st_mode & 0o777 == 0o755
+    _assert_mode((user / "memory" / "handoffs"), 0o700)
+    _assert_mode((user / result["path"]), 0o600)
+    _assert_mode(user, 0o755)
 
 
 def test_write_handoff_tightens_an_existing_user_inbox(stores, monkeypatch, tmp_path: Path):
@@ -344,7 +351,7 @@ def test_write_handoff_tightens_an_existing_user_inbox(stores, monkeypatch, tmp_
     monkeypatch.setattr(memory_scope, "resolve_wired_target", lambda cwd, harness=None: None)
     tools = memory_mcp_core.MemoryTools(cwd=tmp_path, inbox="claude")
     assert tools.call("write_handoff", {"title": "T", "summary": "S.", "content": "Body."})[1] is False
-    assert inbox.stat().st_mode & 0o777 == 0o700
+    _assert_mode(inbox, 0o700)
 
 
 def test_write_handoff_bounds_content_and_lists(stores):
@@ -401,3 +408,16 @@ def test_stdio_and_http_answer_identically(stores, monkeypatch: pytest.MonkeyPat
         thread.join(10)
     assert len(stdio_replies) == len(requests)
     assert http_replies == stdio_replies
+
+
+def test_card_refs_and_uris_use_forward_slashes_for_windows_paths(monkeypatch):
+    monkeypatch.setattr(memory_mcp_core, "_NATIVE_SEP", "\\")
+    assert memory_mcp_core.card_ref("repo", "memory\\cards\\a.md") == "repo:memory/cards/a.md"
+    assert memory_mcp_core.card_uri("repo", "memory\\cards\\a.md") == "card://memory/cards/a.md"
+    assert memory_mcp_core.card_uri("user", "memory\\cards\\b c.md") == "user-card://memory/cards/b%20c.md"
+
+
+def test_card_refs_keep_literal_backslashes_where_they_are_filename_characters(monkeypatch):
+    monkeypatch.setattr(memory_mcp_core, "_NATIVE_SEP", "/")
+    assert memory_mcp_core.card_ref("repo", "memory/cards/a\\b.md") == "repo:memory/cards/a\\b.md"
+    assert memory_mcp_core.card_uri("user", "memory/cards/a\\b.md") == "user-card://memory/cards/a%5Cb.md"
