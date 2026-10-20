@@ -783,11 +783,11 @@ def _git_tracked_names(directory: Path) -> set[str] | None:
         return None
 
 
-def _git_tracked_files(directory: Path) -> set[tuple[int, int]] | None:
-    """Return (st_dev, st_ino) for each tracked file directly in `directory`.
+def _git_tracked_files(directory: Path) -> tuple[set[str], set[tuple[int, int]]] | None:
+    """Return indexed names and file identities directly in `directory`.
 
-    Matching by identity rather than spelling keeps a case-only rename on a
-    case-insensitive filesystem tracked. None means the check failed.
+    Names protect deleted and recreated files. Identities also protect case
+    aliases on case-insensitive filesystems. None means the check failed.
     """
     names = _git_tracked_names(directory)
     if names is None:
@@ -802,17 +802,20 @@ def _git_tracked_files(directory: Path) -> set[tuple[int, int]] | None:
             _warn_tracking_check_failed(directory, str(exc))
             return None
         identities.add((st.st_dev, st.st_ino))
-    return identities
+    return names, identities
 
 
-def _is_tracked(path: Path, tracked: set[tuple[int, int]] | None) -> bool:
+def _is_tracked(path: Path, tracked: tuple[set[str], set[tuple[int, int]]] | None) -> bool:
     if tracked is None:
+        return True
+    names, identities = tracked
+    if path.name in names:
         return True
     try:
         st = path.stat()
     except OSError:
         return True
-    return (st.st_dev, st.st_ino) in tracked
+    return (st.st_dev, st.st_ino) in identities
 
 
 def _list_handoffs(handoffs_dir: Path) -> tuple[List[Path], List[Path]]:

@@ -1898,6 +1898,37 @@ def test_archive_refuses_tracked_handoff_after_transient_identity_error(tmp_path
     assert "identity lookup failed" in stderr
 
 
+def test_archive_refuses_indexed_name_deleted_and_recreated_during_check(tmp_path: Path, monkeypatch):
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    _git(tmp_path, "init", "-q")
+    handoff = _write_handoff(inbox, "tracked.md", _PLAIN_HANDOFF)
+    original = handoff.read_bytes()
+    _git(tmp_path, "add", "--", "inbox/tracked.md")
+    stat = Path.stat
+    injected = False
+
+    def delete_and_recreate_once(path, *args, **kwargs):
+        nonlocal injected
+        if path == handoff and not injected:
+            injected = True
+            path.unlink()
+            try:
+                return stat(path, *args, **kwargs)
+            finally:
+                path.write_bytes(original)
+        return stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", delete_and_recreate_once)
+    with pytest.raises(ingest_mod.TrackedHandoffError):
+        ingest_mod._archive(handoff, inbox / "processed")
+
+    assert injected
+    assert handoff.read_bytes() == original
+    assert _git(tmp_path, "status", "--porcelain").stdout == "A  inbox/tracked.md\n"
+    assert not (inbox / "processed").exists()
+
+
 def test_archive_ignores_missing_indexed_entry(tmp_path: Path):
     inbox = tmp_path / "inbox"
     inbox.mkdir()
