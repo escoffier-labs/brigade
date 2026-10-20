@@ -81,7 +81,16 @@ def tool_specs() -> list[dict[str, Any]]:
             {"limit": limit, "after": text},
             [],
         ),
-        ("fleet_claims", "List repository claims without changing ownership.", {"all": boolean}, []),
+        (
+            "fleet_claims",
+            "List one page of repository claims without changing ownership.",
+            {
+                "all": boolean,
+                "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 200},
+                "after": text,
+            },
+            [],
+        ),
     ]
     return [
         {
@@ -173,7 +182,8 @@ def _frame(value: Any) -> Any:
 # claim target, harness, session ids). Only fields the hub authenticates or
 # assigns pass through unchanged; every other string is fenced, whatever it
 # looks like, so a node cannot place instructions outside the fence.
-_STRUCTURAL_FIELDS = frozenset({"node_id", "principal_id", "owner_node", "state", "expired"})
+# next_cursor is hex the hub derives from a claim target, not peer text.
+_STRUCTURAL_FIELDS = frozenset({"node_id", "principal_id", "owner_node", "state", "expired", "next_cursor"})
 
 
 def _structural(key: str) -> bool:
@@ -296,7 +306,9 @@ class FleetMcp:
             ids = [_message_id(item) for item in arguments.get("ids", [])]
             message_id = _message_id(arguments["id"]) if "id" in arguments else None
             reply_to = _message_id(arguments["reply_to"]) if "reply_to" in arguments else None
-            if "after" in arguments:
+            # fleet_claims pages by an opaque hex cursor the hub validates; the
+            # message tools page by message ID.
+            if "after" in arguments and name != "fleet_claims":
                 _message_id(arguments["after"], allow_zero=True)
             payload = self._call(name, arguments, ids, message_id, reply_to)
             return _frame(payload), False

@@ -795,12 +795,44 @@ def reply(conn: sqlite3.Connection, raw: dict[str, Any], *, sender: str) -> dict
     return _fetch(conn, message["id"])
 
 
+# Station claims pages stay well under the client's response cap even with
+# long targets. The cursor is the hex of the last target, so it carries no
+# peer-chosen text back to the model.
+CLAIMS_PAGE_DEFAULT = 200
+CLAIMS_PAGE_MAX = 500
+
+
+def _claims_page_args(raw: dict[str, Any]) -> tuple[int, str | None]:
+    limit = raw.get("limit", CLAIMS_PAGE_DEFAULT)
+    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= CLAIMS_PAGE_MAX:
+        raise MessageError(f"claims limit must be an integer from 1 to {CLAIMS_PAGE_MAX}")
+    cursor = raw.get("after")
+    if cursor is None:
+        return limit, None
+    if not isinstance(cursor, str) or len(cursor) > 2 * 4096:
+        raise MessageError("invalid claims cursor")
+    try:
+        return limit, bytes.fromhex(cursor).decode("utf-8")
+    except ValueError:
+        raise MessageError("invalid claims cursor") from None
+
+
+def _claims_page(rows: list[dict[str, Any]], *, limit: int, after: str | None) -> dict[str, Any]:
+    ordered = sorted(rows, key=lambda row: str(row.get("target", "")))
+    if after is not None:
+        ordered = [row for row in ordered if str(row.get("target", "")) > after]
+    page = ordered[:limit]
+    more = len(ordered) > limit
+    next_cursor = str(page[-1].get("target", "")).encode("utf-8").hex() if more and page else None
+    return {"claims": page, "next_cursor": next_cursor}
+
+
 def _station_read(conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str) -> dict[str, Any]:
     """Read-only directory/claims for message credentials, without admin access."""
     from . import fleet_claim_display, fleet_hub, fleet_hub_message_grants as grants, fleet_hub_sessions
 
     action = raw["action"]
-    allowed = {"action", "all", "filter"} if action == "who" else {"action", "all"}
+    allowed = {"action", "all", "filter"} if action == "who" else {"action", "all", "limit", "after"}
     include_all = raw.get("all", False)
     query = raw.get("filter", "")
     if set(raw) - allowed or not isinstance(include_all, bool) or not isinstance(query, str):
@@ -814,15 +846,16 @@ def _station_read(conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str)
         return grants.permits(patterns, caller, recipient)
 
     if action == "claims":
+        limit, after = _claims_page_args(raw)
         if not caller.startswith("agent:"):
-            return {"claims": fleet_claim_display.list_display_claims(conn, include_all=include_all)}
-        return {
-            "claims": [
+            rows = fleet_claim_display.list_display_claims(conn, include_all=include_all)
+        else:
+            rows = [
                 {key: value for key, value in row.items() if key not in {"job", "session", "owner_conductor"}}
                 for row in fleet_hub.list_claims(conn, include_all=include_all)
                 if permitted(row["owner_node"])
             ]
-        }
+        return _claims_page(rows, limit=limit, after=after)
 
     nodes = [
         {"node_id": str(row[0])}

@@ -833,3 +833,36 @@ def test_station_read_loads_agent_grants_once(hub, monkeypatch):
         assert calls == ["agent:counter", "agent:counter"]
     finally:
         conn.close()
+
+
+def test_claims_are_paged_with_an_opaque_cursor(stations, hub):
+    _base, _ta, _tb, db = hub
+    conn = fleet_hub.open_db(db)
+    try:
+        for index in range(5):
+            status, claim = fleet_hub.handle_claim(
+                conn,
+                {"action": "acquire", "node_id": NODE_B, "target": f"page-{index}", "holder": f"p{index}"},
+                caller_node=NODE_B,
+            )
+            assert status == 200 and claim["granted"]
+    finally:
+        conn.close()
+    seen = []
+    cursor = None
+    pages = 0
+    while True:
+        args = {"limit": 2} if cursor is None else {"limit": 2, "after": cursor}
+        page = call(stations[0], "fleet_claims", **args)
+        pages += 1
+        seen.extend(unfence(row["target"]) for row in page["claims"])
+        cursor = page["next_cursor"]
+        if cursor is None:
+            break
+        assert isinstance(cursor, str) and all(char in "0123456789abcdef" for char in cursor)
+    assert [target for target in seen if target.startswith("page-")] == [f"page-{index}" for index in range(5)]
+    assert pages == 3
+    _payload, error = stations[0].call("fleet_claims", {"limit": 501})
+    assert error
+    _payload, error = stations[0].call("fleet_claims", {"after": "not-hex"})
+    assert error
