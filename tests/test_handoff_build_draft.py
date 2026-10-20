@@ -117,3 +117,21 @@ def test_forced_draft_never_writes_through_a_symlink_planted_after_the_check(tmp
     assert path.is_file() and not os.path.islink(path)
     _assert_mode(path, 0o600)
     assert sorted(p.name for p in inbox.iterdir()) == [path.name]
+
+
+def test_draft_without_o_nofollow_refuses_a_dangling_symlink(tmp_path: Path, monkeypatch):
+    _freeze(monkeypatch)
+    monkeypatch.delattr(drafts.os, "O_NOFOLLOW", raising=False)
+    inbox = tmp_path / "in"
+    inbox.mkdir()
+    kwargs = dict(target=tmp_path, title="Same", summary="S.", content="Body.", inbox=str(inbox))
+    path = Path(drafts.build_draft(**kwargs)["path"])
+    assert path.read_text(encoding="utf-8").startswith("# Memory Handoff")
+    _assert_mode(path, 0o600)
+    path.unlink()
+    victim = tmp_path / "victim.md"
+    path.symlink_to(victim)
+    with pytest.raises(ValueError, match="already exists"):
+        drafts.build_draft(**kwargs)
+    assert not victim.exists()
+    assert sorted(p.name for p in inbox.iterdir()) == [path.name]

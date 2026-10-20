@@ -8,6 +8,7 @@ the shape mcp_server.ToolCaller expects.
 
 from __future__ import annotations
 
+import os
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -24,6 +25,7 @@ SERVER_NAME = "brigade-memory"
 CARD_URI_PREFIX = "card://"
 # User-store cards get their own scheme: "card://user:<rel>" would put a colon in the URI authority.
 USER_CARD_URI_PREFIX = "user-card://"
+_NATIVE_SEP = os.sep
 SEARCH_LIMIT = 20
 MAX_CONTENT_BYTES = 256 * 1024
 MAX_LIST_ITEMS = 50
@@ -53,8 +55,9 @@ ToolResult = tuple[object, bool]
 
 
 def _posix(rel: str) -> str:
-    """Card paths are always reported with forward slashes, including on Windows."""
-    return rel.replace("\\", "/")
+    """Report card paths with forward slashes. Only the native separator is rewritten,
+    since a backslash is an ordinary filename character on POSIX."""
+    return rel.replace(_NATIVE_SEP, "/") if _NATIVE_SEP != "/" else rel
 
 
 def card_ref(origin: str, rel: str) -> str:

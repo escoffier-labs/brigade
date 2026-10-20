@@ -410,7 +410,14 @@ def test_stdio_and_http_answer_identically(stores, monkeypatch: pytest.MonkeyPat
     assert http_replies == stdio_replies
 
 
-def test_card_refs_and_uris_use_forward_slashes_for_windows_paths():
+def test_card_refs_and_uris_use_forward_slashes_for_windows_paths(monkeypatch):
+    monkeypatch.setattr(memory_mcp_core, "_NATIVE_SEP", "\\")
     assert memory_mcp_core.card_ref("repo", "memory\\cards\\a.md") == "repo:memory/cards/a.md"
     assert memory_mcp_core.card_uri("repo", "memory\\cards\\a.md") == "card://memory/cards/a.md"
     assert memory_mcp_core.card_uri("user", "memory\\cards\\b c.md") == "user-card://memory/cards/b%20c.md"
+
+
+def test_card_refs_keep_literal_backslashes_where_they_are_filename_characters(monkeypatch):
+    monkeypatch.setattr(memory_mcp_core, "_NATIVE_SEP", "/")
+    assert memory_mcp_core.card_ref("repo", "memory/cards/a\\b.md") == "repo:memory/cards/a\\b.md"
+    assert memory_mcp_core.card_uri("user", "memory/cards/a\\b.md") == "user-card://memory/cards/a%5Cb.md"
