@@ -8,13 +8,21 @@ import os
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
-from brigade import cli, fleet_client
+from brigade import antigravity_presence, cli, fleet_client
 from brigade import fleet_session_presence as presence
 from brigade.config import Config, write_config
 from brigade.selection import Selection
+
+
+def _stub_publisher_process(monkeypatch, factory):
+    # Keep the stdlib class intact for asyncio's Windows Popen subclass.
+    publisher_subprocess = SimpleNamespace(**vars(subprocess))
+    publisher_subprocess.Popen = factory
+    monkeypatch.setattr(antigravity_presence, "subprocess", publisher_subprocess)
 
 
 @pytest.fixture()
@@ -58,7 +66,7 @@ def test_hook_detaches_silent_publisher_and_preserves_session(workspace, monkeyp
         launches.append((argv, kwargs))
         return object()  # No wait/communicate methods: the hook cannot wait for the Hub.
 
-    monkeypatch.setattr(subprocess, "Popen", spawn)
+    _stub_publisher_process(monkeypatch, spawn)
     monkeypatch.setattr(
         sys,
         "stdin",
@@ -95,8 +103,6 @@ def test_hook_detaches_silent_publisher_and_preserves_session(workspace, monkeyp
     monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "http://127.0.0.1:3774")
     monkeypatch.setattr(fleet_client, "upsert_session", lambda snap: snapshots.append(snap) or True)
     monkeypatch.setattr(fleet_client, "end_session", lambda snap: pytest.fail("Stop must not end a session"))
-    # Restore Popen for the Git commands used to build the snapshot.
-    monkeypatch.setattr(subprocess, "Popen", REAL_POPEN)
     assert cli.main(argv[3:]) == 0
     assert capsys.readouterr().out == ""
     assert len(snapshots) == 1
@@ -107,15 +113,14 @@ def test_hook_detaches_silent_publisher_and_preserves_session(workspace, monkeyp
     assert "planted.txt" not in snapshot.dirty_paths
 
 
-REAL_POPEN = subprocess.Popen
-
-
 @pytest.mark.parametrize(
-    "raw", ["{}", "not json", "[]", '{"conversationId":1}', "x" * (presence.MAX_PRESENCE_STDIN_BYTES + 1)]
+    "raw",
+    ["{}", "not json", "[]", '{"conversationId":1}', "x" * (presence.MAX_PRESENCE_STDIN_BYTES + 1)],
+    ids=["empty-object", "malformed-json", "array", "invalid-session", "oversized"],
 )
 def test_invalid_payload_is_silent_and_does_not_spawn(monkeypatch, capsys, raw):
     monkeypatch.setattr(sys, "stdin", io.StringIO(raw))
-    monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: pytest.fail("invalid payload spawned a publisher"))
+    _stub_publisher_process(monkeypatch, lambda *a, **kw: pytest.fail("invalid payload spawned a publisher"))
     assert cli.main(["work", "presence-hook", "--harness", "antigravity", "--stdin", "--event", "start"]) == 0
     captured = capsys.readouterr()
     assert captured.out == captured.err == ""
@@ -138,7 +143,7 @@ def test_spawn_failure_is_silent(workspace, monkeypatch, capsys):
     def fail(*args, **kwargs):
         raise OSError("publisher unavailable")
 
-    monkeypatch.setattr(subprocess, "Popen", fail)
+    _stub_publisher_process(monkeypatch, fail)
     assert cli.main(["work", "presence-hook", "--harness", "antigravity", "--stdin", "--event", "start"]) == 0
     captured = capsys.readouterr()
     assert captured.out == captured.err == ""
@@ -222,7 +227,7 @@ def test_hook_skips_unwired_unselected_and_operator_home(tmp_path, monkeypatch, 
     monkeypatch.setattr(
         sys, "stdin", io.StringIO(json.dumps({"conversationId": "conversation-1", "workspacePaths": [str(repo)]}))
     )
-    monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: pytest.fail("unwired target spawned publisher"))
+    _stub_publisher_process(monkeypatch, lambda *a, **kw: pytest.fail("unwired target spawned publisher"))
     assert cli.main(["work", "presence-hook", "--harness", "antigravity", "--stdin", "--event", "start"]) == 0
     captured = capsys.readouterr()
     assert captured.out == captured.err == ""
@@ -302,7 +307,7 @@ def test_hook_finds_unique_wired_workspaces_after_unwired_roots(workspace, tmp_p
         other, Config(version=1, selection=Selection(depth="repo", harnesses=["antigravity"], owner="antigravity"))
     )
     launches = []
-    monkeypatch.setattr(subprocess, "Popen", lambda argv, **kw: launches.append(argv) or object())
+    _stub_publisher_process(monkeypatch, lambda argv, **kw: launches.append(argv) or object())
     monkeypatch.setattr(
         sys,
         "stdin",
