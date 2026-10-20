@@ -119,7 +119,7 @@ jobs:
           archive = proof / 'original-archives.zip'
           digest = hashlib.sha256(archive.read_bytes()).hexdigest()
           assert digest == expected_digest, 'original ZIP digest mismatch'
-          expected = {'artifacts.json', 'runtime.json', 'escoffier-labs-brigade-0.30.0.tgz'} | {f'escoffier-labs-brigade-uv-{p}-0.30.0.tgz' for p in ['linux-x64', 'linux-arm64', 'darwin-x64', 'darwin-arm64', 'win32-x64']}
+          expected = {'artifacts.json', 'runtime.json', 'escoffier-labs-brigade-0.29.0.tgz'} | {f'escoffier-labs-brigade-uv-{p}-0.29.0.tgz' for p in ['linux-x64', 'linux-arm64', 'darwin-x64', 'darwin-arm64', 'win32-x64']}
           output = Path(os.environ['RUNNER_TEMP']) / 'npm-artifacts'
           assert not output.exists(), 'original archive destination must be fresh'
           with zipfile.ZipFile(archive) as z:
@@ -143,7 +143,7 @@ jobs:
         env:
           EXPECTED_PLATFORM: ${{ matrix.platform }}
         run: |
-          argv=$(node -e 'process.stdout.write(JSON.stringify(["node",process.env.GITHUB_WORKSPACE+"/validation-harness/npm/feasibility/acceptance.cjs","--artifacts",process.env.RUNNER_TEMP+"/npm-artifacts","--out",process.env.RUNNER_TEMP+"/npm-receipts","--expected-platform",process.env.EXPECTED_PLATFORM,"--registry-spec","@escoffier-labs/brigade@0.30.0","--expected-packaging-sha",process.env.PACKAGING_SHA]))')
+          argv=$(node -e 'process.stdout.write(JSON.stringify(["node",process.env.GITHUB_WORKSPACE+"/validation-harness/npm/feasibility/acceptance.cjs","--artifacts",process.env.RUNNER_TEMP+"/npm-artifacts","--out",process.env.RUNNER_TEMP+"/npm-receipts","--expected-platform",process.env.EXPECTED_PLATFORM,"--registry-spec","@escoffier-labs/brigade@0.29.0","--expected-packaging-sha",process.env.PACKAGING_SHA]))')
           PYTHONPATH=src python -m brigade work verify run --target . --argv-json "$argv" --timeout 900 --capture brigade-work
       - name: Recheck original archives after acceptance
         if: always()

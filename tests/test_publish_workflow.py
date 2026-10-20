@@ -546,7 +546,7 @@ def test_npm_revalidation_is_read_only_and_pins_two_source_identities():
         if step in acceptance:
             assert argv[:2] == ["node", "/fixture/workspace/validation-harness/npm/feasibility/acceptance.cjs"]
             assert argv[argv.index("--expected-packaging-sha") + 1] == env["PACKAGING_SHA"]
-            assert argv[argv.index("--registry-spec") + 1] == "@escoffier-labs/brigade@0.30.0"
+            assert argv[argv.index("--registry-spec") + 1] == "@escoffier-labs/brigade@0.29.0"
         else:
             assert argv == ["python", "npm/feasibility/prepare.py", "--verify-artifacts", "/fixture/temp/npm-artifacts"]
     assert native["steps"].index(preparation[0]) < native["steps"].index(acceptance[0])
@@ -601,9 +601,9 @@ def test_npm_revalidation_rejects_substituted_or_unsafe_original_artifacts(tmp_p
     proof.mkdir()
     archive = proof / "original-archives.zip"
     names = (
-        ["escoffier-labs-brigade-0.30.0.tgz"]
+        ["escoffier-labs-brigade-0.29.0.tgz"]
         + [
-            f"escoffier-labs-brigade-uv-{p}-0.30.0.tgz"
+            f"escoffier-labs-brigade-uv-{p}-0.29.0.tgz"
             for p in ("linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64", "win32-x64")
         ]
         + ["artifacts.json", "runtime.json"]
