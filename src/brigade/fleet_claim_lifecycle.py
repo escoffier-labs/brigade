@@ -31,6 +31,26 @@ def _client() -> ModuleType:
     return fleet_client
 
 
+def _bound_connection(hub_url: str, token: str) -> Callable[[], dict[str, Any]]:
+    """Pin ``hub_url`` for a claim while honoring node token rotation (#1781).
+
+    Each call re-reads configuration. Its token replaces ``token`` only while
+    the configured hub still equals ``hub_url``, so one hub's credential never
+    goes to another hub (#1780). Otherwise the bound token is kept.
+    """
+
+    def current() -> dict[str, Any]:
+        try:
+            config = _client().load_fleet_config()
+        except Exception:
+            config = {}
+        fresh = config.get("token", "")
+        same_hub = config.get("hub_url") == hub_url
+        return {"hub_url": hub_url, "token": fresh if same_hub and fresh else token}
+
+    return current
+
+
 def _force_release(target: str, *, holder: str | None, acquired_at: str | None, **kwargs: Any) -> Any:
     """Fence operator force to inspection, retaining old-hub compatibility."""
     inspected = _client().inspect_claim(target, **kwargs)
@@ -226,6 +246,7 @@ def _schedule_orphan_release(
     config = _client().load_fleet_config() if hub_url is None or token is None else {}
     hub_url = config.get("hub_url", "") if hub_url is None else hub_url
     token = config.get("token", "") if token is None else token
+    connection = _bound_connection(hub_url, token)
     stop = _client().threading.Event()
 
     def _retry() -> None:
@@ -233,7 +254,7 @@ def _schedule_orphan_release(
         deadline = started + ttl_seconds
         while not stop.is_set() and _client().time.monotonic() < deadline:
             outcome = _client().release_claim(
-                target, node_id=node_id, holder=holder, conductor=conductor, hub_url=hub_url, token=token
+                target, node_id=node_id, holder=holder, conductor=conductor, **connection()
             )
             if outcome.reason in CLEANUP_RETRY_REASONS:
                 stop.wait(min(_client().ORPHAN_RELEASE_RETRY_SECONDS, max(0.0, deadline - _client().time.monotonic())))

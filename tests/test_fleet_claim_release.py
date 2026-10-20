@@ -1337,3 +1337,63 @@ class TestWorkspaceFromRunDir:
         assert resolved is None
         assert "has no readable run.json naming its workspace" in why
         assert "<workspace>/.brigade/runs layout" in why
+
+
+@pytest.mark.parametrize("hub_switch", [False, True])
+def test_heartbeat_and_exit_release_follow_a_rotated_node_token_on_the_bound_hub(tmp_path, monkeypatch, hub_switch):
+    """Issue #1781: rotating the node token file mid-run must not cancel it.
+
+    The hub stays pinned (#1780): when configuration names another hub, the
+    rotated token never leaves for it and the bound credential stays in use.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    token_file = tmp_path / "node-token"
+    token_file.write_text("fake-token-one\n", encoding="utf-8")
+
+    def configure(hub_url):
+        (home / "fleet.toml").write_text(
+            f'[fleet]\nhub_url = "{hub_url}"\nnode_token_file = "{token_file.as_posix()}"\n', encoding="utf-8"
+        )
+
+    configure("https://hub-one.example.invalid")
+    for name in ("BRIGADE_FLEET_HUB_URL", "BRIGADE_FLEET_TOKEN", "BRIGADE_FLEET_NODE_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("BRIGADE_HOME", str(home))
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda base_path=None: NODE_A)
+    monkeypatch.setattr(fleet_client, "_claim_renew_interval", lambda ttl: 0.01)
+    accepted = {"fake-token-one"}
+    posts = []
+    renewed_after_rotation = threading.Event()
+    rotated = threading.Event()
+
+    def post(hub_url, token, body, *, timeout):
+        posts.append((body["action"], hub_url, token, rotated.is_set()))
+        if token not in accepted:
+            return 401, {"error": "unknown node token"}
+        if body["action"] == "renew" and rotated.is_set():
+            renewed_after_rotation.set()
+        key = {"acquire": "granted", "renew": "renewed", "release": "released"}[body["action"]]
+        return 200, {key: True, "claim": {"generation": 1}}
+
+    monkeypatch.setattr(fleet_client, "_post_claim_blocking", post)
+    credential_failures = []
+    with fleet_client.repo_claim(
+        "fake-target", ttl_seconds=60, on_credential_failure=credential_failures.append
+    ) as decision:
+        assert decision.granted
+        if hub_switch:
+            configure("https://hub-two.example.invalid")
+        else:
+            accepted.clear()
+            accepted.add("fake-token-two")
+        token_file.write_text("fake-token-two\n", encoding="utf-8")
+        rotated.set()
+        assert renewed_after_rotation.wait(5), f"no renewal succeeded after rotation: {posts[-3:]}"
+        assert not decision.cancel_event.is_set()
+    assert credential_failures == []
+    assert {hub_url for _, hub_url, _, _ in posts} == {"https://hub-one.example.invalid"}
+    expected = "fake-token-one" if hub_switch else "fake-token-two"
+    after = [(action, token) for action, _, token, was_rotated in posts if was_rotated]
+    assert after and all(token == expected for _, token in after)
+    assert posts[-1][:3] == ("release", "https://hub-one.example.invalid", expected)
