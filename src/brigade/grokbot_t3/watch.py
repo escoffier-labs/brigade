@@ -14,9 +14,10 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..grokbot_feed import _NoRedirect
+from ..hub_messages import call_message
 from . import contracts as c
 from .fleet import CALL_TIMEOUT, FleetCallError, FleetTimeout
-from .ledger import Ledger, wake_target_id
+from .ledger import HUB_PENDING_LIMIT, Ledger, wake_target_id
 from .inbox import HubInbox
 from .runtime_config import Runtime
 from . import runtime_config
@@ -121,20 +122,37 @@ def _wake_hub_inbox(
         return
     summary["checked"] += 1
     hub = HubInbox(token_file=str(runtime.hub_token_file))
+    # The existing client bounds network draining to 12 seconds. Never replay queued
+    # mutations while the connector is disabled, and keep flush failure independent of reads.
+    if runtime.enabled:
+        try:
+            call_message("flush_credential", token_file=str(runtime.hub_token_file))
+        except Exception:
+            summary["failed"] += 1
     scope = hub.notification_scope()
     targets = wake_targets.get(runtime.hub_wake_target, [])
     if not targets:
         raise c.T3DispatchError("invalid_request")
-    cursors = {
-        wake_target_id(target["url"]): ledger.hub_wake_cursor(scope, wake_target_id(target["url"]))
-        for target in targets
-    }
-    rows = []
-    for page, _ in hub.pages(after=min(cursors.values())):
-        rows.extend(page)
     for target in targets:
         target_id = wake_target_id(target["url"])
-        pending = [row for row in rows if row["id"] > cursors[target_id]]
+        pending = ledger.pending_hub_wake(scope, target_id)
+        after = max(ledger.hub_wake_cursor(scope, target_id), pending[-1]["id"] if pending else 0)
+        if len(pending) < HUB_PENDING_LIMIT:
+            try:
+                # Each endpoint discovers independently, so a failed endpoint can retain its
+                # bounded batch without blocking healthy endpoints at the same old ids.
+                for page, _ in hub.pages(after=after):
+                    if any(len(row["sender"].encode("utf-8")) > 256 for row in page):
+                        raise c.T3DispatchError("hub-error")
+                    ledger.queue_hub_wake(scope, target_id, page)
+                    pending = ledger.pending_hub_wake(scope, target_id)
+                    if len(pending) >= HUB_PENDING_LIMIT:
+                        break
+            except Exception:
+                summary["failed"] += 1
+        # A failed POST remains retryable even if the Hub now omits acknowledged messages
+        # or a later page fetch failed. No message content is retained in the ledger.
+        pending = ledger.pending_hub_wake(scope, target_id)
         if not pending:
             continue
         body = {
@@ -152,7 +170,10 @@ def _wake_hub_inbox(
             summary["woken"] += 1
         else:
             summary["failed"] += 1
-        _append_log(log_path, {"at": clock().isoformat(timespec="seconds"), **body, "statuses": [code]})
+        try:
+            _append_log(log_path, {"at": clock().isoformat(timespec="seconds"), **body, "statuses": [code]})
+        except OSError:
+            pass
 
 
 def run_watch_once(

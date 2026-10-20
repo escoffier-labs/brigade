@@ -91,7 +91,10 @@ credentials to resolve names. Provision the principal and its send grants on the
 Hub before enabling it. The token file contains only the token, with no trailing
 newline. Do not use an admin token. An invalid file closes messaging with
 `hub-error` and `hub_code: token_file_invalid`, while dispatch remains available.
-The underlying Fleet client keeps queued sends in its credential-scoped spool.
+The underlying Fleet client keeps queued sends and replies in its credential-scoped spool.
+Each enabled watcher tick attempts a drain through the existing client, whose
+network drain deadline is 12 seconds. A disabled connector leaves queued
+mutations untouched. Drain errors do not stop inbox or request notifications.
 Permit that spool directory in `writable_paths` if the service sandbox otherwise
 makes it read-only. The connector never adds credential values to tool results,
 request ledgers, wake payloads, logs, or subprocess arguments.
@@ -171,9 +174,11 @@ notification, subject to the same delivery retry cap. A successful status poll
 resets the failure count. Results append to `wake-notify.jsonl` beside `wake_path`.
 
 When `hub_token_file` is configured, the existing one-minute watcher also checks
-the principal's unacknowledged inbox. Each tick fetches at most 3 pages of 100
-messages, with a 1-second transport timeout per page and a 3-second polling
-budget. New message ids trigger the target list named by `hub_wake_target`.
+the principal's unacknowledged inbox. Each target independently fetches at most
+3 pages of 100 messages per tick, with a 1-second transport timeout per page and
+a 3-second polling budget. At most 4 targets means at most 12 pages and 12
+seconds of inbox polling per tick. New message ids trigger the target list
+named by `hub_wake_target`.
 The wake body contains exactly `kind: "hub-inbox"`, `count`, `latest_id`, and
 `sender_ids`. It contains no subjects or message bodies. For example:
 
@@ -182,22 +187,29 @@ The wake body contains exactly `kind: "hub-inbox"`, `count`, `latest_id`, and
 ```
 
 Each target's last notified id persists in the ledger and advances only after
-HTTP 200. Successful targets suppress unchanged notifications across restarts.
-Failed wakes retry on the next tick without the request wake retry cap. The
-cursor is scoped to the credential so changing principals starts a fresh inbox
-scan. The watcher never acknowledges messages. Hub failures do not stop request
-wakes. A missing configured target reports a failure and waits for configuration
-to be corrected.
+HTTP 200. Each target also retains at most 300 pending message ids and sender
+ids, committed before delivery. A full pending batch pauses that target's scan
+until delivery succeeds. Healthy targets continue discovering later messages.
+Successful targets suppress unchanged notifications across restarts. Failed
+wakes retry on the next tick even if another consumer acknowledges those
+messages or the Hub is unavailable. Cursor advancement and removal of delivered
+metadata share one transaction. A crash after HTTP 200 but before that transaction
+can repeat the wake. Pending batches have no request wake retry cap. The cursor
+is scoped to the credential value, so any token rotation starts a fresh scan,
+even for the same principal. The watcher never acknowledges messages. Hub or
+log-write failures do not stop later targets or request wakes. A missing configured
+target reports a failure and waits for configuration to be corrected.
 
 ## Tools
 
 | Tool | Arguments | Does |
 |---|---|---|
-| `inbox_list` | Optional `unacked_only` (default `true`), `limit` (1 through 50, default 20) | Read the principal inbox. Marks message content as untrusted. Uses the same bounded page scan as the watcher. `has_more` marks an incomplete scan, so `unacked_total` then counts only fetched messages. Orders fetched messages oldest first for unacknowledged mail, newest first otherwise. |
+| `inbox_list` | Optional `unacked_only` (default `true`), `limit` (1 through 50, default 20) | Read the principal inbox. Marks message content as untrusted. Scans the oldest up to 300 retained ids within 3 seconds. Returns fewer messages when the requested limit or the 131072-byte public JSON limit requires it, with `has_more: true`. `unacked_total` counts fetched messages when the scan is incomplete. Orders unacknowledged mail oldest first. With `unacked_only: false`, incomplete scans report `order: "newest first within oldest fetched window"`. |
 | `inbox_ack` | `ids` (1 through 100 unique positive integers) | Acknowledge inbox messages. Missing ids appear in `not_pending`. |
 | `inbox_reply` | `msg_id`, `body` | Reply without acknowledging the original message. Body limit: 8192 UTF-8 bytes. |
 | `message_send` | `to`, `subject`, `body`, optional `ref`, `priority`, `thread`, `kind`, `client_id` | Send within principal grants to a node name such as `host-a`, a node id, or `agent:example`. Subject limit: 200 UTF-8 bytes. Body limit: 8192 UTF-8 bytes. Priority: `low`, `normal` (default), `high`, `urgent`. Kind: `message` (default), `question`, `completion`. Supply a stable `client_id` when retrying the same send. |
 | `message_status` | `ids` (1 through 50 unique positive integers) | Read acknowledgement status for sent messages. Omits bodies. |
+
 | `t3_capacity` | none | `t3-fleet capacity`, projected to host, active, limit, state. Read-only. |
 | `t3_submit` | `repository`, `prompt`, `title`, `caller`, optional `host` (default `auto`), `seat`, `base_ref`, `interaction_mode` (`default` or `plan`) | Validates against allowlists and limits, resolves `base_ref` (default the repository's default branch) to a 40-character SHA with `git ls-remote` in the controller's checkout, picks an allowlisted host when `auto`, including in enrolled mode (most free capacity among allowlisted eligible hosts), prepends the dispatch header, runs `t3-fleet submit` in machine mode with one `t3-fleet.request.v1` JSON object on stdin carrying the prompt and `runtime_mode: full-access` (the prompt never reaches argv), records the request in the ledger, returns `request_id`, host, seat. |
 | `t3_status` | `request_id` | `t3-fleet status`, projected: state, `needs_attention`, `pending_request` (as `t3-fleet` bounds it), thread id, seat, last update. |
@@ -207,6 +219,14 @@ to be corrected.
 | `t3_approve` | `request_id`, `approval_id`, `decision` | `t3-fleet approve` for the pending approval named by `approval_id`; `decision` is `accept`, `acceptForSession`, `decline`, or `cancel`. |
 | `t3_interrupt` | `request_id` | `t3-fleet interrupt`. |
 | `t3_recent` | `caller` optional, `limit` (max 20) | Ledger rows for this pack: request, caller, repository, host, seat, state, times. Read-only. |
+
+A later-page failure preserves messages already fetched and sets `has_more: true`.
+A first-page failure returns the closed `hub-error`. Acknowledge fetched oldest
+unacknowledged messages to progress through a larger backlog. If acknowledgement
+succeeds but its recount fails, `inbox_ack` still returns `acked` and `not_pending`,
+with `unacked_total: null` and `has_more: true`. Repeating an acknowledgement of
+an existing message is idempotent and reports it in `acked`. `not_pending` covers
+messages the Hub reports missing.
 
 Hub tools use Dot's argument validators and message projections. A send without
 `client_id` derives one from its content and a ten-minute time bucket. Reusing

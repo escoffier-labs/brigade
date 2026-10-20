@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import builtins
 import hashlib
+import json
 import time
 from typing import Any, Iterator
 
 from ..fleet_client_message_credentials import FleetMessageHubError, read_message_token_file
 from ..hub_messages import HubMessageError, MessageOperations, inbox_page, legacy_message
+from .contracts import PUBLIC_RESULT_LIMIT
 
 POLL_MAX_PAGES = 3
 POLL_TIMEOUT_SECONDS = 1.0
@@ -47,17 +49,37 @@ class HubInbox(MessageOperations):
     def list(self, unacked_only: bool = True, limit: int = 20) -> dict[str, Any]:
         rows = []
         complete = False
-        for page, _ in self.pages(unacked=unacked_only):
-            rows.extend(page)
-            complete = not page
+        try:
+            for page, _ in self.pages(unacked=unacked_only):
+                rows.extend(page)
+                complete = not page
+        except HubMessageError:
+            if not rows:
+                raise
         ordered = rows if unacked_only else list(reversed(rows))
-        return dict(
-            messages=[legacy_message(row, "") for row in ordered[:limit]],
+        result: dict[str, Any] = dict(
+            messages=[],
             unacked_total=sum(row.get("acked_at") is None for row in rows),
-            has_more=not complete,
-            order="oldest first" if unacked_only else "newest first",
+            has_more=False,
+            order=(
+                "oldest first"
+                if unacked_only
+                else "newest first"
+                if complete
+                else "newest first within oldest fetched window"
+            ),
             content_trust="untrusted",
         )
+        # Match the public boundary's JSON encoding, including ASCII escaping and all metadata.
+        for row in ordered[:limit]:
+            result["messages"].append(legacy_message(row, ""))
+            if len(json.dumps(result, separators=(",", ":")).encode("utf-8")) > PUBLIC_RESULT_LIMIT:
+                result["messages"].pop()
+                if not result["messages"]:
+                    raise HubMessageError("hub_unavailable")
+                break
+        result["has_more"] = not complete or len(result["messages"]) < len(rows)
+        return result
 
     def ack(self, ids: builtins.list[int]) -> dict[str, Any]:
         acked, not_pending = [], []
@@ -70,7 +92,11 @@ class HubInbox(MessageOperations):
                 not_pending.append(ident)
             else:
                 acked.append(ident)
-        listing = self.list(limit=1)
+        try:
+            listing = self.list(limit=1)
+        except HubMessageError:
+            # The mutation succeeded even when its best-effort recount is unavailable.
+            listing = {"unacked_total": None, "has_more": True}
         return dict(
             acked=acked, not_pending=not_pending, unacked_total=listing["unacked_total"], has_more=listing["has_more"]
         )
