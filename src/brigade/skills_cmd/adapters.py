@@ -231,10 +231,42 @@ def _run_mcp_stdio(target: Path) -> int:
     )
 
 
-def serve_mcp(*, target: Path, json_output: bool = False, stdio: bool = False) -> int:
+MCP_HTTP_DEFAULT_PORT = 8932
+
+
+def _run_mcp_http(target: Path, *, host: str | None, port: int | None) -> int:
+    return mcp_server.run_http_from_env(
+        server_name="brigade-skills-readonly",
+        host=host,
+        port=port,
+        default_port=MCP_HTTP_DEFAULT_PORT,
+        list_resources=lambda: _mcp_resource_items(target),
+        read_resource=lambda uri: _mcp_read_resource(target, uri),
+        list_tools=_mcp_tool_specs,
+        call_tool=lambda name, arguments: _mcp_tool_call(target, name, arguments),
+    )
+
+
+def serve_mcp(
+    *,
+    target: Path,
+    json_output: bool = False,
+    stdio: bool = False,
+    http: bool = False,
+    host: str | None = None,
+    port: int | None = None,
+) -> int:
     target = target.expanduser().resolve()
+    if stdio and http:
+        print("error: --stdio and --http are mutually exclusive", file=sys.stderr)
+        return 2
+    if not http and (host is not None or port is not None):
+        print("error: --host and --port require --http", file=sys.stderr)
+        return 2
     if stdio:
         return _run_mcp_stdio(target)
+    if http:
+        return _run_mcp_http(target, host=host, port=port)
     payload = _mcp_contract_payload(target)
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
@@ -247,6 +279,7 @@ def serve_mcp(*, target: Path, json_output: bool = False, stdio: bool = False) -
         "tools: search_skills, get_skill, get_skill_metadata, get_skill_changelog, get_skill_compatibility, get_skill_history, lint_skill"
     )
     print(f"registered_resources: {len(payload['registered_resources'])}")
+    print("transports: --stdio (default server), --http (loopback Streamable HTTP, token from BRIGADE_MCP_HTTP_TOKEN)")
     return 0
 
 

@@ -1983,15 +1983,48 @@ def _run_card_mcp_stdio(target: Path) -> int:
     )
 
 
-def serve_mcp(*, target: Path, stdio: bool = False, json_output: bool = False) -> int:
+MCP_HTTP_DEFAULT_PORT = 8931
+
+
+def _run_card_mcp_http(target: Path, *, host: str | None, port: int | None) -> int:
+    config = load_config(target) or MemoryCareConfig()
+    return mcp_server.run_http_from_env(
+        server_name="brigade-memory-readonly",
+        host=host,
+        port=port,
+        default_port=MCP_HTTP_DEFAULT_PORT,
+        list_resources=lambda: _mcp_card_resources(target, config),
+        read_resource=lambda uri: _mcp_read_card(target, config, uri),
+        list_tools=_mcp_card_tool_specs,
+        call_tool=lambda name, arguments: _mcp_card_tool_call(target, config, name, arguments),
+    )
+
+
+def serve_mcp(
+    *,
+    target: Path,
+    stdio: bool = False,
+    json_output: bool = False,
+    http: bool = False,
+    host: str | None = None,
+    port: int | None = None,
+) -> int:
     target = target.expanduser().resolve()
     try:
         config = load_config(target) or MemoryCareConfig()
     except ValueError as exc:
         print(f"error: invalid memory-care config: {exc}", file=sys.stderr)
         return 2
+    if stdio and http:
+        print("error: --stdio and --http are mutually exclusive", file=sys.stderr)
+        return 2
+    if not http and (host is not None or port is not None):
+        print("error: --host and --port require --http", file=sys.stderr)
+        return 2
     if stdio:
         return _run_card_mcp_stdio(target)
+    if http:
+        return _run_card_mcp_http(target, host=host, port=port)
     resources = _mcp_card_resources(target, config)
     tools = [str(spec["name"]) for spec in _mcp_card_tool_specs()]
     payload: dict[str, Any] = {
@@ -2009,4 +2042,8 @@ def serve_mcp(*, target: Path, stdio: bool = False, json_output: bool = False) -
     print(f"tools: {', '.join(tools)}")
     print(f"registered_resources: {payload['registered_resources']}")
     print("run the stdio server with: brigade memory serve-mcp --stdio")
+    print(
+        "or serve over loopback HTTP with: brigade memory serve-mcp --http "
+        f"(token from {mcp_server.HTTP_TOKEN_ENV}, default port {MCP_HTTP_DEFAULT_PORT})"
+    )
     return 0

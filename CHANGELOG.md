@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `brigade memory serve-mcp --http` and `brigade skills serve-mcp --http` serve the read-only MCP tools over a stateless loopback Streamable HTTP endpoint (`POST /mcp`, `GET /healthz`) for MCP hosts that cannot spawn a stdio process. The server binds only `127.0.0.1` or `::1`, requires a bearer token from `BRIGADE_MCP_HTTP_TOKEN` (32 characters or more, never a flag), rejects non-loopback `Host` and `Origin` headers, and caps request bodies at 1 MiB. Stdio remains the default.
+
+### Changed
+
+- The read-only MCP servers negotiate the protocol version (`2024-11-05`, `2025-03-26`, or `2025-06-18`) instead of always answering `2024-11-05`, and report the Brigade version in `serverInfo`.
+
 ## [0.30.0] - 2026-10-20
 
 ### Added

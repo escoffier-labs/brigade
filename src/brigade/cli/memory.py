@@ -303,9 +303,19 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_memory_serve_mcp.add_argument(
         "--target", "-t", type=Path, default=Path("."), help="Repo or workspace whose cards to serve."
     )
-    p_memory_serve_mcp.add_argument(
+    memory_transport = p_memory_serve_mcp.add_mutually_exclusive_group()
+    memory_transport.add_argument(
         "--stdio", action="store_true", help="Run the JSON-RPC stdio server (otherwise print the contract)."
     )
+    memory_transport.add_argument(
+        "--http",
+        action="store_true",
+        help="Run a loopback Streamable HTTP server at /mcp (token from BRIGADE_MCP_HTTP_TOKEN).",
+    )
+    p_memory_serve_mcp.add_argument(
+        "--host", default=None, help="With --http: loopback address to bind (127.0.0.1, ::1, or localhost)."
+    )
+    p_memory_serve_mcp.add_argument("--port", type=int, default=None, help="With --http: port to bind (default 8931).")
     p_memory_serve_mcp.add_argument("--json", action="store_true", help="Print the contract as JSON.")
 
     # Embedded memory-doctor verbs (status / lint / compact / init-git).
@@ -494,7 +504,14 @@ def dispatch(args) -> int:
             target=args.target, cwd=args.cwd, limit=args.limit, json_output=args.json, query=args.query
         )
     if args.memory_command == "serve-mcp":
-        return memory_cmd.serve_mcp(target=args.target, stdio=args.stdio, json_output=args.json)
+        return memory_cmd.serve_mcp(
+            target=args.target,
+            stdio=args.stdio,
+            json_output=args.json,
+            http=args.http,
+            host=args.host,
+            port=args.port,
+        )
 
     from .. import memory_doctor_cmd
 
