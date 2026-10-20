@@ -411,8 +411,8 @@ def _validate_campaign_edge_endpoints(
 ) -> None:
     """Fail closed when campaign edges name tasks absent from loaded members.
 
-    Per-repo orphan blockers do not gate readiness; campaign edges must not
-    inherit that silence across repos.
+    Member missing dependencies gate readiness in the resolver. Campaign edges
+    additionally require both endpoints, including dependents, to exist.
     """
     task_ids = {
         str(task["id"])
@@ -466,6 +466,9 @@ def campaign_readiness_payload(
     _validate_campaign_edge_endpoints(config, synthetic)
 
     resolution = edges_mod.resolve_readiness(synthetic)
+    for dependency in resolution.orphans:
+        # Synthetic qualified IDs cannot repair a member's local ledger.
+        dependency.pop("repair_commands", None)
     payload = resolution.as_dict(explain=explain)
     payload["ready"] = [_annotate_ready_item(item) for item in payload["ready"]]
     if explain and isinstance(payload.get("blocked"), list):
