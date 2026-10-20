@@ -1158,7 +1158,11 @@ def health(target: Path) -> dict[str, Any]:
         "issue_count": len(issues),
         "scan_issue_count": scan_issue_count,
         "enabled_checks": list(config.enabled_checks),
-        "counts": scan_payload.get("counts", {}) if isinstance(scan_payload, dict) else {},
+        "counts": (
+            scan_payload["counts"]
+            if isinstance(scan_payload, dict) and isinstance(scan_payload.get("counts"), dict)
+            else {}
+        ),
         "queue_count": queue_count,
         "top_issue": top_issue or (issues[0] if issues else None),
         "checks": checks,

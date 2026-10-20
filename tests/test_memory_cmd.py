@@ -2039,3 +2039,21 @@ def test_memory_care_status_distinguishes_disabled_evidence_check(tmp_path, caps
     assert f"unconsolidated-evidence: {expected}\n" in capsys.readouterr().out
     assert memory_cmd.status(target=tmp_path, json_output=True) == 0
     assert json.loads(capsys.readouterr().out)["enabled_checks"] == checks
+
+
+@pytest.mark.parametrize(
+    "scan_payload",
+    [{}] + [{"counts": value} for value in [None, [], "invalid", 1, False, {}, {"unconsolidated-evidence": 3}]],
+)
+def test_memory_care_status_validates_saved_counts(tmp_path, capsys, scan_payload):
+    scan_dir = tmp_path / ".brigade/memory-care/decay"
+    scan_dir.mkdir(parents=True)
+    (scan_dir / "scan-latest.json").write_text(json.dumps(scan_payload))
+
+    args = ["memory", "care", "status", "--target", str(tmp_path)]
+    assert cli.main(args) == 0
+    counts = scan_payload.get("counts")
+    expected = counts if isinstance(counts, dict) else {}
+    assert f"unconsolidated-evidence: {expected.get('unconsolidated-evidence', 0)}\n" in capsys.readouterr().out
+    assert cli.main([*args, "--json"]) == 0
+    assert json.loads(capsys.readouterr().out)["counts"] == expected
