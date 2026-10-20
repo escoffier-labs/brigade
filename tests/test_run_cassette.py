@@ -35,6 +35,7 @@ def _documents(run_dir):
 
 def test_default_records_classified_body_but_only_reference_in_journal(tmp_path):
     run_dir = tmp_path / ".brigade" / "runs" / "20261020-120000-cassette"
+    run_journal.ensure_journal(run_dir / "events" / "lifecycle.jsonl")
     ref = _record(run_dir)
     assert set(ref) == {"path", "sha256", "media_type", "byte_size", "privacy_class"}
     docs = _documents(run_dir)
@@ -93,3 +94,23 @@ def test_write_time_scrub_resolved_overrides(tmp_path, monkeypatch):
     run_dir = tmp_path / ".brigade" / "runs" / "20261020-120000-cassette"
     _record(run_dir, agent=agent, result=agents.AgentResult(text=f"prefix{needle}suffix", detail=needle, ok=True))
     assert needle not in json.dumps(_documents(run_dir))
+
+
+def test_literal_env_overrides_preserve_result_text(tmp_path, monkeypatch):
+    needle = "cassette-credential-value"
+    monkeypatch.setenv("CASSETTE_TEST_TOKEN", needle)
+    agent = Agent(name="worker", cli="codex", role="write", env={"CI": "1", "API_KEY_REF": "CASSETTE_TEST_TOKEN"})
+    run_dir = tmp_path / ".brigade" / "runs" / "20261020-120000-cassette"
+    _record(run_dir, agent=agent, result=agents.AgentResult(text=f"1 test passed for issue 1854: {needle}", ok=True))
+    body = next(d["result"] for d in _documents(run_dir) if d["privacy_class"] == "private")
+    assert body["text"] == "1 test passed for issue 1854: [redacted]"
+
+
+def test_recording_stop_does_not_enable_lifecycle_journaling(tmp_path, monkeypatch):
+    from brigade import run_cassette_store as store
+
+    monkeypatch.setattr(store, "MAX_ENTRY_BYTES", 128)
+    run_dir = tmp_path / ".brigade" / "runs" / "20261020-120000-cassette"
+    assert _record(run_dir) is None
+    assert any(d.get("status") == "stopped" for d in _documents(run_dir))
+    assert not (run_dir / "events" / "lifecycle.jsonl").exists()

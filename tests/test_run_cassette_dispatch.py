@@ -6,10 +6,65 @@ import hashlib
 import json
 from threading import Event, Thread
 
+import pytest
+
 from brigade import agents, fleet_session_bootstrap, proc, run_journal, run_transport
 from brigade.roster import Agent, Roster
 from brigade.run_seat import SeatInvoker
 from tests.test_run_cassette import _documents
+
+
+@pytest.mark.parametrize("retry_ok,reprobe", [(True, True), (False, True), (False, False)])
+def test_retry_records_only_the_terminal_worker_result(tmp_path, monkeypatch, retry_ok, reprobe):
+    calls = []
+
+    def worker(*args, **kwargs):
+        calls.append(args)
+        if len(calls) == 1 or not retry_ok:
+            return agents.AgentResult(text="failed attempt", ok=False, failure_kind="network-error")
+        return agents.AgentResult(text="recovered answer", ok=True)
+
+    monkeypatch.setattr(agents, "run_agent", worker)
+    roster = Roster(orchestrator="chef", agents={"worker": Agent(name="worker", cli="codex", role="write")})
+    run_dir = tmp_path / ".brigade" / "runs" / "20261020-120000-cassette"
+    run_journal.ensure_journal(run_dir / "events" / "lifecycle.jsonl")
+    result = run_transport.dispatch(
+        [run_transport.Assignment(worker="worker", task="task")],
+        roster,
+        build_prompt=lambda *args, **kw: "task",
+        run_appserver_worker=lambda *args, **kw: None,
+        event_writer=lambda *args, **kw: None,
+        reprobe_seat=lambda agent: reprobe,
+        cwd=tmp_path,
+        output_dir=run_dir,
+    )[0]
+    assert len(calls) == (2 if reprobe else 1)
+    docs = _documents(run_dir)
+    assert len([d for d in docs if d["privacy_class"] == "public-metadata"]) == 1
+    bodies = [d["result"] for d in docs if d["privacy_class"] == "private"]
+    assert len(bodies) == 1
+    assert bodies[0]["text"] == result.text
+    assert bodies[0]["ok"] == result.ok
+    assert len(run_journal.read_journal(run_dir / "events" / "lifecycle.jsonl").events) == 1
+
+
+def test_default_dispatch_does_not_enable_lifecycle_journaling(tmp_path, monkeypatch):
+    monkeypatch.setattr(agents, "run_agent", lambda *args, **kw: agents.AgentResult(text="answer", ok=True))
+    run_dir = tmp_path / ".brigade" / "runs" / "20261020-120000-cassette"
+    run_dir.mkdir(parents=True)
+    snapshot = {"status": "dispatching", "lifecycle_journal_requested": False}
+    (run_dir / "run.json").write_text(json.dumps(snapshot))
+    invoker = SeatInvoker(
+        roster=Roster(orchestrator="chef", agents={"worker": Agent(name="worker", cli="codex", role="write")}),
+        cwd=tmp_path,
+        run_id=run_dir.name,
+        process_registry=proc.ProcessRegistry(),
+        output_dir=run_dir,
+    )
+    assert invoker.invoke(seat="worker", phase="research.plan", prompt="task", timeout=10).ok
+    assert any(d["privacy_class"] == "private" for d in _documents(run_dir))
+    assert not (run_dir / "events" / "lifecycle.jsonl").exists()
+    assert json.loads((run_dir / "run.json").read_text()) == snapshot
 
 
 def test_each_dispatched_worker_records_exact_injected_prompt_once(tmp_path, monkeypatch):
@@ -29,6 +84,7 @@ def test_each_dispatched_worker_records_exact_injected_prompt_once(tmp_path, mon
         },
     )
     run_dir = tmp_path / ".brigade" / "runs" / "20261020-120000-cassette"
+    run_journal.ensure_journal(run_dir / "events" / "lifecycle.jsonl")
     result = run_transport.dispatch(
         [run_transport.Assignment(worker=name, task="coordinator task") for name in ("one", "two")],
         roster,

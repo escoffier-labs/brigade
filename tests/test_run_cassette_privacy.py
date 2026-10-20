@@ -130,6 +130,7 @@ def test_purge_finishes_when_retention_removes_an_inventoried_file(tmp_path, mon
 def test_caps_stop_recording_once_without_failing_run(tmp_path, monkeypatch, cap, capsys):
     monkeypatch.setattr(store, cap, 128)
     run_dir = tmp_path / ".brigade" / "runs" / "20261020-120000-cassette"
+    run_journal.ensure_journal(run_dir / "events" / "lifecycle.jsonl")
     assert _record(run_dir) is None
     assert _record(run_dir) is None
     docs = _documents(run_dir)
@@ -228,7 +229,11 @@ def test_sidecars_refuse_linked_files_and_directories(tmp_path, kind):
     assert outside.read_text() == "do not touch"
 
 
-def test_appserver_projection_contains_no_worker_text(tmp_path):
+@pytest.mark.parametrize("seat", ["worker", "security_review"])
+def test_appserver_projection_contains_no_worker_text(tmp_path, seat):
+    from brigade.aboyeur.planning import _worker_event_writer
+    from brigade.roster import Agent
+
     run = tmp_path / ".brigade" / "runs" / "20261020-120000-cassette"
     events = run / "events"
     events.mkdir(parents=True)
@@ -244,8 +249,12 @@ def test_appserver_projection_contains_no_worker_text(tmp_path):
             },
         },
     }
-    (events / "worker.jsonl").write_text(json.dumps(raw) + "\n")
-    _record(run, result=agents.AgentResult(text="answer", ok=True, transport="codex-app-server"))
+    _worker_event_writer(events, seat)(raw)
+    _record(
+        run,
+        agent=Agent(name=seat, cli="codex", role="review"),
+        result=agents.AgentResult(text="answer", ok=True, transport="codex-app-server"),
+    )
     metadata = next(d for d in _documents(run) if d["privacy_class"] == "scrubbed")
     assert "adversarial-stream-secret" not in json.dumps(metadata)
     projection = metadata["notification_projection"]
@@ -281,6 +290,7 @@ def test_fleet_report_projects_only_lifecycle_metadata(tmp_path, monkeypatch):
     monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "https://invalid.example"})
     monkeypatch.setattr(fleet_client, "report_event", lambda event, **kw: reported.append(event))
     run_dir = tmp_path / ".brigade" / "runs" / "20261020-120000-cassette"
+    run_journal.ensure_journal(run_dir / "events" / "lifecycle.jsonl")
     _record(run_dir, result=agents.AgentResult(text="fleet-private-needle", ok=True))
     assert reported
     assert "fleet-private-needle" not in json.dumps(reported)

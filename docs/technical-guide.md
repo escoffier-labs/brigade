@@ -503,9 +503,12 @@ Set `"run": {"record": "auto"}` in `.brigade/config.json` for the default policy
 `metadata-only` to omit private result bodies, or `off` to disable recording.
 Keys use seat identity and the coordinator-owned prompt fingerprint. Injected
 brief changes affect only the exact-prompt digest. Prompt text is never stored.
-Private bodies contain the result already persisted in `worker-results.json`,
-with resolved env overrides scrubbed again at write time. Scrubbed metadata and
+Private bodies contain the terminal result after retries and fallback, already
+persisted in `worker-results.json`, with resolved `_REF` secrets scrubbed again
+at write time. Literal env overrides remain intact. Scrubbed metadata and
 app-server notification projections contain no raw worker stream.
+Recording adds references only to an existing lifecycle journal. Runs without
+lifecycle journaling keep cassette sidecars without activating the journal.
 Remote and unsupported transports carry `not-observed` markers.
 Audit coverage states `not recorded: orchestrator calls` because planning and
 synthesis calls outside worker dispatch are not recorded.

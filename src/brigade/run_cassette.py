@@ -10,13 +10,17 @@ import hashlib
 import json
 import os
 import sys
+from contextlib import nullcontext
 from pathlib import Path
-from typing import Any, Mapping
+from typing import TYPE_CHECKING, Any, Mapping
 from uuid import uuid4
 
 from . import agents, config, dirfd, run_audit, run_events, run_journal, worker_events
 from . import run_cassette_store as store
 from .roster import Agent
+
+if TYPE_CHECKING:
+    from .run_transport import WorkerResult
 
 SCHEMA_VERSION = 1
 SCHEMA = "brigade.run-cassette.v1"
@@ -85,7 +89,8 @@ def _secret_values(agent: Agent) -> tuple[str, ...]:
     resolved, error = agents.resolve_env_overrides(agent.env)
     if error or resolved is None:
         raise store.CassetteError("cassette env resolution unavailable")
-    return tuple(sorted({v for v in resolved.values() if v}, key=len, reverse=True))
+    targets = agents.secret_ref_targets(agent.env)
+    return tuple(sorted({resolved[key] for key in targets if resolved.get(key)}, key=len, reverse=True))
 
 
 def _scrub(value: Any, secrets: tuple[str, ...]) -> Any:
@@ -101,14 +106,15 @@ def _scrub(value: Any, secrets: tuple[str, ...]) -> Any:
 
 
 def _projection(run_dir: Path, agent: Agent) -> dict[str, Any] | None:
-    dirfd.validate_component(agent.name)
+    from .aboyeur.run_io import _slug
+
     try:
         parent = dirfd.open_directory_chain(Path(os.path.abspath(run_dir / "events")))
     except FileNotFoundError:
         return None
     try:
         try:
-            raw = store.read(parent, f"{agent.name}.jsonl", private=False)
+            raw = store.read(parent, f"{_slug(agent.name)}.jsonl", private=False)
         except FileNotFoundError:
             return None
     finally:
@@ -154,10 +160,10 @@ def _stop(run_dir: Path) -> None:
         if _finished(run_dir):
             return
         journal = run_dir / "events" / "lifecycle.jsonl"
-        run_journal.ensure_journal(journal)
+        journaled = journal.exists()
         with (
             run_lifecycle.checkpoint_event_pair(),
-            run_journal.journal_mutation(journal),
+            run_journal.journal_mutation(journal) if journaled else nullcontext(),
             store.directory(run_dir, create=True) as parent,
         ):
             if _finished(run_dir):
@@ -176,7 +182,7 @@ def _stop(run_dir: Path) -> None:
             finally:
                 os.close(descriptor)
             dirfd.fsync_directory(parent)
-            if fits:
+            if fits and journaled:
                 _append_reference(run_dir, _reference(data, "public-metadata"))
     except (OSError, ValueError, RuntimeError):
         # A full or unavailable journal cannot carry even a stop reference.
@@ -326,10 +332,10 @@ def _record_result(
     if sum(len(raw) for _, raw in blobs) > store.MAX_ENTRY_BYTES:
         raise store.CassetteError("cassette entry byte cap reached")
     journal = run_dir / "events" / "lifecycle.jsonl"
-    run_journal.ensure_journal(journal)
+    journaled = journal.exists()
     with (
         run_lifecycle.checkpoint_event_pair(),
-        run_journal.journal_mutation(journal),
+        run_journal.journal_mutation(journal) if journaled else nullcontext(),
         store.directory(run_dir, create=True) as parent,
     ):
         if _finished(run_dir):
@@ -344,46 +350,49 @@ def _record_result(
         if sum(info.st_size for _, info in files) + added + len(_STOP_BYTES) > store.MAX_RUN_BYTES:
             raise store.CassetteError("cassette run byte cap reached")
         # Check journal admission before publishing any bodies.
-        report = run_journal.read_journal_bounded(journal)
-        if (
-            report.chain_errors
-            or report.partial_tail
-            or len(report.events) >= 2048 - 8
-            or journal.stat().st_size + 2048 > 8 * 1024 * 1024
-        ):
-            raise store.CassetteError("cassette journal cap reached")
+        if journaled:
+            report = run_journal.read_journal_bounded(journal)
+            if (
+                report.chain_errors
+                or report.partial_tail
+                or len(report.events) >= 2048 - 8
+                or journal.stat().st_size + 2048 > 8 * 1024 * 1024
+            ):
+                raise store.CassetteError("cassette journal cap reached")
         for _, raw in blobs:
             store.publish(parent, raw)
         ref = _reference(data, "public-metadata")
-        _append_reference(run_dir, ref)
+        if journaled:
+            _append_reference(run_dir, ref)
     store.retain_private(cwd, run_dir.parent, current=run_dir)
     return ref
 
 
 def record_dispatch_result(
-    result: agents.AgentResult,
+    result: WorkerResult,
     *,
     run_dir: Path | None,
     cwd: Path | None,
     agent: Agent,
-    task: str,
     prompt: str,
     read_only: bool,
     sandbox: str | None,
-    remote: bool,
-) -> None:
+) -> WorkerResult:
+    from .run_receipts import agent_result_from_worker
+
     if run_dir is not None:
         record_result(
             run_dir=run_dir,
             cwd=cwd or Path.cwd(),
             agent=agent,
-            task=task,
+            task=result.task,
             prompt=prompt,
-            result=result,
+            result=agent_result_from_worker(result),
             read_only=read_only,
             sandbox=sandbox,
-            remote=remote,
+            remote=result.remote is not None,
         )
+    return result
 
 
 def redact_sidecars(run_dir: Path) -> None:
