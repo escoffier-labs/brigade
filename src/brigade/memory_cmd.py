@@ -1934,18 +1934,43 @@ def _mcp_card_tool_specs() -> list[dict[str, Any]]:
     return [
         {
             "name": "list_cards",
-            "description": "List memory cards (path and title).",
+            "description": (
+                "List every memory card in the served repo or workspace, with each card's repo-relative path and "
+                "card:// URI. Use search_cards to find cards by topic."
+            ),
             "inputSchema": {"type": "object", "properties": {}},
         },
         {
             "name": "get_card",
-            "description": "Read one memory card by repo-relative path or card:// uri.",
-            "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+            "description": "Read one memory card's full markdown, frontmatter included.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": (
+                            "Repo-relative card path such as memory/cards/release-process.md, or a card:// URI "
+                            "from list_cards or search_cards."
+                        ),
+                    }
+                },
+                "required": ["path"],
+            },
         },
         {
             "name": "search_cards",
-            "description": "Keyword-search memory cards; returns ranked path/title matches.",
-            "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+            "description": (
+                "Keyword-search memory cards. A term in a card's title, tags, or summary outranks one found only "
+                "in the body. Returns up to 20 matches with path, title, tags, summary, and score; read one with "
+                "get_card."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Space-separated keywords, case-insensitive."}
+                },
+                "required": ["query"],
+            },
         },
     ]
 

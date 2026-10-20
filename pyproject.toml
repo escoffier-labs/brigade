@@ -50,6 +50,9 @@ Issues = "https://github.com/escoffier-labs/brigade/issues"
 
 [project.scripts]
 brigade = "brigade.cli:process_main"
+# Same entry point under the package name, so `uvx brigade-cli ...` works (the MCP
+# registry launches PyPI servers as `uvx <package> <args>`).
+brigade-cli = "brigade.cli:process_main"
 brigade-hook = "brigade.claude_hooks.entry:main"
 
 [tool.setuptools.packages.find]

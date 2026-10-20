@@ -96,6 +96,19 @@ Then follow the [install guide](https://brigade.tools/docs/getting-started/insta
 
 For preview builds on a pipx install, run `brigade update --channel beta`. Details: [update channels](docs/update-channels.md).
 
+## MCP servers
+
+`brigade-cli` includes two read-only MCP servers. They speak stdio by default, and `--http` serves them on loopback Streamable HTTP for hosts that connect by URL ([details](docs/technical-guide.md#streamable-http-for-the-read-only-mcp-servers)).
+
+- `brigade memory serve-mcp --stdio`: the repo's memory cards, with `list_cards`, `search_cards`, and `get_card`.
+- `brigade skills serve-mcp --stdio`: the reviewed skill registry, with search, read, lint, compatibility, and install-history tools.
+
+Without a global install, `uvx brigade-cli memory serve-mcp --stdio` runs the same server.
+
+<!-- MCP Registry ownership markers; keep each on its own line. -->
+<!-- mcp-name: io.github.escoffier-labs/brigade-memory -->
+<!-- mcp-name: io.github.escoffier-labs/brigade-skills -->
+
 ## How it compares
 
 Most neighbors go deeper on one layer. Brigade connects work, memory, tool config, and evidence around the same coding-agent task. Where a neighbor is stronger, its cell says so. Sources, dated notes, and projects that left these tables: [docs/comparison.md](docs/comparison.md) (checked 2026-10-18).

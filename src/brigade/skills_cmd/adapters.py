@@ -156,31 +156,68 @@ def _mcp_read_resource(target: Path, uri: str) -> tuple[str, str] | tuple[None, 
 def _mcp_tool_specs() -> list[dict[str, Any]]:
     schema_skill = {
         "type": "object",
-        "properties": {"skill_id": {"type": "string"}},
+        "properties": {
+            "skill_id": {"type": "string", "description": "Registered skill id, for example security-review."}
+        },
         "required": ["skill_id"],
         "additionalProperties": False,
     }
     return [
         {
             "name": "search_skills",
-            "description": "Search the local reviewed skill registry.",
+            "description": (
+                "Search the workspace's reviewed skill registry. Every query term must appear in a skill's id, "
+                "title, or description; an empty query lists every registered skill. Returns the count and each "
+                "match's skill.json metadata."
+            ),
             "inputSchema": {
                 "type": "object",
-                "properties": {"query": {"type": "string"}},
+                "properties": {
+                    "query": {"type": "string", "description": "Space-separated keywords, case-insensitive."}
+                },
                 "required": ["query"],
                 "additionalProperties": False,
             },
         },
-        {"name": "get_skill", "description": "Read a skill SKILL.md file.", "inputSchema": schema_skill},
-        {"name": "get_skill_metadata", "description": "Read skill.json metadata.", "inputSchema": schema_skill},
-        {"name": "get_skill_changelog", "description": "Read skill changelog text.", "inputSchema": schema_skill},
         {
-            "name": "get_skill_compatibility",
-            "description": "Read skill compatibility JSON.",
+            "name": "get_skill",
+            "description": "Read a registered skill's SKILL.md instructions as markdown.",
             "inputSchema": schema_skill,
         },
-        {"name": "get_skill_history", "description": "Read skill install history JSON.", "inputSchema": schema_skill},
-        {"name": "lint_skill", "description": "Read skill lint JSON.", "inputSchema": schema_skill},
+        {
+            "name": "get_skill_metadata",
+            "description": (
+                "Read a registered skill's skill.json metadata: id, title, description, version, required tools "
+                "and MCP servers, and supported harnesses."
+            ),
+            "inputSchema": schema_skill,
+        },
+        {
+            "name": "get_skill_changelog",
+            "description": "Read a registered skill's CHANGELOG.md. Returns an error result when the skill has none.",
+            "inputSchema": schema_skill,
+        },
+        {
+            "name": "get_skill_compatibility",
+            "description": (
+                "Report, per harness adapter, whether a skill is supported and installed, its installed and current "
+                "versions, source or render drift, and any blockers, as JSON."
+            ),
+            "inputSchema": schema_skill,
+        },
+        {
+            "name": "get_skill_history",
+            "description": "List the install receipts recorded for a skill in this workspace, as JSON.",
+            "inputSchema": schema_skill,
+        },
+        {
+            "name": "lint_skill",
+            "description": (
+                "Lint a registered skill and return validity, errors, and warnings as JSON. Read-only: nothing is "
+                "fixed or written."
+            ),
+            "inputSchema": schema_skill,
+        },
     ]
 
 
