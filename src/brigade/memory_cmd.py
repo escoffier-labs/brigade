@@ -1930,7 +1930,7 @@ def serve_mcp(
     payload: dict[str, Any] = {
         "target": str(resolution.repo_root) if resolution.repo_root is not None else None,
         "read_only": False,
-        "resource_scheme": "card://<repo-relative-path> and card://user:<path>",
+        "resource_scheme": "card://<repo-relative-path> and user-card://<path>",
         "tools": tool_names,
         "stores": [{"origin": store.origin, "root": str(store.root)} for store in resolution.stores],
         "registered_resources": len(tools.resources()),

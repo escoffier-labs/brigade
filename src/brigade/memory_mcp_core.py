@@ -21,6 +21,8 @@ from .memory_scope import REPO, USER, MemoryStore, Resolution
 
 SERVER_NAME = "brigade-memory"
 CARD_URI_PREFIX = "card://"
+# User-store cards get their own scheme: "card://user:<rel>" would put a colon in the URI authority.
+USER_CARD_URI_PREFIX = "user-card://"
 SEARCH_LIMIT = 20
 MAX_CONTENT_BYTES = 256 * 1024
 MAX_LIST_ITEMS = 50
@@ -54,11 +56,13 @@ def card_ref(origin: str, rel: str) -> str:
 
 
 def card_uri(origin: str, rel: str) -> str:
-    return f"{CARD_URI_PREFIX}{rel}" if origin == REPO else f"{CARD_URI_PREFIX}{USER}:{rel}"
+    return f"{CARD_URI_PREFIX}{rel}" if origin == REPO else f"{USER_CARD_URI_PREFIX}{rel}"
 
 
 def split_ref(ref: str) -> tuple[str | None, str]:
-    """Parse repo:<rel>, user:<rel>, card://<ref>, or a bare path (origin None)."""
+    """Parse repo:<rel>, user:<rel>, card://<ref>, user-card://<rel>, or a bare path (origin None)."""
+    if ref.startswith(USER_CARD_URI_PREFIX):
+        return USER, ref[len(USER_CARD_URI_PREFIX) :]
     if ref.startswith(CARD_URI_PREFIX):
         ref = ref[len(CARD_URI_PREFIX) :]
     for origin in (REPO, USER):

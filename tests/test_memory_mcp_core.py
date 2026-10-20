@@ -5,6 +5,7 @@ from __future__ import annotations
 import http.client
 import io
 import json
+from urllib.parse import urlsplit
 import threading
 from pathlib import Path
 
@@ -30,6 +31,9 @@ def stores(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path]
     set_home(monkeypatch, home)
     monkeypatch.setenv("BRIGADE_HOME", str(user))
     return repo, user
+
+
+WIRED_CONFIG = '{"version": 1, "depth": "repo", "harnesses": ["claude"], "owner": "claude"}'
 
 
 def _tools(repo: Path) -> memory_mcp_core.MemoryTools:
@@ -105,9 +109,12 @@ def test_resources_use_card_uris_per_origin(stores):
     _card(user, "b.md", "B", "b")
     tools = _tools(repo)
     uris = {r["uri"] for r in tools.resources()}
-    assert uris == {"card://memory/cards/a.md", "card://user:memory/cards/b.md"}
-    text, mime = tools.read_resource("card://user:memory/cards/b.md")
+    assert uris == {"card://memory/cards/a.md", "user-card://memory/cards/b.md"}
+    for uri in uris:
+        assert urlsplit(uri).port is None  # every advertised URI parses as a valid URI
+    text, mime = tools.read_resource("user-card://memory/cards/b.md")
     assert text is not None and mime == "text/markdown"
+    assert tools.call("get_card", {"path": "user-card://memory/cards/b.md"})[1] is False
 
 
 def test_memory_status_reports_stores_and_config_error(stores):
@@ -188,7 +195,7 @@ def test_work_brief_outside_wired_repo_points_at_user_store(stores, monkeypatch,
 def test_work_brief_in_wired_repo_uses_cheap_helpers_only(stores, monkeypatch):
     repo, _ = stores
     (repo / ".brigade").mkdir()
-    (repo / ".brigade" / "config.json").write_text("{}")
+    (repo / ".brigade" / "config.json").write_text(WIRED_CONFIG)
     from brigade.work_cmd.session import briefing
 
     def _full_brief(*args, **kwargs):
@@ -217,7 +224,7 @@ def test_unexpected_tool_exception_is_a_tool_error(stores, monkeypatch):
 def test_write_handoff_uses_repo_inbox_when_repo_config_is_invalid(stores):
     repo, _ = stores
     (repo / ".brigade").mkdir()
-    (repo / ".brigade" / "config.json").write_text("{}")
+    (repo / ".brigade" / "config.json").write_text(WIRED_CONFIG)
     (repo / ".brigade" / "memory-care.toml").write_text("card_roots = 7\n")
     tools = _tools(repo)
     assert tools.resolution().repo_config_error

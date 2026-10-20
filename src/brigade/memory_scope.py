@@ -56,7 +56,9 @@ def _nearest_marker(cwd: Path) -> Path | None:
 def _repo_root(target: Path | None, cwd: Path) -> tuple[Path | None, bool]:
     if target is not None:
         root = target.expanduser().resolve()
-        return root, (root / ".brigade" / "config.json").is_file()
+        # Wired only when the config loads, the same rule automatic discovery uses.
+        wired = resolve_wired_target(str(root), harness=None)
+        return root, wired is not None and wired.resolve() == root
     wired = resolve_wired_target(str(cwd), harness=None)
     wired_root = wired.resolve() if wired is not None and not is_operator_home(wired) else None
     marker = _nearest_marker(cwd)

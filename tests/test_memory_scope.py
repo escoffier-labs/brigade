@@ -29,6 +29,15 @@ def test_explicit_target_is_repo_store_even_when_unwired(home: Path, tmp_path: P
     assert res.stores[1].root == (home / ".brigade").resolve()
 
 
+def test_explicit_target_with_unloadable_config_is_not_wired(home: Path, tmp_path: Path):
+    repo = tmp_path / "repo"
+    (repo / ".brigade").mkdir(parents=True)
+    (repo / ".brigade" / "config.json").write_text("{not json", encoding="utf-8")
+    res = memory_scope.resolve(target=repo)
+    assert res.repo_root == repo.resolve()
+    assert res.repo_wired is False
+
+
 def test_no_target_and_no_wired_repo_gives_user_store_only(home: Path, tmp_path: Path, monkeypatch):
     monkeypatch.setattr(memory_scope, "resolve_wired_target", lambda cwd, harness=None: None)
     res = memory_scope.resolve(cwd=tmp_path)

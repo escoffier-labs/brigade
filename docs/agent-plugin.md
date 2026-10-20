@@ -39,7 +39,7 @@ Card references use one grammar:
 
 - `repo:<path>` reads from the repo store.
 - `user:<path>` reads from the user store.
-- `card://<path>` is accepted as an alias for a bare path.
+- `card://<path>` is accepted as an alias for a bare path. Resources list repo cards as `card://<path>` and user-store cards as `user-card://<path>`.
 - A bare path resolves in the repo store first, then the user store.
 
 `write_handoff` with `action` `create-card` or `update-card` (plus `target_card` and frontmatter `content`) is the reviewed route for proposing card changes. It never edits a canonical card. If the content fails lint, the draft is deleted and the tool returns the lint errors so the agent can retry. Content is capped at 256 KiB, and facts and evidence at 50 items each. Cards are served only when their real path stays inside the store, so a symlinked cards directory contributes nothing, and a handoff inbox that resolves outside the store is refused.
