@@ -93,15 +93,18 @@ def test_fallback_adapter_exception_records_active_seat_and_transport(tmp_path, 
         },
     )
     calls = []
+    sent_prompts = []
 
     def invoke(cli_ref, prompt, **kwargs):
         calls.append(cli_ref)
         if cli_ref == "grok":
             return _invalid_final()
+        sent_prompts.append(prompt)
         raise OSError("fallback pipe failed")
 
     def fail(*args, **kwargs):
         calls.append(fallback.cli)
+        sent_prompts.append(args[3] if transport == "codex-app-server" else args[0])
         raise OSError("fallback pipe failed")
 
     monkeypatch.setattr(agents, "run_agent", invoke)
@@ -157,5 +160,5 @@ def test_fallback_adapter_exception_records_active_seat_and_transport(tmp_path, 
     body = next(d["result"] for d in docs if d["privacy_class"] == "private")
     assert body["transport"] == transport
     assert body["requested_model"] == fallback.model
-    if transport != "codex-app-server":
-        assert manifest["full_prompt_sha256"] == hashlib.sha256(b"prompt for fallback").hexdigest()
+    assert len(sent_prompts) == 1 and sent_prompts[0].startswith("prompt for fallback")
+    assert manifest["full_prompt_sha256"] == hashlib.sha256(sent_prompts[0].encode()).hexdigest()

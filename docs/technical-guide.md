@@ -502,7 +502,10 @@ Worker dispatches also record classified cassettes under `events/cassettes/`.
 The default `run.record` policy is `metadata-only`, which omits private result
 bodies. Private bodies are opt-in until the hardening follow-up lands.
 Set `"run": {"record": "auto"}` in `.brigade/config.json` to record private
-bodies, or use `off` to disable recording.
+bodies, or use `off` to disable recording. The `auto` default proposed in
+[#1854](https://github.com/escoffier-labs/brigade/issues/1854) remains deferred.
+Runs intended for [replay (#1855)](https://github.com/escoffier-labs/brigade/issues/1855)
+require explicit `auto` recording to retain private result bodies.
 Keys use seat identity and the coordinator-owned prompt fingerprint. Injected
 brief changes affect only the exact-prompt digest. Prompt text is never stored.
 Single-seat calls through `SeatInvoker` retain the exact coordinator prompt digest

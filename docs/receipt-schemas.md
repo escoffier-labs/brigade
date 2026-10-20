@@ -12,7 +12,10 @@ and closeout writers live in
 
 `run.record` defaults to `metadata-only`, which creates no private cassette body.
 Private bodies require an explicit `auto` opt-in until the hardening follow-up
-lands. `off` disables cassette recording.
+lands. `off` disables cassette recording. The `auto` default proposed in
+[#1854](https://github.com/escoffier-labs/brigade/issues/1854) remains deferred.
+Runs intended for [replay (#1855)](https://github.com/escoffier-labs/brigade/issues/1855)
+require explicit `auto` recording to retain private result bodies.
 
 `brigade.run-cassette.v1` uses `schema_version: 1` and content-addressed JSON
 under `events/cassettes/<sha256>.json`. When a lifecycle journal exists, each

@@ -517,22 +517,27 @@ def dispatch_failure(
     transport: str = "cli",
     requested_model: str | None = None,
 ) -> WorkerResult:
-    """Map adapter I/O failures only. Never persist arbitrary exception content."""
-    from . import proc, runguard
+    """Keep ordinary failures worker-local without persisting exception content."""
+    from . import proc, run_budget, runguard
     from .run_transport import WorkerResult
 
     runguard.raise_if_retained_run_lock(error)
-    cancelled = isinstance(error, proc.ProcessCancelledError)
-    if not isinstance(error, OSError) and not cancelled:
+    if isinstance(error, run_budget.BudgetPolicyError):
         raise error
+    if isinstance(error, proc.ProcessCancelledError):
+        detail, failure_kind = "worker dispatch cancelled", "cancelled"
+    elif isinstance(error, OSError):
+        detail, failure_kind = "worker transport unavailable", "transport-error"
+    else:
+        detail, failure_kind = "worker dispatch failed", "internal-error"
     return WorkerResult(
         worker=worker,
         task=task,
         text="",
         ok=False,
-        detail="worker dispatch cancelled" if cancelled else "worker transport unavailable",
+        detail=detail,
         failure_phase="dispatch",
-        failure_kind="cancelled" if cancelled else "transport-error",
+        failure_kind=failure_kind,
         transport=transport,
         requested_model=requested_model,
     )
@@ -646,8 +651,10 @@ def _purge_run_dir(run: str, *, cwd: Path, runs_dir: Path | None) -> Path:
     from . import run_id, runs_cmd
 
     raw = Path(run).expanduser()
-    if raw.is_absolute() or len(raw.parts) > 1 or _path_present(raw):
+    if raw.is_absolute() or len(raw.parts) > 1:
         candidate = raw
+    elif _path_present(cwd / raw):
+        candidate = cwd / raw
     else:
         root = runs_dir.expanduser() if runs_dir is not None else cwd.expanduser() / ".brigade" / "runs"
         # Inspect only a root whose original components pass the same no-follow gate.

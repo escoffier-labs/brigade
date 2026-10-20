@@ -260,18 +260,19 @@ def test_dispatch_releases_lease_when_worker_invocation_raises(monkeypatch, tmp_
         raise RuntimeError("worker transport failed")
 
     monkeypatch.setattr(agents, "run_agent", raises)
-    with pytest.raises(RuntimeError, match="worker transport failed"):
-        run_transport.dispatch(
-            [Assignment(worker="coder", task="implement it")],
-            _roster(),
-            build_prompt=lambda agent, assignment, **kw: assignment.task,
-            run_appserver_worker=lambda *a, **kw: agents.AgentResult(text="", ok=False, detail="unused"),
-            event_writer=lambda events_dir, worker, verbose=False: None,
-            cwd=tmp_path,
-            read_only=True,
-            output_dir=tmp_path,
-            model_lease=lease,
-        )
+    result = run_transport.dispatch(
+        [Assignment(worker="coder", task="implement it")],
+        _roster(),
+        build_prompt=lambda agent, assignment, **kw: assignment.task,
+        run_appserver_worker=lambda *a, **kw: agents.AgentResult(text="", ok=False, detail="unused"),
+        event_writer=lambda events_dir, worker, verbose=False: None,
+        cwd=tmp_path,
+        read_only=True,
+        output_dir=tmp_path,
+        model_lease=lease,
+    )[0]
+    assert not result.ok and result.failure_kind == "internal-error"
+    assert result.detail == "worker dispatch failed"
     assert released == ["coder"]
 
 
