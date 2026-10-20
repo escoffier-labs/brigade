@@ -7,6 +7,7 @@ with one JSON body: no server-sent events and no sessions.
 
 from __future__ import annotations
 
+import errno
 import hmac
 import json
 import os
@@ -16,7 +17,7 @@ import stat
 import sys
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
-from urllib.parse import urlsplit
+from urllib.parse import SplitResult, urlsplit
 
 from .mcp_server import Handlers, dispatch, response
 
@@ -24,6 +25,7 @@ LOOPBACK_HOSTS = ("127.0.0.1", "::1")
 ORIGIN_HOSTS = ("127.0.0.1", "::1", "localhost")
 MCP_PATH = "/mcp"
 MAX_BODY_BYTES = 1024 * 1024
+MAX_TOKEN_BYTES = 4096
 
 
 def parse_bind(value: str) -> tuple[str, int]:
@@ -37,12 +39,26 @@ def parse_bind(value: str) -> tuple[str, int]:
 
 
 def read_token(path: Path) -> str:
-    info = path.lstat()
-    if stat.S_ISLNK(info.st_mode) or not stat.S_ISREG(info.st_mode):
-        raise ValueError(f"bearer file must be a regular file, not a symlink: {path}")
-    if info.st_mode & 0o077:
-        raise ValueError(f"bearer file must be mode 0600: {path}")
-    token = path.read_text(encoding="utf-8").strip()
+    # One no-follow open, then validate and read that descriptor, so the file
+    # cannot be swapped between the check and the read.
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0))
+    except OSError as exc:
+        if exc.errno in (errno.ELOOP, errno.EMLINK):
+            raise ValueError(f"bearer file must be a regular file, not a symlink: {path}") from exc
+        raise
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            raise ValueError(f"bearer file must be a regular file, not a symlink: {path}")
+        if hasattr(os, "getuid") and info.st_uid != os.getuid():
+            raise ValueError(f"bearer file must be owned by the current user: {path}")
+        if info.st_mode & 0o077:
+            raise ValueError(f"bearer file must be mode 0600: {path}")
+        data = os.read(fd, MAX_TOKEN_BYTES)
+    finally:
+        os.close(fd)
+    token = data.decode("utf-8").strip()
     if not token:
         raise ValueError(f"bearer file is empty: {path}")
     return token
@@ -60,10 +76,32 @@ def ensure_token(path: Path) -> Path:
     return path
 
 
+def _loopback_authority(parts: SplitResult) -> bool:
+    try:
+        hostname, _port = parts.hostname, parts.port  # .port raises on a malformed port
+    except ValueError:
+        return False
+    return hostname in ORIGIN_HOSTS
+
+
 def _origin_allowed(origin: str | None) -> bool:
     if origin is None:
         return True
-    return urlsplit(origin).hostname in ORIGIN_HOSTS
+    try:
+        parts = urlsplit(origin)
+    except ValueError:
+        return False
+    return parts.scheme in ("http", "https") and _loopback_authority(parts)
+
+
+def _host_allowed(host: str | None) -> bool:
+    if not host:
+        return False
+    try:
+        parts = urlsplit(f"//{host}")
+    except ValueError:
+        return False
+    return _loopback_authority(parts)
 
 
 def make_handler(handlers: Handlers, token: str) -> type[BaseHTTPRequestHandler]:
@@ -71,6 +109,7 @@ def make_handler(handlers: Handlers, token: str) -> type[BaseHTTPRequestHandler]
 
     class McpRequestHandler(BaseHTTPRequestHandler):
         server_version = "brigade-mcp"
+        timeout = 10  # seconds; a stalled client must not hold the single-threaded server
 
         def log_message(self, format: str, *args: object) -> None:
             return  # keep request lines out of logs; tool arguments are user content
@@ -87,6 +126,9 @@ def make_handler(handlers: Handlers, token: str) -> type[BaseHTTPRequestHandler]
         def _admitted(self) -> bool:
             if urlsplit(self.path).path != MCP_PATH:
                 self._send(404, {"error": "not found"})
+                return False
+            if not _host_allowed(self.headers.get("Host")):
+                self._send(403, {"error": "host not allowed"})
                 return False
             if not _origin_allowed(self.headers.get("Origin")):
                 self._send(403, {"error": "origin not allowed"})
@@ -118,7 +160,7 @@ def make_handler(handlers: Handlers, token: str) -> type[BaseHTTPRequestHandler]
             raw = self.rfile.read(int(length_text))
             try:
                 request = json.loads(raw)
-            except (json.JSONDecodeError, UnicodeDecodeError):
+            except (ValueError, RecursionError):
                 self._send(400, response(None, error={"code": -32700, "message": "parse error"}))
                 return
             if isinstance(request, list):

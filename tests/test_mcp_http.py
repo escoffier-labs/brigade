@@ -5,7 +5,10 @@ from __future__ import annotations
 import io
 import json
 import os
+import socket
+import stat
 import threading
+import time
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -141,3 +144,90 @@ def test_stdio_and_http_answer_identically(tmp_path: Path, monkeypatch):
         srv.shutdown()
         srv.server_close()
     assert http_replies == stdio_replies
+
+
+def _raw(url: str, data: bytes, headers: dict[str, str] | None = None) -> tuple[int, object]:
+    request = urllib.request.Request(url, data=data, method="POST")
+    for key, value in {"Authorization": f"Bearer {TOKEN}", **(headers or {})}.items():
+        request.add_header(key, value)
+    try:
+        with urllib.request.urlopen(request, timeout=5) as resp:
+            raw = resp.read()
+            return resp.status, json.loads(raw) if raw else None
+    except urllib.error.HTTPError as exc:
+        raw = exc.read()
+        return exc.code, json.loads(raw) if raw else None
+
+
+def test_host_and_malformed_origin_are_rejected(server):
+    ping = {"jsonrpc": "2.0", "id": 1, "method": "ping"}
+    port = server.rsplit(":", 1)[1]
+    assert _post(f"{server}/mcp", ping, {"Host": f"evil.example:{port}"})[0] == 403
+    assert _post(f"{server}/mcp", ping, {"Host": f"localhost:{port}"})[0] == 200
+    assert _post(f"{server}/mcp", ping, {"Host": "127.0.0.1"})[0] == 200
+    assert _post(f"{server}/mcp", ping, {"Origin": "http://[::1"})[0] == 403
+    assert _post(f"{server}/mcp", ping, {"Origin": "ftp://localhost"})[0] == 403
+    assert _post(f"{server}/mcp", ping, {"Origin": "http://localhost:notaport"})[0] == 403
+
+
+def test_parser_failures_return_fixed_400_without_traceback(server, capsys):
+    for body in (b"[" * 100000, b"1" * 5000):
+        status, reply = _raw(f"{server}/mcp", body)
+        assert status == 400
+        assert reply["error"] == {"code": -32700, "message": "parse error"}
+    assert "Traceback" not in capsys.readouterr().err
+
+
+def test_slow_client_cannot_hold_the_server():
+    srv = mcp_http.build_server(_handlers(), host="127.0.0.1", port=0, token=TOKEN)
+    assert srv.RequestHandlerClass.timeout == 10
+    srv.RequestHandlerClass.timeout = 0.5
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    port = srv.server_address[1]
+    slow = socket.create_connection(("127.0.0.1", port))
+    try:
+        slow.sendall(b"POST /mc")
+        time.sleep(0.1)
+        started = time.monotonic()
+        status, _ = _post(f"http://127.0.0.1:{port}/mcp", {"jsonrpc": "2.0", "id": 1, "method": "ping"})
+        assert status == 200
+        assert time.monotonic() - started < 4
+    finally:
+        slow.close()
+        srv.shutdown()
+        srv.server_close()
+
+
+def test_read_token_reads_the_opened_file_only(tmp_path: Path, monkeypatch):
+    path = tmp_path / "token"
+    path.write_text("real-token\n")
+    os.chmod(path, 0o600)
+    attacker = tmp_path / "attacker"
+    attacker.write_text("attacker-token\n")
+    os.chmod(attacker, 0o600)
+    real_lstat = Path.lstat
+
+    def swapping_lstat(self: Path) -> os.stat_result:
+        result = real_lstat(self)
+        if self == path and not stat.S_ISLNK(result.st_mode):
+            path.unlink()
+            path.symlink_to(attacker)
+        return result
+
+    monkeypatch.setattr(Path, "lstat", swapping_lstat)
+    try:
+        token = mcp_http.read_token(path)
+    except ValueError:
+        token = None
+    assert token != "attacker-token"
+
+
+def test_read_token_checks_owner_and_bounds_size(tmp_path: Path, monkeypatch):
+    path = tmp_path / "token"
+    path.write_text("a" * 5000)
+    os.chmod(path, 0o600)
+    assert len(mcp_http.read_token(path)) == 4096
+    monkeypatch.setattr(mcp_http.os, "getuid", lambda: os.stat(path).st_uid + 1)
+    with pytest.raises(ValueError, match="owned by the current user"):
+        mcp_http.read_token(path)

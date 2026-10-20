@@ -197,3 +197,58 @@ def test_work_brief_in_wired_repo_returns_brief_subset(stores, monkeypatch):
         "latest_session": None,
         "next": "ship",
     }
+
+
+def test_symlinked_card_root_yields_no_cards(stores, tmp_path: Path):
+    repo, _ = stores
+    outside = tmp_path / "outside"
+    _card(outside, "leak.md", "Leaked secret", "vlan secret body")
+    (repo / "memory").mkdir()
+    (repo / "memory" / "cards").symlink_to(outside / "memory" / "cards")
+    tools = _tools(repo)
+    assert tools.call("list_cards", {"scope": "repo"}) == ([], False)
+    assert tools.call("search_cards", {"query": "vlan"}) == ([], False)
+    assert tools.resources() == []
+    assert tools.call("get_card", {"path": "repo:memory/cards/leak.md"})[1] is True
+    status, _ = tools.call("memory_status", {})
+    assert status["repo"]["card_count"] == 0
+
+
+def test_write_handoff_refuses_symlinked_inbox(stores, tmp_path: Path):
+    repo, _ = stores
+    outside = tmp_path / "outside-inbox"
+    outside.mkdir()
+    (repo / ".claude").mkdir()
+    (repo / ".claude" / "memory-handoffs").symlink_to(outside)
+    message, failed = _tools(repo).call("write_handoff", {"title": "T", "summary": "S.", "content": "Body."})
+    assert failed is True
+    assert "outside the memory store" in message
+    assert list(outside.iterdir()) == []
+
+
+def test_write_handoff_user_store_modes_are_private(stores, monkeypatch, tmp_path: Path):
+    _, user = stores
+    from brigade import memory_scope
+
+    user.mkdir(mode=0o755)
+    user.chmod(0o755)
+    monkeypatch.setattr(memory_scope, "resolve_wired_target", lambda cwd, harness=None: None)
+    tools = memory_mcp_core.MemoryTools(cwd=tmp_path, inbox="claude")
+    result, failed = tools.call("write_handoff", {"title": "T", "summary": "S.", "content": "Body."})
+    assert failed is False
+    assert (user / "memory" / "handoffs").stat().st_mode & 0o777 == 0o700
+    assert (user / result["path"]).stat().st_mode & 0o777 == 0o600
+    assert user.stat().st_mode & 0o777 == 0o755
+
+
+def test_write_handoff_bounds_content_and_lists(stores):
+    repo, _ = stores
+    tools = _tools(repo)
+    base = {"title": "T", "summary": "S."}
+    message, failed = tools.call("write_handoff", {**base, "content": "x" * (256 * 1024 + 1)})
+    assert failed is True and "content" in message
+    for key in ("facts", "evidence"):
+        message, failed = tools.call("write_handoff", {**base, "content": "Body.", key: ["f"] * 51})
+        assert failed is True and key in message
+    inbox = repo / ".claude" / "memory-handoffs"
+    assert not inbox.exists() or not list(inbox.glob("*.md"))

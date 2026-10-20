@@ -8,11 +8,13 @@ the shape mcp_server.ToolCaller expects.
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
 from . import mcp_server, memory_cmd, memory_scope
+from .card_fingerprint import read_text_nofollow
 from .handoff_cmd import drafts as handoff_drafts
 from .handoff_cmd.models import DEFAULT_DRAFT_DOCUMENT
 from .memory_scope import REPO, USER, MemoryStore, Resolution
@@ -20,6 +22,8 @@ from .memory_scope import REPO, USER, MemoryStore, Resolution
 SERVER_NAME = "brigade-memory"
 CARD_URI_PREFIX = "card://"
 SEARCH_LIMIT = 20
+MAX_CONTENT_BYTES = 256 * 1024
+MAX_LIST_ITEMS = 50
 SCOPES = ("repo", "user", "all")
 BRIEF_KEYS = ("git", "active_session", "latest_session", "next")
 UNWIRED_HINT = (
@@ -52,16 +56,27 @@ def split_ref(ref: str) -> tuple[str | None, str]:
     return None, ref
 
 
+def _inside(path: Path, root: Path) -> bool:
+    return path.resolve().is_relative_to(root.resolve())
+
+
+def _store_cards(store: MemoryStore) -> list[Path]:
+    """Cards whose real path stays inside the store.
+
+    _iter_cards skips symlinked files but follows a symlinked card root, so a
+    memory/cards link to an outside directory would otherwise leak its cards.
+    """
+    return [path for path in memory_cmd._iter_cards(store.root, store.config) if _inside(path, store.root)]
+
+
 def _read_in_store(store: MemoryStore, rel: str) -> str | None:
     candidate = (store.root / rel).resolve()
-    # Only files whose real path stays inside the store; _iter_cards already
-    # skips symlinks, so a .md link pointing outside never matches.
-    if not candidate.is_relative_to(store.root):
+    if not candidate.is_relative_to(store.root.resolve()):
         return None
-    for path in memory_cmd._iter_cards(store.root, store.config):
+    for path in _store_cards(store):
         if path.resolve() == candidate:
             try:
-                return path.read_text(encoding="utf-8", errors="replace")
+                return read_text_nofollow(path)
             except OSError:
                 return None
     return None
@@ -94,6 +109,8 @@ def _string_list(arguments: dict[str, Any], key: str) -> list[str]:
     value = arguments.get(key, [])
     if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
         raise ValueError(f"{key} must be a list of strings")
+    if len(value) > MAX_LIST_ITEMS:
+        raise ValueError(f"{key} must have at most {MAX_LIST_ITEMS} items")
     return list(value)
 
 
@@ -188,7 +205,7 @@ class MemoryTools:
     def resources(self) -> list[dict[str, Any]]:
         items: list[dict[str, Any]] = []
         for store in self.resolution().stores:
-            for path in memory_cmd._iter_cards(store.root, store.config):
+            for path in _store_cards(store):
                 fields = memory_cmd._card_search_fields(path, store.root)
                 if not fields:
                     continue
@@ -235,7 +252,7 @@ class MemoryTools:
         for store in self.resolution().stores:
             if scope != "all" and store.origin != scope:
                 continue
-            for path in memory_cmd._iter_cards(store.root, store.config):
+            for path in _store_cards(store):
                 rel = str(path.relative_to(store.root))
                 items.append(
                     {
@@ -258,14 +275,17 @@ class MemoryTools:
         query = str(arguments.get("query") or "")
         ranked: list[tuple[int, dict[str, Any]]] = []
         for rank, store in enumerate(self.resolution().stores):
-            for match in memory_cmd.search_cards_payload(store.root, query, limit=SEARCH_LIMIT)["matches"]:
+            # Uncapped so outside-the-store matches dropped here cannot crowd out real ones.
+            for match in memory_cmd.search_cards_payload(store.root, query, limit=sys.maxsize)["matches"]:
+                if not _inside(store.root / match["path"], store.root):
+                    continue
                 ranked.append((rank, {**match, "origin": store.origin, "ref": card_ref(store.origin, match["path"])}))
         ranked.sort(key=lambda item: (-item[1]["score"], item[0], item[1]["path"]))
         return [match for _, match in ranked[:SEARCH_LIMIT]], False
 
     def _memory_status(self, arguments: dict[str, Any]) -> ToolResult:
         res = self.resolution()
-        counts = {store.origin: len(memory_cmd._iter_cards(store.root, store.config)) for store in res.stores}
+        counts = {store.origin: len(_store_cards(store)) for store in res.stores}
         user = memory_scope.user_root()
         repo: dict[str, Any] | None = None
         if res.repo_root is not None:
@@ -300,6 +320,8 @@ class MemoryTools:
         title = _required_text(arguments, "title")
         summary = _required_text(arguments, "summary")
         content = _required_text(arguments, "content")
+        if len(content.encode("utf-8")) > MAX_CONTENT_BYTES:
+            raise ValueError(f"content must be at most {MAX_CONTENT_BYTES} bytes")
         target_card = _optional_text(arguments, "target_card")
         target_document = _optional_text(arguments, "target_document") or DEFAULT_DRAFT_DOCUMENT
         facts = _string_list(arguments, "facts")
@@ -312,6 +334,11 @@ class MemoryTools:
             root.mkdir(mode=0o700, parents=True, exist_ok=True)
             (root / "memory").mkdir(mode=0o700, exist_ok=True)
             inbox, origin = str(root / memory_scope.USER_HANDOFF_INBOX), USER
+        inbox_path, _ = handoff_drafts._draft_inbox_path(root, inbox)
+        if not inbox_path.is_relative_to(root.resolve()):
+            raise ValueError(f"handoff inbox resolves outside the memory store: {inbox_path}")
+        if origin == USER:
+            inbox_path.mkdir(mode=0o700, exist_ok=True)
         payload = handoff_drafts.build_draft(
             target=root,
             title=title,

@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 import re
 import sys
 import time
@@ -809,8 +810,6 @@ def build_draft(
     timestamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
     safe_id = _slugify(draft_id or title)
     path = inbox_path / f"{timestamp}-{safe_id}.md"
-    if path.exists() and not force:
-        raise ValueError(f"handoff draft already exists: {path}")
     text = _render_handoff_draft(
         handoff_type=handoff_type,
         title=title,
@@ -823,7 +822,17 @@ def build_draft(
         suggested_content=suggested_content,
     )
     inbox_path.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
+    if force:
+        path.write_text(text, encoding="utf-8")
+    else:
+        # Exclusive no-follow create: never truncate a file or follow a planted symlink.
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(path, flags, 0o600)
+        except FileExistsError as exc:
+            raise ValueError(f"handoff draft already exists: {path}") from exc
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
     lint_result = _linting_mod.lint_file(path)
     guard_result = _linting_mod._guard_handoff_path(path, target=target, policy=guard_policy) if guard else None
     return {
