@@ -63,9 +63,9 @@ These were decided while reading the code. Task 10 writes them back into the spe
 
 **Files:** none tracked.
 
-- [ ] Wire the worktree into Brigade (writes git-excluded files only): `brigade init --target . --depth repo --harnesses claude --owner claude --git-exclude`, then expect `brigade work brief --target .` to print `work brief: <worktree path>`.
-- [ ] Create the venv: `python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'`. Expect the last line to contain `Successfully installed brigade-cli`.
-- [ ] Baseline: `PY -m pytest tests/test_memory_search_mcp.py tests/test_handoff_cmd.py -q -p no:cacheprovider`. Expect all to pass. Stop and report if not.
+- [x] Wire the worktree into Brigade (writes git-excluded files only): `brigade init --target . --depth repo --harnesses claude --owner claude --git-exclude`, then expect `brigade work brief --target .` to print `work brief: <worktree path>`.
+- [x] Create the venv: `python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'`. Expect the last line to contain `Successfully installed brigade-cli`.
+- [x] Baseline: `PY -m pytest tests/test_memory_search_mcp.py tests/test_handoff_cmd.py -q -p no:cacheprovider`. Expect all to pass. Stop and report if not.
 
 ---
 
