@@ -1525,7 +1525,7 @@ Added after the read-only Daybreak review of Tasks 4-6 (0 critical, 0 high, 5 me
 - Modify: `tests/test_memory_search_mcp.py:10,166-215`
 - Modify: `tests/test_module_size_ratchet.py:22`
 
-- [ ] In `tests/test_memory_search_mcp.py`, replace lines 9-10 with `from brigade import cli, memory_cmd, memory_mcp_core` (the old names are only used by the tests replaced below), and add `import pytest` after `import json`. Replace the three tests from `def test_card_mcp_resources_and_read_are_scoped` to the end of the file with:
+- [x] In `tests/test_memory_search_mcp.py`, replace lines 9-10 with `from brigade import cli, memory_cmd, memory_mcp_core` (the old names are only used by the tests replaced below), and add `import pytest` after `import json`. Replace the three tests from `def test_card_mcp_resources_and_read_are_scoped` to the end of the file with:
 
 ```python
 def test_card_mcp_resources_and_read_are_scoped(tmp_path: Path, monkeypatch):
@@ -1604,8 +1604,8 @@ def test_serve_mcp_contract_lists_six_tools(tmp_path: Path, monkeypatch, capsys)
     assert [s["origin"] for s in payload["stores"]] == ["repo", "user"]
 ```
 
-- [ ] Run, watch them fail: `PY -m pytest tests/test_memory_search_mcp.py -q -p no:cacheprovider`. Expect the new CLI tests and the stdio roundtrip to FAIL (`unrecognized arguments: --http`, server name `brigade-memory-readonly`).
-- [ ] In `src/brigade/memory_cmd.py`, delete everything from the line `# --- read-only MCP server exposing memory cards over card:// ---` through the end of `_run_card_mcp_stdio()` (the `_CARD_URI_PREFIX`, `_card_uri`, `_mcp_card_resources`, `_mcp_read_card`, `_mcp_card_tool_specs`, `_mcp_card_tool_call`, `_run_card_mcp_stdio` definitions). Replace `serve_mcp()` with:
+- [x] Run, watch them fail: `PY -m pytest tests/test_memory_search_mcp.py -q -p no:cacheprovider`. Expect the new CLI tests and the stdio roundtrip to FAIL (`unrecognized arguments: --http`, server name `brigade-memory-readonly`).
+- [x] In `src/brigade/memory_cmd.py`, delete everything from the line `# --- read-only MCP server exposing memory cards over card:// ---` through the end of `_run_card_mcp_stdio()` (the `_CARD_URI_PREFIX`, `_card_uri`, `_mcp_card_resources`, `_mcp_read_card`, `_mcp_card_tool_specs`, `_mcp_card_tool_call`, `_run_card_mcp_stdio` definitions). Replace `serve_mcp()` with:
 
 ```python
 # --- memory MCP server (stdio or loopback HTTP); the tool contract lives in memory_mcp_core ---
@@ -1675,7 +1675,7 @@ def serve_mcp(
 
   Keep the `mcp_server` import at the top of `memory_cmd.py`; it is still used.
 
-- [ ] In `src/brigade/cli/memory.py`, replace lines 300-309 (the `serve-mcp` parser) with:
+- [x] In `src/brigade/cli/memory.py`, replace lines 300-309 (the `serve-mcp` parser) with:
 
 ```python
     p_memory_serve_mcp = memory_sub.add_parser(
@@ -1722,10 +1722,10 @@ def serve_mcp(
         )
 ```
 
-- [ ] Count lines: `wc -l src/brigade/memory_cmd.py`. Expect about 1955 (2012 minus the 125-line block plus the 68-line `serve_mcp`). Delete the line `"src/brigade/memory_cmd.py": 2093,` from `LEGACY_OVERSIZED` in `tests/test_module_size_ratchet.py`; `test_allowlist_only_shrinks` fails while a module under 2000 lines keeps an entry.
-- [ ] Run to green: `PY -m pytest tests/test_memory_search_mcp.py tests/test_memory_mcp_core.py tests/test_mcp_http.py tests/test_module_size_ratchet.py tests/test_cli_inventory_contract.py tests/test_harness_user_scope.py tests/test_harness_user_scope_slice2.py -q -p no:cacheprovider`. Expect all PASS. The command inventory lists command names only, so new flags do not change it.
-- [ ] Lint and types: `PY -m ruff check src/brigade/memory_cmd.py src/brigade/cli/memory.py` and `PY -m mypy src/brigade/memory_cmd.py src/brigade/cli/memory.py`. Expect clean.
-- [ ] Commit: `git add src/brigade/memory_cmd.py src/brigade/cli/memory.py tests/test_memory_search_mcp.py tests/test_module_size_ratchet.py && git commit -m "feat(memory): serve the memory MCP core over stdio and loopback HTTP"`
+- [x] Count lines: `wc -l src/brigade/memory_cmd.py`. Expect about 1955 (2012 minus the 125-line block plus the 68-line `serve_mcp`). Delete the line `"src/brigade/memory_cmd.py": 2093,` from `LEGACY_OVERSIZED` in `tests/test_module_size_ratchet.py`; `test_allowlist_only_shrinks` fails while a module under 2000 lines keeps an entry.
+- [x] Run to green: `PY -m pytest tests/test_memory_search_mcp.py tests/test_memory_mcp_core.py tests/test_mcp_http.py tests/test_module_size_ratchet.py tests/test_cli_inventory_contract.py tests/test_harness_user_scope.py tests/test_harness_user_scope_slice2.py -q -p no:cacheprovider`. Expect all PASS. The command inventory lists command names only, so new flags do not change it.
+- [x] Lint and types: `PY -m ruff check src/brigade/memory_cmd.py src/brigade/cli/memory.py` and `PY -m mypy src/brigade/memory_cmd.py src/brigade/cli/memory.py`. Expect clean.
+- [x] Commit: `git add src/brigade/memory_cmd.py src/brigade/cli/memory.py tests/test_memory_search_mcp.py tests/test_module_size_ratchet.py && git commit -m "feat(memory): serve the memory MCP core over stdio and loopback HTTP"`
 
 ---
 

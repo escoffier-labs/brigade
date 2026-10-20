@@ -123,5 +123,5 @@ plugins/brigade/
 ## Later phases (not designed here)
 
 1. Claude Desktop extension that bundles the stdio server.
-2. `brigade connect`: OAuth and a tunnel in front of the HTTP transport, offering the v1 memory tools as a custom connector for ChatGPT, claude.ai, and Grok Bot. This generalizes the single-operator Dot and Grok Bot packs.
+2. A future connect command: OAuth and a tunnel in front of the HTTP transport, offering the v1 memory tools as a custom connector for ChatGPT, claude.ai, and Grok Bot. This generalizes the single-operator Dot and Grok Bot packs.
 3. Directory submissions once the connector is stable.

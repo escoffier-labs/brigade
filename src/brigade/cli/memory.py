@@ -298,13 +298,30 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     p_memory_recall.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_memory_serve_mcp = memory_sub.add_parser(
-        "serve-mcp", help="Expose memory cards over a read-only MCP stdio server (card:// scheme)."
+        "serve-mcp", help="Serve Brigade memory over MCP (stdio or loopback HTTP); prints the contract otherwise."
     )
     p_memory_serve_mcp.add_argument(
-        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace whose cards to serve."
+        "--target",
+        "-t",
+        type=Path,
+        default=None,
+        help="Repo whose cards form the repo store. Default: nearest Brigade-wired repo above the cwd.",
+    )
+    serve_transport = p_memory_serve_mcp.add_mutually_exclusive_group()
+    serve_transport.add_argument("--stdio", action="store_true", help="Run the JSON-RPC stdio server.")
+    serve_transport.add_argument(
+        "--http", metavar="HOST:PORT", default=None, help="Run Streamable HTTP on loopback, e.g. 127.0.0.1:8790."
+    )
+    serve_transport.add_argument(
+        "--print-token-path",
+        action="store_true",
+        help="Create the HTTP bearer token file if missing and print its path (never the token).",
     )
     p_memory_serve_mcp.add_argument(
-        "--stdio", action="store_true", help="Run the JSON-RPC stdio server (otherwise print the contract)."
+        "--bearer-file", type=Path, default=None, help="Existing mode-0600 bearer token file for --http."
+    )
+    p_memory_serve_mcp.add_argument(
+        "--inbox", default="codex", help="Handoff inbox alias or path for write_handoff in the repo store."
     )
     p_memory_serve_mcp.add_argument("--json", action="store_true", help="Print the contract as JSON.")
 
@@ -494,7 +511,15 @@ def dispatch(args) -> int:
             target=args.target, cwd=args.cwd, limit=args.limit, json_output=args.json, query=args.query
         )
     if args.memory_command == "serve-mcp":
-        return memory_cmd.serve_mcp(target=args.target, stdio=args.stdio, json_output=args.json)
+        return memory_cmd.serve_mcp(
+            target=args.target,
+            stdio=args.stdio,
+            http=args.http,
+            bearer_file=args.bearer_file,
+            print_token_path=args.print_token_path,
+            inbox=args.inbox,
+            json_output=args.json,
+        )
 
     from .. import memory_doctor_cmd
 
