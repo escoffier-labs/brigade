@@ -10,6 +10,8 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
 from brigade import toml_compat
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -69,6 +71,7 @@ def _run_hook(tmp_path: Path, project: Path, path_dirs: list[Path]) -> subproces
     return subprocess.run(["bash", str(HOOK)], env=env, capture_output=True, text=True, timeout=30)
 
 
+@pytest.mark.skipif(os.name != "posix", reason="the SessionStart hook is a POSIX shell script")
 def test_hook_exits_zero_without_brigade_on_path(tmp_path: Path):
     project = tmp_path / "proj"
     project.mkdir()
@@ -77,6 +80,7 @@ def test_hook_exits_zero_without_brigade_on_path(tmp_path: Path):
     assert "brigade-memory MCP tools" in result.stdout
 
 
+@pytest.mark.skipif(os.name != "posix", reason="the SessionStart hook is a POSIX shell script")
 def test_hook_prints_brief_in_wired_repo_and_skips_when_enforced(tmp_path: Path):
     project = tmp_path / "proj"
     (project / ".brigade").mkdir(parents=True)
@@ -93,6 +97,7 @@ def test_hook_prints_brief_in_wired_repo_and_skips_when_enforced(tmp_path: Path)
     assert _run_hook(tmp_path, project, [bin_dir]).stdout == ""
 
 
+@pytest.mark.skipif(os.name != "posix", reason="the SessionStart hook is a POSIX shell script")
 def test_hook_parses_and_exits_zero_with_home_unset(tmp_path: Path):
     assert subprocess.run(["bash", "-n", str(HOOK)], capture_output=True, timeout=30).returncode == 0
     project = tmp_path / "proj"
@@ -103,6 +108,7 @@ def test_hook_parses_and_exits_zero_with_home_unset(tmp_path: Path):
     assert "brigade-memory MCP tools" in result.stdout
 
 
+@pytest.mark.skipif(os.name != "posix", reason="the SessionStart hook is a POSIX shell script")
 def test_hook_skips_the_brief_when_no_timeout_runner_exists(tmp_path: Path):
     project = tmp_path / "proj"
     (project / ".brigade").mkdir(parents=True)

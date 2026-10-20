@@ -163,13 +163,17 @@ def partition_ready(
     target: Path,
     *,
     impact_runner: Any | None = None,
+    occupied: Sequence[dict[str, Any] | None] = (),
 ) -> dict[str, Any]:
     """Greedy-partition ``ready`` into dispatch waves by footprint intersection.
 
     Returns a payload suitable for additive merge onto the readiness JSON:
 
     ``waves``, ``wave_count``, ``partition_mode``, ``partition_degraded``,
-    and optional ``partition_degraded_reason``.
+    and optional ``partition_degraded_reason``. ``occupied`` contains footprints
+    of claimed in-flight work. Conflicts are omitted from every wave and
+    reported as ``skipped`` with reason ``occupied``. An unknown occupied
+    footprint holds all ready work, just like an exclusive ready footprint.
     """
     target = target.expanduser().resolve()
     available, degrade_reason, binary, db_path = _graphtrail_availability(target)
@@ -178,6 +182,18 @@ def partition_ready(
 
     runner = impact_runner or footprint_mod._run_graphtrail_impact
     impact_cache: dict[str, dict[str, Any] | None] = {}
+    occupied_files = [
+        _effective_files(
+            footprint,
+            target=target,
+            binary=binary,
+            db_path=db_path,
+            use_symbol_impact=use_symbol_impact,
+            impact_runner=runner,
+            impact_cache=impact_cache,
+        )
+        for footprint in occupied
+    ]
     effective: dict[str, frozenset[str]] = {}
     exclusive: dict[str, bool] = {}
     for item in ready:
@@ -199,10 +215,14 @@ def partition_ready(
     waves: list[list[dict[str, Any]]] = []
     wave_task_ids: list[list[str]] = []
     wave_has_exclusive: list[bool] = []
+    skipped: list[dict[str, str]] = []
 
     for item in ready:
         task_id = str(item.get("id") or "")
         files = effective.get(task_id, frozenset())
+        if any(footprints_overlap(None, None, left_files=files, right_files=busy) for busy in occupied_files):
+            skipped.append({"task_id": task_id, "reason": "occupied"})
+            continue
         is_exclusive = exclusive.get(task_id, True)
         placed = False
         for index, wave in enumerate(waves):
@@ -248,6 +268,8 @@ def partition_ready(
     }
     if not use_symbol_impact and degrade_reason:
         payload["partition_degraded_reason"] = degrade_reason
+    if occupied:
+        payload["skipped"] = skipped
     return payload
 
 

@@ -9,8 +9,10 @@ Conservative by design:
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
@@ -66,6 +68,22 @@ NO_HANDOFF_INBOX = 2
 INVALID_SOURCE_CONFIG = 3
 SKIP_NO_HANDOFF_INBOX = "no handoff inbox"
 SKIP_INVALID_SOURCE_CONFIG = "invalid handoff source config"
+
+# Git state that would point `git -C <inbox>` at some other repository or
+# stop discovery short of the one that owns the inbox.
+_GIT_LOCATION_ENV = (
+    "GIT_DIR",
+    "GIT_WORK_TREE",
+    "GIT_INDEX_FILE",
+    "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
+    "GIT_CEILING_DIRECTORIES",
+)
+_TRACKED_SKIP_REASON = "tracked by git or tracking unverifiable; left in place"
+
+
+class TrackedHandoffError(RuntimeError):
+    """A handoff git tracks (or may track) must never be moved out of place."""
 
 
 def skip_reason(rc: int) -> str | None:
@@ -225,7 +243,11 @@ def ingest_into(
 
     for handoffs_dir in handoff_dirs:
         processed_dir = handoffs_dir / "processed"
-        for path in _list_handoffs(handoffs_dir):
+        handoffs, tracked = _list_handoffs(handoffs_dir)
+        for path in tracked:
+            stats.skipped += 1
+            stats.actions.append(f"skip   {path.name}  ({_TRACKED_SKIP_REASON})")
+        for path in handoffs:
             stats.processed += 1
             sections = parse(path)
             outcome = decide(
@@ -234,15 +256,18 @@ def ingest_into(
                 promote_cards=promote_cards,
                 route_documents=route_documents,
             )
-            action = _execute(
-                outcome,
-                handoff_path=path,
-                target=owner,
-                sections=sections,
-                inbox_dir=inbox_dir,
-                processed_dir=processed_dir,
-                dry_run=dry_run,
-            )
+            try:
+                action = _execute(
+                    outcome,
+                    handoff_path=path,
+                    target=owner,
+                    sections=sections,
+                    inbox_dir=inbox_dir,
+                    processed_dir=processed_dir,
+                    dry_run=dry_run,
+                )
+            except TrackedHandoffError:
+                action = Action("skipped", f"skip   {path.name}  ({_TRACKED_SKIP_REASON})")
             stats.actions.append(action.summary)
             if action.kind == "promoted":
                 stats.promoted += 1
@@ -544,6 +569,9 @@ def _execute(
     from .inbox_lock import InboxLockTimeout
 
     name = handoff_path.name
+    # Re-check before destination writes as well as at the final archive boundary.
+    if not dry_run and _is_tracked(handoff_path, _git_tracked_files(handoff_path.parent)):
+        raise TrackedHandoffError(f"refusing to ingest git-tracked handoff {handoff_path}")
 
     if outcome.kind == "promoted":
         dest = outcome.dest
@@ -653,15 +681,162 @@ def _evidence_pointer(handoff_path: Path, *, sections: Dict[str, str], target: P
     return handoff_path.name
 
 
-def _list_handoffs(handoffs_dir: Path) -> List[Path]:
+def _warn_tracking_check_failed(directory: Path, detail: str) -> None:
+    # Otherwise a persistent git error reads like ordinary tracked-file skips.
+    print(
+        f"brigade ingest: git tracking check failed for {directory} ({detail}); leaving its handoffs in place",
+        file=sys.stderr,
+    )
+
+
+def _git_tracked_names(directory: Path) -> set[str] | None:
+    """Return names tracked by any work tree containing `directory`.
+
+    An absent git binary or a directory outside any work tree yields an empty
+    set. Any other failure returns None so callers can fail closed.
+    """
+    env = {k: v for k, v in os.environ.items() if k not in _GIT_LOCATION_ENV}
+    env["LC_ALL"] = "C"
+    env["GIT_DISCOVERY_ACROSS_FILESYSTEM"] = "true"
+    try:
+        directory = directory.resolve()
+        try:
+            discovery = subprocess.run(
+                ["git", "-C", str(directory), "rev-parse", "--show-cdup"],
+                capture_output=True,
+                env=env,
+                timeout=30,
+                check=False,
+            )
+        except FileNotFoundError:
+            return set()
+        worktrees: list[Path] = []
+        # Discovery can skip incomplete metadata and find an outer repository.
+        # lstat also keeps dangling .git symlinks and unreadable markers visible.
+        for probe in (directory, *directory.parents):
+            try:
+                (probe / ".git").lstat()
+            except FileNotFoundError:
+                continue
+            worktrees.append(probe)
+        if discovery.returncode != 0:
+            if not worktrees and b"not a git repository" in discovery.stderr:
+                return set()
+            detail = discovery.stderr.decode("utf-8", "replace").strip().splitlines()
+            _warn_tracking_check_failed(directory, detail[0] if detail else f"git exited {discovery.returncode}")
+            return None
+        if not worktrees:
+            _warn_tracking_check_failed(directory, "git discovered a repository without an accessible .git marker")
+            return None
+        names: set[str] = set()
+        # A nested repository's index can hide paths still in an outer index.
+        for marker_root in worktrees:
+            discovery = subprocess.run(
+                ["git", "-C", str(marker_root), "--git-dir", str(marker_root / ".git"), "rev-parse", "--show-cdup"],
+                capture_output=True,
+                env=env,
+                timeout=30,
+                check=False,
+            )
+            if discovery.returncode != 0:
+                detail = discovery.stderr.decode("utf-8", "replace").strip().splitlines()
+                _warn_tracking_check_failed(directory, detail[0] if detail else f"git exited {discovery.returncode}")
+                return None
+            # --show-cdup can return an absolute configured-worktree path.
+            worktree = (marker_root / os.fsdecode(discovery.stdout.removesuffix(b"\n"))).resolve()
+            result = subprocess.run(
+                [
+                    "git",
+                    "-C",
+                    str(worktree),
+                    "--git-dir",
+                    str(marker_root / ".git"),
+                    "--work-tree",
+                    str(worktree),
+                    "-c",
+                    "core.fsmonitor=false",
+                    "ls-files",
+                    "-z",
+                ],
+                capture_output=True,
+                env=env,
+                timeout=30,
+                check=False,
+            )
+            if result.returncode != 0:
+                detail = result.stderr.decode("utf-8", "replace").strip().splitlines()
+                _warn_tracking_check_failed(directory, detail[0] if detail else f"git exited {result.returncode}")
+                return None
+            for entry in result.stdout.decode("utf-8", "surrogateescape").split("\0"):
+                if not entry:
+                    continue
+                try:
+                    # Git's case matching can miss Unicode directory aliases.
+                    if (worktree / entry).parent.samefile(directory):
+                        names.add(Path(entry).name)
+                except FileNotFoundError:
+                    # A deleted parent cannot contain the current handoff.
+                    continue
+        return names
+    except (OSError, subprocess.SubprocessError) as exc:
+        _warn_tracking_check_failed(directory, str(exc))
+        return None
+
+
+def _git_tracked_files(directory: Path) -> tuple[set[str], set[tuple[int, int]]] | None:
+    """Return indexed names and file identities directly in `directory`.
+
+    Names protect deleted and recreated files. Identities also protect case
+    aliases on case-insensitive filesystems. None means the check failed.
+    """
+    names = _git_tracked_names(directory)
+    if names is None:
+        return None
+    identities: set[tuple[int, int]] = set()
+    for name in names:
+        try:
+            st = (directory / name).stat()
+        except FileNotFoundError:
+            continue
+        except OSError as exc:
+            _warn_tracking_check_failed(directory, str(exc))
+            return None
+        identities.add((st.st_dev, st.st_ino))
+    return names, identities
+
+
+def _is_tracked(path: Path, tracked: tuple[set[str], set[tuple[int, int]]] | None) -> bool:
+    if tracked is None:
+        return True
+    names, identities = tracked
+    # Protect case aliases even when their identities could not be read.
+    if path.name.casefold() in {name.casefold() for name in names}:
+        return True
+    try:
+        st = path.stat()
+    except OSError:
+        return True
+    return (st.st_dev, st.st_ino) in identities
+
+
+def _list_handoffs(handoffs_dir: Path) -> tuple[List[Path], List[Path]]:
+    """Split the inbox's handoffs into (ingestable, git-tracked)."""
+    tracked_files = _git_tracked_files(handoffs_dir)
     out: List[Path] = []
+    tracked: List[Path] = []
     for p in sorted(handoffs_dir.iterdir()):
         if p.is_file() and p.suffix == ".md" and p.name != "TEMPLATE.md":
-            out.append(p)
-    return out
+            if _is_tracked(p, tracked_files):
+                tracked.append(p)
+            else:
+                out.append(p)
+    return out, tracked
 
 
 def _archive(src: Path, processed_dir: Path) -> None:
+    # Re-check right before the move: a file tracked after listing must stay.
+    if _is_tracked(src, _git_tracked_files(src.parent)):
+        raise TrackedHandoffError(f"refusing to archive git-tracked handoff {src}")
     processed_dir.mkdir(parents=True, exist_ok=True)
     dest = processed_dir / src.name
     if dest.exists():
