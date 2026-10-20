@@ -936,18 +936,18 @@ def task_edge_remove(
         ledger = ledger_mod._read_task_ledger(target)
         resolved_source = source
         resolved_target = target_id
-        if source and not edge_id:
+        if source and not edge_id and not any(edge["source"] == source for edge in ledger["edges"]):
             source_task, _ = ledger_mod._find_task(target, source)
-            if source_task is None and not any(edge["source"] == source for edge in ledger["edges"]):
+            if source_task is None:
                 print(f"error: unknown source task: {source}", file=sys.stderr)
                 return 1
-            resolved_source = str(source_task["id"]) if source_task is not None else source
-        if target_id and not edge_id:
+            resolved_source = str(source_task["id"])
+        if target_id and not edge_id and not any(edge["target"] == target_id for edge in ledger["edges"]):
             target_task, _ = ledger_mod._find_task(target, target_id)
-            if target_task is None and not any(edge["target"] == target_id for edge in ledger["edges"]):
+            if target_task is None:
                 print(f"error: unknown target task: {target_id}", file=sys.stderr)
                 return 1
-            resolved_target = str(target_task["id"]) if target_task is not None else target_id
+            resolved_target = str(target_task["id"])
         removed = edges_mod.remove_edge_from_ledger(
             ledger,
             edge_id=edge_id,

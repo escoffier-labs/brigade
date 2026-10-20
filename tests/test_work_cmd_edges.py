@@ -285,7 +285,12 @@ def test_terminal_statuses_satisfy_blockers(tmp_path, monkeypatch, capsys):
 
 @pytest.mark.parametrize("with_edge_id", [True, False])
 @pytest.mark.parametrize("missing_kind", ["blocker", "parent", "ancestor_blocker", "ancestor_parent"])
-def test_missing_dependency_gates_ready_and_names_repair(tmp_path, capsys, missing_kind, with_edge_id):
+def test_missing_dependency_gates_ready_and_names_repair(tmp_path, monkeypatch, capsys, missing_kind, with_edge_id):
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    monkeypatch.chdir(elsewhere)
+    tmp_path = tmp_path / "repo with spaces"
+    tmp_path.mkdir()
     _init_git_repo(tmp_path)
     task = _add(tmp_path, "Missing dependency consumer")
     unfinished = _add(tmp_path, "Unfinished dependency")
@@ -328,13 +333,53 @@ def test_missing_dependency_gates_ready_and_names_repair(tmp_path, capsys, missi
     repair = blocked["missing_dependencies"][0]["repair_commands"][0]
     assert repair in out
     if with_edge_id:
-        assert repair == f"brigade work task edge remove --id {edge['id']}"
-    assert cli.main([*shlex.split(repair)[1:], "--target", str(tmp_path)]) == 0
+        assert repair == f"brigade work task edge remove --id {edge['id']} --target {shlex.quote(str(tmp_path))}"
+    assert cli.main(shlex.split(repair)[1:]) == 0
     assert work_cmd.task_done(target=tmp_path, task_id=unfinished["id"]) == 0
     capsys.readouterr()
     assert work_cmd.ready(target=tmp_path, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
     assert task["id"] in {item["id"] for item in payload["ready"]}
+
+
+@pytest.mark.parametrize("endpoint", ["source", "target"])
+def test_edge_remove_prefers_literal_endpoint_over_live_task_prefix(tmp_path, capsys, endpoint):
+    _init_git_repo(tmp_path)
+    live = _add(tmp_path, "Live prefix match")
+    other = _add(tmp_path, "Other endpoint")
+    missing_id = live["id"][:-1]
+    ledger = work_cmd._read_task_ledger(tmp_path)
+    literal = {"source": missing_id, "target": other["id"]}
+    if endpoint == "target":
+        literal = {"source": other["id"], "target": missing_id}
+    actual = {**literal, endpoint: live["id"], "type": "blocks"}
+    ledger["edges"] = [{**literal, "type": "blocks"}, actual]
+    work_cmd._write_task_ledger(tmp_path, ledger)
+
+    assert (
+        cli.main(
+            [
+                "work",
+                "task",
+                "edge",
+                "remove",
+                "--target",
+                str(tmp_path),
+                "--type",
+                "blocks",
+                "--source",
+                literal["source"],
+                "--edge-target",
+                literal["target"],
+                "--json",
+            ]
+        )
+        == 0
+    )
+    removed = json.loads(capsys.readouterr().out)["removed"]
+    assert len(removed) == 1
+    assert removed[0][endpoint] == missing_id
+    assert work_cmd._read_task_ledger(tmp_path)["edges"] == [actual]
 
 
 def test_task_add_deps_and_graph_atomic(tmp_path, monkeypatch, capsys):
