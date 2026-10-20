@@ -8,6 +8,7 @@ import hashlib
 import os
 import re
 import sys
+import tempfile
 import time
 import shutil
 from dataclasses import dataclass
@@ -822,25 +823,29 @@ def build_draft(
         suggested_content=suggested_content,
     )
     inbox_path.mkdir(parents=True, exist_ok=True)
-    # Never follow a planted symlink. Without --force the create is exclusive, so an
-    # existing file is never truncated; with --force it is overwritten and kept 0600.
-    flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
-    flags |= os.O_TRUNC if force else os.O_EXCL
-    if force and not hasattr(os, "O_NOFOLLOW") and path.is_symlink():
-        # No O_NOFOLLOW (Windows): O_TRUNC would follow the link, so refuse it up front.
-        raise ValueError(f"handoff draft path is a symlink: {path}")
-    try:
-        fd = os.open(path, flags, 0o600)
-    except FileExistsError as exc:
-        raise ValueError(f"handoff draft already exists: {path}") from exc
-    except OSError as exc:
+    if force:
+        # Overwrite by writing a private temp file and renaming it over the draft.
+        # A rename replaces a symlink at the destination instead of following it,
+        # so this stays no-follow and atomic even where O_NOFOLLOW is missing.
         if path.is_symlink():
-            raise ValueError(f"handoff draft path is a symlink: {path}") from exc
-        raise
-    with os.fdopen(fd, "w", encoding="utf-8") as handle:
-        if hasattr(os, "fchmod"):
-            os.fchmod(handle.fileno(), 0o600)
-        handle.write(text)
+            raise ValueError(f"handoff draft path is a symlink: {path}")
+        fd, tmp_name = tempfile.mkstemp(dir=inbox_path, prefix=f".{path.name}.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(text)
+            os.replace(tmp_name, path)
+        except BaseException:
+            Path(tmp_name).unlink(missing_ok=True)
+            raise
+    else:
+        # Exclusive no-follow create: never truncate a file or follow a planted symlink.
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(path, flags, 0o600)
+        except FileExistsError as exc:
+            raise ValueError(f"handoff draft already exists: {path}") from exc
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
     lint_result = _linting_mod.lint_file(path)
     guard_result = _linting_mod._guard_handoff_path(path, target=target, policy=guard_policy) if guard else None
     return {
