@@ -29,8 +29,8 @@
           "value": "serve-mcp"
         },
         {
-          "type": "named",
-          "name": "--stdio"
+          "type": "positional",
+          "value": "--stdio"
         },
         {
           "type": "named",
