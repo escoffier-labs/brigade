@@ -697,30 +697,62 @@ def _git_tracked_names(directory: Path) -> set[str] | None:
     env["GIT_DISCOVERY_ACROSS_FILESYSTEM"] = "true"
     try:
         directory = directory.resolve()
-        probe = directory
+        try:
+            discovery = subprocess.run(
+                ["git", "-C", str(directory), "rev-parse", "--show-cdup"],
+                capture_output=True,
+                env=env,
+                timeout=30,
+                check=False,
+            )
+        except FileNotFoundError:
+            return set()
+        worktrees: list[Path] = []
+        # Discovery can skip incomplete metadata and find an outer repository.
+        # lstat also keeps dangling .git symlinks and unreadable markers visible.
+        for probe in (directory, *directory.parents):
+            try:
+                (probe / ".git").lstat()
+            except FileNotFoundError:
+                continue
+            worktrees.append(probe)
+        if discovery.returncode != 0:
+            if not worktrees and b"not a git repository" in discovery.stderr:
+                return set()
+            detail = discovery.stderr.decode("utf-8", "replace").strip().splitlines()
+            _warn_tracking_check_failed(directory, detail[0] if detail else f"git exited {discovery.returncode}")
+            return None
+        if not worktrees:
+            _warn_tracking_check_failed(directory, "git discovered a repository without an accessible .git marker")
+            return None
         names: set[str] = set()
         # A nested repository's index can hide paths still in an outer index.
-        while True:
-            try:
-                discovery = subprocess.run(
-                    ["git", "-C", str(probe), "rev-parse", "--show-cdup"],
-                    capture_output=True,
-                    env=env,
-                    timeout=30,
-                    check=False,
-                )
-            except FileNotFoundError:
-                return set()
+        for marker_root in worktrees:
+            discovery = subprocess.run(
+                ["git", "-C", str(marker_root), "--git-dir", str(marker_root / ".git"), "rev-parse", "--show-cdup"],
+                capture_output=True,
+                env=env,
+                timeout=30,
+                check=False,
+            )
             if discovery.returncode != 0:
-                if b"not a git repository" in discovery.stderr:
-                    return names
                 detail = discovery.stderr.decode("utf-8", "replace").strip().splitlines()
                 _warn_tracking_check_failed(directory, detail[0] if detail else f"git exited {discovery.returncode}")
                 return None
-            # --show-cdup emits only ../ components, avoiding quoted filenames.
-            worktree = (probe / discovery.stdout.decode("ascii").strip()).resolve()
+            # Honor core.worktree without decoding quoted directory names.
+            worktree = (marker_root / discovery.stdout.decode("ascii").strip()).resolve()
             result = subprocess.run(
-                ["git", "-C", str(worktree), "ls-files", "-z"],
+                [
+                    "git",
+                    "-C",
+                    str(worktree),
+                    "--git-dir",
+                    str(marker_root / ".git"),
+                    "--work-tree",
+                    str(worktree),
+                    "ls-files",
+                    "-z",
+                ],
                 capture_output=True,
                 env=env,
                 timeout=30,
@@ -740,9 +772,7 @@ def _git_tracked_names(directory: Path) -> set[str] | None:
                 except FileNotFoundError:
                     # A deleted parent cannot contain the current handoff.
                     continue
-            if worktree.parent == worktree:
-                return names
-            probe = worktree.parent
+        return names
     except (OSError, subprocess.SubprocessError) as exc:
         _warn_tracking_check_failed(directory, str(exc))
         return None

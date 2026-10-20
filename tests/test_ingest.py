@@ -1501,6 +1501,66 @@ def test_archive_refuses_git_tracked_handoff(tmp_path: Path):
     assert not (inbox / "processed" / "tracked.md").exists()
 
 
+@pytest.mark.parametrize("outer_repo", [False, True], ids=["standalone", "nested"])
+@pytest.mark.parametrize("broken_marker", ["gitdir-file", "incomplete-directory"])
+def test_archive_preserves_handoff_with_broken_git_metadata(tmp_path: Path, capsys, outer_repo, broken_marker):
+    if outer_repo:
+        _git(tmp_path, "init", "-q")
+    repo = tmp_path / "inner"
+    inbox = repo / "inbox"
+    inbox.mkdir(parents=True)
+    _git(repo, "init", "-q")
+    handoff = _write_handoff(inbox, "tracked.md", _PLAIN_HANDOFF)
+    _git(repo, "add", "--", "inbox/tracked.md")
+    marker = repo / ".git"
+    if broken_marker == "gitdir-file":
+        marker.rename(repo / "saved-git")
+        marker.write_text("gitdir: missing-metadata\n", encoding="utf-8")
+    else:
+        # Git discovery can skip this incomplete repository for an outer one.
+        (marker / "HEAD").unlink()
+
+    with pytest.raises(ingest_mod.TrackedHandoffError):
+        ingest_mod._archive(handoff, inbox / "processed")
+
+    assert handoff.is_file()
+    assert not (inbox / "processed").exists()
+    assert "git tracking check failed" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("gitdir_kind", ["separate", "linked", "configured-root"])
+def test_tracking_check_supports_gitdir_files(tmp_path: Path, gitdir_kind):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    if gitdir_kind != "linked":
+        _git(repo, "init", "-q", "--separate-git-dir", str(tmp_path / "metadata"))
+        (repo / ".git").write_text("gitdir: ../metadata\n", encoding="utf-8")
+        if gitdir_kind == "configured-root":
+            _git(repo, "config", "core.worktree", str(tmp_path))
+    else:
+        _git(repo, "init", "-q")
+        _git(repo, "commit", "-q", "--allow-empty", "-m", "seed worktree")
+        linked = tmp_path / "linked"
+        _git(repo, "worktree", "add", "-q", "-b", "linked", str(linked))
+        repo = linked
+    inbox = repo / "inbox"
+    inbox.mkdir()
+    handoff = _write_handoff(inbox, "tracked note.md", _PLAIN_HANDOFF)
+    # update-index stages inside this marker even when core.worktree is above it.
+    _git(repo, "update-index", "--add", "--", "inbox/tracked note.md")
+    untracked = _write_handoff(inbox, "untracked.md", _PLAIN_HANDOFF)
+
+    handoffs, tracked = ingest_mod._list_handoffs(inbox)
+    assert handoffs == [untracked]
+    assert tracked == [handoff]
+    with pytest.raises(ingest_mod.TrackedHandoffError):
+        ingest_mod._archive(handoff, inbox / "processed")
+    assert handoff.is_file()
+    ingest_mod._archive(untracked, inbox / "processed")
+    assert not untracked.exists()
+    assert (inbox / "processed" / untracked.name).is_file()
+
+
 def test_ingest_without_git_binary_archives_as_before(tmp_target: Path, monkeypatch):
     inbox = _seed(tmp_target)
     handoff = _write_handoff(inbox, "2026-10-20-0902-nogit.md", _PLAIN_HANDOFF)
