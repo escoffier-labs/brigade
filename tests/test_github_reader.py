@@ -86,12 +86,25 @@ def test_private_and_unknown_never_produce_octopool_argv(tmp_path, visibility):
     assert all(call[0][0] == "gh" for call in runner.calls)
 
 
-def test_unhealthy_probe_uses_gh_and_is_cached(tmp_path):
-    runner = FakeRunner(gh(), gh(), healthy=False)
-    client = reader(tmp_path, runner, visibility="public")
-    client.get(PATH, params={}, max_bytes=100)
-    client.get(PATH, params={}, max_bytes=100)
-    assert [c[0][0] for c in runner.calls] == ["octopool", "gh", "gh"]
+@pytest.mark.parametrize("allow_fallback", [False, True])
+def test_unhealthy_probe_honors_fallback_opt_in_and_is_cached(tmp_path, allow_fallback):
+    clock = [1000.0]
+    runner = FakeRunner(*([gh(), gh()] if allow_fallback else []), relay(), healthy=False)
+    client = reader(tmp_path, runner, visibility="public", allow_public_fallback=allow_fallback, clock=lambda: clock[0])
+    for _ in range(2):
+        result = client.get(PATH, params={}, max_bytes=100)
+        if not allow_fallback:
+            assert all(call[0][0] == "octopool" for call in runner.calls)
+        assert (result.status, result.state) == ((200, "ok") if allow_fallback else (502, "inconclusive"))
+    assert [c[0][0] for c in runner.calls] == (["octopool", "gh", "gh"] if allow_fallback else ["octopool"])
+    summary = client.observation()["github_reads"]
+    assert summary["requests"] == (2 if allow_fallback else 0)
+    assert summary["fallbacks"] == (2 if allow_fallback else 0)
+    clock[0] += 600
+    runner.healthy = True
+    result = client.get(PATH, params={}, max_bytes=100)
+    assert (result.status, result.route) == (200, "octopool")
+    assert runner.calls[-2][0] == ["octopool", "whoami"]
 
 
 @pytest.mark.parametrize(
@@ -278,13 +291,21 @@ def test_queue_errors_without_sqlite_errorcode(tmp_path, monkeypatch, message):
 
 
 @pytest.mark.parametrize("failure", [CommandResult(1, b""), CommandResult(0, b"", truncated=True), OSError()])
-def test_failed_relay_marks_health_unavailable_until_probe_ttl(tmp_path, failure):
+@pytest.mark.parametrize("allow_fallback", [False, True])
+def test_failed_relay_marks_health_unavailable_until_probe_ttl(tmp_path, failure, allow_fallback):
     clock = [1000.0]
-    runner = FakeRunner(failure, gh(), relay())
-    client = reader(tmp_path, runner, visibility="public", clock=lambda: clock[0])
-    assert client.get(PATH, params={}, max_bytes=100).state == "inconclusive"
-    assert client.get(PATH, params={}, max_bytes=100).route == "gh"
-    assert [call[0][0] for call in runner.calls] == ["octopool", "octopool", "gh"]
+    runner = FakeRunner(failure, *([gh(), gh()] if allow_fallback else []), relay())
+    client = reader(tmp_path, runner, visibility="public", allow_public_fallback=allow_fallback, clock=lambda: clock[0])
+    for _ in range(2):
+        result = client.get(PATH, params={}, max_bytes=100)
+        if not allow_fallback:
+            assert all(call[0][0] == "octopool" for call in runner.calls)
+        assert (result.status, result.state) == ((200, "ok") if allow_fallback else (502, "inconclusive"))
+    expected_calls = ["octopool", "octopool"] + (["gh", "gh"] if allow_fallback else [])
+    assert [call[0][0] for call in runner.calls] == expected_calls
+    summary = client.observation()["github_reads"]
+    assert summary["requests"] == (3 if allow_fallback else 1)
+    assert summary["fallbacks"] == (2 if allow_fallback else 0)
     clock[0] += 600
     assert client.get(PATH, params={}, max_bytes=100).route == "octopool"
     assert runner.calls[-2][0] == ["octopool", "whoami"]

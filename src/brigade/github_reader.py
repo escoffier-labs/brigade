@@ -324,12 +324,30 @@ class GitHubReader:
                 # Admission precedes the health probe. An exhausted relay allowance
                 # must not spend a probe or silently move to native credentials.
                 unhealthy = self._health is not None and 0 <= now - self._health[0] < 600 and not self._health[1]
-                route = "octopool" if self.visibility == "public" and not unhealthy else "gh"
+                route = (
+                    "octopool"
+                    if self.visibility == "public" and not (unhealthy and self.allow_public_fallback)
+                    else "gh"
+                )
                 credential = "octopool" if route == "octopool" else self.credential_class
                 if self.ledger.admission(conn, credential, route, endpoint_key, now, self.caps[credential]):
                     return self._read(conn, path, query, endpoint, endpoint_key, route, max_bytes, max_age, fresh)
                 route = "octopool" if self.visibility == "public" and self._healthy(now) else "gh"
-                result = self._read(conn, path, query, endpoint, endpoint_key, route, max_bytes, max_age, fresh)
+                fallback = self.visibility == "public" and route == "gh"
+                if fallback and not self.allow_public_fallback:
+                    self.ledger.record(
+                        conn,
+                        now=now,
+                        credential="octopool",
+                        route="octopool",
+                        status=None,
+                        state="inconclusive",
+                        attempted=False,
+                    )
+                    return ReadResult(502, b"", state="inconclusive", route="octopool")
+                result = self._read(
+                    conn, path, query, endpoint, endpoint_key, route, max_bytes, max_age, fresh, fallback=fallback
+                )
                 if route == "octopool" and result.state == "inconclusive" and self.allow_public_fallback:
                     return self._read(
                         conn, path, query, endpoint, endpoint_key, "gh", max_bytes, max_age, fresh, fallback=True
