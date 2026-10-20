@@ -1,6 +1,6 @@
 # Brigade agent plugin (phase 1: Claude Code and Codex)
 
-Status: decisions approved 2026-10-19; written spec awaiting review. The implementation plan will go in `docs/phase-agent-plugin-plan.md`.
+Status: approved 2026-10-19. The implementation plan will go in `docs/phase-agent-plugin-plan.md`.
 
 ## Goal
 
