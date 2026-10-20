@@ -43,3 +43,20 @@ def test_python_home_call_is_not_a_hostname():
 
 def test_python_host_arguments_and_type_annotations_are_not_hostnames():
     assert_clean("host: str, host: object, host=host, host=config.host, hostname = parts.hostname")
+
+
+@pytest.mark.parametrize("value", ["BuildNode", "BUILDNODE", "buildnode", "bUiLdNoDe"])
+def test_local_hostname_is_case_insensitive(tmp_path, monkeypatch, value):
+    monkeypatch.setattr("brigade.bug_redaction.socket.gethostname", lambda: "BuildNode")
+    redactor = Redactor(tmp_path)
+    redacted = redactor.text("failure on " + value)
+    assert value not in redacted
+    assert redacted == "failure on <local>"
+    assert_clean(redacted)
+
+
+def test_hostname_matching_does_not_fold_other_local_literals(tmp_path, monkeypatch):
+    monkeypatch.setattr("brigade.bug_redaction.socket.gethostname", lambda: "BuildNode")
+    monkeypatch.setenv("TEST_CREDENTIAL", "CaseSensitiveValue")
+    redactor = Redactor(tmp_path)
+    assert redactor.text("BUILDNODE casesensitivevalue") == "<local> casesensitivevalue"

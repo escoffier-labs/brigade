@@ -20,8 +20,11 @@ You should get an acknowledgment within 72 hours. If you do not, please follow u
 
 Use `brigade bug report --summary "What happened and what you expected" --dry-run`
 to review a redacted diagnostic bundle. Bug reports are for ordinary defects.
-Report vulnerabilities using the private instructions above. The CLI refuses
-security reports and does not upload crashes automatically.
+Report vulnerabilities using the private instructions above. The CLI blocks
+recognized vulnerability descriptions and asks interactive submitters whether
+the report is a vulnerability. Non-interactive submission requires
+`--yes --not-security` to assert it is an ordinary defect. Brigade does not
+upload crashes automatically.
 
 ## In scope
 

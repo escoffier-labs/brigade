@@ -1918,7 +1918,10 @@ and the last local CLI error. Task text and worker output are excluded.
 `--include-output FILE` adds only a redacted tail of a file you choose, bounded
 to 200 lines and a 60 KB input read. The complete rendered bundle is capped at
 60 KB. `--summary-file FILE` reads at most 60 KB plus one byte and rejects
-oversized input before decoding it.
+oversized input before decoding it. Diagnostic receipt reads stop at 256 KB per
+file. Each run or verification reader examines at most 1,024 directory entries,
+reads the newest 64 directories in that window, and processes at most 512
+worker or command entries. Older or oversized receipts can be omitted.
 
 The report uses a fixed field allowlist, removes known local literals and
 credential references, applies the origin redactor with `origin=unknown`,
@@ -1931,17 +1934,24 @@ diagnostics. Replace `REPORT_ID` with the identifier printed during preparation.
 Run without `--dry-run` to search GitHub for the visible `bf-` fingerprint
 through `gh search issues`. Search failure prints `dedup skipped`. A dry run
 makes no network calls. With an interactive terminal, review the destination
-and explicitly confirm before sharing. For a shown duplicate, select its
-number to comment or choose `new` or `abort`. Agents must show the complete
+and answer "Is this a security vulnerability? [y/N]" before sharing. Answering
+yes blocks submission and points to SECURITY.md. The keyword classifier also
+blocks recognized vulnerability descriptions, but it cannot recognize every
+vulnerability. Confirm the complete preview separately before sharing. For a
+shown duplicate, select its number to comment or choose `new` or `abort`.
+Agents must show the complete
 preview to the user and receive a clear yes before using `--yes`:
 
 ```bash
 brigade bug report --summary-file description.txt --json --dry-run
-brigade bug report --report-id REPORT_ID --json --yes --via gh
+brigade bug report --report-id REPORT_ID --json --yes --not-security --via gh
 ```
 
-`--yes` requires `--report-id`. Brigade verifies the stored JSON and Markdown
-digests and scans both again before any network call. New summaries, titles,
+`--yes` requires `--report-id`. Non-interactive submission also requires
+`--not-security`, asserting that the report does not describe a vulnerability.
+An interactive submission asks the security question even with `--yes`.
+Brigade verifies the stored JSON and Markdown digests and scans both again
+before any network call. New summaries, titles,
 and output files cannot be combined with `--report-id`.
 Without a terminal and `--yes`, the command only prepares local files.
 `--via auto` prefers authenticated `gh`, then a prefilled issue URL.
@@ -1954,7 +1964,9 @@ send email. Attach the printed full bundle path when using a shortened link.
 `--via file` always keeps the report local. This command never creates a gist.
 
 Receipts record the bundle digest, detector counts, destination, duplicates
-shown, and consent mode (`prompt`, `flag`, or `none`). A pending receipt means
+shown, and consent mode (`prompt`, `flag`, or `none`). The separate
+`security_confirmation` records its mode and whether the submitter asserted
+that this is not a vulnerability report. A pending receipt means
 the remote result is uncertain. Check it before retrying. Local controls limit
 sharing to five attempts per UTC day and one per fingerprint every five
 minutes. A pending submission also blocks retries for five minutes.
@@ -1976,7 +1988,7 @@ publication from `brigade work brief` when a Codex thread id and hub are configu
 The normal exception is your own configured tooling:
 
 - `brigade bug report --dry-run` collects and redacts locally, then writes a complete preview and receipt without network calls
-- an explicit bug report can search for its fingerprint through GitHub's `gh` client, then send the reviewed bundle to a public issue only after confirmation or `--yes`
+- an explicit bug report can search for its fingerprint through GitHub's `gh` client, then send the reviewed bundle to a public issue only after confirmation or `--yes --not-security`
 - URL and email report destinations print shortened links and the full local bundle path for manual attachment
 - CLI failures update a local redacted error record without uploading or prompting
 - the `pre-push` hook runs Brigade's embedded content guard before commits leave the machine

@@ -41,7 +41,7 @@ def invoke(target, *flags):
 def submit_prepared(target, capsys, *flags, summary="Expected a profile, got an error"):
     assert invoke(target, "--summary", summary, "--dry-run", "--json") == 0
     preview = result(capsys)
-    return cli.main(["bug", "report", "--report-id", preview["report_id"], "--yes", *flags])
+    return cli.main(["bug", "report", "--report-id", preview["report_id"], "--yes", "--not-security", *flags])
 
 
 def result(capsys):
@@ -122,15 +122,25 @@ def test_scanner_failure_or_residual_blocks_all_submission(report_env, monkeypat
     assert not list(Path(mod.data_root()).rglob("bundle.json"))
 
 
-def test_fingerprint_normalizes_volatile_values():
+@pytest.mark.parametrize(
+    "first_path,second_path",
+    [
+        ("/tmp/run-12/a.json", "/tmp/run-98/b.json"),
+        ("/var/lib/Alpha One/result", "/opt/Beta Two/result"),
+        (r"C:\Alpha One\result", r"D:\Beta Two\result"),
+        ('"/var/lib/Alpha One/result file"', '"/opt/Beta Two/other file"'),
+        (r'"C:\Alpha One\result file"', r'"D:\Beta Two\other file"'),
+    ],
+)
+def test_fingerprint_normalizes_volatile_values(first_path, second_path):
     from brigade.bug_cmd import fingerprint
 
     first = {
         "command": "doctor",
         "exception_type": "ValueError",
-        "message_head": "failed /tmp/run-12/a.json id abcd1234 123",
+        "message_head": f"failed {first_path} id abcd1234 123",
     }
-    second = {**first, "message_head": "failed /tmp/run-98/b.json id ffff9876 999"}
+    second = {**first, "message_head": f"failed {second_path} id ffff9876 999"}
     assert fingerprint(first, ["profile"]) == fingerprint(second, ["profile"])
     assert fingerprint(first, ["profile"]) != fingerprint(first, ["memory"])
 
@@ -156,6 +166,7 @@ def test_noninteractive_requires_yes_and_flag_receipt(report_env, monkeypatch, c
     out = result(capsys)
     receipt = json.loads(Path(out["receipt_path"]).read_text())
     assert receipt["consent"]["mode"] == "flag"
+    assert receipt["security_confirmation"] == {"mode": "flag", "not_security": True}
     assert receipt["submitted"] is True
     assert not any("--label" in c for c in calls)
     assert submit_prepared(target, capsys, "--json", "--via", "gh") == 2
@@ -547,7 +558,12 @@ def test_submit_uses_approved_bundle_without_recollecting(report_env, monkeypatc
         return ""
 
     monkeypatch.setattr(mod, "gh", fake)
-    assert cli.main(["bug", "report", "--report-id", preview["report_id"], "--yes", "--via", "gh", "--json"]) == 0
+    assert (
+        cli.main(
+            ["bug", "report", "--report-id", preview["report_id"], "--yes", "--not-security", "--via", "gh", "--json"]
+        )
+        == 0
+    )
     submitted = result(capsys)
     assert submitted["report_id"] == preview["report_id"]
     assert bodies == [preview["preview_markdown"]]
@@ -571,7 +587,9 @@ def test_prepared_tampering_blocks_before_transport(report_env, monkeypatch, cap
             value["bundle_digest"] = "changed"
         path.write_text(json.dumps(value))
     monkeypatch.setattr(mod, "gh", lambda *a: pytest.fail("transport before integrity check"))
-    assert cli.main(["bug", "report", "--report-id", preview["report_id"], "--yes", "--via", "gh"]) == 2
+    assert (
+        cli.main(["bug", "report", "--report-id", preview["report_id"], "--yes", "--not-security", "--via", "gh"]) == 2
+    )
     assert "digest" in capsys.readouterr().err
 
 
@@ -597,7 +615,10 @@ def test_report_failure_preserves_previous_error(report_env, monkeypatch, capsys
     else:
         assert invoke(target, "--dry-run", "--json") == 0
         preview = result(capsys)
-        assert cli.main(["bug", "report", "--report-id", preview["report_id"], "--yes", "--via", "gh"]) == 2
+        assert (
+            cli.main(["bug", "report", "--report-id", preview["report_id"], "--yes", "--not-security", "--via", "gh"])
+            == 2
+        )
     assert bug_last_error.error_path().read_bytes() == original
 
 
@@ -606,12 +627,25 @@ def test_report_failure_preserves_previous_error(report_env, monkeypatch, capsys
     "narrative",
     [
         "SQL injection",
+        "code execution in the ingester",
+        "personal data leaks into a workspace",
         "CVE-2026-12345",
         "authentication bypass",
         "cross-site scripting",
         "privilege escalation",
         "SSRF",
         "command injection",
+        "symlink race permits arbitrary file overwrite",
+        "sandbox escape exposes private keys",
+        "TOCTOU permits arbitrary file access",
+        "leak of keys or tokens",
+        "profile writes outside --target",
+        "guard bypass publishes personal data",
+        "template exposes credentials",
+        "insecure deserialization",
+        "path traversal",
+        "RCE",
+        "XSS",
     ],
 )
 def test_vulnerability_narratives_refused(report_env, capsys, tmp_path, field, narrative):
@@ -669,7 +703,7 @@ def test_delayed_prepared_submission_still_starts_cooldown(report_env, capsys):
     receipt = json.loads(receipt_path.read_text())
     receipt["created_at"] = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
     receipt_path.write_text(json.dumps(receipt))
-    args = ["bug", "report", "--report-id", preview["report_id"], "--yes", "--via", "url", "--json"]
+    args = ["bug", "report", "--report-id", preview["report_id"], "--yes", "--not-security", "--via", "url", "--json"]
     assert cli.main(args) == 0
     result(capsys)
     assert cli.main(args) == 2
@@ -695,14 +729,16 @@ def test_prepared_report_rescans_before_search_or_submit(report_env, monkeypatch
     preview = result(capsys)
     monkeypatch.setattr(bug_redaction, "scan_text", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("scanner")))
     monkeypatch.setattr(mod, "gh", lambda *a: pytest.fail("transport before rescan"))
-    assert cli.main(["bug", "report", "--report-id", preview["report_id"], "--yes", "--via", "gh"]) == 2
+    assert (
+        cli.main(["bug", "report", "--report-id", preview["report_id"], "--yes", "--not-security", "--via", "gh"]) == 2
+    )
     assert "second scan failed" in capsys.readouterr().err
 
 
 def test_prepared_report_id_cannot_escape_store(report_env, monkeypatch, capsys):
     mod, _ = report_env
     monkeypatch.setattr(mod, "gh", lambda *a: pytest.fail("transport with invalid id"))
-    assert cli.main(["bug", "report", "--report-id", "../outside", "--yes", "--via", "gh"]) == 2
+    assert cli.main(["bug", "report", "--report-id", "../outside", "--yes", "--not-security", "--via", "gh"]) == 2
     assert "invalid --report-id" in capsys.readouterr().err
 
 
@@ -713,5 +749,127 @@ def test_prepared_unicode_bundle_roundtrips_within_byte_cap(report_env, tmp_path
     assert invoke(target, "--include-output", str(output), "--dry-run", "--json") == 0
     preview = result(capsys)
     assert len(preview["preview_markdown"].encode()) < mod.BUNDLE_CAP
-    assert cli.main(["bug", "report", "--report-id", preview["report_id"], "--yes", "--via", "url", "--json"]) == 0
+    assert (
+        cli.main(
+            ["bug", "report", "--report-id", preview["report_id"], "--yes", "--not-security", "--via", "url", "--json"]
+        )
+        == 0
+    )
     assert result(capsys)["preview_markdown"] == preview["preview_markdown"]
+
+
+@pytest.mark.parametrize("via", ["gh", "url", "email"])
+def test_yes_requires_not_security_assertion(report_env, monkeypatch, capsys, via):
+    mod, target = report_env
+    assert invoke(target, "--dry-run", "--json") == 0
+    preview = result(capsys)
+    monkeypatch.setattr(mod, "gh", lambda *a: pytest.fail("network before security assertion"))
+    assert cli.main(["bug", "report", "--report-id", preview["report_id"], "--yes", "--via", via, "--json"]) == 2
+    assert "--not-security" in capsys.readouterr().err
+    receipt = json.loads(Path(preview["receipt_path"]).read_text())
+    assert receipt["submitted"] is False
+
+
+@pytest.mark.parametrize("security_answer", ["y", "yes", "n", ""])
+@pytest.mark.parametrize("yes_flag", [False, True])
+def test_interactive_security_confirmation(report_env, monkeypatch, capsys, security_answer, yes_flag):
+    import sys
+
+    mod, target = report_env
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: True)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: True)
+    flags = []
+    if yes_flag:
+        assert invoke(target, "--dry-run", "--json") == 0
+        preview = result(capsys)
+        flags = ["--report-id", preview["report_id"], "--yes", "--not-security"]
+    questions = []
+    answers = iter([security_answer, "y"])
+
+    def answer(question):
+        questions.append(question)
+        return next(answers)
+
+    monkeypatch.setattr("builtins.input", answer)
+    security = security_answer in {"y", "yes"}
+    code = cli.main(["bug", "report", "--via", "url", *flags]) if yes_flag else invoke(target, "--via", "url")
+    assert code == (2 if security else 0)
+    captured = capsys.readouterr()
+    assert questions[0] == "Is this a security vulnerability? [y/N] "
+    receipt_path = next((Path(mod.data_root()) / "brigade" / "bug-reports").glob("*/receipt.json"))
+    receipt = json.loads(receipt_path.read_text())
+    assert receipt["security_confirmation"] == {"mode": "prompt", "not_security": not security}
+    assert receipt["submitted"] is not security
+    if security:
+        assert len(questions) == 1
+        assert "SECURITY.md" in captured.err
+    else:
+        assert len(questions) == (1 if yes_flag else 2)
+
+
+@pytest.mark.parametrize("code", [None, 0, 2, 7, "", "dispatch failed"])
+def test_dispatch_system_exit_records_only_failure(report_env, monkeypatch, code):
+    from brigade import bug_last_error
+    from brigade.cli import version
+
+    bug_last_error.record("doctor", 1, RuntimeError("previous"))
+    previous = bug_last_error.error_path().read_bytes()
+    monkeypatch.setattr(version, "dispatch", lambda args: (_ for _ in ()).throw(SystemExit(code)))
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["version"])
+    assert caught.value.code == code
+    if code in (None, 0):
+        assert bug_last_error.error_path().read_bytes() == previous
+    else:
+        record = json.loads(bug_last_error.error_path().read_text())
+        assert record["command"] == "version"
+        assert record["exit_code"] == (code if isinstance(code, int) else 1)
+        assert record["exception_type"] == "SystemExit"
+
+
+def test_dispatch_parser_error_replaces_stale_diagnostic(report_env):
+    from brigade import bug_last_error
+
+    bug_last_error.record("doctor", 1, RuntimeError("previous"))
+    with pytest.raises(SystemExit) as caught:
+        cli.main(["version", "--json"])
+    assert caught.value.code == 2
+    record = json.loads(bug_last_error.error_path().read_text())
+    assert record["command"] == "version"
+    assert record["exit_code"] == 2
+
+
+def test_report_dispatch_system_exit_preserves_previous_error(report_env, monkeypatch):
+    from brigade import bug_last_error
+    from brigade.cli import bug
+
+    _, target = report_env
+    bug_last_error.record("doctor", 1, RuntimeError("previous"))
+    previous = bug_last_error.error_path().read_bytes()
+    monkeypatch.setattr(bug, "dispatch", lambda args: (_ for _ in ()).throw(SystemExit(2)))
+    with pytest.raises(SystemExit):
+        invoke(target, "--dry-run")
+    assert bug_last_error.error_path().read_bytes() == previous
+
+
+def test_older_prepared_vulnerability_is_blocked_before_network(report_env, monkeypatch, capsys):
+    import hashlib
+
+    mod, target = report_env
+    assert invoke(target, "--dry-run", "--json") == 0
+    preview = result(capsys)
+    directory = Path(preview["preview_path"]).parent
+    bundle = json.loads((directory / "bundle.json").read_text())
+    bundle["user"]["summary"] = "sandbox escape exposes private keys"
+    markdown = mod.render(bundle)
+    (directory / "bundle.json").write_text(json.dumps(bundle))
+    (directory / "bundle.md").write_text(markdown)
+    receipt = json.loads((directory / "receipt.json").read_text())
+    receipt["bundle_digest"] = mod.canonical_json_digest(bundle)
+    receipt["preview_digest"] = hashlib.sha256(markdown.encode()).hexdigest()
+    (directory / "receipt.json").write_text(json.dumps(receipt))
+    monkeypatch.setattr(mod, "gh", lambda *args: pytest.fail("network for a vulnerability"))
+    assert (
+        cli.main(["bug", "report", "--report-id", preview["report_id"], "--yes", "--not-security", "--via", "gh"]) == 2
+    )
+    assert "SECURITY.md" in capsys.readouterr().err

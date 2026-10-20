@@ -31,10 +31,14 @@ EMAIL_BUDGET = 1800
 BUNDLE_CAP = 60 * 1024
 _SECURITY = re.compile(
     r"\b(?:security|vulnerabilit\w*|exploit\w*|CVE-\d{4}-\d+|"
-    r"(?:SQL|command|code|shell|LDAP|template) injection|(?:remote|arbitrary) code execution|"
+    r"(?:SQL|command|code|shell|LDAP|template) injection|(?:(?:remote|arbitrary) )?code execution|"
     r"(?:authentication|authorization|auth) bypass|privilege escalation|cross[- ]site (?:scripting|request forgery)|"
     r"XSS|CSRF|SSRF|RCE|XXE|insecure deserialization|directory traversal|path traversal|"
-    r"credential leak|token leak|secret leak|buffer overflow|use[- ]after[- ]free|denial[- ]of[- ]service)\b",
+    r"symlink\w*|TOCTOU|race|overwrite\w*|escape\w*|privilege\w*|deserialization|traversal|"
+    r"arbitrary file (?:access|read|write)|(?:read\w*|writ\w*) outside|guard bypass|"
+    r"(?:leak\w*|expos\w*)[^.\n]{0,80}\b(?:keys?|tokens?|credentials?|secrets?|personal data)|"
+    r"(?:private[- ]keys?|credentials?|tokens?|secrets?|personal data)[^.\n]{0,80}\b(?:leak\w*|expos\w*)|"
+    r"buffer overflow|use[- ]after[- ]free|denial[- ]of[- ]service)\b",
     re.I,
 )
 
@@ -53,7 +57,12 @@ def gh(*args: str) -> str:
 def fingerprint(last_error: dict[str, Any] | None, check_names: list[str]) -> str:
     error = last_error or {}
     message = str(error.get("message_head", ""))
-    message = re.sub(r"(?:[A-Za-z]:[\\/]|/)[^\s<>]+", "<path>", message)
+    message = re.sub(
+        r"""["'](?:[A-Za-z]:[\\/]|/)[^"'\r\n]+["']|"""
+        r"""(?:[A-Za-z]:[\\/]|/)(?:[^\r\n<>"'\\/]+[\\/])*[^\s<>"'\\/]*""",
+        "<path>",
+        message,
+    )
     message = re.sub(r"\b[\w.-]*(?:[0-9][\w.-]*)\b", "<id>", message)
     identity = [
         error.get("command", ""),
@@ -258,6 +267,8 @@ def _load_prepared(report_id: str) -> tuple[Path, dict[str, Any], str, dict[str,
         raise ReportBlocked("Bug report blocked: prepared bundle digest mismatch, prepare a new preview")
     assert_clean(json.dumps(bundle, ensure_ascii=False, sort_keys=True))
     assert_clean(markdown)
+    if _SECURITY.search(markdown):
+        raise ReportBlocked("Bug report blocked: report security concerns privately using SECURITY.md")
     return directory, bundle, markdown, receipt
 
 
@@ -314,6 +325,7 @@ def _prepare(args: argparse.Namespace) -> tuple[Path, dict[str, Any], str, dict[
         "redaction": redactor.record(),
         "destination": "file",
         "consent": {"mode": "none"},
+        "security_confirmation": {"mode": "none", "not_security": None},
         "duplicates": [],
         "duplicate_choice": "new",
         "submitted": False,
@@ -325,6 +337,7 @@ def _prepare(args: argparse.Namespace) -> tuple[Path, dict[str, Any], str, dict[
 
 
 def _report(args: argparse.Namespace) -> int:
+    interactive = sys.stdin.isatty() and sys.stdout.isatty() and not args.json
     if args.kind == "security":
         raise ReportBlocked("Bug report blocked: report vulnerabilities privately using SECURITY.md")
     if os.environ.get("BRIGADE_BUG_REPORT", "").lower() == "never" and not args.dry_run and args.via != "file":
@@ -333,6 +346,10 @@ def _report(args: argparse.Namespace) -> int:
         raise ReportBlocked("Bug report blocked: --yes requires the approved preview's --report-id")
     if args.report_id and any((args.summary, args.summary_file, args.title, args.include_output)):
         raise ReportBlocked("Bug report blocked: --report-id cannot be combined with new report content")
+    if args.yes and not interactive and not args.not_security and not args.dry_run and args.via != "file":
+        raise ReportBlocked(
+            "Bug report blocked: --yes also requires --not-security. Use SECURITY.md for vulnerabilities"
+        )
     directory, bundle, markdown, receipt = _load_prepared(args.report_id) if args.report_id else _prepare(args)
     root = directory.parent
     report_id = directory.name
@@ -342,7 +359,6 @@ def _report(args: argparse.Namespace) -> int:
         ([], "dedup skipped") if args.dry_run or args.via == "file" else _duplicates(bundle, Redactor(args.target))
     )
     receipt["duplicates"] = duplicates
-    interactive = sys.stdin.isatty() and sys.stdout.isatty() and not args.json
     if not args.json:
         print(markdown, end="")
         print(f"Redactions: {json.dumps(receipt['redaction'])}\nDedup: {dedup_status}")
@@ -362,6 +378,14 @@ def _report(args: argparse.Namespace) -> int:
                 via = "url"
     approved = args.yes and not args.dry_run and via != "file"
     comment_on = args.comment_on
+    if interactive and not args.dry_run and via != "file":
+        answer = input("Is this a security vulnerability? [y/N] ").strip().lower()
+        if answer not in {"y", "yes", "n", "no", ""}:
+            raise ReportBlocked("Bug report blocked: answer yes or no to the security question")
+        receipt["security_confirmation"] = {"mode": "prompt", "not_security": answer not in {"y", "yes"}}
+        write_json(receipt_path, receipt)
+        if answer in {"y", "yes"}:
+            raise ReportBlocked("Bug report blocked: report vulnerabilities privately using SECURITY.md")
     if interactive and not args.dry_run and via != "file" and not args.yes:
         if duplicates and comment_on is None:
             choice = input("Duplicate found. Enter its number to comment, 'new', or 'abort': ").strip()
@@ -384,6 +408,8 @@ def _report(args: argparse.Namespace) -> int:
         assert_clean(markdown)
         if args.yes:
             receipt["consent"]["mode"] = "flag"
+            if not interactive:
+                receipt["security_confirmation"] = {"mode": "flag", "not_security": True}
         receipt.update(
             destination=via,
             status="pending",

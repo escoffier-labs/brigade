@@ -31,7 +31,10 @@ Review the complete preview for private information. Reuse its printed report
 identifier with `brigade bug report --report-id REPORT_ID` to search for
 duplicates and choose a destination. Use
 `--include-output FILE` only for a log you want included. The command redacts
-its tail before saving it. Include the fingerprint when discussing the report.
+its tail before saving it. Answer the security question before sharing.
+For agent submission, approve the preview and confirm this is an ordinary
+defect before using `--yes --not-security`. Include the fingerprint when
+discussing the report.
 
 ## Doctor Not Ready
 

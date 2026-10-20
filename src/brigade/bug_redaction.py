@@ -78,11 +78,12 @@ def assert_clean(text: str) -> None:
 class Redactor:
     def __init__(self, target: Path):
         self.counts: Counter[str] = Counter()
+        self.hostname = socket.gethostname()
         values = {
             str(Path.home()),
             str(target.resolve()),
             tempfile.gettempdir(),
-            socket.gethostname(),
+            self.hostname,
             getpass.getuser(),
         }
         values.update(
@@ -99,7 +100,9 @@ class Redactor:
             pattern = re.escape(literal)
             if literal == getpass.getuser() or (len(literal) <= 3 and literal.isalnum()):
                 pattern = rf"(?<![\w.]){pattern}(?![\w.])"
-            text, count = re.subn(pattern, "<local>", text, flags=re.I if "\\" in literal else 0)
+            text, count = re.subn(
+                pattern, "<local>", text, flags=re.I if literal == self.hostname or "\\" in literal else 0
+            )
             self.counts["local-literal"] += count
         text, count = re.subn(
             r"(?i)\bAuthorization:[ \t]*(?:Bearer|Basic)[ \t]+[^\s]+", "Authorization: <credential>", text

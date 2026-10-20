@@ -267,6 +267,10 @@ def main(argv=None) -> int:
     command = bug_last_error.command_path(parser, parse_argv)
     try:
         exit_code = func(args)
+    except SystemExit as exc:
+        if exc.code not in (None, 0) and command != "bug report":
+            bug_last_error.record(command, exc.code if isinstance(exc.code, int) else 1, exc)
+        raise
     except Exception as exc:
         if command != "bug report":
             bug_last_error.record(command, 1, exc)

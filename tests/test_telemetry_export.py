@@ -575,3 +575,106 @@ def test_run_only_projection_is_unchanged(tmp_path):
     assert otel_with_extra[0] == _RUN_ONLY_OTEL_ROW
     assert oi_with_extra[0] == _RUN_ONLY_OPENINFERENCE_ROW
     assert len(otel_with_extra) > 1 and len(oi_with_extra) > 1
+
+
+@pytest.mark.parametrize("kind", ["oversize", "invalid-utf8", "deep-json"])
+def test_receipt_reader_bounds_bytes_before_decoding(tmp_path, monkeypatch, kind):
+    import io
+    from pathlib import Path
+
+    payload = {
+        "oversize": b'{"log":"' + b"x" * (256 * 1024) + b'"}',
+        "invalid-utf8": b"\xff",
+        "deep-json": b"[" * 2000 + b"]" * 2000,
+    }[kind]
+    reads = []
+
+    class ReceiptInput(io.BytesIO):
+        def read(self, size=-1):
+            assert 0 < size <= 256 * 1024 + 1
+            reads.append(size)
+            return super().read(size)
+
+    monkeypatch.setattr(Path, "open", lambda *a, **k: ReceiptInput(payload))
+    assert telemetry_export._object(tmp_path / "receipt.json") is None
+    assert len(reads) == 1
+
+
+@pytest.mark.parametrize("source", ["runs", "verify"])
+def test_receipt_projection_caps_files_and_reads_newest_first(tmp_path, monkeypatch, source):
+    import os
+
+    directories = []
+    for i in range(4):
+        if source == "runs":
+            directory = _run(tmp_path, run_id=f"run-{i}")
+        else:
+            directory = _verify_receipt(tmp_path, f"verify-{i}").parent
+        os.utime(directory, (100 + i, 100 + i))
+        directories.append(directory)
+    monkeypatch.setattr(telemetry_export, "_RECEIPT_DIR_LIMIT", 2, raising=False)
+    original = telemetry_export._object
+    reads = []
+
+    def read(path):
+        reads.append(path.parent)
+        return original(path)
+
+    monkeypatch.setattr(telemetry_export, "_object", read)
+    if source == "runs":
+        rows, _, _ = telemetry_export._project_runs(tmp_path, "otel-genai")
+    else:
+        rows = telemetry_export._project_verify(tmp_path, "otel-genai", {})
+    assert len(rows) == 2
+    assert list(dict.fromkeys(reads)) == directories[:1:-1]
+    assert len(reads) == (6 if source == "runs" else 2)
+
+
+def test_receipt_directory_enumeration_has_work_budget(tmp_path, monkeypatch):
+    import os
+
+    root = tmp_path / ".brigade" / "runs"
+    root.mkdir(parents=True)
+    for i in range(5):
+        (root / f"run-{i}").mkdir()
+    original = os.scandir
+    visited = []
+
+    class Entries:
+        def __enter__(self):
+            self.entries = original(root)
+            return self
+
+        def __exit__(self, *args):
+            self.entries.close()
+
+        def __iter__(self):
+            for entry in self.entries:
+                visited.append(entry.name)
+                assert len(visited) <= 2, "directory scan exceeded the entry budget"
+                yield entry
+
+    monkeypatch.setattr(telemetry_export, "_DIRECTORY_ENTRY_LIMIT", 2, raising=False)
+    monkeypatch.setattr(os, "scandir", lambda path: Entries())
+    telemetry_export._project_runs(tmp_path, "otel-genai")
+    assert len(visited) == 2
+
+
+@pytest.mark.parametrize("source", ["runs", "verify"])
+def test_receipt_projection_caps_row_work(tmp_path, monkeypatch, source):
+    monkeypatch.setattr(telemetry_export, "_PROJECTION_ROW_LIMIT", 2, raising=False)
+    if source == "runs":
+        directory = _run(tmp_path)
+        path = directory / "worker-results.json"
+        receipt = json.loads(path.read_text())
+        receipt["results"] *= 5
+        path.write_text(json.dumps(receipt))
+        rows, anchors, _ = telemetry_export._project_runs(tmp_path, "otel-genai")
+        assert "run-1" in anchors
+    else:
+        path = _verify_receipt(tmp_path, "verify-1")
+        receipt = json.loads(path.read_text())
+        receipt["commands"] *= 5
+        path.write_text(json.dumps(receipt))
+        rows = telemetry_export._project_verify(tmp_path, "otel-genai", {})
+    assert len(rows) == 2

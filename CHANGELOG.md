@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Bug reports require a vulnerability check before sharing, redact hostname case variants, bound diagnostic receipt reads, record dispatch exits, and normalize paths with spaces in fingerprints.
+
 - Bug reports submit the saved preview by report ID after digest checks, preserve the original CLI diagnostic, and refuse vulnerability descriptions in titles, summaries, and selected output. Summary-file reads are bounded, and quickstart points to the redacted preview.
 
 - Scanner children run with `BRIGADE_NO_UPDATE_CHECK=1`. The detached update refresh a child started outlived its throwaway sandbox and recreated it when writing `update-notify.json`, leaving one `brigade-scanner-child-*` directory in the temp dir per scanner run.

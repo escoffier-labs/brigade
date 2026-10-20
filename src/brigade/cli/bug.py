@@ -25,6 +25,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     report.add_argument(
         "--yes", action="store_true", help="Submit --report-id after the user has approved its complete preview."
     )
+    report.add_argument(
+        "--not-security",
+        action="store_true",
+        help="Assert this is not a vulnerability report. Required for non-interactive --yes.",
+    )
     report.set_defaults(func=dispatch)
 
 

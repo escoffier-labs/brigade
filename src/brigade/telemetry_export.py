@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import shlex
 import sys
 from collections.abc import Callable, Mapping
+from itertools import islice
 from pathlib import Path
 from typing import Any
 
@@ -28,14 +30,39 @@ OPENINFERENCE_MAPPING = {
 _SHA256_HEX = re.compile(r"^[0-9a-f]{64}$")
 _FINGERPRINT_HEX = re.compile(r"^[0-9a-f]{16}$")
 _OUTCOME_SCALAR_KEYS = ("artifact_id", "artifact_kind", "task_id", "source", "evidence_ref", "ts")
+_RECEIPT_BYTE_LIMIT = 256 * 1024
+_DIRECTORY_ENTRY_LIMIT = 1024
+_RECEIPT_DIR_LIMIT = 64
+_PROJECTION_ROW_LIMIT = 512
 
 
 def _object(path: Path) -> dict[str, Any] | None:
     try:
-        value = json.loads(path.read_text())
-    except (OSError, json.JSONDecodeError):
+        with path.open("rb") as handle:
+            raw = handle.read(_RECEIPT_BYTE_LIMIT + 1)
+        if len(raw) > _RECEIPT_BYTE_LIMIT:
+            return None
+        value = json.loads(raw)
+    except (OSError, ValueError, RecursionError):
         return None
     return value if isinstance(value, dict) else None
+
+
+def _newest_receipt_dirs(root: Path) -> list[Path]:
+    """Bound enumeration, then read the newest directories in that window first."""
+    candidates: list[tuple[int, str]] = []
+    try:
+        with os.scandir(root) as entries:
+            for entry in islice(entries, _DIRECTORY_ENTRY_LIMIT):
+                try:
+                    if entry.is_dir(follow_symlinks=False):
+                        candidates.append((entry.stat(follow_symlinks=False).st_mtime_ns, entry.name))
+                except OSError:
+                    continue
+    except OSError:
+        return []
+    candidates.sort(reverse=True)
+    return [root / name for _modified, name in candidates[:_RECEIPT_DIR_LIMIT]]
 
 
 def _ids(run_id: str, seat: str, ordinal: int) -> tuple[str, str]:
@@ -309,9 +336,10 @@ def _project_runs(
     verify_parents: dict[str, tuple[str, str]] = {}
     ambiguous_verify: set[str] = set()
     root = target / ".brigade" / "runs"
-    for run_dir in sorted(root.iterdir()) if root.is_dir() else []:
-        if not run_dir.is_dir():
-            continue
+    remaining = _PROJECTION_ROW_LIMIT
+    for run_dir in _newest_receipt_dirs(root):
+        if remaining <= 0:
+            break
         run = _object(run_dir / "run.json")
         roster = _object(run_dir / "roster.json")
         workers = _object(run_dir / "worker-results.json")
@@ -320,8 +348,14 @@ def _project_runs(
         agents = roster.get("agents")
         if not isinstance(agents, dict):
             continue
+        results = workers.get("results")
+        if not isinstance(results, list):
+            continue
         anchor: tuple[str, str] | None = None
-        for ordinal, result in enumerate(workers.get("results", []), start=1):
+        for ordinal, result in enumerate(results, start=1):
+            if remaining <= 0:
+                break
+            remaining -= 1
             if not isinstance(result, dict) or not isinstance(result.get("worker"), str):
                 continue
             seat = result["worker"]
@@ -351,6 +385,9 @@ def _project_runs(
                         elif existing != anchor:
                             ambiguous_verify.add(run_id)
                             verify_parents.pop(run_id, None)
+    # Keep the export's existing run-id order while bounding reads newest first.
+    ids = {trace: run_id for run_id, (trace, _span) in run_anchors.items()}
+    rows.sort(key=lambda row: ids[row["trace_id"]])
     return rows, run_anchors, verify_parents
 
 
@@ -363,9 +400,10 @@ def _project_verify(
     rows: list[dict[str, Any]] = []
     target_name = target.name
     root = target / ".brigade" / "work" / "verify-runs"
-    for run_dir in sorted(root.iterdir()) if root.is_dir() else []:
-        if not run_dir.is_dir():
-            continue
+    remaining = _PROJECTION_ROW_LIMIT
+    for run_dir in _newest_receipt_dirs(root):
+        if remaining <= 0:
+            break
         receipt = _object(run_dir / "receipt.json")
         if receipt is None:
             continue
@@ -391,6 +429,9 @@ def _project_verify(
         receipt_started_at = _as_str(receipt.get("started_at"), iso=True)
         receipt_completed_at = _as_str(receipt.get("completed_at"), iso=True)
         for ordinal, command in enumerate(commands, start=1):
+            if remaining <= 0:
+                break
+            remaining -= 1
             if not isinstance(command, dict):
                 continue
             raw_command = command.get("command")
@@ -446,6 +487,7 @@ def _project_verify(
                     brigade_attrs=brigade_attrs,
                 )
             )
+    rows.sort(key=lambda row: row["attributes"]["brigade.receipt.id"])
     return rows
 
 
