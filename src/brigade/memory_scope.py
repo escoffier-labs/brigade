@@ -1,7 +1,8 @@
 """Resolve the memory stores an MCP session reads and writes.
 
 Two stores exist. The repo store is an explicit --target, or the nearest
-Brigade-wired repo above the server's cwd (never the home directory). The user
+directory above the server's cwd holding .brigade/config.json or
+.brigade/memory-care.toml (never the home directory). The user
 store lives under BRIGADE_HOME so memory works outside any repo. Repo results
 take precedence; an invalid repo memory-care config drops the repo store and is
 reported instead of failing the server.
@@ -20,6 +21,7 @@ from .wiring import resolve_wired_target
 REPO = "repo"
 USER = "user"
 USER_HANDOFF_INBOX = "memory/handoffs"
+REPO_MARKERS = (".brigade/config.json", ".brigade/memory-care.toml")
 
 
 @dataclass(frozen=True)
@@ -41,14 +43,26 @@ def user_root() -> Path:
     return brigade_home().expanduser().resolve()
 
 
+def _nearest_marker(cwd: Path) -> Path | None:
+    current = cwd.expanduser().resolve()
+    for candidate in (current, *current.parents):
+        if is_operator_home(candidate):
+            return None
+        if any((candidate / marker).is_file() for marker in REPO_MARKERS):
+            return candidate
+    return None
+
+
 def _repo_root(target: Path | None, cwd: Path) -> tuple[Path | None, bool]:
     if target is not None:
         root = target.expanduser().resolve()
         return root, (root / ".brigade" / "config.json").is_file()
-    found = resolve_wired_target(str(cwd), harness=None)
-    if found is None or is_operator_home(found):
-        return None, False
-    return found.resolve(), True
+    wired = resolve_wired_target(str(cwd), harness=None)
+    wired_root = wired.resolve() if wired is not None and not is_operator_home(wired) else None
+    marker = _nearest_marker(cwd)
+    if marker is None:
+        return wired_root, wired_root is not None
+    return marker, marker == wired_root
 
 
 def resolve(*, target: Path | None = None, cwd: Path | None = None) -> Resolution:

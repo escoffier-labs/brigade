@@ -1,6 +1,6 @@
 # Brigade agent plugin (phase 1: Claude Code and Codex)
 
-Status: approved 2026-10-19. The implementation plan will go in `docs/phase-agent-plugin-plan.md`.
+Status: approved 2026-10-19. The implementation plan is in `docs/phase-agent-plugin-plan.md`.
 
 ## Goal
 
@@ -49,8 +49,8 @@ Write tools carry MCP `annotations` (`readOnlyHint: false`, `destructiveHint: fa
 
 ### 3. Memory resolution (`src/brigade/memory_scope.py`)
 
-- User store: `$BRIGADE_HOME/memory/` when `BRIGADE_HOME` is set, otherwise `~/.brigade/memory/`. Layout: `cards/`, `handoffs/`, `proposals/`. Created on first write, with mode `0700` directories. Read tools against a missing store return empty results, not errors.
-- Repo store: found by walking up from the server's working directory (or an explicit `--target`) to the nearest directory containing `.brigade/`. It uses the repo's existing memory-care config and card roots.
+- User store: `$BRIGADE_HOME/memory/` when `BRIGADE_HOME` is set, otherwise `~/.brigade/memory/`. Layout: `cards/` and `handoffs/`. Created on first write, with mode `0700` directories. Read tools against a missing store return empty results, not errors.
+- Repo store: an explicit `--target` is always the repo store, wired or not. With no `--target`, the server walks up from its working directory to the nearest directory holding `.brigade/config.json` or `.brigade/memory-care.toml`, stops at the first one, and never treats the home directory as a repo. It uses the repo's existing memory-care config and card roots. `repo_wired` means `.brigade/config.json` loads for that directory through `resolve_wired_target`; a memory-care-only repo serves its cards but is not wired. An invalid memory-care config drops the repo store from reads, while `write_handoff` still writes to the repo inbox.
 - Both stores are searched by one call. The core never follows symlinks out of either root, reusing the existing card path guard in `_mcp_read_card`.
 
 ### 4. Transports
@@ -116,7 +116,7 @@ plugins/brigade/
 
 ## Dependencies and checks for the plan
 
-- npm `@escoffier-labs/brigade@0.29.0` is published. The plugin pins the pyproject version through `scripts/version_sync.py`, and the marketplace entries land with the first release that contains these commands.
+- The plugin pins the pyproject version through `scripts/version_sync.py`. The marketplace entries land with 0.31.0, the first release that contains these commands, and the plugin needs `@escoffier-labs/brigade@0.31.0` or later on npm.
 - The Codex plugin manifest schema is confirmed from `codex plugin --help` and Codex documentation during planning. No design decision depends on it.
 - New modules stay well under the module size ceiling. `memory_cmd.py` should shrink as the card tool code moves into the core.
 

@@ -305,7 +305,7 @@ def register(sub: argparse._SubParsersAction) -> None:
         "-t",
         type=Path,
         default=None,
-        help="Repo whose cards form the repo store. Default: nearest Brigade-wired repo above the cwd.",
+        help="Repo whose cards form the repo store. Default: nearest repo above the cwd with .brigade/config.json or .brigade/memory-care.toml.",
     )
     serve_transport = p_memory_serve_mcp.add_mutually_exclusive_group()
     serve_transport.add_argument(

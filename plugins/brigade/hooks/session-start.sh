@@ -4,7 +4,8 @@
 set -u
 
 project="${CLAUDE_PROJECT_DIR:-$PWD}"
-claude_home="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+home="${HOME:-}"
+claude_home="${CLAUDE_CONFIG_DIR:-$home/.claude}"
 
 # Brigade's enforced hooks already inject the brief; stay quiet when installed.
 if [ -f "$claude_home/brigade/claude-hooks.json" ]; then
@@ -13,7 +14,7 @@ fi
 
 root=""
 probe="$project"
-while [ -n "$probe" ] && [ "$probe" != "/" ] && [ "$probe" != "$HOME" ]; do
+while [ -n "$probe" ] && [ "$probe" != "/" ] && [ "$probe" != "$home" ]; do
   if [ -f "$probe/.brigade/config.json" ]; then
     root="$probe"
     break
@@ -34,5 +35,5 @@ if [ -n "$root" ] && command -v brigade >/dev/null 2>&1; then
   exit 0
 fi
 
-echo "Brigade memory is available through the brigade-memory MCP tools (search_cards, get_card, write_handoff). Memory outside a Brigade-wired repo lives in ${BRIGADE_HOME:-$HOME/.brigade}/memory."
+echo "Brigade memory is available through the brigade-memory MCP tools (search_cards, get_card, write_handoff). Memory outside a Brigade-wired repo lives in ${BRIGADE_HOME:-$home/.brigade}/memory."
 exit 0

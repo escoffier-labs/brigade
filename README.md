@@ -98,10 +98,10 @@ For preview builds on a pipx install, run `brigade update --channel beta`. Detai
 
 ## MCP servers
 
-`brigade-cli` includes two read-only MCP servers. `--stdio` runs them over stdin and stdout, and `--http` serves them on loopback Streamable HTTP for hosts that connect by URL ([details](docs/technical-guide.md#streamable-http-for-the-read-only-mcp-servers)).
+`brigade-cli` includes two MCP servers. `--stdio` runs them over stdin and stdout, and `--http` serves them on loopback Streamable HTTP for hosts that connect by URL ([details](docs/technical-guide.md#streamable-http-for-the-mcp-servers)).
 
-- `brigade memory serve-mcp --stdio`: the repo's memory cards, with `list_cards`, `search_cards`, and `get_card`.
-- `brigade skills serve-mcp --stdio`: the reviewed skill registry, with search, read, lint, compatibility, and install-history tools.
+- `brigade memory serve-mcp --stdio`: memory cards from the repo and user stores, with six tools: `list_cards`, `get_card`, `search_cards`, `memory_status`, `work_brief`, and `write_handoff`. `write_handoff` is the one write tool; it drafts a Memory Handoff and never edits a canonical card ([details](docs/agent-plugin.md#tools)).
+- `brigade skills serve-mcp --stdio`: the reviewed skill registry, read-only, with search, read, lint, compatibility, and install-history tools.
 
 Without a global install, `uvx --from brigade-cli brigade memory serve-mcp --stdio` runs the same server.
 

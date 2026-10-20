@@ -9,7 +9,9 @@ The Brigade plugin gives Claude Code and Codex working agent memory in the sessi
 /plugin install brigade@brigade
 ```
 
-The plugin launches the memory server through npm, so it requires Brigade 0.31.0 or later on npm. If you already have the CLI from pipx, change the `command` in the plugin's MCP config to `brigade` and drop the first two arguments.
+The marketplace install works from Brigade 0.31.0, the release that adds the marketplace entries. The plugin launches the memory server through npm, so it requires Brigade 0.31.0 or later on npm. If you already have the CLI from pipx, change the `command` in the plugin's MCP config to `brigade` and drop the first two arguments.
+
+Before 0.31.0, the only way to try the plugin is to load `plugins/brigade` locally with its `command` changed to a `brigade` CLI built from this branch, because no published package has these commands yet.
 
 ## Install in Codex
 
@@ -18,7 +20,7 @@ codex plugin marketplace add escoffier-labs/brigade
 codex plugin add brigade@brigade
 ```
 
-The Codex plugin ships no hook, because codex-cli 0.163.0 has no verified plugin hook contract. Codex gets the brief from the `work_brief` tool, which the `brigade-work` skill tells agents to run first.
+The Codex plugin ships no hook, because codex-cli 0.163.0 has no verified plugin hook contract. Codex users can call the `work_brief` tool for the same brief the Claude Code hook prints.
 
 `write_handoff` is marked as a write tool, so Codex asks for approval before calling it. Under `codex exec` with the default `never` approval policy the call is rejected; pass `--approve-for-me` to route it through automatic review.
 
@@ -47,10 +49,14 @@ Card references use one grammar:
 The repo store is chosen in this order:
 
 1. An explicit `--target` is always used as the repo store, wired or not. This keeps existing `--target .` configs working.
-2. With no `--target`, the server walks up from its working directory to the nearest `.brigade/config.json`.
+2. With no `--target`, the server walks up from its working directory to the nearest directory holding `.brigade/config.json` or `.brigade/memory-care.toml`, and stops at the first one it finds.
 3. The home directory is never treated as a repo.
 
+The repo counts as Brigade-wired only when `.brigade/config.json` loads; a repo found through `memory-care.toml` alone serves its cards, but `work_brief` reports it as not wired. If the repo's `memory-care.toml` is invalid, its cards are dropped from reads and `memory_status` reports the error, but `write_handoff` still writes to the repo inbox.
+
 The user store is `$BRIGADE_HOME/memory/cards`, with handoffs in `$BRIGADE_HOME/memory/handoffs`. `BRIGADE_HOME` defaults to `~/.brigade`. A missing store returns empty results, not errors.
+
+User-store handoffs are plain Markdown files under `$BRIGADE_HOME/memory/handoffs`. Read them directly, and check one with `brigade handoff lint <file>`.
 
 ## Loopback HTTP for MCP gateways
 
@@ -73,4 +79,4 @@ The plugin starts memory-first and ships no enforcement hooks. Ask the agent to 
 brigade init --target . --depth repo --harnesses <harness> --owner <harness> --git-exclude
 ```
 
-That writes `.brigade/` into the repo, installs the harness's Brigade hooks (verification capture, raw-check blocking, and the handoff-before-stop gate), and adds local git excludes so none of it is committed. It then runs `brigade work brief --target .`. The hooks take effect in the next session.
+That writes `.brigade/`, the `brigade-work` skill, AGENTS guidance, and a handoff inbox into the repo. The full enforced hooks (verification capture, raw-check blocking, and the handoff-before-stop gate) are installed for Claude Code only, into `.claude/settings.json`; they take effect in the next session. Codex gets the skills and AGENTS guidance from `brigade init`, but no hooks. `--git-exclude` keeps Brigade's own files out of git through local excludes. Some repos already track `.claude/settings.json`, and there the hook entries show up as a change to that file. The skill then runs `brigade work brief --target .`.

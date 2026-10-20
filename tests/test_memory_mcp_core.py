@@ -112,11 +112,13 @@ def test_resources_use_card_uris_per_origin(stores):
 
 def test_memory_status_reports_stores_and_config_error(stores):
     repo, user = stores
+    _card(repo, "a.md", "A", "a")
     _card(user, "b.md", "B", "b")
     status, failed = _tools(repo).call("memory_status", {})
     assert failed is False
     assert status["repo"]["root"] == str(repo.resolve())
     assert status["repo"]["wired"] is False
+    assert status["repo"]["card_count"] == 1
     assert status["user"]["card_count"] == 1
     assert status["claude_hooks_installed"] is False
     (repo / ".brigade").mkdir()
@@ -183,24 +185,93 @@ def test_work_brief_outside_wired_repo_points_at_user_store(stores, monkeypatch,
     assert result["user_store"].endswith(".brigade/memory")
 
 
-def test_work_brief_in_wired_repo_returns_brief_subset(stores, monkeypatch):
+def test_work_brief_in_wired_repo_uses_cheap_helpers_only(stores, monkeypatch):
     repo, _ = stores
     (repo / ".brigade").mkdir()
     (repo / ".brigade" / "config.json").write_text("{}")
     from brigade.work_cmd.session import briefing
 
-    fake = {"git": {"branch": "main"}, "active_session": None, "latest_session": None, "next": "ship", "extra": 1}
-    monkeypatch.setattr(briefing, "_brief_payload", lambda target, limit=3: fake)
+    def _full_brief(*args, **kwargs):
+        raise AssertionError("work_brief must not build the full brief")
+
+    monkeypatch.setattr(briefing, "_brief_payload", _full_brief)
     result, failed = _tools(repo).call("work_brief", {})
     assert failed is False
-    assert result == {
-        "wired": True,
-        "root": str(repo.resolve()),
-        "git": {"branch": "main"},
-        "active_session": None,
-        "latest_session": None,
-        "next": "ship",
-    }
+    assert result["wired"] is True and result["root"] == str(repo.resolve())
+    assert set(result) == {"wired", "root", "git", "active_session", "latest_session", "next"}
+    assert result["active_session"] is None and result["latest_session"] is None
+    assert isinstance(result["next"], str) and result["next"]
+
+
+def test_unexpected_tool_exception_is_a_tool_error(stores, monkeypatch):
+    repo, _ = stores
+    tools = _tools(repo)
+
+    def _boom(arguments):
+        raise KeyError("missing")
+
+    monkeypatch.setattr(tools, "_tool_table", lambda: {"list_cards": _boom})
+    assert tools.call("list_cards", {}) == ("list_cards failed: KeyError: 'missing'", True)
+
+
+def test_write_handoff_uses_repo_inbox_when_repo_config_is_invalid(stores):
+    repo, _ = stores
+    (repo / ".brigade").mkdir()
+    (repo / ".brigade" / "config.json").write_text("{}")
+    (repo / ".brigade" / "memory-care.toml").write_text("card_roots = 7\n")
+    tools = _tools(repo)
+    assert tools.resolution().repo_config_error
+    result, failed = tools.call("write_handoff", {"title": "T", "summary": "S.", "content": "Body."})
+    assert failed is False and result["origin"] == "repo"
+    assert result["path"].startswith(".claude/memory-handoffs/")
+    assert (repo / result["path"]).is_file()
+
+
+def test_memory_status_reports_the_real_handoff_destination(stores, monkeypatch, tmp_path: Path):
+    repo, user = stores
+    status, _ = _tools(repo).call("memory_status", {})
+    assert status["handoff_inbox"] == "claude"
+    from brigade import memory_scope
+
+    monkeypatch.setattr(memory_scope, "resolve_wired_target", lambda cwd, harness=None: None)
+    outside, _ = memory_mcp_core.MemoryTools(cwd=tmp_path, inbox="claude").call("memory_status", {})
+    assert outside["handoff_inbox"] == str(user.resolve() / "memory" / "handoffs")
+
+
+def test_unwired_hint_names_the_user_store_only_without_a_repo_store(stores, monkeypatch, tmp_path: Path):
+    repo, _ = stores
+    explicit, _ = _tools(repo).call("work_brief", {})
+    assert explicit["wired"] is False
+    assert "user store" not in explicit["hint"]
+    from brigade import memory_scope
+
+    monkeypatch.setattr(memory_scope, "resolve_wired_target", lambda cwd, harness=None: None)
+    outside, _ = memory_mcp_core.MemoryTools(cwd=tmp_path).call("work_brief", {})
+    assert "use the user store" in outside["hint"]
+
+
+def test_write_handoff_errors_name_tool_arguments(stores):
+    repo, _ = stores
+    tools = _tools(repo)
+    message, failed = tools.call(
+        "write_handoff", {"title": "T", "summary": "S.", "content": "Body.", "action": "create-card"}
+    )
+    assert failed is True
+    assert message == "target_card is required for card handoffs"
+    message, failed = tools.call("write_handoff", {"title": "T", "summary": "S.", "content": "Body.", "action": "x"})
+    assert failed is True and message.startswith("action must be one of:")
+
+
+def test_search_uses_each_store_config(stores):
+    repo, user = stores
+    _card(user, "u.md", "Uniquekey card", "body")
+    (user / ".brigade").mkdir(parents=True)
+    (user / ".brigade" / "memory-care.toml").write_text("card_roots = 7\n")
+    tools = _tools(repo)
+    matches, failed = tools.call("search_cards", {"query": "uniquekey"})
+    assert failed is False
+    assert [m["ref"] for m in matches] == ["user:memory/cards/u.md"]
+    assert tools.call("get_card", {"path": "user:memory/cards/u.md"})[1] is False
 
 
 def test_symlinked_card_root_yields_no_cards(stores, tmp_path: Path):

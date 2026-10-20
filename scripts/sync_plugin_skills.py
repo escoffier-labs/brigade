@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
-"""Copy canonical Brigade skills into the agent plugin; --check fails on drift.
+"""Check the agent plugin's copies of canonical Brigade skills; --write syncs them.
 
-The plugin directory is a build output for these files, never a place to edit
-them. Edit src/brigade/templates/skills/<name>/SKILL.md, then run --write.
+With no flags the script exits 1 and names each plugin copy that differs from
+its canonical source. The plugin directory is a build output for these files,
+never a place to edit them. Edit src/brigade/templates/skills/<name>/SKILL.md,
+then run with --write.
 """
 
 from __future__ import annotations

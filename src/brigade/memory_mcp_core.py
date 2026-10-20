@@ -30,6 +30,18 @@ UNWIRED_HINT = (
     "This directory is not a Brigade-wired repo, so memory tools use the user store. "
     "Run the Brigade enforce skill to wire this repo into the full work loop."
 )
+UNWIRED_REPO_HINT = (
+    "This repo is not Brigade-wired, so no work brief is available. "
+    "Run the Brigade enforce skill to wire this repo into the full work loop."
+)
+# build_draft words its errors for the CLI; the tool reports its own argument names.
+_DRAFT_FLAG_ARGS = (
+    ("--target-document", "target_document"),
+    ("--target-card", "target_card"),
+    ("--action", "action"),
+    ("--title", "title"),
+    ("--summary", "summary"),
+)
 
 _READ = {"readOnlyHint": True}
 _WRITE = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False}
@@ -259,10 +271,11 @@ class MemoryTools:
             return f"unknown tool: {name}", True
         try:
             return handler(arguments)
-        except ValueError as exc:
+        except (ValueError, OSError) as exc:
             return str(exc), True
-        except OSError as exc:
-            return str(exc), True
+        except Exception as exc:
+            # One bad call must not end a long-lived stdio or HTTP server.
+            return f"{name} failed: {type(exc).__name__}: {exc}", True
 
     def _tool_table(self) -> dict[str, Callable[[dict[str, Any]], ToolResult]]:
         return {
@@ -304,7 +317,8 @@ class MemoryTools:
         ranked: list[tuple[int, dict[str, Any]]] = []
         for rank, store in enumerate(self.resolution().stores):
             # Uncapped so outside-the-store matches dropped here cannot crowd out real ones.
-            for match in memory_cmd.search_cards_payload(store.root, query, limit=sys.maxsize)["matches"]:
+            payload = memory_cmd.search_cards_payload(store.root, query, limit=sys.maxsize, config=store.config)
+            for match in payload["matches"]:
                 if not _inside(store.root / match["path"], store.root):
                     continue
                 ranked.append((rank, {**match, "origin": store.origin, "ref": card_ref(store.origin, match["path"])}))
@@ -328,7 +342,9 @@ class MemoryTools:
             "user": {"root": str(user), "exists": (user / "memory").is_dir(), "card_count": counts.get(USER, 0)},
             "claude_hooks_installed": res.repo_root is not None
             and (res.repo_root / ".brigade" / "claude-hooks.json").is_file(),
-            "handoff_inbox": self._inbox,
+            "handoff_inbox": self._inbox
+            if res.repo_root is not None
+            else str(memory_scope.user_root() / memory_scope.USER_HANDOFF_INBOX),
         }, False
 
     def _work_brief(self, arguments: dict[str, Any]) -> ToolResult:
@@ -337,12 +353,22 @@ class MemoryTools:
             return {
                 "wired": False,
                 "user_store": str(memory_scope.user_root() / "memory"),
-                "hint": UNWIRED_HINT,
+                "hint": UNWIRED_HINT if res.repo_root is None else UNWIRED_REPO_HINT,
             }, False
-        from .work_cmd.session import briefing
+        # The same helpers the full brief uses for these keys, without its hub,
+        # presence, and health sections, so the tool stays local and fast.
+        from .work_cmd import helpers
+        from .work_cmd.session.lifecycle import _resolve_next_task
 
-        payload = briefing._brief_payload(res.repo_root, limit=3)
-        return {"wired": True, "root": str(res.repo_root), **{key: payload.get(key) for key in BRIEF_KEYS}}, False
+        root = res.repo_root
+        sessions, _ = helpers._collect_sessions(helpers._work_root(root))
+        brief = {
+            "git": helpers._git_snapshot(root),
+            "active_session": helpers._active_session_info(root),
+            "latest_session": helpers._session_info(*sessions[0]) if sessions else None,
+            "next": str(_resolve_next_task(root)["task"]),
+        }
+        return {"wired": True, "root": str(root), **{key: brief[key] for key in BRIEF_KEYS}}, False
 
     def _write_handoff(self, arguments: dict[str, Any]) -> ToolResult:
         title = _required_text(arguments, "title")
@@ -354,9 +380,11 @@ class MemoryTools:
         target_document = _optional_text(arguments, "target_document") or DEFAULT_DRAFT_DOCUMENT
         facts = _string_list(arguments, "facts")
         evidence = _string_list(arguments, "evidence")
-        repo = next((store for store in self.resolution().stores if store.origin == REPO), None)
-        if repo is not None:
-            root, inbox, origin = repo.root, self._inbox, REPO
+        repo_root = self.resolution().repo_root
+        if repo_root is not None:
+            # The repo inbox stays the destination even when an invalid
+            # memory-care config dropped the repo store from reads.
+            root, inbox, origin = repo_root, self._inbox, REPO
         else:
             root = memory_scope.user_root()
             root.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -367,19 +395,25 @@ class MemoryTools:
             raise ValueError(f"handoff inbox resolves outside the memory store: {inbox_path}")
         if origin == USER:
             inbox_path.mkdir(mode=0o700, exist_ok=True)
-        payload = handoff_drafts.build_draft(
-            target=root,
-            title=title,
-            summary=summary,
-            content=content,
-            handoff_type=_optional_text(arguments, "type") or "workflow",
-            action=_optional_text(arguments, "action") or "no-card",
-            target_card=target_card,
-            target_document=target_document,
-            fact=facts,
-            evidence=evidence,
-            inbox=inbox,
-        )
+        try:
+            payload = handoff_drafts.build_draft(
+                target=root,
+                title=title,
+                summary=summary,
+                content=content,
+                handoff_type=_optional_text(arguments, "type") or "workflow",
+                action=_optional_text(arguments, "action") or "no-card",
+                target_card=target_card,
+                target_document=target_document,
+                fact=facts,
+                evidence=evidence,
+                inbox=inbox,
+            )
+        except ValueError as exc:
+            message = str(exc)
+            for flag, arg in _DRAFT_FLAG_ARGS:
+                message = message.replace(flag, arg)
+            raise ValueError(message) from exc
         path = Path(payload["path"])
         if not payload["valid"]:
             path.unlink(missing_ok=True)

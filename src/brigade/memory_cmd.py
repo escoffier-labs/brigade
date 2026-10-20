@@ -1821,9 +1821,12 @@ def _card_search_fields(path: Path, target: Path) -> dict[str, Any]:
     }
 
 
-def search_cards_payload(target: Path, query: str, *, limit: int = 20) -> dict[str, Any]:
+def search_cards_payload(
+    target: Path, query: str, *, limit: int = 20, config: MemoryCareConfig | None = None
+) -> dict[str, Any]:
     target = target.expanduser().resolve()
-    config = load_config(target) or MemoryCareConfig()
+    if config is None:
+        config = load_config(target) or MemoryCareConfig()
     terms = [term for term in query.lower().split() if term]
     matches: list[dict[str, Any]] = []
     for path in _iter_cards(target, config):
@@ -1903,6 +1906,9 @@ def serve_mcp(
 ) -> int:
     from . import memory_mcp_core
 
+    if target is not None and not target.expanduser().is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
+        return 2
     if stdio and http:
         print("error: --stdio and --http are mutually exclusive", file=sys.stderr)
         return 2

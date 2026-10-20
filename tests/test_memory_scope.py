@@ -59,3 +59,46 @@ def test_invalid_repo_config_degrades_to_user_store(home: Path, tmp_path: Path):
 def test_target_equal_to_user_root_is_not_duplicated(home: Path):
     res = memory_scope.resolve(target=home / ".brigade")
     assert [s.origin for s in res.stores] == ["user"]
+
+
+WIRED_CONFIG = '{"version": 1, "depth": "repo", "harnesses": ["claude"], "owner": "claude"}'
+
+
+def _marker(root: Path, name: str, text: str = "") -> None:
+    (root / ".brigade").mkdir(parents=True, exist_ok=True)
+    (root / ".brigade" / name).write_text(text)
+
+
+def test_memory_care_only_repo_is_detected_without_wiring(home: Path, tmp_path: Path):
+    repo = tmp_path / "work" / "repo"
+    sub = repo / "src"
+    sub.mkdir(parents=True)
+    _marker(repo, "memory-care.toml")
+    res = memory_scope.resolve(cwd=sub)
+    assert res.repo_root == repo.resolve()
+    assert res.repo_wired is False
+    assert [s.origin for s in res.stores] == ["repo", "user"]
+
+
+def test_nested_repo_stops_at_the_nearest_marker(home: Path, tmp_path: Path):
+    outer = tmp_path / "outer"
+    inner = outer / "inner"
+    deep = inner / "pkg"
+    deep.mkdir(parents=True)
+    _marker(outer, "config.json", WIRED_CONFIG)
+    _marker(inner, "memory-care.toml")
+    res = memory_scope.resolve(cwd=deep)
+    assert res.repo_root == inner.resolve()
+    assert res.repo_wired is False
+    wired = memory_scope.resolve(cwd=outer)
+    assert wired.repo_root == outer.resolve() and wired.repo_wired is True
+
+
+def test_home_directory_markers_are_skipped(home: Path):
+    sub = home / "notes"
+    sub.mkdir()
+    _marker(home, "config.json", WIRED_CONFIG)
+    _marker(home, "memory-care.toml")
+    res = memory_scope.resolve(cwd=sub)
+    assert res.repo_root is None
+    assert [s.origin for s in res.stores] == ["user"]

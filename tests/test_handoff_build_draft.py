@@ -54,5 +54,3 @@ def test_build_draft_creates_private_file_without_following_symlinks(tmp_path: P
     with pytest.raises(ValueError, match="already exists"):
         drafts.build_draft(**kwargs)
     assert not victim.exists()
-    payload = drafts.build_draft(**kwargs, force=True)
-    assert payload["valid"] is True

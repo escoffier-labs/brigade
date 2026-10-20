@@ -21,7 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The memory and skills MCP tools describe what they return and when to use them, and their input fields carry descriptions, so MCP clients and directories can pick the right tool.
 - The read-only MCP servers negotiate the protocol version (`2024-11-05`, `2025-03-26`, or `2025-06-18`) instead of always answering `2024-11-05`, answer `ping` with an empty result, return `-32600` for malformed requests, and report the Brigade version in `serverInfo`.
 - The npm package `@escoffier-labs/brigade@0.30.0` bundles the published `brigade-cli==0.30.0` wheel. Its launcher runs `brigade.cli:process_main`, the same entry point as the `brigade` console script, so npm installs keep exit status 130 when a verification is cancelled.
-- The memory MCP server reports `serverInfo.name` `brigade-memory` (was `brigade-memory-readonly`), and `serve-mcp --target` defaults to the nearest Brigade-wired repo. An explicit `--target` is still used as the repo store.
+- The memory MCP server reports `serverInfo.name` `brigade-memory` (was `brigade-memory-readonly`), and `serve-mcp --target` defaults to the nearest directory above the working directory holding `.brigade/config.json` or `.brigade/memory-care.toml`, never the home directory. An explicit `--target` is still used as the repo store, and one that is not an existing directory exits 2.
+- The memory `work_brief` tool builds its git, session, and next-task keys from local helpers only, so it never contacts the fleet hub. An unexpected exception in any memory tool is returned as a tool error instead of ending the server, and `write_handoff` writes to the repo inbox even when an invalid memory-care config drops the repo store from reads.
 - `brigade handoff draft` creates draft files with mode 0600 (previously the umask default).
 
 ## [0.30.0] - 2026-10-20

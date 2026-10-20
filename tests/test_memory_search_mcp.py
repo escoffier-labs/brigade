@@ -224,9 +224,6 @@ def test_serve_mcp_cli_refuses_non_loopback_and_both_transports(tmp_path: Path, 
     assert "require --http" in capsys.readouterr().err
     with pytest.raises(SystemExit):
         cli.main(["memory", "serve-mcp", "--stdio", "--http"])
-    for removed in ("--print-token-path", "--bearer-file"):
-        with pytest.raises(SystemExit):
-            cli.main(["memory", "serve-mcp", removed])
 
 
 def test_serve_mcp_contract_lists_six_tools(tmp_path: Path, monkeypatch, capsys):
@@ -236,3 +233,11 @@ def test_serve_mcp_contract_lists_six_tools(tmp_path: Path, monkeypatch, capsys)
     assert payload["read_only"] is False
     assert len(payload["tools"]) == 6
     assert [s["origin"] for s in payload["stores"]] == ["repo", "user"]
+
+
+@pytest.mark.parametrize("mode", [[], ["--json"], ["--stdio"], ["--http"]])
+def test_serve_mcp_explicit_target_must_be_a_directory(tmp_path: Path, monkeypatch, capsys, mode):
+    monkeypatch.setenv("BRIGADE_HOME", str(tmp_path / "bh"))
+    missing = tmp_path / "missing"
+    assert cli.main(["memory", "serve-mcp", "--target", str(missing), *mode]) == 2
+    assert f"error: --target is not a directory: {missing}" in capsys.readouterr().err

@@ -89,3 +89,13 @@ def test_hook_prints_brief_in_wired_repo_and_skips_when_enforced(tmp_path: Path)
     assert "FAKE-BRIEF work brief --target" in result.stdout
     (project / ".brigade" / "claude-hooks.json").write_text("{}")
     assert _run_hook(tmp_path, project, [bin_dir]).stdout == ""
+
+
+def test_hook_parses_and_exits_zero_with_home_unset(tmp_path: Path):
+    assert subprocess.run(["bash", "-n", str(HOOK)], capture_output=True, timeout=30).returncode == 0
+    project = tmp_path / "proj"
+    project.mkdir()
+    env = {"PATH": "/usr/bin:/bin", "CLAUDE_PROJECT_DIR": str(project)}
+    result = subprocess.run(["bash", str(HOOK)], env=env, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert "brigade-memory MCP tools" in result.stdout
