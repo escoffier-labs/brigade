@@ -263,8 +263,7 @@ def load_fleet_config() -> dict[str, str]:
     (``BRIGADE_FLEET_NODE_TOKEN`` / ``[fleet] node_token_file``), or, when
     none is configured, the shared admin token (``BRIGADE_FLEET_TOKEN`` /
     ``[fleet] token_file``) — the deprecated shared-token mode, logged as
-    one WARNING per process when a hub is configured. See
-    ``load_fleet_settings`` for precedence.
+    one WARNING per process when a hub is configured. See ``load_fleet_settings`` for precedence.
     """
     global _SHARED_TOKEN_WARNED
     settings = load_fleet_settings()
@@ -274,7 +273,7 @@ def load_fleet_config() -> dict[str, str]:
         if settings["hub_url"] and not _SHARED_TOKEN_WARNED:
             _SHARED_TOKEN_WARNED = True
             _LOG.warning(_SHARED_TOKEN_WARNING)
-    return {"hub_url": settings["hub_url"], "token": token}
+    return _claim_lifecycle._FleetConfig(settings, token)
 
 
 def _read_token_file(raw_path: str) -> str:
@@ -1599,6 +1598,7 @@ def _schedule_orphan_release(
     ttl_seconds: int,
     hub_url: str | None = None,
     token: str | None = None,
+    connect: Callable[[], dict[str, Any]] | None = None,
 ) -> None:
     _claim_lifecycle._schedule_orphan_release(
         target,
@@ -1608,6 +1608,7 @@ def _schedule_orphan_release(
         ttl_seconds=ttl_seconds,
         hub_url=hub_url,
         token=token,
+        connect=connect,
     )
 
 
@@ -1725,9 +1726,9 @@ def repo_claim(
     if not hub_configured:
         yield ClaimDecision(granted=False, reason="no-hub")
         return
-    # One authority for the entire claim, including cleanup after guarded work
-    # changed configuration. Only a same-hub token rotation is followed (#1781).
-    connection = _claim_lifecycle._bound_connection(config["hub_url"], config.get("token", ""))
+    connection = _claim_lifecycle._bound_connection(
+        config["hub_url"], config.get("token", ""), shared=getattr(config, "shared_token", None)
+    )
     node_id = resolve_node_id(base_path)
     if not _node_id_is_claimable(node_id):
         _LOG.warning("no usable fleet node identity (%r); relying on the local run lock alone for %s", node_id, target)
@@ -1756,7 +1757,7 @@ def repo_claim(
     if not decision.granted and decision.reason == "quota":
         if ambiguous_initial_acquire:
             _schedule_orphan_release(
-                target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds, **connection()
+                target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds, connect=connection
             )
         raise FleetClaimQuotaError(f"fleet hub claim quota refused {target!r}: {decision.detail}")
     if not decision.granted and decision.reason == "auth-failed":
@@ -1772,7 +1773,7 @@ def repo_claim(
     if not decision.granted and decision.reason == "hub-unavailable":
         _LOG.warning("fleet hub unreachable (%s); falling back to the local run lock for %s", decision.detail, target)
         _schedule_orphan_release(
-            target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds, **connection()
+            target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds, connect=connection
         )
         yield decision
         return
@@ -1786,14 +1787,14 @@ def repo_claim(
             # still in flight. Preserve degraded admission and fence any
             # later commit using the original retry holder token.
             _schedule_orphan_release(
-                target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds, **connection()
+                target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds, connect=connection
             )
         yield decision
         return
     if not decision.granted:
         if decision.reason == "claim-fence-refused" and ambiguous_initial_acquire:
             _schedule_orphan_release(
-                target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds, **connection()
+                target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds, connect=connection
             )
         if decision.reason in TERMINAL_CLAIM_REFUSALS:
             raise FleetClaimHeldError(f"fleet claim on {target!r} refused: {decision.reason}", owner=decision.owner)
@@ -1846,10 +1847,9 @@ def repo_claim(
                     release_outcome.reason,
                 )
         if release_outcome.reason in CLEANUP_RETRY_REASONS:
-            # A refused release has not retired this holder. Keep cleanup
-            # alive after both ordinary exit and rejected admission.
+            # Retain the bound connection while retrying refused releases after exit or rejected admission.
             _schedule_orphan_release(
-                target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds, **connection()
+                target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds, connect=connection
             )
         # This window cannot fence a server request that commits beyond it
         # (#1189), even when every release received a positive acknowledgement.
@@ -1909,7 +1909,7 @@ def repo_claim(
         release_outcome = release_claim(target, holder=holder, node_id=node_id, conductor=conductor, **connection())
         if release_outcome.reason in CLEANUP_RETRY_REASONS:
             _schedule_orphan_release(
-                target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds, **connection()
+                target, node_id=node_id, holder=holder, conductor=conductor, ttl_seconds=ttl_seconds, connect=connection
             )
 
     def _renew_loop() -> None:

@@ -1575,3 +1575,170 @@ def test_initial_acquire_retry_uses_a_token_rotated_during_the_first_attempt(mon
         assert decision.granted
     assert posts[1][:2] == ("acquire", "fake-token-two")
     assert posts[0][2] == posts[1][2]
+
+
+@pytest.mark.parametrize("file_state", ["empty", "unreadable"])
+def test_exit_orphan_release_keeps_node_credential_when_its_file_is_unavailable(tmp_path, monkeypatch, file_state):
+    """Orphan cleanup must retain the claim's node credential kind (#1781)."""
+    home = tmp_path / "home"
+    home.mkdir()
+    token_file = tmp_path / "node-token"
+    _write_fleet_file(home, token_file, HUB_ONE, "fake-node-token")
+    monkeypatch.setenv("BRIGADE_HOME", str(home))
+    _fleet_env(monkeypatch, admin="fake-admin-token")
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda base_path=None: NODE_A)
+    monkeypatch.setattr(fleet_client, "_claim_renew_interval", lambda ttl: 1000)
+    releases = []
+    done = threading.Event()
+
+    def post(hub_url, token, body, *, timeout):
+        if body["action"] == "release":
+            releases.append((hub_url, token, body["holder"]))
+            if len(releases) == 1:
+                return 503, {"error": "fake unavailable hub"}
+            done.set()
+            return 200, {"released": True}
+        assert body["action"] == "acquire"
+        return 200, {"granted": True, "claim": {"generation": 1}}
+
+    monkeypatch.setattr(fleet_client, "_post_claim_blocking", post)
+    with fleet_client.repo_claim("fake-target", ttl_seconds=60) as decision:
+        assert decision.granted
+        if file_state == "empty":
+            token_file.write_text("", encoding="utf-8")
+        else:
+            token_file.unlink()
+            token_file.mkdir()  # Reading a directory fails even for privileged test runners.
+    assert done.wait(5), "exit cleanup did not hand off to orphan release"
+    assert len(releases) == 2
+    assert [(hub, token) for hub, token, _ in releases] == [(HUB_ONE, "fake-node-token")] * 2
+    assert releases[0][2] == releases[1][2]
+
+
+@pytest.mark.parametrize("kind", ["node", "shared"])
+def test_repo_claim_keeps_initial_credential_kind_across_empty_bind_snapshots(tmp_path, monkeypatch, caplog, kind):
+    """Initial token provenance survives config replacement before binding."""
+    home = tmp_path / "home"
+    home.mkdir()
+    node_file = home / "node-token"
+    admin_file = home / "admin-token"
+    node_file.write_text("fake-node-token" if kind == "node" else "", encoding="utf-8")
+    admin_file.write_text("fake-admin-one", encoding="utf-8")
+    config_file = home / "fleet.toml"
+    full_config = (
+        f'[fleet]\nhub_url = "{HUB_ONE}"\nnode_token_file = "{node_file.as_posix()}"\n'
+        f'token_file = "{admin_file.as_posix()}"\n'
+    )
+    config_file.write_text(full_config, encoding="utf-8")
+    monkeypatch.setenv("BRIGADE_HOME", str(home))
+    _fleet_env(monkeypatch)
+    monkeypatch.setattr(fleet_client, "_SHARED_TOKEN_WARNED", False)
+    load = fleet_client.load_fleet_config
+
+    def initial_load():
+        config = load()
+        config_file.write_text("", encoding="utf-8")
+        return config
+
+    posts = []
+
+    def post(hub_url, token, body, *, timeout):
+        posts.append((body["action"], hub_url, token))
+        if body["action"] == "acquire":
+            node_file.write_text("", encoding="utf-8")
+            admin_file.write_text("fake-admin-two", encoding="utf-8")
+            config_file.write_text(full_config, encoding="utf-8")
+            return 200, {"granted": True, "claim": {"generation": 1}}
+        assert body["action"] == "release"
+        return 200, {"released": True}
+
+    monkeypatch.setattr(fleet_client, "load_fleet_config", initial_load)
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda base_path=None: NODE_A)
+    monkeypatch.setattr(fleet_client, "_claim_renew_interval", lambda ttl: 1000)
+    monkeypatch.setattr(fleet_client, "_post_claim_blocking", post)
+    with fleet_client.repo_claim("fake-target", ttl_seconds=60) as decision:
+        assert decision.granted
+    assert posts == [
+        ("acquire", HUB_ONE, "fake-node-token" if kind == "node" else "fake-admin-one"),
+        ("release", HUB_ONE, "fake-node-token" if kind == "node" else "fake-admin-two"),
+    ]
+    assert (fleet_client._SHARED_TOKEN_WARNING in caplog.text) == (kind == "shared")
+
+
+def test_bound_connection_serializes_refreshes_before_retaining_a_hub_switch_fallback(monkeypatch):
+    """An older in-flight read cannot replace a newer same-hub credential."""
+    from brigade import fleet_claim_lifecycle
+
+    monkeypatch.setattr(fleet_claim_lifecycle, "_token_snapshot", lambda: (HUB_ONE, "fake-token-one", ""))
+    connection = fleet_claim_lifecycle._bound_connection(HUB_ONE, "fake-token-one")
+    old_read = threading.Event()
+    finish_old_read = threading.Event()
+    new_started = threading.Event()
+    new_read = threading.Event()
+    results = []
+
+    def snapshot():
+        if threading.current_thread().name == "fake-old-refresh":
+            old_read.set()
+            assert finish_old_read.wait(5), "old refresh was never released"
+            return HUB_ONE, "fake-token-one", ""
+        new_read.set()
+        return HUB_ONE, "fake-token-two", ""
+
+    def refresh_new():
+        new_started.set()
+        results.append(connection())
+
+    monkeypatch.setattr(fleet_claim_lifecycle, "_token_snapshot", snapshot)
+    old_worker = threading.Thread(target=lambda: results.append(connection()), name="fake-old-refresh")
+    new_worker = threading.Thread(target=refresh_new, name="fake-new-refresh")
+    old_worker.start()
+    try:
+        assert old_read.wait(5)
+        new_worker.start()
+        assert new_started.wait(5)
+        # Without serialization the newer read completes before the delayed old
+        # read. With serialization it waits, then becomes the last cached token.
+        if new_read.wait(0.2):
+            new_worker.join(5)
+            assert not new_worker.is_alive()
+    finally:
+        finish_old_read.set()
+        old_worker.join(5)
+        if new_worker.ident is not None:
+            new_worker.join(5)
+    assert not old_worker.is_alive() and not new_worker.is_alive()
+    assert len(results) == 2
+    monkeypatch.setattr(fleet_claim_lifecycle, "_token_snapshot", lambda: (HUB_TWO, "fake-other-hub-token", ""))
+    assert connection() == {"hub_url": HUB_ONE, "token": "fake-token-two"}
+
+
+def test_orphan_release_does_not_attach_config_provenance_to_an_explicit_token(monkeypatch):
+    """A token override must not inherit an unrelated configured node's kind."""
+    _fleet_env(monkeypatch, node="fake-config-node")
+    load = fleet_client.load_fleet_config
+
+    def initial_load():
+        config = load()
+        _fleet_env(monkeypatch, admin="fake-admin-one")
+        return config
+
+    tokens = []
+    done = threading.Event()
+
+    def release(target, **kwargs):
+        tokens.append(kwargs["token"])
+        if len(tokens) == 1:
+            _fleet_env(monkeypatch, admin="fake-admin-two")
+            return fleet_client.ClaimDecision(granted=False, reason="hub-unavailable")
+        done.set()
+        return fleet_client.ClaimDecision(granted=True, reason="ok")
+
+    monkeypatch.setattr(fleet_client, "load_fleet_config", initial_load)
+    monkeypatch.setattr(fleet_client, "release_claim", release)
+    monkeypatch.setattr(fleet_client, "ORPHAN_RELEASE_RETRY_SECONDS", 0.01)
+    fleet_client._schedule_orphan_release(
+        "fake-target", node_id=NODE_A, holder="fake-holder", conductor=None, ttl_seconds=5, token="fake-explicit-token"
+    )
+    assert done.wait(5)
+    assert tokens == ["fake-admin-one", "fake-admin-two"]

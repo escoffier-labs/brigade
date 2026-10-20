@@ -54,34 +54,46 @@ def _token_snapshot() -> tuple[str, str, str]:
     return hub_url, tokens[0], tokens[1]
 
 
-def _bound_connection(hub_url: str, token: str) -> Callable[[], dict[str, Any]]:
+class _FleetConfig(dict[str, str]):
+    """Keep credential provenance without changing the connection mapping."""
+
+    def __init__(self, settings: dict[str, str], token: str) -> None:
+        super().__init__(hub_url=settings["hub_url"], token=token)
+        self.shared_token: bool | None = not bool(settings["node_token"]) if token else None
+
+
+def _bound_connection(hub_url: str, token: str, *, shared: bool | None = None) -> Callable[[], dict[str, Any]]:
     """Pin ``hub_url`` for a claim while honoring node token rotation (#1781).
 
     Each call re-reads configuration (see ``_token_snapshot``). Its token
-    replaces ``token`` only while the configured hub still equals ``hub_url``,
-    so one hub's credential never goes to another hub (#1780). Otherwise the
+    replaces ``token`` only while the configured hub still equals ``hub_url``
+    (#1780). Untagged token files cannot identify a different hub's token
+    written before the hub configuration changes. Otherwise the
     latest token seen for this hub is kept, never an earlier one a rotation
     has already revoked. A claim bound to a node token never adopts
     ``load_fleet_config``'s admin token fallback, which a briefly unreadable
     node token file would trigger. The credential kind comes from the same
-    snapshot as the token; a snapshot showing neither leaves it unknown until
-    one does, so a config mid-replacement cannot fix the wrong kind.
+    snapshot as the token, carried by ``load_fleet_config``. Callers supplying
+    only a token retain snapshot-based discovery when its kind is unknown.
+    A per-binding lock orders each complete read, cache update, and return;
+    callers perform network requests after the lock is released.
     """
     latest = token
-    shared: bool | None = None
+    lock = Lock()
 
     def current() -> dict[str, Any]:
         nonlocal latest, shared
-        try:
-            configured_hub, node_token, admin_token = _token_snapshot()
-        except Exception:
-            configured_hub, node_token, admin_token = "", "", ""
-        if configured_hub == hub_url:
-            if node_token:
-                latest, shared = node_token, False
-            elif admin_token and shared is not False:
-                latest, shared = admin_token, True
-        return {"hub_url": hub_url, "token": latest}
+        with lock:
+            try:
+                configured_hub, node_token, admin_token = _token_snapshot()
+            except Exception:
+                configured_hub, node_token, admin_token = "", "", ""
+            if configured_hub == hub_url:
+                if node_token:
+                    latest, shared = node_token, False
+                elif admin_token and shared is not False:
+                    latest, shared = admin_token, True
+            return {"hub_url": hub_url, "token": latest}
 
     current()
 
@@ -266,6 +278,7 @@ def _schedule_orphan_release(
     ttl_seconds: int,
     hub_url: str | None = None,
     token: str | None = None,
+    connect: Callable[[], dict[str, Any]] | None = None,
 ) -> None:
     """Best-effort background cleanup after a lost acquire response.
 
@@ -278,21 +291,22 @@ def _schedule_orphan_release(
     response must release before process exit kills this daemon thread.
     """
 
-    # Resolve before starting the daemon. A later environment/configuration
-    # change must never redirect this holder or its credential to another hub.
-    config = _client().load_fleet_config() if hub_url is None or token is None else {}
-    hub_url = config.get("hub_url", "") if hub_url is None else hub_url
-    token = config.get("token", "") if token is None else token
-    connection = _bound_connection(hub_url, token)
+    # Preserve a claim's existing binding, including its credential kind.
+    # Direct callers resolve before the daemon so later configuration changes
+    # cannot redirect this holder or its credential to another hub.
+    if connect is None:
+        config = _client().load_fleet_config() if hub_url is None or token is None else {}
+        shared = getattr(config, "shared_token", None) if token is None else None
+        hub_url = config.get("hub_url", "") if hub_url is None else hub_url
+        token = config.get("token", "") if token is None else token
+        connect = _bound_connection(hub_url, token, shared=shared)
     stop = _client().threading.Event()
 
     def _retry() -> None:
         started = _client().time.monotonic()
         deadline = started + ttl_seconds
         while not stop.is_set() and _client().time.monotonic() < deadline:
-            outcome = _client().release_claim(
-                target, node_id=node_id, holder=holder, conductor=conductor, **connection()
-            )
+            outcome = _client().release_claim(target, node_id=node_id, holder=holder, conductor=conductor, **connect())
             if outcome.reason in CLEANUP_RETRY_REASONS:
                 stop.wait(min(_client().ORPHAN_RELEASE_RETRY_SECONDS, max(0.0, deadline - _client().time.monotonic())))
                 continue
