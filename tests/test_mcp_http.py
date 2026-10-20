@@ -543,3 +543,9 @@ def test_methodless_request_with_id_is_invalid_but_responses_are_ignored(memory_
 
     status, _, body = memory_station.rpc({"jsonrpc": "2.0", "id": 8, "result": {}})
     assert (status, body) == (202, b"")
+
+
+def test_ping_gets_an_empty_result(memory_station: _Station) -> None:
+    status, _, body = memory_station.rpc({"jsonrpc": "2.0", "id": 9, "method": "ping"})
+    assert status == 200
+    assert _json(body) == {"jsonrpc": "2.0", "id": 9, "result": {}}

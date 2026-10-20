@@ -109,6 +109,8 @@ def handle_message(
                 "serverInfo": {"name": server_name, "version": __version__},
             },
         )
+    if method == "ping":
+        return response(request_id, result={})
     if method == "resources/list":
         return response(request_id, result={"resources": list_resources()})
     if method == "resources/read":
