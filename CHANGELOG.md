@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Handle GitHub read queue locks on Python 3.10, return rate-limit 403s as importer-compatible 429s, and unset inherited Octopool freshness outside named merge gates. ETag savings require a long-lived reader. (#1873)
 - Exclude validated GitHub 304s from the hourly cap, distinguish rate-limit 403s from denials, bound the ETag body cache, and report busy read queues. Failed relay commands invalidate cached health. (#1873)
 
 - Scanner children run with `BRIGADE_NO_UPDATE_CHECK=1`. The detached update refresh a child started outlived its throwaway sandbox and recreated it when writing `update-notify.json`, leaving one `brigade-scanner-child-*` directory in the temp dir per scanner run.

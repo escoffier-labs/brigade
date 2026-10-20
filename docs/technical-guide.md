@@ -127,19 +127,23 @@ Use `SubprocessRunner()` for bounded local execution, or supply your own runner.
 The supplied runner uses Brigade's subprocess capture with no shell, capped
 stdout, discarded stderr, and a timeout. Put native `gh` and `octopool` executables
 on PATH without a `gh` shim. Construction makes no requests or auth changes.
+Custom runners must remove environment variables whose override is `None`.
 
 Public reads use `octopool request` after `octopool whoami` succeeds, cached for
 600 seconds. A failed or truncated relay command marks that health cache unhealthy.
 Private and unknown repositories never invoke Octopool.
 `get(path, params=..., max_bytes=..., max_age=120)` sends the freshness bound as
 `Cache-Control`. Only a named `merge_gating_reason` enables `OCTOPOOL_FRESH=1`
-and `max-age=0`. Relay denials, 404s, fallback signals, and stale responses are
+and `max-age=0`. Other reads unset `OCTOPOOL_FRESH` in the child environment.
+Relay denials, 404s, fallback signals, and stale responses are
 inconclusive. Native fallback requires `allow_public_fallback=True`.
 See the [Octopool relay contract](https://docs.octopool.dev/relay.html).
 
 Native reads cache ETags and complete bodies per endpoint in the reader.
 The cache evicts the least recently used entries above 128 endpoints or 16 MiB
 of bodies. ETags reset with each reader instance, including one-shot CLI calls.
+Keep one long-lived reader per repository to reuse ETags and receive 304 savings.
+The ledger stores no ETags or bodies across readers or processes.
 A validated 304 returns the body with `state="not-modified"` and
 `upstream_status=304`. Importers retain pagination budgets and truncation marks.
 Readers sharing a credential class must use the same local SQLite ledger and
@@ -150,7 +154,8 @@ without a request. Queue waits allow three runner timeouts plus a margin.
 If the lock wait expires, `get()` returns `state="queue-busy"` without a request.
 Persistent cooldowns honor `x-poll-interval`, `Retry-After`, and primary reset
 headers. A native 403 with `Retry-After` or zero remaining budget is
-`rate-limited` and excluded from denial totals. Deferred reads include `retry_at`.
+returned as status 429 with `state="rate-limited"` and `upstream_status=403`,
+and excluded from denial totals. Deferred reads include `retry_at`.
 The adapter performs no automatic retries or sleeps.
 
 `observation()` returns a node observation fragment with hourly route, status,

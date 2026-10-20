@@ -70,7 +70,7 @@ def test_public_healthy_routes_with_freshness_and_cached_probe(tmp_path):
     assert argv[:4] == ["octopool", "request", "--method", "GET"]
     assert "cache-control=max-age=120" in argv
     assert "cache-control=max-age=45" in runner.calls[2][0]
-    assert env == {"OCTOPOOL_NO_FALLBACK": "1", "OCTOPOOL_FRESH": "0"}
+    assert env == {"OCTOPOOL_NO_FALLBACK": "1", "OCTOPOOL_FRESH": None}
     clock[0] += 600
     client.get(PATH, params={}, max_bytes=100)
     assert [c[0] for c in runner.calls].count(["octopool", "whoami"]) == 2
@@ -167,7 +167,7 @@ def test_retry_after_defers_other_endpoints_and_survives_reopen(tmp_path, status
 def test_rate_limit_403_is_not_a_permission_denial(tmp_path, headers):
     client = reader(tmp_path, FakeRunner(gh(403, **headers)), visibility="private")
     result = client.get(PATH, params={}, max_bytes=100)
-    assert (result.status, result.state) == (403, "rate-limited")
+    assert (result.status, result.state, result.upstream_status) == (429, "rate-limited", 403)
     assert client.observation()["github_reads"]["denied"] == 0
 
 
@@ -256,6 +256,25 @@ def test_busy_queue_is_visible_without_spending_a_request(tmp_path):
         assert runner.calls == []
         blocker.rollback()
     assert client.get(PATH, params={}, max_bytes=100).status == 200
+
+
+@pytest.mark.parametrize("message", ["database is locked", "database table is locked", "unable to open database file"])
+def test_queue_errors_without_sqlite_errorcode(tmp_path, monkeypatch, message):
+    runner = FakeRunner()
+    client = reader(tmp_path, runner, visibility="private")
+
+    def fail_connect(*args, **kwargs):
+        # Python 3.10 sqlite errors have no sqlite_errorcode attribute.
+        raise sqlite3.OperationalError(message)
+
+    monkeypatch.setattr(sqlite3, "connect", fail_connect)
+    if "locked" in message:
+        result = client.get(PATH, params={}, max_bytes=100)
+        assert (result.status, result.state) == (503, "queue-busy")
+    else:
+        with pytest.raises(sqlite3.OperationalError, match=message):
+            client.get(PATH, params={}, max_bytes=100)
+    assert runner.calls == []
 
 
 @pytest.mark.parametrize("failure", [CommandResult(1, b""), CommandResult(0, b"", truncated=True), OSError()])
@@ -442,3 +461,23 @@ def test_supplied_subprocess_runner_timeout_cannot_expose_partial_http_success()
         timeout=0.1,
     )
     assert result.returncode != 0 and result.stdout == b""
+
+
+@pytest.mark.parametrize("merge_gating_reason", [None, "required checks for exact head"])
+def test_subprocess_reads_clear_inherited_fresh_unless_merge_gating(tmp_path, monkeypatch, merge_gating_reason):
+    from brigade.github_reader import SubprocessRunner
+
+    # Use a real child without contacting GitHub or reading operator config.
+    class EnvironmentRunner(SubprocessRunner):
+        def __call__(self, argv, **kwargs):
+            script = (
+                "import os, sys; "
+                "sys.stdout.write('HTTP/2.0 200 OK\\r\\n\\r\\n'); "
+                "sys.stdout.write(os.environ.get('OCTOPOOL_FRESH', 'unset'))"
+            )
+            return super().__call__([sys.executable, "-c", script], **kwargs)
+
+    monkeypatch.setenv("OCTOPOOL_FRESH", "1")
+    client = reader(tmp_path, EnvironmentRunner(), visibility="private")
+    result = client.get(PATH, params={}, max_bytes=100, merge_gating_reason=merge_gating_reason)
+    assert (result.status, result.body) == (200, b"1" if merge_gating_reason else b"unset")

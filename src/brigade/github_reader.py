@@ -1,8 +1,9 @@
 """Injected node-local GitHub GET transport, with no Hub wiring.
 
 The required runner owns process execution, bounded stdout/stderr capture and a
-blocking timeout. It must apply the supplied environment overrides to the child
-without logging its environment or output. No shell, credentials or identity
+blocking timeout. It must apply the supplied environment overrides to the child.
+An override of None removes a variable. It must not log the environment or
+output. No shell, credentials or identity
 discovery are used here. One BudgetLedger file serializes all its readers.
 """
 
@@ -69,8 +70,10 @@ class CommandResult:
 
 
 class CommandRunner(Protocol):
-    def __call__(self, argv: Sequence[str], *, env: Mapping[str, str], max_bytes: int, timeout: float) -> CommandResult:
-        """Execute argv without a shell, capping output during collection."""
+    def __call__(
+        self, argv: Sequence[str], *, env: Mapping[str, str | None], max_bytes: int, timeout: float
+    ) -> CommandResult:
+        """Execute argv with capped output. None environment values remove keys."""
         ...
 
 
@@ -82,14 +85,22 @@ class SubprocessRunner:
     Construction makes no requests or authentication changes.
     """
 
-    def __call__(self, argv: Sequence[str], *, env: Mapping[str, str], max_bytes: int, timeout: float) -> CommandResult:
+    def __call__(
+        self, argv: Sequence[str], *, env: Mapping[str, str | None], max_bytes: int, timeout: float
+    ) -> CommandResult:
         from brigade.dot.process import CommandRunner as BoundedRunner
 
         if type(max_bytes) is not int or not 0 < max_bytes <= 32 * 1024 * 1024 + _ENVELOPE_OVERHEAD:
             raise ValueError("positive bounded output cap required")
         if not math.isfinite(timeout) or not 0 < timeout <= 300:
             raise ValueError("positive bounded timeout required")
-        output = BoundedRunner().run(list(argv), env={**os.environ, **env}, timeout=timeout, max_output=max_bytes)
+        child_env = dict(os.environ)
+        for key, value in env.items():
+            if value is None:
+                child_env.pop(key, None)
+            else:
+                child_env[key] = value
+        output = BoundedRunner().run(list(argv), env=child_env, timeout=timeout, max_output=max_bytes)
         if output.timed_out:
             return CommandResult(124, b"")
         return CommandResult(output.returncode if output.returncode is not None else 1, output.stdout, output.overflow)
@@ -168,6 +179,7 @@ def _http(output: bytes) -> tuple[int, dict[str, str], bytes]:
 
 
 def _octopool(output: bytes) -> tuple[int, dict[str, str], bytes, bool]:
+    # Response envelope and encodings: https://docs.octopool.dev/relay.html#response-envelope
     envelope = json.loads(output)
     status = envelope.get("status")
     if type(status) is not int or not 100 <= status <= 599:
@@ -239,7 +251,7 @@ class GitHubReader:
     def _run(self, argv: list[str], cap: int, fresh: bool = False) -> CommandResult:
         result = self.runner(
             argv,
-            env={"OCTOPOOL_NO_FALLBACK": "1", "OCTOPOOL_FRESH": "1" if fresh else "0"},
+            env={"OCTOPOOL_NO_FALLBACK": "1", "OCTOPOOL_FRESH": "1" if fresh else None},
             max_bytes=cap,
             timeout=self.timeout,
         )
@@ -324,7 +336,9 @@ class GitHubReader:
                     )
                 return result
         except sqlite3.OperationalError as exc:
-            if queue_acquired or exc.sqlite_errorcode not in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+            code = getattr(exc, "sqlite_errorcode", None)
+            busy = code in {5, 6} if code is not None else "locked" in str(exc).lower()
+            if queue_acquired or not busy:
                 raise
             # The writer owns the ledger, so no deferred row can be recorded.
             return ReadResult(503, b"", state="queue-busy", route="none")
@@ -356,6 +370,8 @@ class GitHubReader:
             )
         age = 0 if fresh else max_age
         if route == "octopool":
+            # CLI docs, "octopool request": https://docs.octopool.dev/cli.html
+            # The raw request command prints the full relay envelope, unlike gh.
             argv = [
                 "octopool",
                 "request",
@@ -453,7 +469,7 @@ class GitHubReader:
                 upstream_status=status,
             )
         return ReadResult(
-            200 if etag_hit else status or 503,
+            200 if etag_hit else 429 if state == "rate-limited" else status or 503,
             data[:cap],
             truncated or len(data) > cap,
             state=state,
