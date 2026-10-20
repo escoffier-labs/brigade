@@ -78,6 +78,32 @@ def hub_settings(hub, monkeypatch):
     return settings
 
 
+@pytest.fixture
+def transport_settings(monkeypatch):
+    """Perturb only current validation at the real transport seam, after capture."""
+    from types import SimpleNamespace
+    from brigade import fleet_client_message_credentials as credentials
+
+    original_settings, original_transport = credentials.message_settings, messages._authority
+    hook = SimpleNamespace(load=original_settings)
+    active = False
+
+    def settings(*args, **kwargs):
+        return hook.load(*args, **kwargs) if active else original_settings(*args, **kwargs)
+
+    def transport(*args, **kwargs):
+        nonlocal active
+        active = True
+        try:
+            return original_transport(*args, **kwargs)
+        finally:
+            active = False
+
+    monkeypatch.setattr(credentials, "message_settings", settings)
+    monkeypatch.setattr(messages, "_authority", transport)
+    return hook
+
+
 @pytest.mark.parametrize("name,args", HUB_TOOLS.items())
 def test_missing_hub_config_is_closed_without_breaking_dispatch(dispatch_make, name, args):
     tools, _, _ = dispatch_make()
@@ -180,12 +206,12 @@ def test_security_message_scope_change_during_request_closes_result(
 @pytest.mark.parametrize("tool_name", ["message_send", "inbox_reply", "message_status"])
 @pytest.mark.parametrize("restore_after_load", [False, True])
 def test_security_message_scope_checks_loaded_transport_pair(
-    hub, hub_settings, monkeypatch, caplog, change, tool_name, restore_after_load
+    hub, hub_settings, monkeypatch, caplog, change, tool_name, restore_after_load, transport_settings
 ):
     tools, _, row, token, token_file, ledger = hub
     original_hub = hub_settings["hub_url"]
     replacement = "y" * 64
-    original_settings = messages._settings
+    original_settings = transport_settings.load
     requests = []
 
     def settings(*args, **kwargs):
@@ -205,7 +231,7 @@ def test_security_message_scope_checks_loaded_transport_pair(
             return 200, {"messages": [row], "next_cursor": row["id"]}
         return 200, {"message": dict(row, client_id=body["client_id"])}
 
-    monkeypatch.setattr(messages, "_settings", settings)
+    monkeypatch.setattr(transport_settings, "load", settings)
     monkeypatch.setattr(messages, "_request", request)
     result = tools.call_tool(tool_name, HUB_TOOLS[tool_name])
     assert result.get("error", {}).get("code") == "hub-error"
@@ -1038,7 +1064,7 @@ def test_security_ack_recount_shares_batch_deadline(hub, monkeypatch, setup_dela
     tools, _, row, _, _, _ = hub
     elapsed = 0.0
     calls = []
-    original_scope = inbox.HubInbox.notification_scope
+    original_scope = inbox.HubInbox.capture
     scope_reads = 0
 
     def scope(self):
@@ -1058,7 +1084,7 @@ def test_security_ack_recount_shares_batch_deadline(hub, monkeypatch, setup_dela
         elapsed += timeout
         return 200, {"messages": [row], "next_cursor": row["id"]}
 
-    monkeypatch.setattr(inbox.HubInbox, "notification_scope", scope)
+    monkeypatch.setattr(inbox.HubInbox, "capture", scope)
     monkeypatch.setattr(inbox, "time", SimpleNamespace(monotonic=lambda: elapsed))
     monkeypatch.setattr(messages, "_request", request)
     result = tools.call_tool("inbox_ack", {"ids": [1, 2]})
@@ -1117,13 +1143,13 @@ def test_security_ack_rotation_closes_batch_after_request(hub, monkeypatch, capl
 @pytest.mark.parametrize("invalid,restore_after_load", [(False, False), (False, True), (True, False)])
 @pytest.mark.parametrize("rotate_before", ["first-ack", "later-ack", "recount"])
 def test_security_ack_checks_loaded_transport_credential(
-    hub, monkeypatch, caplog, invalid, restore_after_load, rotate_before
+    hub, monkeypatch, caplog, invalid, restore_after_load, rotate_before, transport_settings
 ):
     import hashlib
 
     tools, _, row, token, token_file, ledger = hub
     replacement = "y" * 64
-    original_settings = messages._settings
+    original_settings = transport_settings.load
     loads = 0
     requests = []
     rotate_on = {"first-ack": 1, "later-ack": 2, "recount": 3}[rotate_before]
@@ -1146,7 +1172,7 @@ def test_security_ack_checks_loaded_transport_credential(
             return 200, {"message": dict(row, id=body["id"])}
         return 200, {"messages": [], "next_cursor": body["after"]}
 
-    monkeypatch.setattr(messages, "_settings", settings)
+    monkeypatch.setattr(transport_settings, "load", settings)
     monkeypatch.setattr(messages, "_request", request)
     result = tools.call_tool("inbox_ack", {"ids": [1, 2]})
     assert result.get("error", {}).get("code") == "hub-error"
@@ -1255,10 +1281,10 @@ def test_security_ack_endpoint_switch_closes_batch(hub, hub_settings, monkeypatc
     "tool,load_at", [("inbox_ack", 1), ("inbox_ack", 2), ("inbox_ack", 3), ("inbox_list", 1), ("inbox_list", 2)]
 )
 def test_security_inbox_checks_loaded_endpoint(
-    hub, hub_settings, monkeypatch, caplog, restore_after_load, tool, load_at
+    hub, hub_settings, monkeypatch, caplog, restore_after_load, tool, load_at, transport_settings
 ):
     tools, _, row, token, _, ledger = hub
-    original_settings = messages._settings
+    original_settings = transport_settings.load
     original_hub = hub_settings["hub_url"]
     loads = 0
     requests = []
@@ -1280,7 +1306,7 @@ def test_security_inbox_checks_loaded_endpoint(
         ident = body["after"] + 1
         return 200, {"messages": [dict(row, id=ident)], "next_cursor": ident}
 
-    monkeypatch.setattr(messages, "_settings", settings)
+    monkeypatch.setattr(transport_settings, "load", settings)
     monkeypatch.setattr(messages, "_request", request)
     result = tools.call_tool(tool, {"ids": [1, 2]} if tool == "inbox_ack" else {})
     assert result.get("error", {}).get("code") == "hub-error"
@@ -1391,3 +1417,21 @@ def test_hub_wake_endpoint_and_legacy_histories_are_isolated(hub, hub_settings, 
         assert token not in json.dumps([body for _, _, body in post.calls])
     finally:
         reopened.close()
+
+
+def test_pages_capture_at_invocation_before_iteration(hub, monkeypatch):
+    from brigade.grokbot_t3.inbox import HubInbox
+    from brigade.hub_messages import HubMessageError
+
+    _, calls, _, _, token_file, _ = hub
+
+    def request(hub, token, body, **kwargs):
+        calls.append(dict(body))
+        return 200, {"messages": [], "next_cursor": body["after"]}
+
+    monkeypatch.setattr(messages, "_request", request)
+    pages = HubInbox(token_file=str(token_file)).pages()
+    token_file.write_text("y" * 64)
+    with pytest.raises(HubMessageError, match="hub_credential_changed"):
+        next(pages)
+    assert calls == []

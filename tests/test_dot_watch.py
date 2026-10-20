@@ -372,7 +372,7 @@ def test_notify_wait_passes_its_deadline(configured, capsys):
     target, _, _ = configured
     seen = []
 
-    def wait(msg_id, cursor, *, deadline=None, scope=None):
+    def wait(msg_id, cursor, *, deadline=None, authority=None):
         seen.append(deadline)
         return [{"id": 2, "body": "answer"}], 2
 
@@ -483,7 +483,7 @@ def test_watch_rejects_partial_result_if_endpoint_changes_in_send(configured, sc
         insert(state, scoped_hub)
         state.hub_set("last_sync_ok_at", (NOW + timedelta(hours=1)).isoformat(), scope=scoped_hub)
 
-    def switch(*args):
+    def switch(*args, **kwargs):
         watch_settings["hub_url"] = "https://b.invalid"
         return 0
 
@@ -505,3 +505,23 @@ def test_notify_cli_does_not_mix_confirmation_and_count_across_endpoints(configu
     with patch.object(cli.HubInbox, "notify", side_effect=changed):
         assert cli.main(["notify", "--target", str(target), "--from", "worker", "body"]) == 2
     assert json.loads(capsys.readouterr().out) == {"ok": False, "error": "inbox_unavailable"}
+
+
+@requires_local_state
+def test_rotation_during_alert_preparation_stops_before_subprocess(configured, scoped_hub, watch_settings, monkeypatch):
+    target, runtime, _ = configured
+    with BridgeState(runtime.paths.state_dir) as state:
+        insert(state, scoped_hub)
+    original_dumps = json.dumps
+    calls = []
+
+    def dumps(value, *args, **kwargs):
+        if isinstance(value, dict) and value.get("source") == "dot-inbox-watch":
+            watch_settings["hub_url"] = "https://other.invalid"
+        return original_dumps(value, *args, **kwargs)
+
+    monkeypatch.setattr(w.json, "dumps", dumps)
+    monkeypatch.setattr(w, "probe_route", lambda *a: [])
+    monkeypatch.setattr(w.subprocess, "run", lambda *a, **k: calls.append(a) or type("Result", (), {"returncode": 0})())
+    assert w.run_watch_once(target, now=NOW + timedelta(hours=1))["ok"] is False
+    assert calls == []

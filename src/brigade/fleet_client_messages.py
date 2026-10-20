@@ -19,7 +19,13 @@ from typing import Any
 from uuid import uuid4
 
 from . import fleet_client
-from .fleet_client_message_credentials import FleetMessageHubError, message_scope, message_settings
+from .fleet_client_message_credentials import (
+    FleetMessageHubError,
+    MessageAuthority,
+    MessageAuthorityError,
+    MessageNotConfiguredError,
+    message_scope,
+)
 from . import fleet_hub_messages as _message_limits
 
 _LOG = logging.getLogger("brigade.fleet")
@@ -33,11 +39,7 @@ class _UnauthorizedError(FleetMessageHubError):
     """A sender authentication failure cannot safely queue work in its scoped spool."""
 
 
-def _spool_path(node_id: str, token: str | None = None, *, hub_url: str | None = None) -> Path:
-    if token is None or hub_url is None:
-        settings = fleet_client.load_fleet_settings()
-        token = settings["node_token"] if token is None else token
-        hub_url = settings["hub_url"] if hub_url is None else hub_url
+def _spool_path(node_id: str, token: str, *, hub_url: str) -> Path:
     # The versioned filename proves origin; older token-only files are never adopted.
     return fleet_client.spool_path(node_id).with_name(f"messages-v1-{message_scope(hub_url, token)}.jsonl")
 
@@ -107,8 +109,8 @@ def _request_with_timeout(hub: str, token: str, body: dict[str, Any], timeout: f
         return fleet_client._run_with_deadline(request_blocking, timeout=timeout)
     except FleetMessageHubError:
         raise
-    except fleet_client.FleetClientError as exc:
-        raise FleetMessageHubError(str(exc), code="hub_unavailable") from exc
+    except fleet_client.FleetClientError:
+        raise FleetMessageHubError("fleet hub request failed", code="hub_unavailable") from None
     except Exception as exc:
         raise FleetMessageHubError(f"fleet hub messages failed: {type(exc).__name__}", code="hub_unavailable") from exc
 
@@ -135,10 +137,6 @@ def _spool_exists_locked(path: Path, dir_fd: int | None) -> bool:
     return True
 
 
-def _settings(token_file: str | None = None) -> tuple[str, str, str]:
-    return message_settings(token_file)
-
-
 def _request_timeout(timeout: float | None) -> float | None:
     if timeout is None:
         return None
@@ -147,24 +145,75 @@ def _request_timeout(timeout: float | None) -> float | None:
     return float(timeout)
 
 
-def _require_scope(hub: str, token: str, expected_scope: str | None) -> None:
-    if expected_scope is not None and not hmac.compare_digest(message_scope(hub, token), expected_scope):
-        raise FleetMessageHubError("message credential changed", code="token_scope_changed")
+def _authority(
+    authority: MessageAuthority | None, token_file: str | None, expected_scope: str | None
+) -> MessageAuthority:
+    # Public entries capture only when their caller has not already captured.
+    authority = MessageAuthority.capture(token_file) if authority is None else authority
+    if expected_scope is not None and not hmac.compare_digest(authority.scope, expected_scope):
+        raise MessageAuthorityError("message credential changed", code="token_scope_changed")
+    authority.validate()
+    return authority
 
 
-def _online(
-    body: dict[str, Any],
-    *,
-    token_file: str | None = None,
-    timeout: float | None = None,
-    expected_scope: str | None = None,
-) -> dict[str, Any]:
-    hub, token, _node_id = _settings() if token_file is None else _settings(token_file)
-    _require_scope(hub, token, expected_scope)
-    status, payload = _request(hub, token, body, timeout=_request_timeout(timeout))
+def _transport(
+    authority: MessageAuthority, body: dict[str, Any], *, timeout: float | None = None
+) -> tuple[int, dict[str, Any]]:
+    authority.validate()
+    fleet_client._require_encrypted_or_loopback_hub(authority.hub)
+    try:
+        if timeout is None:
+            return _request(authority.hub, authority.token, body)
+        return _request(authority.hub, authority.token, body, timeout=timeout)
+    except MessageAuthorityError:
+        raise
+    except FleetMessageHubError as error:
+        authority.validate()
+        raise FleetMessageHubError(
+            _rejection(error.status, {"code": error.code}) if error.status is not None else "fleet hub request failed",
+            status=error.status,
+            code=error.code,
+        ) from None
+    except (fleet_client.FleetClientError, OSError, ValueError):
+        authority.validate()
+        raise FleetMessageHubError("fleet hub request failed", code="hub_unavailable") from None
+
+
+def _rejection(status: int, payload: dict[str, Any]) -> str:
+    """Closed protocol descriptions, never arbitrary upstream error text."""
+    descriptions = {
+        "message_sender_inactive": "sender is not an active hub principal",
+        "message_not_found": "message not found",
+        "principal_enrollment_changed": "principal generation changed",
+        "principal_enrollment_revoked": "principal generation changed",
+    }
+    code = payload.get("code")
+    if isinstance(code, str) and code in descriptions:
+        return descriptions[code]
+    # Older Hubs omit codes for these fixed protocol errors.
+    legacy = {"message principal already exists", "invalid label", "principal generation changed"}
+    error = payload.get("error")
+    if isinstance(error, str) and error in legacy:
+        return next(text for text in legacy if text == error)
+    if status == 401:
+        return "unauthorized"
+    if status == 404:
+        return "message not found"
+    if status == 409:
+        return "message request conflict"
+    if 300 <= status < 400:
+        return "fleet hub request redirected"
+    return "fleet hub message rejected"
+
+
+def _online(body: dict[str, Any], *, authority: MessageAuthority, timeout: float | None = None) -> dict[str, Any]:
+    try:
+        status, payload = _transport(authority, body, timeout=_request_timeout(timeout))
+    finally:
+        authority.validate()
     if not 200 <= status < 300:
         raise FleetMessageHubError(
-            str(payload.get("error") or f"fleet hub returned HTTP {status}"),
+            _rejection(status, payload),
             status=status,
             code=payload.get("code"),
         )
@@ -243,19 +292,21 @@ def _remove_queued_locked(path: Path, message: dict[str, Any], *, dir_fd: int | 
             break
 
 
-def _send_ordered(message: dict[str, Any], hub: str, token: str, node_id: str) -> dict[str, Any]:
+def _send_ordered(message: dict[str, Any], authority: MessageAuthority) -> dict[str, Any]:
+    hub, token, node_id = authority.hub, authority.token, authority.node_id
     fleet_client._require_encrypted_or_loopback_hub(hub)
     path = _spool_path(node_id, token, hub_url=hub)
     _warn_inactive_spools(node_id, path)
     try:
         with fleet_client._spool_lock(path) as dir_fd:
+            authority.validate()
             if _spool_exists_locked(path, dir_fd):
                 existing = _queued_retry(path, message, dir_fd=dir_fd)
                 if existing is not None:
                     return existing
                 drain_started = monotonic()
                 batch_limit = MESSAGE_BATCH_SIZE - 1 if message.get("action") == "reply" else MESSAGE_BATCH_SIZE
-                _delivered, globally_blocked = _drain_locked(path, hub, token, max_messages=batch_limit, dir_fd=dir_fd)
+                _delivered, globally_blocked = _drain_locked(path, authority, max_messages=batch_limit, dir_fd=dir_fd)
                 pending = fleet_client._read_spool(path, dir_fd=dir_fd, strict=True)
                 recipient = message.get("_recipient") or message.get("to")
                 if any(queued.get("action") == "reply" and _message_recipient(queued) is None for queued in pending):
@@ -266,12 +317,11 @@ def _send_ordered(message: dict[str, Any], hub: str, token: str, node_id: str) -
                         return _queue_locked(path, message, dir_fd=dir_fd)
                     try:
                         recipient = _reply_recipient(
-                            hub,
-                            token,
+                            authority,
                             int(message["id"]),
                             timeout=min(fleet_client.FLUSH_TIMEOUT_SECONDS, remaining),
                         )
-                    except _UnauthorizedError:
+                    except (_UnauthorizedError, MessageAuthorityError):
                         raise
                     except (KeyError, TypeError, ValueError, fleet_client.FleetClientError):
                         return _queue_locked(path, message, dir_fd=dir_fd)
@@ -280,11 +330,15 @@ def _send_ordered(message: dict[str, Any], hub: str, token: str, node_id: str) -
                     message["_recipient"] = recipient
                 if any(_message_recipient(item) == recipient for item in pending) or globally_blocked:
                     return _queue_locked(path, message, dir_fd=dir_fd)
+            authority.validate()
             _require_spool_capacity(path, message, dir_fd=dir_fd)
             queued_result = _queue_locked(path, message, dir_fd=dir_fd)
             try:
-                status, payload = _request(hub, token, message)
+                status, payload = _transport(authority, message)
+            except MessageAuthorityError:
+                raise
             except fleet_client.FleetClientError:
+                authority.validate()
                 return queued_result
             # 401 is surfaced because a rotated token cannot flush this token-scoped spool.
             if status in (408, 425, 429) or status >= 500:
@@ -297,8 +351,9 @@ def _send_ordered(message: dict[str, Any], hub: str, token: str, node_id: str) -
                 if status == 400 and payload.get("code") == "message_recipient_inactive":
                     return queued_result
                 _remove_queued_locked(path, message, dir_fd=dir_fd)
+                authority.validate()
                 raise FleetMessageHubError(
-                    str(payload.get("error") or f"fleet hub returned HTTP {status}"),
+                    _rejection(status, payload),
                     status=status,
                     code=payload.get("code"),
                 )
@@ -356,9 +411,15 @@ def _wire_metadata(**values: str | None) -> dict[str, str]:
 
 
 def sent(
-    *, after: int = 0, ids: list[int] | None = None, token_file: str | None = None, expected_scope: str | None = None
+    *,
+    after: int = 0,
+    ids: list[int] | None = None,
+    token_file: str | None = None,
+    authority: MessageAuthority | None = None,
+    expected_scope: str | None = None,
 ) -> dict[str, Any]:
     _validate_sqlite_integer(after, "after cursor", allow_zero=True)
+    authority = _authority(authority, token_file, expected_scope)
     body: dict[str, Any] = {"action": "sent"}
     if ids is not None:
         if after != 0 or not isinstance(ids, list) or not 1 <= len(ids) <= 100:
@@ -368,19 +429,22 @@ def sent(
         body["ids"] = ids
     else:
         body["after"] = after
-    payload = _validate_page(_online(body, token_file=token_file, expected_scope=expected_scope), after=after)
+    payload = _validate_page(_online(body, authority=authority), after=after)
     if ids is not None and any(message["id"] not in ids for message in payload["messages"]):
         raise fleet_client.FleetClientError("fleet hub returned an invalid message page")
     return payload
 
 
 def flush_credential(
-    token_file: str | None = None, *, lock_timeout: float | None = None, expected_scope: str | None = None
+    token_file: str | None = None,
+    *,
+    lock_timeout: float | None = None,
+    authority: MessageAuthority | None = None,
+    expected_scope: str | None = None,
 ) -> int:
     fleet_client._validate_spool_lock_timeout(lock_timeout)
-    hub, token, scope = _settings() if token_file is None else _settings(token_file)
-    _require_scope(hub, token, expected_scope)
-    return flush(scope, hub_url=hub, token=token, lock_timeout=lock_timeout)
+    authority = _authority(authority, token_file, expected_scope)
+    return flush(authority.node_id, authority=authority, lock_timeout=lock_timeout)
 
 
 def send(
@@ -395,10 +459,10 @@ def send(
     sender_label: str | None = None,
     client_id: str | None = None,
     token_file: str | None = None,
+    authority: MessageAuthority | None = None,
     expected_scope: str | None = None,
 ) -> dict[str, Any]:
-    hub, token, node_id = _settings() if token_file is None else _settings(token_file)
-    _require_scope(hub, token, expected_scope)
+    authority = _authority(authority, token_file, expected_scope)
     try:
         recipient = _message_limits._text(recipient, "to", 256) or ""
         subject = _message_limits._text(subject, "subject", _message_limits.SUBJECT_LIMIT) or ""
@@ -419,7 +483,9 @@ def send(
         "enqueued_at": datetime.now(timezone.utc).isoformat(),
     }
     message.update(_wire_metadata(thread=thread, kind=kind, sender_label=sender_label))
-    return _send_ordered(message, hub, token, node_id)
+    result = _send_ordered(message, authority)
+    authority.validate()
+    return result
 
 
 def list_messages(
@@ -428,14 +494,15 @@ def list_messages(
     unacked: bool = False,
     token_file: str | None = None,
     timeout: float | None = None,
+    authority: MessageAuthority | None = None,
     expected_scope: str | None = None,
 ) -> dict[str, Any]:
     _validate_sqlite_integer(after, "after cursor", allow_zero=True)
+    authority = _authority(authority, token_file, expected_scope)
     payload = _online(
         {"action": "list", "after": after, "unacked": unacked},
-        token_file=token_file,
+        authority=authority,
         timeout=timeout,
-        expected_scope=expected_scope,
     )
     return _validate_page(payload, after=after)
 
@@ -474,14 +541,15 @@ def ack(
     *,
     token_file: str | None = None,
     timeout: float | None = None,
+    authority: MessageAuthority | None = None,
     expected_scope: str | None = None,
 ) -> dict[str, Any]:
     _validate_sqlite_integer(message_id, "message id")
+    authority = _authority(authority, token_file, expected_scope)
     payload = _online(
         {"action": "ack", "id": message_id},
-        token_file=token_file,
+        authority=authority,
         timeout=timeout,
-        expected_scope=expected_scope,
     )
     message = payload.get("message")
     response_id = message.get("id") if isinstance(message, dict) else None
@@ -502,10 +570,10 @@ def reply(
     sender_label: str | None = None,
     client_id: str | None = None,
     token_file: str | None = None,
+    authority: MessageAuthority | None = None,
     expected_scope: str | None = None,
 ) -> dict[str, Any]:
-    hub, token, node_id = _settings() if token_file is None else _settings(token_file)
-    _require_scope(hub, token, expected_scope)
+    authority = _authority(authority, token_file, expected_scope)
     _validate_sqlite_integer(message_id, "message id")
     try:
         body = _message_limits._text(body, "body", _message_limits.BODY_LIMIT) or ""
@@ -527,7 +595,9 @@ def reply(
         "enqueued_at": datetime.now(timezone.utc).isoformat(),
     }
     message.update(_wire_metadata(thread=thread, kind=kind, sender_label=sender_label))
-    return _send_ordered(message, hub, token, node_id)
+    result = _send_ordered(message, authority)
+    authority.validate()
+    return result
 
 
 def _principal_admin_request(hub: str, admin_token: str, body: dict[str, Any]) -> tuple[int, dict[str, Any]]:
@@ -561,8 +631,8 @@ def _principal_admin_request(hub: str, admin_token: str, body: dict[str, Any]) -
         return fleet_client._run_with_deadline(request_blocking, timeout=fleet_client.FLUSH_TIMEOUT_SECONDS)
     except FleetMessageHubError:
         raise
-    except fleet_client.FleetClientError as exc:
-        raise FleetMessageHubError(str(exc), code="hub_unavailable") from exc
+    except fleet_client.FleetClientError:
+        raise FleetMessageHubError("fleet hub request failed", code="hub_unavailable") from None
     except Exception as exc:
         raise FleetMessageHubError(
             f"fleet hub principal management failed: {type(exc).__name__}", code="hub_unavailable"
@@ -580,9 +650,7 @@ def _principal_enrollment_generation(hub: str, admin_token: str, name: str) -> s
         or principal.get("principal_id") != f"agent:{name}"
         or principal.get("name") != name
     ):
-        raise fleet_client.FleetClientError(
-            str(payload.get("error") or "fleet hub did not confirm the principal generation")
-        )
+        raise fleet_client.FleetClientError(_rejection(status, payload))
     request_id = principal.get("enrollment_id")
     if request_id is not None and (
         not isinstance(request_id, str)
@@ -602,6 +670,7 @@ def manage_principal(
     may_send_to: list[str] | None = None,
     _defer_finalize: bool = False,
     _deferred_request_ids: list[str] | None = None,
+    _deferred_paths: list[Path] | None = None,
 ) -> dict[str, Any]:
     if _defer_finalize and _deferred_request_ids is None:
         raise fleet_client.FleetClientError("deferred principal enrollment requires a request ID holder")
@@ -677,7 +746,7 @@ def manage_principal(
             request_id = body.get("request_id") if action == "add" else revoke_pending_request_id
             if isinstance(request_id, str):
                 _clear_principal_request(pending_path, request_id=request_id)
-        message = str(payload.get("error") or f"fleet hub returned HTTP {status}")
+        message = _rejection(status, payload)
         if action == "add" and payload.get("code") in ("principal_enrollment_revoked", "principal_enrollment_changed"):
             message += "; run principals add again to request a new enrollment generation"
         raise FleetMessageHubError(message, status=status, code=payload.get("code"))
@@ -699,6 +768,8 @@ def manage_principal(
         if _defer_finalize:
             if _deferred_request_ids is not None:
                 _deferred_request_ids.append(body["request_id"])
+            if _deferred_paths is not None:
+                _deferred_paths.append(pending_path)
         else:
             _clear_principal_request(pending_path, request_id=body["request_id"])
     elif action == "revoke":
@@ -727,26 +798,25 @@ def show_principal(name: str) -> dict[str, Any]:
     return manage_principal("get", name=name)
 
 
-def finalize_principal_add(name: str, *, request_id: str) -> None:
+def finalize_principal_add(name: str, *, request_id: str, pending_path: Path | None = None) -> None:
     """Clear enrollment retry state after the caller has safely delivered the token."""
     settings = fleet_client.load_fleet_settings()
     if not settings["admin_token"]:
         raise fleet_client.FleetClientError("no fleet admin token configured")
-    _clear_principal_request(
-        _principal_pending_path(name, settings["admin_token"], hub_url=settings["hub_url"]), request_id=request_id
-    )
+    current_path = _principal_pending_path(name, settings["admin_token"], hub_url=settings["hub_url"])
+    if pending_path is not None and current_path != pending_path:
+        raise FleetMessageHubError("principal credential changed", code="token_scope_changed")
+    _clear_principal_request(current_path if pending_path is None else pending_path, request_id=request_id)
 
 
-def _principal_pending_path(name: str, admin_token: str, *, hub_url: str | None = None) -> Path:
-    hub = fleet_client.load_fleet_settings()["hub_url"] if hub_url is None else hub_url
-    token_scope = "v1-" + message_scope(hub, admin_token)
+def _principal_pending_path(name: str, admin_token: str, *, hub_url: str) -> Path:
+    token_scope = "v1-" + message_scope(hub_url, admin_token)
     name_scope = hashlib.sha256(name.encode("utf-8")).hexdigest()[:16]
     return fleet_client.brigade_home() / fleet_client.SPOOL_DIRNAME / f"principal-{name_scope}-{token_scope}.jsonl"
 
 
-def _principal_revocation_path(name: str, admin_token: str, *, hub_url: str | None = None) -> Path:
-    hub = fleet_client.load_fleet_settings()["hub_url"] if hub_url is None else hub_url
-    token_scope = "v1-" + message_scope(hub, admin_token)
+def _principal_revocation_path(name: str, admin_token: str, *, hub_url: str) -> Path:
+    token_scope = "v1-" + message_scope(hub_url, admin_token)
     name_scope = hashlib.sha256(name.encode("utf-8")).hexdigest()[:16]
     return (
         fleet_client.brigade_home() / fleet_client.SPOOL_DIRNAME / f"principal-{name_scope}-{token_scope}.revoke.jsonl"
@@ -766,7 +836,7 @@ def _pending_principal_revocation_request(
     admin_token: str,
     *,
     expected_enrollment_id: str | None | object = _NOT_PROVIDED,
-    hub_url: str | None = None,
+    hub_url: str,
 ) -> dict[str, Any] | None:
     """Read or persist a revoke's enrollment generation across ambiguous retries."""
     path = _principal_revocation_path(name, admin_token, hub_url=hub_url)
@@ -801,7 +871,7 @@ def _pending_principal_request(
     *,
     expected_enrollment_id: str | None = None,
     may_send_to: list[str] | None = None,
-    hub_url: str | None = None,
+    hub_url: str,
 ) -> dict[str, Any]:
     path = _principal_pending_path(name, admin_token, hub_url=hub_url)
     with fleet_client._spool_lock(path) as dir_fd:
@@ -871,26 +941,39 @@ def _pending_principal_request_id(path: Path, name: str, *, enrollment_id: str |
 
 
 def flush(
-    node_id: str, *, hub_url: str | None = None, token: str | None = None, lock_timeout: float | None = None
+    node_id: str,
+    *,
+    hub_url: str | None = None,
+    token: str | None = None,
+    lock_timeout: float | None = None,
+    authority: MessageAuthority | None = None,
 ) -> int:
     fleet_client._validate_spool_lock_timeout(lock_timeout)
-    settings = fleet_client.load_fleet_settings() if hub_url is None or token is None else {}
-    hub = settings["hub_url"] if hub_url is None else hub_url
-    auth = settings["node_token"] if token is None else token
-    if not hub or not auth:
-        return 0
-    path = _spool_path(node_id, auth, hub_url=hub)
+    if authority is None:
+        try:
+            authority = MessageAuthority.capture(node_credential=True)
+        except MessageNotConfiguredError:
+            return 0
+        if (hub_url is not None and hub_url.rstrip("/") != authority.hub.rstrip("/")) or (
+            token is not None and not hmac.compare_digest(token, authority.token)
+        ):
+            raise MessageAuthorityError("message credential changed", code="token_scope_changed")
+    authority.validate()
+    path = _spool_path(node_id, authority.token, hub_url=authority.hub)
     _warn_inactive_spools(node_id, path)
     if not path.is_file():
         return 0
     with fleet_client._spool_lock(path, timeout=lock_timeout) as dir_fd:
-        return _flush_locked(path, hub, auth, dir_fd=dir_fd)
+        authority.validate()
+        result = _flush_locked(path, authority, dir_fd=dir_fd)
+    authority.validate()
+    return result
 
 
 def _flush_locked(
-    path: Path, hub: str, token: str, *, max_messages: int | None = None, dir_fd: int | None = None
+    path: Path, authority: MessageAuthority, *, max_messages: int | None = None, dir_fd: int | None = None
 ) -> int:
-    return _drain_locked(path, hub, token, max_messages=max_messages, dir_fd=dir_fd)[0]
+    return _drain_locked(path, authority, max_messages=max_messages, dir_fd=dir_fd)[0]
 
 
 def _message_recipient(message: dict[str, Any]) -> str | None:
@@ -898,15 +981,16 @@ def _message_recipient(message: dict[str, Any]) -> str | None:
     return recipient if isinstance(recipient, str) else None
 
 
-def _reply_recipient(hub: str, token: str, message_id: int, *, timeout: float | None = None) -> str | None:
+def _reply_recipient(authority: MessageAuthority, message_id: int, *, timeout: float | None = None) -> str | None:
     _validate_sqlite_integer(message_id, "message id")
     body = {"action": "list", "after": message_id - 1, "unacked": False}
-    status, payload = _request(hub, token, body) if timeout is None else _request(hub, token, body, timeout=timeout)
+    try:
+        status, payload = _transport(authority, body, timeout=timeout)
+    finally:
+        authority.validate()
     messages = payload.get("messages")
     if status == 401 or (status == 403 and payload.get("code") == "message_sender_inactive"):
-        raise _UnauthorizedError(
-            str(payload.get("error") or f"fleet hub returned HTTP {status}"), status=status, code=payload.get("code")
-        )
+        raise _UnauthorizedError(_rejection(status, payload), status=status, code=payload.get("code"))
     if status != 200 or not isinstance(messages, list):
         raise fleet_client.FleetClientError("fleet hub could not resolve the reply recipient")
     previous_id = message_id - 1
@@ -933,9 +1017,10 @@ def _reply_recipient(hub: str, token: str, message_id: int, *, timeout: float | 
 
 
 def _drain_locked(
-    path: Path, hub: str, token: str, *, max_messages: int | None = None, dir_fd: int | None = None
+    path: Path, authority: MessageAuthority, *, max_messages: int | None = None, dir_fd: int | None = None
 ) -> tuple[int, bool]:
-    if path.name != f"messages-v1-{message_scope(hub, token)}.jsonl":
+    authority.validate()
+    if path.name != f"messages-v1-{authority.scope}.jsonl":
         raise FleetMessageHubError("message spool origin does not match transport", code="token_scope_changed")
     messages = fleet_client._read_spool(path, dir_fd=dir_fd, strict=True)
     deadline = monotonic() + MESSAGE_DRAIN_DEADLINE_SECONDS
@@ -944,6 +1029,7 @@ def _drain_locked(
     retained: list[dict[str, Any]] = []
     blocked_recipients: set[str] = set()
     for index, message in enumerate(messages):
+        authority.validate()
         if _expired(message):
             _LOG.warning("fleet message spool %s: dropping expired offline message", path)
             continue
@@ -961,11 +1047,13 @@ def _drain_locked(
             try:
                 attempted += 1
                 lookup_timeout = min(fleet_client.FLUSH_TIMEOUT_SECONDS, remaining)
-                recipient = _reply_recipient(hub, token, int(message["id"]), timeout=lookup_timeout)
+                recipient = _reply_recipient(authority, int(message["id"]), timeout=lookup_timeout)
                 if recipient is None:
                     _LOG.warning("fleet message spool %s: dropping reply because its parent expired", path)
                     continue
                 message["_recipient"] = recipient
+            except MessageAuthorityError:
+                raise
             except _UnauthorizedError:
                 retained.extend(messages[index:])
                 fleet_client._write_spool_atomic(path, retained, dir_fd=dir_fd)
@@ -990,19 +1078,23 @@ def _drain_locked(
             attempted += 1
             timeout = min(fleet_client.FLUSH_TIMEOUT_SECONDS, remaining)
             if timeout == fleet_client.FLUSH_TIMEOUT_SECONDS:
-                status, payload = _request(hub, token, message)
+                status, payload = _transport(authority, message)
             else:
-                status, payload = _request(hub, token, message, timeout=timeout)
+                status, payload = _transport(authority, message, timeout=timeout)
+        except MessageAuthorityError:
+            raise
         except fleet_client.FleetClientError:
+            authority.validate()
             retained.extend(messages[index:])
             fleet_client._write_spool_atomic(path, retained, dir_fd=dir_fd)
             return delivered, True
+        authority.validate()
         code = payload.get("code")
         if status == 401 or (status == 403 and code == "message_sender_inactive"):
             retained.extend(messages[index:])
             fleet_client._write_spool_atomic(path, retained, dir_fd=dir_fd)
             raise _UnauthorizedError(
-                str(payload.get("error") or f"fleet hub returned HTTP {status}"),
+                _rejection(status, payload),
                 status=status,
                 code=payload.get("code"),
             )
@@ -1031,7 +1123,13 @@ def _drain_locked(
             return delivered, True
         if not 200 <= status < 300 and status >= 400:
             _LOG.warning(
-                "fleet message spool %s: dropping rejected message: %s", path, _safe_log_text(payload.get("error"))
+                "fleet message spool %s: dropping rejected message: %s",
+                path,
+                _safe_log_text(
+                    payload.get("code")
+                    if payload.get("code") in ("invalid_argument", "message_recipient_unknown", "message_not_found")
+                    else "hub_rejected"
+                ),
             )
         elif 200 <= status < 300:
             if not _response_confirms(payload, message):
@@ -1045,6 +1143,7 @@ def _drain_locked(
             fleet_client._write_spool_atomic(path, retained, dir_fd=dir_fd)
             return delivered, True
     fleet_client._write_spool_atomic(path, retained, dir_fd=dir_fd)
+    authority.validate()
     return delivered, False
 
 

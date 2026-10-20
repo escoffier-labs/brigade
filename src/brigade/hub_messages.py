@@ -11,7 +11,7 @@ from typing import Any, Callable, Iterator, Mapping
 
 from . import fleet_client_messages
 from .fleet_client import FleetClientError
-from .fleet_client_message_credentials import FleetMessageHubError
+from .fleet_client_message_credentials import FleetMessageHubError, MessageAuthority
 
 MAX_MESSAGE_BYTES = 8192
 INBOX_TOOLS = frozenset({"inbox_list", "inbox_ack", "inbox_reply", "message_send", "message_status"})
@@ -163,10 +163,30 @@ class MessageOperations:
     def _call(self, action: str, *args: Any, **kwargs: Any) -> Any:
         return call_message(action, *args, token_file=self.token_file, **kwargs)
 
+    def capture(self) -> MessageAuthority:
+        try:
+            return MessageAuthority.capture(self.token_file)
+        except FleetClientError as error:
+            raise HubMessageError("hub_credential_invalid", getattr(error, "code", None)) from None
+
+    def require_authority(self, authority: MessageAuthority) -> None:
+        try:
+            authority.validate()
+        except FleetClientError as error:
+            code = (
+                "hub_credential_changed"
+                if getattr(error, "code", None) == "token_scope_changed"
+                else "hub_credential_invalid"
+            )
+            raise HubMessageError(code, getattr(error, "code", None)) from None
+
     @contextmanager
-    def _operation_scope(self) -> Iterator[str | None]:
-        """Connector authority guard for preparation, transport, and complete projection."""
-        yield None
+    def _operation_scope(self) -> Iterator[MessageAuthority]:
+        authority = self.capture()
+        try:
+            yield authority
+        finally:
+            self.require_authority(authority)
 
     def _sent_message(self, value: dict[str, Any], *, agent: bool) -> dict[str, Any] | None:
         if value.get("queued") is True:
@@ -182,7 +202,7 @@ class MessageOperations:
         return row
 
     def reply(self, msg_id: int, body: str) -> dict[str, Any]:
-        with self._operation_scope() as scope:
+        with self._operation_scope() as authority:
             cid = "mr-" + hashlib.sha256(f"{msg_id}\n{body}".encode()).hexdigest()[:40]
             value = self._call(
                 "reply",
@@ -195,7 +215,7 @@ class MessageOperations:
                 kind="message",
                 sender_label=None,
                 client_id=cid,
-                expected_scope=scope,
+                authority=authority,
             )
             row = self._sent_message(value, agent=True)
             result: dict[str, Any] = dict(
@@ -219,7 +239,7 @@ class MessageOperations:
         kind: str = "message",
         client_id: str | None = None,
     ) -> dict[str, Any]:
-        with self._operation_scope() as scope:
+        with self._operation_scope() as authority:
             # Node names from hub_recipients resolve to node ids; grants name node ids.
             recipient = dict(self.recipients).get(to, to)
             cid = (
@@ -243,7 +263,7 @@ class MessageOperations:
                     kind=kind,
                     sender_label=None,
                     client_id=cid,
-                    expected_scope=scope,
+                    authority=authority,
                 ),
                 agent=True,
             )
@@ -257,8 +277,8 @@ class MessageOperations:
             )
 
     def status(self, ids: builtins.list[int]) -> dict[str, Any]:
-        with self._operation_scope() as scope:
-            value = self._call("sent", ids=ids, expected_scope=scope)
+        with self._operation_scope() as authority:
+            value = self._call("sent", ids=ids, authority=authority)
             self._require(isinstance(value.get("messages"), list), "hub_unavailable")
             self._require(
                 all(

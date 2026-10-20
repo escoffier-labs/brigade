@@ -15,6 +15,8 @@ import ssl
 import time
 from typing import Any, Awaitable, Callable, Protocol
 from uuid import uuid4
+from brigade.fleet_client_message_credentials import MessageAuthority
+
 from .contracts import DotError
 from .event_app import EventError, EventsApp as EventsApp, IDENTITY as IDENTITY
 from .state import BridgeState
@@ -26,8 +28,8 @@ WebhookPost = Callable[[str, bytes, dict[str, str]], Awaitable[tuple[int, bytes]
 
 
 class HubSync(Protocol):
-    def scope(self, *, agent: bool = True) -> str: ...
-    def require_scope(self, scope: str, *, agent: bool = True) -> None: ...
+    def capture(self, *, agent: bool = True) -> MessageAuthority: ...
+    def require_authority(self, authority: MessageAuthority) -> None: ...
     def sync(self) -> None: ...
     def reconcile(self) -> None: ...
     def flush_pending(self) -> None: ...
@@ -281,9 +283,11 @@ class EventService:
     async def deliver(self, now: float | None = None) -> None:
         now = time.time() if now is None else now
         active_source = ""
+        authority = None
         if self.hub is not None:
             try:
-                active_source = "hub-inbox:" + self.hub.scope() + ":%"
+                authority = self.hub.capture()
+                active_source = "hub-inbox:" + authority.scope + ":%"
             except DotError:
                 pass
         with self.state.transaction() as c:
@@ -309,10 +313,10 @@ class EventService:
             source = row["source"]
             hub_scope = source.split(":")[1] if source.startswith("hub-inbox:") else None
             if hub_scope is not None:
-                if self.hub is None or not hub_scope:
+                if self.hub is None or authority is None or hub_scope != authority.scope:
                     continue
                 try:
-                    self.hub.require_scope(hub_scope)
+                    self.hub.require_authority(authority)
                 except DotError:
                     continue
             with self.state.transaction() as c:
@@ -356,20 +360,23 @@ class EventService:
             ).encode()
             previous = row["previous_secret"] if row["rotate_until"] and row["rotate_until"] > now else None
             try:
-                if hub_scope is not None:
-                    assert self.hub is not None
-                    self.hub.require_scope(hub_scope)
-                status, _ = await self.post(
-                    row["url"],
-                    body,
-                    signed_headers(
-                        row["secret"], row["event_id"], body, row["subscription_id"], now=now, previous=previous
-                    ),
+                headers = signed_headers(
+                    row["secret"], row["event_id"], body, row["subscription_id"], now=now, previous=previous
                 )
+                if hub_scope is not None:
+                    assert self.hub is not None and authority is not None
+                    self.hub.require_authority(authority)
+                status, _ = await self.post(row["url"], body, headers)
             except DotError:
                 continue
             except Exception:
                 status = 503
+            if hub_scope is not None:
+                assert self.hub is not None and authority is not None
+                try:
+                    self.hub.require_authority(authority)
+                except DotError:
+                    continue
             done = 200 <= status < 300
             permanent = status in (410, 413) or (400 <= status < 500 and status not in (408, 429))
             attempts = row["attempts"] + 1

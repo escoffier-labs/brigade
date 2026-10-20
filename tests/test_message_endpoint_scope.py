@@ -67,15 +67,16 @@ def test_spool_origin_survives_endpoint_switch(tmp_path, monkeypatch, caplog, in
     assert legacy.read_bytes() == node_legacy.read_bytes() == legacy_bytes
     assert "fixture-node" not in caplog.text
 
-    # Explicit captured settings must not reread configuration at all.
-    def forbidden_settings_read():
-        raise AssertionError("explicit flush reread mutable settings")
+    # Validation may reread current settings, but cannot adopt B or replay A while B is current.
+    from brigade.fleet_client_message_credentials import FleetMessageHubError
 
-    monkeypatch.setattr(fleet_client, "load_fleet_settings", forbidden_settings_read)
+    with pytest.raises(FleetMessageHubError, match="message credential changed"):
+        messages.flush("node-a", hub_url="https://a.invalid/", token="fixture-node")
+    assert calls == []
+    assert all(p.read_bytes() == content for p, content in original.items())
+    settings["hub_url"] = "https://a.invalid"
     assert messages.flush("node-a", hub_url="https://a.invalid/", token="fixture-node") == (1 if interrupted else 2)
     assert all(hub == "https://a.invalid" for hub, _ in calls)
-    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: dict(settings))
-    settings["hub_url"] = "https://a.invalid"
     assert messages.flush_credential() == 0
     assert legacy.read_bytes() == node_legacy.read_bytes() == legacy_bytes
 
@@ -84,19 +85,35 @@ def test_admin_retry_state_endpoint_walk(tmp_path, monkeypatch):
     settings = dict(hub_url="https://a.invalid", node_token="", admin_token="fixture-admin")
     monkeypatch.setenv("BRIGADE_HOME", str(tmp_path))
     monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: dict(settings))
-    first = messages._pending_principal_request("fixture", "fixture-admin", None)
-    revoke = messages._pending_principal_revocation_request("fixture", "fixture-admin", expected_enrollment_id="a")
+    first = messages._pending_principal_request(
+        "fixture", "fixture-admin", None, hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    )
+    revoke = messages._pending_principal_revocation_request(
+        "fixture", "fixture-admin", expected_enrollment_id="a", hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    )
     settings["hub_url"] = "https://b.invalid"
-    second = messages._pending_principal_request("fixture", "fixture-admin", None)
+    second = messages._pending_principal_request(
+        "fixture", "fixture-admin", None, hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    )
     other_revoke = messages._pending_principal_revocation_request(
-        "fixture", "fixture-admin", expected_enrollment_id="b"
+        "fixture", "fixture-admin", expected_enrollment_id="b", hub_url=fleet_client.load_fleet_settings()["hub_url"]
     )
     assert first["request_id"] != second["request_id"]
     assert revoke["request_id"] != other_revoke["request_id"]
     assert other_revoke["expected_enrollment_id"] == "b"
     settings["hub_url"] = "https://a.invalid/"
-    assert messages._pending_principal_request("fixture", "fixture-admin", None) == first
-    assert messages._pending_principal_revocation_request("fixture", "fixture-admin") == revoke
+    assert (
+        messages._pending_principal_request(
+            "fixture", "fixture-admin", None, hub_url=fleet_client.load_fleet_settings()["hub_url"]
+        )
+        == first
+    )
+    assert (
+        messages._pending_principal_revocation_request(
+            "fixture", "fixture-admin", hub_url=fleet_client.load_fleet_settings()["hub_url"]
+        )
+        == revoke
+    )
 
 
 class TestDotEndpointScope(unittest.TestCase):
@@ -289,8 +306,66 @@ class TestDotEndpointScope(unittest.TestCase):
             self.hub.flush_pending()
         self.assertEqual([c["token_file"] for c in self.runner.calls if c["action"] == "flush_credential"], [None])
 
+    @requires_local_state
+    def test_rotation_during_event_signing_stops_before_post(self):
+        import asyncio
+        import base64
+        from unittest.mock import patch
+        from brigade.dot import events
+
+        self.runner.add()
+        self.hub.sync()
+        with self.state.transaction() as c:
+            c.execute(
+                "INSERT INTO subscriptions VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (
+                    "sub",
+                    "owner",
+                    "fleet.inbox.message",
+                    "{}",
+                    "https://callback.invalid",
+                    "whsec_" + base64.b64encode(b"k" * 32).decode(),
+                    None,
+                    None,
+                    None,
+                    0,
+                ),
+            )
+        posted = []
+
+        async def post(*args):
+            posted.append(args)
+            return 200, b""
+
+        service = events.EventService(
+            self.state,
+            fleet_status=lambda _: {},
+            hub=self.hub,
+            hub_poll_seconds=30,
+            callback_hosts=frozenset(),
+            post=post,
+        )
+        original = events.signed_headers
+
+        def sign(*args, **kwargs):
+            self.runner.settings["hub_url"] = "https://other.invalid"
+            return original(*args, **kwargs)
+
+        with patch.object(events, "signed_headers", side_effect=sign):
+            asyncio.run(service.deliver())
+        self.assertEqual(posted, [])
+
 
 def test_drain_rejects_mismatched_origin_before_lookup_or_replay(tmp_path, monkeypatch):
+    from brigade.fleet_client_message_credentials import MessageAuthority
+
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: dict(hub_url="https://b.invalid", node_token="fixture-node", admin_token=""),
+    )
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: "node-a")
+    message_authority = MessageAuthority.capture()
     monkeypatch.setenv("BRIGADE_HOME", str(tmp_path))
     path = messages._spool_path("node-a", "fixture-node", hub_url="https://a.invalid")
     with fleet_client._spool_lock(path) as fd:
@@ -300,7 +375,7 @@ def test_drain_rejects_mismatched_origin_before_lookup_or_replay(tmp_path, monke
 
     with patch.object(messages, "_request") as request:
         with pytest.raises(fleet_client.FleetClientError, match="origin does not match"):
-            messages._flush_locked(path, "https://b.invalid", "fixture-node")
+            messages._flush_locked(path, message_authority)
         request.assert_not_called()
     assert path.read_bytes() == original
 
@@ -317,9 +392,14 @@ def test_unknown_admin_retry_is_preserved_and_never_adopted(tmp_path, monkeypatc
     legacy.write_text(json.dumps(dict(name="fixture", request_id="old-origin", expected_enrollment_id="old")) + "\n")
     original = legacy.read_bytes()
     for operation in (
-        lambda: messages._pending_principal_request("fixture", "fixture-admin", None),
+        lambda: messages._pending_principal_request(
+            "fixture", "fixture-admin", None, hub_url=fleet_client.load_fleet_settings()["hub_url"]
+        ),
         lambda: messages._pending_principal_revocation_request(
-            "fixture", "fixture-admin", expected_enrollment_id="new"
+            "fixture",
+            "fixture-admin",
+            expected_enrollment_id="new",
+            hub_url=fleet_client.load_fleet_settings()["hub_url"],
         ),
     ):
         with pytest.raises(fleet_client.FleetClientError, match="unproven endpoint scope") as error:

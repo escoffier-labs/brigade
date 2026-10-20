@@ -68,6 +68,9 @@ class FakeMessages:
 
     def call(self, action, *args, **kwargs):
         # Explicit fixture credentials let the real Dot wrapper bind all captured state.
+        authority = kwargs.pop("authority", None)
+        if authority is not None:
+            authority.validate()
         expected = kwargs.pop("expected_scope", None)
         if expected is not None:
             from brigade.fleet_client_message_credentials import message_scope, message_settings
@@ -947,3 +950,116 @@ def test_dot_shared_operation_scope_covers_preparation_and_projection(
     public = json.dumps(result) + str(error) + caplog.text
     for secret in (token, replacement, "n" * 64):
         assert secret not in public + persisted + spool_text
+
+
+@requires_local_state
+@pytest.mark.parametrize("rotation", ["before", "after-commit"])
+def test_notify_cli_rotation_before_transport_and_identical_retry(dot_message_transport, monkeypatch, capsys, rotation):
+    from brigade.dot import __main__ as entry
+
+    tools, _, state, _, token_file = dot_message_transport
+    requests, committed = [], {}
+    original_notify = HubInbox.notify
+    rotate_before = True
+
+    def notify(self, *args, **kwargs):
+        if rotate_before and rotation == "before":
+            token_file.write_text("y" * 64)
+        return original_notify(self, *args, **kwargs)
+
+    def request(hub, token, body, *, timeout=None):
+        requests.append(dict(body))
+        row = committed.setdefault(
+            body["client_id"],
+            dict(
+                id=len(committed) + 1,
+                recipient="agent:dot",
+                sender="node-a",
+                body=body["body"],
+                created_at=NOW.isoformat(),
+                client_id=body["client_id"],
+            ),
+        )
+        if rotate_before and rotation == "after-commit":
+            token_file.write_text("y" * 64)
+        return 200, {"message": row}
+
+    runtime = replace(tools.runtime, paths=replace(tools.runtime.paths, state_dir=state.directory))
+    monkeypatch.setattr(entry, "_load_config", lambda target: (None, runtime))
+    monkeypatch.setattr(HubInbox, "notify", notify)
+    monkeypatch.setattr(messages, "_request", request)
+    argv = ["notify", "--target", str(state.directory.parent), "--from", "worker", "same notification"]
+    assert entry.main(argv) == 2
+    assert json.loads(capsys.readouterr().out)["error"] == "inbox_unavailable"
+    assert len(requests) == (0 if rotation == "before" else 1)
+    # Retry must use the original id even if a send committed before validation failed.
+    rotate_before = False
+    assert entry.main(argv) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert entry.main(argv) == 0
+    second = json.loads(capsys.readouterr().out)
+    assert first["id"] == second["id"] and len(committed) == 1
+
+
+@requires_local_state
+def test_send_rotation_while_waiting_for_spool_lock_has_no_transport(dot_message_transport, monkeypatch):
+    from contextlib import contextmanager
+    from brigade import fleet_client
+
+    tools, _, _, _, token_file = dot_message_transport
+    original_lock = fleet_client._spool_lock
+    requests = []
+
+    @contextmanager
+    def rotating_lock(*args, **kwargs):
+        with original_lock(*args, **kwargs) as descriptor:
+            token_file.write_text("y" * 64)
+            yield descriptor
+
+    def request(hub, token, body, *, timeout=None):
+        requests.append(body)
+        return 503, {}
+
+    monkeypatch.setattr(fleet_client, "_spool_lock", rotating_lock)
+    monkeypatch.setattr(messages, "_request", request)
+    with pytest.raises(DotError, match="hub_credential_changed"):
+        tools.message_send("worker", "subject", "body", client_id="stable-id")
+    assert requests == []
+
+
+@requires_local_state
+def test_notify_cli_initially_unusable_agent_is_not_recaptured_after_repair(dot_message_transport, monkeypatch, capsys):
+    from brigade.dot import __main__ as entry
+
+    tools, _, state, _, token_file = dot_message_transport
+    token_file.unlink()
+    runtime = replace(tools.runtime, paths=replace(tools.runtime.paths, state_dir=state.directory))
+    original = HubInbox.notify
+    requests = []
+
+    def notify(self, *args, **kwargs):
+        token_file.write_text("y" * 64)
+        token_file.chmod(0o600)
+        return original(self, *args, **kwargs)
+
+    def request(hub, token, body, **kwargs):
+        requests.append(body["action"])
+        return 200, {
+            "message": dict(
+                id=1,
+                recipient="agent:dot",
+                sender="node-a",
+                body=body["body"],
+                created_at=NOW.isoformat(),
+                client_id=body["client_id"],
+            )
+        }
+
+    monkeypatch.setattr(entry, "_load_config", lambda target: (None, runtime))
+    monkeypatch.setattr(HubInbox, "notify", notify)
+    monkeypatch.setattr(messages, "_request", request)
+    assert entry.main(["notify", "--target", str(state.directory), "--from", "worker", "body"]) == 0
+    assert json.loads(capsys.readouterr().out)["unacked"] == 0
+    assert requests == ["send"]
+    with state.transaction() as connection:
+        assert connection.execute("SELECT count(*) FROM hub_inbox").fetchone()[0] == 0

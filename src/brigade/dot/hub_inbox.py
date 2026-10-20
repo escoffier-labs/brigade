@@ -3,17 +3,16 @@
 from __future__ import annotations
 
 import builtins
-from contextlib import contextmanager
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import hashlib
-import os
 import re
 import threading
 import time
 from typing import Any, Callable, Iterator, Mapping
 
 from brigade.fleet_client import FleetClientError
-from brigade.fleet_client_message_credentials import ENV_TOKEN_FILE, message_scope, message_settings
+from brigade.fleet_client_message_credentials import MessageAuthority
 from brigade.hub_messages import (
     LOCAL_CLI_CODES as LOCAL_CLI_CODES,
     HubMessageError,
@@ -30,6 +29,8 @@ from .contracts import MESSAGE_BODY, THREAD, DotError, _text, require
 from .runtime_config import HubConfig
 from .state import BridgeState, _iso, utc_now
 
+_UNCAPTURED = object()
+
 
 class HubInbox(MessageOperations):
     def __init__(self, state: BridgeState, hub: HubConfig, *, clock: Callable[[], datetime] = utc_now) -> None:
@@ -38,38 +39,37 @@ class HubInbox(MessageOperations):
         self._sync_lock = threading.Lock()
         self._reconcile_lock = threading.Lock()
 
-    def scope(self, *, agent: bool = True) -> str:
-        if not agent:
-            require(ENV_TOKEN_FILE not in os.environ, "hub_credential_invalid")
+    def capture(self, *, agent: bool = True) -> MessageAuthority:
         try:
-            hub, token, _ = message_settings(str(self.config.message_token_file) if agent else None)
-            return message_scope(hub, token)
+            return MessageAuthority.capture(str(self.config.message_token_file) if agent else None, node_only=not agent)
         except FleetClientError:
             raise DotError("hub_credential_invalid") from None
 
-    def require_scope(self, scope: str, *, agent: bool = True) -> None:
-        require(self.scope(agent=agent) == scope, "hub_credential_changed")
+    def scope(self, *, agent: bool = True) -> str:
+        """Compatibility snapshot accessor, never used to validate or select nested authority."""
+        return self.capture(agent=agent).scope
 
-    @contextmanager
-    def _operation_scope(self) -> Iterator[str]:
-        scope = self.scope(agent=True)
+    def require_authority(self, authority: MessageAuthority) -> None:
         try:
-            yield scope
-        finally:
-            # Shared tool projections must finish under the authority captured before preparation.
-            self.require_scope(scope, agent=True)
+            authority.validate()
+        except FleetClientError as error:
+            raise DotError(
+                "hub_credential_changed"
+                if getattr(error, "code", None) == "token_scope_changed"
+                else "hub_credential_invalid"
+            ) from None
 
-    def _call(self, action: str, *args: Any, agent: bool = True, **kwargs: Any) -> Any:
-        scope = kwargs.pop("expected_scope", None) or self.scope(agent=agent)
-        self.require_scope(scope, agent=agent)
-        token_file = str(self.config.message_token_file) if agent else None
+    def _call(self, action: str, *args: Any, authority: MessageAuthority, agent: bool = True, **kwargs: Any) -> Any:
+        self.require_authority(authority)
         try:
             try:
-                value = call_message(action, *args, token_file=token_file, expected_scope=scope, **kwargs)
+                value = call_message(action, *args, token_file=authority.token_file, authority=authority, **kwargs)
                 if isinstance(value, dict) and value.get("queued") is True:
-                    self.state.hub_set("agent_spool_pending" if agent else "node_spool_pending", "1", scope=scope)
+                    self.state.hub_set(
+                        "agent_spool_pending" if agent else "node_spool_pending", "1", scope=authority.scope
+                    )
             finally:
-                self.require_scope(scope, agent=agent)
+                self.require_authority(authority)
         except HubMessageError as error:
             raise DotError(error.code) from None
         return value
@@ -89,17 +89,16 @@ class HubInbox(MessageOperations):
         max_pages: int = 1001,
         timeout: float = 45,
         deadline: float | None = None,
-        scope: str | None = None,
+        authority: MessageAuthority,
     ) -> Iterator[tuple[builtins.list[dict[str, Any]], int, datetime]]:
-        scope = self.scope(agent=agent) if scope is None else scope
         for _ in range(max_pages):
-            self.require_scope(scope, agent=agent)
+            self.require_authority(authority)
             remaining = timeout if deadline is None else min(timeout, deadline - time.monotonic())
             if remaining <= 0:
                 return
             fetched_at = self.clock()  # A local ack after the fetch starts wins over this copy.
             value = self._call(
-                "list_messages", after=after, unacked=unacked, agent=agent, timeout=remaining, expected_scope=scope
+                "list_messages", after=after, unacked=unacked, agent=agent, timeout=remaining, authority=authority
             )
             try:
                 rows, cursor = inbox_page(
@@ -107,7 +106,7 @@ class HubInbox(MessageOperations):
                 )
             except HubMessageError as error:
                 raise DotError(error.code) from None
-            self.require_scope(scope, agent=agent)
+            self.require_authority(authority)
             yield rows, cursor, fetched_at
             if not rows:
                 return
@@ -123,21 +122,24 @@ class HubInbox(MessageOperations):
         lock_timeout: float | None = None,
         deadline: float | None = None,
         after: int | None = None,
-        scope: str | None = None,
+        authority: MessageAuthority | None = None,
     ) -> None:
-        scope = self.scope() if scope is None else scope
-        self.require_scope(scope)
+        authority = self.capture() if authority is None else authority
+        scope = authority.scope
+        self.require_authority(authority)
         acquired = self._sync_lock.acquire() if lock_timeout is None else self._sync_lock.acquire(timeout=lock_timeout)
         if not acquired:
             return
         try:
+            self.require_authority(authority)
             try:
                 after = int(self.state.hub_get("cursor", "0", scope=scope) or "0") if after is None else after
                 for rows, cursor, fetched_at in self._pages(
-                    after=after, max_pages=max_pages, timeout=timeout, deadline=deadline, scope=scope
+                    after=after, max_pages=max_pages, timeout=timeout, deadline=deadline, authority=authority
                 ):
-                    self.require_scope(scope)
+                    self.require_authority(authority)
                     with self.state.transaction() as c:
+                        self.require_authority(authority)
                         self.state.hub_upsert(
                             rows,
                             node_id=self.config.node_id,
@@ -149,7 +151,7 @@ class HubInbox(MessageOperations):
                         self.state.hub_set("cursor", cursor, scope=scope, connection=c)
                         self.state.hub_set("last_sync_ok_at", _iso(self.clock()), scope=scope, connection=c)
                         self.state.hub_set("last_sync_error", "", scope=scope, connection=c)
-                self.require_scope(scope)
+                self.require_authority(authority)
             except DotError as error:
                 self.state.hub_set("last_sync_error", str(error), scope=scope)
                 raise
@@ -157,7 +159,9 @@ class HubInbox(MessageOperations):
             self._sync_lock.release()
 
     def reconcile(self) -> None:
-        scope = self.scope()
+        authority = self.capture()
+        scope = authority.scope
+        node_authority = self.capture(agent=False)
         # Independent of foreground sync; never hold its lock during network IO.
         if not self._reconcile_lock.acquire(blocking=False):
             return
@@ -165,10 +169,11 @@ class HubInbox(MessageOperations):
             after = int(self.state.hub_get("reconcile_cursor", "0", scope=scope) or "0")
             try:
                 for rows, cursor, fetched_at in self._pages(
-                    after=after, max_pages=10, timeout=2, deadline=time.monotonic() + 20, scope=scope
+                    after=after, max_pages=10, timeout=2, deadline=time.monotonic() + 20, authority=authority
                 ):
-                    self.require_scope(scope)
+                    self.require_authority(authority)
                     with self.state.transaction() as c:
+                        self.require_authority(authority)
                         self.state.hub_upsert(
                             rows,
                             node_id=self.config.node_id,
@@ -189,20 +194,20 @@ class HubInbox(MessageOperations):
                     "DELETE FROM hub_inbox WHERE scope=? AND acked_at < ?",
                     (scope, _iso(self.clock() - timedelta(days=90))),
                 )
-            self.require_scope(scope)
-            self._sweep_node_replies()
-            self.require_scope(scope)
+            self.require_authority(authority)
+            self._sweep_node_replies(node_authority)
+            self.require_authority(authority)
         finally:
             self._reconcile_lock.release()
 
-    def _sweep_node_replies(self) -> None:
-        scope = self.scope(agent=False)
+    def _sweep_node_replies(self, authority: MessageAuthority) -> None:
+        scope = authority.scope
         swept = 0
         deadline = time.monotonic() + 10
         cutoff = self.clock() - timedelta(hours=24)
         after = int(self.state.hub_get("node_sweep_cursor", "0", scope=scope) or "0")
         for rows, _, _ in self._pages(
-            after=after, unacked=True, agent=False, max_pages=2, timeout=2, deadline=deadline, scope=scope
+            after=after, unacked=True, agent=False, max_pages=2, timeout=2, deadline=deadline, authority=authority
         ):
             if not rows:
                 self.state.hub_set("node_sweep_cursor", "0", scope=scope)
@@ -218,31 +223,33 @@ class HubInbox(MessageOperations):
                         "ack",
                         row["id"],
                         agent=False,
-                        expected_scope=scope,
+                        authority=authority,
                         timeout=max(0.1, min(2.0, deadline - time.monotonic())),
                     )
                     swept += 1
-                self.require_scope(scope, agent=False)
+                self.require_authority(authority)
                 self.state.hub_set("node_sweep_cursor", row["id"], scope=scope)
                 if swept >= 5:
                     return
 
     def list(self, unacked_only: bool = True, limit: int = 20) -> dict[str, Any]:
-        scope = self.scope()
+        authority = self.capture()
+        scope = authority.scope
         try:
-            self.sync(max_pages=1, timeout=1.5, lock_timeout=0.1, deadline=time.monotonic() + 1.6, scope=scope)
+            self.sync(max_pages=1, timeout=1.5, lock_timeout=0.1, deadline=time.monotonic() + 1.6, authority=authority)
         except DotError as error:
             if error.code in {"hub_credential_invalid", "hub_credential_changed"}:
                 raise
-        self.require_scope(scope)
+        self.require_authority(authority)
         value = self.state.hub_messages(
             unacked_only=unacked_only, limit=limit, node_id=self.config.node_id, scope=scope
         )
-        self.require_scope(scope)
+        self.require_authority(authority)
         return value
 
     def ack(self, ids: builtins.list[int]) -> dict[str, Any]:
-        scope = self.scope()
+        authority = self.capture()
+        scope = authority.scope
 
         def known_rows() -> dict[int, str | None]:
             with self.state.transaction() as c:
@@ -255,16 +262,16 @@ class HubInbox(MessageOperations):
         acked, not_pending = [], []
         refreshed = False
         for ident in ids:
-            self.require_scope(scope)
+            self.require_authority(authority)
             if ident not in known and not refreshed:
-                self.sync(scope=scope)
+                self.sync(authority=authority)
                 refreshed = True
                 known = known_rows()
             if ident not in known or known[ident] is not None:
                 not_pending.append(ident)
                 continue
             try:
-                self._call("ack", ident, expected_scope=scope)
+                self._call("ack", ident, authority=authority)
             except DotError as error:
                 if str(error) != "message_not_found":
                     raise
@@ -276,7 +283,7 @@ class HubInbox(MessageOperations):
             known[ident] = _iso(self.clock())
             acked.append(ident)
         listing = self.state.hub_messages(unacked_only=True, limit=1, node_id=self.config.node_id, scope=scope)
-        self.require_scope(scope)
+        self.require_authority(authority)
         return dict(acked=acked, not_pending=not_pending, unacked_total=listing["unacked_total"])
 
     def _sent_message(self, value: dict[str, Any], *, agent: bool) -> dict[str, Any] | None:
@@ -293,6 +300,7 @@ class HubInbox(MessageOperations):
         return row
 
     def send_completion(self, request_id: str, generation: int, state: str) -> bool:
+        authority = self.capture(agent=False)
         cid = "dbc-" + hashlib.sha256(f"{request_id}:{generation}".encode()).hexdigest()[:40]
         value = self._call(
             "send",
@@ -306,18 +314,28 @@ class HubInbox(MessageOperations):
             priority="normal",
             client_id=cid,
             agent=False,
+            authority=authority,
         )
         self._sent_message(value, agent=False)
+        self.require_authority(authority)
         return True
 
     def flush_pending(self) -> None:
         first_error: DotError | None = None
+        captured = []
         for key, agent in (("agent_spool_pending", True), ("node_spool_pending", False)):
             try:
-                scope = self.scope(agent=agent)
+                captured.append((key, agent, self.capture(agent=agent)))
+            except DotError as error:
+                first_error = first_error or error
+        for key, agent, authority in captured:
+            scope = authority.scope
+            try:
+                self.require_authority(authority)
                 if self.state.hub_get(key, scope=scope) != "1":
                     continue
-                self._call("flush_credential", agent=agent, expected_scope=scope)
+                self._call("flush_credential", agent=agent, authority=authority)
+                self.require_authority(authority)
             except DotError as error:
                 first_error = first_error or error
             else:
@@ -336,9 +354,21 @@ class HubInbox(MessageOperations):
         kind: str,
         client_id: str,
         *,
-        node_scope: str | None = None,
+        node_authority: MessageAuthority | None = None,
+        agent_authority: MessageAuthority | None | object = _UNCAPTURED,
     ) -> dict[str, Any] | None:
         """Node send for the notify entry point, mirrored only to the proven agent scope."""
+        node_authority = self.capture(agent=False) if node_authority is None else node_authority
+        if agent_authority is _UNCAPTURED:
+            try:
+                agent_authority = self.capture()
+            except DotError:
+                agent_authority = None
+        assert agent_authority is None or isinstance(agent_authority, MessageAuthority)
+        if agent_authority is not None:
+            node_authority = replace(node_authority, companions=(agent_authority,))
+        self.require_authority(node_authority)
+        scope = agent_authority.scope if agent_authority is not None else None
         require(isinstance(sender, str) and re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", sender) is not None)
         MESSAGE_BODY(body)
         if thread is not None:
@@ -346,12 +376,6 @@ class HubInbox(MessageOperations):
         if ref is not None:
             THREAD(ref)
         subject = _text(max_bytes=200)(subject) if subject is not None else default_subject(body, kind, sender)
-        node_scope = self.scope(agent=False) if node_scope is None else node_scope
-        self.require_scope(node_scope, agent=False)
-        try:
-            scope = self.scope()
-        except DotError:
-            scope = None
         value = self._call(
             "send",
             recipient=self.config.principal,
@@ -364,27 +388,26 @@ class HubInbox(MessageOperations):
             kind=kind,
             client_id=client_id,
             agent=False,
-            expected_scope=node_scope,
+            authority=node_authority,
         )
         row = self._sent_message(value, agent=False)
         if row is not None:
             require(row.get("recipient") == self.config.principal, "hub_inconsistent")
             if scope is not None:
-                self.require_scope(scope)
-                self.require_scope(node_scope, agent=False)
+                self.require_authority(node_authority)
                 self.state.hub_upsert([row], node_id=self.config.node_id, scope=scope, clock=self.clock)
-        if scope is not None:
-            self.require_scope(scope)
-        self.require_scope(node_scope, agent=False)
+        self.require_authority(node_authority)
         return row
 
     def wait_replies(
-        self, msg_id: int, cursor: int, *, deadline: float | None = None, scope: str | None = None
+        self, msg_id: int, cursor: int, *, deadline: float | None = None, authority: MessageAuthority | None = None
     ) -> tuple[builtins.list[dict[str, Any]], int]:
-        scope = self.scope(agent=False) if scope is None else scope
-        self.require_scope(scope, agent=False)
+        authority = self.capture(agent=False) if authority is None else authority
+        self.require_authority(authority)
         replies: builtins.list[dict[str, Any]] = []
-        for rows, next_cursor, _ in self._pages(after=cursor, agent=False, max_pages=5, deadline=deadline, scope=scope):
+        for rows, next_cursor, _ in self._pages(
+            after=cursor, agent=False, max_pages=5, deadline=deadline, authority=authority
+        ):
             cursor = next_cursor
             replies.extend(
                 dict(id=row["id"], msg_id=msg_id, created_at=row["created_at"], body=row["body"])
@@ -396,9 +419,9 @@ class HubInbox(MessageOperations):
                 break  # Unacked replies are still returned; the next poll acks them.
             bound = {} if deadline is None else {"timeout": max(0.1, min(45.0, deadline - time.monotonic()))}
             try:
-                self._call("ack", row["id"], agent=False, expected_scope=scope, **bound)
+                self._call("ack", row["id"], agent=False, authority=authority, **bound)
             except DotError as error:
                 if error.code in {"hub_credential_invalid", "hub_credential_changed"}:
                     raise
-        self.require_scope(scope, agent=False)
+        self.require_authority(authority)
         return replies, cursor

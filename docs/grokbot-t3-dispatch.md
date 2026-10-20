@@ -256,9 +256,11 @@ Each acknowledgement batch and its recount stay bound to the initial Hub endpoin
 and credential. Rotation, a Hub endpoint change, or an invalid credential closes
 the whole call with `hub-error`, stops further acknowledgements, and omits partial
 results and counts. Earlier acknowledgements may already have committed. Confirm
-the intended principal and Hub before retrying those ids. The transport checks the
-endpoint and credential it loaded against the batch scope before sending each
-acknowledgement or recount request.
+the intended principal and Hub before retrying those ids. The operation captures its endpoint, credential and node identity once. Nested
+pages, acknowledgements, recounts and replay steps receive that same immutable
+authority. The transport compares it with current credentials immediately before
+each request, including after lock waits. Current settings never replace the
+captured authority. Public page iterators capture when called, before iteration.
 
 Hub tools use Dot's argument validators and message projections. A send without
 `client_id` derives one from its content and a ten-minute time bucket. Reusing

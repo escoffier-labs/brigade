@@ -3,13 +3,11 @@
 from __future__ import annotations
 
 import builtins
-from contextlib import contextmanager
 import json
 import time
 from typing import Any, Iterator
 
-from ..fleet_client import FleetClientError
-from ..fleet_client_message_credentials import message_scope, message_settings
+from ..fleet_client_message_credentials import MessageAuthority
 from ..hub_messages import HubMessageError, MessageOperations, inbox_page, legacy_message
 from .contracts import PUBLIC_RESULT_LIMIT
 
@@ -23,35 +21,15 @@ ACK_TIMEOUT_SECONDS = 5.0
 
 class HubInbox(MessageOperations):
     def notification_scope(self) -> str:
-        # Rotation or a Hub switch must not reuse another principal's notification cursor.
-        try:
-            hub, token, _node_id = message_settings(self.token_file)
-            return message_scope(hub, token)
-        except FleetClientError as error:
-            raise HubMessageError("hub_credential_invalid", getattr(error, "code", None)) from None
+        # Compatibility snapshot accessor. Operations pass the captured authority instead.
+        return self.capture().scope
 
-    def require_notification_scope(self, scope: str) -> None:
-        if self.notification_scope() != scope:
-            raise HubMessageError("hub_credential_changed")
-
-    @contextmanager
-    def _operation_scope(self) -> Iterator[str]:
-        scope = self.notification_scope()
+    def _call(self, action: str, *args: Any, authority: MessageAuthority, **kwargs: Any) -> Any:
+        self.require_authority(authority)
         try:
-            yield scope
+            return super()._call(action, *args, authority=authority, **kwargs)
         finally:
-            # Validate after complete projection, including preparation or projection failures.
-            self.require_notification_scope(scope)
-
-    def _call(self, action: str, *args: Any, **kwargs: Any) -> Any:
-        scope = kwargs.pop("expected_scope", None)
-        scope = self.notification_scope() if scope is None else scope
-        self.require_notification_scope(scope)
-        try:
-            return super()._call(action, *args, expected_scope=scope, **kwargs)
-        finally:
-            # Queued mutations stay durable, but changed authority cannot project their result.
-            self.require_notification_scope(scope)
+            self.require_authority(authority)
 
     def pages(
         self,
@@ -61,24 +39,31 @@ class HubInbox(MessageOperations):
         max_pages: int = POLL_MAX_PAGES,
         timeout: float = POLL_TIMEOUT_SECONDS,
         budget: float = POLL_BUDGET_SECONDS,
-        scope: str | None = None,
+        authority: MessageAuthority | None = None,
         deadline: float | None = None,
     ) -> Iterator[tuple[builtins.list[dict[str, Any]], int]]:
-        scope = self.notification_scope() if scope is None else scope
+        authority = self.capture() if authority is None else authority
         poll_deadline = time.monotonic() + budget
         deadline = poll_deadline if deadline is None else min(poll_deadline, deadline)
+        return self._pages(
+            after=after, unacked=unacked, max_pages=max_pages, timeout=timeout, deadline=deadline, authority=authority
+        )
+
+    def _pages(
+        self, *, after: int, unacked: bool, max_pages: int, timeout: float, deadline: float, authority: MessageAuthority
+    ) -> Iterator[tuple[builtins.list[dict[str, Any]], int]]:
         for _ in range(max_pages):
-            self.require_notification_scope(scope)
+            self.require_authority(authority)
             remaining = min(timeout, deadline - time.monotonic())
             if remaining <= 0:
                 return
             try:
                 value = self._call(
-                    "list_messages", after=after, unacked=unacked, timeout=remaining, expected_scope=scope
+                    "list_messages", after=after, unacked=unacked, timeout=remaining, authority=authority
                 )
             finally:
                 # Check failed fetches too: a changed credential invalidates earlier rows.
-                self.require_notification_scope(scope)
+                self.require_authority(authority)
             rows, cursor = inbox_page(value, after=after)
             yield rows, cursor
             if not rows:
@@ -91,19 +76,19 @@ class HubInbox(MessageOperations):
         limit: int = 20,
         *,
         deadline: float | None = None,
-        scope: str | None = None,
+        authority: MessageAuthority | None = None,
     ) -> dict[str, Any]:
-        scope = self.notification_scope() if scope is None else scope
+        authority = self.capture() if authority is None else authority
         rows = []
         complete = False
         try:
-            for page, _ in self.pages(unacked=unacked_only, scope=scope, deadline=deadline):
+            for page, _ in self.pages(unacked=unacked_only, authority=authority, deadline=deadline):
                 rows.extend(page)
                 complete = not page
         except HubMessageError as error:
             if not rows or error.code in {"hub_credential_changed", "hub_credential_invalid"}:
                 raise
-        self.require_notification_scope(scope)
+        self.require_authority(authority)
         ordered = rows if unacked_only else list(reversed(rows))
         result: dict[str, Any] = dict(
             messages=[],
@@ -127,26 +112,27 @@ class HubInbox(MessageOperations):
                     raise HubMessageError("hub_unavailable")
                 break
         result["has_more"] = not complete or len(result["messages"]) < len(rows)
+        self.require_authority(authority)
         return result
 
     def ack(self, ids: builtins.list[int]) -> dict[str, Any]:
         deadline = time.monotonic() + ACK_BUDGET_SECONDS
-        scope = self.notification_scope()
+        authority = self.capture()
         acked: builtins.list[int] = []
         not_pending: builtins.list[int] = []
         remaining_ids = []
         for index, ident in enumerate(ids):
-            self.require_notification_scope(scope)
+            self.require_authority(authority)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 remaining_ids = ids[index:]
                 break
             try:
                 try:
-                    self._call("ack", ident, timeout=min(ACK_TIMEOUT_SECONDS, remaining), expected_scope=scope)
+                    self._call("ack", ident, timeout=min(ACK_TIMEOUT_SECONDS, remaining), authority=authority)
                 finally:
                     # Check failures too, before preserving any partial batch result.
-                    self.require_notification_scope(scope)
+                    self.require_authority(authority)
             except HubMessageError as error:
                 if error.code in {"hub_credential_changed", "hub_credential_invalid"}:
                     raise
@@ -163,13 +149,13 @@ class HubInbox(MessageOperations):
         remaining = deadline - time.monotonic()
         if not remaining_ids and remaining > 0:
             try:
-                listing = self.list(limit=1, deadline=deadline, scope=scope)
+                listing = self.list(limit=1, deadline=deadline, authority=authority)
             except HubMessageError as error:
                 if error.code in {"hub_credential_changed", "hub_credential_invalid"}:
                     raise
                 # Confirmed mutations survive an unavailable best-effort recount.
                 pass
-        self.require_notification_scope(scope)
+        self.require_authority(authority)
         result = dict(
             acked=acked, not_pending=not_pending, unacked_total=listing["unacked_total"], has_more=listing["has_more"]
         )

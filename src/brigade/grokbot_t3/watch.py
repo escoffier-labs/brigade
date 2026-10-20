@@ -125,7 +125,8 @@ def _wake_hub_inbox(
         return
     summary["checked"] += 1
     hub = HubInbox(token_file=str(runtime.hub_token_file))
-    scope = hub.notification_scope()
+    authority = hub.capture()
+    scope = authority.scope
     targets = wake_targets.get(runtime.hub_wake_target, [])
     if not targets:
         raise c.T3DispatchError("invalid_request")
@@ -137,10 +138,10 @@ def _wake_hub_inbox(
             try:
                 # Each endpoint discovers independently, so a failed endpoint can retain its
                 # bounded batch without blocking healthy endpoints at the same old ids.
-                for page, _ in hub.pages(after=after, scope=scope):
+                for page, _ in hub.pages(after=after, authority=authority):
                     if any(len(row["sender"].encode("utf-8")) > 256 for row in page):
                         raise c.T3DispatchError("hub-error")
-                    hub.require_notification_scope(scope)
+                    hub.require_authority(authority)
                     ledger.queue_hub_wake(scope, target_id, page)
                     pending = ledger.pending_hub_wake(scope, target_id)
                     if len(pending) >= HUB_PENDING_LIMIT:
@@ -160,10 +161,11 @@ def _wake_hub_inbox(
         }
         try:
             key = read_key(target["key_file"])
-            hub.require_notification_scope(scope)
+            hub.require_authority(authority)
             code = post(target["url"], key, body)
         except Exception:
             code = 0
+        hub.require_authority(authority)
         if code == 200:
             ledger.mark_hub_notified(scope, target_id, body["latest_id"])
             summary["woken"] += 1

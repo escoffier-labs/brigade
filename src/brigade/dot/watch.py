@@ -13,7 +13,7 @@ from typing import Any
 from .access_auth import METADATA_PATH
 from .contracts import DotError
 from .hub_inbox import sender_name
-from brigade.fleet_client_message_credentials import FleetMessageHubError, message_scope, message_settings
+from brigade.fleet_client_message_credentials import FleetMessageHubError, MessageAuthority
 from .lifecycle import DotListenerConfig, _base, _load_config, _probe
 from .runtime_config import Runtime
 
@@ -145,12 +145,12 @@ def decide(now, unacked, last_call, open_requests, state):
 
 
 def read_bridge(
-    runtime: Runtime, *, scope: str | None = None
+    runtime: Runtime, *, authority: MessageAuthority | None = None
 ) -> tuple[list[Any], str | None, int, str | None, bool, datetime | None]:
     """Use SQLite's read-only mode. The watcher never migrates or initializes state."""
-    scope = message_scope(*message_settings(str(runtime.hub.message_token_file))[:2]) if scope is None else scope
-    if message_scope(*message_settings(str(runtime.hub.message_token_file))[:2]) != scope:
-        raise DotError("hub_credential_changed")
+    authority = MessageAuthority.capture(str(runtime.hub.message_token_file)) if authority is None else authority
+    scope = authority.scope
+    authority.validate()
     url = (runtime.paths.state_dir / "bridge.sqlite3").as_uri() + "?mode=ro"
     with sqlite3.connect(url, uri=True, timeout=5) as connection:
         connection.row_factory = sqlite3.Row
@@ -169,8 +169,7 @@ def read_bridge(
             value = connection.execute(
                 "SELECT MAX(timestamp) FROM wake_attempts WHERE source LIKE ?", ("hub-inbox:" + scope + ":%",)
             ).fetchone()[0]
-    if message_scope(*message_settings(str(runtime.hub.message_token_file))[:2]) != scope:
-        raise DotError("hub_credential_changed")
+    authority.validate()
     credential = any(hub.get(key) == "hub_credential_invalid" for key in ("last_sync_error", "last_reconcile_error"))
     wake = None if value is None else datetime.fromtimestamp(value, timezone.utc)
     return unacked, last_call, pending, hub.get("last_sync_ok_at"), credential, wake
@@ -186,7 +185,7 @@ def probe_route(config: DotListenerConfig, runtime: Runtime) -> list[str]:
     return failed
 
 
-def send(command: tuple[str, ...], alert: dict[str, Any]) -> int | None:
+def send(command: tuple[str, ...], alert: dict[str, Any], *, authority: MessageAuthority | None = None) -> int | None:
     payload = json.dumps(
         {
             "title": alert["title"],
@@ -196,6 +195,8 @@ def send(command: tuple[str, ...], alert: dict[str, Any]) -> int | None:
             "tags": ["dot", "dot-bridge"],
         }
     )
+    if authority is not None:
+        authority.validate()
     try:
         return subprocess.run(
             list(command),
@@ -254,12 +255,12 @@ def run_watch_once(target: Path, *, now: datetime | None = None, dry_run: bool =
     try:
         config, runtime = _load_config(target)
         try:
-            scope = message_scope(*message_settings(str(runtime.hub.message_token_file))[:2])
+            authority = MessageAuthority.capture(str(runtime.hub.message_token_file))
         except FleetMessageHubError as error:
             if error.code not in {"token_file_invalid", "admin_token_refused"}:
                 raise
             return _credential_health(runtime, now, dry_run)
-        return _run_scoped_watch(config, runtime, scope, now, dry_run)
+        return _run_scoped_watch(config, runtime, authority, now, dry_run)
     except DotError as error:
         return {
             "ok": False,
@@ -270,9 +271,10 @@ def run_watch_once(target: Path, *, now: datetime | None = None, dry_run: bool =
 
 
 def _run_scoped_watch(
-    config: DotListenerConfig, runtime: Runtime, scope: str, now: datetime, dry_run: bool
+    config: DotListenerConfig, runtime: Runtime, authority: MessageAuthority, now: datetime, dry_run: bool
 ) -> dict[str, Any]:
-    unacked, last_call, pending, sync_at, credential, last_wake = read_bridge(runtime, scope=scope)
+    scope = authority.scope
+    unacked, last_call, pending, sync_at, credential, last_wake = read_bridge(runtime, authority=authority)
     state_path = runtime.paths.state_dir / ("inbox-watch-" + scope + ".json")
     state = load_state(state_path)
     alerts, notes, stale = decide(now, unacked, last_call, pending, state)
@@ -302,12 +304,11 @@ def _run_scoped_watch(
     notes += more_notes
     failed, sent = False, False
     for alert in alerts:
-        if message_scope(*message_settings(str(runtime.hub.message_token_file))[:2]) != scope:
-            raise DotError("hub_credential_changed")
+        authority.validate()
         if dry_run or runtime.notify_command is None:
             alert["result"] = "would_send" if dry_run else "skipped"
             continue
-        code = send(runtime.notify_command, alert)
+        code = send(runtime.notify_command, alert, authority=authority)
         alert["result"] = "sent" if code == 0 else f"send_failed:{code}"
         if code != 0:
             failed = True
@@ -326,8 +327,7 @@ def _run_scoped_watch(
             state["route"]["wake"] = alert["key"]
         else:
             state["idle"]["last_call"] = alert["key"]
-    if message_scope(*message_settings(str(runtime.hub.message_token_file))[:2]) != scope:
-        raise DotError("hub_credential_changed")
+    authority.validate()
     if sent:
         cutoff = now - KEEP_STATE
         state["inbox"] = {k: v for k, v in state["inbox"].items() if parse_time(v) >= cutoff}
