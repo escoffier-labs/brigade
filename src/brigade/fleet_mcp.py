@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import argparse
+import re
 from time import monotonic, sleep
 from typing import Any
 
@@ -156,6 +157,25 @@ def _frame(value: Any) -> Any:
     return result
 
 
+# Directory and claim records carry peer-written labels such as repo_label and
+# branch. Identifier-shaped values (IDs, timestamps, branch names) pass through;
+# any other text is fenced so a node cannot place instructions outside the fence.
+_PLAIN_FIELD = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/:@+-]{0,255}")
+
+
+def _frame_directory(value: Any) -> Any:
+    if isinstance(value, list):
+        return [_frame_directory(item) for item in value]
+    if isinstance(value, dict):
+        return {key: _frame_directory(item) for key, item in value.items()}
+    if isinstance(value, str) and value and not _PLAIN_FIELD.fullmatch(value):
+        return {
+            "untrusted": wrap_untrusted(value, source_kind="peer-message"),
+            "flagged": scan_untrusted(value).flagged,
+        }
+    return value
+
+
 def poll_inbox(*, wait_secs: int, unacked_only: bool, token_file: str | None, after: int = 0) -> dict[str, Any]:
     """Bounded list polling; replace here when the hub gains long-poll support."""
     deadline = monotonic() + wait_secs
@@ -260,9 +280,9 @@ class FleetMcp:
         self, name: str, args: dict[str, Any], ids: list[int], message_id: int | None, reply_to: int | None
     ) -> dict[str, Any]:
         if name == "fleet_who":
-            return messages._online({"action": "who", **args}, token_file=self.token_file)
+            return _frame_directory(messages._online({"action": "who", **args}, token_file=self.token_file))
         if name == "fleet_claims":
-            return messages._online({"action": "claims", **args}, token_file=self.token_file)
+            return _frame_directory(messages._online({"action": "claims", **args}, token_file=self.token_file))
         if name == "fleet_send":
             result = messages.send(
                 recipient=args["to"],
