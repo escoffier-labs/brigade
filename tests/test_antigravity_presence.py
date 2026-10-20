@@ -18,6 +18,12 @@ from brigade.config import Config, write_config
 from brigade.selection import Selection
 
 
+@pytest.fixture(autouse=True)
+def _configured_presence_hub(monkeypatch):
+    # Target/payload tests must reach those boundaries instead of skipping for no Hub.
+    monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "http://127.0.0.1:3774")
+
+
 def _stub_publisher_process(monkeypatch, factory):
     # Keep the stdlib class intact for asyncio's Windows Popen subclass.
     publisher_subprocess = SimpleNamespace(**vars(subprocess))
@@ -322,5 +328,20 @@ def test_hook_finds_unique_wired_workspaces_after_unwired_roots(workspace, tmp_p
     )
     assert cli.main(["work", "presence-hook", "--harness", "antigravity", "--stdin", "--event", "start"]) == 0
     assert [argv[argv.index("--target") + 1] for argv in launches] == [str(workspace.resolve()), str(other.resolve())]
+    captured = capsys.readouterr()
+    assert captured.out == captured.err == ""
+
+
+@pytest.mark.parametrize("event", ["start", "heartbeat"])
+def test_hook_without_configured_hub_does_not_launch_publisher(workspace, monkeypatch, capsys, event):
+    monkeypatch.delenv("BRIGADE_FLEET_HUB_URL", raising=False)
+    launches = []
+    _stub_publisher_process(monkeypatch, lambda argv, **kw: launches.append(argv) or object())
+    monkeypatch.setattr(
+        sys, "stdin", io.StringIO(json.dumps({"conversationId": "conversation-1", "workspacePaths": [str(workspace)]}))
+    )
+    assert not presence._hub_url_configured()
+    assert cli.main(["work", "presence-hook", "--harness", "antigravity", "--stdin", "--event", event]) == 0
+    assert launches == []
     captured = capsys.readouterr()
     assert captured.out == captured.err == ""

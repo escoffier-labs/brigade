@@ -45,10 +45,11 @@ def run_hook(event: str | None) -> None:
     agy does not include an event name in stdin. Installed handlers supply the
     normalized event. Stop refreshes presence; abandoned sessions expire by TTL.
     """
+    from .fleet_client import load_fleet_settings
     from .fleet_session_presence import _read_bounded_json_object
 
     payload = _read_bounded_json_object()
-    if payload is None or event not in {"start", "heartbeat"}:
+    if payload is None or event not in {"start", "heartbeat"} or not load_fleet_settings().get("hub_url"):
         return
     session = payload.get("conversationId")
     roots = payload.get("workspacePaths")
