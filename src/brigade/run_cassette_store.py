@@ -56,14 +56,30 @@ def directory(run_dir: Path, *, create: bool = False) -> Iterator[int]:
             os.close(descriptor)
 
 
-def read(parent: int, name: str, *, limit: int = MAX_ENTRY_BYTES, private: bool = True) -> bytes:
-    descriptor = dirfd.open_child_file(parent, name, os.O_RDONLY)
+def read(
+    parent: int,
+    name: str,
+    *,
+    limit: int = MAX_ENTRY_BYTES,
+    private: bool = True,
+    offset: int = 0,
+    identity: tuple[int, int] | None = None,
+) -> bytes:
+    flags = os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+    descriptor = dirfd.open_child_file(parent, name, flags)
     try:
         info = os.fstat(descriptor)
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > limit:
+        if (
+            not stat.S_ISREG(info.st_mode)
+            or info.st_nlink != 1
+            or not 0 <= offset <= info.st_size
+            or info.st_size - offset > limit
+            or (identity is not None and (info.st_dev, info.st_ino) != identity)
+        ):
             raise CassetteError("cassette file is unsafe or oversized")
         if private and os.name == "posix" and info.st_mode & 0o077:
             raise CassetteError("cassette file permissions are unsafe")
+        os.lseek(descriptor, offset, os.SEEK_SET)
         data = bytearray()
         while chunk := os.read(descriptor, min(65536, limit + 1 - len(data))):
             data.extend(chunk)

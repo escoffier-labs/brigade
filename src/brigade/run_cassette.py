@@ -9,10 +9,13 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import stat
 import sys
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
+from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Mapping
+from threading import Lock
+from typing import TYPE_CHECKING, Any, Callable, Iterator, Mapping
 from uuid import uuid4
 
 from . import agents, config, dirfd, run_audit, run_events, run_journal, worker_events
@@ -32,6 +35,15 @@ OBSERVED_TRANSPORTS = frozenset({"cli", "direct", "exec", "acpx", "app-server", 
 _STOP_BYTES = store.encode(
     {"schema": SCHEMA, "schema_version": SCHEMA_VERSION, "privacy_class": "public-metadata", "status": "stopped"}
 )
+_WINDOW_LOCK = Lock()
+_ACTIVE_WINDOWS: dict[tuple[str, str], list[_ProjectionWindow]] = {}
+
+
+@dataclass(eq=False)
+class _ProjectionWindow:
+    offset: int = 0
+    identity: tuple[int, int] | None = None
+    unavailable: bool = False
 
 
 def validate_reference(payload: Mapping[str, Any]) -> None:
@@ -107,20 +119,62 @@ def _scrub(value: Any, secrets: tuple[str, ...]) -> Any:
     return value
 
 
-def _projection(run_dir: Path, agent: Agent) -> dict[str, Any] | None:
+def _stream_name(agent: Agent) -> str:
     from .aboyeur.run_io import _slug
 
-    try:
-        parent = dirfd.open_directory_chain(Path(os.path.abspath(run_dir / "events")))
-    except FileNotFoundError:
-        return None
+    return f"{_slug(agent.name)}.jsonl"
+
+
+@contextmanager
+def _projection_window(run_dir: Path | None, agent: Agent) -> Iterator[_ProjectionWindow]:
+    window = _ProjectionWindow()
+    if run_dir is None:
+        yield window
+        return
+    key = (os.path.abspath(run_dir), _stream_name(agent))
+    with _WINDOW_LOCK:
+        active = _ACTIVE_WINDOWS.setdefault(key, [])
+        if active:
+            for other in active:
+                other.unavailable = True
+            window.unavailable = True
+        active.append(window)
     try:
         try:
-            raw = store.read(
-                parent, f"{_slug(agent.name)}.jsonl", private=False, limit=worker_events.MAX_LINE_BYTES * 4096
-            )
+            parent = dirfd.open_directory_chain(Path(os.path.abspath(run_dir / "events")))
+            try:
+                info = dirfd.stat_child(parent, _stream_name(agent))
+                if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+                    raise store.CassetteError("cassette stream is unsafe")
+                window.offset = info.st_size
+                window.identity = (info.st_dev, info.st_ino)
+            finally:
+                os.close(parent)
         except FileNotFoundError:
-            return None
+            pass
+        except (OSError, RuntimeError):
+            window.unavailable = True
+        yield window
+    finally:
+        with _WINDOW_LOCK:
+            active.remove(window)
+            if not active:
+                del _ACTIVE_WINDOWS[key]
+
+
+def _projection(run_dir: Path, agent: Agent, window: _ProjectionWindow) -> dict[str, Any]:
+    if window.unavailable:
+        raise store.CassetteError("cassette stream dispatch is ambiguous")
+    parent = dirfd.open_directory_chain(Path(os.path.abspath(run_dir / "events")))
+    try:
+        raw = store.read(
+            parent,
+            _stream_name(agent),
+            private=False,
+            limit=store.MAX_ENTRY_BYTES * 2,
+            offset=window.offset,
+            identity=window.identity,
+        )
     finally:
         os.close(parent)
     return worker_events.scrub_stream_text(raw.decode("utf-8"))
@@ -205,6 +259,7 @@ def record_result(
     sandbox: str | None,
     remote: bool = False,
     codex_transport: str = "exec",
+    projection_window: _ProjectionWindow | None = None,
 ) -> dict[str, Any] | None:
     """Best-effort recording. Failure stops recording, never the worker run."""
     try:
@@ -228,6 +283,7 @@ def record_result(
             remote=remote,
             mode=mode,
             codex_transport=codex_transport,
+            projection_window=projection_window or _ProjectionWindow(),
         )
     except Exception:
         _stop(run_dir)
@@ -250,6 +306,7 @@ def _record_result(
     remote: bool,
     mode: str,
     codex_transport: str,
+    projection_window: _ProjectionWindow,
 ) -> dict[str, Any] | None:
     from . import run_lifecycle, run_receipts
 
@@ -288,13 +345,25 @@ def _record_result(
     }
     key = hashlib.sha256(run_events.canonical_bytes(identity)).hexdigest()
     observed = not remote and transport in OBSERVED_TRANSPORTS and result.failure_phase != "preflight"
-    secrets = _secret_values(agent) if observed else ()
+    env_unavailable = False
+    try:
+        secrets = _secret_values(agent) if observed else ()
+    except store.CassetteError:
+        observed, env_unavailable, secrets = False, True, ()
     body = _scrub(run_receipts.agent_result_payload(result), secrets) if observed else None
-    projection = (
-        _scrub(_projection(run_dir, agent), secrets)
-        if observed and transport in {"app-server", "codex-app-server"}
-        else None
-    )
+    projection = None
+    projection_status = "unavailable"
+    appserver = observed and transport in {"app-server", "codex-app-server"}
+    if appserver:
+        try:
+            with _WINDOW_LOCK:
+                projection = _scrub(_projection(run_dir, agent, projection_window), secrets)
+            if len(store.encode(projection)) > store.MAX_ENTRY_BYTES // 2:
+                projection = None
+            else:
+                projection_status = "available"
+        except (OSError, ValueError, RuntimeError, worker_events.WorkerEventError):
+            pass
     blobs: list[tuple[str, bytes]] = []
     metadata: dict[str, Any] = {
         "schema": SCHEMA,
@@ -305,6 +374,8 @@ def _record_result(
         "reason": "local-result" if observed else "remote" if remote else "unsupported-or-unobserved",
         "observed_transport": _scrub(transport, secrets) if transport in OBSERVED_TRANSPORTS else "unsupported",
     }
+    if env_unavailable:
+        metadata["reason"] = "env-resolution-unavailable"
     if body is not None:
         metadata["result_sha256"] = hashlib.sha256(store.encode(body)).hexdigest()
         metadata["result_bytes"] = len(store.encode(body))
@@ -334,6 +405,12 @@ def _record_result(
     if projection is not None:
         metadata["notification_projection"] = projection
         metadata["notification_projection_sha256"] = hashlib.sha256(store.encode(projection)).hexdigest()
+        if sum(len(raw) for _, raw in blobs) + len(store.encode(metadata)) > store.MAX_ENTRY_BYTES - 4096:
+            del metadata["notification_projection"]
+            del metadata["notification_projection_sha256"]
+            projection_status = "unavailable"
+    if appserver:
+        metadata["projection_status"] = projection_status
     blobs.append(("scrubbed", store.encode(metadata)))
     manifest: dict[str, Any] = {
         "schema": SCHEMA,
@@ -386,36 +463,58 @@ def _record_result(
 
 
 def record_dispatch_result(
-    result: WorkerResult,
+    resolve: Callable[[], WorkerResult],
     *,
     run_dir: Path | None,
     cwd: Path | None,
-    agent: Agent,
-    prompt: str,
+    agent: Callable[[], Agent],
+    prompt: Callable[[], str],
+    task: str,
+    transport: str,
     read_only: bool,
     sandbox: str | None,
     codex_transport: str = "exec",
 ) -> WorkerResult:
+    from . import run_budget, runguard
     from .run_receipts import agent_result_from_worker
+    from .run_transport import WorkerResult
 
-    if run_dir is not None:
-        record_result(
-            run_dir=run_dir,
-            cwd=cwd or Path.cwd(),
-            agent=agent,
-            task=result.task,
-            prompt=prompt,
-            result=agent_result_from_worker(result),
-            read_only=read_only,
-            sandbox=sandbox,
-            remote=result.remote is not None,
-            codex_transport=codex_transport,
-        )
+    with _projection_window(run_dir, agent()) as window:
+        try:
+            result = resolve()
+        except (runguard.RetainRunLockError, run_budget.BudgetPolicyError):
+            raise
+        except Exception as exc:
+            result = WorkerResult(
+                worker=agent().name,
+                task=task,
+                text="",
+                ok=False,
+                detail=str(exc)[:200],
+                failure_phase="dispatch",
+                failure_kind="unclassified",
+                transport=transport,
+                requested_model=agent().model,
+            )
+        if run_dir is not None:
+            record_result(
+                run_dir=run_dir,
+                cwd=cwd or Path.cwd(),
+                agent=agent(),
+                task=result.task,
+                prompt=prompt(),
+                result=agent_result_from_worker(result),
+                read_only=read_only,
+                sandbox=sandbox,
+                remote=result.remote is not None,
+                codex_transport=codex_transport,
+                projection_window=window,
+            )
     return result
 
 
 def redact_sidecars(run_dir: Path) -> None:
-    """Conservative deletion before journal redaction, including retry paths."""
+    """Delete only after durable journal redaction and its anchor, also on retry."""
     from .run_redaction import RedactionError
 
     try:

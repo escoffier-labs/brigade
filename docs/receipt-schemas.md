@@ -11,15 +11,19 @@ and closeout writers live in
 ## Worker cassette sidecars
 
 `brigade.run-cassette.v1` uses `schema_version: 1` and content-addressed JSON
-under `events/cassettes/<sha256>.json`. Each worker dispatch adds one
-`run.cassette.recorded` event with exactly `path`, `sha256`, `media_type`,
+under `events/cassettes/<sha256>.json`. When a lifecycle journal exists, each
+recorded worker dispatch adds one `run.cassette.recorded` event with exactly `path`, `sha256`, `media_type`,
 `byte_size`, and `privacy_class`. The reference points to a `public-metadata`
 manifest containing a request key, coordinator and exact-prompt digests, an
 observation marker, and classified artifact references. `private` artifacts
 contain `run_receipts.agent_result_payload`. `scrubbed` artifacts contain result
 counts, digests, exit metadata, and an optional `worker_events` notification
 projection and its digest. Prompts and raw notification streams are excluded.
-Recording failures publish a bounded public `stopped` marker when possible.
+Runs without a lifecycle journal retain manifests in that directory for discovery.
+Unavailable projections use `projection_status: "unavailable"` without stopping
+result recording. Unresolved seat secrets produce a `not-observed` entry with
+reason `env-resolution-unavailable` and no result body.
+Storage and classification failures publish a bounded public `stopped` marker when possible.
 Redaction deletes sidecars and replaces affected references with the closed
 redaction tombstone. Purge and retention may leave references without bodies.
 These sidecars do not participate in lifecycle projection or audit authority.

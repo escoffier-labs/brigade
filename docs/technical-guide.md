@@ -509,6 +509,10 @@ Private bodies contain the terminal result after retries and fallback, already
 persisted in `worker-results.json`, with resolved `_REF` secrets scrubbed again
 at write time. Literal env overrides remain intact. Scrubbed metadata and
 app-server notification projections contain no raw worker stream.
+Projections cover only bytes appended during that dispatch. Malformed, oversized,
+or overlapping seat streams produce `projection_status: "unavailable"` while
+result recording continues. Unresolved seat secrets produce a `not-observed`
+entry without a body and leave other seats recording.
 Secrets that collide with structural field names stop recording with a bounded
 diagnostic instead of rewriting those names. Invalid recording configuration
 skips recording without creating cassette files.
@@ -525,8 +529,9 @@ It scans once per run after the first recorded dispatch. Unreadable evidence,
 ledger rows over 8 MiB, or a runs inventory over 10,000 entries skip pruning
 with a bounded stderr diagnostic. Retention errors leave recording active.
 Crash temp files and unsafe or unclassifiable files in old runs are left alone.
-Entry and run caps are 4 MiB and 32 MiB. Raw app-server streams use the worker
-event scrubber's input bound before the entry cap is applied to the projection.
+Entry and run caps are 4 MiB and 32 MiB. App-server projection reads are bounded
+to 8 MiB of appended bytes. Projections over 2 MiB or the remaining entry budget
+are omitted with an unavailable marker.
 A measured local run had one 31,519-byte worker result. The two-worker journal regression measured
 1,628 bytes, or 814 bytes and one cassette reference event per dispatch. It
 enforces less than 1 KiB per dispatch,
@@ -535,8 +540,10 @@ journal slots and stops with a bounded diagnostic when admission fails.
 Scrubbed and public metadata remain until the run is deleted.
 `brigade runs cassette purge <run>` deletes all cassette sidecars without
 changing lifecycle authority. `runs redact` conservatively purges all cassette
-sidecars before rewriting the selected journal range and recording its
-redaction anchor. Export strips all cassette classes on the copy. Direct
+sidecars after validating and rewriting the selected journal range and recording
+its durable redaction anchor. Cleanup completes before success and retries finish
+interrupted cleanup. Rejected preflight checks preserve sidecars.
+Export strips all cassette classes on the copy. Direct
 archive builds refuse unstripped cassettes. Evidence packages use their file
 allowlist and fleet reports carry lifecycle metadata only.
 

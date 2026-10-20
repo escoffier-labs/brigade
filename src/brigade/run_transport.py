@@ -776,8 +776,7 @@ def dispatch(
         started = time.monotonic()
         effective_read_only = read_only if sandbox_read_only is None else sandbox_read_only
         approval_correlation_marker = secrets.token_urlsafe(32)
-        # Set by invoke() and read by finish() so delegated routing facts reach
-        # their receipt and later local attempts do not inherit them.
+        # invoke() and finish() share remote routing facts only for the current attempt.
         remote_disposition: list[dict[str, Any] | None] = [None]
         sent_prompt = [prompt]
 
@@ -857,8 +856,7 @@ def dispatch(
                     **cloud_dispatch_kwargs,
                 )
             if selected_agent.env is not None:
-                # Env seats always dispatch through the direct CLI path. The
-                # app-server session cannot apply per-seat env safely.
+                # Env seats use direct CLI because app-server cannot apply per-seat env.
                 env_kwargs: dict[str, Any] = {}
                 if sandbox is not None:
                     env_kwargs["sandbox"] = sandbox
@@ -1303,12 +1301,14 @@ def dispatch(
             return finish(fallback_result, fallback_agent, attempts)
 
         return run_cassette.record_dispatch_result(
-            resolve(),
+            resolve,
             run_dir=output_dir,
             cwd=cwd,
             codex_transport=roster.codex_transport,
-            agent=recording_agent,
-            prompt=sent_prompt[0],
+            agent=lambda: recording_agent,
+            prompt=lambda: sent_prompt[0],
+            task=assignment.task,
+            transport=_receipt_transport(agent, appserver=appserver),
             read_only=read_only,
             sandbox=sandbox or roster.sandbox or ("read-only" if effective_read_only else None),
         )

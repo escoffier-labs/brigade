@@ -2250,7 +2250,6 @@ def redact_journal(
                 raise RedactionError("invalid sequence range")
             if any(event.run_id != resolved_run_dir.name for event in events):
                 raise RedactionError("journal run identity mismatch")
-            run_cassette.redact_sidecars(resolved_run_dir)
             operation_id = _operation_id(resolved_run_dir.name, start, end, bounded_reason)
             operation_dir, quarantine_path, record_path = _operation_paths(
                 resolved_run_dir,
@@ -2403,14 +2402,8 @@ def redact_journal(
                             ),
                         )
                     _post_replace_verify(resolved_run_dir, expected_digest=None)
-                    return RedactionReport(
-                        operation_id,
-                        start,
-                        end,
-                        quarantine_path,
-                        record_path,
-                        cleaned=cleaned,
-                    )
+                    run_cassette.redact_sidecars(resolved_run_dir)
+                    return RedactionReport(operation_id, start, end, quarantine_path, record_path, cleaned=cleaned)
                 if active_digest != prior_state.get("original_sha256") or prior_state["phase"] != "quarantined":
                     raise RedactionError("redaction transaction does not match the active journal")
 
@@ -2536,6 +2529,7 @@ def redact_journal(
             )
             _replace_projection(resolved_run_dir, _projection(after_projection.snapshot, [*rewritten_events, anchor]))
             _post_replace_verify(resolved_run_dir, expected_digest=None)
+            run_cassette.redact_sidecars(resolved_run_dir)
             return RedactionReport(operation_id, start, end, quarantine_path, record_path)
 
 
