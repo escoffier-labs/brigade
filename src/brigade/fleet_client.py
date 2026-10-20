@@ -809,8 +809,11 @@ def report_event(event: dict[str, Any], *, base_path: Path | None = None, node_i
     """Report with local identity and durable spool, preserving the public bool API.
 
     Origin overrides remain ignored. Interrupts propagate only after a
-    best-effort spool write. One request per call, with a bounded deadline.
-    ``report_event_detailed`` captures the durable outcome for receipt callers
+    best-effort spool write. Without a spool this is one request with a
+    bounded deadline. With a spool it is one batch request, plus isolation
+    of a rejected batch capped at ``REPORT_TIMEOUT_SECONDS`` in total; on a
+    hub too slow to isolate within that, the spool waits for an explicit
+    ``fleet flush``. ``report_event_detailed`` captures the durable outcome for receipt callers
     without changing this established signature or return type.
     """
     from .fleet_event_report import report
