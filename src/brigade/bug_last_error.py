@@ -11,6 +11,9 @@ from typing import Any
 
 from .component_paths import data_root
 from .localio import write_json
+from .memory_proposal_io import read_bytes
+
+_LAST_ERROR_BYTE_LIMIT = 64 * 1024
 
 
 def error_path() -> Path:
@@ -89,8 +92,8 @@ def record(
 
 def read() -> dict[str, Any] | None:
     try:
-        value = json.loads(error_path().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+        value = json.loads(read_bytes(error_path(), limit=_LAST_ERROR_BYTE_LIMIT) or b"")
+    except (OSError, ValueError, RecursionError):
         return None
     if not isinstance(value, dict):
         return None

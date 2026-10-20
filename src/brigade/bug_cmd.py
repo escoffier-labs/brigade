@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
-from . import __version__
+from . import __version__, memory_proposal_io as private_io
 from .bug_collect import collect, collect_doctor
 from .bug_redaction import Redactor, ReportBlocked, assert_clean, assert_terminal_safe
 from .component_paths import data_root
@@ -75,18 +75,27 @@ def fingerprint(last_error: dict[str, Any] | None, check_names: list[str]) -> st
     return "bf-" + hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:12]
 
 
+def _code_block(text: str, language: str = "text") -> str:
+    fence = "`" * max(3, 1 + max((len(run) for run in re.findall(r"`+", text)), default=0))
+    return f"{fence}{language}\n{text}\n{fence}"
+
+
+def _prose(text: str) -> str:
+    return text.replace("@", "@\u200b")
+
+
 def render(bundle: dict[str, Any]) -> str:
     runtime, user = bundle["runtime"], bundle["user"]
-    # A full JSON rendering keeps every schema field visible. No source text is
-    # interpolated into commands, headers, or hidden HTML comments.
+    # Every untrusted field is literal code, including JSON string contents.
+    # A content-derived fence prevents embedded backticks from closing it.
     return (
-        f"### What happened\n\n{user['summary']}\n\n"
-        f"### Brigade version\n\n{bundle['brigade']['version']}\n\n"
-        f"### Python version\n\n{runtime['python']}\n\n"
-        f"### OS\n\n{runtime['os']} {runtime['release']} {runtime['arch']}\n\n"
+        f"### What happened\n\n{_code_block(user['summary'])}\n\n"
+        f"### Brigade version\n\n{_code_block(bundle['brigade']['version'])}\n\n"
+        f"### Python version\n\n{_code_block(runtime['python'])}\n\n"
+        f"### OS\n\n{_code_block(' '.join(runtime[key] for key in ('os', 'release', 'arch')))}\n\n"
         f"### Fingerprint\n\n{bundle['fingerprint']}\n\n"
-        f"### Doctor summary\n\n{json.dumps(bundle['doctor'], ensure_ascii=False, indent=2)}\n\n"
-        f"### Full output\n\n{json.dumps(bundle, ensure_ascii=False, indent=2, sort_keys=True)}\n"
+        f"### Doctor summary\n\n{_code_block(json.dumps(bundle['doctor'], ensure_ascii=False, indent=2, sort_keys=True), 'json')}\n\n"
+        f"### Full output\n\n{_code_block(json.dumps(bundle, ensure_ascii=False, indent=2, sort_keys=True), 'json')}\n"
     )
 
 
@@ -124,11 +133,19 @@ def _duplicates(bundle: dict[str, Any], redactor: Redactor) -> tuple[list[dict[s
         return [], "dedup skipped"
 
 
-def _bounded_link(base: str, fixed: dict[str, str], variable: dict[str, str], budget: int) -> str:
+def _bounded_link(
+    base: str, fixed: dict[str, str], variable: dict[str, str], budget: int, *, fenced: tuple[str, ...] = ()
+) -> str:
     """Measure the fully percent-encoded UTF-8 URL, including fixed query fields."""
     values = dict(variable)
     while True:
-        link = base + "?" + urlencode({**fixed, **values})
+        link = (
+            base
+            + "?"
+            + urlencode(
+                {**fixed, **{key: _code_block(value) if key in fenced else value for key, value in values.items()}}
+            )
+        )
         if len(link.encode("utf-8")) <= budget:
             return link
         key = max(values, key=lambda name: len(values[name].encode("utf-8")))
@@ -161,21 +178,24 @@ def destination_link(via: str, bundle: dict[str, Any]) -> str:
             "os": bundle["runtime"]["os"],
         },
         {
-            "title": bundle["user"]["title"],
+            "title": _prose(bundle["user"]["title"]),
             "what-happened": bundle["user"]["summary"],
             "logs": "Full redacted bundle: attach the local bundle.md shown by Brigade.\n"
             + json.dumps(bundle["doctor"], ensure_ascii=False),
         },
         URL_BUDGET,
+        fenced=("what-happened", "logs"),
     )
 
 
 def _attempts(root: Path, day: datetime) -> list[dict[str, Any]]:
     path = root / "attempts" / f"{day.date().isoformat()}.jsonl"
     try:
-        raw = _read_bounded(path)
+        raw = private_io.read_bytes(path, limit=BUNDLE_CAP) or b""
     except FileNotFoundError:
         return []
+    except ValueError:
+        raise ReportBlocked("Bug report blocked: submission attempt log exceeds 60 KB") from None
     lines = raw.splitlines()
     if len(lines) > 5:
         raise ReportBlocked("Bug report blocked: invalid submission attempt log")
@@ -193,6 +213,23 @@ def _attempts(root: Path, day: datetime) -> list[dict[str, Any]]:
             raise ReportBlocked("Bug report blocked: invalid submission attempt timestamp")
         attempts.append(attempt)
     return attempts
+
+
+def _append_attempt(path: Path, record: dict[str, Any]) -> None:
+    with private_io.directory(path.parent, create=True, private=True) as parent:
+        fd = os.open(
+            path.name, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=parent
+        )
+        try:
+            private_io._regular(fd, private=True)
+            os.fchmod(fd, 0o600)
+            with os.fdopen(os.dup(fd), "ab") as handle:
+                handle.write((json.dumps(record, sort_keys=True) + "\n").encode("utf-8"))
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.fsync(parent)
+        finally:
+            os.close(fd)
 
 
 def _limit_submissions(root: Path, fp: str, now: datetime) -> None:
@@ -243,7 +280,16 @@ def _submit(via: str, bundle: dict[str, Any], markdown: str, comment_on: int | N
         if comment_on is not None:
             gh("issue", "comment", str(comment_on), "--repo", REPOSITORY, "--body-file", str(body))
             return f"{ISSUES_URL}/{comment_on}"
-        raw = gh("issue", "create", "--repo", REPOSITORY, "--title", bundle["user"]["title"], "--body-file", str(body))
+        raw = gh(
+            "issue",
+            "create",
+            "--repo",
+            REPOSITORY,
+            "--title",
+            _prose(bundle["user"]["title"]),
+            "--body-file",
+            str(body),
+        )
         match = re.fullmatch(re.escape(ISSUES_URL) + r"/[1-9][0-9]*", raw)
         if match is None:
             raise OSError("gh returned no issue URL, check GitHub before retrying")
@@ -308,6 +354,8 @@ def _load_prepared(report_id: str) -> tuple[Path, dict[str, Any], str, dict[str,
     assert_clean(json.dumps(bundle, ensure_ascii=False, sort_keys=True))
     assert_clean(markdown)
     _check_security(bundle)
+    if markdown != render(bundle):
+        raise ReportBlocked("Bug report blocked: outdated preview rendering, prepare a new preview")
     return directory, bundle, markdown, receipt
 
 
@@ -453,13 +501,9 @@ def _report(args: argparse.Namespace) -> int:
             _limit_submissions(root, bundle["fingerprint"], now)
             receipt["attempted_at"] = now.isoformat()
             attempts = root / "attempts"
-            attempts.mkdir(mode=0o700, exist_ok=True)
             record = {key: receipt[key] for key in ("report_id", "fingerprint", "attempted_at")}
             # Reserve capacity durably before transport, even if the outcome is lost.
-            with (attempts / f"{now.date().isoformat()}.jsonl").open("ab") as handle:
-                handle.write((json.dumps(record, sort_keys=True) + "\n").encode("utf-8"))
-                handle.flush()
-                os.fsync(handle.fileno())
+            _append_attempt(attempts / f"{now.date().isoformat()}.jsonl", record)
             write_json(receipt_path, receipt)
         destination_url = _submit(via, bundle, markdown, comment_on)
         receipt.update(

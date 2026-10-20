@@ -70,6 +70,112 @@ def test_dry_run_complete_local_bundle(report_env, capsys):
     assert receipt["bundle_digest"] == mod.canonical_json_digest(bundle)
 
 
+def test_untrusted_markdown_stays_in_code_blocks_through_submission(report_env, monkeypatch, capsys, tmp_path):
+    mod, target = report_env
+    payload = "``````\n![image](https://example.com/image)\n<b>html</b> [link](https://example.com) @example-user"
+    summary = tmp_path / "summary.txt"
+    output = tmp_path / "output.txt"
+    summary.write_text(payload)
+    output.write_text(payload)
+    assert (
+        cli.main(
+            [
+                "bug",
+                "report",
+                "--target",
+                str(target),
+                "--summary-file",
+                str(summary),
+                "--title",
+                "Problem @example-user",
+                "--include-output",
+                str(output),
+                "--dry-run",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    preview = result(capsys)
+    bodies, titles = [], []
+
+    def fake_gh(*args):
+        if args[:2] == ("search", "issues"):
+            return "[]"
+        bodies.append(Path(args[args.index("--body-file") + 1]).read_text())
+        titles.append(args[args.index("--title") + 1])
+        return mod.ISSUES_URL + "/42"
+
+    monkeypatch.setattr(mod, "gh", fake_gh)
+    assert (
+        cli.main(
+            [
+                "bug",
+                "report",
+                "--report-id",
+                preview["report_id"],
+                "--yes",
+                "--not-security",
+                "--via",
+                "gh",
+                "--json",
+            ]
+        )
+        == 0
+    )
+    result(capsys)
+    assert bodies == [preview["preview_markdown"]]
+    fence = None
+    literal = []
+    for line in bodies[0].splitlines():
+        if fence is None and re.fullmatch(r"`{3,}(?:json|text)?", line):
+            fence = re.match(r"`+", line)[0]
+        elif fence is not None and line == fence:
+            fence = None
+        elif fence is not None:
+            literal.append(line)
+        else:
+            assert not any(value in line for value in ("![", "[link]", "<b>", "@example-user"))
+    assert fence is None
+    assert "<b>html</b> [link](https://example.com) @example-user" in literal
+    assert "@example-user" not in titles[0]
+
+
+def test_legacy_unfenced_preview_requires_reprepare_before_network(report_env, monkeypatch, capsys):
+    import hashlib
+
+    mod, target = report_env
+    assert invoke(target, "--summary", "[link](https://example.com) @example-user", "--dry-run", "--json") == 0
+    preview = result(capsys)
+    path = Path(preview["preview_path"])
+    bundle = json.loads(path.with_name("bundle.json").read_text())
+    # Emulate a digest-valid preview saved before literal Markdown rendering.
+    old_markdown = f"### What happened\n\n{bundle['user']['summary']}\n\n### Full output\n\n{json.dumps(bundle)}\n"
+    path.write_text(old_markdown)
+    receipt_path = Path(preview["receipt_path"])
+    receipt = json.loads(receipt_path.read_text())
+    receipt["preview_digest"] = hashlib.sha256(old_markdown.encode()).hexdigest()
+    receipt_path.write_text(json.dumps(receipt))
+    monkeypatch.setattr(mod, "gh", lambda *a: pytest.fail("unfenced preview reached network"))
+    assert (
+        cli.main(
+            [
+                "bug",
+                "report",
+                "--report-id",
+                preview["report_id"],
+                "--yes",
+                "--not-security",
+                "--via",
+                "gh",
+                "--json",
+            ]
+        )
+        == 2
+    )
+    assert "prepare a new preview" in capsys.readouterr().err
+
+
 def test_adversarial_values_scrubbed_before_persistence(report_env, monkeypatch, capsys, tmp_path):
     _, target = report_env
     monkeypatch.setenv("TEST_CREDENTIAL", "unique-secret-value")
@@ -80,6 +186,8 @@ def test_adversarial_values_scrubbed_before_persistence(report_env, monkeypatch,
         "/root/private",
         socket.gethostname(),
         "ghp_" + "a" * 36,
+        *[prefix + "a" * 36 for prefix in ("gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "sk-", "xoxb-")],
+        "AKIA" + "A" * 16,
         "Authorization: Bearer " + "b" * 40,
         "op://vault/item/key",
         "keepass://entry/key",
@@ -250,6 +358,11 @@ def test_encoded_destinations_bounded_and_bundle_available(report_env, capsys, v
         fields = parse_qs(urlsplit(out["destination_url"]).query)
         assert fields["template"] == ["bug.yml"]
         assert fields["fingerprint"] == [out["fingerprint"]]
+        for key in ("what-happened", "logs"):
+            lines = fields[key][0].splitlines()
+            fence = lines[0].removesuffix("text")
+            assert re.fullmatch(r"`{3,}", fence)
+            assert lines[-1] == fence
 
 
 def test_last_error_closed_schema_and_only_brigade_frames(report_env, monkeypatch):
@@ -338,6 +451,8 @@ def test_daily_cap_counts_repeated_report_attempts(report_env, monkeypatch, caps
     before = log.read_bytes()
     attempts = [json.loads(line) for line in before.splitlines()]
     assert len(attempts) == 5
+    assert log.stat().st_mode & 0o777 == 0o600
+    assert log.parent.stat().st_mode & 0o777 == 0o700
     assert {row["report_id"] for row in attempts} == {preview["report_id"]}
     assert len({row["attempted_at"] for row in attempts}) == 5
     assert cli.main(args) == 2
@@ -450,10 +565,30 @@ def test_concurrent_submissions_share_daily_limit(report_env, monkeypatch, capsy
     assert "blocked" in capsys.readouterr().err.lower()
 
 
-def test_real_doctor_temp_workspace_dry_run_is_network_free(report_env, monkeypatch, capsys):
+@pytest.mark.parametrize("source", ["sidecar", "registry", "host"])
+def test_real_doctor_temp_workspace_dry_run_is_network_free(report_env, monkeypatch, capsys, source):
+    from brigade import doctor, managed, registry
     from brigade.bug_collect import collect_doctor
+    from brigade.station import DoctorContext, Station
 
     mod, target = report_env
+    # Installed sidecars and even target-labelled registry callbacks are not
+    # safe to invoke merely to discard their results after collection.
+    monkeypatch.setattr(managed.ManagedTool, "detect", lambda self: True)
+    sidecar = next(tool for tool in managed.for_station("search") if tool.name == "code-search-api")
+    monkeypatch.setattr(
+        managed, "for_station", lambda station: (sidecar,) if source == "sidecar" and station == "search" else ()
+    )
+    monkeypatch.setattr(managed.urllib.request, "urlopen", lambda *a, **k: pytest.fail("sidecar network used"))
+    monkeypatch.setattr(
+        doctor, "build_context", lambda t: DoctorContext(t, None, ["openclaw"] if source == "host" else [])
+    )
+    monkeypatch.setattr(doctor, "_check_openclaw", lambda: pytest.fail("host check used"))
+    network_station = Station("network", "fake network check", lambda ctx: pytest.fail("registry network used"))
+    original = registry.all_stations()
+    monkeypatch.setattr(
+        registry, "all_stations", lambda: (*original, network_station) if source == "registry" else original
+    )
     monkeypatch.setattr(mod, "collect_doctor", collect_doctor)
     assert invoke(target, "--dry-run", "--json") == 0
     out = result(capsys)
@@ -1148,7 +1283,6 @@ def test_attempt_cooldown_crosses_utc_midnight(report_env, monkeypatch, capsys, 
 
 
 def test_attempt_log_read_is_bounded_and_fails_closed(report_env, monkeypatch, capsys):
-    import io
     from datetime import datetime, timezone
 
     mod, target = report_env
@@ -1158,22 +1292,15 @@ def test_attempt_log_read_is_bounded_and_fails_closed(report_env, monkeypatch, c
     logs.mkdir()
     log = logs / f"{datetime.now(timezone.utc).date().isoformat()}.jsonl"
     log.write_bytes(b"x" * (mod.BUNDLE_CAP + 100))
-    original_open = Path.open
-    reads = []
+    original_read = os.read
+    inode = log.stat().st_ino
 
-    class BoundedInput(io.BytesIO):
-        def read(self, size=-1):
-            reads.append(size)
-            assert size == mod.BUNDLE_CAP + 1
-            return super().read(size)
+    def bounded_read(fd, size):
+        if os.fstat(fd).st_ino == inode:
+            pytest.fail("oversized attempt log was read before its size was rejected")
+        return original_read(fd, size)
 
-    def bounded_open(path, mode="r", *a, **k):
-        if path == log:
-            assert mode == "rb"
-            return BoundedInput(b"x" * (mod.BUNDLE_CAP + 100))
-        return original_open(path, mode, *a, **k)
-
-    monkeypatch.setattr(Path, "open", bounded_open)
+    monkeypatch.setattr(os, "read", bounded_read)
     assert (
         cli.main(
             [
@@ -1190,5 +1317,89 @@ def test_attempt_log_read_is_bounded_and_fails_closed(report_env, monkeypatch, c
         )
         == 2
     )
-    assert reads == [mod.BUNDLE_CAP + 1]
     assert "60 KB" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("kind", ["symlink", "hardlink", "public", "directory-symlink"])
+def test_submission_refuses_unsafe_attempt_log(report_env, monkeypatch, capsys, tmp_path, kind):
+    from datetime import datetime, timezone
+
+    mod, target = report_env
+    assert invoke(target, "--dry-run", "--json") == 0
+    preview = result(capsys)
+    root = Path(mod.data_root()) / "brigade" / "bug-reports"
+    logs = root / "attempts"
+    victim = tmp_path / "victim"
+    limit = mod._limit_submissions
+
+    def plant_after_limit_check(*args):
+        limit(*args)
+        if kind == "directory-symlink":
+            victim.mkdir()
+            logs.symlink_to(victim, target_is_directory=True)
+        else:
+            logs.mkdir()
+            log = logs / f"{datetime.now(timezone.utc).date().isoformat()}.jsonl"
+            victim.touch(mode=0o600)
+            if kind == "symlink":
+                log.symlink_to(victim)
+            elif kind == "hardlink":
+                log.hardlink_to(victim)
+            else:
+                log.touch(mode=0o644)
+
+    monkeypatch.setattr(mod, "_limit_submissions", plant_after_limit_check)
+    monkeypatch.setattr(mod, "_submit", lambda *a: pytest.fail("unsafe log reached transport"))
+    assert (
+        cli.main(
+            [
+                "bug",
+                "report",
+                "--report-id",
+                preview["report_id"],
+                "--yes",
+                "--not-security",
+                "--via",
+                "url",
+                "--json",
+            ]
+        )
+        == 2
+    )
+    assert "blocked" in capsys.readouterr().err
+    if kind == "directory-symlink":
+        assert list(victim.iterdir()) == []
+    else:
+        assert victim.read_bytes() == b""
+
+
+@pytest.mark.parametrize("kind", ["oversize", "symlink", "fifo", "directory", "deep-json"])
+def test_last_error_reader_rejects_unsafe_or_oversized_files(report_env, monkeypatch, tmp_path, kind):
+    from brigade import bug_last_error
+
+    path = tmp_path / "last-error.json"
+    monkeypatch.setattr(bug_last_error, "error_path", lambda: path)
+    if kind == "oversize":
+        # Valid JSON must be rejected before decoding rather than truncated.
+        path.write_text(json.dumps({"message_head": "x" * (64 * 1024)}))
+    elif kind == "symlink":
+        victim = tmp_path / "victim.json"
+        victim.write_text('{"command":"untrusted"}')
+        path.symlink_to(victim)
+    elif kind == "fifo":
+        os.mkfifo(path)
+        # A no-writer FIFO would hang the vulnerable reader, so fail on an
+        # ordinary Path.open before that operation can block.
+        original = Path.open
+
+        def deny_fifo(p, *a, **k):
+            if p == path:
+                pytest.fail("last-error reader used a blocking FIFO open")
+            return original(p, *a, **k)
+
+        monkeypatch.setattr(Path, "open", deny_fifo)
+    elif kind == "directory":
+        path.mkdir()
+    else:
+        path.write_text("[" * 2000 + "]" * 2000)
+    assert bug_last_error.read() is None

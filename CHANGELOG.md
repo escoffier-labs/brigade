@@ -32,6 +32,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Bug reports redact every GitHub token family, collect only local target checks, fence untrusted Markdown, and reject unsafe diagnostic and attempt-log files.
+
 - Bug reports count retries in an append-only attempt log, escape terminal controls before preview, and allow ordinary UI wording such as "Pressing Escape closes the prompt".
 
 - Bug reports block embedded short environment secrets during the second scan and select recent receipts by timestamp across up to 20,000 directory entries.

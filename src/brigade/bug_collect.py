@@ -140,10 +140,39 @@ def _failed_verify(target: Path) -> dict[str, Any] | None:
 
 
 def collect_doctor(target: Path) -> dict[str, Any]:
-    from . import doctor
+    from . import doctor, security_cmd
 
     ctx = doctor.build_context(target)
-    checks = doctor._filter_target_scoped_checks(doctor._gather_checks(ctx))
+    # An explicit allowlist is intentional. Registry callbacks mix local target
+    # checks with host probes, managed commands, and authenticated HTTP requests.
+    # Filtering their results after invocation cannot make collection offline.
+    local = [
+        *doctor._check_workspace_files(ctx.target),
+        *doctor._check_agents_quality(ctx.target),
+        *doctor._check_default_wired_skills(ctx.target, ctx.harnesses),
+        *doctor._check_orphan_inboxes(ctx.target, ctx.harnesses),
+        doctor._check_recovery_checkpoints(ctx.target),
+        doctor._check_unreconciled_run_lock(ctx.target),
+        *doctor._check_journal_event_headroom(ctx.target),
+        doctor._check_run_lineage(ctx.target),
+        *doctor._check_outcome_loop(ctx),
+        *doctor.memory_station_checks(ctx),
+        *doctor.mcp_station_checks(ctx),
+    ]
+    if "claude" in ctx.harnesses:
+        check = doctor._check_claude_work_loop(ctx.target)
+        if check is not None:
+            local.append(check)
+    # The security station also probes host isolation and can run scanners.
+    # Read its target configuration only, without executing that callback.
+    try:
+        config = security_cmd.load_config(ctx.target)
+    except ValueError as exc:
+        local.append((doctor.FAIL, "security: config", f"invalid config: {exc}"))
+    else:
+        if config is None:
+            local.append((doctor.WARN, "security: config", "missing .brigade/security.toml"))
+    checks = [doctor._normalize_scoped_check(check) for check in local]
     counts = doctor._status_counts(list(checks))
     return {
         "target": "<target>",

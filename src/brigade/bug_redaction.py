@@ -41,7 +41,7 @@ _BUG_RULES: tuple[Rule, ...] = (
     Rule(
         id="bare-token",
         category="secret",
-        pattern=r"\b(?:ghp_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|AKIA[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]{20,})",
+        pattern=r"\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|sk-[A-Za-z0-9_-]{20,}|AKIA[A-Z0-9]{16}|xox[baprs]-[A-Za-z0-9-]{20,})",
         replacement="[redacted-secret]",
         description="Recognizable credential prefixes without an assignment.",
     ),
