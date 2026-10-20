@@ -27,7 +27,7 @@ HUB_TOOLS = {
 @pytest.fixture
 def hub(dispatch_make, tmp_path, monkeypatch):
     token_file = tmp_path / "principal.token"
-    token = "synthetic_principal_credential_" + "x" * 32
+    token = "x" * 64
     token_file.write_text(token)
     token_file.chmod(0o600)
     tools, runner, ledger = dispatch_make(hub_token_file=str(token_file), hub_recipients={"host-a": HUB_NODE_ID})
