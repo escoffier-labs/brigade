@@ -369,6 +369,11 @@ def _make_handler(
                 # Notifications (method, no id) and client responses (result or
                 # error, no method) never get a reply. A methodless object with an
                 # id that is not a response falls through to an invalid-request error.
+                if isinstance(message, dict) and message.get("jsonrpc") != "2.0":
+                    # Enforced over HTTP only; stdio keeps accepting legacy clients
+                    # that omit the version field.
+                    replies.append(response(message.get("id"), error={"code": -32600, "message": "invalid request"}))
+                    continue
                 if isinstance(message, dict):
                     is_notification = "id" not in message and isinstance(message.get("method"), str)
                     is_response = "method" not in message and ("result" in message or "error" in message)

@@ -555,3 +555,14 @@ def test_notification_with_a_non_string_method_is_an_invalid_request(memory_stat
     status, _, body = memory_station.rpc({"jsonrpc": "2.0", "method": 1})
     assert status == 200
     assert _json(body) == {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "invalid request"}}
+
+
+def test_http_requires_jsonrpc_2_0(memory_station: _Station) -> None:
+    for message in ({"id": 1, "method": "tools/list"}, {"jsonrpc": "1.0", "id": 2, "method": "tools/list"}):
+        status, _, body = memory_station.rpc(message)
+        assert status == 200
+        assert _json(body) == {
+            "jsonrpc": "2.0",
+            "id": message["id"],
+            "error": {"code": -32600, "message": "invalid request"},
+        }
