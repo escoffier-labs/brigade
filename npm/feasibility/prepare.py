@@ -104,8 +104,12 @@ def write_json(path: Path, value: object) -> None:
 
 
 def pack(directory: Path, output: Path) -> dict[str, object]:
+    # Windows installs npm as npm.cmd, which CreateProcess does not resolve from a bare "npm".
+    npm = shutil.which("npm")
+    if npm is None:
+        raise ValueError("npm executable not found on PATH")
     result = subprocess.run(
-        ["npm", "pack", "--ignore-scripts", "--json", "--pack-destination", str(output)],
+        [npm, "pack", "--ignore-scripts", "--json", "--pack-destination", str(output)],
         cwd=directory,
         check=True,
         capture_output=True,
