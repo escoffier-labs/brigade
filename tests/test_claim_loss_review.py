@@ -606,6 +606,48 @@ def test_interrupt_shutdown_preserves_worker_retention(tmp_path, monkeypatch, sc
     assert runguard.lock_path(tmp_path).exists()
 
 
+@pytest.mark.parametrize("scheduler", ["waves", "dag"])
+def test_sibling_retention_records_replaced_budget_denial(tmp_path, monkeypatch, scheduler):
+    budget_raised = threading.Event()
+
+    def worker(cli_ref, *args, **kwargs):
+        if cli_ref == "codex":
+            budget_raised.set()
+            raise run_budget.BudgetPolicyError(
+                "token ceiling reached",
+                code="budget_denied",
+                dimension="tokens",
+                exhausted=True,
+                request_id="req-1",
+            )
+        assert budget_raised.wait(5)
+        raise runguard.RetainRunLockError("sibling receipt unavailable")
+
+    monkeypatch.setattr(agents, "run_agent", worker)
+    error = None
+    try:
+        with runguard.run_lock(tmp_path):
+            run_transport.dispatch(
+                [
+                    run_transport.Assignment(worker="reviewer", task="review", stage=1, covers=("review",)),
+                    run_transport.Assignment(worker="coder", task="inspect", stage=1, covers=("inspect",)),
+                ],
+                _roster(),
+                build_prompt=lambda *args, **kwargs: "inspect",
+                run_appserver_worker=lambda *args, **kwargs: pytest.fail("unused app-server"),
+                event_writer=lambda *args, **kwargs: None,
+                cwd=tmp_path,
+                scheduler=scheduler,
+                route_dependencies={"review": (), "inspect": ()},
+            )
+    except BaseException as exc:
+        error = exc
+    assert isinstance(error, runguard.RetainRunLockError), f"sibling retention failure lost: {error!r}"
+    notes = "\n".join(getattr(error, "__notes__", ()))
+    assert "BudgetPolicyError" in notes and "token ceiling reached" in notes
+    assert runguard.lock_path(tmp_path).exists()
+
+
 @pytest.mark.parametrize("granted", [False, True])
 def test_remote_transport_supervision_requires_claim(claimed_run, monkeypatch, granted):
     _ws, _callbacks, run = claimed_run

@@ -1398,13 +1398,21 @@ def dispatch(
 
 
 def _raise_retained_future_error(futures: dict[Any, int], interrupt: BaseException) -> None:
-    """Do not discard worker cleanup failures when interrupting the scheduler."""
+    """Do not discard worker cleanup failures when interrupting the scheduler.
+
+    The retention error replaces ``interrupt``, so record it as a note. Python
+    keeps ``__context__`` out of the printed traceback when the retention error
+    already has a ``__cause__``, and a replaced worker failure such as a budget
+    denial would otherwise leave no trace.
+    """
     for future in futures:
         if future.done() and not future.cancelled():
             error = future.exception()
             retained = runguard.retained_run_lock_error(error) if error is not None else None
             if retained is not None:
-                retained.__context__ = interrupt
+                # Same effect as BaseException.add_note, which is 3.11+.
+                notes = retained.__dict__.setdefault("__notes__", [])
+                notes.append(f"replaced scheduler failure: {type(interrupt).__name__}: {str(interrupt)[:200]}")
                 raise retained
 
 

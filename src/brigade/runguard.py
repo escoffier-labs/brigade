@@ -72,7 +72,12 @@ class RetainRunLockError(RunGuardError):
 
 
 def retained_run_lock_error(error: BaseException) -> RetainRunLockError | None:
-    """Find retention failures even when asynchronous cleanup replaces them."""
+    """Find retention failures even when asynchronous cleanup replaces them.
+
+    The walk stops after 64 nodes, so a chain deeper than that is treated as
+    holding no retention failure and the lock would be released. No real
+    cleanup chain is that deep.
+    """
     current: BaseException | None = error
     seen: set[int] = set()
     while current is not None and len(seen) < 64:
