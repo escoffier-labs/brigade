@@ -590,6 +590,7 @@ def dispatch(
     remote_transport: RemoteTransport | None = None,
     coordinator_prompt_sha256: str | None = None,
     codex_transport: str | None = None,
+    policy_workspace: Path | None = None,
 ) -> list[WorkerResult]:
     """Dispatch staged assignments while keeping transport policy in one module.
 
@@ -1305,7 +1306,7 @@ def dispatch(
             resolve,
             coordinator_prompt_sha256=coordinator_prompt_sha256,
             run_dir=output_dir,
-            cwd=cwd,
+            workspace=policy_workspace or cwd,
             codex_transport=codex_transport or roster.codex_transport,
             agent=lambda: recording_agent[0],
             prompt=lambda: sent_prompt[0],

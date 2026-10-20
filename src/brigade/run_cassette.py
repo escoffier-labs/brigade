@@ -250,7 +250,7 @@ def _stop(run_dir: Path) -> None:
 def record_result(
     *,
     run_dir: Path,
-    cwd: Path,
+    workspace: Path,
     agent: Agent,
     task: str,
     prompt: str,
@@ -264,7 +264,7 @@ def record_result(
 ) -> dict[str, Any] | None:
     """Best-effort recording. Failure stops recording, never the worker run."""
     try:
-        cfg = config.load_config(cwd)
+        cfg = config.load_config(workspace)
     except Exception:
         print("cassette recording skipped: configuration unavailable", file=sys.stderr)
         return None
@@ -274,7 +274,6 @@ def record_result(
     try:
         ref = _record_result(
             run_dir=run_dir,
-            cwd=cwd,
             agent=agent,
             task=task,
             prompt=prompt,
@@ -291,14 +290,13 @@ def record_result(
         _stop(run_dir)
         return None
     if ref is not None:
-        store.retain_private_once(cwd, run_dir)
+        store.retain_private_once(workspace, run_dir)
     return ref
 
 
 def _record_result(
     *,
     run_dir: Path,
-    cwd: Path,
     agent: Agent,
     task: str,
     prompt: str,
@@ -470,7 +468,7 @@ def record_dispatch_result(
     resolve: Callable[[], WorkerResult],
     *,
     run_dir: Path | None,
-    cwd: Path | None,
+    workspace: Path | None,
     agent: Callable[[], Agent],
     prompt: Callable[[], str],
     task: str,
@@ -506,7 +504,7 @@ def record_dispatch_result(
         if run_dir is not None:
             record_result(
                 run_dir=run_dir,
-                cwd=cwd or Path.cwd(),
+                workspace=workspace or Path.cwd(),
                 agent=agent(),
                 task=result.task,
                 prompt=prompt(),

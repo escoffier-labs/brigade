@@ -1584,6 +1584,7 @@ def run(
                 assignments,
                 roster,
                 cwd=cwd,
+                policy_workspace=lock_workspace,
                 read_only=read_only,
                 sandbox_read_only=sandbox_read_only,
                 sandbox=sandbox,

@@ -237,10 +237,8 @@ def _pinned_runs(workspace: Path) -> set[str] | None:
 
 def retain_private(workspace: Path, runs_root: Path, *, current: Path) -> int:
     """Keep newest N runs and at most D days, except outcome-pinned bodies."""
-    pinned = _pinned_runs(workspace)
-    if pinned is None:
-        print("cassette retention skipped: outcome evidence unreadable or scan cap exceeded", file=sys.stderr)
-        return 0
+    from . import outcome_cmd
+
     parent = dirfd.open_directory_chain(Path(os.path.abspath(runs_root)))
     try:
         runs = []
@@ -258,14 +256,26 @@ def retain_private(workspace: Path, runs_root: Path, *, current: Path) -> int:
     finally:
         os.close(parent)
     runs.sort(reverse=True)
-    removed = 0
     cutoff = time.time() - KEEP_DAYS * 86400
-    for index, (modified, name) in enumerate(runs):
-        path = runs_root / name
-        if path == current or name in pinned:
-            continue
-        if index >= KEEP_RUNS or modified < cutoff:
-            removed += purge(path, private_only=True)
+    candidates = [
+        runs_root / name
+        for index, (modified, name) in enumerate(runs)
+        if runs_root / name != current and (index >= KEEP_RUNS or modified < cutoff)
+    ]
+    # Still report unreadable evidence when there is currently nothing to prune.
+    if not candidates and _pinned_runs(workspace) is not None:
+        return 0
+    removed = 0
+    # Capture fsyncs under this same lock. No newly durable pin can be missed
+    # between the snapshot and deletion, including the ledger's first append.
+    with outcome_cmd._records_append_lock(outcome_cmd._records_lock_path(workspace)):
+        pinned = _pinned_runs(workspace)
+        if pinned is None:
+            print("cassette retention skipped: outcome evidence unreadable or scan cap exceeded", file=sys.stderr)
+            return 0
+        for path in candidates:
+            if path.name not in pinned:
+                removed += purge(path, private_only=True)
     return removed
 
 

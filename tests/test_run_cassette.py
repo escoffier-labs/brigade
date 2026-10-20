@@ -18,7 +18,7 @@ def _record(run_dir: Path, **kwargs):
 
     return run_cassette.record_result(
         run_dir=run_dir,
-        cwd=kwargs.pop("cwd", run_dir.parent.parent.parent),
+        workspace=kwargs.pop("cwd", run_dir.parent.parent.parent),
         agent=kwargs.pop("agent", Agent(name="worker", cli="codex", role="write", model="test-model")),
         task=kwargs.pop("task", "coordinator task"),
         prompt=kwargs.pop("prompt", "injected brief and private prompt"),
