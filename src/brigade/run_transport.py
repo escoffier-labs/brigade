@@ -1387,6 +1387,7 @@ def dispatch(
             executor.shutdown(wait=True, cancel_futures=True)
             if not isinstance(exc, runguard.RetainRunLockError):
                 _raise_retained_future_error(future_to_index, exc)
+            _note_sibling_failures(future_to_index, exc)
             raise
         else:
             executor.shutdown(wait=True)
@@ -1395,6 +1396,16 @@ def dispatch(
         if fail_fast and any(not result.ok for result in stage_results):
             abort_after_stage = stage
     return all_results
+
+
+def _add_note(error: BaseException, note: str) -> None:
+    # Same effect as BaseException.add_note, which is 3.11+.
+    error.__dict__.setdefault("__notes__", []).append(note)
+
+
+def _describe_failure(error: BaseException) -> str:
+    detail = str(error)[:200]
+    return f"{type(error).__name__}: {detail}" if detail else type(error).__name__
 
 
 def _raise_retained_future_error(futures: dict[Any, int], interrupt: BaseException) -> None:
@@ -1410,10 +1421,17 @@ def _raise_retained_future_error(futures: dict[Any, int], interrupt: BaseExcepti
             error = future.exception()
             retained = runguard.retained_run_lock_error(error) if error is not None else None
             if retained is not None:
-                # Same effect as BaseException.add_note, which is 3.11+.
-                notes = retained.__dict__.setdefault("__notes__", [])
-                notes.append(f"replaced scheduler failure: {type(interrupt).__name__}: {str(interrupt)[:200]}")
+                _add_note(retained, f"replaced scheduler failure: {_describe_failure(interrupt)}")
                 raise retained
+
+
+def _note_sibling_failures(futures: dict[Any, int], retained: BaseException) -> None:
+    """Keep non-retention worker failures that finished beside a retention error."""
+    for future in futures:
+        if future.done() and not future.cancelled():
+            error = future.exception()
+            if error is not None and runguard.retained_run_lock_error(error) is None:
+                _add_note(retained, f"sibling worker failure: {_describe_failure(error)}")
 
 
 def _dag_placement_error(
@@ -1642,6 +1660,7 @@ def _dag_dispatch(
         executor.shutdown(wait=True, cancel_futures=True)
         if not isinstance(exc, runguard.RetainRunLockError):
             _raise_retained_future_error(future_to_index, exc)
+        _note_sibling_failures(future_to_index, exc)
         raise
     else:
         executor.shutdown(wait=True)

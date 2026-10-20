@@ -664,6 +664,60 @@ def test_sibling_retention_records_replaced_budget_denial(tmp_path, monkeypatch,
     assert runguard.lock_path(tmp_path).exists()
 
 
+@pytest.mark.parametrize("scheduler", ["waves", "dag"])
+def test_retention_first_records_sibling_budget_denial(tmp_path, monkeypatch, scheduler):
+    retain_raised = threading.Event()
+
+    def worker(cli_ref, *args, **kwargs):
+        if cli_ref == "codex":
+            assert retain_raised.wait(5)
+            raise run_budget.BudgetPolicyError(
+                "token ceiling reached",
+                code="budget_denied",
+                dimension="tokens",
+                exhausted=True,
+                request_id="req-1",
+            )
+        retain_raised.set()
+        raise runguard.RetainRunLockError("sibling receipt unavailable")
+
+    def retention_first(futures):
+        assert retain_raised.wait(5)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            for future in futures:
+                if future.done() and isinstance(future.exception(), runguard.RetainRunLockError):
+                    yield future
+                    return
+            time.sleep(0.005)
+        pytest.fail("retention failure never completed")
+
+    monkeypatch.setattr(agents, "run_agent", worker)
+    monkeypatch.setattr(run_transport, "as_completed", retention_first)
+    error = None
+    try:
+        with runguard.run_lock(tmp_path):
+            run_transport.dispatch(
+                [
+                    run_transport.Assignment(worker="reviewer", task="review", stage=1, covers=("review",)),
+                    run_transport.Assignment(worker="coder", task="inspect", stage=1, covers=("inspect",)),
+                ],
+                _roster(),
+                build_prompt=lambda *args, **kwargs: "inspect",
+                run_appserver_worker=lambda *args, **kwargs: pytest.fail("unused app-server"),
+                event_writer=lambda *args, **kwargs: None,
+                cwd=tmp_path,
+                scheduler=scheduler,
+                route_dependencies={"review": (), "inspect": ()},
+            )
+    except BaseException as exc:
+        error = exc
+    assert isinstance(error, runguard.RetainRunLockError), f"retention failure lost: {error!r}"
+    notes = "\n".join(getattr(error, "__notes__", ()))
+    assert "sibling worker failure: BudgetPolicyError: token ceiling reached" in notes
+    assert runguard.lock_path(tmp_path).exists()
+
+
 @pytest.mark.parametrize("granted", [False, True])
 def test_remote_transport_supervision_requires_claim(claimed_run, monkeypatch, granted):
     _ws, _callbacks, run = claimed_run
