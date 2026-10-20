@@ -8,6 +8,8 @@ import os
 import re
 import subprocess
 import sys
+import threading
+import time
 import urllib.request
 from datetime import datetime, timedelta, timezone
 from typing import Any
@@ -67,12 +69,46 @@ def run_wrangler(argv: list[str], *, account: str | None = None) -> Any:
         env["CLOUDFLARE_ACCOUNT_ID"] = account
     env["WRANGLER_SEND_METRICS"] = "false"
     try:
-        result = subprocess.run(argv, shell=False, capture_output=True, text=True, timeout=60, env=env, check=True)
-        if len(result.stdout) > _MAX_RESPONSE:
-            raise ValueError("oversized D1 response")
-        return json.loads(result.stdout)
+        return json.loads(_bounded_output(argv, env))
     except (OSError, subprocess.SubprocessError, ValueError):
         raise ValueError("D1 read failed") from None
+
+
+def _bounded_output(argv: list[str], env: dict[str, str]) -> bytes:
+    # Discard stderr at the OS boundary. It may contain credentials, and is not
+    # needed to decode a successful aggregate response.
+    process = subprocess.Popen(argv, shell=False, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env)
+    pipe = process.stdout
+    assert pipe is not None
+    output = bytearray()
+    failed: list[bool] = []
+
+    def read() -> None:
+        try:
+            with pipe:
+                while len(output) <= _MAX_RESPONSE:
+                    chunk = pipe.read(min(65536, _MAX_RESPONSE + 1 - len(output)))
+                    if not chunk:
+                        return
+                    output.extend(chunk)
+                process.kill()
+        except OSError:
+            failed.append(True)
+
+    reader = threading.Thread(target=read, daemon=True)
+    deadline = time.monotonic() + 60
+    reader.start()
+    try:
+        reader.join(timeout=max(0, deadline - time.monotonic()))
+        if reader.is_alive() or failed or len(output) > _MAX_RESPONSE:
+            raise ValueError("D1 output unavailable or oversized")
+        if process.wait(timeout=max(0, deadline - time.monotonic())) != 0:
+            raise ValueError("D1 command failed")
+        return bytes(output)
+    finally:
+        if process.poll() is None:
+            process.kill()
+        process.wait()
 
 
 def fetch_json(url: str, *, body: dict[str, Any] | None = None, token: str | None = None) -> Any:
@@ -115,7 +151,8 @@ def _analytics(settings: dict[str, Any], now: datetime) -> list[dict[str, Any]]:
     token = os.environ.get(key, "") if isinstance(key, str) else ""
     if not token:
         raise ValueError("analytics credential unavailable")
-    start = now.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=30)
+    end = now.replace(hour=0, minute=0, second=0, microsecond=0)
+    start = end - timedelta(days=30)
     payload = fetch_json(
         "https://api.cloudflare.com/client/v4/graphql",
         token=token,
@@ -125,7 +162,7 @@ def _analytics(settings: dict[str, Any], now: datetime) -> list[dict[str, Any]]:
                 "account": settings["account"],
                 "worker": settings["worker"],
                 "start": start.isoformat(),
-                "end": now.isoformat(),
+                "end": end.isoformat(),
             },
         },
     )
@@ -153,7 +190,7 @@ def _analytics(settings: dict[str, Any], now: datetime) -> list[dict[str, Any]]:
 
 def collect(settings: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
     """Unavailable providers stay unknown. Successful empty queries never imply zero."""
-    now = now or datetime.now(timezone.utc)
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     sources = []
     weeks: list[dict[str, Any]] = []
     daily: list[dict[str, Any]] = []
@@ -167,18 +204,8 @@ def collect(settings: dict[str, Any], *, now: datetime | None = None) -> dict[st
             for row in data["weekly"]:
                 week = row["week"]
                 start = stats._week(week)
-                versions = [
-                    {"version": c["version"], "active_sources": c["active_sources"]}
-                    for c in data["versions"]
-                    if c["week"] == week
-                ]
-                upgrades = [
-                    {key: c[key] for key in ("from_version", "to_version", "active_sources")}
-                    for c in data["upgrades"]
-                    if c["week"] == week
-                ]
-                # Ignore downgrades when both versions have a numeric release tuple.
-                upgrades = [c for c in upgrades if _release(c["to_version"]) > _release(c["from_version"])]
+                versions = _histogram(data["versions"], week, upgrades=False)
+                upgrades = _histogram(data["upgrades"], week, upgrades=True)
                 weeks.append(
                     {
                         "week": week,
@@ -188,6 +215,9 @@ def collect(settings: dict[str, Any], *, now: datetime | None = None) -> dict[st
                         "upgrades": upgrades,
                     }
                 )
+            # Validate within the source boundary so malformed D1 data cannot
+            # discard successful Worker and download reads.
+            weeks = stats.snapshot(taken_at=now, source_set=["d1"], weeks=weeks, daily=[], downloads=downloads)["weeks"]
             sources.append("d1")
         except (ValueError, KeyError, TypeError, AttributeError):
             weeks = []
@@ -211,9 +241,29 @@ def collect(settings: dict[str, Any], *, now: datetime | None = None) -> dict[st
     return stats.snapshot(taken_at=now, source_set=sources, weeks=weeks, daily=daily, downloads=downloads)
 
 
+def _histogram(rows: list[dict[str, Any]], week: str, *, upgrades: bool) -> list[dict[str, Any]]:
+    fields = ("from_version", "to_version") if upgrades else ("version",)
+    cells = []
+    for row in rows:
+        try:
+            if row["week"] != week:
+                continue
+            for field in fields:
+                stats._version(row[field])
+            stats._count(row["active_sources"])
+            if upgrades and _release(row["to_version"]) <= _release(row["from_version"]):
+                continue
+            cells.append({key: row[key] for key in (*fields, "active_sources")})
+        except (ValueError, KeyError, TypeError):
+            continue
+    # An empty array renders as unknown. Never show a truncated distribution.
+    return cells if len(cells) <= (200 if upgrades else 100) else []
+
+
 def _release(version: str) -> tuple[int, ...]:
     stats._version(version)
-    return tuple(int(part) for part in re.match(r"[0-9.]+", version).group().rstrip(".").split("."))  # type: ignore[union-attr]
+    release = tuple(int(part) for part in re.match(r"[0-9.]+", version).group().rstrip(".").split("."))  # type: ignore[union-attr]
+    return release + (0,) * (4 - len(release))
 
 
 def publish(value: dict[str, Any]) -> None:

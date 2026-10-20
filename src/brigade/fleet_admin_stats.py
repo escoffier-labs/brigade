@@ -31,7 +31,7 @@ FIELD_PATHS = (
     "downloads.pypi",
     "downloads.npm",
 )
-_VERSION = re.compile(r"[0-9]{1,6}(?:\.[0-9]{1,6}){1,3}(?:(?:a|b|rc|\.post|\.dev)[0-9]{1,6})?")
+_VERSION = re.compile(r"[0-9]{1,6}(?:\.[0-9]{1,6}){1,3}(?:(?:a|b|rc|\.post)[0-9]{1,6}|\.dev[0-9]{1,8})?")
 
 
 def config() -> dict[str, Any]:
@@ -50,6 +50,19 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         snapshot_id TEXT PRIMARY KEY, taken_at TEXT NOT NULL, source_set TEXT NOT NULL,
         schema TEXT NOT NULL, payload_json TEXT NOT NULL, digest TEXT NOT NULL)""")
     conn.execute("CREATE INDEX IF NOT EXISTS admin_stats_taken_at ON admin_stats_snapshots(taken_at)")
+    new_history = conn.execute("SELECT 1 FROM sqlite_master WHERE name='admin_stats_weeks'").fetchone() is None
+    conn.execute("""CREATE TABLE IF NOT EXISTS admin_stats_weeks (
+        week TEXT PRIMARY KEY, partial INTEGER NOT NULL, taken_at TEXT NOT NULL,
+        payload_json TEXT NOT NULL)""")
+    if new_history:
+        # Backfill before compaction, preserving complete weeks from v35.
+        for row in conn.execute("SELECT payload_json FROM admin_stats_snapshots"):
+            try:
+                value = validate(json.loads(row[0]))
+            except (ValueError, TypeError, KeyError, AttributeError):
+                continue
+            _store_weeks(conn, value)
+        _prune(conn, datetime.now(timezone.utc))
 
 
 def _keys(value: Any, fields: tuple[str, ...]) -> None:
@@ -190,7 +203,7 @@ def snapshot(
 
 def store(conn: sqlite3.Connection, value: Any, *, now: datetime | None = None) -> None:
     value = validate(value)
-    now = now or datetime.now(timezone.utc)
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
     taken = _stamp(value["taken_at"])
     if not now - timedelta(days=RETENTION_DAYS) <= taken <= now + timedelta(minutes=5):
         raise ValueError("snapshot timestamp outside retention window")
@@ -206,24 +219,68 @@ def store(conn: sqlite3.Connection, value: Any, *, now: datetime | None = None) 
                 value["digest"],
             ),
         )
-        conn.execute(
-            "DELETE FROM admin_stats_snapshots WHERE taken_at < ?",
-            ((now - timedelta(days=RETENTION_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ"),),
+        _store_weeks(conn, value)
+        _prune(conn, now)
+
+
+def _store_weeks(conn: sqlite3.Connection, value: dict[str, Any]) -> None:
+    for week in value["weeks"]:
+        # A self-contained validated payload keeps page reads small and lets
+        # the complete row survive daily snapshot compaction.
+        payload = snapshot(
+            taken_at=_stamp(value["taken_at"]),
+            source_set=["d1"],
+            weeks=[week],
+            daily=[],
+            downloads={"pypi": None, "npm": None},
         )
+        conn.execute(
+            """INSERT INTO admin_stats_weeks VALUES (?, ?, ?, ?)
+            ON CONFLICT(week) DO UPDATE SET partial=excluded.partial,
+                taken_at=excluded.taken_at, payload_json=excluded.payload_json
+            WHERE excluded.partial < admin_stats_weeks.partial OR
+                (excluded.partial = admin_stats_weeks.partial AND
+                 (excluded.taken_at, excluded.payload_json) >
+                 (admin_stats_weeks.taken_at, admin_stats_weeks.payload_json))""",
+            (week["week"], int(week["partial"]), value["taken_at"], json.dumps(payload, sort_keys=True)),
+        )
+
+
+def _prune(conn: sqlite3.Connection, now: datetime) -> None:
+    # Compact globally, including any snapshots stored before daily bucketing.
+    conn.execute("""DELETE FROM admin_stats_snapshots WHERE snapshot_id IN (
+        SELECT snapshot_id FROM (
+            SELECT snapshot_id, ROW_NUMBER() OVER (
+                PARTITION BY substr(taken_at, 1, 10)
+                ORDER BY taken_at DESC, snapshot_id DESC) AS position
+            FROM admin_stats_snapshots) WHERE position > 1)""")
+    cutoff = (now - timedelta(days=RETENTION_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
+    conn.execute("DELETE FROM admin_stats_snapshots WHERE taken_at < ?", (cutoff,))
+    conn.execute("DELETE FROM admin_stats_weeks WHERE taken_at < ?", (cutoff,))
+    conn.execute("""DELETE FROM admin_stats_weeks WHERE week NOT IN (
+        SELECT week FROM admin_stats_weeks ORDER BY week DESC LIMIT 60)""")
 
 
 def load_view(conn: sqlite3.Connection, *, now: datetime | None = None) -> dict[str, Any]:
     cutoff = ((now or datetime.now(timezone.utc)) - timedelta(days=RETENTION_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    rows = conn.execute(
-        "SELECT payload_json FROM admin_stats_snapshots WHERE taken_at >= ? ORDER BY taken_at DESC, snapshot_id DESC LIMIT 1601",
-        (cutoff,),
-    ).fetchall()
-    weeks: dict[str, Any] = {}
     latest = None
-    for row in rows:
-        value = validate(json.loads(row[0]))
-        if latest is None:
-            latest = value
-        for week in value["weeks"]:
-            weeks.setdefault(week["week"], week)
-    return {"latest": latest, "weeks": [weeks[k] for k in sorted(weeks, reverse=True)[:60]]}
+    for row in conn.execute(
+        "SELECT payload_json FROM admin_stats_snapshots WHERE taken_at >= ? ORDER BY taken_at DESC, snapshot_id DESC",
+        (cutoff,),
+    ):
+        try:
+            latest = validate(json.loads(row[0]))
+        except (ValueError, TypeError, KeyError, AttributeError):
+            continue
+        break
+    weeks = []
+    for row in conn.execute(
+        "SELECT payload_json FROM admin_stats_weeks WHERE taken_at >= ? ORDER BY week DESC LIMIT 60",
+        (cutoff,),
+    ):
+        try:
+            value = validate(json.loads(row[0]))
+        except (ValueError, TypeError, KeyError, AttributeError):
+            continue
+        weeks.extend(value["weeks"])
+    return {"latest": latest, "weeks": weeks}

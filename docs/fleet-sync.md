@@ -797,8 +797,12 @@ trusted proxy identity. It renders the latest snapshot and a weekly series from
 the Hub database through the shared Deck theme. Rendering makes no provider calls.
 `POST /stats` requires an enrolled node token whose node is in
 `fleet.stats.collector_nodes`. Admin tokens are refused even with admin writes
-enabled. Snapshots are deduplicated by digest in `admin_stats_snapshots`.
-Hub schema version 35 adds this table through the normal startup migration.
+enabled. Replayed snapshots are ignored. `admin_stats_snapshots` keeps the newest
+snapshot per UTC day, at most 402 rows within the 400-day retention window.
+`admin_stats_weeks` keeps the best observation for each of the latest 60 weeks.
+Complete observations beat partial ones, then the newest observation wins.
+Hub schema version 36 adds weekly history and backfills existing v35 snapshots
+before compaction through the normal startup migration.
 
 Configure the collector and Hub separately in the operator's fleet.toml:
 
@@ -838,14 +842,18 @@ Worker error and public download counts are event counts and may be zero.
 Weekly counts mean active sources, not people or installs. Retention is activity
 on 2+ or 3+ distinct days in the same ISO week. Possible upgrades pair versions
 observed in time order within a week, restricted to increasing numeric releases.
-The current week and the oldest week truncated by the 90-day query are labelled partial. Source identities rotate weekly.
+The current week and the oldest week truncated by the 90-day query are labelled partial.
+Source identities rotate weekly. Worker counts cover 30 completed UTC days.
+Malformed version cells are omitted. Histograms over 100 versions or 200 upgrade
+pairs render as unknown. Development versions may use eight-digit date suffixes.
 `source_set` contains only `d1`, `worker` and `downloads` for successful reads.
 `digest` is SHA-256 of canonical JSON without `digest` or `snapshot_id`, with
 sorted keys and compact separators. `snapshot_id` equals that digest.
 
-Controller and erasure contact: Solomon Neas through the project maintainer
-contact. No hashes, install IDs, addresses, hostnames or deployment identifiers
-enter snapshots. The Hub rejects unknown fields at every depth. It keeps only
-aggregate snapshots for 400 days and purges older rows on each accepted POST.
+Controller and erasure contact: Solomon Neas. Contact the maintainer at the
+address in [SECURITY.md](../SECURITY.md). No hashes, install IDs, addresses,
+hostnames or deployment identifiers enter snapshots. The Hub rejects unknown fields at every depth. It keeps only
+aggregate snapshots and weekly observations for 400 days and purges older rows
+on each accepted POST. Invalid stored payloads are skipped when rendering.
 Opt-in usage aggregates are not available yet. Future opt-in counts will
 undercount usage.

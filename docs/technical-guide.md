@@ -1961,7 +1961,7 @@ through the exact `wrangler d1 execute <configured-database> --remote --json
 --command <fixed-statement>` argv shape. There is no shell, user SQL or mutable
 Cloudflare command. Database date expressions bound reads to the last 90 days.
 Internal source observations are excluded. Optional Cloudflare GraphQL Analytics
-reads request and error totals by day over the last 30 days. The optional public
+reads request and error totals by day over 30 completed UTC days. The optional public
 download-metrics JSON supplies matching 30-day PyPI and npm download counts.
 Unavailable providers stay unknown. `--no-publish` prints the snapshot instead of
 posting it. Collection is explicit and no timer is installed.

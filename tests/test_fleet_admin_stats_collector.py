@@ -12,7 +12,7 @@ def test_runner_refuses_arbitrary_sql_and_subcommands(monkeypatch):
     def forbidden(*args, **kwargs):
         pytest.fail("refused command reached subprocess")
 
-    monkeypatch.setattr(collector.subprocess, "run", forbidden)
+    monkeypatch.setattr(collector.subprocess, "Popen", forbidden)
     for sql in (
         "DELETE FROM checks",
         "SELECT * FROM checks",
@@ -60,15 +60,18 @@ def test_collector_uses_fixed_read_queries_and_suppresses(monkeypatch):
 def test_wrangler_runner_oauth_env_and_sanitized_failure(monkeypatch):
     from brigade import fleet_admin_stats_collector as collector
 
+    import sys
+
     monkeypatch.setenv("CLOUDFLARE_API_TOKEN", "example-secret")
+    original = collector.subprocess.Popen
 
     def run(argv, **kwargs):
         assert kwargs["shell"] is False
         assert "CLOUDFLARE_API_TOKEN" not in kwargs["env"]
         assert "example-secret" not in str(argv)
-        raise collector.subprocess.CalledProcessError(1, argv, stderr="example-secret")
+        return original([sys.executable, "-c", "import sys; sys.stderr.write('example-secret'); sys.exit(1)"], **kwargs)
 
-    monkeypatch.setattr(collector.subprocess, "run", run)
+    monkeypatch.setattr(collector.subprocess, "Popen", run)
     with pytest.raises(ValueError, match="D1 read failed") as error:
         collector.run_wrangler(collector.wrangler_argv("example-db", "weekly"))
     assert "example-secret" not in str(error.value)
@@ -85,13 +88,15 @@ def test_analytics_and_downloads_fixture_transports(monkeypatch):
         if body:
             assert body["query"] == collector.ANALYTICS_QUERY
             assert body["variables"]["account"] == "example-account"
+            assert body["variables"]["start"] == "2026-09-20T00:00:00+00:00"
+            assert body["variables"]["end"] == "2026-10-20T00:00:00+00:00"
             return {
                 "data": {
                     "viewer": {
                         "accounts": [
                             {
                                 "workersInvocationsAdaptive": [
-                                    {"dimensions": {"date": "2026-10-20"}, "sum": {"requests": 100, "errors": 0}}
+                                    {"dimensions": {"date": "2026-10-19"}, "sum": {"requests": 100, "errors": 0}}
                                 ]
                             }
                         ]
@@ -114,9 +119,9 @@ def test_analytics_and_downloads_fixture_transports(monkeypatch):
             "analytics_token_env": "EXAMPLE_ANALYTICS_TOKEN",
             "downloads_url": "https://example.invalid/downloads.json",
         },
-        now=datetime(2026, 10, 20, tzinfo=timezone.utc),
+        now=datetime(2026, 10, 20, 12, tzinfo=timezone.utc),
     )
-    assert value["daily"] == [{"day": "2026-10-20", "worker_requests": 100, "worker_errors": 0}]
+    assert value["daily"] == [{"day": "2026-10-19", "worker_requests": 100, "worker_errors": 0}]
     assert value["downloads"] == {"pypi": 123, "npm": 0}
     assert len(requests) == 2
     assert "example-secret" not in json.dumps(value)
@@ -221,13 +226,137 @@ def test_oldest_truncated_week_is_partial(monkeypatch):
 
 
 def test_wrangler_account_setting_is_environment_only(monkeypatch):
-    from types import SimpleNamespace
+    import sys
     from brigade import fleet_admin_stats_collector as collector
+
+    original = collector.subprocess.Popen
 
     def run(argv, **kwargs):
         assert "example-account" not in argv
         assert kwargs["env"]["CLOUDFLARE_ACCOUNT_ID"] == "example-account"
-        return SimpleNamespace(stdout='[{"success": true, "results": []}]')
+        return original([sys.executable, "-c", 'print(\'[{"success": true, "results": []}]\')'], **kwargs)
 
-    monkeypatch.setattr(collector.subprocess, "run", run)
-    collector.run_wrangler(collector.wrangler_argv("example-db", "weekly"), account="example-account")
+    monkeypatch.setattr(collector.subprocess, "Popen", run)
+    assert collector.run_wrangler(collector.wrangler_argv("example-db", "weekly"), account="example-account") == [
+        {"success": True, "results": []}
+    ]
+
+
+def test_collector_filters_invalid_cells_and_keeps_other_sources(monkeypatch):
+    from brigade import fleet_admin_stats_collector as collector
+
+    def runner(argv, **kwargs):
+        if argv[-1] == collector.QUERIES["weekly"]:
+            rows = [{"week": "2026-W43", "active_sources": 20, "retained_2d_sources": 8, "retained_3d_sources": 5}]
+        elif argv[-1] == collector.QUERIES["versions"]:
+            rows = [
+                {"week": "2026-W43", "version": version, "active_sources": 8}
+                for version in ("dev", "0.28.0+local", "0.28.0-beta.1", "0.31.0.dev20260808")
+            ]
+        else:
+            rows = [
+                {"week": "2026-W43", "from_version": version, "to_version": "0.31.0.dev20260808", "active_sources": 8}
+                for version in ("dev", "0.28.0")
+            ]
+        return [{"success": True, "results": rows}]
+
+    monkeypatch.setattr(collector, "run_wrangler", runner)
+    monkeypatch.setattr(
+        collector,
+        "fetch_json",
+        lambda *a, **k: {
+            "schemaVersion": 1,
+            "period": {"days": 30, "timezone": "UTC"},
+            "sources": {"pypi": {"downloads": 12}, "npm": {"downloads": 8}},
+        },
+    )
+    value = collector.collect(
+        {"database": "example-db", "downloads_url": "https://example.invalid/counts.json"},
+        now=datetime(2026, 10, 20, tzinfo=timezone.utc),
+    )
+    assert value["source_set"] == ["d1", "downloads"]
+    assert value["weeks"][0]["versions"] == [{"version": "0.31.0.dev20260808", "active_sources": 8}]
+    assert value["weeks"][0]["upgrades"] == [
+        {"from_version": "0.28.0", "to_version": "0.31.0.dev20260808", "active_sources": 8}
+    ]
+    assert value["downloads"] == {"pypi": 12, "npm": 8}
+
+
+@pytest.mark.parametrize("kind,limit", [("versions", 100), ("upgrades", 200)])
+def test_oversized_week_histogram_becomes_unknown(monkeypatch, kind, limit):
+    from brigade import fleet_admin_stats_collector as collector
+
+    def runner(argv, **kwargs):
+        if argv[-1] == collector.QUERIES["weekly"]:
+            rows = [{"week": "2026-W43", "active_sources": 20, "retained_2d_sources": 8, "retained_3d_sources": 5}]
+        elif argv[-1] == collector.QUERIES[kind]:
+            rows = [
+                {
+                    "week": "2026-W43",
+                    "active_sources": 5,
+                    **(
+                        {"version": f"0.28.{i}"}
+                        if kind == "versions"
+                        else {"from_version": "0.27.0", "to_version": f"0.28.{i}"}
+                    ),
+                }
+                for i in range(limit + 1)
+            ]
+        else:
+            rows = []
+        return [{"success": True, "results": rows}]
+
+    monkeypatch.setattr(collector, "run_wrangler", runner)
+    value = collector.collect({"database": "example-db"}, now=datetime(2026, 10, 20, tzinfo=timezone.utc))
+    assert value["source_set"] == ["d1"]
+    assert value["weeks"][0]["active_sources"] == 20
+    assert value["weeks"][0][kind] == []
+
+
+def test_equivalent_release_spellings_are_not_upgrades(monkeypatch):
+    from brigade import fleet_admin_stats_collector as collector
+
+    def runner(argv, **kwargs):
+        if argv[-1] == collector.QUERIES["weekly"]:
+            rows = [{"week": "2026-W43", "active_sources": 8, "retained_2d_sources": 8, "retained_3d_sources": 8}]
+        elif argv[-1] == collector.QUERIES["upgrades"]:
+            rows = [{"week": "2026-W43", "from_version": "0.28", "to_version": "0.28.0", "active_sources": 8}]
+        else:
+            rows = []
+        return [{"success": True, "results": rows}]
+
+    monkeypatch.setattr(collector, "run_wrangler", runner)
+    value = collector.collect({"database": "example-db"}, now=datetime(2026, 10, 20, tzinfo=timezone.utc))
+    assert value["weeks"][0]["upgrades"] == []
+
+
+def test_wrangler_output_is_bounded_while_child_is_running(monkeypatch):
+    import subprocess
+    import sys
+    import time
+    from brigade import fleet_admin_stats_collector as collector
+
+    original = subprocess.Popen
+    children = []
+
+    def launch(argv, **kwargs):
+        # Substitute a local writer, never invoke wrangler. It stays alive after
+        # overflowing stdout so rejection must terminate it before the timeout.
+        child = original(
+            [
+                sys.executable,
+                "-c",
+                "import sys,time; sys.stdout.buffer.write(b'x'*8192); sys.stdout.flush(); time.sleep(30)",
+            ],
+            **kwargs,
+        )
+        children.append(child)
+        return child
+
+    monkeypatch.setattr(collector, "_MAX_RESPONSE", 4096)
+    monkeypatch.setattr(collector.subprocess, "Popen", launch)
+    started = time.monotonic()
+    with pytest.raises(ValueError, match="D1 read failed"):
+        collector.run_wrangler(collector.wrangler_argv("example-db", "weekly"))
+    assert time.monotonic() - started < 5
+    assert children[0].poll() is not None

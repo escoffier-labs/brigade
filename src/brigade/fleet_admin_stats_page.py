@@ -19,7 +19,8 @@ def render(view: dict[str, Any], *, nonce: str, now: datetime) -> str:
     body += "<p>Counts describe active sources, not people or installs. Source cells below 5 are suppressed. "
     body += "Unknown includes suppressed cells and unavailable data. Retention means activity on 2+ or 3+ distinct days within one week. "
     body += "Possible upgrades link versions observed in time order within the same week. Weekly source identities rotate.</p>"
-    body += "<p>Controller and erasure contact: Solomon Neas. Contact the controller through the project maintainer contact. "
+    body += "<p>Controller and erasure contact: Solomon Neas. Contact the maintainer at the address in "
+    body += '<a href="https://github.com/escoffier-labs/brigade/blob/main/SECURITY.md">SECURITY.md</a>. '
     body += "The Hub retains aggregate snapshots for 400 days. Opt-in usage aggregates are not available yet. "
     body += "Future opt-in counts will undercount usage.</p>"
     body += '</section><section class="panel"><h2>Latest snapshot</h2>'
@@ -35,7 +36,7 @@ def render(view: dict[str, Any], *, nonce: str, now: datetime) -> str:
             + _number(latest["downloads"][name] if latest else None, "downloads." + name)
             + "</p>"
         )
-    body += '</div><div data-field="daily"><h3>Worker activity by day</h3>'
+    body += '</div><div data-field="daily"><h3>Worker activity over 30 completed UTC days</h3>'
     if not latest or not latest["daily"]:
         body += "<p>unknown</p>"
     for day in latest["daily"] if latest else []:
