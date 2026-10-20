@@ -425,6 +425,13 @@ def test_project_trial_dot_directory_scope_glob_keeps_leading_dot(scoreable_targ
     assert projection.eligible is True
 
 
+def test_patch_changed_paths_keeps_literal_utf8_in_quoted_paths():
+    patch = (
+        'diff --git "a/\u76ee/a\\tb.txt" "b/\u76ee/a\\tb.txt"\n--- "a/\u76ee/a\\tb.txt"\n+++ "b/\u76ee/a\\tb.txt"\n'
+    ).encode()
+    assert verify_trial.patch_changed_paths(patch) == ["\u76ee/a\tb.txt"]
+
+
 @pytest.mark.parametrize("config", [("diff.mnemonicPrefix", "true"), ("diff.noprefix", "true")])
 def test_project_trial_scope_check_ignores_diff_prefix_config(scoreable_target, monkeypatch, config):
     subprocess.run(["git", "config", *config], cwd=scoreable_target, check=True)

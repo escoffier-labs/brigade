@@ -125,12 +125,36 @@ def _patch_delta_bytes_for_path(patch_bytes: bytes, subject_path: str) -> bytes 
 _PATCH_HEADER_PATH_PREFIXES = ("--- ", "+++ ", "rename from ", "rename to ", "copy from ", "copy to ")
 
 
+_C_ESCAPES = {"a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13, '"': 34, "\\": 92}
+
+
 def _unquote_patch_path(token: str) -> str:
     token = token.rstrip("\t")
-    if len(token) >= 2 and token.startswith('"') and token.endswith('"'):
-        raw = token[1:-1].encode("latin-1", errors="backslashreplace").decode("unicode_escape")
-        token = raw.encode("latin-1", errors="replace").decode("utf-8", errors="replace")
-    return token
+    if not (len(token) >= 2 and token.startswith('"') and token.endswith('"')):
+        return token
+    # Git C-quotes paths; with core.quotePath=false bytes above 0x80 stay literal
+    # UTF-8, so decode escapes to bytes and only then decode the whole path.
+    body = token[1:-1]
+    out = bytearray()
+    index = 0
+    while index < len(body):
+        char = body[index]
+        if char != "\\" or index + 1 >= len(body):
+            out += char.encode("utf-8")
+            index += 1
+            continue
+        escape = body[index + 1]
+        octal = body[index + 1 : index + 4]
+        if len(octal) == 3 and all(digit in "01234567" for digit in octal):
+            out.append(int(octal, 8) & 0xFF)
+            index += 4
+        elif escape in _C_ESCAPES:
+            out.append(_C_ESCAPES[escape])
+            index += 2
+        else:
+            out += char.encode("utf-8")
+            index += 1
+    return out.decode("utf-8", errors="replace")
 
 
 def _header_path(line: str, prefix: str) -> str | None:
