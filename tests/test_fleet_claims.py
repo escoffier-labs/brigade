@@ -1818,6 +1818,8 @@ class TestDispatchWiring:
             return real_post(hub_url, tok, body, timeout=timeout)
 
         def record_orphan_release(target, **kwargs):
+            connect = kwargs.pop("connect")
+            kwargs.update(connect())
             scheduled_releases.append((target, kwargs))
 
         monkeypatch.setattr(fleet_client, "_post_claim_blocking", record_post)
