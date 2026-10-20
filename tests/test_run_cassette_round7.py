@@ -68,6 +68,7 @@ def test_worktree_uses_coordinator_recording_policy(tmp_path, monkeypatch, mode,
 def test_retention_waits_for_inflight_outcome_pin(tmp_path, monkeypatch):
     run = tmp_path / ".brigade" / "runs" / "old"
     _record(run)
+    (run / "run.json").write_text(json.dumps({"run_id": run.name}))
     expired = time.time() - 40 * 86400
     os.utime(run, (expired, expired))
     writer_locked, retention_started, writer_done = Event(), Event(), Event()

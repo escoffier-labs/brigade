@@ -1382,12 +1382,8 @@ def dispatch(
                     raise
                 except Exception as exc:  # pragma: no cover - defensive boundary
                     assignment = stage_assignments[index]
-                    stage_results_by_index[index] = WorkerResult(
-                        worker=assignment.worker,
-                        task=assignment.task,
-                        text="",
-                        ok=False,
-                        detail=str(exc)[:200],
+                    stage_results_by_index[index] = run_cassette.dispatch_failure(
+                        exc, worker=assignment.worker, task=assignment.task
                     )
         except KeyboardInterrupt as exc:
             try:
@@ -1449,12 +1445,7 @@ def _add_note(error: BaseException, note: str, output_dir: Path | None, cwd: Pat
 
 
 def _describe_failure(error: BaseException) -> str:
-    try:
-        detail = str(error)[:200]
-        return f"{type(error).__name__}: {detail}" if detail else type(error).__name__
-    except BaseException:
-        # Even an interrupted formatter must not replace lock retention.
-        return type(error).__name__
+    return run_cassette.failure_diagnostic(error)
 
 
 def _raise_retained_future_error(
@@ -1694,13 +1685,7 @@ def _dag_dispatch(
             except run_budget.BudgetPolicyError:
                 raise
             except Exception as exc:
-                finished = WorkerResult(
-                    worker=assignments[i].worker,
-                    task=assignments[i].task,
-                    text="",
-                    ok=False,
-                    detail=str(exc)[:200],
-                )
+                finished = run_cassette.dispatch_failure(exc, worker=assignments[i].worker, task=assignments[i].task)
                 results[i] = finished
             if finished.ok:
                 completed_ok.append(finished)

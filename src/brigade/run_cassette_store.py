@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any, Iterator
 from uuid import uuid4
 
-from . import dirfd
+from . import dirfd, run_dirfd
 
 DIRECTORY = "cassettes"
 MAX_FILES = 8192
@@ -22,6 +22,7 @@ MAX_ENTRY_BYTES = 4 * 1024 * 1024
 MAX_RUN_BYTES = 32 * 1024 * 1024
 KEEP_RUNS = 50
 KEEP_DAYS = 30
+MAX_RUN_SCAN_BYTES = 64 * 1024 * 1024
 MAX_OUTCOME_BYTES = 64 * 1024 * 1024
 MAX_OUTCOME_ROWS = 100_000
 MAX_OUTCOME_REFERENCES = 10_000
@@ -58,6 +59,79 @@ def directory(run_dir: Path, *, create: bool = False) -> Iterator[int]:
     finally:
         for descriptor in reversed(descriptors):
             os.close(descriptor)
+
+
+@contextmanager
+def journal_scope(run_dir: Path) -> Iterator[None]:
+    """Bind journal helpers to a run opened by an all-component no-follow walk."""
+    descriptor = dirfd.open_directory_chain(Path(os.path.abspath(run_dir)), create=True)
+    info = os.fstat(descriptor)
+    bound = run_dirfd.BoundRunDir(run_dir, descriptor, (info.st_dev, info.st_ino))
+    token = run_dirfd._active.set(bound)
+    try:
+        yield
+    finally:
+        run_dirfd._active.reset(token)
+        bound.close()
+
+
+def validated_runs(runs_root: Path) -> list[tuple[float, str, dict[str, Any]]]:
+    """Bound the scan and admit only plain directories with safe object run.json."""
+    parent = dirfd.open_directory_chain(Path(os.path.abspath(runs_root)))
+    try:
+        names = dirfd.child_names(parent, 10001)
+        if len(names) > 10000:
+            raise CassetteError("runs inventory exceeds 10000 entries")
+        runs = []
+        scanned_bytes = 0
+        for name in names:
+            try:
+                child = dirfd.open_child_directory(parent, name)
+                try:
+                    raw = read(child, "run.json", private=False)
+                    modified = os.fstat(child).st_mtime
+                finally:
+                    os.close(child)
+            except (OSError, CassetteError):
+                continue
+            scanned_bytes += len(raw)
+            if scanned_bytes > MAX_RUN_SCAN_BYTES:
+                raise CassetteError("runs inventory exceeds byte cap")
+            try:
+                metadata = json.loads(raw)
+            except ValueError:
+                continue
+            if isinstance(metadata, dict):
+                started = metadata.get("started_at")
+                # Keep only the bounded sort field rather than every run body.
+                summary = {"started_at": started} if isinstance(started, str) and len(started) <= 128 else {}
+                runs.append((modified, name, summary))
+        return runs
+    finally:
+        os.close(parent)
+
+
+@contextmanager
+def _outcome_lock(workspace: Path) -> Iterator[None]:
+    """Share capture's lock protocol without following links or writing aliases."""
+    from . import outcome_cmd
+
+    path = outcome_cmd._records_lock_path(workspace)
+    parent = dirfd.open_directory_chain(Path(os.path.abspath(path.parent)), create=True)
+    try:
+        descriptor = dirfd.open_child_lock_file(parent, path.name)
+    finally:
+        os.close(parent)
+    with os.fdopen(descriptor, "r+b") as handle:
+        info = os.fstat(handle.fileno())
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise CassetteError("outcome lock is unsafe")
+        outcome_cmd._ensure_lock_sentinel(handle)
+        outcome_cmd._acquire_file_lock(handle, wait_seconds=outcome_cmd._LOCK_WAIT_SECONDS)
+        try:
+            yield
+        finally:
+            outcome_cmd._release_file_lock(handle)
 
 
 def read(
@@ -199,7 +273,13 @@ def _pinned_runs(workspace: Path) -> set[str] | None:
     """Stream outcome references, conservatively pinning on unreadable rows."""
     path = workspace / "memory" / "outcome" / "records.jsonl"
     try:
-        descriptor = dirfd.open_file_nofollow(path, os.O_RDONLY)
+        parent = dirfd.open_directory_chain(Path(os.path.abspath(path.parent)))
+        try:
+            descriptor = dirfd.open_child_file(
+                parent, path.name, os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0) | getattr(os, "O_NONBLOCK", 0)
+            )
+        finally:
+            os.close(parent)
     except FileNotFoundError:
         return set()
     except OSError:
@@ -237,29 +317,16 @@ def _pinned_runs(workspace: Path) -> set[str] | None:
 
 def retain_private(workspace: Path, runs_root: Path, *, current: Path) -> int:
     """Keep newest N runs and at most D days, except outcome-pinned bodies."""
-    from . import outcome_cmd
-
-    parent = dirfd.open_directory_chain(Path(os.path.abspath(runs_root)))
     try:
-        runs = []
-        names = dirfd.child_names(parent, 10001)
-        if len(names) > 10000:
-            print("cassette retention skipped: runs inventory exceeds 10000 entries", file=sys.stderr)
-            return 0
-        for name in names:
-            try:
-                info = dirfd.stat_child(parent, name)
-            except FileNotFoundError:
-                continue
-            if stat.S_ISDIR(info.st_mode):
-                runs.append((info.st_mtime, name))
-    finally:
-        os.close(parent)
-    runs.sort(reverse=True)
+        runs = validated_runs(runs_root)
+    except CassetteError:
+        print("cassette retention skipped: runs inventory exceeds scan cap", file=sys.stderr)
+        return 0
+    runs.sort(key=lambda item: (item[0], item[1]), reverse=True)
     cutoff = time.time() - KEEP_DAYS * 86400
     candidates = [
         runs_root / name
-        for index, (modified, name) in enumerate(runs)
+        for index, (modified, name, _) in enumerate(runs)
         if runs_root / name != current and (index >= KEEP_RUNS or modified < cutoff)
     ]
     # Still report unreadable evidence when there is currently nothing to prune.
@@ -268,7 +335,7 @@ def retain_private(workspace: Path, runs_root: Path, *, current: Path) -> int:
     removed = 0
     # Capture fsyncs under this same lock. No newly durable pin can be missed
     # between the snapshot and deletion, including the ledger's first append.
-    with outcome_cmd._records_append_lock(outcome_cmd._records_lock_path(workspace)):
+    with _outcome_lock(workspace):
         pinned = _pinned_runs(workspace)
         if pinned is None:
             print("cassette retention skipped: outcome evidence unreadable or scan cap exceeded", file=sys.stderr)

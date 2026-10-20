@@ -120,7 +120,7 @@ def test_fallback_adapter_exception_records_active_seat_and_transport(tmp_path, 
         direct=True,
     )[0]
     assert calls == ["grok", "grok", fallback.cli]
-    assert not result.ok and result.detail == "fallback pipe failed"
+    assert not result.ok and result.detail == "worker transport unavailable"
     assert result.worker == "grok-review"
     docs = _documents(run)
     manifest = next(d for d in docs if d["privacy_class"] == "public-metadata")

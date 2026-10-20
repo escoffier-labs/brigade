@@ -87,6 +87,7 @@ def test_seat_invoker_prompt_digest_is_informational_only(tmp_path, monkeypatch)
 def test_cleanup_removes_owned_crash_temps_before_final_inventory(tmp_path, prune):
     run = tmp_path / ".brigade" / "runs" / "old"
     _record(run)
+    (run / "run.json").write_text(json.dumps({"run_id": run.name}))
     directory = run / "events" / "cassettes"
     private = next(p for p in directory.glob("*.json") if json.loads(p.read_bytes())["privacy_class"] == "private")
     linked = directory / (".cassette-" + "a" * 32 + ".tmp")
@@ -110,6 +111,7 @@ def test_cleanup_removes_owned_crash_temps_before_final_inventory(tmp_path, prun
 def test_retention_skips_ledger_beyond_aggregate_bounds(tmp_path, monkeypatch, capsys, bound):
     run = tmp_path / ".brigade" / "runs" / "old"
     _record(run)
+    (run / "run.json").write_text(json.dumps({"run_id": run.name}))
     expired = time.time() - 40 * 86400
     os.utime(run, (expired, expired))
     ledger = tmp_path / "memory" / "outcome" / "records.jsonl"
@@ -206,7 +208,7 @@ def test_adapter_exception_records_a_terminal_failure(tmp_path, monkeypatch, sch
         output_dir=run,
         scheduler=scheduler,
     )[0]
-    assert not result.ok and "adapter pipe failed" in result.detail
+    assert not result.ok and result.detail == "worker transport unavailable"
     docs = _documents(run)
     assert len([d for d in docs if d["privacy_class"] == "public-metadata"]) == 1
     body = next(d["result"] for d in docs if d["privacy_class"] == "private")

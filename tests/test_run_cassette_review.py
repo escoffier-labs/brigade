@@ -51,6 +51,7 @@ def test_secret_colliding_with_structural_key_stops_before_body_publication(tmp_
 def test_retention_skips_crash_debris_and_keeps_recording(tmp_path, leftover):
     old = tmp_path / ".brigade" / "runs" / "old"
     _record(old)
+    (old / "run.json").write_text(json.dumps({"run_id": old.name}))
     debris = old / "events" / "cassettes" / (".cassette-abcd.tmp" if leftover == "temp" else "unsafe.json")
     if leftover == "hardlink":
         outside = tmp_path / "outside"
@@ -120,6 +121,7 @@ def test_request_key_uses_configured_transport_before_dispatch(tmp_path, monkeyp
 def test_retention_streams_large_outcome_ledger_and_preserves_pins(tmp_path):
     old = tmp_path / ".brigade" / "runs" / "old"
     _record(old)
+    (old / "run.json").write_text(json.dumps({"run_id": old.name}))
     modified = time.time() - 40 * 86400
     os.utime(old, (modified, modified))
     ledger = tmp_path / "memory" / "outcome" / "records.jsonl"

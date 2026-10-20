@@ -182,6 +182,20 @@ def _projection(run_dir: Path, agent: Agent, window: _ProjectionWindow) -> dict[
     return worker_events.scrub_stream_text(raw.decode("utf-8"))
 
 
+def _journal_present(journal: Path) -> bool:
+    if run_journal.bound_lstat(journal) is None:
+        return False
+    _journal_size(journal)
+    return True
+
+
+def _journal_size(journal: Path) -> int:
+    info = run_journal.bound_lstat(journal)
+    if info is None or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        raise store.CassetteError("cassette journal is unsafe")
+    return info.st_size
+
+
 def _append_reference(run_dir: Path, ref: dict[str, Any]) -> None:
     from . import run_shadow
 
@@ -191,7 +205,7 @@ def _append_reference(run_dir: Path, ref: dict[str, Any]) -> None:
         raise store.CassetteError("cassette journal is not readable")
     sequence = len(report.events)
     # Leave space for lifecycle completion. The recorder never consumes the tail.
-    if sequence >= 2048 - 8 or journal.stat().st_size + 2048 > 8 * 1024 * 1024:
+    if sequence >= 2048 - 8 or _journal_size(journal) + 2048 > 8 * 1024 * 1024:
         raise store.CassetteError("cassette journal cap reached")
     try:
         snapshot = _read_object(run_dir / "run.json")
@@ -213,40 +227,45 @@ def _append_reference(run_dir: Path, ref: dict[str, Any]) -> None:
 
 def _stop(run_dir: Path) -> None:
     """A single bounded stop fact when storage or policy cannot admit a body."""
-    from . import run_lifecycle
-
     print("cassette recording stopped: storage, classification, or byte cap", file=sys.stderr)
     try:
         if _finished(run_dir):
             return
         journal = run_dir / "events" / "lifecycle.jsonl"
-        journaled = journal.exists()
-        with (
-            run_lifecycle.checkpoint_event_pair(),
-            run_journal.journal_mutation(journal) if journaled else nullcontext(),
-            store.directory(run_dir, create=True) as parent,
-        ):
-            if _finished(run_dir):
-                return
-            files = store.inventory(parent)
-            names = {name for name, _ in files}
-            if ".stopped" in names:
-                return
-            data = _STOP_BYTES
-            fits = sum(info.st_size for _, info in files) + len(data) <= store.MAX_RUN_BYTES
-            if fits:
-                store.publish(parent, data)
-            descriptor = dirfd.open_child_file(parent, ".stopped", os.O_WRONLY | os.O_CREAT | os.O_EXCL)
-            try:
-                os.fsync(descriptor)
-            finally:
-                os.close(descriptor)
-            dirfd.fsync_directory(parent)
-            if fits and journaled:
-                _append_reference(run_dir, _reference(data, "public-metadata"))
+        with store.journal_scope(run_dir):
+            _stop_bound(run_dir, journal)
     except Exception:
         # A full or unavailable journal cannot carry even a stop reference.
         pass
+
+
+def _stop_bound(run_dir: Path, journal: Path) -> None:
+    from . import run_lifecycle
+
+    journaled = _journal_present(journal)
+    with (
+        run_lifecycle.checkpoint_event_pair(),
+        run_journal.journal_mutation(journal) if journaled else nullcontext(),
+        store.directory(run_dir, create=True) as parent,
+    ):
+        if _finished(run_dir):
+            return
+        files = store.inventory(parent)
+        names = {name for name, _ in files}
+        if ".stopped" in names:
+            return
+        data = _STOP_BYTES
+        fits = sum(info.st_size for _, info in files) + len(data) <= store.MAX_RUN_BYTES
+        if fits:
+            store.publish(parent, data)
+        descriptor = dirfd.open_child_file(parent, ".stopped", os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+        try:
+            os.fsync(descriptor)
+        finally:
+            os.close(descriptor)
+        dirfd.fsync_directory(parent)
+        if fits and journaled:
+            _append_reference(run_dir, _reference(data, "public-metadata"))
 
 
 def record_result(
@@ -311,7 +330,7 @@ def _record_result(
     projection_window: _ProjectionWindow,
     coordinator_prompt_sha256: str | None,
 ) -> dict[str, Any] | None:
-    from . import run_lifecycle, run_receipts
+    from . import run_receipts
 
     try:
         with store.directory(run_dir) as parent:
@@ -435,7 +454,14 @@ def _record_result(
     if sum(len(raw) for _, raw in blobs) > store.MAX_ENTRY_BYTES:
         raise store.CassetteError("cassette entry byte cap reached")
     journal = run_dir / "events" / "lifecycle.jsonl"
-    journaled = journal.exists()
+    with store.journal_scope(run_dir):
+        return _publish_blobs(run_dir, journal, blobs, data)
+
+
+def _publish_blobs(run_dir: Path, journal: Path, blobs: list[tuple[str, bytes]], data: bytes) -> dict[str, Any] | None:
+    from . import run_lifecycle
+
+    journaled = _journal_present(journal)
     with (
         run_lifecycle.checkpoint_event_pair(),
         run_journal.journal_mutation(journal) if journaled else nullcontext(),
@@ -459,7 +485,7 @@ def _record_result(
                 report.chain_errors
                 or report.partial_tail
                 or len(report.events) >= 2048 - 8
-                or journal.stat().st_size + 2048 > 8 * 1024 * 1024
+                or _journal_size(journal) + 2048 > 8 * 1024 * 1024
             ):
                 raise store.CassetteError("cassette journal cap reached")
         for _, raw in blobs:
@@ -468,6 +494,48 @@ def _record_result(
         if journaled:
             _append_reference(run_dir, ref)
     return ref
+
+
+def failure_diagnostic(error: BaseException) -> str:
+    """Closed failure classes for notes that can be persisted by the scheduler."""
+    from . import run_budget
+
+    if isinstance(error, run_budget.BudgetPolicyError):
+        return "budget-policy: worker dispatch denied"
+    if isinstance(error, OSError):
+        return "transport-error: worker transport unavailable"
+    if isinstance(error, KeyboardInterrupt):
+        return "interrupted: worker dispatch interrupted"
+    return "internal-error: worker dispatch failed"
+
+
+def dispatch_failure(
+    error: Exception,
+    *,
+    worker: str,
+    task: str,
+    transport: str = "cli",
+    requested_model: str | None = None,
+) -> WorkerResult:
+    """Map adapter I/O failures only. Never persist arbitrary exception content."""
+    from . import proc, runguard
+    from .run_transport import WorkerResult
+
+    runguard.raise_if_retained_run_lock(error)
+    cancelled = isinstance(error, proc.ProcessCancelledError)
+    if not isinstance(error, OSError) and not cancelled:
+        raise error
+    return WorkerResult(
+        worker=worker,
+        task=task,
+        text="",
+        ok=False,
+        detail="worker dispatch cancelled" if cancelled else "worker transport unavailable",
+        failure_phase="dispatch",
+        failure_kind="cancelled" if cancelled else "transport-error",
+        transport=transport,
+        requested_model=requested_model,
+    )
 
 
 def record_dispatch_result(
@@ -486,7 +554,6 @@ def record_dispatch_result(
 ) -> WorkerResult:
     from . import run_budget, runguard
     from .run_receipts import agent_result_from_worker
-    from .run_transport import WorkerResult
 
     assigned_agent = agent()
     with _projection_window(run_dir, assigned_agent) as window:
@@ -495,17 +562,8 @@ def record_dispatch_result(
         except (runguard.RetainRunLockError, run_budget.BudgetPolicyError):
             raise
         except Exception as exc:
-            runguard.raise_if_retained_run_lock(exc)
-            result = WorkerResult(
-                worker=assigned_agent.name,
-                task=task,
-                text="",
-                ok=False,
-                detail=str(exc)[:200],
-                failure_phase="dispatch",
-                failure_kind="unclassified",
-                transport=transport(),
-                requested_model=agent().model,
+            result = dispatch_failure(
+                exc, worker=assigned_agent.name, task=task, transport=transport(), requested_model=agent().model
             )
         if run_dir is not None:
             record_result(
@@ -570,19 +628,33 @@ def refuse_unstripped_archive(root: Path) -> None:
         raise OSError("cassette bodies cannot cross an archive boundary") from exc
 
 
+def _path_present(path: Path) -> bool:
+    path = Path(os.path.abspath(path))
+    try:
+        parent = dirfd.open_directory_chain(path.parent, writable=False)
+        try:
+            dirfd.stat_child(parent, path.name)
+            return True
+        finally:
+            os.close(parent)
+    except FileNotFoundError:
+        return False
+
+
 def _purge_run_dir(run: str, *, cwd: Path, runs_dir: Path | None) -> Path:
     """Resolve names without erasing links before the destructive no-follow walk."""
     from . import run_id, runs_cmd
 
     raw = Path(run).expanduser()
-    if raw.is_absolute() or len(raw.parts) > 1 or os.path.lexists(raw):
+    if raw.is_absolute() or len(raw.parts) > 1 or _path_present(raw):
         candidate = raw
     else:
         root = runs_dir.expanduser() if runs_dir is not None else cwd.expanduser() / ".brigade" / "runs"
         # Inspect only a root whose original components pass the same no-follow gate.
         os.close(dirfd.open_directory_chain(root.absolute(), writable=False))
         if run == "latest":
-            runs, _ = runs_cmd._collect_runs(root)
+            runs = [(root / name, meta) for _, name, meta in store.validated_runs(root)]
+            runs.sort(key=runs_cmd._run_sort_key, reverse=True)
             if not runs:
                 raise FileNotFoundError("run not found")
             candidate = runs[0][0]
@@ -595,8 +667,9 @@ def _purge_run_dir(run: str, *, cwd: Path, runs_dir: Path | None) -> Path:
                     if runs_cmd._is_bare_run_id(name)
                 ),
             ]
-            candidate = next((p for p in candidates if os.path.lexists(p)), root / raw)
+            candidate = next((p for p in candidates if _path_present(p)), root / raw)
     os.close(dirfd.open_directory_chain(candidate.absolute(), writable=False))
+    _read_object(candidate / "run.json")
     return candidate
 
 

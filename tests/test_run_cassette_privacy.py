@@ -176,6 +176,7 @@ def test_retention_prunes_old_unpinned_private_bodies_only(tmp_path, monkeypatch
     runs = [tmp_path / ".brigade" / "runs" / f"20261020-12000{i}-cassette" for i in range(4)]
     for i, run in enumerate(runs):
         _record(run)
+        (run / "run.json").write_text(json.dumps({"run_id": run.name}))
         timestamp = time.time() - (40 if i == 0 or (i == 1 and reason == "age") else 1) * 86400 + i
         os.utime(run, (timestamp, timestamp))
         if i == 0:
