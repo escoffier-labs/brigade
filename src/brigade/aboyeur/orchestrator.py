@@ -113,6 +113,7 @@ def _worker_remote_transport(
             process_registry=process_registry,
         )
     except Exception as exc:  # never let transport wiring break a local run
+        runguard.raise_if_retained_run_lock(exc)
         print(f"warning: fleet remote transport unavailable: {exc}", file=sys.stderr)
         return None
 
@@ -128,60 +129,11 @@ def terminal_sigterm_handler(
     before_record: Callable[[], None] | None = None,
     should_record: Callable[[], bool] | None = None,
 ) -> Iterator[None]:
-    """Terminalize SIGTERM while preserving the conventional 128+signal exit."""
-
-    if output_dir is None or threading.current_thread() is not threading.main_thread():
+    """Forward signal handling through the shared run I/O compatibility seam."""
+    with run_io.terminal_sigterm_handler(
+        output_dir, seat=seat, before_record=before_record, should_record=should_record
+    ):
         yield
-        return
-
-    output_dir = output_dir.expanduser()
-    previous = signal.getsignal(signal.SIGTERM)
-
-    def handle_sigterm(signum: int, frame: object) -> None:  # noqa: ARG001
-        if should_record is not None and not should_record():
-            raise SystemExit(128 + signum)
-        if before_record is not None:
-            before_record()
-        run_path = output_dir / "run.json"
-        if run_path.is_file():
-            active_seats: tuple[str, ...] = ()
-            active_seat = seat
-            try:
-                payload = json.loads(run_path.read_text())
-            except (OSError, json.JSONDecodeError):
-                payload = None
-            if isinstance(payload, dict):
-                stored_active = payload.get("active_seats")
-                if isinstance(stored_active, list):
-                    active_seats = tuple(value for value in stored_active if isinstance(value, str) and value)
-                    if len(active_seats) == 1:
-                        active_seat = active_seats[0]
-                    elif active_seats:
-                        active_seat = None
-                if not active_seats:
-                    phase_owner = payload.get("phase_owner")
-                    if isinstance(phase_owner, str) and phase_owner:
-                        active_seat = phase_owner
-                    else:
-                        stored_worker = payload.get("worker")
-                        if isinstance(stored_worker, str) and stored_worker:
-                            active_seat = stored_worker
-            artifacts.record_run_termination(
-                output_dir,
-                status="canceled",
-                failure_phase=None,
-                failure_kind="signal",
-                detail="run terminated by SIGTERM",
-                seat=active_seat,
-                active_seats=active_seats,
-            )
-        raise SystemExit(128 + signum)
-
-    signal.signal(signal.SIGTERM, handle_sigterm)
-    try:
-        yield
-    finally:
-        signal.signal(signal.SIGTERM, previous)
 
 
 def _terminalize_run_lifecycle(function: Callable[..., int]) -> Callable[..., int]:
@@ -422,6 +374,7 @@ def _write_seat_routing_receipt(output_dir: Path, receipt: dict[str, object]) ->
     try:
         run_io._write_json(output_dir / "seat-routing.json", receipt)
     except OSError as exc:
+        runguard.raise_if_retained_run_lock(exc)
         print(f"error: seat routing receipt failed: {exc}", file=sys.stderr)
 
 
@@ -453,6 +406,7 @@ def _write_run_seat_health_receipt(
             sandbox=sandbox,
         )
     except Exception as exc:
+        runguard.raise_if_retained_run_lock(exc)
         probe_failed = True
         results = seat_health.exception_results_for_probe_failure(roster, exc)
     try:
@@ -462,6 +416,7 @@ def _write_run_seat_health_receipt(
             run_id=output_dir.name,
         )
     except OSError as exc:
+        runguard.raise_if_retained_run_lock(exc)
         print(f"error: seat health receipt failed: {exc}", file=sys.stderr)
     if probe_failed:
         return None
@@ -625,6 +580,7 @@ def run(
                     return
                 yield None
         except fleet_session_bootstrap.PreflightDenial as exc:
+            runguard.raise_if_retained_run_lock(exc)
             yield f"fleet session policy denied seat {agent.name!r}: {exc.message}"
         finally:
             if token is not None:
@@ -660,10 +616,12 @@ def run(
             try:
                 run_info = os.lstat(run_path)
             except FileNotFoundError as exc:
+                runguard.raise_if_retained_run_lock(exc)
                 if durable_enrollment_expected:
                     raise runguard.RetainRunLockError("refusing to overwrite unknown durable enrollment state") from exc
                 run_info = None
             except OSError as exc:
+                runguard.raise_if_retained_run_lock(exc)
                 if durable_enrollment_expected:
                     raise runguard.RetainRunLockError("refusing to overwrite unknown durable enrollment state") from exc
                 run_info = None
@@ -674,6 +632,7 @@ def run(
                 try:
                     existing = json.loads(run_path.read_text())
                 except (OSError, ValueError, RecursionError) as exc:
+                    runguard.raise_if_retained_run_lock(exc)
                     if durable_enrollment_expected:
                         raise runguard.RetainRunLockError(
                             "refusing to overwrite unknown durable enrollment state"
@@ -755,6 +714,7 @@ def run(
         else:
             drift_snapshot = pre_run_snapshot
     except runguard.RunGuardError as exc:
+        runguard.raise_if_retained_run_lock(exc)
         print(f"error: pre-run snapshot failed: {exc}", file=sys.stderr)
         return 2
     pre_run_snapshot_payload = runguard.snapshot_payload(pre_run_snapshot)
@@ -797,6 +757,7 @@ def run(
         try:
             changed, untracked = runguard.changes_relative_to_snapshot(lock_workspace, drift_snapshot)
         except runguard.RunGuardError as exc:
+            runguard.raise_if_retained_run_lock(exc)
             return f"isolation breach: could not verify canonical checkout: {exc}"
         escaped = sorted(set(changed + untracked))
         if not escaped:
@@ -943,6 +904,7 @@ def run(
                 try:
                     run_payload = json.loads(run_path.read_text())
                 except (OSError, json.JSONDecodeError) as exc:
+                    runguard.raise_if_retained_run_lock(exc)
                     raise runguard.RetainRunLockError(
                         f"failed to read run receipt before seat-routing abort: {exc}"
                     ) from exc
@@ -1066,6 +1028,7 @@ def run(
                 model_lease=lease_model_agent,
             )
         except RuntimeError as exc:
+            runguard.raise_if_retained_run_lock(exc)
             final_attempt = plan_attempts[-1] if plan_attempts else None
             timed_out = isinstance(final_attempt, dict) and final_attempt.get("timed_out") is True
             if isinstance(final_attempt, dict) and isinstance(final_attempt.get("failure_kind"), str):
@@ -1136,7 +1099,8 @@ def run(
         if contract_for_plan is None:
             try:
                 run_raw = json.loads((output_dir / "run.json").read_text())
-            except (OSError, json.JSONDecodeError):
+            except (OSError, json.JSONDecodeError) as exc:
+                runguard.raise_if_retained_run_lock(exc)
                 run_raw = None
             if isinstance(run_raw, dict) and isinstance(run_raw.get("verification_contract"), dict):
                 contract_for_plan = dict(run_raw["verification_contract"])
@@ -1146,7 +1110,8 @@ def run(
         if budget_for_plan is None:
             try:
                 run_raw = json.loads((output_dir / "run.json").read_text())
-            except (OSError, json.JSONDecodeError):
+            except (OSError, json.JSONDecodeError) as exc:
+                runguard.raise_if_retained_run_lock(exc)
                 run_raw = None
             if isinstance(run_raw, dict) and isinstance(run_raw.get("run_budget"), dict):
                 budget_for_plan = dict(run_raw["run_budget"])
@@ -1183,7 +1148,8 @@ def run(
         )
         try:
             prior_plan = json.loads((output_dir / "plan.json").read_text())
-        except (OSError, json.JSONDecodeError):
+        except (OSError, json.JSONDecodeError) as exc:
+            runguard.raise_if_retained_run_lock(exc)
             prior_plan = None
         if isinstance(prior_plan, dict) and isinstance(prior_plan.get("verification_contract"), dict):
             plan_doc["verification_contract"] = dict(prior_plan["verification_contract"])
@@ -1297,10 +1263,16 @@ def run(
             close()
 
     def close_server_resources() -> None:
+        pending = sys.exc_info()[1]
         try:
-            close_control_server()
-        finally:
-            close_appserver()
+            try:
+                close_control_server()
+            finally:
+                close_appserver()
+        except BaseException:
+            if pending is not None:
+                runguard.raise_if_retained_run_lock(pending)
+            raise
 
     try:
         if effective_transport == "app-server":
@@ -1325,6 +1297,7 @@ def run(
                 with claim_loss_cancellation.cancellation_boundary(check_cancellation):
                     appserver.start()
             except codex_appserver.AppServerError as exc:
+                runguard.raise_if_retained_run_lock(exc)
                 close_appserver()
                 transport_routing_payload = seat_health_policy.transport_fallback_decision(
                     requested_transport="app-server",
@@ -1336,6 +1309,7 @@ def run(
                     try:
                         run_io._write_json(output_dir / "transport-routing.json", dict(transport_routing_payload))
                     except OSError as write_exc:
+                        runguard.raise_if_retained_run_lock(write_exc)
                         print(f"error: transport routing receipt failed: {write_exc}", file=sys.stderr)
                 print(
                     f"warning: codex app-server unavailable ({exc}); falling back to exec [transport-unavailable]",
@@ -1349,6 +1323,7 @@ def run(
                 try:
                     control_transport = control_server.start()
                 except run_control.ControlError as exc:
+                    runguard.raise_if_retained_run_lock(exc)
                     close_control_server()
                     print(f"warning: run control unavailable ({exc})", file=sys.stderr)
                     control_registry = None
@@ -1411,17 +1386,20 @@ def run(
             )
         except run_budget.BudgetCompatibilityError as exc:
             # Unknown schema/dimension must stop recovery/dispatch with a bounded diagnostic.
-            active_seat = active_seats[0] if len(active_seats) == 1 else None
-            artifacts.record_run_termination(
-                output_dir,
-                status="failed",
-                failure_phase="dispatch",
-                failure_kind="unexpected-error",
-                detail=f"run budget compatibility error: {exc.diagnostic}",
-                seat=active_seat,
-                active_seats=active_seats,
-            )
-            close_server_resources()
+            try:
+                runguard.raise_if_retained_run_lock(exc)
+                active_seat = active_seats[0] if len(active_seats) == 1 else None
+                artifacts.record_run_termination(
+                    output_dir,
+                    status="failed",
+                    failure_phase="dispatch",
+                    failure_kind="unexpected-error",
+                    detail=f"run budget compatibility error: {exc.diagnostic}",
+                    seat=active_seat,
+                    active_seats=active_seats,
+                )
+            finally:
+                close_server_resources()
             return 1
 
     def stage_started(stage: int, seats: tuple[str, ...]) -> None:
@@ -1449,6 +1427,7 @@ def run(
             run_checkpoint.CheckpointError,
             OSError,
         ) as exc:
+            runguard.raise_if_retained_run_lock(exc)
             raise runguard.RetainRunLockError(f"failed to record budget cancel receipt: {exc}") from exc
 
     def dispatch_interrupted() -> None:
@@ -1486,6 +1465,7 @@ def run(
                 attempt=attempt,
             )
         except (OSError, run_lifecycle.LifecycleJournalError, run_checkpoint.CheckpointError) as exc:
+            runguard.raise_if_retained_run_lock(exc)
             raise runguard.RetainRunLockError(f"failed to record dispatch lifecycle fact: {exc}") from exc
         if event is None:
             return None
@@ -1506,6 +1486,7 @@ def run(
                 record_requested=lambda attempt: dispatch_fact("run.dispatch.requested", agent, attempt),
             )
         except run_budget.BudgetPolicyError as exc:
+            runguard.raise_if_retained_run_lock(exc)
             if exc.exhausted:
                 record_budget_cancel(
                     request_id=f"budgetcancel:{exc.dimension}",
@@ -1516,6 +1497,7 @@ def run(
         except (OSError, run_lifecycle.LifecycleJournalError, run_checkpoint.CheckpointError) as exc:
             # Mirror dispatch_fact fail-closed translation so enrollment gaps
             # before the durable requested write retain the run lock.
+            runguard.raise_if_retained_run_lock(exc)
             raise runguard.RetainRunLockError(f"failed to record dispatch lifecycle fact: {exc}") from exc
 
     def dispatch_observed(agent: Agent, attempt: int) -> None:
@@ -1537,7 +1519,8 @@ def run(
                 allow_model_smoke=False,
                 require_hard_isolation=read_only,
             )
-        except Exception:
+        except Exception as exc:
+            runguard.raise_if_retained_run_lock(exc)
             return False
         if output_dir is not None:
             try:
@@ -1547,6 +1530,7 @@ def run(
                     run_id=output_dir.name,
                 )
             except OSError as exc:
+                runguard.raise_if_retained_run_lock(exc)
                 print(f"error: seat health receipt failed: {exc}", file=sys.stderr)
         return result.status == "healthy"
 
@@ -1560,6 +1544,7 @@ def run(
                 receipt_schema.worker_results_document(_worker_payload([result]), producer_run_id=output_dir.name),
             )
         except OSError as exc:
+            runguard.raise_if_retained_run_lock(exc)
             print(f"error: worker attempt receipt failed: {exc}", file=sys.stderr)
 
     active_seat = active_seats[0] if len(active_seats) == 1 else None
@@ -1569,15 +1554,15 @@ def run(
         run_id=output_dir.name if output_dir is not None else message_envelope.IN_MEMORY_RUN_ID,
         to_seat=roster.orchestrator,
     )
-    # Worker-only: the orchestrator's own attempt keeps its local capacity and
-    # is never delegated, so a chef can never recurse into a T3 delegate.
-    remote_transport = _worker_remote_transport(
-        cwd=cwd,
-        run_id=output_dir.name if output_dir is not None else message_envelope.IN_MEMORY_RUN_ID,
-        model_policy=model_policy,
-        process_registry=claim_process_registry,
-    )
     try:
+        # Worker-only: the orchestrator's own attempt keeps its local capacity and
+        # is never delegated, so a chef can never recurse into a T3 delegate.
+        remote_transport = _worker_remote_transport(
+            cwd=cwd,
+            run_id=output_dir.name if output_dir is not None else message_envelope.IN_MEMORY_RUN_ID,
+            model_policy=model_policy,
+            process_registry=claim_process_registry,
+        )
         try:
             worker_results = planning._call_with_process_registry(
                 planning.dispatch,
@@ -1621,6 +1606,7 @@ def run(
         except runguard.RetainRunLockError:
             raise
         except run_budget.BudgetPolicyError as exc:
+            runguard.raise_if_retained_run_lock(exc)
             active_seat = active_seats[0] if len(active_seats) == 1 else None
             status, kind = run_budget.terminal_status_for_policy("budget_exhausted")
             # Reservation denial without full exhaustion still terminalizes the
@@ -1652,6 +1638,7 @@ def run(
                 )
             raise
         except TimeoutError as exc:
+            runguard.raise_if_retained_run_lock(exc)
             active_seat = active_seats[0] if len(active_seats) == 1 else None
             detail = run_io._one_line(str(exc)) or "worker dispatch timed out"
             if output_dir is not None:
@@ -1666,6 +1653,7 @@ def run(
                 )
             raise
         except Exception as exc:
+            runguard.raise_if_retained_run_lock(exc)
             active_seat = active_seats[0] if len(active_seats) == 1 else None
             detail = f"{type(exc).__name__}: {run_io._one_line(str(exc)) or 'unexpected dispatch failure'}"
             if output_dir is not None:
@@ -1954,6 +1942,7 @@ def run(
                 read_only=read_only,
             )
         except OSError as exc:
+            runguard.raise_if_retained_run_lock(exc)
             detail = f"handoff failed: {exc}"
             if output_dir is not None:
                 direct_worker_finish.write_handoff_failure_receipt(

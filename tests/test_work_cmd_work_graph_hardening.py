@@ -328,10 +328,11 @@ def test_hand_edited_self_edge_surfaces_as_cycle_not_ready(tmp_path, capsys):
     assert blocked["reason"] == edges_mod.REASON_DEPENDENCY_CYCLE
 
 
-def test_hand_edited_dangling_edge_target_does_not_gate_or_crash(tmp_path, capsys):
+def test_hand_edited_missing_source_blocks_but_missing_target_is_informational(tmp_path, capsys):
     _init_git_repo(tmp_path)
     consumer = _add(tmp_path, "Dangling consumer")
     parent = _add(tmp_path, "Parent of missing child")
+    source = _add(tmp_path, "Source of missing dependent")
     ledger = work_cmd._read_task_ledger(tmp_path)
     ledger["edges"] = [
         {
@@ -348,13 +349,22 @@ def test_hand_edited_dangling_edge_target_does_not_gate_or_crash(tmp_path, capsy
             "type": "parent-child",
             "created_at": "2026-01-01T00:00:00+00:00",
         },
+        {
+            "id": "edge-missing-dependent",
+            "source": source["id"],
+            "target": "missing-dependent",
+            "type": "blocks",
+        },
     ]
     _write_raw_ledger(tmp_path, ledger)
     assert work_cmd.ready(target=tmp_path, explain=True, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
-    # Orphan blocker source must not gate the consumer.
+    # Missing sources fail closed while missing dependents stay informational.
     assert payload["orphan_count"] >= 1
-    assert consumer["id"] in {item["id"] for item in payload["ready"]}
+    assert consumer["id"] not in {item["id"] for item in payload["ready"]}
+    blocked = next(item for item in payload["blocked"] if item["id"] == consumer["id"])
+    assert blocked["reason"] == "missing_dependency"
+    assert source["id"] in {item["id"] for item in payload["ready"]}
     # Parent-of-missing is still a parent node, so not startable.
     assert parent["id"] not in {item["id"] for item in payload["ready"]}
 

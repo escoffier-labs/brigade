@@ -6,8 +6,11 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from brigade import work_cmd
 from brigade.work_cmd import campaign as campaign_mod
+from brigade.work_cmd import edges as edges_mod
 from brigade.work_cmd import footprint as footprint_mod
 from brigade.work_cmd import partition as partition_mod
 
@@ -108,6 +111,35 @@ def test_campaign_aggregates_ready_with_qualified_ids(tmp_path, monkeypatch, cap
     lib_qualified = campaign_mod.qualify_task_id("lib", lib_task["id"])
     assert by_id[lib_qualified]["repo"] == "lib"
     assert by_id[lib_qualified]["local_id"] == lib_task["id"]
+
+
+@pytest.mark.parametrize("with_edge_id", [True, False])
+def test_campaign_missing_member_dependency_omits_invalid_repairs(tmp_path, capsys, with_edge_id):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    member = _member_repo(workspace, "lib")
+    task = _add(member, "Missing member dependency")
+    ledger = work_cmd._read_task_ledger(member)
+    edge = {"source": "missing-task", "target": task["id"], "type": "blocks"}
+    if with_edge_id:
+        edge["id"] = "dangling-edge"
+    ledger["edges"] = [edge]
+    work_cmd._write_task_ledger(member, ledger)
+    _write_campaign(workspace, "dangling-member", {"version": 1, "members": [{"id": "lib", "path": "lib"}]})
+
+    assert work_cmd.ready(target=workspace, campaign="dangling-member", json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["ready"] == []
+    blocked = payload["blocked"][0]
+    assert blocked["id"] == campaign_mod.qualify_task_id("lib", task["id"])
+    assert blocked["reason"] == edges_mod.REASON_MISSING_DEPENDENCY
+    assert blocked["missing_dependencies"][0]["id"] == "lib:missing-task"
+    for dependency in [*blocked["missing_dependencies"], *payload["orphans"]]:
+        assert "repair_commands" not in dependency
+    assert work_cmd.ready(target=workspace, campaign="dangling-member", explain=True) == 0
+    explained = capsys.readouterr().out
+    assert "missing_dependency: lib:missing-task" in explained
+    assert "repair:" not in explained
 
 
 def test_cross_repo_blocks_gate_campaign_readiness(tmp_path, monkeypatch, capsys):

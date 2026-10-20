@@ -147,6 +147,45 @@ def test_work_run_task_id_refuses_blocked_dependency(tmp_path, monkeypatch, caps
     assert "completed_at" not in stored
 
 
+@pytest.mark.parametrize("start_path", ["claim", "task_claim", "run"])
+def test_deleted_dependency_refuses_start_and_survives_mutation(tmp_path, monkeypatch, capsys, start_path):
+    """#1857: deleting a blocker must not authorize a claim or explicit run."""
+    _init_git_repo(tmp_path)
+    artifacts_dir = tmp_path / ".brigade" / "runs"
+    dogfood_cmd.init(target=tmp_path, artifacts_dir=artifacts_dir)
+    blocker = _add(tmp_path, "Dependency removed by partial restore")
+    dependent = _add(tmp_path, "Dependent must stay pending")
+    assert (
+        work_cmd.task_edge_add(target=tmp_path, edge_type="blocks", source=blocker["id"], target_id=dependent["id"])
+        == 0
+    )
+    ledger = json.loads(_tasks_path(tmp_path).read_text())
+    original_edges = ledger["edges"]
+    ledger["tasks"] = [task for task in ledger["tasks"] if task["id"] != blocker["id"]]
+    _write_raw_ledger(tmp_path, ledger)
+    _add(tmp_path, "Unrelated mutation preserves the dangling edge")
+    assert json.loads(_tasks_path(tmp_path).read_text())["edges"] == original_edges
+    capsys.readouterr()
+    seen: dict = {}
+    _fake_successful_dogfood(monkeypatch, seen)
+
+    if start_path == "run":
+        rc = work_cmd.run(None, target=tmp_path, task_id=dependent["id"], handoff=False)
+    elif start_path == "task_claim":
+        rc = work_cmd.task_claim(target=tmp_path, task_id=dependent["id"], actor="ops")
+    else:
+        rc = work_cmd.claim(target=tmp_path, task_id=dependent["id"], actor="ops")
+    assert rc != 0
+    assert "missing_dependency" in capsys.readouterr().err
+    assert seen.get("called") is not True
+    ledger = json.loads(_tasks_path(tmp_path).read_text())
+    stored = next(task for task in ledger["tasks"] if task["id"] == dependent["id"])
+    assert stored["status"] == "pending"
+    assert "claim" not in stored
+    assert "completed_at" not in stored
+    assert ledger["edges"] == original_edges
+
+
 def test_work_run_task_id_and_default_refuse_unresolved_decision(tmp_path, monkeypatch, capsys):
     """#1034: explicit and default run must honor decision checkpoints."""
     _init_git_repo(tmp_path)

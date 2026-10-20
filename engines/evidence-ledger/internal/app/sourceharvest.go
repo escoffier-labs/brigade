@@ -36,12 +36,8 @@ func cmdImportSourceHarvest(args []string, out, errw io.Writer) int {
 		return fatalf(errw, "usage: miseledger import sourceharvest <jsonl|markdown|files|html|gitlog|json> <sourceharvest-args> [--json] [--dry-run]")
 	}
 	asJSON, dryRun, passArgs := splitWrapperFlags(args)
-	if !hasFlag(passArgs, "out") {
-		passArgs = append(passArgs, "--out", "-")
-	}
-	if !hasFlag(passArgs, "json") {
-		passArgs = append(passArgs, "--json")
-	}
+	passArgs = ensureValueFlag(passArgs, "out", "-")
+	passArgs = ensureBoolFlag(passArgs, "json")
 	if err := toolpath.Require("sourceharvest", toolpath.HintSourceHarvest); err != nil {
 		return fatalf(errw, "import sourceharvest: %s", err)
 	}

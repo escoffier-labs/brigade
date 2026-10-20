@@ -786,7 +786,7 @@ def ready(
             payload = campaign_mod.campaign_readiness_payload(
                 target,
                 campaign,
-                explain=explain,
+                explain=explain or json_output,
                 parallel_safe=parallel_safe,
             )
         except ledger_mod.TaskLedgerError as exc:
@@ -805,7 +805,7 @@ def ready(
             return int(exc.exit_code)
     else:
         try:
-            payload = ledger_mod._readiness_payload(target, explain=explain, parallel_safe=parallel_safe)
+            payload = ledger_mod._readiness_payload(target, explain=explain or json_output, parallel_safe=parallel_safe)
         except ledger_mod.TaskLedgerError as exc:
             return _emit_ledger_error(exc, json_output=json_output)
     if json_output:
@@ -846,8 +846,12 @@ def ready(
                 f"- blocked {item['id']} reason={item.get('reason')} "
                 f"blockers={len(item.get('blockers') or [])} {helpers._short(str(item.get('title') or ''))}"
             )
-            for blocker in item.get("blockers") or []:
-                print(f"    blocker: {blocker['id']} [{blocker.get('status')}] via={blocker.get('via')}")
+            for blocker in item.get("blocking_dependencies") or []:
+                print(f"    blocking_dependency: {blocker['id']} [{blocker.get('status')}] via={blocker.get('via')}")
+            for dependency in item.get("missing_dependencies") or []:
+                print(f"    missing_dependency: {dependency['id']} via={dependency.get('via')}")
+                for command in dependency.get("repair_commands") or []:
+                    print(f"    repair: {command}")
         for cycle in payload.get("cycles") or []:
             print(f"- cycle reason={cycle.get('reason')} nodes={','.join(cycle.get('nodes') or [])}")
         for orphan in payload.get("orphans") or []:
@@ -926,19 +930,19 @@ def task_edge_remove(
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
     if not edge_id and not (source and target_id and edge_type):
-        print("error: pass --id or --type with --source and --target", file=sys.stderr)
+        print("error: pass --id or --type with --source and --edge-target", file=sys.stderr)
         return 2
     with ledger_mod._task_ledger_lock(target):
         ledger = ledger_mod._read_task_ledger(target)
         resolved_source = source
         resolved_target = target_id
-        if source and not edge_id:
+        if source and not edge_id and not any(edge["source"] == source for edge in ledger["edges"]):
             source_task, _ = ledger_mod._find_task(target, source)
             if source_task is None:
                 print(f"error: unknown source task: {source}", file=sys.stderr)
                 return 1
             resolved_source = str(source_task["id"])
-        if target_id and not edge_id:
+        if target_id and not edge_id and not any(edge["target"] == target_id for edge in ledger["edges"]):
             target_task, _ = ledger_mod._find_task(target, target_id)
             if target_task is None:
                 print(f"error: unknown target task: {target_id}", file=sys.stderr)
