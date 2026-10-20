@@ -859,10 +859,32 @@ def test_claims_are_paged_with_an_opaque_cursor(stations, hub):
         cursor = page["next_cursor"]
         if cursor is None:
             break
-        assert isinstance(cursor, str) and all(char in "0123456789abcdef" for char in cursor)
+        assert isinstance(cursor, str) and all(char in "0123456789abcdef." for char in cursor)
     assert [target for target in seen if target.startswith("page-")] == [f"page-{index}" for index in range(5)]
     assert pages == 3
     _payload, error = stations[0].call("fleet_claims", {"limit": 501})
     assert error
     _payload, error = stations[0].call("fleet_claims", {"after": "not-hex"})
     assert error
+
+
+def test_claims_page_cursor_survives_shared_targets():
+    rows = [
+        {"target": "shared", "owner_node": NODE_A, "role": "claim"},
+        {"target": "shared", "owner_node": NODE_B, "role": "grokbot-lease"},
+        {"target": "zz-last", "owner_node": NODE_A, "role": "claim"},
+    ]
+    seen = []
+    after = None
+    while True:
+        page = fleet_hub_messages._claims_page(rows, limit=1, after=after)
+        seen.extend(page["claims"])
+        if page["next_cursor"] is None:
+            break
+        after = fleet_hub_messages._claims_page_args({"after": page["next_cursor"]})[1]
+    assert len(seen) == 3
+    assert {(row["target"], row["owner_node"]) for row in seen} == {
+        ("shared", NODE_A),
+        ("shared", NODE_B),
+        ("zz-last", NODE_A),
+    }
