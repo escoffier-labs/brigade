@@ -296,6 +296,8 @@ def _journal(lane: Lane, now: datetime) -> None:
             lane.terminal_at = _timestamp(event.recorded_at)
         elif event.event_type == "run.paused":
             phase = "paused"
+        elif event.event_type == "run.artifact_collection.started":
+            phase = "artifact-collection"
         elif event.event_type in {"run.resumed", "run.recovery.started"}:
             lane.terminal_status = None
             lane.terminal_at = None

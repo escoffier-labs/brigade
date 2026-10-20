@@ -335,6 +335,7 @@ def test_unchanged_evidence_keeps_classification_digest(tmp_path, capsys, monkey
     [
         ("run.completed", {"status": "ok"}, "complete"),
         ("run.paused", {"approval_id": "approval-1", "reason": "pending"}, "waiting"),
+        ("run.artifact_collection.started", {"detail": "collecting worker artifacts"}, "waiting"),
     ],
 )
 def test_journal_wins_over_stale_snapshot(tmp_path, monkeypatch, event_type, payload, expected):
@@ -342,7 +343,9 @@ def test_journal_wins_over_stale_snapshot(tmp_path, monkeypatch, event_type, pay
     from brigade.run_lane_state import Thresholds, classify, collect_lanes
 
     repo = _repo(tmp_path)
-    run_dir = _write_run(repo, "20260820-120000-patrol01", extra={"lifecycle_journal_requested": True})
+    run_dir = _write_run(
+        repo, "20260820-120000-patrol01", status="running", extra={"lifecycle_journal_requested": True}
+    )
     if expected == "waiting":
         _write_stale_lock(repo, run_dir)
     monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: True)
