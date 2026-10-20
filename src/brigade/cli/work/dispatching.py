@@ -759,6 +759,16 @@ def _dispatch_impl(args) -> int:
         args._brigade_parser.error(f"unknown task command: {args.task_command}")
         return 2
     if args.work_command == "import":
+        if args.from_bd_jsonl is not None:
+            if args.import_command is not None or not args.bd_version:
+                args._brigade_parser.error("--from-bd-jsonl requires --bd-version and cannot take an import subcommand")
+            from ...work_cmd.import_bd import import_bd_jsonl
+
+            return import_bd_jsonl(
+                target=args.target, input_path=args.from_bd_jsonl, bd_version=args.bd_version, json_output=args.json
+            )
+        if args.bd_version or args.import_command is None:
+            args._brigade_parser.error("work import requires a subcommand or --from-bd-jsonl with --bd-version")
         if args.import_command == "add":
             return work_cmd.import_add(
                 target=args.target,
