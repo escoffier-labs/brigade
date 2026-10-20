@@ -110,6 +110,13 @@ func TestHelpFlagAfterDoubleDashIsALiteralArgument(t *testing.T) {
 		t.Fatalf("search -- --help printed usage instead of searching for the literal term: %q", stdout)
 	}
 
+	for _, route := range []string{"memory", "cursor", "sessions"} {
+		code, stdout, stderr := run("crawl", route, "--", "--help")
+		if strings.Contains(stdout, "usage: miseledger") {
+			t.Fatalf("crawl %s -- --help printed usage for a literal argument: %q (code %d, stderr %q)", route, stdout, code, stderr)
+		}
+	}
+
 	_, _, rest, err := splitFlags([]string{"--json", "--", "--help", "-h", "--"}, nil, map[string]bool{"json": true})
 	if err != nil {
 		t.Fatal(err)

@@ -103,6 +103,9 @@ func stripBoolFlag(args []string, name string) []string {
 func hasBoolFlag(args []string, name string) bool {
 	long := "--" + name
 	for _, arg := range args {
+		if arg == "--" {
+			return false
+		}
 		if arg == long {
 			return true
 		}
