@@ -859,8 +859,9 @@ def test_claims_are_paged_with_an_opaque_cursor(stations, hub):
         cursor = page["next_cursor"]
         if cursor is None:
             break
-        assert isinstance(cursor, str) and all(char in "0123456789abcdef." for char in cursor)
-    assert [target for target in seen if target.startswith("page-")] == [f"page-{index}" for index in range(5)]
+        assert isinstance(cursor, str) and re.fullmatch(r"[0-9a-f]{32}\.[0-9a-f]{16}", cursor)
+    page_targets = [target for target in seen if target.startswith("page-")]
+    assert sorted(page_targets) == [f"page-{index}" for index in range(5)] and len(page_targets) == 5
     assert pages == 3
     _payload, error = stations[0].call("fleet_claims", {"limit": 501})
     assert error
@@ -888,3 +889,35 @@ def test_claims_page_cursor_survives_shared_targets():
         ("shared", NODE_B),
         ("zz-last", NODE_A),
     }
+
+
+def test_claims_cursor_is_fixed_length_for_long_targets():
+    long_target = "x" * 10_000
+    rows = [{"target": long_target, "owner_node": NODE_A}, {"target": "short", "owner_node": NODE_A}]
+    page = fleet_hub_messages._claims_page(rows, limit=1, after=None)
+    assert len(page["next_cursor"]) == 49
+    after = fleet_hub_messages._claims_page_args({"after": page["next_cursor"]})[1]
+    rest = fleet_hub_messages._claims_page(rows, limit=1, after=after)
+    assert {row["target"] for row in page["claims"] + rest["claims"]} == {long_target, "short"}
+    assert rest["next_cursor"] is None
+
+
+def test_claims_pages_stay_under_the_byte_budget(monkeypatch):
+    monkeypatch.setattr(fleet_hub_messages, "CLAIMS_PAGE_MAX_BYTES", 3000)
+    rows = [{"target": f"t{index}-" + "y" * 1000, "owner_node": NODE_A} for index in range(5)]
+    seen = []
+    after = None
+    pages = 0
+    while True:
+        page = fleet_hub_messages._claims_page(rows, limit=500, after=after)
+        pages += 1
+        size = sum(len(json.dumps(row, separators=(",", ":"))) for row in page["claims"])
+        assert page["claims"] and size <= 3000
+        seen.extend(page["claims"])
+        if page["next_cursor"] is None:
+            break
+        after = fleet_hub_messages._claims_page_args({"after": page["next_cursor"]})[1]
+    assert len(seen) == 5 and pages >= 2
+    monkeypatch.setattr(fleet_hub_messages, "CLAIMS_PAGE_MAX_BYTES", 10)
+    single = fleet_hub_messages._claims_page(rows, limit=500, after=None)
+    assert len(single["claims"]) == 1 and single["next_cursor"] is not None

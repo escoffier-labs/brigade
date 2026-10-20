@@ -795,17 +795,25 @@ def reply(conn: sqlite3.Connection, raw: dict[str, Any], *, sender: str) -> dict
     return _fetch(conn, message["id"])
 
 
-# Station claims pages stay well under the client's response cap even with
-# long targets. Rows sort by (target, row fingerprint), because an ordinary
-# claim and a projected Grok Bot lease row can share a target. The cursor is
-# hex of that key, so it carries no peer-chosen text back to the model.
+# Station claims pages are bounded by row count and by serialized size, so a
+# page always fits the client's response cap. Rows page in a fixed-length key
+# order (SHA-256 of the target, then a fingerprint of the row), because targets
+# can be long and an ordinary claim and a projected Grok Bot lease row can share
+# a target. The cursor is that key, so it has a fixed length and carries no
+# peer-chosen text back to the model. Each page is shown in target order.
 CLAIMS_PAGE_DEFAULT = 200
 CLAIMS_PAGE_MAX = 500
+CLAIMS_PAGE_MAX_BYTES = 4 * 1024 * 1024
+_CLAIMS_CURSOR_RE = re.compile(r"[0-9a-f]{32}\.[0-9a-f]{16}")
 
 
 def _claim_key(row: dict[str, Any]) -> tuple[str, str]:
     canonical = json.dumps(row, sort_keys=True, separators=(",", ":"), default=str)
-    return str(row.get("target", "")), hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+    target = str(row.get("target", ""))
+    return (
+        hashlib.sha256(target.encode("utf-8")).hexdigest()[:32],
+        hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16],
+    )
 
 
 def _claims_page_args(raw: dict[str, Any]) -> tuple[int, tuple[str, str] | None]:
@@ -815,28 +823,31 @@ def _claims_page_args(raw: dict[str, Any]) -> tuple[int, tuple[str, str] | None]
     cursor = raw.get("after")
     if cursor is None:
         return limit, None
-    if not isinstance(cursor, str) or len(cursor) > 2 * 4096 + 17:
+    if not isinstance(cursor, str) or not _CLAIMS_CURSOR_RE.fullmatch(cursor):
         raise MessageError("invalid claims cursor")
-    target_hex, _, fingerprint = cursor.partition(".")
-    try:
-        target = bytes.fromhex(target_hex).decode("utf-8")
-    except ValueError:
-        raise MessageError("invalid claims cursor") from None
-    if len(fingerprint) != 16 or any(char not in "0123456789abcdef" for char in fingerprint):
-        raise MessageError("invalid claims cursor")
-    return limit, (target, fingerprint)
+    target_digest, fingerprint = cursor.split(".")
+    return limit, (target_digest, fingerprint)
 
 
 def _claims_page(rows: list[dict[str, Any]], *, limit: int, after: tuple[str, str] | None) -> dict[str, Any]:
     keyed = sorted(((_claim_key(row), row) for row in rows), key=lambda item: item[0])
     if after is not None:
         keyed = [item for item in keyed if item[0] > after]
-    page = keyed[:limit]
+    page: list[tuple[tuple[str, str], dict[str, Any]]] = []
+    size = 0
+    for item in keyed[:limit]:
+        row_size = len(json.dumps(item[1], separators=(",", ":"), default=str).encode("utf-8"))
+        # Always return at least one row so paging can never stall.
+        if page and size + row_size > CLAIMS_PAGE_MAX_BYTES:
+            break
+        page.append(item)
+        size += row_size
     next_cursor = None
-    if len(keyed) > limit and page:
-        target, fingerprint = page[-1][0]
-        next_cursor = f"{target.encode('utf-8').hex()}.{fingerprint}"
-    return {"claims": [row for _key, row in page], "next_cursor": next_cursor}
+    if len(keyed) > len(page) and page:
+        target_digest, fingerprint = page[-1][0]
+        next_cursor = f"{target_digest}.{fingerprint}"
+    claims = sorted((row for _key, row in page), key=lambda row: str(row.get("target", "")))
+    return {"claims": claims, "next_cursor": next_cursor}
 
 
 def _station_read(conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str) -> dict[str, Any]:
