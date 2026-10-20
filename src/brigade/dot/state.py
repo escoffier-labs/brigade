@@ -103,7 +103,10 @@ def _initialize_event_tables(connection: sqlite3.Connection) -> None:
         attempts INTEGER NOT NULL DEFAULT 0, next_attempt REAL NOT NULL DEFAULT 0,
         PRIMARY KEY(event_id, subscription_id))""")
     connection.execute("""CREATE TABLE IF NOT EXISTS wake_attempts (
-        timestamp REAL NOT NULL, priority TEXT NOT NULL)""")
+        timestamp REAL NOT NULL, priority TEXT NOT NULL, source TEXT NOT NULL DEFAULT '')""")
+    if "source" not in {row[1] for row in connection.execute("PRAGMA table_info(wake_attempts)")}:
+        # Unknown wake origins still consume the global budget, but confer no diagnostic scope.
+        connection.execute("ALTER TABLE wake_attempts ADD COLUMN source TEXT NOT NULL DEFAULT ''")
     connection.execute("""CREATE TABLE IF NOT EXISTS tracked_requests (
         request_id TEXT PRIMARY KEY, generation INTEGER NOT NULL DEFAULT 0,
         completed INTEGER NOT NULL DEFAULT 0)""")

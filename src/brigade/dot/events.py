@@ -340,7 +340,10 @@ class EventService:
                     )
                     continue
                 # Reserve failures too, so retries cannot exceed the hourly wake ceiling.
-                c.execute("INSERT INTO wake_attempts VALUES (?,?)", (now, row["priority"]))
+                c.execute(
+                    "INSERT INTO wake_attempts(timestamp,priority,source) VALUES (?,?,?)",
+                    (now, row["priority"], source),
+                )
             body = json.dumps(
                 dict(
                     eventId=row["event_id"],

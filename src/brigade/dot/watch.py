@@ -164,7 +164,11 @@ def read_bridge(
             key.removeprefix(scope + ":"): value
             for key, value in connection.execute("SELECT key,value FROM hub_state WHERE key LIKE ?", (scope + ":%",))
         }
-        value = connection.execute("SELECT MAX(timestamp) FROM wake_attempts").fetchone()[0]
+        value = None
+        if "source" in {row[1] for row in connection.execute("PRAGMA table_info(wake_attempts)")}:
+            value = connection.execute(
+                "SELECT MAX(timestamp) FROM wake_attempts WHERE source LIKE ?", ("hub-inbox:" + scope + ":%",)
+            ).fetchone()[0]
     if message_scope(*message_settings(str(runtime.hub.message_token_file))[:2]) != scope:
         raise DotError("hub_credential_changed")
     credential = any(hub.get(key) == "hub_credential_invalid" for key in ("last_sync_error", "last_reconcile_error"))

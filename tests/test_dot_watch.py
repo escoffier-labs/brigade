@@ -2,6 +2,8 @@
 
 from tests.dot_support import requires_local_state
 
+import asyncio
+import base64
 import json
 from datetime import timedelta
 from unittest.mock import patch
@@ -12,6 +14,8 @@ from brigade.dot import watch as w
 from brigade.dot import __main__ as cli
 from brigade.dot.contracts import DotError
 from brigade.dot.state import BridgeState
+from brigade.dot.events import EventService, enqueue
+from brigade.dot.hub_inbox import HubInbox
 from brigade import fleet_client
 from brigade.fleet_client_message_credentials import message_scope, message_settings
 from tests.test_dot_state import NOW
@@ -64,6 +68,104 @@ def run(configured, now, **kw):
         return w.run_watch_once(target, now=now, **kw)
 
 
+def wake_service(state, runtime, posted):
+    async def post(url, body, headers):
+        posted.append(json.loads(body)["data"]["msg_id"])
+        return 200, b"{}"
+
+    with state.transaction() as c:
+        c.execute(
+            "INSERT INTO subscriptions VALUES (?,?,?,?,?,?,?,?,?,?)",
+            (
+                "sub-example",
+                "owner-example",
+                "fleet.inbox.message",
+                "{}",
+                "https://callback.invalid",
+                "whsec_" + base64.b64encode(b"k" * 32).decode(),
+                None,
+                None,
+                None,
+                0,
+            ),
+        )
+    return EventService(
+        state,
+        fleet_status=lambda _: {},
+        hub=HubInbox(state, runtime.hub),
+        hub_poll_seconds=30,
+        callback_hosts=frozenset(),
+        post=post,
+    )
+
+
+@requires_local_state
+def test_watch_wake_status_is_bound_to_delivered_hub_scope(configured, scoped_hub, watch_settings):
+    target, _, _ = configured
+    runtime = w._load_config(target)[1]
+    posted = []
+    with BridgeState(runtime.paths.state_dir) as state:
+        service = wake_service(state, runtime, posted)
+        with state.transaction() as c:
+            enqueue(
+                c, "fleet.inbox.message", {"msg_id": 50}, "normal", "hub-inbox:" + scoped_hub + ":50", NOW.timestamp()
+            )
+        asyncio.run(service.deliver(NOW.timestamp()))
+        assert posted == [50]
+        assert w.read_bridge(runtime)[-1] == NOW
+        watch_settings["hub_url"] = "https://b.invalid"
+        other = service.hub.scope()
+        assert w.read_bridge(runtime)[-1] is None
+        with patch.object(w, "send", return_value=0):
+            report = run(configured, NOW + timedelta(minutes=31))
+        assert "wake_unanswered" not in {a["kind"] for a in report["alerts"]}
+        with state.transaction() as c:
+            enqueue(c, "fleet.inbox.message", {"msg_id": 1}, "normal", "hub-inbox:" + other + ":1", NOW.timestamp() + 1)
+        asyncio.run(service.deliver(NOW.timestamp() + 1))
+        # A's normal wake still debounces B globally, without becoming B's diagnostic wake.
+        assert posted == [50]
+        assert w.read_bridge(runtime)[-1] is None
+        asyncio.run(service.deliver(NOW.timestamp() + 300))
+        assert posted == [50, 1]
+        assert w.read_bridge(runtime)[-1] == NOW + timedelta(minutes=5)
+        watch_settings["hub_url"] = "https://hub.invalid/"
+        assert w.read_bridge(runtime)[-1] == NOW
+
+
+@requires_local_state
+def test_legacy_wake_rows_keep_global_budget_without_diagnostic_scope(configured, scoped_hub):
+    target, _, _ = configured
+    runtime = w._load_config(target)[1]
+    legacy = [(NOW.timestamp(), "urgent")] * 30
+    with BridgeState(runtime.paths.state_dir) as state:
+        with state.transaction() as c:
+            c.execute("DROP TABLE wake_attempts")
+            c.execute("CREATE TABLE wake_attempts (timestamp REAL NOT NULL, priority TEXT NOT NULL)")
+            c.executemany("INSERT INTO wake_attempts VALUES (?,?)", legacy)
+    # The read-only watcher must also ignore unknown origins before migration.
+    assert w.read_bridge(runtime)[-1] is None
+    # Reopen through the production initializer, as on upgrade.
+    with BridgeState(runtime.paths.state_dir) as state:
+        assert w.read_bridge(runtime)[-1] is None
+        with state.transaction() as c:
+            assert [tuple(r) for r in c.execute("SELECT timestamp,priority FROM wake_attempts")] == legacy
+        posted = []
+        service = wake_service(state, runtime, posted)
+        with state.transaction() as c:
+            enqueue(
+                c, "fleet.inbox.message", {"msg_id": 1}, "urgent", "hub-inbox:" + scoped_hub + ":1", NOW.timestamp()
+            )
+        asyncio.run(service.deliver(NOW.timestamp() + 1))
+        assert posted == []
+        assert w.read_bridge(runtime)[-1] is None
+        with state.transaction() as c:
+            assert [tuple(r) for r in c.execute("SELECT timestamp,priority FROM wake_attempts")] == legacy
+            assert c.execute("SELECT next_attempt FROM event_deliveries").fetchone()[0] == NOW.timestamp() + 3600
+        asyncio.run(service.deliver(NOW.timestamp() + 3601))
+        assert posted == [1]
+        assert w.read_bridge(runtime)[-1] == NOW + timedelta(seconds=3601)
+
+
 @requires_local_state
 def test_watch_fresh_stale_dedupe_and_realert(configured, scoped_hub):
     _, runtime, _ = configured
@@ -109,7 +211,10 @@ def test_watch_idle_credential_and_unanswered_wake(configured, scoped_hub):
         state.hub_set("last_sync_error", "hub_credential_invalid", scope=scoped_hub)
         with state.transaction() as c:
             c.execute("INSERT INTO tracked_requests(request_id) VALUES ('request-example')")
-            c.execute("INSERT INTO wake_attempts VALUES (?, 'normal')", ((NOW + timedelta(minutes=1)).timestamp(),))
+            c.execute(
+                "INSERT INTO wake_attempts(timestamp,priority,source) VALUES (?, 'normal', ?)",
+                ((NOW + timedelta(minutes=1)).timestamp(), "hub-inbox:" + scoped_hub + ":1"),
+            )
     with patch.object(w, "send", return_value=0), patch.object(w, "probe_route", return_value=["edge"]):
         first = w.run_watch_once(target, now=NOW + timedelta(hours=4))
         kinds = {a["kind"] for a in first["alerts"]}
