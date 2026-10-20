@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-import re
 from time import monotonic, sleep
 from typing import Any
 
@@ -149,7 +148,13 @@ def _frame(value: Any) -> Any:
     if isinstance(value.get("body"), str):
         subject = result.pop("subject", "")
         reference = result.pop("ref", None)
-        text = f"Subject: {subject}\nRef: {reference or ''}\nBody:\n{value['body']}"
+        # thread and sender_label are sender-chosen; only the authenticated sender stays outside.
+        thread = result.pop("thread", None)
+        sender_label = result.pop("sender_label", None)
+        text = (
+            f"Subject: {subject}\nRef: {reference or ''}\nThread: {thread or ''}\n"
+            f"Sender label: {sender_label or ''}\nBody:\n{value['body']}"
+        )
         result["body"] = wrap_untrusted(text, source_kind="peer-message")
         signal = scan_untrusted(text)
         # Excerpts would repeat peer instructions outside the fence.
@@ -157,18 +162,23 @@ def _frame(value: Any) -> Any:
     return result
 
 
-# Directory and claim records carry peer-written labels such as repo_label and
-# branch. Identifier-shaped values (IDs, timestamps, branch names) pass through;
-# any other text is fenced so a node cannot place instructions outside the fence.
-_PLAIN_FIELD = re.compile(r"[A-Za-z0-9][A-Za-z0-9._/:@+-]{0,255}")
+# Directory and claim records carry text that nodes choose (repo_label, branch,
+# claim target, harness, session ids). Only fields the hub authenticates or
+# assigns pass through unchanged; every other string is fenced, whatever it
+# looks like, so a node cannot place instructions outside the fence.
+_STRUCTURAL_FIELDS = frozenset({"node_id", "principal_id", "owner_node", "state", "expired"})
 
 
-def _frame_directory(value: Any) -> Any:
+def _structural(key: str) -> bool:
+    return key in _STRUCTURAL_FIELDS or key.endswith("_at")
+
+
+def _frame_directory(value: Any, key: str | None = None) -> Any:
     if isinstance(value, list):
-        return [_frame_directory(item) for item in value]
+        return [_frame_directory(item, key) for item in value]
     if isinstance(value, dict):
-        return {key: _frame_directory(item) for key, item in value.items()}
-    if isinstance(value, str) and value and not _PLAIN_FIELD.fullmatch(value):
+        return {name: _frame_directory(item, name) for name, item in value.items()}
+    if isinstance(value, str) and value and not (key is not None and _structural(key)):
         return {
             "untrusted": wrap_untrusted(value, source_kind="peer-message"),
             "flagged": scan_untrusted(value).flagged,
