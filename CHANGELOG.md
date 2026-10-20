@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Fleet claim renewal and release follow node-token rotation on the bound hub, including orphan-release retries, while retaining the last node credential when its token file is temporarily unavailable.
+
 ### Added
 
 - Memory care flags `unconsolidated-evidence` from a body-free evidence log written by ingest, with newer evidence ids in the refresh queue. (#1859)
@@ -36,6 +40,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Memory care bounds evidence-log scans to the newest 4 MiB and reports a warning when older history is excluded. (#1859)
 - Memory care retains pending evidence across automatic reinforcement review-date bumps and labels disabled evidence checks. External archive evidence ids use path hashes. (#1859)
 - Existing memory-care configs must add `unconsolidated-evidence` to `enabled_checks` after upgrading all readers. The memory-care guide documents migration and UTC log dates versus local reinforcement dates. (#1859)
+- Work readiness, claim, and explicit task runs fail closed on missing blockers or ancestor parents. JSON separates unfinished and missing dependencies, and explained output names edge-removal repairs. (Fixes #1857)
+- Readiness repair commands include the repository target and preserve literal edge endpoints when a live task shares their prefix. Campaign views omit member repair commands that use synthetic IDs. (Refs #1857)
+
 - Scanner children run with `BRIGADE_NO_UPDATE_CHECK=1`. The detached update refresh a child started outlived its throwaway sandbox and recreated it when writing `update-notify.json`, leaving one `brigade-scanner-child-*` directory in the temp dir per scanner run.
 
 ## [0.30.0] - 2026-10-20

@@ -20,6 +20,7 @@ Edge direction (pinned for CLI and JSON):
 from __future__ import annotations
 
 from dataclasses import dataclass
+from shlex import quote
 from typing import Any
 from uuid import uuid4
 
@@ -36,6 +37,7 @@ REASON_UNKNOWN_SOURCE = "unknown_source"
 REASON_UNKNOWN_TARGET = "unknown_target"
 REASON_DEPENDENCY_CYCLE = "dependency_cycle"
 REASON_OPEN_CHILDREN = "open_children"
+REASON_MISSING_DEPENDENCY = "missing_dependency"
 REASON_DUPLICATE_NODE_KEY = "duplicate_node_key"
 REASON_UNKNOWN_NODE_REF = "unknown_node_ref"
 REASON_INVALID_GRAPH = "invalid_graph"
@@ -362,8 +364,9 @@ def _blocker_paths_for_task(
     tasks: dict[str, dict[str, Any]],
     direct_blockers: dict[str, list[str]],
     parents_by_child: dict[str, list[str]],
+    edges: list[dict[str, Any]],
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Return (open_blocker_entries, orphan_entries) for one task."""
+    """Return (unfinished_dependencies, missing_dependencies) for one task."""
     open_blockers: list[dict[str, Any]] = []
     orphans: list[dict[str, Any]] = []
     seen_blocker: set[str] = set()
@@ -393,9 +396,32 @@ def _blocker_paths_for_task(
 
     for blocker_id in direct_blockers.get(task_id, ()):
         consider(blocker_id, via=[task_id])
-    for ancestor in _ancestor_ids(task_id, parents_by_child):
+    ancestors = _ancestor_ids(task_id, parents_by_child)
+    for ancestor in ancestors:
+        if ancestor not in tasks:
+            consider(ancestor, via=[task_id])
         for blocker_id in direct_blockers.get(ancestor, ()):
             consider(blocker_id, via=[ancestor, task_id])
+
+    dependency_targets = {task_id, *ancestors}
+    for orphan in orphans:
+        commands = []
+        for edge in edges:
+            if (
+                edge["type"] in READINESS_EDGE_TYPES
+                and edge["source"] == orphan["id"]
+                and edge["target"] in dependency_targets
+            ):
+                command = "brigade work task edge remove"
+                if edge.get("id"):
+                    command += f" --id {quote(edge['id'])}"
+                else:
+                    command += (
+                        f" --type {quote(edge['type'])} --source {quote(edge['source'])}"
+                        f" --edge-target {quote(edge['target'])}"
+                    )
+                commands.append(command)
+        orphan["repair_commands"] = commands
 
     open_blockers.sort(key=lambda item: (item["id"], tuple(item.get("via") or ())))
     orphans.sort(key=lambda item: (item["id"], tuple(item.get("via") or ())))
@@ -430,54 +456,35 @@ def resolve_readiness(ledger: dict[str, Any]) -> ReadinessResult:
 
     for task in candidates:
         task_id = str(task["id"])
-        if task_id in unknown_blocked_ids:
-            blocked.append(
-                {
-                    "id": task_id,
-                    "title": str(task.get("text") or ""),
-                    "status": _status_of(task),
-                    "reason": REASON_UNKNOWN_EDGE_TYPE,
-                    "blockers": [],
-                }
-            )
-            continue
-        if task_id in parent_set:
-            blocked.append(
-                {
-                    "id": task_id,
-                    "title": str(task.get("text") or ""),
-                    "status": _status_of(task),
-                    "reason": "parent_not_startable",
-                    "blockers": [],
-                }
-            )
-            continue
-        if task_id in cycle_nodes:
-            blocked.append(
-                {
-                    "id": task_id,
-                    "title": str(task.get("text") or ""),
-                    "status": _status_of(task),
-                    "reason": REASON_DEPENDENCY_CYCLE,
-                    "blockers": [],
-                }
-            )
-            continue
-        open_blockers, task_orphans = _blocker_paths_for_task(
+        open_blockers, missing_dependencies = _blocker_paths_for_task(
             task_id,
             tasks=tasks,
             direct_blockers=direct_blockers,
             parents_by_child=parents_by_child,
+            edges=edges,
         )
-        orphans.extend(task_orphans)
-        if open_blockers:
+        orphans.extend(missing_dependencies)
+        reason = None
+        if task_id in unknown_blocked_ids:
+            reason = REASON_UNKNOWN_EDGE_TYPE
+        elif task_id in parent_set:
+            reason = "parent_not_startable"
+        elif task_id in cycle_nodes:
+            reason = REASON_DEPENDENCY_CYCLE
+        elif missing_dependencies:
+            reason = REASON_MISSING_DEPENDENCY
+        elif open_blockers:
+            reason = "open_blockers"
+        if reason is not None:
             blocked.append(
                 {
                     "id": task_id,
                     "title": str(task.get("text") or ""),
                     "status": _status_of(task),
-                    "reason": "open_blockers",
-                    "blockers": open_blockers,
+                    "reason": reason,
+                    "blockers": open_blockers if reason in {"open_blockers", REASON_MISSING_DEPENDENCY} else [],
+                    "blocking_dependencies": open_blockers,
+                    "missing_dependencies": missing_dependencies,
                 }
             )
             continue

@@ -7,8 +7,18 @@ const crypto=require('node:crypto');
 const assert=require('node:assert/strict');
 const {spawnSync}=require('node:child_process');
 const {resolveNpmCli,createVerifier}=require('./provenance.cjs');
+const {readbackDelays}=require('./readback.cjs');
 const index=process.argv.indexOf('--artifacts');
 assert.ok(index>=0 && process.argv[index+1],'--artifacts required');
+// Tests shorten the wait with --readback-delays-ms '[0,1,1]'. Releases use the default window.
+const delaysIndex=process.argv.indexOf('--readback-delays-ms');
+const delays=delaysIndex<0?readbackDelays():JSON.parse(process.argv[delaysIndex+1]);
+// One deadline bounds every wait in the run, so a degraded registry fails with our message before the workflow step timeout.
+const budgetIndex=process.argv.indexOf('--readback-budget-ms');
+const budgetMs=budgetIndex<0?4800000:Number(process.argv[budgetIndex+1]);
+assert.ok(Number.isInteger(budgetMs) && budgetMs>0,'--readback-budget-ms must be a positive integer');
+const deadline=Date.now()+budgetMs;
+assert.ok(Array.isArray(delays) && delays.length>0 && delays.every(ms=>Number.isInteger(ms) && ms>=0),'--readback-delays-ms must be a JSON array of non-negative integers');
 const root=path.resolve(process.argv[index+1]);
 const metadata=JSON.parse(fs.readFileSync(path.join(root,'artifacts.json')));
 assert.match(process.env.GITHUB_SHA || '',/^[a-f0-9]{40}$/,'GITHUB_SHA must identify the packaging commit');
@@ -59,9 +69,21 @@ function integrity(a) {
   return 'unknown';
 }
 const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+// False when waiting would pass the run deadline.
+async function wait(delay) {
+  if(Date.now()>=deadline || Date.now()+delay>deadline) return false;
+  if(delay) await pause(delay);
+  return Date.now()<deadline;
+}
+function deadlineError(action) {
+  return new Error(`Registry reconciliation incomplete: read-back budget expired ${action}. Retain original archives and retry after inspection.`);
+}
+function requireBudget(action) {
+  if(Date.now()>=deadline) throw deadlineError(action);
+}
 async function reconcile(a,field) {
-  for(const delay of [0,1000,2000,4000,8000]) {
-    if(delay) await pause(delay);
+  for(const delay of delays) {
+    if(!await wait(delay)) break;
     if(field==='dist.integrity') {if(integrity(a)==='equal') return;}
     else {
       const r=read(a,field);
@@ -81,9 +103,11 @@ async function reconcile(a,field) {
 }
 async function main() {
   for(const a of [...companions,...launchers]) {
+    requireBudget(`before checking ${a.name}@${version}`);
     const state=integrity(a);
     if(state==='unknown') throw new Error(`Cannot establish registry state before publish: ${a.name}`);
     if(state==='absent') {
+      requireBudget(`before publishing ${a.name}@${version}`);
       const r=npm(['publish',path.join(root,a.filename),'--provenance','--access','public','--tag','latest','--ignore-scripts']);
       // Even a timeout or E403 may follow a successful registry write.
       console.log(JSON.stringify({name:a.name,publishExit:r.status,uncertain:!!r.error || r.status!==0}));
@@ -92,7 +116,12 @@ async function main() {
     await reconcile(a,'dist.attestations');
     console.log(JSON.stringify({name:a.name,version,integrity:a.integrity,status:'verified'}));
   }
-  const latest=read(launchers[0],'dist-tags.latest');
-  assert.equal(latest.status,0);assert.equal(latest.json,version,'latest must identify the stable launcher');
+  let latestMatches=false;
+  for(const delay of delays) {
+    if(!await wait(delay)) break;
+    const latest=read(launchers[0],'dist-tags.latest');
+    if(latest.status===0 && latest.json===version) {latestMatches=true;break;}
+  }
+  if(!latestMatches) throw deadlineError('while verifying latest tag');
 }
 main().catch(error=>{console.error(error.message);process.exitCode=1;}).finally(()=>fs.rmSync(tufCache,{recursive:true,force:true}));

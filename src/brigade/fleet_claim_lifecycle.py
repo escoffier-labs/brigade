@@ -6,6 +6,7 @@ can replace its clock, threading namespace, transport, and interrupt hooks.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from threading import Lock
 from types import ModuleType
@@ -29,6 +30,74 @@ def _client() -> ModuleType:
     from . import fleet_client
 
     return fleet_client
+
+
+def _token_snapshot() -> tuple[str, str, str]:
+    """``(hub_url, node_token, admin_token)`` from one ``fleet.toml`` read.
+
+    Mirrors ``load_fleet_settings`` precedence, but a token read from a file
+    is dropped when that same read names a hub other than the effective one,
+    so an environment hub never pairs with another hub's file token.
+    """
+    client = _client()
+    section = client._read_fleet_section(client.brigade_home() / client.FLEET_CONFIG_REL_PATH.name)
+    raw_hub = section.get("hub_url")
+    file_hub = raw_hub.strip() if isinstance(raw_hub, str) else ""
+    hub_url = os.environ.get("BRIGADE_FLEET_HUB_URL", "").strip() or file_hub
+    tokens = []
+    for env_name, file_key in (("BRIGADE_FLEET_NODE_TOKEN", "node_token_file"), ("BRIGADE_FLEET_TOKEN", "token_file")):
+        value = os.environ.get(env_name, "").strip()
+        path = section.get(file_key)
+        if not value and isinstance(path, str) and path.strip() and file_hub in ("", hub_url):
+            value = client._read_token_file(path)
+        tokens.append(value)
+    return hub_url, tokens[0], tokens[1]
+
+
+class _FleetConfig(dict[str, str]):
+    """Keep credential provenance without changing the connection mapping."""
+
+    def __init__(self, settings: dict[str, str], token: str) -> None:
+        super().__init__(hub_url=settings["hub_url"], token=token)
+        self.shared_token: bool | None = not bool(settings["node_token"]) if token else None
+
+
+def _bound_connection(hub_url: str, token: str, *, shared: bool | None = None) -> Callable[[], dict[str, Any]]:
+    """Pin ``hub_url`` for a claim while honoring node token rotation (#1781).
+
+    Each call re-reads configuration (see ``_token_snapshot``). Its token
+    replaces ``token`` only while the configured hub still equals ``hub_url``
+    (#1780). Untagged token files cannot identify a different hub's token
+    written before the hub configuration changes. Otherwise the
+    latest token seen for this hub is kept, never an earlier one a rotation
+    has already revoked. A claim bound to a node token never adopts
+    ``load_fleet_config``'s admin token fallback, which a briefly unreadable
+    node token file would trigger. The credential kind comes from the same
+    snapshot as the token, carried by ``load_fleet_config``. Callers supplying
+    only a token retain snapshot-based discovery when its kind is unknown.
+    A per-binding lock orders each complete read, cache update, and return;
+    callers perform network requests after the lock is released.
+    """
+    latest = token
+    lock = Lock()
+
+    def current() -> dict[str, Any]:
+        nonlocal latest, shared
+        with lock:
+            try:
+                configured_hub, node_token, admin_token = _token_snapshot()
+            except Exception:
+                configured_hub, node_token, admin_token = "", "", ""
+            if configured_hub == hub_url:
+                if node_token:
+                    latest, shared = node_token, False
+                elif admin_token and shared is not False:
+                    latest, shared = admin_token, True
+            return {"hub_url": hub_url, "token": latest}
+
+    current()
+
+    return current
 
 
 def _force_release(target: str, *, holder: str | None, acquired_at: str | None, **kwargs: Any) -> Any:
@@ -209,6 +278,7 @@ def _schedule_orphan_release(
     ttl_seconds: int,
     hub_url: str | None = None,
     token: str | None = None,
+    connect: Callable[[], dict[str, Any]] | None = None,
 ) -> None:
     """Best-effort background cleanup after a lost acquire response.
 
@@ -221,20 +291,22 @@ def _schedule_orphan_release(
     response must release before process exit kills this daemon thread.
     """
 
-    # Resolve before starting the daemon. A later environment/configuration
-    # change must never redirect this holder or its credential to another hub.
-    config = _client().load_fleet_config() if hub_url is None or token is None else {}
-    hub_url = config.get("hub_url", "") if hub_url is None else hub_url
-    token = config.get("token", "") if token is None else token
+    # Preserve a claim's existing binding, including its credential kind.
+    # Direct callers resolve before the daemon so later configuration changes
+    # cannot redirect this holder or its credential to another hub.
+    if connect is None:
+        config = _client().load_fleet_config() if hub_url is None or token is None else {}
+        shared = getattr(config, "shared_token", None) if token is None else None
+        hub_url = config.get("hub_url", "") if hub_url is None else hub_url
+        token = config.get("token", "") if token is None else token
+        connect = _bound_connection(hub_url, token, shared=shared)
     stop = _client().threading.Event()
 
     def _retry() -> None:
         started = _client().time.monotonic()
         deadline = started + ttl_seconds
         while not stop.is_set() and _client().time.monotonic() < deadline:
-            outcome = _client().release_claim(
-                target, node_id=node_id, holder=holder, conductor=conductor, hub_url=hub_url, token=token
-            )
+            outcome = _client().release_claim(target, node_id=node_id, holder=holder, conductor=conductor, **connect())
             if outcome.reason in CLEANUP_RETRY_REASONS:
                 stop.wait(min(_client().ORPHAN_RELEASE_RETRY_SECONDS, max(0.0, deadline - _client().time.monotonic())))
                 continue
