@@ -1748,10 +1748,10 @@ def repo_claim(
     decision = acquire_claim(target, supersede_dead_owner=supersede_dead_owner, **acquire_kwargs)
     ambiguous_initial_acquire = not decision.granted and decision.reason == "hub-unavailable"
     if not decision.granted and decision.reason in ("hub-unavailable", "missing"):
-        # One retry with the same fencing token: a lost response may have
-        # committed the row (idempotent for this holder), and a 409 with no
-        # owner means the target freed mid-request.
+        # One retry, same fencing token, current credential: a lost response may have committed the row
+        # (idempotent for this holder), and a 409 with no owner means the target freed mid-request.
         request_start = time.monotonic()
+        acquire_kwargs.update(connection())
         decision = acquire_claim(target, supersede_dead_owner=supersede_dead_owner, **acquire_kwargs)
     if not decision.granted and decision.reason == "quota":
         if ambiguous_initial_acquire:

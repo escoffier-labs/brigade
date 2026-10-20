@@ -1466,3 +1466,62 @@ def test_bound_connection_never_swaps_a_node_token_for_the_admin_fallback(monkey
     settings["admin_token"] = "fake-admin-two"
     expected = "fake-node-token" if bound == "fake-node-token" else "fake-admin-two"
     assert connection() == {"hub_url": hub_url, "token": expected}
+
+
+def test_bound_connection_ignores_a_file_token_for_another_hub_under_an_env_hub(tmp_path, monkeypatch):
+    """An environment hub must not pair with a file token that fleet.toml now
+    assigns to a different hub (#1781)."""
+    from brigade import fleet_claim_lifecycle
+
+    home = tmp_path / "home"
+    home.mkdir()
+    token_file = tmp_path / "node-token"
+
+    def configure(hub_url, token):
+        token_file.write_text(token + "\n", encoding="utf-8")
+        (home / "fleet.toml").write_text(
+            f'[fleet]\nhub_url = "{hub_url}"\nnode_token_file = "{token_file.as_posix()}"\n', encoding="utf-8"
+        )
+
+    for name in ("BRIGADE_FLEET_TOKEN", "BRIGADE_FLEET_NODE_TOKEN"):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("BRIGADE_HOME", str(home))
+    monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "https://hub-one.example.invalid")
+    configure("https://hub-one.example.invalid", "fake-token-one")
+    connection = fleet_claim_lifecycle._bound_connection("https://hub-one.example.invalid", "fake-token-one")
+    configure("https://hub-one.example.invalid", "fake-token-two")
+    assert connection()["token"] == "fake-token-two"
+    configure("https://hub-two.example.invalid", "fake-hub-two-token")
+    assert connection() == {"hub_url": "https://hub-one.example.invalid", "token": "fake-token-two"}
+
+
+def test_initial_acquire_retry_uses_a_token_rotated_during_the_first_attempt(monkeypatch):
+    """A first acquire lost to hub-unavailable is retried with the current
+    same-hub token, keeping the same holder (#1781)."""
+    hub_url = "https://hub-one.example.invalid"
+    settings = {"hub_url": hub_url, "node_token": "fake-token-one", "admin_token": ""}
+    accepted = {"fake-token-one"}
+    posts = []
+
+    def post(hub, token, body, *, timeout):
+        posts.append((body["action"], token, body.get("holder")))
+        if token not in accepted:
+            return 401, {"error": "unknown node token"}
+        if body["action"] == "acquire" and len(posts) == 1:
+            settings["node_token"] = "fake-token-two"
+            accepted.clear()
+            accepted.add("fake-token-two")
+            return 503, {"error": "fake lost response"}
+        key = {"acquire": "granted", "renew": "renewed", "release": "released"}[body["action"]]
+        return 200, {key: True, "claim": {"generation": 1}}
+
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: dict(settings))
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda base_path=None: NODE_A)
+    monkeypatch.setattr(fleet_client, "_claim_renew_interval", lambda ttl: 1000)
+    monkeypatch.setattr(fleet_client, "_post_claim_blocking", post)
+    monkeypatch.setattr(fleet_client, "EXIT_ORPHAN_RELEASE_RETRIES", 0)
+    monkeypatch.setattr(fleet_client, "CLAIM_TIMEOUT_SECONDS", 0.01)
+    with fleet_client.repo_claim("fake-target", ttl_seconds=60) as decision:
+        assert decision.granted
+    assert posts[1][:2] == ("acquire", "fake-token-two")
+    assert posts[0][2] == posts[1][2]

@@ -40,6 +40,8 @@ def _bound_connection(hub_url: str, token: str) -> Callable[[], dict[str, Any]]:
     is kept, never an earlier one a rotation has already revoked. A claim
     bound to a node token never adopts ``load_fleet_config``'s admin token
     fallback, which a briefly unreadable node token file would trigger.
+    When ``fleet.toml`` names a hub, it must also be the bound hub: an
+    environment hub never pairs with a file token now assigned elsewhere.
     """
     latest = token
     try:
@@ -50,10 +52,13 @@ def _bound_connection(hub_url: str, token: str) -> Callable[[], dict[str, Any]]:
     def current() -> dict[str, Any]:
         nonlocal latest, shared
         try:
+            # Settings first: a file switched to another hub after this read
+            # is still caught by the later file hub check.
             settings = _client().load_fleet_settings()
+            file_hub = _configured_file_hub()
         except Exception:
-            settings = {}
-        if settings.get("hub_url") == hub_url:
+            settings, file_hub = {}, ""
+        if settings.get("hub_url") == hub_url and file_hub in ("", hub_url):
             if settings.get("node_token"):
                 latest, shared = settings["node_token"], False
             elif shared and settings.get("admin_token"):
@@ -61,6 +66,12 @@ def _bound_connection(hub_url: str, token: str) -> Callable[[], dict[str, Any]]:
         return {"hub_url": hub_url, "token": latest}
 
     return current
+
+
+def _configured_file_hub() -> str:
+    client = _client()
+    value = client._read_fleet_section(client.brigade_home() / client.FLEET_CONFIG_REL_PATH.name).get("hub_url")
+    return value.strip() if isinstance(value, str) else ""
 
 
 def _force_release(target: str, *, holder: str | None, acquired_at: str | None, **kwargs: Any) -> Any:
