@@ -41,8 +41,10 @@ class BudgetLedger:
             )
 
     @contextmanager
-    def serialized(self) -> Iterator[sqlite3.Connection]:
-        conn = sqlite3.connect(self.path, timeout=30, isolation_level=None)
+    def serialized(self, *, timeout: float = 910) -> Iterator[sqlite3.Connection]:
+        # A reader permits three runner calls of at most 300 seconds each.
+        # Constructors and observations must also tolerate that transaction.
+        conn = sqlite3.connect(self.path, timeout=timeout, isolation_level=None)
         conn.row_factory = sqlite3.Row
         try:
             conn.execute("BEGIN IMMEDIATE")
@@ -67,7 +69,7 @@ class BudgetLedger:
         if hold:
             return hold["state"], hold["until"]
         count, first = conn.execute(
-            "SELECT count(*), min(at) FROM reads WHERE credential=? AND attempted=1 AND at>?",
+            "SELECT count(*), min(at) FROM reads WHERE credential=? AND attempted=1 AND etag_hit=0 AND at>?",
             (credential, now - 3600),
         ).fetchone()
         if count >= cap:
@@ -122,7 +124,7 @@ class BudgetLedger:
             result["requests"] += row["attempted"]
             result["etag_hits"] += row["etag_hit"]
             result["inconclusive"] += row["state"] == "inconclusive"
-            result["denied"] += row["attempted"] and row["status"] in {401, 403}
+            result["denied"] += row["attempted"] and row["status"] in {401, 403} and row["state"] != "rate-limited"
             result["fallbacks"] += row["fallback"]
             result["budget_exhausted"] += row["state"] == "budget-exhausted"
             credential = result["credentials"].setdefault(

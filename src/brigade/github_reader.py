@@ -1,4 +1,4 @@
-"""Injected node-local GitHub GET transport. No live client or Hub wiring.
+"""Injected node-local GitHub GET transport, with no Hub wiring.
 
 The required runner owns process execution, bounded stdout/stderr capture and a
 blocking timeout. It must apply the supplied environment overrides to the child
@@ -12,9 +12,11 @@ import base64
 import hashlib
 import json
 import math
+import os
 import re
 import sqlite3
 import time
+from collections import OrderedDict
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from email.utils import parsedate_to_datetime
@@ -49,6 +51,8 @@ _STATS = {
     "eligible_requests",
 }
 _ENVELOPE_OVERHEAD = 65536
+_CACHE_MAX_ENTRIES = 128
+_CACHE_MAX_BYTES = 16 * 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -68,6 +72,27 @@ class CommandRunner(Protocol):
     def __call__(self, argv: Sequence[str], *, env: Mapping[str, str], max_bytes: int, timeout: float) -> CommandResult:
         """Execute argv without a shell, capping output during collection."""
         ...
+
+
+class SubprocessRunner:
+    """Optional live runner using Brigade's bounded subprocess primitive.
+
+    Callers must put native gh and octopool executables on PATH, without a gh
+    shim. Environment overrides apply only to the child. Stderr is discarded.
+    Construction makes no requests or authentication changes.
+    """
+
+    def __call__(self, argv: Sequence[str], *, env: Mapping[str, str], max_bytes: int, timeout: float) -> CommandResult:
+        from brigade.dot.process import CommandRunner as BoundedRunner
+
+        if type(max_bytes) is not int or not 0 < max_bytes <= 32 * 1024 * 1024 + _ENVELOPE_OVERHEAD:
+            raise ValueError("positive bounded output cap required")
+        if not math.isfinite(timeout) or not 0 < timeout <= 300:
+            raise ValueError("positive bounded timeout required")
+        output = BoundedRunner().run(list(argv), env={**os.environ, **env}, timeout=timeout, max_output=max_bytes)
+        if output.timed_out:
+            return CommandResult(124, b"")
+        return CommandResult(output.returncode if output.returncode is not None else 1, output.stdout, output.overflow)
 
 
 @dataclass(frozen=True)
@@ -208,7 +233,7 @@ class GitHubReader:
         self.clock = clock
         self.timeout = timeout
         self._health: tuple[float, bool] | None = None
-        self._cache: dict[str, tuple[str, bytes]] = {}
+        self._cache: OrderedDict[str, tuple[str, bytes]] = OrderedDict()
         self._stats: dict[str, Any] | None = None
 
     def _run(self, argv: list[str], cap: int, fresh: bool = False) -> CommandResult:
@@ -279,22 +304,30 @@ class GitHubReader:
             query[key] = value
         endpoint = path + ("?" + urlencode(sorted(query.items())) if query else "")
         endpoint_key = hashlib.sha256(endpoint.encode()).hexdigest()
-        with self.ledger.serialized() as conn:
-            now = self.clock()
-            # Admission precedes the health probe. An exhausted relay allowance
-            # must not spend a probe or silently move to native credentials.
-            unhealthy = self._health is not None and 0 <= now - self._health[0] < 600 and not self._health[1]
-            route = "octopool" if self.visibility == "public" and not unhealthy else "gh"
-            credential = "octopool" if route == "octopool" else self.credential_class
-            if self.ledger.admission(conn, credential, route, endpoint_key, now, self.caps[credential]):
-                return self._read(conn, path, query, endpoint, endpoint_key, route, max_bytes, max_age, fresh)
-            route = "octopool" if self.visibility == "public" and self._healthy(now) else "gh"
-            result = self._read(conn, path, query, endpoint, endpoint_key, route, max_bytes, max_age, fresh)
-            if route == "octopool" and result.state == "inconclusive" and self.allow_public_fallback:
-                return self._read(
-                    conn, path, query, endpoint, endpoint_key, "gh", max_bytes, max_age, fresh, fallback=True
-                )
-            return result
+        queue_acquired = False
+        try:
+            with self.ledger.serialized(timeout=3 * self.timeout + 10) as conn:
+                queue_acquired = True
+                now = self.clock()
+                # Admission precedes the health probe. An exhausted relay allowance
+                # must not spend a probe or silently move to native credentials.
+                unhealthy = self._health is not None and 0 <= now - self._health[0] < 600 and not self._health[1]
+                route = "octopool" if self.visibility == "public" and not unhealthy else "gh"
+                credential = "octopool" if route == "octopool" else self.credential_class
+                if self.ledger.admission(conn, credential, route, endpoint_key, now, self.caps[credential]):
+                    return self._read(conn, path, query, endpoint, endpoint_key, route, max_bytes, max_age, fresh)
+                route = "octopool" if self.visibility == "public" and self._healthy(now) else "gh"
+                result = self._read(conn, path, query, endpoint, endpoint_key, route, max_bytes, max_age, fresh)
+                if route == "octopool" and result.state == "inconclusive" and self.allow_public_fallback:
+                    return self._read(
+                        conn, path, query, endpoint, endpoint_key, "gh", max_bytes, max_age, fresh, fallback=True
+                    )
+                return result
+        except sqlite3.OperationalError as exc:
+            if queue_acquired or exc.sqlite_errorcode not in {sqlite3.SQLITE_BUSY, sqlite3.SQLITE_LOCKED}:
+                raise
+            # The writer owns the ledger, so no deferred row can be recorded.
+            return ReadResult(503, b"", state="queue-busy", route="none")
 
     def _read(
         self,
@@ -360,6 +393,7 @@ class GitHubReader:
             truncated = output.truncated
             if route == "octopool":
                 if output.returncode != 0 or truncated:
+                    self._health = self.clock(), False
                     state = "inconclusive"
                 else:
                     status, headers, data, uncertain = _octopool(output.stdout)
@@ -369,14 +403,19 @@ class GitHubReader:
                 status, headers, data = _http(output.stdout)
             if status is not None and state == "ok":
                 state = {403: "access-denied", 404: "unavailable", 429: "rate-limited"}.get(status, "ok")
+                if status == 403 and ("retry-after" in headers or _integer(headers.get("x-ratelimit-remaining")) == 0):
+                    state = "rate-limited"
                 if status not in {200, 304, 403, 404, 429}:
                     state = "http-unavailable"
         except Exception:
+            if route == "octopool":
+                self._health = self.clock(), False
             state = "inconclusive" if route == "octopool" else "transport-unavailable"
         etag_hit = status == 304 and route == "gh" and endpoint in self._cache
         if status == 304:
             if etag_hit:
                 data = self._cache[endpoint][1]
+                self._cache.move_to_end(endpoint)
                 state = "not-modified"
             else:
                 state = "inconclusive"
@@ -384,6 +423,11 @@ class GitHubReader:
             self._cache.pop(endpoint, None)
             if status == 200 and state == "ok" and not truncated and len(data) <= cap and headers.get("etag"):
                 self._cache[endpoint] = headers["etag"], data
+                while (
+                    len(self._cache) > _CACHE_MAX_ENTRIES
+                    or sum(len(body) for _, body in self._cache.values()) > _CACHE_MAX_BYTES
+                ):
+                    self._cache.popitem(last=False)
         remaining = _integer(headers.get("x-ratelimit-remaining"))
         reset = _integer(headers.get("x-ratelimit-reset"))
         self._holds(conn, credential, route, key, headers, remaining, reset)

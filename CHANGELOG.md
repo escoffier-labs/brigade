@@ -9,7 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Add an injected node-local GitHub GET adapter with public Octopool routing, native ETag reads, serial hourly budgets, and a local observation ledger. Existing readers migrate separately. (#1873)
+- Add an injected node-local GitHub GET adapter with public Octopool routing, native ETag reads, a bounded subprocess runner, serial hourly budgets, and a local observation ledger. Existing readers migrate separately. (#1873)
 - `brigade memory serve-mcp --http` and `brigade skills serve-mcp --http` serve the read-only MCP tools over a stateless loopback Streamable HTTP endpoint (`POST /mcp`, `GET /healthz`) for MCP hosts that cannot spawn a stdio process. The server binds only `127.0.0.1` or `::1`, requires a bearer token from `BRIGADE_MCP_HTTP_TOKEN` (32 characters or more, never a flag), rejects non-loopback `Host` and `Origin` headers, and caps request bodies at 1 MiB. `--stdio` is unchanged.
 - MCP registry metadata for the two read-only servers: `mcp-registry/memory/server.json` (`io.github.escoffier-labs/brigade-memory`) and `mcp-registry/skills/server.json` (`io.github.escoffier-labs/brigade-skills`), with matching `mcp-name` markers in the README. `scripts/version_sync.py` keeps both manifests on the release version.
 - A `brigade-cli` console script alias, so `uvx brigade-cli memory serve-mcp --stdio` works without a global install.
@@ -23,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The beta channel moves to the 0.31 preview line. `brigade update --channel beta` resolves `0.31.0.devYYYYMMDD` wheels again, instead of older 0.29.0 development builds from before the 0.30.0 release.
 
 ### Fixed
+
+- Exclude validated GitHub 304s from the hourly cap, distinguish rate-limit 403s from denials, bound the ETag body cache, and report busy read queues. Failed relay commands invalidate cached health. (#1873)
 
 - Scanner children run with `BRIGADE_NO_UPDATE_CHECK=1`. The detached update refresh a child started outlived its throwaway sandbox and recreated it when writing `update-notify.json`, leaving one `brigade-scanner-child-*` directory in the temp dir per scanner run.
 

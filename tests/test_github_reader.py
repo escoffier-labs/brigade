@@ -1,6 +1,8 @@
 """Offline contracts for the node-local, GET-only GitHub adapter."""
 
 import json
+import sqlite3
+import sys
 from collections import deque
 from concurrent.futures import ThreadPoolExecutor
 from threading import Lock
@@ -129,6 +131,16 @@ def test_gh_etag_revalidation_keeps_body_and_counts_304(tmp_path):
     assert client.observation()["github_reads"]["etag_hits"] == 1
 
 
+def test_304_polls_do_not_exhaust_the_primary_cap(tmp_path):
+    runner = FakeRunner(gh(etag='"v1"'), *[gh(304) for _ in range(5)], gh())
+    client = reader(tmp_path, runner, visibility="private", hourly_caps={"user": 2})
+    for _ in range(7):
+        assert client.get(PATH, params={}, max_bytes=100).status == 200
+    assert client.get(PATH, params={}, max_bytes=100).state == "budget-exhausted"
+    summary = client.observation()["github_reads"]
+    assert (summary["requests"], summary["etag_hits"]) == (7, 5)
+
+
 @pytest.mark.parametrize("status,state", [(403, "access-denied"), (404, "unavailable"), (429, "rate-limited")])
 def test_gh_http_errors_are_explicit(tmp_path, status, state):
     runner = FakeRunner(gh(status))
@@ -151,6 +163,14 @@ def test_retry_after_defers_other_endpoints_and_survives_reopen(tmp_path, status
     assert reopened.get(PATH, params={}, max_bytes=100).status == 200
 
 
+@pytest.mark.parametrize("headers", [{"retry_after": "30"}, {"x_ratelimit_remaining": "0"}])
+def test_rate_limit_403_is_not_a_permission_denial(tmp_path, headers):
+    client = reader(tmp_path, FakeRunner(gh(403, **headers)), visibility="private")
+    result = client.get(PATH, params={}, max_bytes=100)
+    assert (result.status, result.state) == (403, "rate-limited")
+    assert client.observation()["github_reads"]["denied"] == 0
+
+
 def test_poll_interval_and_primary_reset_prevent_early_requests(tmp_path):
     clock = [1000.0]
     runner = FakeRunner(gh(x_poll_interval=20), gh(x_ratelimit_remaining=0, x_ratelimit_reset=1100), gh())
@@ -168,10 +188,10 @@ def test_poll_interval_and_primary_reset_prevent_early_requests(tmp_path):
 def test_ledger_totals_caps_and_rolling_window_are_durable(tmp_path):
     clock = [1000.0]
     runner = FakeRunner(gh(etag='"v1"', x_ratelimit_remaining=99, x_ratelimit_reset=4600), gh(304), gh(404), gh())
-    client = reader(tmp_path, runner, visibility="private", hourly_caps={"user": 3}, clock=lambda: clock[0])
+    client = reader(tmp_path, runner, visibility="private", hourly_caps={"user": 2}, clock=lambda: clock[0])
     for _ in range(3):
         client.get(PATH, params={}, max_bytes=100)
-    reopened = reader(tmp_path, runner, visibility="private", hourly_caps={"user": 3}, clock=lambda: clock[0])
+    reopened = reader(tmp_path, runner, visibility="private", hourly_caps={"user": 2}, clock=lambda: clock[0])
     assert reopened.get(PATH, params={}, max_bytes=100).state == "budget-exhausted"
     assert len(runner.calls) == 3
     summary = reopened.observation()["github_reads"]
@@ -214,6 +234,63 @@ def test_requests_are_serial_across_readers_sharing_a_ledger(tmp_path):
         results = list(pool.map(lambda client: client.get(PATH, params={}, max_bytes=100), clients))
     assert maximum == 1
     assert sorted(result.state for result in results) == ["budget-exhausted", "budget-exhausted", "ok", "ok"]
+
+
+def test_busy_queue_is_visible_without_spending_a_request(tmp_path):
+    runner = FakeRunner(gh())
+    ledger = BudgetLedger(tmp_path / "reads.sqlite")
+    client = GitHubReader("example/project", runner=runner, ledger=ledger, visibility="private")
+    # Exercise a real lock timeout without holding the suite for 30 seconds.
+    with sqlite3.connect(ledger.path) as blocker:
+        blocker.execute("BEGIN IMMEDIATE")
+        original_connect = sqlite3.connect
+
+        def impatient_connect(*args, **kwargs):
+            kwargs["timeout"] = 0.01
+            return original_connect(*args, **kwargs)
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(sqlite3, "connect", impatient_connect)
+            result = client.get(PATH, params={}, max_bytes=100)
+        assert (result.status, result.state) == (503, "queue-busy")
+        assert runner.calls == []
+        blocker.rollback()
+    assert client.get(PATH, params={}, max_bytes=100).status == 200
+
+
+@pytest.mark.parametrize("failure", [CommandResult(1, b""), CommandResult(0, b"", truncated=True), OSError()])
+def test_failed_relay_marks_health_unavailable_until_probe_ttl(tmp_path, failure):
+    clock = [1000.0]
+    runner = FakeRunner(failure, gh(), relay())
+    client = reader(tmp_path, runner, visibility="public", clock=lambda: clock[0])
+    assert client.get(PATH, params={}, max_bytes=100).state == "inconclusive"
+    assert client.get(PATH, params={}, max_bytes=100).route == "gh"
+    assert [call[0][0] for call in runner.calls] == ["octopool", "octopool", "gh"]
+    clock[0] += 600
+    assert client.get(PATH, params={}, max_bytes=100).route == "octopool"
+    assert runner.calls[-2][0] == ["octopool", "whoami"]
+
+
+@pytest.mark.parametrize("limit", ["entries", "bytes"])
+def test_etag_body_cache_evicts_least_recently_used_endpoint(tmp_path, monkeypatch, limit):
+    from brigade import github_reader
+
+    monkeypatch.setattr(github_reader, "_CACHE_MAX_ENTRIES", 2 if limit == "entries" else 128, raising=False)
+    monkeypatch.setattr(github_reader, "_CACHE_MAX_BYTES", 6 if limit == "bytes" else 16 * 1024 * 1024, raising=False)
+    runner = FakeRunner(
+        gh(body=b"[1]", etag='"v1"'),
+        gh(body=b"[2]", etag='"v2"'),
+        gh(304),
+        gh(body=b"[3]", etag='"v3"'),
+        gh(304),
+        gh(304),
+    )
+    client = reader(tmp_path, runner, visibility="private")
+    for page in (1, 2, 1, 3):
+        assert client.get(PATH, params={"page": page}, max_bytes=100).status == 200
+    assert client.get(PATH, params={"page": 1}, max_bytes=100).body == b"[1]"
+    assert client.get(PATH, params={"page": 2}, max_bytes=100).state == "inconclusive"
+    assert not any("If-None-Match" in arg for arg in runner.calls[-1][0])
 
 
 def test_force_fresh_requires_a_named_merge_gate(tmp_path):
@@ -329,3 +406,39 @@ def test_fallback_cannot_bypass_native_credential_cap(tmp_path):
     assert result.state == "budget-exhausted"
     assert all(call[0][0] == "octopool" for call in runner.calls)
     assert client.observation()["github_reads"]["requests"] == 1
+
+
+def test_supplied_subprocess_runner_bounds_output_and_discards_stderr():
+    from brigade.github_reader import SubprocessRunner
+
+    run = SubprocessRunner()
+    result = run(
+        [
+            sys.executable,
+            "-c",
+            "import os, sys; sys.stderr.write('discard-me'); sys.stdout.write(os.environ['EXAMPLE'])",
+        ],
+        env={"EXAMPLE": "literal $(no-shell)"},
+        max_bytes=100,
+        timeout=5,
+    )
+    assert result == CommandResult(0, b"literal $(no-shell)")
+    overflow = run(
+        [sys.executable, "-c", "import sys; sys.stdout.buffer.write(b'x' * 1000000)"],
+        env={},
+        max_bytes=100,
+        timeout=5,
+    )
+    assert overflow.stdout == b"x" * 100 and overflow.truncated
+
+
+def test_supplied_subprocess_runner_timeout_cannot_expose_partial_http_success():
+    from brigade.github_reader import SubprocessRunner
+
+    result = SubprocessRunner()(
+        [sys.executable, "-c", "import sys, time; print('HTTP/2.0 200 OK\\n\\n[]', flush=True); time.sleep(10)"],
+        env={},
+        max_bytes=100,
+        timeout=0.1,
+    )
+    assert result.returncode != 0 and result.stdout == b""
