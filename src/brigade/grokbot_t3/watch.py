@@ -17,6 +17,8 @@ from ..grokbot_feed import _NoRedirect
 from . import contracts as c
 from .fleet import CALL_TIMEOUT, FleetCallError, FleetTimeout
 from .ledger import Ledger, wake_target_id
+from .inbox import HubInbox
+from .runtime_config import Runtime
 from . import runtime_config
 from .runtime_config import read_owner_file
 
@@ -105,9 +107,58 @@ def _append_log(path: Path, record: dict[str, Any]) -> None:
         os.close(fd)
 
 
+def _wake_hub_inbox(
+    *,
+    runtime: Runtime,
+    ledger: Ledger,
+    wake_targets: dict[str, list[dict[str, str]]],
+    log_path: Path,
+    clock: Callable[[], datetime],
+    post: Post,
+    summary: dict[str, int],
+) -> None:
+    if runtime.hub_token_file is None:
+        return
+    summary["checked"] += 1
+    hub = HubInbox(token_file=str(runtime.hub_token_file))
+    scope = hub.notification_scope()
+    targets = wake_targets.get(runtime.hub_wake_target, [])
+    if not targets:
+        raise c.T3DispatchError("invalid_request")
+    cursors = {
+        wake_target_id(target["url"]): ledger.hub_wake_cursor(scope, wake_target_id(target["url"]))
+        for target in targets
+    }
+    rows = []
+    for page, _ in hub.pages(after=min(cursors.values())):
+        rows.extend(page)
+    for target in targets:
+        target_id = wake_target_id(target["url"])
+        pending = [row for row in rows if row["id"] > cursors[target_id]]
+        if not pending:
+            continue
+        body = {
+            "kind": "hub-inbox",
+            "count": len(pending),
+            "latest_id": pending[-1]["id"],
+            "sender_ids": sorted({row["sender"] for row in pending}),
+        }
+        try:
+            code = post(target["url"], read_key(target["key_file"]), body)
+        except Exception:
+            code = 0
+        if code == 200:
+            ledger.mark_hub_notified(scope, target_id, body["latest_id"])
+            summary["woken"] += 1
+        else:
+            summary["failed"] += 1
+        _append_log(log_path, {"at": clock().isoformat(timespec="seconds"), **body, "statuses": [code]})
+
+
 def run_watch_once(
     *,
     runner: Any,
+    runtime: Runtime | None = None,
     ledger: Ledger,
     wake_targets: dict[str, list[dict[str, str]]],
     log_path: Path,
@@ -119,6 +170,26 @@ def run_watch_once(
     clock = now or (lambda: datetime.now(timezone.utc))
     summary = {"checked": 0, "woken": 0, "failed": 0}
     started = monotonic()
+    if runtime is not None:
+        try:
+            _wake_hub_inbox(
+                runtime=runtime,
+                ledger=ledger,
+                wake_targets=wake_targets,
+                log_path=log_path,
+                clock=clock,
+                post=post,
+                summary=summary,
+            )
+        except Exception:
+            # Never let Hub credentials, outages or malformed pages starve request notifications.
+            summary["failed"] += 1
+            try:
+                _append_log(
+                    log_path, {"at": clock().isoformat(timespec="seconds"), "kind": "hub-inbox", "error": "hub-error"}
+                )
+            except OSError:
+                pass
     rows = ledger.pending_notifications()
     for index, row in enumerate(rows):
         if monotonic() - started >= budget_seconds:

@@ -5,67 +5,34 @@ from __future__ import annotations
 import builtins
 from datetime import datetime, timedelta, timezone
 import hashlib
-import json
 import os
 import re
 import threading
 import time
-from typing import Any, Callable, Iterator
+from typing import Any, Callable, Iterator, Mapping
 
-from brigade import fleet_client_messages
-from brigade.fleet_client import FleetClientError
-from brigade.fleet_client_message_credentials import ENV_TOKEN_FILE, FleetMessageHubError
+from brigade.fleet_client_message_credentials import ENV_TOKEN_FILE
+from brigade.hub_messages import (
+    LOCAL_CLI_CODES as LOCAL_CLI_CODES,
+    HubMessageError,
+    MessageOperations,
+    call_message,
+    inbox_page,
+    default_subject as default_subject,
+    legacy_message as legacy_message,
+    sender_name as sender_name,
+    truncate_subject as truncate_subject,
+)
 
-from .contracts import MAX_MESSAGE_BYTES, MESSAGE_BODY, THREAD, DotError, _text, require
+from .contracts import MESSAGE_BODY, THREAD, DotError, _text, require
 from .runtime_config import HubConfig
 from .state import BridgeState, _iso, utc_now
 
-LOCAL_CLI_CODES = {
-    "token_file_invalid": "hub_credential_invalid",
-    "admin_token_refused": "hub_credential_invalid",
-    "spool_conflict": "client_id_conflict",
-    "client_id_invalid": "invalid_request",
-    "invalid_argument": "invalid_request",
-}
 
-
-def sender_name(row: dict[str, Any], node_id: str) -> str:
-    label = row.get("sender_label")
-    sender = row["sender"]
-    return label if label and sender == node_id else f"{label}@{sender}" if label else sender
-
-
-def legacy_message(row: dict[str, Any], node_id: str) -> dict[str, Any]:
-    body = row["body"]
-    raw = body.encode("utf-8")
-    if len(raw) > MAX_MESSAGE_BYTES:
-        suffix = "\n[truncated; hub message " + str(row["id"]) + "]"
-        body = raw[: MAX_MESSAGE_BYTES - len(suffix.encode())].decode("utf-8", errors="ignore") + suffix
-    return dict(
-        id=row["id"],
-        created_at=row["created_at"],
-        sender=sender_name(row, node_id),
-        thread=row.get("thread"),
-        body=body,
-        acked_at=row.get("acked_at"),
-        priority="urgent" if row.get("priority") in ("high", "urgent") else "normal",
-        subject=row.get("subject"),
-        ref=row.get("ref"),
-        kind=row.get("kind") or "message",
-    )
-
-
-def truncate_subject(subject: str) -> str:
-    return subject.encode("utf-8")[:200].decode("utf-8", errors="ignore")
-
-
-def default_subject(body: str, kind: str, sender: str) -> str:
-    return truncate_subject(next((line.strip() for line in body.splitlines() if line.strip()), f"{kind} from {sender}"))
-
-
-class HubInbox:
+class HubInbox(MessageOperations):
     def __init__(self, state: BridgeState, hub: HubConfig, *, clock: Callable[[], datetime] = utc_now) -> None:
-        self.state, self.config, self.clock = state, hub, clock
+        super().__init__(token_file=str(hub.message_token_file), recipients=hub.recipients, clock=clock)
+        self.state, self.config = state, hub
         self._sync_lock = threading.Lock()
         self._reconcile_lock = threading.Lock()
 
@@ -74,28 +41,15 @@ class HubInbox:
             require(ENV_TOKEN_FILE not in os.environ, "hub_credential_invalid")
         token_file = str(self.config.message_token_file) if agent else None
         try:
-            value = getattr(fleet_client_messages, action)(*args, token_file=token_file, **kwargs)
-        except FleetMessageHubError as error:
-            code = {
-                401: "hub_unauthorized",
-                403: "hub_forbidden",
-                404: "message_not_found",
-                429: "hub_quota",
-                400: "invalid_request",
-                409: "invalid_request",
-            }.get(error.status or 0, "hub_unavailable")
-            code = {
-                "message_recipient_not_permitted": "recipient_not_permitted",
-                "message_sender_recipient_quota": "recipient_quota",
-            }.get(error.code or "", code)
-            if error.status is None:
-                code = LOCAL_CLI_CODES.get(error.code or "", code)
-            raise DotError(code) from None
-        except (FleetClientError, OSError, ValueError):
-            raise DotError("hub_unavailable") from None
-        if action != "flush_credential":
-            require(isinstance(value, dict), "hub_unavailable")
-        return value
+            return call_message(action, *args, token_file=token_file, **kwargs)
+        except HubMessageError as error:
+            raise DotError(error.code) from None
+
+    @property
+    def recipients(self) -> Mapping[str, str]:
+        return self.config.recipients
+
+    _require = staticmethod(require)
 
     def _pages(
         self,
@@ -113,20 +67,12 @@ class HubInbox:
                 return
             fetched_at = self.clock()  # A local ack after the fetch starts wins over this copy.
             value = self._call("list_messages", after=after, unacked=unacked, agent=agent, timeout=remaining)
-            rows, cursor = value.get("messages"), value.get("next_cursor")
-            require(isinstance(rows, list) and type(cursor) is int, "hub_unavailable")
-            previous = after
-            for row in rows:
-                require(
-                    isinstance(row, dict) and type(row.get("id")) is int and row["id"] > previous, "hub_inconsistent"
+            try:
+                rows, cursor = inbox_page(
+                    value, after=after, recipient=self.config.principal if agent else self.config.node_id
                 )
-                previous = row["id"]
-                require(
-                    row.get("recipient") == (self.config.principal if agent else self.config.node_id),
-                    "hub_inconsistent",
-                )
-                require(all(isinstance(row.get(k), str) for k in ("sender", "body", "created_at")), "hub_inconsistent")
-            require(cursor == previous, "hub_inconsistent")
+            except HubMessageError as error:
+                raise DotError(error.code) from None
             yield rows, cursor, fetched_at
             if not rows:
                 return
@@ -267,89 +213,6 @@ class HubInbox:
             "hub_unavailable",
         )
         return row
-
-    def reply(self, msg_id: int, body: str) -> dict[str, Any]:
-        cid = "mr-" + hashlib.sha256(f"{msg_id}\n{body}".encode()).hexdigest()[:40]
-        value = self._call(
-            "reply",
-            msg_id,
-            body=body,
-            subject=None,
-            reference=None,
-            priority="normal",
-            thread=None,
-            kind="message",
-            sender_label=None,
-            client_id=cid,
-        )
-        row = self._sent_message(value, agent=True)
-        result: dict[str, Any] = dict(
-            id=row["id"] if row else None,
-            msg_id=msg_id,
-            created_at=row["created_at"] if row else _iso(self.clock()),
-            body=body,
-        )
-        if row is None:
-            result["queued"] = True
-        return result
-
-    def send(
-        self,
-        to: str,
-        subject: str,
-        body: str,
-        ref: str | None = None,
-        priority: str = "normal",
-        thread: str | None = None,
-        kind: str = "message",
-        client_id: str | None = None,
-    ) -> dict[str, Any]:
-        # Node names from hub_recipients resolve to node ids; grants name node ids.
-        recipient = dict(self.config.recipients).get(to, to)
-        cid = (
-            client_id
-            or "ms-"
-            + hashlib.sha256(
-                json.dumps(
-                    [recipient, subject, body, ref, priority, thread, kind, int(self.clock().timestamp()) // 600]
-                ).encode()
-            ).hexdigest()[:40]
-        )
-        row = self._sent_message(
-            self._call(
-                "send",
-                recipient=recipient,
-                subject=subject,
-                body=body,
-                reference=ref,
-                priority=priority,
-                thread=thread,
-                kind=kind,
-                sender_label=None,
-                client_id=cid,
-            ),
-            agent=True,
-        )
-        return dict(
-            id=row["id"] if row else None,
-            to=to,
-            recipient=recipient,
-            created_at=row["created_at"] if row else _iso(self.clock()),
-            client_id=cid,
-            queued=row is None,
-        )
-
-    def status(self, ids: builtins.list[int]) -> dict[str, Any]:
-        value = self._call("sent", ids=ids)
-        require(isinstance(value.get("messages"), list), "hub_unavailable")
-        keys = ("id", "subject", "created_at", "acked_at", "acked_by", "reply_to")
-        names = {node: name for name, node in self.config.recipients.items()}
-        return dict(
-            messages=[
-                dict(to=names.get(row.get("recipient"), row.get("recipient")), **{k: row.get(k) for k in keys})
-                for row in value["messages"]
-            ]
-        )
 
     def send_completion(self, request_id: str, generation: int, state: str) -> bool:
         cid = "dbc-" + hashlib.sha256(f"{request_id}:{generation}".encode()).hexdigest()[:40]

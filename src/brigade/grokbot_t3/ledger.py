@@ -75,6 +75,10 @@ class Ledger:
             "CREATE TABLE IF NOT EXISTS intake_claims "
             "(issue_key TEXT PRIMARY KEY, request_id TEXT, claimed_at TEXT NOT NULL)"
         )
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS hub_wake_cursors "
+            "(scope TEXT NOT NULL, target TEXT NOT NULL, cursor INTEGER NOT NULL, PRIMARY KEY (scope, target))"
+        )
         # Seed legacy rows once, atomically with creation of the attempt ledger.
         with self._conn:
             self._conn.execute("BEGIN IMMEDIATE")
@@ -327,3 +331,19 @@ class Ledger:
                 "SELECT wake_attempts FROM requests WHERE request_id = ?", (request_id,)
             ).fetchone()
             return int(row[0])
+
+    def hub_wake_cursor(self, scope: str, target: str) -> int:
+        with self._lock:
+            row = self._conn.execute(
+                "SELECT cursor FROM hub_wake_cursors WHERE scope = ? AND target = ?", (scope, target)
+            ).fetchone()
+            return int(row[0]) if row is not None else 0
+
+    def mark_hub_notified(self, scope: str, target: str, cursor: int) -> None:
+        # Concurrent watchers can complete out of order. Never move a successful cursor backwards.
+        with self._lock:
+            self._conn.execute(
+                "INSERT INTO hub_wake_cursors (scope, target, cursor) VALUES (?, ?, ?) "
+                "ON CONFLICT (scope, target) DO UPDATE SET cursor = MAX(cursor, excluded.cursor)",
+                (scope, target, cursor),
+            )

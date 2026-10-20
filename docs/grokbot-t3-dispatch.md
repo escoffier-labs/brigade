@@ -19,7 +19,8 @@ Let Grok Bot bots launch and steer T3 Code threads on allowlisted fleet hosts th
 ## Runtime JSON
 
 The pack instance config stores one extra key, `runtime_path`, pointing to this
-owner-only JSON file. Every key below is required. Unknown keys are rejected.
+owner-only JSON file. The base keys below are required. Optional keys are marked
+in the reference table. Unknown keys are rejected.
 Use mode `0600` for the runtime file. It must be a regular file owned by the
 listener user, with no symlink or group/other permissions.
 
@@ -57,7 +58,7 @@ paths with your configured values.
 | Key | Meaning |
 |---|---|
 | `schema` | Must be `brigade.grokbot.t3-dispatch-runtime.v1`. |
-| `enabled` | Boolean kill switch for submit, followup, answer, and approve. Interrupt stays available. |
+| `enabled` | Boolean kill switch for submit, followup, answer, approve, inbox acknowledgement, reply, and send. Interrupt stays available. |
 | `t3_fleet_bin` | Absolute path to the local `t3-fleet` executable. |
 | `git_bin` | Absolute path to `git`, used to resolve `base_ref`. |
 | `repositories` | Nonempty map of allowed repository ids to `remote` and `default_branch`, up to 50 entries. Remotes must be HTTPS Git URLs ending in `.git`. |
@@ -72,12 +73,28 @@ paths with your configured values.
 | `ledger_path` | Absolute path to the pack-owned SQLite ledger. |
 | `wake_path` | Absolute path to the wake config below. |
 | `writable_paths` | Up to 8 additional absolute paths permitted by the service write sandbox. |
+| `hub_token_file` | Optional absolute path to a Fleet Hub message principal token file, for example `/srv/t3/config/principal.token`. Must be a regular file owned by the service user, mode `0600`, with no symlink. Omit it to leave all five Hub tools closed with `hub-not-configured`. |
+| `hub_wake_target` | Optional wake target name, default `default`. Must match a key in the wake config when Hub polling is enabled. |
+| `hub_recipients` | Optional map of up to 16 node-name aliases to node UUIDs, default `{}`. Example: `{"host-a":"00000000-0000-4000-8000-000000000001"}`. Node ids and `agent:example` pass through unchanged. |
 
 The service sandbox permits writes to the ledger and wake directories plus
 `writable_paths`. Include the actual t3-fleet state directory explicitly, such
 as `$HOME/.local/state/t3-fleet` after expansion. SSH `known_hosts` and
 `ControlPath` directories may also need write access. The unit renderers do
 not add these paths automatically. Doctor warns when `writable_paths` is empty.
+
+Hub messaging uses the existing Fleet configuration's `hub_url`, the direct
+Fleet message client, and the explicit principal file. No extra Hub URL or
+shell command is needed. Node names resolve through `hub_recipients`, using
+the same alias logic as Dot. The connector does not read broader Fleet policy
+credentials to resolve names. Provision the principal and its send grants on the
+Hub before enabling it. The token file contains only the token, with no trailing
+newline. Do not use an admin token. An invalid file closes messaging with
+`hub-error` and `hub_code: token_file_invalid`, while dispatch remains available.
+The underlying Fleet client keeps queued sends in its credential-scoped spool.
+Permit that spool directory in `writable_paths` if the service sandbox otherwise
+makes it read-only. The connector never adds credential values to tool results,
+request ledgers, wake payloads, logs, or subprocess arguments.
 
 Submits and follow-ups always send `runtime_mode: full-access`. This is fixed
 internally and is not a runtime JSON key or tool argument. Calls use machine
@@ -139,7 +156,8 @@ lists alongside it when needed. Each list accepts 1 through 4 targets. Wake requ
 HTTPS POST, `Authorization: Bearer <key>` and `X-Automation-Key: <key>`, an
 8-second timeout, no redirects or environment proxies, and one attempt per
 pending target per timer tick. A redirect counts as a failed wake. The JSON body
-contains only `request_id`, `state`, `repository`, and `title`.
+for request notifications contains only `request_id`, `state`, `repository`,
+and `title`.
 
 The watcher wakes on `needs_attention`, `unknown`, `succeeded`, `failed`, or
 `interrupted`. A state change clears `notified_state`, so a second question
@@ -152,10 +170,34 @@ status failures, it records `unknown`, stops polling that row, and sends one
 notification, subject to the same delivery retry cap. A successful status poll
 resets the failure count. Results append to `wake-notify.jsonl` beside `wake_path`.
 
+When `hub_token_file` is configured, the existing one-minute watcher also checks
+the principal's unacknowledged inbox. Each tick fetches at most 3 pages of 100
+messages, with a 1-second transport timeout per page and a 3-second polling
+budget. New message ids trigger the target list named by `hub_wake_target`.
+The wake body contains exactly `kind: "hub-inbox"`, `count`, `latest_id`, and
+`sender_ids`. It contains no subjects or message bodies. For example:
+
+```json
+{"kind":"hub-inbox","count":1,"latest_id":42,"sender_ids":["host-a"]}
+```
+
+Each target's last notified id persists in the ledger and advances only after
+HTTP 200. Successful targets suppress unchanged notifications across restarts.
+Failed wakes retry on the next tick without the request wake retry cap. The
+cursor is scoped to the credential so changing principals starts a fresh inbox
+scan. The watcher never acknowledges messages. Hub failures do not stop request
+wakes. A missing configured target reports a failure and waits for configuration
+to be corrected.
+
 ## Tools
 
 | Tool | Arguments | Does |
 |---|---|---|
+| `inbox_list` | Optional `unacked_only` (default `true`), `limit` (1 through 50, default 20) | Read the principal inbox. Marks message content as untrusted. Uses the same bounded page scan as the watcher. `has_more` marks an incomplete scan, so `unacked_total` then counts only fetched messages. Orders fetched messages oldest first for unacknowledged mail, newest first otherwise. |
+| `inbox_ack` | `ids` (1 through 100 unique positive integers) | Acknowledge inbox messages. Missing ids appear in `not_pending`. |
+| `inbox_reply` | `msg_id`, `body` | Reply without acknowledging the original message. Body limit: 8192 UTF-8 bytes. |
+| `message_send` | `to`, `subject`, `body`, optional `ref`, `priority`, `thread`, `kind`, `client_id` | Send within principal grants to a node name such as `host-a`, a node id, or `agent:example`. Subject limit: 200 UTF-8 bytes. Body limit: 8192 UTF-8 bytes. Priority: `low`, `normal` (default), `high`, `urgent`. Kind: `message` (default), `question`, `completion`. Supply a stable `client_id` when retrying the same send. |
+| `message_status` | `ids` (1 through 50 unique positive integers) | Read acknowledgement status for sent messages. Omits bodies. |
 | `t3_capacity` | none | `t3-fleet capacity`, projected to host, active, limit, state. Read-only. |
 | `t3_submit` | `repository`, `prompt`, `title`, `caller`, optional `host` (default `auto`), `seat`, `base_ref`, `interaction_mode` (`default` or `plan`) | Validates against allowlists and limits, resolves `base_ref` (default the repository's default branch) to a 40-character SHA with `git ls-remote` in the controller's checkout, picks an allowlisted host when `auto`, including in enrolled mode (most free capacity among allowlisted eligible hosts), prepends the dispatch header, runs `t3-fleet submit` in machine mode with one `t3-fleet.request.v1` JSON object on stdin carrying the prompt and `runtime_mode: full-access` (the prompt never reaches argv), records the request in the ledger, returns `request_id`, host, seat. |
 | `t3_status` | `request_id` | `t3-fleet status`, projected: state, `needs_attention`, `pending_request` (as `t3-fleet` bounds it), thread id, seat, last update. |
@@ -165,6 +207,14 @@ resets the failure count. Results append to `wake-notify.jsonl` beside `wake_pat
 | `t3_approve` | `request_id`, `approval_id`, `decision` | `t3-fleet approve` for the pending approval named by `approval_id`; `decision` is `accept`, `acceptForSession`, `decline`, or `cancel`. |
 | `t3_interrupt` | `request_id` | `t3-fleet interrupt`. |
 | `t3_recent` | `caller` optional, `limit` (max 20) | Ledger rows for this pack: request, caller, repository, host, seat, state, times. Read-only. |
+
+Hub tools use Dot's argument validators and message projections. A send without
+`client_id` derives one from its content and a ten-minute time bucket. Reusing
+an explicit id preserves the Fleet client's idempotency and offline queue
+behavior. Replies derive a stable id from the original message id and body.
+Hub refusals return the closed `hub-error` plus a recognized `hub_code`, such as
+`message_recipient_not_permitted` or `message_sender_recipient_quota`. Raw Hub
+exception text is omitted. A grant refusal means nothing was sent or queued.
 
 `caller` is the bot's own name and selects its wake targets. The title prefix
 is `[grokbot:<caller>]`. Tools taking `request_id` accept only requests in this
@@ -188,7 +238,9 @@ it reads the runtime once at start:
 systemctl --user restart brigade-grokbot-t3-dispatch.service
 ```
 
-Submit, followup, answer, and approve then return `dispatch-disabled`.
+Submit, followup, answer, approve, inbox acknowledgement, reply, and send then
+return `dispatch-disabled`. Inbox reads, sent status, and wake polling remain
+available.
 `t3_interrupt` stays available while disabled so it can stop active work.
 Read tools remain available. For an immediate hard stop:
 
