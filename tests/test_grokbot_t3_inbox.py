@@ -116,6 +116,128 @@ def test_send_accepts_hub_recipients_and_preserves_client_id(hub, recipient):
     assert all(call["to"] == expected and call["client_id"] == "stable-id" for call in sends)
 
 
+@pytest.mark.parametrize("change", ["token", "endpoint", "invalid-token"])
+@pytest.mark.parametrize("tool_name", ["message_send", "inbox_reply", "message_status"])
+@pytest.mark.parametrize("outcome", ["success", "offline", "refused"])
+def test_security_message_scope_change_during_request_closes_result(
+    hub, hub_settings, monkeypatch, caplog, change, tool_name, outcome
+):
+    tools, _, row, token, token_file, ledger = hub
+    original_hub = hub_settings["hub_url"]
+    replacement = "y" * 64
+    path = messages._spool_path("node-id", token, hub_url=original_hub)
+    requests = []
+
+    def request(hub_url, credential, body, *, timeout=None):
+        requests.append((hub_url, credential, dict(body)))
+        if change == "endpoint":
+            hub_settings["hub_url"] = "https://other.example.test"
+        else:
+            token_file.write_text("invalid" if change == "invalid-token" else replacement)
+        if outcome == "offline":
+            raise FleetMessageHubError(credential, code="hub_unavailable")
+        if outcome == "refused":
+            return 403, {"error": credential, "code": "message_recipient_not_permitted"}
+        if body["action"] == "sent":
+            return 200, {"messages": [row], "next_cursor": row["id"]}
+        return 200, {"message": dict(row, client_id=body["client_id"])}
+
+    monkeypatch.setattr(messages, "_request", request)
+    result = tools.call_tool(tool_name, HUB_TOOLS[tool_name])
+    assert result.get("error", {}).get("code") == "hub-error"
+    assert result["error"].get("hub_code") == ("token_file_invalid" if change == "invalid-token" else None)
+    assert set(result) == {"error"}
+    assert [(hub_url, credential) for hub_url, credential, _ in requests] == [(original_hub, token)]
+    pending = fleet_client._read_spool(path)
+    if tool_name != "message_status" and outcome == "offline":
+        assert len(pending) == 1 and pending[0]["client_id"] == requests[0][2]["client_id"]
+        assert pending[0]["action"] == requests[0][2]["action"]
+        # The new pair must not replay or move the original pair's durable mutation.
+        if change != "invalid-token":
+            assert messages.flush_credential(str(token_file)) == 0
+            assert len(requests) == 1 and fleet_client._read_spool(path) == pending
+        hub_settings["hub_url"] = original_hub
+        token_file.write_text(token)
+        delivered = []
+
+        def restored_request(hub_url, credential, body, *, timeout=None):
+            delivered.append((hub_url, credential, body["client_id"]))
+            return 200, {"message": dict(row, client_id=body["client_id"])}
+
+        monkeypatch.setattr(messages, "_request", restored_request)
+        assert messages.flush_credential(str(token_file)) == 1
+        assert delivered == [(original_hub, token, pending[0]["client_id"])]
+        assert fleet_client._read_spool(path) == []
+    else:
+        assert pending == []
+    public = json.dumps(result) + caplog.text + "\n".join(ledger._conn.iterdump())
+    spool_text = "".join(p.read_text() for p in path.parent.glob("*.jsonl")) if path.parent.exists() else ""
+    for secret in (token, replacement):
+        assert secret not in public + spool_text
+
+
+@pytest.mark.parametrize("change", ["token", "endpoint"])
+@pytest.mark.parametrize("tool_name", ["message_send", "inbox_reply", "message_status"])
+@pytest.mark.parametrize("restore_after_load", [False, True])
+def test_security_message_scope_checks_loaded_transport_pair(
+    hub, hub_settings, monkeypatch, caplog, change, tool_name, restore_after_load
+):
+    tools, _, row, token, token_file, ledger = hub
+    original_hub = hub_settings["hub_url"]
+    replacement = "y" * 64
+    original_settings = messages._settings
+    requests = []
+
+    def settings(*args, **kwargs):
+        if change == "endpoint":
+            hub_settings["hub_url"] = "https://other.example.test"
+        else:
+            token_file.write_text(replacement)
+        loaded = original_settings(*args, **kwargs)
+        if restore_after_load:
+            hub_settings["hub_url"] = original_hub
+            token_file.write_text(token)
+        return loaded
+
+    def request(hub_url, credential, body, *, timeout=None):
+        requests.append((hub_url, credential))
+        if body["action"] == "sent":
+            return 200, {"messages": [row], "next_cursor": row["id"]}
+        return 200, {"message": dict(row, client_id=body["client_id"])}
+
+    monkeypatch.setattr(messages, "_settings", settings)
+    monkeypatch.setattr(messages, "_request", request)
+    result = tools.call_tool(tool_name, HUB_TOOLS[tool_name])
+    assert result.get("error", {}).get("code") == "hub-error"
+    assert set(result) == {"error"}
+    assert requests == []
+    directory = fleet_client.spool_path("node-id").parent
+    assert not any(p.stat().st_size for p in directory.glob("messages-*.jsonl"))
+    public = json.dumps(result) + caplog.text + "\n".join(ledger._conn.iterdump())
+    for secret in (token, replacement):
+        assert secret not in public
+
+
+@pytest.mark.parametrize("change", ["token", "endpoint"])
+def test_security_status_transport_failure_still_checks_current_scope(hub, hub_settings, monkeypatch, change):
+    from brigade.grokbot_t3.inbox import HubInbox
+    from brigade.hub_messages import HubMessageError
+
+    _, _, _, token, token_file, _ = hub
+
+    def request(hub_url, credential, body, *, timeout=None):
+        if change == "endpoint":
+            hub_settings["hub_url"] = "https://other.example.test"
+        else:
+            token_file.write_text("y" * 64)
+        raise FleetMessageHubError(token, code="hub_unavailable")
+
+    monkeypatch.setattr(messages, "_request", request)
+    with pytest.raises(HubMessageError) as caught:
+        HubInbox(token_file=str(token_file)).status([1])
+    assert caught.value.code == "hub_credential_changed"
+
+
 @pytest.mark.parametrize("name", ["inbox_ack", "inbox_reply", "message_send"])
 def test_hub_mutations_honor_enabled(hub, name):
     tools, calls, _, _, _, _ = hub

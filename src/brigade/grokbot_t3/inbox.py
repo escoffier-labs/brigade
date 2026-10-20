@@ -33,6 +33,16 @@ class HubInbox(MessageOperations):
         if self.notification_scope() != scope:
             raise HubMessageError("hub_credential_changed")
 
+    def _call(self, action: str, *args: Any, **kwargs: Any) -> Any:
+        scope = kwargs.pop("expected_scope", None)
+        scope = self.notification_scope() if scope is None else scope
+        self.require_notification_scope(scope)
+        try:
+            return super()._call(action, *args, expected_scope=scope, **kwargs)
+        finally:
+            # Queued mutations stay durable, but changed authority cannot project their result.
+            self.require_notification_scope(scope)
+
     def pages(
         self,
         *,
