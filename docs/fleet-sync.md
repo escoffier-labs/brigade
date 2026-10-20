@@ -220,8 +220,12 @@ after the journal write completes and the lock is released):
   a flush that delivers nothing leaves the file untouched.
 - The spool is capped at 16 MiB (oldest events dropped, logged on the
   `brigade.fleet` logger). A non-retryable 4xx (anything but
-  401/403/408/429) drops that batch as poison instead of retrying forever;
-  401, 403 (a credential bound to another node, or the admin token on a
+  401/403/408/429) rejects the whole batch, so the client bisects it: valid
+  sub-batches are delivered in order and each event the hub rejects on its
+  own moves to `<node_id>.rejected.jsonl` beside the spool (the newest 200
+  records, each with the event's sequence, digest, timestamp, and a
+  sanitized reason; bodies over 16 KiB are omitted). A transport failure
+  during bisection keeps every unprocessed event queued. 401, 403 (a credential bound to another node, or the admin token on a
   hub without `--allow-admin-writes`), 5xx, and network failures keep the
   spool.
 - When a spool exists, new events are appended to it and the spool is flushed

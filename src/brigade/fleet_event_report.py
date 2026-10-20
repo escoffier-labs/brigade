@@ -80,6 +80,7 @@ def _report(event: dict[str, Any], *, detailed: bool) -> ReportResult:
                             dir_fd=dir_fd,
                             preserve_poison=detailed,
                             on_delivered=record_delivery if detailed else None,
+                            bisect_budget=client.REPORT_TIMEOUT_SECONDS,
                         )
                     except (KeyboardInterrupt, SystemExit) as exc:
                         interrupted = exc

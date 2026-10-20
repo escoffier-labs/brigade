@@ -5,8 +5,10 @@ from __future__ import annotations
 
 import json
 import hashlib
+import os
 import re
 import sys
+import tempfile
 import time
 import shutil
 from dataclasses import dataclass
@@ -766,6 +768,101 @@ def _render_handoff_draft(
     return "\n".join(parts).rstrip() + "\n"
 
 
+def build_draft(
+    *,
+    target: Path,
+    title: str,
+    summary: str,
+    content: str | None = None,
+    content_file: Path | None = None,
+    handoff_type: str = "workflow",
+    action: str = NO_CARD_ACTION,
+    target_card: str | None = None,
+    target_document: str | None = DEFAULT_DRAFT_DOCUMENT,
+    fact: list[str] | None = None,
+    evidence: list[str] | None = None,
+    inbox: str = DEFAULT_DRAFT_INBOX,
+    draft_id: str | None = None,
+    force: bool = False,
+    guard: bool = False,
+    guard_policy: str = "personal",
+) -> dict[str, Any]:
+    """Write one handoff draft and return its payload. Raises ValueError on bad input."""
+    action = action.strip().casefold()
+    if action not in HANDOFF_ACTIONS:
+        raise ValueError("--action must be one of: " + ", ".join(HANDOFF_ACTIONS))
+    if not title.strip():
+        raise ValueError("--title is required")
+    if not summary.strip():
+        raise ValueError("--summary is required")
+    if action in CARD_ACTIONS:
+        if not target_card:
+            raise ValueError("--target-card is required for card handoffs")
+        target_document = None
+    else:
+        if not target_document:
+            raise ValueError("--target-document is required for no-card handoffs")
+        target_card = None
+    suggested_content = _read_suggested_content(content, content_file)
+    if not suggested_content:
+        raise ValueError("suggested content is empty")
+    inbox_path, inbox_label = _draft_inbox_path(target, inbox)
+    created_at = _iso_from_timestamp()
+    timestamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
+    safe_id = _slugify(draft_id or title)
+    path = inbox_path / f"{timestamp}-{safe_id}.md"
+    text = _render_handoff_draft(
+        handoff_type=handoff_type,
+        title=title,
+        summary=summary,
+        facts=fact or [],
+        evidence=evidence or [],
+        action=action,
+        target_card=target_card,
+        target_document=target_document,
+        suggested_content=suggested_content,
+    )
+    inbox_path.mkdir(parents=True, exist_ok=True)
+    if force:
+        # Overwrite by writing a private temp file and renaming it over the draft.
+        # A rename replaces a symlink at the destination instead of following it,
+        # so this stays no-follow and atomic even where O_NOFOLLOW is missing.
+        if path.is_symlink():
+            raise ValueError(f"handoff draft path is a symlink: {path}")
+        fd, tmp_name = tempfile.mkstemp(dir=inbox_path, prefix=f".{path.name}.", suffix=".tmp")
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(text)
+            os.replace(tmp_name, path)
+        except BaseException:
+            Path(tmp_name).unlink(missing_ok=True)
+            raise
+    else:
+        # Exclusive no-follow create: never truncate a file or follow a planted symlink.
+        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(path, flags, 0o600)
+        except FileExistsError as exc:
+            raise ValueError(f"handoff draft already exists: {path}") from exc
+        with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            handle.write(text)
+    lint_result = _linting_mod.lint_file(path)
+    guard_result = _linting_mod._guard_handoff_path(path, target=target, policy=guard_policy) if guard else None
+    return {
+        "target": str(target),
+        "created_at": created_at,
+        "path": str(path),
+        "id": path.stem,
+        "inbox": inbox_label,
+        "action": action,
+        "target_card": target_card,
+        "target_document": target_document,
+        "lint": lint_result.as_dict(),
+        "content_guard": guard_result,
+        "valid": lint_result.valid and (guard_result is None or guard_result.get("exit_code") == 0),
+    }
+
+
 def draft(
     *,
     target: Path,
@@ -790,91 +887,51 @@ def draft(
     if not target.is_dir():
         print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
-    action = action.strip().casefold()
-    if action not in HANDOFF_ACTIONS:
-        print("error: --action must be one of: " + ", ".join(HANDOFF_ACTIONS), file=sys.stderr)
-        return 2
-    if not title.strip():
-        print("error: --title is required", file=sys.stderr)
-        return 2
-    if not summary.strip():
-        print("error: --summary is required", file=sys.stderr)
-        return 2
-    if action in CARD_ACTIONS:
-        if not target_card:
-            print("error: --target-card is required for card handoffs", file=sys.stderr)
-            return 2
-        target_document = None
-    else:
-        if not target_document:
-            print("error: --target-document is required for no-card handoffs", file=sys.stderr)
-            return 2
-        target_card = None
     try:
-        suggested_content = _read_suggested_content(content, content_file)
+        payload = build_draft(
+            target=target,
+            title=title,
+            summary=summary,
+            content=content,
+            content_file=content_file,
+            handoff_type=handoff_type,
+            action=action,
+            target_card=target_card,
+            target_document=target_document,
+            fact=fact,
+            evidence=evidence,
+            inbox=inbox,
+            draft_id=draft_id,
+            force=force,
+            guard=guard,
+            guard_policy=guard_policy,
+        )
     except ValueError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    if not suggested_content:
-        print("error: suggested content is empty", file=sys.stderr)
-        return 2
-    inbox_path, inbox_label = _draft_inbox_path(target, inbox)
-    created_at = _iso_from_timestamp()
-    timestamp = time.strftime("%Y%m%d-%H%M%S", time.gmtime())
-    safe_id = _slugify(draft_id or title)
-    filename = f"{timestamp}-{safe_id}.md"
-    path = inbox_path / filename
-    if path.exists() and not force:
-        print(f"error: handoff draft already exists: {path}", file=sys.stderr)
-        return 2
-    text = _render_handoff_draft(
-        handoff_type=handoff_type,
-        title=title,
-        summary=summary,
-        facts=fact or [],
-        evidence=evidence or [],
-        action=action,
-        target_card=target_card,
-        target_document=target_document,
-        suggested_content=suggested_content,
-    )
-    inbox_path.mkdir(parents=True, exist_ok=True)
-    path.write_text(text, encoding="utf-8")
-    lint_result = _linting_mod.lint_file(path)
-    guard_result = _linting_mod._guard_handoff_path(path, target=target, policy=guard_policy) if guard else None
-    payload = {
-        "target": str(target),
-        "created_at": created_at,
-        "path": str(path),
-        "id": path.stem,
-        "inbox": inbox_label,
-        "action": action,
-        "target_card": target_card,
-        "target_document": target_document,
-        "lint": lint_result.as_dict(),
-        "content_guard": guard_result,
-        "valid": lint_result.valid and (guard_result is None or guard_result.get("exit_code") == 0),
-    }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0 if payload["valid"] else 1
+    lint = payload["lint"]
+    path = payload["path"]
     print(f"handoff draft: {path}")
     print(f"id: {payload['id']}")
-    print(f"inbox: {inbox_label}")
-    print(f"action: {action}")
-    if target_card:
-        print(f"target_card: {target_card}")
-    if target_document:
-        print(f"target_document: {target_document}")
-    print(f"lint: {'ok' if lint_result.valid else 'fail'}")
+    print(f"inbox: {payload['inbox']}")
+    print(f"action: {payload['action']}")
+    if payload["target_card"]:
+        print(f"target_card: {payload['target_card']}")
+    if payload["target_document"]:
+        print(f"target_document: {payload['target_document']}")
+    print(f"lint: {'ok' if lint['valid'] else 'fail'}")
+    guard_result = payload["content_guard"]
     if guard_result is not None:
         guard_ok = guard_result.get("exit_code") == 0
         print(f"content_guard: {'ok' if guard_ok else 'fail'} ({guard_policy})")
         if not guard_ok:
             print(f"content_guard_detail: {guard_result.get('detail')}")
-    for error in lint_result.errors:
+    for error in lint["errors"]:
         print(f"error: {error}")
-    if not lint_result.valid:
+    if not lint["valid"]:
         print(f"note: invalid draft kept at {path}; repair or delete it, then rerun `brigade handoff lint`.")
     return 0 if payload["valid"] else 1
 

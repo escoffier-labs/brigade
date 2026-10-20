@@ -1190,11 +1190,11 @@ Shared skill registry commands:
 - `brigade skills adapters list --include-planned` shows built-in and planned harness adapters, including Antigravity, Pi, and Cursor as built-in targets.
 - `brigade skills serve-mcp` reports a read-only local MCP skill resource contract and registered registry resources without starting a long-running server.
 - `brigade skills serve-mcp --stdio` serves that read-only registry contract over line-delimited JSON-RPC for local MCP clients.
-- `brigade skills serve-mcp --http` and `brigade memory serve-mcp --http` serve the same read-only contracts over loopback Streamable HTTP for MCP hosts that cannot spawn a stdio process. See "Streamable HTTP for the read-only MCP servers" below.
+- `brigade skills serve-mcp --http` and `brigade memory serve-mcp --http` serve the same contracts over loopback Streamable HTTP for MCP hosts that cannot spawn a stdio process. The skills server is read-only. The memory server has five read tools and one write tool, `write_handoff`, which drafts a Memory Handoff and never edits a canonical card ([agent-plugin.md](agent-plugin.md#tools)). See "Streamable HTTP for the MCP servers" below.
 - `brigade skills publish security-review --scope workspace` writes a reviewed publish proposal instead of pushing a prompt pack directly.
 - `brigade skills pack build`, `list`, `show`, `archive`, and `import <pack-dir>` build and move reviewed portable skill source bundles between machines without installing them automatically.
 
-#### Streamable HTTP for the read-only MCP servers
+#### Streamable HTTP for the MCP servers
 
 Without a transport flag, `brigade memory serve-mcp` and `brigade skills serve-mcp` print their resource and tool contract and exit. `--stdio` runs the server over stdin and stdout, and `--http` serves the same tools over a stateless Streamable HTTP endpoint on loopback. `--stdio` and `--http` are mutually exclusive.
 

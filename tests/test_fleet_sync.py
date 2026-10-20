@@ -1081,6 +1081,32 @@ class TestSpoolHardening:
         finally:
             conn.close()
 
+    def test_oversized_legacy_target_does_not_drop_batch_peers(self, hub, monkeypatch):
+        """#1710: one 422 event between valid events in one batch loses only itself."""
+        url, token, db = hub
+        monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", url)
+        monkeypatch.setenv("BRIGADE_FLEET_TOKEN", token)
+        node = _event()["node_id"]
+        spool = fleet_client.spool_path(node)
+        spool.parent.mkdir(parents=True, exist_ok=True)
+        oversized = {**_event(node=node, seq=2), "repo": "legacy/" + "t" * 2000}
+        spool.write_text(
+            "".join(
+                json.dumps(e, sort_keys=True) + "\n"
+                for e in (_event(node=node, seq=1), oversized, _event(node=node, seq=3))
+            )
+        )
+        assert fleet_client.flush_spool(node) == 2
+        assert not spool.exists()
+        conn = fleet_hub.init_db(db)
+        try:
+            assert [r[0] for r in conn.execute("SELECT sequence FROM events ORDER BY rowid")] == [1, 3]
+        finally:
+            conn.close()
+        dead = spool.with_name(spool.stem + ".rejected.jsonl")
+        [record] = [json.loads(line) for line in dead.read_text().splitlines()]
+        assert record["sequence"] == 2 and record["event"] == oversized
+
     def test_401_keeps_spool(self, hub, monkeypatch):
         url, _token, _db = hub
         monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", url)
