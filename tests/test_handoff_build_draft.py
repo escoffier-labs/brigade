@@ -42,13 +42,24 @@ def test_build_draft_validates_inputs(tmp_path: Path):
         drafts.build_draft(target=tmp_path, title="T", summary="S.", content="Body.", action="delete")
 
 
-def test_build_draft_creates_private_file_without_following_symlinks(tmp_path: Path, monkeypatch):
+@pytest.mark.skipif(os.name == "nt", reason="Windows does not expose POSIX permission bits")
+@pytest.mark.parametrize("force,existing", [(False, False), (True, False), (True, True)])
+def test_build_draft_uses_private_posix_mode(tmp_path: Path, monkeypatch, force: bool, existing: bool):
+    _freeze(monkeypatch)
+    kwargs = dict(target=tmp_path, title="Same", summary="S.", content="Body.", inbox=str(tmp_path / "in"))
+    if existing:
+        path = Path(drafts.build_draft(**kwargs)["path"])
+        path.chmod(0o644)
+    payload = drafts.build_draft(**kwargs, force=force)
+    assert Path(payload["path"]).stat().st_mode & 0o777 == 0o600
+
+
+def test_build_draft_refuses_a_planted_symlink(tmp_path: Path, monkeypatch):
     _freeze(monkeypatch)
     inbox = tmp_path / "in"
     inbox.mkdir()
     kwargs = dict(target=tmp_path, title="Same", summary="S.", content="Body.", inbox=str(inbox))
     first = drafts.build_draft(**kwargs)
-    assert Path(first["path"]).stat().st_mode & 0o777 == 0o600
     Path(first["path"]).unlink()
     victim = tmp_path / "victim.md"
     Path(first["path"]).symlink_to(victim)
@@ -57,17 +68,13 @@ def test_build_draft_creates_private_file_without_following_symlinks(tmp_path: P
     assert not victim.exists()
 
 
-def test_forced_draft_stays_private_and_refuses_a_planted_symlink(tmp_path: Path, monkeypatch):
+def test_forced_draft_refuses_a_planted_symlink(tmp_path: Path, monkeypatch):
     _freeze(monkeypatch)
     inbox = tmp_path / "in"
     inbox.mkdir()
     kwargs = dict(target=tmp_path, title="Same", summary="S.", content="Body.", inbox=str(inbox), force=True)
     first = drafts.build_draft(**kwargs)
     path = Path(first["path"])
-    assert path.stat().st_mode & 0o777 == 0o600
-    path.chmod(0o644)
-    drafts.build_draft(**kwargs)
-    assert path.stat().st_mode & 0o777 == 0o600
     path.unlink()
     victim = tmp_path / "victim.md"
     victim.write_text("keep", encoding="utf-8")
@@ -109,5 +116,6 @@ def test_forced_draft_never_writes_through_a_symlink_planted_after_the_check(tmp
     drafts.build_draft(**kwargs)
     assert victim.read_text(encoding="utf-8") == "keep"
     assert path.is_file() and not os.path.islink(path)
-    assert path.stat().st_mode & 0o777 == 0o600
+    if os.name != "nt":
+        assert path.stat().st_mode & 0o777 == 0o600
     assert sorted(p.name for p in inbox.iterdir()) == [path.name]

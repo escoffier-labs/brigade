@@ -19,6 +19,7 @@ from .. import scrub
 from ..budgets import HANDOFF_BACKLOG_STALE_SECONDS
 from ..config import load_config as load_brigade_config
 from ..localio import write_json as _write_json
+from ..localio import write_text_exclusive
 from ..selection import WRITER_INBOXES as _WRITER_INBOX_MAP
 
 from . import issue_ops as _issue_ops_mod
@@ -838,14 +839,11 @@ def build_draft(
             Path(tmp_name).unlink(missing_ok=True)
             raise
     else:
-        # Exclusive no-follow create: never truncate a file or follow a planted symlink.
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+        # Publish without following a dangling symlink, including on Windows.
         try:
-            fd = os.open(path, flags, 0o600)
+            write_text_exclusive(path, text)
         except FileExistsError as exc:
             raise ValueError(f"handoff draft already exists: {path}") from exc
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(text)
     lint_result = _linting_mod.lint_file(path)
     guard_result = _linting_mod._guard_handoff_path(path, target=target, policy=guard_policy) if guard else None
     return {
