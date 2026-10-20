@@ -238,6 +238,147 @@ def test_security_status_transport_failure_still_checks_current_scope(hub, hub_s
     assert caught.value.code == "hub_credential_changed"
 
 
+@pytest.mark.parametrize("change", ["token", "endpoint", "invalid-token"])
+@pytest.mark.parametrize("fail_projection", [False, True])
+@pytest.mark.parametrize(
+    "tool_name,queued,rotate_at",
+    [
+        ("message_send", False, "sent-message"),
+        ("inbox_reply", False, "sent-message"),
+        ("message_send", True, "sent-message"),
+        ("inbox_reply", True, "sent-message"),
+        ("message_send", True, "clock"),
+        ("inbox_reply", True, "clock"),
+        ("message_status", False, "recipients"),
+    ],
+)
+def test_security_message_projection_scope_change_closes_complete_operation(
+    hub, hub_settings, monkeypatch, caplog, change, fail_projection, tool_name, queued, rotate_at
+):
+    from brigade.grokbot_t3.inbox import HubInbox
+    from brigade.hub_messages import HubMessageError, MessageOperations
+
+    tools, _, row, token, token_file, ledger = hub
+    original_hub = hub_settings["hub_url"]
+    replacement = "y" * 64
+    requests = []
+    rotations = []
+
+    def rotate():
+        # Every seam here runs after the actual transport and its final scope check.
+        assert len(requests) == 1
+        rotations.append(rotate_at)
+        if change == "endpoint":
+            hub_settings["hub_url"] = "https://other.example.test"
+        else:
+            token_file.write_text("invalid" if change == "invalid-token" else replacement)
+        if fail_projection:
+            raise HubMessageError("hub_unavailable", "message_not_found")
+
+    def request(hub_url, credential, body, *, timeout=None):
+        requests.append((hub_url, credential, dict(body)))
+        if queued:
+            return 503, {}
+        if body["action"] == "sent":
+            return 200, {"messages": [row], "next_cursor": row["id"]}
+        return 200, {"message": dict(row, id=7, client_id=body["client_id"])}
+
+    original_sent_message = HubInbox._sent_message
+    original_clock = tools.now
+
+    def sent_message(self, value, *, agent):
+        result = original_sent_message(self, value, agent=agent)
+        rotate()
+        return result
+
+    def clock():
+        if requests:
+            rotate()
+        return original_clock()
+
+    def recipients(self):
+        rotate()
+        return MessageOperations.recipients.fget(self)
+
+    monkeypatch.setattr(messages, "_request", request)
+    if rotate_at == "sent-message":
+        monkeypatch.setattr(HubInbox, "_sent_message", sent_message)
+    elif rotate_at == "clock":
+        monkeypatch.setattr(tools, "now", clock)
+    else:
+        monkeypatch.setattr(HubInbox, "recipients", property(recipients))
+    args = dict(HUB_TOOLS[tool_name])
+    if tool_name == "message_send":
+        args["client_id"] = "stable-id"
+    result = tools.call_tool(tool_name, args)
+    assert rotations == [rotate_at]
+    assert result.get("error", {}).get("code") == "hub-error"
+    assert result["error"].get("hub_code") == ("token_file_invalid" if change == "invalid-token" else None)
+    assert set(result) == {"error"}
+    assert [(hub_url, credential) for hub_url, credential, _ in requests] == [(original_hub, token)]
+    path = messages._spool_path("node-id", token, hub_url=original_hub)
+    pending = fleet_client._read_spool(path)
+    if queued:
+        assert len(pending) == 1 and pending[0]["client_id"] == requests[0][2]["client_id"]
+        assert pending[0]["action"] == requests[0][2]["action"]
+        if change != "invalid-token":
+            assert messages.flush_credential(str(token_file)) == 0
+            assert len(requests) == 1 and fleet_client._read_spool(path) == pending
+    else:
+        assert pending == []
+    public = json.dumps(result) + caplog.text + "\n".join(ledger._conn.iterdump())
+    spool_text = "".join(p.read_text() for p in path.parent.glob("*.jsonl")) if path.parent.exists() else ""
+    for secret in (token, replacement):
+        assert secret not in public + spool_text
+    assert "stable-id" not in json.dumps(result)
+
+
+@pytest.mark.parametrize("change", ["token", "endpoint", "invalid-token"])
+@pytest.mark.parametrize("rotate_at", ["clock", "recipients"])
+@pytest.mark.parametrize("fail_preparation", [False, True])
+def test_security_send_scope_is_captured_before_clock_and_recipient_resolution(
+    hub, hub_settings, monkeypatch, caplog, change, rotate_at, fail_preparation
+):
+    from brigade.grokbot_t3.inbox import HubInbox
+    from brigade.hub_messages import HubMessageError, MessageOperations
+
+    tools, requests, _, token, token_file, ledger = hub
+    replacement = "y" * 64
+    rotations = []
+
+    def rotate():
+        rotations.append(rotate_at)
+        if change == "endpoint":
+            hub_settings["hub_url"] = "https://other.example.test"
+        else:
+            token_file.write_text("invalid" if change == "invalid-token" else replacement)
+        if fail_preparation:
+            raise HubMessageError("hub_unavailable", "message_not_found")
+
+    original_clock = tools.now
+
+    def clock():
+        rotate()
+        return original_clock()
+
+    def recipients(self):
+        rotate()
+        return MessageOperations.recipients.fget(self)
+
+    if rotate_at == "clock":
+        monkeypatch.setattr(tools, "now", clock)
+    else:
+        monkeypatch.setattr(HubInbox, "recipients", property(recipients))
+    result = tools.call_tool("message_send", HUB_TOOLS["message_send"])
+    assert rotations == [rotate_at]
+    assert result.get("error", {}).get("code") == "hub-error"
+    assert result["error"].get("hub_code") == ("token_file_invalid" if change == "invalid-token" else None)
+    assert set(result) == {"error"} and requests == []
+    public = json.dumps(result) + caplog.text + "\n".join(ledger._conn.iterdump())
+    for secret in (token, replacement):
+        assert secret not in public
+
+
 @pytest.mark.parametrize("name", ["inbox_ack", "inbox_reply", "message_send"])
 def test_hub_mutations_honor_enabled(hub, name):
     tools, calls, _, _, _, _ = hub

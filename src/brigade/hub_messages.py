@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import builtins
+from contextlib import contextmanager
 import hashlib
 import json
 from datetime import datetime, timezone
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Iterator, Mapping
 
 from . import fleet_client_messages
 from .fleet_client import FleetClientError
@@ -162,6 +163,11 @@ class MessageOperations:
     def _call(self, action: str, *args: Any, **kwargs: Any) -> Any:
         return call_message(action, *args, token_file=self.token_file, **kwargs)
 
+    @contextmanager
+    def _operation_scope(self) -> Iterator[str | None]:
+        """Connector authority guard for preparation, transport, and complete projection."""
+        yield None
+
     def _sent_message(self, value: dict[str, Any], *, agent: bool) -> dict[str, Any] | None:
         if value.get("queued") is True:
             return None
@@ -176,29 +182,31 @@ class MessageOperations:
         return row
 
     def reply(self, msg_id: int, body: str) -> dict[str, Any]:
-        cid = "mr-" + hashlib.sha256(f"{msg_id}\n{body}".encode()).hexdigest()[:40]
-        value = self._call(
-            "reply",
-            msg_id,
-            body=body,
-            subject=None,
-            reference=None,
-            priority="normal",
-            thread=None,
-            kind="message",
-            sender_label=None,
-            client_id=cid,
-        )
-        row = self._sent_message(value, agent=True)
-        result: dict[str, Any] = dict(
-            id=row["id"] if row else None,
-            msg_id=msg_id,
-            created_at=row["created_at"] if row else self._created_at(),
-            body=body,
-        )
-        if row is None:
-            result["queued"] = True
-        return result
+        with self._operation_scope() as scope:
+            cid = "mr-" + hashlib.sha256(f"{msg_id}\n{body}".encode()).hexdigest()[:40]
+            value = self._call(
+                "reply",
+                msg_id,
+                body=body,
+                subject=None,
+                reference=None,
+                priority="normal",
+                thread=None,
+                kind="message",
+                sender_label=None,
+                client_id=cid,
+                expected_scope=scope,
+            )
+            row = self._sent_message(value, agent=True)
+            result: dict[str, Any] = dict(
+                id=row["id"] if row else None,
+                msg_id=msg_id,
+                created_at=row["created_at"] if row else self._created_at(),
+                body=body,
+            )
+            if row is None:
+                result["queued"] = True
+            return result
 
     def send(
         self,
@@ -211,56 +219,59 @@ class MessageOperations:
         kind: str = "message",
         client_id: str | None = None,
     ) -> dict[str, Any]:
-        # Node names from hub_recipients resolve to node ids; grants name node ids.
-        recipient = dict(self.recipients).get(to, to)
-        cid = (
-            client_id
-            or "ms-"
-            + hashlib.sha256(
-                json.dumps(
-                    [recipient, subject, body, ref, priority, thread, kind, int(self.clock().timestamp()) // 600]
-                ).encode()
-            ).hexdigest()[:40]
-        )
-        row = self._sent_message(
-            self._call(
-                "send",
+        with self._operation_scope() as scope:
+            # Node names from hub_recipients resolve to node ids; grants name node ids.
+            recipient = dict(self.recipients).get(to, to)
+            cid = (
+                client_id
+                or "ms-"
+                + hashlib.sha256(
+                    json.dumps(
+                        [recipient, subject, body, ref, priority, thread, kind, int(self.clock().timestamp()) // 600]
+                    ).encode()
+                ).hexdigest()[:40]
+            )
+            row = self._sent_message(
+                self._call(
+                    "send",
+                    recipient=recipient,
+                    subject=subject,
+                    body=body,
+                    reference=ref,
+                    priority=priority,
+                    thread=thread,
+                    kind=kind,
+                    sender_label=None,
+                    client_id=cid,
+                    expected_scope=scope,
+                ),
+                agent=True,
+            )
+            return dict(
+                id=row["id"] if row else None,
+                to=to,
                 recipient=recipient,
-                subject=subject,
-                body=body,
-                reference=ref,
-                priority=priority,
-                thread=thread,
-                kind=kind,
-                sender_label=None,
+                created_at=row["created_at"] if row else self._created_at(),
                 client_id=cid,
-            ),
-            agent=True,
-        )
-        return dict(
-            id=row["id"] if row else None,
-            to=to,
-            recipient=recipient,
-            created_at=row["created_at"] if row else self._created_at(),
-            client_id=cid,
-            queued=row is None,
-        )
+                queued=row is None,
+            )
 
     def status(self, ids: builtins.list[int]) -> dict[str, Any]:
-        value = self._call("sent", ids=ids)
-        self._require(isinstance(value.get("messages"), list), "hub_unavailable")
-        self._require(
-            all(
-                isinstance(row, dict) and isinstance(row.get("recipient"), (str, type(None)))
-                for row in value["messages"]
-            ),
-            "hub_unavailable",
-        )
-        keys = ("id", "subject", "created_at", "acked_at", "acked_by", "reply_to")
-        names = {node: name for name, node in self.recipients.items()}
-        return dict(
-            messages=[
-                dict(to=names.get(row.get("recipient"), row.get("recipient")), **{k: row.get(k) for k in keys})
-                for row in value["messages"]
-            ]
-        )
+        with self._operation_scope() as scope:
+            value = self._call("sent", ids=ids, expected_scope=scope)
+            self._require(isinstance(value.get("messages"), list), "hub_unavailable")
+            self._require(
+                all(
+                    isinstance(row, dict) and isinstance(row.get("recipient"), (str, type(None)))
+                    for row in value["messages"]
+                ),
+                "hub_unavailable",
+            )
+            keys = ("id", "subject", "created_at", "acked_at", "acked_by", "reply_to")
+            names = {node: name for name, node in self.recipients.items()}
+            return dict(
+                messages=[
+                    dict(to=names.get(row.get("recipient"), row.get("recipient")), **{k: row.get(k) for k in keys})
+                    for row in value["messages"]
+                ]
+            )

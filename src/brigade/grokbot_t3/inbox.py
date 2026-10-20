@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import builtins
+from contextlib import contextmanager
 import json
 import time
 from typing import Any, Iterator
@@ -32,6 +33,15 @@ class HubInbox(MessageOperations):
     def require_notification_scope(self, scope: str) -> None:
         if self.notification_scope() != scope:
             raise HubMessageError("hub_credential_changed")
+
+    @contextmanager
+    def _operation_scope(self) -> Iterator[str]:
+        scope = self.notification_scope()
+        try:
+            yield scope
+        finally:
+            # Validate after complete projection, including preparation or projection failures.
+            self.require_notification_scope(scope)
 
     def _call(self, action: str, *args: Any, **kwargs: Any) -> Any:
         scope = kwargs.pop("expected_scope", None)
