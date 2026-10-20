@@ -849,6 +849,7 @@ def test_message_post_does_not_follow_same_origin_redirect():
     class RedirectHandler(BaseHTTPRequestHandler):
         def do_POST(self):  # noqa: N802 - stdlib handler API
             requests.append(self.command)
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
             self.send_response(302)
             self.send_header("Location", "/redirect-target")
             self.send_header("Content-Length", "0")
