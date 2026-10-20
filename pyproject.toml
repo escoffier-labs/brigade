@@ -5,12 +5,12 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "brigade-cli"
 version = "0.30.0"
-description = "Your agents run loops. Brigade keeps the receipts. Local control plane for multi-agent coding: share MCP/tools/memory, remember via handoffs, prove with file receipts, improve by promoting skills only on real exit codes. Claude Code, Codex, Grok, Hermes, OpenClaw, and more. Stations for evidence, code graph, pantry, skills. pipx install brigade-cli."
+description = "Track work, verify results, carry memory, and sync MCP servers, tools, and skills across coding agents. Local files, no daemon."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
 authors = [{ name = "Solomon Neas", email = "me@solomonneas.dev" }] # content-guard: allow email
-keywords = ["agents", "ai-agents", "agent-memory", "agent-handoffs", "ai-memory", "mcp", "mcp-config", "mcp-sync", "model-context-protocol", "openclaw", "claude-code", "codex", "opencode", "grok", "hermes", "memory", "bootstrap", "brigade", "brigade-cli", "operator", "local-first", "guardrails", "agents-md", "miseledger", "graphtrail", "agentpantry", "code-graph", "evidence-ledger"]
+keywords = ["agents", "ai-agents", "agent-memory", "agent-handoffs", "ai-memory", "mcp", "mcp-config", "mcp-sync", "model-context-protocol", "openclaw", "claude-code", "codex", "opencode", "grok", "hermes", "memory", "bootstrap", "brigade", "brigade-cli", "operator", "local-first", "guardrails", "agents-md", "code-graph", "evidence-ledger", "mcp-server", "agent-skills"]
 classifiers = [
     "Development Status :: 3 - Alpha",
     "License :: OSI Approved :: MIT License",
@@ -44,8 +44,8 @@ CookbookSource = "https://github.com/escoffier-labs/solos-cookbook"
 OpenClaw = "https://github.com/solomonneas/openclaw"
 ContentGuard = "https://github.com/escoffier-labs/content-guard"
 AgentPantry = "https://github.com/escoffier-labs/agentpantry"
-MiseLedger = "https://brigade.tools/miseledger"
-GraphTrail = "https://brigade.tools/graphtrail"
+EvidenceMemory = "https://brigade.tools/evidence-memory"
+CodeIntelligence = "https://brigade.tools/code-intelligence"
 Issues = "https://github.com/escoffier-labs/brigade/issues"
 
 [project.scripts]

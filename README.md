@@ -25,7 +25,7 @@
 
 Brigade is a local CLI for people who point Claude Code, Codex, Cursor, and other agents at the same repos. Each harness keeps its own notes, its own MCP config, and its own idea of what "tests pass" means. Brigade gives them one ledger in the repo instead: what is ready, who claimed it, which commands actually ran and how they exited, and what the last session handed off.
 
-**Stable:** v0.29.0 (`brigade-cli==0.29.0` on PyPI, `@escoffier-labs/brigade@0.29.0` on npm). **Beta:** main is the 0.30 preview line. See the [changelog](CHANGELOG.md) for what each release changed.
+**Stable:** v0.30.0 (`brigade-cli==0.30.0` on PyPI, `@escoffier-labs/brigade@0.30.0` on npm). **Beta:** paused. Use stable: until main moves to the next version, `brigade update --channel beta` resolves older 0.29.0 development builds. See the [changelog](CHANGELOG.md) for what each release changed.
 
 The downloads badge sums `brigade-cli` on PyPI (excluding mirrors) and `@escoffier-labs/brigade` on npm over the same 30 completed UTC days. Downloads include automation and do not count unique people. The [metric JSON](https://raw.githubusercontent.com/escoffier-labs/brigade/download-metrics/downloads.json) records each source, the period, and the last successful refresh. npm platform companions are excluded. Daily refreshes retain the previous metric if a source fails validation or its latest day is more than three UTC days old.
 
@@ -79,11 +79,11 @@ brigade mcp sync --write                    # merge into each harness's native c
 If Node.js 22 or newer and npm are installed on glibc Linux x64/ARM64, macOS x64/ARM64, or Windows x64, install the [npm package](https://www.npmjs.com/package/@escoffier-labs/brigade). This route does not need Python or pipx first:
 
 ```bash
-npm install --global @escoffier-labs/brigade@0.29.0
+npm install --global @escoffier-labs/brigade@0.30.0
 brigade setup
 ```
 
-To try it without a global install, run each command through npx instead, for example `npx --yes @escoffier-labs/brigade@0.29.0 --version`. The package brings its own uv, through platform packages that npm installs as optional dependencies, and the published 0.29.0 wheel. Leave optional dependencies enabled. The first launch downloads a managed Python, so it needs network access. Install Git yourself for repository features. npm targets are Linux (glibc) x64 and ARM64, macOS x64 and ARM64, and Windows x64. Upgrade with npm, because `brigade update` refuses npm-managed installs. Platform details and known limits: [npm package notes](npm/feasibility/README.md).
+To try it without a global install, run each command through npx instead, for example `npx --yes @escoffier-labs/brigade@0.30.0 --version`. The package brings its own uv, through platform packages that npm installs as optional dependencies, and the published 0.30.0 wheel. Leave optional dependencies enabled. The first launch downloads a managed Python, so it needs network access. Install Git yourself for repository features. npm targets are Linux (glibc) x64 and ARM64, macOS x64 and ARM64, and Windows x64. Upgrade with npm, because `brigade update` refuses npm-managed installs. Platform details and known limits: [npm package notes](npm/feasibility/README.md).
 
 On other platforms, or to use Python 3.10 or newer directly:
 

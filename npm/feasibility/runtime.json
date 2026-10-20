@@ -1,5 +1,5 @@
 {
-  "version": "0.29.0",
+  "version": "0.30.0",
   "uvVersion": "0.12.23",
   "pythonVersion": "3.12.15",
   "pythonBuild": "20261003",
@@ -44,17 +44,17 @@
       "binarySha256": "70742ae9bd9f64f984fd69126662cfda5c03558bcb40075b2263833e4075f744"
     }
   },
-  "payloadVersion": "0.29.0",
+  "payloadVersion": "0.30.0",
   "payloadWheel": {
-    "url": "https://files.pythonhosted.org/packages/09/2f/273f58a5c1dde4ae5677efafbfa3107169d8dd3451f31e2e80734df14ca8/brigade_cli-0.29.0-py3-none-any.whl",
-    "sha256": "a6d3a942a9c23660bb43c0f85198c969fe86daf27ebcacdddf959abb69fdfe38",
-    "releaseTag": "v0.29.0",
-    "sourceCommit": "19d293f5648e27ccd39856348f8769eb88f6a021",
+    "url": "https://files.pythonhosted.org/packages/23/4f/d5b0aa32d111bf8d637486d0a6ed69bf320354e69313189f0986263b176c/brigade_cli-0.30.0-py3-none-any.whl",
+    "sha256": "35d5cfaaef2895891e58d08dccbbaca34c523f0b17969250e67671a928227aaf",
+    "releaseTag": "v0.30.0",
+    "sourceCommit": "02270bc7ffd92640cd8debf39711eca7c8678fc0",
     "componentManifest": {
-      "url": "https://github.com/escoffier-labs/brigade/releases/download/v0.29.0/component-manifest-v1.json",
-      "sha256": "b9dd5d0f776919dcc953938f1862fc786d0a344c629064d58e2285e246533b69",
-      "checksumsUrl": "https://github.com/escoffier-labs/brigade/releases/download/v0.29.0/checksums.txt",
-      "checksumsSha256": "326a26cf7c29ec16329940029c4b8be76d3e4a922145b945c763ae3963e9a5e8"
+      "url": "https://github.com/escoffier-labs/brigade/releases/download/v0.30.0/component-manifest-v1.json",
+      "sha256": "046dcba26923a792cb49bea266bfad7c0c8d44beb10c2249356faaa346620ba9",
+      "checksumsUrl": "https://github.com/escoffier-labs/brigade/releases/download/v0.30.0/checksums.txt",
+      "checksumsSha256": "390557f5b865321e349cbaadf0cd5bdcd25255cfeeb66b4d9b5078446adf45e6"
     }
   }
 }

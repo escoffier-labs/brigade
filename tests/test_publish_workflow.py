@@ -478,7 +478,7 @@ def test_npm_release_workflow_has_dispatch_source_oidc_and_native_gates():
     assert 'test "$GITHUB_REF" = refs/heads/main' in publish
     assert 'test "$GITHUB_SHA" = "$EXPECTED_SHA"' in publish
     assert 'test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"' in publish
-    assert 'test "$RELEASE_TAG" = v0.29.0' in publish
+    assert 'test "$RELEASE_TAG" = v0.30.0' in publish
     guard = next(step for step in jobs["publish"]["steps"] if "EXPECTED_SHA" in step.get("env", {}))
     assert guard["env"]["EXPECTED_SHA"] == "${{ inputs.expected_sha }}"
     assert guard["env"]["RELEASE_TAG"] == "${{ inputs.release_tag }}"

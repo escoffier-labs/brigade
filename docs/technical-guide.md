@@ -235,7 +235,7 @@ See [`docs/workflow-rules.md`](workflow-rules.md) for the public-safe repo workf
 ## Install
 
 ```bash
-npm install --global @escoffier-labs/brigade@0.29.0   # Node.js 22+ and npm
+npm install --global @escoffier-labs/brigade@0.30.0   # Node.js 22+ and npm
 ```
 
 The npm package runs the published `brigade-cli` wheel on a managed Python that it downloads on first launch. Upgrade it with npm, because `brigade update` refuses npm-managed installs. Runtime, cache, and platform details: [`npm/feasibility/README.md`](../npm/feasibility/README.md).

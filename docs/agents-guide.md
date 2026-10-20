@@ -37,7 +37,7 @@ When a human pastes a short job into Claude Code, Codex, Cursor, OpenClaw, or an
 ```text
 Read https://github.com/escoffier-labs/brigade and follow docs/agents-guide.md.
 If brigade is missing, install it with npm install --global
-@escoffier-labs/brigade@0.29.0 only when Node.js 22+ and npm are present and
+@escoffier-labs/brigade@0.30.0 only when Node.js 22+ and npm are present and
 the target is glibc Linux x64/ARM64, macOS x64/ARM64, or Windows x64.
 Otherwise use pipx install brigade-cli (or uv tool install brigade-cli),
 including on musl Linux (such as Alpine) and Windows ARM64.
@@ -57,7 +57,7 @@ Work in the **target** directory (the repo or operator workspace the user named)
 Always dry-run before write. Then apply. Then doctor.
 
 ```bash
-npm install --global @escoffier-labs/brigade@0.29.0
+npm install --global @escoffier-labs/brigade@0.30.0
 # alternatives: pipx install brigade-cli, or uv tool install brigade-cli
 brigade setup
 brigade --version
