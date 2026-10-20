@@ -17,7 +17,7 @@ import pytest
 from brigade import aboyeur, agents, cli, fleet_client, fleet_session_bootstrap, proc, runguard
 from brigade import fleet_t3_transport as t3
 from brigade.aboyeur import orchestrator, planning
-from brigade import claim_loss_cancellation, run_budget, run_lifecycle, run_transport
+from brigade import claim_loss_cancellation, localio, run_budget, run_lifecycle, run_transport
 from tests.test_aboyeur import _roster
 from tests.run_test_helpers import run_aboyeur_guarded
 from tests._posix import requires_process_groups
@@ -606,10 +606,54 @@ def test_interrupt_shutdown_preserves_worker_retention(tmp_path, monkeypatch, sc
     assert runguard.lock_path(tmp_path).exists()
 
 
+def _assert_retention_diagnostic_recovery(workspace, run_dir, original_receipt, monkeypatch):
+    run_json = run_dir / "run.json"
+    assert run_json.read_bytes() == original_receipt
+    pending = json.loads(run_json.read_text())
+    assert pending["status"] == "dispatching"
+    assert not {"failure", "failure_phase", "error", "finished_at"} & pending.keys()
+    assert "retention_diagnostics" not in pending
+    sidecar = run_dir / "retention-diagnostics.json"
+    assert "BudgetPolicyError: token ceiling reached" in sidecar.read_text()
+    diagnostics = json.loads(sidecar.read_text())["diagnostics"]
+    assert any("BudgetPolicyError: token ceiling reached" in diagnostic for diagnostic in diagnostics)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+    assert runguard.recover_stale_run(workspace, run_dir) is True
+    recovered = json.loads(run_json.read_text())
+    assert "retention_diagnostics" not in recovered
+    assert recovered["status"] == "failed"
+    assert recovered["failure"]["kind"] == "owner-process-exited"
+    assert recovered["failure"]["prior_status"] == "dispatching"
+    for diagnostic in diagnostics:
+        assert diagnostic in recovered["failure"]["detail"]
+        assert diagnostic in recovered["error"]
+    assert not runguard.lock_path(workspace).exists()
+
+
 @pytest.mark.parametrize("scheduler", ["waves", "dag"])
-def test_sibling_retention_records_replaced_budget_denial(tmp_path, monkeypatch, scheduler):
+@pytest.mark.parametrize("diagnostic_write_fails", [False, True])
+def test_sibling_retention_records_replaced_budget_denial(tmp_path, monkeypatch, scheduler, diagnostic_write_fails):
     budget_raised = threading.Event()
     scheduler_saw_budget = threading.Event()
+    retained = runguard.RetainRunLockError("sibling receipt unavailable")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    run_json = run_dir / "run.json"
+    original_receipt = json.dumps({"status": "dispatching"})
+    run_json.write_text(original_receipt)
+    original_bytes = run_json.read_bytes()
+    diagnostic_path = run_dir / "retention-diagnostics.json"
+    write_attempts = []
+    write_json = localio.write_json
+
+    def fail_diagnostic_write(path, payload):
+        if path == diagnostic_path:
+            write_attempts.append(path)
+            raise OSError("diagnostic disk full")
+        write_json(path, payload)
+
+    if diagnostic_write_fails:
+        monkeypatch.setattr(localio, "write_json", fail_diagnostic_write)
 
     def worker(cli_ref, *args, **kwargs):
         if cli_ref == "codex":
@@ -622,7 +666,7 @@ def test_sibling_retention_records_replaced_budget_denial(tmp_path, monkeypatch,
                 request_id="req-1",
             )
         assert scheduler_saw_budget.wait(5)
-        raise runguard.RetainRunLockError("sibling receipt unavailable")
+        raise retained
 
     def budget_first(futures):
         # Hand the scheduler the budget failure before the sibling can retain,
@@ -642,7 +686,7 @@ def test_sibling_retention_records_replaced_budget_denial(tmp_path, monkeypatch,
     monkeypatch.setattr(run_transport, "as_completed", budget_first)
     error = None
     try:
-        with runguard.run_lock(tmp_path):
+        with runguard.run_lock(tmp_path, run_dir=run_dir):
             run_transport.dispatch(
                 [
                     run_transport.Assignment(worker="reviewer", task="review", stage=1, covers=("review",)),
@@ -653,20 +697,31 @@ def test_sibling_retention_records_replaced_budget_denial(tmp_path, monkeypatch,
                 run_appserver_worker=lambda *args, **kwargs: pytest.fail("unused app-server"),
                 event_writer=lambda *args, **kwargs: None,
                 cwd=tmp_path,
+                output_dir=run_dir,
                 scheduler=scheduler,
                 route_dependencies={"review": (), "inspect": ()},
             )
     except BaseException as exc:
         error = exc
-    assert isinstance(error, runguard.RetainRunLockError), f"sibling retention failure lost: {error!r}"
+    assert error is retained, f"sibling retention failure lost: {error!r}"
     notes = "\n".join(getattr(error, "__notes__", ()))
     assert "BudgetPolicyError" in notes and "token ceiling reached" in notes
     assert runguard.lock_path(tmp_path).exists()
+    assert run_json.read_bytes() == original_bytes
+    if diagnostic_write_fails:
+        assert write_attempts == [diagnostic_path]
+        assert not diagnostic_path.exists()
+    else:
+        _assert_retention_diagnostic_recovery(tmp_path, run_dir, original_bytes, monkeypatch)
 
 
 @pytest.mark.parametrize("scheduler", ["waves", "dag"])
 def test_retention_first_records_sibling_budget_denial(tmp_path, monkeypatch, scheduler):
     retain_raised = threading.Event()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "run.json").write_text(json.dumps({"status": "dispatching"}))
+    original_receipt = (run_dir / "run.json").read_bytes()
 
     def worker(cli_ref, *args, **kwargs):
         if cli_ref == "codex":
@@ -696,7 +751,7 @@ def test_retention_first_records_sibling_budget_denial(tmp_path, monkeypatch, sc
     monkeypatch.setattr(run_transport, "as_completed", retention_first)
     error = None
     try:
-        with runguard.run_lock(tmp_path):
+        with runguard.run_lock(tmp_path, run_dir=run_dir):
             run_transport.dispatch(
                 [
                     run_transport.Assignment(worker="reviewer", task="review", stage=1, covers=("review",)),
@@ -707,6 +762,7 @@ def test_retention_first_records_sibling_budget_denial(tmp_path, monkeypatch, sc
                 run_appserver_worker=lambda *args, **kwargs: pytest.fail("unused app-server"),
                 event_writer=lambda *args, **kwargs: None,
                 cwd=tmp_path,
+                output_dir=run_dir,
                 scheduler=scheduler,
                 route_dependencies={"review": (), "inspect": ()},
             )
@@ -716,6 +772,34 @@ def test_retention_first_records_sibling_budget_denial(tmp_path, monkeypatch, sc
     notes = "\n".join(getattr(error, "__notes__", ()))
     assert "sibling worker failure: BudgetPolicyError: token ceiling reached" in notes
     assert runguard.lock_path(tmp_path).exists()
+    _assert_retention_diagnostic_recovery(tmp_path, run_dir, original_receipt, monkeypatch)
+
+
+@pytest.mark.parametrize(
+    "sidecar_bytes",
+    [b"{", b'{"diagnostics": "not a list"}', b" " * 65536 + b"{", None],
+    ids=["invalid-json", "invalid-shape", "oversized", "unreadable-directory"],
+)
+def test_stale_recovery_ignores_unusable_retention_diagnostics(tmp_path, monkeypatch, sidecar_bytes):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    run_json = run_dir / "run.json"
+    run_json.write_text(json.dumps({"status": "dispatching"}))
+    sidecar = run_dir / "retention-diagnostics.json"
+    if sidecar_bytes is None:
+        sidecar.mkdir()
+    else:
+        sidecar.write_bytes(sidecar_bytes)
+    with pytest.raises(runguard.RetainRunLockError):
+        with runguard.run_lock(tmp_path, run_dir=run_dir):
+            raise runguard.RetainRunLockError("receipt unavailable")
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+    assert runguard.recover_stale_run(tmp_path, run_dir) is True
+    recovered = json.loads(run_json.read_text())
+    assert recovered["status"] == "failed"
+    assert recovered["failure"]["kind"] == "owner-process-exited"
+    assert "is no longer active" in recovered["failure"]["detail"]
+    assert not runguard.lock_path(tmp_path).exists()
 
 
 @pytest.mark.parametrize("granted", [False, True])

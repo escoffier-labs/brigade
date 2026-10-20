@@ -23,6 +23,11 @@ from uuid import uuid4
 
 from . import localio, proc, receipt_schema
 
+# Separate from journal-owned run.json; bounded even for many failing siblings.
+RETENTION_DIAGNOSTICS_NAME = "retention-diagnostics.json"
+RETENTION_DIAGNOSTICS_LIMIT = 16
+RETENTION_DIAGNOSTIC_CHAR_LIMIT = 256
+
 _NONTERMINAL_RUN_STATUSES = frozenset(
     {
         "started",
@@ -348,6 +353,7 @@ def _build_stale_lock_recovery_receipt(
     lock_workspace: object | None = None,
     lock_acquired_at: object | None = None,
     persist_recovery_provenance: bool = False,
+    retention_diagnostics: list[str] | None = None,
 ) -> dict[str, object]:
     """Pure builder for the stale-lock-recovery terminal receipt payload.
 
@@ -363,6 +369,8 @@ def _build_stale_lock_recovery_receipt(
     fresh copy they own.
     """
     detail = f"run owner process {owner_pid} is no longer active"
+    if retention_diagnostics:
+        detail += "; " + "; ".join(retention_diagnostics)
     failure_attribution: dict[str, object] = {}
     stored_status = payload.get("status")
     active_seats = payload.get("active_seats")
@@ -457,6 +465,23 @@ def _recover_run_artifact(owner: dict[str, object] | None, *, persist_recovery_p
             prior_status = status
             if status not in _NONTERMINAL_RUN_STATUSES:
                 return "terminal"
+    retention_diagnostics: list[str] = []
+    try:
+        # The writer caps notes below 64 KiB even with JSON escaping. Never
+        # let an unavailable, malformed, or oversized sidecar block recovery.
+        with run_json.with_name(RETENTION_DIAGNOSTICS_NAME).open("rb") as handle:
+            diagnostic_bytes = handle.read(65537)
+        if len(diagnostic_bytes) <= 65536:
+            sidecar = json.loads(diagnostic_bytes)
+            candidates = sidecar.get("diagnostics") if isinstance(sidecar, dict) else None
+            if isinstance(candidates, list):
+                retention_diagnostics = [
+                    diagnostic[:RETENTION_DIAGNOSTIC_CHAR_LIMIT]
+                    for diagnostic in candidates[:RETENTION_DIAGNOSTICS_LIMIT]
+                    if isinstance(diagnostic, str) and diagnostic
+                ]
+    except (OSError, ValueError, RecursionError):
+        pass
     recovered_at = datetime.now(timezone.utc).isoformat()
     stamped = _build_stale_lock_recovery_receipt(
         payload,
@@ -466,6 +491,7 @@ def _recover_run_artifact(owner: dict[str, object] | None, *, persist_recovery_p
         lock_workspace=owner.get("_lock_workspace"),
         lock_acquired_at=owner.get("acquired_at"),
         persist_recovery_provenance=persist_recovery_provenance,
+        retention_diagnostics=retention_diagnostics,
     )
     if stamped.get("dry_run") is not True:
         workspace = resolve_run_lock_workspace(stamped, run_json.parent)
