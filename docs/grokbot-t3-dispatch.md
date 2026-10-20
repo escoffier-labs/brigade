@@ -93,8 +93,12 @@ newline. Do not use an admin token. An invalid file closes messaging with
 `hub-error` and `hub_code: token_file_invalid`, while dispatch remains available.
 The underlying Fleet client keeps queued sends and replies in its credential-scoped spool.
 Each enabled watcher tick attempts a drain after request notifications through
-the existing client, whose network drain deadline is 12 seconds. A disabled connector leaves queued
-mutations untouched. Drain errors do not stop inbox or request notifications.
+the existing client, whose network drain deadline is 12 seconds. Lock acquisition
+waits at most 1 second, capped by the remaining 300-second unit budget after
+reserving the drain deadline and 30 seconds for shutdown. If that budget is
+exhausted, the tick records a failure and leaves queued mutations for retry.
+A disabled connector leaves queued mutations untouched. Drain errors do not stop
+inbox or request notifications.
 Permit that spool directory in `writable_paths` if the service sandbox otherwise
 makes it read-only. The connector never adds credential values to tool results,
 request ledgers, wake payloads, logs, or subprocess arguments.
@@ -208,7 +212,7 @@ target reports a failure and waits for configuration to be corrected.
 
 | Tool | Arguments | Does |
 |---|---|---|
-| `inbox_list` | Optional `unacked_only` (default `true`), `limit` (1 through 50, default 20) | Read the principal inbox. Marks message content as untrusted. Scans the oldest up to 300 retained ids within 3 seconds. Returns fewer messages when the requested limit or the 131072-byte public JSON limit requires it, with `has_more: true`. `unacked_total` counts fetched messages when the scan is incomplete. Orders unacknowledged mail oldest first. With `unacked_only: false`, incomplete scans report `order: "newest first within oldest fetched window"`. |
+| `inbox_list` | Optional `unacked_only` (default `true`), `limit` (1 through 50, default 20) | Read the principal inbox. Marks message content as untrusted. Scans the oldest up to 300 retained ids within 3 seconds. Returns fewer messages when the requested limit or the 131072-byte public JSON limit requires it, with `has_more: true`. `unacked_total` is exact when the scan completes and `null` when it is incomplete. Orders unacknowledged mail oldest first. With `unacked_only: false`, incomplete scans report `order: "newest first within oldest fetched window"`. |
 | `inbox_ack` | `ids` (1 through 100 unique positive integers) | Acknowledge inbox messages within a shared 10-second deadline, including recount. Missing ids appear in `not_pending`. |
 | `inbox_reply` | `msg_id`, `body` | Reply without acknowledging the original message. Body limit: 8192 UTF-8 bytes. |
 | `message_send` | `to`, `subject`, `body`, optional `ref`, `priority`, `thread`, `kind`, `client_id` | Send within principal grants to a node name such as `host-a`, a node id, or `agent:example`. Subject limit: 200 UTF-8 bytes. Body limit: 8192 UTF-8 bytes. Priority: `low`, `normal` (default), `high`, `urgent`. Kind: `message` (default), `question`, `completion`. Supply a stable `client_id` when retrying the same send. |
@@ -228,8 +232,8 @@ Credential rotation or an invalid credential closes the whole foreground scan
 with `hub-error`, discarding earlier rows.
 A first-page failure returns the closed `hub-error`. Acknowledge fetched oldest
 unacknowledged messages to progress through a larger backlog. If acknowledgement
-succeeds but its recount fails, `inbox_ack` still returns `acked` and `not_pending`,
-with `unacked_total: null` and `has_more: true`. Repeating an acknowledgement of
+succeeds but its recount fails or remains incomplete, `inbox_ack` still returns
+`acked` and `not_pending`, with `unacked_total: null` and `has_more: true`. Repeating an acknowledgement of
 an existing message is idempotent and reports it in `acked`. `not_pending` covers
 messages the Hub reports missing. Each acknowledgement gets at most 5 seconds
 and the time remaining in the batch's 10-second deadline. If that deadline

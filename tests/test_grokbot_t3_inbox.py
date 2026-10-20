@@ -427,6 +427,29 @@ def test_review_inbox_projection_fits_public_bytes_and_can_progress(hub, monkeyp
     assert tools.call_tool("inbox_list", {})["messages"][0]["id"] == len(ids) + 1
 
 
+@pytest.mark.parametrize("pending", [20, 500])
+def test_review_list_and_ack_totals_require_complete_scan(hub, monkeypatch, pending):
+    tools, _, template, _, _, _ = hub
+    rows = [dict(template, id=ident) for ident in range(1, pending + 1)]
+
+    def request(hub_url, credential, body, *, timeout=None):
+        if body["action"] == "ack":
+            rows[0]["acked_at"] = "2026-10-20T12:01:00+00:00"
+            return 200, {"message": rows[0]}
+        page = [row for row in rows if row["id"] > body["after"] and row["acked_at"] is None][:100]
+        return 200, {"messages": page, "next_cursor": page[-1]["id"] if page else body["after"]}
+
+    monkeypatch.setattr(messages, "_request", request)
+    listing = tools.call_tool("inbox_list", {"limit": 1})
+    acked = tools.call_tool("inbox_ack", {"ids": [1]})
+    assert listing["unacked_total"] == (20 if pending == 20 else None)
+    assert acked["unacked_total"] == (19 if pending == 20 else None)
+    assert listing["has_more"] is True and acked["has_more"] is True
+    assert listing["order"] == "oldest first"
+    assert listing["messages"][0]["id"] == 1
+    assert acked["acked"] == [1]
+
+
 def test_review_incomplete_history_labels_retained_window(hub, monkeypatch):
     tools, _, template, _, _, _ = hub
 

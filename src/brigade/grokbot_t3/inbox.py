@@ -77,7 +77,7 @@ class HubInbox(MessageOperations):
         ordered = rows if unacked_only else list(reversed(rows))
         result: dict[str, Any] = dict(
             messages=[],
-            unacked_total=sum(row.get("acked_at") is None for row in rows),
+            unacked_total=sum(row.get("acked_at") is None for row in rows) if complete else None,
             has_more=False,
             order=(
                 "oldest first"

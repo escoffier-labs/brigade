@@ -78,6 +78,7 @@ import _thread as _thread
 import errno
 import json
 import logging
+import math
 import os
 import re
 import secrets
@@ -599,23 +600,69 @@ def _open_private(path: Path, flags: int, *, dir_fd: int | None = None) -> int:
     return fd
 
 
+def _validate_spool_lock_timeout(timeout: float | None) -> None:
+    if timeout is None:
+        return
+    try:
+        valid = (
+            not isinstance(timeout, bool)
+            and isinstance(timeout, (int, float))
+            and math.isfinite(timeout)
+            and timeout >= 0
+        )
+    except OverflowError:
+        valid = False
+    if not valid:
+        raise FleetClientError("invalid fleet spool lock timeout")
+
+
 @contextmanager
-def _spool_lock(path: Path) -> Iterator[int | None]:
+def _spool_lock(path: Path, *, timeout: float | None = None) -> Iterator[int | None]:
     """Guard a spool across processes and threads.
 
     Yields a validated directory descriptor for relative I/O, or None on Windows.
+    An optional finite, nonnegative timeout shares one budget across both locks.
+    None preserves blocking acquisition; zero attempts acquisition without waiting.
     """
+    _validate_spool_lock_timeout(timeout)
+    deadline = None if timeout is None else time.monotonic() + timeout
     dir_fd = _ensure_private_dir(path.parent)
     lock_name = path.name + ".lock"
     try:
-        with _SPOOL_PROCESS_LOCK:
+        if deadline is None:
+            _SPOOL_PROCESS_LOCK.acquire()
+        elif not _SPOOL_PROCESS_LOCK.acquire(timeout=min(max(0.0, deadline - time.monotonic()), threading.TIMEOUT_MAX)):
+            raise FleetClientError("fleet spool lock timed out")
+        try:
             if dir_fd is not None:
                 fd = os.open(lock_name, os.O_RDWR | os.O_CREAT | _O_NOFOLLOW | _O_CLOEXEC, 0o600, dir_fd=dir_fd)
             else:  # pragma: no cover - Windows
                 fd = os.open(str(path.with_name(lock_name)), os.O_RDWR | os.O_CREAT | _O_CLOEXEC, 0o600)
             locked = False
             try:
-                if fcntl is not None:
+                if deadline is not None and (fcntl is not None or msvcrt is not None):
+                    while True:
+                        try:
+                            if fcntl is not None:
+                                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                            elif msvcrt is not None:  # pragma: no cover - Windows
+                                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                            locked = True
+                            break
+                        except OSError as exc:
+                            if exc.errno not in {
+                                errno.EACCES,
+                                errno.EAGAIN,
+                                errno.EWOULDBLOCK,
+                                errno.EINTR,
+                                errno.EDEADLK,
+                            }:
+                                raise
+                            remaining = deadline - time.monotonic()
+                            if remaining <= 0:
+                                raise FleetClientError("fleet spool lock timed out") from None
+                            time.sleep(min(0.05, remaining))
+                elif fcntl is not None:
                     fcntl.flock(fd, fcntl.LOCK_EX)
                     locked = True
                 elif msvcrt is not None:  # pragma: no cover - Windows
@@ -636,6 +683,8 @@ def _spool_lock(path: Path) -> Iterator[int | None]:
                             msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
                 finally:
                     os.close(fd)
+        finally:
+            _SPOOL_PROCESS_LOCK.release()
     finally:
         if dir_fd is not None:
             os.close(dir_fd)

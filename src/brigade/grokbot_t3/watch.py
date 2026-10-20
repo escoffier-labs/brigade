@@ -14,6 +14,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..grokbot_feed import _NoRedirect
+from ..fleet_client_messages import MESSAGE_DRAIN_DEADLINE_SECONDS
 from ..hub_messages import call_message
 from . import contracts as c
 from .fleet import CALL_TIMEOUT, FleetCallError, FleetTimeout
@@ -32,7 +33,9 @@ POST_TIMEOUT = 8
 # The watcher unit's TimeoutStartSec. The budget is checked only before each row starts, so reserve the
 # slowest row (a status call plus a post to every target) and startup and shutdown time.
 UNIT_TIMEOUT_SECONDS = 300
-PASS_BUDGET_SECONDS = float(UNIT_TIMEOUT_SECONDS - CALL_TIMEOUT - MAX_TARGETS * POST_TIMEOUT - 30)
+SHUTDOWN_MARGIN_SECONDS = 30
+FLUSH_LOCK_TIMEOUT_SECONDS = 1.0
+PASS_BUDGET_SECONDS = float(UNIT_TIMEOUT_SECONDS - CALL_TIMEOUT - MAX_TARGETS * POST_TIMEOUT - SHUTDOWN_MARGIN_SECONDS)
 MAX_ATTEMPTS = 30
 Post = Callable[[str, str, dict[str, Any]], int]
 
@@ -316,9 +319,19 @@ def run_watch_once(
                 ledger.record_status_poll(row["request_id"], failed=True)
     if runtime is not None and runtime.enabled and runtime.hub_token_file is not None:
         # Request wakes run first: a competing sender's spool lock must not hold them up.
-        # The existing client bounds network draining to 12 seconds after acquiring its lock.
-        try:
-            call_message("flush_credential", token_file=str(runtime.hub_token_file))
-        except Exception:
+        # Reserve the existing network-drain deadline and shutdown margin before waiting.
+        remaining = (
+            UNIT_TIMEOUT_SECONDS - (monotonic() - started) - MESSAGE_DRAIN_DEADLINE_SECONDS - SHUTDOWN_MARGIN_SECONDS
+        )
+        if remaining <= 0:
             summary["failed"] += 1
+        else:
+            try:
+                call_message(
+                    "flush_credential",
+                    token_file=str(runtime.hub_token_file),
+                    lock_timeout=min(FLUSH_LOCK_TIMEOUT_SECONDS, remaining),
+                )
+            except Exception:
+                summary["failed"] += 1
     return summary

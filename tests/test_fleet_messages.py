@@ -3337,3 +3337,43 @@ def test_message_reads_forward_explicit_timeouts(monkeypatch):
     fleet_client_messages.list_messages(after=0)
     # Omitting the timeout keeps the client's default transport timeout.
     assert seen == [("list", 1.5), ("ack", 0.5), ("list", None)]
+
+
+@pytest.mark.parametrize("lock_timeout", [None, 0, 0.25])
+def test_flush_credential_forwards_optional_lock_timeout(tmp_path, monkeypatch, lock_timeout):
+    from contextlib import contextmanager
+
+    path = tmp_path / "messages.jsonl"
+    path.touch()
+    calls = []
+    monkeypatch.setattr(
+        fleet_client_messages, "_settings", lambda *args: ("https://hub.example.test", "x" * 64, "node-a")
+    )
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.example.test"})
+    monkeypatch.setattr(fleet_client_messages, "_spool_path", lambda *args: path)
+    monkeypatch.setattr(fleet_client_messages, "_warn_inactive_spools", lambda *args: None)
+    monkeypatch.setattr(fleet_client_messages, "_flush_locked", lambda *args, **kwargs: 7)
+
+    @contextmanager
+    def lock(path, *, timeout=None):
+        calls.append(timeout)
+        yield None
+
+    monkeypatch.setattr(fleet_client, "_spool_lock", lock)
+    assert fleet_client_messages.flush_credential(lock_timeout=lock_timeout) == 7
+    assert calls == [lock_timeout]
+
+
+@pytest.mark.parametrize("lock_timeout", [-1, float("nan"), float("inf"), True])
+@pytest.mark.parametrize("credential", [True, False])
+def test_flush_rejects_invalid_lock_timeout_before_settings(monkeypatch, lock_timeout, credential):
+    def forbidden():
+        pytest.fail("settings accessed before timeout validation")
+
+    monkeypatch.setattr(fleet_client_messages, "_settings", forbidden)
+    monkeypatch.setattr(fleet_client, "load_fleet_config", forbidden)
+    with pytest.raises(fleet_client.FleetClientError, match="^invalid fleet spool lock timeout$"):
+        if credential:
+            fleet_client_messages.flush_credential(lock_timeout=lock_timeout)
+        else:
+            fleet_client_messages.flush("node-a", lock_timeout=lock_timeout)

@@ -357,9 +357,10 @@ def sent(*, after: int = 0, ids: list[int] | None = None, token_file: str | None
     return payload
 
 
-def flush_credential(token_file: str | None = None) -> int:
+def flush_credential(token_file: str | None = None, *, lock_timeout: float | None = None) -> int:
+    fleet_client._validate_spool_lock_timeout(lock_timeout)
     hub, token, scope = _settings() if token_file is None else _settings(token_file)
-    return flush(scope, hub_url=hub, token=token)
+    return flush(scope, hub_url=hub, token=token, lock_timeout=lock_timeout)
 
 
 def send(
@@ -824,7 +825,10 @@ def _pending_principal_request_id(path: Path, name: str, *, enrollment_id: str |
     return None
 
 
-def flush(node_id: str, *, hub_url: str | None = None, token: str | None = None) -> int:
+def flush(
+    node_id: str, *, hub_url: str | None = None, token: str | None = None, lock_timeout: float | None = None
+) -> int:
+    fleet_client._validate_spool_lock_timeout(lock_timeout)
     config = fleet_client.load_fleet_config()
     hub = hub_url or config["hub_url"]
     auth = token or fleet_client.load_fleet_settings()["node_token"]
@@ -834,7 +838,7 @@ def flush(node_id: str, *, hub_url: str | None = None, token: str | None = None)
     _warn_inactive_spools(node_id, path)
     if not path.is_file():
         return 0
-    with fleet_client._spool_lock(path) as dir_fd:
+    with fleet_client._spool_lock(path, timeout=lock_timeout) as dir_fd:
         return _flush_locked(path, hub, auth, dir_fd=dir_fd)
 
 
