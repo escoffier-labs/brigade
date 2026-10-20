@@ -95,8 +95,10 @@ def _structural_fixture_binding(**overrides) -> dict:
     return binding
 
 
-def _write_patch_manifest(path: Path, *, manifest_id: str = "test-skill-patch") -> dict:
-    payload = {
+def _write_patch_manifest(
+    path: Path, *, manifest_id: str = "test-skill-patch", scope_globs: list[str] | None = None
+) -> dict:
+    payload: dict = {
         "schema": "brigade.verify_manifest.v1",
         "schema_version": 1,
         "manifest_id": manifest_id,
@@ -116,6 +118,8 @@ def _write_patch_manifest(path: Path, *, manifest_id: str = "test-skill-patch") 
             }
         ],
     }
+    if scope_globs is not None:
+        payload["scope_globs"] = scope_globs
     verify_manifest.write_workspace_manifest(path, payload)
     _track_workspace_manifest(path, manifest_id)
     return payload
@@ -378,6 +382,105 @@ def test_project_trial_owned_patch_is_eligible(scoreable_target, monkeypatch):
     receipt = _run_manifest_verify(scoreable_target, "test-skill-patch", monkeypatch=monkeypatch, start_session=False)
     projection = verify_trial.project_trial(receipt, target=scoreable_target)
     assert projection.eligible is True
+
+
+def _run_scoped_patch_verify(target: Path, monkeypatch, *, scope_globs, extra_paths=()) -> dict:
+    _write_patch_manifest(target, scope_globs=scope_globs)
+    assert work_cmd.start(target=target, title="verify-trial") == 0
+    skill = _write_skill_subject(target, content="# brigade-work\npatched\n")
+    subprocess.run(["git", "add", str(skill.relative_to(target))], cwd=target, check=True)
+    for rel in extra_paths:
+        extra = target / rel
+        extra.parent.mkdir(parents=True, exist_ok=True)
+        extra.write_text("out of scope\n")
+    return _run_manifest_verify(target, "test-skill-patch", monkeypatch=monkeypatch, start_session=False)
+
+
+def test_project_trial_in_scope_patch_is_eligible(scoreable_target, monkeypatch):
+    receipt = _run_scoped_patch_verify(scoreable_target, monkeypatch, scope_globs=["skills/brigade-work/**"])
+    projection = verify_trial.project_trial(receipt, target=scoreable_target)
+    assert projection.eligible is True
+
+
+def test_project_trial_out_of_scope_patch_path_is_ineligible(scoreable_target, monkeypatch):
+    receipt = _run_scoped_patch_verify(
+        scoreable_target,
+        monkeypatch,
+        scope_globs=["skills/brigade-work/**"],
+        extra_paths=[".vale-styles/Slop/Banlist.yml"],
+    )
+    projection = verify_trial.project_trial(receipt, target=scoreable_target)
+    assert projection.eligible is False
+    assert projection.reason == "out_of_scope_changes"
+
+
+def test_project_trial_dot_directory_scope_glob_keeps_leading_dot(scoreable_target, monkeypatch):
+    receipt = _run_scoped_patch_verify(
+        scoreable_target,
+        monkeypatch,
+        scope_globs=["skills/brigade-work/**", ".vale-styles/**"],
+        extra_paths=[".vale-styles/Slop/Banlist.yml"],
+    )
+    projection = verify_trial.project_trial(receipt, target=scoreable_target)
+    assert projection.eligible is True
+
+
+def test_patch_changed_paths_keeps_literal_utf8_in_quoted_paths():
+    patch = (
+        'diff --git "a/\u76ee/a\\tb.txt" "b/\u76ee/a\\tb.txt"\n--- "a/\u76ee/a\\tb.txt"\n+++ "b/\u76ee/a\\tb.txt"\n'
+    ).encode()
+    assert verify_trial.patch_changed_paths(patch) == ["\u76ee/a\tb.txt"]
+
+
+@pytest.mark.parametrize("config", [("diff.mnemonicPrefix", "true"), ("diff.noprefix", "true")])
+def test_project_trial_scope_check_ignores_diff_prefix_config(scoreable_target, monkeypatch, config):
+    subprocess.run(["git", "config", *config], cwd=scoreable_target, check=True)
+    receipt = _run_scoped_patch_verify(scoreable_target, monkeypatch, scope_globs=["skills/brigade-work/**"])
+    projection = verify_trial.project_trial(receipt, target=scoreable_target)
+    assert projection.eligible is True, projection.reason
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="backslash is a path separator on Windows")
+def test_project_trial_backslash_patch_path_is_not_treated_as_in_scope(scoreable_target, monkeypatch):
+    receipt = _run_scoped_patch_verify(
+        scoreable_target,
+        monkeypatch,
+        scope_globs=["skills/brigade-work/**"],
+        extra_paths=["skills\\brigade-work\\outside.md"],
+    )
+    projection = verify_trial.project_trial(receipt, target=scoreable_target)
+    assert projection.eligible is False
+    assert projection.reason == "out_of_scope_changes"
+
+
+def test_project_trial_without_scope_globs_ignores_extra_patch_paths(scoreable_target, monkeypatch):
+    receipt = _run_scoped_patch_verify(
+        scoreable_target, monkeypatch, scope_globs=None, extra_paths=[".vale-styles/Slop/Banlist.yml"]
+    )
+    projection = verify_trial.project_trial(receipt, target=scoreable_target)
+    assert projection.eligible is True
+
+
+def test_patch_changed_paths_reads_headers_not_hunk_content():
+    patch = (
+        b"diff --git a/old name.md b/new name.md\n"
+        b"similarity index 90%\n"
+        b"rename from old name.md\n"
+        b"rename to new name.md\n"
+        b"--- a/old name.md\t\n"
+        b"+++ b/new name.md\t\n"
+        b"@@ -1 +1 @@\n"
+        b"--- a/looks-like-a-header.md\n"
+        b"+++ b/also-not-a-path.md\n"
+        b"diff --git a/bin.dat b/bin.dat\n"
+        b"new file mode 100644\n"
+        b"GIT binary patch\n"
+        b"literal 1\n"
+        b'diff --git "a/caf\\303\\251.md" "b/caf\\303\\251.md"\n'
+        b'--- "a/caf\\303\\251.md"\n'
+        b'+++ "b/caf\\303\\251.md"\n'
+    )
+    assert verify_trial.patch_changed_paths(patch) == ["old name.md", "new name.md", "bin.dat", "caf\u00e9.md"]
 
 
 def test_project_trial_fixture_eval_without_patch(scoreable_target, monkeypatch):

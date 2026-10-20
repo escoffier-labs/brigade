@@ -1047,6 +1047,9 @@ def dispatch(args) -> int:
         return rc
     except runguard.RunGuardError as exc:
         print(f"error: {exc}", file=sys.stderr)
+        # str(exc) omits notes, such as a scheduler failure a retention error replaced.
+        for note in getattr(exc, "__notes__", ()):
+            print(f"note: {note}", file=sys.stderr)
         if worktree_cwd is not None and keep_worktree:
             print(f"worktree kept for recovery: {worktree_cwd}", file=sys.stderr)
         return 2
