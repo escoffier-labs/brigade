@@ -1496,6 +1496,27 @@ def serve_http(handlers: Handlers, *, host: str, port: int, token: str) -> int:
 
 ---
 
+### Task 6b: Security hardening from the Daybreak review
+
+Added after the read-only Daybreak review of Tasks 4-6 (0 critical, 0 high, 5 medium, 3 low). Each fix gets a failing test first, in the existing test file for that module.
+
+**Files:**
+- Modify: `src/brigade/memory_mcp_core.py`, `src/brigade/mcp_http.py`, `src/brigade/handoff_cmd/drafts.py`
+- Test: `tests/test_memory_mcp_core.py`, `tests/test_mcp_http.py`, `tests/test_handoff_build_draft.py`
+
+- [ ] M1 card enumeration containment: `list_cards`, `search_cards`, `resources()` and `_read_in_store` only return cards whose resolved path stays under the resolved `store.root`. A store whose `memory/cards` directory is itself a symlink to an outside directory yields no cards from it. Do not change `memory_cmd._iter_cards` (CLI behavior stays as is); filter in the core with one helper. Read the file through a no-follow open (reuse `card_fingerprint.read_text_nofollow` or `managed_block.read_text_nofollow` if its contract fits).
+- [ ] M2 handoff destination: in `write_handoff`, refuse (tool error) when the resolved inbox is not under the resolved store root, which covers a symlinked `.claude/memory-handoffs`, `.codex/memory-handoffs`, or user `memory/handoffs`. In `build_draft`, when `force` is false, create the file with `O_CREAT | O_EXCL | O_NOFOLLOW` (mode 0600) instead of `exists()` then `write_text()`, and raise the same `handoff draft already exists: <path>` ValueError on `FileExistsError`. Keep `force=True` behavior. `brigade handoff draft` CLI output stays byte-identical; the existing handoff tests must stay green.
+- [ ] M3 bearer file: `read_token` opens once with `O_RDONLY | O_NOFOLLOW`, validates the descriptor with `fstat` (regular file, owned by the current uid, no group/other bits), reads at most 4096 bytes from it, and keeps the existing error messages. `ensure_token` keeps `O_EXCL` creation.
+- [ ] M4 slow clients: the request handler sets a socket timeout (class attribute `timeout = 10`) so a partial request cannot hold the single-threaded server; a test opens a raw socket, sends half a request line, and asserts the server answers a second client within the deadline (patch the timeout down to keep the test fast).
+- [ ] M5 user store modes: when `write_handoff` writes to the user store, the inbox directory is created 0700 and the handoff file is 0600. Do not chmod or reject a pre-existing `$BRIGADE_HOME`.
+- [ ] L1 Host and Origin: reject (403) a `Host` header that is not a loopback literal or `localhost` (port optional); a malformed `Origin` or a non-http(s) scheme is a 403, never a 500.
+- [ ] L2 parser failures: `ValueError` and `RecursionError` from `json.loads` return a fixed 400 parse error with no traceback on stderr.
+- [ ] L3 size bounds: `write_handoff` rejects `content` over 256 KiB and `facts`/`evidence` lists over 50 items with a tool error.
+- [ ] Run to green: `PY -m pytest tests/test_memory_mcp_core.py tests/test_mcp_http.py tests/test_handoff_build_draft.py tests/test_handoff_cmd.py tests/test_memory_search_mcp.py -q -p no:cacheprovider`, then ruff check, ruff format --check and mypy on the three modules.
+- [ ] Commit: `fix(mcp): harden memory MCP transports per security review`
+
+---
+
 ### Task 7: Wire `serve-mcp` to the core and both transports
 
 **Files:**
