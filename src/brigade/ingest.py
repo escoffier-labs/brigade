@@ -783,40 +783,61 @@ def _git_tracked_names(directory: Path) -> set[str] | None:
         return None
 
 
-def _git_tracked_files(directory: Path) -> tuple[set[str], set[tuple[int, int]]] | None:
+def _git_tracked_files(directory: Path) -> tuple[set[str], dict[str, tuple[int, int]]] | None:
     """Return indexed names and file identities directly in `directory`.
 
-    Names protect deleted and recreated files. Identities also protect case
-    aliases on case-insensitive filesystems. None means the check failed.
+    Names protect deleted and recreated files. Keep identities by indexed name
+    so distinct directory entries can be verified without following symlinks.
+    None means the check failed.
     """
     names = _git_tracked_names(directory)
     if names is None:
         return None
-    identities: set[tuple[int, int]] = set()
+    identities: dict[str, tuple[int, int]] = {}
     for name in names:
         try:
-            st = (directory / name).stat()
+            st = (directory / name).lstat()
         except FileNotFoundError:
             continue
         except OSError as exc:
             _warn_tracking_check_failed(directory, str(exc))
             return None
-        identities.add((st.st_dev, st.st_ino))
+        identities[name] = (st.st_dev, st.st_ino)
     return names, identities
 
 
-def _is_tracked(path: Path, tracked: tuple[set[str], set[tuple[int, int]]] | None) -> bool:
+def _is_tracked(path: Path, tracked: tuple[set[str], dict[str, tuple[int, int]]] | None) -> bool:
     if tracked is None:
         return True
     names, identities = tracked
-    # Protect case aliases even when their identities could not be read.
-    if path.name.casefold() in {name.casefold() for name in names}:
+    if path.name in names:
         return True
     try:
-        st = path.stat()
+        st = path.lstat()
+        identity = (st.st_dev, st.st_ino)
+        case_matches = {name for name in names if name.casefold() == path.name.casefold()}
+        identity_matches = {name for name, indexed_identity in identities.items() if indexed_identity == identity}
+        # Missing identities cannot disprove aliases after deletion/recreation.
+        # Case-equivalent hardlinks remain protected as ambiguous aliases.
+        if any(name not in identities for name in case_matches) or case_matches & identity_matches:
+            return True
+        possible_aliases = case_matches | identity_matches
+        if not possible_aliases:
+            return False
+        # Different inode observations alone can result from a replacement
+        # race. Require both exact spellings as directory entries, with the
+        # identities collected above still present, before exempting either.
+        observed: dict[str, tuple[int, int]] = {}
+        with os.scandir(path.parent) as entries:
+            for entry in entries:
+                if entry.name == path.name or entry.name in possible_aliases:
+                    entry_st = (path.parent / entry.name).lstat()
+                    observed[entry.name] = (entry_st.st_dev, entry_st.st_ino)
+        return observed.get(path.name) != identity or any(
+            observed.get(name) != identities[name] for name in possible_aliases
+        )
     except OSError:
         return True
-    return (st.st_dev, st.st_ino) in identities
 
 
 def _list_handoffs(handoffs_dir: Path) -> tuple[List[Path], List[Path]]:
