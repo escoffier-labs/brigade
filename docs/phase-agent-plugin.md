@@ -4,7 +4,7 @@ Status: approved 2026-10-19. The implementation plan will go in `docs/phase-agen
 
 ## Goal
 
-A person who has never used Brigade installs one plugin in Claude Code or Codex and gets working agent memory in the same session: search and read memory cards, write handoffs, and propose memory changes. The same memory core must also run behind an HTTP MCP endpoint so MCP gateways that do not accept stdio servers (Executor v2) can use it. A later phase reuses that endpoint as a bring-your-own remote connector for ChatGPT, claude.ai, and Grok Bot.
+A person who has never used Brigade installs one plugin in Claude Code or Codex and gets working agent memory in the same session: search and read memory cards, write handoffs, and propose memory changes through reviewed handoffs. The same memory core must also run behind an HTTP MCP endpoint so MCP gateways that do not accept stdio servers (Executor v2) can use it. A later phase reuses that endpoint as a bring-your-own remote connector for ChatGPT, claude.ai, and Grok Bot.
 
 ## Settled decisions
 
@@ -43,8 +43,7 @@ The existing read-only card server in `src/brigade/memory_cmd.py` (`_mcp_card_to
 | `search_cards` | read | Existing behavior across both stores. Results are labeled by origin and repo matches rank first on ties. |
 | `memory_status` | read | Resolved store paths, card counts per origin, whether the cwd is Brigade-wired, and the enforcement state. |
 | `work_brief` | read | The compact output of `brigade work brief` for a Brigade-wired repo. Outside one, a short pointer to the user store. |
-| `write_handoff` | write | Writes one handoff using the existing handoff template and writer. In a Brigade-wired repo it lands in that repo's handoff inbox; otherwise in the user store's inbox. Never overwrites an existing file. |
-| `propose_memory` | write | Creates a reviewed memory proposal through the existing proposal path (phase 028). It never edits a canonical card. |
+| `write_handoff` | write | Writes one handoff using the existing handoff template and writer. In a Brigade-wired repo it lands in that repo's handoff inbox; otherwise in the user store's inbox. Never overwrites an existing file. With `action` `create-card` or `update-card`, it is the reviewed route for proposing card changes. |
 
 Write tools carry MCP `annotations` (`readOnlyHint: false`, `destructiveHint: false`, `idempotentHint: false`) so clients can gate them. Read tools set `readOnlyHint: true`.
 
@@ -61,6 +60,7 @@ Write tools carry MCP `annotations` (`readOnlyHint: false`, `destructiveHint: fa
   - Binds only to loopback (`127.0.0.1` or `::1`). Any other address is refused with exit code 2.
   - Requires `Authorization: Bearer <token>`. The token is generated on first HTTP start into `$BRIGADE_HOME/mcp-http.token` (mode `0600`) unless `--bearer-file` names an existing protected file. The token value is never printed. `--print-token-path` prints its location for gateway setup.
   - Validates the `Origin` header when present and rejects non-loopback origins (DNS rebinding protection required by the MCP transport spec).
+  - `--target` defaults to auto-detection; an explicit `--target` is always the repo store.
   - Stateless: no session resumption in phase 1. Server-sent streaming is not needed for these tools; responses use single JSON bodies.
 
 Executor v1 uses the stdio command. Executor v2 registers `http://127.0.0.1:<port>/mcp` with the bearer header.
@@ -73,24 +73,24 @@ plugins/brigade/
   .claude-plugin/plugin.json
   .codex-plugin/plugin.json              # Codex manifest, schema per `codex plugin` docs
   .mcp.json                              # memory server, stdio
-  hooks/hooks.json                       # SessionStart brief only
+  codex.mcp.json                         # Codex MCP launch config
+  hooks/hooks.json                       # SessionStart brief only (Claude Code)
   hooks/session-start.sh
   skills/brigade-work/SKILL.md           # generated copy, see below
-  commands/enforce.md                    # /brigade:enforce
-  commands/memory-status.md              # /brigade:memory-status
+  skills/enforce/SKILL.md                # /brigade:enforce
 ```
 
 - **MCP launch**: `.mcp.json` runs `npx -y @escoffier-labs/brigade@<pinned version> memory serve-mcp --stdio`. The npm package bundles its Python runtime, so the user needs no prior pipx install. The README documents swapping the command to `brigade` for users who already have the CLI. The pinned version is bumped by the release process.
 - **Skill copy**: the plugin's `brigade-work` skill is generated from the canonical skill source by a script, and a test fails when the copy drifts. The plugin directory is not a third hand-maintained skill location.
-- **SessionStart hook**: calls `brigade work brief` in compact form when the cwd is Brigade-wired, otherwise prints one line naming the user store. It runs under a 5-second timeout and always exits 0, so a missing CLI, slow npx cold start, or broken repo never blocks a session.
-- **`/brigade:enforce`**: runs `brigade init --target . --depth repo --harnesses <current harness> --git-exclude` after showing the user what it will wire. That reuses the existing enforced hooks (verify capture, raw-check blocking, handoff Stop gate). The plugin itself ships none of those hooks.
+- **SessionStart hook**: Claude Code only; Codex has no verified plugin hook contract in codex-cli 0.163.0. Calls `brigade work brief` in compact form when the cwd is Brigade-wired, otherwise prints one line naming the user store. It runs under a 5-second timeout and always exits 0, so a missing CLI, slow npx cold start, or broken repo never blocks a session.
+- **`/brigade:enforce`** (a plugin skill named `enforce`, so it exists in both harnesses): runs `brigade init --target . --depth repo --harnesses <current harness> --git-exclude` after showing the user what it will wire. That reuses the existing enforced hooks (verify capture, raw-check blocking, handoff Stop gate). The plugin itself ships none of those hooks.
 - **Install path**: `/plugin marketplace add escoffier-labs/brigade` then `/plugin install brigade@brigade` in Claude Code; the equivalent `codex plugin` commands in Codex.
 
 ## Data flow
 
 1. The agent calls `search_cards`. The transport decodes JSON-RPC and hands `(name, arguments)` to the core.
 2. The core resolves both stores through `memory_scope`, runs the existing search on each, merges and labels results, and returns them.
-3. `write_handoff` and `propose_memory` validate inputs, resolve the destination store, and call the existing writers. The response includes the written path, relative to its store.
+3. `write_handoff` validates inputs, resolve the destination store, and call the existing writers. The response includes the written path, relative to its store.
 
 ## Failure handling
 
@@ -116,7 +116,7 @@ plugins/brigade/
 
 ## Dependencies and checks for the plan
 
-- `@escoffier-labs/brigade` must be published to npm at a version that contains these commands before the plugin's `.mcp.json` can pin it. Until then, the plugin documents the pipx route.
+- npm `@escoffier-labs/brigade@0.29.0` is published. The plugin pins the pyproject version through `scripts/version_sync.py`, and the marketplace entries land with the first release that contains these commands.
 - The Codex plugin manifest schema is confirmed from `codex plugin --help` and Codex documentation during planning. No design decision depends on it.
 - New modules stay well under the module size ceiling. `memory_cmd.py` should shrink as the card tool code moves into the core.
 

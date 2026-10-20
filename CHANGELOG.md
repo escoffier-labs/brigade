@@ -9,7 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Brigade agent plugin for Claude Code and Codex (`plugins/brigade/`): memory MCP tools, the `brigade-work` skill, a non-blocking SessionStart brief (Claude Code only), and an opt-in `enforce` skill.
+- `brigade memory serve-mcp --http 127.0.0.1:<port>`: loopback Streamable HTTP with a private bearer token file, for MCP gateways that do not accept stdio servers. It checks Host and Origin, drops a stalled connection after 10 seconds, and requires the bearer file to be a regular file owned by the current user with no group or other permission bits.
+- Memory MCP tools `memory_status`, `work_brief`, and `write_handoff`; card tools now span the repo store and a user store under `BRIGADE_HOME`. Cards are served only when their real path stays inside the store, and `write_handoff` caps content at 256 KiB and facts and evidence at 50 items each.
 - Stable npm publishing support for `@escoffier-labs/brigade@0.29.0` and five public platform companions, using the pinned official PyPI wheel, tag-based payload auditing, immutable archive retries, hosted provenance and native registry acceptance gates. Registry publication is tracked by the release workflow.
+
+### Changed
+
+- The memory MCP server reports `serverInfo.name` `brigade-memory` (was `brigade-memory-readonly`), and `serve-mcp --target` defaults to the nearest Brigade-wired repo. An explicit `--target` is still used as the repo store.
+- `brigade handoff draft` creates draft files with mode 0600 (previously the umask default).
 
 ## [0.29.0] - 2026-10-18
 

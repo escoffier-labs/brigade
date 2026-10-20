@@ -2082,7 +2082,7 @@ PLUGIN_LOCATIONS = [
 - Modify: `docs/phase-agent-plugin.md` (apply the spec deltas)
 - Modify: `CHANGELOG.md` (Unreleased section)
 
-- [ ] Create `docs/agent-plugin.md` with these sections and this exact content outline:
+- [x] Create `docs/agent-plugin.md` with these sections and this exact content outline:
   1. `# Brigade agent plugin`: one paragraph on what the plugin does (memory tools, `brigade-work` skill, Claude SessionStart brief, opt-in `enforce` skill).
   2. `## Install in Claude Code`: `/plugin marketplace add escoffier-labs/brigade`, then `/plugin install brigade@brigade`. Note it requires Brigade 0.30.0 or later on npm.
   3. `## Install in Codex`: `codex plugin marketplace add escoffier-labs/brigade`, then `codex plugin add brigade`.
@@ -2090,8 +2090,8 @@ PLUGIN_LOCATIONS = [
   5. `## Where memory lives`: the repo store rules (explicit `--target`, or the nearest `.brigade/config.json` above the cwd, never home) and the user store (`$BRIGADE_HOME/memory/cards`, handoffs in `$BRIGADE_HOME/memory/handoffs`).
   6. `## Loopback HTTP for MCP gateways`: `brigade memory serve-mcp --print-token-path`, then `brigade memory serve-mcp --http 127.0.0.1:8790`. Register `http://127.0.0.1:8790/mcp` with header `Authorization: Bearer <contents of the token file>`. Executor v1 can use the stdio command instead; Executor v2 needs the HTTP mode. Binding off loopback is refused.
   7. `## Turn on the full work loop`: what the `enforce` skill runs.
-- [ ] In `docs/phase-agent-plugin.md`: in the tool contract table, delete the `propose_memory` row and add to the `write_handoff` row: "With `action` `create-card` or `update-card`, it is the reviewed route for proposing card changes." In the packaging tree, delete `commands/enforce.md` and `commands/memory-status.md`, add `skills/enforce/SKILL.md` and `codex.mcp.json`, and note under SessionStart hook: "Claude Code only; Codex has no verified plugin hook contract in codex-cli 0.163.0." Under Transports, add: "`--target` defaults to auto-detection; an explicit `--target` is always the repo store." Under Dependencies, replace the npm bullet with: "npm `@escoffier-labs/brigade@0.29.0` is published. The plugin pins the pyproject version through `scripts/version_sync.py`, and the marketplace entries land with the first release that contains these commands."
-- [ ] Add under the CHANGELOG `## Unreleased` heading (create the heading at the top if missing):
+- [x] In `docs/phase-agent-plugin.md`: in the tool contract table, delete the `propose_memory` row and add to the `write_handoff` row: "With `action` `create-card` or `update-card`, it is the reviewed route for proposing card changes." In the packaging tree, delete `commands/enforce.md` and `commands/memory-status.md`, add `skills/enforce/SKILL.md` and `codex.mcp.json`, and note under SessionStart hook: "Claude Code only; Codex has no verified plugin hook contract in codex-cli 0.163.0." Under Transports, add: "`--target` defaults to auto-detection; an explicit `--target` is always the repo store." Under Dependencies, replace the npm bullet with: "npm `@escoffier-labs/brigade@0.29.0` is published. The plugin pins the pyproject version through `scripts/version_sync.py`, and the marketplace entries land with the first release that contains these commands."
+- [x] Add under the CHANGELOG `## Unreleased` heading (create the heading at the top if missing):
 
 ```markdown
 ### Added
@@ -2103,7 +2103,7 @@ PLUGIN_LOCATIONS = [
 - The memory MCP server reports `serverInfo.name` `brigade-memory` (was `brigade-memory-readonly`), and `serve-mcp --target` defaults to the nearest Brigade-wired repo.
 ```
 
-- [ ] Commit: `git add docs/agent-plugin.md docs/phase-agent-plugin.md CHANGELOG.md && git commit -m "docs: document the Brigade agent plugin and HTTP memory server"`
+- [x] Commit: `git add docs/agent-plugin.md docs/phase-agent-plugin.md CHANGELOG.md && git commit -m "docs: document the Brigade agent plugin and HTTP memory server"`
 
 ---
 
