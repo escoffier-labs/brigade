@@ -1027,6 +1027,7 @@ Task ledger commands:
 
   A missing `blocks` source or missing ancestor parent fails closed with `missing_dependency`, including blockers inherited from ancestors. Missing dependent targets stay informational. `--explain` and `--json` separate unfinished `blocking_dependencies` from unresolvable `missing_dependencies` per blocked task and retain `orphans`. Explained output names the affected ids and repair commands such as `brigade work task edge remove --id <edge-id>`. Claim and `work run --task-id` use the same resolver.
 
+- `brigade work dispatch [--target .] [--wave N] [--max N] [--batch-size N] [--worker SEAT | --seat-map CLASS=SEAT ...] --dry-run [--json]` plans one ready wave, ranked by priority, age, and task id. The default wave is the first dispatchable wave. Wave indexes count dispatchable waves after start gates, seat mapping, and occupied-footprint filtering, so they can differ from `work ready --parallel-safe`. Selection is the minimum of available capacity, batch size, and ready tasks in that wave. The cap defaults to roster `limits.max_workers`, and batch size defaults to the cap. Claimed in-progress footprints hold overlapping tasks out with reason `occupied`. Seats supplied by `--worker` or `--seat-map` must exist in the resolved roster, including when `--max` supplies the cap. Receipts are `.brigade/dispatch/<dispatch_id>/session.json` and `plan.json`, with a canonical `plan_digest`. The plan is written before the session. Future apply/resume must reload the saved `plan.json` by dispatch id rather than re-plan, because claims change the ledger and therefore the digest. Planning changes no ledger, claim, or worktree. Without `--dry-run`, the command exits 2 because launching is a follow-up slice of #1849. Omitted routing leaves seats unset, and an explicit seat map skips tasks whose class is unmapped.
 - `brigade work claim <task-id> --actor <name> [--claim-id]` atomically claims a ready task (`pending` → `in_progress` with assignee) under the tasks.json lock. Same `--claim-id` retries are idempotent; a different claim id loses with exit 13 naming the holder (no release/steal suggestion). Claims against blocked or wrong-status tasks fail closed. `work claim --next` selects the highest-priority ready task in the same lock.
 - `brigade work release --task|--actor|--claim-id` releases matching claims; empty or whitespace-only filter values match nothing (fail closed). Release compares claim identity so a late reaper cannot clear a newer claim. `work reassign <task-id> --to <actor> [--claim-id]` reassigns a live claim. `work status` lists stale claims (default 24h).
 - `brigade work task edge add <type> <source> <target>` adds one typed edge (`blocks`, `parent-child`, or `discovered-from`). Repeatable `add` dedupes identical endpoints.
@@ -2002,3 +2003,52 @@ Each subsystem has a companion doc under [`docs/`](.) with the full local contra
 ## License
 
 MIT
+
+
+## Aggregate adoption statistics
+
+`brigade fleet stats collect` reads three fixed aggregate SELECT/WITH statements
+through the exact `wrangler d1 execute <configured-database> --remote --json
+--command <fixed-statement>` argv shape. There is no shell, user SQL or mutable
+Cloudflare command. With `fleet.stats.database_id` and `d1_token_env`, the same
+fixed statements use D1 REST with a D1 Read account token instead. Database date
+expressions bound reads to the last 90 days.
+Internal source observations are excluded. Optional Cloudflare GraphQL Analytics
+reads request and error totals by day over 30 completed UTC days. The optional public
+download-metrics JSON supplies matching 30-day PyPI and npm download counts.
+Unavailable providers stay unknown. If no source succeeds, collection exits 1
+without publishing. `--no-publish` prints a successful snapshot instead of
+posting it. Collection is explicit and no timer is installed.
+
+The closed `brigade.admin-stats.v1` snapshot and page expose these fields:
+
+- `schema`, `snapshot_id`, `taken_at`, `source_set`.
+- `weeks`, `daily`, `downloads`, `digest`.
+- `weeks.week`, `weeks.partial`, `weeks.active_sources`, `weeks.retained_2d_sources`.
+- `weeks.retained_3d_sources`, `weeks.versions`, `weeks.upgrades`, `weeks.versions.version`.
+- `weeks.versions.active_sources`, `weeks.upgrades.from_version`, `weeks.upgrades.to_version`, `weeks.upgrades.active_sources`.
+- `daily.day`, `daily.worker_requests`, `daily.worker_errors`, `downloads.pypi`.
+- `downloads.npm`.
+
+`weeks`, `daily`, version cells and upgrade cells are arrays. Counts are nullable
+nonnegative integers. Source counts below 5 become `null`, including zero.
+Weekly source counts are hidden together when any count is suppressed or
+subtraction, including excess version observations, would expose 1 to 4 sources.
+Incomplete version or upgrade reads hide both histograms. The Hub enforces
+suppression and rejects known subset counts that exceed their parent totals.
+The page renders `null` and missing observations as unknown. Worker request,
+Worker error and public download counts are event counts and may be zero.
+Weekly counts mean active sources, not people or installs. Retention is activity
+on 2+ or 3+ distinct days in the same ISO week. Possible upgrades pair versions
+observed in time order within a week, restricted to increasing numeric releases.
+The current week and the oldest week truncated by the 90-day query are labelled partial. Source identities rotate weekly.
+`source_set` contains only `d1`, `worker` and `downloads` for successful reads.
+`digest` is SHA-256 of canonical JSON without `digest` or `snapshot_id`, with
+sorted keys and compact separators. `snapshot_id` equals that digest.
+
+Controller and erasure contact: Solomon Neas through the project maintainer
+contact. No hashes, install IDs, addresses, hostnames or deployment identifiers
+enter snapshots. The Hub rejects unknown fields at every depth. It keeps only
+aggregate snapshots for 400 days and purges older rows on each accepted POST.
+Opt-in usage aggregates are not available yet. Future opt-in counts will
+undercount usage.

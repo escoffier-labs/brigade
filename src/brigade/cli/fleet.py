@@ -12,7 +12,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .. import worklore_brigade_sync, worklore_github_sync
+from .. import fleet_admin_stats_collector, worklore_brigade_sync, worklore_github_sync
 
 DEFAULT_PORT = 3774
 DEFAULT_DB_REL_PATH = Path(".brigade") / "fleet-hub.db"
@@ -88,7 +88,7 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     fleet_sub = p_fleet.add_subparsers(dest="fleet_command", metavar="<fleet-command>")
     fleet_sub.required = True
-
+    fleet_admin_stats_collector.register(fleet_sub)
     from .fleet_dot import register as register_dot
 
     register_dot(fleet_sub)
