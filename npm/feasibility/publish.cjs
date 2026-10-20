@@ -7,8 +7,13 @@ const crypto=require('node:crypto');
 const assert=require('node:assert/strict');
 const {spawnSync}=require('node:child_process');
 const {resolveNpmCli,createVerifier}=require('./provenance.cjs');
+const {readbackDelays}=require('./readback.cjs');
 const index=process.argv.indexOf('--artifacts');
 assert.ok(index>=0 && process.argv[index+1],'--artifacts required');
+// Tests shorten the wait with --readback-delays-ms '[0,1,1]'. Releases use the default window.
+const delaysIndex=process.argv.indexOf('--readback-delays-ms');
+const delays=delaysIndex<0?readbackDelays():JSON.parse(process.argv[delaysIndex+1]);
+assert.ok(Array.isArray(delays) && delays.length>0 && delays.every(ms=>Number.isInteger(ms) && ms>=0),'--readback-delays-ms must be a JSON array of non-negative integers');
 const root=path.resolve(process.argv[index+1]);
 const metadata=JSON.parse(fs.readFileSync(path.join(root,'artifacts.json')));
 assert.match(process.env.GITHUB_SHA || '',/^[a-f0-9]{40}$/,'GITHUB_SHA must identify the packaging commit');
@@ -60,7 +65,7 @@ function integrity(a) {
 }
 const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 async function reconcile(a,field) {
-  for(const delay of [0,1000,2000,4000,8000]) {
+  for(const delay of delays) {
     if(delay) await pause(delay);
     if(field==='dist.integrity') {if(integrity(a)==='equal') return;}
     else {
@@ -92,7 +97,12 @@ async function main() {
     await reconcile(a,'dist.attestations');
     console.log(JSON.stringify({name:a.name,version,integrity:a.integrity,status:'verified'}));
   }
-  const latest=read(launchers[0],'dist-tags.latest');
+  let latest;
+  for(const delay of delays) {
+    if(delay) await pause(delay);
+    latest=read(launchers[0],'dist-tags.latest');
+    if(latest.status===0 && latest.json===version) break;
+  }
   assert.equal(latest.status,0);assert.equal(latest.json,version,'latest must identify the stable launcher');
 }
 main().catch(error=>{console.error(error.message);process.exitCode=1;}).finally(()=>fs.rmSync(tufCache,{recursive:true,force:true}));
