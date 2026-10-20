@@ -70,6 +70,56 @@ def test_dry_run_complete_local_bundle(report_env, capsys):
     assert receipt["bundle_digest"] == mod.canonical_json_digest(bundle)
 
 
+@pytest.mark.parametrize("via", ["gh", "url", "email"])
+def test_windows_submission_records_attempt_and_enforces_cooldown(report_env, monkeypatch, capsys, via):
+    from brigade import bug_last_error
+
+    mod, target = report_env
+    _without_posix_io(monkeypatch)
+    mod.write_json(bug_last_error.error_path(), {"command": "doctor", "message_head": "profile missing"})
+    calls = []
+
+    def fake_gh(*args):
+        calls.append(args)
+        return "[]" if args[:2] == ("search", "issues") else mod.ISSUES_URL + "/42"
+
+    monkeypatch.setattr(mod, "gh", fake_gh)
+    assert submit_prepared(target, capsys, "--via", via, "--json") == 0
+    submitted = result(capsys)
+    assert submitted["submitted"] is True
+    assert submitted["destination"] == via
+    bundle = json.loads(Path(submitted["preview_path"]).with_name("bundle.json").read_text())
+    assert bundle["last_error"]["command"] == "doctor"
+    assert bundle["last_error"]["message_head"] == "profile missing"
+    logs = Path(submitted["receipt_path"]).parent.parent / "attempts"
+    records = [json.loads(line) for path in logs.glob("*.jsonl") for line in path.read_text().splitlines()]
+    assert len(records) == 1
+    assert records[0]["report_id"] == submitted["report_id"]
+    assert records[0]["fingerprint"] == submitted["fingerprint"]
+    assert any(call[:2] == ("issue", "create") for call in calls) == (via == "gh")
+    assert (
+        cli.main(
+            ["bug", "report", "--report-id", submitted["report_id"], "--yes", "--not-security", "--via", via, "--json"]
+        )
+        == 2
+    )
+    assert "cooldown" in capsys.readouterr().err
+    assert sum(len(path.read_text().splitlines()) for path in logs.glob("*.jsonl")) == 1
+
+
+def _without_posix_io(monkeypatch):
+    import shutil
+    from brigade import localio, run_journal
+
+    monkeypatch.setattr(os, "supports_dir_fd", set())
+    monkeypatch.setattr(run_journal, "_HAS_O_NOFOLLOW", False)
+    monkeypatch.setattr(localio, "_supports_directory_fsync", lambda: False)
+    # shutil caches this decision at import time. Windows uses the path branch.
+    monkeypatch.setattr(shutil, "_use_fd_functions", False)
+    for name in ("O_NOFOLLOW", "O_NONBLOCK", "fchmod"):
+        monkeypatch.delattr(os, name, raising=False)
+
+
 def test_untrusted_markdown_stays_in_code_blocks_through_submission(report_env, monkeypatch, capsys, tmp_path):
     mod, target = report_env
     payload = "``````\n![image](https://example.com/image)\n<b>html</b> [link](https://example.com) @example-user"
@@ -1282,10 +1332,13 @@ def test_attempt_cooldown_crosses_utc_midnight(report_env, monkeypatch, capsys, 
     assert len((logs / "2026-01-02.jsonl").read_text().splitlines()) == 1
 
 
-def test_attempt_log_read_is_bounded_and_fails_closed(report_env, monkeypatch, capsys):
+@pytest.mark.parametrize("fallback", [False, True])
+def test_attempt_log_read_is_bounded_and_fails_closed(report_env, monkeypatch, capsys, fallback):
     from datetime import datetime, timezone
 
     mod, target = report_env
+    if fallback:
+        _without_posix_io(monkeypatch)
     assert invoke(target, "--dry-run", "--json") == 0
     preview = result(capsys)
     logs = Path(mod.data_root()) / "brigade" / "bug-reports" / "attempts"
@@ -1321,10 +1374,13 @@ def test_attempt_log_read_is_bounded_and_fails_closed(report_env, monkeypatch, c
 
 
 @pytest.mark.parametrize("kind", ["symlink", "hardlink", "public", "directory-symlink"])
-def test_submission_refuses_unsafe_attempt_log(report_env, monkeypatch, capsys, tmp_path, kind):
+@pytest.mark.parametrize("fallback", [False, True])
+def test_submission_refuses_unsafe_attempt_log(report_env, monkeypatch, capsys, tmp_path, kind, fallback):
     from datetime import datetime, timezone
 
     mod, target = report_env
+    if fallback:
+        _without_posix_io(monkeypatch)
     assert invoke(target, "--dry-run", "--json") == 0
     preview = result(capsys)
     root = Path(mod.data_root()) / "brigade" / "bug-reports"

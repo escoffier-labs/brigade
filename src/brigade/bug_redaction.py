@@ -106,12 +106,13 @@ class Redactor:
     def __init__(self, target: Path):
         self.counts: Counter[str] = Counter()
         self.hostname = socket.gethostname()
+        self.username = getpass.getuser()
         values = {
             str(Path.home()),
             str(target.resolve()),
             tempfile.gettempdir(),
             self.hostname,
-            getpass.getuser(),
+            self.username,
         }
         values.update(value for key, value in os.environ.items() if _SECRET_ENV_NAME.search(key) and len(value) >= 4)
         self.literals = sorted((value for value in values if value and value not in {"/", "\\"}), key=len, reverse=True)
@@ -121,10 +122,13 @@ class Redactor:
             # Short secrets are checked by the second scan rather than replaced.
             # Bare user names need boundaries to avoid corrupting identifiers.
             pattern = re.escape(literal)
-            if literal == getpass.getuser() or (len(literal) <= 3 and literal.isalnum()):
+            if literal == self.username or (len(literal) <= 3 and literal.isalnum()):
                 pattern = rf"(?<![\w.]){pattern}(?![\w.])"
             text, count = re.subn(
-                pattern, "<local>", text, flags=re.I if literal == self.hostname or "\\" in literal else 0
+                pattern,
+                "<local>",
+                text,
+                flags=re.I if literal in {self.hostname, self.username} or "\\" in literal else 0,
             )
             self.counts["local-literal"] += count
         text, count = re.subn(

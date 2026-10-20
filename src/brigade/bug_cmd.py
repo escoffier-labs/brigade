@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
-from . import __version__, memory_proposal_io as private_io
+from . import __version__, bug_io
 from .bug_collect import collect, collect_doctor
 from .bug_redaction import Redactor, ReportBlocked, assert_clean, assert_terminal_safe
 from .component_paths import data_root
@@ -191,7 +191,7 @@ def destination_link(via: str, bundle: dict[str, Any]) -> str:
 def _attempts(root: Path, day: datetime) -> list[dict[str, Any]]:
     path = root / "attempts" / f"{day.date().isoformat()}.jsonl"
     try:
-        raw = private_io.read_bytes(path, limit=BUNDLE_CAP) or b""
+        raw = bug_io.read_bytes(path, limit=BUNDLE_CAP)
     except FileNotFoundError:
         return []
     except ValueError:
@@ -216,20 +216,7 @@ def _attempts(root: Path, day: datetime) -> list[dict[str, Any]]:
 
 
 def _append_attempt(path: Path, record: dict[str, Any]) -> None:
-    with private_io.directory(path.parent, create=True, private=True) as parent:
-        fd = os.open(
-            path.name, os.O_WRONLY | os.O_CREAT | os.O_APPEND | os.O_NOFOLLOW | os.O_NONBLOCK, 0o600, dir_fd=parent
-        )
-        try:
-            private_io._regular(fd, private=True)
-            os.fchmod(fd, 0o600)
-            with os.fdopen(os.dup(fd), "ab") as handle:
-                handle.write((json.dumps(record, sort_keys=True) + "\n").encode("utf-8"))
-                handle.flush()
-                os.fsync(handle.fileno())
-            os.fsync(parent)
-        finally:
-            os.close(fd)
+    bug_io.append_bytes(path, (json.dumps(record, sort_keys=True) + "\n").encode("utf-8"))
 
 
 def _limit_submissions(root: Path, fp: str, now: datetime) -> None:

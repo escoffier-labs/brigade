@@ -11,7 +11,7 @@ from itertools import islice
 from pathlib import Path
 from typing import Any
 
-from . import __version__, bug_last_error, extras, telemetry_export
+from . import __version__, bug_io, bug_last_error, extras, telemetry_export
 from .localio import canonical_json_digest
 
 _RECEIPT_BYTE_LIMIT = 256 * 1024
@@ -23,10 +23,7 @@ _RECEIPT_TIMESTAMP = re.compile(r"^(?:[0-9a-f]{8}\.)?(\d{8}-\d{6})-", re.I)
 
 def _object(path: Path) -> dict[str, Any] | None:
     try:
-        with path.open("rb") as handle:
-            raw = handle.read(_RECEIPT_BYTE_LIMIT + 1)
-        if len(raw) > _RECEIPT_BYTE_LIMIT:
-            return None
+        raw = bug_io.read_bytes(path, limit=_RECEIPT_BYTE_LIMIT)
         value = json.loads(raw)
     except (OSError, ValueError, RecursionError):
         return None

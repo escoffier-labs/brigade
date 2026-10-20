@@ -35,27 +35,98 @@ def _verify_receipt(target, run_id):
     return path
 
 
-@pytest.mark.parametrize("kind", ["oversize", "invalid-utf8", "deep-json"])
-def test_bug_receipt_reader_bounds_bytes_before_decoding(tmp_path, monkeypatch, kind):
-    import io
+@pytest.mark.parametrize("name", ["run.json", "roster.json", "worker-results.json", "receipt.json"])
+@pytest.mark.parametrize("kind", ["fifo", "symlink"])
+@pytest.mark.parametrize("fallback", [False, True])
+def test_diagnostics_skip_nonregular_files(tmp_path, monkeypatch, name, kind, fallback):
     from pathlib import Path
 
+    if kind == "fifo" and not hasattr(os, "mkfifo"):
+        pytest.skip("FIFO creation requires POSIX")
+    if name == "receipt.json":
+        path = _verify_receipt(tmp_path, "verify-1")
+        payload = json.loads(path.read_text())
+        payload["status"] = "failed"
+    else:
+        directory = _run(tmp_path)
+        write_json(directory / "worker-results.json", {"results": [{"worker": "worker", "ok": False}]})
+        path = directory / name
+        payload = json.loads(path.read_text())
+    path.unlink()
+    if kind == "symlink":
+        victim = tmp_path / "victim.json"
+        write_json(victim, payload)
+        path.symlink_to(victim)
+    else:
+        os.mkfifo(path)
+        original = Path.open
+
+        def deny_blocking_open(p, *args, **kwargs):
+            if p == path:
+                pytest.fail("diagnostics used a blocking FIFO open")
+            return original(p, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "open", deny_blocking_open)
+    if fallback:
+        from brigade import run_journal
+
+        monkeypatch.setattr(os, "supports_dir_fd", set())
+        monkeypatch.setattr(run_journal, "_HAS_O_NOFOLLOW", False)
+        monkeypatch.delattr(os, "O_NONBLOCK", raising=False)
+    assert bug_collect.recent_failures(tmp_path) == {"runs": [], "verify": None}
+
+
+def test_diagnostics_skip_file_swapped_to_symlink_during_fallback_open(tmp_path, monkeypatch):
+    from brigade import run_journal
+
+    path = tmp_path / "receipt.json"
+    victim = tmp_path / "victim.json"
+    path.write_text("{}")
+    victim.write_text('{"private":"outside receipt"}')
+    original = os.open
+
+    def swap(p, *args, **kwargs):
+        if p == path:
+            path.unlink()
+            path.symlink_to(victim)
+        return original(p, *args, **kwargs)
+
+    monkeypatch.setattr(os, "supports_dir_fd", set())
+    monkeypatch.setattr(run_journal, "_HAS_O_NOFOLLOW", False)
+    monkeypatch.setattr(os, "open", swap)
+    assert bug_collect._object(path) is None
+
+
+@pytest.mark.parametrize("kind", ["oversize", "invalid-utf8", "deep-json"])
+@pytest.mark.parametrize("fallback", [False, True])
+def test_bug_receipt_reader_bounds_bytes_before_decoding(tmp_path, monkeypatch, kind, fallback):
+    if fallback:
+        from brigade import run_journal
+
+        monkeypatch.setattr(os, "supports_dir_fd", set())
+        monkeypatch.setattr(run_journal, "_HAS_O_NOFOLLOW", False)
     payload = {
         "oversize": b'{"log":"' + b"x" * (256 * 1024) + b'"}',
         "invalid-utf8": b"\xff",
         "deep-json": b"[" * 2000 + b"]" * 2000,
     }[kind]
+    path = tmp_path / "receipt.json"
+    path.write_bytes(payload)
+    original = os.read
     reads = []
 
-    class ReceiptInput(io.BytesIO):
-        def read(self, size=-1):
-            assert 0 < size <= 256 * 1024 + 1
-            reads.append(size)
-            return super().read(size)
+    def bounded_read(fd, size):
+        assert 0 < size <= 256 * 1024 + 1
+        raw = original(fd, size)
+        reads.append(len(raw))
+        return raw
 
-    monkeypatch.setattr(Path, "open", lambda *a, **k: ReceiptInput(payload))
-    assert bug_collect._object(tmp_path / "receipt.json") is None
-    assert len(reads) == 1
+    monkeypatch.setattr(os, "read", bounded_read)
+    assert bug_collect._object(path) is None
+    if kind == "oversize":
+        assert not reads, "oversized files must be rejected before reading"
+    else:
+        assert sum(reads) == len(payload)
 
 
 @pytest.mark.parametrize("source", ["runs", "verify"])
@@ -177,7 +248,8 @@ def test_bug_diagnostics_caps_row_work(tmp_path, monkeypatch, source):
     assert bug_collect.recent_failures(tmp_path) == {"runs": [], "verify": None}
 
 
-def test_latest_failed_verify_uses_latest_command_time(tmp_path):
+@pytest.mark.parametrize("fallback", [False, True])
+def test_latest_failed_verify_uses_latest_command_time(tmp_path, monkeypatch, fallback):
     first = _verify_receipt(tmp_path, "verify-first")
     receipt = json.loads(first.read_text())
     receipt["commands"] = [
@@ -188,4 +260,9 @@ def test_latest_failed_verify_uses_latest_command_time(tmp_path):
     other = json.loads(second.read_text())
     other.update(status="failed", started_at="2026-01-03T00:00:00Z")
     write_json(second, other)
+    if fallback:
+        from brigade import run_journal
+
+        monkeypatch.setattr(os, "supports_dir_fd", set())
+        monkeypatch.setattr(run_journal, "_HAS_O_NOFOLLOW", False)
     assert bug_collect.recent_failures(tmp_path)["verify"]["id"] == "verify-first"

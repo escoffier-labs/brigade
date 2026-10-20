@@ -11,7 +11,7 @@ from typing import Any
 
 from .component_paths import data_root
 from .localio import write_json
-from .memory_proposal_io import read_bytes
+from .bug_io import read_bytes
 
 _LAST_ERROR_BYTE_LIMIT = 64 * 1024
 

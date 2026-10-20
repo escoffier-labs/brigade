@@ -78,6 +78,14 @@ def test_hostname_matching_does_not_fold_other_local_literals(tmp_path, monkeypa
     assert redactor.text("BUILDNODE casesensitivevalue") == "<local> casesensitivevalue"
 
 
+@pytest.mark.parametrize("value", ["ExampleUser", "exampleuser", "EXAMPLEUSER", "eXaMpLeUsEr"])
+def test_local_username_is_case_insensitive_with_boundaries(tmp_path, monkeypatch, value):
+    monkeypatch.setattr("brigade.bug_redaction.getpass.getuser", lambda: "ExampleUser")
+    redacted = Redactor(tmp_path).text(f"owner {value}, exampleuser_extra module.exampleuser")
+    assert redacted == "owner <local>, exampleuser_extra module.exampleuser"
+    assert_clean(redacted)
+
+
 @pytest.mark.parametrize("secret", ["q", "qx", "qxy", "x-y", "q\nx", 'q"x', "q\u2603x"])
 def test_short_secret_blocks_second_scan_without_corrupting_text(tmp_path, monkeypatch, secret):
     monkeypatch.setenv("TEST_CREDENTIAL", secret)

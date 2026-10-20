@@ -1954,7 +1954,10 @@ An interactive submission asks the security question even with `--yes`.
 Brigade verifies the stored JSON and Markdown digests and scans both again
 before any network call. New summaries, titles,
 and output files cannot be combined with `--report-id`.
-Without a terminal and `--yes`, the command only prepares local files.
+Without a terminal and `--yes`, the command prepares local files and searches
+GitHub through `gh search issues`, sending the fingerprint and, if needed,
+the exception type and command path. It does not submit a report. Use
+`--dry-run` or `--via file` to avoid this outbound query.
 `--via auto` prefers authenticated `gh`, then a prefilled issue URL.
 `--via gh` creates an issue without requesting label permissions.
 `--comment-on N --via gh` comments only on a duplicate returned by the search.
