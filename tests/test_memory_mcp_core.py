@@ -126,3 +126,74 @@ def test_unknown_tool_is_a_tool_error(stores):
     repo, _ = stores
     assert _tools(repo).call("nope", {}) == ("unknown tool: nope", True)
     assert json.dumps(_tools(repo).call("list_cards", {})[0]) == "[]"
+
+
+def test_write_handoff_lands_in_repo_inbox(stores):
+    repo, _ = stores
+    result, failed = _tools(repo).call(
+        "write_handoff", {"title": "Plugin memory", "summary": "Short summary.", "content": "Body.", "facts": ["f1"]}
+    )
+    assert failed is False
+    assert result["written"] is True and result["origin"] == "repo"
+    assert result["path"].startswith(".claude/memory-handoffs/")
+    assert (repo / result["path"]).is_file()
+
+
+def test_write_handoff_without_repo_uses_user_store(stores, monkeypatch, tmp_path: Path):
+    _, user = stores
+    from brigade import memory_scope
+
+    monkeypatch.setattr(memory_scope, "resolve_wired_target", lambda cwd, harness=None: None)
+    tools = memory_mcp_core.MemoryTools(cwd=tmp_path, inbox="claude")
+    result, failed = tools.call("write_handoff", {"title": "T", "summary": "S.", "content": "Body."})
+    assert failed is False and result["origin"] == "user"
+    assert result["path"].startswith("memory/handoffs/")
+    assert (user / result["path"]).is_file()
+    assert (user / "memory").stat().st_mode & 0o777 == 0o700
+
+
+def test_write_handoff_rejects_bad_input_and_removes_invalid_drafts(stores):
+    repo, _ = stores
+    tools = _tools(repo)
+    assert tools.call("write_handoff", {"summary": "S.", "content": "Body."}) == ("title is required", True)
+    assert tools.call("write_handoff", {"title": "T", "summary": "S.", "content": "Body.", "facts": "x"}) == (
+        "facts must be a list of strings",
+        True,
+    )
+    result, failed = tools.call(
+        "write_handoff",
+        {"title": "Card", "summary": "S.", "content": "no frontmatter", "action": "create-card", "target_card": "c.md"},
+    )
+    assert failed is True and result["written"] is False
+    assert any("frontmatter" in error for error in result["errors"])
+    inbox = repo / ".claude" / "memory-handoffs"
+    assert not inbox.exists() or not list(inbox.glob("*.md"))
+
+
+def test_work_brief_outside_wired_repo_points_at_user_store(stores, monkeypatch, tmp_path: Path):
+    from brigade import memory_scope
+
+    monkeypatch.setattr(memory_scope, "resolve_wired_target", lambda cwd, harness=None: None)
+    result, failed = memory_mcp_core.MemoryTools(cwd=tmp_path).call("work_brief", {})
+    assert failed is False and result["wired"] is False
+    assert result["user_store"].endswith(".brigade/memory")
+
+
+def test_work_brief_in_wired_repo_returns_brief_subset(stores, monkeypatch):
+    repo, _ = stores
+    (repo / ".brigade").mkdir()
+    (repo / ".brigade" / "config.json").write_text("{}")
+    from brigade.work_cmd.session import briefing
+
+    fake = {"git": {"branch": "main"}, "active_session": None, "latest_session": None, "next": "ship", "extra": 1}
+    monkeypatch.setattr(briefing, "_brief_payload", lambda target, limit=3: fake)
+    result, failed = _tools(repo).call("work_brief", {})
+    assert failed is False
+    assert result == {
+        "wired": True,
+        "root": str(repo.resolve()),
+        "git": {"branch": "main"},
+        "active_session": None,
+        "latest_session": None,
+        "next": "ship",
+    }

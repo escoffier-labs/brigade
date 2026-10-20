@@ -999,7 +999,7 @@ class MemoryTools:
 - Modify: `src/brigade/memory_mcp_core.py`
 - Test: `tests/test_memory_mcp_core.py` (append)
 
-- [ ] Append the failing tests to `tests/test_memory_mcp_core.py`:
+- [x] Append the failing tests to `tests/test_memory_mcp_core.py`:
 
 ```python
 def test_write_handoff_lands_in_repo_inbox(stores):
@@ -1073,8 +1073,8 @@ def test_work_brief_in_wired_repo_returns_brief_subset(stores, monkeypatch):
     }
 ```
 
-- [ ] Run, watch them fail: `PY -m pytest tests/test_memory_mcp_core.py -q -p no:cacheprovider`. Expect the five new tests to FAIL with `unknown tool: write_handoff` / `unknown tool: work_brief` assertion mismatches.
-- [ ] In `src/brigade/memory_mcp_core.py`, add these imports below the existing ones:
+- [x] Run, watch them fail: `PY -m pytest tests/test_memory_mcp_core.py -q -p no:cacheprovider`. Expect the five new tests to FAIL with `unknown tool: write_handoff` / `unknown tool: work_brief` assertion mismatches.
+- [x] In `src/brigade/memory_mcp_core.py`, add these imports below the existing ones:
 
 ```python
 from .handoff_cmd import drafts as handoff_drafts
@@ -1175,9 +1175,9 @@ def _string_list(arguments: dict[str, Any], key: str) -> list[str]:
         }, False
 ```
 
-- [ ] Run to green: same command. Expect 13 PASS.
-- [ ] Lint and types: `PY -m ruff check src/brigade/memory_mcp_core.py` then `PY -m mypy src/brigade/memory_mcp_core.py`. Expect clean.
-- [ ] Commit: `git add src/brigade/memory_mcp_core.py tests/test_memory_mcp_core.py && git commit -m "feat(memory): add write_handoff and work_brief MCP tools"`
+- [x] Run to green: same command. Expect 13 PASS.
+- [x] Lint and types: `PY -m ruff check src/brigade/memory_mcp_core.py` then `PY -m mypy src/brigade/memory_mcp_core.py`. Expect clean.
+- [x] Commit: `git add src/brigade/memory_mcp_core.py tests/test_memory_mcp_core.py && git commit -m "feat(memory): add write_handoff and work_brief MCP tools"`
 
 ---
 

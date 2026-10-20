@@ -13,12 +13,19 @@ from pathlib import Path
 from typing import Any
 
 from . import mcp_server, memory_cmd, memory_scope
+from .handoff_cmd import drafts as handoff_drafts
+from .handoff_cmd.models import DEFAULT_DRAFT_DOCUMENT
 from .memory_scope import REPO, USER, MemoryStore, Resolution
 
 SERVER_NAME = "brigade-memory"
 CARD_URI_PREFIX = "card://"
 SEARCH_LIMIT = 20
 SCOPES = ("repo", "user", "all")
+BRIEF_KEYS = ("git", "active_session", "latest_session", "next")
+UNWIRED_HINT = (
+    "This directory is not a Brigade-wired repo, so memory tools use the user store. "
+    "Run the Brigade enforce skill to wire this repo into the full work loop."
+)
 
 _READ = {"readOnlyHint": True}
 _WRITE = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": False}
@@ -65,6 +72,29 @@ def _scope(arguments: dict[str, Any]) -> str:
     if value not in SCOPES:
         raise ValueError("scope must be one of: " + ", ".join(SCOPES))
     return str(value)
+
+
+def _required_text(arguments: dict[str, Any], key: str) -> str:
+    value = arguments.get(key)
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError(f"{key} is required")
+    return value
+
+
+def _optional_text(arguments: dict[str, Any], key: str) -> str | None:
+    value = arguments.get(key)
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise ValueError(f"{key} must be a string")
+    return value or None
+
+
+def _string_list(arguments: dict[str, Any], key: str) -> list[str]:
+    value = arguments.get(key, [])
+    if not isinstance(value, list) or not all(isinstance(item, str) for item in value):
+        raise ValueError(f"{key} must be a list of strings")
+    return list(value)
 
 
 def tool_specs() -> list[dict[str, Any]]:
@@ -195,6 +225,8 @@ class MemoryTools:
             "get_card": self._get_card,
             "search_cards": self._search_cards,
             "memory_status": self._memory_status,
+            "work_brief": self._work_brief,
+            "write_handoff": self._write_handoff,
         }
 
     def _list_cards(self, arguments: dict[str, Any]) -> ToolResult:
@@ -249,4 +281,58 @@ class MemoryTools:
             "claude_hooks_installed": res.repo_root is not None
             and (res.repo_root / ".brigade" / "claude-hooks.json").is_file(),
             "handoff_inbox": self._inbox,
+        }, False
+
+    def _work_brief(self, arguments: dict[str, Any]) -> ToolResult:
+        res = self.resolution()
+        if res.repo_root is None or not res.repo_wired:
+            return {
+                "wired": False,
+                "user_store": str(memory_scope.user_root() / "memory"),
+                "hint": UNWIRED_HINT,
+            }, False
+        from .work_cmd.session import briefing
+
+        payload = briefing._brief_payload(res.repo_root, limit=3)
+        return {"wired": True, "root": str(res.repo_root), **{key: payload.get(key) for key in BRIEF_KEYS}}, False
+
+    def _write_handoff(self, arguments: dict[str, Any]) -> ToolResult:
+        title = _required_text(arguments, "title")
+        summary = _required_text(arguments, "summary")
+        content = _required_text(arguments, "content")
+        target_card = _optional_text(arguments, "target_card")
+        target_document = _optional_text(arguments, "target_document") or DEFAULT_DRAFT_DOCUMENT
+        facts = _string_list(arguments, "facts")
+        evidence = _string_list(arguments, "evidence")
+        repo = next((store for store in self.resolution().stores if store.origin == REPO), None)
+        if repo is not None:
+            root, inbox, origin = repo.root, self._inbox, REPO
+        else:
+            root = memory_scope.user_root()
+            root.mkdir(mode=0o700, parents=True, exist_ok=True)
+            (root / "memory").mkdir(mode=0o700, exist_ok=True)
+            inbox, origin = str(root / memory_scope.USER_HANDOFF_INBOX), USER
+        payload = handoff_drafts.build_draft(
+            target=root,
+            title=title,
+            summary=summary,
+            content=content,
+            handoff_type=_optional_text(arguments, "type") or "workflow",
+            action=_optional_text(arguments, "action") or "no-card",
+            target_card=target_card,
+            target_document=target_document,
+            fact=facts,
+            evidence=evidence,
+            inbox=inbox,
+        )
+        path = Path(payload["path"])
+        if not payload["valid"]:
+            path.unlink(missing_ok=True)
+            return {"written": False, "errors": payload["lint"]["errors"]}, True
+        return {
+            "written": True,
+            "origin": origin,
+            "path": str(path.relative_to(root)),
+            "id": payload["id"],
+            "action": payload["action"],
         }, False
