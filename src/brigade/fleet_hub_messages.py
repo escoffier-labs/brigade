@@ -807,8 +807,14 @@ CLAIMS_PAGE_MAX_BYTES = 4 * 1024 * 1024
 _CLAIMS_CURSOR_RE = re.compile(r"[0-9a-f]{32}\.[0-9a-f]{16}")
 
 
+# Fields that change when a claim renews or ages; leaving them out keeps a
+# claim's paging key stable between requests.
+_CLAIM_VOLATILE_FIELDS = frozenset({"acquired_at", "renewed_at", "expires_at", "generation", "ttl_seconds", "expired"})
+
+
 def _claim_key(row: dict[str, Any]) -> tuple[str, str]:
-    canonical = json.dumps(row, sort_keys=True, separators=(",", ":"), default=str)
+    identity = {key: value for key, value in row.items() if key not in _CLAIM_VOLATILE_FIELDS}
+    canonical = json.dumps(identity, sort_keys=True, separators=(",", ":"), default=str)
     target = str(row.get("target", ""))
     return (
         hashlib.sha256(target.encode("utf-8")).hexdigest()[:32],

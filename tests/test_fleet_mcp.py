@@ -921,3 +921,22 @@ def test_claims_pages_stay_under_the_byte_budget(monkeypatch):
     monkeypatch.setattr(fleet_hub_messages, "CLAIMS_PAGE_MAX_BYTES", 10)
     single = fleet_hub_messages._claims_page(rows, limit=500, after=None)
     assert len(single["claims"]) == 1 and single["next_cursor"] is not None
+
+
+def test_claims_cursor_key_is_stable_across_renewal():
+    before = {
+        "target": "repo-x",
+        "owner_node": NODE_A,
+        "role": "claim",
+        "expires_at": "2026-10-20T00:00:00+00:00",
+        "generation": 1,
+    }
+    after = {
+        **before,
+        "expires_at": "2026-10-20T01:00:00+00:00",
+        "renewed_at": "2026-10-20T00:30:00+00:00",
+        "generation": 2,
+    }
+    other = {**before, "owner_node": NODE_B}
+    assert fleet_hub_messages._claim_key(before) == fleet_hub_messages._claim_key(after)
+    assert fleet_hub_messages._claim_key(before) != fleet_hub_messages._claim_key(other)
