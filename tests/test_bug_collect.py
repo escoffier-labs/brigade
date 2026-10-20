@@ -322,3 +322,86 @@ def test_doctor_bundle_projection_drops_all_detail_text(tmp_path):
         },
     )
     assert bundle["doctor"]["checks"] == [{"name": "profile", "status": "WARN"}]
+
+
+@pytest.mark.parametrize("hazard", ["runs", "agents"])
+def test_report_doctor_avoids_unbounded_general_checks(tmp_path, monkeypatch, hazard):
+    from pathlib import Path
+    from brigade import doctor
+
+    (tmp_path / "AGENTS.md").write_text("# Definition of Done\nMemory handoff\n")
+    if hazard == "runs":
+        (tmp_path / ".brigade" / "runs").mkdir(parents=True)
+        monkeypatch.setattr(doctor, "_immediate_run_dirs", lambda *a: pytest.fail("unbounded run enumeration"))
+    else:
+        with (tmp_path / "AGENTS.md").open("ab") as handle:
+            handle.truncate(1 << 30)
+        original = Path.read_text
+
+        def bounded(path, *args, **kwargs):
+            if path == tmp_path / "AGENTS.md":
+                pytest.fail("unbounded AGENTS read")
+            return original(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", bounded)
+    report = bug_collect.collect_doctor(tmp_path)
+    assert report["checks"]
+    if hazard == "agents":
+        assert {"status": "WARN", "name": "agents-quality: AGENTS.md"} in report["checks"]
+
+
+def test_report_doctor_kills_checks_at_deadline(tmp_path, monkeypatch):
+    import subprocess
+    import sys
+    import time
+
+    original = subprocess.run
+    deadlines = []
+
+    def stalled_check(argv, **kwargs):
+        deadlines.append(kwargs.get("timeout"))
+        # Keep the real subprocess timeout and cleanup, but simulate stalled I/O.
+        kwargs["timeout"] = 0.05
+        return original([sys.executable, "-c", "import time; time.sleep(30)"], **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", stalled_check)
+    started = time.monotonic()
+    report = bug_collect.collect_doctor(tmp_path)
+    assert deadlines and all(0 < value <= 2 for value in deadlines)
+    assert time.monotonic() - started < 3
+    assert report["checks"] and all(check["status"] == "WARN" for check in report["checks"])
+    assert all("budget" in check["name"] for check in report["checks"])
+
+
+def test_report_doctor_file_probe_has_entry_budget(tmp_path, monkeypatch):
+    from pathlib import Path
+    from brigade import bug_doctor
+
+    original = Path.lstat
+    visited = []
+
+    def probe(path, *args, **kwargs):
+        visited.append(path)
+        assert len(visited) <= 2, "diagnostic exceeded its entry budget"
+        return original(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "lstat", probe)
+    checks = bug_doctor.check(tmp_path, "bootstrap", entry_limit=2)
+    assert len(visited) == 2
+    assert {"status": "WARN", "name": "bug diagnostics: entry budget"} in checks
+
+
+def test_report_doctor_agents_read_is_byte_bounded(tmp_path, monkeypatch):
+    from brigade import bug_doctor
+
+    path = tmp_path / "AGENTS.md"
+    path.write_bytes(b"x" * (64 * 1024 + 1))
+    original = os.read
+
+    def bounded(fd, size):
+        assert size <= 64 * 1024 + 1
+        assert os.fstat(fd).st_size <= 64 * 1024, "oversized diagnostics must be rejected before reading"
+        return original(fd, size)
+
+    monkeypatch.setattr(os, "read", bounded)
+    assert bug_doctor.check(tmp_path, "agents-quality") == [{"status": "WARN", "name": "agents-quality: AGENTS.md"}]

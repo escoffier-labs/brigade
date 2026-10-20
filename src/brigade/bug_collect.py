@@ -6,6 +6,8 @@ import json
 import os
 import platform
 import re
+import subprocess
+import sys
 from datetime import datetime, timezone
 from itertools import islice
 from pathlib import Path
@@ -14,6 +16,8 @@ from typing import Any
 from . import __version__, bug_io, bug_last_error, extras, telemetry_export
 from .localio import canonical_json_digest
 
+_DOCTOR_CHECK_TIMEOUT = 2.0
+_DOCTOR_ENTRY_LIMIT = 8
 _RECEIPT_BYTE_LIMIT = 256 * 1024
 _DIRECTORY_ENTRY_LIMIT = 20_000
 _RECEIPT_DIR_LIMIT = 64
@@ -136,50 +140,30 @@ def _failed_verify(target: Path) -> dict[str, Any] | None:
 
 
 def collect_doctor(target: Path) -> dict[str, Any]:
-    from . import doctor, security_cmd
-
-    ctx = doctor.build_context(target)
-    # An explicit allowlist is intentional. Registry callbacks mix local target
-    # checks with host probes, managed commands, and authenticated HTTP requests.
-    # Filtering their results after invocation cannot make collection offline.
-    local = [
-        *doctor._check_workspace_files(ctx.target),
-        *doctor._check_agents_quality(ctx.target),
-        *doctor._check_default_wired_skills(ctx.target, ctx.harnesses),
-        *doctor._check_orphan_inboxes(ctx.target, ctx.harnesses),
-        doctor._check_recovery_checkpoints(ctx.target),
-        doctor._check_unreconciled_run_lock(ctx.target),
-        *doctor._check_journal_event_headroom(ctx.target),
-        doctor._check_run_lineage(ctx.target),
-        *doctor._check_outcome_loop(ctx),
-        *doctor.mcp_station_checks(ctx),
-    ]
-    # General memory checks follow configured source roots and ingestor logs.
-    # Exclude that callback entirely, rather than reading private logs and then
-    # discarding their details after an unbounded read.
-    if "claude" in ctx.harnesses:
-        check = doctor._check_claude_work_loop(ctx.target)
-        if check is not None:
-            local.append(check)
-    # The security station also probes host isolation and can run scanners.
-    # Read its target configuration only, without executing that callback.
-    try:
-        config = security_cmd.load_config(ctx.target)
-    except ValueError as exc:
-        local.append((doctor.FAIL, "security: config", f"invalid config: {exc}"))
-    else:
-        if config is None:
-            local.append((doctor.WARN, "security: config", "missing .brigade/security.toml"))
-    checks = [doctor._normalize_scoped_check(check) for check in local[:_PROJECTION_ROW_LIMIT]]
-    counts = doctor._status_counts(list(checks))
+    # General Doctor callbacks can enumerate whole run trees, follow configured
+    # roots, read arbitrary files, or contact services. Run only report-specific
+    # fixed-path checks, each in a killable process with a hard deadline.
+    checks: list[dict[str, str]] = []
+    for name in ("bootstrap", "agents-quality", "security-config"):
+        try:
+            result = subprocess.run(
+                [sys.executable, "-m", "brigade.bug_doctor", str(target), name, str(_DOCTOR_ENTRY_LIMIT)],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                timeout=_DOCTOR_CHECK_TIMEOUT,
+                check=True,
+            )
+            checks.extend(json.loads(result.stdout))
+        except (OSError, ValueError, subprocess.SubprocessError):
+            checks.append({"status": "WARN", "name": f"bug diagnostics: {name} budget or check unavailable"})
     return {
         "target": "<target>",
-        "checks": [
-            {"status": status, "name": name}
-            for status, name, _detail, _scope in checks
-            if status in {doctor.FAIL, doctor.WARN}
-        ],
-        "summary": {"failed": counts[doctor.FAIL], "warn": counts[doctor.WARN]},
+        "checks": checks,
+        "summary": {
+            "failed": sum(c["status"] == "FAIL" for c in checks),
+            "warn": sum(c["status"] == "WARN" for c in checks),
+        },
     }
 
 

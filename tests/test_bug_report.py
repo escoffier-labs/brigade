@@ -1319,9 +1319,15 @@ def test_benign_ui_language_allows_report(report_env, capsys, summary):
     assert summary in result(capsys)["preview_markdown"]
 
 
-def test_terminal_controls_escaped_in_text_preview_and_submission(report_env, monkeypatch, capsys, tmp_path):
+@pytest.mark.parametrize(
+    "payload",
+    [
+        "before\x1b]52;c;Y2xpcGJvYXJk\x07after\rconcealed\x9b2J\x00",
+        "before" + "".join(chr(c) for c in [0x200E, 0x200F, *range(0x202A, 0x202F), *range(0x2066, 0x206A)]) + "after",
+    ],
+)
+def test_terminal_controls_escaped_in_text_preview_and_submission(report_env, monkeypatch, capsys, tmp_path, payload):
     mod, target = report_env
-    payload = "before\x1b]52;c;Y2xpcGJvYXJk\x07after\rconcealed\x9b2J\x00"
     summary = tmp_path / "summary.txt"
     summary.write_text(payload, encoding="utf-8")
     output = tmp_path / "output.txt"
@@ -1346,12 +1352,14 @@ def test_terminal_controls_escaped_in_text_preview_and_submission(report_env, mo
     )
     text = capsys.readouterr().out
     assert "before" in text and "after" in text
-    assert not re.search(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]", text)
+    assert not re.search(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069]", text)
     directory = next((Path(mod.data_root()) / "brigade" / "bug-reports").glob("*/bundle.json")).parent
     bundle = json.loads((directory / "bundle.json").read_text())
     for value in bundle["user"].values():
-        assert not re.search(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]", value)
-    assert not re.search(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]", (directory / "bundle.md").read_text())
+        assert not re.search(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069]", value)
+    assert not re.search(
+        r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069]", (directory / "bundle.md").read_text()
+    )
     sent = []
 
     def fake(*args):
@@ -1377,10 +1385,29 @@ def test_terminal_controls_escaped_in_text_preview_and_submission(report_env, mo
         == 0
     )
     assert len(sent) == 2
-    assert all(not re.search(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]", value) for value in sent)
+    assert all(
+        not re.search(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069]", value) for value in sent
+    )
 
 
-def test_older_prepared_control_title_blocked_before_network(report_env, monkeypatch, capsys):
+@pytest.mark.parametrize(
+    "control",
+    [
+        "\x1b]52;c;Y2xpcGJvYXJk\x07\r",
+        "\u202e",
+        "\u2066",
+        "\u2067",
+        "\u2068",
+        "\u2069",
+        "\u200e",
+        "\u200f",
+        "\u202a",
+        "\u202b",
+        "\u202c",
+        "\u202d",
+    ],
+)
+def test_older_prepared_control_title_blocked_before_network(report_env, monkeypatch, capsys, control):
     import hashlib
 
     mod, target = report_env
@@ -1388,7 +1415,7 @@ def test_older_prepared_control_title_blocked_before_network(report_env, monkeyp
     preview = result(capsys)
     directory = Path(preview["preview_path"]).parent
     bundle = json.loads((directory / "bundle.json").read_text())
-    bundle["user"]["title"] = "title\x1b]52;c;Y2xpcGJvYXJk\x07\rhidden"
+    bundle["user"]["title"] = "title" + control + "hidden"
     markdown = mod.render(bundle)
     receipt = json.loads((directory / "receipt.json").read_text())
     receipt["bundle_digest"] = mod.canonical_json_digest(bundle)

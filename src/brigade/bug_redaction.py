@@ -18,7 +18,7 @@ from .guard.policy import Policy
 from .guard.types import GuardResult, Rule, ScanOptions
 
 _SECRET_ENV_NAME = re.compile(r"TOKEN|KEY|SECRET|PASSWORD|PASS|CREDENTIAL", re.I)
-_TERMINAL_CONTROLS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]")
+_TERMINAL_CONTROLS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069]")
 
 
 # Bug bundles need stricter leak detection than repository content. Keep these
@@ -153,8 +153,12 @@ class Redactor:
             except Exception:
                 raise ReportBlocked("Bug report blocked: redaction counts unavailable") from None
         # Keep newlines and tabs for readable logs, but render all other C0/C1
-        # bytes visibly. Escaping ESC also neutralizes ANSI and OSC sequences.
-        text, count = _TERMINAL_CONTROLS.subn(lambda match: f"\\x{ord(match[0]):02x}", verdict.persisted_text)
+        # bytes and Unicode bidi controls visibly. ESC escaping neutralizes ANSI
+        # and OSC sequences. Bidi escaping keeps preview and submission order equal.
+        text, count = _TERMINAL_CONTROLS.subn(
+            lambda match: f"\\x{ord(match[0]):02x}" if ord(match[0]) < 256 else f"\\u{ord(match[0]):04x}",
+            verdict.persisted_text,
+        )
         self.counts["terminal-control"] += count
         return text
 
