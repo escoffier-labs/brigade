@@ -1091,13 +1091,16 @@ def test_promote_mints_stable_id_for_new_card_and_preserves_it_on_update(tmp_tar
     assert "replacement body" in updated
 
 
-def test_create_card_exact_fingerprint_reinforces_existing(tmp_target: Path, capsys):
+@pytest.mark.parametrize("archive_collision", [False, True])
+def test_create_card_exact_fingerprint_reinforces_existing(tmp_target: Path, capsys, archive_collision):
     """Exact content match reinforces the existing card instead of filing a duplicate."""
     from datetime import date
 
     from brigade.card_fingerprint import content_fingerprint
 
     inbox = _seed(tmp_target)
+    if archive_collision:
+        (inbox / "processed/2026-05-13-1100-dup.md").write_text("Previously processed handoff.\n")
     body = (
         "Always flush the shared widget cache after a schema migration completes "
         "otherwise application reads return stale rows for several minutes"
@@ -1176,6 +1179,9 @@ def test_create_card_exact_fingerprint_reinforces_existing(tmp_target: Path, cap
         assert rows[0]["kind"] == "reinforced"
         assert rows[0]["similarity"] == 1.0
         assert rows[0]["card_path"] == "memory/cards/widget-cache.md"
+        evidence = tmp_target / rows[0]["evidence_id"]
+        assert evidence.parent == inbox / "processed"
+        assert body in evidence.read_text()
 
 
 def test_create_card_near_match_proposes_reinforce_without_writing(tmp_target: Path, capsys):
@@ -1225,6 +1231,7 @@ def test_create_card_near_match_proposes_reinforce_without_writing(tmp_target: P
         assert rows[0]["kind"] == "near-match"
         assert rows[0]["card_path"] == "memory/cards/schema-flush.md"
         assert rows[0]["evidence_id"].endswith("2026-05-13-1101-near.md")
+        assert tmp_target / rows[0]["evidence_id"] == inbox_files[0]
         assert 0.9 <= rows[0]["similarity"] < 1
 
 
@@ -1477,7 +1484,8 @@ def test_busy_proposal_lock_leaves_handoff_for_retry(tmp_target, monkeypatch):
 @pytest.mark.skipif(
     os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"), reason="safe descriptor IO required"
 )
-def test_external_handoff_logs_identifier_without_evidence_body(tmp_path):
+@pytest.mark.parametrize("kind", ["near-match", "reinforced"])
+def test_external_handoff_logs_identifier_without_evidence_body(tmp_path, kind):
     owner, source = tmp_path / "owner", tmp_path / "writer"
     _seed(owner)
     inbox = _seed(source)
@@ -1489,7 +1497,11 @@ def test_external_handoff_logs_identifier_without_evidence_body(tmp_path):
     handoff = _write_handoff(
         inbox,
         "external-evidence.md",
-        textwrap.dedent(_card_handoff_body("new.md", "example", body.replace("Always", "Always please"))).replace(
+        textwrap.dedent(
+            _card_handoff_body(
+                "new.md", "example", body.replace("Always", "Always please") if kind == "near-match" else body
+            )
+        ).replace(
             "## Recommended memory action", "## Evidence\n\n- Private evidence body.\n\n## Recommended memory action"
         ),
     )
@@ -1497,5 +1509,13 @@ def test_external_handoff_logs_identifier_without_evidence_body(tmp_path):
     rows = [
         json.loads(line) for line in (owner / ".brigade/memory/reflect/evidence-log.jsonl").read_text().splitlines()
     ]
-    assert rows[0]["evidence_id"] == handoff.name
-    assert card.read_bytes() == before
+    assert rows[0]["kind"] == kind
+    evidence = owner / rows[0]["evidence_id"]
+    assert "Private evidence body." in evidence.read_text()
+    assert not handoff.exists()
+    assert "Private evidence body." not in (owner / ".brigade/memory/reflect/evidence-log.jsonl").read_text()
+    if kind == "near-match":
+        assert evidence.parent == owner / "memory/handoff-inbox"
+        assert card.read_bytes() == before
+    else:
+        assert evidence.parent == inbox / "processed"

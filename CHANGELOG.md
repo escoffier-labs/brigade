@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Memory care flags `unconsolidated-evidence` from a body-free evidence log written by ingest, with newer evidence ids in the refresh queue. (#1859)
+- Evidence findings respect date-only reviews, exclude absorbed reinforcement, and fall back from invalid consolidation dates. Ingest logs surviving evidence paths, and care reports unsupported log IO separately from corrupt rows. (#1859)
 
 - `brigade memory serve-mcp --http` and `brigade skills serve-mcp --http` serve the read-only MCP tools over a stateless loopback Streamable HTTP endpoint (`POST /mcp`, `GET /healthz`) for MCP hosts that cannot spawn a stdio process. The server binds only `127.0.0.1` or `::1`, requires a bearer token from `BRIGADE_MCP_HTTP_TOKEN` (32 characters or more, never a flag), rejects non-loopback `Host` and `Origin` headers, and caps request bodies at 1 MiB. `--stdio` is unchanged.
 - MCP registry metadata for the two read-only servers: `mcp-registry/memory/server.json` (`io.github.escoffier-labs/brigade-memory`) and `mcp-registry/skills/server.json` (`io.github.escoffier-labs/brigade-skills`), with matching `mcp-name` markers in the README. `scripts/version_sync.py` keeps both manifests on the release version.

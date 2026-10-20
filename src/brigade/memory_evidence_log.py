@@ -9,7 +9,7 @@ from __future__ import annotations
 import json
 import os
 import sys
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from typing import Any, TYPE_CHECKING
 
@@ -104,7 +104,7 @@ def log_match(target: Path, match: CardMatch | None, handoff_path: Path) -> None
     try:
         evidence_id = handoff_path.relative_to(target).as_posix()
     except ValueError:
-        evidence_id = handoff_path.name
+        evidence_id = handoff_path.absolute().as_posix()
     kind = "reinforced" if match.kind == "exact" else "opposite-polarity" if match.opposite_polarity else "near-match"
     try:
         append_evidence(target, card_path=match.path, evidence_id=evidence_id, kind=kind, similarity=match.similarity)
@@ -112,8 +112,10 @@ def log_match(target: Path, match: CardMatch | None, handoff_path: Path) -> None
         print(f"warning: evidence log append failed: {exc}", file=sys.stderr)
 
 
-def read_evidence(target: Path) -> tuple[list[dict[str, Any]], int]:
-    """Stream bounded lines from a regular file, counting each rejected line."""
+def read_evidence(target: Path) -> tuple[list[dict[str, Any]], int, bool]:
+    """Return bounded rows, rejection count, and unsupported IO capability."""
+    if os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"):
+        return [], 0, True
     path = target / LOG_PATH
     rows: list[dict[str, Any]] = []
     warnings = 0
@@ -152,15 +154,20 @@ def read_evidence(target: Path) -> tuple[list[dict[str, Any]], int]:
         pass
     except (OSError, ValueError):
         warnings += 1
-    return rows, warnings
+    return rows, warnings, False
 
 
 class EvidenceLog:
     """Read once per care scan and collect findings through the existing factory."""
 
     def __init__(self, target: Path) -> None:
-        rows, warning_count = read_evidence(target)
-        self.summary = {"path": LOG_PATH, "row_count": len(rows), "warning_count": warning_count}
+        rows, warning_count, unsupported = read_evidence(target)
+        self.summary = {
+            "path": LOG_PATH,
+            "row_count": len(rows),
+            "warning_count": warning_count,
+            "unsupported": unsupported,
+        }
         self.by_identity: dict[str, list[dict[str, Any]]] = {}
         for row in rows:
             # Stable IDs survive renames. Legacy cards fall back to their path,
@@ -179,18 +186,28 @@ class EvidenceLog:
 
         if "unconsolidated-evidence" not in config.enabled_checks:
             return []
-        reference = _timestamp(
-            meta.get("last_consolidated")
-            if "last_consolidated" in meta
-            else _frontmatter_value(meta, "last_reviewed", "last_reviewed_at", "reviewed_at")
-        )
+        reference_value = meta.get("last_consolidated")
+        reference = _timestamp(reference_value)
         if reference is None:
+            reference_value = _frontmatter_value(meta, "last_reviewed", "last_reviewed_at", "reviewed_at")
+            reference = _timestamp(reference_value)
+        if reference is None or not isinstance(reference_value, str):
             return []
+        try:
+            date.fromisoformat(reference_value)
+            date_only = True
+        except ValueError:
+            date_only = False
         references = set()
         for key in (identity.card_id, *identity.aliases):
             for row in self.by_identity.get(key, []):
+                # Exact matches already updated the card through reinforcement.
+                if row["kind"] == "reinforced":
+                    continue
                 timestamp = _timestamp(row["ts"])
-                if timestamp is not None and timestamp > reference:
+                if timestamp is not None and (
+                    timestamp.date() > reference.date() if date_only else timestamp > reference
+                ):
                     references.add(row["evidence_id"])
         if not references:
             return []

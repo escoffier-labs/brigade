@@ -582,8 +582,7 @@ def _execute(
                 today=date.today(),
                 evidence_pointer=evidence_pointer,
             )
-            log_match(target, outcome.match, handoff_path)
-            _archive(handoff_path, processed_dir)
+            log_match(target, outcome.match, _archive(handoff_path, processed_dir))
         return Action("reinforced", summary)
 
     if outcome.kind == "routed":
@@ -612,7 +611,7 @@ def _execute(
                 f"<!-- routed from {handoff_path.name}\n     reason: {outcome.reason}\n     routed-at: {slug} -->\n\n"
             )
             dest.write_text(header + original, encoding="utf-8")
-            log_match(target, outcome.match, handoff_path)
+            log_match(target, outcome.match, dest)
             _archive(handoff_path, processed_dir)
         # Both inboxed and skipped are now archived; classify them uniformly.
         return Action("inboxed", summary)
@@ -664,13 +663,14 @@ def _list_handoffs(handoffs_dir: Path) -> List[Path]:
     return out
 
 
-def _archive(src: Path, processed_dir: Path) -> None:
+def _archive(src: Path, processed_dir: Path) -> Path:
     processed_dir.mkdir(parents=True, exist_ok=True)
     dest = processed_dir / src.name
     if dest.exists():
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         dest = processed_dir / f"{src.stem}-{stamp}{src.suffix}"
     shutil.move(str(src), dest)
+    return dest
 
 
 def _report(stats: IngestStats, dry_run: bool) -> None:

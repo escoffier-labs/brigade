@@ -1954,10 +1954,13 @@ def test_memory_care_init_parser_exposes_with_runbooks_flag(capsys):
 @pytest.mark.parametrize(
     ("consolidated", "reviewed", "expected"),
     [
-        (None, "2026-05-01", ["e-new", "e-same-day"]),
+        (None, "2026-05-01", ["e-new"]),
+        (None, "2026-05-01T06:00:00Z", ["e-new", "e-same-day"]),
+        ("2026-05-01T12:00:00Z", "2026-05-01", ["e-new"]),
         ("2026-05-03T12:00:00Z", "2026-05-01", ["e-new"]),
         ("2026-05-05", "2026-05-01", []),
-        ("invalid", "2026-05-01", []),
+        ("invalid", "2026-05-01", ["e-new"]),
+        ("", "2026-05-01", ["e-new"]),
         (None, None, []),
     ],
 )
@@ -1992,6 +1995,7 @@ def test_memory_care_unconsolidated_evidence_dates_queue_and_status(tmp_path, ca
             ("2026-05-04T12:00:00Z", "e-new"),
         ]
     ]
+    rows.append(dict(rows[0], ts="2026-05-06T12:00:00Z", evidence_id="e-reinforced", kind="reinforced"))
     log.write_text("\n".join(json.dumps(row) for row in rows) + "\n{malformed\n")
     before = card.read_bytes(), card.stat().st_mtime_ns
     assert memory_cmd.scan(target=tmp_path, json_output=True) == 0

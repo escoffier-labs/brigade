@@ -28,7 +28,8 @@ def test_append_is_body_free_append_only_and_does_not_write_card(tmp_path):
     before = card.stat(), card.read_bytes()
     for kind in ("near-match", "opposite-polarity", "reinforced", "outcome"):
         append_evidence(tmp_path, card_path=card, evidence_id=f"evidence-{kind}", kind=kind, similarity=0.95)
-    rows, warnings = read_evidence(tmp_path)
+    rows, warnings, unsupported = read_evidence(tmp_path)
+    assert unsupported is False
     assert warnings == 0
     assert len(rows) == 4
     assert {row["kind"] for row in rows} == {"near-match", "opposite-polarity", "reinforced", "outcome"}
@@ -63,18 +64,25 @@ def test_log_refuses_nonregular_or_linked_storage(tmp_path, unsafe):
         log.parent.symlink_to(tmp_path, target_is_directory=True)
     with pytest.raises((OSError, ValueError)):
         append_evidence(tmp_path, card_path=card, evidence_id="e-1", kind="near-match", similarity=0.95)
-    assert read_evidence(tmp_path) == ([], 1)
+    assert read_evidence(tmp_path) == ([], 1, False)
     assert outside.read_bytes() == b"untouched"
 
 
-def test_log_fails_closed_without_directory_descriptors(tmp_path, monkeypatch):
-    from brigade.memory_evidence_log import append_evidence, read_evidence
+def test_log_fails_closed_without_directory_descriptors(tmp_path, monkeypatch, capsys):
+    from brigade import memory_cmd
+    from brigade.memory_evidence_log import append_evidence
 
     card = _card(tmp_path)
     monkeypatch.setattr(io.os, "supports_dir_fd", set())
     with pytest.raises(OSError, match="safe directory descriptors unavailable"):
         append_evidence(tmp_path, card_path=card, evidence_id="e-1", kind="near-match", similarity=0.95)
-    assert read_evidence(tmp_path) == ([], 1)
+    assert memory_cmd.scan(target=tmp_path, json_output=True) == 0
+    captured = capsys.readouterr()
+    summary = json.loads(captured.out)["evidence_log"]
+    assert summary["unsupported"] is True
+    assert summary["row_count"] == 0
+    assert summary["warning_count"] == 0
+    assert "invalid line(s)" not in captured.err
     assert not (tmp_path / LOG).exists()
 
 
@@ -91,7 +99,8 @@ def test_reader_counts_invalid_and_oversized_lines_and_keeps_later_rows(tmp_path
     log.write_bytes(
         valid + b"{broken\n" + b"x" * (MAX_LINE_BYTES * 3) + b"\n" + json.dumps(row).encode() + b"\n" + valid
     )
-    rows, warnings = read_evidence(tmp_path)
+    rows, warnings, unsupported = read_evidence(tmp_path)
+    assert unsupported is False
     assert len(rows) == 2
     assert warnings == 3
     before = log.read_bytes()
