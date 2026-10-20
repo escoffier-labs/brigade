@@ -1487,6 +1487,29 @@ def test_ingest_leaves_git_tracked_handoffs_in_place(tmp_target: Path):
     assert status.stdout == ""
 
 
+def test_ingest_tracking_check_does_not_run_fsmonitor_hook(tmp_path: Path):
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    _git(tmp_path, "init", "-q")
+    tracked = _write_handoff(inbox, "tracked.md", _PLAIN_HANDOFF)
+    _git(tmp_path, "add", "--", "inbox/tracked.md")
+    hook = tmp_path / "fsmonitor-hook"
+    marker = tmp_path / "fsmonitor-hook.called"
+    hook.write_text('#!/bin/sh\nprintf ran > "$0.called"\n', encoding="utf-8", newline="\n")
+    hook.chmod(0o755)
+    _git(tmp_path, "config", "core.fsmonitor", hook.as_posix())
+
+    handoffs, tracked_handoffs = ingest_mod._list_handoffs(inbox)
+
+    assert handoffs == []
+    assert tracked_handoffs == [tracked]
+    assert not marker.exists()
+    with pytest.raises(ingest_mod.TrackedHandoffError):
+        ingest_mod._archive(tracked, inbox / "processed")
+    assert tracked.is_file()
+    assert not marker.exists()
+
+
 def test_archive_refuses_git_tracked_handoff(tmp_path: Path):
     inbox = tmp_path / "inbox"
     inbox.mkdir()

@@ -753,6 +753,8 @@ def _git_tracked_names(directory: Path) -> set[str] | None:
                     str(marker_root / ".git"),
                     "--work-tree",
                     str(worktree),
+                    "-c",
+                    "core.fsmonitor=false",
                     "ls-files",
                     "-z",
                 ],
