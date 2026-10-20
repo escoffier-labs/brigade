@@ -494,10 +494,12 @@ def test_connections_beyond_the_cap_are_refused(tmp_path: Path, monkeypatch: pyt
             idle.sendall(b"GET /healthz HTTP/1.1\r\n")  # holds the only slot
             time.sleep(0.2)
             with socket.create_connection(("127.0.0.1", station.port), timeout=10) as extra:
-                extra.sendall(b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+                # A refused connection reads as EOF on Linux and macOS, and as a reset
+                # or abort (WinError 10053/10054) on Windows. Any of them is a refusal.
                 try:
+                    extra.sendall(b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
                     refused = extra.recv(1024)
-                except ConnectionResetError:
+                except ConnectionError:
                     refused = b""
                 assert refused == b""
         # The slot frees once the idle connection closes.
@@ -506,7 +508,7 @@ def test_connections_beyond_the_cap_are_refused(tmp_path: Path, monkeypatch: pyt
             try:
                 if station.request("GET", "/healthz", token=None)[0] == 200:
                     break
-            except (http.client.RemoteDisconnected, ConnectionResetError):
+            except ConnectionError:
                 pass  # refused while the previous handler thread finishes
             assert time.monotonic() < deadline, "slot was never released"
             time.sleep(0.05)
