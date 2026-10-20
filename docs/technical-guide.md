@@ -1196,7 +1196,7 @@ Shared skill registry commands:
 
 #### Streamable HTTP for the read-only MCP servers
 
-`brigade memory serve-mcp` and `brigade skills serve-mcp` default to stdio. Add `--http` to serve the same tools over a stateless Streamable HTTP endpoint on loopback instead. `--stdio` and `--http` are mutually exclusive.
+Without a transport flag, `brigade memory serve-mcp` and `brigade skills serve-mcp` print their resource and tool contract and exit. `--stdio` runs the server over stdin and stdout, and `--http` serves the same tools over a stateless Streamable HTTP endpoint on loopback. `--stdio` and `--http` are mutually exclusive.
 
 ```bash
 export BRIGADE_MCP_HTTP_TOKEN="$(openssl rand -hex 32)"

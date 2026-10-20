@@ -98,6 +98,8 @@ def handle_message(
     params = message.get("params") if isinstance(message.get("params"), dict) else {}
     if request_id is None and method.startswith("notifications/"):
         return None
+    if not isinstance(message.get("method"), str):
+        return response(request_id, error={"code": -32600, "message": "invalid request"})
     if method == "initialize":
         return response(
             request_id,
@@ -184,7 +186,7 @@ def validate_http_config(*, host: object, port: object, token: object) -> HttpCo
             f"refusing to bind host {host!r}: the HTTP transport serves loopback only (127.0.0.1, ::1, or localhost)"
         )
     if isinstance(port, bool) or not isinstance(port, int) or not 0 <= port <= 65535:
-        raise McpHttpConfigError(f"invalid port {port!r}: expected an integer from 1 to 65535")
+        raise McpHttpConfigError(f"invalid port {port!r}: expected an integer from 0 to 65535 (0 picks a free port)")
     if not isinstance(token, str) or len(token.strip()) < HTTP_MIN_TOKEN_LENGTH:
         raise McpHttpConfigError(
             f"{HTTP_TOKEN_ENV} must be set to a token of at least {HTTP_MIN_TOKEN_LENGTH} characters "
@@ -361,10 +363,14 @@ def _make_handler(
                 return
             replies: list[dict[str, Any]] = []
             for message in messages:
-                # A message with no id or no method is a notification or a client
-                # response: it never gets a reply over HTTP.
-                if isinstance(message, dict) and ("id" not in message or "method" not in message):
-                    continue
+                # Notifications (method, no id) and client responses (result or
+                # error, no method) never get a reply. A methodless object with an
+                # id that is not a response falls through to an invalid-request error.
+                if isinstance(message, dict):
+                    is_notification = "id" not in message and "method" in message
+                    is_response = "method" not in message and ("result" in message or "error" in message)
+                    if is_notification or is_response:
+                        continue
                 try:
                     reply = handle_message(message, server_name=server_name, **callbacks)
                 except Exception:  # noqa: BLE001 - never leak internals or kill the handler thread

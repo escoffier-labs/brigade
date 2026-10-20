@@ -526,3 +526,12 @@ def test_batch_size_nesting_depth_and_huge_length_are_bounded(memory_station: _S
 
     status, _, _ = memory_station.request("POST", "/mcp", headers={"Content-Length": "9" * 5000})
     assert status == 413
+
+
+def test_methodless_request_with_id_is_invalid_but_responses_are_ignored(memory_station: _Station) -> None:
+    status, _, body = memory_station.rpc({"jsonrpc": "2.0", "id": 7})
+    assert status == 200
+    assert _json(body) == {"jsonrpc": "2.0", "id": 7, "error": {"code": -32600, "message": "invalid request"}}
+
+    status, _, body = memory_station.rpc({"jsonrpc": "2.0", "id": 8, "result": {}})
+    assert (status, body) == (202, b"")
