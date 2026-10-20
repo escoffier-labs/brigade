@@ -234,7 +234,9 @@ def _patch_outside_manifest_scope(patch_bytes: bytes, manifest: verify_manifest.
     changed = patch_changed_paths(patch_bytes)
     if changed is None:
         return True
-    return any(not verify_manifest.path_in_manifest_scope(manifest, path) for path in changed)
+    # Git patch paths always use "/"; a backslash is part of a POSIX filename, so
+    # never let path normalization turn it into a directory separator.
+    return any("\\" in path or not verify_manifest.path_in_manifest_scope(manifest, path) for path in changed)
 
 
 def owned_delta_sha256(patch_bytes: bytes, subject_path: str) -> str | None:

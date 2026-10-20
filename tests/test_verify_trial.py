@@ -440,6 +440,19 @@ def test_project_trial_scope_check_ignores_diff_prefix_config(scoreable_target, 
     assert projection.eligible is True, projection.reason
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="backslash is a path separator on Windows")
+def test_project_trial_backslash_patch_path_is_not_treated_as_in_scope(scoreable_target, monkeypatch):
+    receipt = _run_scoped_patch_verify(
+        scoreable_target,
+        monkeypatch,
+        scope_globs=["skills/brigade-work/**"],
+        extra_paths=["skills\\brigade-work\\outside.md"],
+    )
+    projection = verify_trial.project_trial(receipt, target=scoreable_target)
+    assert projection.eligible is False
+    assert projection.reason == "out_of_scope_changes"
+
+
 def test_project_trial_without_scope_globs_ignores_extra_patch_paths(scoreable_target, monkeypatch):
     receipt = _run_scoped_patch_verify(
         scoreable_target, monkeypatch, scope_globs=None, extra_paths=[".vale-styles/Slop/Banlist.yml"]
