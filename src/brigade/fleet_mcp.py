@@ -216,8 +216,12 @@ def poll_inbox(
     if any(row.get("acked_at") is None for row in visible):
         return history
     if any(row.get("acked_at") is None for row in history["messages"]):
-        # Unread mail sits past the caller's limit: return the unread page instead.
-        return read(True)
+        # Unread mail sits past the caller's limit: return the unread page instead,
+        # or the first page if that read fails, as the wait loop does.
+        try:
+            return read(True)
+        except fleet_client.FleetClientError:
+            return history
     delay = 1.0
     last_good = history
     while (remaining := deadline - monotonic()) > 0:

@@ -784,3 +784,21 @@ def test_inbox_wait_with_small_limit_returns_unread_past_the_limit(stations):
     assert len(page["messages"]) == 1
     assert page["messages"][0]["acked_at"] is None
     assert unfence({"untrusted": page["messages"][0]["body"], "flagged": False}).endswith("Unread")
+
+
+def test_inbox_unread_refetch_failure_returns_first_page(stations, monkeypatch):
+    a, b = stations
+    first = call(a, "fleet_send", to=NODE_B, body="Already read")["message"]["id"]
+    call(b, "fleet_ack", ids=[str(first)])
+    call(a, "fleet_send", to=NODE_B, body="Unread")
+    original = fleet_client_messages.list_messages
+
+    def fail_unread(**kwargs):
+        if kwargs.get("unacked"):
+            raise fleet_client.FleetClientError("hub unavailable")
+        return original(**kwargs)
+
+    monkeypatch.setattr(fleet_client_messages, "list_messages", fail_unread)
+    payload, error = b.call("fleet_inbox", {"unacked_only": False, "wait_secs": 5, "limit": 1})
+    assert not error
+    assert len(payload["messages"]) == 1 and payload["messages"][0]["id"] == first
