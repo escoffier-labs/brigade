@@ -2601,8 +2601,8 @@ def doctor(*, target: Path, json_output: bool = False) -> int:
         f"rebuilt={projection['rebuilt_count']} persisted={projection['persisted_count']} "
         f"skipped_receipts={projection['skipped_receipts']}"
     )
-    for item in projection["drift"]:
-        print(f"- {item['artifact_id']} [{item['issue']}]")
+    for line in outcome_projection.status_drift_lines(projection["drift"]):
+        print(line)
     skipped_names = projection["skipped_receipt_names"]
     if skipped_names:
         print(f"skipped_decision_receipts: {', '.join(skipped_names)}")

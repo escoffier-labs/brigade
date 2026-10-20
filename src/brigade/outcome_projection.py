@@ -52,6 +52,14 @@ def status_drift(rebuilt: dict[str, dict], persisted: dict[str, dict]) -> list[d
     return drift
 
 
+def status_drift_lines(drift: list[dict[str, Any]]) -> list[str]:
+    """Format at most ten drift entries with the remaining count for doctor."""
+    lines = [f"- {item['artifact_id']} [{item['issue']}]" for item in drift[:10]]
+    if len(drift) > 10:
+        lines.append(f"... and {len(drift) - 10} more")
+    return lines
+
+
 def status_projection_report(
     transitions: list[Any],
     persisted: dict[str, dict],
@@ -69,6 +77,7 @@ def status_projection_report(
         "rebuilt_count": len(rebuilt),
         "persisted_count": len(persisted),
         "drift": drift,
+        "drift_count": len(drift),
         "legacy": legacy,
         "skipped_receipts": skipped_receipts,
         "skipped_receipt_names": sorted(skipped_receipt_names)[:10],

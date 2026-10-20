@@ -1731,15 +1731,20 @@ Machine-readable audit observations produced by the commit-linkage verifier.
 - `brigade outcome rebuild-status`: prove `status.json` matches decision receipts
 
 `brigade outcome doctor` includes `status_projection` in text and JSON output.
-The report contains `reproducible`, rebuilt and persisted counts, `drift`,
+The report contains `reproducible`, rebuilt and persisted counts, `drift`, `drift_count`,
 `legacy`, `skipped_receipts`, and up to ten `skipped_receipt_names`.
 `reproducible` is false when drift exists, decision receipts are skipped, or a
 non-empty `status.json` has no decision receipts to reproduce it. In that last
 case, `legacy` is true and per-artifact drift is suppressed because the older
 ledger has no decision log.
 
+`rebuild-status` keeps its existing comparison behavior, ignores skipped
+receipts and the legacy marker, and can disagree with doctor's full report.
+
 Projection drift kinds are `only-in-status` (persisted entry has no receipt),
 `missing-from-status` (receipt fold has no persisted entry), and `mismatch`
 (both entries exist but differ). Malformed or partial receipt files are skipped
 from the fold, counted in `skipped_receipts`, and named with a ten-file output
 limit. The report is advisory. `outcome doctor` keeps its existing exit status.
+Doctor prints at most ten drift entries in text mode followed by the remaining
+count. JSON includes every drift entry and the total in `drift_count`.

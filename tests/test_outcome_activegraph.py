@@ -82,24 +82,24 @@ def test_rebuild_status_detects_drift(tmp_path, capsys):
     assert any(d["artifact_id"] == "card-x" and d["issue"] == "mismatch" for d in payload["drift"])
 
 
-def test_rebuild_status_reports_receipt_written_before_status(tmp_path, capsys):
-    decisions = tmp_path / "memory" / "outcome" / "decisions"
-    decisions.mkdir(parents=True)
-    (decisions / "decision-1.json").write_text(
-        json.dumps(
-            {
-                "artifact_id": "card-crash",
-                "new_status": "promoted",
-                "created_at": "2026-06-20T01:00:00+00:00",
-            }
-        )
-    )
+def test_rebuild_status_reports_receipt_written_before_status(tmp_path, capsys, monkeypatch):
+    _seed(tmp_path, _helped("card-x", "card", 2))
+    status_path = tmp_path / "memory" / "outcome" / "status.json"
+    write_json = outcome_cmd.localio.write_json
+
+    def fail_status_write(path, payload):
+        if path == status_path:
+            raise OSError("interrupted status write")
+        write_json(path, payload)
+
+    monkeypatch.setattr(outcome_cmd.localio, "write_json", fail_status_write)
+    with pytest.raises(OSError, match="interrupted status write"):
+        outcome_cmd.reconcile(target=tmp_path, apply=True, json_output=True)
+    assert not status_path.exists()
 
     assert outcome_cmd.rebuild_status(target=tmp_path, check=True, json_output=True) == 1
     payload = json.loads(capsys.readouterr().out)
-    assert any(
-        item["artifact_id"] == "card-crash" and item["issue"] == "missing-from-status" for item in payload["drift"]
-    )
+    assert any(item["artifact_id"] == "card-x" and item["issue"] == "missing-from-status" for item in payload["drift"])
 
 
 def test_outcome_doctor_marks_legacy_status_without_decisions(tmp_path, capsys):
@@ -111,6 +111,7 @@ def test_outcome_doctor_marks_legacy_status_without_decisions(tmp_path, capsys):
     projection = json.loads(capsys.readouterr().out)["status_projection"]
     assert {"reproducible", "drift", "legacy", "skipped_receipts"} <= projection.keys()
     assert projection["legacy"] is True
+    assert projection["reproducible"] is False
     assert projection["drift"] == []
 
 
@@ -129,6 +130,32 @@ def test_outcome_doctor_counts_and_names_malformed_decision_receipt(tmp_path, ca
     projection = json.loads(capsys.readouterr().out)["status_projection"]
     assert projection["skipped_receipts"] == 1
     assert "broken.json" in projection["skipped_receipt_names"]
+
+    assert outcome_cmd.doctor(target=tmp_path) == 0
+    assert "skipped_decision_receipts: broken.json" in capsys.readouterr().out
+
+
+def test_outcome_doctor_bounds_text_drift_and_preserves_json_details(tmp_path, capsys):
+    _seed(tmp_path, _helped("card-x", "card", 2))
+    assert outcome_cmd.reconcile(target=tmp_path, apply=True, json_output=True) == 0
+    capsys.readouterr()
+    status_path = tmp_path / "memory" / "outcome" / "status.json"
+    data = json.loads(status_path.read_text())
+    data["artifacts"].update({f"old-card-{i:02}": {"status": "promoted"} for i in range(12)})
+    status_path.write_text(json.dumps(data))
+
+    assert outcome_cmd.doctor(target=tmp_path) == 0
+    text = capsys.readouterr().out
+    drift_lines = [line for line in text.splitlines() if "[only-in-status]" in line]
+    assert drift_lines == [f"- old-card-{i:02} [only-in-status]" for i in range(10)]
+    assert "... and 2 more" in text
+
+    assert outcome_cmd.doctor(target=tmp_path, json_output=True) == 0
+    projection = json.loads(capsys.readouterr().out)["status_projection"]
+    assert projection["legacy"] is False
+    assert projection["reproducible"] is False
+    assert projection["drift_count"] == 12
+    assert [item["artifact_id"] for item in projection["drift"]] == [f"old-card-{i:02}" for i in range(12)]
 
 
 def test_rebuild_status_reproduces_promoted_route_policy(tmp_path, capsys, monkeypatch):
