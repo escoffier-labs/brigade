@@ -98,7 +98,7 @@ For preview builds on a pipx install, run `brigade update --channel beta`. Detai
 
 ## MCP servers
 
-`brigade-cli` includes two read-only MCP servers. They speak stdio by default, and `--http` serves them on loopback Streamable HTTP for hosts that connect by URL ([details](docs/technical-guide.md#streamable-http-for-the-read-only-mcp-servers)).
+`brigade-cli` includes two read-only MCP servers. `--stdio` runs them over stdin and stdout, and `--http` serves them on loopback Streamable HTTP for hosts that connect by URL ([details](docs/technical-guide.md#streamable-http-for-the-read-only-mcp-servers)).
 
 - `brigade memory serve-mcp --stdio`: the repo's memory cards, with `list_cards`, `search_cards`, and `get_card`.
 - `brigade skills serve-mcp --stdio`: the reviewed skill registry, with search, read, lint, compatibility, and install-history tools.
