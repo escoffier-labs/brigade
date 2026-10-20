@@ -337,12 +337,9 @@ def export_derivative(
     _validate_receipt_field_types(receipt)
     patch_data = raw.get("changes.patch")
     patch_digest = hashlib.sha256(patch_data).hexdigest() if patch_data is not None else None
-    receipt_patch_digest = receipt.get("changes_patch_sha256")
     manifest_patch_digest = source_metadata.get("changes_patch_sha256")
-    if patch_data is None:
-        if receipt_patch_digest != manifest_patch_digest:
-            raise DerivativeExportError("source patch digest does not match receipt and manifest")
-    elif receipt_patch_digest != patch_digest or manifest_patch_digest != patch_digest:
+    # _validate_receipt already requires the receipt and manifest digests to match.
+    if patch_data is not None and manifest_patch_digest != patch_digest:
         raise DerivativeExportError("source patch digest does not match receipt and manifest")
     minimized, removed, redaction_occurrences = _minimize_receipt(receipt)
     excluded = len(names) - len(known_names)
@@ -420,7 +417,6 @@ def export_derivative(
         finally:
             os.close(current_parent_fd)
         dirfd.mkdir_child(parent_fd, out.name)
-        created_output = True
         created_entry = dirfd.stat_child(parent_fd, out.name)
         output_identity = (created_entry.st_dev, created_entry.st_ino)
         output_fd = dirfd.open_child_directory(parent_fd, out.name)
@@ -430,6 +426,14 @@ def export_derivative(
         output_entry = dirfd.stat_child(parent_fd, out.name)
         if (output_entry.st_dev, output_entry.st_ino) != output_identity:
             raise DerivativeExportError("derivative output directory changed during publication")
+        # A competitor can swap the directory between mkdir and stat. Only a
+        # fresh, empty directory we own can be the one we created.
+        if os.name == "posix" and output_info.st_uid != os.geteuid():
+            raise DerivativeExportError("derivative output directory is not owned by the current user")
+        if dirfd.child_names(output_fd, 1):
+            raise DerivativeExportError("derivative output directory changed during publication")
+        # Only now is the directory known to be ours and safe to remove on failure.
+        created_output = True
         temp_fd = dirfd.open_child_file(
             output_fd,
             temp_name,

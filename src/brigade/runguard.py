@@ -21,7 +21,12 @@ from time import monotonic_ns as _monotonic_ns
 from time import sleep as _sleep
 from uuid import uuid4
 
-from . import localio, proc, receipt_schema
+from . import dirfd, localio, proc, receipt_schema, run_dirfd
+
+# Separate from journal-owned run.json; bounded even for many failing siblings.
+RETENTION_DIAGNOSTICS_NAME = "retention-diagnostics.json"
+RETENTION_DIAGNOSTICS_LIMIT = 16
+RETENTION_DIAGNOSTIC_CHAR_LIMIT = 256
 
 _NONTERMINAL_RUN_STATUSES = frozenset(
     {
@@ -72,7 +77,12 @@ class RetainRunLockError(RunGuardError):
 
 
 def retained_run_lock_error(error: BaseException) -> RetainRunLockError | None:
-    """Find retention failures even when asynchronous cleanup replaces them."""
+    """Find retention failures even when asynchronous cleanup replaces them.
+
+    The walk stops after 64 nodes, so a chain deeper than that is treated as
+    holding no retention failure and the lock would be released. No real
+    cleanup chain is that deep.
+    """
     current: BaseException | None = error
     seen: set[int] = set()
     while current is not None and len(seen) < 64:
@@ -343,6 +353,7 @@ def _build_stale_lock_recovery_receipt(
     lock_workspace: object | None = None,
     lock_acquired_at: object | None = None,
     persist_recovery_provenance: bool = False,
+    retention_diagnostics: list[str] | None = None,
 ) -> dict[str, object]:
     """Pure builder for the stale-lock-recovery terminal receipt payload.
 
@@ -358,6 +369,8 @@ def _build_stale_lock_recovery_receipt(
     fresh copy they own.
     """
     detail = f"run owner process {owner_pid} is no longer active"
+    if retention_diagnostics:
+        detail += "; " + "; ".join(retention_diagnostics)
     failure_attribution: dict[str, object] = {}
     stored_status = payload.get("status")
     active_seats = payload.get("active_seats")
@@ -409,6 +422,40 @@ def _build_stale_lock_recovery_receipt(
     return receipt_schema.stamp_run_receipt(payload)
 
 
+def _read_retention_diagnostics(run_dir: Path, owner_token: object) -> list[str]:
+    if not isinstance(owner_token, str) or not owner_token:
+        return []
+    # Without both a held parent and nonblocking no-follow opens, diagnostics
+    # are optional. Never substitute a blocking pathname read on that platform.
+    if not dirfd.posix_available() or not getattr(os, "O_NONBLOCK", 0):
+        return []
+    try:
+        with run_dirfd.bound_run_dir(run_dir) as bound:
+            flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+            descriptor = bound.open_file((), RETENTION_DIAGNOSTICS_NAME, flags)
+            try:
+                if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+                    return []
+                diagnostic_bytes = os.read(descriptor, 65537)
+            finally:
+                os.close(descriptor)
+        if len(diagnostic_bytes) > 65536:
+            return []
+        sidecar = json.loads(diagnostic_bytes)
+        if not isinstance(sidecar, dict) or sidecar.get("owner_token") != owner_token:
+            return []
+        candidates = sidecar.get("diagnostics")
+        if isinstance(candidates, list):
+            return [
+                diagnostic[:RETENTION_DIAGNOSTIC_CHAR_LIMIT]
+                for diagnostic in candidates[:RETENTION_DIAGNOSTICS_LIMIT]
+                if isinstance(diagnostic, str) and diagnostic
+            ]
+    except (OSError, ValueError, RecursionError):
+        pass
+    return []
+
+
 def _recover_run_artifact(owner: dict[str, object] | None, *, persist_recovery_provenance: bool = False) -> str:
     if owner is None:
         return "unattributable"
@@ -452,6 +499,7 @@ def _recover_run_artifact(owner: dict[str, object] | None, *, persist_recovery_p
             prior_status = status
             if status not in _NONTERMINAL_RUN_STATUSES:
                 return "terminal"
+    retention_diagnostics = _read_retention_diagnostics(run_json.parent, owner.get("owner_token"))
     recovered_at = datetime.now(timezone.utc).isoformat()
     stamped = _build_stale_lock_recovery_receipt(
         payload,
@@ -461,6 +509,7 @@ def _recover_run_artifact(owner: dict[str, object] | None, *, persist_recovery_p
         lock_workspace=owner.get("_lock_workspace"),
         lock_acquired_at=owner.get("acquired_at"),
         persist_recovery_provenance=persist_recovery_provenance,
+        retention_diagnostics=retention_diagnostics,
     )
     if stamped.get("dry_run") is not True:
         workspace = resolve_run_lock_workspace(stamped, run_json.parent)
@@ -1675,8 +1724,13 @@ def changes_relative_to_snapshot(cwd: Path | None, snapshot: PreRunSnapshot | No
     return changed, untracked
 
 
+# Pin a/ and b/ so diff.mnemonicPrefix or diff.noprefix cannot change the
+# header paths that eligibility and owned-delta parsing read.
+_PATCH_PREFIX_ARGS = ("--src-prefix=a/", "--dst-prefix=b/")
+
+
 def _tracked_diff(cwd: Path) -> tuple[str, int]:
-    result = _git(cwd, "diff", "--binary", "HEAD")
+    result = _git(cwd, "diff", "--binary", *_PATCH_PREFIX_ARGS, "HEAD")
     if result.code != 0:
         detail = result.stderr.strip() or result.stdout.strip()
         raise RunGuardError(f"failed to collect tracked diff: {detail}")
@@ -1718,7 +1772,9 @@ def _untracked_files(cwd: Path, *, max_bytes: int | None = None) -> list[str]:
 
 
 def _untracked_diff(cwd: Path, relpath: str) -> str:
-    result = proc.run(["git", "diff", "--no-index", "--binary", "--", "/dev/null", relpath], cwd=cwd)
+    result = proc.run(
+        ["git", "diff", "--no-index", "--binary", *_PATCH_PREFIX_ARGS, "--", "/dev/null", relpath], cwd=cwd
+    )
     if result.code not in {0, 1}:
         detail = result.stderr.strip() or result.stdout.strip()
         raise RunGuardError(f"failed to collect untracked diff for {relpath}: {detail}")
