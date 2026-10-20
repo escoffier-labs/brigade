@@ -107,6 +107,8 @@ def _plan(
         "partition_mode": waves["partition_mode"],
         "partition_degraded": waves["partition_degraded"],
     }
+    # Apply/resume must reload this saved plan by dispatch id, never re-plan:
+    # claims mutate the ledger and would change the digest and future intent ids.
     plan["plan_digest"] = localio.canonical_json_digest(plan)
     return plan
 
@@ -152,11 +154,21 @@ def dispatch(
                 raise ValueError("use a nonempty --worker or --seat-map, exclusively")
         mapping = _seat_map(seat_map)
         roster_path = None
-        if max_workers is None:
+        cap = max_workers
+        try:
             roster_path = roster.resolve_roster_path(target)
-            cap = roster.load_roster(roster_path).max_workers
-        else:
-            cap = max_workers
+        except FileNotFoundError:
+            if cap is None:
+                raise
+        if roster_path is not None:
+            configured = roster.load_roster(roster_path)
+            seats = set(mapping.values()) | ({worker} if worker is not None else set())
+            unknown = seats - configured.agents.keys()
+            if unknown:
+                raise ValueError(f"unknown roster seats: {', '.join(sorted(unknown))}")
+            if cap is None:
+                cap = configured.max_workers
+        assert cap is not None
         plan = _plan(
             target,
             locking._read_task_ledger(target),
@@ -186,8 +198,8 @@ def dispatch(
             "dry_run": True,
         }
         directory.mkdir(parents=True, exist_ok=False)
-        localio.write_json_exclusive(directory / "session.json", session)
         localio.write_json_exclusive(directory / "plan.json", plan)
+        localio.write_json_exclusive(directory / "session.json", session)
     except locking.TaskLedgerError:
         raise
     except (OSError, ValueError) as exc:

@@ -7,7 +7,7 @@ import json
 
 import pytest
 
-from brigade import cli, work_cmd
+from brigade import cli, localio, work_cmd
 from brigade.work_cmd import footprint
 
 
@@ -113,6 +113,19 @@ def test_claimed_in_progress_footprint_is_occupied(dispatch_target, capsys):
     assert {"task_id": "task-1", "reason": "occupied"} in plan["skipped"]
 
 
+def test_claimed_in_progress_task_without_footprint_holds_all_pending_work(dispatch_target, capsys):
+    tasks = _tasks(dispatch_target, [[], ["a.py"], ["b.py"]])
+    tasks[0].pop("metadata")
+    tasks[0].update(status="in_progress", claim={"claim_id": "claim-a", "actor": "coder"})
+    work_cmd._write_task_ledger(dispatch_target, {"version": 2, "tasks": tasks, "edges": []})
+    plan, _ = _dispatch(dispatch_target, capsys)
+    assert plan["selected"] == []
+    assert {item["task_id"] for item in plan["skipped"] if item["reason"] == "occupied"} == {
+        "task-1",
+        "task-2",
+    }
+
+
 def test_plan_filters_missing_explicit_seat_mapping(dispatch_target, capsys):
     tasks = _tasks(dispatch_target, [["a.py"], ["b.py"], ["c.py"]])
     tasks[1]["metadata"]["seat_class"] = "review"
@@ -193,6 +206,10 @@ def test_no_dry_run_refuses_launch_without_writes(dispatch_target, capsys):
         ["--seat-map", "unknown=coder"],
         ["--seat-map", "mechanical="],
         ["--seat-map", "mechanical=coder", "--seat-map", "mechanical=chef"],
+        ["--worker", "codr"],
+        ["--seat-map", "mechanical=codr"],
+        ["--max", "2", "--worker", "codr"],
+        ["--max", "2", "--seat-map", "mechanical=codr"],
     ],
 )
 def test_invalid_plan_inputs_do_not_write_receipts(dispatch_target, capsys, options):
@@ -201,6 +218,21 @@ def test_invalid_plan_inputs_do_not_write_receipts(dispatch_target, capsys, opti
     assert cli.main(["work", "dispatch", "--target", str(dispatch_target), "--dry-run", *options]) == 2
     assert capsys.readouterr().err
     assert _snapshot(dispatch_target) == before
+
+
+def test_plan_write_failure_does_not_publish_session(dispatch_target, capsys, monkeypatch):
+    _tasks(dispatch_target, [["a.py"]])
+    write_json = localio.write_json_exclusive
+
+    def fail_plan_write(path, payload):
+        if path.name == "plan.json":
+            raise OSError("plan write failed")
+        write_json(path, payload)
+
+    monkeypatch.setattr(localio, "write_json_exclusive", fail_plan_write)
+    assert cli.main(["work", "dispatch", "--target", str(dispatch_target), "--dry-run"]) == 2
+    assert "plan write failed" in capsys.readouterr().err
+    assert not list((dispatch_target / ".brigade" / "dispatch").rglob("session.json"))
 
 
 def test_empty_ledger_still_writes_a_plan(dispatch_target, capsys):
