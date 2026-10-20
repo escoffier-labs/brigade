@@ -103,7 +103,7 @@ For preview builds on a pipx install, run `brigade update --channel beta`. Detai
 - `brigade memory serve-mcp --stdio`: the repo's memory cards, with `list_cards`, `search_cards`, and `get_card`.
 - `brigade skills serve-mcp --stdio`: the reviewed skill registry, with search, read, lint, compatibility, and install-history tools.
 
-Without a global install, `uvx brigade-cli memory serve-mcp --stdio` runs the same server.
+Without a global install, `uvx --from brigade-cli brigade memory serve-mcp --stdio` runs the same server.
 
 <!-- MCP Registry ownership markers; keep each on its own line. -->
 <!-- mcp-name: io.github.escoffier-labs/brigade-memory -->
