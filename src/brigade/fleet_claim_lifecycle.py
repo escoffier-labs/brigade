@@ -37,19 +37,27 @@ def _bound_connection(hub_url: str, token: str) -> Callable[[], dict[str, Any]]:
     Each call re-reads configuration. Its token replaces ``token`` only while
     the configured hub still equals ``hub_url``, so one hub's credential never
     goes to another hub (#1780). Otherwise the latest token seen for this hub
-    is kept, never an earlier one a rotation has already revoked.
+    is kept, never an earlier one a rotation has already revoked. A claim
+    bound to a node token never adopts ``load_fleet_config``'s admin token
+    fallback, which a briefly unreadable node token file would trigger.
     """
     latest = token
+    try:
+        shared = token == _client().load_fleet_settings()["admin_token"]
+    except Exception:
+        shared = False
 
     def current() -> dict[str, Any]:
-        nonlocal latest
+        nonlocal latest, shared
         try:
-            config = _client().load_fleet_config()
+            settings = _client().load_fleet_settings()
         except Exception:
-            config = {}
-        fresh = config.get("token", "")
-        if fresh and config.get("hub_url") == hub_url:
-            latest = fresh
+            settings = {}
+        if settings.get("hub_url") == hub_url:
+            if settings.get("node_token"):
+                latest, shared = settings["node_token"], False
+            elif shared and settings.get("admin_token"):
+                latest = settings["admin_token"]
         return {"hub_url": hub_url, "token": latest}
 
     return current

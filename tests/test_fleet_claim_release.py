@@ -1409,35 +1409,38 @@ def test_bound_connection_keeps_the_latest_same_hub_token_as_its_fallback(monkey
     or load failure must not fall back to the revoked original (#1781)."""
     from brigade import fleet_claim_lifecycle
 
-    config = {"hub_url": "https://hub-one.example.invalid", "token": "fake-token-two"}
+    config = {"hub_url": "https://hub-one.example.invalid", "node_token": "fake-token-two", "admin_token": ""}
 
     def load():
         if later == "config-error" and config["hub_url"] is None:
             raise OSError("fake unreadable config")
         return dict(config)
 
-    monkeypatch.setattr(fleet_client, "load_fleet_config", load)
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", load)
     connection = fleet_claim_lifecycle._bound_connection("https://hub-one.example.invalid", "fake-token-one")
     assert connection() == {"hub_url": "https://hub-one.example.invalid", "token": "fake-token-two"}
-    config.update(hub_url="https://hub-two.example.invalid" if later == "other-hub" else None, token="fake-later")
+    config.update(hub_url="https://hub-two.example.invalid" if later == "other-hub" else None, node_token="fake-later")
     assert connection() == {"hub_url": "https://hub-one.example.invalid", "token": "fake-token-two"}
 
 
 def test_orphan_release_retry_follows_a_same_hub_token_rotation(monkeypatch):
     """The orphan-release retry re-reads the token for the bound hub (#1781)."""
-    config = {"hub_url": "https://hub-one.example.invalid", "token": "fake-token-one"}
+    config = {"hub_url": "https://hub-one.example.invalid", "node_token": "fake-token-one", "admin_token": ""}
     tokens = []
     done = threading.Event()
 
     def release(target, **kwargs):
         tokens.append((kwargs["hub_url"], kwargs["token"]))
         if len(tokens) == 1:
-            config["token"] = "fake-token-two"
+            config["node_token"] = "fake-token-two"
             return fleet_client.ClaimDecision(granted=False, reason="hub-unavailable")
         done.set()
         return fleet_client.ClaimDecision(granted=True, reason="ok")
 
-    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: dict(config))
+    monkeypatch.setattr(
+        fleet_client, "load_fleet_config", lambda: {"hub_url": config["hub_url"], "token": "fake-token-one"}
+    )
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: dict(config))
     monkeypatch.setattr(fleet_client, "release_claim", release)
     monkeypatch.setattr(fleet_client, "ORPHAN_RELEASE_RETRY_SECONDS", 0.01)
     fleet_client._schedule_orphan_release(
@@ -1448,3 +1451,18 @@ def test_orphan_release_retry_follows_a_same_hub_token_rotation(monkeypatch):
         ("https://hub-one.example.invalid", "fake-token-one"),
         ("https://hub-one.example.invalid", "fake-token-two"),
     ]
+
+
+@pytest.mark.parametrize("bound", ["fake-node-token", "fake-admin-one"])
+def test_bound_connection_never_swaps_a_node_token_for_the_admin_fallback(monkeypatch, bound):
+    """An unreadable node token file must not make renewal send the admin
+    token; shared-token mode still follows an admin token rotation (#1781)."""
+    from brigade import fleet_claim_lifecycle
+
+    hub_url = "https://hub-one.example.invalid"
+    settings = {"hub_url": hub_url, "node_token": "", "admin_token": "fake-admin-one"}
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: dict(settings))
+    connection = fleet_claim_lifecycle._bound_connection(hub_url, bound)
+    settings["admin_token"] = "fake-admin-two"
+    expected = "fake-node-token" if bound == "fake-node-token" else "fake-admin-two"
+    assert connection() == {"hub_url": hub_url, "token": expected}
