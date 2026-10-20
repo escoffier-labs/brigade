@@ -6,11 +6,28 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+import pytest
+
 from brigade import work_cmd
 from brigade.work_cmd import footprint as footprint_mod
 from brigade.work_cmd import partition as partition_mod
 
 from tests.work_cmd_test_helpers import _init_git_repo
+
+
+@pytest.mark.parametrize("occupied_files", [["shared.py"], []])
+def test_occupied_footprints_hold_conflicts_out_of_every_wave(tmp_path, occupied_files):
+    ready = [{"id": "a"}, {"id": "b"}, {"id": "unknown"}]
+    tasks = {
+        "a": {"metadata": {"footprint": {"files": ["shared.py"]}}},
+        "b": {"metadata": {"footprint": {"files": ["free.py"]}}},
+        "unknown": {},
+    }
+    result = partition_mod.partition_ready(ready, tasks, tmp_path, occupied=[{"files": occupied_files}])
+    expected = ["b"] if occupied_files else []
+    assert [task_id for wave in result["waves"] for task_id in wave["task_ids"]] == expected
+    assert {item["task_id"] for item in result["skipped"]} == {"a", "unknown"} | (set() if occupied_files else {"b"})
+    assert all(item["reason"] == "occupied" for item in result["skipped"])
 
 
 def _add(target: Path, text: str, **kwargs):
