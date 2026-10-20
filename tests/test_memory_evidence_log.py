@@ -107,3 +107,33 @@ def test_reader_counts_invalid_and_oversized_lines_and_keeps_later_rows(tmp_path
     with pytest.raises(ValueError):
         append_evidence(tmp_path, card_path=card, evidence_id="x" * MAX_LINE_BYTES, kind="near-match", similarity=0.95)
     assert log.read_bytes() == before
+
+
+@pytest.mark.skipif(not POSIX_IO, reason="proposal IO requires safe directory descriptors")
+@pytest.mark.parametrize("cutoff", ["boundary", "partial-row", "oversized-row"])
+def test_reader_bounds_scan_to_newest_bytes(tmp_path, monkeypatch, cutoff):
+    from brigade import memory_evidence_log as ledger
+
+    card = _card(tmp_path)
+    ledger.append_evidence(tmp_path, card_path=card, evidence_id="old", kind="near-match", similarity=0.95)
+    log = tmp_path / LOG
+    old = log.read_bytes()
+    ledger.append_evidence(tmp_path, card_path=card, evidence_id="new", kind="near-match", similarity=0.95)
+    new = log.read_bytes()[len(old) :]
+    if cutoff == "oversized-row":
+        prefix = b"x" * (ledger.MAX_LINE_BYTES * 3) + b"\n"
+    else:
+        prefix = old * 20
+    data = prefix + new * 2
+    log.write_bytes(data)
+    budget = len(new) * 2 + (0 if cutoff == "boundary" else 17)
+    monkeypatch.setattr(ledger, "MAX_SCAN_BYTES", budget, raising=False)
+    before = log.stat().st_mtime_ns
+
+    rows, warnings, unsupported = ledger.read_evidence(tmp_path)
+
+    assert [row["evidence_id"] for row in rows] == ["new", "new"]
+    assert warnings == 1
+    assert unsupported is False
+    assert log.read_bytes() == data
+    assert log.stat().st_mtime_ns == before

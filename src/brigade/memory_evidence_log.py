@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
 LOG_PATH = ".brigade/memory/reflect/evidence-log.jsonl"
 MAX_LINE_BYTES = 4096
+MAX_SCAN_BYTES = 4 * 1024 * 1024
 KINDS = {"near-match", "opposite-polarity", "reinforced", "outcome"}
 _FIELDS = {"ts", "card_id", "card_path", "evidence_id", "kind", "similarity"}
 
@@ -114,7 +115,7 @@ def log_match(target: Path, match: CardMatch | None, handoff_path: Path) -> None
 
 
 def read_evidence(target: Path) -> tuple[list[dict[str, Any]], int, bool]:
-    """Return bounded rows, rejection count, and unsupported IO capability."""
+    """Return newest bounded rows, warning count, and unsupported IO capability."""
     if os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"):
         return [], 0, True
     path = target / LOG_PATH
@@ -125,6 +126,15 @@ def read_evidence(target: Path) -> tuple[list[dict[str, Any]], int, bool]:
             fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
             with os.fdopen(fd, "rb") as handle:
                 remaining = io._regular(handle.fileno()).st_size
+                # Seek past old history so IO and retained rows stay bounded.
+                # Inspect one preceding byte to preserve a row on the boundary.
+                if remaining > MAX_SCAN_BYTES:
+                    handle.seek(remaining - MAX_SCAN_BYTES - 1)
+                    boundary = handle.read(1) == b"\n"
+                    remaining = MAX_SCAN_BYTES
+                    warnings += 1
+                    if not boundary:
+                        remaining -= len(handle.readline(remaining))
                 # Bound the scan to the initial size, even during live appends.
                 while remaining > 0:
                     line = handle.readline(min(MAX_LINE_BYTES + 1, remaining))
@@ -177,7 +187,9 @@ class EvidenceLog:
             self.by_identity.setdefault(key, []).append(row)
         if warning_count:
             print(
-                f"warning: evidence log ignored {warning_count} invalid line(s) or unreadable file(s)", file=sys.stderr
+                f"warning: evidence log reported {warning_count} warning(s): "
+                "invalid line(s), unreadable file(s), or scan limit exceeded",
+                file=sys.stderr,
             )
 
     def findings(
