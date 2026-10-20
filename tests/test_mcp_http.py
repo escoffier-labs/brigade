@@ -455,3 +455,74 @@ def test_protocol_version_header_is_checked_after_initialize(memory_station: _St
     status, _, body = memory_station.request("POST", "/mcp", payload, headers={"MCP-Protocol-Version": "1999-01-01"})
     assert status == 400
     assert _json(body) == {"error": "unsupported MCP-Protocol-Version"}
+
+
+def _start_memory(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Station]:
+    _card(tmp_path)
+    return _start(monkeypatch, lambda: memory_cmd.serve_mcp(target=tmp_path, http=True, port=0))
+
+
+def test_slow_client_is_dropped_after_the_socket_deadline(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(mcp_server, "HTTP_SOCKET_TIMEOUT_SECONDS", 0.5)
+    stations = _start_memory(tmp_path, monkeypatch)
+    station = next(stations)
+    try:
+        # Unauthenticated peer sends half a request line and stalls.
+        with socket.create_connection(("127.0.0.1", station.port), timeout=10) as slow:
+            slow.sendall(b"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\n")
+            started = time.monotonic()
+            assert slow.recv(1024) == b""
+            assert time.monotonic() - started < 5
+        # An authenticated peer that declares a body and never sends it is dropped too.
+        with socket.create_connection(("127.0.0.1", station.port), timeout=10) as stalled:
+            stalled.sendall(
+                f"POST /mcp HTTP/1.1\r\nHost: 127.0.0.1\r\nAuthorization: Bearer {TOKEN}\r\n"
+                "Content-Length: 100\r\n\r\n{".encode()
+            )
+            assert stalled.recv(1024) == b""
+        assert station.request("GET", "/healthz", token=None)[0] == 200
+    finally:
+        next(stations, None)
+
+
+def test_connections_beyond_the_cap_are_refused(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(mcp_server, "HTTP_MAX_CONCURRENT_CONNECTIONS", 1)
+    stations = _start_memory(tmp_path, monkeypatch)
+    station = next(stations)
+    try:
+        with socket.create_connection(("127.0.0.1", station.port), timeout=10) as idle:
+            idle.sendall(b"GET /healthz HTTP/1.1\r\n")  # holds the only slot
+            time.sleep(0.2)
+            with socket.create_connection(("127.0.0.1", station.port), timeout=10) as extra:
+                extra.sendall(b"GET /healthz HTTP/1.1\r\nHost: 127.0.0.1\r\n\r\n")
+                try:
+                    refused = extra.recv(1024)
+                except ConnectionResetError:
+                    refused = b""
+                assert refused == b""
+        # The slot frees once the idle connection closes.
+        deadline = time.monotonic() + 5
+        while True:
+            try:
+                if station.request("GET", "/healthz", token=None)[0] == 200:
+                    break
+            except (http.client.RemoteDisconnected, ConnectionResetError):
+                pass  # refused while the previous handler thread finishes
+            assert time.monotonic() < deadline, "slot was never released"
+            time.sleep(0.05)
+    finally:
+        next(stations, None)
+
+
+def test_batch_size_nesting_depth_and_huge_length_are_bounded(memory_station: _Station) -> None:
+    batch = [{"jsonrpc": "2.0", "id": i, "method": "tools/list"} for i in range(mcp_server.HTTP_MAX_BATCH_MESSAGES + 1)]
+    status, _, body = memory_station.rpc(batch)
+    assert status == 400
+    assert _json(body)["error"]["code"] == -32600
+
+    status, _, body = memory_station.request("POST", "/mcp", b"[" * 200_000)
+    assert status == 400
+    assert _json(body)["error"]["code"] == -32700
+
+    status, _, _ = memory_station.request("POST", "/mcp", headers={"Content-Length": "9" * 5000})
+    assert status == 413

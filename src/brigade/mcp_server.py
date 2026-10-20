@@ -41,6 +41,13 @@ HTTP_TOKEN_ENV = "BRIGADE_MCP_HTTP_TOKEN"
 HTTP_DEFAULT_HOST = "127.0.0.1"
 HTTP_MIN_TOKEN_LENGTH = 32
 HTTP_MAX_BODY_BYTES = 1024 * 1024
+# Per-connection socket deadline: a peer that trickles headers or a declared body
+# is dropped instead of holding a handler thread open.
+HTTP_SOCKET_TIMEOUT_SECONDS = 10.0
+# Connections served at once; extra connections are closed immediately.
+HTTP_MAX_CONCURRENT_CONNECTIONS = 32
+# Messages per JSON-RPC batch, so one 1 MiB body cannot fan out unbounded work.
+HTTP_MAX_BATCH_MESSAGES = 64
 HTTP_MCP_PATH = "/mcp"
 HTTP_HEALTH_PATH = "/healthz"
 _LOOPBACK_HOSTNAMES = frozenset({"localhost", "127.0.0.1", "::1"})
@@ -233,6 +240,7 @@ def _make_handler(
 ) -> type[BaseHTTPRequestHandler]:
     class McpHttpHandler(BaseHTTPRequestHandler):
         server_version = "brigade-mcp"
+        timeout = HTTP_SOCKET_TIMEOUT_SECONDS
         sys_version = ""
 
         def log_message(self, format: str, *args: Any) -> None:  # noqa: A002
@@ -255,7 +263,11 @@ def _make_handler(
                 self.send_header(key, value)
             self.end_headers()
             if body and self.command != "HEAD":
-                self.wfile.write(body)
+                try:
+                    self.wfile.write(body)
+                except (BrokenPipeError, ConnectionResetError):
+                    # The client went away mid-response; nothing left to tell it.
+                    self.close_connection = True
 
         def _send_json(self, status: int, payload: object, *, headers: Mapping[str, str] | None = None) -> None:
             self._send(status, json.dumps(payload, sort_keys=True).encode("utf-8"), headers=headers)
@@ -320,10 +332,16 @@ def _make_handler(
             if not raw_length.isascii() or not raw_length.isdigit():
                 self._error(400, "malformed Content-Length")
                 return None
-            if int(raw_length) > HTTP_MAX_BODY_BYTES:
+            # Compare digit counts first: int() on a huge digit string raises.
+            max_digits = len(str(HTTP_MAX_BODY_BYTES))
+            if len(raw_length.lstrip("0")) > max_digits or int(raw_length) > HTTP_MAX_BODY_BYTES:
                 self._error(413, f"request body must be at most {HTTP_MAX_BODY_BYTES} bytes")
                 return None
-            return self.rfile.read(int(raw_length))
+            try:
+                return self.rfile.read(int(raw_length))
+            except TimeoutError:
+                self.close_connection = True
+                return None
 
         def _handle_mcp_post(self) -> None:
             body = self._read_body()
@@ -331,12 +349,14 @@ def _make_handler(
                 return
             try:
                 decoded = json.loads(body.decode("utf-8"))
-            except (UnicodeDecodeError, json.JSONDecodeError):
+            except (ValueError, RecursionError):
+                # ValueError covers UnicodeDecodeError and JSONDecodeError;
+                # RecursionError is pathologically deep nesting.
                 self._send_json(400, response(None, error={"code": -32700, "message": "parse error"}))
                 return
             is_batch = isinstance(decoded, list)
             messages = decoded if is_batch else [decoded]
-            if not messages:
+            if not messages or len(messages) > HTTP_MAX_BATCH_MESSAGES:
                 self._send_json(400, response(None, error={"code": -32600, "message": "invalid request"}))
                 return
             replies: list[dict[str, Any]] = []
@@ -368,7 +388,31 @@ class _LoopbackHTTPServer(ThreadingHTTPServer):
     def __init__(self, server_address: tuple[str, int], handler: type[BaseHTTPRequestHandler], *, ipv6: bool):
         if ipv6:
             self.address_family = socket.AF_INET6
+        self._slots = threading.BoundedSemaphore(HTTP_MAX_CONCURRENT_CONNECTIONS)
         super().__init__(server_address, handler)
+
+    def process_request(self, request: Any, client_address: Any) -> None:
+        # Refuse, rather than queue, connections beyond the cap so idle peers
+        # cannot pin an unbounded number of threads.
+        if not self._slots.acquire(blocking=False):
+            self.shutdown_request(request)
+            return
+        try:
+            super().process_request(request, client_address)
+        except BaseException:
+            self._slots.release()
+            raise
+
+    def process_request_thread(self, request: Any, client_address: Any) -> None:
+        try:
+            super().process_request_thread(request, client_address)
+        finally:
+            self._slots.release()
+
+    def handle_error(self, request: Any, client_address: Any) -> None:
+        # The default prints a full traceback with local source paths.
+        exc = sys.exc_info()[1]
+        print(f"MCP HTTP connection error: {type(exc).__name__}", file=sys.stderr, flush=True)
 
 
 def make_http_server(
