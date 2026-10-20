@@ -12,8 +12,6 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
-from .. import worklore_brigade_sync, worklore_github_sync
-
 DEFAULT_PORT = 3774
 DEFAULT_DB_REL_PATH = Path(".brigade") / "fleet-hub.db"
 
@@ -1924,6 +1922,8 @@ def _dispatch_work_unlink(args: argparse.Namespace) -> int:
 def _dispatch_work_sync_github(args: argparse.Namespace) -> int:
     import json as _json
 
+    from .. import worklore_github_sync
+
     try:
         config = worklore_github_sync.load_github_config()
         result = worklore_github_sync.sync_github(
@@ -1965,6 +1965,8 @@ def _dispatch_work_sync_github(args: argparse.Namespace) -> int:
 
 def _dispatch_work_sync_brigade(args: argparse.Namespace) -> int:
     import json as _json
+
+    from .. import worklore_brigade_sync
 
     try:
         config = worklore_brigade_sync.load_brigade_config()
