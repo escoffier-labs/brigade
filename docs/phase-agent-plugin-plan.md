@@ -1187,7 +1187,7 @@ def _string_list(arguments: dict[str, Any], key: str) -> list[str]:
 - Create: `src/brigade/mcp_http.py`
 - Test: `tests/test_mcp_http.py`
 
-- [ ] Write the failing test `tests/test_mcp_http.py`:
+- [x] Write the failing test `tests/test_mcp_http.py`:
 
 ```python
 """Loopback Streamable HTTP transport: binding, auth, origin, token files, parity."""
@@ -1326,8 +1326,8 @@ def test_stdio_and_http_answer_identically(tmp_path: Path, monkeypatch):
     assert http_replies == stdio_replies
 ```
 
-- [ ] Run, watch it fail: `PY -m pytest tests/test_mcp_http.py -q -p no:cacheprovider`. Expect FAIL with `ImportError: cannot import name 'mcp_http'`.
-- [ ] Create `src/brigade/mcp_http.py`:
+- [x] Run, watch it fail: `PY -m pytest tests/test_mcp_http.py -q -p no:cacheprovider`. Expect FAIL with `ImportError: cannot import name 'mcp_http'`.
+- [x] Create `src/brigade/mcp_http.py`:
 
 ```python
 """Loopback Streamable HTTP transport for the shared MCP dispatcher.
@@ -1490,9 +1490,9 @@ def serve_http(handlers: Handlers, *, host: str, port: int, token: str) -> int:
     return 0
 ```
 
-- [ ] Run to green: same command. Expect 7 PASS.
-- [ ] Lint and types: `PY -m ruff check src/brigade/mcp_http.py tests/test_mcp_http.py` and `PY -m mypy src/brigade/mcp_http.py`. Expect `All checks passed!` and `Success: no issues found`.
-- [ ] Commit: `git add src/brigade/mcp_http.py tests/test_mcp_http.py && git commit -m "feat(mcp): add loopback bearer-gated HTTP transport"`
+- [x] Run to green: same command. Expect 6 PASS.
+- [x] Lint and types: `PY -m ruff check src/brigade/mcp_http.py tests/test_mcp_http.py` and `PY -m mypy src/brigade/mcp_http.py`. Expect `All checks passed!` and `Success: no issues found`.
+- [x] Commit: `git add src/brigade/mcp_http.py tests/test_mcp_http.py && git commit -m "feat(mcp): add loopback bearer-gated HTTP transport"`
 
 ---
 
