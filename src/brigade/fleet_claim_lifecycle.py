@@ -6,6 +6,7 @@ can replace its clock, threading namespace, transport, and interrupt hooks.
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from threading import Lock
 from types import ModuleType
@@ -31,47 +32,59 @@ def _client() -> ModuleType:
     return fleet_client
 
 
+def _token_snapshot() -> tuple[str, str, str]:
+    """``(hub_url, node_token, admin_token)`` from one ``fleet.toml`` read.
+
+    Mirrors ``load_fleet_settings`` precedence, but a token read from a file
+    is dropped when that same read names a hub other than the effective one,
+    so an environment hub never pairs with another hub's file token.
+    """
+    client = _client()
+    section = client._read_fleet_section(client.brigade_home() / client.FLEET_CONFIG_REL_PATH.name)
+    raw_hub = section.get("hub_url")
+    file_hub = raw_hub.strip() if isinstance(raw_hub, str) else ""
+    hub_url = os.environ.get("BRIGADE_FLEET_HUB_URL", "").strip() or file_hub
+    tokens = []
+    for env_name, file_key in (("BRIGADE_FLEET_NODE_TOKEN", "node_token_file"), ("BRIGADE_FLEET_TOKEN", "token_file")):
+        value = os.environ.get(env_name, "").strip()
+        path = section.get(file_key)
+        if not value and isinstance(path, str) and path.strip() and file_hub in ("", hub_url):
+            value = client._read_token_file(path)
+        tokens.append(value)
+    return hub_url, tokens[0], tokens[1]
+
+
 def _bound_connection(hub_url: str, token: str) -> Callable[[], dict[str, Any]]:
     """Pin ``hub_url`` for a claim while honoring node token rotation (#1781).
 
-    Each call re-reads configuration. Its token replaces ``token`` only while
-    the configured hub still equals ``hub_url``, so one hub's credential never
-    goes to another hub (#1780). Otherwise the latest token seen for this hub
-    is kept, never an earlier one a rotation has already revoked. A claim
-    bound to a node token never adopts ``load_fleet_config``'s admin token
-    fallback, which a briefly unreadable node token file would trigger.
-    When ``fleet.toml`` names a hub, it must also be the bound hub: an
-    environment hub never pairs with a file token now assigned elsewhere.
+    Each call re-reads configuration (see ``_token_snapshot``). Its token
+    replaces ``token`` only while the configured hub still equals ``hub_url``,
+    so one hub's credential never goes to another hub (#1780). Otherwise the
+    latest token seen for this hub is kept, never an earlier one a rotation
+    has already revoked. A claim bound to a node token never adopts
+    ``load_fleet_config``'s admin token fallback, which a briefly unreadable
+    node token file would trigger.
     """
     latest = token
     try:
-        shared = token == _client().load_fleet_settings()["admin_token"]
+        shared = token == _token_snapshot()[2]
     except Exception:
         shared = False
 
     def current() -> dict[str, Any]:
         nonlocal latest, shared
         try:
-            # Settings first: a file switched to another hub after this read
-            # is still caught by the later file hub check.
-            settings = _client().load_fleet_settings()
-            file_hub = _configured_file_hub()
+            configured_hub, node_token, admin_token = _token_snapshot()
         except Exception:
-            settings, file_hub = {}, ""
-        if settings.get("hub_url") == hub_url and file_hub in ("", hub_url):
-            if settings.get("node_token"):
-                latest, shared = settings["node_token"], False
-            elif shared and settings.get("admin_token"):
-                latest = settings["admin_token"]
+            configured_hub, node_token, admin_token = "", "", ""
+        if configured_hub == hub_url:
+            if node_token:
+                latest, shared = node_token, False
+            elif shared and admin_token:
+                latest = admin_token
         return {"hub_url": hub_url, "token": latest}
 
     return current
-
-
-def _configured_file_hub() -> str:
-    client = _client()
-    value = client._read_fleet_section(client.brigade_home() / client.FLEET_CONFIG_REL_PATH.name).get("hub_url")
-    return value.strip() if isinstance(value, str) else ""
 
 
 def _force_release(target: str, *, holder: str | None, acquired_at: str | None, **kwargs: Any) -> Any:
