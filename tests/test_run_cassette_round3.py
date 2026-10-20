@@ -18,6 +18,7 @@ from brigade import run_cassette_store as store
 from brigade.roster import Agent, Roster
 from brigade.run_seat import SeatInvoker
 from tests.test_run_cassette import _documents, _record
+from tests.test_run_cassette import auto_recording as auto_recording
 from tests.test_run_cassette_privacy import _finish_recording
 from tests.test_run_redaction import _authority_run
 

@@ -1,4 +1,4 @@
-"""Privacy boundary and retention regressions for default-on recording."""
+"""Privacy boundary and retention regressions for opt-in private recording."""
 
 from __future__ import annotations
 
@@ -25,6 +25,7 @@ from brigade import (
 from brigade import run_cassette_store as store
 from brigade import work_run_archive
 from tests.test_run_cassette import _documents, _record
+from tests.test_run_cassette import auto_recording as auto_recording
 from tests.test_run_redaction import _authority_run
 from tests.test_work_run_archive import RUN_ID, _seed_run
 

@@ -6,6 +6,7 @@ from brigade import agents, message_envelope, proc
 from brigade.roster import Agent, Roster
 from brigade.run_seat import SeatInvoker
 from tests.test_run_cassette import _documents, _record
+from tests.test_run_cassette import auto_recording as auto_recording
 
 
 @pytest.mark.parametrize(

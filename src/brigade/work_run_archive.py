@@ -839,6 +839,9 @@ def _copy_run_tree_refuse_special(source: Path, dest: Path) -> None:
         ignored: set[str] = set()
         base = Path(directory)
         for name in names:
+            if base == source / "events" and name == run_cassette.store.DIRECTORY:
+                ignored.add(name)
+                continue
             path = base / name
             try:
                 st = path.lstat()

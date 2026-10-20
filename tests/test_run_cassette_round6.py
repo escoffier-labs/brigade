@@ -11,6 +11,7 @@ import pytest
 from brigade import acpx_adapter, agents, cli, run_audit, run_cassette, run_journal, run_redaction, run_transport
 from brigade.roster import Agent, Roster
 from tests.test_run_cassette import _documents, _record
+from tests.test_run_cassette import auto_recording as auto_recording
 from tests.test_run_cassette_privacy import _finish_recording
 from tests.test_run_redaction import _authority_run
 from tests.test_run_transport_recovery import _invalid_final, _recovery_roster

@@ -14,6 +14,7 @@ from brigade import run_cassette_store as store
 from brigade.roster import Agent, Roster
 from brigade.run_seat import SeatInvoker
 from tests.test_run_cassette import _documents, _record
+from tests.test_run_cassette import auto_recording as auto_recording
 
 
 def test_publication_works_without_posix_link_primitive(tmp_path, monkeypatch):
@@ -185,7 +186,7 @@ def test_retention_runs_once_and_never_stops_recording(tmp_path, monkeypatch, ca
 )
 def test_unreadable_recording_policy_creates_no_cassette(tmp_path, contents):
     cfg = tmp_path / ".brigade" / "config.json"
-    cfg.parent.mkdir()
+    cfg.parent.mkdir(exist_ok=True)
     cfg.write_text(contents)
     run = cfg.parent / "runs" / "current"
     assert _record(run) is None

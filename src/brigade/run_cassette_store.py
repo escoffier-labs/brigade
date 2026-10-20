@@ -76,7 +76,7 @@ def journal_scope(run_dir: Path) -> Iterator[None]:
 
 
 def validated_runs(runs_root: Path) -> list[tuple[float, str, dict[str, Any]]]:
-    """Bound the scan and admit only plain directories with safe object run.json."""
+    """Bound the scan and admit identified runs, excluding hidden staging trees."""
     parent = dirfd.open_directory_chain(Path(os.path.abspath(runs_root)))
     try:
         names = dirfd.child_names(parent, 10001)
@@ -85,6 +85,8 @@ def validated_runs(runs_root: Path) -> list[tuple[float, str, dict[str, Any]]]:
         runs = []
         scanned_bytes = 0
         for name in names:
+            if name.startswith("."):
+                continue
             try:
                 child = dirfd.open_child_directory(parent, name)
                 try:
@@ -101,7 +103,7 @@ def validated_runs(runs_root: Path) -> list[tuple[float, str, dict[str, Any]]]:
                 metadata = json.loads(raw)
             except ValueError:
                 continue
-            if isinstance(metadata, dict):
+            if isinstance(metadata, dict) and metadata.get("run_id") == name:
                 started = metadata.get("started_at")
                 # Keep only the bounded sort field rather than every run body.
                 summary = {"started_at": started} if isinstance(started, str) and len(started) <= 128 else {}

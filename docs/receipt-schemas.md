@@ -10,6 +10,10 @@ and closeout writers live in
 
 ## Worker cassette sidecars
 
+`run.record` defaults to `metadata-only`, which creates no private cassette body.
+Private bodies require an explicit `auto` opt-in until the hardening follow-up
+lands. `off` disables cassette recording.
+
 `brigade.run-cassette.v1` uses `schema_version: 1` and content-addressed JSON
 under `events/cassettes/<sha256>.json`. When a lifecycle journal exists, each
 recorded worker dispatch adds one `run.cassette.recorded` event with exactly `path`, `sha256`, `media_type`,
@@ -27,7 +31,8 @@ Storage and classification failures publish a bounded public `stopped` marker wh
 Redaction deletes sidecars and replaces affected references with the closed
 redaction tombstone. Purge and retention may leave references without bodies.
 These sidecars do not participate in lifecycle projection or audit authority.
-All cassette bodies are stripped from run exports or refused by archive builds.
+Run exports exclude `events/cassettes/` from the initial staging copy and retain
+the stripping guard. Archive builds refuse cassette bodies.
 
 ## Evolution rules (all families)
 

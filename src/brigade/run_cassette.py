@@ -289,7 +289,7 @@ def record_result(
     except Exception:
         print("cassette recording skipped: configuration unavailable", file=sys.stderr)
         return None
-    mode = cfg.run_record if cfg is not None else "auto"
+    mode = cfg.run_record if cfg is not None else "metadata-only"
     if mode == "off":
         return None
     try:

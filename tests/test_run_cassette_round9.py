@@ -11,6 +11,7 @@ from brigade import agents, run_cassette, run_transport
 from brigade import run_cassette_store as store
 from brigade.roster import Agent, Roster
 from tests.test_run_cassette import _documents, _record
+from tests.test_run_cassette import auto_recording as auto_recording
 
 
 def _run(path):

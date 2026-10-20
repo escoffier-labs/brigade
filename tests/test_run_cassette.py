@@ -9,8 +9,18 @@ from pathlib import Path
 
 import pytest
 
-from brigade import agents, run_journal
+from brigade import agents, config, run_journal
+from brigade.selection import Selection
 from brigade.roster import Agent
+
+
+@pytest.fixture(autouse=True)
+def auto_recording(tmp_path):
+    """Body-sensitive cassette tests explicitly opt into private recording."""
+    config.write_config(
+        tmp_path,
+        config.Config(version=1, selection=Selection(depth="repo", harnesses=["codex"]), run_record="auto"),
+    )
 
 
 def _record(run_dir: Path, **kwargs):
@@ -18,7 +28,13 @@ def _record(run_dir: Path, **kwargs):
 
     return run_cassette.record_result(
         run_dir=run_dir,
-        workspace=kwargs.pop("cwd", run_dir.parent.parent.parent),
+        workspace=kwargs.pop(
+            "cwd",
+            next(
+                (parent for parent in list(run_dir.parents)[:3] if config.config_path(parent).is_file()),
+                run_dir.parent.parent.parent,
+            ),
+        ),
         agent=kwargs.pop("agent", Agent(name="worker", cli="codex", role="write", model="test-model")),
         task=kwargs.pop("task", "coordinator task"),
         prompt=kwargs.pop("prompt", "injected brief and private prompt"),
@@ -33,7 +49,7 @@ def _documents(run_dir):
     return [json.loads(p.read_text()) for p in (run_dir / "events" / "cassettes").glob("*.json")]
 
 
-def test_default_records_classified_body_but_only_reference_in_journal(tmp_path):
+def test_auto_records_classified_body_but_only_reference_in_journal(tmp_path):
     run_dir = tmp_path / ".brigade" / "runs" / "20261020-120000-cassette"
     run_journal.ensure_journal(run_dir / "events" / "lifecycle.jsonl")
     ref = _record(run_dir)
@@ -70,7 +86,7 @@ def test_key_ignores_brief_but_tracks_coordinator_and_seat(tmp_path):
 
 @pytest.mark.parametrize("mode,classes", [("off", set()), ("metadata-only", {"scrubbed", "public-metadata"})])
 def test_record_policy(tmp_path, mode, classes):
-    (tmp_path / ".brigade").mkdir()
+    (tmp_path / ".brigade").mkdir(exist_ok=True)
     (tmp_path / ".brigade" / "config.json").write_text(
         json.dumps(
             {

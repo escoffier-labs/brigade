@@ -37,7 +37,7 @@ class Config:
     # Machine-local hub or read-only mirror for session-start recall (#466).
     # Absent on repo installs until the operator sets an explicit path.
     memory_recall_target: str | None = None
-    run_record: str = "auto"
+    run_record: str = "metadata-only"
 
 
 def validate_run_record(value: Any) -> str:
@@ -160,7 +160,7 @@ def write_config(target: Path, cfg: Config) -> None:
         "includes": list(cfg.selection.includes),
     }
     run_record = validate_run_record(cfg.run_record)
-    if run_record != "auto":
+    if run_record != "metadata-only":
         payload["run"] = {"record": run_record}
     if graphtrail_timeout != DEFAULT_GRAPHTRAIL_DELTA_TIMEOUT_SECONDS:
         payload["graphtrail_delta_timeout_seconds"] = graphtrail_timeout
@@ -221,7 +221,7 @@ def load_config(target: Path) -> Optional[Config]:
     run = data.get("run", {})
     if not isinstance(run, dict):
         raise ValueError("run must be an object")
-    run_record = validate_run_record(run.get("record", "auto"))
+    run_record = validate_run_record(run.get("record", "metadata-only"))
     return Config(
         version=version,
         selection=sel,

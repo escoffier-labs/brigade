@@ -499,8 +499,10 @@ unable to interpret a journal event or projector version, stop that writer and
 roll forward. The append-only journal format is a one-way storage boundary.
 
 Worker dispatches also record classified cassettes under `events/cassettes/`.
-Set `"run": {"record": "auto"}` in `.brigade/config.json` for the default policy,
-`metadata-only` to omit private result bodies, or `off` to disable recording.
+The default `run.record` policy is `metadata-only`, which omits private result
+bodies. Private bodies are opt-in until the hardening follow-up lands.
+Set `"run": {"record": "auto"}` in `.brigade/config.json` to record private
+bodies, or use `off` to disable recording.
 Keys use seat identity and the coordinator-owned prompt fingerprint. Injected
 brief changes affect only the exact-prompt digest. Prompt text is never stored.
 Single-seat calls through `SeatInvoker` retain the exact coordinator prompt digest
@@ -524,8 +526,10 @@ Remote and unsupported transports carry `not-observed` markers.
 Audit coverage states `not recorded: orchestrator calls` because planning and
 synthesis calls outside worker dispatch are not recorded.
 
-Private retention keeps the newest 50 runs for at most 30 days. Outcome ledger
-references to a run's `run.json` pin its bodies. Unreadable outcome evidence
+Private retention keeps the newest 50 runs for at most 30 days. Only directories
+whose `run.json` identity matches their name count as runs. Hidden staging
+directories are excluded from retention and `runs cassette purge latest`.
+Outcome ledger references to a run's `run.json` pin its bodies. Unreadable outcome evidence
 prevents pruning. Retention streams the outcome ledger and ignores blank lines.
 It scans once per run after the first recorded dispatch. Unreadable evidence,
 ledger rows over 8 MiB, ledgers over 64 MiB, scans over 100,000 rows or 10,000

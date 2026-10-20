@@ -14,6 +14,7 @@ from brigade.run_seat import SeatInvoker
 from tests.run_test_helpers import run_aboyeur_guarded
 from tests.test_aboyeur import _IntentOnlyAppServer
 from tests.test_run_cassette import _documents
+from tests.test_run_cassette import auto_recording as auto_recording
 
 
 @pytest.mark.parametrize("retry_ok,reprobe", [(True, True), (False, True), (False, False)])
@@ -50,7 +51,7 @@ def test_retry_records_only_the_terminal_worker_result(tmp_path, monkeypatch, re
     assert len(run_journal.read_journal(run_dir / "events" / "lifecycle.jsonl").events) == 1
 
 
-def test_default_dispatch_does_not_enable_lifecycle_journaling(tmp_path, monkeypatch):
+def test_auto_dispatch_does_not_enable_lifecycle_journaling(tmp_path, monkeypatch):
     monkeypatch.setattr(agents, "run_agent", lambda *args, **kw: agents.AgentResult(text="answer", ok=True))
     run_dir = tmp_path / ".brigade" / "runs" / "20261020-120000-cassette"
     run_dir.mkdir(parents=True)
