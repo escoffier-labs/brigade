@@ -109,14 +109,23 @@ def handle_session(
     return 200, {"session": payload}
 
 
+# Columns fleet_who returns, so the SQL filter matches what the caller sees.
+_FILTER_COLUMNS = ("node_id", "harness", "session_id", "repo_identity", "repo_label", "branch", "state", "heartbeat_at")
+
+
 def list_sessions(
     conn: sqlite3.Connection,
     *,
     include_all: bool = False,
     now_epoch: float | None = None,
     node_ids: set[str] | None = None,
+    text_filter: str | None = None,
 ) -> list[dict[str, object]]:
-    """Active unexpired sessions, or history when ``include_all`` is set."""
+    """Active unexpired sessions, or history when ``include_all`` is set.
+
+    ``node_ids`` and ``text_filter`` apply before the row limit, so a narrow
+    grant or filter still finds older matching sessions.
+    """
     now = fleet_hub._now_epoch() if now_epoch is None else now_epoch
     limit = LIST_HISTORY_LIMIT if include_all else LIST_ACTIVE_LIMIT
     node_filter = ""
@@ -126,11 +135,21 @@ def list_sessions(
             return []
         node_filter = "AND node_id IN (" + ",".join("?" for _ in node_ids) + ") "
         params.extend(sorted(node_ids))
+    text_clause = ""
+    if text_filter:
+        # instr() rather than LIKE, so % and _ in the filter are literal.
+        text_clause = (
+            "AND instr(lower("
+            + " || char(31) || ".join(f"coalesce({column}, '')" for column in _FILTER_COLUMNS)
+            + "), lower(?)) > 0 "
+        )
+        params.append(text_filter)
     params.append(limit)
     rows = conn.execute(
         f"SELECT {_SESSION_COLUMNS} FROM interactive_sessions "
         "WHERE (? = 1 OR (state = 'active' AND expires_at > ?)) "
         + node_filter
+        + text_clause
         + "ORDER BY heartbeat_at DESC, started_at DESC, node_id, harness, session_id "
         "LIMIT ?",
         params,

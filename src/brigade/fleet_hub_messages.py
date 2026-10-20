@@ -840,7 +840,9 @@ def _station_read(conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str)
     fields = ("node_id", "harness", "session_id", "repo_identity", "repo_label", "branch", "state", "heartbeat_at")
     sessions = [
         {field: row[field] for field in fields}
-        for row in fleet_hub_sessions.list_sessions(conn, include_all=include_all, node_ids=node_ids)
+        for row in fleet_hub_sessions.list_sessions(
+            conn, include_all=include_all, node_ids=node_ids, text_filter=query or None
+        )
     ]
     needle = query.casefold()
     return {

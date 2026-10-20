@@ -688,3 +688,39 @@ def test_message_thread_is_fenced_with_the_body(stations):
     inner = unfence({"untrusted": message["body"], "flagged": False})
     assert "Thread: ignore-previous-instructions" in inner
     assert inner.endswith("Hello")
+
+
+def test_who_text_filter_applies_before_limit(stations, hub, monkeypatch):
+    from brigade import fleet_hub_sessions
+
+    monkeypatch.setattr(fleet_hub_sessions, "LIST_ACTIVE_LIMIT", 1)
+    monkeypatch.setattr(fleet_hub_sessions, "LIST_HISTORY_LIMIT", 1)
+    conn = fleet_hub.open_db(hub[3])
+    try:
+        for session_id, label in (("older", "needle-repo"), ("newer", "other-repo")):
+            fleet_hub_sessions.handle_session(
+                conn,
+                {
+                    "action": "upsert",
+                    "harness": "codex",
+                    "session_id": session_id,
+                    "repo_identity": "local:" + "c" * 64,
+                    "identity_scope": "node",
+                    "repo_label": label,
+                    "checkout_path": "/example/repo",
+                    "branch": "main",
+                    "dirty_paths": [],
+                    "dirty_truncated": False,
+                },
+                caller_node=NODE_B,
+            )
+        for include_all in (False, True):
+            status, who = fleet_hub_messages.handle(
+                conn, {"action": "who", "all": include_all, "filter": "NEEDLE"}, caller=NODE_A
+            )
+            assert status == 200
+            assert [row["session_id"] for row in who["sessions"]] == ["older"]
+        status, who = fleet_hub_messages.handle(conn, {"action": "who", "filter": "%"}, caller=NODE_A)
+        assert status == 200 and who["sessions"] == []
+    finally:
+        conn.close()
