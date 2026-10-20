@@ -441,6 +441,18 @@ def test_snapshot_reports_work_next_integration(conn):
     assert fleet_hub_routing.snapshot(conn)["worklore_integration"] == "work-next"
 
 
+def test_control_plane_status_reports_no_readiness_reporters_for_work_next(conn):
+    from brigade import fleet_command_deck
+
+    snapshot = fleet_hub_routing.snapshot(conn)
+    assert snapshot["worklore_integration"] == "work-next"
+    assert snapshot["integrations"] == []
+    status = fleet_hub_routing.control_plane_status(conn)
+    assert status["integrations"] == []
+    plane = fleet_command_deck.control_plane_from_snapshot(status)
+    assert "integrations" not in fleet_command_deck.coverage_gaps(plane)
+
+
 def test_considered_length_is_bounded(conn, monkeypatch):
     for index in range(120):
         _seed(conn, f"Blocked {index:03d}", rank=index + 1, blocker="waiting")

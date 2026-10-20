@@ -309,11 +309,7 @@ def test_board_navigation_and_filters_preserve_query_state(view):
     assert markup.elements("form")[0]["action"] == ("/" if view == "machines" else "/view/repos")
 
 
-def test_badge_palette_uses_nonce_stylesheet_without_inline_styles():
-    import re
-
-    from brigade.fleet_deck_brands import harness_brand
-
+def test_badge_icons_have_trusted_accessible_labels_without_inline_styles():
     hostile = '"><img src=x onerror="alert(1)">'
     names = ["claude", "codex", "cursor", "opencode", "google", "t3-fleet", "grok", "grok-bot", "anthropic", hostile]
     tiles = tuple(
@@ -344,16 +340,13 @@ def test_badge_palette_uses_nonce_stylesheet_without_inline_styles():
     assert not [(tag, attrs) for tag, attrs in markup.tags if "style" in attrs]
     assert markup.elements("img") == []
     assert markup.elements("style") == [{"nonce": "badge-nonce"}]
-    stylesheet = rendered.split('<style nonce="badge-nonce">', 1)[1].split("</style>", 1)[0]
     badges = [attrs for attrs in markup.elements("span") if "badge" in attrs.get("class", "").split()]
     assert len(badges) == len(names)
-    for attrs, brand in zip(badges, [harness_brand(name) for name in names], strict=True):
-        assert any(
-            re.search(
-                r"\." + re.escape(cls) + r"\s*\{[^}]*background:\s*" + re.escape(brand.accent) + r"\s*;", stylesheet
-            )
-            for cls in attrs["class"].split()
-        )
+    labels = ["Claude", "Codex", "Cursor", "OpenCode", "Google", "T3 Fleet", "Grok", "Grokbot", "Anthropic", "Agent"]
+    for attrs, label in zip(badges, labels, strict=True):
+        assert "badge-icon" in attrs["class"].split()
+        assert attrs["role"] == "img"
+        assert attrs["aria-label"] == label
     assert [attrs["title"] for attrs in badges[-1:]] == [hostile]
 
 
@@ -406,15 +399,12 @@ def test_boards_and_deck_pages_follow_the_system_scheme_and_center_stays_dark(fl
 
 
 _LITERAL_COLOR = re.compile(r"#[0-9a-fA-F]{3,8}\b|\b(?:rgb|rgba|hsl|hsla)\(", re.IGNORECASE)
-# Vendor brand fills are fixed marks that must not change with the scheme.
-_BRAND_RULE = re.compile(r"\.badge-color-[0-9a-f]+\s*\{[^}]*\}")
 
 
 def test_page_css_has_no_literal_colors_outside_the_token_block(fleet_pages):
     pages = {**fleet_pages, "/center/status": _center_status_page()}
     for route, rendered in pages.items():
         css = _document_css(rendered).replace(ui_theme.TOKENS, "").replace(ui_theme.DARK_TOKENS, "")
-        css = _BRAND_RULE.sub("", css)
         assert _LITERAL_COLOR.findall(css) == [], route
 
 

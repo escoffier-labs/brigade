@@ -1780,6 +1780,10 @@ def snapshot(conn: sqlite3.Connection) -> dict[str, Any]:
         "routes": routes,
         "queue": queue,
         "worklore_integration": WORKLORE_INTEGRATION,
+        # Work-next supplies queue eligibility, not routine readiness. The hub
+        # has no configured readiness reporters; [] explicitly reports that
+        # optional coverage as inapplicable, without inventing an active routine.
+        "integrations": [],
     }
 
 
@@ -1852,4 +1856,5 @@ def control_plane_status(conn: sqlite3.Connection) -> dict[str, Any]:
         "quota_effective": snap.get("quota_effective") or [],
         "routes": snap["routes"],
         "queue": snap["queue"],
+        "integrations": snap["integrations"],
     }
