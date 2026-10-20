@@ -37,6 +37,7 @@ The local config supports:
 Memory care can emit:
 
 - `stale`
+- `unconsolidated-evidence`
 - `expired`
 - `undersourced`
 - `contradictory`
@@ -46,6 +47,10 @@ Memory care can emit:
 - `missing-frontmatter`
 - `missing-reviewed`
 - `missing-freshness`
+
+`unconsolidated-evidence` flags cards with matched evidence newer than `last_consolidated`, falling back to `last_reviewed` only when consolidation metadata is absent. Invalid or missing reference dates are unassessable. Date-only references mean midnight UTC. Each finding lists the newer evidence ids in `evidence_references`, uses the existing refresh queue fingerprint and dedupe rules, and is counted by `memory care status`.
+
+Ingest appends body-free near-match, opposite-polarity, and reinforcement records to `.brigade/memory/reflect/evidence-log.jsonl`. Each row contains a timestamp, card identity and path alias, evidence id, match kind, and similarity. Cards without stable ids retain their legacy identity and path. Reading or appending the log never edits cards. Existing exact-match reinforcement still updates card metadata. Rows are limited to 4 KiB. Care ignores malformed or oversized rows with a counted warning in `evidence_log.warning_count`. Unsafe or non-regular paths are refused. Log IO follows the proposal storage rules and fails closed when safe directory descriptors are unavailable, including Windows.
 
 Contradiction detection is deliberately conservative. Brigade only flags explicit duplicate card identities or metadata hints, not LLM-inferred factual conflicts.
 

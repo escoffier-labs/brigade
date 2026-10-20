@@ -542,6 +542,7 @@ def _execute(
     dry_run: bool,
 ) -> Action:
     from .inbox_lock import InboxLockTimeout
+    from .memory_evidence_log import log_match
 
     name = handoff_path.name
 
@@ -581,6 +582,7 @@ def _execute(
                 today=date.today(),
                 evidence_pointer=evidence_pointer,
             )
+            log_match(target, outcome.match, handoff_path)
             _archive(handoff_path, processed_dir)
         return Action("reinforced", summary)
 
@@ -610,6 +612,7 @@ def _execute(
                 f"<!-- routed from {handoff_path.name}\n     reason: {outcome.reason}\n     routed-at: {slug} -->\n\n"
             )
             dest.write_text(header + original, encoding="utf-8")
+            log_match(target, outcome.match, handoff_path)
             _archive(handoff_path, processed_dir)
         # Both inboxed and skipped are now archived; classify them uniformly.
         return Action("inboxed", summary)

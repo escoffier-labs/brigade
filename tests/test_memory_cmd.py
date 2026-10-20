@@ -1946,3 +1946,71 @@ def test_memory_care_init_parser_exposes_with_runbooks_flag(capsys):
     assert ns.with_runbooks is True
     ns_default = parser.parse_args(["memory", "care", "init"])
     assert ns_default.with_runbooks is False
+
+
+@pytest.mark.skipif(
+    os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"), reason="safe descriptor IO required"
+)
+@pytest.mark.parametrize(
+    ("consolidated", "reviewed", "expected"),
+    [
+        (None, "2026-05-01", ["e-new", "e-same-day"]),
+        ("2026-05-03T12:00:00Z", "2026-05-01", ["e-new"]),
+        ("2026-05-05", "2026-05-01", []),
+        ("invalid", "2026-05-01", []),
+        (None, None, []),
+    ],
+)
+def test_memory_care_unconsolidated_evidence_dates_queue_and_status(tmp_path, capsys, consolidated, reviewed, expected):
+    card_id = "card-12345678-1234-4123-8123-123456789abc"
+    card = tmp_path / "memory/cards/renamed.md"
+    meta = {"id": card_id}
+    if consolidated is not None:
+        meta["last_consolidated"] = consolidated
+    if reviewed is not None:
+        meta["last_reviewed"] = reviewed
+    _write_card(card, meta)
+    config = tmp_path / ".brigade/memory-care.toml"
+    config.parent.mkdir()
+    config.write_text('enabled_checks = ["unconsolidated-evidence"]\n')
+    log = tmp_path / ".brigade/memory/reflect/evidence-log.jsonl"
+    log.parent.mkdir(parents=True)
+    rows = [
+        {
+            "ts": ts,
+            "card_id": card_id,
+            "card_path": "memory/cards/old.md",
+            "evidence_id": eid,
+            "kind": "near-match",
+            "similarity": 0.95,
+        }
+        for ts, eid in [
+            ("2026-04-30T12:00:00Z", "e-old"),
+            ("2026-05-01T00:00:00Z", "e-equal"),
+            ("2026-05-01T12:00:00Z", "e-same-day"),
+            ("2026-05-04T12:00:00Z", "e-new"),
+            ("2026-05-04T12:00:00Z", "e-new"),
+        ]
+    ]
+    log.write_text("\n".join(json.dumps(row) for row in rows) + "\n{malformed\n")
+    before = card.read_bytes(), card.stat().st_mtime_ns
+    assert memory_cmd.scan(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["evidence_log"]["warning_count"] == 1
+    assert payload["counts"].get("unconsolidated-evidence", 0) == bool(expected)
+    if expected:
+        finding = payload["issues"][0]
+        assert finding["evidence_references"] == expected
+        assert finding["card_id"] == card_id
+        assert finding["card_file"] == "memory/cards/renamed.md"
+        assert memory_cmd.import_issues(target=tmp_path, json_output=True) == 0
+        assert json.loads(capsys.readouterr().out)["created"] == 1
+        assert memory_cmd.scan(target=tmp_path, json_output=True) == 0
+        assert json.loads(capsys.readouterr().out)["issues"][0]["source_fingerprint"] == finding["source_fingerprint"]
+        assert memory_cmd.import_issues(target=tmp_path, json_output=True) == 0
+        assert json.loads(capsys.readouterr().out)["skipped_duplicates"] == 1
+    assert memory_cmd.status(target=tmp_path, json_output=True) == 0
+    status = json.loads(capsys.readouterr().out)
+    assert status["counts"].get("unconsolidated-evidence", 0) == bool(expected)
+    assert status["queue_count"] == bool(expected)
+    assert (card.read_bytes(), card.stat().st_mtime_ns) == before
