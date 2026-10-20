@@ -9,8 +9,10 @@ Conservative by design:
 
 from __future__ import annotations
 
+import os
 import re
 import shutil
+import subprocess
 import sys
 from dataclasses import dataclass, field
 from datetime import date, datetime, timezone
@@ -66,6 +68,13 @@ NO_HANDOFF_INBOX = 2
 INVALID_SOURCE_CONFIG = 3
 SKIP_NO_HANDOFF_INBOX = "no handoff inbox"
 SKIP_INVALID_SOURCE_CONFIG = "invalid handoff source config"
+
+# Git state that would point `git -C <inbox>` at some other repository.
+_GIT_LOCATION_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")
+
+
+class TrackedHandoffError(RuntimeError):
+    """A handoff git tracks (or may track) must never be moved out of place."""
 
 
 def skip_reason(rc: int) -> str | None:
@@ -225,7 +234,11 @@ def ingest_into(
 
     for handoffs_dir in handoff_dirs:
         processed_dir = handoffs_dir / "processed"
-        for path in _list_handoffs(handoffs_dir):
+        handoffs, tracked = _list_handoffs(handoffs_dir)
+        for path in tracked:
+            stats.skipped += 1
+            stats.actions.append(f"skip   {path.name}  (tracked by git or tracking unverifiable; left in place)")
+        for path in handoffs:
             stats.processed += 1
             sections = parse(path)
             outcome = decide(
@@ -234,15 +247,18 @@ def ingest_into(
                 promote_cards=promote_cards,
                 route_documents=route_documents,
             )
-            action = _execute(
-                outcome,
-                handoff_path=path,
-                target=owner,
-                sections=sections,
-                inbox_dir=inbox_dir,
-                processed_dir=processed_dir,
-                dry_run=dry_run,
-            )
+            try:
+                action = _execute(
+                    outcome,
+                    handoff_path=path,
+                    target=owner,
+                    sections=sections,
+                    inbox_dir=inbox_dir,
+                    processed_dir=processed_dir,
+                    dry_run=dry_run,
+                )
+            except TrackedHandoffError:
+                action = Action("skipped", f"skip   {path.name}  (tracked by git or tracking unverifiable; left in place)")
             stats.actions.append(action.summary)
             if action.kind == "promoted":
                 stats.promoted += 1
@@ -653,15 +669,53 @@ def _evidence_pointer(handoff_path: Path, *, sections: Dict[str, str], target: P
     return handoff_path.name
 
 
-def _list_handoffs(handoffs_dir: Path) -> List[Path]:
+def _git_tracked_names(directory: Path) -> set[str] | None:
+    """Return the names of files directly in `directory` that git tracks.
+
+    An absent git binary or a directory outside any work tree yields an empty
+    set. Any other failure returns None so callers can fail closed.
+    """
+    env = {k: v for k, v in os.environ.items() if k not in _GIT_LOCATION_ENV}
+    env["LC_ALL"] = "C"
+    try:
+        result = subprocess.run(
+            ["git", "-C", str(directory), "ls-files", "-z", "--", "."],
+            capture_output=True,
+            env=env,
+            timeout=30,
+            check=False,
+        )
+    except FileNotFoundError:
+        return set()
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if result.returncode != 0:
+        if b"not a git repository" in result.stderr:
+            return set()
+        return None
+    entries = result.stdout.decode("utf-8", "surrogateescape").split("\0")
+    return {entry for entry in entries if entry and "/" not in entry}
+
+
+def _list_handoffs(handoffs_dir: Path) -> tuple[List[Path], List[Path]]:
+    """Split the inbox's handoffs into (ingestable, git-tracked)."""
+    tracked_names = _git_tracked_names(handoffs_dir)
     out: List[Path] = []
+    tracked: List[Path] = []
     for p in sorted(handoffs_dir.iterdir()):
         if p.is_file() and p.suffix == ".md" and p.name != "TEMPLATE.md":
-            out.append(p)
-    return out
+            if tracked_names is None or p.name in tracked_names:
+                tracked.append(p)
+            else:
+                out.append(p)
+    return out, tracked
 
 
 def _archive(src: Path, processed_dir: Path) -> None:
+    # Re-check right before the move: a file tracked after listing must stay.
+    tracked_names = _git_tracked_names(src.parent)
+    if tracked_names is None or src.name in tracked_names:
+        raise TrackedHandoffError(f"refusing to archive git-tracked handoff {src}")
     processed_dir.mkdir(parents=True, exist_ok=True)
     dest = processed_dir / src.name
     if dest.exists():

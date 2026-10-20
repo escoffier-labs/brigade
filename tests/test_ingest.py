@@ -1442,3 +1442,91 @@ def test_busy_proposal_lock_leaves_handoff_for_retry(tmp_target, monkeypatch):
     assert not (tmp_target / "memory/cards/busy.md").exists()
     assert not (inbox / "processed/busy-publication.md").exists()
     assert not list((tmp_target / "memory/review-inbox").glob("*.md"))
+
+
+_PLAIN_HANDOFF = """\
+# Memory Handoff
+
+## Recommended memory action
+no-card
+
+## Summary
+plain handoff
+"""
+
+
+def _git(cwd: Path, *args: str) -> subprocess.CompletedProcess[str]:
+    return subprocess.run(
+        ["git", "-c", "user.name=t", "-c", "user.email=t@example.invalid", *args],
+        cwd=cwd,
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+
+
+def test_ingest_leaves_git_tracked_handoffs_in_place(tmp_target: Path):
+    inbox = _seed(tmp_target)
+    _git(tmp_target, "init", "-q")
+    tracked = _write_handoff(inbox, "2026-10-20-0900-tracked.md", _PLAIN_HANDOFF)
+    _git(tmp_target, "add", "-f", "--", str(tracked.relative_to(tmp_target)))
+    _git(tmp_target, "commit", "-q", "-m", "track handoff")
+    untracked = _write_handoff(inbox, "2026-10-20-0901-untracked.md", _PLAIN_HANDOFF)
+
+    stats = ingest_mod.IngestStats()
+    rc = ingest_mod.ingest_into(source=tmp_target, owner=tmp_target, stats=stats)
+
+    assert rc == 0
+    assert tracked.is_file()
+    assert not untracked.exists()
+    assert (inbox / "processed" / untracked.name).is_file()
+    assert stats.processed == 1
+    assert stats.skipped == 1
+    assert any("tracked by git" in line and tracked.name in line for line in stats.actions)
+    status = _git(tmp_target, "status", "--porcelain", "--", str(tracked.relative_to(tmp_target)))
+    assert status.stdout == ""
+
+
+def test_archive_refuses_git_tracked_handoff(tmp_path: Path):
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    _git(tmp_path, "init", "-q")
+    tracked = _write_handoff(inbox, "tracked.md", _PLAIN_HANDOFF)
+    _git(tmp_path, "add", "--", "inbox/tracked.md")
+
+    with pytest.raises(ingest_mod.TrackedHandoffError):
+        ingest_mod._archive(tracked, inbox / "processed")
+
+    assert tracked.is_file()
+    assert not (inbox / "processed" / "tracked.md").exists()
+
+
+def test_ingest_without_git_binary_archives_as_before(tmp_target: Path, monkeypatch):
+    inbox = _seed(tmp_target)
+    handoff = _write_handoff(inbox, "2026-10-20-0902-nogit.md", _PLAIN_HANDOFF)
+
+    def _missing_git(*args, **kwargs):
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(ingest_mod.subprocess, "run", _missing_git)
+    stats = ingest_mod.IngestStats()
+    rc = ingest_mod.ingest_into(source=tmp_target, owner=tmp_target, stats=stats)
+
+    assert rc == 0
+    assert not handoff.exists()
+    assert (inbox / "processed" / handoff.name).is_file()
+    assert stats.processed == 1
+
+
+def test_archive_treats_failed_tracking_check_as_tracked(tmp_path: Path, monkeypatch):
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    handoff = _write_handoff(inbox, "unknown.md", _PLAIN_HANDOFF)
+
+    def _broken_git(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 128, stdout=b"", stderr=b"fatal: detected dubious ownership")
+
+    monkeypatch.setattr(ingest_mod.subprocess, "run", _broken_git)
+    with pytest.raises(ingest_mod.TrackedHandoffError):
+        ingest_mod._archive(handoff, inbox / "processed")
+    assert handoff.is_file()
