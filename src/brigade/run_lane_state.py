@@ -84,6 +84,7 @@ class Lane:
     phase: str | None = None
     timeout_seconds: float | None = None
     progress: list[datetime] = field(default_factory=list)
+    progress_errors: list[str] = field(default_factory=list)
     evidence: list[Evidence] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
 
@@ -100,6 +101,14 @@ class Classification:
     reason: str
     evidence: tuple[Evidence, ...]
     infrastructure_failure: bool | None = None
+
+
+@dataclass
+class _LockObservation:
+    owner: dict[str, Any] | None = None
+    digest: str | None = None
+    owner_live: bool | None = None
+    error: str | None = None
 
 
 def _timestamp(value: object) -> datetime | None:
@@ -151,7 +160,7 @@ def _worktree_progress(lane: Lane, now: datetime) -> None:
         return
     lane.evidence.append(Evidence("worktree", now, "recorded worktree observation"))
     if path.is_symlink():
-        lane.errors.append("symlinked worktree")
+        lane.progress_errors.append("symlinked worktree")
         return
     if not path.exists():
         lane.worktree_missing = True
@@ -159,7 +168,7 @@ def _worktree_progress(lane: Lane, now: datetime) -> None:
         return
     result = _git(path, "status", "--porcelain=v1", "-z", "--untracked-files=all")
     if result.code != 0 or result.output_limit_exceeded:
-        lane.errors.append("worktree status unavailable")
+        lane.progress_errors.append("worktree status unavailable")
         return
     parts = iter(result.stdout.split("\0"))
     paths: list[str] = []
@@ -172,7 +181,6 @@ def _worktree_progress(lane: Lane, now: datetime) -> None:
         if name == ".brigade" or name.startswith(".brigade/"):
             continue
         if len(paths) >= PATH_CAP:
-            lane.errors.append("worktree path cap exceeded")
             break
         paths.append(name)
     lane.dirty = bool(paths)
@@ -191,7 +199,7 @@ def _worktree_progress(lane: Lane, now: datetime) -> None:
         except FileNotFoundError:
             continue  # deletion has no file mtime
         except (OSError, ValueError, RuntimeError):
-            lane.errors.append("changed path unavailable")
+            lane.progress_errors.append("changed path unavailable")
     if newest is not None:
         lane.progress.append(newest)
     lane.evidence.append(Evidence("worktree:git-status", now, f"{len(paths)} changed paths", newest))
@@ -211,17 +219,21 @@ def _observe_worktree(
     # Symlink and missing-path checks still happen in _worktree_progress.
     if path not in cache:
         observation = Lane("worktree", worktree=path)
-        if path.exists() and path.resolve() not in worktrees:
-            observation.errors.append(worktree_error or "worktree is not linked to target")
-            observation.evidence.append(Evidence("worktree", now, "link unavailable"))
-        else:
-            _worktree_progress(observation, now)
+        try:
+            if path.exists() and path.resolve() not in worktrees:
+                observation.progress_errors.append(worktree_error or "worktree is not linked to target")
+                observation.evidence.append(Evidence("worktree", now, "link unavailable"))
+            else:
+                _worktree_progress(observation, now)
+        except (OSError, ValueError, RuntimeError, RecursionError, OverflowError) as exc:
+            observation.progress_errors.append(str(exc)[:160])
+            observation.evidence.append(Evidence("worktree", now, "evidence unavailable"))
         cache[path] = observation
     observation = cache[path]
     lane.worktree_missing = observation.worktree_missing
     lane.dirty = observation.dirty
     lane.progress.extend(observation.progress)
-    lane.errors.extend(observation.errors)
+    lane.progress_errors.extend(observation.progress_errors)
     lane.evidence.extend(observation.evidence)
 
 
@@ -250,18 +262,17 @@ def _journal(lane: Lane, now: datetime) -> None:
         raise ValueError("invalid journal timestamp")
     lane.progress.append(stamp)
     lane.evidence.append(Evidence("events/lifecycle.jsonl", now, last.event_type, stamp, last.event_digest))
-    terminal = next(
-        (event for event in report.events if event.event_type in runs_cmd._TERMINAL_LIFECYCLE_EVENT_TYPES), None
-    )
-    if terminal is not None:
-        lane.terminal_status = {"run.completed": "ok", "run.orphaned": "orphaned"}.get(terminal.event_type, "failed")
-        lane.terminal_at = _timestamp(terminal.recorded_at)
     # The journal wins over a snapshot left behind by a crash.
     phase = None
     for event in report.events:
-        if event.event_type == "run.paused":
+        if event.event_type in runs_cmd._TERMINAL_LIFECYCLE_EVENT_TYPES:
+            lane.terminal_status = {"run.completed": "ok", "run.orphaned": "orphaned"}.get(event.event_type, "failed")
+            lane.terminal_at = _timestamp(event.recorded_at)
+        elif event.event_type == "run.paused":
             phase = "paused"
-        elif event.event_type == "run.resumed":
+        elif event.event_type in {"run.resumed", "run.recovery.started"}:
+            lane.terminal_status = None
+            lane.terminal_at = None
             phase = "running"
     if phase is not None:
         lane.phase = phase
@@ -290,28 +301,39 @@ def _events_progress(lane: Lane, now: datetime) -> None:
             lane.evidence.append(Evidence(f"events/{entry.name}", now, "app-server event mtime", stamp))
 
 
-def _lock(lane: Lane, now: datetime) -> None:
+def _lock(lane: Lane, now: datetime, cache: dict[Path, _LockObservation]) -> None:
     assert lane.run_dir is not None and lane.run is not None
     workspace = runguard.resolve_run_lock_workspace(lane.run, lane.run_dir)
     if workspace is None:
         raise ValueError("lock workspace unavailable")
-    path = runguard.lock_path(workspace)
-    if path.is_symlink():
-        raise ValueError("symlinked lock")
-    if path.exists():
-        owner, digest = _read_json(path / "owner.json")
-        pid = owner.get("pid")
-        if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
-            raise ValueError("invalid owner pid")
-        if not runguard._owner_matches_run(owner, lane.run_dir):
+    if workspace not in cache:
+        observation = _LockObservation()
+        cache[workspace] = observation
+        try:
+            path = runguard.lock_path(workspace)
+            if path.is_symlink():
+                raise ValueError("symlinked lock")
+            if path.exists():
+                observation.owner, observation.digest = _read_json(path / "owner.json")
+                pid = observation.owner.get("pid")
+                if not isinstance(pid, int) or isinstance(pid, bool) or pid <= 0:
+                    raise ValueError("invalid owner pid")
+                observation.owner_live = runguard._pid_is_active(pid)
+        except (OSError, ValueError, RuntimeError, RecursionError, OverflowError) as exc:
+            observation.error = str(exc)[:160]
+    observation = cache[workspace]
+    if observation.error is not None:
+        raise ValueError(observation.error)
+    if observation.owner is not None:
+        if not runguard._owner_matches_run(observation.owner, lane.run_dir):
             lane.lock_state = "foreign"
-            lane.evidence.append(Evidence("run.lock/owner.json", now, "belongs to another run", digest=digest))
+            lane.evidence.append(
+                Evidence("run.lock/owner.json", now, "belongs to another run", digest=observation.digest)
+            )
             return
-        lane.lock_state = runguard.run_lock_state(workspace, lane.run_dir)
-        if lane.lock_state not in {"live", "stale"}:
-            raise ValueError("unverifiable owner")
-        lane.owner_live = lane.lock_state == "live"
-        lane.evidence.append(Evidence("run.lock/owner.json", now, lane.lock_state, digest=digest))
+        lane.owner_live = observation.owner_live
+        lane.lock_state = "live" if lane.owner_live else "stale"
+        lane.evidence.append(Evidence("run.lock/owner.json", now, lane.lock_state, digest=observation.digest))
     else:
         lane.evidence.append(Evidence("run.lock", now, "absent"))
 
@@ -365,6 +387,7 @@ def _collect_run(
     worktrees: set[Path],
     worktree_error: str | None,
     cache: dict[Path, Lane],
+    lock_cache: dict[Path, _LockObservation],
 ) -> Lane:
     lane = Lane(child.name, run_dir=child)
     bound = run_reap._bind_contained_run_dir(child)
@@ -389,7 +412,7 @@ def _collect_run(
             source = "events"
             _events_progress(lane, now)
             source = "run.lock/owner.json"
-            _lock(lane, now)
+            _lock(lane, now, lock_cache)
             if lane.terminal_status is not None:
                 return lane
             # cwd records isolation before dispatch, artifact_collection also records it later.
@@ -428,6 +451,7 @@ def collect_lanes(target: Path, *, now: datetime | None = None, limit: int = 50)
     worktrees, worktree_error = _linked_worktrees(target, WORKTREE_SCAN_LIMIT)
     lanes.truncated = worktree_error == "linked worktree limit exceeded"
     cache: dict[Path, Lane] = {}
+    lock_cache: dict[Path, _LockObservation] = {}
     root = target / ".brigade/runs"
     if root.is_symlink() or root.parent.is_symlink():
         raise ValueError("runs root must not be symlinked")
@@ -449,7 +473,7 @@ def collect_lanes(target: Path, *, now: datetime | None = None, limit: int = 50)
         scan_full = len(newest) > RUN_SCAN_LIMIT
         lanes.truncated |= scan_full
         for _, name in newest[:RUN_SCAN_LIMIT]:
-            lanes.append(_collect_run(root / name, target, clock, worktrees, worktree_error, cache))
+            lanes.append(_collect_run(root / name, target, clock, worktrees, worktree_error, cache, lock_cache))
     ledger_path = target / ".brigade/work/tasks.json"
     if ledger_path.parent.is_symlink():
         raise ValueError("ledger directory must not be symlinked")
@@ -548,9 +572,13 @@ def classify(lane: Lane, now: datetime, thresholds: Thresholds) -> Classificatio
             "complete" if lane.terminal_status in runs_cmd._SUCCESS_STATUSES | {"completed", "complete"} else "failed",
             "terminal run outcome",
         )
-    if lane.phase in {"paused", "artifact-collection"}:
-        return result("waiting", "run is intentionally waiting")
     meta = lane.run or {}
+    approval = meta.get("approval_reference")
+    approval_pending = (
+        lane.phase == "running" and isinstance(approval, dict) and approval.get("decision_state") == "pending"
+    )
+    if lane.phase in {"paused", "artifact-collection"} or approval_pending:
+        return result("waiting", "run is intentionally waiting")
     started = _timestamp(meta.get("started_at"))
     if lane.run is not None:
         if lane.phase not in runs_cmd._NONTERMINAL_STATUSES or started is None or started > clock:
@@ -562,6 +590,8 @@ def classify(lane: Lane, now: datetime, thresholds: Thresholds) -> Classificatio
         phase_started = _timestamp(meta.get("status_started_at", meta.get("started_at")))
         if lane.timeout_seconds and phase_started and (clock - phase_started).total_seconds() > lane.timeout_seconds:
             return result("stalled", "configured seat timeout exceeded")
+        if lane.progress_errors:
+            return result("unknown", lane.progress_errors[0])
         if not lane.progress:
             if lane.worktree_missing:
                 return result("lost-worktree", "recorded worktree path is missing")
@@ -574,6 +604,8 @@ def classify(lane: Lane, now: datetime, thresholds: Thresholds) -> Classificatio
         return result("working", "live owner and recent progress")
     if lane.worktree_missing:
         return result("lost-worktree", "recorded worktree path is missing")
+    if lane.progress_errors:
+        return result("unknown", lane.progress_errors[0])
     if lane.claim:
         claimed = _timestamp(lane.claim.get("claimed_at"))
         if claimed is None or claimed > clock:

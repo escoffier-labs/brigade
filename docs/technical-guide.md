@@ -550,10 +550,13 @@ The defaults are `--older-than 2h`, `--idle-after 15m`, `--stall-after 30m`,
 when either state appears. Runs are scanned newest first by directory mtime,
 with up to 1,000 run snapshots and 1,000 linked worktrees per patrol. `--limit`
 bounds returned lanes and claimed ledger tasks after the whole byte-capped
-ledger is read. JSON reports `truncated: true` when a source or result window
+ledger is read. Lock and owner observations are reused within each workspace.
+JSON reports `truncated: true` when a source or result window
 is cut short. Text output warns, and `--fail-on unknown` returns 1 on truncation.
-Claims join runs only by exact `claim_id`. An unmatched claim reports `unknown`
-while nonterminal runs exist without a verified join.
+Claims join runs only by exact `claim_id`. Current run writers omit that field,
+so normal claims remain separate lanes until dispatch-intent integration (#1849).
+An unmatched claim reports `unknown` while nonterminal runs exist without a
+verified join, including an unreaped run with a dead owner.
 Invalid options or an unreadable target return 2.
 Patrol does not repair runs or claims. Dispatch intents and Hub joins are
 reserved for later slices.

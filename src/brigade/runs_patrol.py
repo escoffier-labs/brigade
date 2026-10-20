@@ -90,6 +90,8 @@ def patrol(
         clock = run_reap._utc_now(now)
         target = target.expanduser().resolve()
         lanes = collect_lanes(target, now=clock, limit=limit)
+        # Progress and starts observed during collection can postdate its start.
+        clock = run_reap._utc_now(now)
         rows = []
         for lane in lanes:
             classification = classify(lane, clock, thresholds)

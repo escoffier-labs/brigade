@@ -39,6 +39,26 @@ def test_default_patrol_is_read_only(tmp_path, capsys, monkeypatch):
     assert _snapshot(repo) == before
 
 
+def test_patrol_uses_clock_after_collection(tmp_path, capsys, monkeypatch):
+    from brigade import run_reap
+
+    repo = _repo(tmp_path)
+    later = NOW + timedelta(seconds=5)
+    run_dir = _write_run(repo, "20260820-120000-patrol01", started_at=later.isoformat())
+    _write_stale_lock(repo, run_dir)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: True)
+    signal = run_dir / "events/worker.jsonl"
+    signal.parent.mkdir()
+    signal.write_text("{}\n")
+    os.utime(signal, (later.timestamp(), later.timestamp()))
+    clocks = iter((NOW, later))
+    monkeypatch.setattr(run_reap, "_utc_now", lambda now=None: now if now is not None else next(clocks))
+    assert cli.main(["runs", "patrol", "--target", str(repo), "--json", "--fail-on", "unknown"]) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["observed_at"] == later.isoformat()
+    assert payload["lanes"][0]["state"] == "working"
+
+
 @pytest.mark.parametrize(
     ("status", "live", "progress_age", "extra", "expected"),
     [
@@ -49,7 +69,7 @@ def test_default_patrol_is_read_only(tmp_path, capsys, monkeypatch):
         ("dispatching", True, 60, {}, "working"),
         ("dispatching", True, 1000, {}, "idle"),
         ("dispatching", True, 2000, {}, "stalled"),
-        ("paused", True, 4000, {"approval_reference": {"decision_state": "pending"}}, "waiting"),
+        ("running", True, 4000, {"approval_reference": {"decision_state": "pending"}}, "waiting"),
         ("artifact-collection", True, 4000, {}, "waiting"),
         ("dispatching", True, None, {}, "unknown"),
     ],
@@ -283,7 +303,38 @@ def test_journal_wins_over_stale_snapshot(tmp_path, monkeypatch, event_type, pay
     assert classify(collect_lanes(repo, now=NOW)[0], NOW, Thresholds()).state == expected
 
 
-def test_worktree_changes_supply_progress_without_event_files(tmp_path, monkeypatch):
+@pytest.mark.parametrize(
+    "event_type,payload",
+    [("run.recovery.started", {"detail": "research reopened"}), ("run.resumed", {"approval_id": "approval-1"})],
+)
+def test_journal_reopen_clears_prior_terminal_state(tmp_path, monkeypatch, event_type, payload):
+    from brigade import run_journal
+    from brigade.run_lane_state import Thresholds, classify, collect_lanes
+
+    repo = _repo(tmp_path)
+    run_dir = _write_run(repo, "20260820-120000-patrol01", status="running", extra={"kind": "research"})
+    _write_stale_lock(repo, run_dir)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: True)
+    for sequence, (kind, data, timestamp) in enumerate(
+        [
+            ("run.completed", {"status": "completed"}, "2026-08-20T12:00:00.000000Z"),
+            (event_type, payload, "2026-08-28T17:59:50.000000Z"),
+        ]
+    ):
+        run_journal.append_event(
+            run_dir / "events/lifecycle.jsonl",
+            run_id=run_dir.name,
+            event_type=kind,
+            payload=data,
+            idempotency_key=f"event-{sequence}",
+            expected_previous_sequence=sequence,
+            recorded_at=timestamp,
+        )
+    assert classify(collect_lanes(repo, now=NOW)[0], NOW, Thresholds()).state == "working"
+
+
+@pytest.mark.parametrize("path_count", [1, 201])
+def test_worktree_changes_supply_progress_without_event_files(tmp_path, monkeypatch, path_count):
     from brigade.run_lane_state import Thresholds, classify, collect_lanes
 
     repo = _repo(tmp_path)
@@ -293,7 +344,47 @@ def test_worktree_changes_supply_progress_without_event_files(tmp_path, monkeypa
     tracked = repo / "tracked.txt"
     tracked.write_text("progress\n")
     os.utime(tracked, (NOW.timestamp() - 10, NOW.timestamp() - 10))
-    assert classify(collect_lanes(repo, now=NOW)[0], NOW, Thresholds()).state == "working"
+    for index in range(path_count - 1):
+        changed = repo / f"changed-{index:03d}"
+        changed.write_text("progress\n")
+        os.utime(changed, (NOW.timestamp() - 10, NOW.timestamp() - 10))
+    lane = collect_lanes(repo, now=NOW)[0]
+    assert classify(lane, NOW, Thresholds()).state == "working"
+    assert any(
+        item.source == "worktree:git-status" and item.detail == f"{min(path_count, 200)} changed paths"
+        for item in lane.evidence
+    )
+
+
+@pytest.mark.parametrize("worktree", ["non-git", "subdirectory", "unreadable", "git-error"])
+@pytest.mark.parametrize("live,expected", [(False, "dead"), (True, "stalled")])
+def test_worktree_problems_do_not_mask_lock_or_timeout(tmp_path, monkeypatch, worktree, live, expected):
+    from brigade import proc, run_lane_state
+
+    if worktree == "non-git":
+        repo = tmp_path / "repo"
+        repo.mkdir()
+    else:
+        repo = _repo(tmp_path)
+    cwd = repo / "subdir" if worktree == "subdirectory" else repo
+    cwd.mkdir(exist_ok=True)
+    run_dir = _write_run(repo, "20260820-120000-patrol01", extra={"cwd": str(cwd)})
+    _write_stale_lock(repo, run_dir)
+    (run_dir / "roster.json").write_text(json.dumps({"timeout_seconds": 60}))
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: live)
+    real_git = run_lane_state._git
+
+    def git(path, *args):
+        if worktree == "git-error" and args[0] == "status":
+            raise OSError("worktree status unavailable")
+        if worktree == "unreadable" and args[0] == "status":
+            return proc.Result(1, "", "status unavailable")
+        return real_git(path, *args)
+
+    monkeypatch.setattr(run_lane_state, "_git", git)
+    lane = run_lane_state.collect_lanes(repo, now=NOW)[0]
+    result = run_lane_state.classify(lane, NOW, run_lane_state.Thresholds())
+    assert result.state == expected
 
 
 def test_claim_joins_run_by_claim_id(tmp_path, monkeypatch):
@@ -570,6 +661,43 @@ def test_shared_worktree_status_is_collected_once(tmp_path, monkeypatch):
     monkeypatch.setattr(run_lane_state, "_git", git)
     run_lane_state.collect_lanes(repo, now=NOW)
     assert calls == [repo]
+
+
+def test_shared_workspace_lock_is_collected_once(tmp_path, monkeypatch):
+    from brigade.run_lane_state import Thresholds, classify, collect_lanes
+
+    repo = _repo(tmp_path)
+    _write_run(repo, "20260820-120000-patrol01", status="ok", extra={"finished_at": OLD_STARTED})
+    _write_run(repo, "20260820-120000-patrol02", status="failed", extra={"finished_at": OLD_STARTED})
+    active = _write_run(repo, "20260820-120000-patrol03")
+    _write_stale_lock(repo, active)
+    signal = active / "events/worker.jsonl"
+    signal.parent.mkdir()
+    signal.write_text("{}\n")
+    os.utime(signal, (NOW.timestamp(), NOW.timestamp()))
+    real_lock_path = runguard.lock_path
+    path_calls = []
+    pid_calls = []
+
+    def lock_path(workspace):
+        path_calls.append(workspace)
+        return real_lock_path(workspace)
+
+    def live(pid):
+        pid_calls.append(pid)
+        return True
+
+    monkeypatch.setattr(runguard, "lock_path", lock_path)
+    monkeypatch.setattr(runguard, "_pid_is_active", live)
+    lanes = collect_lanes(repo, now=NOW)
+    states = {lane.lane_id: classify(lane, NOW, Thresholds()).state for lane in lanes}
+    assert states == {
+        "20260820-120000-patrol01": "complete",
+        "20260820-120000-patrol02": "failed",
+        "20260820-120000-patrol03": "working",
+    }
+    assert path_calls == [repo]
+    assert len(pid_calls) == 1
 
 
 def test_changed_external_symlink_is_skipped(tmp_path, monkeypatch):
