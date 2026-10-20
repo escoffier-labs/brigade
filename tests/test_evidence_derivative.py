@@ -1301,10 +1301,20 @@ def test_derivative_rejects_swapped_in_nonempty_output_directory(tmp_path: Path,
     assert evidence_package.export_package(target=tmp_path, run_id=str(receipt["run_id"]), out_str=str(source)) == 0
     out = tmp_path / "destination" / "derivative"
     _swap_created_output(monkeypatch, lambda path: (path / "planted.txt").write_bytes(b"planted"))
+    open_child_file = evidence_derivative.dirfd.open_child_file
+    created_names: list[str] = []
+
+    def record_creates(parent: int, name: str, flags: int, *args: Any, **kwargs: Any) -> int:
+        if flags & os.O_CREAT:
+            created_names.append(name)
+        return open_child_file(parent, name, flags, *args, **kwargs)
+
+    monkeypatch.setattr(evidence_derivative.dirfd, "open_child_file", record_creates)
 
     with pytest.raises(evidence_derivative.DerivativeExportError, match="output directory changed"):
         _export_into(source, out)
 
+    assert created_names == []
     assert sorted(entry.name for entry in out.iterdir()) == ["planted.txt"]
 
 
@@ -1319,7 +1329,7 @@ def test_derivative_rejects_output_directory_owned_by_another_user(tmp_path: Pat
     real_euid = os.geteuid()
     monkeypatch.setattr(evidence_derivative.os, "geteuid", lambda: real_euid + 1)
 
-    with pytest.raises(evidence_derivative.DerivativeExportError, match="output directory changed"):
+    with pytest.raises(evidence_derivative.DerivativeExportError, match="not owned by the current user"):
         _export_into(source, out)
 
     # A rejected directory may belong to someone else, so cleanup must leave it alone.

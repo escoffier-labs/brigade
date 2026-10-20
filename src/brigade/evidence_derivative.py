@@ -428,7 +428,9 @@ def export_derivative(
             raise DerivativeExportError("derivative output directory changed during publication")
         # A competitor can swap the directory between mkdir and stat. Only a
         # fresh, empty directory we own can be the one we created.
-        if (os.name == "posix" and output_info.st_uid != os.geteuid()) or dirfd.child_names(output_fd, 1):
+        if os.name == "posix" and output_info.st_uid != os.geteuid():
+            raise DerivativeExportError("derivative output directory is not owned by the current user")
+        if dirfd.child_names(output_fd, 1):
             raise DerivativeExportError("derivative output directory changed during publication")
         # Only now is the directory known to be ours and safe to remove on failure.
         created_output = True
