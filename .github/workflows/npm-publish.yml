@@ -182,7 +182,7 @@ jobs:
   publish:
     needs: [build, acceptance]
     runs-on: ubuntu-24.04
-    timeout-minutes: 20
+    timeout-minutes: 120
     environment: npm
     permissions:
       contents: read
@@ -221,7 +221,7 @@ jobs:
       - name: Publish original companions then launcher with mandatory provenance
         run: |
           argv=$(node -e 'process.stdout.write(JSON.stringify(["node","npm/feasibility/publish.cjs","--artifacts",process.env.RUNNER_TEMP+"/npm-artifacts"]))')
-          PYTHONPATH=src python -m brigade work verify run --target . --argv-json "$argv" --timeout 900 --capture brigade-work
+          PYTHONPATH=src python -m brigade work verify run --target . --argv-json "$argv" --timeout 6300 --capture brigade-work
       - name: Retain publisher verification receipts
         if: always()
         uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7

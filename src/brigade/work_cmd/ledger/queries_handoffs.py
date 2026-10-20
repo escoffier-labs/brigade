@@ -16,6 +16,7 @@ import time
 from contextlib import contextmanager
 from datetime import datetime
 from pathlib import Path
+from shlex import quote
 from typing import Any, Callable, Iterator, Mapping, Sequence, cast
 from uuid import uuid4
 
@@ -156,6 +157,11 @@ def _readiness_payload(
 
     ledger = locking._read_task_ledger(target)
     resolution = edges_mod.resolve_readiness(ledger)
+    for dependency in resolution.orphans:
+        dependency["repair_commands"] = [
+            f"{command} --target {quote(str(target.expanduser().resolve()))}"
+            for command in dependency.get("repair_commands") or []
+        ]
     payload = resolution.as_dict(explain=explain)
     payload["target"] = str(target.expanduser().resolve())
     payload["tasks_path"] = str(helpers._tasks_path(target))

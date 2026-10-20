@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "brigade-memory": {
+      "command": "npx",
+      "args": ["-y", "@escoffier-labs/brigade@0.31.0", "memory", "serve-mcp", "--stdio", "--inbox", "codex"]
+    }
+  }
+}

@@ -86,7 +86,14 @@ class ClaimTargetError(hub.FleetHubUnprocessable):
 
 
 class ClaimTargetTooLongError(ClaimTargetError, ClaimFenceError):
-    """A new target exceeds the fence byte bound and must fail closed."""
+    """A new target exceeds the fence byte bound and must fail closed.
+
+    Despite the ``FleetHubUnprocessable`` base (HTTP 422), this reports 409 with
+    an ``owner``. That only holds while the ``ClaimTargetError`` handler runs
+    before the generic ``FleetHubUnprocessable`` handler in ``fleet_hub_http``;
+    a 422 without an owner is treated as non-terminal by deployed base clients,
+    which would fall back to the local lock. A regression test pins the order.
+    """
 
     status = 409
     reason = "claim-target-too-long"

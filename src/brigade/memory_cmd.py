@@ -1821,9 +1821,12 @@ def _card_search_fields(path: Path, target: Path) -> dict[str, Any]:
     }
 
 
-def search_cards_payload(target: Path, query: str, *, limit: int = 20) -> dict[str, Any]:
+def search_cards_payload(
+    target: Path, query: str, *, limit: int = 20, config: MemoryCareConfig | None = None
+) -> dict[str, Any]:
     target = target.expanduser().resolve()
-    config = load_config(target) or MemoryCareConfig()
+    if config is None:
+        config = load_config(target) or MemoryCareConfig()
     terms = [term for term in query.lower().split() if term]
     matches: list[dict[str, Any]] = []
     for path in _iter_cards(target, config):
@@ -1885,160 +1888,26 @@ def recall(*, target: Path, cwd: Path, limit: int = 5, json_output: bool = False
     return memory_hooks.recall(target=target, cwd=cwd, limit=limit, json_output=json_output, query=query)
 
 
-# --- read-only MCP server exposing memory cards over card:// ---
-
-_CARD_URI_PREFIX = "card://"
-
-
-def _card_uri(rel: str) -> str:
-    return f"{_CARD_URI_PREFIX}{rel}"
-
-
-def _mcp_card_resources(target: Path, config: MemoryCareConfig) -> list[dict[str, Any]]:
-    items: list[dict[str, Any]] = []
-    for path in _iter_cards(target, config):
-        fields = _card_search_fields(path, target)
-        if not fields:
-            continue
-        items.append(
-            {
-                "uri": _card_uri(fields["rel"]),
-                "name": fields["title"],
-                "mimeType": "text/markdown",
-                "description": fields["summary"],
-            }
-        )
-    return items
-
-
-def _mcp_read_card(target: Path, config: MemoryCareConfig, uri: str) -> tuple[str, str] | tuple[None, None]:
-    ref = uri[len(_CARD_URI_PREFIX) :] if uri.startswith(_CARD_URI_PREFIX) else uri
-    target_resolved = target.expanduser().resolve()
-    candidate = (target_resolved / ref).resolve()
-    # Only serve files whose real path stays inside the workspace; a `.md` symlink
-    # pointing outside a card root must not become a read primitive.
-    if not candidate.is_relative_to(target_resolved):
-        return None, None
-    for path in _iter_cards(target, config):
-        if path.is_symlink():
-            continue
-        if path.resolve() == candidate:
-            try:
-                return path.read_text(encoding="utf-8", errors="replace"), "text/markdown"
-            except OSError:
-                return None, None
-    return None, None
-
-
-def _mcp_card_tool_specs() -> list[dict[str, Any]]:
-    return [
-        {
-            "name": "list_cards",
-            "description": (
-                "List every memory card in the served repo or workspace, with each card's repo-relative path and "
-                "card:// URI. Use search_cards to find cards by topic."
-            ),
-            "inputSchema": {"type": "object", "properties": {}},
-        },
-        {
-            "name": "get_card",
-            "description": "Read one memory card's full markdown, frontmatter included.",
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "path": {
-                        "type": "string",
-                        "description": (
-                            "Repo-relative card path such as memory/cards/release-process.md, or a card:// URI "
-                            "from list_cards or search_cards."
-                        ),
-                    }
-                },
-                "required": ["path"],
-            },
-        },
-        {
-            "name": "search_cards",
-            "description": (
-                "Keyword-search memory cards. A term in a card's title, tags, or summary outranks one found only "
-                "in the body. Returns up to 20 matches with path, title, tags, summary, and score; read one with "
-                "get_card."
-            ),
-            "inputSchema": {
-                "type": "object",
-                "properties": {
-                    "query": {"type": "string", "description": "Space-separated keywords, case-insensitive."}
-                },
-                "required": ["query"],
-            },
-        },
-    ]
-
-
-def _mcp_card_tool_call(
-    target: Path, config: MemoryCareConfig, name: str, arguments: dict[str, Any]
-) -> tuple[object, bool]:
-    if name == "list_cards":
-        return (
-            [
-                {"path": str(p.relative_to(target)), "uri": _card_uri(str(p.relative_to(target)))}
-                for p in _iter_cards(target, config)
-            ],
-            False,
-        )
-    if name == "get_card":
-        ref = str(arguments.get("path") or "")
-        text, _ = _mcp_read_card(target, config, ref)
-        if text is None:
-            return (f"card not found: {ref}", True)
-        return (text, False)
-    if name == "search_cards":
-        return (search_cards_payload(target, str(arguments.get("query") or ""))["matches"], False)
-    return (f"unknown tool: {name}", True)
-
-
-def _run_card_mcp_stdio(target: Path) -> int:
-    config = load_config(target) or MemoryCareConfig()
-    return mcp_server.serve_stdio(
-        server_name="brigade-memory-readonly",
-        list_resources=lambda: _mcp_card_resources(target, config),
-        read_resource=lambda uri: _mcp_read_card(target, config, uri),
-        list_tools=_mcp_card_tool_specs,
-        call_tool=lambda name, arguments: _mcp_card_tool_call(target, config, name, arguments),
-    )
+# --- memory MCP server (stdio or loopback HTTP); the tool contract lives in memory_mcp_core ---
 
 
 MCP_HTTP_DEFAULT_PORT = 8931
 
 
-def _run_card_mcp_http(target: Path, *, host: str | None, port: int | None) -> int:
-    config = load_config(target) or MemoryCareConfig()
-    return mcp_server.run_http_from_env(
-        server_name="brigade-memory-readonly",
-        host=host,
-        port=port,
-        default_port=MCP_HTTP_DEFAULT_PORT,
-        list_resources=lambda: _mcp_card_resources(target, config),
-        read_resource=lambda uri: _mcp_read_card(target, config, uri),
-        list_tools=_mcp_card_tool_specs,
-        call_tool=lambda name, arguments: _mcp_card_tool_call(target, config, name, arguments),
-    )
-
-
 def serve_mcp(
     *,
-    target: Path,
+    target: Path | None = None,
     stdio: bool = False,
-    json_output: bool = False,
     http: bool = False,
     host: str | None = None,
     port: int | None = None,
+    inbox: str = "codex",
+    json_output: bool = False,
 ) -> int:
-    target = target.expanduser().resolve()
-    try:
-        config = load_config(target) or MemoryCareConfig()
-    except ValueError as exc:
-        print(f"error: invalid memory-care config: {exc}", file=sys.stderr)
+    from . import memory_mcp_core
+
+    if target is not None and not target.expanduser().is_dir():
+        print(f"error: --target is not a directory: {target}", file=sys.stderr)
         return 2
     if stdio and http:
         print("error: --stdio and --http are mutually exclusive", file=sys.stderr)
@@ -2046,25 +1915,33 @@ def serve_mcp(
     if not http and (host is not None or port is not None):
         print("error: --host and --port require --http", file=sys.stderr)
         return 2
+    tools = memory_mcp_core.MemoryTools(target=target, inbox=inbox)
     if stdio:
-        return _run_card_mcp_stdio(target)
+        return mcp_server.serve_stdio(**tools.callbacks())
     if http:
-        return _run_card_mcp_http(target, host=host, port=port)
-    resources = _mcp_card_resources(target, config)
-    tools = [str(spec["name"]) for spec in _mcp_card_tool_specs()]
+        return mcp_server.run_http_from_env(
+            **tools.callbacks(), host=host, port=port, default_port=MCP_HTTP_DEFAULT_PORT
+        )
+    resolution = tools.resolution()
+    if resolution.repo_config_error:
+        print(f"error: invalid memory-care config: {resolution.repo_config_error}", file=sys.stderr)
+        return 2
+    tool_names = [str(spec["name"]) for spec in memory_mcp_core.tool_specs()]
     payload: dict[str, Any] = {
-        "target": str(target),
-        "read_only": True,
-        "resource_scheme": "card://<repo-relative-path>",
-        "tools": tools,
-        "registered_resources": len(resources),
+        "target": str(resolution.repo_root) if resolution.repo_root is not None else None,
+        "read_only": False,
+        "resource_scheme": "card://<repo-relative-path> and user-card://<path>",
+        "tools": tool_names,
+        "stores": [{"origin": store.origin, "root": str(store.root)} for store in resolution.stores],
+        "registered_resources": len(tools.resources()),
     }
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
-    print("memory MCP resources: ready read_only=true")
-    print("resources: card://<repo-relative-path>")
-    print(f"tools: {', '.join(tools)}")
+    print("memory MCP: ready")
+    for store in payload["stores"]:
+        print(f"store: {store['origin']} {store['root']}")
+    print(f"tools: {', '.join(tool_names)}")
     print(f"registered_resources: {payload['registered_resources']}")
     print("run the stdio server with: brigade memory serve-mcp --stdio")
     print(

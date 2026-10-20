@@ -12,7 +12,7 @@ brigade runbook run docs/runbooks/cold-start-gate.json --target . --approved
 
 The runbook executes the documented new-user journey in a throwaway sandbox with neutralized global git config: pipx install from the working tree, quickstart, handoff draft and lint, first-run health checks, and regression guards for past first-contact bugs (the gitignore clobber, the inactive-hook blocker). Review the plan before approving execution. It is part of the pre-tag checklist in RELEASE.md. A neutral sandbox matters: the maintainer's global gitignore and hooksPath masked real clean-machine failures for weeks.
 
-The pipx install uses the caller's pipx environment. The temporary repo and Git config are sandboxed, but the script does not set `PIPX_HOME` or `PIPX_BIN_DIR`.
+The pipx install is sandboxed too: the script points `PIPX_HOME`, `PIPX_BIN_DIR`, and `PIPX_MAN_DIR` at directories under the temporary sandbox and puts that bin directory first on `PATH`, so the gate never replaces the caller's own brigade install.
 
 ## The agent scenarios (before significant releases)
 

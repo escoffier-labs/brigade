@@ -128,6 +128,23 @@ def test_backfill_scorecard_patch_mismatch_is_ineligible(scoreable_target, monke
     assert audit["ineligible_by_reason"]["patch_digest_mismatch"] == 1
 
 
+def test_backfill_scorecard_counts_out_of_scope_changes(scoreable_target, monkeypatch, capsys):
+    from tests.test_verify_trial import _run_scoped_patch_verify
+
+    _run_scoped_patch_verify(
+        scoreable_target,
+        monkeypatch,
+        scope_globs=["skills/brigade-work/**"],
+        extra_paths=["notes/outside.md"],
+    )
+    capsys.readouterr()
+
+    assert outcome_cmd.backfill_scorecard(target=scoreable_target, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["eligible"] == 0
+    assert payload["ineligible_by_reason"]["out_of_scope_changes"] == 1
+
+
 def test_backfill_scorecard_infrastructure_failure_is_ineligible(scoreable_target):
     skill = _write_skill_subject(scoreable_target)
     fingerprint = verify_trial.subject_hash_for_path(scoreable_target, str(skill.relative_to(scoreable_target)))

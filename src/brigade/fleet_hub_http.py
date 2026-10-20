@@ -740,7 +740,7 @@ def make_handler(
                     else ({}, False)
                 )
             except ClaimFenceError as exc:
-                self._send_json(503, {"error": str(exc), "reason": exc.reason, "owner": {}})
+                self._send_json(503, {"error": str(exc), "reason": exc.reason})
                 return
             except sqlite3.Error as exc:
                 self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
@@ -982,7 +982,7 @@ def make_handler(
                         policy_error = f"the policy authority could not be read ({type(exc).__name__})"
                 control_plane = control_plane_from_hub(conn)
             except ClaimFenceError as exc:
-                self._send_json(503, {"error": str(exc), "reason": exc.reason, "owner": {}})
+                self._send_json(503, {"error": str(exc), "reason": exc.reason})
                 return
             except sqlite3.Error as exc:
                 self._send_html(500, f"hub database error: {exc}\n", content_type=plain)
@@ -1575,7 +1575,7 @@ def make_handler(
                     else:
                         payload = {"claims": fleet_claim_display.list_display_claims(conn, include_all=include_all)}
                 except ClaimFenceError as exc:
-                    self._send_json(503, {"error": str(exc), "reason": exc.reason, "owner": {}})
+                    self._send_json(503, {"error": str(exc), "reason": exc.reason})
                     return
                 except sqlite3.Error as exc:
                     self._send_json(500, {"error": f"hub database error: {exc}"})

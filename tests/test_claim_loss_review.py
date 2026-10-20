@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import _thread
 import json
+import os
 import subprocess
 import sys
 import threading
@@ -17,10 +18,10 @@ import pytest
 from brigade import aboyeur, agents, cli, fleet_client, fleet_session_bootstrap, proc, runguard
 from brigade import fleet_t3_transport as t3
 from brigade.aboyeur import orchestrator, planning
-from brigade import claim_loss_cancellation, run_budget, run_lifecycle, run_transport
+from brigade import claim_loss_cancellation, dirfd, localio, run_budget, run_lifecycle, run_transport
 from tests.test_aboyeur import _roster
 from tests.run_test_helpers import run_aboyeur_guarded
-from tests._posix import requires_process_groups
+from tests._posix import requires_dirfd, requires_process_groups
 from tests.test_fleet_t3_transport import (
     FakePolicyClient,
     FakeT3Runner,
@@ -604,6 +605,390 @@ def test_interrupt_shutdown_preserves_worker_retention(tmp_path, monkeypatch, sc
     assert isinstance(error, runguard.RetainRunLockError), f"worker retention failure lost: {error!r}"
     assert isinstance(error.__context__, KeyboardInterrupt)
     assert runguard.lock_path(tmp_path).exists()
+
+
+def _assert_retention_diagnostic_recovery(workspace, run_dir, original_receipt, monkeypatch):
+    run_json = run_dir / "run.json"
+    assert run_json.read_bytes() == original_receipt
+    pending = json.loads(run_json.read_text())
+    assert pending["status"] == "dispatching"
+    assert not {"failure", "failure_phase", "error", "finished_at"} & pending.keys()
+    assert "retention_diagnostics" not in pending
+    sidecar = run_dir / "retention-diagnostics.json"
+    assert "BudgetPolicyError: token ceiling reached" in sidecar.read_text()
+    saved = json.loads(sidecar.read_text())
+    owner = runguard.read_lock_owner(runguard.lock_path(workspace))
+    assert saved.get("owner_token") == owner["owner_token"]
+    diagnostics = saved["diagnostics"]
+    assert any("BudgetPolicyError: token ceiling reached" in diagnostic for diagnostic in diagnostics)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+    assert runguard.recover_stale_run(workspace, run_dir) is True
+    recovered = json.loads(run_json.read_text())
+    assert "retention_diagnostics" not in recovered
+    assert recovered["status"] == "failed"
+    assert recovered["failure"]["kind"] == "owner-process-exited"
+    assert recovered["failure"]["prior_status"] == "dispatching"
+    if dirfd.posix_available() and getattr(os, "O_NONBLOCK", 0):
+        for diagnostic in diagnostics:
+            assert diagnostic in recovered["failure"]["detail"]
+            assert diagnostic in recovered["error"]
+    else:
+        assert recovered["failure"]["detail"].endswith("is no longer active")
+    assert not runguard.lock_path(workspace).exists()
+
+
+@pytest.mark.parametrize("scheduler", ["waves", "dag"])
+@pytest.mark.parametrize("diagnostic_write_fails", [False, True])
+def test_sibling_retention_records_replaced_budget_denial(tmp_path, monkeypatch, scheduler, diagnostic_write_fails):
+    budget_raised = threading.Event()
+    scheduler_saw_budget = threading.Event()
+    retained = runguard.RetainRunLockError("sibling receipt unavailable")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    run_json = run_dir / "run.json"
+    original_receipt = json.dumps({"status": "dispatching"})
+    run_json.write_text(original_receipt)
+    original_bytes = run_json.read_bytes()
+    diagnostic_path = run_dir / "retention-diagnostics.json"
+    write_attempts = []
+    write_json = localio.write_json
+
+    def fail_diagnostic_write(path, payload):
+        if path == diagnostic_path:
+            write_attempts.append(path)
+            raise OSError("diagnostic disk full")
+        write_json(path, payload)
+
+    if diagnostic_write_fails:
+        monkeypatch.setattr(localio, "write_json", fail_diagnostic_write)
+
+    def worker(cli_ref, *args, **kwargs):
+        if cli_ref == "codex":
+            budget_raised.set()
+            raise run_budget.BudgetPolicyError(
+                "token ceiling reached",
+                code="budget_denied",
+                dimension="tokens",
+                exhausted=True,
+                request_id="req-1",
+            )
+        assert scheduler_saw_budget.wait(5)
+        raise retained
+
+    def budget_first(futures):
+        # Hand the scheduler the budget failure before the sibling can retain,
+        # so as_completed ordering cannot decide which error the scheduler sees.
+        assert budget_raised.wait(5)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            for future in futures:
+                if future.done() and isinstance(future.exception(), run_budget.BudgetPolicyError):
+                    scheduler_saw_budget.set()
+                    yield future
+                    return
+            time.sleep(0.005)
+        pytest.fail("budget failure never completed")
+
+    monkeypatch.setattr(agents, "run_agent", worker)
+    monkeypatch.setattr(run_transport, "as_completed", budget_first)
+    error = None
+    try:
+        with runguard.run_lock(tmp_path, run_dir=run_dir):
+            run_transport.dispatch(
+                [
+                    run_transport.Assignment(worker="reviewer", task="review", stage=1, covers=("review",)),
+                    run_transport.Assignment(worker="coder", task="inspect", stage=1, covers=("inspect",)),
+                ],
+                _roster(),
+                build_prompt=lambda *args, **kwargs: "inspect",
+                run_appserver_worker=lambda *args, **kwargs: pytest.fail("unused app-server"),
+                event_writer=lambda *args, **kwargs: None,
+                cwd=tmp_path,
+                output_dir=run_dir,
+                scheduler=scheduler,
+                route_dependencies={"review": (), "inspect": ()},
+            )
+    except BaseException as exc:
+        error = exc
+    assert error is retained, f"sibling retention failure lost: {error!r}"
+    notes = "\n".join(getattr(error, "__notes__", ()))
+    assert "BudgetPolicyError" in notes and "token ceiling reached" in notes
+    assert runguard.lock_path(tmp_path).exists()
+    assert run_json.read_bytes() == original_bytes
+    if diagnostic_write_fails:
+        assert write_attempts == [diagnostic_path]
+        assert not diagnostic_path.exists()
+    else:
+        _assert_retention_diagnostic_recovery(tmp_path, run_dir, original_bytes, monkeypatch)
+
+
+@pytest.mark.parametrize("scheduler", ["waves", "dag"])
+@pytest.mark.parametrize("formatting_error", [RuntimeError, KeyboardInterrupt])
+def test_unprintable_scheduler_failure_preserves_sibling_retention(tmp_path, monkeypatch, scheduler, formatting_error):
+    class UnprintableBudgetError(run_budget.BudgetPolicyError):
+        def __str__(self):
+            raise formatting_error("failure formatting interrupted")
+
+    both_started = threading.Barrier(2)
+    retained = runguard.RetainRunLockError("sibling receipt unavailable")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    run_json = run_dir / "run.json"
+    run_json.write_text(json.dumps({"status": "dispatching"}))
+    original_receipt = run_json.read_bytes()
+
+    def worker(cli_ref, *args, **kwargs):
+        both_started.wait(timeout=5)
+        if cli_ref == "codex":
+            raise UnprintableBudgetError(
+                "budget denied", code="budget_denied", dimension="tokens", exhausted=True, request_id="req-unprintable"
+            )
+        raise retained
+
+    def budget_first(futures):
+        for future in futures:
+            if isinstance(future.exception(timeout=5), UnprintableBudgetError):
+                yield future
+                return
+        pytest.fail("budget failure never completed")
+
+    monkeypatch.setattr(agents, "run_agent", worker)
+    monkeypatch.setattr(run_transport, "as_completed", budget_first)
+    error = None
+    try:
+        with runguard.run_lock(tmp_path, run_dir=run_dir):
+            run_transport.dispatch(
+                [
+                    run_transport.Assignment(worker="reviewer", task="review", stage=1, covers=("review",)),
+                    run_transport.Assignment(worker="coder", task="inspect", stage=1, covers=("inspect",)),
+                ],
+                _roster(),
+                build_prompt=lambda *args, **kwargs: "inspect",
+                run_appserver_worker=lambda *args, **kwargs: pytest.fail("unused app-server"),
+                event_writer=lambda *args, **kwargs: None,
+                cwd=tmp_path,
+                output_dir=run_dir,
+                scheduler=scheduler,
+                route_dependencies={"review": (), "inspect": ()},
+            )
+    except BaseException as exc:
+        error = exc
+    assert error is retained, type(error).__name__
+    assert runguard.lock_path(tmp_path).exists()
+    assert run_json.read_bytes() == original_receipt
+    diagnostic = "replaced scheduler failure: UnprintableBudgetError"
+    assert diagnostic in getattr(error, "__notes__", ())
+    sidecar = json.loads((run_dir / "retention-diagnostics.json").read_text())
+    assert sidecar["diagnostics"] == [diagnostic]
+
+
+@pytest.mark.parametrize("scheduler", ["waves", "dag"])
+def test_retention_first_records_sibling_budget_denial(tmp_path, monkeypatch, scheduler):
+    retain_raised = threading.Event()
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    (run_dir / "run.json").write_text(json.dumps({"status": "dispatching"}))
+    original_receipt = (run_dir / "run.json").read_bytes()
+
+    def worker(cli_ref, *args, **kwargs):
+        if cli_ref == "codex":
+            assert retain_raised.wait(5)
+            raise run_budget.BudgetPolicyError(
+                "token ceiling reached",
+                code="budget_denied",
+                dimension="tokens",
+                exhausted=True,
+                request_id="req-1",
+            )
+        retain_raised.set()
+        raise runguard.RetainRunLockError("sibling receipt unavailable")
+
+    def retention_first(futures):
+        assert retain_raised.wait(5)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            for future in futures:
+                if future.done() and isinstance(future.exception(), runguard.RetainRunLockError):
+                    yield future
+                    return
+            time.sleep(0.005)
+        pytest.fail("retention failure never completed")
+
+    monkeypatch.setattr(agents, "run_agent", worker)
+    monkeypatch.setattr(run_transport, "as_completed", retention_first)
+    error = None
+    try:
+        with runguard.run_lock(tmp_path, run_dir=run_dir):
+            run_transport.dispatch(
+                [
+                    run_transport.Assignment(worker="reviewer", task="review", stage=1, covers=("review",)),
+                    run_transport.Assignment(worker="coder", task="inspect", stage=1, covers=("inspect",)),
+                ],
+                _roster(),
+                build_prompt=lambda *args, **kwargs: "inspect",
+                run_appserver_worker=lambda *args, **kwargs: pytest.fail("unused app-server"),
+                event_writer=lambda *args, **kwargs: None,
+                cwd=tmp_path,
+                output_dir=run_dir,
+                scheduler=scheduler,
+                route_dependencies={"review": (), "inspect": ()},
+            )
+    except BaseException as exc:
+        error = exc
+    assert isinstance(error, runguard.RetainRunLockError), f"retention failure lost: {error!r}"
+    notes = "\n".join(getattr(error, "__notes__", ()))
+    assert "sibling worker failure: BudgetPolicyError: token ceiling reached" in notes
+    assert runguard.lock_path(tmp_path).exists()
+    _assert_retention_diagnostic_recovery(tmp_path, run_dir, original_receipt, monkeypatch)
+
+
+@pytest.mark.parametrize(
+    "sidecar_bytes",
+    [b"{", b'{"diagnostics": "not a list"}', b" " * 65536 + b"{", None],
+    ids=["invalid-json", "invalid-shape", "oversized", "unreadable-directory"],
+)
+def test_stale_recovery_ignores_unusable_retention_diagnostics(tmp_path, monkeypatch, sidecar_bytes):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    run_json = run_dir / "run.json"
+    run_json.write_text(json.dumps({"status": "dispatching"}))
+    sidecar = run_dir / "retention-diagnostics.json"
+    if sidecar_bytes is None:
+        sidecar.mkdir()
+    else:
+        sidecar.write_bytes(sidecar_bytes)
+    with pytest.raises(runguard.RetainRunLockError):
+        with runguard.run_lock(tmp_path, run_dir=run_dir):
+            raise runguard.RetainRunLockError("receipt unavailable")
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+    assert runguard.recover_stale_run(tmp_path, run_dir) is True
+    recovered = json.loads(run_json.read_text())
+    assert recovered["status"] == "failed"
+    assert recovered["failure"]["kind"] == "owner-process-exited"
+    assert "is no longer active" in recovered["failure"]["detail"]
+    assert not runguard.lock_path(tmp_path).exists()
+
+
+@requires_dirfd
+@pytest.mark.parametrize("replacement_write_fails", [False, True])
+def test_retention_diagnostics_do_not_leak_across_reused_output_directory(
+    tmp_path, monkeypatch, replacement_write_fails
+):
+    run_dir = tmp_path / "custom-output"
+    run_dir.mkdir()
+    run_json = run_dir / "run.json"
+    sidecar = run_dir / "retention-diagnostics.json"
+    both_started = threading.Barrier(2)
+    retained = runguard.RetainRunLockError("old receipt unavailable")
+    budget_reason = "old run budget denial"
+
+    def worker(cli_ref, *args, **kwargs):
+        both_started.wait(timeout=5)
+        if cli_ref == "codex":
+            raise run_budget.BudgetPolicyError(
+                budget_reason, code="budget_denied", dimension="tokens", exhausted=True, request_id="req-reuse"
+            )
+        raise retained
+
+    def dispatch():
+        run_transport.dispatch(
+            [
+                run_transport.Assignment(worker="reviewer", task="review", stage=1),
+                run_transport.Assignment(worker="coder", task="inspect", stage=1),
+            ],
+            _roster(),
+            build_prompt=lambda *args, **kwargs: "inspect",
+            run_appserver_worker=lambda *args, **kwargs: pytest.fail("unused app-server"),
+            event_writer=lambda *args, **kwargs: None,
+            cwd=tmp_path,
+            output_dir=run_dir,
+        )
+
+    monkeypatch.setattr(agents, "run_agent", worker)
+    monkeypatch.setattr(run_transport, "as_completed", lambda futures: iter(futures))
+    run_json.write_text(json.dumps({"status": "dispatching"}))
+    with pytest.raises(runguard.RetainRunLockError):
+        with runguard.run_lock(tmp_path, run_dir=run_dir):
+            first_owner = runguard.read_lock_owner(runguard.lock_path(tmp_path))
+            dispatch()
+    old_sidecar = sidecar.read_bytes()
+    with monkeypatch.context() as recovery:
+        recovery.setattr(runguard, "_pid_is_active", lambda pid: False)
+        assert runguard.recover_stale_run(tmp_path, run_dir) is True
+    assert "old run budget denial" in json.loads(run_json.read_text())["failure"]["detail"]
+
+    retained = runguard.RetainRunLockError("new receipt unavailable")
+    budget_reason = "new run budget denial"
+    write_attempts = []
+    write_json = localio.write_json
+
+    def fail_replacement(path, payload):
+        if path == sidecar:
+            write_attempts.append(path)
+            raise OSError("diagnostic disk full")
+        write_json(path, payload)
+
+    run_json.write_text(json.dumps({"status": "dispatching"}))
+    original_receipt = run_json.read_bytes()
+    with pytest.raises(runguard.RetainRunLockError) as caught:
+        with runguard.run_lock(tmp_path, run_dir=run_dir):
+            second_owner = runguard.read_lock_owner(runguard.lock_path(tmp_path))
+            assert second_owner["owner_token"] != first_owner["owner_token"]
+            if replacement_write_fails:
+                monkeypatch.setattr(localio, "write_json", fail_replacement)
+                dispatch()
+            else:
+                raise retained
+    assert caught.value is retained
+    assert run_json.read_bytes() == original_receipt
+    assert sidecar.read_bytes() == old_sidecar
+    assert write_attempts == ([sidecar] if replacement_write_fails else [])
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+    assert runguard.recover_stale_run(tmp_path, run_dir) is True
+    recovered = json.loads(run_json.read_text())
+    assert recovered["status"] == "failed"
+    assert recovered["failure"]["detail"].endswith("is no longer active")
+    assert "old run budget denial" not in recovered["error"]
+    assert not runguard.lock_path(tmp_path).exists()
+
+
+@requires_dirfd
+@pytest.mark.parametrize("kind", ["symlink", "fifo"])
+def test_stale_recovery_rejects_unsafe_retention_sidecars(tmp_path, kind):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    run_json = run_dir / "run.json"
+    run_json.write_text(json.dumps({"status": "dispatching"}))
+    with pytest.raises(runguard.RetainRunLockError):
+        with runguard.run_lock(tmp_path, run_dir=run_dir):
+            owner = runguard.read_lock_owner(runguard.lock_path(tmp_path))
+            raise runguard.RetainRunLockError("receipt unavailable")
+    sidecar = run_dir / "retention-diagnostics.json"
+    outside = tmp_path / "outside.json"
+    outside_bytes = json.dumps({"owner_token": owner["owner_token"], "diagnostics": ["outside diagnostic"]}).encode()
+    outside.write_bytes(outside_bytes)
+    if kind == "fifo":
+        os.mkfifo(sidecar)
+    else:
+        sidecar.symlink_to(outside)
+    script = (
+        "import sys; from pathlib import Path; from brigade import runguard; "
+        "runguard._pid_is_active = lambda pid: False; "
+        "assert runguard.recover_stale_run(Path(sys.argv[1]), Path(sys.argv[2]))"
+    )
+    try:
+        result = subprocess.run(
+            [sys.executable, "-c", script, str(tmp_path), str(run_dir)], capture_output=True, text=True, timeout=10
+        )
+    except subprocess.TimeoutExpired:
+        pytest.fail(f"stale recovery blocked on {kind} diagnostic sidecar")
+    assert result.returncode == 0, result.stderr
+    recovered = json.loads(run_json.read_text())
+    assert recovered["status"] == "failed"
+    assert recovered["failure"]["detail"].endswith("is no longer active")
+    assert "outside diagnostic" not in recovered["error"]
+    assert outside.read_bytes() == outside_bytes
+    assert not runguard.lock_path(tmp_path).exists()
 
 
 @pytest.mark.parametrize("granted", [False, True])
