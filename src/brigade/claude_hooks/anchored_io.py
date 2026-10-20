@@ -290,7 +290,7 @@ class SessionDirectory:
                 except OSError as exc:
                     if isinstance(primary_error, SessionIntegrityError):
                         # Keep the refusal's own cause; the cleanup failure becomes its context.
-                        raise primary_error
+                        raise primary_error from primary_error.__cause__
                     _raise_integrity_error(exc)
                     raise
             raise
