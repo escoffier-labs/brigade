@@ -75,7 +75,7 @@ These were decided while reading the code. Task 10 writes them back into the spe
 - Modify: `src/brigade/mcp_server.py` (whole file, 96 lines)
 - Test: `tests/test_mcp_server_dispatch.py`
 
-- [ ] Write the failing test `tests/test_mcp_server_dispatch.py`:
+- [x] Write the failing test `tests/test_mcp_server_dispatch.py`:
 
 ```python
 """Shared MCP JSON-RPC dispatch used by the stdio and HTTP transports."""
@@ -131,8 +131,8 @@ def test_tools_call_and_errors():
     assert mcp_server.dispatch({"jsonrpc": "2.0", "id": 7, "method": "bogus"}, h)["error"]["code"] == -32601
 ```
 
-- [ ] Run it, watch it fail: `PY -m pytest tests/test_mcp_server_dispatch.py -q -p no:cacheprovider`. Expect FAIL with `AttributeError: module 'brigade.mcp_server' has no attribute 'Handlers'`.
-- [ ] Replace everything from `def _emit` to the end of `src/brigade/mcp_server.py` with the code below. Keep the module docstring, imports, the four `Callable` aliases, and `response()`. Add `from dataclasses import dataclass` to the imports.
+- [x] Run it, watch it fail: `PY -m pytest tests/test_mcp_server_dispatch.py -q -p no:cacheprovider`. Expect FAIL with `AttributeError: module 'brigade.mcp_server' has no attribute 'Handlers'`.
+- [x] Replace everything from `def _emit` to the end of `src/brigade/mcp_server.py` with the code below. Keep the module docstring, imports, the four `Callable` aliases, and `response()`. Add `from dataclasses import dataclass` to the imports.
 
 ```python
 SUPPORTED_PROTOCOL_VERSIONS = ("2025-06-18", "2025-03-26", "2024-11-05")
@@ -237,9 +237,9 @@ def serve_stdio(
     return serve_stdio_handlers(Handlers(server_name, list_resources, read_resource, list_tools, call_tool))
 ```
 
-- [ ] Update the module docstring's first two lines to: `"""Shared zero-dependency MCP JSON-RPC dispatch and stdio loop.` / blank / `Stations expose local data over MCP (skills, memory cards). The JSON-RPC` (leave the rest).
-- [ ] Run to green: `PY -m pytest tests/test_mcp_server_dispatch.py tests/test_memory_search_mcp.py tests/test_skills_cmd.py -q -p no:cacheprovider`. Expect all PASS.
-- [ ] Commit: `git add src/brigade/mcp_server.py tests/test_mcp_server_dispatch.py && git commit -m "refactor(mcp): share JSON-RPC dispatch across transports"`
+- [x] Update the module docstring's first two lines to: `"""Shared zero-dependency MCP JSON-RPC dispatch and stdio loop.` / blank / `Stations expose local data over MCP (skills, memory cards). The JSON-RPC` (leave the rest).
+- [x] Run to green: `PY -m pytest tests/test_mcp_server_dispatch.py tests/test_memory_search_mcp.py tests/test_skills_cmd.py -q -p no:cacheprovider`. Expect all PASS.
+- [x] Commit: `git add src/brigade/mcp_server.py tests/test_mcp_server_dispatch.py && git commit -m "refactor(mcp): share JSON-RPC dispatch across transports"`
 
 ---
 
