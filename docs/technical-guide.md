@@ -1917,7 +1917,8 @@ identifiers, the latest failing verification receipt identifier and digest,
 and the last local CLI error. Task text and worker output are excluded.
 `--include-output FILE` adds only a redacted tail of a file you choose, bounded
 to 200 lines and a 60 KB input read. The complete rendered bundle is capped at
-60 KB. `--summary-file FILE` reads the description from a file.
+60 KB. `--summary-file FILE` reads at most 60 KB plus one byte and rejects
+oversized input before decoding it.
 
 The report uses a fixed field allowlist, removes known local literals and
 credential references, applies the origin redactor with `origin=unknown`,
@@ -1925,7 +1926,9 @@ and scans the final JSON and Markdown again. Any remaining finding or scanner
 error blocks the report. Review every field anyway. Redaction cannot identify
 every private name in free text. Use SECURITY.md for vulnerabilities.
 
-Run again without `--dry-run` to search GitHub for the visible `bf-` fingerprint
+Use `--report-id REPORT_ID` to reuse the saved preview without recollecting
+diagnostics. Replace `REPORT_ID` with the identifier printed during preparation.
+Run without `--dry-run` to search GitHub for the visible `bf-` fingerprint
 through `gh search issues`. Search failure prints `dedup skipped`. A dry run
 makes no network calls. With an interactive terminal, review the destination
 and explicitly confirm before sharing. For a shown duplicate, select its
@@ -1934,9 +1937,12 @@ preview to the user and receive a clear yes before using `--yes`:
 
 ```bash
 brigade bug report --summary-file description.txt --json --dry-run
-brigade bug report --summary-file description.txt --json --yes --via gh
+brigade bug report --report-id REPORT_ID --json --yes --via gh
 ```
 
+`--yes` requires `--report-id`. Brigade verifies the stored JSON and Markdown
+digests and scans both again before any network call. New summaries, titles,
+and output files cannot be combined with `--report-id`.
 Without a terminal and `--yes`, the command only prepares local files.
 `--via auto` prefers authenticated `gh`, then a prefilled issue URL.
 `--via gh` creates an issue without requesting label permissions.
@@ -1955,7 +1961,8 @@ minutes. A pending submission also blocks retries for five minutes.
 `BRIGADE_BUG_REPORT=never` disables sharing while allowing `--dry-run` and
 `--via file`. No doctor, status command, or hook starts bug reporting.
 
-CLI failures overwrite the local `brigade/last-error.json` with the resolved
+Failures from `bug report` preserve the previous diagnostic. Other CLI failures
+overwrite the local `brigade/last-error.json` with the resolved
 command names, exit code, exception type, redacted message head, and frames
 inside Brigade. The record contains no command arguments and is never uploaded
 automatically. You can delete it and past report directories at any time.

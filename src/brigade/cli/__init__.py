@@ -247,7 +247,9 @@ def main(argv=None) -> int:
         if exc.code:
             from .. import bug_last_error
 
-            bug_last_error.record(bug_last_error.command_path(parser, parse_argv), 2)
+            command = bug_last_error.command_path(parser, parse_argv)
+            if command != "bug report":
+                bug_last_error.record(command, 2)
         raise
     if engine_args is not None:
         args.engine_args = engine_args
@@ -266,12 +268,13 @@ def main(argv=None) -> int:
     try:
         exit_code = func(args)
     except Exception as exc:
-        bug_last_error.record(command, 1, exc)
+        if command != "bug report":
+            bug_last_error.record(command, 1, exc)
         raise
-    if exit_code:
-        bug_last_error.record(command, exit_code)
     if command == "bug report":
         return exit_code
+    if exit_code:
+        bug_last_error.record(command, exit_code)
     try:
         from .. import update_notify
 

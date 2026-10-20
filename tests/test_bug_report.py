@@ -38,6 +38,12 @@ def invoke(target, *flags):
     return cli.main(["bug", "report", "--target", str(target), "--summary", "Expected a profile, got an error", *flags])
 
 
+def submit_prepared(target, capsys, *flags, summary="Expected a profile, got an error"):
+    assert invoke(target, "--summary", summary, "--dry-run", "--json") == 0
+    preview = result(capsys)
+    return cli.main(["bug", "report", "--report-id", preview["report_id"], "--yes", *flags])
+
+
 def result(capsys):
     return json.loads(capsys.readouterr().out)
 
@@ -110,7 +116,7 @@ def test_scanner_failure_or_residual_blocks_all_submission(report_env, monkeypat
             "scan_text",
             lambda text, **k: GuardResult(text, text, [Finding("unknown", "secret", "block", "", "", 1, 1, 0, 1)]),
         )
-    assert invoke(target, "--yes", "--via", "gh", "--json") == 2
+    assert invoke(target, "--dry-run", "--json") == 2
     assert not sent
     assert "blocked" in capsys.readouterr().err.lower()
     assert not list(Path(mod.data_root()).rglob("bundle.json"))
@@ -146,13 +152,13 @@ def test_noninteractive_requires_yes_and_flag_receipt(report_env, monkeypatch, c
     out = result(capsys)
     assert out["submitted"] is False
     assert not any(c[:2] == ("issue", "create") for c in calls)
-    assert invoke(target, "--json", "--via", "gh", "--yes") == 0
+    assert submit_prepared(target, capsys, "--json", "--via", "gh") == 0
     out = result(capsys)
     receipt = json.loads(Path(out["receipt_path"]).read_text())
     assert receipt["consent"]["mode"] == "flag"
     assert receipt["submitted"] is True
     assert not any("--label" in c for c in calls)
-    assert invoke(target, "--json", "--via", "gh", "--yes") == 2
+    assert submit_prepared(target, capsys, "--json", "--via", "gh") == 2
     assert "cooldown" in capsys.readouterr().err
 
 
@@ -193,7 +199,7 @@ def test_encoded_destinations_bounded_and_bundle_available(report_env, capsys, v
     from brigade.bug_cmd import BUG_EMAIL
 
     _, target = report_env
-    assert invoke(target, "--summary", "界 ? & # " * 1500, "--via", via, "--yes", "--json") == 0
+    assert submit_prepared(target, capsys, "--via", via, "--json", summary="界 ? & # " * 1500) == 0
     out = result(capsys)
     assert len(out["destination_url"].encode()) <= budget
     assert Path(out["preview_path"]).is_file()
@@ -243,10 +249,10 @@ def test_duplicate_comment_requires_shown_number(report_env, monkeypatch, capsys
         return ""
 
     monkeypatch.setattr(mod, "gh", fake)
-    assert invoke(target, "--yes", "--via", "gh", "--comment-on", "41", "--json") == 2
+    assert submit_prepared(target, capsys, "--via", "gh", "--comment-on", "41", "--json") == 2
     capsys.readouterr()
     assert not any(c[:2] == ("issue", "comment") for c in calls)
-    assert invoke(target, "--yes", "--via", "gh", "--comment-on", "42", "--json") == 0
+    assert submit_prepared(target, capsys, "--via", "gh", "--comment-on", "42", "--json") == 0
     out = result(capsys)
     assert out["duplicates"] == [
         {"number": 42, "title": "Same failure", "state": "open", "url": mod.ISSUES_URL + "/42"}
@@ -269,13 +275,13 @@ def test_daily_cap_refuses_sixth_attempt(report_env, capsys):
                 {"submitted": True, "created_at": datetime.now(timezone.utc).isoformat(), "fingerprint": "bf-" + str(i)}
             )
         )
-    assert invoke(target, "--yes", "--via", "url", "--json") == 2
+    assert submit_prepared(target, capsys, "--via", "url", "--json") == 2
     assert "daily cap" in capsys.readouterr().err
 
 
 def test_oversize_bundle_refused_before_network_or_save(report_env, capsys):
     mod, target = report_env
-    assert invoke(target, "--summary", "failure " * 10000, "--yes", "--via", "gh", "--json") == 2
+    assert invoke(target, "--summary", "failure " * 10000, "--dry-run", "--json") == 2
     assert "60 KB" in capsys.readouterr().err
     assert not list(Path(mod.data_root()).rglob("bundle.json"))
 
@@ -289,11 +295,11 @@ def test_failed_transport_leaves_pending_receipt_for_cooldown(report_env, monkey
         raise OSError("response lost after submission")
 
     monkeypatch.setattr(mod, "gh", fake)
-    assert invoke(target, "--yes", "--via", "gh", "--json") == 2
+    assert submit_prepared(target, capsys, "--via", "gh", "--json") == 2
     capsys.readouterr()
     receipts = list((Path(mod.data_root()) / "brigade" / "bug-reports").glob("*/receipt.json"))
     assert json.loads(receipts[0].read_text())["status"] == "pending"
-    assert invoke(target, "--yes", "--via", "gh", "--json") == 2
+    assert submit_prepared(target, capsys, "--via", "gh", "--json") == 2
     assert "cooldown" in capsys.readouterr().err
 
 
@@ -373,7 +379,7 @@ def test_concurrent_submissions_share_daily_limit(report_env, monkeypatch, capsy
     # Exercise the same lock primitive independently of the reporting process.
     # The bounded acquisition must fail before the fake transport can run.
     with held_file_lock(root / "submission.lock", deadline_seconds=1):
-        assert invoke(target, "--yes", "--via", "url", "--json") == 2
+        assert submit_prepared(target, capsys, "--via", "url", "--json") == 2
     assert "blocked" in capsys.readouterr().err.lower()
 
 
@@ -394,9 +400,9 @@ def test_parser_failure_records_only_resolved_command(report_env):
     from brigade import bug_last_error
 
     with pytest.raises(SystemExit):
-        cli.main(["bug", "report", "--unknown-private-value"])
+        cli.main(["version", "--unknown-private-value"])
     record = json.loads(bug_last_error.error_path().read_text())
-    assert record["command"] == "bug report"
+    assert record["command"] == "version"
     assert record["exit_code"] == 2
     assert "private-value" not in json.dumps(record)
 
@@ -510,3 +516,202 @@ def test_duplicate_search_falls_back_to_exception_and_command(report_env, monkey
     out = result(capsys)
     assert out["duplicates"][0]["number"] == 99
     assert "ValueError" in queries[1] and "doctor" in queries[1]
+
+
+def test_yes_requires_prepared_report(report_env, capsys):
+    _, target = report_env
+    assert invoke(target, "--yes", "--via", "gh", "--json") == 2
+    assert "--report-id" in capsys.readouterr().err
+
+
+def test_submit_uses_approved_bundle_without_recollecting(report_env, monkeypatch, capsys, tmp_path):
+    from brigade import bug_last_error
+
+    mod, target = report_env
+    log = tmp_path / "chosen.log"
+    log.write_text("reviewed output")
+    assert invoke(target, "--include-output", str(log), "--dry-run", "--json") == 0
+    preview = result(capsys)
+    log.write_text("unreviewed output")
+    bug_last_error.error_path().write_text('{"command": "unreviewed"}')
+    monkeypatch.setattr(mod, "collect_doctor", lambda *a: pytest.fail("doctor recollected"))
+    monkeypatch.setattr(mod, "collect", lambda *a, **k: pytest.fail("bundle recollected"))
+    bodies = []
+
+    def fake(*args):
+        if args[:2] == ("search", "issues"):
+            return "[]"
+        if args[:2] == ("issue", "create"):
+            bodies.append(Path(args[-1]).read_text())
+            return mod.ISSUES_URL + "/42"
+        return ""
+
+    monkeypatch.setattr(mod, "gh", fake)
+    assert cli.main(["bug", "report", "--report-id", preview["report_id"], "--yes", "--via", "gh", "--json"]) == 0
+    submitted = result(capsys)
+    assert submitted["report_id"] == preview["report_id"]
+    assert bodies == [preview["preview_markdown"]]
+    assert "reviewed output" in bodies[0]
+    assert "unreviewed" not in bodies[0]
+
+
+@pytest.mark.parametrize("filename", ["bundle.json", "bundle.md", "receipt.json"])
+def test_prepared_tampering_blocks_before_transport(report_env, monkeypatch, capsys, filename):
+    mod, target = report_env
+    assert invoke(target, "--dry-run", "--json") == 0
+    preview = result(capsys)
+    path = Path(preview["preview_path"]).with_name(filename)
+    if filename == "bundle.md":
+        path.write_text(path.read_text() + "changed")
+    else:
+        value = json.loads(path.read_text())
+        if filename == "bundle.json":
+            value["user"]["summary"] = "unapproved summary"
+        else:
+            value["bundle_digest"] = "changed"
+        path.write_text(json.dumps(value))
+    monkeypatch.setattr(mod, "gh", lambda *a: pytest.fail("transport before integrity check"))
+    assert cli.main(["bug", "report", "--report-id", preview["report_id"], "--yes", "--via", "gh"]) == 2
+    assert "digest" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("failure", ["parser", "scanner", "transport", "exception"])
+def test_report_failure_preserves_previous_error(report_env, monkeypatch, capsys, failure):
+    from brigade import bug_last_error, bug_redaction
+
+    mod, target = report_env
+    bug_last_error.record("version", 1, RuntimeError("original diagnostic"))
+    original = bug_last_error.error_path().read_bytes()
+    if failure == "parser":
+        with pytest.raises(SystemExit):
+            cli.main(["bug", "report", "--unknown-private-value"])
+    elif failure == "scanner":
+        monkeypatch.setattr(bug_redaction, "scan_text", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("scanner")))
+        assert invoke(target, "--dry-run", "--json") == 2
+    elif failure == "exception":
+        from brigade.cli import bug
+
+        monkeypatch.setattr(bug, "dispatch", lambda *a: (_ for _ in ()).throw(RuntimeError("unexpected")))
+        with pytest.raises(RuntimeError, match="unexpected"):
+            invoke(target, "--dry-run", "--json")
+    else:
+        assert invoke(target, "--dry-run", "--json") == 0
+        preview = result(capsys)
+        assert cli.main(["bug", "report", "--report-id", preview["report_id"], "--yes", "--via", "gh"]) == 2
+    assert bug_last_error.error_path().read_bytes() == original
+
+
+@pytest.mark.parametrize("field", ["summary", "title", "output", "last_error"])
+@pytest.mark.parametrize(
+    "narrative",
+    [
+        "SQL injection",
+        "CVE-2026-12345",
+        "authentication bypass",
+        "cross-site scripting",
+        "privilege escalation",
+        "SSRF",
+        "command injection",
+    ],
+)
+def test_vulnerability_narratives_refused(report_env, capsys, tmp_path, field, narrative):
+    mod, target = report_env
+    flags = ["--" + field, narrative]
+    if field == "output":
+        path = tmp_path / "output.txt"
+        path.write_text(narrative)
+        flags = ["--include-output", str(path)]
+    elif field == "last_error":
+        from brigade import bug_last_error
+
+        bug_last_error.record("version", 1, RuntimeError(narrative))
+        flags = []
+    assert invoke(target, "--dry-run", "--json", *flags) == 2
+    assert "SECURITY.md" in capsys.readouterr().err
+    assert not list(Path(mod.data_root()).rglob("bundle.json"))
+
+
+def test_summary_file_read_is_bounded_before_decoding(report_env, monkeypatch, capsys, tmp_path):
+    import io
+
+    mod, target = report_env
+    summary = tmp_path / "huge.txt"
+    summary.write_bytes(b"x" * (mod.BUNDLE_CAP + 1) + b"\xff")
+    original_open = Path.open
+    reads = []
+
+    class BoundedInput(io.BytesIO):
+        def read(self, size=-1):
+            reads.append(size)
+            assert size == mod.BUNDLE_CAP + 1
+            return super().read(size)
+
+    def bounded_open(path, mode="r", *a, **k):
+        if path == summary:
+            if mode == "rb":
+                return BoundedInput(b"x" * (mod.BUNDLE_CAP + 1) + b"\xff")
+            pytest.fail("summary decoded before size check")
+        return original_open(path, mode, *a, **k)
+
+    monkeypatch.setattr(Path, "open", bounded_open)
+    assert cli.main(["bug", "report", "--target", str(target), "--summary-file", str(summary), "--dry-run"]) == 2
+    assert reads == [mod.BUNDLE_CAP + 1]
+    assert "60 KB" in capsys.readouterr().err
+
+
+def test_delayed_prepared_submission_still_starts_cooldown(report_env, capsys):
+    from datetime import datetime, timedelta, timezone
+
+    _, target = report_env
+    assert invoke(target, "--dry-run", "--json") == 0
+    preview = result(capsys)
+    receipt_path = Path(preview["receipt_path"])
+    receipt = json.loads(receipt_path.read_text())
+    receipt["created_at"] = (datetime.now(timezone.utc) - timedelta(minutes=10)).isoformat()
+    receipt_path.write_text(json.dumps(receipt))
+    args = ["bug", "report", "--report-id", preview["report_id"], "--yes", "--via", "url", "--json"]
+    assert cli.main(args) == 0
+    result(capsys)
+    assert cli.main(args) == 2
+    assert "cooldown" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "field,value", [("--summary", "changed"), ("--title", "changed"), ("--include-output", "missing.log")]
+)
+def test_prepared_report_rejects_new_content(report_env, capsys, field, value):
+    _, target = report_env
+    assert invoke(target, "--dry-run", "--json") == 0
+    preview = result(capsys)
+    assert cli.main(["bug", "report", "--report-id", preview["report_id"], field, value, "--yes", "--via", "gh"]) == 2
+    assert "new report content" in capsys.readouterr().err
+
+
+def test_prepared_report_rescans_before_search_or_submit(report_env, monkeypatch, capsys):
+    from brigade import bug_redaction
+
+    mod, target = report_env
+    assert invoke(target, "--dry-run", "--json") == 0
+    preview = result(capsys)
+    monkeypatch.setattr(bug_redaction, "scan_text", lambda *a, **k: (_ for _ in ()).throw(RuntimeError("scanner")))
+    monkeypatch.setattr(mod, "gh", lambda *a: pytest.fail("transport before rescan"))
+    assert cli.main(["bug", "report", "--report-id", preview["report_id"], "--yes", "--via", "gh"]) == 2
+    assert "second scan failed" in capsys.readouterr().err
+
+
+def test_prepared_report_id_cannot_escape_store(report_env, monkeypatch, capsys):
+    mod, _ = report_env
+    monkeypatch.setattr(mod, "gh", lambda *a: pytest.fail("transport with invalid id"))
+    assert cli.main(["bug", "report", "--report-id", "../outside", "--yes", "--via", "gh"]) == 2
+    assert "invalid --report-id" in capsys.readouterr().err
+
+
+def test_prepared_unicode_bundle_roundtrips_within_byte_cap(report_env, tmp_path, capsys):
+    mod, target = report_env
+    output = tmp_path / "unicode.log"
+    output.write_text("界" * 12000, encoding="utf-8")
+    assert invoke(target, "--include-output", str(output), "--dry-run", "--json") == 0
+    preview = result(capsys)
+    assert len(preview["preview_markdown"].encode()) < mod.BUNDLE_CAP
+    assert cli.main(["bug", "report", "--report-id", preview["report_id"], "--yes", "--via", "url", "--json"]) == 0
+    assert result(capsys)["preview_markdown"] == preview["preview_markdown"]

@@ -30,7 +30,12 @@ URL_BUDGET = 6000
 EMAIL_BUDGET = 1800
 BUNDLE_CAP = 60 * 1024
 _SECURITY = re.compile(
-    r"\b(?:security|vulnerabilit\w*|exploit\w*|credential leak|token leak|remote code execution|path traversal)\b", re.I
+    r"\b(?:security|vulnerabilit\w*|exploit\w*|CVE-\d{4}-\d+|"
+    r"(?:SQL|command|code|shell|LDAP|template) injection|(?:remote|arbitrary) code execution|"
+    r"(?:authentication|authorization|auth) bypass|privilege escalation|cross[- ]site (?:scripting|request forgery)|"
+    r"XSS|CSRF|SSRF|RCE|XXE|insecure deserialization|directory traversal|path traversal|"
+    r"credential leak|token leak|secret leak|buffer overflow|use[- ]after[- ]free|denial[- ]of[- ]service)\b",
+    re.I,
 )
 
 
@@ -162,7 +167,7 @@ def _limit_submissions(root: Path, fp: str, now: datetime) -> None:
             receipt = json.loads(path.read_text(encoding="utf-8"))
             if not receipt.get("submitted") and receipt.get("status") != "pending":
                 continue
-            when = datetime.fromisoformat(receipt["created_at"])
+            when = datetime.fromisoformat(receipt.get("attempted_at") or receipt["created_at"])
             if when.date() == now.date():
                 daily += 1
             if (receipt.get("fingerprint") == fp or receipt.get("status") == "pending") and (
@@ -226,15 +231,42 @@ def report(args: argparse.Namespace) -> int:
         return 2
 
 
-def _report(args: argparse.Namespace) -> int:
-    if args.kind == "security":
-        raise ReportBlocked("Bug report blocked: report vulnerabilities privately using SECURITY.md")
-    if os.environ.get("BRIGADE_BUG_REPORT", "").lower() == "never" and not args.dry_run and args.via != "file":
-        raise ReportBlocked("Bug report blocked: BRIGADE_BUG_REPORT=never disables submission")
-    summary = args.summary_file.read_text(encoding="utf-8") if args.summary_file else (args.summary or "")
+def _read_bounded(path: Path) -> bytes:
+    with path.open("rb") as handle:
+        value = handle.read(BUNDLE_CAP + 1)
+    if len(value) > BUNDLE_CAP:
+        raise ReportBlocked("Bug report blocked: selected input exceeds 60 KB")
+    return value
+
+
+def _load_prepared(report_id: str) -> tuple[Path, dict[str, Any], str, dict[str, Any]]:
+    if re.fullmatch(r"[0-9a-f]{32}", report_id) is None:
+        raise ReportBlocked("Bug report blocked: invalid --report-id")
+    directory = Path(data_root()) / "brigade" / "bug-reports" / report_id
+    bundle = json.loads(_read_bounded(directory / "bundle.json"))
+    markdown = _read_bounded(directory / "bundle.md").decode("utf-8")
+    receipt = json.loads(_read_bounded(directory / "receipt.json"))
+    if (
+        not isinstance(bundle, dict)
+        or not isinstance(receipt, dict)
+        or bundle.get("schema") != "brigade.bug-report.v1"
+        or receipt.get("schema") != "brigade.bug-report-receipt.v1"
+        or receipt.get("report_id") != report_id
+        or receipt.get("bundle_digest") != canonical_json_digest(bundle)
+        or receipt.get("preview_digest") != hashlib.sha256(markdown.encode()).hexdigest()
+    ):
+        raise ReportBlocked("Bug report blocked: prepared bundle digest mismatch, prepare a new preview")
+    assert_clean(json.dumps(bundle, ensure_ascii=False, sort_keys=True))
+    assert_clean(markdown)
+    return directory, bundle, markdown, receipt
+
+
+def _prepare(args: argparse.Namespace) -> tuple[Path, dict[str, Any], str, dict[str, Any]]:
+    summary = _read_bounded(args.summary_file).decode("utf-8") if args.summary_file else (args.summary or "")
+    output = _output_tail(args.include_output)
     if not summary.strip():
         raise ReportBlocked("Bug report blocked: a nonempty --summary or --summary-file is required")
-    if _SECURITY.search(summary):
+    if any(_SECURITY.search(text) for text in (summary, args.title or "", output)):
         raise ReportBlocked("Bug report blocked: report security concerns privately using SECURITY.md")
     target = args.target.resolve()
     doctor = collect_doctor(target)
@@ -243,17 +275,18 @@ def _report(args: argparse.Namespace) -> int:
         for c in doctor.get("checks", [])
     ):
         raise ReportBlocked("Bug report blocked: security-category failure, use SECURITY.md")
-    redactor = Redactor(target)
-    bundle = redactor.project(
-        collect(
-            target,
-            summary=summary,
-            title=args.title,
-            kind=args.kind,
-            doctor=doctor,
-            output=_output_tail(args.include_output),
-        )
+    collected = collect(
+        target,
+        summary=summary,
+        title=args.title or "Brigade bug report",
+        kind=args.kind,
+        doctor=doctor,
+        output=output,
     )
+    if _SECURITY.search(str((collected.get("last_error") or {}).get("message_head", ""))):
+        raise ReportBlocked("Bug report blocked: report security concerns privately using SECURITY.md")
+    redactor = Redactor(target)
+    bundle = redactor.project(collected)
     # Schema and package metadata are fixed public constants, not local input.
     bundle["schema"] = "brigade.bug-report.v1"
     bundle["brigade"]["version"] = __version__
@@ -261,46 +294,63 @@ def _report(args: argparse.Namespace) -> int:
         bundle["last_error"], [c["name"] for c in bundle["doctor"]["checks"] if c["status"] == "FAIL"]
     )
     markdown = render(bundle)
-    encoded = json.dumps(bundle, ensure_ascii=False, indent=2, sort_keys=True)
+    encoded = json.dumps(bundle, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     if max(len(encoded.encode()), len(markdown.encode())) > BUNDLE_CAP:
         raise ReportBlocked("Bug report blocked: redacted bundle exceeds 60 KB")
     assert_clean(encoded)
     assert_clean(markdown)
-    # Nothing remote happens until both final serialized forms pass the scan.
-    duplicates, dedup_status = (
-        ([], "dedup skipped") if args.dry_run or args.via == "file" else _duplicates(bundle, redactor)
-    )
     root = Path(data_root()) / "brigade" / "bug-reports"
-    report_id = uuid.uuid4().hex
-    directory = root / report_id
+    directory = root / uuid.uuid4().hex
     directory.mkdir(parents=True, mode=0o700)
-    write_json(directory / "bundle.json", bundle)
+    write_text_atomic(directory / "bundle.json", encoded)
     write_text_atomic(directory / "bundle.md", markdown)
     receipt: dict[str, Any] = {
         "schema": "brigade.bug-report-receipt.v1",
         "created_at": datetime.now(timezone.utc).isoformat(),
-        "report_id": report_id,
+        "report_id": directory.name,
         "fingerprint": bundle["fingerprint"],
         "bundle_digest": canonical_json_digest(bundle),
+        "preview_digest": hashlib.sha256(markdown.encode()).hexdigest(),
         "redaction": redactor.record(),
         "destination": "file",
         "consent": {"mode": "none"},
-        "duplicates": duplicates,
+        "duplicates": [],
         "duplicate_choice": "new",
         "submitted": False,
         "status": "prepared",
         "issue_url": None,
     }
+    write_json(directory / "receipt.json", receipt)
+    return directory, bundle, markdown, receipt
+
+
+def _report(args: argparse.Namespace) -> int:
+    if args.kind == "security":
+        raise ReportBlocked("Bug report blocked: report vulnerabilities privately using SECURITY.md")
+    if os.environ.get("BRIGADE_BUG_REPORT", "").lower() == "never" and not args.dry_run and args.via != "file":
+        raise ReportBlocked("Bug report blocked: BRIGADE_BUG_REPORT=never disables submission")
+    if args.yes and not args.report_id:
+        raise ReportBlocked("Bug report blocked: --yes requires the approved preview's --report-id")
+    if args.report_id and any((args.summary, args.summary_file, args.title, args.include_output)):
+        raise ReportBlocked("Bug report blocked: --report-id cannot be combined with new report content")
+    directory, bundle, markdown, receipt = _load_prepared(args.report_id) if args.report_id else _prepare(args)
+    root = directory.parent
+    report_id = directory.name
     receipt_path = directory / "receipt.json"
-    write_json(receipt_path, receipt)
+    # Nothing remote happens until the saved bundle's digest and both serialized forms pass.
+    duplicates, dedup_status = (
+        ([], "dedup skipped") if args.dry_run or args.via == "file" else _duplicates(bundle, Redactor(args.target))
+    )
+    receipt["duplicates"] = duplicates
     interactive = sys.stdin.isatty() and sys.stdout.isatty() and not args.json
     if not args.json:
         print(markdown, end="")
-        print(f"Redactions: {json.dumps(redactor.record())}\nDedup: {dedup_status}")
+        print(f"Redactions: {json.dumps(receipt['redaction'])}\nDedup: {dedup_status}")
         for duplicate in duplicates:
             print(f"Duplicate #{duplicate['number']}: {duplicate['url']} ({duplicate['state']}) {duplicate['title']}")
         print(f"Destination: {args.via}. GitHub reports are public. Email goes to the maintainer.")
         print(f"Full redacted bundle: {directory / 'bundle.md'}")
+        print(f"Report ID: {report_id}")
     via = args.via
     if via == "auto":
         via = "file"
@@ -334,7 +384,12 @@ def _report(args: argparse.Namespace) -> int:
         assert_clean(markdown)
         if args.yes:
             receipt["consent"]["mode"] = "flag"
-        receipt.update(destination=via, status="pending", duplicate_choice="comment" if comment_on else "new")
+        receipt.update(
+            destination=via,
+            status="pending",
+            attempted_at=datetime.now(timezone.utc).isoformat(),
+            duplicate_choice="comment" if comment_on else "new",
+        )
         with held_file_lock(root / "submission.lock", deadline_seconds=1):
             _limit_submissions(root, bundle["fingerprint"], datetime.now(timezone.utc))
             write_json(receipt_path, receipt)
@@ -351,7 +406,7 @@ def _report(args: argparse.Namespace) -> int:
         "preview_path": str(directory / "bundle.md"),
         "preview_markdown": markdown,
         "receipt_path": str(receipt_path),
-        "redaction": redactor.record(),
+        "redaction": receipt["redaction"],
         "duplicates": duplicates,
         "dedup_status": dedup_status,
         "submitted": receipt["submitted"],
