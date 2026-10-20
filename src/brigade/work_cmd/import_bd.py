@@ -104,10 +104,18 @@ def _parse_snapshot(raw: bytes, bd_version: str) -> list[dict[str, Any]]:
             importer_source="bd-jsonl",
         )
         digest = hashlib.sha256(data).hexdigest()
+        fingerprint = helpers._stable_hash(
+            {
+                **{field: record[field] for field in ("text", "kind", "type", "priority", "acceptance")},
+                "proposed_edges": sorted(proposals, key=lambda edge: (edge["type"], edge["source"], edge["target"])),
+                "status": row["status"],
+                "issue_type": row["issue_type"],
+            }
+        )
         record["metadata"].update(
             {
                 "source_item_key": f"bd-jsonl:{key}",
-                "source_fingerprint": digest,
+                "source_fingerprint": fingerprint,
                 "bd": {
                     "id": key,
                     "version": bd_version,
@@ -184,12 +192,17 @@ def import_bd_jsonl(*, target: Path, input_path: Path, bd_version: str, json_out
             )
             try:
                 _write_receipt(directory, payload)
-                imported, skipped, dismissed, rejected = ledger._append_import_records(
-                    target, records, provenance_source="bd-jsonl"
-                )
+                try:
+                    imported, skipped, dismissed, rejected = ledger._append_import_records(
+                        target, records, provenance_source="bd-jsonl"
+                    )
+                except Exception as exc:
+                    payload.update({"status": "failed", "reason": str(exc)})
+                    _write_receipt(directory, payload)
+                    raise
                 payload.update(
                     {
-                        "status": "failed" if rejected else "completed",
+                        "status": "completed",
                         "created": len(imported),
                         "skipped_duplicates": len(skipped),
                         "skipped_dismissed": len(dismissed),
@@ -207,4 +220,4 @@ def import_bd_jsonl(*, target: Path, input_path: Path, bd_version: str, json_out
     else:
         print(f"bd import: created={payload['created']} skipped_duplicates={payload['skipped_duplicates']}")
         print(f"receipt: {receipt_path}")
-    return 2 if payload["rejected"] else 0
+    return 0

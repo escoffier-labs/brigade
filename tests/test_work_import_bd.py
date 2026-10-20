@@ -35,11 +35,13 @@ def test_bd_snapshot_receipts_replay_and_omissions_are_additive(tmp_path, capsys
     assert rc == 0
     assert payload["created"] == 2
     receipt = json.loads(Path(payload["receipt_path"]).read_text())
+    assert receipt["status"] == "completed"
     assert receipt["bd_version"] == "1.3.1"
     assert receipt["input_digest"] == hashlib.sha256(FIXTURE.read_bytes()).hexdigest()
     items = work_cmd.ledger._read_imports(tmp_path)
     assert all(item["status"] == "pending" for item in items)
     assert all(item["metadata"]["provenance"] for item in items)
+    assert all(item["metadata"]["bd"]["input_digest"] == receipt["input_digest"] for item in items)
     assert items[0]["metadata"]["bd"]["row_digest"] == hashlib.sha256(FIXTURE.read_bytes().splitlines()[0]).hexdigest()
     assert items[1]["metadata"]["proposed_edges"] == [{"type": "blocks", "source": "example-1", "target": "example-2"}]
     rc, repeated = run_import(tmp_path, FIXTURE, capsys)
@@ -52,6 +54,94 @@ def test_bd_snapshot_receipts_replay_and_omissions_are_additive(tmp_path, capsys
     assert run_import(tmp_path, smaller, capsys)[0] == 0
     assert len(work_cmd.ledger._read_imports(tmp_path)) == 2
     assert not (tmp_path / ".brigade/work/tasks.json").exists()
+
+
+@pytest.mark.parametrize("dismiss", [False, True], ids=["pending", "dismissed"])
+def test_bd_replay_ignores_operational_row_changes(tmp_path, capsys, dismiss):
+    assert run_import(tmp_path, FIXTURE, capsys)[0] == 0
+    original = work_cmd.ledger._read_imports(tmp_path)
+    if dismiss:
+        for item in original:
+            assert work_cmd.import_dismiss(target=tmp_path, import_id=item["id"], reason="reviewed") == 0
+        capsys.readouterr()
+    rows = [json.loads(line) for line in FIXTURE.read_text().splitlines()]
+    for row in rows:
+        row.update(
+            updated_at="2026-10-20T19:00:00Z",
+            heartbeat_at="2026-10-20T19:00:00Z",
+            lease_expires_at="2026-10-20T19:05:00Z",
+            comment_count=3,
+            dependency_count=5,
+        )
+    path = tmp_path / "fresh.jsonl"
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    rc, repeated = run_import(tmp_path, path, capsys)
+    assert rc == 0
+    assert repeated["created"] == 0
+    assert repeated["skipped_dismissed" if dismiss else "skipped_duplicates"] == 2
+    assert len(work_cmd.ledger._read_imports(tmp_path)) == 2
+    assert repeated["rows"][0]["row_digest"] != original[0]["metadata"]["bd"]["row_digest"]
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    [
+        ("title", "Revised plan"),
+        ("notes", "Additional work"),
+        ("priority", 3),
+        ("acceptance_criteria", "Parser accepts exports"),
+        ("status", "closed"),
+        ("issue_type", "bug"),
+        ("dependencies", [{"issue_id": "example-2", "depends_on_id": "example-1", "type": "parent-child"}]),
+    ],
+)
+def test_bd_changed_proposal_is_an_additive_candidate(tmp_path, capsys, field, value):
+    assert run_import(tmp_path, FIXTURE, capsys)[0] == 0
+    rows = [json.loads(line) for line in FIXTURE.read_text().splitlines()]
+    rows[1][field] = value
+    path = tmp_path / "revised.jsonl"
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    rc, payload = run_import(tmp_path, path, capsys)
+    assert rc == 0
+    assert payload["created"] == 1
+    assert payload["skipped_duplicates"] == 1
+    assert len(work_cmd.ledger._read_imports(tmp_path)) == 3
+
+
+@pytest.mark.parametrize("option", ["--target", "--json"])
+def test_bd_parent_options_require_snapshot_mode(tmp_path, monkeypatch, capsys, option):
+    current = tmp_path / "current"
+    current.mkdir()
+    destination = tmp_path / "destination"
+    destination.mkdir()
+    monkeypatch.chdir(current)
+    args = [option, str(destination)] if option == "--target" else [option]
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["work", "import", *args, "add", "task"])
+    assert exc.value.code == 2
+    assert "require --from-bd-jsonl" in capsys.readouterr().err
+    assert work_cmd.ledger._read_imports(current) == []
+    assert work_cmd.ledger._read_imports(destination) == []
+
+
+@pytest.mark.parametrize("error_type", [work_cmd.ledger._ImportProvenanceError, RuntimeError])
+def test_bd_publication_exception_leaves_failed_receipt(tmp_path, monkeypatch, error_type):
+    from brigade.work_cmd.import_bd import import_bd_jsonl
+
+    def fail_stamp(**kwargs):
+        raise error_type("simulated publication failure")
+
+    monkeypatch.setattr(work_cmd.ledger, "_stamp_import_provenance", fail_stamp)
+    with pytest.raises(error_type, match="simulated publication failure"):
+        import_bd_jsonl(target=tmp_path, input_path=FIXTURE, bd_version="1.3.1")
+    receipts = list((tmp_path / ".brigade/work/import-runs").glob("*/receipt.json"))
+    assert len(receipts) == 1
+    receipt = json.loads(receipts[0].read_text())
+    assert receipt["status"] == "failed"
+    assert receipt["reason"] == "simulated publication failure"
+    assert receipt["bd_version"] == "1.3.1"
+    assert receipt["input_digest"] == hashlib.sha256(FIXTURE.read_bytes()).hexdigest()
+    assert work_cmd.ledger._read_imports(tmp_path) == []
 
 
 @pytest.mark.parametrize(

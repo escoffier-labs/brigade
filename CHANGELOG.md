@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Beads imports deduplicate operational-only row changes, reject misplaced parent options, and record publication exceptions as failed receipts. Content changes remain additive review candidates.
 - Scanner children run with `BRIGADE_NO_UPDATE_CHECK=1`. The detached update refresh a child started outlived its throwaway sandbox and recreated it when writing `update-notify.json`, leaving one `brigade-scanner-child-*` directory in the temp dir per scanner run.
 
 ## [0.30.0] - 2026-10-20

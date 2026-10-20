@@ -212,13 +212,23 @@ The operator supplies the producer version because export rows do not contain
 one. The receipt records the operator's version declaration.
 Each attempt that reaches publication has its own
 `.brigade/work/import-runs/<run-id>/receipt.json`, including duplicate-only
-imports. The input SHA-256 covers exact file bytes. Each row SHA-256 covers its
+imports. Publication exceptions mark the receipt `failed` with the reason before
+propagating the error. Successful publication marks it `completed`.
+The input SHA-256 covers exact file bytes. Each row SHA-256 covers its
 JSON line bytes without the line ending. Both digests and the version accompany
 the locally stamped import provenance in `metadata.bd`.
+Receipt storage requires the inbox gate's descriptor-relative directory
+operations, supplied by POSIX descriptors or Windows handle-relative operations.
+Hosts without either capability fail closed with `bd_import_io_error`.
+The bd adapter was tested on Linux. Native Windows execution was not tested.
 
 The adapter accepts issue rows and their nested dependency records. Unknown
 row kinds or fields fail closed before any inbox items are written. The input
-limit is 4 MiB. Every dependency endpoint must exist in the snapshot. Native
+limit is 4 MiB. Every dependency endpoint must exist in the snapshot. A filtered
+export that omits a prerequisite, or a cross-project dependency such as
+`external:<project>:<id>` whose endpoint is absent, rejects the entire file with
+`unknown_node_ref`. Export the complete local dependency closure and resolve
+external dependencies before importing. Native
 validation rejects unknown edge types, self-edges, and readiness cycles before
 publication. `blocks` and `parent-child` point from the prerequisite or parent
 to the issue. `discovered-from` points from the issue to its origin. Duplicate
@@ -231,7 +241,16 @@ type retained as evidence. Priorities 0 and 1 map to high, 2 to normal, and 3
 and 4 to low. Description, design, notes, and acceptance criteria enter the
 untrusted import surface. Producer metadata cannot supply provenance or
 operational edge authority. Omitted issues never delete existing imports,
-tasks, or edges. Replaying identical rows does not duplicate inbox items.
+tasks, or edges. Deduplication fingerprints cover mapped text, priority,
+acceptance criteria, proposed edges, bd status, and bd issue type. Timestamp,
+heartbeat, lease, count, and producer metadata changes alone do not create new
+items or revive dismissed items. The raw row digest still records those changes.
+A change to fingerprinted content adds a new pending candidate for review,
+including after dismissal. It does not replace the previous item.
+
+Parent `--target` and `--json` options require `--from-bd-jsonl`. For existing
+import subcommands, place their options after the subcommand, for example
+`brigade work import add 'Review parser' --target example-repo`.
 
 The claim result is one six-way run on one machine and one shared server.
 Network partitions, federation, lease expiry, `--any-replica`, Windows,
