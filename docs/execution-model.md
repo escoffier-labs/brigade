@@ -20,8 +20,8 @@ an operator, a runbook, or a host scheduler within the authorized scope.
 | Action | Record |
 | --- | --- |
 | `brigade work verify run` | Receipt, command logs, exit code, and Git state under `.brigade/work/verify-runs/`. |
-| `brigade run` | Run artifacts under `.brigade/runs/`, including `run.json` and lifecycle journals when enabled. |
-| `brigade work claim` | Task state and claim ownership in the work ledger. Fleet claims also use the hub when configured. |
+| `brigade run` | Run artifacts under `.brigade/runs/`, including `run.json` and lifecycle journals when enabled. Run-level repository claims use Fleet Hub when configured. |
+| `brigade work claim` | Task state and claim ownership in the local work ledger under one store lock. Separate clones can each claim their local copy of a task. |
 | `brigade runbook run` | Runbook metadata, step commands, exit codes, and log paths in its run folder. |
 | `brigade memory care scan` | Latest scan and refresh queue under `.brigade/memory-care/`. |
 | `brigade ingest` | Ingested memory or a review-queue entry, with reconciliation records. |
