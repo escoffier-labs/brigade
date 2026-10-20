@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import http.client
+import io
 import json
+import threading
 from pathlib import Path
 
 import pytest
 
-from brigade import memory_mcp_core
+from brigade import mcp_server, memory_mcp_core
 from tests._home import set_home
 
 
@@ -253,3 +256,46 @@ def test_write_handoff_bounds_content_and_lists(stores):
         assert failed is True and key in message
     inbox = repo / ".claude" / "memory-handoffs"
     assert not inbox.exists() or not list(inbox.glob("*.md"))
+
+
+def test_stdio_and_http_answer_identically(stores, monkeypatch: pytest.MonkeyPatch):
+    repo, _ = stores
+    _card(repo, "a.md", "Vlan", "trunk")
+    callbacks = _tools(repo).callbacks()
+    assert callbacks["server_name"] == "brigade-memory"
+    requests = [
+        {"jsonrpc": "2.0", "id": 1, "method": "initialize", "params": {"protocolVersion": "2025-06-18"}},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list"},
+        {
+            "jsonrpc": "2.0",
+            "id": 3,
+            "method": "tools/call",
+            "params": {"name": "search_cards", "arguments": {"query": "vlan"}},
+        },
+        {"jsonrpc": "2.0", "id": 4, "method": "resources/read", "params": {"uri": "card://memory/cards/a.md"}},
+    ]
+    monkeypatch.setattr("sys.stdin", io.StringIO("\n".join(json.dumps(r) for r in requests) + "\n"))
+    out = io.StringIO()
+    monkeypatch.setattr("sys.stdout", out)
+    assert mcp_server.serve_stdio(**callbacks) == 0
+    stdio_replies = [json.loads(line) for line in out.getvalue().splitlines()]
+    token = "t" * 40
+    srv = mcp_server.make_http_server(**callbacks, host="127.0.0.1", port=0, token=token)
+    thread = threading.Thread(target=srv.serve_forever, daemon=True)
+    thread.start()
+    http_replies = []
+    try:
+        for request in requests:
+            conn = http.client.HTTPConnection("127.0.0.1", srv.server_address[1], timeout=10)
+            try:
+                headers = {"Content-Type": "application/json", "Authorization": f"Bearer {token}"}
+                conn.request("POST", "/mcp", body=json.dumps(request).encode(), headers=headers)
+                http_replies.append(json.loads(conn.getresponse().read()))
+            finally:
+                conn.close()
+    finally:
+        srv.shutdown()
+        srv.server_close()
+        thread.join(10)
+    assert len(stdio_replies) == len(requests)
+    assert http_replies == stdio_replies

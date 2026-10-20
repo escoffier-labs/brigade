@@ -56,14 +56,14 @@ Write tools carry MCP `annotations` (`readOnlyHint: false`, `destructiveHint: fa
 ### 4. Transports
 
 - **stdio**: `brigade memory serve-mcp --stdio` (existing command, now backed by the core). Zero dependencies, as today.
-- **HTTP**: `brigade memory serve-mcp --http 127.0.0.1:<port>`. Streamable HTTP on `/mcp`, built on the standard library like the stdio harness. A new `src/brigade/mcp_http.py` holds the HTTP envelope so `mcp_server.py` keeps one job.
-  - Binds only to loopback (`127.0.0.1` or `::1`). Any other address is refused with exit code 2.
-  - Requires `Authorization: Bearer <token>`. The token is generated on first HTTP start into `$BRIGADE_HOME/mcp-http.token` (mode `0600`) unless `--bearer-file` names an existing protected file. The token value is never printed. `--print-token-path` prints its location for gateway setup.
+- **HTTP**: `brigade memory serve-mcp --http [--host 127.0.0.1] [--port 8931]`. Streamable HTTP on `POST /mcp`, with an unauthenticated `GET /healthz` that exposes nothing, built on the standard library in `src/brigade/mcp_server.py` (the transport #1816 added for the memory and skills servers). The memory core passes its callbacks to that transport unchanged.
+  - Binds only to loopback (`127.0.0.1`, `::1`, or `localhost`). Any other address is refused with exit code 2.
+  - Requires `Authorization: Bearer <token>`. The token comes only from the `BRIGADE_MCP_HTTP_TOKEN` environment variable and must be at least 32 characters; it is never a flag and never printed. A missing or short token exits 2 before binding.
   - Validates the `Origin` header when present and rejects non-loopback origins (DNS rebinding protection required by the MCP transport spec).
   - `--target` defaults to auto-detection; an explicit `--target` is always the repo store.
   - Stateless: no session resumption in phase 1. Server-sent streaming is not needed for these tools; responses use single JSON bodies.
 
-Executor v1 uses the stdio command. Executor v2 registers `http://127.0.0.1:<port>/mcp` with the bearer header.
+Executor v1 uses the stdio command. Executor v2 registers `http://127.0.0.1:8931/mcp` (or the chosen port) with the bearer header.
 
 ### 5. Plugin packaging
 
@@ -97,7 +97,7 @@ plugins/brigade/
 - An unknown tool or invalid arguments return an MCP tool error (`isError: true`) with a one-line reason, not a JSON-RPC protocol error.
 - An invalid repo memory-care config degrades to user-store-only results, and `memory_status` reports the config error. This changes today's behavior, where `serve-mcp` exits 2.
 - A write to a store that cannot be created returns a tool error naming the path and the OS error.
-- The HTTP server answers 401 without a valid bearer, 403 for a rejected origin, 404 off `/mcp`, and 405 for methods other than POST.
+- The HTTP server answers 401 without a valid bearer, 403 for a rejected origin, 404 for paths other than `/mcp` and `/healthz`, and 405 for methods other than POST on `/mcp`.
 
 ## Security notes
 

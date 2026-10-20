@@ -216,19 +216,17 @@ def test_card_mcp_stdio_roundtrip(tmp_path: Path, monkeypatch, capsys):
     assert "hello mcp" in responses[2]["result"]["content"][0]["text"]
 
 
-def test_serve_mcp_cli_refuses_non_loopback_and_both_transports(tmp_path: Path, capsys):
-    assert cli.main(["memory", "serve-mcp", "--target", str(tmp_path), "--http", "0.0.0.0:8790"]) == 2
-    assert "127.0.0.1 or [::1]" in capsys.readouterr().err
+def test_serve_mcp_cli_refuses_non_loopback_and_both_transports(tmp_path: Path, monkeypatch, capsys):
+    monkeypatch.setenv("BRIGADE_MCP_HTTP_TOKEN", "t" * 40)
+    assert cli.main(["memory", "serve-mcp", "--target", str(tmp_path), "--http", "--host", "0.0.0.0"]) == 2
+    assert "loopback" in capsys.readouterr().err
+    assert cli.main(["memory", "serve-mcp", "--target", str(tmp_path), "--port", "8931"]) == 2
+    assert "require --http" in capsys.readouterr().err
     with pytest.raises(SystemExit):
-        cli.main(["memory", "serve-mcp", "--stdio", "--http", "127.0.0.1:8790"])
-
-
-def test_serve_mcp_print_token_path_creates_private_token(tmp_path: Path, monkeypatch, capsys):
-    monkeypatch.setenv("BRIGADE_HOME", str(tmp_path / "bh"))
-    assert cli.main(["memory", "serve-mcp", "--print-token-path"]) == 0
-    printed = Path(capsys.readouterr().out.strip())
-    assert printed == (tmp_path / "bh").resolve() / "mcp-http.token"
-    assert printed.stat().st_mode & 0o777 == 0o600
+        cli.main(["memory", "serve-mcp", "--stdio", "--http"])
+    for removed in ("--print-token-path", "--bearer-file"):
+        with pytest.raises(SystemExit):
+            cli.main(["memory", "serve-mcp", removed])
 
 
 def test_serve_mcp_contract_lists_six_tools(tmp_path: Path, monkeypatch, capsys):

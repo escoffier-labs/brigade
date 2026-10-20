@@ -20,7 +20,6 @@ from .wiring import resolve_wired_target
 REPO = "repo"
 USER = "user"
 USER_HANDOFF_INBOX = "memory/handoffs"
-HTTP_TOKEN_NAME = "mcp-http.token"
 
 
 @dataclass(frozen=True)
@@ -40,10 +39,6 @@ class Resolution:
 
 def user_root() -> Path:
     return brigade_home().expanduser().resolve()
-
-
-def http_token_path() -> Path:
-    return user_root() / HTTP_TOKEN_NAME
 
 
 def _repo_root(target: Path | None, cwd: Path) -> tuple[Path | None, bool]:

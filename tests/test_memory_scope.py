@@ -59,7 +59,3 @@ def test_invalid_repo_config_degrades_to_user_store(home: Path, tmp_path: Path):
 def test_target_equal_to_user_root_is_not_duplicated(home: Path):
     res = memory_scope.resolve(target=home / ".brigade")
     assert [s.origin for s in res.stores] == ["user"]
-
-
-def test_http_token_path_lives_under_brigade_home(home: Path):
-    assert memory_scope.http_token_path() == (home / ".brigade").resolve() / "mcp-http.token"

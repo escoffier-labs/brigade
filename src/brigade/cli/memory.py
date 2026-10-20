@@ -308,18 +308,18 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Repo whose cards form the repo store. Default: nearest Brigade-wired repo above the cwd.",
     )
     serve_transport = p_memory_serve_mcp.add_mutually_exclusive_group()
-    serve_transport.add_argument("--stdio", action="store_true", help="Run the JSON-RPC stdio server.")
     serve_transport.add_argument(
-        "--http", metavar="HOST:PORT", default=None, help="Run Streamable HTTP on loopback, e.g. 127.0.0.1:8790."
+        "--stdio", action="store_true", help="Run the JSON-RPC stdio server (otherwise print the contract)."
     )
     serve_transport.add_argument(
-        "--print-token-path",
+        "--http",
         action="store_true",
-        help="Create the HTTP bearer token file if missing and print its path (never the token).",
+        help="Run a loopback Streamable HTTP server at /mcp (token from BRIGADE_MCP_HTTP_TOKEN).",
     )
     p_memory_serve_mcp.add_argument(
-        "--bearer-file", type=Path, default=None, help="Existing mode-0600 bearer token file for --http."
+        "--host", default=None, help="With --http: loopback address to bind (127.0.0.1, ::1, or localhost)."
     )
+    p_memory_serve_mcp.add_argument("--port", type=int, default=None, help="With --http: port to bind (default 8931).")
     p_memory_serve_mcp.add_argument(
         "--inbox", default="codex", help="Handoff inbox alias or path for write_handoff in the repo store."
     )
@@ -515,8 +515,8 @@ def dispatch(args) -> int:
             target=args.target,
             stdio=args.stdio,
             http=args.http,
-            bearer_file=args.bearer_file,
-            print_token_path=args.print_token_path,
+            host=args.host,
+            port=args.port,
             inbox=args.inbox,
             json_output=args.json,
         )

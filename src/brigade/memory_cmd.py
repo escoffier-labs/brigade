@@ -1888,44 +1888,34 @@ def recall(*, target: Path, cwd: Path, limit: int = 5, json_output: bool = False
 # --- memory MCP server (stdio or loopback HTTP); the tool contract lives in memory_mcp_core ---
 
 
+MCP_HTTP_DEFAULT_PORT = 8931
+
+
 def serve_mcp(
     *,
     target: Path | None = None,
     stdio: bool = False,
-    http: str | None = None,
-    bearer_file: Path | None = None,
-    print_token_path: bool = False,
+    http: bool = False,
+    host: str | None = None,
+    port: int | None = None,
     inbox: str = "codex",
     json_output: bool = False,
 ) -> int:
-    from . import mcp_http, memory_mcp_core, memory_scope
+    from . import memory_mcp_core
 
-    if print_token_path:
-        try:
-            if bearer_file is not None:
-                mcp_http.read_token(bearer_file)
-                token_path = bearer_file
-            else:
-                token_path = mcp_http.ensure_token(memory_scope.http_token_path())
-        except (OSError, ValueError) as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 2
-        print(token_path)
-        return 0
+    if stdio and http:
+        print("error: --stdio and --http are mutually exclusive", file=sys.stderr)
+        return 2
+    if not http and (host is not None or port is not None):
+        print("error: --host and --port require --http", file=sys.stderr)
+        return 2
     tools = memory_mcp_core.MemoryTools(target=target, inbox=inbox)
     if stdio:
-        return mcp_server.serve_stdio_handlers(tools.handlers())
-    if http is not None:
-        try:
-            host, port = mcp_http.parse_bind(http)
-            token_file = (
-                bearer_file if bearer_file is not None else mcp_http.ensure_token(memory_scope.http_token_path())
-            )
-            token = mcp_http.read_token(token_file)
-        except (OSError, ValueError) as exc:
-            print(f"error: {exc}", file=sys.stderr)
-            return 2
-        return mcp_http.serve_http(tools.handlers(), host=host, port=port, token=token)
+        return mcp_server.serve_stdio(**tools.callbacks())
+    if http:
+        return mcp_server.run_http_from_env(
+            **tools.callbacks(), host=host, port=port, default_port=MCP_HTTP_DEFAULT_PORT
+        )
     resolution = tools.resolution()
     if resolution.repo_config_error:
         print(f"error: invalid memory-care config: {resolution.repo_config_error}", file=sys.stderr)
@@ -1947,6 +1937,9 @@ def serve_mcp(
         print(f"store: {store['origin']} {store['root']}")
     print(f"tools: {', '.join(tool_names)}")
     print(f"registered_resources: {payload['registered_resources']}")
-    print("run over stdio with: brigade memory serve-mcp --stdio")
-    print("or loopback HTTP with: brigade memory serve-mcp --http 127.0.0.1:8790")
+    print("run the stdio server with: brigade memory serve-mcp --stdio")
+    print(
+        "or serve over loopback HTTP with: brigade memory serve-mcp --http "
+        f"(token from {mcp_server.HTTP_TOKEN_ENV}, default port {MCP_HTTP_DEFAULT_PORT})"
+    )
     return 0

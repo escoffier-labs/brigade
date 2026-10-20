@@ -9,7 +9,7 @@ The Brigade plugin gives Claude Code and Codex working agent memory in the sessi
 /plugin install brigade@brigade
 ```
 
-The plugin launches the memory server through npm, so it requires Brigade 0.30.0 or later on npm. If you already have the CLI from pipx, change the `command` in the plugin's MCP config to `brigade` and drop the first two arguments.
+The plugin launches the memory server through npm, so it requires Brigade 0.31.0 or later on npm. If you already have the CLI from pipx, change the `command` in the plugin's MCP config to `brigade` and drop the first two arguments.
 
 ## Install in Codex
 
@@ -54,16 +54,16 @@ The user store is `$BRIGADE_HOME/memory/cards`, with handoffs in `$BRIGADE_HOME/
 
 ## Loopback HTTP for MCP gateways
 
-Print the path of the bearer token file, then start the server:
+Put a bearer token of at least 32 characters in `BRIGADE_MCP_HTTP_TOKEN`, then start the server:
 
 ```
-brigade memory serve-mcp --print-token-path
-brigade memory serve-mcp --http 127.0.0.1:8790
+export BRIGADE_MCP_HTTP_TOKEN="$(python3 -c 'import secrets; print(secrets.token_urlsafe(32))')"
+brigade memory serve-mcp --http [--host 127.0.0.1] [--port 8931]
 ```
 
-Register `http://127.0.0.1:8790/mcp` with the header `Authorization: Bearer <contents of the token file>`. The token is generated on first start with mode 0600 and is never printed. The file must be a regular file owned by you with no group or other permission bits.
+The token is read only from the environment, never from a flag, so it stays out of process listings and shell history. The default host is `127.0.0.1` and the default port is 8931. Register `http://127.0.0.1:8931/mcp` with the header `Authorization: Bearer <token>`. MCP requests go to `POST /mcp`. `GET /healthz` answers without a token and reveals nothing about the stores.
 
-Executor v1 can use the stdio command instead. Executor v2 needs the HTTP mode. Binding off loopback is refused. The server checks the Host and Origin headers, answers 401 without a valid bearer, and drops a connection that stalls for 10 seconds.
+Executor v1 can use the stdio command instead. Executor v2 needs the HTTP mode. Binding off loopback (`127.0.0.1`, `::1`, or `localhost`) is refused with exit code 2, as is a missing or short token. The server checks the Host and Origin headers, answers 401 without a valid bearer, and drops a connection that stalls for 10 seconds.
 
 ## Turn on the full work loop
 

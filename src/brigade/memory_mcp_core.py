@@ -13,7 +13,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
-from . import mcp_server, memory_cmd, memory_scope
+from . import memory_cmd, memory_scope
 from .card_fingerprint import read_text_nofollow
 from .handoff_cmd import drafts as handoff_drafts
 from .handoff_cmd.models import DEFAULT_DRAFT_DOCUMENT
@@ -120,21 +120,48 @@ def tool_specs() -> list[dict[str, Any]]:
     return [
         {
             "name": "list_cards",
-            "description": "List memory cards from the repo and user stores, labeled by origin.",
+            "description": (
+                "List every memory card in the repo and user stores, with each card's store-relative path, "
+                "card:// URI, origin (repo or user), and origin-qualified ref. Use search_cards to find cards "
+                "by topic."
+            ),
             "inputSchema": {"type": "object", "properties": {"scope": scope}},
             "annotations": _READ,
         },
         {
             "name": "get_card",
-            "description": "Read one memory card. Accepts repo:<path>, user:<path>, card://<path>, "
-            "or a bare path (repo store first, then user).",
-            "inputSchema": {"type": "object", "properties": {"path": {"type": "string"}}, "required": ["path"]},
+            "description": "Read one memory card's full markdown, frontmatter included.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "path": {
+                        "type": "string",
+                        "description": (
+                            "A ref such as repo:memory/cards/release-process.md or user:memory/cards/x.md, a "
+                            "card:// URI from list_cards or search_cards, or a bare store-relative path, which "
+                            "is looked up in the repo store first and then the user store."
+                        ),
+                    }
+                },
+                "required": ["path"],
+            },
             "annotations": _READ,
         },
         {
             "name": "search_cards",
-            "description": "Keyword-search memory cards across both stores; repo matches rank first on ties.",
-            "inputSchema": {"type": "object", "properties": {"query": {"type": "string"}}, "required": ["query"]},
+            "description": (
+                "Keyword-search memory cards across the repo and user stores. A term in a card's title, tags, "
+                "or summary outranks one found only in the body, and repo matches rank first on ties. Returns "
+                f"up to {SEARCH_LIMIT} matches with path, title, tags, summary, score, origin, and ref; read "
+                "one with get_card."
+            ),
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "query": {"type": "string", "description": "Space-separated keywords, case-insensitive."}
+                },
+                "required": ["query"],
+            },
             "annotations": _READ,
         },
         {
@@ -183,14 +210,15 @@ class MemoryTools:
     def resolution(self) -> Resolution:
         return memory_scope.resolve(target=self._target, cwd=self._cwd)
 
-    def handlers(self) -> mcp_server.Handlers:
-        return mcp_server.Handlers(
-            server_name=SERVER_NAME,
-            list_resources=self.resources,
-            read_resource=self.read_resource,
-            list_tools=tool_specs,
-            call_tool=self.call,
-        )
+    def callbacks(self) -> dict[str, Any]:
+        """Keyword arguments for mcp_server.serve_stdio and run_http_from_env."""
+        return {
+            "server_name": SERVER_NAME,
+            "list_resources": self.resources,
+            "read_resource": self.read_resource,
+            "list_tools": tool_specs,
+            "call_tool": self.call,
+        }
 
     def read_card(self, ref: str) -> tuple[str | None, str | None]:
         origin, rel = split_ref(ref)
