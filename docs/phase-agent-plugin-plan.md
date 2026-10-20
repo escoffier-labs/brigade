@@ -1735,7 +1735,7 @@ def serve_mcp(
 - Create: `scripts/sync_plugin_skills.py`
 - Create (generated): `plugins/brigade/skills/brigade-work/SKILL.md`
 
-- [ ] Create `scripts/sync_plugin_skills.py`:
+- [x] Create `scripts/sync_plugin_skills.py`:
 
 ```python
 #!/usr/bin/env python3
@@ -1782,8 +1782,8 @@ if __name__ == "__main__":
     raise SystemExit(main())
 ```
 
-- [ ] Generate: `PY scripts/sync_plugin_skills.py --write`. Expect `wrote plugins/brigade/skills/brigade-work/SKILL.md`. Then `PY scripts/sync_plugin_skills.py`, expect exit 0 and no output.
-- [ ] Commit: `git add scripts/sync_plugin_skills.py plugins/brigade/skills/brigade-work/SKILL.md && git commit -m "build(plugin): sync the brigade-work skill into the plugin"`
+- [x] Generate: `PY scripts/sync_plugin_skills.py --write`. Expect `wrote plugins/brigade/skills/brigade-work/SKILL.md`. Then `PY scripts/sync_plugin_skills.py`, expect exit 0 and no output.
+- [x] Commit: `git add scripts/sync_plugin_skills.py plugins/brigade/skills/brigade-work/SKILL.md && git commit -m "build(plugin): sync the brigade-work skill into the plugin"`
 
 ---
 
