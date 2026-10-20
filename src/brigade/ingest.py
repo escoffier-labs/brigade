@@ -809,7 +809,8 @@ def _is_tracked(path: Path, tracked: tuple[set[str], set[tuple[int, int]]] | Non
     if tracked is None:
         return True
     names, identities = tracked
-    if path.name in names:
+    # Protect case aliases even when their identities could not be read.
+    if path.name.casefold() in {name.casefold() for name in names}:
         return True
     try:
         st = path.stat()

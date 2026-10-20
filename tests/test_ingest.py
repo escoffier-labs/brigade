@@ -1898,25 +1898,32 @@ def test_archive_refuses_tracked_handoff_after_transient_identity_error(tmp_path
     assert "identity lookup failed" in stderr
 
 
-def test_archive_refuses_indexed_name_deleted_and_recreated_during_check(tmp_path: Path, monkeypatch):
+@pytest.mark.parametrize("indexed_name", ["tracked.md", "Tracked.md"])
+def test_archive_refuses_indexed_name_deleted_and_recreated_during_check(tmp_path: Path, monkeypatch, indexed_name):
     inbox = tmp_path / "inbox"
     inbox.mkdir()
     _git(tmp_path, "init", "-q")
-    handoff = _write_handoff(inbox, "tracked.md", _PLAIN_HANDOFF)
-    original = handoff.read_bytes()
-    _git(tmp_path, "add", "--", "inbox/tracked.md")
+    indexed = _write_handoff(inbox, indexed_name, _PLAIN_HANDOFF)
+    original = indexed.read_bytes()
+    _git(tmp_path, "add", "--", f"inbox/{indexed_name}")
+    handoff = inbox / "tracked.md"
+    if indexed != handoff:
+        indexed.rename(handoff)
+    index_before = _git(tmp_path, "ls-files", "--stage", "-z").stdout
+    status_before = _git(tmp_path, "status", "--porcelain").stdout
     stat = Path.stat
     injected = False
 
     def delete_and_recreate_once(path, *args, **kwargs):
         nonlocal injected
-        if path == handoff and not injected:
+        if path == indexed and not injected:
             injected = True
-            path.unlink()
+            handoff.unlink()
             try:
-                return stat(path, *args, **kwargs)
+                # Model the indexed spelling resolving to the case alias.
+                return stat(handoff, *args, **kwargs)
             finally:
-                path.write_bytes(original)
+                handoff.write_bytes(original)
         return stat(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "stat", delete_and_recreate_once)
@@ -1925,7 +1932,8 @@ def test_archive_refuses_indexed_name_deleted_and_recreated_during_check(tmp_pat
 
     assert injected
     assert handoff.read_bytes() == original
-    assert _git(tmp_path, "status", "--porcelain").stdout == "A  inbox/tracked.md\n"
+    assert _git(tmp_path, "ls-files", "--stage", "-z").stdout == index_before
+    assert _git(tmp_path, "status", "--porcelain").stdout == status_before
     assert not (inbox / "processed").exists()
 
 
