@@ -122,6 +122,10 @@ func Run(args []string, out, errw io.Writer) int {
 	if cmd == nil {
 		return fatalf(errw, "unknown command: %s", args[0])
 	}
+	if wantsHelp(args[1:]) {
+		writeCommandHelp(out, cmd, args[1:])
+		return 0
+	}
 	return cmd.run(args[1:], out, errw)
 }
 

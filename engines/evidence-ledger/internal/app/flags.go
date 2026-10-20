@@ -11,7 +11,11 @@ func splitFlags(args []string, valueFlags, boolFlags map[string]bool) (map[strin
 	var rest []string
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
-		if !strings.HasPrefix(arg, "--") || arg == "--" {
+		if arg == "--" {
+			rest = append(rest, args[i+1:]...)
+			break
+		}
+		if !strings.HasPrefix(arg, "--") {
 			rest = append(rest, arg)
 			continue
 		}
@@ -57,7 +61,11 @@ func splitExactBoolPassthrough(args []string, names ...string) (map[string]bool,
 	}
 	bools := map[string]bool{}
 	pass := make([]string, 0, len(args))
-	for _, arg := range args {
+	for i, arg := range args {
+		if arg == "--" {
+			pass = append(pass, args[i:]...)
+			break
+		}
 		name, ok := exactLongFlagName(arg)
 		if ok && known[name] {
 			bools[name] = true
@@ -99,6 +107,9 @@ func stripBoolFlag(args []string, name string) []string {
 func hasBoolFlag(args []string, name string) bool {
 	long := "--" + name
 	for _, arg := range args {
+		if arg == "--" {
+			return false
+		}
 		if arg == long {
 			return true
 		}
@@ -110,6 +121,9 @@ func hasFlag(args []string, name string) bool {
 	long := "--" + name
 	prefix := long + "="
 	for _, arg := range args {
+		if arg == "--" {
+			return false
+		}
 		if arg == long || strings.HasPrefix(arg, prefix) {
 			return true
 		}
