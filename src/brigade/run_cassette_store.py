@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import stat
+import sys
 import time
 from contextlib import contextmanager
 from pathlib import Path
@@ -90,8 +91,7 @@ def publish(parent: int, data: bytes) -> str:
         finally:
             os.close(descriptor)
         try:
-            # link_child uses a no-replace rename on Windows.
-            dirfd.link_child(parent, temporary, name)
+            dirfd.replace_children(parent, temporary, name, replace=False)
         except FileExistsError:
             if read(parent, name) != data:
                 raise CassetteError("cassette content address collision") from None
@@ -104,17 +104,21 @@ def publish(parent: int, data: bytes) -> str:
     return digest
 
 
-def inventory(parent: int) -> list[tuple[str, os.stat_result]]:
+def inventory(parent: int, *, private_only: bool = False) -> list[tuple[str, os.stat_result]]:
     result = []
     names = dirfd.child_names(parent, MAX_FILES + 1)
     if len(names) > MAX_FILES:
         raise CassetteError("cassette inventory exceeds file cap")
     for name in names:
+        if private_only and (name in {".stopped", ".retained"} or name.startswith(".cassette-")):
+            continue
         try:
             info = dirfd.stat_child(parent, name)
         except FileNotFoundError:
             continue
         if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            if private_only:
+                continue
             raise CassetteError("cassette inventory contains unsafe entries")
         result.append((name, info))
     return result
@@ -125,11 +129,9 @@ def purge(run_dir: Path, *, private_only: bool = False) -> int:
     try:
         with directory(run_dir) as parent:
             removed = 0
-            for name, _ in inventory(parent):
+            for name, _ in inventory(parent, private_only=private_only):
                 try:
                     if private_only:
-                        if name == ".stopped":
-                            continue
                         obj = json.loads(read(parent, name))
                         if not isinstance(obj, dict) or obj.get("privacy_class") != "private":
                             continue
@@ -138,6 +140,10 @@ def purge(run_dir: Path, *, private_only: bool = False) -> int:
                     # Retention may concurrently delete another inventoried body.
                     # Keep deleting the remaining entries rather than returning early.
                     continue
+                except (ValueError, CassetteError):
+                    if private_only:
+                        continue
+                    raise
                 removed += 1
             dirfd.fsync_directory(parent)
             return removed
@@ -146,7 +152,7 @@ def purge(run_dir: Path, *, private_only: bool = False) -> int:
 
 
 def _pinned_runs(workspace: Path) -> set[str] | None:
-    """Uncertain or oversized outcome evidence conservatively pins everything."""
+    """Stream outcome references, conservatively pinning on unreadable rows."""
     path = workspace / "memory" / "outcome" / "records.jsonl"
     try:
         descriptor = dirfd.open_file_nofollow(path, os.O_RDONLY)
@@ -156,22 +162,23 @@ def _pinned_runs(workspace: Path) -> set[str] | None:
         return None
     try:
         info = os.fstat(descriptor)
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 8 * 1024 * 1024:
-            return None
-        with os.fdopen(descriptor, "rb", closefd=False) as handle:
-            raw = handle.read(8 * 1024 * 1024 + 1)
-        if len(raw) > 8 * 1024 * 1024:
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
             return None
         pinned = set()
-        for line in raw.splitlines():
-            row = json.loads(line)
-            if not isinstance(row, dict):
-                return None
-            reference = row.get("evidence_ref")
-            if isinstance(reference, str):
-                # Outcome capture stores the run.json path, including custom runs roots.
-                source = Path(reference)
-                pinned.add(source.parent.name if source.name == "run.json" else source.name)
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            while line := handle.readline(8 * 1024 * 1024 + 1):
+                if len(line) > 8 * 1024 * 1024:
+                    return None
+                if not line.strip():
+                    continue
+                row = json.loads(line)
+                if not isinstance(row, dict):
+                    return None
+                reference = row.get("evidence_ref")
+                if isinstance(reference, str):
+                    # Outcome capture stores the run.json path, including custom runs roots.
+                    source = Path(reference)
+                    pinned.add(source.parent.name if source.name == "run.json" else source.name)
         return pinned
     except (OSError, ValueError):
         return None
@@ -183,12 +190,14 @@ def retain_private(workspace: Path, runs_root: Path, *, current: Path) -> int:
     """Keep newest N runs and at most D days, except outcome-pinned bodies."""
     pinned = _pinned_runs(workspace)
     if pinned is None:
+        print("cassette retention skipped: outcome evidence unreadable or row exceeds 8 MiB", file=sys.stderr)
         return 0
     parent = dirfd.open_directory_chain(Path(os.path.abspath(runs_root)))
     try:
         runs = []
         names = dirfd.child_names(parent, 10001)
         if len(names) > 10000:
+            print("cassette retention skipped: runs inventory exceeds 10000 entries", file=sys.stderr)
             return 0
         for name in names:
             try:
@@ -209,3 +218,21 @@ def retain_private(workspace: Path, runs_root: Path, *, current: Path) -> int:
         if index >= KEEP_RUNS or modified < cutoff:
             removed += purge(path, private_only=True)
     return removed
+
+
+def retain_private_once(workspace: Path, current: Path) -> None:
+    """Claim one scan per run, isolating maintenance failures from recording."""
+    try:
+        with directory(current) as parent:
+            try:
+                descriptor = dirfd.open_child_file(parent, ".retained", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:
+                return
+            try:
+                os.fsync(descriptor)
+            finally:
+                os.close(descriptor)
+            dirfd.fsync_directory(parent)
+        retain_private(workspace, current.parent, current=current)
+    except Exception:
+        print("cassette retention skipped: storage unavailable", file=sys.stderr)

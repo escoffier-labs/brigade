@@ -503,10 +503,15 @@ Set `"run": {"record": "auto"}` in `.brigade/config.json` for the default policy
 `metadata-only` to omit private result bodies, or `off` to disable recording.
 Keys use seat identity and the coordinator-owned prompt fingerprint. Injected
 brief changes affect only the exact-prompt digest. Prompt text is never stored.
+The key uses the configured seat transport and Codex transport policy, including
+when a worker falls back to exec. Scrubbed metadata reports the observed transport.
 Private bodies contain the terminal result after retries and fallback, already
 persisted in `worker-results.json`, with resolved `_REF` secrets scrubbed again
 at write time. Literal env overrides remain intact. Scrubbed metadata and
 app-server notification projections contain no raw worker stream.
+Secrets that collide with structural field names stop recording with a bounded
+diagnostic instead of rewriting those names. Invalid recording configuration
+skips recording without creating cassette files.
 Recording adds references only to an existing lifecycle journal. Runs without
 lifecycle journaling keep cassette sidecars without activating the journal.
 Remote and unsupported transports carry `not-observed` markers.
@@ -515,8 +520,14 @@ synthesis calls outside worker dispatch are not recorded.
 
 Private retention keeps the newest 50 runs for at most 30 days. Outcome ledger
 references to a run's `run.json` pin its bodies. Unreadable outcome evidence
-prevents pruning. Entry and run caps are 4 MiB and 32 MiB. A measured local run
-had one 31,519-byte worker result. The two-worker journal regression measured
+prevents pruning. Retention streams the outcome ledger and ignores blank lines.
+It scans once per run after the first recorded dispatch. Unreadable evidence,
+ledger rows over 8 MiB, or a runs inventory over 10,000 entries skip pruning
+with a bounded stderr diagnostic. Retention errors leave recording active.
+Crash temp files and unsafe or unclassifiable files in old runs are left alone.
+Entry and run caps are 4 MiB and 32 MiB. Raw app-server streams use the worker
+event scrubber's input bound before the entry cap is applied to the projection.
+A measured local run had one 31,519-byte worker result. The two-worker journal regression measured
 1,628 bytes, or 814 bytes and one cassette reference event per dispatch. It
 enforces less than 1 KiB per dispatch,
 against the journal's 2048-event and 8 MiB limits. Recording reserves eight

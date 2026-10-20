@@ -776,9 +776,8 @@ def dispatch(
         started = time.monotonic()
         effective_read_only = read_only if sandbox_read_only is None else sandbox_read_only
         approval_correlation_marker = secrets.token_urlsafe(32)
-        # Set by the most recent invoke() and read by the finish() that maps it,
-        # so a delegated attempt's routing/handoff facts reach its own receipt
-        # and a following local attempt does not inherit them.
+        # Set by invoke() and read by finish() so delegated routing facts reach
+        # their receipt and later local attempts do not inherit them.
         remote_disposition: list[dict[str, Any] | None] = [None]
         sent_prompt = [prompt]
 
@@ -1307,6 +1306,7 @@ def dispatch(
             resolve(),
             run_dir=output_dir,
             cwd=cwd,
+            codex_transport=roster.codex_transport,
             agent=recording_agent,
             prompt=sent_prompt[0],
             read_only=read_only,

@@ -99,7 +99,9 @@ def _scrub(value: Any, secrets: tuple[str, ...]) -> Any:
             value = value.replace(secret, "[redacted]")
         return value
     if isinstance(value, dict):
-        return {_scrub(k, secrets): _scrub(v, secrets) for k, v in value.items()}
+        if any(secret in key for key in value for secret in secrets):
+            raise store.CassetteError("cassette secret collides with a structural key")
+        return {k: _scrub(v, secrets) for k, v in value.items()}
     if isinstance(value, list):
         return [_scrub(v, secrets) for v in value]
     return value
@@ -114,7 +116,9 @@ def _projection(run_dir: Path, agent: Agent) -> dict[str, Any] | None:
         return None
     try:
         try:
-            raw = store.read(parent, f"{_slug(agent.name)}.jsonl", private=False)
+            raw = store.read(
+                parent, f"{_slug(agent.name)}.jsonl", private=False, limit=worker_events.MAX_LINE_BYTES * 4096
+            )
         except FileNotFoundError:
             return None
     finally:
@@ -184,7 +188,7 @@ def _stop(run_dir: Path) -> None:
             dirfd.fsync_directory(parent)
             if fits and journaled:
                 _append_reference(run_dir, _reference(data, "public-metadata"))
-    except (OSError, ValueError, RuntimeError):
+    except Exception:
         # A full or unavailable journal cannot carry even a stop reference.
         pass
 
@@ -200,10 +204,19 @@ def record_result(
     read_only: bool,
     sandbox: str | None,
     remote: bool = False,
+    codex_transport: str = "exec",
 ) -> dict[str, Any] | None:
     """Best-effort recording. Failure stops recording, never the worker run."""
     try:
-        return _record_result(
+        cfg = config.load_config(cwd)
+    except Exception:
+        print("cassette recording skipped: configuration unavailable", file=sys.stderr)
+        return None
+    mode = cfg.run_record if cfg is not None else "auto"
+    if mode == "off":
+        return None
+    try:
+        ref = _record_result(
             run_dir=run_dir,
             cwd=cwd,
             agent=agent,
@@ -213,10 +226,15 @@ def record_result(
             read_only=read_only,
             sandbox=sandbox,
             remote=remote,
+            mode=mode,
+            codex_transport=codex_transport,
         )
-    except (OSError, ValueError, RuntimeError, TypeError):
+    except Exception:
         _stop(run_dir)
         return None
+    if ref is not None:
+        store.retain_private_once(cwd, run_dir)
+    return ref
 
 
 def _record_result(
@@ -230,13 +248,11 @@ def _record_result(
     read_only: bool,
     sandbox: str | None,
     remote: bool,
+    mode: str,
+    codex_transport: str,
 ) -> dict[str, Any] | None:
     from . import run_lifecycle, run_receipts
 
-    cfg = config.load_config(cwd)
-    mode = cfg.run_record if cfg is not None else "auto"
-    if mode == "off":
-        return None
     try:
         with store.directory(run_dir) as parent:
             if any(name == ".stopped" for name, _ in store.inventory(parent)):
@@ -265,7 +281,8 @@ def _record_result(
             "model": agent.model,
             "reasoning": agent.reasoning,
             "sandbox": sandbox,
-            "transport": transport,
+            "transport": agent.transport,
+            **({"codex_transport": codex_transport} if agent.cli == "codex" else {}),
         },
         "coordinator_prompt_fingerprint": fingerprint,
     }
@@ -286,6 +303,7 @@ def _record_result(
         "key": key,
         "status": "observed" if observed else "not-observed",
         "reason": "local-result" if observed else "remote" if remote else "unsupported-or-unobserved",
+        "observed_transport": _scrub(transport, secrets) if transport in OBSERVED_TRANSPORTS else "unsupported",
     }
     if body is not None:
         metadata["result_sha256"] = hashlib.sha256(store.encode(body)).hexdigest()
@@ -364,7 +382,6 @@ def _record_result(
         ref = _reference(data, "public-metadata")
         if journaled:
             _append_reference(run_dir, ref)
-    store.retain_private(cwd, run_dir.parent, current=run_dir)
     return ref
 
 
@@ -377,6 +394,7 @@ def record_dispatch_result(
     prompt: str,
     read_only: bool,
     sandbox: str | None,
+    codex_transport: str = "exec",
 ) -> WorkerResult:
     from .run_receipts import agent_result_from_worker
 
@@ -391,6 +409,7 @@ def record_dispatch_result(
             read_only=read_only,
             sandbox=sandbox,
             remote=result.remote is not None,
+            codex_transport=codex_transport,
         )
     return result
 
