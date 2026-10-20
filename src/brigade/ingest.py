@@ -716,14 +716,43 @@ def _git_tracked_names(directory: Path) -> set[str] | None:
     return {entry for entry in entries if entry and "/" not in entry}
 
 
+def _git_tracked_files(directory: Path) -> set[tuple[int, int]] | None:
+    """Return (st_dev, st_ino) for each tracked file directly in `directory`.
+
+    Matching by identity rather than spelling keeps a case-only rename on a
+    case-insensitive filesystem tracked. None means the check failed.
+    """
+    names = _git_tracked_names(directory)
+    if names is None:
+        return None
+    identities: set[tuple[int, int]] = set()
+    for name in names:
+        try:
+            st = (directory / name).stat()
+        except OSError:
+            continue
+        identities.add((st.st_dev, st.st_ino))
+    return identities
+
+
+def _is_tracked(path: Path, tracked: set[tuple[int, int]] | None) -> bool:
+    if tracked is None:
+        return True
+    try:
+        st = path.stat()
+    except OSError:
+        return True
+    return (st.st_dev, st.st_ino) in tracked
+
+
 def _list_handoffs(handoffs_dir: Path) -> tuple[List[Path], List[Path]]:
     """Split the inbox's handoffs into (ingestable, git-tracked)."""
-    tracked_names = _git_tracked_names(handoffs_dir)
+    tracked_files = _git_tracked_files(handoffs_dir)
     out: List[Path] = []
     tracked: List[Path] = []
     for p in sorted(handoffs_dir.iterdir()):
         if p.is_file() and p.suffix == ".md" and p.name != "TEMPLATE.md":
-            if tracked_names is None or p.name in tracked_names:
+            if _is_tracked(p, tracked_files):
                 tracked.append(p)
             else:
                 out.append(p)
@@ -732,8 +761,7 @@ def _list_handoffs(handoffs_dir: Path) -> tuple[List[Path], List[Path]]:
 
 def _archive(src: Path, processed_dir: Path) -> None:
     # Re-check right before the move: a file tracked after listing must stay.
-    tracked_names = _git_tracked_names(src.parent)
-    if tracked_names is None or src.name in tracked_names:
+    if _is_tracked(src, _git_tracked_files(src.parent)):
         raise TrackedHandoffError(f"refusing to archive git-tracked handoff {src}")
     processed_dir.mkdir(parents=True, exist_ok=True)
     dest = processed_dir / src.name

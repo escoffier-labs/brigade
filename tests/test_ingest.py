@@ -1584,3 +1584,20 @@ def test_archive_ignores_git_ceiling_directories(tmp_path: Path, monkeypatch):
     with pytest.raises(ingest_mod.TrackedHandoffError):
         ingest_mod._archive(tracked, inbox / "processed")
     assert tracked.is_file()
+
+
+def test_tracked_check_matches_by_file_identity_not_spelling(tmp_path: Path, monkeypatch):
+    # A hardlink stands in for a case-insensitive filesystem, where the index
+    # spelling `Tracked.md` and the listed `tracked.md` name the same file.
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    handoff = _write_handoff(inbox, "tracked.md", _PLAIN_HANDOFF)
+    os.link(handoff, inbox / "Tracked.md")
+    monkeypatch.setattr(ingest_mod, "_git_tracked_names", lambda directory: {"Tracked.md"})
+
+    handoffs, tracked = ingest_mod._list_handoffs(inbox)
+    assert handoff in tracked
+    assert handoff not in handoffs
+    with pytest.raises(ingest_mod.TrackedHandoffError):
+        ingest_mod._archive(handoff, inbox / "processed")
+    assert handoff.is_file()
