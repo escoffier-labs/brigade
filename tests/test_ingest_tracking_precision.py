@@ -101,3 +101,94 @@ def test_archive_refuses_case_alias_recreated_after_identity_read(
     assert not (inbox / "processed").exists()
     assert _git(tmp_path, "ls-files", "--stage", "-z") == index_before
     assert _git(tmp_path, "status", "--porcelain", "--", "inbox") == status_before
+
+
+@pytest.mark.parametrize("initial_link", [False, True], ids=["directory", "symlink"])
+@pytest.mark.parametrize("mutation", ["indexed-identity", "classification", "enumeration", "no-alias"])
+def test_parent_replacement_refuses_tracked_handoff(tmp_path: Path, monkeypatch, initial_link, mutation):
+    _git(tmp_path, "init", "-q")
+    original = tmp_path / ("first" if initial_link else "inbox")
+    original.mkdir()
+    probe = tmp_path / "directory-link"
+    try:
+        probe.symlink_to(original, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"directory symlinks unavailable: {exc}")
+    probe.unlink()
+    replacement = tmp_path / "second"
+    replacement.mkdir()
+    handoff_name = "unrelated.md" if mutation == "no-alias" else "tracked.md"
+    for name in ("Tracked.md", handoff_name):
+        if name == handoff_name and (original / name).exists():
+            pytest.skip("filesystem aliases these case variants")
+        (original / name).write_text(name + "\n", encoding="utf-8")
+        # Keep file identities stable across replacement: only the parent
+        # distinguishes these entries' different Git index memberships.
+        os.link(original / name, replacement / name)
+    _git(tmp_path, "add", "--", f"{original.name}/Tracked.md", f"second/{handoff_name}")
+    index_before = _git(tmp_path, "ls-files", "--stage", "-z")
+    inbox = tmp_path / "inbox"
+    if initial_link:
+        inbox.symlink_to(original, target_is_directory=True)
+    handoff = inbox / handoff_name
+    original_bytes = handoff.read_bytes()
+    lstat = Path.lstat
+    iterdir = Path.iterdir
+    scandir = os.scandir
+    injected = False
+
+    def replace_parent():
+        nonlocal injected
+        injected = True
+        if initial_link:
+            inbox.unlink()
+        else:
+            inbox.rename(tmp_path / "original-inbox")
+        inbox.symlink_to(replacement, target_is_directory=True)
+
+    def replace_during_identity(path, *args, **kwargs):
+        if mutation == "indexed-identity" and path == inbox / "Tracked.md" and not injected:
+            replace_parent()
+        return lstat(path, *args, **kwargs)
+
+    def replace_before_classification(path):
+        if mutation in {"classification", "no-alias"} and path == inbox and not injected:
+            replace_parent()
+        return iterdir(path)
+
+    class ReplacingEntries:
+        def __enter__(self):
+            self.inner = scandir(inbox)
+
+            def entries():
+                yield from self.inner
+                # Mutation before the scan completes must invalidate even
+                # identical entry observations made in the original parent.
+                replace_parent()
+
+            return entries()
+
+        def __exit__(self, *args):
+            self.inner.close()
+
+    def replace_during_enumeration(path):
+        if mutation == "enumeration" and Path(path) == inbox and not injected:
+            return ReplacingEntries()
+        return scandir(path)
+
+    monkeypatch.setattr(Path, "lstat", replace_during_identity)
+    monkeypatch.setattr(Path, "iterdir", replace_before_classification)
+    monkeypatch.setattr(os, "scandir", replace_during_enumeration)
+    if mutation in {"classification", "no-alias"}:
+        handoffs, tracked = ingest._list_handoffs(inbox)
+        assert injected
+        assert handoff in tracked
+        assert handoff not in handoffs
+    else:
+        with pytest.raises(ingest.TrackedHandoffError):
+            ingest._archive(handoff, inbox / "processed")
+        assert injected
+
+    assert (replacement / handoff_name).read_bytes() == original_bytes
+    assert not (replacement / "processed").exists()
+    assert _git(tmp_path, "ls-files", "--stage", "-z") == index_before

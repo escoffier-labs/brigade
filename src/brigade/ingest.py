@@ -783,33 +783,41 @@ def _git_tracked_names(directory: Path) -> set[str] | None:
         return None
 
 
-def _git_tracked_files(directory: Path) -> tuple[set[str], dict[str, tuple[int, int]]] | None:
+def _git_tracked_files(directory: Path) -> tuple[set[str], dict[str, tuple[int, int]], tuple[int, int]] | None:
     """Return indexed names and file identities directly in `directory`.
 
     Names protect deleted and recreated files. Keep identities by indexed name
     so distinct directory entries can be verified without following symlinks.
-    None means the check failed.
+    Bind both collections to the same parent directory. None means the check
+    failed or the directory changed during collection.
     """
-    names = _git_tracked_names(directory)
-    if names is None:
-        return None
-    identities: dict[str, tuple[int, int]] = {}
-    for name in names:
-        try:
-            st = (directory / name).lstat()
-        except FileNotFoundError:
-            continue
-        except OSError as exc:
-            _warn_tracking_check_failed(directory, str(exc))
+    try:
+        parent_st = directory.stat()
+        parent_identity = (parent_st.st_dev, parent_st.st_ino)
+        names = _git_tracked_names(directory)
+        if names is None:
             return None
-        identities[name] = (st.st_dev, st.st_ino)
-    return names, identities
+        identities: dict[str, tuple[int, int]] = {}
+        for name in names:
+            try:
+                st = (directory / name).lstat()
+            except FileNotFoundError:
+                continue
+            identities[name] = (st.st_dev, st.st_ino)
+        parent_st = directory.stat()
+        if (parent_st.st_dev, parent_st.st_ino) != parent_identity:
+            _warn_tracking_check_failed(directory, "directory changed during tracking check")
+            return None
+        return names, identities, parent_identity
+    except OSError as exc:
+        _warn_tracking_check_failed(directory, str(exc))
+        return None
 
 
-def _is_tracked(path: Path, tracked: tuple[set[str], dict[str, tuple[int, int]]] | None) -> bool:
+def _is_tracked(path: Path, tracked: tuple[set[str], dict[str, tuple[int, int]], tuple[int, int]] | None) -> bool:
     if tracked is None:
         return True
-    names, identities = tracked
+    names, identities, parent_identity = tracked
     if path.name in names:
         return True
     try:
@@ -822,20 +830,24 @@ def _is_tracked(path: Path, tracked: tuple[set[str], dict[str, tuple[int, int]]]
         if any(name not in identities for name in case_matches) or case_matches & identity_matches:
             return True
         possible_aliases = case_matches | identity_matches
-        if not possible_aliases:
-            return False
         # Different inode observations alone can result from a replacement
         # race. Require both exact spellings as directory entries, with the
         # identities collected above still present, before exempting either.
-        observed: dict[str, tuple[int, int]] = {}
-        with os.scandir(path.parent) as entries:
-            for entry in entries:
-                if entry.name == path.name or entry.name in possible_aliases:
-                    entry_st = (path.parent / entry.name).lstat()
-                    observed[entry.name] = (entry_st.st_dev, entry_st.st_ino)
-        return observed.get(path.name) != identity or any(
-            observed.get(name) != identities[name] for name in possible_aliases
-        )
+        if possible_aliases:
+            observed: dict[str, tuple[int, int]] = {}
+            with os.scandir(path.parent) as entries:
+                for entry in entries:
+                    if entry.name == path.name or entry.name in possible_aliases:
+                        entry_st = (path.parent / entry.name).lstat()
+                        observed[entry.name] = (entry_st.st_dev, entry_st.st_ino)
+            if observed.get(path.name) != identity or any(
+                observed.get(name) != identities[name] for name in possible_aliases
+            ):
+                return True
+        # Every untracked result must still refer to the directory whose Git
+        # names and identities were collected, even with no possible aliases.
+        parent_st = path.parent.stat()
+        return (parent_st.st_dev, parent_st.st_ino) != parent_identity
     except OSError:
         return True
 
