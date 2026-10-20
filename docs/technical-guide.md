@@ -522,6 +522,11 @@ default. Pass `--strict-approvals` to also make stale, expired,
 indeterminate, or unapproved runs return nonzero. The default
 receipt-verification exit behavior is unchanged.
 
+Use `brigade receipts lineage <kind>:<id>` to inspect recorded plan, run,
+verify, outcome, handoff, and synthesis parents. The command reports broken
+links and digest mismatches without changing receipts. Pass `--json` for the
+versioned `brigade.receipts_lineage.v1` contract.
+
 Use `brigade runs reap --cwd /path/to/repo` to terminalize local runs whose
 recorded owner process is gone. Reap writes `status: orphaned` and a dirty-file
 count (filenames stay off the receipt) through the same run.json writer every
