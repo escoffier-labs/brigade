@@ -4,8 +4,10 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 from brigade import toml_compat
@@ -97,5 +99,30 @@ def test_hook_parses_and_exits_zero_with_home_unset(tmp_path: Path):
     project.mkdir()
     env = {"PATH": "/usr/bin:/bin", "CLAUDE_PROJECT_DIR": str(project)}
     result = subprocess.run(["bash", str(HOOK)], env=env, capture_output=True, text=True, timeout=30)
+    assert result.returncode == 0, result.stderr
+    assert "brigade-memory MCP tools" in result.stdout
+
+
+def test_hook_skips_the_brief_when_no_timeout_runner_exists(tmp_path: Path):
+    project = tmp_path / "proj"
+    (project / ".brigade").mkdir(parents=True)
+    (project / ".brigade" / "config.json").write_text("{}")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    for tool in ("dirname", "head"):
+        found = shutil.which(tool)
+        assert found is not None
+        (bin_dir / tool).symlink_to(found)
+    stalled = bin_dir / "brigade"
+    stalled.write_text("#!/bin/sh\nsleep 30\n")
+    stalled.chmod(0o755)
+    home = tmp_path / "home"
+    home.mkdir()
+    env = {"HOME": str(home), "PATH": str(bin_dir), "CLAUDE_PROJECT_DIR": str(project)}
+    started = time.monotonic()
+    result = subprocess.run(
+        [shutil.which("bash") or "/bin/bash", str(HOOK)], env=env, capture_output=True, text=True, timeout=30
+    )
+    assert time.monotonic() - started < 5
     assert result.returncode == 0, result.stderr
     assert "brigade-memory MCP tools" in result.stdout

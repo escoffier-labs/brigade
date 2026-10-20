@@ -399,6 +399,9 @@ class MemoryTools:
             raise ValueError(f"handoff inbox resolves outside the memory store: {inbox_path}")
         if origin == USER:
             inbox_path.mkdir(mode=0o700, exist_ok=True)
+            # mkdir leaves an existing inbox as it was; keep handoff names private.
+            if inbox_path.stat().st_mode & 0o077:
+                inbox_path.chmod(0o700)
         try:
             payload = handoff_drafts.build_draft(
                 target=root,

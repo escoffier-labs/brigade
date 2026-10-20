@@ -26,12 +26,17 @@ if [ -n "$root" ] && [ -f "$root/.brigade/claude-hooks.json" ]; then
   exit 0
 fi
 
-if [ -n "$root" ] && command -v brigade >/dev/null 2>&1; then
-  if command -v timeout >/dev/null 2>&1; then
-    timeout 5 brigade work brief --target "$root" 2>/dev/null | head -n 40
-  else
-    brigade work brief --target "$root" 2>/dev/null | head -n 40
-  fi
+# The brief only runs under a time limit; without timeout or gtimeout (stock macOS)
+# the hook prints the pointer below instead of risking a stalled session start.
+runner=""
+if command -v timeout >/dev/null 2>&1; then
+  runner="timeout"
+elif command -v gtimeout >/dev/null 2>&1; then
+  runner="gtimeout"
+fi
+
+if [ -n "$root" ] && [ -n "$runner" ] && command -v brigade >/dev/null 2>&1; then
+  "$runner" 5 brigade work brief --target "$root" 2>/dev/null | head -n 40
   exit 0
 fi
 

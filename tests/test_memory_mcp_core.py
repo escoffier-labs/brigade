@@ -323,6 +323,19 @@ def test_write_handoff_user_store_modes_are_private(stores, monkeypatch, tmp_pat
     assert user.stat().st_mode & 0o777 == 0o755
 
 
+def test_write_handoff_tightens_an_existing_user_inbox(stores, monkeypatch, tmp_path: Path):
+    _, user = stores
+    from brigade import memory_scope
+
+    inbox = user / "memory" / "handoffs"
+    inbox.mkdir(parents=True)
+    inbox.chmod(0o755)
+    monkeypatch.setattr(memory_scope, "resolve_wired_target", lambda cwd, harness=None: None)
+    tools = memory_mcp_core.MemoryTools(cwd=tmp_path, inbox="claude")
+    assert tools.call("write_handoff", {"title": "T", "summary": "S.", "content": "Body."})[1] is False
+    assert inbox.stat().st_mode & 0o777 == 0o700
+
+
 def test_write_handoff_bounds_content_and_lists(stores):
     repo, _ = stores
     tools = _tools(repo)
