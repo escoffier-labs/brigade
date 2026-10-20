@@ -223,17 +223,33 @@ def open_directory_nofollow(path: Path, *, writable: bool = True) -> int:
     raise unavailable("directory operations")
 
 
+def _open_chain_child(parent: int, name: str, *, final: bool) -> int:
+    # Linux O_PATH needs only search permission, so traverse-only ancestors
+    # (0711 homes) work like ``mkdir -p``. The final directory keeps a real
+    # read descriptor for fsync and enumeration.
+    o_path = getattr(os, "O_PATH", 0)
+    if final or not o_path or not posix_available():
+        return open_child_directory(parent, name, writable=False)
+    _validate_child_component(name)
+    return os.open(name, o_path | directory_flags(), dir_fd=parent)
+
+
 def open_directory_chain(path: Path, *, create: bool = False, writable: bool = True) -> int:
     """Walk an absolute directory path from its anchor without following links."""
     path = Path(path)
     if not path.is_absolute():
         raise OSError("directory path must be absolute")
-    descriptor = open_directory_nofollow(Path(path.anchor), writable=False)
+    names = path.parts[1:]
+    if names and posix_available() and hasattr(os, "O_PATH"):
+        descriptor = os.open(Path(path.anchor), root_directory_flags())
+    else:
+        descriptor = open_directory_nofollow(Path(path.anchor), writable=False)
     try:
-        for name in path.parts[1:]:
+        for index, name in enumerate(names):
             _validate_child_component(name)
+            final = index == len(names) - 1
             try:
-                child = open_child_directory(descriptor, name, writable=False)
+                child = _open_chain_child(descriptor, name, final=final)
             except FileNotFoundError:
                 if not create:
                     raise
@@ -241,7 +257,7 @@ def open_directory_chain(path: Path, *, create: bool = False, writable: bool = T
                     mkdir_child(descriptor, name)
                 except FileExistsError:
                     pass
-                child = open_child_directory(descriptor, name, writable=False)
+                child = _open_chain_child(descriptor, name, final=final)
             os.close(descriptor)
             descriptor = child
         if writable and nt_available():

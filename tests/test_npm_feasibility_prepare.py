@@ -185,6 +185,13 @@ def test_stable_payload_audit_binds_tag_inventory_and_only_release_manifest(tmp_
         "equal",
         "mismatch",
         "uncertain",
+        "lagging",
+        "lagging-forever",
+        "lagging-deadline",
+        "deadline-after-read",
+        "slow-pre-publish-read",
+        "latest-mismatch",
+        "latest-after-deadline",
         "unavailable",
         "no-attestation",
         "wrong-commit",
@@ -256,13 +263,27 @@ if args[0]=='view':
         if kind=='error': print(json.dumps(['0.0.0-bootstrap']));sys.exit(1)
         print(json.dumps(values[kind]));sys.exit(0)
     if mode.startswith('blank-versions-') and not published: print('  ');sys.exit(0)
+    if mode.startswith('lagging'):
+        def lag(key, misses):
+            p=root/('lag-'+key.replace('/','_').replace('@','_'))
+            n=int(p.read_text())+1 if p.exists() else 1
+            p.write_text(str(n))
+            if mode in ('lagging-forever','lagging-deadline') or n<=misses: print(json.dumps({'error':{'code':'E404'}}));sys.exit(1)
+        if not published and args[2]!='dist-tags.latest': print(json.dumps({'error':{'code':'E404'}}));sys.exit(1)
+        lag(name+args[2], 5)
+    if mode=='deadline-after-read' and args[2]=='dist.attestations' and name==metadata['artifacts'][0]['name']:
+        import time; time.sleep(3.5)
+    if mode=='slow-pre-publish-read' and args[2]=='dist.integrity' and name==metadata['artifacts'][1]['name']:
+        import time; time.sleep(3.5)
+    if mode=='latest-after-deadline' and args[2]=='dist-tags.latest':
+        import time; time.sleep(10.5)
     if mode=='malformed-integrity': print('{');sys.exit(0)
     if mode=='unavailable': print(json.dumps({'error':{'code':'E503'}}));sys.exit(1)
-    if mode in ['absent','uncertain','no-attestation'] and not published:
+    if mode in ['absent','uncertain','no-attestation','deadline-after-read','slow-pre-publish-read'] and not published:
         print(json.dumps({'error':{'code':'E404'}}));sys.exit(1)
     if args[2]=='dist.integrity': print(json.dumps('sha512-wrong' if mode=='mismatch' else a['integrity']))
     elif args[2]=='dist.attestations': print(json.dumps(None if mode=='no-attestation' else {'url':'https://registry.npmjs.org/-/npm/v1/attestations/'+name+'@0.30.0'}))
-    elif args[2]=='dist-tags.latest': print(json.dumps('0.30.0'))
+    elif args[2]=='dist-tags.latest': print(json.dumps('0.29.0' if mode=='latest-mismatch' else '0.30.0'))
 else:
     assert args[0]=='publish' and '--provenance' in args and '--access' in args and 'public' in args
     archive=Path(args[1]); assert archive.read_bytes().startswith(b'original-')
@@ -278,8 +299,22 @@ else:
         + json.dumps(str(npm))
         + ",...process.argv.slice(2)],{stdio:'inherit'});process.exit(r.status ?? 1);"
     )
+    import time
+
+    started = time.monotonic() if state == "lagging-deadline" else None
     result = subprocess.run(
-        ["node", str(SOURCE.parent / "publish.cjs"), "--artifacts", str(tmp_path)],
+        ["node", str(SOURCE.parent / "publish.cjs"), "--artifacts", str(tmp_path)]
+        + (
+            ["--readback-delays-ms", "[0,10000]", "--readback-budget-ms", "3000"]
+            if state == "lagging-deadline"
+            else ["--readback-delays-ms", "[0,1]", "--readback-budget-ms", "3000"]
+            if state in {"deadline-after-read", "slow-pre-publish-read"}
+            else ["--readback-delays-ms", "[0,30000]", "--readback-budget-ms", "30000"]
+            if state == "latest-mismatch"
+            else ["--readback-delays-ms", "[0]", "--readback-budget-ms", "10000"]
+            if state == "latest-after-deadline"
+            else ["--readback-delays-ms", "[0,1,1,1,1,1]"]
+        ),
         env={
             **os.environ,
             "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
@@ -293,7 +328,16 @@ else:
         text=True,
         timeout=90,
     )
-    successful = {"absent", "equal", "uncertain", "blank-versions-string", "blank-versions-array"}
+    elapsed = time.monotonic() - started if started is not None else None
+    successful = {
+        "absent",
+        "equal",
+        "uncertain",
+        "lagging",
+        "blank-versions-string",
+        "blank-versions-array",
+        "latest-after-deadline",
+    }
     assert (result.returncode == 0) == (state in successful), result.stderr
     calls = (
         [json.loads(line) for line in (tmp_path / "calls.jsonl").read_text().splitlines()]
@@ -305,7 +349,26 @@ else:
         state.startswith("blank-versions-") and state not in successful
     ):
         assert not publications
-    if state in {"absent", "uncertain", "blank-versions-string", "blank-versions-array"}:
+    if state == "lagging-forever":
+        assert "Registry reconciliation incomplete" in result.stderr
+        assert len([call for call in calls if call[0] == "view" and call[2] == "dist.integrity"]) == 6 + 1
+    if state == "lagging-deadline":
+        assert "Registry reconciliation incomplete" in result.stderr
+        assert len([call for call in calls if call[0] == "view" and call[2] == "dist.integrity"]) == 2, (
+            "the run deadline must stop the wait before the 10s delay elapses"
+        )
+        assert elapsed is not None and elapsed < 8, "the run should stop before the 10s retry delay"
+    if state == "deadline-after-read":
+        assert "Registry reconciliation incomplete" in result.stderr
+        assert [Path(call[1]).name for call in publications] == [packages[0]["filename"]]
+    if state == "slow-pre-publish-read":
+        assert "Registry reconciliation incomplete" in result.stderr
+        assert [Path(call[1]).name for call in publications] == [packages[0]["filename"]]
+    if state == "latest-mismatch":
+        assert "Registry reconciliation incomplete" in result.stderr
+    if state == "latest-after-deadline":
+        assert result.returncode == 0, result.stderr
+    if state in {"absent", "uncertain", "lagging", "blank-versions-string", "blank-versions-array"}:
         assert [Path(call[1]).name for call in publications] == [a["filename"] for a in packages]
         assert len([call for call in calls if call[0] == "view" and call[2] == "dist.attestations"]) >= 6
     if state == "no-attestation":
@@ -817,6 +880,22 @@ def test_native_acceptance_receipt_guards_require_pinned_clients(tmp_path, workf
         assert (result.returncode == 0) == (wrong_version is None), (
             "receipt guard must reject a different client version"
         )
+
+
+def test_readback_schedule_spans_about_ten_minutes_with_capped_backoff():
+    root = SOURCE.parent
+    out = subprocess.check_output(
+        ["node", "-p", "JSON.stringify(require(process.argv[1]).readbackDelays())", str(root / "readback.cjs")],
+        text=True,
+    )
+    import json
+
+    delays = json.loads(out)
+    assert delays[0] == 0
+    assert 540_000 <= sum(delays) <= 660_000
+    assert max(delays) == 60_000
+    assert delays[1] == 15_000
+    assert all(b >= a for a, b in zip(delays[1:-1], delays[2:-1], strict=False))
 
 
 def test_source_provenance_crypto_gate_cannot_be_skipped_or_env_configured():
