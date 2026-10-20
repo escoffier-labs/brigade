@@ -1157,6 +1157,7 @@ def health(target: Path) -> dict[str, Any]:
         "valid": not any(check["status"] == "fail" for check in checks),
         "issue_count": len(issues),
         "scan_issue_count": scan_issue_count,
+        "enabled_checks": list(config.enabled_checks),
         "counts": scan_payload.get("counts", {}) if isinstance(scan_payload, dict) else {},
         "queue_count": queue_count,
         "top_issue": top_issue or (issues[0] if issues else None),
@@ -1192,7 +1193,10 @@ def status(*, target: Path, json_output: bool = False) -> int:
     print(f"queue_path: {payload['queue_path']}")
     issue_count = payload["issue_count"]
     print(f"health: {'ok' if issue_count == 0 else str(issue_count) + ' issue(s)'}")
-    print(f"unconsolidated-evidence: {payload['counts'].get('unconsolidated-evidence', 0)}")
+    evidence_count = payload["counts"].get("unconsolidated-evidence", 0)
+    if "unconsolidated-evidence" not in payload["enabled_checks"]:
+        evidence_count = "disabled"
+    print(f"unconsolidated-evidence: {evidence_count}")
     metadata_value = payload.get("metadata")
     metadata = metadata_value if isinstance(metadata_value, dict) else {}
     reviewed_value = metadata.get("reviewed_dates")

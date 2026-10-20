@@ -1964,7 +1964,10 @@ def test_memory_care_init_parser_exposes_with_runbooks_flag(capsys):
         (None, None, []),
     ],
 )
-def test_memory_care_unconsolidated_evidence_dates_queue_and_status(tmp_path, capsys, consolidated, reviewed, expected):
+@pytest.mark.parametrize("machine_review", [False, True])
+def test_memory_care_unconsolidated_evidence_dates_queue_and_status(
+    tmp_path, capsys, consolidated, reviewed, expected, machine_review
+):
     card_id = "card-12345678-1234-4123-8123-123456789abc"
     card = tmp_path / "memory/cards/renamed.md"
     meta = {"id": card_id}
@@ -1995,7 +1998,10 @@ def test_memory_care_unconsolidated_evidence_dates_queue_and_status(tmp_path, ca
             ("2026-05-04T12:00:00Z", "e-new"),
         ]
     ]
-    rows.append(dict(rows[0], ts="2026-05-06T12:00:00Z", evidence_id="e-reinforced", kind="reinforced"))
+    reinforced_at = "2026-05-06T12:00:00Z" if machine_review else "2026-04-29T12:00:00Z"
+    rows.append(dict(rows[0], ts=reinforced_at, evidence_id="e-reinforced", kind="reinforced"))
+    if machine_review and consolidated in (None, "", "invalid") and reviewed is not None:
+        expected = ["e-equal", "e-new", "e-old", "e-same-day"]
     log.write_text("\n".join(json.dumps(row) for row in rows) + "\n{malformed\n")
     before = card.read_bytes(), card.stat().st_mtime_ns
     assert memory_cmd.scan(target=tmp_path, json_output=True) == 0
@@ -2018,3 +2024,18 @@ def test_memory_care_unconsolidated_evidence_dates_queue_and_status(tmp_path, ca
     assert status["counts"].get("unconsolidated-evidence", 0) == bool(expected)
     assert status["queue_count"] == bool(expected)
     assert (card.read_bytes(), card.stat().st_mtime_ns) == before
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_memory_care_status_distinguishes_disabled_evidence_check(tmp_path, capsys, enabled):
+    checks = [check for check in memory_cmd.CHECKS if enabled or check != "unconsolidated-evidence"]
+    config = tmp_path / ".brigade/memory-care.toml"
+    config.parent.mkdir()
+    config.write_text(f"enabled_checks = {json.dumps(checks)}\n")
+    assert memory_cmd.scan(target=tmp_path, json_output=True) == 0
+    assert json.loads(capsys.readouterr().out)["counts"].get("unconsolidated-evidence", 0) == 0
+    assert memory_cmd.status(target=tmp_path) == 0
+    expected = "0" if enabled else "disabled"
+    assert f"unconsolidated-evidence: {expected}\n" in capsys.readouterr().out
+    assert memory_cmd.status(target=tmp_path, json_output=True) == 0
+    assert json.loads(capsys.readouterr().out)["enabled_checks"] == checks

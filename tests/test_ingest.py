@@ -1484,6 +1484,59 @@ def test_busy_proposal_lock_leaves_handoff_for_retry(tmp_target, monkeypatch):
 @pytest.mark.skipif(
     os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"), reason="safe descriptor IO required"
 )
+def test_reinforcement_keeps_pending_near_match_in_care_queue(tmp_target, monkeypatch, capsys):
+    from datetime import date, datetime, timezone
+
+    from brigade import memory_cmd, memory_evidence_log
+
+    class Clock(datetime):
+        current = datetime(2026, 10, 10, 12, tzinfo=timezone.utc)
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current
+
+    class LocalDate(date):
+        @classmethod
+        def today(cls):
+            return Clock.current.date()
+
+    monkeypatch.setattr(memory_evidence_log, "datetime", Clock)
+    monkeypatch.setattr(ingest_mod, "date", LocalDate)
+    inbox = _seed(tmp_target)
+    card = tmp_target / "memory/cards/example.md"
+    card.parent.mkdir(parents=True, exist_ok=True)
+    body = "Always flush the shared widget cache after every schema migration completes to avoid stale application rows"
+    card.write_text(f"---\ntopic: example\nlast_reviewed: 2026-10-01\n---\n\n# example\n\n{body}\n")
+    near = "pending-near.md"
+    _write_handoff(inbox, near, _card_handoff_body("near.md", "example", body.replace("Always", "Always please")))
+    assert ingest_mod.run(target=tmp_target, dry_run=False, promote_cards=True, route_documents=True) == 0
+    capsys.readouterr()
+    assert memory_cmd.scan(target=tmp_target, json_output=True) == 0
+    initial = json.loads(capsys.readouterr().out)
+    pending = [issue for issue in initial["issues"] if issue["issue_type"] == "unconsolidated-evidence"]
+    assert len(pending) == 1
+    evidence = list((tmp_target / "memory/handoff-inbox").glob(f"*{near}"))
+    assert len(evidence) == 1
+    assert pending[0]["evidence_references"] == [evidence[0].relative_to(tmp_target).as_posix()]
+
+    Clock.current = datetime(2026, 10, 12, 12, tzinfo=timezone.utc)
+    _write_handoff(inbox, "exact.md", _card_handoff_body("duplicate.md", "example", body))
+    assert ingest_mod.run(target=tmp_target, dry_run=False, promote_cards=True, route_documents=True) == 0
+    capsys.readouterr()
+    assert "last_reviewed: 2026-10-12" in card.read_text()
+    before = card.read_bytes(), card.stat().st_mtime_ns
+    assert memory_cmd.scan(target=tmp_target, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    pending_after = [issue for issue in payload["issues"] if issue["issue_type"] == "unconsolidated-evidence"]
+    assert len(pending_after) == 1
+    assert pending_after[0]["evidence_references"] == pending[0]["evidence_references"]
+    assert (card.read_bytes(), card.stat().st_mtime_ns) == before
+
+
+@pytest.mark.skipif(
+    os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"), reason="safe descriptor IO required"
+)
 @pytest.mark.parametrize("kind", ["near-match", "reinforced"])
 def test_external_handoff_logs_identifier_without_evidence_body(tmp_path, kind):
     owner, source = tmp_path / "owner", tmp_path / "writer"
@@ -1510,12 +1563,15 @@ def test_external_handoff_logs_identifier_without_evidence_body(tmp_path, kind):
         json.loads(line) for line in (owner / ".brigade/memory/reflect/evidence-log.jsonl").read_text().splitlines()
     ]
     assert rows[0]["kind"] == kind
-    evidence = owner / rows[0]["evidence_id"]
-    assert "Private evidence body." in evidence.read_text()
     assert not handoff.exists()
-    assert "Private evidence body." not in (owner / ".brigade/memory/reflect/evidence-log.jsonl").read_text()
+    ledger = (owner / ".brigade/memory/reflect/evidence-log.jsonl").read_text()
+    assert "Private evidence body." not in ledger
+    assert source.as_posix() not in ledger
     if kind == "near-match":
+        evidence = owner / rows[0]["evidence_id"]
         assert evidence.parent == owner / "memory/handoff-inbox"
+        assert "Private evidence body." in evidence.read_text()
         assert card.read_bytes() == before
     else:
-        assert evidence.parent == inbox / "processed"
+        assert re.fullmatch(r"sha256:[0-9a-f]{64}", rows[0]["evidence_id"])
+        assert "Private evidence body." in (inbox / "processed" / handoff.name).read_text()

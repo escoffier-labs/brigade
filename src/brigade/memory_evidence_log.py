@@ -6,6 +6,7 @@ without them. Neither append nor scan writes canonical card files.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sys
@@ -104,7 +105,7 @@ def log_match(target: Path, match: CardMatch | None, handoff_path: Path) -> None
     try:
         evidence_id = handoff_path.relative_to(target).as_posix()
     except ValueError:
-        evidence_id = handoff_path.absolute().as_posix()
+        evidence_id = "sha256:" + hashlib.sha256(handoff_path.absolute().as_posix().encode()).hexdigest()
     kind = "reinforced" if match.kind == "exact" else "opposite-polarity" if match.opposite_polarity else "near-match"
     try:
         append_evidence(target, card_path=match.path, evidence_id=evidence_id, kind=kind, similarity=match.similarity)
@@ -188,6 +189,7 @@ class EvidenceLog:
             return []
         reference_value = meta.get("last_consolidated")
         reference = _timestamp(reference_value)
+        consolidated = reference is not None
         if reference is None:
             reference_value = _frontmatter_value(meta, "last_reviewed", "last_reviewed_at", "reviewed_at")
             reference = _timestamp(reference_value)
@@ -198,17 +200,26 @@ class EvidenceLog:
             date_only = True
         except ValueError:
             date_only = False
-        references = set()
-        for key in (identity.card_id, *identity.aliases):
-            for row in self.by_identity.get(key, []):
-                # Exact matches already updated the card through reinforcement.
-                if row["kind"] == "reinforced":
-                    continue
-                timestamp = _timestamp(row["ts"])
-                if timestamp is not None and (
-                    timestamp.date() > reference.date() if date_only else timestamp > reference
-                ):
-                    references.add(row["evidence_id"])
+        rows = [
+            (row, _timestamp(row["ts"]))
+            for key in (identity.card_id, *identity.aliases)
+            for row in self.by_identity.get(key, [])
+        ]
+        # Reinforcement bumps last_reviewed without reviewing pending matches.
+        # Its date comes from local date.today(), unlike the ledger's UTC ts.
+        machine_review = not consolidated and any(
+            row["kind"] == "reinforced"
+            and timestamp is not None
+            and (timestamp.astimezone().date() >= reference.date() if date_only else timestamp >= reference)
+            for row, timestamp in rows
+        )
+        references = {
+            row["evidence_id"]
+            for row, timestamp in rows
+            if row["kind"] != "reinforced"
+            and timestamp is not None
+            and (machine_review or (timestamp.date() > reference.date() if date_only else timestamp > reference))
+        }
         if not references:
             return []
         return [

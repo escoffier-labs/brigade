@@ -26,6 +26,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Memory care retains pending evidence across automatic reinforcement review-date bumps and labels disabled evidence checks. External archive evidence ids use path hashes. (#1859)
+- Existing memory-care configs must add `unconsolidated-evidence` to `enabled_checks` after upgrading all readers. The memory-care guide documents migration and UTC log dates versus local reinforcement dates. (#1859)
 - Scanner children run with `BRIGADE_NO_UPDATE_CHECK=1`. The detached update refresh a child started outlived its throwaway sandbox and recreated it when writing `update-notify.json`, leaving one `brigade-scanner-child-*` directory in the temp dir per scanner run.
 
 ## [0.30.0] - 2026-10-20
