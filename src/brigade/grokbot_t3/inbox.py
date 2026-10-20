@@ -52,7 +52,9 @@ class HubInbox(MessageOperations):
             if remaining <= 0:
                 return
             try:
-                value = self._call("list_messages", after=after, unacked=unacked, timeout=remaining)
+                value = self._call(
+                    "list_messages", after=after, unacked=unacked, timeout=remaining, expected_token_scope=scope
+                )
             finally:
                 # Check failed fetches too: a changed credential invalidates earlier rows.
                 self.require_notification_scope(scope)
@@ -62,8 +64,15 @@ class HubInbox(MessageOperations):
                 return
             after = cursor
 
-    def list(self, unacked_only: bool = True, limit: int = 20, *, deadline: float | None = None) -> dict[str, Any]:
-        scope = self.notification_scope()
+    def list(
+        self,
+        unacked_only: bool = True,
+        limit: int = 20,
+        *,
+        deadline: float | None = None,
+        scope: str | None = None,
+    ) -> dict[str, Any]:
+        scope = self.notification_scope() if scope is None else scope
         rows = []
         complete = False
         try:
@@ -101,17 +110,25 @@ class HubInbox(MessageOperations):
 
     def ack(self, ids: builtins.list[int]) -> dict[str, Any]:
         deadline = time.monotonic() + ACK_BUDGET_SECONDS
+        scope = self.notification_scope()
         acked: builtins.list[int] = []
         not_pending: builtins.list[int] = []
         remaining_ids = []
         for index, ident in enumerate(ids):
+            self.require_notification_scope(scope)
             remaining = deadline - time.monotonic()
             if remaining <= 0:
                 remaining_ids = ids[index:]
                 break
             try:
-                self._call("ack", ident, timeout=min(ACK_TIMEOUT_SECONDS, remaining))
+                try:
+                    self._call("ack", ident, timeout=min(ACK_TIMEOUT_SECONDS, remaining), expected_token_scope=scope)
+                finally:
+                    # Check failures too, before preserving any partial batch result.
+                    self.require_notification_scope(scope)
             except HubMessageError as error:
+                if error.code in {"hub_credential_changed", "hub_credential_invalid"}:
+                    raise
                 if error.code != "message_not_found":
                     if not acked and not not_pending:
                         raise
@@ -125,10 +142,13 @@ class HubInbox(MessageOperations):
         remaining = deadline - time.monotonic()
         if not remaining_ids and remaining > 0:
             try:
-                listing = self.list(limit=1, deadline=deadline)
-            except HubMessageError:
+                listing = self.list(limit=1, deadline=deadline, scope=scope)
+            except HubMessageError as error:
+                if error.code in {"hub_credential_changed", "hub_credential_invalid"}:
+                    raise
                 # Confirmed mutations survive an unavailable best-effort recount.
                 pass
+        self.require_notification_scope(scope)
         result = dict(
             acked=acked, not_pending=not_pending, unacked_total=listing["unacked_total"], has_more=listing["has_more"]
         )

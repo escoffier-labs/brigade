@@ -144,8 +144,17 @@ def _request_timeout(timeout: float | None) -> float | None:
     return float(timeout)
 
 
-def _online(body: dict[str, Any], *, token_file: str | None = None, timeout: float | None = None) -> dict[str, Any]:
+def _online(
+    body: dict[str, Any],
+    *,
+    token_file: str | None = None,
+    timeout: float | None = None,
+    expected_token_scope: str | None = None,
+) -> dict[str, Any]:
     hub, token, _node_id = _settings() if token_file is None else _settings(token_file)
+    # Bind the check to the immutable credential actually passed to transport.
+    if expected_token_scope is not None and hashlib.sha256(token.encode("utf-8")).hexdigest() != expected_token_scope:
+        raise FleetMessageHubError("message credential changed", code="token_scope_changed")
     status, payload = _request(hub, token, body, timeout=_request_timeout(timeout))
     if not 200 <= status < 300:
         raise FleetMessageHubError(
@@ -401,10 +410,20 @@ def send(
 
 
 def list_messages(
-    *, after: int = 0, unacked: bool = False, token_file: str | None = None, timeout: float | None = None
+    *,
+    after: int = 0,
+    unacked: bool = False,
+    token_file: str | None = None,
+    timeout: float | None = None,
+    expected_token_scope: str | None = None,
 ) -> dict[str, Any]:
     _validate_sqlite_integer(after, "after cursor", allow_zero=True)
-    payload = _online({"action": "list", "after": after, "unacked": unacked}, token_file=token_file, timeout=timeout)
+    payload = _online(
+        {"action": "list", "after": after, "unacked": unacked},
+        token_file=token_file,
+        timeout=timeout,
+        expected_token_scope=expected_token_scope,
+    )
     return _validate_page(payload, after=after)
 
 
@@ -437,9 +456,20 @@ def _validate_page(payload: dict[str, Any], *, after: int) -> dict[str, Any]:
     return payload
 
 
-def ack(message_id: int, *, token_file: str | None = None, timeout: float | None = None) -> dict[str, Any]:
+def ack(
+    message_id: int,
+    *,
+    token_file: str | None = None,
+    timeout: float | None = None,
+    expected_token_scope: str | None = None,
+) -> dict[str, Any]:
     _validate_sqlite_integer(message_id, "message id")
-    payload = _online({"action": "ack", "id": message_id}, token_file=token_file, timeout=timeout)
+    payload = _online(
+        {"action": "ack", "id": message_id},
+        token_file=token_file,
+        timeout=timeout,
+        expected_token_scope=expected_token_scope,
+    )
     message = payload.get("message")
     response_id = message.get("id") if isinstance(message, dict) else None
     if isinstance(response_id, bool) or not isinstance(response_id, int) or response_id != message_id:

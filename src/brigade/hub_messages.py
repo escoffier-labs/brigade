@@ -90,6 +90,7 @@ def inbox_page(value: dict[str, Any], *, after: int, recipient: str | None = Non
 LOCAL_CLI_CODES = {
     "token_file_invalid": "hub_credential_invalid",
     "admin_token_refused": "hub_credential_invalid",
+    "token_scope_changed": "hub_credential_changed",
     "spool_conflict": "client_id_conflict",
     "client_id_invalid": "invalid_request",
     "invalid_argument": "invalid_request",

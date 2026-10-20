@@ -232,17 +232,24 @@ Credential rotation or an invalid credential closes the whole foreground scan
 with `hub-error`, discarding earlier rows.
 A first-page failure returns the closed `hub-error`. Acknowledge fetched oldest
 unacknowledged messages to progress through a larger backlog. If acknowledgement
-succeeds but its recount fails or remains incomplete, `inbox_ack` still returns
+succeeds but its recount has a transport failure or remains incomplete, `inbox_ack` still returns
 `acked` and `not_pending`, with `unacked_total: null` and `has_more: true`. Repeating an acknowledgement of
 an existing message is idempotent and reports it in `acked`. `not_pending` covers
 messages the Hub reports missing. Each acknowledgement gets at most 5 seconds
 and the time remaining in the batch's 10-second deadline. If that deadline
-expires or a later acknowledgement fails, the result preserves confirmed
+expires or a later acknowledgement has a transport or grant failure, the result preserves confirmed
 `acked` and `not_pending` ids and adds `incomplete: true` and `remaining_ids`.
 The remaining ids include an uncertain acknowledgement, which is safe to retry.
 Incomplete batches skip recount and return `unacked_total: null` and
 `has_more: true`. A first-call authentication or grant refusal stays a closed
 `hub-error`.
+
+Each acknowledgement batch and its recount stay bound to the initial credential.
+Rotation or an invalid credential closes the whole call with `hub-error`, stops
+further acknowledgements, and omits partial results and counts. Earlier
+acknowledgements may already have committed. Confirm the intended principal
+before retrying those ids. The transport checks its loaded credential against
+the batch scope before sending each acknowledgement or recount request.
 
 Hub tools use Dot's argument validators and message projections. A send without
 `client_id` derives one from its content and a ten-minute time bucket. Reusing

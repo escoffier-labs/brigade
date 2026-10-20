@@ -801,3 +801,105 @@ def test_security_first_ack_refusal_stays_closed(hub, monkeypatch, status):
     result = tools.call_tool("inbox_ack", {"ids": [1, 2]})
     assert result["error"]["code"] == "hub-error"
     assert "acked" not in result and token not in json.dumps(result)
+
+
+@pytest.mark.parametrize("invalid", [False, True])
+@pytest.mark.parametrize("rotate_at,outcome", [(1, "success"), (2, "success"), (2, "missing"), (2, "offline")])
+def test_security_ack_rotation_closes_batch_after_request(hub, monkeypatch, caplog, invalid, rotate_at, outcome):
+    import hashlib
+
+    tools, _, row, token, token_file, ledger = hub
+    replacement = "y" * 64
+    requests = []
+
+    def request(hub_url, credential, body, *, timeout=None):
+        requests.append((credential, dict(body)))
+        if body["action"] == "ack":
+            if body["id"] == rotate_at:
+                token_file.write_text("invalid" if invalid else replacement)
+                if outcome != "success":
+                    raise FleetMessageHubError(
+                        replacement, status=404 if outcome == "missing" else None, code="hub_unavailable"
+                    )
+            return 200, {"message": dict(row, id=body["id"])}
+        return 200, {"messages": [], "next_cursor": body["after"]}
+
+    monkeypatch.setattr(messages, "_request", request)
+    result = tools.call_tool("inbox_ack", {"ids": [1, 2, 3]})
+    assert result.get("error", {}).get("code") == "hub-error"
+    assert "acked" not in result and "not_pending" not in result
+    assert [(credential, body["id"]) for credential, body in requests] == [
+        (token, ident) for ident in range(1, rotate_at + 1)
+    ]
+    public = json.dumps(result) + caplog.text + "\n".join(ledger._conn.iterdump())
+    for secret in (token, replacement):
+        assert secret not in public and hashlib.sha256(secret.encode()).hexdigest() not in public
+
+
+@pytest.mark.parametrize("invalid,restore_after_load", [(False, False), (False, True), (True, False)])
+@pytest.mark.parametrize("rotate_before", ["first-ack", "later-ack", "recount"])
+def test_security_ack_checks_loaded_transport_credential(
+    hub, monkeypatch, caplog, invalid, restore_after_load, rotate_before
+):
+    import hashlib
+
+    tools, _, row, token, token_file, ledger = hub
+    replacement = "y" * 64
+    original_settings = messages._settings
+    loads = 0
+    requests = []
+    rotate_on = {"first-ack": 1, "later-ack": 2, "recount": 3}[rotate_before]
+
+    def settings(*args, **kwargs):
+        nonlocal loads
+        loads += 1
+        # Rotation occurs after the connector's outer guard, before transport loads it.
+        if loads == rotate_on:
+            token_file.write_text("invalid" if invalid else replacement)
+        loaded = original_settings(*args, **kwargs)
+        if loads == rotate_on and restore_after_load:
+            # Even a rotation back before the outer guard must not send the other token.
+            token_file.write_text(token)
+        return loaded
+
+    def request(hub_url, credential, body, *, timeout=None):
+        requests.append((credential, dict(body)))
+        if body["action"] == "ack":
+            return 200, {"message": dict(row, id=body["id"])}
+        return 200, {"messages": [], "next_cursor": body["after"]}
+
+    monkeypatch.setattr(messages, "_settings", settings)
+    monkeypatch.setattr(messages, "_request", request)
+    result = tools.call_tool("inbox_ack", {"ids": [1, 2]})
+    assert result.get("error", {}).get("code") == "hub-error"
+    assert "acked" not in result
+    assert [(credential, body["id"]) for credential, body in requests] == [
+        (token, ident) for ident in range(1, rotate_on)
+    ]
+    public = json.dumps(result) + caplog.text + "\n".join(ledger._conn.iterdump())
+    for secret in (token, replacement):
+        assert secret not in public and hashlib.sha256(secret.encode()).hexdigest() not in public
+
+
+@pytest.mark.parametrize("fail_recount", [False, True])
+def test_security_ack_rotation_during_recount_closes_result(hub, monkeypatch, caplog, fail_recount):
+    tools, _, row, token, token_file, ledger = hub
+    replacement = "y" * 64
+    requests = []
+
+    def request(hub_url, credential, body, *, timeout=None):
+        requests.append((credential, dict(body)))
+        if body["action"] == "ack":
+            return 200, {"message": row}
+        token_file.write_text(replacement)
+        if fail_recount:
+            raise FleetMessageHubError(replacement, code="hub_unavailable")
+        return 200, {"messages": [dict(row, body=replacement)], "next_cursor": 1}
+
+    monkeypatch.setattr(messages, "_request", request)
+    result = tools.call_tool("inbox_ack", {"ids": [1]})
+    assert result.get("error", {}).get("code") == "hub-error"
+    assert "acked" not in result and "unacked_total" not in result
+    assert [(credential, body["action"]) for credential, body in requests] == [(token, "ack"), (token, "list")]
+    public = json.dumps(result) + caplog.text + "\n".join(ledger._conn.iterdump())
+    assert token not in public and replacement not in public

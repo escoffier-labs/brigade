@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- T3 inbox acknowledgement batches stop on credential rotation or an invalid credential, including during failed requests and recount. Each request checks the credential loaded for transport against the original batch scope.
+
 - Scanner children run with `BRIGADE_NO_UPDATE_CHECK=1`. The detached update refresh a child started outlived its throwaway sandbox and recreated it when writing `update-notify.json`, leaving one `brigade-scanner-child-*` directory in the temp dir per scanner run.
 
 ## [0.30.0] - 2026-10-20
