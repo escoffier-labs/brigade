@@ -544,8 +544,9 @@ against the journal's 2048-event and 8 MiB limits. Recording reserves eight
 journal slots and stops with a bounded diagnostic when admission fails.
 Scrubbed and public metadata remain until the run is deleted.
 `brigade runs cassette purge <run>` deletes all cassette sidecars without
-changing lifecycle authority. `runs redact` conservatively purges all cassette
-sidecars after validating and rewriting the selected journal range and recording
+changing lifecycle authority and rejects linked path components. `runs redact`
+conservatively tombstones every cassette reference, including those outside the
+selected range. It purges all cassette sidecars after rewriting the journal and recording
 its durable redaction anchor. Cleanup completes before success and retries finish
 interrupted cleanup. Rejected preflight checks preserve sidecars.
 Export strips all cassette classes on the copy. Direct

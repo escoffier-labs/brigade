@@ -680,7 +680,7 @@ def dispatch(
                     pass
 
     def run_one(assignment: Assignment, prior_results: list[WorkerResult]) -> WorkerResult:
-        agent = recording_agent = roster.agents[assignment.worker]
+        agent = roster.agents[assignment.worker]
         if quarantine_state.is_quarantined(assignment.worker):
             return WorkerResult(
                 worker=assignment.worker,
@@ -779,6 +779,7 @@ def dispatch(
         approval_correlation_marker = secrets.token_urlsafe(32)
         # invoke() and finish() share remote routing facts only for the current attempt.
         remote_disposition: list[dict[str, Any] | None] = [None]
+        recording_agent = [agent]
         sent_prompt = [prompt]
 
         def _invoke_external(
@@ -1044,6 +1045,7 @@ def dispatch(
             resume_session_id: str | None = None,
         ) -> agents.AgentResult:
             """Record transport facts around exactly one real external call."""
+            recording_agent[0] = selected_agent
             proc.check_cancellation(process_registry)
             blocked = _selected_agent_preflight(
                 selected_agent,
@@ -1105,8 +1107,6 @@ def dispatch(
             terminal_agent: Agent,
             attempts: list[WorkerAttempt] | None = None,
         ) -> WorkerResult:
-            nonlocal recording_agent
-            recording_agent = terminal_agent
             bounded_text = message_envelope.truncate_utf8(result.text)
             over_cap = _is_output_limit_failure(result)
             # #1200: salvage stays a diagnostic only; ok=True additionally
@@ -1259,7 +1259,7 @@ def dispatch(
                     failure_kind="grok-fallback-missing",
                 )
                 return finish(missing_fallback, agent, attempts)
-            fallback_agent = roster.agents[fallback_name]
+            recording_agent[0] = fallback_agent = roster.agents[fallback_name]
             fallback_cloudflare_detail = agents.cloudflare_ai_gateway_preflight_detail(fallback_agent.model)
             if fallback_cloudflare_detail is not None:
                 # Route through finish() so the accumulated grok attempt history and
@@ -1307,10 +1307,10 @@ def dispatch(
             run_dir=output_dir,
             cwd=cwd,
             codex_transport=codex_transport or roster.codex_transport,
-            agent=lambda: recording_agent,
+            agent=lambda: recording_agent[0],
             prompt=lambda: sent_prompt[0],
             task=assignment.task,
-            transport=_receipt_transport(agent, appserver=appserver),
+            transport=lambda: _receipt_transport(recording_agent[0], appserver=appserver),
             read_only=read_only,
             sandbox=sandbox or roster.sandbox or ("read-only" if effective_read_only else None),
         )

@@ -474,7 +474,7 @@ def record_dispatch_result(
     agent: Callable[[], Agent],
     prompt: Callable[[], str],
     task: str,
-    transport: str,
+    transport: Callable[[], str],
     read_only: bool,
     sandbox: str | None,
     codex_transport: str = "exec",
@@ -484,7 +484,8 @@ def record_dispatch_result(
     from .run_receipts import agent_result_from_worker
     from .run_transport import WorkerResult
 
-    with _projection_window(run_dir, agent()) as window:
+    assigned_agent = agent()
+    with _projection_window(run_dir, assigned_agent) as window:
         try:
             result = resolve()
         except (runguard.RetainRunLockError, run_budget.BudgetPolicyError):
@@ -492,14 +493,14 @@ def record_dispatch_result(
         except Exception as exc:
             runguard.raise_if_retained_run_lock(exc)
             result = WorkerResult(
-                worker=agent().name,
+                worker=assigned_agent.name,
                 task=task,
                 text="",
                 ok=False,
                 detail=str(exc)[:200],
                 failure_phase="dispatch",
                 failure_kind="unclassified",
-                transport=transport,
+                transport=transport(),
                 requested_model=agent().model,
             )
         if run_dir is not None:
@@ -518,6 +519,13 @@ def record_dispatch_result(
                 coordinator_prompt_sha256=coordinator_prompt_sha256,
             )
     return result
+
+
+def redaction_affects(event: run_journal.RunEvent, start: int, end: int) -> bool:
+    """A whole-store purge also retires references outside the selected range."""
+    return start <= event.sequence <= end or (
+        event.event_type == EVENT_TYPE and dict(event.payload) != REDACTED_REFERENCE
+    )
 
 
 def redact_sidecars(run_dir: Path) -> None:
@@ -558,14 +566,39 @@ def refuse_unstripped_archive(root: Path) -> None:
         raise OSError("cassette bodies cannot cross an archive boundary") from exc
 
 
-def purge_cli(run: str, *, cwd: Path, runs_dir: Path | None = None) -> int:
-    from . import runs_cmd
+def _purge_run_dir(run: str, *, cwd: Path, runs_dir: Path | None) -> Path:
+    """Resolve names without erasing links before the destructive no-follow walk."""
+    from . import run_id, runs_cmd
 
-    run_dir, error = runs_cmd._resolve_run_dir(run, cwd=cwd, runs_dir=runs_dir)
-    if error or run_dir is None:
-        print(error or "run not found", file=sys.stderr)
-        return 2
+    raw = Path(run).expanduser()
+    if raw.is_absolute() or len(raw.parts) > 1 or os.path.lexists(raw):
+        candidate = raw
+    else:
+        root = runs_dir.expanduser() if runs_dir is not None else cwd.expanduser() / ".brigade" / "runs"
+        # Inspect only a root whose original components pass the same no-follow gate.
+        os.close(dirfd.open_directory_chain(root.absolute(), writable=False))
+        if run == "latest":
+            runs, _ = runs_cmd._collect_runs(root)
+            if not runs:
+                raise FileNotFoundError("run not found")
+            candidate = runs[0][0]
+        else:
+            candidates = [
+                root / raw,
+                *(
+                    root / name
+                    for name in run_id.lookup_names_for_workspace(run, cwd)
+                    if runs_cmd._is_bare_run_id(name)
+                ),
+            ]
+            candidate = next((p for p in candidates if os.path.lexists(p)), root / raw)
+    os.close(dirfd.open_directory_chain(candidate.absolute(), writable=False))
+    return candidate
+
+
+def purge_cli(run: str, *, cwd: Path, runs_dir: Path | None = None) -> int:
     try:
+        run_dir = _purge_run_dir(run, cwd=cwd, runs_dir=runs_dir)
         count = store.purge(run_dir)
     except (OSError, ValueError, RuntimeError):
         print("error: cassette purge refused unsafe sidecars", file=sys.stderr)

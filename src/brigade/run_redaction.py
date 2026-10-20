@@ -429,7 +429,7 @@ def _rewrite_events(
     total = bytearray()
     idempotency_keys: set[str] = set()
     for event in events:
-        affected = sequence_start <= event.sequence <= sequence_end
+        affected = run_cassette.redaction_affects(event, sequence_start, sequence_end)
         preserved_anchor = event.event_type == "run.redaction.recorded"
         payload = _redacted_payload(event) if affected and not preserved_anchor else dict(event.payload)
         idempotency_key = (

@@ -31,6 +31,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Worker cassette redaction retires all purged references, purge rejects linked run paths, and adapter failures retain the active fallback identity (#1854).
 - Worker cassette keys ignore exact prompt digests and use the effective run transport, including CLI overrides (#1854).
 - Worker cassettes clean up owned crash temporary files, bound outcome-ledger scans, and preserve chained run-lock failures (#1854).
 - Worker cassettes anchor redaction before deleting sidecars, record handled adapter failures, reject unsafe input files, and isolate projection and secret-resolution failures (#1854).
