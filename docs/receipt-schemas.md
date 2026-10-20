@@ -8,6 +8,23 @@ field serialization in [`run_receipts.py`](../src/brigade/run_receipts.py). Veri
 and closeout writers live in
 [`work_cmd/verification.py`](../src/brigade/work_cmd/verification.py).
 
+## Worker cassette sidecars
+
+`brigade.run-cassette.v1` uses `schema_version: 1` and content-addressed JSON
+under `events/cassettes/<sha256>.json`. Each worker dispatch adds one
+`run.cassette.recorded` event with exactly `path`, `sha256`, `media_type`,
+`byte_size`, and `privacy_class`. The reference points to a `public-metadata`
+manifest containing a request key, coordinator and exact-prompt digests, an
+observation marker, and classified artifact references. `private` artifacts
+contain `run_receipts.agent_result_payload`. `scrubbed` artifacts contain result
+counts, digests, exit metadata, and an optional `worker_events` notification
+projection and its digest. Prompts and raw notification streams are excluded.
+Recording failures publish a bounded public `stopped` marker when possible.
+Redaction deletes sidecars and replaces affected references with the closed
+redaction tombstone. Purge and retention may leave references without bodies.
+These sidecars do not participate in lifecycle projection or audit authority.
+All cassette bodies are stripped from run exports or refused by archive builds.
+
 ## Evolution rules (all families)
 
 1. **`schema_version` is an integer.** Bump only for breaking changes (rename,

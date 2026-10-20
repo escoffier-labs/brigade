@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
-from brigade import localio, run_checkpoint, run_events, run_journal, run_projector, run_shadow, runguard
+from brigade import localio, run_cassette, run_checkpoint, run_events, run_journal, run_projector, run_shadow, runguard
 
 REDACTION_SCHEMA = "brigade.run_redaction.v1"
 REDACTION_SCHEMA_VERSION = 1
@@ -2250,7 +2250,7 @@ def redact_journal(
                 raise RedactionError("invalid sequence range")
             if any(event.run_id != resolved_run_dir.name for event in events):
                 raise RedactionError("journal run identity mismatch")
-
+            run_cassette.redact_sidecars(resolved_run_dir)
             operation_id = _operation_id(resolved_run_dir.name, start, end, bounded_reason)
             operation_dir, quarantine_path, record_path = _operation_paths(
                 resolved_run_dir,

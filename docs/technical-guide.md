@@ -498,6 +498,34 @@ checkpoint before replacing `run.json`. If rollback leaves an older Brigade
 unable to interpret a journal event or projector version, stop that writer and
 roll forward. The append-only journal format is a one-way storage boundary.
 
+Worker dispatches also record classified cassettes under `events/cassettes/`.
+Set `"run": {"record": "auto"}` in `.brigade/config.json` for the default policy,
+`metadata-only` to omit private result bodies, or `off` to disable recording.
+Keys use seat identity and the coordinator-owned prompt fingerprint. Injected
+brief changes affect only the exact-prompt digest. Prompt text is never stored.
+Private bodies contain the result already persisted in `worker-results.json`,
+with resolved env overrides scrubbed again at write time. Scrubbed metadata and
+app-server notification projections contain no raw worker stream.
+Remote and unsupported transports carry `not-observed` markers.
+Audit coverage states `not recorded: orchestrator calls` because planning and
+synthesis calls outside worker dispatch are not recorded.
+
+Private retention keeps the newest 50 runs for at most 30 days. Outcome ledger
+references to a run's `run.json` pin its bodies. Unreadable outcome evidence
+prevents pruning. Entry and run caps are 4 MiB and 32 MiB. A measured local run
+had one 31,519-byte worker result. The two-worker journal regression measured
+1,628 bytes, or 814 bytes and one cassette reference event per dispatch. It
+enforces less than 1 KiB per dispatch,
+against the journal's 2048-event and 8 MiB limits. Recording reserves eight
+journal slots and stops with a bounded diagnostic when admission fails.
+Scrubbed and public metadata remain until the run is deleted.
+`brigade runs cassette purge <run>` deletes all cassette sidecars without
+changing lifecycle authority. `runs redact` conservatively purges all cassette
+sidecars before rewriting the selected journal range and recording its
+redaction anchor. Export strips all cassette classes on the copy. Direct
+archive builds refuse unstripped cassettes. Evidence packages use their file
+allowlist and fleet reports carry lifecycle metadata only.
+
 Record a final human decision with `brigade run approve <run-id> --decision
 allow|deny|hold`. New decisions use `human-approval/v2`: Brigade signs the final
 tree, `changes.patch` digest, and exact Test Result payload set for that tree,

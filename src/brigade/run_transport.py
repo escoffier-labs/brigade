@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 from urllib.parse import urlparse
 
-from . import agents, message_envelope, proc, receipt_schema, run_budget, run_control, runguard
+from . import agents, message_envelope, proc, receipt_schema, run_budget, run_cassette, run_control, runguard
 from .roster import Agent, Roster, is_cli_allowed, timeout_for
 from .seat_health_policy import SeatQuarantineState, decide_retry, failure_for_worker_result
 
@@ -780,6 +780,7 @@ def dispatch(
         # so a delegated attempt's routing/handoff facts reach its own receipt
         # and a following local attempt does not inherit them.
         remote_disposition: list[dict[str, Any] | None] = [None]
+        sent_prompt = [prompt]
 
         def _invoke_external(
             selected_agent: Agent,
@@ -804,7 +805,7 @@ def dispatch(
             from . import fleet_session_bootstrap
 
             try:
-                selected_prompt = fleet_session_bootstrap.ensure_prompt(
+                selected_prompt = sent_prompt[0] = fleet_session_bootstrap.ensure_prompt(
                     selected_prompt,
                     cli_ref=cli_ref,
                     model=selected_agent.model,
@@ -880,7 +881,7 @@ def dispatch(
                     session_binding_id=session_binding_id,
                 )
             if selected_agent.cli == "codex" and appserver is not None:
-                approval_prompt = (
+                approval_prompt = sent_prompt[0] = (
                     f"{selected_prompt}\n\n"
                     "Approval correlation rule: prefix every Brigade CLI command in this turn with "
                     f"`BRIGADE_APPROVAL_CORRELATION={approval_correlation_marker}`. "
@@ -1099,6 +1100,17 @@ def dispatch(
                         on_dispatch_completed(selected_agent, attempt)
                 elif on_dispatch_failed is not None:
                     on_dispatch_failed(selected_agent, attempt)
+            run_cassette.record_dispatch_result(
+                result,
+                run_dir=output_dir,
+                cwd=cwd,
+                agent=selected_agent,
+                task=assignment.task,
+                prompt=selected_prompt if remote_disposition[0] is not None else sent_prompt[0],
+                read_only=read_only,
+                sandbox=sandbox or roster.sandbox or ("read-only" if effective_read_only else None),
+                remote=remote_disposition[0] is not None,
+            )
             return result
 
         def finish(

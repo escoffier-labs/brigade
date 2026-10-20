@@ -1,0 +1,123 @@
+"""The production dispatch and SeatInvoker paths own cassette recording."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from threading import Event, Thread
+
+from brigade import agents, fleet_session_bootstrap, proc, run_journal, run_transport
+from brigade.roster import Agent, Roster
+from brigade.run_seat import SeatInvoker
+from tests.test_run_cassette import _documents
+
+
+def test_each_dispatched_worker_records_exact_injected_prompt_once(tmp_path, monkeypatch):
+    prompts = []
+    monkeypatch.setattr(fleet_session_bootstrap, "ensure_prompt", lambda prompt, **kw: prompt + "\ninjected policy")
+
+    def worker(cli, prompt, **kwargs):
+        prompts.append(prompt)
+        return agents.AgentResult(text="worker-model-text-needle", ok=True, transport="cli")
+
+    monkeypatch.setattr(agents, "run_agent", worker)
+    roster = Roster(
+        orchestrator="chef",
+        agents={
+            "one": Agent(name="one", cli="codex", role="write", model="test-model"),
+            "two": Agent(name="two", cli="codex", role="write", model="test-model"),
+        },
+    )
+    run_dir = tmp_path / ".brigade" / "runs" / "20261020-120000-cassette"
+    result = run_transport.dispatch(
+        [run_transport.Assignment(worker=name, task="coordinator task") for name in ("one", "two")],
+        roster,
+        build_prompt=lambda *args, **kw: "worker-prompt-needle",
+        run_appserver_worker=lambda *args, **kw: None,
+        event_writer=lambda *args, **kw: None,
+        cwd=tmp_path,
+        output_dir=run_dir,
+        direct=True,
+        read_only=True,
+    )
+    assert len(result) == 2 and all(r.ok for r in result)
+    manifests = [d for d in _documents(run_dir) if d["privacy_class"] == "public-metadata"]
+    assert len(manifests) == 2
+    assert {d["full_prompt_sha256"] for d in manifests} == {hashlib.sha256(p.encode()).hexdigest() for p in prompts}
+    journal = run_dir / "events" / "lifecycle.jsonl"
+    events = run_journal.read_journal(journal).events
+    assert len(events) == 2
+    # Measured cassette growth only. No dispatch callbacks are installed here.
+    assert journal.stat().st_size / len(result) < 1024
+    assert len(events) < 2048 and journal.stat().st_size < 8 * 1024 * 1024
+    for needle in ("worker-model-text-needle", "worker-prompt-needle", "injected policy"):
+        assert needle not in journal.read_text()
+
+
+def test_seat_invoker_records_through_dispatch_and_storage_failure_keeps_result(tmp_path, monkeypatch):
+    monkeypatch.setattr(agents, "run_agent", lambda *args, **kw: agents.AgentResult(text="answer", ok=True))
+    roster = Roster(orchestrator="chef", agents={"worker": Agent(name="worker", cli="codex", role="write")})
+    run_dir = tmp_path / ".brigade" / "runs" / "20261020-120000-cassette"
+    invoker = SeatInvoker(
+        roster=roster, cwd=tmp_path, run_id=run_dir.name, process_registry=proc.ProcessRegistry(), output_dir=run_dir
+    )
+    result = invoker.invoke(seat="worker", phase="research.plan", prompt="task", timeout=10)
+    assert result.ok and result.text == "answer"
+    assert len([d for d in _documents(run_dir) if d["privacy_class"] == "private"]) == 1
+    # Corrupt sidecar storage must not turn a successful worker into a failed run.
+    (run_dir / "events" / "cassettes" / "unexpected-directory").mkdir()
+    result = invoker.invoke(seat="worker", phase="research.extract", prompt="next task", timeout=10)
+    assert result.ok and result.text == "answer"
+
+
+def test_appserver_digest_is_exact_prompt_including_transport_suffix(tmp_path, monkeypatch):
+    seen = []
+
+    def worker(appserver, agent, name, prompt, **kwargs):
+        seen.append(prompt)
+        return agents.AgentResult(text="answer", ok=True, transport="codex-app-server")
+
+    roster = Roster(orchestrator="chef", agents={"worker": Agent(name="worker", cli="codex", role="write")})
+    run_dir = tmp_path / ".brigade" / "runs" / "20261020-120000-cassette"
+    run_transport.dispatch(
+        [run_transport.Assignment(worker="worker", task="task")],
+        roster,
+        build_prompt=lambda *args, **kw: "task",
+        run_appserver_worker=worker,
+        event_writer=lambda *args, **kw: None,
+        appserver=object(),
+        cwd=tmp_path,
+        output_dir=run_dir,
+    )
+    manifest = next(d for d in _documents(run_dir) if d["privacy_class"] == "public-metadata")
+    assert manifest["full_prompt_sha256"] == hashlib.sha256(seen[0].encode()).hexdigest()
+    assert "Approval correlation" not in json.dumps(_documents(run_dir))
+
+
+def test_late_result_does_not_append_to_a_terminal_run(tmp_path, monkeypatch):
+    started, release = Event(), Event()
+
+    def worker(*args, **kwargs):
+        started.set()
+        assert release.wait(5)
+        return agents.AgentResult(text="late worker answer", ok=True)
+
+    monkeypatch.setattr(agents, "run_agent", worker)
+    run_dir = tmp_path / ".brigade" / "runs" / "20261020-120000-cassette"
+    run_dir.mkdir(parents=True)
+    roster = Roster(orchestrator="chef", agents={"worker": Agent(name="worker", cli="codex", role="write")})
+    invoker = SeatInvoker(
+        roster=roster, cwd=tmp_path, run_id=run_dir.name, process_registry=proc.ProcessRegistry(), output_dir=run_dir
+    )
+    thread = Thread(target=lambda: invoker.invoke(seat="worker", phase="research.plan", prompt="task", timeout=10))
+    thread.start()
+    try:
+        assert started.wait(5)
+        invoker.close_receipts()
+        (run_dir / "run.json").write_text(json.dumps({"status": "cancelled", "finished_at": "2026-10-20T12:00:00Z"}))
+    finally:
+        release.set()
+        thread.join(5)
+    assert not thread.is_alive()
+    assert not _documents(run_dir)
+    assert not (run_dir / "events" / "lifecycle.jsonl").exists()
