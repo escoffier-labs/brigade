@@ -1322,4 +1322,6 @@ def test_derivative_rejects_output_directory_owned_by_another_user(tmp_path: Pat
     with pytest.raises(evidence_derivative.DerivativeExportError, match="output directory changed"):
         _export_into(source, out)
 
-    assert not out.exists()
+    # A rejected directory may belong to someone else, so cleanup must leave it alone.
+    assert out.is_dir()
+    assert list(out.iterdir()) == []
