@@ -13,6 +13,11 @@ assert.ok(index>=0 && process.argv[index+1],'--artifacts required');
 // Tests shorten the wait with --readback-delays-ms '[0,1,1]'. Releases use the default window.
 const delaysIndex=process.argv.indexOf('--readback-delays-ms');
 const delays=delaysIndex<0?readbackDelays():JSON.parse(process.argv[delaysIndex+1]);
+// One deadline bounds every wait in the run, so a degraded registry fails with our message before the workflow step timeout.
+const budgetIndex=process.argv.indexOf('--readback-budget-ms');
+const budgetMs=budgetIndex<0?4800000:Number(process.argv[budgetIndex+1]);
+assert.ok(Number.isInteger(budgetMs) && budgetMs>0,'--readback-budget-ms must be a positive integer');
+const deadline=Date.now()+budgetMs;
 assert.ok(Array.isArray(delays) && delays.length>0 && delays.every(ms=>Number.isInteger(ms) && ms>=0),'--readback-delays-ms must be a JSON array of non-negative integers');
 const root=path.resolve(process.argv[index+1]);
 const metadata=JSON.parse(fs.readFileSync(path.join(root,'artifacts.json')));
@@ -64,9 +69,16 @@ function integrity(a) {
   return 'unknown';
 }
 const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
+// False when waiting would pass the run deadline.
+async function wait(delay) {
+  if(!delay) return true;
+  if(Date.now()+delay>deadline) return false;
+  await pause(delay);
+  return true;
+}
 async function reconcile(a,field) {
   for(const delay of delays) {
-    if(delay) await pause(delay);
+    if(!await wait(delay)) break;
     if(field==='dist.integrity') {if(integrity(a)==='equal') return;}
     else {
       const r=read(a,field);
@@ -99,10 +111,10 @@ async function main() {
   }
   let latest;
   for(const delay of delays) {
-    if(delay) await pause(delay);
+    if(!await wait(delay)) break;
     latest=read(launchers[0],'dist-tags.latest');
     if(latest.status===0 && latest.json===version) break;
   }
-  assert.equal(latest.status,0);assert.equal(latest.json,version,'latest must identify the stable launcher');
+  assert.equal(latest?.status,0);assert.equal(latest.json,version,'latest must identify the stable launcher');
 }
 main().catch(error=>{console.error(error.message);process.exitCode=1;}).finally(()=>fs.rmSync(tufCache,{recursive:true,force:true}));

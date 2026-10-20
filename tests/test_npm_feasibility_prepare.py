@@ -115,7 +115,6 @@ def test_dirty_preparation_refuses_before_download(tmp_path, monkeypatch, untrac
         prepare.main()
 
 
-@pytest.mark.skipif(sys.platform == "win32", reason="prepare.pack spawns bare npm, which is npm.cmd on Windows")
 def test_pack_preserves_registry_integrity_of_original_archive(tmp_path):
     import json
 
@@ -178,6 +177,7 @@ def test_stable_payload_audit_binds_tag_inventory_and_only_release_manifest(tmp_
         "uncertain",
         "lagging",
         "lagging-forever",
+        "lagging-deadline",
         "unavailable",
         "no-attestation",
         "wrong-commit",
@@ -254,7 +254,7 @@ if args[0]=='view':
             p=root/('lag-'+key.replace('/','_').replace('@','_'))
             n=int(p.read_text())+1 if p.exists() else 1
             p.write_text(str(n))
-            if mode=='lagging-forever' or n<=misses: print(json.dumps({'error':{'code':'E404'}}));sys.exit(1)
+            if mode in ('lagging-forever','lagging-deadline') or n<=misses: print(json.dumps({'error':{'code':'E404'}}));sys.exit(1)
         if not published and args[2]!='dist-tags.latest': print(json.dumps({'error':{'code':'E404'}}));sys.exit(1)
         lag(name+args[2], 5)
     if mode=='malformed-integrity': print('{');sys.exit(0)
@@ -281,7 +281,11 @@ else:
     )
     result = subprocess.run(
         ["node", str(SOURCE.parent / "publish.cjs"), "--artifacts", str(tmp_path)]
-        + ["--readback-delays-ms", "[0,1,1,1,1,1]"],
+        + (
+            ["--readback-delays-ms", "[0,5000]", "--readback-budget-ms", "1000"]
+            if state == "lagging-deadline"
+            else ["--readback-delays-ms", "[0,1,1,1,1,1]"]
+        ),
         env={
             **os.environ,
             "PATH": str(tmp_path) + os.pathsep + os.environ["PATH"],
@@ -310,6 +314,11 @@ else:
     if state == "lagging-forever":
         assert "Registry reconciliation incomplete" in result.stderr
         assert len([call for call in calls if call[0] == "view" and call[2] == "dist.integrity"]) == 6 + 1
+    if state == "lagging-deadline":
+        assert "Registry reconciliation incomplete" in result.stderr
+        assert len([call for call in calls if call[0] == "view" and call[2] == "dist.integrity"]) == 2, (
+            "the run deadline must stop the wait before the 5s delay elapses"
+        )
     if state in {"absent", "uncertain", "lagging", "blank-versions-string", "blank-versions-array"}:
         assert [Path(call[1]).name for call in publications] == [a["filename"] for a in packages]
         assert len([call for call in calls if call[0] == "view" and call[2] == "dist.attestations"]) >= 6

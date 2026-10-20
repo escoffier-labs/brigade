@@ -105,7 +105,7 @@ def write_json(path: Path, value: object) -> None:
 
 def pack(directory: Path, output: Path) -> dict[str, object]:
     result = subprocess.run(
-        ["npm", "pack", "--ignore-scripts", "--json", "--pack-destination", str(output)],
+        [shutil.which("npm") or "npm", "pack", "--ignore-scripts", "--json", "--pack-destination", str(output)],
         cwd=directory,
         check=True,
         capture_output=True,
