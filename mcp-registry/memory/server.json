@@ -3,7 +3,7 @@
   "name": "io.github.escoffier-labs/brigade-memory",
   "title": "Brigade Memory",
   "description": "Read-only access to a repo's Brigade memory cards: list, keyword search, and read.",
-  "version": "0.30.0",
+  "version": "0.31.0",
   "websiteUrl": "https://brigade.tools",
   "repository": {
     "url": "https://github.com/escoffier-labs/brigade",
@@ -14,7 +14,7 @@
       "registryType": "pypi",
       "registryBaseUrl": "https://pypi.org",
       "identifier": "brigade-cli",
-      "version": "0.30.0",
+      "version": "0.31.0",
       "runtimeHint": "uvx",
       "transport": {
         "type": "stdio"
