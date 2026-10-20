@@ -7,17 +7,120 @@ import json
 import os
 import subprocess
 import sys
+import time
 from concurrent.futures import ThreadPoolExecutor
-from threading import Barrier
+from threading import Barrier, Event
 
 import pytest
 
-from brigade import agents, run_journal, run_redaction, run_transport
+from brigade import agents, proc, run_journal, run_redaction, run_transport, runguard
 from brigade import run_cassette_store as store
 from brigade.roster import Agent, Roster
+from brigade.run_seat import SeatInvoker
 from tests.test_run_cassette import _documents, _record
 from tests.test_run_cassette_privacy import _finish_recording
 from tests.test_run_redaction import _authority_run
+
+
+@pytest.mark.parametrize("scheduler", ["waves", "dag"])
+def test_interrupt_preserves_chained_retained_lock_error(tmp_path, monkeypatch, scheduler):
+    started, release = Event(), Event()
+    retained = runguard.RetainRunLockError("cleanup receipt unavailable")
+
+    def fail(*args, **kwargs):
+        started.set()
+        assert release.wait(5)
+        raise RuntimeError("cleanup replaced failure") from retained
+
+    def interrupt(futures):
+        assert started.wait(5)
+        raise KeyboardInterrupt
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(agents, "run_agent", fail)
+    monkeypatch.setattr(run_transport, "as_completed", interrupt)
+    caught = None
+    try:
+        run_transport.dispatch(
+            [run_transport.Assignment(worker="worker", task="task")],
+            Roster(orchestrator="chef", agents={"worker": Agent(name="worker", cli="codex", role="write")}),
+            build_prompt=lambda *a, **kw: "task",
+            run_appserver_worker=lambda *a, **kw: None,
+            event_writer=lambda *a, **kw: None,
+            cwd=tmp_path,
+            output_dir=tmp_path / ".brigade" / "runs" / "current",
+            scheduler=scheduler,
+            route_dependencies={"worker": ()},
+            on_interrupt=release.set,
+        )
+    except BaseException as exc:
+        caught = exc
+    assert caught is retained
+
+
+def test_seat_invoker_keys_include_coordinator_owned_prompt(tmp_path, monkeypatch):
+    monkeypatch.setattr(agents, "run_agent", lambda *a, **kw: agents.AgentResult(text="answer", ok=True))
+    run = tmp_path / ".brigade" / "runs" / "current"
+    invoker = SeatInvoker(
+        roster=Roster(orchestrator="chef", agents={"worker": Agent(name="worker", cli="codex", role="research")}),
+        cwd=tmp_path,
+        run_id="current",
+        process_registry=proc.ProcessRegistry(),
+        output_dir=run,
+    )
+    keys = []
+    for prompt in ("first synthesis", "second synthesis", "first synthesis"):
+        assert invoker.invoke(seat="worker", phase="synthesis", prompt=prompt, timeout=10).ok
+        manifest = next(
+            d
+            for d in _documents(run)
+            if d["privacy_class"] == "public-metadata"
+            and d["full_prompt_sha256"] == hashlib.sha256(prompt.encode()).hexdigest()
+        )
+        keys.append(manifest["key"])
+    assert keys[0] != keys[1]
+    assert keys[0] == keys[2]
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX hard-link publication")
+@pytest.mark.parametrize("prune", [True, False], ids=["retention", "purge"])
+def test_cleanup_removes_owned_crash_temps_before_final_inventory(tmp_path, prune):
+    run = tmp_path / ".brigade" / "runs" / "old"
+    _record(run)
+    directory = run / "events" / "cassettes"
+    private = next(p for p in directory.glob("*.json") if json.loads(p.read_bytes())["privacy_class"] == "private")
+    linked = directory / (".cassette-" + "a" * 32 + ".tmp")
+    os.link(private, linked)
+    unlinked = directory / (".cassette-" + "b" * 32 + ".tmp")
+    unlinked.write_bytes(b"complete private crash body")
+    unlinked.chmod(0o600)
+    if prune:
+        expired = time.time() - 40 * 86400
+        os.utime(run, (expired, expired))
+        store.retain_private(tmp_path, run.parent, current=run.parent / "new")
+        assert {d["privacy_class"] for d in _documents(run)} == {"public-metadata", "scrubbed"}
+    else:
+        store.purge(run)
+        assert not list(directory.iterdir())
+    assert not linked.exists() and not unlinked.exists()
+    assert not private.exists()
+
+
+@pytest.mark.parametrize("bound", ["bytes", "rows", "references"])
+def test_retention_skips_ledger_beyond_aggregate_bounds(tmp_path, monkeypatch, capsys, bound):
+    run = tmp_path / ".brigade" / "runs" / "old"
+    _record(run)
+    expired = time.time() - 40 * 86400
+    os.utime(run, (expired, expired))
+    ledger = tmp_path / "memory" / "outcome" / "records.jsonl"
+    ledger.parent.mkdir(parents=True)
+    rows = [{"evidence_ref": f"other-{i}/run.json"} for i in range(3)]
+    ledger.write_text("".join(json.dumps(row) + "\n" for row in rows))
+    limit = {"bytes": "MAX_OUTCOME_BYTES", "rows": "MAX_OUTCOME_ROWS", "references": "MAX_OUTCOME_REFERENCES"}[bound]
+    monkeypatch.setattr(store, limit, 2, raising=False)
+    assert store.retain_private(tmp_path, run.parent, current=run.parent / "new") == 0
+    assert any(d["privacy_class"] == "private" for d in _documents(run))
+    assert "cassette retention skipped:" in capsys.readouterr().err
 
 
 @pytest.mark.parametrize("failure", ["checkpoint-only", "journal-changed", "anchors"])

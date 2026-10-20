@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import stat
 import sys
 import time
@@ -21,6 +22,9 @@ MAX_ENTRY_BYTES = 4 * 1024 * 1024
 MAX_RUN_BYTES = 32 * 1024 * 1024
 KEEP_RUNS = 50
 KEEP_DAYS = 30
+MAX_OUTCOME_BYTES = 64 * 1024 * 1024
+MAX_OUTCOME_ROWS = 100_000
+MAX_OUTCOME_REFERENCES = 10_000
 
 
 class CassetteError(RuntimeError):
@@ -144,7 +148,7 @@ def purge(run_dir: Path, *, private_only: bool = False) -> int:
     """Remove bodies or the entire cassette inventory, never the journal."""
     try:
         with directory(run_dir) as parent:
-            removed = 0
+            removed = _remove_owned_temps(parent)
             for name, _ in inventory(parent, private_only=private_only):
                 try:
                     if private_only:
@@ -167,6 +171,30 @@ def purge(run_dir: Path, *, private_only: bool = False) -> int:
         return 0
 
 
+def _remove_owned_temps(parent: int) -> int:
+    """Unlink private publication debris before checking final hard-link counts."""
+    names = dirfd.child_names(parent, MAX_FILES + 1)
+    if len(names) > MAX_FILES:
+        raise CassetteError("cassette inventory exceeds file cap")
+    removed = 0
+    for name in names:
+        if not re.fullmatch(r"\.cassette-[0-9a-f]{32}\.tmp", name):
+            continue
+        try:
+            info = dirfd.stat_child(parent, name)
+            if not stat.S_ISREG(info.st_mode):
+                continue
+            if os.name == "posix" and (info.st_uid != os.geteuid() or info.st_mode & 0o077):
+                continue
+            dirfd.unlink_child(parent, name)
+            removed += 1
+        except FileNotFoundError:
+            continue
+    if removed:
+        dirfd.fsync_directory(parent)
+    return removed
+
+
 def _pinned_runs(workspace: Path) -> set[str] | None:
     """Stream outcome references, conservatively pinning on unreadable rows."""
     path = workspace / "memory" / "outcome" / "records.jsonl"
@@ -178,12 +206,15 @@ def _pinned_runs(workspace: Path) -> set[str] | None:
         return None
     try:
         info = os.fstat(descriptor)
-        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > MAX_OUTCOME_BYTES:
             return None
         pinned = set()
+        rows = total_bytes = 0
         with os.fdopen(descriptor, "rb", closefd=False) as handle:
             while line := handle.readline(8 * 1024 * 1024 + 1):
-                if len(line) > 8 * 1024 * 1024:
+                rows += 1
+                total_bytes += len(line)
+                if len(line) > 8 * 1024 * 1024 or total_bytes > MAX_OUTCOME_BYTES or rows > MAX_OUTCOME_ROWS:
                     return None
                 if not line.strip():
                     continue
@@ -195,6 +226,8 @@ def _pinned_runs(workspace: Path) -> set[str] | None:
                     # Outcome capture stores the run.json path, including custom runs roots.
                     source = Path(reference)
                     pinned.add(source.parent.name if source.name == "run.json" else source.name)
+                    if len(pinned) > MAX_OUTCOME_REFERENCES:
+                        return None
         return pinned
     except (OSError, ValueError):
         return None
@@ -206,7 +239,7 @@ def retain_private(workspace: Path, runs_root: Path, *, current: Path) -> int:
     """Keep newest N runs and at most D days, except outcome-pinned bodies."""
     pinned = _pinned_runs(workspace)
     if pinned is None:
-        print("cassette retention skipped: outcome evidence unreadable or row exceeds 8 MiB", file=sys.stderr)
+        print("cassette retention skipped: outcome evidence unreadable or scan cap exceeded", file=sys.stderr)
         return 0
     parent = dirfd.open_directory_chain(Path(os.path.abspath(runs_root)))
     try:

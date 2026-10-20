@@ -503,6 +503,8 @@ Set `"run": {"record": "auto"}` in `.brigade/config.json` for the default policy
 `metadata-only` to omit private result bodies, or `off` to disable recording.
 Keys use seat identity and the coordinator-owned prompt fingerprint. Injected
 brief changes affect only the exact-prompt digest. Prompt text is never stored.
+Single-seat calls through `SeatInvoker` also key on a digest of the full
+coordinator-owned prompt, so different prompts within one phase stay distinct.
 The key uses the configured seat transport and Codex transport policy, including
 when a worker falls back to exec. Scrubbed metadata reports the observed transport.
 Private bodies contain the terminal result after retries and fallback, already
@@ -526,9 +528,12 @@ Private retention keeps the newest 50 runs for at most 30 days. Outcome ledger
 references to a run's `run.json` pin its bodies. Unreadable outcome evidence
 prevents pruning. Retention streams the outcome ledger and ignores blank lines.
 It scans once per run after the first recorded dispatch. Unreadable evidence,
-ledger rows over 8 MiB, or a runs inventory over 10,000 entries skip pruning
+ledger rows over 8 MiB, ledgers over 64 MiB, scans over 100,000 rows or 10,000
+distinct run references, or a runs inventory over 10,000 entries skip pruning
 with a bounded stderr diagnostic. Retention errors leave recording active.
-Crash temp files and unsafe or unclassifiable files in old runs are left alone.
+Pruning and purge remove owned private publication temporary files before
+checking final file link counts. Unsafe or unclassifiable entries are left alone
+during retention.
 Entry and run caps are 4 MiB and 32 MiB. App-server projection reads are bounded
 to 8 MiB of appended bytes. Projections over 2 MiB or the remaining entry budget
 are omitted with an unavailable marker.

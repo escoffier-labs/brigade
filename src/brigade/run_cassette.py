@@ -260,6 +260,7 @@ def record_result(
     remote: bool = False,
     codex_transport: str = "exec",
     projection_window: _ProjectionWindow | None = None,
+    coordinator_prompt_sha256: str | None = None,
 ) -> dict[str, Any] | None:
     """Best-effort recording. Failure stops recording, never the worker run."""
     try:
@@ -284,6 +285,7 @@ def record_result(
             mode=mode,
             codex_transport=codex_transport,
             projection_window=projection_window or _ProjectionWindow(),
+            coordinator_prompt_sha256=coordinator_prompt_sha256,
         )
     except Exception:
         _stop(run_dir)
@@ -307,6 +309,7 @@ def _record_result(
     mode: str,
     codex_transport: str,
     projection_window: _ProjectionWindow,
+    coordinator_prompt_sha256: str | None,
 ) -> dict[str, Any] | None:
     from . import run_lifecycle, run_receipts
 
@@ -342,6 +345,7 @@ def _record_result(
             **({"codex_transport": codex_transport} if agent.cli == "codex" else {}),
         },
         "coordinator_prompt_fingerprint": fingerprint,
+        **({"coordinator_prompt_sha256": coordinator_prompt_sha256} if coordinator_prompt_sha256 is not None else {}),
     }
     key = hashlib.sha256(run_events.canonical_bytes(identity)).hexdigest()
     observed = not remote and transport in OBSERVED_TRANSPORTS and result.failure_phase != "preflight"
@@ -419,6 +423,7 @@ def _record_result(
         "key": key,
         "coordinator_prompt_fingerprint": fingerprint,
         "full_prompt_sha256": hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
+        **({"coordinator_prompt_sha256": coordinator_prompt_sha256} if coordinator_prompt_sha256 is not None else {}),
         "status": metadata["status"],
         "artifacts": [_reference(data, cls) for cls, data in blobs],
     }
@@ -474,6 +479,7 @@ def record_dispatch_result(
     read_only: bool,
     sandbox: str | None,
     codex_transport: str = "exec",
+    coordinator_prompt_sha256: str | None = None,
 ) -> WorkerResult:
     from . import run_budget, runguard
     from .run_receipts import agent_result_from_worker
@@ -485,6 +491,7 @@ def record_dispatch_result(
         except (runguard.RetainRunLockError, run_budget.BudgetPolicyError):
             raise
         except Exception as exc:
+            runguard.raise_if_retained_run_lock(exc)
             result = WorkerResult(
                 worker=agent().name,
                 task=task,
@@ -509,6 +516,7 @@ def record_dispatch_result(
                 remote=result.remote is not None,
                 codex_transport=codex_transport,
                 projection_window=window,
+                coordinator_prompt_sha256=coordinator_prompt_sha256,
             )
     return result
 

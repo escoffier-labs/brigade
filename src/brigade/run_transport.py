@@ -588,6 +588,7 @@ def dispatch(
     output_dir: Path | None = None,
     model_lease: Callable[[Agent], Any] | None = None,
     remote_transport: RemoteTransport | None = None,
+    coordinator_prompt_sha256: str | None = None,
 ) -> list[WorkerResult]:
     """Dispatch staged assignments while keeping transport policy in one module.
 
@@ -1302,6 +1303,7 @@ def dispatch(
 
         return run_cassette.record_dispatch_result(
             resolve,
+            coordinator_prompt_sha256=coordinator_prompt_sha256,
             run_dir=output_dir,
             cwd=cwd,
             codex_transport=roster.codex_transport,

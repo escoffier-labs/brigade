@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import time
+from pathlib import Path
 
 import pytest
 
@@ -93,6 +94,23 @@ def test_export_strips_cassettes_and_archive_build_refuses_them(tmp_path):
         not in b"".join(p.read_bytes() for p in destination.rglob("*") if p.is_file()).decode()
     )
     assert _documents(run_dir)
+
+
+def test_export_with_cassette_journal_reference_validates_imports_and_audits(tmp_path, monkeypatch):
+    monkeypatch.setattr("tests.test_run_redaction.RUN_ID", RUN_ID)
+    run, snapshot, _ = _authority_run(tmp_path)
+    _record(run, result=agents.AgentResult(text="adversarial-cassette-secret", ok=True))
+    _finish_recording(run, snapshot)
+    assert any(
+        e.event_type == run_cassette.EVENT_TYPE
+        for e in run_journal.read_journal(run / "events" / "lifecycle.jsonl").events
+    )
+    destination = tmp_path / "archive"
+    work_run_archive.export_run(run, destination)
+    assert work_run_archive.validate_cli(destination) == 0
+    assert b"adversarial-cassette-secret" not in b"".join(p.read_bytes() for p in destination.rglob("*") if p.is_file())
+    imported = work_run_archive.import_archive(destination, runs_dir=tmp_path / "imported")
+    assert run_audit.audit_run(Path(imported["run_dir"])).result == "match"
 
 
 def test_purge_command_keeps_journal_and_audit_unchanged(tmp_path):

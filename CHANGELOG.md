@@ -24,6 +24,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Worker cassettes clean up owned crash temporary files, bound outcome-ledger scans, preserve chained run-lock failures, and distinguish coordinator prompts in single-seat calls (#1854).
 - Worker cassettes anchor redaction before deleting sidecars, record handled adapter failures, reject unsafe input files, and isolate projection and secret-resolution failures (#1854).
 - Worker cassettes publish on Windows, preserve schema keys during secret scrubbing, and keep request keys stable across transport fallback. Retention scans once per run, streams outcome references, and reports failures without stopping recording (#1854).
 - Worker cassettes record one terminal result after retries and fallback, preserve literal env values, read slugged event filenames, and keep lifecycle journaling opt-in (#1854).
