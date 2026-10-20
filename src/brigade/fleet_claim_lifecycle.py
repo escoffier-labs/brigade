@@ -36,17 +36,21 @@ def _bound_connection(hub_url: str, token: str) -> Callable[[], dict[str, Any]]:
 
     Each call re-reads configuration. Its token replaces ``token`` only while
     the configured hub still equals ``hub_url``, so one hub's credential never
-    goes to another hub (#1780). Otherwise the bound token is kept.
+    goes to another hub (#1780). Otherwise the latest token seen for this hub
+    is kept, never an earlier one a rotation has already revoked.
     """
+    latest = token
 
     def current() -> dict[str, Any]:
+        nonlocal latest
         try:
             config = _client().load_fleet_config()
         except Exception:
             config = {}
         fresh = config.get("token", "")
-        same_hub = config.get("hub_url") == hub_url
-        return {"hub_url": hub_url, "token": fresh if same_hub and fresh else token}
+        if fresh and config.get("hub_url") == hub_url:
+            latest = fresh
+        return {"hub_url": hub_url, "token": latest}
 
     return current
 

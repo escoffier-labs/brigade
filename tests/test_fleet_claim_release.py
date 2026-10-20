@@ -1397,3 +1397,23 @@ def test_heartbeat_and_exit_release_follow_a_rotated_node_token_on_the_bound_hub
     after = [(action, token) for action, _, token, was_rotated in posts if was_rotated]
     assert after and all(token == expected for _, token in after)
     assert posts[-1][:3] == ("release", "https://hub-one.example.invalid", expected)
+
+
+@pytest.mark.parametrize("later", ["other-hub", "config-error"])
+def test_bound_connection_keeps_the_latest_same_hub_token_as_its_fallback(monkeypatch, later):
+    """Once a rotated token is observed on the bound hub, a later config switch
+    or load failure must not fall back to the revoked original (#1781)."""
+    from brigade import fleet_claim_lifecycle
+
+    config = {"hub_url": "https://hub-one.example.invalid", "token": "fake-token-two"}
+
+    def load():
+        if later == "config-error" and config["hub_url"] is None:
+            raise OSError("fake unreadable config")
+        return dict(config)
+
+    monkeypatch.setattr(fleet_client, "load_fleet_config", load)
+    connection = fleet_claim_lifecycle._bound_connection("https://hub-one.example.invalid", "fake-token-one")
+    assert connection() == {"hub_url": "https://hub-one.example.invalid", "token": "fake-token-two"}
+    config.update(hub_url="https://hub-two.example.invalid" if later == "other-hub" else None, token="fake-later")
+    assert connection() == {"hub_url": "https://hub-one.example.invalid", "token": "fake-token-two"}
