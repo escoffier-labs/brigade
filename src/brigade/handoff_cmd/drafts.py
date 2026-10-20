@@ -838,14 +838,29 @@ def build_draft(
             Path(tmp_name).unlink(missing_ok=True)
             raise
     else:
-        # Exclusive no-follow create: never truncate a file or follow a planted symlink.
-        flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
-        try:
-            fd = os.open(path, flags, 0o600)
-        except FileExistsError as exc:
-            raise ValueError(f"handoff draft already exists: {path}") from exc
-        with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            handle.write(text)
+        if hasattr(os, "O_NOFOLLOW"):
+            # Exclusive no-follow create: never truncate a file or follow a planted symlink.
+            flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW
+            try:
+                fd = os.open(path, flags, 0o600)
+            except FileExistsError as exc:
+                raise ValueError(f"handoff draft already exists: {path}") from exc
+            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                handle.write(text)
+        else:
+            # Without O_NOFOLLOW (Windows), O_EXCL can follow a dangling symlink. Hard-link a
+            # private temp file into place instead: a link never follows the destination and
+            # fails on any existing entry, symlinks included.
+            fd, tmp_name = tempfile.mkstemp(dir=inbox_path, prefix=f".{path.name}.", suffix=".tmp")
+            try:
+                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                    handle.write(text)
+                try:
+                    os.link(tmp_name, path)
+                except FileExistsError as exc:
+                    raise ValueError(f"handoff draft already exists: {path}") from exc
+            finally:
+                Path(tmp_name).unlink(missing_ok=True)
     lint_result = _linting_mod.lint_file(path)
     guard_result = _linting_mod._guard_handoff_path(path, target=target, policy=guard_policy) if guard else None
     return {
