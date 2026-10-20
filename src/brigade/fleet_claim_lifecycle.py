@@ -63,13 +63,12 @@ def _bound_connection(hub_url: str, token: str) -> Callable[[], dict[str, Any]]:
     latest token seen for this hub is kept, never an earlier one a rotation
     has already revoked. A claim bound to a node token never adopts
     ``load_fleet_config``'s admin token fallback, which a briefly unreadable
-    node token file would trigger.
+    node token file would trigger. The credential kind comes from the same
+    snapshot as the token; a snapshot showing neither leaves it unknown until
+    one does, so a config mid-replacement cannot fix the wrong kind.
     """
     latest = token
-    try:
-        shared = token == _token_snapshot()[2]
-    except Exception:
-        shared = False
+    shared: bool | None = None
 
     def current() -> dict[str, Any]:
         nonlocal latest, shared
@@ -80,9 +79,11 @@ def _bound_connection(hub_url: str, token: str) -> Callable[[], dict[str, Any]]:
         if configured_hub == hub_url:
             if node_token:
                 latest, shared = node_token, False
-            elif shared and admin_token:
-                latest = admin_token
+            elif admin_token and shared is not False:
+                latest, shared = admin_token, True
         return {"hub_url": hub_url, "token": latest}
+
+    current()
 
     return current
 

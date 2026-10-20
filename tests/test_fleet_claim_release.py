@@ -1460,17 +1460,29 @@ def test_orphan_release_retry_follows_a_same_hub_token_rotation(monkeypatch):
     assert tokens == [(HUB_ONE, "fake-token-one"), (HUB_ONE, "fake-token-two")]
 
 
-@pytest.mark.parametrize("bound", ["fake-node-token", "fake-admin-one"])
-def test_bound_connection_never_swaps_a_node_token_for_the_admin_fallback(monkeypatch, bound):
+@pytest.mark.parametrize("mode", ["node", "shared"])
+def test_bound_connection_never_swaps_a_node_token_for_the_admin_fallback(monkeypatch, mode):
     """An unreadable node token file must not make renewal send the admin
     token; shared-token mode still follows an admin token rotation (#1781)."""
     from brigade import fleet_claim_lifecycle
 
-    _fleet_env(monkeypatch, admin="fake-admin-one")
+    bound = "fake-node-token" if mode == "node" else "fake-admin-one"
+    _fleet_env(monkeypatch, node=bound if mode == "node" else "", admin="fake-admin-one")
     connection = fleet_claim_lifecycle._bound_connection(HUB_ONE, bound)
-    monkeypatch.setenv("BRIGADE_FLEET_TOKEN", "fake-admin-two")
-    expected = "fake-node-token" if bound == "fake-node-token" else "fake-admin-two"
+    _fleet_env(monkeypatch, admin="fake-admin-two")
+    expected = "fake-node-token" if mode == "node" else "fake-admin-two"
     assert connection() == {"hub_url": HUB_ONE, "token": expected}
+
+
+def test_bound_connection_follows_shared_rotation_after_a_transient_empty_bind_snapshot(monkeypatch):
+    """A config mid-replacement at bind time must not lock shared-token mode
+    out of a later admin token rotation (#1781)."""
+    from brigade import fleet_claim_lifecycle
+
+    snapshots = [(HUB_ONE, "", ""), (HUB_ONE, "", "fake-admin-two")]
+    monkeypatch.setattr(fleet_claim_lifecycle, "_token_snapshot", lambda: snapshots.pop(0))
+    connection = fleet_claim_lifecycle._bound_connection(HUB_ONE, "fake-admin-one")
+    assert connection() == {"hub_url": HUB_ONE, "token": "fake-admin-two"}
 
 
 def _write_fleet_file(home, token_file, hub_url, token):
