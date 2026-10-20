@@ -16,6 +16,7 @@ import signal
 import threading
 import time
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -741,29 +742,54 @@ def test_bounded_followup_latches_when_session_lock_times_out(tmp_path: Path, mo
     assert runtime._read_hook_latch(target, "s")[0] is True
 
 
-def test_timeout_followup_does_not_hide_latch_behind_log_stall(tmp_path: Path, monkeypatch) -> None:
-    """A known latch stays latched when hook.log append blocks."""
+@pytest.mark.parametrize("deadline_stage", ["before_persistence", "at_log"])
+def test_timeout_followup_does_not_hide_latch_behind_log_stall(
+    tmp_path: Path, monkeypatch, deadline_stage: str
+) -> None:
+    """Deadline expiry reports only a published latch, even with a stalled log."""
     target = _wired_claude(tmp_path)
     first = runtime._record_hook_timeout(target, "s")
     assert first.get("hook_latched") is not True
 
     release_log = threading.Event()
     log_started = threading.Event()
+    worker_started = threading.Event()
+    release_worker = threading.Event()
     workers: list[threading.Thread] = []
 
     def hang_log(*_args, **_kwargs):
         log_started.set()
         thread_sync.wait_for_event(release_log, description="release stalled hook log")
 
-    def abandon_at_log(fn, *, timeout, default, on_abandon=None):
-        # Drive abandonment only after persistence reaches the log append.
-        # A real 0.5s wait can expire before that point under I/O or CPU load.
-        workers.append(thread_sync.start_thread(fn))
-        thread_sync.wait_for_event(log_started, description="timeout follow-up reached hook log")
-        return default
+    def delayed_worker(*, target, name, daemon):
+        def run():
+            worker_started.set()
+            thread_sync.wait_for_event(release_worker, description="release unscheduled follow-up")
+            target()
+
+        worker = threading.Thread(target=run, name=name, daemon=daemon)
+        workers.append(worker)
+        return worker
+
+    def deadline_event():
+        done = threading.Event()
+
+        def expire_deadline(timeout):
+            assert timeout == runtime._TIMEOUT_FOLLOWUP_SECONDS
+            thread_sync.wait_for_event(worker_started, description="follow-up worker scheduled")
+            if deadline_stage == "at_log":
+                release_worker.set()
+                thread_sync.wait_for_event(log_started, description="timeout follow-up reached hook log")
+            assert not done.is_set()
+            return False
+
+        monkeypatch.setattr(done, "wait", expire_deadline)
+        return done
 
     monkeypatch.setattr(envelope, "append_log", hang_log)
-    monkeypatch.setattr(runtime, "_run_best_effort_bounded", abandon_at_log)
+    # Keep the real bounded executor and persistence. Signal its deadline
+    # independently of runner speed, before publication or at the blocked log.
+    monkeypatch.setattr(runtime, "threading", SimpleNamespace(Event=deadline_event, Thread=delayed_worker))
 
     try:
         outcome = runtime._bounded_timeout_followup(
@@ -772,9 +798,16 @@ def test_timeout_followup_does_not_hide_latch_behind_log_stall(tmp_path: Path, m
             "s",
             runtime.HookDegraded("hook operation timed out"),
         )
-        assert outcome == "latched"
+        if deadline_stage == "before_persistence":
+            assert outcome == "degraded"
+            assert runtime._read_hook_latch(target, "s")[0] is False
+            release_worker.set()
+            thread_sync.wait_for_event(log_started, description="abandoned follow-up reached hook log")
+        else:
+            assert outcome == "latched"
         assert runtime._read_hook_latch(target, "s")[0] is True
     finally:
+        release_worker.set()
         release_log.set()
         for worker in workers:
             thread_sync.join_thread(worker, description="timeout follow-up after releasing hook log")

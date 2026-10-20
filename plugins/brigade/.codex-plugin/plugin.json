@@ -1,0 +1,25 @@
+{
+  "name": "brigade",
+  "version": "0.31.0",
+  "description": "Agent memory that works in every repo: search and read memory cards, write reviewed handoffs, and opt in to Brigade's verified work loop.",
+  "author": {
+    "name": "Solomon Neas",
+    "url": "https://brigade.tools"
+  },
+  "homepage": "https://brigade.tools",
+  "repository": "https://github.com/escoffier-labs/brigade",
+  "license": "MIT",
+  "keywords": ["memory", "agent-memory", "handoffs", "mcp", "brigade"],
+  "skills": "./skills/",
+  "mcpServers": "./codex.mcp.json",
+  "interface": {
+    "displayName": "Brigade",
+    "shortDescription": "Agent memory across repos, with an opt-in verified work loop",
+    "longDescription": "Brigade gives Codex durable memory: search and read memory cards from the current repo and your user store, write Memory Handoffs that are reviewed before they become cards, and turn on Brigade's verified work loop per repo when you want it.",
+    "developerName": "Solomon Neas",
+    "category": "Developer Tools",
+    "capabilities": ["Read", "Write"],
+    "websiteURL": "https://brigade.tools",
+    "defaultPrompt": ["Search Brigade memory for what we already decided about this repo."]
+  }
+}

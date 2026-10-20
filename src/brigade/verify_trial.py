@@ -122,6 +122,123 @@ def _patch_delta_bytes_for_path(patch_bytes: bytes, subject_path: str) -> bytes 
     return "".join(chunks).encode("utf-8")
 
 
+_PATCH_HEADER_PATH_PREFIXES = ("--- ", "+++ ", "rename from ", "rename to ", "copy from ", "copy to ")
+
+
+_C_ESCAPES = {"a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13, '"': 34, "\\": 92}
+
+
+def _unquote_patch_path(token: str) -> str:
+    token = token.rstrip("\t")
+    if not (len(token) >= 2 and token.startswith('"') and token.endswith('"')):
+        return token
+    # Git C-quotes paths; with core.quotePath=false bytes above 0x80 stay literal
+    # UTF-8, so decode escapes to bytes and only then decode the whole path.
+    body = token[1:-1]
+    out = bytearray()
+    index = 0
+    while index < len(body):
+        char = body[index]
+        if char != "\\" or index + 1 >= len(body):
+            out += char.encode("utf-8")
+            index += 1
+            continue
+        escape = body[index + 1]
+        octal = body[index + 1 : index + 4]
+        if len(octal) == 3 and all(digit in "01234567" for digit in octal):
+            out.append(int(octal, 8) & 0xFF)
+            index += 4
+        elif escape in _C_ESCAPES:
+            out.append(_C_ESCAPES[escape])
+            index += 2
+        else:
+            out += char.encode("utf-8")
+            index += 1
+    return out.decode("utf-8", errors="replace")
+
+
+def _header_path(line: str, prefix: str) -> str | None:
+    token = _unquote_patch_path(line[len(prefix) :])
+    if token == "/dev/null":
+        return None
+    if prefix in {"--- ", "+++ "} and token.startswith(("a/", "b/")):
+        token = token[2:]
+    return token or None
+
+
+def _diff_git_symmetric_path(line: str) -> str | None:
+    rest = line[len("diff --git ") :].rstrip("\n")
+    if rest.startswith('"'):
+        parts = rest.split('" "', 1)
+        if len(parts) != 2:
+            return None
+        left, right = _unquote_patch_path(parts[0] + '"'), _unquote_patch_path('"' + parts[1])
+    else:
+        if len(rest) % 2 == 0:
+            return None
+        half = len(rest) // 2
+        if rest[half] != " ":
+            return None
+        left, right = rest[:half], rest[half + 1 :]
+    if not (left.startswith("a/") and right.startswith("b/")) or left[2:] != right[2:]:
+        return None
+    return left[2:] or None
+
+
+def patch_changed_paths(patch_bytes: bytes) -> list[str] | None:
+    """Return the repo-relative paths a git patch touches, or None when a file block is unparseable.
+
+    Only file headers are read; hunk bodies are skipped so a removed line that
+    looks like ``--- a/x`` is never mistaken for a path.
+    """
+    text = patch_bytes.decode("utf-8", errors="replace")
+    paths: list[str] = []
+    block: list[str] | None = None
+    header_line = ""
+    in_header = False
+
+    def close_block() -> bool:
+        if block is None:
+            return True
+        found = block or [p for p in [_diff_git_symmetric_path(header_line)] if p]
+        if not found:
+            return False
+        for path in found:
+            if path not in paths:
+                paths.append(path)
+        return True
+
+    for line in text.splitlines():
+        if line.startswith("diff --git "):
+            if not close_block():
+                return None
+            block, header_line, in_header = [], line, True
+            continue
+        if not in_header or block is None:
+            continue
+        if line.startswith(("@@", "GIT binary patch", "Binary files ")):
+            in_header = False
+            continue
+        for prefix in _PATCH_HEADER_PATH_PREFIXES:
+            if line.startswith(prefix):
+                path = _header_path(line, prefix)
+                if path is not None and path not in block:
+                    block.append(path)
+                break
+    if not close_block():
+        return None
+    return paths
+
+
+def _patch_outside_manifest_scope(patch_bytes: bytes, manifest: verify_manifest.VerifyManifest) -> bool:
+    changed = patch_changed_paths(patch_bytes)
+    if changed is None:
+        return True
+    # Git patch paths always use "/"; a backslash is part of a POSIX filename, so
+    # never let path normalization turn it into a directory separator.
+    return any("\\" in path or not verify_manifest.path_in_manifest_scope(manifest, path) for path in changed)
+
+
 def owned_delta_sha256(patch_bytes: bytes, subject_path: str) -> str | None:
     delta = _patch_delta_bytes_for_path(patch_bytes, subject_path)
     if delta is None:
@@ -497,6 +614,7 @@ def _validate_manifest_contract(
     binding: dict[str, Any],
     *,
     target: Path | None,
+    patch_bytes: bytes = b"",
 ) -> str | None:
     manifest_binding = _manifest_binding_dict(binding)
     if manifest_binding is None or not _manifest_binding_structure_complete(manifest_binding):
@@ -530,6 +648,12 @@ def _validate_manifest_contract(
         return "verifier_manifest_mismatch"
     if not _required_utility_ids_match(receipt, manifest):
         return "verifier_manifest_mismatch"
+    if (
+        manifest.binding_mode == "patch_backed"
+        and manifest.scope_globs
+        and _patch_outside_manifest_scope(patch_bytes, manifest)
+    ):
+        return "out_of_scope_changes"
     return None
 
 
@@ -551,6 +675,7 @@ def project_trial(
         return TrialProjection(eligible=False, reason="missing_check_role", attributed=True)
 
     binding_mode = binding.get("binding_mode")
+    patch_bytes = b""
     if binding_mode == "patch_backed":
         patch_binding = binding.get("patch_binding")
         if not isinstance(patch_binding, dict):
@@ -573,7 +698,6 @@ def project_trial(
             receipt_path = receipt.get("path")
             if isinstance(receipt_path, str) and receipt_path:
                 patch_file = Path(receipt_path) / "changes.patch"
-        patch_bytes = b""
         if patch_file is not None and patch_file.is_file():
             try:
                 patch_bytes = patch_file.read_bytes()
@@ -634,7 +758,7 @@ def project_trial(
     else:
         return TrialProjection(eligible=False, reason="missing_subject_binding", attributed=True)
 
-    manifest_reason = _validate_manifest_contract(receipt, binding, target=target)
+    manifest_reason = _validate_manifest_contract(receipt, binding, target=target, patch_bytes=patch_bytes)
     if manifest_reason is not None:
         return TrialProjection(eligible=False, reason=manifest_reason, attributed=True)
 

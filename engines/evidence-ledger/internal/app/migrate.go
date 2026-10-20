@@ -49,7 +49,19 @@ func cmdMigrateCodexArguments(args []string, out, errw io.Writer) int {
 	if err != nil {
 		return fatalf(errw, "migrate codex-arguments: %s", err)
 	}
-	if bools["help"] || (len(rest) == 1 && (rest[0] == "help" || rest[0] == "-h")) {
+	positionalHelp := len(rest) == 1 && (rest[0] == "help" || rest[0] == "-h")
+	if positionalHelp {
+		for _, arg := range args {
+			if arg == "--" {
+				positionalHelp = false
+				break
+			}
+			if arg == rest[0] {
+				break
+			}
+		}
+	}
+	if bools["help"] || positionalHelp {
 		return writeMigrateHelp(out)
 	}
 	if len(rest) != 0 || (bools["apply"] && bools["dry-run"]) {
