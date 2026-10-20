@@ -140,6 +140,9 @@ class HubFixture(unittest.TestCase):
         self.token.chmod(0o600)
         self.cfg = HubConfig("agent:dot", "node-a", self.token, 30, {})
         self.state = BridgeState(dot_private_dir)
+        from brigade import fleet_client
+
+        monkeypatch.setattr(fleet_client, "spool_path", lambda *args: dot_private_dir.parent / "spool" / "node.jsonl")
         self.runner = FakeMessages(monkeypatch)
         self.hub = HubInbox(self.state, self.cfg, clock=lambda: NOW)
         self.runtime = replace(parse_runtime(_document()), hub=self.cfg)
@@ -1063,3 +1066,207 @@ def test_notify_cli_initially_unusable_agent_is_not_recaptured_after_repair(dot_
     assert requests == ["send"]
     with state.transaction() as connection:
         assert connection.execute("SELECT count(*) FROM hub_inbox").fetchone()[0] == 0
+
+
+@requires_local_state
+@pytest.mark.parametrize("operation", ["send", "reply", "node-notify", "node-completion"])
+@pytest.mark.parametrize("failure", ["503", "no-commit-then-raise", "committed-then-raise"])
+def test_request_rotation_retained_retry_is_discovered_by_background_flush(
+    dot_message_transport, monkeypatch, operation, failure
+):
+    from brigade import fleet_client
+
+    tools, hub, state, settings, token_file = dot_message_transport
+    agent = not operation.startswith("node-")
+    authority = hub.capture(agent=agent)
+    path = messages._spool_path(authority.node_id, authority.token, hub_url=authority.hub)
+    calls, committed = [], {}
+    rotate = True
+    key = "agent_spool_pending" if agent else "node_spool_pending"
+
+    def commit(body):
+        return committed.setdefault(
+            body["client_id"], dict(id=7, client_id=body["client_id"], created_at=NOW.isoformat())
+        )
+
+    def request(endpoint, token, body, **kwargs):
+        calls.append(dict(body))
+        if rotate:
+            if failure == "committed-then-raise":
+                commit(body)
+            if agent:
+                token_file.write_text("y" * 64)
+            else:
+                settings["node_token"] = "z" * 64
+            if failure != "503":
+                raise OSError("synthetic ambiguous failure")
+            return 503, {}
+        assert state.hub_get(key, scope=authority.scope) == "1"
+        return 200, {"message": commit(body)}
+
+    monkeypatch.setattr(messages, "_request", request)
+    operations = {
+        "send": lambda: tools.message_send("worker", "subject", "body", client_id="retry-send"),
+        "reply": lambda: tools.inbox_reply(1, "body"),
+        "node-notify": lambda: hub.notify("worker", "body", None, "normal", None, None, "message", "retry-notify"),
+        "node-completion": lambda: hub.send_completion("request", 0, "completed"),
+    }
+    with pytest.raises(DotError, match="hub_credential_changed"):
+        operations[operation]()
+    pending = fleet_client._read_spool(path)
+    assert len(calls) == len(pending) == 1
+    assert len(committed) == (1 if failure == "committed-then-raise" else 0)
+    original = path.read_bytes()
+    # The replacement credential cannot adopt or replay A's durable retry.
+    hub.flush_pending()
+    assert len(calls) == 1 and path.read_bytes() == original
+    token_file.write_text("x" * 64)
+    settings["node_token"] = "n" * 64
+    rotate = False
+    hub.flush_pending()
+    assert len(calls) == 2 and calls[1]["client_id"] == pending[0]["client_id"]
+    assert fleet_client._read_spool(path) == []
+    assert len(committed) == 1
+    assert state.hub_get(key, scope=authority.scope) == "0"
+
+
+@requires_local_state
+@pytest.mark.parametrize("stage", ["before-row", "signing", "after-post"])
+@pytest.mark.parametrize("failure", ["changed", "invalid"])
+def test_transient_authority_failure_suppresses_later_hub_events_only(
+    dot_message_transport, monkeypatch, stage, failure
+):
+    import asyncio
+    import base64
+    from brigade import fleet_client_message_credentials as credentials
+    from brigade.dot import events
+
+    _, hub, state, _, _ = dot_message_transport
+    scope = hub.capture().scope
+    rows = [
+        dict(
+            id=ident,
+            recipient="agent:dot",
+            sender="node-a",
+            body="body",
+            priority="urgent",
+            created_at=NOW.isoformat(),
+            acked_at=None,
+        )
+        for ident in (1, 2)
+    ]
+    state.hub_upsert(rows, node_id="node-a", scope=scope, clock=lambda: NOW)
+    with state.transaction() as connection:
+        for ident, name in (("hub-sub", "fleet.inbox.message"), ("request-sub", "fleet.request.completed")):
+            connection.execute(
+                "INSERT INTO subscriptions VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (
+                    ident,
+                    "owner",
+                    name,
+                    "{}",
+                    "https://callback.invalid/" + ident,
+                    "whsec_" + base64.b64encode(b"k" * 32).decode(),
+                    None,
+                    None,
+                    None,
+                    0,
+                ),
+            )
+        events.enqueue(
+            connection, "fleet.request.completed", {"request_id": "request-wake"}, "urgent", "request:example"
+        )
+    original_settings, original_require, original_sign = (
+        credentials.message_settings,
+        hub.require_authority,
+        events.signed_headers,
+    )
+    armed, fired = False, False
+    posts = []
+
+    def settings(*args, **kwargs):
+        nonlocal armed
+        value = original_settings(*args, **kwargs)
+        if armed:
+            armed = False
+            if failure == "invalid":
+                raise FleetMessageHubError("synthetic invalid credential", code="token_file_invalid")
+            return value[0], "y" * 64, value[2]
+        return value
+
+    def require(authority):
+        nonlocal armed, fired
+        if stage == "before-row" and not fired:
+            armed = fired = True
+        return original_require(authority)
+
+    def sign(*args, **kwargs):
+        nonlocal armed, fired
+        value = original_sign(*args, **kwargs)
+        if stage == "signing" and not fired and json.loads(args[2])["name"] == "fleet.inbox.message":
+            armed = fired = True
+        return value
+
+    async def post(url, body, headers):
+        nonlocal armed, fired
+        payload = json.loads(body)
+        posts.append(payload)
+        if stage == "after-post" and not fired and payload["name"] == "fleet.inbox.message":
+            armed = fired = True
+        return 200, b""
+
+    monkeypatch.setattr(credentials, "message_settings", settings)
+    monkeypatch.setattr(hub, "require_authority", require)
+    monkeypatch.setattr(events, "signed_headers", sign)
+    service = events.EventService(
+        state, fleet_status=lambda _: {}, hub=hub, hub_poll_seconds=30, callback_hosts=frozenset(), post=post
+    )
+    asyncio.run(service.deliver())
+    assert fired
+    hub_posts = [payload for payload in posts if payload["name"] == "fleet.inbox.message"]
+    assert len(hub_posts) == (1 if stage == "after-post" else 0)
+    assert len([payload for payload in posts if payload["name"] == "fleet.request.completed"]) == 1
+    with state.transaction() as connection:
+        pending = connection.execute(
+            "SELECT count(*) FROM event_deliveries WHERE subscription_id='hub-sub' AND state='pending'"
+        ).fetchone()[0]
+    assert pending == 2
+    before = len(posts)
+    asyncio.run(service.deliver())
+    assert len(posts) == before + 2
+    assert all(payload["name"] == "fleet.inbox.message" for payload in posts[before:])
+
+
+@requires_local_state
+def test_discovered_retry_uses_bounded_background_lock_wait(dot_message_transport, monkeypatch):
+    import time
+    from brigade import fleet_client
+
+    _, hub, state, _, _ = dot_message_transport
+    authority = hub.capture()
+    path = messages._spool_path(authority.node_id, authority.token, hub_url=authority.hub)
+    calls = []
+
+    def request(endpoint, token, body, **kwargs):
+        calls.append(body)
+        return 503, {}
+
+    monkeypatch.setattr(messages, "_request", request)
+    assert messages.send(
+        recipient="node-b",
+        subject="subject",
+        body="body",
+        reference=None,
+        priority="normal",
+        client_id="another-process",
+        authority=authority,
+    )["queued"]
+    assert state.hub_get("agent_spool_pending", scope=authority.scope) is None
+    with fleet_client._spool_lock(path):
+        started = time.monotonic()
+        with pytest.raises(DotError, match="hub_unavailable"):
+            hub.flush_pending()
+        assert time.monotonic() - started < 1.0
+    assert len(calls) == 1
+    assert state.hub_get("agent_spool_pending", scope=authority.scope) == "1"
+    assert len(fleet_client._read_spool(path)) == 1

@@ -1435,3 +1435,74 @@ def test_pages_capture_at_invocation_before_iteration(hub, monkeypatch):
     with pytest.raises(HubMessageError, match="hub_credential_changed"):
         next(pages)
     assert calls == []
+
+
+@pytest.mark.usefixtures("t3_owner_reads", "t3_watch_log")
+@pytest.mark.parametrize("stage", ["fetch", "pre-post"])
+@pytest.mark.parametrize("failure", ["changed", "invalid"])
+def test_transient_authority_failure_ends_hub_wake_invocation_but_not_request_wakes(
+    hub, tmp_path, monkeypatch, stage, failure
+):
+    from brigade import fleet_client_message_credentials as credentials
+    from brigade.grokbot_t3 import watch
+    from brigade.grokbot_t3.inbox import HubInbox
+    from brigade.grokbot_t3.ledger import wake_target_id
+    from tests.test_grokbot_t3_watch import Post, _record
+
+    tools, _, row, _, token_file, ledger = hub
+    tools.runtime = replace(tools.runtime, hub_wake_target="Hub")
+    scope = HubInbox(token_file=str(token_file)).notification_scope()
+    key = tmp_path / "wake.key"
+    key.write_text("synthetic-wake-key")
+    key.chmod(0o600)
+    targets = [{"url": "https://wake.example.test/" + suffix, "key_file": str(key)} for suffix in ("first", "second")]
+    for target in targets:
+        ledger.queue_hub_wake(scope, wake_target_id(target["url"]), [row])
+    _record(ledger, "request-wake", state="succeeded")
+    original_settings, original_read_key = credentials.message_settings, watch.read_key
+    armed, fired = False, False
+
+    def settings(*args, **kwargs):
+        nonlocal armed
+        value = original_settings(*args, **kwargs)
+        if armed:
+            armed = False  # The next read is restored A, but this operation must stay closed.
+            if failure == "invalid":
+                raise FleetMessageHubError("synthetic invalid credential", code="token_file_invalid")
+            return value[0], "y" * 64, value[2]
+        return value
+
+    def request(endpoint, token, body, **kwargs):
+        nonlocal armed, fired
+        if stage == "fetch" and not fired:
+            armed = fired = True
+        return 200, {"messages": [], "next_cursor": body["after"]}
+
+    def read_key(path):
+        nonlocal armed, fired
+        value = original_read_key(path)
+        if stage == "pre-post" and not fired:
+            armed = fired = True
+        return value
+
+    monkeypatch.setattr(credentials, "message_settings", settings)
+    monkeypatch.setattr(messages, "_request", request)
+    monkeypatch.setattr(watch, "read_key", read_key)
+    post = Post([])
+    kwargs = dict(
+        runner=tools.runner,
+        runtime=tools.runtime,
+        ledger=ledger,
+        post=post,
+        wake_targets={"Hub": targets, "Builder": [{"url": "https://wake.example.test/request", "key_file": str(key)}]},
+        log_path=tmp_path / "wake.jsonl",
+    )
+    summary = watch.run_watch_once(**kwargs)
+    assert fired and summary["failed"] >= 1
+    assert [call[2].get("request_id") for call in post.calls] == ["request-wake"]
+    for target in targets:
+        target_id = wake_target_id(target["url"])
+        assert ledger.hub_wake_cursor(scope, target_id) == 0
+        assert ledger.pending_hub_wake(scope, target_id) == [{"id": row["id"], "sender": row["sender"]}]
+    assert watch.run_watch_once(**kwargs)["woken"] == 2
+    assert [call[2].get("kind") for call in post.calls[1:]] == ["hub-inbox", "hub-inbox"]

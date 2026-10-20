@@ -15,7 +15,7 @@ from typing import Any, Callable
 
 from ..grokbot_feed import _NoRedirect
 from ..fleet_client_messages import MESSAGE_DRAIN_DEADLINE_SECONDS
-from ..hub_messages import call_message
+from ..hub_messages import HubMessageError, call_message
 from . import contracts as c
 from .fleet import CALL_TIMEOUT, FleetCallError, FleetTimeout
 from .ledger import HUB_PENDING_LIMIT, Ledger, wake_target_id
@@ -146,7 +146,12 @@ def _wake_hub_inbox(
                     pending = ledger.pending_hub_wake(scope, target_id)
                     if len(pending) >= HUB_PENDING_LIMIT:
                         break
-            except Exception:
+            except Exception as error:
+                if isinstance(error, HubMessageError) and error.code in {
+                    "hub_credential_changed",
+                    "hub_credential_invalid",
+                }:
+                    raise
                 summary["failed"] += 1
         # A failed POST remains retryable even if the Hub now omits acknowledged messages
         # or a later page fetch failed. No message content is retained in the ledger.
@@ -163,7 +168,12 @@ def _wake_hub_inbox(
             key = read_key(target["key_file"])
             hub.require_authority(authority)
             code = post(target["url"], key, body)
-        except Exception:
+        except Exception as error:
+            if isinstance(error, HubMessageError) and error.code in {
+                "hub_credential_changed",
+                "hub_credential_invalid",
+            }:
+                raise
             code = 0
         hub.require_authority(authority)
         if code == 200:

@@ -11,6 +11,7 @@ import threading
 import time
 from typing import Any, Callable, Iterator, Mapping
 
+from brigade import fleet_client_messages
 from brigade.fleet_client import FleetClientError
 from brigade.fleet_client_message_credentials import MessageAuthority
 from brigade.hub_messages import (
@@ -333,8 +334,16 @@ class HubInbox(MessageOperations):
             try:
                 self.require_authority(authority)
                 if self.state.hub_get(key, scope=scope) != "1":
-                    continue
-                self._call("flush_credential", agent=agent, authority=authority)
+                    # A closed result may have hidden a durable retry before the flag was set.
+                    try:
+                        pending = fleet_client_messages.has_pending(authority)
+                    except FleetClientError:
+                        raise DotError("hub_unavailable") from None
+                    if not pending:
+                        continue
+                self.require_authority(authority)
+                self.state.hub_set(key, "1", scope=scope)
+                self._call("flush_credential", agent=agent, authority=authority, lock_timeout=0.1)
                 self.require_authority(authority)
             except DotError as error:
                 first_error = first_error or error

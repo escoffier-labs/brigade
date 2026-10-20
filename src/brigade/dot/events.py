@@ -284,6 +284,7 @@ class EventService:
         now = time.time() if now is None else now
         active_source = ""
         authority = None
+        hub_failed = False
         if self.hub is not None:
             try:
                 authority = self.hub.capture()
@@ -313,11 +314,12 @@ class EventService:
             source = row["source"]
             hub_scope = source.split(":")[1] if source.startswith("hub-inbox:") else None
             if hub_scope is not None:
-                if self.hub is None or authority is None or hub_scope != authority.scope:
+                if hub_failed or self.hub is None or authority is None or hub_scope != authority.scope:
                     continue
                 try:
                     self.hub.require_authority(authority)
                 except DotError:
+                    hub_failed = True
                     continue
             with self.state.transaction() as c:
                 current = c.execute(
@@ -367,7 +369,9 @@ class EventService:
                     assert self.hub is not None and authority is not None
                     self.hub.require_authority(authority)
                 status, _ = await self.post(row["url"], body, headers)
-            except DotError:
+            except DotError as error:
+                if error.code in {"hub_credential_changed", "hub_credential_invalid"}:
+                    hub_failed = True
                 continue
             except Exception:
                 status = 503
@@ -376,6 +380,7 @@ class EventService:
                 try:
                     self.hub.require_authority(authority)
                 except DotError:
+                    hub_failed = True
                     continue
             done = 200 <= status < 300
             permanent = status in (410, 413) or (400 <= status < 500 and status not in (408, 429))

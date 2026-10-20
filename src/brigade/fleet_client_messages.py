@@ -44,6 +44,18 @@ def _spool_path(node_id: str, token: str, *, hub_url: str) -> Path:
     return fleet_client.spool_path(node_id).with_name(f"messages-v1-{message_scope(hub_url, token)}.jsonl")
 
 
+def has_pending(authority: MessageAuthority) -> bool:
+    """Inspect only the captured authority's queue metadata, without a lock or settings read."""
+    path = _spool_path(authority.node_id, authority.token, hub_url=authority.hub)
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError:
+        raise fleet_client.FleetClientError("fleet message spool could not be inspected") from None
+    return stat.S_ISREG(info.st_mode) and info.st_size > 0
+
+
 def _warn_inactive_spools(node_id: str, active_path: Path) -> None:
     directory = fleet_client.spool_path(node_id).parent
     prefix = "messages-"
