@@ -50,7 +50,6 @@ class Thresholds:
     stall_after: timedelta = timedelta(minutes=30)
     stranded_after: timedelta = timedelta(hours=24)
     zombie_after: timedelta = timedelta(seconds=60)
-    claim_grace: timedelta = timedelta(hours=1)
     evidence_max_age: timedelta = timedelta(seconds=60)
 
     def as_dict(self) -> dict[str, float]:
@@ -490,7 +489,7 @@ def collect_lanes(target: Path, *, now: datetime | None = None, limit: int = 50)
                 claim = claim_record(task)
                 if task.get("claim") is not None and claim is None:
                     raise ValueError("invalid ledger claim")
-                if claim:
+                if claim and task.get("status") == "in_progress":
                     claimed_tasks.append((task, claim))
             # Append order puts fresh claims at the end of the ledger. Validate
             # the whole byte-capped file, then bound only claimed task rows.
@@ -540,9 +539,14 @@ def collect_lanes(target: Path, *, now: datetime | None = None, limit: int = 50)
     return result
 
 
-def classify(lane: Lane, now: datetime, thresholds: Thresholds) -> Classification:
+def classify(
+    lane: Lane, now: datetime, thresholds: Thresholds, *, observation_started_at: datetime | None = None
+) -> Classification:
     """Return one conservative state using only the collected observation."""
     clock = run_reap._utc_now(now)
+    # A fresh collection must not expire its own evidence while reading sources.
+    # Reclassifying a retained lane without a new collection still uses now.
+    freshness_clock = run_reap._utc_now(observation_started_at) if observation_started_at is not None else clock
 
     def result(state: str, reason: str) -> Classification:
         infrastructure = None
@@ -554,7 +558,8 @@ def classify(lane: Lane, now: datetime, thresholds: Thresholds) -> Classificatio
     if lane.errors:
         return result("unknown", lane.errors[0])
     if not lane.evidence or any(
-        clock - item.observed_at > thresholds.evidence_max_age or item.observed_at > clock for item in lane.evidence
+        freshness_clock - item.observed_at > thresholds.evidence_max_age or item.observed_at > clock
+        for item in lane.evidence
     ):
         return result("unknown", "missing or stale observation")
     if any(stamp > clock for stamp in lane.progress):
@@ -577,14 +582,15 @@ def classify(lane: Lane, now: datetime, thresholds: Thresholds) -> Classificatio
     approval_pending = (
         lane.phase == "running" and isinstance(approval, dict) and approval.get("decision_state") == "pending"
     )
-    if lane.phase in {"paused", "artifact-collection"} or approval_pending:
-        return result("waiting", "run is intentionally waiting")
     started = _timestamp(meta.get("started_at"))
     if lane.run is not None:
-        if lane.phase not in runs_cmd._NONTERMINAL_STATUSES or started is None or started > clock:
+        if lane.phase not in runs_cmd._NONTERMINAL_STATUSES | {"paused"} or started is None or started > clock:
             return result("unknown", "missing or invalid run phase or start time")
         if lane.lock_state == "stale" and clock - started > thresholds.older_than:
             return result("dead", "nonterminal run has a stale owner lock")
+    if lane.phase in {"paused", "artifact-collection"} or approval_pending:
+        return result("waiting", "run is intentionally waiting")
+    if lane.run is not None:
         if lane.owner_live is not True:
             return result("unknown", "owner liveness is unverified or dead run is below age threshold")
         phase_started = _timestamp(meta.get("status_started_at", meta.get("started_at")))
@@ -618,7 +624,5 @@ def classify(lane: Lane, now: datetime, thresholds: Thresholds) -> Classificatio
             and clock - max([claimed, *lane.progress]) >= thresholds.stranded_after
         ):
             return result("stranded", "old claimed worktree has unlanded changes")
-        if clock - claimed >= thresholds.claim_grace:
-            return result("claim-without-run", "claim has no matching run after grace")
-        return result("waiting", "claim is within run-start grace")
+        return result("unknown", "no task-to-run join key for unmatched claim")
     return result("unknown", "insufficient lane evidence")

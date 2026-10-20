@@ -39,11 +39,12 @@ def test_default_patrol_is_read_only(tmp_path, capsys, monkeypatch):
     assert _snapshot(repo) == before
 
 
-def test_patrol_uses_clock_after_collection(tmp_path, capsys, monkeypatch):
+@pytest.mark.parametrize("elapsed", [5, 120])
+def test_patrol_uses_clock_after_collection(tmp_path, capsys, monkeypatch, elapsed):
     from brigade import run_reap
 
     repo = _repo(tmp_path)
-    later = NOW + timedelta(seconds=5)
+    later = NOW + timedelta(seconds=elapsed)
     run_dir = _write_run(repo, "20260820-120000-patrol01", started_at=later.isoformat())
     _write_stale_lock(repo, run_dir)
     monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: True)
@@ -57,6 +58,7 @@ def test_patrol_uses_clock_after_collection(tmp_path, capsys, monkeypatch):
     payload = json.loads(capsys.readouterr().out)
     assert payload["observed_at"] == later.isoformat()
     assert payload["lanes"][0]["state"] == "working"
+    assert payload["scan_duration_seconds"] == elapsed
 
 
 @pytest.mark.parametrize(
@@ -93,6 +95,23 @@ def test_lane_states(tmp_path, monkeypatch, status, live, progress_age, extra, e
     result = classify(lanes[0], NOW, Thresholds())
     assert result.state == expected
     assert result.evidence
+
+
+@pytest.mark.parametrize(
+    "status,extra",
+    [("artifact-collection", {}), ("running", {"approval_reference": {"decision_state": "pending"}}), ("paused", {})],
+)
+@pytest.mark.parametrize("lock_present", [True, False])
+def test_dead_owner_precedes_waiting(tmp_path, capsys, monkeypatch, status, extra, lock_present):
+    from brigade.runs_patrol import patrol
+
+    repo = _repo(tmp_path)
+    run_dir = _write_run(repo, "20260820-120000-patrol01", status=status, extra=extra)
+    if lock_present:
+        _write_stale_lock(repo, run_dir)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+    assert patrol(target=repo, now=NOW, json_output=True, fail_on="dead") == int(lock_present)
+    assert json.loads(capsys.readouterr().out)["lanes"][0]["state"] == ("dead" if lock_present else "waiting")
 
 
 def test_corrupt_journal_is_unknown_even_with_live_progress(tmp_path, monkeypatch):
@@ -137,21 +156,57 @@ def _ledger(repo, *, worktree=None):
     return path
 
 
+@pytest.mark.parametrize("status", ["done", "cancelled"])
+def test_finished_tasks_with_retained_claims_do_not_consume_claim_window(tmp_path, status):
+    from brigade.run_lane_state import collect_lanes
+
+    repo = _repo(tmp_path)
+    ledger = _ledger(repo)
+    active = json.loads(ledger.read_text())["tasks"][0]
+    finished = [
+        {
+            **active,
+            "id": f"finished-{index}",
+            "status": status,
+            "completed_at": OLD_STARTED,
+            "claim": {**active["claim"], "claim_id": f"finished-claim-{index}"},
+        }
+        for index in range(60)
+    ]
+    ledger.write_text(json.dumps({"tasks": [active, *finished]}))
+    lanes = collect_lanes(repo, now=NOW, limit=1)
+    assert [lane.task["id"] for lane in lanes] == ["task-1"]
+    assert not lanes.truncated
+
+
 @pytest.mark.parametrize(
-    ("kind", "expected"), [("claim", "claim-without-run"), ("dirty", "stranded"), ("missing", "lost-worktree")]
+    ("kind", "claim_minutes", "expected"),
+    [
+        ("claim", 30, "unknown"),
+        ("claim", 90, "unknown"),
+        ("dirty", None, "stranded"),
+        ("missing", None, "lost-worktree"),
+    ],
 )
-def test_claim_and_worktree_lanes(tmp_path, kind, expected):
+def test_claim_and_worktree_lanes(tmp_path, kind, claim_minutes, expected):
     from brigade.run_lane_state import Thresholds, classify, collect_lanes
 
     repo = _repo(tmp_path)
-    _ledger(repo, worktree=repo / "gone" if kind == "missing" else repo if kind == "dirty" else None)
+    ledger = _ledger(repo, worktree=repo / "gone" if kind == "missing" else repo if kind == "dirty" else None)
+    if claim_minutes is not None:
+        payload = json.loads(ledger.read_text())
+        payload["tasks"][0]["claim"]["claimed_at"] = (NOW - timedelta(minutes=claim_minutes)).isoformat()
+        ledger.write_text(json.dumps(payload))
     if kind == "dirty":
         (repo / "tracked.txt").write_text("unlanded work\n")
         stamp = (NOW - timedelta(days=2)).timestamp()
         os.utime(repo / "tracked.txt", (stamp, stamp))
     lanes = collect_lanes(repo, now=NOW)
     assert len(lanes) == 1
-    assert classify(lanes[0], NOW, Thresholds()).state == expected
+    result = classify(lanes[0], NOW, Thresholds())
+    assert result.state == expected
+    if kind == "claim":
+        assert "no task-to-run join key" in result.reason
 
 
 def test_recorded_missing_run_worktree(tmp_path, monkeypatch):
@@ -535,10 +590,10 @@ def test_claims_after_old_unclaimed_tasks_and_claim_truncation(tmp_path, capsys)
     tasks = [{"id": f"old-{index}", "status": "done"} for index in range(180)]
     tasks.append(claim)
     ledger.write_text(json.dumps({"tasks": tasks}))
-    assert patrol(target=repo, now=NOW, limit=1, json_output=True) == 0
+    assert patrol(target=repo, now=NOW, limit=1, json_output=True, fail_on="claim-without-run") == 0
     payload = json.loads(capsys.readouterr().out)
     assert payload["lanes"][0]["claim_id"] == "claim-1"
-    assert payload["lanes"][0]["state"] == "claim-without-run"
+    assert payload["lanes"][0]["state"] == "unknown"
     assert payload["truncated"] is False
     tasks.append({**claim, "id": "task-2", "claim": {**claim["claim"], "claim_id": "claim-2"}})
     ledger.write_text(json.dumps({"tasks": tasks}))
@@ -579,7 +634,7 @@ def test_reclaimed_task_does_not_join_old_terminal_run(tmp_path):
     lanes = collect_lanes(repo, now=NOW)
     assert len(lanes) == 2
     claim = next(lane for lane in lanes if lane.claim)
-    assert classify(claim, NOW, Thresholds()).state == "claim-without-run"
+    assert classify(claim, NOW, Thresholds()).state == "unknown"
 
 
 def test_worktree_inventory_has_separate_cap_and_only_unverified_lanes_fail(tmp_path, monkeypatch):

@@ -87,14 +87,14 @@ def patrol(
         selected = {value.strip() for value in fail_on.split(",") if value.strip()}
         if selected - STATES:
             raise ValueError("fail-on contains an unknown state")
-        clock = run_reap._utc_now(now)
+        collection_started_at = run_reap._utc_now(now)
         target = target.expanduser().resolve()
-        lanes = collect_lanes(target, now=clock, limit=limit)
+        lanes = collect_lanes(target, now=collection_started_at, limit=limit)
         # Progress and starts observed during collection can postdate its start.
         clock = run_reap._utc_now(now)
         rows = []
         for lane in lanes:
-            classification = classify(lane, clock, thresholds)
+            classification = classify(lane, clock, thresholds, observation_started_at=collection_started_at)
             evidence = [asdict(item) for item in classification.evidence]
             for item in evidence:
                 item["source"] = runs_cmd._clean_str(item["source"], 240)
@@ -126,6 +126,7 @@ def patrol(
             "schema": SCHEMA,
             "patrol_id": patrol_id,
             "observed_at": clock.isoformat(),
+            "scan_duration_seconds": (clock - collection_started_at).total_seconds(),
             "thresholds": thresholds.as_dict(),
             "limit": limit,
             "truncated": lanes.truncated,

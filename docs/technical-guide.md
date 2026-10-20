@@ -537,7 +537,8 @@ lists orphaned runs and the recorded dirty count.
 Use `brigade runs patrol --target /path/to/repo` to report local run and
 ledger-claim lanes with timestamped evidence. It joins bounded run snapshots,
 lifecycle journals, lock owners, linked worktrees, and changed-file mtimes.
-Approval pauses and artifact collection report `waiting`. Missing or unreadable
+Approval pauses and artifact collection report `waiting` unless a stale owner
+lock exceeds `--older-than`, which reports `dead`. Missing or unreadable
 required evidence reports `unknown`. Legacy runs can use event-file or worktree
 progress when no journal was requested. A terminal run that retains its
 own live lock beyond 60 seconds reports `zombie`. A stale lock remains
@@ -549,14 +550,20 @@ The defaults are `--older-than 2h`, `--idle-after 15m`, `--stall-after 30m`,
 `.brigade/patrol/<id>/patrol.json`. `--fail-on dead,stalled` returns status 1
 when either state appears. Runs are scanned newest first by directory mtime,
 with up to 1,000 run snapshots and 1,000 linked worktrees per patrol. `--limit`
-bounds returned lanes and claimed ledger tasks after the whole byte-capped
-ledger is read. Lock and owner observations are reused within each workspace.
+bounds returned lanes and active claimed ledger tasks after the whole byte-capped
+ledger is read. Finished and cancelled tasks with retained claims are excluded.
+`--limit` does not bound run inspection cost. Lock and owner observations are
+reused within each workspace. Evidence observation times identify collection
+start, which is also the freshness reference for that scan. Classification uses
+the clock after collection for run age and progress. JSON records elapsed
+collection time as `scan_duration_seconds`.
 JSON reports `truncated: true` when a source or result window
 is cut short. Text output warns, and `--fail-on unknown` returns 1 on truncation.
 Claims join runs only by exact `claim_id`. Current run writers omit that field,
 so normal claims remain separate lanes until dispatch-intent integration (#1849).
-An unmatched claim reports `unknown` while nonterminal runs exist without a
-verified join, including an unreaped run with a dead owner.
+An unmatched claim without independent worktree findings reports `unknown`
+with reason `no task-to-run join key`, regardless of age or other active runs.
+Claim age alone cannot establish `claim-without-run` until a verified join exists.
 Invalid options or an unreadable target return 2.
 Patrol does not repair runs or claims. Dispatch intents and Hub joins are
 reserved for later slices.
