@@ -809,25 +809,10 @@ def _pending_principal_request(
     # Unknown-origin retries must never acquire authority from current configuration.
     # Keep old files intact and refuse a new operation until they are reconciled.
     _require_no_legacy_principal_requests(name, admin_token, path)
-    if not pending:
-        # Only versioned files whose filename proves this exact origin can migrate.
-        # Never hold two spool locks: they share a process lock.
-        for proven in sorted(path.parent.glob(f"*.{path.name}")):
-            if proven.is_symlink() or not proven.is_file():
-                continue
-            with fleet_client._spool_lock(proven) as old_fd:
-                previous = fleet_client._read_spool(proven, dir_fd=old_fd, strict=True)
-            if previous:
-                with fleet_client._spool_lock(path) as dir_fd:
-                    pending = fleet_client._read_spool(path, dir_fd=dir_fd, strict=True)
-                    if not pending:
-                        pending = previous
-                        fleet_client._write_spool_atomic(path, pending, dir_fd=dir_fd)
-                if pending == previous:
-                    for item in previous:
-                        if isinstance(item.get("request_id"), str):
-                            _clear_principal_request(proven, request_id=item["request_id"])
-                break
+    # An interrupted migration can leave a copy of an already finalized request.
+    # Even origin-bearing filenames cannot prove that this history is pending.
+    if any(path.parent.glob(f"*.{path.name}")):
+        raise fleet_client.FleetClientError("node-prefixed principal retry requires reconciliation; left untouched")
     if not pending:
         with fleet_client._spool_lock(path) as dir_fd:
             pending = fleet_client._read_spool(path, dir_fd=dir_fd, strict=True)

@@ -961,10 +961,7 @@ def test_principal_add_reuses_pending_request_after_ambiguous_timeout(tmp_path, 
         fleet_client_messages.manage_principal("add", name="researcher")
 
     stable_path = fleet_client_messages._principal_pending_path("researcher", "admin-token")
-    legacy_path = stable_path.with_name(f"{NODE_A}.{stable_path.name}")
-    stable_path.rename(legacy_path)
-    # Recover origin-bearing retry state with an obsolete node prefix even after
-    # the home node identity changes. Unproven legacy files are tested separately.
+    # Active scoped retry state survives a change in the home node identity.
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_B)
     deferred_request_ids = []
     enrolled = fleet_client_messages.manage_principal(
@@ -978,7 +975,74 @@ def test_principal_add_reuses_pending_request_after_ambiguous_timeout(tmp_path, 
     assert requests[0]["request_id"] == requests[1]["request_id"]
     assert requests[0]["token"] == requests[1]["token"]
     assert not stable_path.exists()
-    assert fleet_client._read_spool(legacy_path) == []
+
+
+@pytest.mark.parametrize("interruption", ["before-copy", "after-copy", "after-finalize"])
+def test_node_prefixed_principal_retry_cannot_resurrect_after_interruption(tmp_path, monkeypatch, interruption):
+    settings = {"hub_url": "https://a.invalid", "node_token": "", "admin_token": "fixture-admin"}
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: dict(settings))
+    pending = fleet_client_messages._pending_principal_request("fixture", settings["admin_token"], None)
+    active = fleet_client_messages._principal_pending_path("fixture", settings["admin_token"])
+    history = active.with_name(f"node-a.{active.name}")
+    original = active.read_bytes()
+    if interruption == "before-copy":
+        active.rename(history)
+    else:
+        history.write_bytes(original)
+        history.chmod(0o600)
+        if interruption == "after-finalize":
+            fleet_client_messages.finalize_principal_add("fixture", request_id=pending["request_id"])
+    active_bytes = active.read_bytes() if active.exists() else None
+    enrollments = []
+
+    def principal_request(hub, _admin, body):
+        if body["action"] == "get":
+            return 404, {"error": "missing"}
+        enrollments.append((hub, dict(body)))
+        return 201, {
+            "principal": {
+                "principal_id": "agent:fixture",
+                "name": "fixture",
+                "token": body["token"],
+                "enrollment_id": body["request_id"],
+            }
+        }
+
+    monkeypatch.setattr(fleet_client_messages, "_principal_admin_request", principal_request)
+    # Retrying repeatedly must preserve both sides of an interrupted migration.
+    for _ in range(2):
+        with pytest.raises(fleet_client.FleetClientError) as error:
+            fleet_client_messages.manage_principal("add", name="fixture")
+        assert str(error.value) == "node-prefixed principal retry requires reconciliation; left untouched"
+        assert history.read_bytes() == original
+        assert (active.read_bytes() if active.exists() else None) == active_bytes
+        assert enrollments == []
+
+    # The same admin credential at another endpoint gets independent retry state.
+    settings["hub_url"] = "https://b.invalid"
+    deferred = []
+    fleet_client_messages.manage_principal("add", name="fixture", _defer_finalize=True, _deferred_request_ids=deferred)
+    assert len(enrollments) == 1
+    assert enrollments[0][0] == "https://b.invalid"
+    assert deferred == [enrollments[0][1]["request_id"]]
+    assert deferred[0] != pending["request_id"]
+    other = fleet_client_messages._principal_pending_path("fixture", settings["admin_token"])
+    assert other != active
+    assert fleet_client._read_spool(other)[0]["request_id"] == deferred[0]
+    fleet_client_messages.finalize_principal_add("fixture", request_id=deferred[0])
+    assert not other.exists()
+    assert history.read_bytes() == original
+    assert (active.read_bytes() if active.exists() else None) == active_bytes
+
+    # A normalized return to the original endpoint must still refuse old history.
+    settings["hub_url"] = "https://a.invalid/"
+    with pytest.raises(fleet_client.FleetClientError) as error:
+        fleet_client_messages.manage_principal("add", name="fixture")
+    assert str(error.value) == "node-prefixed principal retry requires reconciliation; left untouched"
+    assert len(enrollments) == 1
+    assert history.read_bytes() == original
+    assert (active.read_bytes() if active.exists() else None) == active_bytes
 
 
 def test_principal_add_keeps_retry_state_until_response_matches_request(tmp_path, monkeypatch):
