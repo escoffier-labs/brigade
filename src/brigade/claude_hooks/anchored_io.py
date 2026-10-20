@@ -68,6 +68,15 @@ def _windows_replace_contention(error: OSError) -> bool:
     )
 
 
+def _single_link_regular(info: os.stat_result) -> bool:
+    return (
+        stat.S_ISREG(info.st_mode)
+        and info.st_nlink == 1
+        and not getattr(info, "st_reparse_tag", 0)
+        and not (getattr(info, "st_file_attributes", 0) & stat.FILE_ATTRIBUTE_REPARSE_POINT)
+    )
+
+
 def _identity(info: os.stat_result) -> tuple[int, int]:
     return info.st_dev, info.st_ino
 
@@ -218,6 +227,19 @@ class SessionDirectory:
             self.validate()
             return b"".join(chunks)
 
+    def refuse_non_regular_target(self, name: str, contention: OSError) -> None:
+        """NTFS reports a directory or linked publish target as contention; refuse it instead."""
+        try:
+            info = dirfd.stat_child(self.fd, name, allow_reparse=True)
+        except FileNotFoundError:
+            return
+        except OSError as exc:
+            _raise_integrity_error(exc)
+            # A target that cannot be inspected right now is still contention.
+            return
+        if not _single_link_regular(info):
+            raise SessionIntegrityError("Claude hook publish target is not a single-link regular file") from contention
+
     def write_json(self, name: str, payload: dict[str, Any]) -> None:
         data = (json.dumps(payload, indent=2, sort_keys=True) + "\n").encode("utf-8")
         temporary = f".{dirfd.validate_component(name)}.{uuid.uuid4().hex}.tmp"
@@ -247,6 +269,7 @@ class SessionDirectory:
                         _raise_integrity_error(exc)
                         if not _windows_replace_contention(exc):
                             raise
+                        self.refuse_non_regular_target(name, exc)
                         if attempt + 1 == _WINDOWS_REPLACE_ATTEMPTS:
                             raise OSError(errno.EBUSY, "Windows session publication remained busy") from exc
                         time.sleep(_WINDOWS_REPLACE_BACKOFF_SECONDS)
@@ -257,19 +280,22 @@ class SessionDirectory:
             finally:
                 os.close(fd)
             dirfd.fsync_directory(self.fd)
-        finally:
+        except BaseException as primary_error:
             if created and not published:
                 # Cleanup stays relative even when a parent was renamed.
-                primary_error = sys.exc_info()[1]
                 try:
                     dirfd.unlink_child(self.fd, temporary)
                 except FileNotFoundError:
                     pass
                 except OSError as exc:
                     if isinstance(primary_error, SessionIntegrityError):
-                        raise primary_error from exc
+                        # Keep the refusal's own cause; the cleanup failure becomes its context.
+                        if primary_error.__cause__ is None:
+                            raise primary_error  # noqa: B904 - "from None" would hide the cleanup failure
+                        raise primary_error from primary_error.__cause__
                     _raise_integrity_error(exc)
                     raise
+            raise
 
     @contextlib.contextmanager
     def held_lock(self, name: str, *, deadline_seconds: float) -> Iterator[None]:

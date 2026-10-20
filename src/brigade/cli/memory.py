@@ -298,16 +298,20 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     p_memory_recall.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_memory_serve_mcp = memory_sub.add_parser(
-        "serve-mcp", help="Expose memory cards over a read-only MCP stdio server (card:// scheme)."
+        "serve-mcp", help="Serve Brigade memory over MCP (stdio or loopback HTTP); prints the contract otherwise."
     )
     p_memory_serve_mcp.add_argument(
-        "--target", "-t", type=Path, default=Path("."), help="Repo or workspace whose cards to serve."
+        "--target",
+        "-t",
+        type=Path,
+        default=None,
+        help="Repo whose cards form the repo store. Default: nearest repo above the cwd with .brigade/config.json or .brigade/memory-care.toml.",
     )
-    memory_transport = p_memory_serve_mcp.add_mutually_exclusive_group()
-    memory_transport.add_argument(
+    serve_transport = p_memory_serve_mcp.add_mutually_exclusive_group()
+    serve_transport.add_argument(
         "--stdio", action="store_true", help="Run the JSON-RPC stdio server (otherwise print the contract)."
     )
-    memory_transport.add_argument(
+    serve_transport.add_argument(
         "--http",
         action="store_true",
         help="Run a loopback Streamable HTTP server at /mcp (token from BRIGADE_MCP_HTTP_TOKEN).",
@@ -316,6 +320,9 @@ def register(sub: argparse._SubParsersAction) -> None:
         "--host", default=None, help="With --http: loopback address to bind (127.0.0.1, ::1, or localhost)."
     )
     p_memory_serve_mcp.add_argument("--port", type=int, default=None, help="With --http: port to bind (default 8931).")
+    p_memory_serve_mcp.add_argument(
+        "--inbox", default="codex", help="Handoff inbox alias or path for write_handoff in the repo store."
+    )
     p_memory_serve_mcp.add_argument("--json", action="store_true", help="Print the contract as JSON.")
 
     # Embedded memory-doctor verbs (status / lint / compact / init-git).
@@ -507,10 +514,11 @@ def dispatch(args) -> int:
         return memory_cmd.serve_mcp(
             target=args.target,
             stdio=args.stdio,
-            json_output=args.json,
             http=args.http,
             host=args.host,
             port=args.port,
+            inbox=args.inbox,
+            json_output=args.json,
         )
 
     from .. import memory_doctor_cmd
