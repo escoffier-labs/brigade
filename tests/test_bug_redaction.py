@@ -1,8 +1,20 @@
 """Additional public-report leak patterns use fake adversarial values."""
 
+import json
+import os
+import re
+
 import pytest
 from brigade.bug_redaction import Redactor, ReportBlocked, assert_clean
 from brigade.guard.engine import scan_text
+
+
+@pytest.fixture(autouse=True)
+def isolated_secret_environment(monkeypatch):
+    # Only credentials seeded by these tests may influence their second scan.
+    for name in os.environ:
+        if re.search(r"TOKEN|KEY|SECRET|PASSWORD|PASS|CREDENTIAL", name, re.I):
+            monkeypatch.delenv(name)
 
 
 @pytest.mark.parametrize(
@@ -60,3 +72,22 @@ def test_hostname_matching_does_not_fold_other_local_literals(tmp_path, monkeypa
     monkeypatch.setenv("TEST_CREDENTIAL", "CaseSensitiveValue")
     redactor = Redactor(tmp_path)
     assert redactor.text("BUILDNODE casesensitivevalue") == "<local> casesensitivevalue"
+
+
+@pytest.mark.parametrize("secret", ["q", "qx", "qxy", "x-y", "q\nx", 'q"x', "q\u2603x"])
+def test_short_secret_blocks_second_scan_without_corrupting_text(tmp_path, monkeypatch, secret):
+    monkeypatch.setenv("TEST_CREDENTIAL", secret)
+    text = f"prefix{secret}postfix"
+    redacted = Redactor(tmp_path).text(text)
+    assert redacted == text
+    for candidate in (redacted, json.dumps({"detail": redacted}), json.dumps({"detail": redacted}, ensure_ascii=False)):
+        with pytest.raises(ReportBlocked, match="TEST_CREDENTIAL") as blocked:
+            assert_clean(candidate)
+        assert secret not in str(blocked.value)
+
+
+def test_long_secret_is_scrubbed_inside_words(tmp_path, monkeypatch):
+    monkeypatch.setenv("TEST_CREDENTIAL", "qxyz")
+    redacted = Redactor(tmp_path).text("prefixqxyzpostfix")
+    assert redacted == "prefix<local>postfix"
+    assert_clean(redacted)

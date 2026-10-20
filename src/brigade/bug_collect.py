@@ -5,6 +5,8 @@ from __future__ import annotations
 import json
 import os
 import platform
+import re
+from datetime import datetime, timezone
 from itertools import islice
 from pathlib import Path
 from typing import Any
@@ -13,9 +15,10 @@ from . import __version__, bug_last_error, extras, telemetry_export
 from .localio import canonical_json_digest
 
 _RECEIPT_BYTE_LIMIT = 256 * 1024
-_DIRECTORY_ENTRY_LIMIT = 1024
+_DIRECTORY_ENTRY_LIMIT = 20_000
 _RECEIPT_DIR_LIMIT = 64
 _PROJECTION_ROW_LIMIT = 512
+_RECEIPT_TIMESTAMP = re.compile(r"^(?:[0-9a-f]{8}\.)?(\d{8}-\d{6})-", re.I)
 
 
 def _object(path: Path) -> dict[str, Any] | None:
@@ -31,14 +34,24 @@ def _object(path: Path) -> dict[str, Any] | None:
 
 
 def _newest_receipt_dirs(root: Path) -> list[Path]:
-    """Bound diagnostics only. Public receipt exports remain exhaustive."""
+    """Sort the bounded listing by creation stamps, using mtime for legacy names."""
     candidates: list[tuple[int, str]] = []
     try:
         with os.scandir(root) as entries:
             for entry in islice(entries, _DIRECTORY_ENTRY_LIMIT):
                 try:
                     if entry.is_dir(follow_symlinks=False):
-                        candidates.append((entry.stat(follow_symlinks=False).st_mtime_ns, entry.name))
+                        stamp = _RECEIPT_TIMESTAMP.match(entry.name)
+                        modified = None
+                        if stamp is not None:
+                            try:
+                                created = datetime.strptime(stamp[1], "%Y%m%d-%H%M%S").replace(tzinfo=timezone.utc)
+                                modified = int(created.timestamp()) * 1_000_000_000
+                            except ValueError:
+                                pass
+                        if modified is None:
+                            modified = entry.stat(follow_symlinks=False).st_mtime_ns
+                        candidates.append((modified, entry.name))
                 except OSError:
                     continue
     except OSError:

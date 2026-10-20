@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+from datetime import datetime, timedelta, timezone
 
 import pytest
 
@@ -111,6 +113,50 @@ def test_bug_receipt_directory_enumeration_has_work_budget(tmp_path, monkeypatch
     monkeypatch.setattr(os, "scandir", lambda path: Entries() if path == root else original(path))
     bug_collect.recent_failures(tmp_path)
     assert len(visited) == 2
+
+
+@pytest.mark.parametrize("source", ["runs", "verify"])
+def test_latest_failures_beyond_1024_entries_use_timestamp_names(tmp_path, monkeypatch, source):
+    root = tmp_path / ".brigade" / ("runs" if source == "runs" else "work/verify-runs")
+    root.mkdir(parents=True)
+    directories = []
+    start = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    for i in range(1030):
+        stamp = (start + timedelta(seconds=i)).strftime("%Y%m%d-%H%M%S")
+        # Run ids may carry a node namespace that must not affect ordering.
+        name = f"{stamp}-00000000" if source == "verify" else f"{1029 - i:08x}.{stamp}-00000000"
+        directory = root / name
+        directory.mkdir()
+        os.utime(directory, (2000 - i, 2000 - i))
+        directories.append(directory)
+    latest = directories[-1]
+    if source == "runs":
+        _run(tmp_path, run_id=latest.name)
+        write_json(latest / "worker-results.json", {"results": [{"worker": "worker", "ok": False}]})
+    else:
+        receipt_path = _verify_receipt(tmp_path, latest.name)
+        receipt = json.loads(receipt_path.read_text())
+        receipt["status"] = "failed"
+        write_json(receipt_path, receipt)
+    os.utime(latest, (1, 1))
+
+    # Pin hostile filesystem order so the latest entry is outside the old cap.
+    original = os.scandir
+
+    class Entries:
+        def __enter__(self):
+            with original(root) as entries:
+                by_name = {entry.name: entry for entry in entries}
+            return iter(by_name[d.name] for d in directories)
+
+        def __exit__(self, *args):
+            pass
+
+    monkeypatch.setattr(os, "scandir", lambda path: Entries() if path == root else original(path))
+    failures = bug_collect.recent_failures(tmp_path)
+    found = failures["runs"][0] if source == "runs" and failures["runs"] else failures["verify"]
+    assert found is not None
+    assert found["id"] == latest.name
 
 
 @pytest.mark.parametrize("source", ["runs", "verify"])

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import getpass
+import json
 import os
 import re
 import socket
@@ -15,6 +16,8 @@ from .evidence_redaction import apply_origin_redaction
 from .guard.engine import scan_text
 from .guard.policy import Policy
 from .guard.types import GuardResult, Rule, ScanOptions
+
+_SECRET_ENV_NAME = re.compile(r"TOKEN|KEY|SECRET|PASSWORD|PASS|CREDENTIAL", re.I)
 
 
 # Bug bundles need stricter leak detection than repository content. Keep these
@@ -58,6 +61,16 @@ class ReportBlocked(ValueError):
 
 def assert_clean(text: str) -> None:
     """Scan the final bytes independently, ignoring embedded allow directives."""
+    for name, value in os.environ.items():
+        if not _SECRET_ENV_NAME.search(name) or not 0 < len(value) <= 3:
+            continue
+        # Rendered JSON may disclose the same value with quotes, control bytes,
+        # or non-ASCII characters escaped.
+        variants = (value, json.dumps(value)[1:-1], json.dumps(value, ensure_ascii=False)[1:-1])
+        if any(variant in text for variant in variants):
+            raise ReportBlocked(
+                f"Bug report blocked: second scan found a short secret from environment variable {name}"
+            )
     try:
         result = scan_text(
             text,
@@ -86,17 +99,13 @@ class Redactor:
             self.hostname,
             getpass.getuser(),
         }
-        values.update(
-            value
-            for key, value in os.environ.items()
-            if re.search(r"TOKEN|KEY|SECRET|PASSWORD|PASS|CREDENTIAL", key, re.I) and value
-        )
+        values.update(value for key, value in os.environ.items() if _SECRET_ENV_NAME.search(key) and len(value) >= 4)
         self.literals = sorted((value for value in values if value and value not in {"/", "\\"}), key=len, reverse=True)
 
     def text(self, text: str) -> str:
         for literal in self.literals:
-            # Path/secret literals may occur inside larger strings. Bare user
-            # names need boundaries to avoid corrupting unrelated identifiers.
+            # Short secrets are checked by the second scan rather than replaced.
+            # Bare user names need boundaries to avoid corrupting identifiers.
             pattern = re.escape(literal)
             if literal == getpass.getuser() or (len(literal) <= 3 and literal.isalnum()):
                 pattern = rf"(?<![\w.]){pattern}(?![\w.])"

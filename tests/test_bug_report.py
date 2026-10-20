@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 import socket
 from pathlib import Path
 
@@ -15,6 +17,10 @@ from brigade import cli
 def report_env(tmp_path, monkeypatch):
     from brigade import bug_cmd
 
+    # A host's short credential must not block unrelated fixture reports.
+    for name in os.environ:
+        if re.search(r"TOKEN|KEY|SECRET|PASSWORD|PASS|CREDENTIAL", name, re.I):
+            monkeypatch.delenv(name)
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     monkeypatch.setenv("LOCALAPPDATA", str(tmp_path / "data"))
     monkeypatch.setenv("BRIGADE_BUG_REPORT", "ask")
@@ -90,6 +96,30 @@ def test_adversarial_values_scrubbed_before_persistence(report_env, monkeypatch,
 
     assert_clean(stored)
     assert out["redaction"]["count"] >= len(secrets)
+
+
+@pytest.mark.parametrize("stage", ["preview", "prepared"])
+def test_embedded_short_secret_blocks_report(report_env, monkeypatch, capsys, stage):
+    mod, target = report_env
+    monkeypatch.delenv("TEST_CREDENTIAL", raising=False)
+    flags = ["--summary", "prefixqxypostfix", "--dry-run", "--json"]
+    before = None
+    if stage == "prepared":
+        assert invoke(target, *flags) == 0
+        preview = result(capsys)
+        before = Path(preview["receipt_path"]).read_bytes()
+        flags = ["--report-id", preview["report_id"], "--yes", "--not-security", "--via", "gh"]
+    monkeypatch.setenv("TEST_CREDENTIAL", "qxy")
+    monkeypatch.setattr(mod, "gh", lambda *a: pytest.fail("blocked report reached gh"))
+    status = cli.main(["bug", "report", *flags]) if stage == "prepared" else invoke(target, *flags)
+    assert status == 2
+    captured = capsys.readouterr()
+    assert "TEST_CREDENTIAL" in captured.err
+    assert "qxy" not in captured.out + captured.err
+    if before is None:
+        assert not list(Path(mod.data_root()).rglob("bundle.json"))
+    else:
+        assert Path(preview["receipt_path"]).read_bytes() == before
 
 
 @pytest.mark.parametrize("stage", ["first", "second", "residual"])
