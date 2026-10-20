@@ -497,7 +497,8 @@ def test_work_import_ingest_redacts_acceptance_and_metadata(tmp_path, capsys):
                 "acceptance": [f"Notify {email} after the change", f"Host {address} answers health checks"],
                 "metadata": {
                     "owner": f"Contact {email}",
-                    "nested": {"hosts": [f"node at {address}"]},
+                    email: "keyed by an address",
+                    "nested": {"hosts": [f"node at {address}"], address: 1},
                     "count": 3,
                 },
             }
@@ -528,6 +529,31 @@ def test_work_import_ingest_redacts_acceptance_and_metadata(tmp_path, capsys):
     ledger_text = (tmp_path / ".brigade" / "work" / "tasks.json").read_text()
     assert email not in ledger_text
     assert address not in ledger_text
+
+
+def test_work_import_ingest_field_redaction_failure_quarantines_row(tmp_path, capsys, monkeypatch):
+    from brigade import evidence_redaction
+
+    real_apply = evidence_redaction.apply_and_record
+
+    def failing_apply(text, *, origin, scanner=None):
+        if "force-scan-failure" in text:
+            return evidence_redaction.FAILED_PLACEHOLDER, evidence_redaction._error_verdict(origin).record(), True
+        return real_apply(text, origin=origin, scanner=scanner)
+
+    monkeypatch.setattr(evidence_redaction, "apply_and_record", failing_apply)
+    _init_git_repo(tmp_path)
+    import_file = tmp_path / "imports.jsonl"
+    import_file.write_text(
+        json.dumps({"text": "Review the rollout", "kind": "task", "acceptance": ["force-scan-failure entry"]}) + "\n"
+    )
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    item = json.loads(capsys.readouterr().out)["imports"][0]
+    assert item["acceptance"] == [evidence_redaction.FAILED_PLACEHOLDER]
+    assert item["metadata"]["field_redaction"]["status"] == "error"
+    assert item["metadata"]["provenance"]["trust"]["label"] == "quarantined"
+    assert work_cmd.import_promote(target=tmp_path, import_id=item["id"]) == 2
 
 
 def test_work_import_ingest_keeps_distinct_raw_identities_after_redaction(tmp_path, capsys):

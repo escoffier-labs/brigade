@@ -94,15 +94,20 @@ class _ImportFieldRedaction:
         self.detectors: set[str] = set()
         self.failed = False
 
+    def redact_text(self, value: str) -> str:
+        persisted, record, failed = evidence_redaction.apply_and_record(value, origin=self.origin)
+        self.count += int(record.get("count") or 0)
+        self.detectors.update(str(detector) for detector in record.get("detectors") or ())
+        self.failed = self.failed or failed
+        return persisted
+
     def redact(self, value: object) -> object:
         if isinstance(value, str):
-            persisted, record, failed = evidence_redaction.apply_and_record(value, origin=self.origin)
-            self.count += int(record.get("count") or 0)
-            self.detectors.update(str(detector) for detector in record.get("detectors") or ())
-            self.failed = self.failed or failed
-            return persisted
+            return self.redact_text(value)
         if isinstance(value, dict):
-            return {key: self.redact(item) for key, item in value.items()}
+            return {
+                self.redact_text(key) if isinstance(key, str) else key: self.redact(item) for key, item in value.items()
+            }
         if isinstance(value, list):
             return [self.redact(item) for item in value]
         return value
@@ -117,7 +122,9 @@ class _ImportFieldRedaction:
 
 
 # Dedupe identity keys keep their raw value so re-import still matches.
-_IMPORT_REDACTION_EXEMPT_METADATA_KEYS = frozenset(import_model._UNTRUSTED_IMPORT_IDENTITY_METADATA_KEYS)
+_IMPORT_REDACTION_EXEMPT_METADATA_KEYS: frozenset[str] = frozenset(
+    import_model._UNTRUSTED_IMPORT_IDENTITY_METADATA_KEYS
+)
 
 
 def _import_field_redaction(provenance_authority: str, origin: str) -> _ImportFieldRedaction | None:
@@ -131,7 +138,7 @@ def _persisted_import_acceptance(acceptance: object, field_redaction: _ImportFie
     normalized = import_model._normalize_acceptance(acceptance)
     if field_redaction is None:
         return normalized
-    return [str(field_redaction.redact(entry)) for entry in normalized]
+    return [field_redaction.redact_text(entry) for entry in normalized]
 
 
 def _make_import(
@@ -181,7 +188,9 @@ def _make_import(
     stamped_metadata = inbox_provenance._sanitize_import_identity_metadata(stamped_metadata)
     if field_redaction is not None:
         stamped_metadata = {
-            key: value if key in _IMPORT_REDACTION_EXEMPT_METADATA_KEYS else field_redaction.redact(value)
+            key if key in _IMPORT_REDACTION_EXEMPT_METADATA_KEYS else field_redaction.redact_text(key): (
+                value if key in _IMPORT_REDACTION_EXEMPT_METADATA_KEYS else field_redaction.redact(value)
+            )
             for key, value in stamped_metadata.items()
         }
         redaction_failed = redaction_failed or field_redaction.failed

@@ -39,8 +39,8 @@ receives the external tier. Other producer mappings stay unchanged.
 
 The redaction first covered only the import's `text` field.
 [#1712](https://github.com/escoffier-labs/brigade/issues/1712) extends it to
-`learning-loop` rows' `acceptance` entries and every string value in the
-allowlisted metadata, at the same origin. Dedupe identity keys such as
+`learning-loop` rows' `acceptance` entries and every string key and value in
+the allowlisted metadata, nested ones included, at the same origin. Dedupe identity keys such as
 `source_fingerprint` and `source_item_key` keep their raw values, so re-import
 dedupe still matches. The field verdict is stored as `metadata.field_redaction`,
 next to the provenance envelope. The envelope's `redaction` record still
