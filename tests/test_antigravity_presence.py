@@ -1,0 +1,293 @@
+"""Antigravity's silent, detached hook transport and presence lifecycle."""
+
+from __future__ import annotations
+
+import io
+import json
+import os
+import subprocess
+import sys
+from pathlib import Path
+
+import pytest
+
+from brigade import cli, fleet_client
+from brigade import fleet_session_presence as presence
+from brigade.config import Config, write_config
+from brigade.selection import Selection
+
+
+@pytest.fixture()
+def workspace(tmp_path):
+    repo = tmp_path / "project"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-b", "topic", str(repo)], check=True, capture_output=True)
+    subprocess.run(
+        ["git", "-C", str(repo), "remote", "add", "origin", "https://github.com/example/project.git"],
+        check=True,
+        capture_output=True,
+    )
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(repo),
+            "-c",
+            "user.name=Example Dev",
+            "-c",
+            "user.email=dev@example.com",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "init",
+        ],
+        check=True,
+        capture_output=True,
+    )
+    write_config(
+        repo, Config(version=1, selection=Selection(depth="repo", harnesses=["antigravity"], owner="antigravity"))
+    )
+    return repo
+
+
+@pytest.mark.parametrize("expected", ["start", "heartbeat"])
+def test_hook_detaches_silent_publisher_and_preserves_session(workspace, monkeypatch, capsys, expected):
+    launches = []
+
+    def spawn(argv, **kwargs):
+        launches.append((argv, kwargs))
+        return object()  # No wait/communicate methods: the hook cannot wait for the Hub.
+
+    monkeypatch.setattr(subprocess, "Popen", spawn)
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(
+            json.dumps(
+                {
+                    "conversationId": "conversation-1",
+                    "workspacePaths": [str(workspace)],
+                    "prompt": "PLANTED_PROMPT_DO_NOT_LEAK",
+                    "repo_identity": "evil.invalid/planted",
+                    "dirty_paths": ["planted.txt"],
+                }
+            )
+        ),
+    )
+    assert cli.main(["work", "presence-hook", "--harness", "antigravity", "--stdin", "--event", expected]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == captured.err == ""
+    assert len(launches) == 1
+    argv, options = launches[0]
+    assert options["stdin"] == options["stdout"] == options["stderr"] == subprocess.DEVNULL
+    assert options["close_fds"] is True
+    if os.name == "nt":
+        assert options["creationflags"] & subprocess.DETACHED_PROCESS
+    else:
+        assert options["start_new_session"] is True
+    assert "PLANTED" not in repr(launches)
+    assert argv[:3] == [sys.executable, "-m", "brigade"]
+    assert argv[3:5] == ["work", "presence-hook"]
+    assert argv[argv.index("--event") + 1] == expected
+
+    # Run the detached command's real entry point and inspect what reaches the client.
+    snapshots = []
+    monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "http://127.0.0.1:3774")
+    monkeypatch.setattr(fleet_client, "upsert_session", lambda snap: snapshots.append(snap) or True)
+    monkeypatch.setattr(fleet_client, "end_session", lambda snap: pytest.fail("Stop must not end a session"))
+    # Restore Popen for the Git commands used to build the snapshot.
+    monkeypatch.setattr(subprocess, "Popen", REAL_POPEN)
+    assert cli.main(argv[3:]) == 0
+    assert capsys.readouterr().out == ""
+    assert len(snapshots) == 1
+    snapshot = snapshots[0]
+    assert (snapshot.harness, snapshot.session_id, snapshot.branch) == ("antigravity", "conversation-1", "topic")
+    assert snapshot.repo_identity == "github.com/example/project"
+    assert snapshot.checkout_path == str(workspace.resolve())
+    assert "planted.txt" not in snapshot.dirty_paths
+
+
+REAL_POPEN = subprocess.Popen
+
+
+@pytest.mark.parametrize(
+    "raw", ["{}", "not json", "[]", '{"conversationId":1}', "x" * (presence.MAX_PRESENCE_STDIN_BYTES + 1)]
+)
+def test_invalid_payload_is_silent_and_does_not_spawn(monkeypatch, capsys, raw):
+    monkeypatch.setattr(sys, "stdin", io.StringIO(raw))
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: pytest.fail("invalid payload spawned a publisher"))
+    assert cli.main(["work", "presence-hook", "--harness", "antigravity", "--stdin", "--event", "start"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == captured.err == ""
+
+
+def test_spawn_failure_is_silent(workspace, monkeypatch, capsys):
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(
+            json.dumps(
+                {
+                    "conversationId": "conversation-1",
+                    "workspacePaths": [str(workspace)],
+                }
+            )
+        ),
+    )
+
+    def fail(*args, **kwargs):
+        raise OSError("publisher unavailable")
+
+    monkeypatch.setattr(subprocess, "Popen", fail)
+    assert cli.main(["work", "presence-hook", "--harness", "antigravity", "--stdin", "--event", "start"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == captured.err == ""
+
+
+def test_init_installs_named_antigravity_hooks_without_replacing_foreign_entries(tmp_path, monkeypatch, capsys):
+    import shlex
+
+    monkeypatch.setenv("BRIGADE_EXTRAS", "1")
+    hooks_path = tmp_path / ".agents" / "hooks.json"
+    hooks_path.parent.mkdir()
+    foreign = {"formatter": {"PostToolUse": [{"matcher": "write_to_file", "hooks": [{"command": "format-code"}]}]}}
+    hooks_path.write_text(json.dumps(foreign), encoding="utf-8")
+    argv = ["init", "--target", str(tmp_path), "--depth", "repo", "--harnesses", "antigravity"]
+    assert cli.main(argv) == 0
+    doc = json.loads(hooks_path.read_text(encoding="utf-8"))
+    assert doc["formatter"] == foreign["formatter"]
+    managed = doc["brigade-presence"]
+    for event, expected in (
+        ("PreInvocation", "start"),
+        ("PostToolUse", "heartbeat"),
+        ("PostInvocation", "heartbeat"),
+        ("Stop", "heartbeat"),
+    ):
+        handlers = managed[event]
+        if event == "PostToolUse":
+            assert handlers[0]["matcher"] == "*"
+            handlers = handlers[0]["hooks"]
+        assert len(handlers) == 1
+        command = shlex.split(handlers[0]["command"])
+        assert command == [
+            "brigade",
+            "work",
+            "presence-hook",
+            "--harness",
+            "antigravity",
+            "--stdin",
+            "--event",
+            expected,
+        ]
+    first = hooks_path.read_bytes()
+    assert cli.main(argv) == 0
+    assert hooks_path.read_bytes() == first
+    capsys.readouterr()
+
+
+@pytest.mark.parametrize("flag", ["--no-wire", "--dry-run"])
+def test_init_without_wiring_does_not_install_hook(tmp_path, monkeypatch, flag):
+    monkeypatch.setenv("BRIGADE_EXTRAS", "1")
+    assert cli.main(["init", "--target", str(tmp_path), "--depth", "repo", "--harnesses", "antigravity", flag]) == 0
+    assert not (tmp_path / ".agents" / "hooks.json").exists()
+
+
+@pytest.mark.parametrize("existing", ["{broken", "[]", '{"brigade-presence":{"enabled":false}}'])
+def test_init_preserves_conflicting_hook_config(tmp_path, monkeypatch, capsys, existing):
+    monkeypatch.setenv("BRIGADE_EXTRAS", "1")
+    hooks_path = tmp_path / ".agents" / "hooks.json"
+    hooks_path.parent.mkdir()
+    hooks_path.write_text(existing, encoding="utf-8")
+    assert cli.main(["init", "--target", str(tmp_path), "--depth", "repo", "--harnesses", "antigravity"]) == 0
+    assert hooks_path.read_text(encoding="utf-8") == existing
+    assert "warning:" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("selection", [None, "claude", "home"])
+def test_hook_skips_unwired_unselected_and_operator_home(tmp_path, monkeypatch, capsys, selection):
+    repo = tmp_path / "project"
+    repo.mkdir()
+    if selection is not None:
+        write_config(
+            repo,
+            Config(
+                version=1,
+                selection=Selection(
+                    depth="repo", harnesses=["antigravity" if selection == "home" else selection], owner="this-repo"
+                ),
+            ),
+        )
+    if selection == "home":
+        monkeypatch.setattr(Path, "home", lambda: repo)
+    monkeypatch.setattr(
+        sys, "stdin", io.StringIO(json.dumps({"conversationId": "conversation-1", "workspacePaths": [str(repo)]}))
+    )
+    monkeypatch.setattr(subprocess, "Popen", lambda *a, **kw: pytest.fail("unwired target spawned publisher"))
+    assert cli.main(["work", "presence-hook", "--harness", "antigravity", "--stdin", "--event", "start"]) == 0
+    captured = capsys.readouterr()
+    assert captured.out == captured.err == ""
+
+
+def test_hook_process_returns_while_detached_publisher_is_blocked(workspace, tmp_path):
+    """A live publisher cannot keep agy's hook stdout pipe or hook process open."""
+    import time
+
+    started = tmp_path / "publisher-started"
+    release = tmp_path / "release-publisher"
+    finished = tmp_path / "publisher-finished"
+    customization = tmp_path / "python-startup"
+    customization.mkdir()
+    (customization / "sitecustomize.py").write_text(
+        "import os, time\n"
+        "from pathlib import Path\n"
+        "from brigade import fleet_client\n"
+        "def blocked(snapshot):\n"
+        "    Path(os.environ['TEST_PUBLISHER_STARTED']).touch()\n"
+        "    while not Path(os.environ['TEST_PUBLISHER_RELEASE']).exists():\n"
+        "        time.sleep(0.01)\n"
+        "    Path(os.environ['TEST_PUBLISHER_FINISHED']).touch()\n"
+        "    return True\n"
+        "fleet_client.upsert_session = blocked\n",
+        encoding="utf-8",
+    )
+    env = dict(os.environ)
+    env.update(
+        PYTHONPATH=os.pathsep.join([str(customization), str(Path(presence.__file__).resolve().parents[1])]),
+        BRIGADE_EXTRAS="1",
+        BRIGADE_FLEET_HUB_URL="http://127.0.0.1:3774",
+        TEST_PUBLISHER_STARTED=str(started),
+        TEST_PUBLISHER_RELEASE=str(release),
+        TEST_PUBLISHER_FINISHED=str(finished),
+    )
+    try:
+        result = subprocess.run(
+            [
+                sys.executable,
+                "-m",
+                "brigade",
+                "work",
+                "presence-hook",
+                "--harness",
+                "antigravity",
+                "--stdin",
+                "--event",
+                "start",
+            ],
+            input=json.dumps({"conversationId": "conversation-1", "workspacePaths": [str(workspace)]}),
+            text=True,
+            capture_output=True,
+            env=env,
+            timeout=10,
+            check=True,
+        )
+        assert result.stdout == result.stderr == ""
+        deadline = time.monotonic() + 10
+        while not started.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert started.exists(), "detached publisher did not reach the client"
+        assert not finished.exists(), "publisher was released before the hook returned"
+    finally:
+        release.touch()
+        deadline = time.monotonic() + 10
+        while started.exists() and not finished.exists() and time.monotonic() < deadline:
+            time.sleep(0.01)

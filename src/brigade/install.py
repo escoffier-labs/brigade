@@ -477,6 +477,14 @@ def install_selection(
                 file=sys.stderr,
             )
 
+    if wire_skills and "antigravity" in selection.harnesses:
+        from .antigravity_presence import install_hooks
+
+        try:
+            install_hooks(target)
+        except (OSError, ValueError) as exc:
+            print(f"warning: unable to wire Antigravity presence hooks: {exc}", file=sys.stderr)
+
     if update_gitignore:
         result = apply_gitignore(target, selection, use_git_exclude=use_git_exclude)
         print(f"brigade: gitignore {result}")
