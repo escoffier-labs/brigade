@@ -9,7 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Worker cassettes default to metadata only until the hardening follow-up. Exports exclude cassette staging copies, and retention and latest purge require matching run identities. (#1854)
 - Fleet claim renewal and release follow node-token rotation on the bound hub, including orphan-release retries, while retaining the last node credential when its token file is temporarily unavailable.
 
 ### Added
