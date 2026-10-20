@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import builtins
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 import hashlib
 import os
@@ -48,6 +49,15 @@ class HubInbox(MessageOperations):
 
     def require_scope(self, scope: str, *, agent: bool = True) -> None:
         require(self.scope(agent=agent) == scope, "hub_credential_changed")
+
+    @contextmanager
+    def _operation_scope(self) -> Iterator[str]:
+        scope = self.scope(agent=True)
+        try:
+            yield scope
+        finally:
+            # Shared tool projections must finish under the authority captured before preparation.
+            self.require_scope(scope, agent=True)
 
     def _call(self, action: str, *args: Any, agent: bool = True, **kwargs: Any) -> Any:
         scope = kwargs.pop("expected_scope", None) or self.scope(agent=agent)

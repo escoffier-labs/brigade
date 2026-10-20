@@ -6,6 +6,7 @@ from copy import deepcopy
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import hashlib
+import json
 import threading
 import unittest
 from unittest.mock import patch
@@ -803,3 +804,146 @@ class TestHubInbox(HubFixture):
                 with self.assertRaisesRegex(DotError, "^hub_unavailable$"):
                     self.tools.message_send("node-b", "s", "b")
         self.assertIsNone(self.state.hub_get("agent_spool_pending", scope=self.hub.scope()))
+
+
+@pytest.fixture
+def dot_message_transport(dot_private_dir, monkeypatch):
+    from brigade import fleet_client
+
+    monkeypatch.delenv(ENV_TOKEN_FILE, raising=False)
+    token_file = dot_private_dir.parent / "principal.token"
+    token_file.write_text("x" * 64)
+    token_file.chmod(0o600)
+    settings = dict(hub_url="https://hub.example.test", node_token="n" * 64, admin_token="")
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: dict(settings))
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: "node-a")
+    monkeypatch.setattr(fleet_client, "spool_path", lambda *args: dot_private_dir.parent / "spool" / "node.jsonl")
+    cfg = HubConfig("agent:dot", "node-a", token_file, 30, {"worker": "node-b"})
+    state = BridgeState(dot_private_dir)
+    hub = HubInbox(state, cfg, clock=lambda: NOW)
+    tools = InboxTools(replace(parse_runtime(_document()), hub=cfg), state, hub)
+    try:
+        yield tools, hub, state, settings, token_file
+    finally:
+        state.close()
+
+
+@requires_local_state
+@pytest.mark.parametrize("change", ["endpoint", "token", "invalid-token"])
+@pytest.mark.parametrize(
+    "tool_name,seam,queued,fail_projection",
+    [
+        ("message_send", "sent-message", False, False),
+        ("inbox_reply", "sent-message", False, False),
+        ("message_status", "recipients", False, False),
+        ("message_send", "clock", True, False),
+        ("inbox_reply", "sent-message", True, False),
+        ("inbox_reply", "sent-message", True, True),
+        ("message_status", "recipients", False, True),
+        ("message_send", "prepare-clock", False, True),
+        ("inbox_reply", "prepare-call", False, False),
+        ("message_status", "prepare-call", False, False),
+    ],
+)
+def test_dot_shared_operation_scope_covers_preparation_and_projection(
+    dot_message_transport, monkeypatch, caplog, change, tool_name, seam, queued, fail_projection
+):
+    from brigade import fleet_client
+
+    tools, hub, state, settings, token_file = dot_message_transport
+    token, replacement = "x" * 64, "y" * 64
+    original_hub = settings["hub_url"]
+    original_scope = hub.scope()
+    requests, rotations = [], []
+    row = dict(id=7, recipient="node-b", sender="agent:dot", created_at=NOW.isoformat(), body="body")
+
+    def rotate():
+        assert len(requests) == (0 if seam.startswith("prepare-") else 1)
+        rotations.append(seam)
+        if change == "endpoint":
+            settings["hub_url"] = "https://other.example.test"
+        else:
+            token_file.write_text("invalid" if change == "invalid-token" else replacement)
+        if fail_projection:
+            raise DotError("hub_unavailable")
+
+    def request(hub_url, credential, body, *, timeout=None):
+        requests.append((hub_url, credential, dict(body)))
+        if queued:
+            return 503, {}
+        if body["action"] == "sent":
+            return 200, {"messages": [row], "next_cursor": row["id"]}
+        return 200, {"message": dict(row, client_id=body["client_id"])}
+
+    original_sent_message, original_call = hub._sent_message, hub._call
+
+    def sent_message(value, *, agent):
+        result = original_sent_message(value, agent=agent)
+        rotate()
+        return result
+
+    def clock():
+        if requests or seam == "prepare-clock":
+            rotate()
+        return NOW
+
+    def recipients(self):
+        rotate()
+        return self.config.recipients
+
+    def prepare_call(*args, **kwargs):
+        rotate()
+        return original_call(*args, **kwargs)
+
+    monkeypatch.setattr(messages, "_request", request)
+    if seam == "sent-message":
+        monkeypatch.setattr(hub, "_sent_message", sent_message)
+    elif seam in {"clock", "prepare-clock"}:
+        monkeypatch.setattr(hub, "clock", clock)
+    elif seam == "prepare-call":
+        monkeypatch.setattr(hub, "_call", prepare_call)
+    else:
+        monkeypatch.setattr(HubInbox, "recipients", property(recipients))
+    args = {
+        "message_send": dict(to="worker", subject="subject", body="body"),
+        "inbox_reply": dict(msg_id=1, body="reply"),
+        "message_status": dict(ids=[7]),
+    }[tool_name]
+    if tool_name == "message_send" and seam != "prepare-clock":
+        args["client_id"] = "stable-id"
+    result, error = None, None
+    try:
+        result = getattr(tools, tool_name)(**args)
+    except DotError as caught:
+        error = caught
+    assert error is not None, result
+    assert error.code == ("hub_credential_invalid" if change == "invalid-token" else "hub_credential_changed")
+    assert result is None and rotations == [seam]
+    assert [(hub_url, credential) for hub_url, credential, _ in requests] == (
+        [] if seam.startswith("prepare-") else [(original_hub, token)]
+    )
+    path = messages._spool_path("node-a", token, hub_url=original_hub)
+    pending = fleet_client._read_spool(path)
+    if queued:
+        assert len(pending) == 1 and pending[0]["client_id"] == requests[0][2]["client_id"]
+        assert state.hub_get("agent_spool_pending", scope=original_scope) == "1"
+        if change != "invalid-token":
+            assert state.hub_get("agent_spool_pending", scope=hub.scope()) is None
+            hub.flush_pending()
+            assert len(requests) == 1 and fleet_client._read_spool(path) == pending
+        # Restoration drains the actual original spool and clears only its pending flag.
+        settings["hub_url"] = original_hub
+        token_file.write_text(token)
+        queued = False
+        hub.flush_pending()
+        assert fleet_client._read_spool(path) == []
+        assert state.hub_get("agent_spool_pending", scope=original_scope) == "0"
+        assert [(hub_url, credential) for hub_url, credential, _ in requests] == [(original_hub, token)] * 2
+    else:
+        assert pending == [] and state.hub_get("agent_spool_pending", scope=original_scope) is None
+    with state.transaction() as connection:
+        persisted = "\n".join(connection.iterdump())
+    spool_text = "".join(p.read_text() for p in path.parent.glob("*.jsonl")) if path.parent.exists() else ""
+    public = json.dumps(result) + str(error) + caplog.text
+    for secret in (token, replacement, "n" * 64):
+        assert secret not in public + persisted + spool_text
