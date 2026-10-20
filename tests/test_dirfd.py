@@ -81,6 +81,26 @@ def test_open_directory_chain_creates_nested_directories(tmp_path: Path) -> None
         os.close(descriptor)
 
 
+@pytest.mark.skipif(
+    not dirfd.posix_available() or not hasattr(os, "O_PATH") or os.geteuid() == 0,
+    reason="unreadable ancestor needs Linux O_PATH and a non-root user",
+)
+def test_open_directory_chain_traverses_unreadable_ancestor(tmp_path: Path) -> None:
+    ancestor = tmp_path / "traverse-only"
+    ancestor.mkdir()
+    target = ancestor / "first" / "second"
+    ancestor.chmod(0o311)
+    try:
+        descriptor = dirfd.open_directory_chain(target, create=True)
+        try:
+            assert os.fstat(descriptor).st_ino == target.stat().st_ino
+            dirfd.fsync_directory(descriptor)
+        finally:
+            os.close(descriptor)
+    finally:
+        ancestor.chmod(0o700)
+
+
 @pytest.mark.skipif(not dirfd.available(), reason="descriptor-relative directory operations required")
 def test_replace_children_without_replacement_preserves_destination(tmp_path: Path) -> None:
     parent = dirfd.open_directory_nofollow(tmp_path)
