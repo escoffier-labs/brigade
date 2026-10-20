@@ -12,6 +12,7 @@ import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote, unquote
 
 from . import memory_cmd, memory_scope
 from .card_fingerprint import read_text_nofollow
@@ -56,13 +57,14 @@ def card_ref(origin: str, rel: str) -> str:
 
 
 def card_uri(origin: str, rel: str) -> str:
-    return f"{CARD_URI_PREFIX}{rel}" if origin == REPO else f"{USER_CARD_URI_PREFIX}{rel}"
+    # Repo card:// URIs keep their historical unencoded form for existing clients.
+    return f"{CARD_URI_PREFIX}{rel}" if origin == REPO else f"{USER_CARD_URI_PREFIX}{quote(rel, safe='/')}"
 
 
 def split_ref(ref: str) -> tuple[str | None, str]:
     """Parse repo:<rel>, user:<rel>, card://<ref>, user-card://<rel>, or a bare path (origin None)."""
     if ref.startswith(USER_CARD_URI_PREFIX):
-        return USER, ref[len(USER_CARD_URI_PREFIX) :]
+        return USER, unquote(ref[len(USER_CARD_URI_PREFIX) :])
     if ref.startswith(CARD_URI_PREFIX):
         ref = ref[len(CARD_URI_PREFIX) :]
     for origin in (REPO, USER):

@@ -826,6 +826,9 @@ def build_draft(
     # existing file is never truncated; with --force it is overwritten and kept 0600.
     flags = os.O_WRONLY | os.O_CREAT | getattr(os, "O_NOFOLLOW", 0)
     flags |= os.O_TRUNC if force else os.O_EXCL
+    if force and not hasattr(os, "O_NOFOLLOW") and path.is_symlink():
+        # No O_NOFOLLOW (Windows): O_TRUNC would follow the link, so refuse it up front.
+        raise ValueError(f"handoff draft path is a symlink: {path}")
     try:
         fd = os.open(path, flags, 0o600)
     except FileExistsError as exc:

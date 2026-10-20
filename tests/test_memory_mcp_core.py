@@ -117,6 +117,17 @@ def test_resources_use_card_uris_per_origin(stores):
     assert tools.call("get_card", {"path": "user-card://memory/cards/b.md"})[1] is False
 
 
+def test_user_card_uris_are_percent_encoded(stores):
+    repo, user = stores
+    _card(user, "release notes #2.md", "Notes", "body")
+    tools = _tools(repo)
+    uris = [r["uri"] for r in tools.resources() if r["uri"].startswith("user-card://")]
+    assert uris == ["user-card://memory/cards/release%20notes%20%232.md"]
+    assert urlsplit(uris[0]).fragment == ""
+    text, _ = tools.read_resource(uris[0])
+    assert text is not None and "body" in text
+
+
 def test_memory_status_reports_stores_and_config_error(stores):
     repo, user = stores
     _card(repo, "a.md", "A", "a")

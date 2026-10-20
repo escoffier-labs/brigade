@@ -74,3 +74,19 @@ def test_forced_draft_stays_private_and_refuses_a_planted_symlink(tmp_path: Path
     with pytest.raises(ValueError, match="symlink"):
         drafts.build_draft(**kwargs)
     assert victim.read_text(encoding="utf-8") == "keep"
+
+
+def test_forced_draft_refuses_a_symlink_where_o_nofollow_is_missing(tmp_path: Path, monkeypatch):
+    _freeze(monkeypatch)
+    monkeypatch.delattr(drafts.os, "O_NOFOLLOW", raising=False)
+    inbox = tmp_path / "in"
+    inbox.mkdir()
+    kwargs = dict(target=tmp_path, title="Same", summary="S.", content="Body.", inbox=str(inbox), force=True)
+    path = Path(drafts.build_draft(**kwargs)["path"])
+    path.unlink()
+    victim = tmp_path / "victim.md"
+    victim.write_text("keep", encoding="utf-8")
+    path.symlink_to(victim)
+    with pytest.raises(ValueError, match="symlink"):
+        drafts.build_draft(**kwargs)
+    assert victim.read_text(encoding="utf-8") == "keep"
