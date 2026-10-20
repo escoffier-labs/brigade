@@ -51,7 +51,7 @@ def wrangler_argv(database: str, query: str) -> list[str]:
     return ["wrangler", "d1", "execute", database, "--remote", "--json", "--command", QUERIES[query]]
 
 
-def run_wrangler(argv: list[str], *, account: str | None = None) -> Any:
+def run_wrangler(argv: list[str], *, account: str | None = None, token_envs: tuple[str, ...] = ()) -> Any:
     """Only the exact generated read vector is executable. Never print tool output."""
     if not isinstance(argv, list) or len(argv) != 8 or argv[-1] not in QUERIES.values():
         raise ValueError("command outside stats read allowlist")
@@ -61,7 +61,8 @@ def run_wrangler(argv: list[str], *, account: str | None = None) -> Any:
     env = {
         key: value
         for key, value in os.environ.items()
-        if key not in ("CLOUDFLARE_API_TOKEN", "CLOUDFLARE_API_KEY", "CF_API_TOKEN", "CF_API_KEY")
+        if key not in ("CLOUDFLARE_API_TOKEN", "CLOUDFLARE_API_KEY", "CF_API_TOKEN", "CF_API_KEY", *token_envs)
+        and not key.startswith("BRIGADE_")
     }
     if account is not None:
         if not isinstance(account, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", account):
@@ -146,6 +147,34 @@ def _results(payload: Any) -> list[dict[str, Any]]:
     return payload[0]["results"]
 
 
+def _d1(settings: dict[str, Any], query: str) -> list[dict[str, Any]]:
+    if query not in QUERIES:
+        raise ValueError("unknown stats query")
+    if settings.get("database_id"):
+        account, database = settings.get("account"), settings["database_id"]
+        for value in (account, database):
+            if not isinstance(value, str) or not re.fullmatch(r"[A-Za-z0-9_-]{1,128}", value):
+                raise ValueError("invalid stats D1 setting")
+        key = settings.get("d1_token_env")
+        token = os.environ.get(key, "") if isinstance(key, str) else ""
+        if not token:
+            raise ValueError("D1 credential unavailable")
+        payload = fetch_json(
+            f"https://api.cloudflare.com/client/v4/accounts/{account}/d1/database/{database}/query",
+            token=token,
+            body={"sql": QUERIES[query]},
+        )
+        if payload.get("success") is not True or payload.get("errors"):
+            raise ValueError("D1 read failed")
+        return _results(payload["result"])
+    token_envs = tuple(
+        settings[key] for key in ("analytics_token_env", "d1_token_env") if isinstance(settings.get(key), str)
+    )
+    return _results(
+        run_wrangler(wrangler_argv(settings["database"], query), account=settings.get("account"), token_envs=token_envs)
+    )
+
+
 def _analytics(settings: dict[str, Any], now: datetime) -> list[dict[str, Any]]:
     key = settings.get("analytics_token_env")
     token = os.environ.get(key, "") if isinstance(key, str) else ""
@@ -195,12 +224,9 @@ def collect(settings: dict[str, Any], *, now: datetime | None = None) -> dict[st
     weeks: list[dict[str, Any]] = []
     daily: list[dict[str, Any]] = []
     downloads: dict[str, Any] = {"pypi": None, "npm": None}
-    if settings.get("database"):
+    if settings.get("database") or settings.get("database_id"):
         try:
-            data = {
-                key: _results(run_wrangler(wrangler_argv(settings["database"], key), account=settings.get("account")))
-                for key in QUERIES
-            }
+            data = {key: _d1(settings, key) for key in QUERIES}
             for row in data["weekly"]:
                 week = row["week"]
                 start = stats._week(week)
@@ -223,7 +249,13 @@ def collect(settings: dict[str, Any], *, now: datetime | None = None) -> dict[st
             weeks = []
     if settings.get("account") and settings.get("worker"):
         try:
-            daily = _analytics(settings, now)
+            daily = stats.snapshot(
+                taken_at=now,
+                source_set=["worker"],
+                weeks=[],
+                daily=_analytics(settings, now),
+                downloads={"pypi": None, "npm": None},
+            )["daily"]
             sources.append("worker")
         except (ValueError, KeyError, TypeError, AttributeError):
             daily = []
@@ -275,7 +307,7 @@ def publish(value: dict[str, Any]) -> None:
     fleet_client._require_encrypted_or_loopback_hub(hub)
     request = urllib.request.Request(
         hub.rstrip("/") + "/stats",
-        data=json.dumps(value).encode(),
+        data=json.dumps(value, separators=(",", ":")).encode(),
         headers={"Content-Type": "application/json", "Authorization": "Bearer " + token},
     )
     try:
@@ -301,6 +333,8 @@ def register(sub: argparse._SubParsersAction) -> None:
 def dispatch(args: argparse.Namespace) -> int:
     try:
         value = collect(stats.config())
+        if not value["source_set"]:
+            raise ValueError("no stats sources available")
         if args.no_publish:
             print(json.dumps(value, sort_keys=True))
         else:

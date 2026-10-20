@@ -360,3 +360,153 @@ def test_wrangler_output_is_bounded_while_child_is_running(monkeypatch):
         collector.run_wrangler(collector.wrangler_argv("example-db", "weekly"))
     assert time.monotonic() - started < 5
     assert children[0].poll() is not None
+
+
+@pytest.mark.parametrize("no_publish", [False, True])
+def test_cli_refuses_empty_source_set(monkeypatch, capsys, no_publish):
+    import argparse
+    from brigade import fleet_admin_stats_collector as collector
+
+    monkeypatch.setattr(collector.stats, "config", lambda: {})
+    monkeypatch.setattr(collector, "publish", lambda value: pytest.fail("empty snapshot was published"))
+    assert collector.dispatch(argparse.Namespace(no_publish=no_publish)) == 1
+    captured = capsys.readouterr()
+    assert not captured.out
+    assert "Stats collection failed" in captured.err
+
+
+@pytest.mark.parametrize("day", ["not-a-date", "2026-10-21", "20261019"])
+def test_invalid_analytics_preserves_successful_providers(monkeypatch, day):
+    from brigade import fleet_admin_stats_collector as collector
+
+    monkeypatch.setenv("EXAMPLE_ANALYTICS_TOKEN", "example-secret")
+    monkeypatch.setattr(collector, "run_wrangler", lambda *a, **k: [{"success": True, "results": []}])
+
+    def fetch(url, **kwargs):
+        if kwargs.get("body"):
+            return {
+                "data": {
+                    "viewer": {
+                        "accounts": [
+                            {
+                                "workersInvocationsAdaptive": [
+                                    {"dimensions": {"date": day}, "sum": {"requests": 100, "errors": 0}}
+                                ]
+                            }
+                        ]
+                    }
+                }
+            }
+        return {
+            "schemaVersion": 1,
+            "period": {"days": 30, "timezone": "UTC"},
+            "sources": {"pypi": {"downloads": 12}, "npm": {"downloads": 8}},
+        }
+
+    monkeypatch.setattr(collector, "fetch_json", fetch)
+    value = collector.collect(
+        {
+            "database": "example-db",
+            "account": "example-account",
+            "worker": "example-worker",
+            "analytics_token_env": "EXAMPLE_ANALYTICS_TOKEN",
+            "downloads_url": "https://example.invalid/counts.json",
+        },
+        now=datetime(2026, 10, 20, tzinfo=timezone.utc),
+    )
+    assert value["source_set"] == ["d1", "downloads"]
+    assert value["daily"] == []
+    assert value["downloads"] == {"pypi": 12, "npm": 8}
+
+
+def test_wrangler_excludes_custom_and_brigade_credentials(monkeypatch):
+    from brigade import fleet_admin_stats_collector as collector
+
+    for name in (
+        "EXAMPLE_ANALYTICS_TOKEN",
+        "EXAMPLE_D1_TOKEN",
+        "BRIGADE_FLEET_TOKEN",
+        "BRIGADE_FLEET_NODE_TOKEN",
+        "BRIGADE_MCP_HTTP_TOKEN",
+        "BRIGADE_AUTHORITY_KEY_FILE",
+    ):
+        monkeypatch.setenv(name, "example-secret")
+
+    def output(argv, env):
+        leaked = [
+            key for key in env if key.startswith("BRIGADE_") or key in ("EXAMPLE_ANALYTICS_TOKEN", "EXAMPLE_D1_TOKEN")
+        ]
+        assert leaked == []
+        return b'[{"success": true, "results": []}]'
+
+    monkeypatch.setattr(collector, "_bounded_output", output)
+    value = collector.collect(
+        {"database": "example-db", "analytics_token_env": "EXAMPLE_ANALYTICS_TOKEN", "d1_token_env": "EXAMPLE_D1_TOKEN"}
+    )
+    assert value["source_set"] == ["d1"]
+
+
+def test_d1_token_transport_uses_only_fixed_queries(monkeypatch):
+    from brigade import fleet_admin_stats_collector as collector
+
+    monkeypatch.setenv("EXAMPLE_D1_TOKEN", "example-secret")
+    monkeypatch.setattr(collector, "run_wrangler", lambda *a, **k: pytest.fail("token transport invoked wrangler"))
+    calls = []
+
+    def fetch(url, *, body, token):
+        calls.append(body["sql"])
+        assert url == "https://api.cloudflare.com/client/v4/accounts/example-account/d1/database/example-db-id/query"
+        assert token == "example-secret"
+        assert body["sql"] in collector.QUERIES.values()
+        rows = (
+            [{"week": "2026-W43", "active_sources": 10, "retained_2d_sources": 10, "retained_3d_sources": 10}]
+            if body["sql"] == collector.QUERIES["weekly"]
+            else []
+        )
+        return {"success": True, "result": [{"success": True, "results": rows}]}
+
+    monkeypatch.setattr(collector, "fetch_json", fetch)
+    value = collector.collect(
+        {"account": "example-account", "database_id": "example-db-id", "d1_token_env": "EXAMPLE_D1_TOKEN"},
+        now=datetime(2026, 10, 20, tzinfo=timezone.utc),
+    )
+    assert calls == list(collector.QUERIES.values())
+    assert value["source_set"] == ["d1"]
+    assert value["weeks"][0]["active_sources"] == 10
+    assert "example-secret" not in json.dumps(value)
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"success": False, "errors": ["example-private-error"]},
+        {"success": True, "result": [{"success": False, "results": []}]},
+    ],
+)
+def test_failed_d1_rest_does_not_fall_back_to_wrangler(monkeypatch, response):
+    from brigade import fleet_admin_stats_collector as collector
+
+    monkeypatch.setenv("EXAMPLE_D1_TOKEN", "example-secret")
+    monkeypatch.setattr(collector, "run_wrangler", lambda *a, **k: pytest.fail("REST failure invoked wrangler"))
+    monkeypatch.setattr(collector, "fetch_json", lambda *a, **k: response)
+    value = collector.collect(
+        {
+            "account": "example-account",
+            "database": "example-db",
+            "database_id": "example-db-id",
+            "d1_token_env": "EXAMPLE_D1_TOKEN",
+        }
+    )
+    assert value["source_set"] == []
+    assert value["weeks"] == []
+    assert "example-private-error" not in json.dumps(value)
+
+
+def test_d1_rest_refuses_arbitrary_sql_before_transport(monkeypatch):
+    from brigade import fleet_admin_stats_collector as collector
+
+    monkeypatch.setattr(collector, "fetch_json", lambda *a, **k: pytest.fail("unapproved SQL reached transport"))
+    with pytest.raises(ValueError, match="unknown stats query"):
+        collector._d1(
+            {"account": "example-account", "database_id": "example-db-id"}, "SELECT * FROM version_observations"
+        )

@@ -801,12 +801,13 @@ trusted proxy identity. It renders the latest snapshot and a weekly series from
 the Hub database through the shared Deck theme. Rendering makes no provider calls.
 `POST /stats` requires an enrolled node token whose node is in
 `fleet.stats.collector_nodes`. Admin tokens are refused even with admin writes
-enabled. Replayed snapshots are ignored. `admin_stats_snapshots` keeps the newest
-snapshot per UTC day, at most 402 rows within the 400-day retention window.
+enabled. Replayed snapshots are ignored. `admin_stats_snapshots` keeps the snapshot with the most successful sources per
+UTC day, then prefers recency, at most 402 rows within the 400-day retention window.
 `admin_stats_weeks` keeps the best observation for each of the latest 60 weeks.
 Complete observations beat partial ones, then the newest observation wins.
-Hub schema version 36 adds weekly history and backfills existing v35 snapshots
-before compaction through the normal startup migration.
+Hub schema version 36 adds `admin_stats_snapshots` and `admin_stats_weeks`
+through the normal startup migration. Startup also preserves weekly history
+from the earlier branch schema when present.
 
 Configure the collector and Hub separately in the operator's fleet.toml:
 
@@ -818,16 +819,23 @@ database = "example-db"            # Set on the collector.
 # account = "example-account"
 # worker = "example-worker"
 # analytics_token_env = "EXAMPLE_ANALYTICS_TOKEN"
+# database_id = "example-db-id"      # Select D1 REST instead of wrangler.
+# d1_token_env = "EXAMPLE_D1_TOKEN"
 # downloads_url = "https://example.invalid/downloads.json"
 ```
 
-The collector uses its existing wrangler OAuth login for D1 reads. API token
-variables are removed from that subprocess. GraphQL requires Account Analytics
-Read in the environment variable named by `analytics_token_env`, injected by the
-approved secrets render. Credentials never enter argv, snapshots, the Hub store
-or tool error messages. A D1 Read API-token transport is not implemented.
+The collector uses its existing wrangler OAuth login for D1 reads when only
+`database` is set. Setting `database_id` selects D1 REST, using the account and
+the D1 Read token in the environment variable named by `d1_token_env`. GraphQL
+requires Account Analytics Read in the variable named by `analytics_token_env`.
+Both names may reference the same account token with both read permissions,
+injected by the approved secrets render. Wrangler receives neither configured
+token variable, standard Cloudflare API token variables, nor Brigade variables.
+Credentials never enter argv, snapshots, the Hub store or tool error messages.
 Run `brigade fleet stats collect` explicitly from an authorized collector node.
 `--no-publish` prints aggregates for inspection. It still reads configured sources.
+If all sources fail or none are configured, the command exits 1 without publishing
+or printing a snapshot. Partial snapshots retain only successful sources.
 
 The closed `brigade.admin-stats.v1` snapshot and page expose these fields:
 
@@ -841,6 +849,13 @@ The closed `brigade.admin-stats.v1` snapshot and page expose these fields:
 
 `weeks`, `daily`, version cells and upgrade cells are arrays. Counts are nullable
 nonnegative integers. Source counts below 5 become `null`, including zero.
+Both retention totals are also hidden when either is suppressed or subtraction
+between the nested retention counts would reveal 1 to 4 sources. Both histograms
+hide all their source counts when any cell is suppressed or its difference from
+the active-source total is 1 to 4. Hiding both distributions prevents version
+overlap from revealing a suppressed upgrade count. These rules also apply to
+uploaded snapshots.
+The POST body ceiling is 4 MiB to cover the full 60-week schema maximum.
 The page renders `null` and missing observations as unknown. Worker request,
 Worker error and public download counts are event counts and may be zero.
 Weekly counts mean active sources, not people or installs. Retention is activity

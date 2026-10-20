@@ -282,3 +282,122 @@ def test_v35_migration_backfills_weekly_history(tmp_path):
     assert conn.execute("PRAGMA user_version").fetchone()[0] == 36
     assert stats.load_view(conn, now=NOW)["weeks"] == value["weeks"]
     conn.close()
+
+
+@pytest.mark.parametrize("retention", [(6, 5, 5), (16, 12, 12), (20, 10, 6)])
+def test_retention_does_not_disclose_small_complements(retention):
+    from brigade import fleet_admin_stats as stats
+
+    week = snapshot()["weeks"][0]
+    week.update(zip(stats.SOURCE_FIELDS, retention, strict=True))
+    week.update(versions=[], upgrades=[])
+    value = stats.snapshot(
+        taken_at=NOW, source_set=["d1"], weeks=[week], daily=[], downloads={"pypi": None, "npm": None}
+    )
+    assert value["weeks"][0]["active_sources"] == retention[0]
+    assert value["weeks"][0]["retained_2d_sources"] is None
+    assert value["weeks"][0]["retained_3d_sources"] is None
+    # A correctly digested upload must not bypass complementary suppression.
+    value["weeks"][0].update(zip(stats.SOURCE_FIELDS, retention, strict=True))
+    value["digest"] = value["snapshot_id"] = stats._digest(value)
+    with pytest.raises(ValueError, match="suppression"):
+        stats.validate(value)
+
+
+@pytest.mark.parametrize("kind", ["versions", "upgrades"])
+def test_histograms_do_not_disclose_single_suppressed_cell(kind):
+    from brigade import fleet_admin_stats as stats
+
+    week = snapshot()["weeks"][0]
+    week.update(active_sources=16, retained_2d_sources=16, retained_3d_sources=16)
+    week[kind] = [
+        {
+            **(
+                {"version": f"0.28.{i}"}
+                if kind == "versions"
+                else {"from_version": "0.27.0", "to_version": f"0.28.{i}"}
+            ),
+            "active_sources": count,
+        }
+        for i, count in enumerate((12, 4))
+    ]
+    value = stats.snapshot(
+        taken_at=NOW, source_set=["d1"], weeks=[week], daily=[], downloads={"pypi": None, "npm": None}
+    )
+    assert [cell["active_sources"] for cell in value["weeks"][0][kind]] == [None, None]
+
+
+@pytest.mark.parametrize("sources", [[], ["d1"], ["worker", "downloads"]])
+def test_daily_compaction_prefers_coverage_over_recency(tmp_path, sources):
+    from datetime import timedelta
+    from brigade import fleet_admin_stats as stats
+
+    conn = fleet_hub.init_db(tmp_path / "hub.db")
+    full = stats.snapshot(
+        taken_at=NOW, source_set=["d1", "worker", "downloads"], weeks=[], daily=[], downloads={"pypi": 12, "npm": 5}
+    )
+    fewer = stats.snapshot(
+        taken_at=NOW + timedelta(hours=1), source_set=sources, weeks=[], daily=[], downloads={"pypi": None, "npm": None}
+    )
+    stats.store(conn, full, now=NOW)
+    stats.store(conn, fewer, now=NOW + timedelta(hours=1))
+    assert stats.load_view(conn, now=NOW)["latest"] == full
+    assert conn.execute("SELECT COUNT(*) FROM admin_stats_snapshots").fetchone()[0] == 1
+    conn.close()
+
+
+def test_stats_post_accepts_validator_maximum_snapshot(tmp_path, monkeypatch):
+    from datetime import timedelta
+    from brigade import fleet_admin_stats as stats
+
+    monkeypatch.setattr(stats, "config", lambda: {"collector_nodes": ["example-node"]})
+    conn = fleet_hub.init_db(tmp_path / "hub.db")
+    _, token = fleet_hub.add_node(conn, "example-node", "Example")
+    conn.close()
+    now = datetime.now(timezone.utc)
+    weeks = []
+    for index in range(60):
+        day = now.date() - timedelta(weeks=index)
+        year, number, _ = day.isocalendar()
+        weeks.append(
+            {
+                "week": f"{year}-W{number:02}",
+                "partial": True,
+                "active_sources": 10**15,
+                "retained_2d_sources": 10**15,
+                "retained_3d_sources": 10**15,
+                "versions": [
+                    {"version": f"999999.999999.999999.{i}.dev99999999", "active_sources": 10**15} for i in range(100)
+                ],
+                "upgrades": [
+                    {
+                        "from_version": "999999.999999.999998.999999.dev99999999",
+                        "to_version": f"999999.999999.999999.{i}.dev99999999",
+                        "active_sources": 10**15,
+                    }
+                    for i in range(200)
+                ],
+            }
+        )
+    value = stats.snapshot(
+        taken_at=now, source_set=["d1"], weeks=weeks, daily=[], downloads={"pypi": None, "npm": None}
+    )
+    assert len(json.dumps(value).encode()) > 1024 * 1024
+    h, result, _ = handler(tmp_path, path="/stats", bearer=token, body=value)
+    h.do_POST()
+    assert result[-1][0] == 200
+
+
+def test_version_overlap_cannot_reconstruct_suppressed_upgrade():
+    from brigade import fleet_admin_stats as stats
+
+    week = snapshot()["weeks"][0]
+    week.update(active_sources=20, retained_2d_sources=20, retained_3d_sources=20)
+    # Two versions cover the week, so 12 + 9 - 20 would reveal one upgrade.
+    week["versions"] = [{"version": "0.27.0", "active_sources": 12}, {"version": "0.28.0", "active_sources": 9}]
+    week["upgrades"][0]["active_sources"] = 1
+    value = stats.snapshot(
+        taken_at=NOW, source_set=["d1"], weeks=[week], daily=[], downloads={"pypi": None, "npm": None}
+    )
+    assert [cell["active_sources"] for cell in value["weeks"][0]["versions"]] == [None, None]
+    assert value["weeks"][0]["upgrades"][0]["active_sources"] is None

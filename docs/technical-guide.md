@@ -1959,11 +1959,14 @@ MIT
 `brigade fleet stats collect` reads three fixed aggregate SELECT/WITH statements
 through the exact `wrangler d1 execute <configured-database> --remote --json
 --command <fixed-statement>` argv shape. There is no shell, user SQL or mutable
-Cloudflare command. Database date expressions bound reads to the last 90 days.
+Cloudflare command. With `fleet.stats.database_id` and `d1_token_env`, the same
+fixed statements use D1 REST with a D1 Read account token instead. Database date
+expressions bound reads to the last 90 days.
 Internal source observations are excluded. Optional Cloudflare GraphQL Analytics
 reads request and error totals by day over 30 completed UTC days. The optional public
 download-metrics JSON supplies matching 30-day PyPI and npm download counts.
-Unavailable providers stay unknown. `--no-publish` prints the snapshot instead of
+Unavailable providers stay unknown. If no source succeeds, collection exits 1
+without publishing. `--no-publish` prints a successful snapshot instead of
 posting it. Collection is explicit and no timer is installed.
 
 The closed `brigade.admin-stats.v1` snapshot and page expose these fields:
@@ -1978,6 +1981,8 @@ The closed `brigade.admin-stats.v1` snapshot and page expose these fields:
 
 `weeks`, `daily`, version cells and upgrade cells are arrays. Counts are nullable
 nonnegative integers. Source counts below 5 become `null`, including zero.
+Related retention totals and histogram cells are also hidden when subtraction
+would expose 1 to 4 sources. The Hub enforces these suppression rules.
 The page renders `null` and missing observations as unknown. Worker request,
 Worker error and public download counts are event counts and may be zero.
 Weekly counts mean active sources, not people or installs. Retention is activity

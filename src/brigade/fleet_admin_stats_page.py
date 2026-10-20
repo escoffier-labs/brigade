@@ -16,7 +16,7 @@ def _number(value: Any, field: str) -> str:
 def render(view: dict[str, Any], *, nonce: str, now: datetime) -> str:
     latest = view["latest"]
     body = '<main class="deck-shell"><h1>Adoption statistics</h1><section class="panel">'
-    body += "<p>Counts describe active sources, not people or installs. Source cells below 5 are suppressed. "
+    body += "<p>Counts describe active sources, not people or installs. Source cells below 5 are suppressed. Related retention and histogram counts may also be hidden to prevent disclosure by subtraction. "
     body += "Unknown includes suppressed cells and unavailable data. Retention means activity on 2+ or 3+ distinct days within one week. "
     body += "Possible upgrades link versions observed in time order within the same week. Weekly source identities rotate.</p>"
     body += "<p>Controller and erasure contact: Solomon Neas. Contact the maintainer at the address in "

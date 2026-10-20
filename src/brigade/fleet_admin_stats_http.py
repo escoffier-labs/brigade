@@ -45,7 +45,7 @@ def post(handler: Any, db_path: Path, query: str) -> None:
             if caller[0] or not isinstance(collectors, list) or caller[1] not in collectors:
                 handler._send_json(403, {"error": "stats collector node required"})
                 return
-            value = handler._read_json_body(256 * 1024)
+            value = handler._read_json_body(4 * 1024 * 1024)
             if value is None:
                 return
             stats.store(conn, value)

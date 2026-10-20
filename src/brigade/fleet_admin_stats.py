@@ -55,7 +55,7 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         week TEXT PRIMARY KEY, partial INTEGER NOT NULL, taken_at TEXT NOT NULL,
         payload_json TEXT NOT NULL)""")
     if new_history:
-        # Backfill before compaction, preserving complete weeks from v35.
+        # Preserve history from the earlier branch schema before compaction.
         for row in conn.execute("SELECT payload_json FROM admin_stats_snapshots"):
             try:
                 value = validate(json.loads(row[0]))
@@ -144,6 +144,10 @@ def validate(value: Any) -> dict[str, Any]:
             if pair in pairs or pair[0] == pair[1]:
                 raise ValueError("invalid upgrade pair")
             pairs.add(pair)
+        suppressed = copy.deepcopy(row)
+        _suppress_week(suppressed)
+        if suppressed != row:
+            raise ValueError("invalid complementary suppression")
     days = set()
     for row in _rows(value["daily"], 400):
         _keys(row, DAILY_FIELDS)
@@ -189,16 +193,39 @@ def snapshot(
         }
     )
     for row in value["weeks"]:
-        for cell, fields in [
-            (row, SOURCE_FIELDS),
-            *((c, ("active_sources",)) for c in row["versions"] + row["upgrades"]),
-        ]:
-            for field in fields:
-                count = cell[field]
-                if type(count) is int and 0 <= count < 5:
-                    cell[field] = None
+        _suppress_week(row)
     value["digest"] = value["snapshot_id"] = _digest(value)
     return validate(value)
+
+
+def _suppress_week(row: dict[str, Any]) -> None:
+    """Hide related cells when subtraction would disclose a small source count."""
+    cells = [(row, SOURCE_FIELDS), *((c, ("active_sources",)) for c in row["versions"] + row["upgrades"])]
+    for cell, fields in cells:
+        for field in fields:
+            count = cell[field]
+            if type(count) is int and 0 <= count < 5:
+                cell[field] = None
+    counts = [row[field] for field in SOURCE_FIELDS]
+    # Retention counts are nested sets. Hide both retention totals if a
+    # primary suppression or any pairwise difference could reveal 1-4 sources.
+    if any(count is None for count in counts) or any(
+        type(a) is int and type(b) is int and 0 < a - b < 5
+        for index, a in enumerate(counts)
+        for b in counts[index + 1 :]
+    ):
+        row["retained_2d_sources"] = row["retained_3d_sources"] = None
+    total = row["active_sources"]
+    histogram = row["versions"] + row["upgrades"]
+    # Suppress both distributions together. Version overlap can otherwise
+    # reconstruct a hidden upgrade count even when its own peers are hidden.
+    if total is None or any(
+        cell["active_sources"] is None
+        or (type(total) is int and type(cell["active_sources"]) is int and 0 < total - cell["active_sources"] < 5)
+        for cell in histogram
+    ):
+        for cell in histogram:
+            cell["active_sources"] = None
 
 
 def store(conn: sqlite3.Connection, value: Any, *, now: datetime | None = None) -> None:
@@ -252,7 +279,7 @@ def _prune(conn: sqlite3.Connection, now: datetime) -> None:
         SELECT snapshot_id FROM (
             SELECT snapshot_id, ROW_NUMBER() OVER (
                 PARTITION BY substr(taken_at, 1, 10)
-                ORDER BY taken_at DESC, snapshot_id DESC) AS position
+                ORDER BY json_array_length(source_set) DESC, taken_at DESC, snapshot_id DESC) AS position
             FROM admin_stats_snapshots) WHERE position > 1)""")
     cutoff = (now - timedelta(days=RETENTION_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
     conn.execute("DELETE FROM admin_stats_snapshots WHERE taken_at < ?", (cutoff,))
