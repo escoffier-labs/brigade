@@ -16,7 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
-- Reframe current docs around operator-controlled autonomous agents, evidence-based handoffs, and the records and lifecycles of shipped long-running services. (Fixes #1851)
+- Reframe current docs, package metadata, and CLI report wording around operator-controlled autonomous agents, evidence-based handoffs, and the records and lifecycles of shipped long-running services. (Fixes #1851)
 
 - The memory and skills MCP tools describe what they return and when to use them, and their input fields carry descriptions, so MCP clients and directories can pick the right tool.
 - The read-only MCP servers negotiate the protocol version (`2024-11-05`, `2025-03-26`, or `2025-06-18`) instead of always answering `2024-11-05`, answer `ping` with an empty result, return `-32600` for malformed requests, and report the Brigade version in `serverInfo`.
