@@ -417,7 +417,10 @@ def registered_manifest_ids(target: Path) -> list[str]:
 
 
 def _normalize_repo_path(path: str) -> str:
-    return path.replace("\\", "/").lstrip("./")
+    normalized = path.replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized.lstrip("/")
 
 
 def _workspace_manifest_file_from_selector(target: Path, selector: str) -> Path | None:

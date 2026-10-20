@@ -414,6 +414,17 @@ def test_project_trial_out_of_scope_patch_path_is_ineligible(scoreable_target, m
     assert projection.reason == "out_of_scope_changes"
 
 
+def test_project_trial_dot_directory_scope_glob_keeps_leading_dot(scoreable_target, monkeypatch):
+    receipt = _run_scoped_patch_verify(
+        scoreable_target,
+        monkeypatch,
+        scope_globs=["skills/brigade-work/**", ".vale-styles/**"],
+        extra_paths=[".vale-styles/Slop/Banlist.yml"],
+    )
+    projection = verify_trial.project_trial(receipt, target=scoreable_target)
+    assert projection.eligible is True
+
+
 def test_project_trial_without_scope_globs_ignores_extra_patch_paths(scoreable_target, monkeypatch):
     receipt = _run_scoped_patch_verify(
         scoreable_target, monkeypatch, scope_globs=None, extra_paths=[".vale-styles/Slop/Banlist.yml"]
