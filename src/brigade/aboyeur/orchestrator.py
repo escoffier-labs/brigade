@@ -229,6 +229,7 @@ def _terminalize_run_lifecycle(function: Callable[..., int]) -> Callable[..., in
             )
             raise
         except TimeoutError as exc:
+            runguard.raise_if_retained_run_lock(exc)
             terminate_existing(
                 status="timeout",
                 failure_kind="timeout",
@@ -236,6 +237,7 @@ def _terminalize_run_lifecycle(function: Callable[..., int]) -> Callable[..., in
             )
             raise
         except Exception as exc:
+            runguard.raise_if_retained_run_lock(exc)
             terminate_existing(
                 status="failed",
                 failure_kind="unexpected-error",
