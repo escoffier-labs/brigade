@@ -527,6 +527,12 @@ def test_batch_size_nesting_depth_and_huge_length_are_bounded(memory_station: _S
     status, _, _ = memory_station.request("POST", "/mcp", headers={"Content-Length": "9" * 5000})
     assert status == 413
 
+    # Zero padding is normalized, not fed to int(): a padded valid length still works.
+    payload = b'{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+    padded = "0" * 5000 + str(len(payload))
+    assert memory_station.request("POST", "/mcp", payload, headers={"Content-Length": padded})[0] == 200
+    assert memory_station.request("POST", "/mcp", headers={"Content-Length": "0" * 5000})[0] == 400
+
 
 def test_methodless_request_with_id_is_invalid_but_responses_are_ignored(memory_station: _Station) -> None:
     status, _, body = memory_station.rpc({"jsonrpc": "2.0", "id": 7})

@@ -334,13 +334,14 @@ def _make_handler(
             if not raw_length.isascii() or not raw_length.isdigit():
                 self._error(400, "malformed Content-Length")
                 return None
-            # Compare digit counts first: int() on a huge digit string raises.
-            max_digits = len(str(HTTP_MAX_BODY_BYTES))
-            if len(raw_length.lstrip("0")) > max_digits or int(raw_length) > HTTP_MAX_BODY_BYTES:
+            # Drop zero padding and compare digit counts before int(): int() raises on
+            # digit strings past the interpreter's conversion limit.
+            significant = raw_length.lstrip("0") or "0"
+            if len(significant) > len(str(HTTP_MAX_BODY_BYTES)) or int(significant) > HTTP_MAX_BODY_BYTES:
                 self._error(413, f"request body must be at most {HTTP_MAX_BODY_BYTES} bytes")
                 return None
             try:
-                return self.rfile.read(int(raw_length))
+                return self.rfile.read(int(significant))
             except TimeoutError:
                 self.close_connection = True
                 return None
