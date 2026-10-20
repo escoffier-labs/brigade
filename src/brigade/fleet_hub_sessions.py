@@ -113,6 +113,10 @@ def handle_session(
 _FILTER_COLUMNS = ("node_id", "harness", "session_id", "repo_identity", "repo_label", "branch", "state", "heartbeat_at")
 
 
+def _casefold(value: object) -> str:
+    return str(value).casefold() if value is not None else ""
+
+
 def list_sessions(
     conn: sqlite3.Connection,
     *,
@@ -138,12 +142,15 @@ def list_sessions(
     text_clause = ""
     if text_filter:
         # instr() rather than LIKE, so % and _ in the filter are literal.
+        # SQLite lower() folds ASCII only; register Python casefold so the SQL
+        # filter matches the Unicode-aware filter callers apply afterwards.
+        conn.create_function("brigade_casefold", 1, _casefold, deterministic=True)
         text_clause = (
-            "AND instr(lower("
+            "AND instr(brigade_casefold("
             + " || char(31) || ".join(f"coalesce({column}, '')" for column in _FILTER_COLUMNS)
-            + "), lower(?)) > 0 "
+            + "), ?) > 0 "
         )
-        params.append(text_filter)
+        params.append(text_filter.casefold())
     params.append(limit)
     rows = conn.execute(
         f"SELECT {_SESSION_COLUMNS} FROM interactive_sessions "

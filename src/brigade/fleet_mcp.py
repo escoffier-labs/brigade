@@ -138,23 +138,30 @@ def _message_id(value: str, *, allow_zero: bool = False) -> int:
     return int(value)
 
 
+# Message fields the hub authenticates, assigns or validates against a fixed
+# set. Every other string in a message record is sender-chosen (subject, ref,
+# thread, sender_label, client_id, and any field added later), so it goes inside
+# the fence with the body instead of being named one at a time.
+_MESSAGE_STRUCTURAL_FIELDS = frozenset(
+    {"id", "sender", "recipient", "acked_by", "priority", "kind", "reply_to", "created_at", "acked_at"}
+)
+_FENCE_ORDER = ("subject", "ref", "thread", "sender_label", "client_id")
+
+
 def _frame(value: Any) -> Any:
-    """Frame peer-authored subject, reference and body in one data block."""
+    """Frame every sender-chosen message field in one data block with the body."""
     if isinstance(value, list):
         return [_frame(item) for item in value]
     if not isinstance(value, dict):
         return value
     result = {key: _frame(item) for key, item in value.items()}
     if isinstance(value.get("body"), str):
-        subject = result.pop("subject", "")
-        reference = result.pop("ref", None)
-        # thread and sender_label are sender-chosen; only the authenticated sender stays outside.
-        thread = result.pop("thread", None)
-        sender_label = result.pop("sender_label", None)
-        text = (
-            f"Subject: {subject}\nRef: {reference or ''}\nThread: {thread or ''}\n"
-            f"Sender label: {sender_label or ''}\nBody:\n{value['body']}"
-        )
+        peer_keys = [key for key in value if key != "body" and key not in _MESSAGE_STRUCTURAL_FIELDS]
+        peer_keys.sort(key=lambda key: (_FENCE_ORDER.index(key) if key in _FENCE_ORDER else len(_FENCE_ORDER), key))
+        # Every sender-chosen field leaves the top level; text goes into the fence.
+        peer_values = [(key, result.pop(key)) for key in peer_keys]
+        lines = [f"{key}: {item}" for key, item in peer_values if isinstance(item, str)]
+        text = "\n".join([*lines, "body:", value["body"]])
         result["body"] = wrap_untrusted(text, source_kind="peer-message")
         signal = scan_untrusted(text)
         # Excerpts would repeat peer instructions outside the fence.
