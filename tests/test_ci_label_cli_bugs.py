@@ -42,17 +42,14 @@ function gh() {{
 {run_script}
 """
 
-        try:
-            result = subprocess.run(
-                ["bash", "-c", script_to_run],
-                env=env,
-                capture_output=True,
-                text=True,
-                check=True,
-            )
-            return result.stdout
-        except subprocess.CalledProcessError as e:
-            return e.stdout + e.stderr
+        result = subprocess.run(
+            ["bash", "-e", "-c", script_to_run],
+            env=env,
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        return result.stdout
 
     # Test 1: Valid fingerprint, no initial labels
     valid_body = "Some text\nbf-1234567890ab\nMore text"
