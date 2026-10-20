@@ -122,13 +122,6 @@ def _wake_hub_inbox(
         return
     summary["checked"] += 1
     hub = HubInbox(token_file=str(runtime.hub_token_file))
-    # The existing client bounds network draining to 12 seconds. Never replay queued
-    # mutations while the connector is disabled, and keep flush failure independent of reads.
-    if runtime.enabled:
-        try:
-            call_message("flush_credential", token_file=str(runtime.hub_token_file))
-        except Exception:
-            summary["failed"] += 1
     scope = hub.notification_scope()
     targets = wake_targets.get(runtime.hub_wake_target, [])
     if not targets:
@@ -318,4 +311,11 @@ def run_watch_once(
                     ledger.mark_notified(row["request_id"], state, clock())
             else:
                 ledger.record_status_poll(row["request_id"], failed=True)
+    if runtime is not None and runtime.enabled and runtime.hub_token_file is not None:
+        # Request wakes run first: a competing sender's spool lock must not hold them up.
+        # The existing client bounds network draining to 12 seconds after acquiring its lock.
+        try:
+            call_message("flush_credential", token_file=str(runtime.hub_token_file))
+        except Exception:
+            summary["failed"] += 1
     return summary

@@ -509,7 +509,7 @@ def test_review_flush_and_log_failures_leave_inbox_and_request_targets_working(h
     flushed = []
 
     def broken_flush(**kwargs):
-        flushed.append(kwargs)
+        flushed.append(len([body for _, _, body in post.calls if "request_id" in body]) == 2)
         raise FleetMessageHubError(token, code="hub_unavailable")
 
     monkeypatch.setattr(messages, "flush_credential", broken_flush)
@@ -527,7 +527,7 @@ def test_review_flush_and_log_failures_leave_inbox_and_request_targets_working(h
         log_path=tmp_path,
         post=post,
     )
-    assert len(flushed) == 1
+    assert flushed == [True]
     assert [body["kind"] for _, _, body in post.calls if "kind" in body] == ["hub-inbox", "hub-inbox"]
     assert len([body for _, _, body in post.calls if "request_id" in body]) == 2
 

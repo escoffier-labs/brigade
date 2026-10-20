@@ -92,8 +92,8 @@ Hub before enabling it. The token file contains only the token, with no trailing
 newline. Do not use an admin token. An invalid file closes messaging with
 `hub-error` and `hub_code: token_file_invalid`, while dispatch remains available.
 The underlying Fleet client keeps queued sends and replies in its credential-scoped spool.
-Each enabled watcher tick attempts a drain through the existing client, whose
-network drain deadline is 12 seconds. A disabled connector leaves queued
+Each enabled watcher tick attempts a drain after request notifications through
+the existing client, whose network drain deadline is 12 seconds. A disabled connector leaves queued
 mutations untouched. Drain errors do not stop inbox or request notifications.
 Permit that spool directory in `writable_paths` if the service sandbox otherwise
 makes it read-only. The connector never adds credential values to tool results,
@@ -209,7 +209,6 @@ target reports a failure and waits for configuration to be corrected.
 | `inbox_reply` | `msg_id`, `body` | Reply without acknowledging the original message. Body limit: 8192 UTF-8 bytes. |
 | `message_send` | `to`, `subject`, `body`, optional `ref`, `priority`, `thread`, `kind`, `client_id` | Send within principal grants to a node name such as `host-a`, a node id, or `agent:example`. Subject limit: 200 UTF-8 bytes. Body limit: 8192 UTF-8 bytes. Priority: `low`, `normal` (default), `high`, `urgent`. Kind: `message` (default), `question`, `completion`. Supply a stable `client_id` when retrying the same send. |
 | `message_status` | `ids` (1 through 50 unique positive integers) | Read acknowledgement status for sent messages. Omits bodies. |
-
 | `t3_capacity` | none | `t3-fleet capacity`, projected to host, active, limit, state. Read-only. |
 | `t3_submit` | `repository`, `prompt`, `title`, `caller`, optional `host` (default `auto`), `seat`, `base_ref`, `interaction_mode` (`default` or `plan`) | Validates against allowlists and limits, resolves `base_ref` (default the repository's default branch) to a 40-character SHA with `git ls-remote` in the controller's checkout, picks an allowlisted host when `auto`, including in enrolled mode (most free capacity among allowlisted eligible hosts), prepends the dispatch header, runs `t3-fleet submit` in machine mode with one `t3-fleet.request.v1` JSON object on stdin carrying the prompt and `runtime_mode: full-access` (the prompt never reaches argv), records the request in the ledger, returns `request_id`, host, seat. |
 | `t3_status` | `request_id` | `t3-fleet status`, projected: state, `needs_attention`, `pending_request` (as `t3-fleet` bounds it), thread id, seat, last update. |
@@ -226,7 +225,8 @@ unacknowledged messages to progress through a larger backlog. If acknowledgement
 succeeds but its recount fails, `inbox_ack` still returns `acked` and `not_pending`,
 with `unacked_total: null` and `has_more: true`. Repeating an acknowledgement of
 an existing message is idempotent and reports it in `acked`. `not_pending` covers
-messages the Hub reports missing.
+messages the Hub reports missing. If a later acknowledgement in a batch fails,
+retrying the same ids is safe because acknowledgement is idempotent.
 
 Hub tools use Dot's argument validators and message projections. A send without
 `client_id` derives one from its content and a ten-minute time bucket. Reusing
