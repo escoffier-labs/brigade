@@ -9,8 +9,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Adoption statistics compare suppression gaps only between containing groups and omit small histogram cells without hiding valid weekly totals. The collector closes subprocess stdin, and the docs clarify same-day snapshot compaction.
-
 - Fleet claim renewal and release follow node-token rotation on the bound hub, including orphan-release retries, while retaining the last node credential when its token file is temporarily unavailable.
 
 ### Added
