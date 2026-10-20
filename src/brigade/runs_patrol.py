@@ -28,9 +28,7 @@ def register(sub: argparse._SubParsersAction) -> None:
         ("stranded-after", "24h"),
     ):
         parser.add_argument(f"--{name}", default=default, help=f"Positive duration (default {default}).")
-    parser.add_argument(
-        "--limit", type=int, default=50, help="Maximum entries per source and returned lanes (default 50)."
-    )
+    parser.add_argument("--limit", type=int, default=50, help="Maximum returned lanes and ledger claims (default 50).")
     parser.add_argument("--json", action="store_true", help=f"Emit the versioned {SCHEMA} contract.")
     parser.add_argument("--receipt", action="store_true", help="Write .brigade/patrol/<id>/patrol.json.")
     parser.add_argument("--fail-on", default="", help="Comma-separated states that return exit status 1.")
@@ -120,7 +118,7 @@ def patrol(
             }
             row["classification_digest"] = hashlib.sha256(json.dumps(stable, sort_keys=True).encode()).hexdigest()
             rows.append(row)
-        exit_code = int(any(row["state"] in selected for row in rows))
+        exit_code = int(any(row["state"] in selected for row in rows) or (lanes.truncated and "unknown" in selected))
         patrol_id = clock.strftime("%Y%m%dT%H%M%S") + "-" + uuid4().hex[:12]
         payload = {
             "schema": SCHEMA,
@@ -128,6 +126,7 @@ def patrol(
             "observed_at": clock.isoformat(),
             "thresholds": thresholds.as_dict(),
             "limit": limit,
+            "truncated": lanes.truncated,
             "lanes": rows,
             "actions": [],
             "fail_on": sorted(selected),
@@ -147,4 +146,6 @@ def patrol(
             print(f"{row['lane_id']}: {row['state']} ({row['reason']})")
     else:
         print("No local lanes found.")
+    if lanes.truncated and not json_output:
+        print("Patrol scan or lane report truncated. Increase --limit or inspect sources directly.")
     return exit_code

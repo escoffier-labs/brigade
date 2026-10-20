@@ -296,12 +296,12 @@ def test_worktree_changes_supply_progress_without_event_files(tmp_path, monkeypa
     assert classify(collect_lanes(repo, now=NOW)[0], NOW, Thresholds()).state == "working"
 
 
-def test_claim_joins_run_by_task_id(tmp_path, monkeypatch):
+def test_claim_joins_run_by_claim_id(tmp_path, monkeypatch):
     from brigade.run_lane_state import Thresholds, classify, collect_lanes
 
     repo = _repo(tmp_path)
     _ledger(repo)
-    run_dir = _write_run(repo, "20260820-120000-patrol01", extra={"task_id": "task-1"})
+    run_dir = _write_run(repo, "20260820-120000-patrol01", extra={"claim_id": "claim-1"})
     _write_stale_lock(repo, run_dir)
     monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
     lanes = collect_lanes(repo, now=NOW)
@@ -311,18 +311,17 @@ def test_claim_joins_run_by_task_id(tmp_path, monkeypatch):
 
 
 def test_claim_is_unknown_when_run_scan_is_incomplete(tmp_path, monkeypatch):
-    from brigade.run_lane_state import Thresholds, classify, collect_lanes
+    from brigade import run_lane_state
 
     repo = _repo(tmp_path)
     _ledger(repo)
-    root = repo / ".brigade/runs"
-    root.mkdir()
-    # The scan budget is spent on malformed entries before any run is read.
-    (root / "bad first").mkdir()
-    _write_run(repo, "20260820-120000-patrol01", extra={"task_id": "task-1"})
-    lanes = collect_lanes(repo, now=NOW, limit=1)
-    assert len(lanes) == 1
-    assert classify(lanes[0], NOW, Thresholds()).state == "unknown"
+    for index in range(2):
+        _write_run(repo, f"20260820-120000-patrol{index:02d}", status="ok")
+    monkeypatch.setattr(run_lane_state, "RUN_SCAN_LIMIT", 1, raising=False)
+    lanes = run_lane_state.collect_lanes(repo, now=NOW)
+    claim = next(lane for lane in lanes if lane.claim)
+    assert run_lane_state.classify(claim, NOW, run_lane_state.Thresholds()).state == "unknown"
+    assert lanes.truncated
 
 
 def test_receipt_refuses_symlinked_destination(tmp_path, capsys):
@@ -346,14 +345,17 @@ def test_missing_target_and_unsupported_apply(tmp_path, capsys):
     assert exc.value.code == 2
 
 
-def test_terminal_stale_lock_is_zombie_after_grace(tmp_path, monkeypatch):
+@pytest.mark.parametrize("status,expected", [("ok", "complete"), ("failed", "failed")])
+def test_terminal_stale_lock_keeps_outcome_and_cleanup_evidence(tmp_path, monkeypatch, status, expected):
     from brigade.run_lane_state import Thresholds, classify, collect_lanes
 
     repo = _repo(tmp_path)
-    run_dir = _write_run(repo, "20260820-120000-patrol01", status="ok", extra={"finished_at": OLD_STARTED})
+    run_dir = _write_run(repo, "20260820-120000-patrol01", status=status, extra={"finished_at": OLD_STARTED})
     _write_stale_lock(repo, run_dir)
     monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
-    assert classify(collect_lanes(repo, now=NOW)[0], NOW, Thresholds()).state == "zombie"
+    result = classify(collect_lanes(repo, now=NOW)[0], NOW, Thresholds())
+    assert result.state == expected
+    assert any(item.source == "run.lock/owner.json" and item.detail == "stale" for item in result.evidence)
 
 
 def test_terminal_run_does_not_own_newer_runs_lock(tmp_path, monkeypatch):
@@ -412,3 +414,189 @@ def test_corrupt_source_is_named_in_evidence(tmp_path):
     assert any(
         item.source == "events/lifecycle.jsonl" and item.detail == "evidence unavailable" for item in lane.evidence
     )
+
+
+def test_newest_runs_win_return_limit_and_truncation_fails_unknown(tmp_path, capsys):
+    from brigade.runs_patrol import patrol
+
+    repo = _repo(tmp_path)
+    newest = _write_run(repo, "20260820-120000-aaaa0000", status="ok")
+    for index in range(54):
+        older = _write_run(repo, f"20260820-120000-zzzz{index:04d}", status="ok")
+        os.utime(older, (NOW.timestamp() - 100, NOW.timestamp() - 100))
+    os.utime(newest, (NOW.timestamp(), NOW.timestamp()))
+    (newest.parent / "junk entry").mkdir()
+    assert patrol(target=repo, now=NOW, limit=2, json_output=True, fail_on="unknown") == 1
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["truncated"] is True
+    assert len(payload["lanes"]) == 2
+    assert newest.name in {row["run_id"] for row in payload["lanes"]}
+    assert patrol(target=repo, now=NOW, limit=2) == 0
+    assert "truncated" in capsys.readouterr().out
+
+
+def test_claims_after_old_unclaimed_tasks_and_claim_truncation(tmp_path, capsys):
+    from brigade.runs_patrol import patrol
+
+    repo = _repo(tmp_path)
+    ledger = _ledger(repo)
+    claim = json.loads(ledger.read_text())["tasks"][0]
+    tasks = [{"id": f"old-{index}", "status": "done"} for index in range(180)]
+    tasks.append(claim)
+    ledger.write_text(json.dumps({"tasks": tasks}))
+    assert patrol(target=repo, now=NOW, limit=1, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["lanes"][0]["claim_id"] == "claim-1"
+    assert payload["lanes"][0]["state"] == "claim-without-run"
+    assert payload["truncated"] is False
+    tasks.append({**claim, "id": "task-2", "claim": {**claim["claim"], "claim_id": "claim-2"}})
+    ledger.write_text(json.dumps({"tasks": tasks}))
+    assert patrol(target=repo, now=NOW, limit=1, json_output=True, fail_on="unknown") == 1
+    assert json.loads(capsys.readouterr().out)["truncated"] is True
+
+
+@pytest.mark.parametrize("old_claim", [None, "old-claim"])
+def test_unmatched_claim_is_unknown_beside_realistic_active_run(tmp_path, monkeypatch, old_claim):
+    from brigade.run_lane_state import Thresholds, classify, collect_lanes
+
+    repo = _repo(tmp_path)
+    _ledger(repo)
+    if old_claim:
+        _write_run(repo, "20260820-120000-oldrun01", status="ok", extra={"task_id": "task-1", "claim_id": old_claim})
+    run_dir = _write_run(repo, "20260820-120000-patrol01")
+    _write_stale_lock(repo, run_dir)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: True)
+    signal = run_dir / "events/worker.jsonl"
+    signal.parent.mkdir()
+    signal.write_text("{}\n")
+    os.utime(signal, (NOW.timestamp() - 10, NOW.timestamp() - 10))
+    lanes = collect_lanes(repo, now=NOW)
+    claim = next(lane for lane in lanes if lane.claim)
+    result = classify(claim, NOW, Thresholds())
+    assert result.state == "unknown"
+    assert "no task-to-run join key" in result.reason
+    active = next(lane for lane in lanes if lane.run_dir == run_dir)
+    assert classify(active, NOW, Thresholds()).state == "working"
+
+
+def test_reclaimed_task_does_not_join_old_terminal_run(tmp_path):
+    from brigade.run_lane_state import Thresholds, classify, collect_lanes
+
+    repo = _repo(tmp_path)
+    _ledger(repo)
+    _write_run(repo, "20260820-120000-patrol01", status="ok", extra={"task_id": "task-1", "claim_id": "old-claim"})
+    lanes = collect_lanes(repo, now=NOW)
+    assert len(lanes) == 2
+    claim = next(lane for lane in lanes if lane.claim)
+    assert classify(claim, NOW, Thresholds()).state == "claim-without-run"
+
+
+def test_worktree_inventory_has_separate_cap_and_only_unverified_lanes_fail(tmp_path, monkeypatch):
+    from brigade import proc, run_lane_state
+
+    repo = _repo(tmp_path)
+    run_dir = _write_run(repo, "20260820-120000-patrol01")
+    _write_stale_lock(repo, run_dir)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: True)
+    (repo / "tracked.txt").write_text("progress")
+    os.utime(repo / "tracked.txt", (NOW.timestamp() - 10, NOW.timestamp() - 10))
+    real_git = run_lane_state._git
+    paths = [repo, *(tmp_path / f"linked-{index}" for index in range(60))]
+
+    def git(path, *args):
+        if args[:2] == ("worktree", "list"):
+            return proc.Result(0, "".join(f"worktree {item}\0" for item in paths), "")
+        return real_git(path, *args)
+
+    monkeypatch.setattr(run_lane_state, "_git", git)
+    lanes = run_lane_state.collect_lanes(repo, now=NOW, limit=1)
+    assert run_lane_state.classify(lanes[0], NOW, run_lane_state.Thresholds()).state == "working"
+    monkeypatch.setattr(run_lane_state, "WORKTREE_SCAN_LIMIT", 1, raising=False)
+    paths[1].mkdir()
+    outside = _write_run(repo, "20260820-120000-patrol02", extra={"worktree": str(paths[1])})
+    lanes = run_lane_state.collect_lanes(repo, now=NOW)
+    states = {lane.run_dir: run_lane_state.classify(lane, NOW, run_lane_state.Thresholds()).state for lane in lanes}
+    assert states == {run_dir: "working", outside: "unknown"}
+    assert lanes.truncated
+
+
+@pytest.mark.parametrize("terminal_source", ["snapshot", "journal"])
+def test_terminal_runs_skip_secondary_evidence(tmp_path, monkeypatch, terminal_source):
+    from brigade import run_journal, run_lane_state
+
+    repo = _repo(tmp_path)
+    run_dir = _write_run(
+        repo,
+        "20260820-120000-patrol01",
+        status="ok" if terminal_source == "snapshot" else "dispatching",
+        extra={"finished_at": OLD_STARTED, "worktree": str(repo / "pruned")},
+    )
+    (run_dir / "roster.json").write_text("corrupt")
+    if terminal_source == "journal":
+        run_journal.append_event(
+            run_dir / "events/lifecycle.jsonl",
+            run_id=run_dir.name,
+            event_type="run.completed",
+            payload={"status": "ok"},
+            idempotency_key="complete",
+            expected_previous_sequence=0,
+            recorded_at="2026-08-20T12:00:00.000000Z",
+        )
+    real_git = run_lane_state._git
+
+    def git(path, *args):
+        assert args[0] != "status", "terminal run must not query git status"
+        return real_git(path, *args)
+
+    monkeypatch.setattr(run_lane_state, "_git", git)
+    lane = run_lane_state.collect_lanes(repo, now=NOW)[0]
+    assert run_lane_state.classify(lane, NOW, run_lane_state.Thresholds()).state == "complete"
+
+
+def test_shared_worktree_status_is_collected_once(tmp_path, monkeypatch):
+    from brigade import run_lane_state
+
+    repo = _repo(tmp_path)
+    for index in range(3):
+        _write_run(repo, f"20260820-120000-patrol{index:02d}")
+    real_git = run_lane_state._git
+    calls = []
+
+    def git(path, *args):
+        if args[0] == "status":
+            calls.append(path)
+        return real_git(path, *args)
+
+    monkeypatch.setattr(run_lane_state, "_git", git)
+    run_lane_state.collect_lanes(repo, now=NOW)
+    assert calls == [repo]
+
+
+def test_changed_external_symlink_is_skipped(tmp_path, monkeypatch):
+    from brigade.run_lane_state import Thresholds, classify, collect_lanes
+
+    repo = _repo(tmp_path)
+    run_dir = _write_run(repo, "20260820-120000-patrol01")
+    _write_stale_lock(repo, run_dir)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: True)
+    (repo / "external").symlink_to(tmp_path / "outside")
+    (repo / "tracked.txt").write_text("progress")
+    os.utime(repo / "tracked.txt", (NOW.timestamp() - 10, NOW.timestamp() - 10))
+    lane = collect_lanes(repo, now=NOW)[0]
+    assert classify(lane, NOW, Thresholds()).state == "working"
+
+
+@pytest.mark.parametrize("live,expected", [(False, "dead"), (True, "working")])
+def test_run_liveness_precedes_missing_worktree(tmp_path, monkeypatch, live, expected):
+    from brigade.run_lane_state import Thresholds, classify, collect_lanes
+
+    repo = _repo(tmp_path)
+    run_dir = _write_run(repo, "20260820-120000-patrol01", extra={"worktree": str(repo / "pruned")})
+    _write_stale_lock(repo, run_dir)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: live)
+    signal = run_dir / "events/worker.jsonl"
+    signal.parent.mkdir()
+    signal.write_text("{}\n")
+    os.utime(signal, (NOW.timestamp() - 10, NOW.timestamp() - 10))
+    lane = collect_lanes(repo, now=NOW)[0]
+    assert classify(lane, NOW, Thresholds()).state == expected

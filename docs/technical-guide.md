@@ -540,13 +540,21 @@ lifecycle journals, lock owners, linked worktrees, and changed-file mtimes.
 Approval pauses and artifact collection report `waiting`. Missing or unreadable
 required evidence reports `unknown`. Legacy runs can use event-file or worktree
 progress when no journal was requested. A terminal run that retains its
-own lock beyond 60 seconds reports `zombie`.
+own live lock beyond 60 seconds reports `zombie`. A stale lock remains
+cleanup evidence on the terminal outcome.
 
 The defaults are `--older-than 2h`, `--idle-after 15m`, `--stall-after 30m`,
 `--stranded-after 24h`, and `--limit 50`. `--json` emits
 `brigade.runs_patrol.v1`. `--receipt` saves that report under
 `.brigade/patrol/<id>/patrol.json`. `--fail-on dead,stalled` returns status 1
-when either state appears. Invalid options or an unreadable target return 2.
+when either state appears. Runs are scanned newest first by directory mtime,
+with up to 1,000 run snapshots and 1,000 linked worktrees per patrol. `--limit`
+bounds returned lanes and claimed ledger tasks after the whole byte-capped
+ledger is read. JSON reports `truncated: true` when a source or result window
+is cut short. Text output warns, and `--fail-on unknown` returns 1 on truncation.
+Claims join runs only by exact `claim_id`. An unmatched claim reports `unknown`
+while nonterminal runs exist without a verified join.
+Invalid options or an unreadable target return 2.
 Patrol does not repair runs or claims. Dispatch intents and Hub joins are
 reserved for later slices.
 

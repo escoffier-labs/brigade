@@ -7,7 +7,7 @@ repairs a lock, refreshes a claim, activates a journal, or updates a Git index.
 from __future__ import annotations
 
 import hashlib
-import itertools
+import heapq
 import json
 import os
 import stat
@@ -39,6 +39,8 @@ STATES = frozenset(
 FILE_BYTE_CAP = 1024 * 1024
 PATH_CAP = 200
 MAX_LIMIT = 1000
+RUN_SCAN_LIMIT = MAX_LIMIT
+WORKTREE_SCAN_LIMIT = MAX_LIMIT
 
 
 @dataclass(frozen=True)
@@ -84,6 +86,12 @@ class Lane:
     progress: list[datetime] = field(default_factory=list)
     evidence: list[Evidence] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+
+
+class Lanes(list[Lane]):
+    """Lane window with explicit source or output truncation metadata."""
+
+    truncated: bool = False
 
 
 @dataclass(frozen=True)
@@ -173,11 +181,11 @@ def _worktree_progress(lane: Lane, now: datetime) -> None:
         candidate = path / name
         try:
             # Never follow a changed symlink or a parent outside this worktree.
-            if not candidate.resolve().is_relative_to(path.resolve()):
-                raise ValueError("changed path outside worktree")
             info = candidate.lstat()
             if stat.S_ISLNK(info.st_mode):
                 continue
+            if not candidate.parent.resolve().is_relative_to(path.resolve()):
+                raise ValueError("changed path outside worktree")
             stamp = datetime.fromtimestamp(info.st_mtime, timezone.utc)
             newest = max(newest, stamp) if newest else stamp
         except FileNotFoundError:
@@ -187,6 +195,34 @@ def _worktree_progress(lane: Lane, now: datetime) -> None:
     if newest is not None:
         lane.progress.append(newest)
     lane.evidence.append(Evidence("worktree:git-status", now, f"{len(paths)} changed paths", newest))
+
+
+def _observe_worktree(
+    lane: Lane,
+    now: datetime,
+    worktrees: set[Path],
+    worktree_error: str | None,
+    cache: dict[Path, Lane],
+) -> None:
+    path = lane.worktree
+    if path is None:
+        return
+    # Cache the complete observation, including errors, within this patrol.
+    # Symlink and missing-path checks still happen in _worktree_progress.
+    if path not in cache:
+        observation = Lane("worktree", worktree=path)
+        if path.exists() and path.resolve() not in worktrees:
+            observation.errors.append(worktree_error or "worktree is not linked to target")
+            observation.evidence.append(Evidence("worktree", now, "link unavailable"))
+        else:
+            _worktree_progress(observation, now)
+        cache[path] = observation
+    observation = cache[path]
+    lane.worktree_missing = observation.worktree_missing
+    lane.dirty = observation.dirty
+    lane.progress.extend(observation.progress)
+    lane.errors.extend(observation.errors)
+    lane.evidence.extend(observation.evidence)
 
 
 def _journal(lane: Lane, now: datetime) -> None:
@@ -322,7 +358,14 @@ def _timeout(lane: Lane, now: datetime) -> None:
     lane.evidence.append(Evidence("roster.json", now, "configured seat timeout", digest=digest))
 
 
-def _collect_run(child: Path, target: Path, now: datetime, worktrees: set[Path]) -> Lane:
+def _collect_run(
+    child: Path,
+    target: Path,
+    now: datetime,
+    worktrees: set[Path],
+    worktree_error: str | None,
+    cache: dict[Path, Lane],
+) -> Lane:
     lane = Lane(child.name, run_dir=child)
     bound = run_reap._bind_contained_run_dir(child)
     if bound is None:
@@ -341,25 +384,25 @@ def _collect_run(child: Path, target: Path, now: datetime, worktrees: set[Path])
             if lane.phase != "paused" and (lane.phase == "orphaned" or runs_cmd._is_terminal(meta)):
                 lane.terminal_status = lane.phase
                 lane.terminal_at = _timestamp(meta.get("finished_at") or meta.get("orphaned_at"))
-            # Worktree isolation records its path in artifact_collection.
+            source = "events/lifecycle.jsonl"
+            _journal(lane, now)
+            source = "events"
+            _events_progress(lane, now)
+            source = "run.lock/owner.json"
+            _lock(lane, now)
+            if lane.terminal_status is not None:
+                return lane
+            # cwd records isolation before dispatch, artifact_collection also records it later.
             collection = meta.get("artifact_collection")
             recorded = collection.get("worktree") if isinstance(collection, dict) else None
             raw_worktree = meta.get("worktree") or recorded or meta.get("cwd") or str(target)
             if not isinstance(raw_worktree, str) or not Path(raw_worktree).is_absolute():
                 raise ValueError("invalid worktree path")
             lane.worktree = Path(raw_worktree)
-            source = "events/lifecycle.jsonl"
-            _journal(lane, now)
-            source = "events"
-            _events_progress(lane, now)
             source = "roster.json"
             _timeout(lane, now)
-            source = "run.lock/owner.json"
-            _lock(lane, now)
             source = "worktree"
-            if lane.worktree.exists() and lane.worktree.resolve() not in worktrees:
-                raise ValueError("worktree is not linked to target")
-            _worktree_progress(lane, now)
+            _observe_worktree(lane, now, worktrees, worktree_error, cache)
     except (OSError, ValueError, RuntimeError, RecursionError, OverflowError) as exc:
         lane.errors.append(str(exc)[:160])
         lane.evidence.append(Evidence(source, now, "evidence unavailable"))
@@ -368,7 +411,7 @@ def _collect_run(child: Path, target: Path, now: datetime, worktrees: set[Path])
     return lane
 
 
-def collect_lanes(target: Path, *, now: datetime | None = None, limit: int = 50) -> list[Lane]:
+def collect_lanes(target: Path, *, now: datetime | None = None, limit: int = 50) -> Lanes:
     """Join a bounded local run window, ledger claims and recorded worktrees.
 
     Malformed directory names and symlinked run directories are skipped. An
@@ -381,8 +424,10 @@ def collect_lanes(target: Path, *, now: datetime | None = None, limit: int = 50)
     if not target.is_dir() or not os.access(target, os.R_OK | os.X_OK):
         raise ValueError("target is not a readable directory")
     clock = run_reap._utc_now(now)
-    lanes: list[Lane] = []
-    worktrees, worktree_error = _linked_worktrees(target, limit)
+    lanes = Lanes()
+    worktrees, worktree_error = _linked_worktrees(target, WORKTREE_SCAN_LIMIT)
+    lanes.truncated = worktree_error == "linked worktree limit exceeded"
+    cache: dict[Path, Lane] = {}
     root = target / ".brigade/runs"
     if root.is_symlink() or root.parent.is_symlink():
         raise ValueError("runs root must not be symlinked")
@@ -390,21 +435,21 @@ def collect_lanes(target: Path, *, now: datetime | None = None, limit: int = 50)
     if root.exists():
         if not root.is_dir():
             raise ValueError("runs root is not a directory")
+        resolved_root = root.resolve()
         with os.scandir(root) as entries:
-            # Bound directory entries as well as parsed files, including junk.
-            for index, entry in enumerate(entries):
-                if index >= limit:
-                    scan_full = True
-                    break
-                child = root / entry.name
-                if run_reap._classify_child(child, root.resolve()) is not None or not entry.is_dir(
-                    follow_symlinks=False
-                ):
-                    continue
-                lane = _collect_run(child, target, clock, worktrees)
-                if worktree_error:
-                    lane.errors.append(worktree_error)
-                lanes.append(lane)
+            # Inspect directory metadata to select newest first, retaining only
+            # a bounded window in memory. Junk does not consume the run budget.
+            candidates = (
+                (entry.stat(follow_symlinks=False).st_mtime_ns, entry.name)
+                for entry in entries
+                if entry.is_dir(follow_symlinks=False)
+                and run_reap._classify_child(root / entry.name, resolved_root) is None
+            )
+            newest = heapq.nlargest(RUN_SCAN_LIMIT + 1, candidates)
+        scan_full = len(newest) > RUN_SCAN_LIMIT
+        lanes.truncated |= scan_full
+        for _, name in newest[:RUN_SCAN_LIMIT]:
+            lanes.append(_collect_run(root / name, target, clock, worktrees, worktree_error, cache))
     ledger_path = target / ".brigade/work/tasks.json"
     if ledger_path.parent.is_symlink():
         raise ValueError("ledger directory must not be symlinked")
@@ -414,36 +459,43 @@ def collect_lanes(target: Path, *, now: datetime | None = None, limit: int = 50)
             tasks = ledger.get("tasks")
             if not isinstance(tasks, list):
                 raise ValueError("ledger tasks must be a list")
-            for task in itertools.islice(tasks, limit):
+            claimed_tasks = []
+            for task in tasks:
                 if not isinstance(task, dict) or not isinstance(task.get("id"), str) or not task["id"]:
                     raise ValueError("invalid ledger task")
                 claim = claim_record(task)
                 if task.get("claim") is not None and claim is None:
                     raise ValueError("invalid ledger claim")
-                matches = [
-                    lane
-                    for lane in lanes
-                    if lane.run
-                    and (
-                        lane.run.get("task_id") == task.get("id")
-                        or (claim and lane.run.get("claim_id") == claim["claim_id"])
-                    )
-                ]
-                if not matches and claim and len(lanes) < limit:
+                if claim:
+                    claimed_tasks.append((task, claim))
+            # Append order puts fresh claims at the end of the ledger. Validate
+            # the whole byte-capped file, then bound only claimed task rows.
+            lanes.truncated |= len(claimed_tasks) > limit
+            by_claim: dict[str, list[Lane]] = {}
+            for lane in lanes:
+                key = lane.run.get("claim_id") if lane.run else None
+                if isinstance(key, str) and key:
+                    by_claim.setdefault(key, []).append(lane)
+            join_unverified = scan_full or any(lane.run_dir is not None and lane.errors for lane in lanes)
+            nonterminal = any(lane.run is not None and lane.terminal_status is None for lane in lanes)
+            for task, claim in claimed_tasks[-limit:]:
+                # A task can be reclaimed. Only the exact claim generation can
+                # join a run, never the task id shared with a completed run.
+                matches = by_claim.get(claim["claim_id"], [])
+                if not matches:
                     matches = [Lane(f"claim:{claim['claim_id']}")]
                     lanes.extend(matches)
-                    if scan_full or any(lane.run_dir is not None and lane.errors for lane in lanes):
+                    if join_unverified:
                         matches[0].errors.append("run scan incomplete, claim join unverified")
+                    elif nonterminal:
+                        matches[0].errors.append("no task-to-run join key for unmatched claim beside nonterminal runs")
                     recorded = task.get("worktree")
                     if recorded is not None:
                         if not isinstance(recorded, str) or not Path(recorded).is_absolute():
                             matches[0].errors.append("invalid task worktree")
                         else:
                             matches[0].worktree = Path(recorded)
-                            if matches[0].worktree.exists() and matches[0].worktree.resolve() not in worktrees:
-                                matches[0].errors.append("worktree is not linked to target")
-                            else:
-                                _worktree_progress(matches[0], clock)
+                            _observe_worktree(matches[0], clock, worktrees, worktree_error, cache)
                 for lane in matches:
                     lane.task, lane.claim = task, claim
                     lane.evidence.append(
@@ -456,7 +508,12 @@ def collect_lanes(target: Path, *, now: datetime | None = None, limit: int = 50)
                 lanes.append(Lane("ledger", errors=["ledger unreadable"]))
             for lane in lanes:
                 lane.evidence.append(Evidence(".brigade/work/tasks.json", clock, "unreadable"))
-    return sorted(lanes, key=lambda lane: lane.lane_id)
+    lanes.truncated |= len(lanes) > limit
+    # Run rows retain newest-first order. Truncation is explicit even when
+    # the output window leaves no room for unmatched claim rows.
+    result = Lanes(lanes[:limit])
+    result.truncated = lanes.truncated
+    return result
 
 
 def classify(lane: Lane, now: datetime, thresholds: Thresholds) -> Classification:
@@ -483,20 +540,14 @@ def classify(lane: Lane, now: datetime, thresholds: Thresholds) -> Classificatio
     if lane.terminal_status is not None:
         if lane.terminal_at is not None and lane.terminal_at > clock:
             return result("unknown", "terminal timestamp is in the future")
-        if lane.lock_state in {"live", "stale"} and lane.terminal_at is None:
+        if lane.lock_state == "live" and lane.terminal_at is None:
             return result("unknown", "terminal lock has no finish time for grace")
-        if (
-            lane.lock_state in {"live", "stale"}
-            and lane.terminal_at
-            and clock - lane.terminal_at > thresholds.zombie_after
-        ):
+        if lane.lock_state == "live" and lane.terminal_at and clock - lane.terminal_at > thresholds.zombie_after:
             return result("zombie", "terminal run still owns a live lock beyond grace")
         return result(
             "complete" if lane.terminal_status in runs_cmd._SUCCESS_STATUSES | {"completed", "complete"} else "failed",
             "terminal run outcome",
         )
-    if lane.worktree_missing:
-        return result("lost-worktree", "recorded worktree path is missing")
     if lane.phase in {"paused", "artifact-collection"}:
         return result("waiting", "run is intentionally waiting")
     meta = lane.run or {}
@@ -512,6 +563,8 @@ def classify(lane: Lane, now: datetime, thresholds: Thresholds) -> Classificatio
         if lane.timeout_seconds and phase_started and (clock - phase_started).total_seconds() > lane.timeout_seconds:
             return result("stalled", "configured seat timeout exceeded")
         if not lane.progress:
+            if lane.worktree_missing:
+                return result("lost-worktree", "recorded worktree path is missing")
             return result("unknown", "no progress signal available")
         silence = clock - max(lane.progress)
         if silence >= thresholds.stall_after:
@@ -519,6 +572,8 @@ def classify(lane: Lane, now: datetime, thresholds: Thresholds) -> Classificatio
         if silence >= thresholds.idle_after:
             return result("idle", "progress silence exceeds idle threshold")
         return result("working", "live owner and recent progress")
+    if lane.worktree_missing:
+        return result("lost-worktree", "recorded worktree path is missing")
     if lane.claim:
         claimed = _timestamp(lane.claim.get("claimed_at"))
         if claimed is None or claimed > clock:
