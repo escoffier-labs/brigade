@@ -802,3 +802,34 @@ def test_inbox_unread_refetch_failure_returns_first_page(stations, monkeypatch):
     payload, error = b.call("fleet_inbox", {"unacked_only": False, "wait_secs": 5, "limit": 1})
     assert not error
     assert len(payload["messages"]) == 1 and payload["messages"][0]["id"] == first
+
+
+def test_station_read_loads_agent_grants_once(hub, monkeypatch):
+    from brigade import fleet_hub_message_grants
+
+    _base, _ta, _tb, db = hub
+    conn = fleet_hub.open_db(db)
+    try:
+        fleet_hub_messages.add_principal(conn, {"name": "counter", "may_send_to": [NODE_B]})
+        for index in range(5):
+            status, claim = fleet_hub.handle_claim(
+                conn,
+                {"action": "acquire", "node_id": NODE_B, "target": f"repo-{index}", "holder": f"h{index}"},
+                caller_node=NODE_B,
+            )
+            assert status == 200 and claim["granted"]
+        calls = []
+        original = fleet_hub_message_grants.grants_for
+
+        def counting(conn, principal_id):
+            calls.append(principal_id)
+            return original(conn, principal_id)
+
+        monkeypatch.setattr(fleet_hub_message_grants, "grants_for", counting)
+        status, payload = fleet_hub_messages.handle(conn, {"action": "claims"}, caller="agent:counter")
+        assert status == 200 and len(payload["claims"]) == 5
+        status, _who = fleet_hub_messages.handle(conn, {"action": "who"}, caller="agent:counter")
+        assert status == 200
+        assert calls == ["agent:counter", "agent:counter"]
+    finally:
+        conn.close()

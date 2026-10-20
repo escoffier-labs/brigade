@@ -806,12 +806,12 @@ def _station_read(conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str)
     if set(raw) - allowed or not isinstance(include_all, bool) or not isinstance(query, str):
         raise MessageError("invalid station read arguments")
 
+    # Load the caller's grants once; checking every row with require_granted
+    # would issue one query per claim or session.
+    patterns = frozenset(grants.grants_for(conn, caller)) if caller.startswith("agent:") else frozenset()
+
     def permitted(recipient: str) -> bool:
-        try:
-            grants.require_granted(conn, caller, recipient)
-        except MessageForbidden:
-            return False
-        return True
+        return grants.permits(patterns, caller, recipient)
 
     if action == "claims":
         if not caller.startswith("agent:"):
