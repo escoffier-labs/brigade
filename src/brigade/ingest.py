@@ -719,18 +719,8 @@ def _git_tracked_names(directory: Path) -> set[str] | None:
                 return None
             # --show-cdup emits only ../ components, avoiding quoted filenames.
             worktree = (probe / discovery.stdout.decode("ascii").strip()).resolve()
-            pathspec = directory.relative_to(worktree).as_posix()
             result = subprocess.run(
-                [
-                    "git",
-                    "--no-literal-pathspecs",
-                    "-C",
-                    str(worktree),
-                    "ls-files",
-                    "-z",
-                    "--",
-                    f":(literal,icase){pathspec}",
-                ],
+                ["git", "-C", str(worktree), "ls-files", "-z"],
                 capture_output=True,
                 env=env,
                 timeout=30,
@@ -741,8 +731,15 @@ def _git_tracked_names(directory: Path) -> set[str] | None:
                 _warn_tracking_check_failed(directory, detail[0] if detail else f"git exited {result.returncode}")
                 return None
             for entry in result.stdout.decode("utf-8", "surrogateescape").split("\0"):
-                if entry and (worktree / entry).parent.samefile(directory):
-                    names.add(Path(entry).name)
+                if not entry:
+                    continue
+                try:
+                    # Git's case matching can miss Unicode directory aliases.
+                    if (worktree / entry).parent.samefile(directory):
+                        names.add(Path(entry).name)
+                except FileNotFoundError:
+                    # A deleted parent cannot contain the current handoff.
+                    continue
             if worktree.parent == worktree:
                 return names
             probe = worktree.parent

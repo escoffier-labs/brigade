@@ -1630,14 +1630,22 @@ def test_tracking_check_preserves_handoffs_in_every_containing_repo(tmp_path: Pa
 
 
 @pytest.mark.parametrize("literal_env", [None, "1"])
-def test_tracking_check_matches_directory_case_alias(tmp_path: Path, monkeypatch, literal_env):
-    inbox = tmp_path / "Inbox"
+@pytest.mark.parametrize("directory_names", [("Inbox", "inbox"), ("ÄInbox", "äinbox")])
+def test_tracking_check_matches_directory_case_alias(tmp_path: Path, monkeypatch, literal_env, directory_names):
+    indexed_name, actual_name = directory_names
+    inbox = tmp_path / indexed_name
     inbox.mkdir()
     _git(tmp_path, "init", "-q")
     _git(tmp_path, "config", "core.ignorecase", "true")
     _write_handoff(inbox, "tracked.md", _PLAIN_HANDOFF)
-    _git(tmp_path, "add", "--", "Inbox/tracked.md")
-    renamed = tmp_path / "inbox"
+    _git(tmp_path, "add", "--", f"{indexed_name}/tracked.md")
+    unrelated = tmp_path / "deleted-directory"
+    unrelated.mkdir()
+    (unrelated / "note.txt").write_text("unrelated tracked file")
+    _git(tmp_path, "add", "--", "deleted-directory/note.txt")
+    (unrelated / "note.txt").unlink()
+    unrelated.rmdir()
+    renamed = tmp_path / actual_name
     inbox.rename(renamed)
     if not inbox.exists():
         # Model case-insensitive directory lookup on case-sensitive hosts.
