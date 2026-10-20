@@ -192,25 +192,38 @@ def import_bd_jsonl(*, target: Path, input_path: Path, bd_version: str, json_out
             )
             try:
                 _write_receipt(directory, payload)
+                inbox_parent, inbox_name, previous_raw, previous_exists = ledger._snapshot_import_inbox(target)
+                imported: list[dict[str, Any]] = []
                 try:
-                    imported, skipped, dismissed, rejected = ledger._append_import_records(
-                        target, records, provenance_source="bd-jsonl"
-                    )
-                except Exception as exc:
-                    payload.update({"status": "failed", "reason": str(exc)})
-                    _write_receipt(directory, payload)
-                    raise
-                payload.update(
-                    {
-                        "status": "completed",
-                        "created": len(imported),
-                        "skipped_duplicates": len(skipped),
-                        "skipped_dismissed": len(dismissed),
-                        "rejected": rejected,
-                        "import_ids": [item["id"] for item in imported],
-                    }
-                )
-                _write_receipt(directory, payload)
+                    try:
+                        imported, skipped, dismissed, rejected = ledger._append_import_records(
+                            target, records, provenance_source="bd-jsonl"
+                        )
+                        payload.update(
+                            {
+                                "status": "completed",
+                                "created": len(imported),
+                                "skipped_duplicates": len(skipped),
+                                "skipped_dismissed": len(dismissed),
+                                "rejected": rejected,
+                                "import_ids": [item["id"] for item in imported],
+                            }
+                        )
+                        _write_receipt(directory, payload)
+                    except Exception as exc:
+                        if imported:
+                            # Receipt finalization is part of the locked publication.
+                            try:
+                                ledger._restore_import_inbox_snapshot(
+                                    inbox_parent, inbox_name, previous_raw, previous_exists
+                                )
+                            finally:
+                                ledger._remove_persisted_import_proofs(target, imported)
+                        payload.update({"status": "failed", "reason": str(exc), "created": 0, "import_ids": []})
+                        _write_receipt(directory, payload)
+                        raise
+                finally:
+                    os.close(inbox_parent)
             finally:
                 os.close(directory)
     except OSError as exc:

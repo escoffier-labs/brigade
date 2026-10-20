@@ -144,6 +144,56 @@ def test_bd_publication_exception_leaves_failed_receipt(tmp_path, monkeypatch, e
     assert work_cmd.ledger._read_imports(tmp_path) == []
 
 
+@pytest.mark.parametrize("existing", [False, True], ids=["absent-inbox", "existing-inbox"])
+@pytest.mark.parametrize("failure", ["_dirfd_replace", "_dirfd_fsync"])
+def test_bd_final_receipt_failure_rolls_back_publication(tmp_path, monkeypatch, capsys, existing, failure):
+    from brigade.work_cmd import import_bd
+
+    if existing:
+        assert work_cmd.import_add(target=tmp_path, text="Existing reviewed candidate") == 0
+        capsys.readouterr()
+    inbox = work_cmd.helpers._imports_path(tmp_path)
+    previous = inbox.read_bytes() if existing else None
+    proofs = tmp_path / ".brigade/work/imports/proofs"
+    previous_proofs = {path.name: path.read_bytes() for path in proofs.glob("*.json")}
+    write_receipt = import_bd._write_receipt
+
+    def fail_io(*args, **kwargs):
+        raise OSError("simulated final receipt failure")
+
+    def fail_final_receipt(directory, payload):
+        if payload["status"] == "completed":
+            assert len(payload["import_ids"]) == 2
+            with monkeypatch.context() as fault:
+                fault.setattr(work_cmd.ledger, failure, fail_io)
+                write_receipt(directory, payload)
+        else:
+            write_receipt(directory, payload)
+
+    with monkeypatch.context() as fault:
+        fault.setattr(import_bd, "_write_receipt", fail_final_receipt)
+        rc, error = run_import(tmp_path, FIXTURE, capsys)
+    assert rc == 2
+    assert error["reason"] == "bd_import_io_error"
+    assert (inbox.read_bytes() if inbox.exists() else None) == previous
+    assert {path.name: path.read_bytes() for path in proofs.glob("*.json")} == previous_proofs
+    receipts = list((tmp_path / ".brigade/work/import-runs").glob("*/receipt.json"))
+    assert len(receipts) == 1
+    failed = json.loads(receipts[0].read_text())
+    assert failed["status"] == "failed"
+    assert failed["created"] == 0
+    assert failed["import_ids"] == []
+    rc, retried = run_import(tmp_path, FIXTURE, capsys)
+    assert rc == 0
+    assert retried["created"] == 2
+    assert retried["skipped_duplicates"] == 0
+    completed = json.loads(Path(retried["receipt_path"]).read_text())
+    assert completed["status"] == "completed"
+    assert set(completed["import_ids"]) == {
+        item["id"] for item in work_cmd.ledger._read_imports(tmp_path) if item["source"] == "bd-jsonl"
+    }
+
+
 @pytest.mark.parametrize(
     "change,reason",
     [
