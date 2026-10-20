@@ -693,6 +693,7 @@ def _git_tracked_names(directory: Path) -> set[str] | None:
     """
     env = {k: v for k, v in os.environ.items() if k not in _GIT_LOCATION_ENV}
     env["LC_ALL"] = "C"
+    env["GIT_DISCOVERY_ACROSS_FILESYSTEM"] = "true"
     try:
         result = subprocess.run(
             ["git", "-C", str(directory), "ls-files", "-z", "--", "."],

@@ -1601,3 +1601,31 @@ def test_tracked_check_matches_by_file_identity_not_spelling(tmp_path: Path, mon
     with pytest.raises(ingest_mod.TrackedHandoffError):
         ingest_mod._archive(handoff, inbox / "processed")
     assert handoff.is_file()
+
+
+@pytest.mark.parametrize("discovery", [None, "0"])
+def test_archive_discovers_tracked_handoff_across_filesystem_boundary(tmp_path: Path, monkeypatch, discovery):
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    _git(tmp_path, "init", "-q")
+    handoff = _write_handoff(inbox, "tracked.md", _PLAIN_HANDOFF)
+    _git(tmp_path, "add", "--", "inbox/tracked.md")
+    if discovery is None:
+        monkeypatch.delenv("GIT_DISCOVERY_ACROSS_FILESYSTEM", raising=False)
+    else:
+        monkeypatch.setenv("GIT_DISCOVERY_ACROSS_FILESYSTEM", discovery)
+    run = subprocess.run
+
+    def mounted_inbox(cmd, **kwargs):
+        # Model Git's mount boundary without requiring privileged mounts.
+        if kwargs["env"].get("GIT_DISCOVERY_ACROSS_FILESYSTEM") != "true":
+            return subprocess.CompletedProcess(
+                cmd, 128, stdout=b"", stderr=b"fatal: not a git repository (or any parent up to mount point)"
+            )
+        return run(cmd, **kwargs)
+
+    monkeypatch.setattr(ingest_mod.subprocess, "run", mounted_inbox)
+    with pytest.raises(ingest_mod.TrackedHandoffError):
+        ingest_mod._archive(handoff, inbox / "processed")
+    assert handoff.is_file()
+    assert not (inbox / "processed").exists()
