@@ -609,6 +609,7 @@ def test_interrupt_shutdown_preserves_worker_retention(tmp_path, monkeypatch, sc
 @pytest.mark.parametrize("scheduler", ["waves", "dag"])
 def test_sibling_retention_records_replaced_budget_denial(tmp_path, monkeypatch, scheduler):
     budget_raised = threading.Event()
+    scheduler_saw_budget = threading.Event()
 
     def worker(cli_ref, *args, **kwargs):
         if cli_ref == "codex":
@@ -620,10 +621,25 @@ def test_sibling_retention_records_replaced_budget_denial(tmp_path, monkeypatch,
                 exhausted=True,
                 request_id="req-1",
             )
-        assert budget_raised.wait(5)
+        assert scheduler_saw_budget.wait(5)
         raise runguard.RetainRunLockError("sibling receipt unavailable")
 
+    def budget_first(futures):
+        # Hand the scheduler the budget failure before the sibling can retain,
+        # so as_completed ordering cannot decide which error the scheduler sees.
+        assert budget_raised.wait(5)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            for future in futures:
+                if future.done() and isinstance(future.exception(), run_budget.BudgetPolicyError):
+                    scheduler_saw_budget.set()
+                    yield future
+                    return
+            time.sleep(0.005)
+        pytest.fail("budget failure never completed")
+
     monkeypatch.setattr(agents, "run_agent", worker)
+    monkeypatch.setattr(run_transport, "as_completed", budget_first)
     error = None
     try:
         with runguard.run_lock(tmp_path):
