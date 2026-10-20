@@ -849,12 +849,12 @@ The closed `brigade.admin-stats.v1` snapshot and page expose these fields:
 
 `weeks`, `daily`, version cells and upgrade cells are arrays. Counts are nullable
 nonnegative integers. Source counts below 5 become `null`, including zero.
-Both retention totals are also hidden when either is suppressed or subtraction
-between the nested retention counts would reveal 1 to 4 sources. Both histograms
-hide all their source counts when any cell is suppressed or its difference from
-the active-source total is 1 to 4. Hiding both distributions prevents version
-overlap from revealing a suppressed upgrade count. These rules also apply to
-uploaded snapshots.
+All weekly source counts are hidden together when any count is suppressed,
+subtraction between counts would reveal 1 to 4 sources, or excess version
+observations would reveal 1 to 4 sources using multiple versions. Incomplete
+version or upgrade reads hide both histograms. These rules also apply to uploaded
+snapshots. Known retention counts must satisfy active >= 2+ day >= 3+ day sources.
+Each known version or upgrade count must not exceed the active-source total.
 The POST body ceiling is 4 MiB to cover the full 60-week schema maximum.
 The page renders `null` and missing observations as unknown. Worker request,
 Worker error and public download counts are event counts and may be zero.

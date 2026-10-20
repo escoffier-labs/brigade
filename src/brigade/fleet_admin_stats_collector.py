@@ -226,12 +226,20 @@ def collect(settings: dict[str, Any], *, now: datetime | None = None) -> dict[st
     downloads: dict[str, Any] = {"pypi": None, "npm": None}
     if settings.get("database") or settings.get("database_id"):
         try:
-            data = {key: _d1(settings, key) for key in QUERIES}
-            for row in data["weekly"]:
+            weekly = _d1(settings, "weekly")
+            data: dict[str, list[dict[str, Any]] | None] = {}
+            for key in ("versions", "upgrades"):
+                try:
+                    data[key] = _d1(settings, key)
+                except (ValueError, KeyError, TypeError, AttributeError):
+                    data[key] = None
+            for row in weekly:
                 week = row["week"]
                 start = stats._week(week)
                 versions = _histogram(data["versions"], week, upgrades=False)
                 upgrades = _histogram(data["upgrades"], week, upgrades=True)
+                if versions is None or upgrades is None:
+                    versions = upgrades = []
                 weeks.append(
                     {
                         "week": week,
@@ -273,10 +281,10 @@ def collect(settings: dict[str, Any], *, now: datetime | None = None) -> dict[st
     return stats.snapshot(taken_at=now, source_set=sources, weeks=weeks, daily=daily, downloads=downloads)
 
 
-def _histogram(rows: list[dict[str, Any]], week: str, *, upgrades: bool) -> list[dict[str, Any]]:
+def _histogram(rows: list[dict[str, Any]] | None, week: str, *, upgrades: bool) -> list[dict[str, Any]] | None:
     # A global query limit can omit cells even in a small per-week histogram.
-    if len(rows) >= (12000 if upgrades else 6000):
-        return []
+    if rows is None or len(rows) >= (12000 if upgrades else 6000):
+        return None
     fields = ("from_version", "to_version") if upgrades else ("version",)
     cells = []
     for row in rows:
@@ -292,9 +300,9 @@ def _histogram(rows: list[dict[str, Any]], week: str, *, upgrades: bool) -> list
         except (ValueError, KeyError, TypeError):
             # An omitted malformed cell could disclose 1-4 sources by
             # subtraction from the week's total. Hide the distribution.
-            return []
+            return None
     # An empty array renders as unknown. Never show a truncated distribution.
-    return cells if len(cells) <= (200 if upgrades else 100) else []
+    return cells if len(cells) <= (200 if upgrades else 100) else None
 
 
 def _release(version: str) -> tuple[int, ...]:

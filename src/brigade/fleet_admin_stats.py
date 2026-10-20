@@ -202,33 +202,32 @@ def snapshot(
 
 
 def _suppress_week(row: dict[str, Any]) -> None:
-    """Hide related cells when subtraction would disclose a small source count."""
+    """Reject impossible subsets, then hide related counts as one group."""
     cells = [(row, SOURCE_FIELDS), *((c, ("active_sources",)) for c in row["versions"] + row["upgrades"])]
-    for cell, fields in cells:
-        for field in fields:
-            count = cell[field]
-            if type(count) is int and 0 <= count < 5:
-                cell[field] = None
-    counts = [row[field] for field in SOURCE_FIELDS]
-    # Retention counts are nested sets. Hide both retention totals if a
-    # primary suppression or any pairwise difference could reveal 1-4 sources.
-    if any(count is None for count in counts) or any(
-        type(a) is int and type(b) is int and 0 < a - b < 5
-        for index, a in enumerate(counts)
-        for b in counts[index + 1 :]
-    ):
-        row["retained_2d_sources"] = row["retained_3d_sources"] = None
+    counts = [cell[field] for cell, fields in cells for field in fields]
+    for count in counts:
+        _count(count)
+    totals = [row[field] for field in SOURCE_FIELDS]
+    if any(a is not None and b is not None and a < b for index, a in enumerate(totals) for b in totals[index + 1 :]):
+        raise ValueError("source subset exceeds parent total")
     total = row["active_sources"]
-    histogram = row["versions"] + row["upgrades"]
-    # Suppress both distributions together. Version overlap can otherwise
-    # reconstruct a hidden upgrade count even when its own peers are hidden.
-    if total is None or any(
-        cell["active_sources"] is None
-        or (type(total) is int and type(cell["active_sources"]) is int and 0 < total - cell["active_sources"] < 5)
-        for cell in histogram
-    ):
-        for cell in histogram:
-            cell["active_sources"] = None
+    if total is not None and any(count is not None and count > total for count in counts[len(SOURCE_FIELDS) :]):
+        raise ValueError("source subset exceeds active total")
+    # All weekly source counts are related. Coarsen the entire group if a
+    # primary suppression or subtraction could disclose 1-4 sources.
+    known = sorted({count for count in counts if count is not None})
+    hidden = any(count is None or count < 5 for count in counts) or any(
+        b - a < 5 for a, b in zip(known, known[1:], strict=False)
+    )
+    versions = [cell["active_sources"] for cell in row["versions"]]
+    # Excess version observations bound the group using multiple versions,
+    # even when the upgrade histogram is empty or unavailable.
+    if total is not None and all(count is not None for count in versions):
+        hidden = hidden or 0 < sum(versions) - total < 5
+    if hidden:
+        for cell, fields in cells:
+            for field in fields:
+                cell[field] = None
 
 
 def store(conn: sqlite3.Connection, value: Any, *, now: datetime | None = None) -> None:

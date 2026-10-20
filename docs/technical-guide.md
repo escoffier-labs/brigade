@@ -1981,8 +1981,10 @@ The closed `brigade.admin-stats.v1` snapshot and page expose these fields:
 
 `weeks`, `daily`, version cells and upgrade cells are arrays. Counts are nullable
 nonnegative integers. Source counts below 5 become `null`, including zero.
-Related retention totals and histogram cells are also hidden when subtraction
-would expose 1 to 4 sources. The Hub enforces these suppression rules.
+Weekly source counts are hidden together when any count is suppressed or
+subtraction, including excess version observations, would expose 1 to 4 sources.
+Incomplete version or upgrade reads hide both histograms. The Hub enforces
+suppression and rejects known subset counts that exceed their parent totals.
 The page renders `null` and missing observations as unknown. Worker request,
 Worker error and public download counts are event counts and may be zero.
 Weekly counts mean active sources, not people or installs. Retention is activity

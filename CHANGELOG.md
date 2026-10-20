@@ -47,6 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Hide related weekly adoption counts together to prevent small overlaps from being inferred. Incomplete version or upgrade reads hide both distributions, and snapshots reject subset counts above their parent totals. (#1875)
 - Keep caught verification cancellation active through the `brigade` console script and `python -m brigade` process exit so late repeated signals preserve exit status 130. Programmatic calls still restore their prior signal handlers.
 - The workflow-rules repair hint includes the full repo kit (`--full`), so following it installs the missing rule templates and keeps rule files that already exist. (Fixes #1762)
 - Fleet event and message spools work on Windows when an existing drive or share root denies directory creation. Existing directories are recognized before treating a creation error as a persistence failure.

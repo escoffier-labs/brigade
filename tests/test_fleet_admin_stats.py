@@ -364,7 +364,7 @@ def test_retention_does_not_disclose_small_complements(retention):
     value = stats.snapshot(
         taken_at=NOW, source_set=["d1"], weeks=[week], daily=[], downloads={"pypi": None, "npm": None}
     )
-    assert value["weeks"][0]["active_sources"] == retention[0]
+    assert value["weeks"][0]["active_sources"] is None
     assert value["weeks"][0]["retained_2d_sources"] is None
     assert value["weeks"][0]["retained_3d_sources"] is None
     # A correctly digested upload must not bypass complementary suppression.
@@ -458,16 +458,79 @@ def test_stats_post_accepts_validator_maximum_snapshot(tmp_path, monkeypatch):
     assert result[-1][0] == 200
 
 
-def test_version_overlap_cannot_reconstruct_suppressed_upgrade():
+@pytest.mark.parametrize("upgrade_count", [None, 1, 5])
+@pytest.mark.parametrize("active,counts", [(20, [12, 9]), (30, [20, 11]), (20, [7, 7, 7])])
+def test_version_overlap_cannot_reconstruct_suppressed_upgrade(upgrade_count, active, counts):
     from brigade import fleet_admin_stats as stats
 
     week = snapshot()["weeks"][0]
-    week.update(active_sources=20, retained_2d_sources=20, retained_3d_sources=20)
-    # Two versions cover the week, so 12 + 9 - 20 would reveal one upgrade.
-    week["versions"] = [{"version": "0.27.0", "active_sources": 12}, {"version": "0.28.0", "active_sources": 9}]
-    week["upgrades"][0]["active_sources"] = 1
+    week.update(active_sources=active, retained_2d_sources=active, retained_3d_sources=active)
+    # The excess version observations reveal a small group using multiple versions.
+    week["versions"] = [{"version": f"0.28.{i}", "active_sources": count} for i, count in enumerate(counts)]
+    week["upgrades"] = (
+        []
+        if upgrade_count is None
+        else [{"from_version": "0.27.0", "to_version": "0.28.0", "active_sources": upgrade_count}]
+    )
     value = stats.snapshot(
         taken_at=NOW, source_set=["d1"], weeks=[week], daily=[], downloads={"pypi": None, "npm": None}
     )
-    assert [cell["active_sources"] for cell in value["weeks"][0]["versions"]] == [None, None]
-    assert value["weeks"][0]["upgrades"][0]["active_sources"] is None
+    assert [cell["active_sources"] for cell in value["weeks"][0]["versions"]] == [None] * len(counts)
+    assert all(value["weeks"][0][field] is None for field in stats.SOURCE_FIELDS)
+    assert all(cell["active_sources"] is None for cell in value["weeks"][0]["upgrades"])
+    # Authorized producers cannot bypass suppression with a fresh digest.
+    if upgrade_count != 1:
+        value["weeks"] = [week]
+        value["digest"] = value["snapshot_id"] = stats._digest(value)
+        with pytest.raises(ValueError, match="suppression"):
+            stats.validate(value)
+
+
+@pytest.mark.parametrize("counts", [(20, 5, 5, 16), (20, 10, 5, 11), (20, None, None, 10)])
+def test_related_weekly_source_counts_are_suppressed_together(counts):
+    from brigade import fleet_admin_stats as stats
+
+    active, retained_2d, retained_3d, version = counts
+    week = {
+        "week": "2026-W43",
+        "partial": True,
+        "active_sources": active,
+        "retained_2d_sources": retained_2d,
+        "retained_3d_sources": retained_3d,
+        "versions": [{"version": "0.28.0", "active_sources": version}],
+        "upgrades": [],
+    }
+    value = stats.snapshot(
+        taken_at=NOW, source_set=["d1"], weeks=[week], daily=[], downloads={"pypi": None, "npm": None}
+    )
+    assert all(value["weeks"][0][field] is None for field in stats.SOURCE_FIELDS)
+    assert value["weeks"][0]["versions"][0]["active_sources"] is None
+
+
+@pytest.mark.parametrize(
+    "active,retained_2d,retained_3d,version,upgrade",
+    [(5, 10, 5, 5, 5), (20, 10, 15, 5, 5), (10, None, 11, 5, 5), (5, 5, 5, 11, 5), (5, 5, 5, 5, 11), (3, 5, 5, 3, 3)],
+)
+@pytest.mark.parametrize("boundary", ["snapshot", "store"])
+def test_impossible_source_subsets_are_rejected(tmp_path, active, retained_2d, retained_3d, version, upgrade, boundary):
+    from brigade import fleet_admin_stats as stats
+
+    value = snapshot()
+    row = value["weeks"][0]
+    row.update(active_sources=active, retained_2d_sources=retained_2d, retained_3d_sources=retained_3d)
+    row["versions"][0]["active_sources"] = version
+    row["upgrades"][0]["active_sources"] = upgrade
+    if boundary == "snapshot":
+        with pytest.raises(ValueError, match="subset"):
+            stats.snapshot(
+                taken_at=NOW, source_set=["d1"], weeks=[row], daily=[], downloads={"pypi": None, "npm": None}
+            )
+    else:
+        value["digest"] = value["snapshot_id"] = stats._digest(value)
+        conn = fleet_hub.init_db(tmp_path / "hub.db")
+        try:
+            with pytest.raises(ValueError):
+                stats.store(conn, value, now=NOW)
+            assert conn.execute("SELECT COUNT(*) FROM admin_stats_snapshots").fetchone()[0] == 0
+        finally:
+            conn.close()

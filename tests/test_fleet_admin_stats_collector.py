@@ -285,10 +285,10 @@ def test_collector_hides_invalid_histograms_and_keeps_other_sources(monkeypatch,
     )
     assert value["source_set"] == ["d1", "downloads"]
     assert value["weeks"][0]["versions"] == (
-        [] if malformed else [{"version": "0.31.0.dev20260808", "active_sources": 8}]
+        [] if malformed else [{"version": "0.31.0.dev20260808", "active_sources": None}]
     )
     assert value["weeks"][0]["upgrades"] == (
-        [] if malformed else [{"from_version": "0.28.0", "to_version": "0.31.0.dev20260808", "active_sources": 8}]
+        [] if malformed else [{"from_version": "0.28.0", "to_version": "0.31.0.dev20260808", "active_sources": None}]
     )
     assert value["downloads"] == {"pypi": 12, "npm": 8}
 
@@ -377,8 +377,38 @@ def test_oversized_week_histogram_becomes_unknown(monkeypatch, kind, limit):
     monkeypatch.setattr(collector, "run_wrangler", runner)
     value = collector.collect({"database": "example-db"}, now=datetime(2026, 10, 20, tzinfo=timezone.utc))
     assert value["source_set"] == ["d1"]
-    assert value["weeks"][0]["active_sources"] == 20
-    assert value["weeks"][0][kind] == []
+    assert all(value["weeks"][0][field] is None for field in collector.stats.SOURCE_FIELDS)
+    assert value["weeks"][0]["versions"] == value["weeks"][0]["upgrades"] == []
+
+
+@pytest.mark.parametrize("kind,limit", [("versions", 6000), ("upgrades", 12000)])
+@pytest.mark.parametrize("failure", ["limit", "malformed", "unavailable"])
+def test_incomplete_histogram_hides_both_distributions(monkeypatch, kind, limit, failure):
+    from brigade import fleet_admin_stats_collector as collector
+
+    def runner(argv, **kwargs):
+        query = next(key for key, sql in collector.QUERIES.items() if sql == argv[-1])
+        if query == "weekly":
+            rows = [{"week": "2026-W43", "active_sources": 20, "retained_2d_sources": 20, "retained_3d_sources": 20}]
+        elif query == kind:
+            if failure == "unavailable":
+                raise ValueError("unavailable")
+            rows = [{}] * limit if failure == "limit" else [{"week": "2026-W43"}]
+        elif query == "versions":
+            rows = [
+                {"week": "2026-W43", "version": version, "active_sources": count}
+                for version, count in (("0.27.0", 12), ("0.28.0", 9))
+            ]
+        else:
+            rows = [{"week": "2026-W43", "from_version": "0.27.0", "to_version": "0.28.0", "active_sources": 5}]
+        return [{"success": True, "results": rows}]
+
+    monkeypatch.setattr(collector, "run_wrangler", runner)
+    value = collector.collect({"database": "example-db"}, now=datetime(2026, 10, 20, tzinfo=timezone.utc))
+    assert value["source_set"] == ["d1"]
+    week = value["weeks"][0]
+    assert week["versions"] == week["upgrades"] == []
+    assert week["active_sources"] == 20
 
 
 def test_equivalent_release_spellings_are_not_upgrades(monkeypatch):
