@@ -739,8 +739,8 @@ def _git_tracked_names(directory: Path) -> set[str] | None:
                 detail = discovery.stderr.decode("utf-8", "replace").strip().splitlines()
                 _warn_tracking_check_failed(directory, detail[0] if detail else f"git exited {discovery.returncode}")
                 return None
-            # Honor core.worktree without decoding quoted directory names.
-            worktree = (marker_root / discovery.stdout.decode("ascii").strip()).resolve()
+            # --show-cdup can return an absolute configured-worktree path.
+            worktree = (marker_root / os.fsdecode(discovery.stdout.removesuffix(b"\n"))).resolve()
             result = subprocess.run(
                 [
                     "git",

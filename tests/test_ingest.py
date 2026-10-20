@@ -1561,6 +1561,41 @@ def test_tracking_check_supports_gitdir_files(tmp_path: Path, gitdir_kind):
     assert (inbox / "processed" / untracked.name).is_file()
 
 
+@pytest.mark.parametrize(
+    "worktree_name",
+    [
+        "wörk",
+        pytest.param(
+            "tree ",
+            marks=pytest.mark.skipif(os.name == "nt", reason="Win32 paths do not preserve trailing directory spaces"),
+        ),
+    ],
+)
+def test_tracking_check_preserves_configured_worktree_path(tmp_path: Path, worktree_name: str):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(repo, "init", "-q")
+    worktree = repo / worktree_name
+    inbox = worktree / "inbox"
+    inbox.mkdir(parents=True)
+    # The trimmed sibling makes whitespace loss a false negative, not an error.
+    (repo / "tree" / "inbox").mkdir(parents=True)
+    _git(repo, "config", "core.worktree", str(worktree))
+    handoff = _write_handoff(inbox, "tracked.md", _PLAIN_HANDOFF)
+    _git(worktree, "add", "--", "inbox/tracked.md")
+    untracked = _write_handoff(inbox, "untracked.md", _PLAIN_HANDOFF)
+
+    handoffs, tracked = ingest_mod._list_handoffs(inbox)
+    assert handoffs == [untracked]
+    assert tracked == [handoff]
+    with pytest.raises(ingest_mod.TrackedHandoffError):
+        ingest_mod._archive(handoff, inbox / "processed")
+    assert handoff.is_file()
+    ingest_mod._archive(untracked, inbox / "processed")
+    assert not untracked.exists()
+    assert (inbox / "processed" / untracked.name).is_file()
+
+
 def test_ingest_without_git_binary_archives_as_before(tmp_target: Path, monkeypatch):
     inbox = _seed(tmp_target)
     handoff = _write_handoff(inbox, "2026-10-20-0902-nogit.md", _PLAIN_HANDOFF)
