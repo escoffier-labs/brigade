@@ -127,6 +127,16 @@ def test_pack_preserves_registry_integrity_of_original_archive(tmp_path):
     assert artifact["shasum"] == hashlib.sha1(data).hexdigest()
 
 
+def test_pack_refuses_clearly_when_npm_is_missing(tmp_path, monkeypatch):
+    def forbidden(*args, **kwargs):
+        pytest.fail("pack ran a subprocess without a resolved npm")
+
+    monkeypatch.setattr(prepare.shutil, "which", lambda name: None)
+    monkeypatch.setattr(prepare.subprocess, "run", forbidden)
+    with pytest.raises(ValueError, match="npm executable not found on PATH"):
+        prepare.pack(tmp_path, tmp_path)
+
+
 @pytest.mark.parametrize("mutation", [None, "drift", "addition", "missing", "manifest", "revision"])
 def test_stable_payload_audit_binds_tag_inventory_and_only_release_manifest(tmp_path, mutation):
     import json
