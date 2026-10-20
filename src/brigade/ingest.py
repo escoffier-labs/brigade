@@ -76,6 +76,7 @@ _GIT_LOCATION_ENV = (
     "GIT_WORK_TREE",
     "GIT_INDEX_FILE",
     "GIT_COMMON_DIR",
+    "GIT_OBJECT_DIRECTORY",
     "GIT_CEILING_DIRECTORIES",
 )
 _TRACKED_SKIP_REASON = "tracked by git or tracking unverifiable; left in place"
@@ -686,7 +687,7 @@ def _warn_tracking_check_failed(directory: Path, detail: str) -> None:
 
 
 def _git_tracked_names(directory: Path) -> set[str] | None:
-    """Return the names of files directly in `directory` that git tracks.
+    """Return names tracked by any work tree containing `directory`.
 
     An absent git binary or a directory outside any work tree yields an empty
     set. Any other failure returns None so callers can fail closed.
@@ -695,26 +696,50 @@ def _git_tracked_names(directory: Path) -> set[str] | None:
     env["LC_ALL"] = "C"
     env["GIT_DISCOVERY_ACROSS_FILESYSTEM"] = "true"
     try:
-        result = subprocess.run(
-            ["git", "-C", str(directory), "ls-files", "-z", "--", "."],
-            capture_output=True,
-            env=env,
-            timeout=30,
-            check=False,
-        )
-    except FileNotFoundError:
-        return set()
+        directory = directory.resolve()
+        probe = directory
+        names: set[str] = set()
+        # A nested repository's index can hide paths still in an outer index.
+        while True:
+            try:
+                discovery = subprocess.run(
+                    ["git", "-C", str(probe), "rev-parse", "--show-cdup"],
+                    capture_output=True,
+                    env=env,
+                    timeout=30,
+                    check=False,
+                )
+            except FileNotFoundError:
+                return set()
+            if discovery.returncode != 0:
+                if b"not a git repository" in discovery.stderr:
+                    return names
+                detail = discovery.stderr.decode("utf-8", "replace").strip().splitlines()
+                _warn_tracking_check_failed(directory, detail[0] if detail else f"git exited {discovery.returncode}")
+                return None
+            # --show-cdup emits only ../ components, avoiding quoted filenames.
+            worktree = (probe / discovery.stdout.decode("ascii").strip()).resolve()
+            pathspec = directory.relative_to(worktree).as_posix()
+            result = subprocess.run(
+                ["git", "--literal-pathspecs", "-C", str(worktree), "ls-files", "-z", "--", pathspec],
+                capture_output=True,
+                env=env,
+                timeout=30,
+                check=False,
+            )
+            if result.returncode != 0:
+                detail = result.stderr.decode("utf-8", "replace").strip().splitlines()
+                _warn_tracking_check_failed(directory, detail[0] if detail else f"git exited {result.returncode}")
+                return None
+            for entry in result.stdout.decode("utf-8", "surrogateescape").split("\0"):
+                if entry and (worktree / entry).parent.samefile(directory):
+                    names.add(Path(entry).name)
+            if worktree.parent == worktree:
+                return names
+            probe = worktree.parent
     except (OSError, subprocess.SubprocessError) as exc:
         _warn_tracking_check_failed(directory, str(exc))
         return None
-    if result.returncode != 0:
-        if b"not a git repository" in result.stderr:
-            return set()
-        detail = result.stderr.decode("utf-8", "replace").strip().splitlines()
-        _warn_tracking_check_failed(directory, detail[0] if detail else f"git exited {result.returncode}")
-        return None
-    entries = result.stdout.decode("utf-8", "surrogateescape").split("\0")
-    return {entry for entry in entries if entry and "/" not in entry}
 
 
 def _git_tracked_files(directory: Path) -> set[tuple[int, int]] | None:

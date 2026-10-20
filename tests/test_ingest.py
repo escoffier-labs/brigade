@@ -1586,6 +1586,49 @@ def test_archive_ignores_git_ceiling_directories(tmp_path: Path, monkeypatch):
     assert tracked.is_file()
 
 
+def test_tracking_check_ignores_git_object_directory(tmp_path: Path, monkeypatch):
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    _git(tmp_path, "init", "-q")
+    handoff = _write_handoff(inbox, "tracked.md", _PLAIN_HANDOFF)
+    _git(tmp_path, "add", "--", "inbox/tracked.md")
+    monkeypatch.setenv("GIT_OBJECT_DIRECTORY", ".git/objects")
+
+    handoffs, tracked = ingest_mod._list_handoffs(inbox)
+    assert handoffs == []
+    assert tracked == [handoff]
+    with pytest.raises(ingest_mod.TrackedHandoffError):
+        ingest_mod._archive(handoff, inbox / "processed")
+    assert handoff.is_file()
+    assert not (inbox / "processed").exists()
+
+
+@pytest.mark.parametrize("inbox_name", ["inbox", "in[box]"])
+def test_tracking_check_preserves_handoffs_in_every_containing_repo(tmp_path: Path, inbox_name: str):
+    inbox = tmp_path / inbox_name
+    inbox.mkdir()
+    _git(tmp_path, "init", "-q")
+    outer_tracked = _write_handoff(inbox, "outer.md", _PLAIN_HANDOFF)
+    _git(tmp_path, "--literal-pathspecs", "add", "--", f"{inbox_name}/outer.md")
+    # Initializing the nested repo must not hide the outer index's staged file.
+    _git(inbox, "init", "-q")
+    inner_tracked = _write_handoff(inbox, "inner.md", _PLAIN_HANDOFF)
+    _git(inbox, "add", "--", "inner.md")
+    untracked = _write_handoff(inbox, "untracked.md", _PLAIN_HANDOFF)
+
+    handoffs, tracked = ingest_mod._list_handoffs(inbox)
+    assert handoffs == [untracked]
+    assert set(tracked) == {outer_tracked, inner_tracked}
+    for handoff in tracked:
+        with pytest.raises(ingest_mod.TrackedHandoffError):
+            ingest_mod._archive(handoff, inbox / "processed")
+        assert handoff.is_file()
+    assert not (inbox / "processed").exists()
+    ingest_mod._archive(untracked, inbox / "processed")
+    assert not untracked.exists()
+    assert (inbox / "processed" / untracked.name).is_file()
+
+
 def test_tracked_check_matches_by_file_identity_not_spelling(tmp_path: Path, monkeypatch):
     # A hardlink stands in for a case-insensitive filesystem, where the index
     # spelling `Tracked.md` and the listed `tracked.md` name the same file.
