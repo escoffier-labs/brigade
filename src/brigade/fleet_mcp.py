@@ -193,7 +193,9 @@ def _frame_directory(value: Any, key: str | None = None) -> Any:
     return value
 
 
-def poll_inbox(*, wait_secs: int, unacked_only: bool, token_file: str | None, after: int = 0) -> dict[str, Any]:
+def poll_inbox(
+    *, wait_secs: int, unacked_only: bool, token_file: str | None, after: int = 0, limit: int | None = None
+) -> dict[str, Any]:
     """Bounded list polling; replace here when the hub gains long-poll support."""
     deadline = monotonic() + wait_secs
 
@@ -207,8 +209,15 @@ def poll_inbox(*, wait_secs: int, unacked_only: bool, token_file: str | None, af
         )
 
     history = read(unacked_only)
-    if not wait_secs or any(row.get("acked_at") is None for row in history["messages"]):
+    if not wait_secs:
         return history
+    # Decide on the rows the caller will see after its limit, not the whole page.
+    visible = history["messages"][:limit] if limit is not None else history["messages"]
+    if any(row.get("acked_at") is None for row in visible):
+        return history
+    if any(row.get("acked_at") is None for row in history["messages"]):
+        # Unread mail sits past the caller's limit: return the unread page instead.
+        return read(True)
     delay = 1.0
     last_good = history
     while (remaining := deadline - monotonic()) > 0:
@@ -345,6 +354,7 @@ class FleetMcp:
                     unacked_only=args.get("unacked_only", True),
                     token_file=self.token_file,
                     after=int(args.get("after", "0")),
+                    limit=args.get("limit", 100),
                 ),
                 args.get("limit", 100),
             )

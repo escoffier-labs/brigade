@@ -773,3 +773,14 @@ def test_who_filter_is_unicode_case_insensitive_before_limit(stations, hub, monk
         assert status == 200 and [row["session_id"] for row in who["sessions"]] == ["older"]
     finally:
         conn.close()
+
+
+def test_inbox_wait_with_small_limit_returns_unread_past_the_limit(stations):
+    a, b = stations
+    first = call(a, "fleet_send", to=NODE_B, body="Already read")["message"]["id"]
+    call(b, "fleet_ack", ids=[str(first)])
+    call(a, "fleet_send", to=NODE_B, body="Unread")
+    page = call(b, "fleet_inbox", unacked_only=False, wait_secs=5, limit=1)
+    assert len(page["messages"]) == 1
+    assert page["messages"][0]["acked_at"] is None
+    assert unfence({"untrusted": page["messages"][0]["body"], "flagged": False}).endswith("Unread")
