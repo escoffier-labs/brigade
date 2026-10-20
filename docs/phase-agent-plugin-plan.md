@@ -409,7 +409,7 @@ The user store passes `BRIGADE_HOME` as the memory-care target with the default 
 - Modify: `src/brigade/handoff_cmd/drafts.py:769-874` (`draft()`)
 - Test: `tests/test_handoff_build_draft.py`
 
-- [ ] Write the failing test `tests/test_handoff_build_draft.py`:
+- [x] Write the failing test `tests/test_handoff_build_draft.py`:
 
 ```python
 """build_draft() writes one handoff and returns its payload without printing."""
@@ -455,8 +455,8 @@ def test_build_draft_validates_inputs(tmp_path: Path):
         drafts.build_draft(target=tmp_path, title="T", summary="S.", content="Body.", action="delete")
 ```
 
-- [ ] Run it, watch it fail: `PY -m pytest tests/test_handoff_build_draft.py -q -p no:cacheprovider`. Expect FAIL with `AttributeError: module 'brigade.handoff_cmd.drafts' has no attribute 'build_draft'`.
-- [ ] In `src/brigade/handoff_cmd/drafts.py`, insert `build_draft()` immediately above `def draft(`:
+- [x] Run it, watch it fail: `PY -m pytest tests/test_handoff_build_draft.py -q -p no:cacheprovider`. Expect FAIL with `AttributeError: module 'brigade.handoff_cmd.drafts' has no attribute 'build_draft'`.
+- [x] In `src/brigade/handoff_cmd/drafts.py`, insert `build_draft()` immediately above `def draft(`:
 
 ```python
 def build_draft(
@@ -534,7 +534,7 @@ def build_draft(
     }
 ```
 
-- [ ] Replace the body of `draft()` (keep its signature unchanged) with:
+- [x] Replace the body of `draft()` (keep its signature unchanged) with:
 
 ```python
     target = target.expanduser().resolve()
@@ -590,8 +590,8 @@ def build_draft(
     return 0 if payload["valid"] else 1
 ```
 
-- [ ] Run to green: `PY -m pytest tests/test_handoff_build_draft.py tests/test_handoff_cmd.py -q -p no:cacheprovider`. Expect all PASS. The CLI messages are byte-identical to before because each `ValueError` carries the old text after `error: `.
-- [ ] Commit: `git add src/brigade/handoff_cmd/drafts.py tests/test_handoff_build_draft.py && git commit -m "refactor(handoff): expose build_draft for non-CLI callers"`
+- [x] Run to green: `PY -m pytest tests/test_handoff_build_draft.py tests/test_handoff_cmd.py -q -p no:cacheprovider`. Expect all PASS. The CLI messages are byte-identical to before because each `ValueError` carries the old text after `error: `.
+- [x] Commit: `git add src/brigade/handoff_cmd/drafts.py tests/test_handoff_build_draft.py && git commit -m "refactor(handoff): expose build_draft for non-CLI callers"`
 
 ---
 
