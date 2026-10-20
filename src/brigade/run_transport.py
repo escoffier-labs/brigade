@@ -1434,8 +1434,12 @@ def _add_note(error: BaseException, note: str, output_dir: Path | None, cwd: Pat
 
 
 def _describe_failure(error: BaseException) -> str:
-    detail = str(error)[:200]
-    return f"{type(error).__name__}: {detail}" if detail else type(error).__name__
+    try:
+        detail = str(error)[:200]
+        return f"{type(error).__name__}: {detail}" if detail else type(error).__name__
+    except BaseException:
+        # Even an interrupted formatter must not replace lock retention.
+        return type(error).__name__
 
 
 def _raise_retained_future_error(

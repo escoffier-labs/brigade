@@ -723,6 +723,66 @@ def test_sibling_retention_records_replaced_budget_denial(tmp_path, monkeypatch,
 
 
 @pytest.mark.parametrize("scheduler", ["waves", "dag"])
+@pytest.mark.parametrize("formatting_error", [RuntimeError, KeyboardInterrupt])
+def test_unprintable_scheduler_failure_preserves_sibling_retention(tmp_path, monkeypatch, scheduler, formatting_error):
+    class UnprintableBudgetError(run_budget.BudgetPolicyError):
+        def __str__(self):
+            raise formatting_error("failure formatting interrupted")
+
+    both_started = threading.Barrier(2)
+    retained = runguard.RetainRunLockError("sibling receipt unavailable")
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    run_json = run_dir / "run.json"
+    run_json.write_text(json.dumps({"status": "dispatching"}))
+    original_receipt = run_json.read_bytes()
+
+    def worker(cli_ref, *args, **kwargs):
+        both_started.wait(timeout=5)
+        if cli_ref == "codex":
+            raise UnprintableBudgetError(
+                "budget denied", code="budget_denied", dimension="tokens", exhausted=True, request_id="req-unprintable"
+            )
+        raise retained
+
+    def budget_first(futures):
+        for future in futures:
+            if isinstance(future.exception(timeout=5), UnprintableBudgetError):
+                yield future
+                return
+        pytest.fail("budget failure never completed")
+
+    monkeypatch.setattr(agents, "run_agent", worker)
+    monkeypatch.setattr(run_transport, "as_completed", budget_first)
+    error = None
+    try:
+        with runguard.run_lock(tmp_path, run_dir=run_dir):
+            run_transport.dispatch(
+                [
+                    run_transport.Assignment(worker="reviewer", task="review", stage=1, covers=("review",)),
+                    run_transport.Assignment(worker="coder", task="inspect", stage=1, covers=("inspect",)),
+                ],
+                _roster(),
+                build_prompt=lambda *args, **kwargs: "inspect",
+                run_appserver_worker=lambda *args, **kwargs: pytest.fail("unused app-server"),
+                event_writer=lambda *args, **kwargs: None,
+                cwd=tmp_path,
+                output_dir=run_dir,
+                scheduler=scheduler,
+                route_dependencies={"review": (), "inspect": ()},
+            )
+    except BaseException as exc:
+        error = exc
+    assert error is retained, type(error).__name__
+    assert runguard.lock_path(tmp_path).exists()
+    assert run_json.read_bytes() == original_receipt
+    diagnostic = "replaced scheduler failure: UnprintableBudgetError"
+    assert diagnostic in getattr(error, "__notes__", ())
+    sidecar = json.loads((run_dir / "retention-diagnostics.json").read_text())
+    assert sidecar["diagnostics"] == [diagnostic]
+
+
+@pytest.mark.parametrize("scheduler", ["waves", "dag"])
 def test_retention_first_records_sibling_budget_denial(tmp_path, monkeypatch, scheduler):
     retain_raised = threading.Event()
     run_dir = tmp_path / "run"
