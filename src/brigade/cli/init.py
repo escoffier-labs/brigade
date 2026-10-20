@@ -82,7 +82,7 @@ def _recorded_selection(target: Path):
 
     try:
         cfg = load_config(target.expanduser().resolve())
-    except (ValueError, AttributeError):
+    except (ValueError, AttributeError, TypeError):
         return None
     return cfg.selection if cfg is not None else None
 

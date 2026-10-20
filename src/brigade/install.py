@@ -353,8 +353,9 @@ def _write_surface_evidence(target: Path, selection: Selection, *, projection_on
 def _merged_config(target: Path, selection: Selection) -> Config:
     try:
         existing = load_config(target)
-    except (ValueError, AttributeError):
+    except (ValueError, AttributeError, TypeError) as exc:
         # An unreadable config is replaced, as a first install would.
+        print(f"warning: replacing unreadable .brigade/config.json ({exc})", file=sys.stderr)
         existing = None
     if existing is None:
         return Config(version=1, selection=selection)

@@ -474,3 +474,38 @@ def test_cli_rerun_without_depth_keeps_recorded_depth_and_includes(tmp_path: Pat
     data = json.loads((target / ".brigade" / "config.json").read_text())
     assert data["depth"] == "workspace"
     assert data["includes"] == ["publisher"]
+
+
+def test_cli_rerun_keeps_recorded_owner_override(tmp_path: Path):
+    import json
+
+    from brigade.cli import main
+
+    target = tmp_path / "r"
+    assert (
+        main(["init", "--target", str(target), "--depth", "repo", "--harnesses", "codex", "--owner", "this-repo"]) == 0
+    )
+    assert main(["init", "--target", str(target), "--depth", "repo"]) == 0
+
+    data = json.loads((target / ".brigade" / "config.json").read_text())
+    assert data["harnesses"] == ["codex"]
+    assert data["owner"] == "this-repo"
+
+
+def test_cli_rerun_replaces_config_with_wrong_typed_field(tmp_path: Path, capsys):
+    import json
+
+    from brigade.cli import main
+    from brigade.work_cmd.session import briefing
+
+    target = tmp_path / "r"
+    assert main(["init", "--target", str(target), "--depth", "repo", "--harnesses", "codex"]) == 0
+    cfg_path = target / ".brigade" / "config.json"
+    data = json.loads(cfg_path.read_text())
+    data["includes"] = 5
+    cfg_path.write_text(json.dumps(data))
+
+    assert "--depth repo --full" in briefing._workflow_rule_health(target)["detail"]
+    assert main(["init", "--target", str(target), "--depth", "repo", "--harnesses", "codex"]) == 0
+    assert "unreadable" in capsys.readouterr().err
+    assert json.loads(cfg_path.read_text())["includes"] == []

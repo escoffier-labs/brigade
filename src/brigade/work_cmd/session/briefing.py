@@ -46,7 +46,7 @@ def _workflow_rule_repair_command(target: Path) -> str:
     # match the recorded depth; --full matters at repo depth alone.
     try:
         cfg = load_config(target)
-    except (ValueError, AttributeError):
+    except (ValueError, AttributeError, TypeError):
         cfg = None
     depth = cfg.selection.depth if cfg is not None else "repo"
     full = " --full" if depth == "repo" else ""
