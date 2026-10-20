@@ -207,6 +207,10 @@ def register(sub: argparse._SubParsersAction) -> None:
 
     register_messages(fleet_sub)
 
+    from ..fleet_mcp import register as register_mcp
+
+    register_mcp(fleet_sub)
+
     p_cloud = fleet_sub.add_parser("cloud", help="Read the fleet hub's sanitized cloud lease snapshot.")
     p_cloud.add_argument("--all", action="store_true", help="Include released and expired cloud leases.")
     p_cloud.add_argument("--json", action="store_true", help="Emit JSON instead of a table.")

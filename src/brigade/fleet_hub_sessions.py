@@ -114,16 +114,26 @@ def list_sessions(
     *,
     include_all: bool = False,
     now_epoch: float | None = None,
+    node_ids: set[str] | None = None,
 ) -> list[dict[str, object]]:
     """Active unexpired sessions, or history when ``include_all`` is set."""
     now = fleet_hub._now_epoch() if now_epoch is None else now_epoch
     limit = LIST_HISTORY_LIMIT if include_all else LIST_ACTIVE_LIMIT
+    node_filter = ""
+    params: list[Any] = [int(include_all), now]
+    if node_ids is not None:
+        if not node_ids:
+            return []
+        node_filter = "AND node_id IN (" + ",".join("?" for _ in node_ids) + ") "
+        params.extend(sorted(node_ids))
+    params.append(limit)
     rows = conn.execute(
         f"SELECT {_SESSION_COLUMNS} FROM interactive_sessions "
         "WHERE (? = 1 OR (state = 'active' AND expires_at > ?)) "
-        "ORDER BY heartbeat_at DESC, started_at DESC, node_id, harness, session_id "
+        + node_filter
+        + "ORDER BY heartbeat_at DESC, started_at DESC, node_id, harness, session_id "
         "LIMIT ?",
-        (int(include_all), now, limit),
+        params,
     ).fetchall()
     return [_session_payload(row, now=now) for row in rows]
 

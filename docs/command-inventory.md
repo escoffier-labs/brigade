@@ -203,6 +203,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade fleet export`
 - `brigade fleet flush`
 - `brigade fleet grokbot enroll-actor`
+- `brigade fleet mcp`
 - `brigade fleet models admit`
 - `brigade fleet models bindings`
 - `brigade fleet models default set`
