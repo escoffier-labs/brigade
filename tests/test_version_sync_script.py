@@ -18,6 +18,7 @@ def _load_version_sync_module(repo_root: Path):
     spec.loader.exec_module(module)
     module.ROOT = repo_root
     module.RECORDINGS = []
+    module.PLUGIN_LOCATIONS = []
     return module
 
 

@@ -45,7 +45,7 @@ The CLI posts its own event first, independently of any existing spool
 backlog. Exit 0 means delivered or durably queued after transport failure.
 A permanent hub rejection returns `rejected` and exit 2 without spooling
 that event. Exit 1 means delivery failed and the event could not be persisted.
-Shared spool poison-batch isolation is tracked in [#1735](https://github.com/escoffier-labs/brigade/issues/1735).
+A shared spool batch the hub rejects is bisected, and only the events it rejects individually move to the dead letter described in [fleet-sync.md](fleet-sync.md) ([#1735](https://github.com/escoffier-labs/brigade/issues/1735)).
 
 ## Rollback
 
