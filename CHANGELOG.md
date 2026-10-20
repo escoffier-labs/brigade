@@ -25,6 +25,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Prepared bug reports use the same security checks as previews, and saved CLI errors scrub parsed paths. Diagnostic read limits apply only to bug reports, preserving complete receipt exports.
+
 - Bug reports require a vulnerability check before sharing, redact hostname case variants, bound diagnostic receipt reads, record dispatch exits, and normalize paths with spaces in fingerprints.
 
 - Bug reports submit the saved preview by report ID after digest checks, preserve the original CLI diagnostic, and refuse vulnerability descriptions in titles, summaries, and selected output. Summary-file reads are bounded, and quickstart points to the redacted preview.

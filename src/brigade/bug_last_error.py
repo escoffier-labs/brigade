@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 from pathlib import Path
 from types import TracebackType
 from typing import Any
@@ -38,12 +39,40 @@ def frames(tb: TracebackType | None) -> list[str]:
     return result[-20:]
 
 
-def record(command: str, exit_code: int, exc: BaseException | None = None) -> None:
+def record(
+    command: str, exit_code: int, exc: BaseException | None = None, *, args: argparse.Namespace | None = None
+) -> None:
     try:
         from .bug_redaction import Redactor, assert_clean
 
         # Scrub before truncating, so a truncated credential is never saved.
-        message = Redactor(Path.cwd()).text(str(exc))[:500] if exc is not None else ""
+        redactor = Redactor(Path.cwd())
+        paths = {str(Path.cwd())}
+
+        def add_paths(value: Any) -> None:
+            if isinstance(value, Path):
+                paths.update((str(value), str(value.absolute()), str(value.resolve())))
+            elif isinstance(value, (list, tuple, set)):
+                for item in value:
+                    add_paths(item)
+            elif isinstance(value, dict):
+                for item in value.values():
+                    add_paths(item)
+
+        if args is not None:
+            add_paths(vars(args))
+        message = str(exc) if exc is not None else ""
+        for literal in sorted(paths - {"", ".", "/", "\\"}, key=len, reverse=True):
+            message = message.replace(literal.replace("\\", "\\\\"), "<local>").replace(literal, "<local>")
+        # Exceptions may name paths unrelated to any parsed argument. Quoted
+        # paths include spaces, and the fallback removes unquoted absolute paths.
+        # Do this before the general scrubber can replace only a path prefix.
+        message = re.sub(
+            r"""(["'])(?:[A-Za-z]:[\\/]|/|\\\\)[^\r\n]*?\1|(?:[A-Za-z]:[\\/]|/|\\\\)[^\r\n"'<>|]+""",
+            "<path>",
+            message,
+        )
+        message = redactor.text(message)[:500]
         payload = {
             "command": command,
             "exit_code": exit_code,

@@ -407,6 +407,65 @@ def test_real_doctor_temp_workspace_dry_run_is_network_free(report_env, monkeypa
     assert all(c["status"] in {"FAIL", "WARN"} for c in bundle["doctor"]["checks"])
 
 
+def test_real_doctor_prepared_report_allows_security_config_warning(report_env, monkeypatch, capsys):
+    from brigade.bug_collect import collect_doctor
+
+    mod, target = report_env
+    monkeypatch.setattr(mod, "collect_doctor", collect_doctor)
+    assert invoke(target, "--dry-run", "--json") == 0
+    preview = result(capsys)
+    bundle = json.loads(Path(preview["preview_path"]).with_name("bundle.json").read_text())
+    assert any(c["status"] == "WARN" and c["name"].startswith("security:") for c in bundle["doctor"]["checks"])
+    assert (
+        cli.main(
+            ["bug", "report", "--report-id", preview["report_id"], "--yes", "--not-security", "--via", "url", "--json"]
+        )
+        == 0
+    )
+    submitted = result(capsys)
+    assert submitted["submitted"] is True
+    assert submitted["preview_markdown"] == preview["preview_markdown"]
+
+
+@pytest.mark.parametrize("process", [False, True])
+@pytest.mark.parametrize("exception", [RuntimeError, SystemExit])
+@pytest.mark.parametrize("quoted", [False, True])
+def test_last_error_scrubs_all_parsed_paths_and_unknown_absolute_paths(
+    report_env, monkeypatch, capsys, tmp_path, process, exception, quoted
+):
+    from brigade import bug_last_error
+    from brigade.cli import evidence
+
+    _, target = report_env
+    monkeypatch.chdir(tmp_path)
+    lexical_target = Path("private client/../workspace")
+    lexical_file = Path("private report/output file.md")
+    private_paths = [str(p) for p in (lexical_target, lexical_target.resolve(), lexical_file, lexical_file.resolve())]
+    private_paths += [
+        "/srv/private tenant/repo/module.py",
+        "/home/example tenant/repo/module.py",  # content-guard: allow home-path
+        r"D:\Private Tenant\repo\module.py",
+        r"\\private-share\tenant\repo\module.py",
+    ]
+    message = "failed " + " | ".join(repr(p) if quoted else p for p in private_paths)
+    monkeypatch.setattr(evidence, "dispatch", lambda args: (_ for _ in ()).throw(exception(message)))
+    argv = ["evidence", "controls", "--target", str(lexical_target), "--render-doc", str(lexical_file)]
+    with pytest.raises(exception):
+        if process:
+            monkeypatch.setattr("sys.argv", ["brigade", *argv])
+            cli.process_main()
+        else:
+            cli.main(argv)
+    record = json.loads(bug_last_error.error_path().read_text())
+    assert record["command"] == "evidence controls"
+    assert record["message_head"].startswith("failed ")
+    assert all(p not in record["message_head"] for p in private_paths)
+    assert "private" not in record["message_head"].lower()
+    assert "tenant" not in record["message_head"].lower()
+    assert invoke(target, "--dry-run", "--json") == 0
+    assert "private" not in result(capsys)["preview_markdown"].lower()
+
+
 def test_parser_failure_records_only_resolved_command(report_env):
     from brigade import bug_last_error
 

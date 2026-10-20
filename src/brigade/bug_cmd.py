@@ -248,6 +248,19 @@ def _read_bounded(path: Path) -> bytes:
     return value
 
 
+def _check_security(bundle: dict[str, Any]) -> None:
+    user = bundle.get("user", {})
+    texts = [str(user.get(key, "")) for key in ("summary", "title", "output_tail")]
+    texts.append(str((bundle.get("last_error") or {}).get("message_head", "")))
+    if user.get("kind") == "security" or any(_SECURITY.search(text) for text in texts):
+        raise ReportBlocked("Bug report blocked: report security concerns privately using SECURITY.md")
+    if any(
+        c.get("status") == "FAIL" and _SECURITY.search(str(c.get("name")) + " " + str(c.get("detail")))
+        for c in bundle.get("doctor", {}).get("checks", [])
+    ):
+        raise ReportBlocked("Bug report blocked: security-category failure, use SECURITY.md")
+
+
 def _load_prepared(report_id: str) -> tuple[Path, dict[str, Any], str, dict[str, Any]]:
     if re.fullmatch(r"[0-9a-f]{32}", report_id) is None:
         raise ReportBlocked("Bug report blocked: invalid --report-id")
@@ -267,8 +280,7 @@ def _load_prepared(report_id: str) -> tuple[Path, dict[str, Any], str, dict[str,
         raise ReportBlocked("Bug report blocked: prepared bundle digest mismatch, prepare a new preview")
     assert_clean(json.dumps(bundle, ensure_ascii=False, sort_keys=True))
     assert_clean(markdown)
-    if _SECURITY.search(markdown):
-        raise ReportBlocked("Bug report blocked: report security concerns privately using SECURITY.md")
+    _check_security(bundle)
     return directory, bundle, markdown, receipt
 
 
@@ -281,11 +293,6 @@ def _prepare(args: argparse.Namespace) -> tuple[Path, dict[str, Any], str, dict[
         raise ReportBlocked("Bug report blocked: report security concerns privately using SECURITY.md")
     target = args.target.resolve()
     doctor = collect_doctor(target)
-    if any(
-        c.get("status") == "FAIL" and _SECURITY.search(str(c.get("name")) + " " + str(c.get("detail")))
-        for c in doctor.get("checks", [])
-    ):
-        raise ReportBlocked("Bug report blocked: security-category failure, use SECURITY.md")
     collected = collect(
         target,
         summary=summary,
@@ -294,8 +301,7 @@ def _prepare(args: argparse.Namespace) -> tuple[Path, dict[str, Any], str, dict[
         doctor=doctor,
         output=output,
     )
-    if _SECURITY.search(str((collected.get("last_error") or {}).get("message_head", ""))):
-        raise ReportBlocked("Bug report blocked: report security concerns privately using SECURITY.md")
+    _check_security(collected)
     redactor = Redactor(target)
     bundle = redactor.project(collected)
     # Schema and package metadata are fixed public constants, not local input.
