@@ -1366,12 +1366,18 @@ def test_heartbeat_and_exit_release_follow_a_rotated_node_token_on_the_bound_hub
     posts = []
     renewed_after_rotation = threading.Event()
     rotated = threading.Event()
+    expected = "fake-token-one" if hub_switch else "fake-token-two"
+    first_rotated_renewal = []
 
     def post(hub_url, token, body, *, timeout):
-        posts.append((body["action"], hub_url, token, rotated.is_set()))
+        posts.append((body["action"], hub_url, token))
         if token not in accepted:
             return 401, {"error": "unknown node token"}
-        if body["action"] == "renew" and rotated.is_set():
+        if body["action"] == "renew" and rotated.is_set() and token == expected and not first_rotated_renewal:
+            # Revoke the old token only once a renewal proves the new one is
+            # in use, so a renewal racing the file rewrite cannot flake.
+            first_rotated_renewal.append(len(posts) - 1)
+            accepted.intersection_update({expected})
             renewed_after_rotation.set()
         key = {"acquire": "granted", "renew": "renewed", "release": "released"}[body["action"]]
         return 200, {key: True, "claim": {"generation": 1}}
@@ -1385,17 +1391,15 @@ def test_heartbeat_and_exit_release_follow_a_rotated_node_token_on_the_bound_hub
         if hub_switch:
             configure("https://hub-two.example.invalid")
         else:
-            accepted.clear()
             accepted.add("fake-token-two")
         token_file.write_text("fake-token-two\n", encoding="utf-8")
         rotated.set()
         assert renewed_after_rotation.wait(5), f"no renewal succeeded after rotation: {posts[-3:]}"
         assert not decision.cancel_event.is_set()
     assert credential_failures == []
-    assert {hub_url for _, hub_url, _, _ in posts} == {"https://hub-one.example.invalid"}
-    expected = "fake-token-one" if hub_switch else "fake-token-two"
-    after = [(action, token) for action, _, token, was_rotated in posts if was_rotated]
-    assert after and all(token == expected for _, token in after)
+    assert {hub_url for _, hub_url, _ in posts} == {"https://hub-one.example.invalid"}
+    after = posts[first_rotated_renewal[0] :]
+    assert all(token == expected for _, _, token in after)
     assert posts[-1][:3] == ("release", "https://hub-one.example.invalid", expected)
 
 
@@ -1417,3 +1421,30 @@ def test_bound_connection_keeps_the_latest_same_hub_token_as_its_fallback(monkey
     assert connection() == {"hub_url": "https://hub-one.example.invalid", "token": "fake-token-two"}
     config.update(hub_url="https://hub-two.example.invalid" if later == "other-hub" else None, token="fake-later")
     assert connection() == {"hub_url": "https://hub-one.example.invalid", "token": "fake-token-two"}
+
+
+def test_orphan_release_retry_follows_a_same_hub_token_rotation(monkeypatch):
+    """The orphan-release retry re-reads the token for the bound hub (#1781)."""
+    config = {"hub_url": "https://hub-one.example.invalid", "token": "fake-token-one"}
+    tokens = []
+    done = threading.Event()
+
+    def release(target, **kwargs):
+        tokens.append((kwargs["hub_url"], kwargs["token"]))
+        if len(tokens) == 1:
+            config["token"] = "fake-token-two"
+            return fleet_client.ClaimDecision(granted=False, reason="hub-unavailable")
+        done.set()
+        return fleet_client.ClaimDecision(granted=True, reason="ok")
+
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: dict(config))
+    monkeypatch.setattr(fleet_client, "release_claim", release)
+    monkeypatch.setattr(fleet_client, "ORPHAN_RELEASE_RETRY_SECONDS", 0.01)
+    fleet_client._schedule_orphan_release(
+        "fake-target", node_id=NODE_A, holder="fake-holder", conductor=None, ttl_seconds=5
+    )
+    assert done.wait(5)
+    assert tokens == [
+        ("https://hub-one.example.invalid", "fake-token-one"),
+        ("https://hub-one.example.invalid", "fake-token-two"),
+    ]
