@@ -15,7 +15,7 @@ import math
 import secrets
 import sqlite3
 from datetime import datetime, timedelta, timezone
-from typing import Any, Callable, Mapping
+from typing import Any, Callable, Mapping, Sequence
 
 from . import fleet_hub, fleet_hub_policy, fleet_policy, fleet_quota
 from .fleet_hub import FleetHubConflict, FleetHubError, FleetHubForbidden
@@ -609,6 +609,54 @@ def _seat_occupancy(
     return int(usage["used"]["seat"])
 
 
+def _machine_wide_reasons(
+    machine: Mapping[str, Any],
+    telemetry: Mapping[str, Any] | None,
+    *,
+    routing: Mapping[str, Any],
+    seats: Sequence[str],
+    now: datetime,
+) -> list[str]:
+    """Routing rejections that hold for a machine whatever the request.
+
+    ``_evaluate_pair`` passes the one seat it evaluates; ``snapshot`` passes
+    every policy seat, so ``machine-seat-unusable`` there means no seat at all.
+    """
+    reasons: list[str] = []
+    if not machine.get("enabled", True):
+        reasons.append("machine-disabled")
+    if machine.get("draining"):
+        reasons.append("machine-draining")
+    ttl = int(routing.get("telemetry_ttl_seconds") or fleet_policy.DEFAULT_TELEMETRY_TTL_SECONDS)
+    if telemetry is None:
+        reasons.append("machine-unknown-telemetry")
+        return reasons
+    observed_at = _parse_stamp(telemetry.get("observed_at"))
+    report_ttl = int(telemetry.get("ttl_seconds") or ttl)
+    effective_ttl = min(ttl, report_ttl)
+    stale = observed_at is None or (now - observed_at).total_seconds() >= effective_ttl
+    if stale:
+        reasons.append("machine-stale-telemetry")
+    if telemetry.get("status") == "unknown":
+        reasons.append("machine-unknown-telemetry")
+    elif telemetry.get("status") in {"unavailable", "draining"}:
+        reasons.append(f"machine-{telemetry['status']}")
+    elif telemetry.get("status") == "busy":
+        reasons.append("machine-busy")
+    credential_state = telemetry.get("credential_state")
+    if credential_state is None:
+        reasons.append("machine-unknown-auth")
+    elif credential_state != "ok":
+        reasons.append("machine-stale-auth")
+    if "usable_seats" not in telemetry or telemetry.get("usable_seats") is None:
+        reasons.append("machine-unknown-inventory")
+    else:
+        usable = list(telemetry.get("usable_seats") or [])
+        if not any(seat in usable for seat in seats):
+            reasons.append("machine-seat-unusable")
+    return reasons
+
+
 def _evaluate_pair(
     conn: sqlite3.Connection,
     *,
@@ -636,10 +684,6 @@ def _evaluate_pair(
         reasons.append("machine-unmapped-node")
     admission = fleet_policy.admissible_seat(document, seat_name, resolution)
     reasons.extend(admission["reasons"])
-    if not machine.get("enabled", True):
-        reasons.append("machine-disabled")
-    if machine.get("draining"):
-        reasons.append("machine-draining")
     required_os = requirements.get("os")
     if required_os and required_os != "unknown" and machine.get("os") != required_os:
         reasons.append("machine-wrong-os")
@@ -653,33 +697,7 @@ def _evaluate_pair(
     eligible_machines = seat.get("eligible_machines") or []
     if eligible_machines and machine_name not in eligible_machines:
         reasons.append("machine-not-eligible")
-    ttl = int(routing.get("telemetry_ttl_seconds") or fleet_policy.DEFAULT_TELEMETRY_TTL_SECONDS)
-    if telemetry is None:
-        reasons.append("machine-unknown-telemetry")
-    else:
-        observed_at = _parse_stamp(telemetry.get("observed_at"))
-        report_ttl = int(telemetry.get("ttl_seconds") or ttl)
-        effective_ttl = min(ttl, report_ttl)
-        stale = observed_at is None or (now - observed_at).total_seconds() >= effective_ttl
-        if stale:
-            reasons.append("machine-stale-telemetry")
-        if telemetry.get("status") == "unknown":
-            reasons.append("machine-unknown-telemetry")
-        elif telemetry.get("status") in {"unavailable", "draining"}:
-            reasons.append(f"machine-{telemetry['status']}")
-        elif telemetry.get("status") == "busy":
-            reasons.append("machine-busy")
-        credential_state = telemetry.get("credential_state")
-        if credential_state is None:
-            reasons.append("machine-unknown-auth")
-        elif credential_state != "ok":
-            reasons.append("machine-stale-auth")
-        if "usable_seats" not in telemetry or telemetry.get("usable_seats") is None:
-            reasons.append("machine-unknown-inventory")
-        else:
-            usable = list(telemetry.get("usable_seats") or [])
-            if seat_name not in usable:
-                reasons.append("machine-seat-unusable")
+    reasons.extend(_machine_wide_reasons(machine, telemetry, routing=routing, seats=[seat_name], now=now))
     occupancy, tokens = _occupancy(
         conn,
         machine=machine_name,
@@ -1655,6 +1673,8 @@ def snapshot(conn: sqlite3.Connection) -> dict[str, Any]:
     current = fleet_hub_policy.current_policy(conn)
     document = current["document"]
     now = _now()
+    routing = document.get("routing") or {}
+    seats = document.get("seats") or {}
     machines: list[dict[str, Any]] = []
     for name, record in document.get("machines", {}).items():
         node_id = record.get("node_id")
@@ -1666,41 +1686,28 @@ def snapshot(conn: sqlite3.Connection) -> dict[str, Any]:
         load: float | None = None
         unused_reason = None
         available_slots: int | None = None
-        if telemetry is None:
-            unused_reason = "unknown-telemetry"
-        else:
+        if telemetry is not None:
             last_observed_at = telemetry.get("observed_at")
             load = telemetry.get("load")
-            # Same freshness rule as _candidate: the shorter of the policy and reporter TTLs.
-            ttl = int(
-                document.get("routing", {}).get("telemetry_ttl_seconds") or fleet_policy.DEFAULT_TELEMETRY_TTL_SECONDS
-            )
-            ttl = min(ttl, int(telemetry.get("ttl_seconds") or ttl))
-            observed_at = _parse_stamp(last_observed_at)
-            stale = observed_at is None or (now - observed_at).total_seconds() >= ttl
-            if stale:
-                state = "unknown"
-                unused_reason = "stale-telemetry"
+        # The same machine-wide checks _evaluate_pair applies, so a machine routing
+        # refuses for every seat never shows free slots here.
+        reasons = _machine_wide_reasons(record, telemetry, routing=routing, seats=list(seats), now=now)
+        if "machine-stale-telemetry" in reasons:
+            unused_reason = "stale-telemetry"
+        elif "machine-unknown-telemetry" in reasons:
+            unused_reason = "unknown-telemetry"
+        else:
+            state = str((telemetry or {}).get("status") or "unknown")
+            if not routing.get("enabled"):
+                available_slots = 0
+                unused_reason = "routing-disabled"
+            elif reasons:
+                available_slots = 0
+                unused_reason = reasons[0]
             else:
-                state = str(telemetry.get("status") or "unknown")
-                if state == "unknown":
-                    unused_reason = "unknown-telemetry"
-                    available_slots = None
-                elif (
-                    not document.get("routing", {}).get("enabled")
-                    or not record.get("enabled", True)
-                    or record.get("draining")
-                ):
-                    # Routing refuses these machines (route, _candidate), so no slot is usable.
-                    available_slots = 0
-                    if not document.get("routing", {}).get("enabled"):
-                        unused_reason = "routing-disabled"
-                    else:
-                        unused_reason = "machine-disabled" if not record.get("enabled", True) else "machine-draining"
-                else:
-                    available_slots = max(capacity - occupancy, 0)
-                    if available_slots > 0 and state == "available":
-                        unused_reason = "idle-capacity"
+                available_slots = max(capacity - occupancy, 0)
+                if available_slots > 0 and state == "available":
+                    unused_reason = "idle-capacity"
         active_claims = occupancy
         machines.append(
             {
@@ -1758,7 +1765,6 @@ def snapshot(conn: sqlite3.Connection) -> dict[str, Any]:
     except Exception:
         sessions = []
     quota_effective = []
-    routing = document.get("routing") or {}
     for pool_id in routing.get("quota_pools") or {}:
         quota_effective.append(fleet_quota.admit_pool(conn, pool_id, routing=routing, now=now))
     return {
