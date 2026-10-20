@@ -71,6 +71,7 @@ SKIP_INVALID_SOURCE_CONFIG = "invalid handoff source config"
 
 # Git state that would point `git -C <inbox>` at some other repository.
 _GIT_LOCATION_ENV = ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR")
+_TRACKED_SKIP_REASON = "tracked by git or tracking unverifiable; left in place"
 
 
 class TrackedHandoffError(RuntimeError):
@@ -237,7 +238,7 @@ def ingest_into(
         handoffs, tracked = _list_handoffs(handoffs_dir)
         for path in tracked:
             stats.skipped += 1
-            stats.actions.append(f"skip   {path.name}  (tracked by git or tracking unverifiable; left in place)")
+            stats.actions.append(f"skip   {path.name}  ({_TRACKED_SKIP_REASON})")
         for path in handoffs:
             stats.processed += 1
             sections = parse(path)
@@ -258,7 +259,7 @@ def ingest_into(
                     dry_run=dry_run,
                 )
             except TrackedHandoffError:
-                action = Action("skipped", f"skip   {path.name}  (tracked by git or tracking unverifiable; left in place)")
+                action = Action("skipped", f"skip   {path.name}  ({_TRACKED_SKIP_REASON})")
             stats.actions.append(action.summary)
             if action.kind == "promoted":
                 stats.promoted += 1
