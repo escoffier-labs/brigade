@@ -105,12 +105,31 @@ class _ImportFieldRedaction:
         if isinstance(value, str):
             return self.redact_text(value)
         if isinstance(value, dict):
-            return {
-                self.redact_text(key) if isinstance(key, str) else key: self.redact(item) for key, item in value.items()
-            }
+            return self.redact_mapping(value)
         if isinstance(value, list):
             return [self.redact(item) for item in value]
         return value
+
+    def redact_mapping(self, value: Mapping[Any, Any], *, exempt_keys: frozenset[str] = frozenset()) -> dict[Any, Any]:
+        entries = [
+            (key, item)
+            if key in exempt_keys
+            else (self.redact_text(key) if isinstance(key, str) else key, self.redact(item))
+            for key, item in value.items()
+        ]
+        # Reserve every base key, including literal placeholder/suffix keys that
+        # appear later, so allocating a collision suffix cannot overwrite them.
+        reserved = {key for key, _ in entries}
+        redacted: dict[Any, Any] = {}
+        for key, item in entries:
+            output_key = key
+            suffix = 2
+            if output_key in redacted:
+                while output_key in reserved or output_key in redacted:
+                    output_key = f"{key}_{suffix}"
+                    suffix += 1
+            redacted[output_key] = item
+        return redacted
 
     def record(self, text_record: Mapping[str, Any]) -> dict[str, Any]:
         """Return a field-scope record in the text record's schema, kept apart so the text gate is unchanged."""
@@ -187,12 +206,9 @@ def _make_import(
     inbound_provenance = stamped_metadata.pop("provenance", None)
     stamped_metadata = inbox_provenance._sanitize_import_identity_metadata(stamped_metadata)
     if field_redaction is not None:
-        stamped_metadata = {
-            key if key in _IMPORT_REDACTION_EXEMPT_METADATA_KEYS else field_redaction.redact_text(key): (
-                value if key in _IMPORT_REDACTION_EXEMPT_METADATA_KEYS else field_redaction.redact(value)
-            )
-            for key, value in stamped_metadata.items()
-        }
+        stamped_metadata = field_redaction.redact_mapping(
+            stamped_metadata, exempt_keys=_IMPORT_REDACTION_EXEMPT_METADATA_KEYS
+        )
         redaction_failed = redaction_failed or field_redaction.failed
     stamped_metadata["provenance"] = inbox_provenance._stamp_import_provenance(
         text=persist_text,

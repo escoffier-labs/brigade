@@ -531,6 +531,57 @@ def test_work_import_ingest_redacts_acceptance_and_metadata(tmp_path, capsys):
     assert address not in ledger_text
 
 
+def test_work_import_ingest_preserves_colliding_redacted_metadata_keys(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    first = "first@private.example"  # <!-- content-guard: allow email --> synthetic fixture
+    second = "second@private.example"  # <!-- content-guard: allow email --> synthetic fixture
+    colliding = {
+        first: f"first value {second}",
+        second: f"second value {first}",
+        "<PRIVATE_EMAIL>": "literal placeholder value",
+        "<PRIVATE_EMAIL>_2": "literal suffix value",
+    }
+    import_file = tmp_path / "imports.jsonl"
+    import_file.write_text(
+        json.dumps(
+            {
+                "text": "Retain every metadata entry",
+                "kind": "task",
+                "metadata": {**colliding, "nested": dict(reversed(list(colliding.items())))},
+            }
+        )
+        + "\n"
+    )
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    item = json.loads(capsys.readouterr().out)["imports"][0]
+    assert work_cmd.import_list(target=tmp_path, all_imports=True, json_output=True) == 0
+    persisted = json.loads(capsys.readouterr().out)["imports"][0]
+    assert work_cmd.import_promote(target=tmp_path, import_id=item["id"]) == 0
+    capsys.readouterr()
+    task_path = tmp_path / ".brigade" / "work" / "tasks.json"
+    task = json.loads(task_path.read_text())["tasks"][0]
+
+    expected_values = {
+        "first value <PRIVATE_EMAIL>",
+        "second value <PRIVATE_EMAIL>",
+        "literal placeholder value",
+        "literal suffix value",
+    }
+    for record in (persisted, task):
+        metadata = record["metadata"]
+        for mapping in (metadata, metadata["nested"]):
+            retained = {key: value for key, value in mapping.items() if key.startswith("<PRIVATE_EMAIL>")}
+            assert len(retained) == 4
+            assert set(retained.values()) == expected_values
+        assert first not in json.dumps(record)
+        assert second not in json.dumps(record)
+    for path in (tmp_path / ".brigade" / "work" / "imports").rglob("*"):
+        if path.is_file():
+            assert first.encode() not in path.read_bytes()
+            assert second.encode() not in path.read_bytes()
+
+
 def test_work_import_ingest_field_redaction_failure_quarantines_row(tmp_path, capsys, monkeypatch):
     from brigade import evidence_redaction
 
