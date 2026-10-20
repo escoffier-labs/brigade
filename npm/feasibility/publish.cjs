@@ -116,13 +116,12 @@ async function main() {
     await reconcile(a,'dist.attestations');
     console.log(JSON.stringify({name:a.name,version,integrity:a.integrity,status:'verified'}));
   }
-  let latest;
+  let latestMatches=false;
   for(const delay of delays) {
     if(!await wait(delay)) break;
-    latest=read(launchers[0],'dist-tags.latest');
-    if(latest.status===0 && latest.json===version) break;
+    const latest=read(launchers[0],'dist-tags.latest');
+    if(latest.status===0 && latest.json===version) {latestMatches=true;break;}
   }
-  if(Date.now()>=deadline) throw deadlineError('while verifying latest tag');
-  assert.equal(latest?.status,0);assert.equal(latest.json,version,'latest must identify the stable launcher');
+  if(!latestMatches) throw deadlineError('while verifying latest tag');
 }
 main().catch(error=>{console.error(error.message);process.exitCode=1;}).finally(()=>fs.rmSync(tufCache,{recursive:true,force:true}));
