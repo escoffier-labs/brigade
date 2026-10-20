@@ -30,6 +30,40 @@ This guide preserves the detailed command walkthroughs and operational notes tha
   decisions manual.
 </p>
 
+## Node-local GitHub reads
+
+`brigade.github_reader.GitHubReader` supplies the passive importers' GET transport.
+Construct it with a canonical repository, independently confirmed `visibility`,
+an injected `CommandRunner`, and a `BudgetLedger(Path(...))` outside version control.
+The runner must execute argv without a shell, resolve `gh` to the native CLI,
+apply environment overrides, enforce the timeout, and cap stdout and stderr
+while reading. It returns `CommandResult` without retaining stderr.
+
+Public reads use `octopool request` after `octopool whoami` succeeds, cached for
+600 seconds. Private and unknown repositories never invoke Octopool.
+`get(path, params=..., max_bytes=..., max_age=120)` sends the freshness bound as
+`Cache-Control`. Only a named `merge_gating_reason` enables `OCTOPOOL_FRESH=1`
+and `max-age=0`. Relay denials, 404s, fallback signals, and stale responses are
+inconclusive. Native fallback requires `allow_public_fallback=True`.
+See the [Octopool relay contract](https://docs.octopool.dev/relay.html).
+
+Native reads cache ETags and complete bodies per endpoint in the reader.
+A validated 304 returns the body with `state="not-modified"` and
+`upstream_status=304`. Importers retain pagination budgets and truncation marks.
+Readers sharing a credential class must use the same local SQLite ledger and
+hourly cap policy. Transactions serialize requests across processes. The rolling
+hourly cap counts attempts, including 304s. Exhaustion returns
+`state="budget-exhausted"` without a request. Persistent cooldowns honor
+`x-poll-interval`, `Retry-After`, and primary reset headers. Deferred reads include
+`retry_at`. The adapter performs no automatic retries or sleeps.
+
+`observation()` returns a node observation fragment with hourly route, status,
+denial, fallback, ETag, and remaining/reset totals. For public readers,
+`observation(refresh_octopool_stats=True)` adds allowlisted numeric counters from
+`octopool stats --json`. Ledger rows exclude bodies, endpoints, credentials, and
+caller identities. There is no default runner, publication, or Hub integration.
+The three existing GitHub read implementations migrate in follow-up changes.
+
 ## What this is
 
 Mise en place means "everything in its place before the work starts."
