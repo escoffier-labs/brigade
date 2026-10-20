@@ -670,6 +670,14 @@ def _evidence_pointer(handoff_path: Path, *, sections: Dict[str, str], target: P
     return handoff_path.name
 
 
+def _warn_tracking_check_failed(directory: Path, detail: str) -> None:
+    # Otherwise a persistent git error reads like ordinary tracked-file skips.
+    print(
+        f"brigade ingest: git tracking check failed for {directory} ({detail}); leaving its handoffs in place",
+        file=sys.stderr,
+    )
+
+
 def _git_tracked_names(directory: Path) -> set[str] | None:
     """Return the names of files directly in `directory` that git tracks.
 
@@ -688,11 +696,14 @@ def _git_tracked_names(directory: Path) -> set[str] | None:
         )
     except FileNotFoundError:
         return set()
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError) as exc:
+        _warn_tracking_check_failed(directory, str(exc))
         return None
     if result.returncode != 0:
         if b"not a git repository" in result.stderr:
             return set()
+        detail = result.stderr.decode("utf-8", "replace").strip().splitlines()
+        _warn_tracking_check_failed(directory, detail[0] if detail else f"git exited {result.returncode}")
         return None
     entries = result.stdout.decode("utf-8", "surrogateescape").split("\0")
     return {entry for entry in entries if entry and "/" not in entry}

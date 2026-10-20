@@ -1530,3 +1530,44 @@ def test_archive_treats_failed_tracking_check_as_tracked(tmp_path: Path, monkeyp
     with pytest.raises(ingest_mod.TrackedHandoffError):
         ingest_mod._archive(handoff, inbox / "processed")
     assert handoff.is_file()
+
+
+def test_ingest_skips_handoff_tracked_after_listing(tmp_target: Path, monkeypatch):
+    inbox = _seed(tmp_target)
+    handoff = _write_handoff(inbox, "2026-10-20-0903-race.md", _PLAIN_HANDOFF)
+    calls: list[Path] = []
+
+    def _tracked_after_listing(directory: Path):
+        calls.append(directory)
+        return set() if len(calls) == 1 else {handoff.name}
+
+    monkeypatch.setattr(ingest_mod, "_git_tracked_names", _tracked_after_listing)
+    stats = ingest_mod.IngestStats()
+    rc = ingest_mod.ingest_into(source=tmp_target, owner=tmp_target, stats=stats)
+
+    assert rc == 0
+    assert handoff.is_file()
+    assert not (inbox / "processed" / handoff.name).exists()
+    assert stats.skipped == 1
+    assert len(calls) == 2
+
+
+def test_ingest_leaves_inbox_in_place_when_tracking_check_fails(tmp_target: Path, monkeypatch, capsys):
+    inbox = _seed(tmp_target)
+    handoff = _write_handoff(inbox, "2026-10-20-0904-unknown.md", _PLAIN_HANDOFF)
+
+    def _broken_git(cmd, **kwargs):
+        return subprocess.CompletedProcess(cmd, 128, stdout=b"", stderr=b"fatal: detected dubious ownership\n")
+
+    monkeypatch.setattr(ingest_mod.subprocess, "run", _broken_git)
+    stats = ingest_mod.IngestStats()
+    rc = ingest_mod.ingest_into(source=tmp_target, owner=tmp_target, stats=stats)
+
+    assert rc == 0
+    assert handoff.is_file()
+    assert not (inbox / "processed" / handoff.name).exists()
+    assert stats.processed == 0
+    assert stats.skipped == 1
+    err = capsys.readouterr().err
+    assert "git tracking check failed" in err
+    assert "dubious ownership" in err
