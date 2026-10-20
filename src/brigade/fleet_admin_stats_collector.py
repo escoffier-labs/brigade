@@ -78,7 +78,9 @@ def run_wrangler(argv: list[str], *, account: str | None = None, token_envs: tup
 def _bounded_output(argv: list[str], env: dict[str, str]) -> bytes:
     # Discard stderr at the OS boundary. It may contain credentials, and is not
     # needed to decode a successful aggregate response.
-    process = subprocess.Popen(argv, shell=False, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env)
+    process = subprocess.Popen(
+        argv, shell=False, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, env=env
+    )
     pipe = process.stdout
     assert pipe is not None
     output = bytearray()

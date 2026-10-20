@@ -67,6 +67,7 @@ def test_wrangler_runner_oauth_env_and_sanitized_failure(monkeypatch):
 
     def run(argv, **kwargs):
         assert kwargs["shell"] is False
+        assert kwargs["stdin"] == collector.subprocess.DEVNULL
         assert "CLOUDFLARE_API_TOKEN" not in kwargs["env"]
         assert "example-secret" not in str(argv)
         return original([sys.executable, "-c", "import sys; sys.stderr.write('example-secret'); sys.exit(1)"], **kwargs)
@@ -294,7 +295,7 @@ def test_collector_omits_invalid_cells_and_keeps_valid_histograms_and_other_sour
 
 
 @pytest.mark.parametrize("counts", [(10, 6, 4), (8, 9, 3)])
-def test_rejected_version_cannot_disclose_small_remainder(monkeypatch, counts):
+def test_rejected_version_keeps_unrelated_valid_cells_and_week_totals(monkeypatch, counts):
     from brigade import fleet_admin_stats_collector as collector
 
     def runner(argv, **kwargs):
@@ -311,8 +312,11 @@ def test_rejected_version_cannot_disclose_small_remainder(monkeypatch, counts):
 
     monkeypatch.setattr(collector, "run_wrangler", runner)
     value = collector.collect({"database": "example-db"}, now=datetime(2026, 10, 20, tzinfo=timezone.utc))
-    assert value["weeks"][0]["active_sources"] is None
-    assert value["weeks"][0]["versions"] == []
+    assert value["weeks"][0]["active_sources"] == 20
+    assert value["weeks"][0]["versions"] == [
+        {"version": version, "active_sources": count}
+        for version, count in zip(("0.27.0", "0.28.0"), counts[:2], strict=True)
+    ]
 
 
 @pytest.mark.parametrize("kind,limit", [("versions", 6000), ("upgrades", 12000)])

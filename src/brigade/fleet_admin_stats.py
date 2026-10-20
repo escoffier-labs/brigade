@@ -208,7 +208,7 @@ def snapshot(
 
 
 def _suppress_week(row: dict[str, Any]) -> None:
-    """Reject impossible subsets, then hide related counts as one group."""
+    """Suppress small cells and complements only across containing groups."""
     cells = [(row, SOURCE_FIELDS), *((c, ("active_sources",)) for c in row["versions"] + row["upgrades"])]
     counts = [cell[field] for cell, fields in cells for field in fields]
     for count in counts:
@@ -219,17 +219,30 @@ def _suppress_week(row: dict[str, Any]) -> None:
     total = row["active_sources"]
     if total is not None and any(count is not None and count > total for count in counts[len(SOURCE_FIELDS) :]):
         raise ValueError("source subset exceeds active total")
-    # All weekly source counts are related. Coarsen the entire group if a
-    # primary suppression or subtraction could disclose 1-4 sources.
-    known = sorted({count for count in counts if count is not None})
-    hidden = any(count is None or count < 5 for count in counts) or any(
-        b - a < 5 for a, b in zip(known, known[1:], strict=False)
-    )
     versions = [cell["active_sources"] for cell in row["versions"]]
+    for field in SOURCE_FIELDS:
+        if row[field] is not None and row[field] < 5:
+            row[field] = None
+    for field in ("versions", "upgrades"):
+        # Drop category names too. The page provides an unknown other row
+        # without disclosing whether omitted cells existed or their sum.
+        row[field] = [cell for cell in row[field] if cell["active_sources"] is not None and cell["active_sources"] >= 5]
+    totals = [row[field] for field in SOURCE_FIELDS]
+    pairs = [(a, b) for index, a in enumerate(totals) for b in totals[index + 1 :]]
+    pairs.extend((row["active_sources"], cell["active_sources"]) for cell in row["versions"])
+    versions_by_name = {cell["version"]: cell["active_sources"] for cell in row["versions"]}
+    pairs.extend(
+        (versions_by_name.get(cell[field]), cell["active_sources"])
+        for cell in row["upgrades"]
+        for field in ("from_version", "to_version")
+    )
+    hidden = any(a is not None and b is not None and 0 < a - b < 5 for a, b in pairs)
     # Excess version observations bound the group using multiple versions,
     # even when the upgrade histogram is empty or unavailable.
-    if total is not None and all(count is not None for count in versions):
-        hidden = hidden or 0 < sum(versions) - total < 5
+    visible_versions = [cell["active_sources"] for cell in row["versions"]]
+    for observations in (versions, visible_versions):
+        if total is not None and all(count is not None for count in observations):
+            hidden = hidden or 0 < sum(observations) - total < 5
     if hidden:
         for field in SOURCE_FIELDS:
             row[field] = None

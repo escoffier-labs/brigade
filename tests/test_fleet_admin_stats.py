@@ -49,6 +49,7 @@ def test_snapshot_suppresses_small_cells_and_checks_digest():
         downloads=value["downloads"],
     )
     assert value["weeks"][0]["retained_2d_sources"] is None
+    assert value["weeks"][0]["active_sources"] == 20
     assert stats.validate(value) == value
     bad = copy.deepcopy(value)
     bad["downloads"]["pypi"] = 100
@@ -400,6 +401,8 @@ def test_histograms_do_not_disclose_single_suppressed_cell(kind):
     week = snapshot()["weeks"][0]
     week.update(active_sources=16, retained_2d_sources=16, retained_3d_sources=16)
     week.update(versions=[], upgrades=[])
+    if kind == "upgrades":
+        week["versions"] = [{"version": "0.27.0", "active_sources": 16}]
     week[kind] = [
         {
             **(
@@ -488,7 +491,7 @@ def test_stats_post_accepts_validator_maximum_snapshot(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("upgrade_count", [None, 1, 5])
-@pytest.mark.parametrize("active,counts", [(20, [12, 9]), (30, [20, 11]), (20, [7, 7, 7])])
+@pytest.mark.parametrize("active,counts", [(20, [12, 9]), (30, [20, 11]), (20, [7, 7, 7]), (20, [12, 9, None])])
 def test_version_overlap_cannot_reconstruct_suppressed_upgrade(upgrade_count, active, counts):
     from brigade import fleet_admin_stats as stats
 
@@ -515,8 +518,10 @@ def test_version_overlap_cannot_reconstruct_suppressed_upgrade(upgrade_count, ac
             stats.validate(value)
 
 
-@pytest.mark.parametrize("counts", [(20, 5, 5, 16), (20, 10, 5, 11), (20, None, None, 10)])
-def test_related_weekly_source_counts_are_suppressed_together(counts):
+@pytest.mark.parametrize(
+    "counts,hidden", [((20, 5, 5, 16), True), ((20, 10, 5, 11), False), ((20, None, None, 10), False)]
+)
+def test_only_containing_weekly_source_counts_trigger_gap_suppression(counts, hidden):
     from brigade import fleet_admin_stats as stats
 
     active, retained_2d, retained_3d, version = counts
@@ -532,8 +537,72 @@ def test_related_weekly_source_counts_are_suppressed_together(counts):
     value = stats.snapshot(
         taken_at=NOW, source_set=["d1"], weeks=[week], daily=[], downloads={"pypi": None, "npm": None}
     )
+    result = value["weeks"][0]
+    if hidden:
+        assert all(result[field] is None for field in stats.SOURCE_FIELDS)
+        assert result["versions"] == []
+    else:
+        assert result == week
+
+
+@pytest.mark.parametrize("small_counts", [[], [None], [0], [2]])
+def test_unrelated_version_counts_and_small_cells_preserve_week_totals(small_counts):
+    from brigade import fleet_admin_stats as stats, fleet_admin_stats_page as page
+
+    week = snapshot()["weeks"][0]
+    # At 60 active sources the excess-observations guard would still hide
+    # these versions (62 observations), independently of unrelated gaps.
+    week.update(active_sources=70, retained_2d_sources=30, retained_3d_sources=12)
+    visible = [
+        {"version": version, "active_sources": count}
+        for version, count in (("0.28.0", 40), ("0.27.0", 13), ("0.26.0", 9))
+    ]
+    week["versions"] = visible + [{"version": "0.25.0", "active_sources": count} for count in small_counts]
+    week["upgrades"] = [
+        {"from_version": "0.25.0", "to_version": "0.28.0", "active_sources": count} for count in small_counts
+    ]
+    value = stats.snapshot(
+        taken_at=NOW, source_set=["d1"], weeks=[week], daily=[], downloads={"pypi": None, "npm": None}
+    )
+    result = value["weeks"][0]
+    assert [result[field] for field in stats.SOURCE_FIELDS] == [70, 30, 12]
+    assert result["versions"] == visible
+    assert result["upgrades"] == []
+    html = page.render({"latest": value, "weeks": value["weeks"]}, nonce="example", now=NOW)
+    assert "0.25.0" not in json.dumps(value)
+    assert "0.25.0" not in html
+    assert html.count("other (suppressed): unknown") == 2
+    assert stats.validate(value) == value
+
+
+@pytest.mark.parametrize("parent", ["from_version", "to_version"])
+def test_version_upgrade_containment_gap_is_suppressed(parent):
+    from brigade import fleet_admin_stats as stats
+
+    week = snapshot()["weeks"][0]
+    week.update(active_sources=60, retained_2d_sources=45, retained_3d_sources=15)
+    upgrade = {"from_version": "0.27.0", "to_version": "0.28.0", "active_sources": 27}
+    week["versions"] = [{"version": upgrade[parent], "active_sources": 30}]
+    week["upgrades"] = [upgrade]
+    value = stats.snapshot(
+        taken_at=NOW, source_set=["d1"], weeks=[week], daily=[], downloads={"pypi": None, "npm": None}
+    )
     assert all(value["weeks"][0][field] is None for field in stats.SOURCE_FIELDS)
-    assert value["weeks"][0]["versions"] == []
+    assert value["weeks"][0]["versions"] == value["weeks"][0]["upgrades"] == []
+
+
+def test_dropped_histogram_cells_do_not_trigger_gap_suppression():
+    from brigade import fleet_admin_stats as stats
+
+    week = snapshot()["weeks"][0]
+    week.update(active_sources=6, retained_2d_sources=6, retained_3d_sources=6)
+    week["versions"] = [{"version": "0.28.0", "active_sources": 2}]
+    week["upgrades"] = [{"from_version": "0.27.0", "to_version": "0.28.0", "active_sources": 1}]
+    value = stats.snapshot(
+        taken_at=NOW, source_set=["d1"], weeks=[week], daily=[], downloads={"pypi": None, "npm": None}
+    )
+    assert [value["weeks"][0][field] for field in stats.SOURCE_FIELDS] == [6, 6, 6]
+    assert value["weeks"][0]["versions"] == value["weeks"][0]["upgrades"] == []
 
 
 @pytest.mark.parametrize(

@@ -60,18 +60,12 @@ def render(view: dict[str, Any], *, nonce: str, now: datetime) -> str:
             body += f"<p>{label}: " + _number(week[field], "weeks." + field) + "</p>"
         for field in ("versions", "upgrades"):
             body += f'<div data-field="weeks.{field}"><h4>{field.title()}</h4>'
-            if not week[field]:
-                body += (
-                    "<p>other (suppressed): unknown</p>"
-                    if all(week[key] is None for key in stats.SOURCE_FIELDS)
-                    else "<p>unknown</p>"
-                )
             for cell in week[field]:
                 body += "<p>"
                 for key, value in cell.items():
                     body += escape(key.replace("_", " ")) + ": " + _number(value, f"weeks.{field}.{key}") + " "
                 body += "</p>"
-            body += "</div>"
+            body += "<p>other (suppressed): unknown</p></div>"
         body += "</article>"
     body += "</section></main>"
     return deck._document(body, nonce=nonce, now=now, title="Statistics", refresh=False, active="stats")

@@ -803,6 +803,10 @@ the Hub database through the shared Deck theme. Rendering makes no provider call
 `fleet.stats.collector_nodes`. Admin tokens are refused even with admin writes
 enabled. Replayed snapshots are ignored. `admin_stats_snapshots` keeps the snapshot with the most successful sources per
 UTC day, then prefers recency, at most 402 rows within the 400-day retention window.
+HTTP 200 acknowledges validation and processing. It does not guarantee that the
+returned `snapshot_id` remains stored after same-day compaction. Daily activity
+and downloads can therefore come from an older snapshot with more successful
+sources, while weekly observations reflect a newer upload.
 `admin_stats_weeks` keeps the best observation for each of the latest 60 weeks.
 Complete observations beat partial ones, then the newest observation wins.
 Hub schema version 36 adds `admin_stats_snapshots` and `admin_stats_weeks`
@@ -849,10 +853,15 @@ The closed `brigade.admin-stats.v1` snapshot and page expose these fields:
 
 `weeks`, `daily`, version cells and upgrade cells are arrays. Counts are nullable
 nonnegative integers. Source counts below 5 become `null`, including zero.
-All weekly source counts and categorical histogram rows are hidden together when any count is suppressed,
-subtraction between counts would reveal 1 to 4 sources, or excess version
-observations would reveal 1 to 4 sources using multiple versions. The page groups
-hidden categories into an "other (suppressed)" row with an unknown count. Incomplete
+Gap checks compare only containing groups: active sources contain both retention
+groups and each version, 2+ day sources contain 3+ day sources, and each version
+contains its upgrade cells. A gap of 1 to 4 sources hides the week's source counts
+and both histograms. Excess version observations revealing 1 to 4 sources using
+multiple versions also hide the week, checked before and after removing small cells.
+Other small or unknown histogram cells lose their category names without hiding
+the week's totals or valid peers. The page always includes an "other (suppressed)"
+row with an unknown count in each histogram, even when no cells were omitted.
+It never reports the omitted cells' sum or whether any existed. Incomplete
 version or upgrade reads hide both histograms. These rules also apply to uploaded
 snapshots. Known retention counts must satisfy active >= 2+ day >= 3+ day sources.
 Each known version or upgrade count must not exceed the active-source total.
