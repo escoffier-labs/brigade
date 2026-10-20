@@ -484,6 +484,39 @@ def test_work_import_ingest_preserves_identity_after_text_redaction(tmp_path, ca
             assert sensitive.encode() not in path.read_bytes()
 
 
+def test_work_import_ingest_dedupes_legacy_redacted_text_with_raw_acceptance(tmp_path, capsys, monkeypatch):
+    from brigade.work_cmd.ledger import tasks_plans
+
+    _init_git_repo(tmp_path)
+    sensitive = "person@private.example"  # <!-- content-guard: allow email --> synthetic fixture
+    acceptance = [f"Notify {sensitive}"]
+    import_file = tmp_path / "imports.jsonl"
+    import_file.write_text(
+        json.dumps({"text": f"Contact {sensitive}", "kind": "task", "acceptance": acceptance}) + "\n"
+    )
+
+    # Reproduce the old writer through public ingest, including its real proof.
+    with monkeypatch.context() as legacy_writer:
+        legacy_writer.setattr(tasks_plans, "_import_field_redaction", lambda source, origin: None)
+        assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert first["created"] == 1
+    original = first["imports"][0]
+    assert sensitive not in original["text"]
+    assert original["metadata"]["provenance"]["redaction"]["status"] == "redacted"
+    assert original["acceptance"] == acceptance
+    assert work_cmd.ledger._has_persisted_import_proof(original, target=tmp_path)
+    inbox_before = work_cmd.helpers._imports_path(tmp_path).read_bytes()
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    repeated = json.loads(capsys.readouterr().out)
+    assert repeated["created"] == 0
+    assert repeated["skipped"] == 1
+    assert work_cmd.import_list(target=tmp_path, all_imports=True, json_output=True) == 0
+    assert json.loads(capsys.readouterr().out)["imports"] == [original]
+    assert work_cmd.helpers._imports_path(tmp_path).read_bytes() == inbox_before
+
+
 def test_work_import_ingest_redacts_acceptance_and_metadata(tmp_path, capsys):
     _init_git_repo(tmp_path)
     email = "person@private.example"  # <!-- content-guard: allow email --> synthetic fixture
