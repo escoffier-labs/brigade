@@ -417,7 +417,10 @@ def registered_manifest_ids(target: Path) -> list[str]:
 
 
 def _normalize_repo_path(path: str) -> str:
-    return path.replace("\\", "/").lstrip("./")
+    normalized = path.replace("\\", "/")
+    while normalized.startswith("./"):
+        normalized = normalized[2:]
+    return normalized.lstrip("/")
 
 
 def _workspace_manifest_file_from_selector(target: Path, selector: str) -> Path | None:
@@ -512,6 +515,13 @@ def _path_matches_scope_glob(pattern: str, candidate: str) -> bool:
     return False
 
 
+def path_in_manifest_scope(manifest: VerifyManifest, candidate: str) -> bool:
+    """Return whether a repo-relative path is the manifest subject or inside its scope_globs."""
+    return _path_matches_subject(manifest.subject_path, candidate) or any(
+        _path_matches_scope_glob(glob, candidate) for glob in manifest.scope_globs
+    )
+
+
 def manifests_matching_paths(target: Path, paths: Sequence[str]) -> list[VerifyManifest]:
     """Return tracked workspace manifests whose subject_path or scope_globs cover any path."""
     target = target.expanduser().resolve()
@@ -530,11 +540,7 @@ def manifests_matching_paths(target: Path, paths: Sequence[str]) -> list[VerifyM
             continue
         if manifest.manifest_id in seen:
             continue
-        if any(
-            _path_matches_subject(manifest.subject_path, item)
-            or any(_path_matches_scope_glob(glob, item) for glob in manifest.scope_globs)
-            for item in candidates
-        ):
+        if any(path_in_manifest_scope(manifest, item) for item in candidates):
             seen.add(manifest.manifest_id)
             matches.append(manifest)
     return matches
