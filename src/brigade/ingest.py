@@ -796,8 +796,11 @@ def _git_tracked_files(directory: Path) -> set[tuple[int, int]] | None:
     for name in names:
         try:
             st = (directory / name).stat()
-        except OSError:
+        except FileNotFoundError:
             continue
+        except OSError as exc:
+            _warn_tracking_check_failed(directory, str(exc))
+            return None
         identities.add((st.st_dev, st.st_ino))
     return identities
 

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import errno
 import json
 import os
 import re
@@ -1865,6 +1866,51 @@ def test_tracked_check_matches_by_file_identity_not_spelling(tmp_path: Path, mon
     with pytest.raises(ingest_mod.TrackedHandoffError):
         ingest_mod._archive(handoff, inbox / "processed")
     assert handoff.is_file()
+
+
+def test_archive_refuses_tracked_handoff_after_transient_identity_error(tmp_path: Path, monkeypatch, capsys):
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    _git(tmp_path, "init", "-q")
+    handoff = _write_handoff(inbox, "tracked.md", _PLAIN_HANDOFF)
+    original = handoff.read_bytes()
+    _git(tmp_path, "add", "--", "inbox/tracked.md")
+    stat = Path.stat
+    injected = False
+
+    def fail_once(path, *args, **kwargs):
+        nonlocal injected
+        if path == handoff and not injected:
+            injected = True
+            raise OSError(errno.EIO, "identity lookup failed", str(path))
+        return stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "stat", fail_once)
+    with pytest.raises(ingest_mod.TrackedHandoffError):
+        ingest_mod._archive(handoff, inbox / "processed")
+
+    assert injected
+    assert handoff.read_bytes() == original
+    assert not (inbox / "processed").exists()
+    assert _git(tmp_path, "status", "--porcelain").stdout == "A  inbox/tracked.md\n"
+    stderr = capsys.readouterr().err
+    assert "git tracking check failed" in stderr
+    assert "identity lookup failed" in stderr
+
+
+def test_archive_ignores_missing_indexed_entry(tmp_path: Path):
+    inbox = tmp_path / "inbox"
+    inbox.mkdir()
+    _git(tmp_path, "init", "-q")
+    missing = _write_handoff(inbox, "missing.md", _PLAIN_HANDOFF)
+    _git(tmp_path, "add", "--", "inbox/missing.md")
+    missing.unlink()
+    handoff = _write_handoff(inbox, "untracked.md", _PLAIN_HANDOFF)
+
+    ingest_mod._archive(handoff, inbox / "processed")
+
+    assert not handoff.exists()
+    assert (inbox / "processed" / handoff.name).read_text() == _PLAIN_HANDOFF
 
 
 @pytest.mark.parametrize("discovery", [None, "0"])
