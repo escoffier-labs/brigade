@@ -1224,9 +1224,16 @@ def _append_import_records_locked(
                 persisted_text, _redaction, failed = evidence_redaction.apply_and_record(
                     str(record["text"]), origin=origin
                 )
+                persisted_record = {**record, "text": persisted_text}
+                field_redaction = tasks_plans._import_field_redaction(source, origin)
+                if field_redaction is not None and isinstance(record.get("acceptance"), list):
+                    persisted_record["acceptance"] = tasks_plans._persisted_import_acceptance(
+                        record["acceptance"], field_redaction
+                    )
+                    failed = failed or field_redaction.failed
                 canonical_existing_row = not failed and import_model._untrusted_import_canonical_hash(
                     existing_item
-                ) == import_model._untrusted_import_canonical_hash({**record, "text": persisted_text})
+                ) == import_model._untrusted_import_canonical_hash(persisted_record)
             canonical_migration = migrate_untrusted_identities and canonical_incoming_row and not canonical_existing_row
             existing_migration_proof = (
                 authority_record is not None

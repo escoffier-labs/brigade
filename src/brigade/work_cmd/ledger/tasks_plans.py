@@ -85,6 +85,55 @@ def _parse_metadata(items: list[str] | None) -> dict[str, str]:
     return metadata
 
 
+class _ImportFieldRedaction:
+    """Redact structured import fields at the text origin and tally the result."""
+
+    def __init__(self, origin: str) -> None:
+        self.origin = origin
+        self.count = 0
+        self.detectors: set[str] = set()
+        self.failed = False
+
+    def redact(self, value: object) -> object:
+        if isinstance(value, str):
+            persisted, record, failed = evidence_redaction.apply_and_record(value, origin=self.origin)
+            self.count += int(record.get("count") or 0)
+            self.detectors.update(str(detector) for detector in record.get("detectors") or ())
+            self.failed = self.failed or failed
+            return persisted
+        if isinstance(value, dict):
+            return {key: self.redact(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [self.redact(item) for item in value]
+        return value
+
+    def record(self, text_record: Mapping[str, Any]) -> dict[str, Any]:
+        """Return a field-scope record in the text record's schema, kept apart so the text gate is unchanged."""
+        record = dict(text_record)
+        record["status"] = "error" if self.failed else ("redacted" if self.count else "clean")
+        record["count"] = 0 if self.failed else self.count
+        record["detectors"] = [] if self.failed else sorted(self.detectors)[: evidence_redaction.MAX_DETECTORS]
+        return record
+
+
+# Dedupe identity keys keep their raw value so re-import still matches.
+_IMPORT_REDACTION_EXEMPT_METADATA_KEYS = frozenset(import_model._UNTRUSTED_IMPORT_IDENTITY_METADATA_KEYS)
+
+
+def _import_field_redaction(provenance_authority: str, origin: str) -> _ImportFieldRedaction | None:
+    """Generic JSONL rows (``learning-loop``) redact acceptance and metadata, not only text (#1712)."""
+    if provenance_authority.strip().lower() != "learning-loop":
+        return None
+    return _ImportFieldRedaction(origin)
+
+
+def _persisted_import_acceptance(acceptance: object, field_redaction: _ImportFieldRedaction | None) -> list[str]:
+    normalized = import_model._normalize_acceptance(acceptance)
+    if field_redaction is None:
+        return normalized
+    return [str(field_redaction.redact(entry)) for entry in normalized]
+
+
 def _make_import(
     text: str,
     *,
@@ -105,6 +154,7 @@ def _make_import(
     )
     origin, _modality = inbox_provenance._import_origin_modality(provenance_authority, kind=kind)
     persist_text, redaction_record, redaction_failed = evidence_redaction.apply_and_record(text, origin=origin)
+    field_redaction = _import_field_redaction(provenance_authority, origin)
     item_id = f"{now.strftime('%Y%m%d-%H%M%S')}-{kind}-{helpers._slug(persist_text)}-{uuid4().hex[:6]}"
     item: dict[str, Any] = {
         "id": item_id,
@@ -122,13 +172,19 @@ def _make_import(
     if template:
         item["template"] = template
     if acceptance is not None:
-        item["acceptance"] = import_model._normalize_acceptance(acceptance)
+        item["acceptance"] = _persisted_import_acceptance(acceptance, field_redaction)
     # Preserve producer metadata (scanner/session/capture/repo hints). A
     # validated inbound envelope may reuse safe identity fields; trust/digest
     # are always recomputed. Inbound provenance is never authority.
     stamped_metadata = dict(metadata) if isinstance(metadata, dict) else {}
     inbound_provenance = stamped_metadata.pop("provenance", None)
     stamped_metadata = inbox_provenance._sanitize_import_identity_metadata(stamped_metadata)
+    if field_redaction is not None:
+        stamped_metadata = {
+            key: value if key in _IMPORT_REDACTION_EXEMPT_METADATA_KEYS else field_redaction.redact(value)
+            for key, value in stamped_metadata.items()
+        }
+        redaction_failed = redaction_failed or field_redaction.failed
     stamped_metadata["provenance"] = inbox_provenance._stamp_import_provenance(
         text=persist_text,
         source=provenance_authority,
@@ -140,6 +196,10 @@ def _make_import(
         redaction_failed=redaction_failed,
         kind=kind,
     )
+    if field_redaction is not None:
+        # Sibling of the envelope, not inside it: the envelope schema is closed and
+        # its redaction record describes item text only, which the promote gate reads.
+        stamped_metadata["field_redaction"] = field_redaction.record(redaction_record)
     item["metadata"] = stamped_metadata
     return item
 

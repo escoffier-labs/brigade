@@ -484,6 +484,52 @@ def test_work_import_ingest_preserves_identity_after_text_redaction(tmp_path, ca
             assert sensitive.encode() not in path.read_bytes()
 
 
+def test_work_import_ingest_redacts_acceptance_and_metadata(tmp_path, capsys):
+    _init_git_repo(tmp_path)
+    email = "person@private.example"  # <!-- content-guard: allow email --> synthetic fixture
+    address = "10.20.30.40"  # <!-- content-guard: allow private-ipv4 --> synthetic fixture
+    import_file = tmp_path / "imports.jsonl"
+    import_file.write_text(
+        json.dumps(
+            {
+                "text": "Review the deployment notes",
+                "kind": "task",
+                "acceptance": [f"Notify {email} after the change", f"Host {address} answers health checks"],
+                "metadata": {
+                    "owner": f"Contact {email}",
+                    "nested": {"hosts": [f"node at {address}"]},
+                    "count": 3,
+                },
+            }
+        )
+        + "\n"
+    )
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    item = json.loads(capsys.readouterr().out)["imports"][0]
+    assert email not in json.dumps(item)
+    assert address not in json.dumps(item)
+    assert len(item["acceptance"]) == 2
+    assert item["metadata"]["count"] == 3
+    assert item["metadata"]["provenance"]["redaction"]["status"] == "clean"
+    assert item["metadata"]["field_redaction"]["status"] == "redacted"
+    assert item["metadata"]["field_redaction"]["count"] >= 4
+    inbox_directory = tmp_path / ".brigade" / "work" / "imports"
+    for path in inbox_directory.rglob("*"):
+        if path.is_file():
+            assert email.encode() not in path.read_bytes()
+            assert address.encode() not in path.read_bytes()
+
+    assert work_cmd.import_ingest(target=tmp_path, input_path=import_file, json_output=True) == 0
+    assert json.loads(capsys.readouterr().out)["skipped"] == 1
+
+    assert work_cmd.import_promote(target=tmp_path, import_id=item["id"]) == 0
+    capsys.readouterr()
+    ledger_text = (tmp_path / ".brigade" / "work" / "tasks.json").read_text()
+    assert email not in ledger_text
+    assert address not in ledger_text
+
+
 def test_work_import_ingest_keeps_distinct_raw_identities_after_redaction(tmp_path, capsys):
     _init_git_repo(tmp_path)
     import_file = tmp_path / "imports.jsonl"
