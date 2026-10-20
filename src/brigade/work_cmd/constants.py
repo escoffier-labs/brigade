@@ -377,7 +377,7 @@ REVIEW_DEFAULTS = (
     {
         "id": "codex-review",
         "name": "Codex local code review",
-        "command": "brigade dogfood --json",
+        "command": "brigade dogfood",
         "cwd": ".",
         "enabled": False,
         "timeout": 600,
@@ -405,7 +405,7 @@ REVIEW_DEFAULTS = (
     {
         "id": "custom",
         "name": "Custom local code review",
-        "command": "brigade dogfood --json",
+        "command": "brigade dogfood",
         "cwd": ".",
         "enabled": False,
         "timeout": 600,

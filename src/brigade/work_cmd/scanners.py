@@ -191,6 +191,9 @@ def _scanner_child_environment(sandbox: Path) -> dict[str, str]:
     env["XDG_CONFIG_HOME"] = str(config_home)
     env["XDG_CACHE_HOME"] = str(cache_home)
     env["XDG_STATE_HOME"] = str(state_home)
+    # The detached update refresh outlives the child and would recreate the
+    # sandbox after it is removed when it writes its cache file.
+    env["BRIGADE_NO_UPDATE_CHECK"] = "1"
     if "GH_CONFIG_DIR" not in env:
         gh_config = _parent_gh_config_dir()
         if gh_config is not None:

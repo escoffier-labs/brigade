@@ -3465,6 +3465,19 @@ def test_scanner_child_environment_sandbox_is_removed_when_the_child_raises() ->
     assert captured and not captured[0].exists()
 
 
+def test_scanner_child_environment_disables_the_detached_update_refresh() -> None:
+    # A Brigade child that spawns the detached refresh outlives the sandbox and
+    # recreates it when it writes update-notify.json, leaking one dir per run.
+    from brigade import update_notify
+    from brigade.work_cmd import scanners as scanners_mod
+
+    spawned: list[bool] = []
+    with scanners_mod._scanner_child_environment_sandbox() as env:
+        update_notify.maybe_notify(["work", "verify"], 0, env=env, spawn=lambda: spawned.append(True))
+
+    assert spawned == []
+
+
 def test_scanner_child_environment_passes_through_documented_allowlist(monkeypatch) -> None:
     from brigade.work_cmd import scanners as scanners_mod
 
