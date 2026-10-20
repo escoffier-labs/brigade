@@ -549,3 +549,9 @@ def test_ping_gets_an_empty_result(memory_station: _Station) -> None:
     status, _, body = memory_station.rpc({"jsonrpc": "2.0", "id": 9, "method": "ping"})
     assert status == 200
     assert _json(body) == {"jsonrpc": "2.0", "id": 9, "result": {}}
+
+
+def test_notification_with_a_non_string_method_is_an_invalid_request(memory_station: _Station) -> None:
+    status, _, body = memory_station.rpc({"jsonrpc": "2.0", "method": 1})
+    assert status == 200
+    assert _json(body) == {"jsonrpc": "2.0", "id": None, "error": {"code": -32600, "message": "invalid request"}}

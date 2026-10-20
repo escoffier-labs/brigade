@@ -370,7 +370,7 @@ def _make_handler(
                 # error, no method) never get a reply. A methodless object with an
                 # id that is not a response falls through to an invalid-request error.
                 if isinstance(message, dict):
-                    is_notification = "id" not in message and "method" in message
+                    is_notification = "id" not in message and isinstance(message.get("method"), str)
                     is_response = "method" not in message and ("result" in message or "error" in message)
                     if is_notification or is_response:
                         continue

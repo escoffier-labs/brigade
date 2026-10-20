@@ -13,14 +13,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - MCP registry metadata for the two read-only servers: `mcp-registry/memory/server.json` (`io.github.escoffier-labs/brigade-memory`) and `mcp-registry/skills/server.json` (`io.github.escoffier-labs/brigade-skills`), with matching `mcp-name` markers in the README. `scripts/version_sync.py` keeps both manifests on the release version.
 - A `brigade-cli` console script alias, so `uvx brigade-cli memory serve-mcp --stdio` works without a global install.
 - A root `Dockerfile` that runs the memory MCP server over stdio as a non-root user, plus `glama.json`; the image installs the latest `brigade-cli` release from PyPI (`--build-arg BRIGADE_VERSION=X.Y.Z` pins one), so MCP directories that build and introspect a repo image can list the servers.
-- `brigade memory serve-mcp --http` and `brigade skills serve-mcp --http` serve the read-only MCP tools over a stateless loopback Streamable HTTP endpoint (`POST /mcp`, `GET /healthz`) for MCP hosts that cannot spawn a stdio process. The server binds only `127.0.0.1` or `::1`, requires a bearer token from `BRIGADE_MCP_HTTP_TOKEN` (32 characters or more, never a flag), rejects non-loopback `Host` and `Origin` headers, and caps request bodies at 1 MiB. Stdio remains the default.
 
 ### Changed
 
 - The memory and skills MCP tools describe what they return and when to use them, and their input fields carry descriptions, so MCP clients and directories can pick the right tool.
-- The read-only MCP servers negotiate the protocol version (`2024-11-05`, `2025-03-26`, or `2025-06-18`) instead of always answering `2024-11-05`, and report the Brigade version in `serverInfo`.
-### Changed
-
+- The read-only MCP servers negotiate the protocol version (`2024-11-05`, `2025-03-26`, or `2025-06-18`) instead of always answering `2024-11-05`, answer `ping` with an empty result, return `-32600` for malformed requests, and report the Brigade version in `serverInfo`.
 - The npm package `@escoffier-labs/brigade@0.30.0` bundles the published `brigade-cli==0.30.0` wheel. Its launcher runs `brigade.cli:process_main`, the same entry point as the `brigade` console script, so npm installs keep exit status 130 when a verification is cancelled.
 
 ## [0.30.0] - 2026-10-20
