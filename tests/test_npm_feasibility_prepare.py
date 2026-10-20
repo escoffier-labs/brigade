@@ -256,7 +256,7 @@ if args[0]=='view':
             p.write_text(str(n))
             if mode=='lagging-forever' or n<=misses: print(json.dumps({'error':{'code':'E404'}}));sys.exit(1)
         if not published and args[2]!='dist-tags.latest': print(json.dumps({'error':{'code':'E404'}}));sys.exit(1)
-        lag(name+args[2], 3)
+        lag(name+args[2], 5)
     if mode=='malformed-integrity': print('{');sys.exit(0)
     if mode=='unavailable': print(json.dumps({'error':{'code':'E503'}}));sys.exit(1)
     if mode in ['absent','uncertain','no-attestation'] and not published:
