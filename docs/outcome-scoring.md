@@ -90,6 +90,8 @@ brigade work verify run --manifest "verify/manifests/<id>.json" --capture <artif
 
 `verify_manifest.suggested_manifest_command` returns that string from dirty paths so `brigade work verify plan` and `brigade work brief` can surface it.
 
+When a patch-backed manifest declares `scope_globs`, every path in the receipt's `changes.patch` must be the `subject_path` or match one of the globs. A receipt whose patch touches any other path, or whose patch headers cannot be parsed, is ineligible with reason `out_of_scope_changes` and counts under that key in `brigade outcome backfill scorecard --json` `ineligible_by_reason`. Manifests without `scope_globs` keep scoring the whole patch. This check only sees changed files: a check that reads an unchanged file outside the scope, such as a repository-wide scan, can still fail on state the subject did not cause, so keep check commands narrowed to the scope.
+
 ## Read-time recomputation
 
 `brigade outcome capture` loads the run receipt, worker results, and any linked verify receipt, then applies the current classifier in `worker_failure.py` and `outcome_cmd.py`. The `signal_value` on the outcome record reflects that read-time classification, not the wording stamped on the receipt at run completion.

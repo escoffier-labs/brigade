@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 from ... import dogfood_cmd, localio
+from ...config import load_config
 from ...install import apply_gitignore
 from .. import constants, helpers, ledger as ledger_mod, config as config_mod, services as services_mod
 from .. import scanners as scanners_mod, reviews as reviews_mod
@@ -40,6 +41,18 @@ def _doctor_ignore_level(value: str) -> str:
     return constants.WARN
 
 
+def _workflow_rule_repair_command(target: Path) -> str:
+    # init keeps the recorded harnesses and settings, so the hint only has to
+    # match the recorded depth; --full matters at repo depth alone.
+    try:
+        cfg = load_config(target)
+    except (ValueError, AttributeError, TypeError):
+        cfg = None
+    depth = cfg.selection.depth if cfg is not None else "repo"
+    full = " --full" if depth == "repo" else ""
+    return f"brigade init --target {shlex.quote(str(target))} --depth {depth}{full}"
+
+
 def _workflow_rule_health(target: Path) -> dict[str, Any]:
     missing = [rel for rel in constants.WORKFLOW_RULE_TEMPLATES if not (target / rel).is_file()]
     return {
@@ -48,7 +61,7 @@ def _workflow_rule_health(target: Path) -> dict[str, Any]:
         "detail": (
             "repo-shareable workflow rules installed"
             if not missing
-            else f"missing {', '.join(missing)}; run `brigade init --target {target} --depth repo --full` to install the missing templates"
+            else f"missing {', '.join(missing)}; run `{_workflow_rule_repair_command(target)}` to install the missing templates"
         ),
         "missing": missing,
     }

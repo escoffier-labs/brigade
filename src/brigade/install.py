@@ -9,11 +9,12 @@ from __future__ import annotations
 
 import json
 import os
+import dataclasses
 import sys
 from pathlib import Path
 from typing import List, Tuple
 
-from .config import Config, write_config
+from .config import Config, load_config, write_config
 from .selection import Selection, SurfaceInstallRefusal, SurfaceRecord, WRITER_INBOXES
 from .templates import (
     canonical_template_bytes,
@@ -349,6 +350,18 @@ def _write_surface_evidence(target: Path, selection: Selection, *, projection_on
     path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
 
+def _merged_config(target: Path, selection: Selection) -> Config:
+    try:
+        existing = load_config(target)
+    except (ValueError, AttributeError, TypeError) as exc:
+        # An unreadable config is replaced, as a first install would.
+        print(f"warning: replacing unreadable .brigade/config.json ({exc})", file=sys.stderr)
+        existing = None
+    if existing is None:
+        return Config(version=1, selection=selection)
+    return dataclasses.replace(existing, version=1, selection=selection)
+
+
 def install_selection(
     target: Path,
     selection: Selection,
@@ -421,8 +434,9 @@ def install_selection(
         if mode_str:
             os.chmod(dst, int(mode_str, 8))
 
-    # Persist config.json.
-    write_config(target, Config(version=1, selection=selection))
+    # Persist config.json. Keep settings an operator already recorded (verify
+    # retention, run-lock wait, recall target, ...); only the selection changes.
+    write_config(target, _merged_config(target, selection))
     _write_surface_evidence(target, selection, projection_only=projection_only)
 
     # Wire Brigade's built-in skills into each harness's skills directory so

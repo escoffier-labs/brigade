@@ -7,11 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Fleet claim renewal and release follow node-token rotation on the bound hub, including orphan-release retries, while retaining the last node credential when its token file is temporarily unavailable.
+
 ### Added
 
 - `brigade receipts lineage <kind>:<id>` walks bounded causal receipt lineage for plans, runs, verification, outcomes, handoffs, and synthesis, reporting broken links and digest mismatches without modifying artifacts. `--json` emits `brigade.receipts_lineage.v1`. (#1853)
 - `brigade memory serve-mcp --http` and `brigade skills serve-mcp --http` serve the read-only MCP tools over a stateless loopback Streamable HTTP endpoint (`POST /mcp`, `GET /healthz`) for MCP hosts that cannot spawn a stdio process. The server binds only `127.0.0.1` or `::1`, requires a bearer token from `BRIGADE_MCP_HTTP_TOKEN` (32 characters or more, never a flag), rejects non-loopback `Host` and `Origin` headers, and caps request bodies at 1 MiB. `--stdio` is unchanged.
 - MCP registry metadata for the two read-only servers: `mcp-registry/memory/server.json` (`io.github.escoffier-labs/brigade-memory`) and `mcp-registry/skills/server.json` (`io.github.escoffier-labs/brigade-skills`), with matching `mcp-name` markers in the README. `scripts/version_sync.py` keeps both manifests on the release version.
+- Brigade agent plugin for Claude Code and Codex (`plugins/brigade/`): memory MCP tools, the `brigade-work` skill, a non-blocking SessionStart brief (Claude Code only), and an opt-in `enforce` skill.
+- Memory MCP tools `memory_status`, `work_brief`, and `write_handoff`; card tools now span the repo store and a user store under `BRIGADE_HOME`. Cards are served only when their real path stays inside the store, and `write_handoff` caps content at 256 KiB and facts and evidence at 50 items each.
+- `brigade memory serve-mcp --http` and `brigade skills serve-mcp --http` serve the MCP tools over a stateless loopback Streamable HTTP endpoint (`POST /mcp`, `GET /healthz`) for MCP hosts that cannot spawn a stdio process. The skills tools are read-only; the memory server also has `write_handoff`. The server binds only `127.0.0.1` or `::1`, requires a bearer token from `BRIGADE_MCP_HTTP_TOKEN` (32 characters or more, never a flag), rejects non-loopback `Host` and `Origin` headers, and caps request bodies at 1 MiB. `--stdio` is unchanged.
+- MCP registry metadata for the memory and skills servers: `mcp-registry/memory/server.json` (`io.github.escoffier-labs/brigade-memory`) and `mcp-registry/skills/server.json` (`io.github.escoffier-labs/brigade-skills`), with matching `mcp-name` markers in the README. `scripts/version_sync.py` keeps both manifests on the release version.
 - A `brigade-cli` console script alias, so `uvx brigade-cli memory serve-mcp --stdio` works without a global install.
 - A root `Dockerfile` that runs the memory MCP server over stdio as a non-root user, plus `glama.json`; the image installs the latest `brigade-cli` release from PyPI (`--build-arg BRIGADE_VERSION=X.Y.Z` pins one), so MCP directories that build and introspect a repo image can list the servers.
 
@@ -20,9 +28,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The memory and skills MCP tools describe what they return and when to use them, and their input fields carry descriptions, so MCP clients and directories can pick the right tool.
 - The read-only MCP servers negotiate the protocol version (`2024-11-05`, `2025-03-26`, or `2025-06-18`) instead of always answering `2024-11-05`, answer `ping` with an empty result, return `-32600` for malformed requests, and report the Brigade version in `serverInfo`.
 - The npm package `@escoffier-labs/brigade@0.30.0` bundles the published `brigade-cli==0.30.0` wheel. Its launcher runs `brigade.cli:process_main`, the same entry point as the `brigade` console script, so npm installs keep exit status 130 when a verification is cancelled.
+- The memory MCP server reports `serverInfo.name` `brigade-memory` (was `brigade-memory-readonly`), and `serve-mcp --target` defaults to the nearest directory above the working directory holding `.brigade/config.json` or `.brigade/memory-care.toml`, never the home directory. An explicit `--target` is still used as the repo store, and one that is not an existing directory exits 2.
+- The memory `work_brief` tool builds its git, session, and next-task keys from local helpers only, so it never contacts the fleet hub. An unexpected exception in any memory tool is returned as a tool error instead of ending the server, and `write_handoff` writes to the repo inbox even when an invalid memory-care config drops the repo store from reads.
+- `brigade handoff draft` creates draft files with mode 0600 (previously the umask default).
 - The beta channel moves to the 0.31 preview line. `brigade update --channel beta` resolves `0.31.0.devYYYYMMDD` wheels again, instead of older 0.29.0 development builds from before the 0.30.0 release.
 
 ### Fixed
+
+- Work readiness, claim, and explicit task runs fail closed on missing blockers or ancestor parents. JSON separates unfinished and missing dependencies, and explained output names edge-removal repairs. (Fixes #1857)
+- Readiness repair commands include the repository target and preserve literal edge endpoints when a live task shares their prefix. Campaign views omit member repair commands that use synthetic IDs. (Refs #1857)
 
 - Scanner children run with `BRIGADE_NO_UPDATE_CHECK=1`. The detached update refresh a child started outlived its throwaway sandbox and recreated it when writing `update-notify.json`, leaving one `brigade-scanner-child-*` directory in the temp dir per scanner run.
 
