@@ -64,6 +64,7 @@ def test_cold_start_gate_installs_into_a_sandboxed_pipx():
     install = script.index("pipx install")
     assert script.index('export PIPX_HOME="$SANDBOX/pipx-home"') < install
     assert script.index('export PIPX_BIN_DIR="$SANDBOX/pipx-bin"') < install
+    assert script.index('export PIPX_MAN_DIR="$SANDBOX/pipx-man"') < install
     assert script.index('export PATH="$PIPX_BIN_DIR:$PATH"') < install
 
 

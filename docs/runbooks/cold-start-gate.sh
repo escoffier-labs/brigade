@@ -22,6 +22,7 @@ git config --file "$GIT_CONFIG_GLOBAL" user.name "cold-start-gate"
 # brigade install (or drops its injected packages).
 export PIPX_HOME="$SANDBOX/pipx-home"
 export PIPX_BIN_DIR="$SANDBOX/pipx-bin"
+export PIPX_MAN_DIR="$SANDBOX/pipx-man"
 export PATH="$PIPX_BIN_DIR:$PATH"
 pipx install --force "$REPO_DIR" >/dev/null
 echo "installed: $(brigade --version)"
