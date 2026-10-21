@@ -197,15 +197,62 @@ def test_revocation_expires_unstarted_and_ack_does_not_verify(tmp_path):
     with pytest.raises(ActionError, match="scope-revoked"):
         actions.start(conn, "node-fixture", action["action_id"], claimed["generation"])
     assert actions.show(conn, action["action_id"])["status"] == "expired"
-    # A broker cannot manufacture verification, even with a valid action fence.
-    with pytest.raises(ActionError):
+    conn.close()
+
+
+@pytest.mark.parametrize("expire_before_start", [False, True])
+def test_recovered_source_does_not_clear_unstarted_action(tmp_path, expire_before_start):
+    from datetime import datetime, timezone
+
+    from brigade import fleet_action_auth as auth, fleet_hub_actions as actions
+
+    conn, _, grant, request = setup_action(tmp_path)
+    action = actions.submit(conn, grant, request)
+    if expire_before_start:
+        from brigade.fleet_action_auth import ActionError
+
+        claimed = actions.claim(conn, "node-fixture")
+        auth.revoke_operator(conn, grant)
+        with pytest.raises(ActionError, match="scope-revoked"):
+            actions.start(conn, "node-fixture", action["action_id"], claimed["generation"])
+        assert actions.show(conn, action["action_id"])["status"] == "expired"
+
+    now = datetime.now(timezone.utc).isoformat()
+    with conn:
+        conn.execute(
+            "UPDATE fleet_machine_telemetry SET status='available', observed_id='fresh', observed_at=?",
+            (now,),
+        )
+        conn.execute(
+            "UPDATE agent_actions SET created_at=? WHERE action_id=?", (actions.time.time() - 10, action["action_id"])
+        )
+
+    assert actions.show(conn, action["action_id"])["verification"] == "pending"
+    conn.close()
+
+
+def test_broker_cannot_submit_verification_on_valid_receipt(tmp_path):
+    from brigade import fleet_hub_actions as actions
+    from brigade.fleet_action_auth import ActionError
+
+    conn, _, grant, request = setup_action(tmp_path)
+    action = actions.submit(conn, grant, request)
+    claimed = actions.claim(conn, "node-fixture")
+    actions.start(conn, "node-fixture", action["action_id"], claimed["generation"])
+    with pytest.raises(ActionError, match="invalid-receipt"):
         actions.report(
             conn,
             "node-fixture",
             action["action_id"],
             claimed["generation"],
-            {"status": "finished", "verification": "passed"},
+            {
+                "event_id": "fixture-event",
+                "status": "finished",
+                "destination_ref": "fixture-turn",
+                "verification": "passed",
+            },
         )
+    assert actions.show(conn, action["action_id"])["status"] == "dispatching"
     conn.close()
 
 

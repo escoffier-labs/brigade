@@ -81,7 +81,7 @@ def show(conn: sqlite3.Connection, action_id: str) -> dict[str, Any]:
     action = _load(conn, action_id)
     # A live projection, never based on broker claims or destination output.
     try:
-        if sources.action_recovered(conn, action):
+        if action["started_at"] is not None and sources.action_recovered(conn, action):
             action["verification"] = "condition-cleared"
     except ActionError:
         pass
