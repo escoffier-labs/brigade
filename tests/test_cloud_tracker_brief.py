@@ -142,6 +142,25 @@ def test_brief_probes_only_the_newest_registered_tasks(monkeypatch, tmp_path):
     assert sorted(observation.tasks) == newest
 
 
+def test_brief_probe_cap_counts_each_task_once(monkeypatch, tmp_path):
+    for _ in range(cloud_tracker.BRIEF_STATUS_PROBE_LIMIT):
+        _register(tmp_path, "task_duplicated", hours_ago=1)
+    _register(tmp_path, "task_other_ready", hours_ago=48)
+    monkeypatch.setattr(codex_cloud, "list_tasks", lambda **kwargs: codex_cloud.ListTasksResult([]))
+    probed: list[str] = []
+
+    def fake_run(command, *, cwd=None, timeout=30.0):
+        probed.append(command[-1])
+        return 0, "[READY] task", ""
+
+    monkeypatch.setattr(cloud_tracker, "_run_text", fake_run)
+
+    observation = cloud_tracker.observe_provider("codex-cloud", tmp_path, codex_max_items=codex_cloud.MAX_LIST_LIMIT)
+
+    assert probed == ["task_duplicated", "task_other_ready"]
+    assert sorted(observation.tasks) == ["task_duplicated", "task_other_ready"]
+
+
 def test_brief_status_probes_share_one_time_budget(monkeypatch, tmp_path):
     for index in range(3):
         _register(tmp_path, f"task_{index:02d}", hours_ago=index + 1)

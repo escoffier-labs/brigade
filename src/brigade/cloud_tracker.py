@@ -1426,13 +1426,17 @@ def _observe_missing_codex_tasks(target: Path, tasks: dict[str, Any], *, bounded
 
     # Failure or absence never implies a terminal state, so an unprobed task stays
     # unobserved rather than guessed.
-    missing = [
-        entry
-        for entry in load_registry(target)["entries"]
-        if isinstance(entry.get("task_id"), str)
-        and entry.get("provider") == "codex-cloud"
-        and entry["task_id"] not in tasks
-    ]
+    # The registry can hold several rows for one task, so keep each task's newest
+    # registration and probe it once.
+    by_task: dict[str, dict[str, Any]] = {}
+    for entry in load_registry(target)["entries"]:
+        task_id = entry.get("task_id")
+        if not isinstance(task_id, str) or entry.get("provider") != "codex-cloud" or task_id in tasks:
+            continue
+        known = by_task.get(task_id)
+        if known is None or str(entry.get("dispatched_at") or "") > str(known.get("dispatched_at") or ""):
+            by_task[task_id] = entry
+    missing = list(by_task.values())
     deadline: float | None = None
     if bounded:
         missing.sort(key=lambda entry: str(entry.get("dispatched_at") or ""), reverse=True)
