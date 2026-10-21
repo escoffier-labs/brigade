@@ -192,16 +192,19 @@ def inspect_payload(*, target: Path, command: str, candidate_id: str | None = No
             "latest_run": runs[0] if runs else None,
         }
     successful = [run for run in runs if run["status"] == "completed"]
-    if command == "candidates":
-        return {
-            "status": "ok",
-            "run_id": successful[0]["run_id"] if successful else None,
-            "candidates": _candidates(target, successful[0]) if successful else [],
-        }
     for run in successful:
-        for candidate in _candidates(target, run):
+        try:
+            candidates = _candidates(target, run)
+        except (OSError, ValueError, UnicodeError, RecursionError):
+            invalid += 1
+            continue
+        if command == "candidates":
+            return {"status": "ok", "run_id": run["run_id"], "candidates": candidates, "invalid_runs": invalid}
+        for candidate in candidates:
             if candidate["candidate_id"] == candidate_id:
                 return candidate
+    if command == "candidates":
+        return {"status": "ok", "run_id": None, "candidates": [], "invalid_runs": invalid}
     raise ValueError("candidate not found")
 
 

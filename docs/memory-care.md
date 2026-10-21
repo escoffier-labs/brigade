@@ -32,8 +32,13 @@ Each candidate cites evidence resolved to an existing file in a receipt or
 handoff root, an evidence root, or the local evidence bundle cache. A log row
 alone does not resolve its id. Missing pointers, hash-only ids, unrelated
 repository files, and external URLs do not count. `proof_count` counts
-distinct resolved supporting ids. Only `reinforced` and `outcome` log rows supply support.
-Near matches appear in `review_evidence_ids` and never increase proof. Candidates
+distinct resolved supporting ids. `evidence_sources` records the matching root for
+each id, or `evidence-bundle` for local cached evidence bundles. `proof_sources` counts distinct
+roots among the supporting ids. These source labels do not establish trust or
+independence. Handoff roots include all writer inboxes from the harness registry,
+`memory/handoff-inbox`, and local inboxes in `.brigade/handoff-sources.json`.
+Only `reinforced` and `outcome` log rows supply new support.
+Pending near matches appear in `review_evidence_ids` and never increase proof. Candidates
 citing near matches or contrary evidence are Tier 2 and have no metadata diff.
 Exact reinforcement is already applied by ingest, so its log rows alone do not
 produce reinforcement previews. A preview triggered by new outcome evidence
@@ -45,8 +50,11 @@ command writes it yet, so ingest alone cannot produce `reinforce` candidates
 in this slice.
 Staleness uses `last_consolidated`, falling back to `last_reviewed` and
 its supported aliases. Date-only cutoffs require evidence on a later UTC date.
+Near-match and opposite-polarity flags use the same cutoff, including the care
+scanner's automatic reinforcement exception. Rows already cited by the card do
+not remain pending flags. Newer support for an id does not revive its older flag.
 Exact normalized fingerprints identify duplicates. Opposite-polarity evidence
-always produces a Tier 2 review flag and never decides which claim is correct.
+that remains pending produces a Tier 2 review flag and never decides which claim is correct.
 Cross-scope and mixed-trust duplicate groups also receive Tier 2. Trust declarations
 include `trust_label` and nested provenance metadata. Block-style metadata lists,
 unparsed YAML flow lists, and citations through `sources`, `source`, `refs`, or
@@ -63,7 +71,9 @@ prints a review summary instead of a consolidation diff. No preview is applied.
 lists the latest successful run, and `memory reflect show <candidate-id>` shows
 one retained candidate and its preview. Inspection reads the newest 1024 run
 directories, without deleting older runs. Invalid receipts are skipped and counted
-in the status payload's `invalid_runs`. Missing receipts indicate unfinished runs
+in the status payload's `invalid_runs`. Candidate inspection also skips runs with
+unreadable or corrupt candidate files and reports skipped runs in the listing's
+`invalid_runs`. Missing receipts indicate unfinished runs
 and are not counted as invalid. All accept `--target` and `--json`.
 Text previews escape terminal control characters except newlines, carriage returns,
 and tabs. Stored candidates retain the original diff text.
@@ -75,6 +85,7 @@ Malformed or missing frontmatter, invalid UTF-8, oversized cards, permission-den
 cards, files with multiple hard links, cards with more than 64 evidence references,
 and ambiguous card identities are skipped and listed by path with a reason in the
 receipt's `skipped_cards`. Cards changed during an exact read still fail the run.
+Malformed or excessively nested trust JSON is treated as unknown trust.
 Retry after the writer finishes.
 Identity collisions include ids and aliases across all valid cards before scope
 filtering. Corpus-wide file and byte limits still fail the run.

@@ -682,3 +682,107 @@ def test_text_previews_escape_terminal_controls(tmp_path, capsys, surface):
     assert "\\x9b31mC1" in output
     assert "\\x7fDEL" in output
     assert snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize("root", [".opencode/memory-handoffs", "writers/custom/inbox"])
+def test_writer_and_configured_handoffs_resolve(tmp_path, capsys, root):
+    path = card(tmp_path, "cache")
+    if root.startswith("writers/"):
+        config = tmp_path / ".brigade/handoff-sources.json"
+        config.parent.mkdir(parents=True)
+        config.write_text(json.dumps({"sources": [{"root": "writers", "inboxes": ["custom/inbox"]}]}))
+    ref = evidence(tmp_path, f"{root}/processed/change.md")
+    log(tmp_path, path, (ref, "near-match", "2026-10-20T12:00:00Z"))
+    code, payload = command(tmp_path, capsys, "run")
+    assert code == 0
+    assert [c["kind"] for c in payload["candidates"]] == ["stale-newer-evidence"]
+    assert payload["candidates"][0]["review_evidence_ids"] == [ref]
+
+
+@pytest.mark.parametrize("kind", ["near-match", "opposite-polarity"])
+@pytest.mark.parametrize("reviewed", ["consolidated", "reviewed", "cited"])
+def test_reviewed_matches_no_longer_block_support(tmp_path, capsys, kind, reviewed):
+    extra = "last_consolidated: 2026-10-19T12:00:00Z\n" if reviewed == "consolidated" else ""
+    path = card(tmp_path, "cache", extra=extra)
+    old = evidence(tmp_path, "memory/handoff-inbox/reviewed.md")
+    if reviewed == "reviewed":
+        path.write_text(path.read_text().replace("last_reviewed: 2026-10-01", "last_reviewed: 2026-10-19"))
+    elif reviewed == "cited":
+        path.write_text(path.read_text().replace("evidence: []", f'evidence: ["{old}"]'))
+    support = evidence(tmp_path, ".brigade/receipts/new.json")
+    log(tmp_path, path, (old, kind, "2026-10-18T12:00:00Z"), (support, "outcome", "2026-10-20T12:00:00Z"))
+    code, payload = command(tmp_path, capsys, "run", "--dry-run")
+    assert code == 0
+    assert {c["kind"] for c in payload["candidates"]} == {"stale-newer-evidence", "reinforce"}
+    for candidate in payload["candidates"]:
+        assert candidate["contrary_ids"] == candidate["review_evidence_ids"] == []
+        assert candidate["tier"] == 0
+        assert candidate["diff"]
+        assert candidate["proof_count"] == len(candidate["evidence_ids"])
+
+
+def test_deep_trust_json_does_not_block_healthy_cards(tmp_path, capsys):
+    healthy = card(tmp_path, "healthy", body="A healthy claim.")
+    deep = '{"a":' * 12000 + '"trusted"' + "}" * 12000
+    malformed = card(tmp_path, "deep", extra=f"trust: {deep}\n")
+    ref = evidence(tmp_path, ".brigade/receipts/support.json")
+    for path in (healthy, malformed):
+        log(tmp_path, path, (ref, "outcome", "2026-10-20T12:00:00Z"))
+    before = snapshot(tmp_path)
+    code, payload = command(tmp_path, capsys, "run")
+    assert code == 0
+    assert any(c["card_ids"] == ["healthy"] for c in payload["candidates"])
+    assert snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize("invalid", ["json", "digest", "count"])
+def test_corrupt_candidates_do_not_block_healthy_history(tmp_path, capsys, invalid):
+    path = card(tmp_path, "cache")
+    log(tmp_path, path, (evidence(tmp_path, ".brigade/receipts/support.json"), "outcome", "2026-10-20T12:00:00Z"))
+    _, healthy = command(tmp_path, capsys, "run")
+    _, newest = command(tmp_path, capsys, "run")
+    retained = tmp_path / newest["candidates_path"]
+    lines = retained.read_text().splitlines()
+    if invalid == "json":
+        retained.write_text("{broken\n")
+    elif invalid == "count":
+        retained.write_text(lines[0] + "\n")
+    else:
+        candidate = json.loads(lines[0])
+        candidate["summary"] = "Corrupt digest."
+        retained.write_text("\n".join([json.dumps(candidate), *lines[1:]]) + "\n")
+    code, payload = command(tmp_path, capsys, "candidates")
+    assert code == 0
+    assert payload["run_id"] == healthy["run_id"]
+    assert payload["candidates"] == healthy["candidates"]
+    assert payload["invalid_runs"] == 1
+    ident = healthy["candidates"][0]["candidate_id"]
+    assert command(tmp_path, capsys, "show", ident)[1]["candidate_id"] == ident
+
+
+def test_proof_records_sources_per_id_and_counts_distinct_roots(tmp_path, capsys):
+    path = card(tmp_path, "cache")
+    refs = [".brigade/receipts/one.json", ".brigade/receipts/two.json", ".codex/memory-handoffs/processed/three.md"]
+    pending = evidence(tmp_path, ".opencode/memory-handoffs/processed/pending.md")
+    log(tmp_path, path, *((evidence(tmp_path, ref), "outcome", "2026-10-20T12:00:00Z") for ref in refs))
+    log(tmp_path, path, (refs[0], "outcome", "2026-10-20T12:00:00Z"), (pending, "near-match", "2026-10-20T12:00:00Z"))
+    code, payload = command(tmp_path, capsys, "run")
+    assert code == 0
+    for candidate in payload["candidates"]:
+        assert candidate["proof_count"] == 3
+        assert candidate["proof_sources"] == 2
+        assert candidate["evidence_sources"] == {
+            ref: ref.rsplit("/processed/", 1)[0] if "/processed/" in ref else ".brigade/receipts"
+            for ref in candidate["evidence_ids"]
+        }
+
+
+@pytest.mark.parametrize("kind", ["near-match", "opposite-polarity"])
+def test_new_support_for_same_id_does_not_revive_reviewed_match(tmp_path, capsys, kind):
+    path = card(tmp_path, "cache", extra="last_consolidated: 2026-10-19\n")
+    ref = evidence(tmp_path, "memory/handoff-inbox/reviewed.md")
+    log(tmp_path, path, (ref, kind, "2026-10-18T12:00:00Z"), (ref, "outcome", "2026-10-20T12:00:00Z"))
+    code, payload = command(tmp_path, capsys, "run")
+    assert code == 0
+    assert {c["kind"] for c in payload["candidates"]} == {"stale-newer-evidence", "reinforce"}
+    assert all(c["tier"] == 0 for c in payload["candidates"])

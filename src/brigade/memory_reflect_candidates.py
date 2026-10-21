@@ -8,8 +8,9 @@ from __future__ import annotations
 
 import difflib
 import json
+import os
 from dataclasses import dataclass, replace
-from datetime import datetime
+from datetime import date, datetime
 from pathlib import Path
 from typing import Any
 
@@ -18,6 +19,7 @@ from . import memory_proposal_io as io
 from .card_fingerprint import _upsert_frontmatter_fields, content_fingerprint, normalize_card_content
 from .card_identity import CardIdentity, card_identity, identity_collision_aliases
 from .memory_evidence_log import EvidenceLog, _timestamp
+from .selection import WRITER_INBOXES
 
 
 class UnsafeState(ValueError):
@@ -117,16 +119,45 @@ EVIDENCE_ROOTS = (
     ".brigade/evidence",
     "memory/evidence",
     "memory/handoff-inbox",
-    ".claude/memory-handoffs",
-    ".codex/memory-handoffs",
-    ".agents/memory-handoffs",
-    ".cursor/memory-handoffs",
-    ".gemini/memory-handoffs",
+    *WRITER_INBOXES.values(),
 )
 
 
-def _resolved(target: Path, refs: list[str]) -> list[str]:
-    result: set[str] = set()
+def _evidence_roots(target: Path) -> tuple[str, ...]:
+    roots = set(EVIDENCE_ROOTS)
+    raw = io.text(target / ".brigade/handoff-sources.json", absent=True)
+    if raw is not None:
+        config = json.loads(raw)
+        sources = config.get("sources") if isinstance(config, dict) else None
+        if not isinstance(sources, list) or len(sources) > io.MAX_LIST:
+            raise ValueError("invalid handoff sources list")
+        for entry in sources:
+            if isinstance(entry, str):
+                root, inboxes = entry, list(WRITER_INBOXES.values())
+            elif isinstance(entry, dict):
+                root, inboxes = entry.get("root", "."), entry.get("inboxes", list(WRITER_INBOXES.values()))
+            else:
+                raise ValueError("invalid handoff source")
+            if not isinstance(root, str) or not root.strip():
+                raise ValueError("invalid handoff source root")
+            if not isinstance(inboxes, list) or len(inboxes) > io.MAX_LIST:
+                raise ValueError("invalid handoff source inboxes")
+            for inbox in inboxes:
+                if not isinstance(inbox, str):
+                    raise ValueError("invalid handoff source inbox")
+                normalized = inbox.strip().replace("\\", "/").strip("/").removeprefix("./")
+                if not normalized:
+                    continue
+                # External sources have hash-only log ids. Only admit local
+                # paths, and leave symlink refusal to descriptor-based reads.
+                path = Path(os.path.abspath(target / Path(root).expanduser() / normalized))
+                if path.is_relative_to(target):
+                    roots.add(io.relative(path.relative_to(target).as_posix()))
+    return tuple(sorted(roots, key=lambda root: (-len(root), root)))
+
+
+def _resolved(target: Path, refs: list[str], roots: tuple[str, ...]) -> dict[str, str]:
+    result: dict[str, str] = {}
     if len(refs) > io.MAX_LIST:
         raise ValueError("card evidence list limit exceeded")
     for ref in refs:
@@ -136,16 +167,18 @@ def _resolved(target: Path, refs: list[str]) -> list[str]:
             bundle = memory_cmd._miseledger_evidence_id(ref)
             if bundle is not None:
                 path = memory_cmd._miseledger_evidence_path(bundle)
+                source = "evidence-bundle"
             else:
                 rel = io.relative(ref.removeprefix("receipt:").split("#", 1)[0])
-                if not any(rel.startswith(root + "/") for root in EVIDENCE_ROOTS):
+                source = next((root for root in roots if rel.startswith(root + "/")), "")
+                if not source:
                     continue
                 path = target / rel
             if path is not None and io.file_mode(path, absent=True) is not None:
-                result.add(ref)
+                result[ref] = source
         except (OSError, ValueError):
             continue
-    return sorted(result)
+    return dict(sorted(result.items()))
 
 
 def _structured_preview(card: Card) -> bool:
@@ -199,8 +232,9 @@ def _trust_labels(meta: dict[str, Any]) -> set[str]:
             if isinstance(value, str) and value.startswith("{"):
                 try:
                     value = json.loads(value)
-                except ValueError:
+                except (ValueError, RecursionError):
                     labels.add("unknown")
+                    value = None
             if isinstance(value, dict):
                 # Canonical metadata only nests these channels a few levels.
                 if len(contexts) < 8:
@@ -218,6 +252,7 @@ def _candidate(
     evidence: list[str],
     contrary: list[str],
     *,
+    sources: dict[str, str],
     diff: str = "",
     review: list[str] | None = None,
     summary: str,
@@ -226,6 +261,7 @@ def _candidate(
     scopes = sorted({str(card.meta.get("scope", "repo")) for card in cards})
     trusts = {label for card in cards for label in _trust_labels(card.meta)}
     review = sorted(set(review or []))
+    proof = set(evidence) - set(contrary) - set(review)
     review_only = bool(
         contrary or review or len(scopes) > 1 or len(trusts) > 1 or any(_structured_preview(c) for c in cards)
     )
@@ -236,7 +272,9 @@ def _candidate(
         "card_paths": {card.identity.card_id: card.path for card in cards},
         "base_sha256": {card.identity.card_id: io.sha256(card.text.encode()) for card in cards},
         "evidence_ids": sorted(set(evidence)),
-        "proof_count": len(set(evidence) - set(contrary) - set(review)),
+        "evidence_sources": {ref: sources[ref] for ref in sorted(set(evidence))},
+        "proof_count": len(proof),
+        "proof_sources": len({sources[ref] for ref in proof}),
         "review_evidence_ids": review,
         "contrary_ids": sorted(set(contrary)),
         "tier": 2 if review_only else 0,
@@ -246,6 +284,42 @@ def _candidate(
     }
     payload["candidate_id"] = "candidate-" + io.sha256(io.json_bytes(payload))[:24]
     return payload
+
+
+def _pending_rows(card: Card) -> list[dict[str, Any]]:
+    """Match EvidenceLog.findings' cutoff, retaining each row's timestamp."""
+    value = card.meta.get("last_consolidated")
+    reference = _timestamp(value)
+    consolidated = reference is not None
+    if reference is None:
+        value = memory_cmd._frontmatter_value(card.meta, "last_reviewed", "last_reviewed_at", "reviewed_at")
+        reference = _timestamp(value)
+    if reference is None or not isinstance(value, str):
+        return []
+    try:
+        date.fromisoformat(value)
+        date_only = True
+    except ValueError:
+        date_only = False
+    machine_review = not consolidated and any(
+        row["kind"] == "reinforced"
+        and (
+            _sort_timestamp(row["ts"]).astimezone().date() >= reference.date()
+            if date_only
+            else _sort_timestamp(row["ts"]) >= reference
+        )
+        for row in card.rows
+    )
+    return [
+        row
+        for row in card.rows
+        if machine_review
+        or (
+            _sort_timestamp(row["ts"]).date() > reference.date()
+            if date_only
+            else _sort_timestamp(row["ts"]) > reference
+        )
+    ]
 
 
 def generate(
@@ -258,25 +332,32 @@ def generate(
     review_by_card: dict[str, list[str]] = {}
     groups: dict[str, list[Card]] = {}
     finding_config = replace(care, enabled_checks=("unconsolidated-evidence",))
+    roots = _evidence_roots(target)
+    sources: dict[str, str] = {}
     for card in cards:
         refs = memory_cmd._evidence_refs(card.meta)
-        current = _resolved(target, refs)
+        current = _resolved(target, refs, roots)
+        sources.update(current)
         # Keep the newest distinct ids, independent of append order or aliases.
         newest = dict.fromkeys(
             row["evidence_id"]
             for row in sorted(card.rows, key=lambda row: (_sort_timestamp(row["ts"]), row["evidence_id"]), reverse=True)
         )
-        row_ids = set(_resolved(target, list(newest)[: io.MAX_LIST]))
+        resolved_rows = _resolved(target, list(newest)[: io.MAX_LIST], roots)
+        sources.update(resolved_rows)
+        row_ids = set(resolved_rows)
         evidence = sorted(set(current) | row_ids)
-        contrary = sorted({row["evidence_id"] for row in card.rows if row["kind"] == "opposite-polarity"} & row_ids)
-        review = sorted({row["evidence_id"] for row in card.rows if row["kind"] == "near-match"} & row_ids)
+        findings = ledger.findings(target, finding_config, card.path, card.identity, card.meta)
+        stale_ids = sorted(set(findings[0]["evidence_references"]) & row_ids) if findings else []
+        pending = set(stale_ids) - set(refs)
+        pending_rows = _pending_rows(card)
+        contrary = sorted({row["evidence_id"] for row in pending_rows if row["kind"] == "opposite-polarity"} & pending)
+        review = sorted({row["evidence_id"] for row in pending_rows if row["kind"] == "near-match"} & pending)
         citations[card.path] = evidence
         contrary_by_card[card.path] = contrary
         review_by_card[card.path] = review
         if normalize_card_content(card.text):
             groups.setdefault(content_fingerprint(card.text), []).append(card)
-        findings = ledger.findings(target, finding_config, card.path, card.identity, card.meta)
-        stale_ids = sorted(set(findings[0]["evidence_references"]) & row_ids) if findings else []
         if stale_ids:
             fields: dict[str, Any] = {
                 "evidence": sorted(set(refs) | set(stale_ids)),
@@ -291,6 +372,7 @@ def generate(
                     [card],
                     sorted(set(current) | set(stale_ids)),
                     contrary,
+                    sources=sources,
                     review=review,
                     diff="" if contrary else _diff(card, fields),
                     summary="Review matched evidence newer than the last consolidation or review.",
@@ -309,6 +391,7 @@ def generate(
                     [card],
                     proof,
                     contrary,
+                    sources=sources,
                     review=sorted(set(review) & set(proof)),
                     diff=_diff(card, {"evidence": sorted(set(refs) | set(proof)), "proof_count": len(proof)}),
                     summary="Append cited evidence and derive its distinct proof count.",
@@ -321,6 +404,7 @@ def generate(
                     [card],
                     contrary,
                     contrary,
+                    sources=sources,
                     summary="Opposite-polarity flag only. Human review must decide the relationship.",
                 )
             )
@@ -337,6 +421,7 @@ def generate(
                 group,
                 evidence,
                 contrary,
+                sources=sources,
                 review=sorted({ref for card in group for ref in review_by_card[card.path]}),
                 summary="would merge exact normalized duplicates: " + ", ".join(sorted(c.path for c in group)),
             )
