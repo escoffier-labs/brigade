@@ -807,7 +807,7 @@ def dispatch(
             from . import fleet_session_bootstrap
 
             try:
-                selected_prompt = recording.prompt = fleet_session_bootstrap.ensure_prompt(
+                selected_prompt = fleet_session_bootstrap.ensure_prompt(
                     selected_prompt,
                     cli_ref=cli_ref,
                     model=selected_agent.model,
@@ -824,6 +824,8 @@ def dispatch(
                     requested_model=selected_agent.model,
                     reasoning=selected_agent.reasoning,
                 )
+            if resume_session_id is None:
+                recording.prompt = selected_prompt
             if selected_agent.transport == "acpx":
                 from . import acpx_adapter
 
@@ -1057,7 +1059,9 @@ def dispatch(
             )
             if blocked is not None:
                 return blocked
-            remote_disposition[0], recording.prompt = None, selected_prompt
+            remote_disposition[0] = None
+            if resume_session_id is None:
+                recording.prompt = selected_prompt
             attempt = on_dispatch_requested(selected_agent) if on_dispatch_requested is not None else None
             try:
                 # The fleet route is resolved before the model lease is entered.

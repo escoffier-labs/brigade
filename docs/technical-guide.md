@@ -546,7 +546,8 @@ roll forward. The append-only journal format is a one-way storage boundary.
 
 Worker dispatches also record classified cassettes under `events/cassettes/`.
 The default `run.record` policy is `metadata-only`, which omits private result
-bodies, as decided in [#1894](https://github.com/escoffier-labs/brigade/issues/1894).
+bodies. Default-on private capture remains tracked by
+[#1894](https://github.com/escoffier-labs/brigade/issues/1894).
 Set `"run": {"record": "auto"}` in `.brigade/config.json` to record private
 bodies with an explicit `auto` opt-in, or use `off` to disable recording.
 Runs intended for [replay (#1855)](https://github.com/escoffier-labs/brigade/issues/1855)
@@ -560,7 +561,9 @@ effective run-level Codex transport policy, including CLI overrides. A worker's
 transport fallback does not change the key. Scrubbed metadata reports the observed transport.
 Private bodies contain the terminal result after retries and fallback, already
 persisted in `worker-results.json`, with resolved `_REF` secrets scrubbed again
-at write time. Literal env overrides remain intact. Scrubbed metadata and
+at write time. Literal overrides whose variable names contain a secret-like
+component (`TOKEN`, `KEY`, `SECRET`, `PASSWORD`, `PASS`, or `CREDENTIALS`) are
+also scrubbed. Ordinary overrides such as `CI` remain intact. Scrubbed metadata and
 app-server notification projections contain no raw worker stream.
 Projections cover only bytes appended during that dispatch. Malformed, oversized,
 or overlapping seat streams produce `projection_status: "unavailable"` while
@@ -571,7 +574,11 @@ diagnostic instead of rewriting those names. Invalid recording configuration
 skips recording without creating cassette files.
 Recording adds references only to an existing lifecycle journal. Runs without
 lifecycle journaling keep cassette sidecars without activating the journal.
-Remote and unsupported transports carry `not-observed` markers.
+Remote and unsupported transports carry `not-observed` markers after prompt
+construction and request-envelope admission. Earlier preflight rejections are
+not dispatched workers and create no cassette entry. This includes unavailable
+or disallowed CLI adapters, quarantined seats, and provider or envelope rejections.
+Failures before prompt construction have no exact-prompt digest to record.
 Audit coverage states `not recorded: orchestrator calls` because planning and
 synthesis calls outside worker dispatch are not recorded.
 
@@ -594,13 +601,23 @@ are omitted with an unavailable marker.
 A measured local run had one 31,519-byte worker result. The two-worker journal regression measured
 1,628 bytes, or 814 bytes and one cassette reference event per dispatch. It
 enforces less than 1 KiB per dispatch,
-against the journal's 2048-event and 8 MiB limits. Recording reserves eight
-journal slots and stops with a bounded diagnostic when admission fails.
+against the journal's 2048-event and 8 MiB limits. Optional cassette references,
+including stop facts, reserve the final 512 slots (25%) for lifecycle events.
+Recording stops when the journal reaches 1536 events, so at most 1536 dispatch
+references fit, fewer when lifecycle events or byte limits consume capacity.
+Admission failure stops recording with a bounded diagnostic.
 Scrubbed and public metadata remain until the run is deleted.
 `brigade runs cassette purge <run>` deletes all cassette sidecars without
-changing lifecycle authority and rejects linked path components. `runs redact`
+changing lifecycle authority and rejects linked path components. Purge refuses
+a run with a live owner, takes the workspace run lock, and serializes with
+checkpoint/event pairs and journal mutation. Offline purge uses normal stale-owner
+recovery, which can require explicit `runs recover` for journaled runs. Retention
+also skips live runs and serializes deletion with publication. `runs redact`
 conservatively tombstones every cassette reference, including those outside the
-selected range. It purges all cassette sidecars after rewriting the journal and recording
+selected range. The redaction record still reports only the requested range.
+This range-accounting limit remains tracked by
+[#1894](https://github.com/escoffier-labs/brigade/issues/1894).
+It purges all cassette sidecars after rewriting the journal and recording
 its durable redaction anchor. Cleanup completes before success and retries finish
 interrupted cleanup. Rejected preflight checks preserve sidecars.
 Export strips all cassette classes on the copy. Direct

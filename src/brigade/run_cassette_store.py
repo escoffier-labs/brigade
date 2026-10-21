@@ -9,7 +9,7 @@ import re
 import stat
 import sys
 import time
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
@@ -259,6 +259,27 @@ def purge(run_dir: Path, *, private_only: bool = False) -> int:
         return 0
 
 
+def purge_inactive(run_dir: Path, *, workspace: Path, private_only: bool = False) -> int:
+    """Fence maintenance against publication; caller excludes new run owners.
+
+    CLI callers hold the workspace run lock. Retention runs inside that lock
+    for the current run, so other runs in the workspace cannot start meanwhile.
+    """
+    from . import run_journal, run_lifecycle, runguard
+
+    journal = run_dir / "events" / "lifecycle.jsonl"
+    with (
+        journal_scope(run_dir),
+        run_lifecycle.checkpoint_event_pair(),
+        run_journal.journal_mutation(journal) if run_journal.bound_lstat(journal) is not None else nullcontext(),
+    ):
+        # CLI maintenance owns this run's lock itself. A different live process
+        # must never lose its stop marker, publication temp, or private bodies.
+        if runguard.has_active_run_owner(workspace, run_dir) and not runguard.is_active_run_owner(workspace, run_dir):
+            raise CassetteError("cassette purge requires an inactive run")
+        return purge(run_dir, private_only=private_only)
+
+
 def _remove_owned_temps(parent: int) -> int:
     """Unlink private publication debris before checking final hard-link counts."""
     names = dirfd.child_names(parent, MAX_FILES + 1)
@@ -367,9 +388,11 @@ def retain_private(workspace: Path, runs_root: Path, *, current: Path) -> int:
         if pinned is None:
             print("cassette retention skipped: outcome evidence unreadable or scan cap exceeded", file=sys.stderr)
             return 0
+        from . import runguard
+
         for path in candidates:
-            if path.name not in pinned:
-                removed += purge(path, private_only=True)
+            if path.name not in pinned and not runguard.has_active_run_owner(workspace, path):
+                removed += purge_inactive(path, workspace=workspace, private_only=True)
     return removed
 
 

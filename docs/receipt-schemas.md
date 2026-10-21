@@ -12,7 +12,7 @@ and closeout writers live in
 
 `run.record` defaults to `metadata-only`, which creates no private cassette body.
 Private bodies require an explicit `auto` opt-in. `off` disables cassette
-recording. The default follows the decision in
+recording. Default-on private capture remains tracked by
 [#1894](https://github.com/escoffier-labs/brigade/issues/1894).
 Runs intended for [replay (#1855)](https://github.com/escoffier-labs/brigade/issues/1855)
 require explicit `auto` recording to retain private result bodies.
@@ -27,12 +27,20 @@ contain `run_receipts.agent_result_payload`. `scrubbed` artifacts contain result
 counts, digests, exit metadata, and an optional `worker_events` notification
 projection and its digest. Prompts and raw notification streams are excluded.
 Runs without a lifecycle journal retain manifests in that directory for discovery.
+Preflight rejections before prompt construction or request-envelope admission
+are not dispatched workers and create no cassette entry. Optional references, including stop facts, stop at
+1536 journal events to reserve 512 of the 2048 slots for lifecycle facts.
 Unavailable projections use `projection_status: "unavailable"` without stopping
 result recording. Unresolved seat secrets produce a `not-observed` entry with
 reason `env-resolution-unavailable` and no result body.
 Storage and classification failures publish a bounded public `stopped` marker when possible.
 Redaction deletes sidecars and replaces affected references with the closed
-redaction tombstone. Purge and retention may leave references without bodies.
+redaction tombstone. All cassette references are tombstoned even when the
+requested redaction range is narrower, while the redaction record still reports
+only that range. Range accounting remains tracked by
+[#1894](https://github.com/escoffier-labs/brigade/issues/1894).
+Purge rejects live owners and uses the workspace lock and publication fences.
+Offline purge and retention may leave references without bodies.
 These sidecars do not participate in lifecycle projection or audit authority.
 Recovery permits trailing cassette references and stop markers after a covered
 checkpoint pair. They cannot cover an earlier uncheckpointed lifecycle event.

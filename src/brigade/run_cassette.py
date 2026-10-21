@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import stat
 import sys
 from contextlib import contextmanager, nullcontext
@@ -21,6 +22,7 @@ from uuid import uuid4
 from . import agents, config, dirfd, run_audit, run_events, run_journal, runguard, worker_events
 from . import run_cassette_store as store
 from .roster import Agent
+from .run_checkpoint import MAX_JOURNAL_BYTES, MAX_JOURNAL_EVENTS
 
 if TYPE_CHECKING:
     from .roster import Roster
@@ -36,6 +38,8 @@ OBSERVED_TRANSPORTS = frozenset({"cli", "direct", "exec", "acpx", "app-server", 
 _STOP_BYTES = store.encode(
     {"schema": SCHEMA, "schema_version": SCHEMA_VERSION, "privacy_class": "public-metadata", "status": "stopped"}
 )
+_LIFECYCLE_EVENT_RESERVE = max(8, MAX_JOURNAL_EVENTS // 4)
+_SECRET_ENV_NAME = re.compile(r"(?:^|_)(?:TOKEN|KEY|SECRET|PASSWORD|PASS|CREDENTIALS?)(?:_|$)", re.I)
 _WINDOW_LOCK = Lock()
 _ACTIVE_WINDOWS: dict[tuple[str, str], list[_ProjectionWindow]] = {}
 
@@ -102,7 +106,7 @@ def _secret_values(agent: Agent) -> tuple[str, ...]:
     resolved, error = agents.resolve_env_overrides(agent.env)
     if error or resolved is None:
         raise store.CassetteError("cassette env resolution unavailable")
-    targets = agents.secret_ref_targets(agent.env)
+    targets = agents.secret_ref_targets(agent.env) | {name for name in resolved if _SECRET_ENV_NAME.search(name)}
     return tuple(sorted({resolved[key] for key in targets if resolved.get(key)}, key=len, reverse=True))
 
 
@@ -207,8 +211,8 @@ def _append_reference(run_dir: Path, workspace: Path, ref: dict[str, Any]) -> No
     if report.chain_errors or report.partial_tail:
         raise store.CassetteError("cassette journal is not readable")
     sequence = len(report.events)
-    # Leave space for lifecycle completion. The recorder never consumes the tail.
-    if sequence >= 2048 - 8 or _journal_size(journal) + 2048 > 8 * 1024 * 1024:
+    # Optional references, including stop facts, cannot consume the lifecycle reserve.
+    if sequence >= MAX_JOURNAL_EVENTS - _LIFECYCLE_EVENT_RESERVE or _journal_size(journal) + 2048 > MAX_JOURNAL_BYTES:
         raise store.CassetteError("cassette journal cap reached")
     try:
         snapshot = _read_object(run_dir / "run.json")
@@ -340,12 +344,8 @@ def _record_result(
 ) -> dict[str, Any] | None:
     from . import run_receipts
 
-    try:
-        with store.directory(run_dir) as parent:
-            if any(name == ".stopped" for name, _ in store.inventory(parent)):
-                return None
-    except FileNotFoundError:
-        pass
+    # Inventory and stop admission belong under _publish_blobs' publication fence.
+    # An unfenced scan can observe the publisher's temporary two-link interval.
     try:
         run_meta = _read_object(run_dir / "run.json")
     except FileNotFoundError:
@@ -497,8 +497,8 @@ def _publish_blobs(
             if (
                 report.chain_errors
                 or report.partial_tail
-                or len(report.events) >= 2048 - 8
-                or _journal_size(journal) + 2048 > 8 * 1024 * 1024
+                or len(report.events) >= MAX_JOURNAL_EVENTS - _LIFECYCLE_EVENT_RESERVE
+                or _journal_size(journal) + 2048 > MAX_JOURNAL_BYTES
             ):
                 raise store.CassetteError("cassette journal cap reached")
         for _, raw in blobs:
@@ -730,7 +730,16 @@ def _purge_run_dir(run: str, *, cwd: Path, runs_dir: Path | None) -> Path:
 def purge_cli(run: str, *, cwd: Path, runs_dir: Path | None = None) -> int:
     try:
         run_dir = _purge_run_dir(run, cwd=cwd, runs_dir=runs_dir)
-        count = store.purge(run_dir)
+        metadata = _read_object(run_dir / "run.json")
+        workspace = runguard.resolve_run_lock_workspace(metadata, run_dir) or cwd
+        if workspace is None or runguard.has_active_run_owner(workspace, run_dir):
+            raise store.CassetteError("cassette purge requires an inactive run")
+        # Acquire before the publication locks: a newly starting owner must lose
+        # the acquisition race, and dead owners use the normal recovery policy.
+        with runguard.run_lock(workspace, run_dir=run_dir):
+            if not runguard.is_active_run_owner(workspace, run_dir):
+                raise store.CassetteError("cassette purge lost run lock ownership")
+            count = store.purge_inactive(run_dir, workspace=workspace)
     except (OSError, ValueError, RuntimeError):
         print("error: cassette purge refused unsafe sidecars", file=sys.stderr)
         return 2
