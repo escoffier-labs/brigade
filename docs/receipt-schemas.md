@@ -34,6 +34,8 @@ Storage and classification failures publish a bounded public `stopped` marker wh
 Redaction deletes sidecars and replaces affected references with the closed
 redaction tombstone. Purge and retention may leave references without bodies.
 These sidecars do not participate in lifecycle projection or audit authority.
+Recovery permits trailing cassette references and stop markers after a covered
+checkpoint pair. They cannot cover an earlier uncheckpointed lifecycle event.
 Run exports exclude `events/cassettes/` from the initial staging copy and retain
 the stripping guard. Archive builds refuse cassette bodies.
 
