@@ -70,6 +70,7 @@ def broker_fixture(tmp_path, monkeypatch, *, payload=None):
     return conn, path, log, action
 
 
+@requires_posix
 @pytest.mark.parametrize(
     ("key", "value"),
     [
@@ -102,6 +103,7 @@ def test_invalid_configured_executable_fails_before_transport(tmp_path, monkeypa
     assert not (tmp_path / "journal").exists()
 
 
+@requires_posix
 def test_manifest_uses_path_default_only_for_omitted_executable(tmp_path, monkeypatch):
     from brigade import fleet_action_runner as runner
 
