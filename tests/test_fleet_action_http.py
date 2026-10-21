@@ -3,6 +3,7 @@
 import html
 import http.client
 import json
+import os
 import re
 import threading
 from contextlib import contextmanager
@@ -14,6 +15,9 @@ from brigade import fleet_hub
 from tests.test_fleet_actions import setup_action
 
 LOGIN = "operator@example.test"
+_POSIX_BROKER = pytest.mark.skipif(
+    os.name != "posix", reason="Broker execution requires POSIX private files, process groups, and systemd"
+)
 
 
 @contextmanager
@@ -148,6 +152,7 @@ def test_submit_csrf_revocation_and_stale_review_preserve_edit(tmp_path):
         conn.close()
 
 
+@_POSIX_BROKER
 def test_form_to_broker_fake_destination_and_receipt(tmp_path, monkeypatch):
     from brigade import fleet_action_runner as runner, fleet_client_actions as client
     from tests.test_fleet_action_runner import fake_executable, manifest

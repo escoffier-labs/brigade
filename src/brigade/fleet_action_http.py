@@ -70,6 +70,8 @@ def handle_api(conn: sqlite3.Connection, caller: tuple[bool, str | None], payloa
 
 
 def _params(raw: str) -> dict[str, str]:
+    if raw == "":
+        return {}
     if len(raw) > 65536:
         raise ActionError("invalid-form", 400)
     try:
