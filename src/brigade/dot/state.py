@@ -103,7 +103,10 @@ def _initialize_event_tables(connection: sqlite3.Connection) -> None:
         attempts INTEGER NOT NULL DEFAULT 0, next_attempt REAL NOT NULL DEFAULT 0,
         PRIMARY KEY(event_id, subscription_id))""")
     connection.execute("""CREATE TABLE IF NOT EXISTS wake_attempts (
-        timestamp REAL NOT NULL, priority TEXT NOT NULL)""")
+        timestamp REAL NOT NULL, priority TEXT NOT NULL, source TEXT NOT NULL DEFAULT '')""")
+    if "source" not in {row[1] for row in connection.execute("PRAGMA table_info(wake_attempts)")}:
+        # Unknown wake origins still consume the global budget, but confer no diagnostic scope.
+        connection.execute("ALTER TABLE wake_attempts ADD COLUMN source TEXT NOT NULL DEFAULT ''")
     connection.execute("""CREATE TABLE IF NOT EXISTS tracked_requests (
         request_id TEXT PRIMARY KEY, generation INTEGER NOT NULL DEFAULT 0,
         completed INTEGER NOT NULL DEFAULT 0)""")
@@ -153,36 +156,48 @@ class BridgeState(PrivateDatabase):
             ok INTEGER NOT NULL, duration_ms INTEGER NOT NULL, request_id TEXT,
             arg_summary TEXT, error_code TEXT)""")
         connection.execute("CREATE INDEX IF NOT EXISTS call_log_ts ON call_log(ts)")
+        inbox_columns = connection.execute("PRAGMA table_info(hub_inbox)").fetchall()
+        if inbox_columns and "scope" not in {row[1] for row in inbox_columns}:
+            # Old IDs have no proven endpoint. Archive them without adopting authority.
+            connection.execute("ALTER TABLE hub_inbox RENAME TO hub_inbox_legacy")
+            connection.execute("DROP INDEX IF EXISTS hub_inbox_pending")
         connection.execute("""CREATE TABLE IF NOT EXISTS hub_inbox (
-            id INTEGER PRIMARY KEY, sender TEXT NOT NULL, sender_label TEXT,
+            scope TEXT NOT NULL DEFAULT '', id INTEGER NOT NULL, sender TEXT NOT NULL, sender_label TEXT,
             subject TEXT, body TEXT NOT NULL, ref TEXT, thread TEXT, kind TEXT,
             priority TEXT, reply_to INTEGER, created_at TEXT NOT NULL,
-            acked_at TEXT, synced_at TEXT NOT NULL)""")
-        connection.execute("CREATE INDEX IF NOT EXISTS hub_inbox_pending ON hub_inbox(acked_at,id)")
+            acked_at TEXT, synced_at TEXT NOT NULL, PRIMARY KEY(scope,id))""")
+        connection.execute("CREATE INDEX IF NOT EXISTS hub_inbox_pending ON hub_inbox(scope,acked_at,id)")
         connection.execute("CREATE TABLE IF NOT EXISTS hub_state (key TEXT PRIMARY KEY, value TEXT NOT NULL)")
         # Recover submitted handles from the existing journal without touching inbox rows.
         connection.execute("""INSERT OR IGNORE INTO tracked_requests(request_id)
             SELECT DISTINCT request_id FROM operations WHERE tool='fleet_submit'
             AND request_id IS NOT NULL AND outcome LIKE 'ok%'""")
 
-    def hub_get(self, key: str, default: Any = None, *, connection: sqlite3.Connection | None = None) -> Any:
+    def hub_get(
+        self, key: str, default: Any = None, *, scope: str = "", connection: sqlite3.Connection | None = None
+    ) -> Any:
         if connection is None:
             with self.transaction() as c:
-                return self.hub_get(key, default, connection=c)
-        row = connection.execute("SELECT value FROM hub_state WHERE key=?", (key,)).fetchone()
+                return self.hub_get(key, default, scope=scope, connection=c)
+        row = connection.execute(
+            "SELECT value FROM hub_state WHERE key=?", ((scope + ":" if scope else "") + key,)
+        ).fetchone()
         return row[0] if row else default
 
-    def hub_set(self, key: str, value: Any, *, connection: sqlite3.Connection | None = None) -> None:
+    def hub_set(self, key: str, value: Any, *, scope: str = "", connection: sqlite3.Connection | None = None) -> None:
         if connection is None:
             with self.transaction() as c:
-                return self.hub_set(key, value, connection=c)
-        connection.execute("INSERT OR REPLACE INTO hub_state VALUES (?,?)", (key, str(value)))
+                return self.hub_set(key, value, scope=scope, connection=c)
+        connection.execute(
+            "INSERT OR REPLACE INTO hub_state VALUES (?,?)", ((scope + ":" if scope else "") + key, str(value))
+        )
 
     def hub_upsert(
         self,
         rows: Iterable[dict[str, Any]],
         *,
         node_id: str,
+        scope: str = "",
         clock: Clock = utc_now,
         connection: sqlite3.Connection | None = None,
         fetched_at: datetime | None = None,
@@ -194,7 +209,9 @@ class BridgeState(PrivateDatabase):
         """
         if connection is None:
             with self.transaction() as c:
-                return self.hub_upsert(rows, node_id=node_id, clock=clock, connection=c, fetched_at=fetched_at)
+                return self.hub_upsert(
+                    rows, node_id=node_id, scope=scope, clock=clock, connection=c, fetched_at=fetched_at
+                )
         from .events import enqueue
 
         fields = (
@@ -214,21 +231,23 @@ class BridgeState(PrivateDatabase):
         now = _iso(clock())
         for row in rows:
             cursor = connection.execute(
-                "INSERT OR IGNORE INTO hub_inbox ("
+                "INSERT OR IGNORE INTO hub_inbox (scope,"
                 + ",".join(fields)
                 + ",synced_at) VALUES ("
-                + ",".join("?" for _ in range(len(fields) + 1))
+                + ",".join("?" for _ in range(len(fields) + 2))
                 + ")",
-                tuple(row.get(key) for key in fields) + (now,),
+                (scope,) + tuple(row.get(key) for key in fields) + (now,),
             )
             if fetched_at is not None and row.get("acked_at") is None:
-                local = connection.execute("SELECT acked_at FROM hub_inbox WHERE id=?", (row["id"],)).fetchone()
+                local = connection.execute(
+                    "SELECT acked_at FROM hub_inbox WHERE scope=? AND id=?", (scope, row["id"])
+                ).fetchone()
                 if local is not None and local[0] is not None and datetime.fromisoformat(local[0]) > fetched_at:
                     continue
             connection.execute(
                 "UPDATE hub_inbox SET acked_at=CASE WHEN ? IS NULL THEN NULL "
-                "ELSE COALESCE(acked_at, ?) END, synced_at=? WHERE id=?",
-                (row.get("acked_at"), row.get("acked_at"), now, row["id"]),
+                "ELSE COALESCE(acked_at, ?) END, synced_at=? WHERE scope=? AND id=?",
+                (row.get("acked_at"), row.get("acked_at"), now, scope, row["id"]),
             )
             if (
                 cursor.rowcount
@@ -246,27 +265,37 @@ class BridgeState(PrivateDatabase):
                     "fleet.inbox.message",
                     {"msg_id": row["id"], "priority": priority},
                     priority,
-                    "hub-inbox:" + str(row["id"]),
+                    "hub-inbox:" + scope + ":" + str(row["id"]),
                 )
 
-    def hub_messages(self, *, unacked_only: bool, limit: int, node_id: str) -> dict[str, Any]:
+    def hub_messages(self, *, unacked_only: bool, limit: int, node_id: str, scope: str = "") -> dict[str, Any]:
         from .inbox_tools import legacy_message
 
         with self.transaction() as c:
-            where = "WHERE acked_at IS NULL" if unacked_only else ""
+            where = "AND acked_at IS NULL" if unacked_only else ""
             order = "ASC" if unacked_only else "DESC"
-            rows = c.execute(f"SELECT * FROM hub_inbox {where} ORDER BY id {order} LIMIT ?", (limit,)).fetchall()
-            pending = c.execute("SELECT COUNT(*) FROM hub_inbox WHERE acked_at IS NULL").fetchone()[0]
+            rows = c.execute(
+                f"SELECT * FROM hub_inbox WHERE scope=? {where} ORDER BY id {order} LIMIT ?", (scope, limit)
+            ).fetchall()
+            pending = c.execute(
+                "SELECT COUNT(*) FROM hub_inbox WHERE scope=? AND acked_at IS NULL", (scope,)
+            ).fetchone()[0]
         return {"unacked_total": pending, "messages": [legacy_message(dict(row), node_id) for row in rows]}
 
     def hub_mark_acked(
-        self, ids: Iterable[int], *, clock: Clock = utc_now, connection: sqlite3.Connection | None = None
+        self,
+        ids: Iterable[int],
+        *,
+        scope: str = "",
+        clock: Clock = utc_now,
+        connection: sqlite3.Connection | None = None,
     ) -> None:
         if connection is None:
             with self.transaction() as c:
-                return self.hub_mark_acked(ids, clock=clock, connection=c)
+                return self.hub_mark_acked(ids, scope=scope, clock=clock, connection=c)
         connection.executemany(
-            "UPDATE hub_inbox SET acked_at=? WHERE id=? AND acked_at IS NULL", [(_iso(clock()), ident) for ident in ids]
+            "UPDATE hub_inbox SET acked_at=? WHERE scope=? AND id=? AND acked_at IS NULL",
+            [(_iso(clock()), scope, ident) for ident in ids],
         )
 
     def begin_operation(self, tool: str, summary: dict[str, Any], *, clock: Clock = utc_now) -> int:

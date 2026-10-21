@@ -3,13 +3,16 @@
 from __future__ import annotations
 
 import json
+from functools import partial
 import re
 from typing import Any, Callable
+
+from ..hub_messages import HUB_CODES, INBOX_TOOLS
 
 PACK_ID = "t3-dispatch"
 DEFAULT_BIND = "127.0.0.1:8778"
 SERVICE_NAME = "grokbot-t3-dispatch"
-TOOLS = frozenset(
+TOOLS = INBOX_TOOLS | frozenset(
     {
         "t3_approve",
         "t3_answer",
@@ -45,6 +48,8 @@ NAME_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 REF_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/-]{0,99}$")
 ERROR_MESSAGES = {
     "invalid_request": "Tool input failed validation",
+    "hub-not-configured": "Fleet Hub messaging is not configured",
+    "hub-error": "Fleet Hub messaging refused the request or is unavailable",
     "dispatch-disabled": "Dispatch is turned off",
     "repository-not-allowed": "Repository is not on the dispatch allowlist",
     "host-not-allowed": "Host is not on the dispatch allowlist",
@@ -80,6 +85,7 @@ class T3DispatchError(ValueError):
         self,
         code: str,
         *,
+        hub_code: str | None = None,
         fleet_code: str | None = None,
         fleet_reason: str | None = None,
         request_id: str | None = None,
@@ -87,6 +93,7 @@ class T3DispatchError(ValueError):
         if code not in ERROR_MESSAGES:
             code = "unavailable"
         self.code = code
+        self.hub_code = hub_code if isinstance(hub_code, str) and hub_code in HUB_CODES else None
         self.fleet_code = _bounded_field(fleet_code)
         self.fleet_reason = _bounded_field(fleet_reason)
         self.request_id = request_id if isinstance(request_id, str) and HANDLE_RE.fullmatch(request_id) else None
@@ -94,6 +101,8 @@ class T3DispatchError(ValueError):
 
     def public_error(self) -> dict[str, dict[str, str]]:
         error = {"code": self.code, "message": ERROR_MESSAGES[self.code]}
+        if self.hub_code is not None:
+            error["hub_code"] = self.hub_code
         if self.fleet_code is not None:
             error["fleet_code"] = self.fleet_code
         if self.fleet_reason is not None:
@@ -272,3 +281,23 @@ PARSERS: dict[str, Callable[[object], dict[str, Any]]] = {
     "t3_submit": parse_submit,
     "t3_wait": parse_wait,
 }
+
+
+def parse_inbox(name: str, raw: object) -> dict[str, Any]:
+    # Reuse Dot's authoritative field validators and defaults, including its byte cap.
+    from ..dot.contracts import DotError, TOOL_SCHEMAS
+
+    schema = TOOL_SCHEMAS[name]
+    data = _object(
+        raw, frozenset(key for key, field in schema.fields.items() if field.required), frozenset(schema.fields)
+    )
+    try:
+        return {
+            key: field.validator(data[key]) if key in data else field.default for key, field in schema.fields.items()
+        }
+    except DotError:
+        raise _invalid() from None
+
+
+for _inbox_name in INBOX_TOOLS:
+    PARSERS[_inbox_name] = partial(parse_inbox, _inbox_name)

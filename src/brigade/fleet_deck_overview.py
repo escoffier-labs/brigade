@@ -212,9 +212,13 @@ def page_alerts(view: DeckView, now: datetime) -> tuple[Alert, ...]:
             if item.routine_state == "needs-attention":
                 detail = f"routine {item.routine_state}" + (f" · {item.detail}" if item.detail else "")
                 attention.append(Alert("integration", item.id, detail, _first_observed(None)))
-        for blocked in plane.queue.blocked:
+        for blocked in plane.queue.blocked_items:
             reason = deck._cp_text(blocked.get("reason"))
             attention.append(Alert("blocked", deck._cp_text(blocked.get("id")), reason, _first_observed(None)))
+        for excluded in plane.queue.actionable_exclusions:
+            count = excluded["count"]
+            title = f"{count} work item{'' if count == 1 else 's'} blocked"
+            attention.append(Alert("blocked", title, deck._cp_text(excluded["reason"]), "observed scan"))
     stale: list[Alert] = []
     coverage: list[Alert] = []
     for station in view.stations:
@@ -286,7 +290,7 @@ def render_header(view: DeckView, now: datetime) -> str:
     )
     return (
         '<header class="page-head"><div><p class="crumbs">Fleet &rsaquo; Fleet overview</p>'
-        f'<h1>Fleet overview <span class="verdict-pill verdict-pill--{tone}">{_esc(verdict)}</span></h1>'
+        f'<h1>Fleet overview <span class="verdict-status verdict-status--{tone}">{_esc(verdict)}</span></h1>'
         f'<p class="page-sub">{_esc(sub)}</p></div>'
         f'<p class="header-meta">Updated {_esc(now.strftime("%H:%M UTC"))} '
         '<a class="refresh-link" href="/deck">Refresh</a></p></header>'
@@ -316,16 +320,17 @@ def _working_row(station: StationView, tile: Tile) -> str:
     )
 
 
-def _queue_body(plane: deck.ControlPlane | None) -> str:
+def _queue_body(plane: deck.ControlPlane | None, *, worklore_enabled: bool) -> str:
     if plane is None or "queue" not in plane.present:
         return '<p class="empty">Queue unknown: the control-plane snapshot has no queue section.</p>'
     queue = plane.queue
     counts = f'<p class="station-meta">eligible {_esc(queue.eligible_count)} · queued {_esc(queue.queued_count)}</p>'
+    counts += deck._queue_exclusions_html(queue, worklore_enabled=worklore_enabled)
     rows = "".join(
         '<li class="row"><span class="dot dot--offline" aria-hidden="true"></span><div class="row-body">'
         f'<p class="row-title">{_esc(deck._cp_text(item.get("id")))}</p>'
         f'<p class="row-meta">blocked · {_esc(deck._cp_text(item.get("reason")))}</p></div></li>'
-        for item in queue.blocked
+        for item in queue.blocked_items
     )
     if rows:
         return counts + f'<ul class="rows">{rows}</ul>'
@@ -333,11 +338,17 @@ def _queue_body(plane: deck.ControlPlane | None) -> str:
         return counts + '<p class="empty">Nothing queued.</p>'
     if queue.queued_count == UNKNOWN:
         return counts + '<p class="empty">Queued items unknown.</p>'
-    note = "none blocked" if queue.blocked_known else "blocked reasons unknown"
+    note = (
+        "queue exclusions reported above"
+        if queue.exclusions
+        else "none blocked"
+        if queue.blocked_known
+        else "blocked reasons unknown"
+    )
     return counts + f'<p class="empty">{_esc(queue.queued_count)} queued, {note}.</p>'
 
 
-def render_work_lists(view: DeckView) -> str:
+def render_work_lists(view: DeckView, *, worklore_enabled: bool = True) -> str:
     rows = "".join(_working_row(station, tile) for station in view.stations for tile in station.tiles)
     count = sum(station.busy for station in view.stations)
     working = f'<ul class="rows">{rows}</ul>' if rows else '<p class="empty">Nothing is running.</p>'
@@ -345,7 +356,7 @@ def render_work_lists(view: DeckView) -> str:
         '<div class="split"><section class="panel" aria-labelledby="working-title"><header>'
         f'<h2 id="working-title">Working now ({count})</h2></header>{working}</section>'
         '<section class="panel" aria-labelledby="queued-title"><header><h2 id="queued-title">Queued</h2></header>'
-        f"{_queue_body(view.control_plane)}</section></div>"
+        f"{_queue_body(view.control_plane, worklore_enabled=worklore_enabled)}</section></div>"
     )
 
 
@@ -594,13 +605,13 @@ def render_overview(view: DeckView, now: datetime, *, worklore_enabled: bool) ->
         render_header(view, now),
         render_summary(view),
         render_alerts(view, now),
-        render_work_lists(view),
+        render_work_lists(view, worklore_enabled=worklore_enabled),
         render_machine_table(view, now),
         render_cloud_workers(view),
         render_sessions(view),
         render_outcomes(view),
         "<details><summary>Control plane details</summary>"
-        + deck.render_control_plane(view.control_plane)
+        + deck.render_control_plane(view.control_plane, worklore_enabled=worklore_enabled)
         + "</details>",
     ]
     if worklore_enabled and view.observed_work_groups:
