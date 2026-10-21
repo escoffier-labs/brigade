@@ -486,6 +486,26 @@ def test_hook_repairs_malformed_observation_collections(target, key, malformed):
         assert state.get(key, []) == []
 
 
+@pytest.mark.parametrize("persisted", [None, 17, "not-a-list", [None, 17, {}], ["caller.py", None, {}], ["caller.py"]])
+def test_compaction_restore_validates_and_retains_brief_observations(target, monkeypatch, persisted):
+    event(target, "SessionStart", source="startup")
+    event(target, "PreCompact", trigger="auto")
+    state = runtime.read_session_state(target, "session-one")
+    state["brief_files"] = persisted
+    runtime.write_session_state(target, "session-one", state)
+    monkeypatch.setattr(
+        runtime,
+        "_run_brief",
+        lambda *args: "_schema v1: 1 entry points - 1 edges_\n- tests/test_api.py\n",
+    )
+    result = event(target, "UserPromptSubmit")
+    assert "tests/test_api.py" in result["hookSpecificOutput"]["additionalContext"]
+    expected = ["tests/test_api.py"]
+    if isinstance(persisted, list) and "caller.py" in persisted:
+        expected.insert(0, "caller.py")
+    assert runtime.read_session_state(target, "session-one")["brief_files"] == expected
+
+
 def test_fresh_incremental_graph_does_not_require_full_rebuild(target, monkeypatch):
     graph(target, monkeypatch)
     original = graphtrail_delta._run_graphtrail

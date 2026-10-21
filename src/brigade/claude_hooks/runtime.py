@@ -2071,7 +2071,8 @@ def _additional_context(
     if files:
         state = read_session_state(target, session_id) or {}
         if state.get("task_epoch") == task_epoch:
-            state["brief_files"] = sorted(set(state.get("brief_files", [])) | set(files))[: dependencies.MAX_SEEN_FILES]
+            # The locked patch writer validates and merges persisted paths.
+            state["brief_files"] = files
             _write_session_state_preserving_latch(
                 target, session_id, state, log_target=target, patch_fields=("brief_files",)
             )
