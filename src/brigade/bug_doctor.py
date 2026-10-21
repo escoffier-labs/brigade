@@ -50,8 +50,8 @@ def check(target: Path, name: str, *, entry_limit: int = _ENTRY_LIMIT) -> list[d
         try:
             regular = stat.S_ISREG(path.lstat().st_mode)
         except FileNotFoundError:
-            if name != "agents-quality":
-                rows.append({"status": "FAIL" if relative == "AGENTS.md" else "WARN", "name": label})
+            if name == "bootstrap" and relative == "AGENTS.md":
+                rows.append({"status": "FAIL", "name": label})
             continue
         except OSError:
             regular = False
@@ -72,7 +72,8 @@ def check(target: Path, name: str, *, entry_limit: int = _ENTRY_LIMIT) -> list[d
         else:
             # Presence only. Config validation and scanner/host probes belong to
             # normal Doctor and cannot be claimed by this bounded subset.
-            rows.append({"status": "WARN", "name": "security: config validation skipped" if regular else label})
+            if not regular:
+                rows.append({"status": "WARN", "name": label})
     if entry_limit < len(paths):
         rows.append({"status": "WARN", "name": "bug diagnostics: entry budget"})
     return rows

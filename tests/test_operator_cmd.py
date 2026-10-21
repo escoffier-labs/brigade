@@ -1376,7 +1376,7 @@ def test_operator_quickstart_prepares_new_user_workspace(tmp_path, capsys):
     assert payload["issue_report"]["status"] == "ok"
     assert (
         payload["issue_report"]["report_command"]
-        == 'brigade bug report --summary "What happened and what you expected" --dry-run'
+        == 'brigade bug report --target TARGET --summary "What happened and what you expected" --dry-run'
     )
     assert str(tmp_path) not in json.dumps(payload["issue_report"])
     assert (tmp_path / ".brigade" / "config.json").is_file()
@@ -1904,4 +1904,7 @@ def test_quickstart_issue_report_excludes_private_commands_and_details(tmp_path)
         }
     )
     assert private not in json.dumps(report)
-    assert report["report_command"] == 'brigade bug report --summary "What happened and what you expected" --dry-run'
+    assert (
+        report["report_command"]
+        == 'brigade bug report --target TARGET --summary "What happened and what you expected" --dry-run'
+    )

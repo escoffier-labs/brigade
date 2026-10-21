@@ -47,7 +47,7 @@ def record(
     command: str, exit_code: int, exc: BaseException | None = None, *, args: argparse.Namespace | None = None
 ) -> None:
     try:
-        from .bug_redaction import Redactor, assert_clean
+        from .bug_redaction import Redactor, ReportBlocked, assert_clean
 
         # Scrub before truncating, so a truncated credential is never saved.
         redactor = Redactor(Path.cwd())
@@ -85,7 +85,15 @@ def record(
             "message_head": message,
             "frames": frames(exc.__traceback__) if exc is not None else [],
         }
-        assert_clean(json.dumps(payload))
+        try:
+            assert_clean(json.dumps(payload))
+        except ReportBlocked:
+            payload.update(message_head="", frames=[])
+            try:
+                assert_clean(json.dumps(payload))
+            except ReportBlocked:
+                error_path().unlink(missing_ok=True)
+                return
         write_json(error_path(), payload)
     except Exception:
         # Errors in diagnostic persistence must not mask the original failure.

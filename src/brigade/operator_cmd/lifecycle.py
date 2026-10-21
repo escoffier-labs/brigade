@@ -722,7 +722,7 @@ def _quickstart_issue_report(payload: dict[str, Any]) -> dict[str, Any]:
         "dry_run": payload.get("dry_run"),
         "force": payload.get("force"),
         "steps": step_summaries,
-        "report_command": 'brigade bug report --summary "What happened and what you expected" --dry-run',
+        "report_command": 'brigade bug report --target TARGET --summary "What happened and what you expected" --dry-run',
         "privacy_note": "Prepare and review a redacted bug report before sharing diagnostics.",
     }
 

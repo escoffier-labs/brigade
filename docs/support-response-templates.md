@@ -38,8 +38,8 @@ discussing the report.
 
 ## Doctor Not Ready
 
-Use the same bug report command above. The bundle includes bounded checks for
-bootstrap files, AGENTS.md quality, and security-config presence under
+Use the same bug report command above. The bundle includes bounded local health
+probes for bootstrap files, AGENTS.md quality, and security-config file type under
 `bug_diagnostics`. It does not include full Doctor output. For a failing hook,
 profile, or component, use `--include-output FILE` to add the relevant output
 from a file you choose. Inspect the full preview before sharing it. For a

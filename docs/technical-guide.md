@@ -1916,11 +1916,13 @@ brigade bug report --target . --summary "What happened and what you expected" --
 The command prints the complete `brigade.bug-report.v1` bundle and saves
 `bundle.json`, `bundle.md`, and `receipt.json` under the user data directory at
 `brigade/bug-reports/<report_id>/`. It includes the Brigade version and channel,
-Python and OS versions, bounded bug diagnostics, up to five failed run
+Python and OS versions, bounded local health probes, up to five failed run
 identifiers, the latest failing verification receipt identifier and digest,
 and the last local CLI error. The `bug_diagnostics` section contains names,
 statuses, and counts for bootstrap file presence, AGENTS.md quality, and
-security-config presence. It does not contain full `brigade doctor` output.
+security-config file type. Missing optional bootstrap files and absent security
+configuration produce no warning. These probes do not validate security
+configuration or contain full `brigade doctor` output.
 General Doctor checks can read configured external logs and are excluded.
 Each diagnostic subprocess uses the parent's package location and a private
 empty working directory with Python safe-path handling and a five-second
@@ -1933,8 +1935,9 @@ to 200 lines and a 60 KB input read. After redaction, it keeps the newest
 `included_output` records the bytes kept and whether that redacted tail was
 truncated. Selected inputs must be regular, single-link files. Ancestors may
 be symlinks, but the final file cannot be a symlink.
-Nonblocking reads check descriptor identity and reject files changed during
-reading. `--summary-file FILE` rejects inputs larger than 60 KB before reading
+Nonblocking reads check descriptor identity. Log tails can change during reading,
+but replacing the file is rejected. Exact reads reject content changes.
+`--summary-file FILE` rejects inputs larger than 60 KB before reading
 or decoding them. Diagnostic receipt reads stop at 256 KB per
 file. Each run or verification reader examines at most 20,000 directory entries,
 reads the newest 64 directories in that window, and processes at most 512
@@ -1951,8 +1954,8 @@ and values of at least eight characters. Boolean and numeric settings are
 excluded. Recognizable token patterns are still scanned independently.
 
 Quickstart JSON now provides `issue_report.report_command` in place of
-`issue_report.github_issue_url`. The command includes a summary placeholder
-that you replace with the observed problem and expected behavior.
+`issue_report.github_issue_url`. Replace its `TARGET` placeholder with the affected
+workspace and its summary placeholder with the observed problem and expected behavior.
 
 Use `--report-id REPORT_ID` to reuse the saved preview without recollecting
 diagnostics. Replace `REPORT_ID` with the identifier printed during preparation.
@@ -1960,12 +1963,18 @@ Run without `--dry-run` to search GitHub for the visible `bf-` fingerprint
 through `gh search issues`, with the unauthenticated GitHub search API as a
 fallback when `gh` fails or is unavailable. API reads have a 10-second timeout
 and a 60 KB response cap. Search failure prints `dedup skipped`. A dry run
-makes no network calls. With an interactive terminal, review the destination
+makes no network calls. Fingerprints use the recorded command, exception type,
+exit code, failing probe names, and Brigade minor version. When no command,
+exception type, or failing probe exists, the fingerprint also uses the lowercased
+summary with paths, digits, and identifiers normalized. Different descriptions
+of the same recorded failure retain the same fingerprint.
+With an interactive terminal, review the destination
 and answer "Is this a security vulnerability? [y/N]" before sharing. Answering
 yes blocks submission and points to SECURITY.md. The keyword classifier also
 blocks recognized vulnerability descriptions, but it cannot recognize every
 vulnerability. Confirm the complete preview separately before sharing. For a
 shown duplicate, select its number to comment or choose `new` or `abort`.
+End-of-input or Ctrl-C cancels the report with a fixed message.
 Agents must show the complete
 preview to the user and receive a clear yes before using `--yes`:
 
@@ -2006,9 +2015,8 @@ records each attempt before transport, including retries of the same report
 ID and failed transports. The limit reads only today's and yesterday's logs,
 at most five records and 60 KB per log. A pending submission also blocks
 retries for five minutes.
-The fingerprint uses failure facts: command path, exit code, exception type,
-failing check names, and Brigade minor version. Summaries and error messages
-do not affect it. Different descriptions of the same failure share a cooldown.
+Reports with the same failure facts share a fingerprint and cooldown even
+when their summaries differ.
 `BRIGADE_BUG_REPORT=never` disables sharing while allowing `--dry-run` and
 `--via file`. No doctor, status command, or hook starts bug reporting.
 
@@ -2017,7 +2025,9 @@ overwrite the local `brigade/last-error.json` with the resolved
 command names, exit code, exception type, redacted message head, frames
 inside Brigade, and a UTC `recorded_at` timestamp. Reports omit timestamped
 errors older than 24 hours or dated in the future. Legacy records without a
-timestamp have unknown age. The record contains no command arguments and is never uploaded
+timestamp have unknown age. If the payload fails its clean check, the writer
+clears the message and frames and scans again. If that scan fails, it removes
+the previous record. The record contains no command arguments and is never uploaded
 automatically. You can delete it and past report directories at any time.
 
 ### Privacy

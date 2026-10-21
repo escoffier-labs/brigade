@@ -345,9 +345,10 @@ def test_report_doctor_avoids_unbounded_general_checks(tmp_path, monkeypatch, ha
 
         monkeypatch.setattr(Path, "read_text", bounded)
     report = bug_collect.collect_diagnostics(tmp_path)
-    assert report["checks"]
     if hazard == "agents":
-        assert {"status": "WARN", "name": "agents-quality: AGENTS.md"} in report["checks"]
+        assert report["checks"] == [{"status": "WARN", "name": "agents-quality: AGENTS.md"}]
+    else:
+        assert report["checks"] == []
 
 
 def test_report_doctor_kills_checks_at_deadline(tmp_path, monkeypatch):

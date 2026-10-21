@@ -720,6 +720,7 @@ def test_real_diagnostics_prepared_report_allows_security_config_warning(report_
     from brigade.bug_collect import collect_diagnostics
 
     mod, target = report_env
+    (target / ".brigade" / "security.toml").mkdir(parents=True)
     monkeypatch.setattr(mod, "collect_diagnostics", collect_diagnostics)
     assert invoke(target, "--dry-run", "--json") == 0
     preview = result(capsys)

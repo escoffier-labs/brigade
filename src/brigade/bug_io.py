@@ -107,7 +107,7 @@ def _read(path: Path, *, limit: int, tail: bool) -> bytes:
                 raise ValueError("file size limit exceeded")
         after = os.fstat(fd)
         _regular(after)
-        if (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+        if not tail and (before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
             after.st_size,
             after.st_mtime_ns,
             after.st_ctime_ns,
@@ -121,7 +121,7 @@ def read_bytes(path: Path, *, limit: int) -> bytes:
 
 
 def read_tail(path: Path, *, limit: int) -> bytes:
-    """Read at most limit bytes from the end, with the exact reader's checks."""
+    """Read at most limit bytes from the end, allowing writes but not replacement."""
     return _read(path, limit=limit, tail=True)
 
 

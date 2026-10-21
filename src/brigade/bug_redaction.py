@@ -124,9 +124,9 @@ class Redactor:
 
     def text(self, text: str) -> str:
         for literal in self.literals:
-            # Bare user names need boundaries to avoid corrupting identifiers.
+            # Bare user and host names need boundaries to preserve identifiers.
             pattern = re.escape(literal)
-            if literal == self.username or (len(literal) <= 3 and literal.isalnum()):
+            if literal in {self.username, self.hostname} or (len(literal) <= 3 and literal.isalnum()):
                 pattern = rf"(?<![\w.]){pattern}(?![\w.])"
             text, count = re.subn(
                 pattern,

@@ -68,7 +68,7 @@ def _normalize_fingerprint(text: str) -> str:
     return " ".join(text.split())
 
 
-def fingerprint(last_error: dict[str, Any] | None, check_names: list[str]) -> str:
+def fingerprint(last_error: dict[str, Any] | None, check_names: list[str], summary: str = "") -> str:
     error = last_error or {}
     identity = [
         error.get("command", ""),
@@ -77,6 +77,8 @@ def fingerprint(last_error: dict[str, Any] | None, check_names: list[str]) -> st
         sorted(_normalize_fingerprint(name) for name in check_names),
         ".".join(__version__.split(".")[:2]),
     ]
+    if not (error.get("command") or error.get("exception_type") or check_names):
+        identity.append(_normalize_fingerprint(summary.lower()))
     return "bf-" + hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:12]
 
 
@@ -306,7 +308,10 @@ def _submit(via: str, bundle: dict[str, Any], markdown: str, comment_on: int | N
 def report(args: argparse.Namespace) -> int:
     try:
         return _report(args)
-    except (OSError, ValueError, subprocess.SubprocessError):
+    except (EOFError, KeyboardInterrupt):
+        print("Bug report cancelled. Check the local receipt before retrying.", file=sys.stderr)
+        return 2
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
         # Diagnostics and transport exceptions can carry local paths or tokens.
         # Only our own fixed refusal messages are safe to print verbatim.
         exc = sys.exc_info()[1]
@@ -404,6 +409,7 @@ def _prepare(args: argparse.Namespace) -> tuple[Path, dict[str, Any], str, dict[
     bundle["fingerprint"] = fingerprint(
         bundle["last_error"],
         [c["name"] for c in bundle["bug_diagnostics"]["checks"] if c["status"] == "FAIL"],
+        bundle["user"]["summary"],
     )
     user = bundle["user"]
     tail = user["output_tail"].encode("utf-8")
