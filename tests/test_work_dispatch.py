@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 
 import pytest
 
 from brigade import cli, localio, work_cmd
 from brigade.work_cmd import footprint
+
+requires_dispatch_apply = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="work dispatch apply is unsupported on Windows",
+)
 
 
 @pytest.fixture
@@ -193,7 +199,12 @@ def test_unclaimed_in_progress_work_does_not_supply_occupied_footprint(dispatch_
 def test_apply_requires_explicit_routing_without_writes(dispatch_target, capsys):
     before = _snapshot(dispatch_target)
     assert cli.main(["work", "dispatch", "--target", str(dispatch_target)]) == 2
-    assert "--worker or --seat-map" in capsys.readouterr().err
+    error = capsys.readouterr().err
+    if sys.platform == "win32":
+        assert "work dispatch apply is unsupported on Windows" in error
+        assert "--dry-run" in error
+    else:
+        assert "--worker or --seat-map" in error
     assert _snapshot(dispatch_target) == before
 
 
