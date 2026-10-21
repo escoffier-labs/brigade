@@ -53,7 +53,8 @@ DEFAULT_STARTUP_RESERVE_SECONDS = 120
 DEFAULT_FINALIZE_RESERVE_SECONDS = 300
 REPLACE_ATTEMPTS = 4
 DEFAULT_WORKERS = 6
-INITIAL_ALLOWLIST_ENTRIES = 182
+# PR #1899 removed the obsolete Grok hook allowlist entry.
+INITIAL_ALLOWLIST_ENTRIES = 181
 REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_ALLOWLIST = REPO_ROOT / "tests" / "windows_pytest_allowlist.json"
 

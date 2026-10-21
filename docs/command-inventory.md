@@ -41,7 +41,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade init`: 1 command path(s)
 - `brigade learn` (extras): 13 command path(s)
 - `brigade mcp`: 14 command path(s)
-- `brigade memory`: 28 command path(s)
+- `brigade memory`: 32 command path(s)
 - `brigade model`: 7 command path(s)
 - `brigade node`: 1 command path(s)
 - `brigade notifications` (extras): 4 command path(s)
@@ -76,7 +76,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade untrusted` (extras): 2 command path(s)
 - `brigade update`: 1 command path(s)
 - `brigade version`: 1 command path(s)
-- `brigade work`: 157 command path(s)
+- `brigade work`: 160 command path(s)
 - `brigade workflow` (extras): 3 command path(s)
 
 ## Commands
@@ -355,6 +355,10 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade memory proposal review`
 - `brigade memory proposal show`
 - `brigade memory recall`
+- `brigade memory reflect candidates`
+- `brigade memory reflect run`
+- `brigade memory reflect show`
+- `brigade memory reflect status`
 - `brigade memory search`
 - `brigade memory serve-mcp`
 - `brigade memory status`
@@ -815,6 +819,9 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade work claim`
 - `brigade work closeout`
 - `brigade work dispatch`
+- `brigade work dispatch-reset`
+- `brigade work dispatch-show`
+- `brigade work dispatches`
 - `brigade work doctor`
 - `brigade work end`
 - `brigade work hook-run`

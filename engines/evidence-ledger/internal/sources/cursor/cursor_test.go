@@ -331,7 +331,7 @@ func TestSQLiteOpErrorNamesPathAndStatement(t *testing.T) {
 }
 
 func TestSQLiteFileURIPathWindowsDriveAndRelative(t *testing.T) {
-	if got := sqliteFileURIPath(`C:\Users\demo\conversation-search.db`); got != "/C:/Users/demo/conversation-search.db" {
+	if got := sqliteFileURIPath(`C:\Users\demo\conversation-search.db`); got != "/C:/Users/demo/conversation-search.db" { // content-guard: allow windows-home-path
 		t.Fatalf("windows drive URI path=%q", got)
 	}
 	if got := sqliteFileURIPath("User/globalStorage/conversation-search.db"); got != "/User/globalStorage/conversation-search.db" {
@@ -439,7 +439,7 @@ func TestDefaultRootForPlatform(t *testing.T) {
 	}{
 		{"linux", "/users/demo", "/config", "", "/config/Cursor/User"},
 		{"darwin", "/users/demo", "", "", "/users/demo/Library/Application Support/Cursor/User"},
-		{"windows", `C:\\Users\\demo`, "", `C:\\Data`, `C:\\Data/Cursor/User`},
+		{"windows", `C:\\Users\\demo`, "", `C:\\Data`, `C:\\Data/Cursor/User`}, // content-guard: allow windows-home-path
 	}
 	for _, tc := range cases {
 		if got := defaultRoot(tc.goos, tc.home, tc.xdg, tc.appData); got != filepath.Clean(tc.want) {

@@ -632,6 +632,24 @@ def _dispatch_impl(args) -> int:
             parallel_safe=args.parallel_safe,
             json_output=args.json,
         )
+    if args.work_command in {"dispatches", "dispatch-show", "dispatch-reset"}:
+        from ...work_cmd import dispatch_state
+
+        try:
+            if args.work_command == "dispatch-reset":
+                return dispatch_state.reset(
+                    target=args.target.resolve(),
+                    task_id=args.task_id,
+                    reason=args.reason,
+                    json_output=args.json,
+                    release_unknown=args.release_unknown,
+                )
+            return dispatch_state.status(
+                target=args.target.resolve(), dispatch_id=getattr(args, "dispatch_id", None), json_output=args.json
+            )
+        except (OSError, ValueError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
     if args.work_command == "dispatch":
         from ...work_cmd.dispatch import dispatch as plan_dispatch
 
@@ -642,6 +660,13 @@ def _dispatch_impl(args) -> int:
             batch_size=args.batch_size,
             worker=args.worker,
             seat_map=args.seat_map,
+            base=args.base,
+            run_budget=args.run_budget,
+            max_total=args.max_total,
+            deadline=args.deadline,
+            spawn_delay=args.spawn_delay,
+            no_wait=args.no_wait,
+            commit=args.commit,
             dry_run=args.dry_run,
             json_output=args.json,
         )

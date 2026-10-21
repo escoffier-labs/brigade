@@ -21,6 +21,7 @@ an operator, a runbook, or a host scheduler within the authorized scope.
 | --- | --- |
 | `brigade work verify run` | Receipt, command logs, exit code, and Git state under `.brigade/work/verify-runs/`. |
 | `brigade run` | Run artifacts under `.brigade/runs/`, including `run.json` and lifecycle journals when enabled. Run-level repository claims use Fleet Hub when configured. |
+| `brigade work dispatch` | Plan, session, per-task intents, and digest-chained event receipts under `.brigade/dispatch/`. Each child has a linked worktree and run artifacts. Successful tasks stay claimed and `in_progress` for review and landing. |
 | `brigade work claim` | Task state and claim ownership in the local work ledger under one store lock. Separate clones can each claim their local copy of a task. |
 | `brigade runbook run` | Runbook metadata, step commands, exit codes, and log paths in its run folder. |
 | `brigade memory care scan` | Latest scan and refresh queue under `.brigade/memory-care/`. |
@@ -29,10 +30,12 @@ an operator, a runbook, or a host scheduler within the authorized scope.
 
 Read-only status commands inspect existing records. They do not create a verify
 receipt merely because they ran. `brigade work ready` computes candidates and
-parallel-safe waves without launching workers. Automatic wave dispatch is
-planned in [#1849](https://github.com/escoffier-labs/brigade/issues/1849), run
-patrol in [#1850](https://github.com/escoffier-labs/brigade/issues/1850), and memory
-reflection in [#1856](https://github.com/escoffier-labs/brigade/issues/1856).
+parallel-safe waves without launching workers. `brigade work dispatch` claims
+and launches one ready wave, then supervises its children until they finish.
+`--no-wait` returns after launch. A later invocation reconciles those children
+and fills available capacity before waiting. Hub summary mirroring and a
+continuous `--watch` mode remain follow-up work. Run patrol is planned in
+[#1850](https://github.com/escoffier-labs/brigade/issues/1850), and memory reflection in [#1856](https://github.com/escoffier-labs/brigade/issues/1856).
 
 ## Long-running modes
 

@@ -65,7 +65,7 @@ def test_store_upserts_one_current_alert_and_writes_mode_0600(tmp_path: Path):
     assert "title" not in public
     assert "source_ref" not in public
     leaked = json.dumps(public)
-    assert "ghp_exampleNotARealToken0000000000000001" not in leaked
+    assert "ghp_exampleNotARealToken0000000000000001" not in leaked  # content-guard: allow bare-token-prefix
     assert "/etc/shadow" not in leaked
     assert path.is_file()
     assert path.stat().st_mode & 0o777 == 0o600

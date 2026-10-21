@@ -14,6 +14,9 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_memory = sub.add_parser("memory", help="Inspect local memory maintenance workflows.")
     memory_sub = p_memory.add_subparsers(dest="memory_command", metavar="<memory-command>")
     memory_sub.required = True
+    from .. import memory_reflect
+
+    memory_reflect.register(memory_sub)
     proposal = memory_sub.add_parser("proposal", help="Preview, review and apply bounded memory pair edits.")
     commands = proposal.add_subparsers(dest="memory_proposal_command", required=True)
     for name in ("create", "show", "review", "reject", "apply"):
@@ -369,6 +372,10 @@ def dispatch(args) -> int:
     from .. import memory_cmd
     from .. import memory_operations
 
+    if args.memory_command == "reflect":
+        from .. import memory_reflect
+
+        return memory_reflect.dispatch(args)
     if args.memory_command == "proposal":
         from .. import memory_proposals
         import json

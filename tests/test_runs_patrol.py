@@ -868,3 +868,42 @@ def test_run_liveness_precedes_missing_worktree(tmp_path, monkeypatch, live, exp
     os.utime(signal, (NOW.timestamp() - 10, NOW.timestamp() - 10))
     lane = collect_lanes(repo, now=NOW)[0]
     assert classify(lane, NOW, Thresholds()).state == expected
+
+
+@pytest.mark.parametrize("claim_id", ["dispatch-intent-1", "newer-claim"])
+def test_dispatch_intent_joins_only_exact_run_and_claim_generation(tmp_path, claim_id):
+    from brigade.run_lane_state import collect_lanes
+
+    repo = _repo(tmp_path)
+    run_dir = _write_run(repo, "20260820-120000-patrol01", status="ok")
+    intent_dir = repo / ".brigade/dispatch/dispatch-example/intents"
+    intent_dir.mkdir(parents=True)
+    (intent_dir / "intent-1.json").write_text(
+        json.dumps(
+            {"intent_id": "intent-1", "run_id": run_dir.name, "task_id": "task-1", "claim_id": "dispatch-intent-1"}
+        )
+    )
+    ledger = repo / ".brigade/work/tasks.json"
+    ledger.parent.mkdir()
+    ledger.write_text(
+        json.dumps(
+            {
+                "tasks": [
+                    {
+                        "id": "task-1",
+                        "status": "in_progress",
+                        "claim": {"claim_id": claim_id, "actor": "coder", "claimed_at": OLD_STARTED},
+                    }
+                ]
+            }
+        )
+    )
+    lanes = collect_lanes(repo, now=NOW)
+    joined = next(lane for lane in lanes if lane.run_dir == run_dir)
+    assert joined.intent["task_id"] == "task-1"
+    if claim_id == "dispatch-intent-1":
+        assert len(lanes) == 1
+        assert joined.task["id"] == "task-1"
+    else:
+        assert joined.task is None
+        assert len(lanes) == 2
