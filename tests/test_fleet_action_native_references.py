@@ -96,7 +96,9 @@ def test_full_length_t3_handle_survives_report_readback_and_recovery(t3_broker, 
     assert "private provider detail" not in auth.canonical(final)
 
 
-@pytest.mark.parametrize("reason", [["operator selection"], {}, True, 1, None, "x" * 201, "bad\x00reason"])
+@pytest.mark.parametrize(
+    "reason", [["operator selection"], {}, True, 1, None, "x" * 201, "bad\x00reason", "\ud800", "\udfff"]
+)
 def test_invalid_override_reason_fails_before_any_execution_effect(t3_broker, monkeypatch, reason):
     conn, path, _, log, action, generation = t3_broker
     manifest_data = json.loads(path.read_text())
@@ -116,7 +118,7 @@ def test_invalid_override_reason_fails_before_any_execution_effect(t3_broker, mo
     assert not log.exists()
 
 
-@pytest.mark.parametrize("reason", [None, "", "explicit operator selection", "x" * 200])
+@pytest.mark.parametrize("reason", [None, "", "explicit operator selection", "x" * 200, "operator 🧭 selection"])
 def test_optional_valid_override_reason_reaches_t3_unchanged(t3_broker, reason):
     conn, path, exe, log, action, generation = t3_broker
     manifest_data = json.loads(path.read_text())

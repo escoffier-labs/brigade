@@ -93,12 +93,14 @@ def load_manifest(path: Path) -> dict[str, Any]:
                 "repo_identity",
             } <= set(binding):
                 raise ActionError("invalid-binding", 400)
-            if "override_reason" in binding and (
-                not isinstance(binding["override_reason"], str)
-                or len(binding["override_reason"]) > 200
-                or "\x00" in binding["override_reason"]
-            ):
-                raise ActionError("invalid-override-reason", 400)
+            if "override_reason" in binding:
+                reason = binding["override_reason"]
+                if not isinstance(reason, str) or len(reason) > 200 or "\x00" in reason:
+                    raise ActionError("invalid-override-reason", 400)
+                try:
+                    reason.encode("utf-8")
+                except UnicodeEncodeError:
+                    raise ActionError("invalid-override-reason", 400) from None
             if not isinstance(binding.get("runtime_mode", "approval-required"), str) or binding.get(
                 "runtime_mode", "approval-required"
             ) not in {
