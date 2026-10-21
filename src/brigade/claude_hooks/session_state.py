@@ -276,6 +276,7 @@ def _write_session_state_preserving_latch(
     state: dict[str, Any],
     *,
     log_target: Path | None = None,
+    require_same_epoch: bool = False,
 ) -> bool:
     """Write state without allowing an older payload to clear the timeout latch."""
     try:
@@ -284,6 +285,8 @@ def _write_session_state_preserving_latch(
             current_state = current if isinstance(current, dict) else {}
             updated = dict(state)
             current_epoch = current_state.get("task_epoch")
+            if require_same_epoch and updated.get("task_epoch") != current_epoch:
+                return False
             if (
                 current_epoch is not None
                 and updated.get("task_epoch") != current_epoch

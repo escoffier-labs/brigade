@@ -303,6 +303,39 @@ def test_native_graph_sections_mark_only_injected_paths_seen(target, monkeypatch
     assert runtime.read_session_state(target, "session-one")["dependency_checks"][-1]["unseen_dependents"] == []
 
 
+@pytest.mark.parametrize("source", ["resume", "compact", "prompt"])
+def test_late_brief_cannot_mark_files_seen_in_new_task(target, monkeypatch, source):
+    graph(target, monkeypatch)
+    event(target, "SessionStart", source="startup")
+    if source == "resume":
+        state = runtime.read_session_state(target, "session-one")
+        state["briefed"] = False
+        runtime.write_session_state(target, "session-one", state)
+    elif source == "prompt":
+        event(target, "PreCompact", trigger="auto")
+    interleaved = False
+
+    def brief(*args):
+        nonlocal interleaved
+        if interleaved:
+            return "new task brief"
+        interleaved = True
+        event(target, "SessionStart", source="clear")
+        return (
+            "## Code graph context (GraphTrail, read-only)\n"
+            "_schema v1: 1 entry points - 1 edges_\n- caller.py\n- tests/test_api.py\n"
+        )
+
+    monkeypatch.setattr(runtime, "_run_brief", brief)
+    result = event(target, "UserPromptSubmit" if source == "prompt" else "SessionStart", source=source)
+    assert "caller.py" in result["hookSpecificOutput"]["additionalContext"]
+    assert not runtime.read_session_state(target, "session-one").get("brief_files")
+    result = event(target, "PreToolUse", tool_name="Edit", tool_input={"file_path": "api.py"})
+    check = runtime.read_session_state(target, "session-one")["dependency_checks"][-1]
+    assert check["unseen_dependents"] == ["caller.py", "tests/test_api.py"]
+    assert "caller.py" in result["hookSpecificOutput"]["additionalContext"]
+
+
 @pytest.mark.parametrize("interleaving", ["read", "write", "new_task"])
 def test_graph_query_cannot_overwrite_observations_from_overlapping_hooks(target, monkeypatch, interleaving):
     graph(target, monkeypatch)

@@ -2053,6 +2053,7 @@ def _additional_context(
     *,
     target: Path,
     session_id: str,
+    task_epoch: str | None = None,
     records: list[str] | None = None,
 ) -> dict[str, Any]:
     max_chars, max_items = envelope.resolve_caps()
@@ -2069,8 +2070,9 @@ def _additional_context(
     files = dependencies.injected_brief_files(shown) if event in {"SessionStart", "UserPromptSubmit"} else []
     if files:
         state = read_session_state(target, session_id) or {}
-        state["brief_files"] = sorted(set(state.get("brief_files", [])) | set(files))[: dependencies.MAX_SEEN_FILES]
-        _write_session_state_preserving_latch(target, session_id, state, log_target=target)
+        if state.get("task_epoch") == task_epoch:
+            state["brief_files"] = sorted(set(state.get("brief_files", [])) | set(files))[: dependencies.MAX_SEEN_FILES]
+            _write_session_state_preserving_latch(target, session_id, state, log_target=target, require_same_epoch=True)
     return result
 
 
@@ -2157,6 +2159,7 @@ def _handle_user_prompt_submit(payload: dict[str, Any], *, pin: Path | None = No
     session_id = payload.get("session_id")
     if not isinstance(session_id, str) or not session_id:
         return None
+    task_epoch = _current_task_epoch(session_id)
     workspace = compaction_marker.cheap_workspace_root(payload.get("cwd"))
     if workspace is None:
         return None
@@ -2181,6 +2184,7 @@ def _handle_user_prompt_submit(payload: dict[str, Any], *, pin: Path | None = No
             brief_text,
             target=target,
             session_id=session_id,
+            task_epoch=task_epoch,
             records=_restore_brief_records(brief_text),
         )
         return _attach_claim(result, claim)
@@ -2243,6 +2247,7 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
                 combined,
                 target=target,
                 session_id=session_id,
+                task_epoch=task_epoch,
                 records=records,
             )
         if state.get("briefed"):
@@ -2259,6 +2264,7 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
             brief_text if not recall_text.strip() else f"{brief_text}\n{recall_text}",
             target=target,
             session_id=session_id,
+            task_epoch=task_epoch,
             records=records,
         )
 
