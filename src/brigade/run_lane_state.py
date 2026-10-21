@@ -41,6 +41,7 @@ PATH_CAP = 200
 MAX_LIMIT = 1000
 RUN_SCAN_LIMIT = MAX_LIMIT
 WORKTREE_SCAN_LIMIT = MAX_LIMIT
+PREALLOCATION_INTENT_STATES = frozenset({"planned", "claimed", "workspace_ready", "lost_race", "failed", "canceled"})
 
 
 @dataclass(frozen=True)
@@ -571,15 +572,26 @@ def collect_lanes(
             intent_scan_complete = False
     by_run = {lane.run_dir.name: lane for lane in lanes if lane.run_dir is not None}
     for item, intent_digest in intent_rows:
+        if not isinstance(item.get("task_id"), str) or not item["task_id"]:
+            intent_scan_complete = False
+            continue
         intent_run_id = item.get("run_id")
-        if intent_run_id is not None and (not isinstance(intent_run_id, str) or not intent_run_id):
+        if intent_run_id is None:
+            intent_state = item.get("state")
+            if (
+                "run_id" not in item
+                or item.get("run_dir") is not None
+                or item.get("pid") is not None
+                or not isinstance(intent_state, str)
+                or intent_state not in PREALLOCATION_INTENT_STATES
+            ):
+                intent_scan_complete = False
+            continue
+        if not isinstance(intent_run_id, str) or not intent_run_id:
             intent_scan_complete = False
             continue
         lane = by_run.get(intent_run_id) if isinstance(intent_run_id, str) else None
         if lane is not None:
-            if not isinstance(item.get("task_id"), str) or not item["task_id"]:
-                intent_scan_complete = False
-                continue
             if lane.intent is not None:
                 lane.errors.append("multiple dispatch intents for run")
                 continue

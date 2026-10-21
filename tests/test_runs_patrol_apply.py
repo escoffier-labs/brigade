@@ -212,6 +212,133 @@ def test_release_requires_complete_intent_scan(tmp_path, monkeypatch, capsys, sc
         assert any(item["detail"] == "intent scan incomplete" for item in report["lanes"][0]["evidence"])
 
 
+@pytest.mark.parametrize("scope", ["ledger", "hub"])
+@pytest.mark.parametrize(
+    "scan",
+    [
+        "run-id-missing",
+        "null-run-id-with-run-dir",
+        "null-run-id-with-pid",
+        "null-run-id-running",
+        "null-run-id-launching",
+        "null-run-id-completed",
+        "unrelated-task-id-missing",
+        "unrelated-task-id-null",
+        "unrelated-task-id-number",
+        "unrelated-task-id-empty",
+        "planned",
+        "claimed",
+        "workspace_ready",
+        "lost_race",
+        "failed",
+        "null-run-id-state-missing",
+        "null-run-id-state-null",
+        "null-run-id-state-bogus",
+        "null-run-id-state-list",
+        "null-run-id-state-dict",
+        "null-run-id-state-number",
+        "null-run-id-state-orphaned",
+        "null-run-id-state-unknown",
+        "run-id-missing-planned",
+        "canceled",
+    ],
+)
+def test_release_validates_all_intent_ownership_rows(tmp_path, monkeypatch, capsys, scope, scan):
+    from brigade import fleet_claim_release, fleet_client
+
+    repo = _repo(tmp_path)
+    run = _write_run(repo, "20260820-120000-patrol01", status="ok", extra={"claim_id": "claim-1"})
+    ledger = _ledger(repo)
+    intent = repo / ".brigade/dispatch/dispatch-example/intents/intent-1.json"
+    intent.parent.mkdir(parents=True)
+    # Keep the pre-allocation controls in the shape written by _new_intent.
+    row = {
+        "intent_id": "intent-1",
+        "task_id": "other",
+        "task_item_revision": 1,
+        "attempt_no": 1,
+        "claim_id": "dispatch-intent-1",
+        "seat": "example",
+        "base_sha": "a" * 40,
+        "branch": "brigade/dispatch/other-intent1",
+        "worktree": str(tmp_path / "other-worktree"),
+        "run_id": None,
+        "run_dir": None,
+        "pid": None,
+        "state": "planned",
+        "state_seq": 0,
+        "created_at": "2026-08-20T12:00:00.000000Z",
+        "updated_at": "2026-08-20T12:00:00.000000Z",
+        "terminal": None,
+        "landing": None,
+    }
+    preallocation = {"planned", "claimed", "workspace_ready", "lost_race", "failed"}
+    preallocation.add("canceled")
+    if scan in preallocation:
+        row["state"] = scan
+    elif scan.startswith("unrelated-task-id-"):
+        row["run_id"] = "other"
+        if scan == "unrelated-task-id-missing":
+            del row["task_id"]
+        else:
+            row["task_id"] = {
+                "unrelated-task-id-null": None,
+                "unrelated-task-id-number": 42,
+                "unrelated-task-id-empty": "",
+            }[scan]
+    else:
+        row.update(task_id="task-1", claim_id="claim-1", state="completed")
+        if scan == "run-id-missing-planned":
+            del row["run_id"]
+            row["state"] = "planned"
+        elif scan.startswith("null-run-id-state-"):
+            if scan == "null-run-id-state-missing":
+                del row["state"]
+            else:
+                row["state"] = {
+                    "null-run-id-state-null": None,
+                    "null-run-id-state-bogus": "bogus",
+                    "null-run-id-state-list": [],
+                    "null-run-id-state-dict": {},
+                    "null-run-id-state-number": 42,
+                    "null-run-id-state-orphaned": "orphaned",
+                    "null-run-id-state-unknown": "unknown",
+                }[scan]
+        elif scan == "run-id-missing":
+            del row["run_id"]
+        elif scan == "null-run-id-with-run-dir":
+            row.update(state="workspace_ready", run_dir=str(run))
+        elif scan == "null-run-id-with-pid":
+            row.update(state="claimed", pid=12345)
+        else:
+            row["state"] = scan.removeprefix("null-run-id-")
+    localio.write_json(intent, row)
+    before = ledger.read_bytes(), intent.read_bytes()
+    calls = []
+    monkeypatch.setattr(
+        fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.example.invalid"} if scope == "hub" else {}
+    )
+
+    def release(*args, **kwargs):
+        calls.append(kwargs)
+        print(json.dumps({"released": True}))
+        return 0
+
+    monkeypatch.setattr(fleet_claim_release, "_release_claim", release)
+    report = _patrol(repo, capsys, apply="release-claim")
+    assert report["lanes"][0]["state"] == "complete"
+    assert intent.read_bytes() == before[1]
+    if scan in preallocation:
+        assert json.loads(ledger.read_text())["tasks"][0].get("claim") is None
+        assert len(calls) == (scope == "hub")
+        assert any(action["status"] == "applied" for action in report["actions"])
+    else:
+        assert ledger.read_bytes() == before[0]
+        assert calls == []
+        assert not any(action["status"] == "applied" for action in report["actions"])
+        assert any(item["detail"] == "intent scan incomplete" for item in report["lanes"][0]["evidence"])
+
+
 def test_release_refuses_newer_claim(tmp_path, monkeypatch, capsys):
     from brigade.work_cmd import ledger
 
