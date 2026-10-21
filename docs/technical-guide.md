@@ -2136,18 +2136,42 @@ automatically. You can delete it and past report directories at any time.
 ### Privacy
 
 Bootstrap templates are packaged with the install and can be applied offline.
-Configured integrations can make network calls, including Fleet Hub presence
-publication from `brigade work brief` when a Codex thread id and hub are configured.
+The Python CLI has these local and network data flows:
 
-The normal exception is your own configured tooling:
-
-- `brigade bug report --dry-run` collects and redacts locally, then writes a complete preview and receipt without network calls
-- an explicit bug report can search for its fingerprint through GitHub's `gh` client or unauthenticated search API, then send the reviewed bundle to a public issue only after confirmation or `--yes --not-security`
-- URL and email report destinations print shortened links and the full local bundle path for manual attachment
-- CLI failures update a local redacted error record without uploading or prompting
-- the `pre-push` hook runs Brigade's embedded content guard before commits leave the machine
-- `brigade security enrich` can call MISP only when you explicitly configure and run the `misp` provider
-- `brigade setup` fetches native components, and configured model runs invoke their provider CLIs
+- The automatic update check can send a detached HTTPS version request after a
+  command. It sends version and OS in the User-Agent and a closed install-channel
+  label in a separate header. The Worker currently ignores the channel header.
+  It stores weekly-salted address hashes and version observations for 90 days.
+  `DO_NOT_TRACK=1` or `BRIGADE_TELEMETRY=0` keeps version retrieval with a generic
+  User-Agent and no channel header, so the Worker records nothing.
+  `BRIGADE_NO_UPDATE_CHECK=1` skips the automatic request entirely. CI skips it
+  too. npm refreshes without displaying an update notice. See
+  [Python CLI telemetry](telemetry.md) for fields, retention, and contact details.
+- Tier 1 usage reporting is held pending consent-wording sign-off. This slice
+  creates no install id, collects no command counters, and shows no consent
+  prompt. `brigade daily telemetry` reads local daily receipts and is unrelated.
+- CLI failures write a local redacted error record without uploading or
+  prompting. `brigade bug report --dry-run` collects and redacts locally, then
+  writes a preview and receipt without network calls.
+- An explicit bug report can search for its fingerprint through GitHub's `gh`
+  client or unauthenticated search API, then send the reviewed bundle to a
+  public issue after confirmation or `--yes --not-security`. URL and email
+  destinations print shortened links and the local bundle path for manual
+  attachment.
+- Configured Fleet Hub integrations exchange claims, node presence, events,
+  and work metadata with the configured hub. `brigade work brief` can publish
+  presence when a Codex thread id and hub are configured.
+- Model runs send the selected task and context through configured provider
+  CLIs. Cloud runs submit work to their selected provider. Configured tools,
+  MCP servers, and notification integrations can communicate with their own
+  endpoints when invoked. Review their configuration and provider policies.
+- `brigade setup` downloads native components. An explicit `brigade update`
+  queries release services and downloads release artifacts. Automatic-check
+  kill switches do not disable these requested operations.
+- `brigade security enrich` can call MISP when you configure and run the `misp`
+  provider. Local handoff scans, projections, and content-guard checks process
+  workspace files. The `pre-push` hook runs the embedded content guard before
+  Git sends commits to its configured remote.
 
 ## Maintenance and utility commands
 

@@ -11,6 +11,7 @@ from typing import Any
 from .. import scrub, security_cmd, work_cmd
 from ..guard.audit import run_audit
 from ..guard.policy import load_policy
+from ..isolated_exec import module_argv, trusted_cwd
 from . import evidence as _evidence_mod
 from .paths import (
     CI_ACTION_REF_RE,
@@ -274,25 +275,17 @@ def _content_guard_command(
     if module == "content_guard":
         env["PYTHONPATH"] = str(scanner_dir / "src")
     if introduced and base_ref:
+        history_args = ["--history", "--range", f"{base_ref}..HEAD", "--policy", str(policy_path)]
+        if module == "brigade.guard":
+            return module_argv("brigade.guard.git_scan_target", str(target.resolve()), *history_args), env, None
         return (
-            [
-                sys.executable,
-                "-m",
-                f"{module}.git_scan",
-                "--history",
-                "--range",
-                f"{base_ref}..HEAD",
-                "--policy",
-                str(policy_path),
-            ],
+            [sys.executable, "-m", f"{module}.git_scan", *history_args],
             env,
             None,
         )
     if module == "brigade.guard":
         return (
-            [
-                sys.executable,
-                "-m",
+            module_argv(
                 module,
                 "audit",
                 str(target),
@@ -301,7 +294,7 @@ def _content_guard_command(
                 "--strict",
                 "--policy",
                 str(policy_path),
-            ],
+            ),
             env,
             None,
         )
@@ -347,7 +340,7 @@ def _run_content_guard_check(
     try:
         result = subprocess.run(
             argv,
-            cwd=target,
+            cwd=trusted_cwd() if scrub.scanner_module() == "brigade.guard" else target,
             env=env,
             check=False,
             stdout=subprocess.PIPE,

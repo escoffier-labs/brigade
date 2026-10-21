@@ -23,6 +23,8 @@ from pathlib import Path
 from typing import Any, Literal
 
 from . import care_schedules, managed_block, memory_cmd, runbook_cmd
+from .care_launchers import explicit_workspace, runbook_argv
+from .isolated_exec import trusted_cwd
 
 CARE_KIND = "CARE"
 CARE_MARKER_VERSION = 1
@@ -534,9 +536,9 @@ def _systemd_environment_path(path_value: str) -> str:
     return f"Environment=PATH={path_value}"
 
 
-def _systemd_exec_start_runbook(runbook_rel: str) -> str:
-    argv = ["/usr/bin/env", "brigade", "runbook", "run", "--approved", runbook_rel, "--target", "."]
-    return "ExecStart=" + " ".join(_systemd_quote_value(arg) for arg in argv)
+def _systemd_exec_start_runbook(runbook_rel: str, workspace: Path) -> str:
+    argv = runbook_argv(runbook_rel, workspace)
+    return "ExecStart=" + " ".join(_systemd_quote_value(arg.replace("$", "$$")) for arg in argv)
 
 
 def _systemd_working_directory(workspace: Path) -> str:
@@ -549,15 +551,16 @@ def _cron_escape_path(value: str) -> str:
 
 
 def _cron_command(entry: CareEntry, *, workspace: Path) -> str:
-    quoted_workspace = _cron_escape_path(str(workspace))
     if entry.kind == "runbook":
         assert entry.runbook_rel is not None
-        quoted_rel = _cron_escape_path(entry.runbook_rel)
-        body = f'brigade runbook run --approved "{quoted_rel}" --target .'
+        workspace = workspace.expanduser().resolve()
+        cwd = trusted_cwd()
+        body = " ".join(f'"{_cron_escape_path(arg)}"' for arg in runbook_argv(entry.runbook_rel, workspace))
     else:
         assert entry.shell is not None
+        cwd = workspace
         body = entry.shell
-    return f'cd "{quoted_workspace}" && {body}'
+    return f'cd "{_cron_escape_path(str(cwd))}" && {body}'
 
 
 def _crontab_body(
@@ -1004,17 +1007,8 @@ def _launchd_plists(
         label = f"dev.brigade.care.{identity}.{entry.entry_id}"
         payload: dict[str, Any] = {
             "Label": label,
-            "ProgramArguments": [
-                "/usr/bin/env",
-                "brigade",
-                "runbook",
-                "run",
-                "--approved",
-                entry.runbook_rel,
-                "--target",
-                ".",
-            ],
-            "WorkingDirectory": str(workspace),
+            "ProgramArguments": runbook_argv(entry.runbook_rel, workspace),
+            "WorkingDirectory": str(trusted_cwd()),
             "EnvironmentVariables": {"PATH": _path_prefix(home)},
         }
         # launchd supports interval timers directly; calendar recipes use their
@@ -1400,7 +1394,7 @@ def _systemd_unit_bodies(
         service_name = f"brigade-care-{identity}-{entry.entry_id}.service"
         timer_name = f"brigade-care-{identity}-{entry.entry_id}.timer"
         assert entry.kind == "runbook" and entry.runbook_rel is not None
-        exec_start = _systemd_exec_start_runbook(entry.runbook_rel)
+        exec_start = _systemd_exec_start_runbook(entry.runbook_rel, workspace)
         calendar_lines = [f"OnCalendar={value}" for value in entry.on_calendar.splitlines() if value.strip()]
         service_body = "\n".join(
             [
@@ -1409,7 +1403,7 @@ def _systemd_unit_bodies(
                 "",
                 "[Service]",
                 "Type=oneshot",
-                _systemd_working_directory(workspace),
+                _systemd_working_directory(trusted_cwd()),
                 _systemd_environment_path(path_value),
                 exec_start,
             ]
@@ -1596,6 +1590,9 @@ def _normalize_workspace_path(value: str) -> Path | None:
 
 
 def _workspace_from_care_body(body: str) -> Path | None:
+    explicit = explicit_workspace(body)
+    if explicit is not None:
+        return _normalize_workspace_path(explicit)
     for line in body.splitlines():
         match = _WORKSPACE_CD_RE.search(line)
         if match:

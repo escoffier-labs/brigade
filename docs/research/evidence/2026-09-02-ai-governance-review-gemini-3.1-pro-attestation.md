@@ -31,7 +31,7 @@ The attestation envelope conforms to **in-toto Statement v1** (`[https://in-toto
     },
     "request": {
       "requester": {
-        "id": "alice[at]corp.internal",
+        "id": "alice[at]example.invalid",
         "kind": "human",
         "keyId": "SHA256:uN0b904v83kd9K30Dkdf903ldkj02kdkf903lkd"
       },
@@ -112,7 +112,7 @@ The attestation envelope conforms to **in-toto Statement v1** (`[https://in-toto
       "reason": "Verified unit test execution against OIDC token claims and segregation-of-duties invariant.",
       "approvedAt": "2026-09-02T19:42:15Z",
       "approver": {
-        "id": "bob-security[at]corp.internal",
+        "id": "bob-security[at]example.invalid",
         "kind": "human",
         "keyId": "SHA256:kL893jd08Kdf023jkd98234lksdf0923jksdf90234l"
       },
@@ -232,7 +232,7 @@ Non-repudiation requires unforgeable cryptographic identity binding across three
 # 1. Extract payload and verify the SSH signature over DSSE PAE using allowed_signers
 ssh-keygen -Y verify \
   -f /etc/brigade/allowed_signers \
-  -I "approver[at]corp.internal" \
+  -I "approver[at]example.invalid" \
   -n "in-toto" \
   -s attestation.dsse.sig \
   < <(brigade receipts dsse-pae attestation.json)
@@ -251,7 +251,7 @@ cosign verify-blob-attestation \
 # Verifies OIDC subject, issuer, and inclusion proof from Rekor transparency log
 cosign verify-blob-attestation \
   --bundle brigade-run-20260902.sigstore.json \
-  --certificate-identity "bob-security[at]corp.internal" \
+  --certificate-identity "bob-security[at]example.invalid" \
   --certificate-oidc-issuer "https://login.microsoftonline.com/v2.0" \
   --type https://brigade.dev/attestation/agent-change/v1 \
   --check-claims \
@@ -265,7 +265,7 @@ cosign verify-blob-attestation \
 scitt-verifier verify \
   --transparency-service-root /etc/scitt/ts-root-ca.pem \
   --statement attestation.scitt.cose \
-  --expected-issuer "spiffe://corp.internal/brigade/orchestrator" \
+  --expected-issuer "spiffe://example.invalid/brigade/orchestrator" \
   --expected-tag "https://brigade.dev/attestation/agent-change/v1"
 ```
 

@@ -149,10 +149,12 @@ def test_release_guard_defaults_to_embedded_brigade_modules(tmp_path, monkeypatc
         tmp_path, policy="public-repo", introduced=True, base_ref="origin/main"
     )
     assert tip_error is None
-    assert tip[:3] == [release_cmd.sys.executable, "-m", "brigade.guard"]
-    assert tip[3:7] == ["audit", str(tmp_path), "--scope", "tracked"]
+    from brigade.isolated_exec import module_argv
+
+    assert tip[:6] == module_argv("brigade.guard")
+    assert tip[6:10] == ["audit", str(tmp_path), "--scope", "tracked"]
     assert "--strict" in tip
-    assert history[:3] == [release_cmd.sys.executable, "-m", "brigade.guard.git_scan"]
+    assert history[:7] == module_argv("brigade.guard.git_scan_target", str(tmp_path))
     assert tip_env == history_env == {}
     assert "CONTENT_GUARD_DIR" not in " ".join(tip + history)
 

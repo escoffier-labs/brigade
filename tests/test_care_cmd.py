@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from brigade import care_cmd, care_schedules, cli, managed_block, memory_cmd
+from brigade.isolated_exec import trusted_cwd
 
 
 def test_care_registration_identity_is_stable_and_target_specific(tmp_path):
@@ -394,7 +395,8 @@ def test_care_crontab_percent_in_path_is_escaped(tmp_path, monkeypatch):
     assert care_cmd.install(target=target, backend="crontab", json_output=True) == 0
     body = care_cmd._crontab_body(workspace=target)
     escaped = care_cmd._cron_escape_path(str(target))
-    assert f'cd "{escaped}"' in body
+    assert f'"--target" "{escaped}"' in body
+    assert f'cd "{care_cmd._cron_escape_path(str(trusted_cwd()))}"' in body
     assert "\\%" in escaped
     assert "\\%" in body
 
@@ -515,7 +517,7 @@ def test_care_windows_printed_schtasks_match_each_schedule_hint(tmp_path, monkey
 
 def test_schtasks_create_command_is_well_formed_for_every_catalog_entry(tmp_path):
     """Emitted lines must use /IT (not /NP) and an absolute cmd.exe /TR."""
-    workspace = Path(r"C:\Users\operator\project")
+    workspace = Path(r"C:\Users\operator\project")  # content-guard: allow windows-home-path
     for entry in (*care_cmd.CARE_ENTRIES, *care_cmd.MEMORY_JOB_ENTRIES):
         command = care_cmd._schtasks_create_command(entry, workspace=workspace)
         flags = EXPECTED_SCHTASKS_FLAGS[entry.schedule]
@@ -532,12 +534,15 @@ def test_schtasks_create_command_is_well_formed_for_every_catalog_entry(tmp_path
 
 def test_care_windows_printed_path_uses_single_backslashes(tmp_path):
     entry = care_cmd.CARE_ENTRIES[0]
-    workspace = Path(r"C:\Users\operator\project")
+    workspace = Path(r"C:\Users\operator\project")  # content-guard: allow windows-home-path
     command = care_cmd._schtasks_create_command(entry, workspace=workspace)
-    assert r"C:\Users\operator\project" in command
+    assert r"C:\Users\operator\project" in command  # content-guard: allow windows-home-path
     assert r"C:\\Users" not in command
-    spaced = care_cmd._schtasks_create_command(entry, workspace=Path(r"C:\Users\operator\my project"))
-    assert r"cd /d \"C:\Users\operator\my project\"" in spaced
+    spaced = care_cmd._schtasks_create_command(
+        entry,
+        workspace=Path(r"C:\Users\operator\my project"),  # content-guard: allow windows-home-path
+    )
+    assert r"cd /d \"C:\Users\operator\my project\"" in spaced  # content-guard: allow windows-home-path
     assert r"C:\\Users" not in spaced
     assert "/F:String" not in command
     assert "/RL" not in command
@@ -778,12 +783,11 @@ def test_care_systemd_unit_quotes_workspace_paths_with_spaces(tmp_path, monkeypa
     assert parsed.status == "ok"
     # Compare against the same quoting helper install uses so a win32
     # workspace path (backslashes, spaces) is not asserted as a POSIX literal.
-    assert care_cmd._systemd_working_directory(target.expanduser().resolve()) in parsed.body
+    assert care_cmd._systemd_working_directory(trusted_cwd()) in parsed.body
     assert "my workspace" in parsed.body
-    assert (
-        "ExecStart=/usr/bin/env brigade runbook run --approved "
-        ".brigade/memory-care/runbooks/daily-care-pass.json --target ."
-    ) in parsed.body
+    assert " -I -c " in parsed.body
+    assert "brigade runbook run --approved " in parsed.body
+    assert str(target / ".brigade/memory-care/runbooks/daily-care-pass.json") in parsed.body
 
 
 def test_care_systemd_environment_path_quotes_home_with_spaces(tmp_path, monkeypatch):
@@ -1015,7 +1019,7 @@ def test_care_crontab_dollar_and_backtick_path_remains_literal(tmp_path):
     assert "\\$" in body
     assert "\\`" in body
     command = care_cmd._cron_command(care_cmd.CARE_ENTRIES[0], workspace=workspace)
-    escaped_workspace = care_cmd._cron_escape_path(str(workspace))
+    escaped_workspace = care_cmd._cron_escape_path(str(trusted_cwd()))
     assert command.startswith(f'cd "{escaped_workspace}" && ')
 
 

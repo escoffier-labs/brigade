@@ -194,7 +194,7 @@ def test_worker_payload_drops_invalid_metadata_provenance_blocks():
 
 
 def test_worker_payload_bounds_model_and_adapter_version_labels():
-    credential_shaped_model = "ghp_FAKE0123456789abcdefghijklmnopqrstuvwxyz"
+    credential_shaped_model = "ghp_FAKE0123456789abcdefghijklmnopqrstuvwxyz"  # content-guard: allow bare-token-prefix
     metadata_provenance = {
         "observed_at": "2026-10-13T12:00:00+00:00",
         "fields": {
@@ -283,7 +283,7 @@ def test_worker_payload_bounds_model_and_adapter_version_labels():
 
 
 def test_acpx_receipt_sanitizes_provider_detail_and_events(tmp_path: Path):
-    credential = "ghp_FAKE0123456789abcdefghijklmnopqrstuvwxyz"
+    credential = "ghp_FAKE0123456789abcdefghijklmnopqrstuvwxyz"  # content-guard: allow bare-token-prefix
     private_path = r"\root\.ssh\id_rsa"
     result = WorkerResult(
         worker="cursor-worker",
@@ -336,7 +336,7 @@ def test_acpx_receipt_sanitizes_provider_detail_and_events(tmp_path: Path):
 
 
 def test_sanitized_configured_model_keeps_other_provenance_fields():
-    credential = "ghp_FAKE0123456789abcdefghijklmnopqrstuvwxyz"
+    credential = "ghp_FAKE0123456789abcdefghijklmnopqrstuvwxyz"  # content-guard: allow bare-token-prefix
     metadata_provenance = {
         "observed_at": "2026-10-13T12:00:00+00:00",
         "fields": {

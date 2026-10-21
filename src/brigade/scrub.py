@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any
 
 from . import localio
+from .isolated_exec import module_argv, trusted_cwd
 from .templates import template_root
 
 
@@ -22,6 +23,13 @@ def scanner_dir() -> Path:
 
 def scanner_module() -> str:
     return "content_guard" if os.environ.get("CONTENT_GUARD_DIR") else "brigade.guard"
+
+
+def _scanner_argv(target: Path, policy: Path) -> list[str]:
+    module = scanner_module()
+    if module == "brigade.guard":
+        return module_argv(module, "scan", str(target), "--policy", str(policy.resolve()))
+    return [sys.executable, "-m", module, "scan", str(target), "--policy", str(policy)]
 
 
 def _scanner_env() -> dict[str, str]:
@@ -275,18 +283,11 @@ def run_scan(scan_target: Path, *, repo_target: Path | None = None, policy: str 
             "policy_path": str(resolved_policy),
             "target": str(scan_target),
         }
-    cmd = [
-        sys.executable,
-        "-m",
-        scanner_module(),
-        "scan",
-        str(scan_target),
-        "--policy",
-        str(resolved_policy),
-    ]
+    cmd = _scanner_argv(scan_target, resolved_policy)
     try:
         result = subprocess.run(
             cmd,
+            cwd=trusted_cwd() if scanner_module() == "brigade.guard" else None,
             env=_scanner_env(),
             check=False,
             stdout=subprocess.PIPE,
@@ -359,7 +360,7 @@ def run(
         print(f"brigade scrub: policy not found: {policy_path}", file=sys.stderr)
         return 3
 
-    cmd = [sys.executable, "-m", scanner_module(), "scan", str(target), "--policy", str(policy_path)]
+    cmd = _scanner_argv(target, policy_path)
     if dry_run:
         if json_output:
             print(

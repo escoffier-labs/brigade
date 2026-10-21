@@ -1073,7 +1073,7 @@ def test_batch_ingest_rejects_forged_loose_origin_modality(tmp_path: Path):
     [
         "/home/operator/private/repo",
         "file:///home/operator/private/repo",
-        "C:\\Users\\operator\\private\\repo",
+        "C:\\Users\\operator\\private\\repo",  # content-guard: allow windows-home-path
     ],
 )
 def test_batch_ingest_rejects_absolute_repository_identity(tmp_path: Path, repo_id: str):
@@ -1203,7 +1203,7 @@ def test_batch_ingest_bounds_repository_identity_from_valid_inbound_envelope(
         "abc123",
         "release/2026-08-11",
         "/var/private/revision",
-        "C:\\Users\\operator\\revision",
+        "C:\\Users\\operator\\revision",  # content-guard: allow windows-home-path
         "\\\\server\\share\\revision",
         r"refs\heads\main",
         r"release\candidate",
@@ -1243,7 +1243,7 @@ def test_batch_ingest_rejects_rooted_or_oversized_repository_revisions_from_meta
         "abc123",
         "release/2026-08-11",
         "/var/private/revision",
-        "C:\\Users\\operator\\revision",
+        "C:\\Users\\operator\\revision",  # content-guard: allow windows-home-path
         "\\\\server\\share\\revision",
         r"refs\heads\main",
         r"release\candidate",
@@ -2426,7 +2426,7 @@ def test_untrusted_identity_migration_does_not_carry_dismissal_from_noncanonical
     "repo_id",
     [
         "C:\\",
-        "D:\\Users\\operator\\private\\repo",
+        "D:\\Users\\operator\\private\\repo",  # content-guard: allow windows-home-path
         "\\Users\\operator\\private\\repo",
     ],
 )
@@ -2459,7 +2459,7 @@ def test_batch_ingest_rejects_windows_rooted_repository_identity(tmp_path: Path,
     "locator_value",
     [
         "\\Users\\operator\\private.md",
-        "C:\\Users\\operator\\private.md",
+        "C:\\Users\\operator\\private.md",  # content-guard: allow windows-home-path
     ],
 )
 def test_batch_ingest_rejects_windows_rooted_repo_relative_locators(tmp_path: Path, locator_value: str):
