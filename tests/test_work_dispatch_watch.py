@@ -155,7 +155,13 @@ def test_watch_signals_stop_launches_and_restore_handlers(apply_target, fake_wat
     _tasks(apply_target, [["a.py"], ["b.py"]])
     signum = getattr(signal, signame)
     previous = signal.getsignal(signum)
-    fake_watch.hooks.append(lambda: fake_watch.stop(signum) if fake_watch.launches else None)
+
+    def stop_once():
+        if fake_watch.launches:
+            fake_watch.hooks.remove(stop_once)
+            fake_watch.stop(signum)
+
+    fake_watch.hooks.append(stop_once)
     directory = _watch(apply_target, capsys, "--max", "1", *(["--drain-wait"] if drain else []))
     assert len(fake_watch.launches) == 1
     assert signal.getsignal(signum) == previous
@@ -334,3 +340,134 @@ def test_watch_deadline_drain_does_not_cancel_children(apply_target, fake_watch,
     directory = _watch(apply_target, capsys, "--deadline", "0.1", "--drain-wait", "--interval", "0.1")
     assert store.read(directory / "session.json")["close_reason"] == "deadline"
     assert store.intents(apply_target)[0][1]["state"] == "completed"
+
+
+def test_later_invocation_keeps_detached_watch_children_after_deadline(apply_target, fake_watch, monkeypatch, capsys):
+    def cancel(*args, **kwargs):
+        pytest.fail("an expired watch must not cancel detached children on later reconciliation")
+
+    monkeypatch.setattr(apply.Apply, "cancel", cancel)
+    directory = _watch(apply_target, capsys, "--deadline", "0.1", "--max-total", "2", "--interval", "0.1")
+    (tick_dir,) = [path for path in store.sessions(apply_target) if path != directory]
+    session = store.read(tick_dir / "session.json")
+    session["created_at"] = "2000-01-01T00:00:00+00:00"
+    localio.write_json(tick_dir / "session.json", session)
+
+    assert apply.Apply(apply_target).reconcile(no_wait=True) == 0
+    assert store.intents(apply_target)[0][1]["state"] == "running"
+    assert session["deadline"] is None
+    assert session["max_total"] is None
+    (task,) = work_cmd._read_task_ledger(apply_target)["tasks"]
+    assert task["claim"]
+
+
+@pytest.mark.parametrize("signame", ["SIGINT", "SIGTERM"])
+def test_second_signal_ends_drain_wait_and_records_close(apply_target, fake_watch, capsys, signame):
+    import signal
+
+    signum = getattr(signal, signame)
+    previous = signal.getsignal(signum)
+    signals = []
+
+    def stop_twice():
+        signals.append(fake_watch.clock[0])
+        if len(signals) == 2:
+            fake_watch.hooks.remove(stop_twice)
+        fake_watch.stop(signum)
+
+    fake_watch.hooks.append(stop_twice)
+    directory = _watch(apply_target, capsys, "--drain-wait", "--interval", "0.1")
+    assert len(signals) == 2
+    assert fake_watch.clock[0] < 0.5
+    assert store.intents(apply_target)[0][1]["state"] == "running"
+    session = store.read(directory / "session.json")
+    assert session["finished_at"] and session["close_reason"] == signame
+    closed = store.events(directory)[-1]
+    assert closed["event_type"] == "work.dispatch.closed"
+    assert closed["payload"]["live_children"] == 1
+    assert signal.getsignal(signum) == previous
+
+
+@pytest.mark.parametrize("failure_at", ["advance", "reconcile"])
+def test_watch_records_tick_error_and_continues_without_canceling_siblings(
+    apply_target, fake_watch, monkeypatch, capsys, failure_at
+):
+    _tasks(apply_target, [["a.py"], ["b.py"], ["c.py"]])
+    advance, refresh = apply.Apply._advance, apply.Apply._refresh
+    failures = []
+
+    def broken_advance(engine, path, row, session):
+        if failure_at == "advance" and row["task_id"] == "task-1" and not failures:
+            failures.append(row["intent_id"])
+            raise KeyError("damaged intent")
+        return advance(engine, path, row, session)
+
+    def broken_refresh(engine, path, row, session):
+        if failure_at == "reconcile" and row["task_id"] == "task-0" and fake_watch.clock[0] >= 0.2 and not failures:
+            failures.append(row["intent_id"])
+            raise KeyError("damaged intent")
+        return refresh(engine, path, row, session)
+
+    def cancel(*args, **kwargs):
+        pytest.fail("a tick error must preserve children and their claims")
+
+    monkeypatch.setattr(apply.Apply, "_advance", broken_advance)
+    monkeypatch.setattr(apply.Apply, "_refresh", broken_refresh)
+    monkeypatch.setattr(apply.Apply, "cancel", cancel)
+
+    def stop_once():
+        if fake_watch.clock[0] >= 1.5:
+            fake_watch.hooks.remove(stop_once)
+            fake_watch.stop()
+
+    fake_watch.hooks.append(stop_once)
+    assert (
+        cli.main(
+            [
+                "work",
+                "dispatch",
+                "--watch",
+                "--target",
+                str(apply_target),
+                "--worker",
+                "coder",
+                "--max",
+                "2",
+                "--interval",
+                "0.2",
+                "--json",
+            ]
+        )
+        == 1
+    )
+    directory = store.root(apply_target) / json.loads(capsys.readouterr().out)["dispatch_id"]
+    assert failures
+    assert len(fake_watch.launches) == 3
+    assert all(row["state"] == "completed" for _, row in store.intents(apply_target))
+    assert all(task["claim"] for task in work_cmd._read_task_ledger(apply_target)["tasks"])
+    errors = [
+        event
+        for path in store.sessions(apply_target)
+        for event in store.events(path)
+        if event["event_type"] == "work.dispatch.tick_error"
+    ]
+    assert len(errors) == 1
+    assert errors[0]["payload"]["error_type"] == "KeyError"
+    assert "damaged intent" in errors[0]["payload"]["error"]
+    assert store.read(directory / "session.json")["close_reason"] == "SIGTERM"
+
+
+@pytest.mark.parametrize("state", ["claimed", "workspace_ready"])
+def test_watch_close_reports_claimed_prelaunch_intents(apply_target, fake_watch, monkeypatch, capsys, state):
+    def interrupted(engine, path, row, session):
+        apply.locking._claim_task(engine.target, row["task_id"], actor=row["seat"], claim_id=row["claim_id"])
+        store.transition(path, row, state)
+        fake_watch.stop()
+
+    monkeypatch.setattr(apply.Apply, "_advance", interrupted)
+    directory = _watch(apply_target, capsys)
+    closed = store.events(directory)[-1]["payload"]
+    assert closed["live_children"] == 0
+    assert closed["claimed_prelaunch_intents"] == 1
+    (task,) = work_cmd._read_task_ledger(apply_target)["tasks"]
+    assert task["claim"]

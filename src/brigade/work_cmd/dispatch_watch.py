@@ -11,6 +11,7 @@ from typing import Any, Callable
 from .. import __version__, localio
 from . import dispatch_state as store
 from .dispatch_apply import Apply
+from .ledger import locking
 
 
 def installed_version() -> str:
@@ -29,6 +30,7 @@ class Watch:
         self.interval = interval
         self.drain_wait = drain_wait
         self.reason: str | None = None
+        self.stop_waiting = False
         self.version = installed_version()
         self.started = time.monotonic()
         self.initial_runs = {row["intent_id"] for _, row in store.intents(engine.target) if row.get("run_dir")}
@@ -126,12 +128,26 @@ class Watch:
         self.seen = current
         self.tick_no += 1
 
+    def claimed_prelaunch_intents(self) -> int:
+        claims = {
+            task["id"]: (task.get("claim") or {}).get("claim_id")
+            for task in locking._read_task_ledger(self.engine.target)["tasks"]
+        }
+        return sum(
+            row["state"] in {"planned", "claimed", "workspace_ready", "launching"}
+            and claims.get(row["task_id"]) == row["claim_id"]
+            and not store.child_alive(row)
+            for _, row in store.intents(self.engine.target)
+        )
+
     def run(self, tick: Callable[[], int]) -> int:
         previous = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
 
         def stop(signum: int, frame: Any) -> None:
             if self.reason is None:
                 self.reason = signal.Signals(signum).name
+            else:
+                self.stop_waiting = True
 
         result = 0
         try:
@@ -140,15 +156,24 @@ class Watch:
             self.engine.can_launch = self.can_launch
             self.engine.reservation_allowed = self.budget_allows
             self.engine.pause = self.pause
+            self.engine.continue_on_error = True
             store.event(self.directory, "work.dispatch.opened", {"version": self.version})
             while self.budget_allows():
-                result = max(result, tick())
+                try:
+                    result = max(result, tick())
+                except Exception as exc:
+                    store.event(
+                        self.directory,
+                        "work.dispatch.tick_error",
+                        {"tick": self.tick_no, "error_type": type(exc).__name__, "error": str(exc)},
+                    )
+                    result = max(result, 1)
                 self.record_tick()
                 if self.budget_allows():
                     self.pause(self.interval)
             # Reconciliation in drain mode observes and finalizes, without new
             # intents, retries, or resuming a pre-launch intent.
-            while True:
+            while not self.stop_waiting:
                 result = max(result, self.engine.reconcile(no_wait=True, launch=False))
                 self.record_tick()
                 if not self.drain_wait or not store.live_children(self.engine.target):
@@ -168,6 +193,7 @@ class Watch:
                         "reason": self.session["close_reason"],
                         "drain_wait": self.drain_wait,
                         "live_children": store.live_children(self.engine.target),
+                        "claimed_prelaunch_intents": self.claimed_prelaunch_intents(),
                     },
                 )
                 localio.write_json(self.directory / "session.json", self.session)
@@ -177,4 +203,5 @@ class Watch:
                 self.engine.can_launch = lambda: True
                 self.engine.reservation_allowed = lambda: True
                 self.engine.pause = time.sleep
+                self.engine.continue_on_error = False
         return result

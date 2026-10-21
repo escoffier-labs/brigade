@@ -295,6 +295,10 @@ def dispatch(
                             "dispatch_id": tick_id,
                             "watch": False,
                             "parent_watch": dispatch_id,
+                            # Watch ceilings stop launches in the supervisor.
+                            # Saved ticks must remain resumable after it exits.
+                            "deadline": None,
+                            "max_total": None,
                             "created_at": datetime.now(timezone.utc).isoformat(),
                             "ledger_digest": tick_plan["ledger_digest"],
                             "plan_digest": tick_plan["plan_digest"],

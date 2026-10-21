@@ -225,6 +225,7 @@ class Apply:
         self.started = time.monotonic()
         self.last_launch: float | None = None
         self.adopted: set[Path] = set()
+        self.continue_on_error = False
         self.can_launch: Callable[[], bool] = lambda: True
         self.reservation_allowed: Callable[[], bool] = lambda: True
         self.pause: Callable[[float], None] = time.sleep
@@ -619,8 +620,9 @@ class Apply:
             self._cancel_previous()
             return 130
         except Exception:
-            self.cancel(rows, session)
-            self._cancel_previous()
+            if not self.continue_on_error:
+                self.cancel(rows, session)
+                self._cancel_previous()
             raise
         if all(not store.supervised(row) for _, row in rows):
             session["finished_at"] = localio.utc_now_iso()
@@ -673,13 +675,23 @@ class Apply:
             session = store.read(directory / "session.json")
             if session.get("dry_run") or session.get("watch"):
                 continue
-            # Terminal rows may still have a claim-release side effect pending.
-            for path in (directory / "intents").glob("*.json"):
-                row = store.read(path)
-                if row["state"] in store.TERMINAL:
-                    self.refresh(path, row, session)
-            if not session.get("finished_at"):
-                result = max(result, self.session(directory, no_wait=no_wait, launch=launch))
-                if not store.read(directory / "session.json").get("finished_at"):
-                    self.adopted.add(directory)
+            try:
+                # Terminal rows may still have a claim-release side effect pending.
+                for path in (directory / "intents").glob("*.json"):
+                    row = store.read(path)
+                    if row["state"] in store.TERMINAL:
+                        self.refresh(path, row, session)
+                if not session.get("finished_at"):
+                    result = max(result, self.session(directory, no_wait=no_wait, launch=launch))
+                    if not store.read(directory / "session.json").get("finished_at"):
+                        self.adopted.add(directory)
+            except Exception as exc:
+                if not self.continue_on_error:
+                    raise
+                store.event(
+                    directory,
+                    "work.dispatch.tick_error",
+                    {"dispatch_id": directory.name, "error_type": type(exc).__name__, "error": str(exc)},
+                )
+                result = max(result, 1)
         return result

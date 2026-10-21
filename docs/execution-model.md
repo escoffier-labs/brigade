@@ -33,8 +33,8 @@ receipt merely because they ran. `brigade work ready` computes candidates and
 parallel-safe waves without launching workers. `brigade work dispatch` claims
 and launches one ready wave, then supervises its children until they finish.
 `--no-wait` returns after launch. A later invocation reconciles those children
-and fills available capacity before waiting. Hub summary mirroring and a
-continuous `--watch` mode remain follow-up work. Run patrol is planned in
+and fills available capacity before waiting. Hub summary mirroring remains
+follow-up work. Run patrol is planned in
 [#1850](https://github.com/escoffier-labs/brigade/issues/1850), and memory reflection in [#1856](https://github.com/escoffier-labs/brigade/issues/1856).
 
 ## Long-running modes
@@ -83,7 +83,13 @@ KillMode=process
 retain their process groups. This allows the default detach behavior. Add
 `--drain-wait` to wait for children instead, and set `TimeoutStopSec` to cover
 the expected child runtime. Both SIGTERM and SIGINT stop new launches and write
-a close receipt. Each tick checks the installed Brigade version and exits
+a close receipt. A second signal ends drain waiting and leaves unfinished
+children detached. Unexpected tick errors are recorded as
+`work.dispatch.tick_error`, preserve running children, and allow later ticks
+to continue. A close receipt includes `claimed_prelaunch_intents`, the count
+of intents that still hold a claim without a child. The next dispatch invocation
+resumes those intents using their saved plans and worktrees.
+Each tick checks the installed Brigade version and exits
 cleanly when it changes. `Restart=always` starts a new process with the updated
 installation. The dispatcher sleeps between ticks even when no task is ready.
 `--max-total` and `--deadline` bound the whole watch session, including retries.
