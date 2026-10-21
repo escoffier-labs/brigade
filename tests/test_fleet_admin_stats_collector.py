@@ -1,6 +1,7 @@
 """Read allowlist and aggregate fixture collection, never executing wrangler or HTTP."""
 
 import json
+import re
 from datetime import datetime, timezone
 
 import pytest
@@ -87,7 +88,13 @@ def test_analytics_and_downloads_fixture_transports(monkeypatch):
     def fetch(url, *, body=None, token=None):
         requests.append((url, body, token))
         if body:
-            assert body["query"] == collector.ANALYTICS_QUERY
+            # Cloudflare uses its lowercase string scalar for account and script filters.
+            assert dict(re.findall(r"\$(\w+):\s*(\w+!)", body["query"])) == {
+                "account": "string!",
+                "worker": "string!",
+                "start": "Time!",
+                "end": "Time!",
+            }
             assert body["variables"]["account"] == "example-account"
             assert body["variables"]["start"] == "2026-09-20T00:00:00+00:00"
             assert body["variables"]["end"] == "2026-10-20T00:00:00+00:00"
