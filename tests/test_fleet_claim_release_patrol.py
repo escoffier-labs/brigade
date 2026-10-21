@@ -256,3 +256,30 @@ def test_unconfirmed_hub_inspection_never_becomes_stable_fence(tmp_path, monkeyp
         report = _patrol(repo, capsys, apply="release-claim", now=NOW + timedelta(minutes=minutes))
         assert report["actions"][0]["status"] == "refused"
     assert len(probes) == 2 and releases == []
+
+
+@pytest.mark.parametrize("malformed", [None, [], "x", True, 1], ids=["omitted", "list", "string", "bool", "number"])
+def test_malformed_inspect_response_is_retried_not_fenced_as_no_claim(tmp_path, monkeypatch, capsys, malformed):
+    repo = _repo(tmp_path)
+    _write_run(repo, "20260820-120000-patrol01", status="ok")
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.invalid", "token": "fake"})
+    monkeypatch.setattr(fleet_client, "find_workspace_for_path", lambda path: None)
+    monkeypatch.setattr(fleet_client, "resolve_claim_target", lambda path: "test-target")
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda *args: NODE)
+    monkeypatch.setattr(fleet_client, "_run_with_deadline", lambda fn, **kw: fn())
+    actions, responses = [], []
+
+    def endpoint(url, token, body, *, timeout):
+        actions.append(body["action"])
+        return 200, responses[0]
+
+    monkeypatch.setattr(fleet_client, "_post_claim_blocking", endpoint)
+    responses.append({"inspected": True} if malformed is None else {"inspected": True, "claim": malformed})
+    report = _patrol(repo, capsys, apply="release-claim", now=NOW)
+    assert report["actions"][0]["status"] == "refused"
+    assert actions == ["inspect"]
+    responses[0] = {"inspected": True, "claim": None, "owned": False}
+    report = _patrol(repo, capsys, apply="release-claim", now=NOW + timedelta(minutes=10))
+    assert actions == ["inspect", "inspect"]
+    assert report["actions"][0]["status"] == "observed"
+    assert report["actions"][0]["result"]["reason"] == "no-claim"
