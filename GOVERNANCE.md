@@ -14,6 +14,8 @@ Brigade favors:
 
 Changes that preserve those principles can usually move through issues and pull requests. Changes that alter those boundaries need discussion first.
 
+The Python CLI's passive version request, retention, and opt-outs are documented in [Python CLI telemetry](docs/telemetry.md). Opt-in usage reporting remains held pending maintainer sign-off on consent wording.
+
 ## What needs discussion first
 
 Open an issue before starting work on:

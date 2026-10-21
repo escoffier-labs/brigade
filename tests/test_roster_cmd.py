@@ -17,7 +17,7 @@ def _hermetic_home(tmp_path_factory, monkeypatch):
     """Keep the machine's real ~/.brigade/roster.toml out of init's shadow guard.
 
     Tests that need a specific home (with or without a user roster) re-patch
-    Path.home in their own body, which takes precedence over this fixture.
+    Path.home in their own body, which takes precedence over this fixture.   # content-guard: allow private-hostname
     """
     home = tmp_path_factory.mktemp("roster-cmd-home")
     monkeypatch.setattr(Path, "home", lambda: home)

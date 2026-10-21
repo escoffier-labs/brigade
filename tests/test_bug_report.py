@@ -233,8 +233,8 @@ def test_adversarial_values_scrubbed_before_persistence(report_env, monkeypatch,
     log = tmp_path / "chosen.log"
     secrets = [
         str(Path.home()) + "/private",
-        r"C:\Users\example-user\private file.txt",
-        "/root/private",
+        r"C:\Users\example-user\private file.txt",  # content-guard: allow windows-home-path
+        "/root/private",  # content-guard: allow root-path
         socket.gethostname(),
         "ghp_" + "a" * 36,
         *[prefix + "a" * 36 for prefix in ("gho_", "ghu_", "ghs_", "ghr_", "github_pat_", "sk-", "xoxb-")],
@@ -243,7 +243,7 @@ def test_adversarial_values_scrubbed_before_persistence(report_env, monkeypatch,
         "op://vault/item/key",
         "keepass://entry/key",
         "unique-secret-value",
-        "build.private.internal",
+        "build.private.internal",  # content-guard: allow private-hostname
     ]
     log.write_text("\n".join(secrets) + "\n<!-- content-" + "guard: allow all file -->")
     assert invoke(target, "--dry-run", "--json", "--include-output", str(log)) == 0

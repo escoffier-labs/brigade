@@ -179,28 +179,86 @@ async function proveInstalledWheel(privateEnv) {
   const code=`import base64,csv,hashlib,importlib.metadata as m,io,json,zipfile\nfrom pathlib import Path\nwith zipfile.ZipFile(${JSON.stringify(wheel)}) as z:\n d=m.distribution('brigade-cli'); rows={r[0]:r for r in csv.reader(io.StringIO(z.read('brigade_cli-${runtime.payload.version}.dist-info/RECORD').decode()))}; result={}\n for name in ['brigade/__init__.py','brigade/work_cmd/verify_runtime.py']:\n  data=Path(d.locate_file(name)).read_bytes(); assert data==z.read(name); digest=base64.urlsafe_b64encode(hashlib.sha256(data).digest()).rstrip(b'=').decode(); assert rows[name][1]=='sha256='+digest; result[name]=hashlib.sha256(data).hexdigest()\n print(json.dumps(result))`;
   const r=await execute(contract.toolPython(privateEnv),['-I','-c',code]);record('installed-wheel-RECORD',r);assert.equal(r.exit,0,r.stderr);
 }
+async function proveVersionRefresh(privatePython,identityEnv,scratch) {
+  const sentinel=path.join(scratch,'forbidden.log');
+  // Mock only the endpoint and process launch. Exercise real cache writes and
+  // request construction, and fail even if production swallows a socket error.
+  const code=`import io,json,os,platform,socket
+from pathlib import Path
+from contextlib import closing,redirect_stderr
+from brigade import __version__,distribution,update_notify as n,update_cmd as u
+assert distribution.is_npm()
+log=Path(${JSON.stringify(sentinel)})
+def denied(*a,**kw):
+ log.write_text('forbidden'); raise AssertionError('unexpected update side effect')
+socket.socket=denied; socket.create_connection=denied; u.default_paths=denied
+requests=[]; spawns=[]
+def fetch(request,timeout):
+ requests.append((request,timeout)); return closing(io.BytesIO(b'{"latest":"98.0.0"}'))
+n.urllib.request.urlopen=fetch
+n.subprocess.Popen=lambda *a,**kw: spawns.append((a,kw))
+class TTY(io.StringIO):
+ def isatty(self): return True
+base=dict(os.environ)
+for key in ('BRIGADE_NO_UPDATE_CHECK','CI','DO_NOT_TRACK','BRIGADE_TELEMETRY','BRIGADE_INSTALL_CHANNEL'):
+ base.pop(key,None)
+for extra in ({},{'DO_NOT_TRACK':'1'},{'BRIGADE_TELEMETRY':'0'}):
+ os.environ.clear(); os.environ.update(base); os.environ.update(extra)
+ p=n.cache_path(os.environ); p.parent.mkdir(parents=True,exist_ok=True)
+ p.write_text(json.dumps({'latest':'99.0.0','checked_at':0})); before=p.read_bytes()
+ requests.clear(); spawns.clear(); err=TTY()
+ n.maybe_notify(['work','brief'],0,now=1000000,stderr=err)
+ assert err.getvalue()=='' and n.available_update() is None
+ assert len(spawns)==1 and spawns[0][1]['env']['BRIGADE_INSTALL_CHANNEL']=='npm'
+ assert spawns[0][0][0][-2:]==['update','--notify-refresh']
+ assert requests==[]
+ assert n.run_refresh(now=1000000)==0
+ assert len(requests)==1
+ request,timeout=requests[0]
+ assert request.full_url==n.CHECK_URL and request.get_method()=='GET' and request.data is None and timeout==5
+ if extra:
+  assert request.get_header('User-agent')=='Python-urllib' and request.get_header('X-brigade-channel') is None
+ else:
+  assert request.get_header('User-agent')==f'brigade-cli/{__version__} ({platform.system()})'
+  assert request.get_header('X-brigade-channel')=='npm'
+ state=json.loads(p.read_text()); assert state['latest']=='98.0.0' and state['checked_at']==1000000 and p.read_bytes()!=before
+ n.maybe_notify(['work','brief'],0,now=1000001,stderr=err)
+ assert len(spawns)==1 and len(requests)==1 and err.getvalue()==''
+for gate in ('BRIGADE_NO_UPDATE_CHECK','CI'):
+ os.environ.clear(); os.environ.update(base); os.environ[gate]='1'
+ before=p.read_bytes(); requests.clear(); spawns.clear()
+ n.maybe_notify(['work','brief'],0,stderr=TTY()); assert n.run_refresh()==0
+ assert requests==[] and spawns==[] and p.read_bytes()==before
+n.cache_path=denied
+assert n.available_update() is None
+with redirect_stderr(io.StringIO()):
+ assert u.run_update()==1
+assert not log.exists()
+print('npm refresh: one bounded mocked GET per refresh, cache updated, notice suppressed, channel and opt-outs verified')`;
+  for(const flags of [['-I'],[]]) {
+    const guarded=await execute(privatePython,[...flags,'-c',code],{env:identityEnv});
+    record('private-respawn-version-refresh-'+(flags.length?'isolated':'normal'),guarded);
+    assert.equal(guarded.exit,0,guarded.stderr);assert.ok(!fs.existsSync(sentinel));
+  }
+}
 async function proveIdentity(privateEnv,independent) {
   const privatePython=contract.toolPython(privateEnv);
   const scratch=path.join(root,'identity-home');fs.mkdirSync(scratch,{recursive:true});
   const identityEnv={...env,HOME:scratch,USERPROFILE:scratch,XDG_CACHE_HOME:path.join(scratch,'cache')};
   delete identityEnv.BRIGADE_NO_UPDATE_CHECK;delete identityEnv.BRIGADE_DISTRIBUTION;delete identityEnv.CI;
   const wheelPath=path.join(path.dirname(launcher),'wheel',runtime.payload.wheel);
-  const seed=`import json,os,sys; sys.path.insert(0,${JSON.stringify(wheelPath)}); from brigade.update_notify import cache_path; p=cache_path(os.environ); p.parent.mkdir(parents=True,exist_ok=True); p.write_text(json.dumps({'latest':'99.0.0','checked_at':0})); print(str(p))`;
+  const seed=`import json,os,sys,time; sys.path.insert(0,${JSON.stringify(wheelPath)}); from brigade.update_notify import cache_path; p=cache_path(os.environ); p.parent.mkdir(parents=True,exist_ok=True); p.write_text(json.dumps({'latest':'99.0.0','checked_at':time.time()})); print(str(p))`;
   const seeded=await execute(independent,['-I','-c',seed],{env:identityEnv});assert.equal(seeded.exit,0,seeded.stderr);
   const cache=seeded.stdout.trim(),before=fs.readFileSync(cache);
   for(const isolated of [true,false]) {
-    for(const argv of [['work','brief','--target',root],['update','--notify-refresh'],['update']]) {
+    for(const argv of [['work','brief','--target',root],['update']]) {
       const r=await execute(privatePython,[...(isolated?['-I']:[]),'-m','brigade',...argv],{env:identityEnv});
       record('private-respawn-'+(isolated?'isolated':'normal')+'-'+argv.join('-'),r);
       assert.equal(r.exit,argv.length===1?1:0,r.stderr);assert.ok(!/update_available|new brigade release/i.test(r.stdout+r.stderr));
       assert.deepEqual(fs.readFileSync(cache),before);
     }
   }
-  // Deterministic owner sentinels: the installed module must return before I/O,
-  // cache access or spawning, including APIs that deliberately swallow errors.
-  const sentinel=path.join(scratch,'forbidden.log');
-  const code=`import os,sys,runpy,json\nfrom pathlib import Path\nfrom brigade import distribution,update_notify as n,update_cmd as u\nassert distribution.is_npm()\nlog=Path(${JSON.stringify(sentinel)})\ndef denied(*a,**kw):\n log.write_text('forbidden'); raise AssertionError('forbidden update side effect')\nn.cache_path=denied; n._spawn_refresh=denied; n.urllib.request.urlopen=denied; n.localio.write_json=denied; u.default_paths=denied\nclass TTY:\n def isatty(self): return True\n def write(self,*a): denied()\nassert n.available_update() is None\nn.maybe_notify(['work','brief'],0,stderr=TTY(),spawn=denied)\nassert n.run_refresh()==0\nassert u.run_update()==1\nassert not log.exists()\nprint('all passive and explicit owner gates refused side effects')`;
-  for(const flags of [['-I'],[]]) {const guarded=await execute(privatePython,[...flags,'-c',code],{env:identityEnv});record('private-respawn-deterministic-side-effect-guard-'+(flags.length?'isolated':'normal'),guarded);assert.equal(guarded.exit,0,guarded.stderr);assert.ok(!fs.existsSync(sentinel));}
+  await proveVersionRefresh(privatePython,identityEnv,scratch);
   const marker=JSON.parse(fs.readFileSync(path.join(path.dirname(privateEnv.UV_TOOL_DIR),'initialized.json')));
   const caller=await execute(independent,['-I','-c',`import sys; sys.path.insert(0,${JSON.stringify(path.dirname(marker.identity.path))}); from brigade import distribution as d; assert not d.is_npm(); print('independent interpreter unmarked')`],{env:identityEnv});
   assert.equal(caller.exit,0,caller.stderr);record('independent-interpreter-unmarked',caller);
@@ -231,12 +289,21 @@ async function proveCanceledReceipt(target,run) {
 }
 async function main() {
   const seen=new Set();
-  const valued=new Set(['--artifacts','--out','--expected-platform','--registry-spec','--expected-packaging-sha']);
+  const valued=new Set(['--artifacts','--out','--expected-platform','--registry-spec','--expected-packaging-sha','--version-check-python']);
   for(let i=0;i<args.length;i++) {
     const name=args[i];
     assert.ok(valued.has(name) || name==='--contained-linux-uncatchable','Unknown option: '+name);
     assert.ok(!seen.has(name),'Duplicate option: '+name);seen.add(name);
     if(valued.has(name)) {assert.ok(args[i+1] && !args[i+1].startsWith('--'),'Required: '+name);i++;}
+  }
+  if(args.includes('--version-check-python')) {
+    assert.equal(args.length,6,'version-check-only mode accepts only --artifacts, --out and --version-check-python');
+    receipt.acceptanceMode='version-check-only';
+    const scratch=path.join(root,'identity-home');fs.mkdirSync(scratch,{recursive:true});
+    const identityEnv={...process.env,HOME:scratch,USERPROFILE:scratch,XDG_CACHE_HOME:path.join(scratch,'cache')};
+    await proveVersionRefresh(option('--version-check-python'),identityEnv,scratch);
+    receipt.status='passed';receipt.completedAt=new Date().toISOString();save();
+    console.log(JSON.stringify({status:receipt.status,receipt:reportPath,mode:receipt.acceptanceMode}));return;
   }
   const packagingIndex=args.indexOf('--expected-packaging-sha');
   const expectedPackagingSha=packagingIndex<0?process.env.GITHUB_SHA:args[packagingIndex+1];

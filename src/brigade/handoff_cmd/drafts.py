@@ -831,7 +831,7 @@ def build_draft(
             raise ValueError(f"handoff draft path is a symlink: {path}")
         fd, tmp_name = tempfile.mkstemp(dir=inbox_path, prefix=f".{path.name}.", suffix=".tmp")
         try:
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
                 handle.write(text)
             os.replace(tmp_name, path)
         except BaseException:
@@ -845,7 +845,7 @@ def build_draft(
                 fd = os.open(path, flags, 0o600)
             except FileExistsError as exc:
                 raise ValueError(f"handoff draft already exists: {path}") from exc
-            with os.fdopen(fd, "w", encoding="utf-8") as handle:
+            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
                 handle.write(text)
         else:
             # Without O_NOFOLLOW (Windows), O_EXCL can follow a dangling symlink. Hard-link a
@@ -853,7 +853,7 @@ def build_draft(
             # fails on any existing entry, symlinks included.
             fd, tmp_name = tempfile.mkstemp(dir=inbox_path, prefix=f".{path.name}.", suffix=".tmp")
             try:
-                with os.fdopen(fd, "w", encoding="utf-8") as handle:
+                with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
                     handle.write(text)
                 try:
                     os.link(tmp_name, path)
