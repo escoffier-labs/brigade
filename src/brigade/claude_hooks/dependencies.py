@@ -6,6 +6,7 @@ import hashlib
 import json
 import sqlite3
 import threading
+from contextlib import closing
 from functools import partial
 from pathlib import Path
 from typing import Any
@@ -141,7 +142,7 @@ def injected_brief_files(text: str) -> list[str]:
 
 def _content_matches_index(target: Path, db: Path, stopped: threading.Event) -> bool:
     """Verify SHA-256 content independently of the engine's size/mtime shortcut."""
-    with sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True, timeout=0.1) as conn:
+    with closing(sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True, timeout=0.1)) as conn:
         count = 0
         for path, expected in conn.execute("SELECT path, content_hash FROM files"):
             if stopped.is_set() or not isinstance(path, str) or relative_path(target, path) != path:

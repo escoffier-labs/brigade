@@ -8,6 +8,7 @@ import os
 import sqlite3
 import sys
 import threading
+from contextlib import closing
 from pathlib import Path
 
 import pytest
@@ -48,7 +49,7 @@ def event(target: Path, name: str, **fields):
 def graph(target: Path, monkeypatch, **overrides):
     db = target / ".graphtrail" / "graphtrail.db"
     db.parent.mkdir()
-    with sqlite3.connect(db) as conn:
+    with closing(sqlite3.connect(db)) as conn, conn:
         conn.execute("CREATE TABLE files(path TEXT, content_hash TEXT)")
         conn.executemany(
             "INSERT INTO files VALUES (?, ?)",
@@ -79,6 +80,35 @@ def graph(target: Path, monkeypatch, **overrides):
 
     monkeypatch.setattr(graphtrail_delta, "_run_graphtrail", run)
     return calls
+
+
+@pytest.mark.parametrize("operation", ["fixture", "matching", "stale", "missing_file"])
+def test_graph_connections_close_after_use(target, monkeypatch, operation):
+    connections = []
+    connect = sqlite3.connect
+
+    def tracked_connect(*args, **kwargs):
+        conn = connect(*args, **kwargs)
+        connections.append(conn)
+        return conn
+
+    monkeypatch.setattr(sqlite3, "connect", tracked_connect)
+    graph(target, monkeypatch)
+    if operation != "fixture":
+        connections.clear()
+        if operation == "stale":
+            (target / "caller.py").write_text("changed\n")
+        elif operation == "missing_file":
+            (target / "caller.py").unlink()
+        db = target / ".graphtrail" / "graphtrail.db"
+        if operation == "missing_file":
+            with pytest.raises(FileNotFoundError):
+                dependencies._content_matches_index(target, db, threading.Event())
+        else:
+            assert dependencies._content_matches_index(target, db, threading.Event()) is (operation == "matching")
+    assert len(connections) == 1
+    with pytest.raises(sqlite3.ProgrammingError, match="closed"):
+        connections[0].execute("SELECT 1")
 
 
 @pytest.mark.parametrize("seen", ["unread", "read", "brief"])
