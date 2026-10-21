@@ -148,6 +148,244 @@ def test_execute_protected_prompt_and_replay_cannot_repeat_turn(tmp_path, monkey
 
 
 @requires_posix
+@pytest.mark.parametrize("failure", ["create", "write", "flush", "file-fsync", "directory-fsync", "intent-write"])
+def test_local_preparation_failure_is_recoverable_before_hub_start(tmp_path, monkeypatch, failure):
+    from brigade import fleet_action_runner as runner, fleet_hub_actions as actions
+
+    conn, path, log, action = broker_fixture(tmp_path, monkeypatch)
+    claimed = actions.claim(conn, "node-fixture")
+    action_id, generation = action["action_id"], claimed["generation"]
+    prompt = tmp_path / "journal" / (action_id + ".prompt")
+    journal = prompt.with_suffix(".jsonl")
+    normal_open, normal_fdopen = runner.fleet_client._open_private, runner.os.fdopen
+    normal_fsync, normal_write = runner.os.fsync, runner._write
+    prompt_fds = set()
+
+    def fail():
+        raise OSError("fixture local preparation failure")
+
+    def open_private(file, flags, **kwargs):
+        if file == prompt and flags & os.O_WRONLY:
+            if failure == "create":
+                fail()
+            fd = normal_open(file, flags, **kwargs)
+            prompt_fds.add(fd)
+            return fd
+        return normal_open(file, flags, **kwargs)
+
+    class PromptStream:
+        def __init__(self, stream):
+            self.stream = stream
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return self.stream.__exit__(*args)
+
+        def write(self, text):
+            if failure == "write":
+                self.stream.write(text[:4])
+                fail()
+            return self.stream.write(text)
+
+        def flush(self):
+            if failure == "flush":
+                fail()
+            return self.stream.flush()
+
+        def fileno(self):
+            return self.stream.fileno()
+
+    def fdopen(fd, *args, **kwargs):
+        stream = normal_fdopen(fd, *args, **kwargs)
+        if fd in prompt_fds:
+            prompt_fds.remove(fd)
+            return PromptStream(stream)
+        return stream
+
+    def fsync(fd):
+        if prompt.exists():
+            info = os.fstat(fd)
+            if (failure == "file-fsync" and info.st_ino == prompt.stat().st_ino) or (
+                failure == "directory-fsync" and stat.S_ISDIR(info.st_mode)
+            ):
+                fail()
+        return normal_fsync(fd)
+
+    def write(root, name, record, directory):
+        if failure == "intent-write" and record.get("phase") == "starting":
+            fail()
+        return normal_write(root, name, record, directory)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(runner.fleet_client, "_open_private", open_private)
+        patch.setattr(runner.os, "fdopen", fdopen)
+        patch.setattr(runner.os, "fsync", fsync)
+        patch.setattr(runner, "_write", write)
+        with pytest.raises(OSError, match="fixture local preparation failure"):
+            runner.execute(path, action_id, generation)
+
+    untouched = actions.show(conn, action_id)
+    assert untouched["started_at"] is None
+    assert untouched["status"] == "dispatching"
+    assert not any(event["event_id"] == "started" for event in untouched["events"])
+    assert not log.exists()
+    assert not prompt.exists()
+    assert not journal.exists() or json.loads(journal.read_text()).get("phase") not in {"starting", "started"}
+    recovered = runner.execute(path, action_id, generation)
+    assert recovered["status"] == "finished" and recovered["destination_ref"] == "fixture-turn"
+    assert runner.execute(path, action_id, generation)["destination_ref"] == "fixture-turn"
+    assert len(log.read_text().splitlines()) == 1
+    conn.close()
+
+
+@requires_posix
+def test_missing_local_executable_is_recoverable_before_hub_start(tmp_path, monkeypatch):
+    from brigade import fleet_action_auth as auth, fleet_action_runner as runner, fleet_hub_actions as actions
+
+    conn, path, log, action = broker_fixture(tmp_path, monkeypatch)
+    generation = actions.claim(conn, "node-fixture")["generation"]
+    executable = Path(json.loads(path.read_text())["executables"]["openclaw"])
+    unavailable = executable.with_suffix(".unavailable")
+    executable.rename(unavailable)
+    with pytest.raises(auth.ActionError, match="transient-executor-unavailable") as error:
+        runner.execute(path, action["action_id"], generation)
+    assert error.value.status == 503
+    current = actions.show(conn, action["action_id"])
+    assert current["started_at"] is None and current["status"] == "dispatching"
+    assert not any(event["event_id"] == "started" for event in current["events"])
+    assert not log.exists()
+    assert not list((tmp_path / "journal").glob("*.prompt"))
+    unavailable.rename(executable)
+    assert runner.execute(path, action["action_id"], generation)["status"] == "finished"
+    assert runner.execute(path, action["action_id"], generation)["destination_ref"] == "fixture-turn"
+    assert len(log.read_text().splitlines()) == 1
+    conn.close()
+
+
+@requires_posix
+@pytest.mark.parametrize("failure", [FileNotFoundError, PermissionError])
+def test_prompt_cleanup_preserves_durable_receipt_and_report(tmp_path, monkeypatch, failure):
+    from brigade import fleet_action_runner as runner, fleet_hub_actions as actions
+
+    conn, path, log, action = broker_fixture(tmp_path, monkeypatch)
+    claimed = actions.claim(conn, "node-fixture")
+    action_id, generation = action["action_id"], claimed["generation"]
+    prompt = tmp_path / "journal" / (action_id + ".prompt")
+    journal = prompt.with_suffix(".jsonl")
+    normal_unlink = runner.os.unlink
+    cleanup_receipts = []
+
+    def unlink(file, *, dir_fd=None):
+        if file == prompt.name:
+            record = json.loads(journal.read_text())
+            assert record["phase"] == "result"
+            assert record["receipt"]["destination_ref"] == "fixture-turn"
+            cleanup_receipts.append(record["receipt"])
+            if failure is FileNotFoundError:
+                normal_unlink(file, dir_fd=dir_fd)
+            raise failure("private prompt cleanup detail")
+        return normal_unlink(file, dir_fd=dir_fd)
+
+    monkeypatch.setattr(runner.os, "unlink", unlink)
+    # The wrapper still forwards dir_fd, including for the platform capability check.
+    monkeypatch.setattr(runner.os, "supports_dir_fd", runner.os.supports_dir_fd | {unlink})
+    result = runner.execute(path, action_id, generation)
+    assert result["status"] == "finished" and result["destination_ref"] == "fixture-turn"
+    assert result["verification"] == "pending"
+    saved = json.loads(journal.read_text())
+    assert saved["phase"] == "reported" and saved["receipt"] == cleanup_receipts[0]
+    event_id = saved["receipt"]["event_id"]
+    assert sum(event["event_id"] == event_id for event in result["events"]) == 1
+    replay = runner.execute(path, action_id, generation)
+    assert replay["destination_ref"] == "fixture-turn"
+    assert sum(event["event_id"] == event_id for event in replay["events"]) == 1
+    assert json.loads(journal.read_text())["receipt"] == saved["receipt"]
+    assert len(cleanup_receipts) == 1 and len(log.read_text().splitlines()) == 1
+    assert "private prompt cleanup detail" not in json.dumps(result) + journal.read_text()
+    if failure is PermissionError:
+        assert stat.S_IMODE(prompt.stat().st_mode) == 0o600
+        assert stat.S_IMODE(prompt.parent.stat().st_mode) == 0o700
+    else:
+        assert not prompt.exists()
+    conn.close()
+
+
+@requires_posix
+@pytest.mark.parametrize("response", ["denied", "lost-before", "lost-after"])
+def test_start_response_failure_cleans_prepared_prompt_without_resending(tmp_path, monkeypatch, response):
+    from brigade import (
+        fleet_action_auth as auth,
+        fleet_action_runner as runner,
+        fleet_client_actions as client,
+        fleet_hub_actions as actions,
+    )
+
+    conn, path, log, action = broker_fixture(tmp_path, monkeypatch)
+    claimed = actions.claim(conn, "node-fixture")
+    action_id, generation = action["action_id"], claimed["generation"]
+    prompt = tmp_path / "journal" / (action_id + ".prompt")
+    journal = prompt.with_suffix(".jsonl")
+    normal = client.request
+    prepared = []
+    if response == "denied":
+        auth.revoke_operator(conn, action["grant_id"])
+
+    def start(body, **kwargs):
+        if body["op"] == "start":
+            prepared.append(prompt.exists())
+            if response == "denied":
+                return normal(body, **kwargs)
+            if response == "lost-after":
+                normal(body, **kwargs)
+            raise OSError("fixture lost start response")
+        return normal(body, **kwargs)
+
+    monkeypatch.setattr(client, "request", start)
+    error, message = (auth.ActionError, "scope-revoked") if response == "denied" else (OSError, "lost start")
+    with pytest.raises(error, match=message):
+        runner.execute(path, action_id, generation)
+    assert prepared == [True]
+    assert not prompt.exists() and not log.exists()
+    saved = json.loads(journal.read_text())
+    assert saved["phase"] == "starting" and "receipt" not in saved
+    current = actions.show(conn, action_id)
+    assert (current["started_at"] is not None) == (response == "lost-after")
+    replay = runner.execute(path, action_id, generation)
+    assert prepared == [True] and not log.exists()
+    if response == "lost-after":
+        assert replay["status"] == "unknown"
+        assert replay["destination_ref"] is None
+        assert json.loads(journal.read_text())["receipt"]["status"] == "unknown"
+    else:
+        assert replay["started_at"] is None
+        assert json.loads(journal.read_text())["phase"] == "awaiting-reclaim"
+    conn.close()
+
+
+@requires_posix
+def test_dispatch_needs_no_poststart_preparation_journal_write(tmp_path, monkeypatch):
+    from brigade import fleet_action_runner as runner, fleet_hub_actions as actions
+
+    conn, path, log, action = broker_fixture(tmp_path, monkeypatch)
+    generation = actions.claim(conn, "node-fixture")["generation"]
+    normal = runner._write
+
+    def write(root, name, record, directory):
+        if actions.show(conn, action["action_id"])["started_at"] is not None and not log.exists():
+            raise OSError("fixture post-start preparation write")
+        return normal(root, name, record, directory)
+
+    monkeypatch.setattr(runner, "_write", write)
+    result = runner.execute(path, action["action_id"], generation)
+    assert result["status"] == "finished" and result["destination_ref"] == "fixture-turn"
+    runner.execute(path, action["action_id"], generation)
+    assert len(log.read_text().splitlines()) == 1
+    conn.close()
+
+
+@requires_posix
 def test_ambiguous_acceptance_is_unknown_and_never_redispatched(tmp_path, monkeypatch):
     from brigade import fleet_action_runner as runner, fleet_hub_actions as actions
 

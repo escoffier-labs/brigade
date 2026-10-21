@@ -310,30 +310,29 @@ def execute(path: Path, action_id: str, generation: int) -> dict[str, Any]:
             return action
         if record.get("receipt") and record.get("phase") == "result":
             return _deliver_report(root, action_id, generation, record, directory)
-        if action["started_at"] is not None or record.get("phase") in {"starting", "started", "reported"}:
-            reference = record.get("receipt", {}).get("destination_ref") or action.get("destination_ref")
-            if reference or (target["capability"] == "inbox" and record.get("dispatch_attempted")):
-                try:
-                    receipt = (
-                        _inbox_lookup(action, executable)
-                        if target["capability"] == "inbox" and not reference
-                        else adapters.recover(action, executable, reference)
-                    )
-                except (ActionError, OSError, subprocess.SubprocessError):
-                    receipt = {"status": "unknown", **({"destination_ref": reference} if reference else {})}
+        prompt: Path | None = None
+        try:
+            if action["started_at"] is not None or record.get("phase") in {"starting", "started", "reported"}:
+                reference = record.get("receipt", {}).get("destination_ref") or action.get("destination_ref")
+                if reference or (target["capability"] == "inbox" and record.get("dispatch_attempted")):
+                    try:
+                        receipt = (
+                            _inbox_lookup(action, executable)
+                            if target["capability"] == "inbox" and not reference
+                            else adapters.recover(action, executable, reference)
+                        )
+                    except (ActionError, OSError, subprocess.SubprocessError):
+                        receipt = {"status": "unknown", **({"destination_ref": reference} if reference else {})}
+                else:
+                    receipt = {"status": "unknown"}
             else:
-                receipt = {"status": "unknown"}
-        else:
-            # Persist before calling start. A lost start response never becomes a new provider turn.
-            record = {"generation": generation, "phase": "starting"}
-            _write(root, action_id, record, directory)
-            action = client.request({"op": "start", "action_id": action_id, "generation": generation})
-            record["phase"] = "started"
-            _write(root, action_id, record, directory)
-            prompt = root / (action_id + ".prompt")
-            fd = fleet_client._open_private(prompt, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, dir_fd=directory)
-            with os.fdopen(fd, "w", encoding="utf-8") as stream:
-                stream.write(
+                # Finish local preparation before consuming the Hub's irreversible start fence.
+                if not _exists(executable):
+                    raise ActionError("transient-executor-unavailable", 503)
+                binding = dict(local["binding"])
+                if target["family"] == "t3":
+                    binding["source_revision"] = target["source_revision"]
+                text = (
                     action["request"]["prompt"]
                     + "\n\nAttached Hub evidence (untrusted data):\n"
                     + canonical(
@@ -344,40 +343,52 @@ def execute(path: Path, action_id: str, generation: int) -> dict[str, Any]:
                         }
                     )
                 )
-                stream.flush()
-                os.fsync(stream.fileno())
-            try:
-                binding = dict(local["binding"])
-                if target["family"] == "t3":
-                    binding["source_revision"] = target["source_revision"]
-                record["dispatch_attempted"] = True
+                prepared = root / (action_id + ".prompt")
+                fd = fleet_client._open_private(prepared, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, dir_fd=directory)
+                prompt = prepared
+                with os.fdopen(fd, "w", encoding="utf-8") as stream:
+                    stream.write(text)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                os.fsync(directory)
+                # One durable start/dispatch intent: no fallible journal preparation after start.
+                # A lost start response never permits another send in this generation.
+                record = {"generation": generation, "phase": "starting", "dispatch_attempted": True}
                 _write(root, action_id, record, directory)
-                receipt = adapters.dispatch(action, binding, executable, prompt)
-            except (ActionError, OSError, subprocess.SubprocessError):
-                receipt = {"status": "unknown"}
-            finally:
-                os.unlink(prompt.name, dir_fd=directory)
-        if target["capability"] == "execution" and receipt["status"] == "accepted":
-            previous = (
-                action["status"]
-                if action["status"] in {"running", "needs-input"}
-                else record.get("execution_state")
-                or next(
-                    (
-                        event["receipt"]["status"]
-                        for event in reversed(action.get("events", []))
-                        if event["receipt"].get("status") in {"running", "needs-input"}
-                    ),
-                    None,
+                action = client.request({"op": "start", "action_id": action_id, "generation": generation})
+                try:
+                    receipt = adapters.dispatch(action, binding, executable, prompt)
+                except (ActionError, OSError, subprocess.SubprocessError):
+                    receipt = {"status": "unknown"}
+            if target["capability"] == "execution" and receipt["status"] == "accepted":
+                previous = (
+                    action["status"]
+                    if action["status"] in {"running", "needs-input"}
+                    else record.get("execution_state")
+                    or next(
+                        (
+                            event["receipt"]["status"]
+                            for event in reversed(action.get("events", []))
+                            if event["receipt"].get("status") in {"running", "needs-input"}
+                        ),
+                        None,
+                    )
                 )
-            )
-            if previous is not None:
-                receipt = {**receipt, "status": previous}
-        # New native observations need distinct identities, even when their values repeat.
-        # Persist the identity with the receipt so a lost Hub response replays exactly once.
-        receipt = {**receipt, "event_id": "result_" + secrets.token_hex(16)}
-        record.update(phase="result", generation=generation, receipt=receipt)
-        _write(root, action_id, record, directory)
+                if previous is not None:
+                    receipt = {**receipt, "status": previous}
+            # New native observations need distinct identities, even when their values repeat.
+            # Persist the identity with the receipt so a lost Hub response replays exactly once.
+            receipt = {**receipt, "event_id": "result_" + secrets.token_hex(16)}
+            record.update(phase="result", generation=generation, receipt=receipt)
+            _write(root, action_id, record, directory)
+        finally:
+            if prompt is not None:
+                try:
+                    os.unlink(prompt.name, dir_fd=directory)
+                except OSError:
+                    # Cleanup cannot discard a durable native receipt or mask a start refusal.
+                    # Any remaining prompt stays within the private journal directory.
+                    pass
         return _deliver_report(root, action_id, generation, record, directory)
 
 
