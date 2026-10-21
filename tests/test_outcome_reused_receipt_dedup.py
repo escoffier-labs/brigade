@@ -83,7 +83,9 @@ def test_canonical_verify_evidence_ref_follows_chain(tmp_path):
         tmp_path / ".brigade" / "work" / "verify-runs" / "root" / "receipt.json"
     )
     mid_receipt = json.loads((mid / "receipt.json").read_text())
-    assert verification.canonical_verify_evidence_ref(tmp_path, mid_receipt).endswith("/root/receipt.json")
+    assert verification.canonical_verify_evidence_ref(tmp_path, mid_receipt).endswith(
+        "/root/receipt.json"  # content-guard: allow root-path
+    )
 
 
 def test_scoring_canonicalizes_legacy_rows_that_stored_reused_path(tmp_path):

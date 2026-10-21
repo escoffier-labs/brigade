@@ -1152,7 +1152,12 @@ def test_actual_breakaway_program_compiles_nested_windows_paths():
         captured.append(code)
         raise CapturedProgram
 
-    native = SimpleNamespace(path=PureWindowsPath(r"C:\Users\fake-user\probe"), start=capture)
+    native = SimpleNamespace(
+        path=PureWindowsPath(
+            r"C:\Users\fake-user\probe"  # content-guard: allow windows-home-path
+        ),
+        start=capture,
+    )
     with pytest.raises(CapturedProgram):
         TestNativeContainment().test_breakaway_is_denied(native)
 

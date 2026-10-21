@@ -244,3 +244,163 @@ class JwtTokenRuleTests(unittest.TestCase):
             "Use eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N1XgL0n3I9PlFUP0THsR8U here."
         )
         self.assertIn("jwt-token", {f.rule_id for f in result.findings})
+
+
+class MissingLeakShapeTests(unittest.TestCase):
+    def test_windows_home_path_matches(self) -> None:
+        result = scan_text(
+            r"Config at C:\Users\example-user\.config\tool.json"  # content-guard: allow windows-home-path
+        )
+        self.assertIn("windows-home-path", {finding.rule_id for finding in result.findings})
+
+    def test_root_path_matches(self) -> None:
+        result = scan_text("Config at /root/.config/tool.json")  # content-guard: allow root-path
+        self.assertIn("root-path", {finding.rule_id for finding in result.findings})
+
+    def test_bare_provider_token_matches(self) -> None:
+        token = "ghp_" + "A" * 36
+        result = scan_text(f"Leaked credential: {token}")
+        self.assertIn("bare-token-prefix", {finding.rule_id for finding in result.findings})
+
+    def test_provider_tokens_preserve_context_detector_precedence(self) -> None:
+        for text, expected in (
+            (
+                'api_key="ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"',  # content-guard: allow api-key-assignment
+                "api-key-assignment",
+            ),
+            (
+                "token='ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA'",  # content-guard: allow api-key-assignment
+                "api-key-assignment",
+            ),
+            (
+                "Credential: ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",  # content-guard: allow bare-token-prefix
+                "bare-token-prefix",
+            ),
+            (
+                "Bearer ghp_AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",  # content-guard: allow bearer-token
+                "bearer-token",
+            ),
+        ):
+            with self.subTest(expected=expected, text=text):
+                result = scan_text(text)
+                self.assertEqual([finding.rule_id for finding in result.findings], [expected])
+
+    def test_private_hostname_matches(self) -> None:
+        result = scan_text("Connect to build-agent.internal for the artifact.")  # content-guard: allow private-hostname
+        self.assertIn("private-hostname", {finding.rule_id for finding in result.findings})
+
+    def test_public_and_reserved_example_hostnames_do_not_match(self) -> None:
+        result = scan_text("See docs.example.com and api.github.com.")
+        self.assertNotIn("private-hostname", {finding.rule_id for finding in result.findings})
+
+    def test_windows_home_path_negatives(self) -> None:
+        for text in (r"C:\Projects\demo", r"C:\Users", r"XC:\Users\demo"):
+            with self.subTest(text=text):
+                self.assertNotIn("windows-home-path", {f.rule_id for f in scan_text(text).findings})
+
+    def test_root_path_negatives(self) -> None:
+        for text in ("/rooted/project", "/srv/root/project", "relative/root/project"):
+            with self.subTest(text=text):
+                self.assertNotIn("root-path", {f.rule_id for f in scan_text(text).findings})
+
+    def test_provider_prefix_families_match_without_assignment(self) -> None:
+        for prefix, body in (
+            ("github_pat_", "a" * 30),
+            ("gho_", "a" * 36),
+            ("xoxb-", "a" * 24),
+            ("sk-live-", "a" * 24),
+            ("sk-proj-", "a" * 24),
+            ("sk-ant-", "a" * 24),
+            ("AKIA", "A" * 16),
+        ):
+            with self.subTest(prefix=prefix):
+                result = scan_text(f"Credential: {prefix}{body}")
+                self.assertIn("bare-token-prefix", {f.rule_id for f in result.findings})
+
+    def test_provider_prefix_negatives(self) -> None:
+        for text in ("ghp_short", "github_pat_example", "xoxb-short", "sk-live-demo", "AKIAEXAMPLE"):
+            with self.subTest(text=text):
+                self.assertNotIn("bare-token-prefix", {f.rule_id for f in scan_text(text).findings})
+
+    def test_private_hostname_without_hyphen_and_nested_labels(self) -> None:
+        for host in (
+            "db.internal",  # content-guard: allow private-hostname
+            "nas.local",  # content-guard: allow private-hostname
+            "ci.lan",  # content-guard: allow private-hostname
+            "db.corp",  # content-guard: allow private-hostname
+            "nas.home",  # content-guard: allow private-hostname
+            "wiki.intranet",  # content-guard: allow private-hostname
+            "db.localdomain",  # content-guard: allow private-hostname
+            "DB.INTERNAL",  # content-guard: allow private-hostname
+            "build.agent.internal",  # content-guard: allow private-hostname
+        ):
+            with self.subTest(host=host):
+                result = scan_text(f"Connect to {host}.")
+                self.assertIn("private-hostname", {f.rule_id for f in result.findings})
+
+    def test_hostname_boundaries_and_python_calls_do_not_match(self) -> None:
+        for text in (
+            "build-agent.internal.example.com",
+            "build-agent.localhost",
+            "build-agent.internality",
+            "build-agent.internal_module",
+            "build-agent.internal.py",
+            "-build-agent.internal",
+            "build_agent.internal",
+            "threading.local()",
+            "Path.home()",
+        ):
+            with self.subTest(text=text):
+                self.assertNotIn("private-hostname", {f.rule_id for f in scan_text(text).findings})
+
+    def test_json_encoded_windows_home_path_matches(self) -> None:
+        result = scan_text(r'"Config at C:\\Users\\demo\\.config\\tool.json"')  # content-guard: allow windows-home-path
+        self.assertIn("windows-home-path", {f.rule_id for f in result.findings})
+
+    def test_hostname_code_contexts_are_skipped(self) -> None:
+        for text in (
+            "if not obj.local:",  # content-guard: allow private-hostname
+            "return obj.local",  # content-guard: allow private-hostname
+            "obj.local",  # content-guard: allow private-hostname
+            "self.home = target",  # content-guard: allow private-hostname
+            "callback(obj.local)",  # content-guard: allow private-hostname
+            "call(tc.home, other)",  # content-guard: allow private-hostname
+            "const value = opts.local ? yes : no;",  # content-guard: allow private-hostname
+            "fs.mkdirSync(fresh.home);",  # content-guard: allow private-hostname
+            "[seats.home]",
+            "f'path = {self.home}'",
+        ):
+            with self.subTest(text=text):
+                self.assertNotIn("private-hostname", {f.rule_id for f in scan_text(text).findings})
+
+    def test_hostname_text_url_and_config_contexts_match(self) -> None:
+        for text in (
+            '"db.local"',  # content-guard: allow private-hostname
+            "'db.internal'",  # content-guard: allow private-hostname
+            "https://db.home/path",  # content-guard: allow private-hostname
+            "server=db.lan",  # content-guard: allow private-hostname
+            "server: db.corp",  # content-guard: allow private-hostname
+            "Reach db.internal for logs.",  # content-guard: allow private-hostname
+            "db.local is reachable.",  # content-guard: allow private-hostname
+        ):
+            with self.subTest(text=text):
+                self.assertIn("private-hostname", {f.rule_id for f in scan_text(text).findings})
+
+    def test_hostname_prose_punctuation_remains_detectable(self) -> None:
+        for text in (
+            "Database: db.local, then continue.",  # content-guard: allow private-hostname
+            "Connect to db.local, then continue.",  # content-guard: allow private-hostname
+            "Use (db.local) for logs.",  # content-guard: allow private-hostname
+        ):
+            with self.subTest(text=text):
+                self.assertIn("private-hostname", {f.rule_id for f in scan_text(text).findings})
+
+    def test_spaced_interpolation_remains_code_shaped(self) -> None:
+        result = scan_text("f'{ self.home }'")
+        self.assertNotIn("private-hostname", {f.rule_id for f in result.findings})
+
+    def test_nested_interpolation_remains_code_shaped(self) -> None:
+        result = scan_text(
+            'lines.append(f\'token_file = "{(self.home / "node.token").as_posix()}"\')'  # content-guard: allow private-hostname
+        )
+        self.assertNotIn("private-hostname", {f.rule_id for f in result.findings})

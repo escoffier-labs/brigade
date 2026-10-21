@@ -196,7 +196,7 @@ func TestValidateRejectsUnsafeAbsoluteLocators(t *testing.T) {
 	}{
 		{"posix absolute", "/etc/passwd"},
 		{"home absolute", "/home/user/secret"},
-		{"windows drive", "C:\\Users\\foo"},
+		{"windows drive", "C:\\Users\\foo"}, // content-guard: allow windows-home-path
 		{"windows unc", "\\\\host\\share\\file"},
 		{"file URI", "file:///home/user/secret"},
 		{"parent traversal", "../secret"},
