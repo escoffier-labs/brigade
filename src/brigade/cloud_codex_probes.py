@@ -9,9 +9,16 @@ from typing import Any, Callable, Iterable
 from . import codex_cloud
 
 # The brief probes at most this many registered tasks missing from its one-page
-# inventory, newest dispatch first, within one shared wall-clock budget.
+# inventory, newest dispatch first.
 BRIEF_STATUS_PROBE_LIMIT = 5
-BRIEF_STATUS_PROBE_BUDGET_SECONDS = 10.0
+# The brief's whole Codex observation, the inventory page plus these probes, shares
+# one budget that fits inside the 5 s SessionStart hook timeout.
+BRIEF_CODEX_BUDGET_SECONDS = 3.0
+
+
+def brief_deadline() -> float:
+    """Return the monotonic deadline for one brief's Codex observation."""
+    return time.monotonic() + BRIEF_CODEX_BUDGET_SECONDS
 
 
 def observe_missing_tasks(
@@ -21,6 +28,7 @@ def observe_missing_tasks(
     run_text: Callable[..., tuple[int, str, str]],
     cwd: Path,
     bounded: bool = False,
+    deadline: float | None = None,
 ) -> None:
     """Add a state to ``tasks`` for each registered Codex task a status probe resolves."""
     # Failure or absence never implies a terminal state, so an unprobed task stays
@@ -36,11 +44,9 @@ def observe_missing_tasks(
         if known is None or str(entry.get("dispatched_at") or "") > str(known.get("dispatched_at") or ""):
             by_task[task_id] = entry
     missing = list(by_task.values())
-    deadline: float | None = None
     if bounded:
         missing.sort(key=lambda entry: str(entry.get("dispatched_at") or ""), reverse=True)
         del missing[BRIEF_STATUS_PROBE_LIMIT:]
-        deadline = time.monotonic() + BRIEF_STATUS_PROBE_BUDGET_SECONDS
     for entry in missing:
         task_id = entry["task_id"]
         if deadline is None:

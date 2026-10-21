@@ -38,9 +38,11 @@ def test_brief_limits_inventory_and_checks_only_missing_registered_tasks(monkeyp
     limits = []
     status_ids = []
 
-    def list_tasks(*, cwd, max_items=codex_cloud.DEFAULT_MAX_ITEMS, max_pages=codex_cloud.MAX_LIST_PAGES):
+    def list_tasks(
+        *, cwd, max_items=codex_cloud.DEFAULT_MAX_ITEMS, max_pages=codex_cloud.MAX_LIST_PAGES, command_timeout=None
+    ):
         assert cwd == tmp_path
-        limits.append((max_items, max_pages))
+        limits.append((max_items, max_pages, command_timeout))
         return codex_cloud.ListTasksResult([{"id": "task_present", "state": "running"}])
 
     def run_text(command, *, cwd, timeout=30.0):
@@ -55,7 +57,7 @@ def test_brief_limits_inventory_and_checks_only_missing_registered_tasks(monkeyp
     result = cloud_tracker.stale_entries_for_brief(tmp_path, now=NOW)
 
     assert "error" not in result
-    assert limits == [(codex_cloud.MAX_LIST_LIMIT, 1)]
+    assert limits == [(codex_cloud.MAX_LIST_LIMIT, 1, cloud_codex_probes.BRIEF_CODEX_BUDGET_SECONDS)]
     assert status_ids == ["task_missing"]
 
 
@@ -161,25 +163,34 @@ def test_brief_probe_cap_counts_each_task_once(monkeypatch, tmp_path):
     assert sorted(observation.tasks) == ["task_duplicated", "task_other_ready"]
 
 
-def test_brief_status_probes_share_one_time_budget(monkeypatch, tmp_path):
+def test_brief_inventory_and_probes_share_one_deadline(monkeypatch, tmp_path):
     for index in range(3):
         _register(tmp_path, f"task_{index:02d}", hours_ago=index + 1)
-    monkeypatch.setattr(codex_cloud, "list_tasks", lambda **kwargs: codex_cloud.ListTasksResult([]))
+    budget = cloud_codex_probes.BRIEF_CODEX_BUDGET_SECONDS
     clock = [1000.0]
     monkeypatch.setattr(cloud_codex_probes.time, "monotonic", lambda: clock[0])
-    timeouts: list[float] = []
+    list_timeouts: list[float] = []
+
+    def slow_list(**kwargs):
+        list_timeouts.append(kwargs["command_timeout"])
+        clock[0] += budget / 3
+        return codex_cloud.ListTasksResult([])
+
+    probe_timeouts: list[float] = []
 
     def slow_run(command, *, cwd=None, timeout=30.0):
-        timeouts.append(timeout)
-        clock[0] += 6.0
+        probe_timeouts.append(timeout)
+        clock[0] += budget / 2
         return 0, "[READY] task", ""
 
+    monkeypatch.setattr(codex_cloud, "list_tasks", slow_list)
     monkeypatch.setattr(cloud_tracker, "_run_text", slow_run)
 
     observation = cloud_tracker.observe_provider("codex-cloud", tmp_path, codex_max_items=codex_cloud.MAX_LIST_LIMIT)
 
-    budget = cloud_codex_probes.BRIEF_STATUS_PROBE_BUDGET_SECONDS
-    assert timeouts == [budget, budget - 6.0]
+    # The page used a third of the budget, so the probes split the rest and stop at the deadline.
+    assert list_timeouts == [budget]
+    assert probe_timeouts == pytest.approx([budget * 2 / 3, budget / 6])
     assert sorted(observation.tasks) == ["task_00", "task_01"]
 
 
@@ -199,8 +210,10 @@ def test_default_observation_keeps_full_inventory(monkeypatch, tmp_path, isolate
     _register(tmp_path, "task_outside_inventory")
     limits = []
 
-    def list_tasks(*, cwd, max_items=codex_cloud.DEFAULT_MAX_ITEMS, max_pages=codex_cloud.MAX_LIST_PAGES):
-        limits.append((max_items, max_pages))
+    def list_tasks(
+        *, cwd, max_items=codex_cloud.DEFAULT_MAX_ITEMS, max_pages=codex_cloud.MAX_LIST_PAGES, command_timeout=None
+    ):
+        limits.append((max_items, max_pages, command_timeout))
         return codex_cloud.ListTasksResult([{"id": "task_inventory", "state": "running"}])
 
     def unexpected_status(*a, **k):
@@ -216,5 +229,5 @@ def test_default_observation_keeps_full_inventory(monkeypatch, tmp_path, isolate
     else:
         tasks, _, _ = cloud_tracker.observe_providers(tmp_path, ignored_legacy_option=True)
 
-    assert limits == [(codex_cloud.DEFAULT_MAX_ITEMS, codex_cloud.MAX_LIST_PAGES)]
+    assert limits == [(codex_cloud.DEFAULT_MAX_ITEMS, codex_cloud.MAX_LIST_PAGES, codex_cloud.DEFAULT_LIST_TIMEOUT)]
     assert tasks == {"task_inventory": {"state": "running", "ready_at": None}}

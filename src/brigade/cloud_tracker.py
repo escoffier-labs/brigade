@@ -1414,23 +1414,30 @@ def _parse_codex_cloud_list(stdout: str) -> dict[str, Any]:
     return tasks
 
 
-def _observe_missing_codex_tasks(target: Path, tasks: dict[str, Any], *, bounded: bool = False) -> None:
+def _observe_missing_codex_tasks(
+    target: Path, tasks: dict[str, Any], *, bounded: bool = False, deadline: float | None = None
+) -> None:
     from . import cloud_codex_probes
 
     cloud_codex_probes.observe_missing_tasks(
-        load_registry(target)["entries"], tasks, run_text=_run_text, cwd=target, bounded=bounded
+        load_registry(target)["entries"], tasks, run_text=_run_text, cwd=target, bounded=bounded, deadline=deadline
     )
 
 
 def _codex_cloud_observation(target: Path, *, codex_max_items: int | None = None) -> ProviderObservation:
-    from . import codex_cloud
+    from . import cloud_codex_probes, codex_cloud
 
+    # A bounded read takes one page, because cursor pages are slow on the provider
+    # side, and shares one deadline between that page and the status probes.
+    deadline = None if codex_max_items is None else cloud_codex_probes.brief_deadline()
     try:
         inventory = codex_cloud.list_tasks(
             cwd=target,
             max_items=codex_cloud.DEFAULT_MAX_ITEMS if codex_max_items is None else codex_max_items,
-            # A bounded read takes one page; cursor pages are slow on the provider side.
             max_pages=codex_cloud.MAX_LIST_PAGES if codex_max_items is None else 1,
+            command_timeout=codex_cloud.DEFAULT_LIST_TIMEOUT
+            if deadline is None
+            else cloud_codex_probes.BRIEF_CODEX_BUDGET_SECONDS,
         )
     except Exception:  # noqa: BLE001 - observation must stay bounded
         return ProviderObservation(True, False, "transport-failure", {})
@@ -1440,7 +1447,7 @@ def _codex_cloud_observation(target: Path, *, codex_max_items: int | None = None
         if isinstance(row.get("id"), str)
     }
     if codex_max_items is not None:
-        _observe_missing_codex_tasks(target, tasks, bounded=True)
+        _observe_missing_codex_tasks(target, tasks, bounded=True, deadline=deadline)
     elif not tasks:
         _observe_missing_codex_tasks(target, tasks)
     if not inventory.ok:
