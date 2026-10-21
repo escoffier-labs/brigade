@@ -22,6 +22,7 @@ def _env(tmp_path: Path, **extra: str) -> dict[str, str]:
         "HOME": str(tmp_path),
         "USERPROFILE": str(tmp_path),
         "XDG_CACHE_HOME": str(tmp_path / "cache"),
+        "LOCALAPPDATA": str(tmp_path / "cache"),
     }
     env.update(extra)
     return env
