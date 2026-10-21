@@ -865,9 +865,10 @@ def test_claims_page_stays_under_the_byte_budget(monkeypatch):
     page = fleet_hub_messages._claims_page(rows, limit=500)
     size = sum(len(json.dumps(row, separators=(",", ":"))) for row in page["claims"])
     assert page["claims"] and size <= 3000 and page["truncated"] and page["total"] == 5
-    monkeypatch.setattr(fleet_hub_messages, "CLAIMS_PAGE_MAX_BYTES", 10)
-    single = fleet_hub_messages._claims_page(rows, limit=500)
-    assert len(single["claims"]) == 1 and single["truncated"]
+    rows.insert(0, {"target": "a-first", "owner_node": NODE_A, "conductor": "z" * 5000})
+    skipped = fleet_hub_messages._claims_page(rows, limit=500)
+    assert skipped["oversized"] == 1 and skipped["truncated"]
+    assert "a-first" not in [row["target"] for row in skipped["claims"]] and skipped["claims"]
 
 
 def test_each_tool_call_captures_one_authority(stations, monkeypatch):

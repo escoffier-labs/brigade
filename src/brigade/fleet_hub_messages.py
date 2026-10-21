@@ -815,14 +815,26 @@ def _claims_page(rows: list[dict[str, Any]], *, limit: int) -> dict[str, Any]:
     ordered = sorted(rows, key=lambda row: str(row.get("target", "")))
     page: list[dict[str, Any]] = []
     size = 0
-    for row in ordered[:limit]:
+    oversized = 0
+    for row in ordered:
+        if len(page) >= limit:
+            break
         row_size = len(json.dumps(row, separators=(",", ":"), default=str).encode("utf-8"))
-        # Always return at least one row.
-        if page and size + row_size > CLAIMS_PAGE_MAX_BYTES:
+        if row_size > CLAIMS_PAGE_MAX_BYTES:
+            # A single row over the budget would push the response past the
+            # client's cap; leave it out and count it rather than fail.
+            oversized += 1
+            continue
+        if size + row_size > CLAIMS_PAGE_MAX_BYTES:
             break
         page.append(row)
         size += row_size
-    return {"claims": page, "truncated": len(page) < len(ordered), "total": len(ordered)}
+    return {
+        "claims": page,
+        "truncated": len(page) < len(ordered),
+        "total": len(ordered),
+        "oversized": oversized,
+    }
 
 
 def _station_read(conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str) -> dict[str, Any]:

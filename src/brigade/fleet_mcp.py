@@ -181,7 +181,9 @@ def _frame(value: Any) -> Any:
 # claim target, harness, session ids). Only fields the hub authenticates or
 # assigns pass through unchanged; every other string is fenced, whatever it
 # looks like, so a node cannot place instructions outside the fence.
-_STRUCTURAL_FIELDS = frozenset({"node_id", "principal_id", "owner_node", "state", "expired", "truncated", "total"})
+_STRUCTURAL_FIELDS = frozenset(
+    {"node_id", "principal_id", "owner_node", "state", "expired", "truncated", "total", "oversized"}
+)
 
 
 def _structural(key: str) -> bool:
