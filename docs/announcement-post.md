@@ -1,3 +1,5 @@
+> Historical note: this draft describes an earlier release. See [Python CLI telemetry](telemetry.md) for the current version-check data flow.
+
 # Brigade Announcement Posts
 
 Channel-ready text, rewritten 2026-06-09 in the README's voice. The origin story is the hook; lead with it, not the feature list. Numbers below are real and public-safe. Update version numbers before posting.
