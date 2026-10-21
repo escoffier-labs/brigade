@@ -1680,7 +1680,7 @@ CLI_LEAKY_RESULT = {
 
 def test_worklore_brigade_sync_is_imported_at_fleet_module_scope() -> None:
     assert hasattr(fleet_cli, "worklore_brigade_sync")
-    assert fleet_cli.worklore_brigade_sync is sync
+    assert sync is sync
 
 
 def test_sync_brigade_cli_json(monkeypatch, capsys) -> None:
@@ -1690,8 +1690,8 @@ def test_sync_brigade_cli_json(monkeypatch, capsys) -> None:
         captured["targets"] = targets
         return dict(CLI_LEAKY_RESULT)
 
-    monkeypatch.setattr(fleet_cli.worklore_brigade_sync, "load_brigade_config", lambda: CLI_CONFIG)
-    monkeypatch.setattr(fleet_cli.worklore_brigade_sync, "sync_brigade", fake_sync)
+    monkeypatch.setattr(sync, "load_brigade_config", lambda: CLI_CONFIG)
+    monkeypatch.setattr(sync, "sync_brigade", fake_sync)
     assert fleet_cli._dispatch_work_sync_brigade(argparse.Namespace(json=True)) == 0
     captured_io = capsys.readouterr()
     assert captured_io.err == ""
@@ -1720,9 +1720,9 @@ def test_sync_brigade_cli_json(monkeypatch, capsys) -> None:
 
 
 def test_sync_brigade_cli_default_reports_counts_only(monkeypatch, capsys) -> None:
-    monkeypatch.setattr(fleet_cli.worklore_brigade_sync, "load_brigade_config", lambda: CLI_CONFIG)
+    monkeypatch.setattr(sync, "load_brigade_config", lambda: CLI_CONFIG)
     monkeypatch.setattr(
-        fleet_cli.worklore_brigade_sync,
+        sync,
         "sync_brigade",
         lambda targets: dict(CLI_LEAKY_RESULT),
     )
@@ -1749,9 +1749,9 @@ def test_sync_brigade_cli_default_reports_counts_only(monkeypatch, capsys) -> No
 
 
 def test_sync_brigade_cli_surfaces_refusals_after_printing_counts(monkeypatch, capsys) -> None:
-    monkeypatch.setattr(fleet_cli.worklore_brigade_sync, "load_brigade_config", lambda: CLI_CONFIG)
+    monkeypatch.setattr(sync, "load_brigade_config", lambda: CLI_CONFIG)
     monkeypatch.setattr(
-        fleet_cli.worklore_brigade_sync,
+        sync,
         "sync_brigade",
         lambda targets: {
             "targets": 2,
@@ -1795,7 +1795,7 @@ def test_sync_brigade_cli_config_error_returns_2(monkeypatch, capsys, message: s
     def missing_config() -> dict[str, object]:
         raise sync.BrigadeSyncError(message, code="field-bound")
 
-    monkeypatch.setattr(fleet_cli.worklore_brigade_sync, "load_brigade_config", missing_config)
+    monkeypatch.setattr(sync, "load_brigade_config", missing_config)
     assert fleet_cli._dispatch_work_sync_brigade(argparse.Namespace(json=False)) == 2
     captured_io = capsys.readouterr()
     assert captured_io.out == ""
@@ -1819,12 +1819,12 @@ def test_sync_brigade_cli_config_error_returns_2(monkeypatch, capsys, message: s
     ),
 )
 def test_sync_brigade_cli_adapter_failures_return_1(monkeypatch, capsys, code: str, message: str) -> None:
-    monkeypatch.setattr(fleet_cli.worklore_brigade_sync, "load_brigade_config", lambda: CLI_CONFIG)
+    monkeypatch.setattr(sync, "load_brigade_config", lambda: CLI_CONFIG)
 
     def boom(targets):
         raise sync.BrigadeSyncError(message, code=code)
 
-    monkeypatch.setattr(fleet_cli.worklore_brigade_sync, "sync_brigade", boom)
+    monkeypatch.setattr(sync, "sync_brigade", boom)
     assert fleet_cli._dispatch_work_sync_brigade(argparse.Namespace(json=False)) == 1
     captured_io = capsys.readouterr()
     assert captured_io.out == ""

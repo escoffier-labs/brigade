@@ -1368,8 +1368,8 @@ def test_sync_github_cli_json(monkeypatch, capsys) -> None:
             "observations": [{"title": "Rotate restic password"}],
         }
 
-    monkeypatch.setattr(fleet_cli.worklore_github_sync, "load_github_config", lambda: CLI_CONFIG)
-    monkeypatch.setattr(fleet_cli.worklore_github_sync, "sync_github", fake_sync)
+    monkeypatch.setattr(sync, "load_github_config", lambda: CLI_CONFIG)
+    monkeypatch.setattr(sync, "sync_github", fake_sync)
     assert fleet_cli._dispatch_work_sync_github(argparse.Namespace(json=True)) == 0
     captured_io = capsys.readouterr()
     assert captured_io.err == ""
@@ -1390,9 +1390,9 @@ def test_sync_github_cli_json(monkeypatch, capsys) -> None:
 
 
 def test_sync_github_cli_default_reports_counts_only(monkeypatch, capsys) -> None:
-    monkeypatch.setattr(fleet_cli.worklore_github_sync, "load_github_config", lambda: CLI_CONFIG)
+    monkeypatch.setattr(sync, "load_github_config", lambda: CLI_CONFIG)
     monkeypatch.setattr(
-        fleet_cli.worklore_github_sync,
+        sync,
         "sync_github",
         lambda orgs=None, *, label, state: {
             "posted": 2,
@@ -1417,9 +1417,9 @@ def test_sync_github_cli_default_reports_counts_only(monkeypatch, capsys) -> Non
 
 
 def test_sync_github_cli_surfaces_refusals_after_printing_counts(monkeypatch, capsys) -> None:
-    monkeypatch.setattr(fleet_cli.worklore_github_sync, "load_github_config", lambda: CLI_CONFIG)
+    monkeypatch.setattr(sync, "load_github_config", lambda: CLI_CONFIG)
     monkeypatch.setattr(
-        fleet_cli.worklore_github_sync,
+        sync,
         "sync_github",
         lambda orgs=None, *, label, state: {"posted": 2, "observation_count": 7, "refused": 1, "skipped": 3},
     )
@@ -1447,7 +1447,7 @@ def test_sync_github_cli_config_error_returns_2(monkeypatch, capsys, message: st
     def missing_config() -> dict[str, object]:
         raise sync.GitHubSyncError(message, code="field-bound")
 
-    monkeypatch.setattr(fleet_cli.worklore_github_sync, "load_github_config", missing_config)
+    monkeypatch.setattr(sync, "load_github_config", missing_config)
     assert fleet_cli._dispatch_work_sync_github(argparse.Namespace(json=False)) == 2
     captured_io = capsys.readouterr()
     assert captured_io.out == ""
@@ -1468,12 +1468,12 @@ def test_sync_github_cli_config_error_returns_2(monkeypatch, capsys, message: st
     ),
 )
 def test_sync_github_cli_adapter_failures_return_1(monkeypatch, capsys, code: str, message: str) -> None:
-    monkeypatch.setattr(fleet_cli.worklore_github_sync, "load_github_config", lambda: CLI_CONFIG)
+    monkeypatch.setattr(sync, "load_github_config", lambda: CLI_CONFIG)
 
     def boom(orgs=None, *, label, state):
         raise sync.GitHubSyncError(message, code=code)
 
-    monkeypatch.setattr(fleet_cli.worklore_github_sync, "sync_github", boom)
+    monkeypatch.setattr(sync, "sync_github", boom)
     assert fleet_cli._dispatch_work_sync_github(argparse.Namespace(json=False)) == 1
     captured_io = capsys.readouterr()
     assert captured_io.out == ""
