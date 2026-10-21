@@ -24,15 +24,25 @@ brigade memory care closeout
 model. It reads the pending-evidence log and canonical cards selected by
 `.brigade/memory-care.toml`. `--scope` matches the exact card frontmatter scope,
 with missing scope treated as `repo`. `--limit` bounds the retained candidates
-from 1 to 100, with a default of 20.
+from 1 to 100, with a default of 20. Receipts include `total_candidates` and
+`truncated`. Priority is opposite-polarity flags, stale evidence, reinforcement,
+then duplicates, with stable ordering within each class.
 
-Each candidate cites evidence resolved in the log or a local file, and
-`proof_count` counts distinct resolved ids. Missing pointers and external URLs do
-not count. Staleness uses `last_consolidated`, falling back to `last_reviewed` and
+Each candidate cites evidence resolved in the log, a receipt or handoff root,
+an evidence root, or the local evidence bundle cache. Missing pointers,
+unrelated repository files, and external URLs do not count. `proof_count` counts
+distinct supporting ids. Only `reinforced` and `outcome` log rows supply support.
+Near matches appear in `review_evidence_ids` and never increase proof. Candidates
+citing near matches or contrary evidence are Tier 2 and have no metadata diff.
+Exact reinforcement is already applied by ingest, so its log rows do not propose
+appending another pointer for the archived handoff.
+Staleness uses `last_consolidated`, falling back to `last_reviewed` and
 its supported aliases. Date-only cutoffs require evidence on a later UTC date.
 Exact normalized fingerprints identify duplicates. Opposite-polarity evidence
 always produces a Tier 2 review flag and never decides which claim is correct.
-Cross-scope and mixed-trust duplicate groups also receive Tier 2.
+Cross-scope and mixed-trust duplicate groups also receive Tier 2. Trust declarations
+include `trust_label` and nested provenance metadata. Block-style metadata lists
+that the scalar preview writer cannot preserve also force Tier 2 with no diff.
 
 Runs retain `candidates.jsonl` and `receipt.json` under
 `.brigade/memory/reflect/runs/<run-id>/`, including dry runs. Dry runs print
@@ -42,12 +52,18 @@ the newest cited evidence timestamp. A stale candidate with contrary evidence
 prints a review summary instead of a consolidation diff. No preview is applied.
 `memory reflect status` shows the latest receipt, `memory reflect candidates`
 lists the latest successful run, and `memory reflect show <candidate-id>` shows
-one retained candidate and its preview. All accept `--target` and `--json`.
+one retained candidate and its preview. Inspection reads the newest 1024 run
+directories, without deleting older runs. All accept `--target` and `--json`.
 
 A stage failure records a failed receipt and leaves cards untouched. Incomplete
 runs never become visible candidates. Unsafe storage is refused when a receipt
 cannot be written safely, including when reflect storage overlaps a card root.
-Evidence-log warnings fail the run before candidates are persisted.
+Malformed or missing frontmatter and ambiguous card identities are skipped and
+listed by path in the receipt's `skipped_cards`. Scope filtering precedes those
+checks. The evidence log's 4 MiB scan window is informational and recorded as
+`scan_window_truncated`. Malformed rows inside that window, unreadable logs,
+and logs changed during a scan still fail the run. No log rotation or compaction
+command is provided in this slice.
 Policy promotion, proposal creation, and model-authored changes are not available
 through these commands.
 

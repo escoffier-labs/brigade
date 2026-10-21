@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import argparse
+import heapq
 import json
+import os
 import re
 import uuid
 from datetime import datetime, timezone
@@ -12,11 +14,44 @@ from typing import Any
 
 from . import memory_proposal_io as io
 from . import memory_reflect_candidates as derive
-from .memory_evidence_log import EvidenceLog
+from .memory_evidence_log import LOG_PATH, MAX_SCAN_BYTES, EvidenceLog
 
 ROOT = ".brigade/memory/reflect/runs"
 DEFAULT_LIMIT = 20
 MAX_LIMIT = 100
+
+
+def _evidence_log(target: Path) -> EvidenceLog:
+    """Separate the existing reader's window warning from invalid-row warnings.
+
+    Bind the classification to an unchanged regular file so concurrent appends
+    cannot disguise an invalid-row warning as a window warning.
+    """
+    path = target / LOG_PATH
+    try:
+        with io.directory(path.parent) as parent:
+            fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)
+            try:
+                before = io._regular(fd)
+                ledger = EvidenceLog(target)
+                after = io._regular(fd)
+                live = os.stat(path.name, dir_fd=parent, follow_symlinks=False)
+                observations = {
+                    (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns) for s in (before, after, live)
+                }
+                if len(observations) != 1:
+                    raise ValueError("evidence log changed during reflection; retry the run")
+                truncated = before.st_size > MAX_SCAN_BYTES
+            finally:
+                os.close(fd)
+    except FileNotFoundError:
+        ledger = EvidenceLog(target)
+        truncated = False
+    ledger.summary["scan_window_truncated"] = truncated
+    warning_count = ledger.summary["warning_count"]
+    assert isinstance(warning_count, int)
+    ledger.summary["invalid_warning_count"] = warning_count - int(truncated)
+    return ledger
 
 
 def register(sub: argparse._SubParsersAction) -> None:
@@ -56,18 +91,24 @@ def run_payload(
         "candidates": [],
         "status": "failed",
         "stage": "configuration",
+        "skipped_cards": [],
+        "total_candidates": 0,
+        "truncated": False,
     }
     try:
         care = derive.configuration(target)
         payload["stage"] = "evidence-log"
-        ledger = EvidenceLog(target)
+        ledger = _evidence_log(target)
         payload["evidence_log"] = ledger.summary
-        if ledger.summary["unsupported"] or ledger.summary["warning_count"]:
+        if ledger.summary["unsupported"] or ledger.summary["invalid_warning_count"]:
             raise ValueError("evidence log is incomplete or unreadable")
         payload["stage"] = "cards"
-        cards = derive.read_cards(target, care, ledger, scope)
+        cards, payload["skipped_cards"] = derive.read_cards(target, care, ledger, scope)
         payload["stage"] = "candidates"
-        candidates = derive.generate(target, care, ledger, cards, limit)
+        candidates = derive.generate(target, care, ledger, cards)
+        payload["total_candidates"] = len(candidates)
+        payload["truncated"] = len(candidates) > limit
+        candidates = candidates[:limit]
         payload["stage"] = "persist"
         io.write_exclusive(target / payload["candidates_path"], b"".join(io.json_bytes(c) for c in candidates))
         payload["candidates"] = candidates
@@ -90,11 +131,12 @@ def _runs(target: Path) -> list[dict[str, Any]]:
     root = target / ROOT
     try:
         with io.directory(root):
-            paths = sorted(root.iterdir(), reverse=True)
+            paths = heapq.nlargest(
+                io.MAX_FILES,
+                (path for path in root.iterdir() if re.fullmatch(r"\d{8}-\d{6}-\d{6}-[0-9a-f]{8}", path.name)),
+            )
     except FileNotFoundError:
         return []
-    if len(paths) > io.MAX_FILES:
-        raise ValueError("reflect run history limit exceeded")
     runs: list[dict[str, Any]] = []
     for path in paths:
         if not re.fullmatch(r"\d{8}-\d{6}-\d{6}-[0-9a-f]{8}", path.name):
