@@ -347,7 +347,7 @@ def _render_relay_units(target: Path, *, python: str | None = None) -> tuple[dic
         str((root / grokbot_ops.QUEUE_STATE_DIR).resolve()),
         str(owner),
     ]
-    secrets = [str(root), str(owner), executable, str(Path(executable).parent)]
+    secrets = [str(root), str(owner), executable, str(Path(executable).parent), str(trusted_cwd())]
     wazuh = _optional_instance(root, "wazuh-triage")
     if wazuh is not None:
         ledger = Path(wazuh["ledger_path"]).resolve()

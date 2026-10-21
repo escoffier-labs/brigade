@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import base64
 import hashlib
+import shlex
 import shutil
 import subprocess
 import sys
@@ -510,45 +512,50 @@ def test_care_windows_printed_schtasks_match_each_schedule_hint(tmp_path, monkey
         assert "/NP" not in line
         assert "/RL" not in line
         assert "/F:String" not in line
-        assert line.endswith(" /F")
+        assert line.partition(" && ")[0].endswith(" /F")
         assert line.startswith("schtasks /Create ")
-        assert r'/TR "C:\Windows\System32\cmd.exe /c cd /d ' in line
+        assert r'/TR "C:\Windows\System32\cmd.exe /d /c exit 1"' in line
+        assert "-EncodedCommand " in line
 
 
 def test_schtasks_create_command_is_well_formed_for_every_catalog_entry(tmp_path):
-    """Emitted lines must use /IT (not /NP) and an absolute cmd.exe /TR."""
+    """Emitted lines retain schedule/account flags and pin the configured action."""
     workspace = Path(r"C:\Users\operator\project")  # content-guard: allow windows-home-path
     for entry in (*care_cmd.CARE_ENTRIES, *care_cmd.MEMORY_JOB_ENTRIES):
         command = care_cmd._schtasks_create_command(entry, workspace=workspace)
         flags = EXPECTED_SCHTASKS_FLAGS[entry.schedule]
         assert f'/TN "BrigadeCare-{entry.entry_id}"' in command
         assert flags in command
-        assert r'/TR "C:\Windows\System32\cmd.exe /c ' in command
+        assert r'/TR "C:\Windows\System32\cmd.exe /d /c exit 1"' in command
+        assert "-EncodedCommand " in command
         assert '/RU "%USERNAME%" /IT /F' in command
         assert "/NP" not in command
         assert "/RL" not in command
         assert "/F:String" not in command
         assert command.startswith("schtasks /Create ")
-        assert command.endswith(" /F")
+        assert command.partition(" && ")[0].endswith(" /F")
 
 
 def test_care_windows_printed_path_uses_single_backslashes(tmp_path):
     entry = care_cmd.CARE_ENTRIES[0]
     workspace = Path(r"C:\Users\operator\project")  # content-guard: allow windows-home-path
     command = care_cmd._schtasks_create_command(entry, workspace=workspace)
-    assert r"C:\Users\operator\project" in command  # content-guard: allow windows-home-path
-    assert r"C:\\Users" not in command
+    action = base64.b64decode(command.split("-EncodedCommand ")[1]).decode("utf-16le")
+    assert r"C:\Users\operator\project" in action  # content-guard: allow windows-home-path
+    assert r"C:\\Users" not in action
     spaced = care_cmd._schtasks_create_command(
         entry,
         workspace=Path(r"C:\Users\operator\my project"),  # content-guard: allow windows-home-path
     )
-    assert r"cd /d \"C:\Users\operator\my project\"" in spaced  # content-guard: allow windows-home-path
-    assert r"C:\\Users" not in spaced
+    spaced_action = base64.b64decode(spaced.split("-EncodedCommand ")[1]).decode("utf-16le")
+    assert r"C:\Users\operator\my project" in spaced_action  # content-guard: allow windows-home-path
+    assert r"C:\\Users" not in spaced_action
+    assert "$action.WorkingDirectory=" in spaced_action
     assert "/F:String" not in command
     assert "/RL" not in command
-    assert command.endswith('/RU "%USERNAME%" /IT /F')
+    assert command.partition(" && ")[0].endswith('/RU "%USERNAME%" /IT /F')
     assert "/NP" not in command
-    assert r"C:\Windows\System32\cmd.exe /c " in command
+    assert r"C:\Windows\System32\cmd.exe /d /c exit 1" in command
 
 
 def test_care_windows_install_json_returns_structured_plan(tmp_path, monkeypatch, capsys):
@@ -781,13 +788,22 @@ def test_care_systemd_unit_quotes_workspace_paths_with_spaces(tmp_path, monkeypa
     text = service.read_text(encoding="utf-8")
     parsed = managed_block.parse_blocks(text, kind=care_cmd.CARE_KIND, style=care_cmd.CARE_MARKER_STYLE)
     assert parsed.status == "ok"
-    # Compare against the same quoting helper install uses so a win32
-    # workspace path (backslashes, spaces) is not asserted as a POSIX literal.
-    assert care_cmd._systemd_working_directory(trusted_cwd()) in parsed.body
-    assert "my workspace" in parsed.body
-    assert " -I -c " in parsed.body
-    assert "brigade runbook run --approved " in parsed.body
-    assert str(target / ".brigade/memory-care/runbooks/daily-care-pass.json") in parsed.body
+    # Decode the emitted double-quoted arguments independently of the
+    # production quoting helper, including systemd's literal % and $ escapes.
+    command = next(
+        line.removeprefix("ExecStart=") for line in parsed.body.splitlines() if line.startswith("ExecStart=")
+    )
+    argv = [arg.replace("%%", "%").replace("$$", "$") for arg in shlex.split(command)]
+    directory = next(
+        line.removeprefix("WorkingDirectory=")
+        for line in parsed.body.splitlines()
+        if line.startswith("WorkingDirectory=")
+    )
+    assert shlex.split(directory) == [str(trusted_cwd())]
+    assert argv[:3] == [sys.executable, "-I", "-c"]
+    assert argv[4] == str(trusted_cwd() / "__init__.py")
+    assert argv[argv.index("--approved") + 1] == str(target / ".brigade/memory-care/runbooks/daily-care-pass.json")
+    assert argv[argv.index("--target") + 1] == str(target)
 
 
 def test_care_systemd_environment_path_quotes_home_with_spaces(tmp_path, monkeypatch):

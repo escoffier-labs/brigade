@@ -55,6 +55,8 @@ with runguard.run_lock(cwd, run_dir=run, wait_seconds=0):
     meta['failure_kind'] = os.environ.get('FAKE_DISPATCH_KIND', meta.get('failure_kind'))
     (run / 'run.json').write_text(json.dumps(meta))
     time.sleep(float(os.environ.get('FAKE_DISPATCH_AFTER_TERMINAL', '0')))
+    release = os.environ.get('FAKE_DISPATCH_RELEASE_FILE')
+    while release and not Path(release).exists(): time.sleep(0.01)
 """
     )
     executable.chmod(0o755)
@@ -445,7 +447,8 @@ def test_full_event_digest_corruption_refuses_resume(apply_target, capsys, monke
 
 
 def test_terminal_run_waits_for_child_exit_before_closeout(apply_target, capsys, monkeypatch):
-    monkeypatch.setenv("FAKE_DISPATCH_AFTER_TERMINAL", "0.5")
+    release = apply_target / "release-child"
+    monkeypatch.setenv("FAKE_DISPATCH_RELEASE_FILE", str(release))
     _apply(apply_target, capsys, "--no-wait")
     (intent,) = _intents(apply_target)
     run_dir = Path(intent["run_dir"])
@@ -455,8 +458,12 @@ def test_terminal_run_waits_for_child_exit_before_closeout(apply_target, capsys,
         if meta and meta.get("status") == "ok":
             break
         time.sleep(0.01)
-    _apply(apply_target, capsys, "--no-wait", "--max", "0")
-    assert _intents(apply_target)[0]["state"] == "running"
+    try:
+        assert meta and meta.get("status") == "ok"
+        _apply(apply_target, capsys, "--no-wait", "--max", "0")
+        assert _intents(apply_target)[0]["state"] == "running"
+    finally:
+        release.touch()
     _apply(apply_target, capsys, "--max", "0")
     assert _intents(apply_target)[0]["state"] == "completed"
 

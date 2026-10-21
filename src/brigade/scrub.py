@@ -10,14 +10,14 @@ from pathlib import Path
 from typing import Any
 
 from . import localio
-from .isolated_exec import module_argv, trusted_cwd
+from .isolated_exec import module_argv, package_argv, trusted_cwd
 from .templates import template_root
 
 
 def scanner_dir() -> Path:
     configured = os.environ.get("CONTENT_GUARD_DIR")
     if configured:
-        return Path(configured).expanduser()
+        return Path(configured).expanduser().resolve()
     return Path(__file__).resolve().parent / "guard"
 
 
@@ -29,15 +29,20 @@ def _scanner_argv(target: Path, policy: Path) -> list[str]:
     module = scanner_module()
     if module == "brigade.guard":
         return module_argv(module, "scan", str(target), "--policy", str(policy.resolve()))
-    return [sys.executable, "-m", module, "scan", str(target), "--policy", str(policy)]
+    return package_argv(
+        scanner_dir() / "src/content_guard/__init__.py",
+        module,
+        "scan",
+        str(target.resolve()),
+        "--policy",
+        str(policy.resolve()),
+    )
 
 
 def _scanner_env() -> dict[str, str]:
     env = os.environ.copy()
-    if scanner_module() == "content_guard":
-        existing_pp = env.get("PYTHONPATH", "")
-        external_src = scanner_dir() / "src"
-        env["PYTHONPATH"] = f"{external_src}{os.pathsep}{existing_pp}" if existing_pp else str(external_src)
+    env.pop("PYTHONPATH", None)
+    env.pop("PYTHONHOME", None)
     return env
 
 
@@ -287,7 +292,7 @@ def run_scan(scan_target: Path, *, repo_target: Path | None = None, policy: str 
     try:
         result = subprocess.run(
             cmd,
-            cwd=trusted_cwd() if scanner_module() == "brigade.guard" else None,
+            cwd=trusted_cwd(),
             env=_scanner_env(),
             check=False,
             stdout=subprocess.PIPE,

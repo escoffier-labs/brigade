@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path
 from types import SimpleNamespace
@@ -47,6 +48,10 @@ def test_detached_run_executes_trusted_cli(hostile_workspace, monkeypatch, capsy
 
     def launch(argv, **kwargs):
         # Help exercises the real child parser without dispatching a model seat.
+        # Keep this help child inside the Windows CI Job Object. Production
+        # detached runs still require breakaway and refuse a restricted job.
+        if os.name == "nt":
+            kwargs["creationflags"] &= ~subprocess.CREATE_BREAKAWAY_FROM_JOB
         launches.append((argv, kwargs))
         return popen([*argv, "--help"], **kwargs)
 

@@ -6,6 +6,7 @@ import pytest
 from brigade.claude_hooks import runtime
 from brigade.config import Config, write_config
 from brigade.selection import Selection
+from tests._home import set_home
 
 
 @pytest.mark.parametrize("shadow", ["brigade.py", "brigade/__init__.py"])
@@ -43,8 +44,7 @@ def test_subprocess_worker_preserves_tilde_target_pin(tmp_path, monkeypatch):
     target = tmp_path / "workspace"
     target.mkdir()
     write_config(target, Config(version=1, selection=Selection(depth="repo", harnesses=["claude"], owner="claude")))
-    monkeypatch.setenv("HOME", str(tmp_path))
-    monkeypatch.setenv("USERPROFILE", str(tmp_path))
+    set_home(monkeypatch, tmp_path)
     monkeypatch.delenv("BRIGADE_FLEET_HUB_URL", raising=False)
     payload = {"cwd": str(target), "session_id": "tilde-session", "hook_event_name": "SessionStart"}
     outcome = runtime._subprocess_timed_hook_run(

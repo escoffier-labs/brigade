@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -218,28 +219,24 @@ def test_release_guard_external_checkout_requires_explicit_override(tmp_path, mo
     )
     policy = str(checkout / "policies" / "public-repo.json")
     assert tip_error is None
-    assert tip == [
-        release_cmd.sys.executable,
-        "-m",
-        "content_guard",
+    assert tip[:3] == history[:3] == [sys.executable, "-I", "-c"]
+    assert tip[4] == history[4] == str(checkout / "src/content_guard/__init__.py")
+    assert tip[tip.index("content_guard") + 1 :] == [
         "scan",
         str(tmp_path),
         "--policy",
         policy,
     ]
     assert history_error is None
-    assert history == [
-        release_cmd.sys.executable,
-        "-m",
-        "content_guard.git_scan",
+    assert history[history.index("content_guard.git_scan") + 1 :] == [
+        str(tmp_path),
         "--history",
         "--range",
         "origin/main..HEAD",
         "--policy",
         policy,
     ]
-    expected_env = {"PYTHONPATH": str(checkout / "src")}
-    assert tip_env == history_env == expected_env
+    assert tip_env == history_env == {}
 
 
 def test_release_plan_run_runs_show_clean_ready(tmp_path, monkeypatch, capsys):

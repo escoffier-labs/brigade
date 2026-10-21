@@ -24,6 +24,7 @@ from typing import Any, Literal
 
 from . import care_schedules, managed_block, memory_cmd, runbook_cmd
 from .care_launchers import explicit_workspace, runbook_argv
+from .care_windows import create_command as _windows_create_command, task_run as _schtasks_task_run
 from .isolated_exec import trusted_cwd
 
 CARE_KIND = "CARE"
@@ -342,11 +343,6 @@ def _uses_schtasks(backend: str) -> bool:
     return backend == SCHTASKS_BACKEND
 
 
-def _windows_path(value: Path | str) -> str:
-    """Emit a Windows path with single backslashes (no cron-style escaping)."""
-    return os.fspath(value).replace("/", "\\")
-
-
 def _schtasks_schedule_flags(schedule: str) -> str:
     """Map a five-field cron expression to schtasks /SC flags.
 
@@ -355,24 +351,6 @@ def _schtasks_schedule_flags(schedule: str) -> str:
     default care entries (#1021).
     """
     return care_schedules.schtasks_schedule_flags(schedule)
-
-
-def _schtasks_task_run(entry: CareEntry, *, workspace: Path) -> str:
-    workspace_text = _windows_path(workspace)
-    if " " in workspace_text or "\t" in workspace_text:
-        # Escape inner quotes so the outer /TR "..." stays one argv for schtasks.
-        cd_target = f'\\"{workspace_text}\\"'
-    else:
-        cd_target = workspace_text
-    if entry.kind == "runbook":
-        assert entry.runbook_rel is not None
-        body = f"brigade runbook run --approved {entry.runbook_rel} --target ."
-    else:
-        assert entry.shell is not None
-        body = entry.shell
-    # Bare "cmd" is not on Task Scheduler's search path ("The system cannot
-    # find the file specified" on windows-latest). Use the absolute console host.
-    return f"{SCHTASKS_CMD_EXE} /c cd /d {cd_target} && {body}"
 
 
 def _schtasks_task_name(entry: CareEntry) -> str:
@@ -385,7 +363,9 @@ def _schtasks_create_command(entry: CareEntry, *, workspace: Path) -> str:
     task_run = _schtasks_task_run(entry, workspace=workspace)
     # Official create flags: /TN /TR /SC [/MO|/D] [/ST] /RU /IT /F.
     # Do not emit /NP (needs elevation) or /RL /F:String.
-    return f'schtasks /Create /TN "{task_name}" /TR "{task_run}" {schedule_flags} {SCHTASKS_S4U_FLAGS} /F'
+    return _windows_create_command(
+        entry, command=task_run, name=task_name, schedule=schedule_flags, account=SCHTASKS_S4U_FLAGS
+    )
 
 
 def _schtasks_delete_command(entry: CareEntry) -> str:
