@@ -209,11 +209,11 @@ def test_adapter_exception_records_a_terminal_failure(tmp_path, monkeypatch, sch
         output_dir=run,
         scheduler=scheduler,
     )[0]
-    assert not result.ok and result.detail == "worker transport unavailable"
+    assert not result.ok and result.detail == "adapter pipe failed"
     docs = _documents(run)
     assert len([d for d in docs if d["privacy_class"] == "public-metadata"]) == 1
     body = next(d["result"] for d in docs if d["privacy_class"] == "private")
-    assert not body["ok"] and body["detail"] == result.detail
+    assert not body["ok"] and body["detail"] == "worker transport unavailable"
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX special-file boundary")

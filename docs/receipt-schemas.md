@@ -11,9 +11,9 @@ and closeout writers live in
 ## Worker cassette sidecars
 
 `run.record` defaults to `metadata-only`, which creates no private cassette body.
-Private bodies require an explicit `auto` opt-in until the hardening follow-up
-lands. `off` disables cassette recording. The `auto` default proposed in
-[#1854](https://github.com/escoffier-labs/brigade/issues/1854) remains deferred.
+Private bodies require an explicit `auto` opt-in. `off` disables cassette
+recording. The default follows the decision in
+[#1894](https://github.com/escoffier-labs/brigade/issues/1894).
 Runs intended for [replay (#1855)](https://github.com/escoffier-labs/brigade/issues/1855)
 require explicit `auto` recording to retain private result bodies.
 

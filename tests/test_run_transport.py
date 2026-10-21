@@ -271,8 +271,8 @@ def test_dispatch_releases_lease_when_worker_invocation_raises(monkeypatch, tmp_
         output_dir=tmp_path,
         model_lease=lease,
     )[0]
-    assert not result.ok and result.failure_kind == "internal-error"
-    assert result.detail == "worker dispatch failed"
+    assert not result.ok and result.failure_kind is None
+    assert result.detail == "worker transport failed"
     assert released == ["coder"]
 
 

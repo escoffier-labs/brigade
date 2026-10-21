@@ -13,7 +13,9 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_runs = sub.add_parser("runs", help="Inspect Brigade run artifacts.")
     runs_sub = p_runs.add_subparsers(dest="runs_command", metavar="<runs-command>")
     runs_sub.required = True
-    cassette = runs_sub.add_parser("cassette", help="Manage local worker recordings.")
+    cassette = runs_sub.add_parser(
+        "cassette", help="Manage worker recordings. Default: metadata-only. Private bodies: auto opt-in."
+    )
     cassette_sub = cassette.add_subparsers(dest="cassette_command", required=True)
     purge = cassette_sub.add_parser("purge", help="Delete cassette sidecars without changing lifecycle history.")
     purge.add_argument("run", help="Run directory path, run id, or 'latest'.")

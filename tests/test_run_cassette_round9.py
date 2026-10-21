@@ -1,16 +1,13 @@
-"""No-follow retention, validated runs, and closed dispatch diagnostics."""
+"""No-follow retention and validated runs."""
 
 import json
 import os
 import time
-from concurrent.futures import Future
-from threading import Barrier
 
 import pytest
 
-from brigade import agents, cli, config, run_cassette, run_transport
+from brigade import cli, run_cassette
 from brigade import run_cassette_store as store
-from brigade.roster import Agent, Roster
 from tests.test_run_cassette import _documents, _record
 from tests.test_run_cassette import auto_recording as auto_recording
 
@@ -92,91 +89,6 @@ def test_outcome_reference_scan_refuses_parent_symlinks(tmp_path):
     assert store._pinned_runs(tmp_path) is None
 
 
-@pytest.mark.parametrize("scheduler", ["waves", "dag"])
-@pytest.mark.parametrize("exception", [OSError, ValueError, TypeError])
-def test_dispatch_exception_diagnostics_are_closed(tmp_path, monkeypatch, scheduler, exception):
-    needle = "https://user:credential-needle@example.invalid/provider?token=provider-value"
-    error = exception(needle)
-
-    def fail(*args, **kwargs):
-        raise error
-
-    monkeypatch.setattr(agents, "run_agent", fail)
-    run = tmp_path / ".brigade" / "runs" / "current"
-
-    def dispatch():
-        return run_transport.dispatch(
-            [run_transport.Assignment(worker="worker", task="task")],
-            Roster(orchestrator="chef", agents={"worker": Agent(name="worker", cli="codex", role="write")}),
-            build_prompt=lambda *a, **kw: "task",
-            run_appserver_worker=fail,
-            event_writer=lambda *a, **kw: None,
-            cwd=tmp_path,
-            output_dir=run,
-            scheduler=scheduler,
-            route_dependencies={"worker": ()},
-        )
-
-    result = dispatch()[0]
-    assert not result.ok
-    assert result.failure_kind == ("transport-error" if exception is OSError else "internal-error")
-    assert result.detail == ("worker transport unavailable" if exception is OSError else "worker dispatch failed")
-    assert needle not in json.dumps(_documents(run))
-    assert needle not in json.dumps(vars(result))
-
-
-@pytest.mark.parametrize("scheduler", ["waves", "dag"])
-@pytest.mark.parametrize("failure_site", ["prompt", "adapter"])
-@pytest.mark.parametrize("record", ["off", "auto"])
-def test_internal_dispatch_failure_keeps_siblings_running(tmp_path, monkeypatch, scheduler, failure_site, record):
-    cfg = config.load_config(tmp_path)
-    cfg.run_record = record
-    config.write_config(tmp_path, cfg)
-    workers = ("broken", "sibling-one", "sibling-two")
-    rendezvous = Barrier(len(workers))
-
-    def maybe_fail(worker):
-        rendezvous.wait(timeout=5)
-        if worker == "broken":
-            raise ValueError("private-dispatch-error-needle")
-
-    def build_prompt(agent, assignment, **kwargs):
-        if failure_site == "prompt":
-            maybe_fail(agent.name)
-        return agent.name
-
-    def invoke(cli_ref, prompt, **kwargs):
-        if failure_site == "adapter":
-            maybe_fail(prompt)
-        return agents.AgentResult(text=f"finished {prompt}", ok=True)
-
-    monkeypatch.setattr(agents, "run_agent", invoke)
-    run = tmp_path / ".brigade" / "runs" / "current"
-    results = run_transport.dispatch(
-        [run_transport.Assignment(worker=worker, task="task") for worker in workers],
-        Roster(
-            orchestrator="chef",
-            agents={worker: Agent(name=worker, cli="codex", role="write") for worker in workers},
-            max_workers=3,
-        ),
-        build_prompt=build_prompt,
-        run_appserver_worker=invoke,
-        event_writer=lambda *a, **kw: None,
-        cwd=tmp_path,
-        output_dir=run,
-        scheduler=scheduler,
-        route_dependencies={worker: () for worker in workers},
-    )
-    failed, *siblings = results
-    assert failed.worker == "broken" and not failed.ok
-    assert failed.failure_kind == "internal-error"
-    assert failed.detail == "worker dispatch failed"
-    assert [(r.worker, r.ok) for r in siblings] == [(w, True) for w in workers[1:]]
-    assert "private-dispatch-error-needle" not in json.dumps(_documents(run))
-    if record == "off":
-        assert not _documents(run)
-
-
 @pytest.mark.parametrize("component", ["events", "run-parent"])
 def test_recorder_journal_operations_refuse_symlink_parents(tmp_path, component):
     outside = tmp_path / "outside"
@@ -205,19 +117,6 @@ def test_purge_latest_ignores_unsafe_metadata_and_import_debris(tmp_path):
     assert run_cassette.purge_cli("latest", cwd=tmp_path) == 0
     assert not _documents(run)
     assert (debris / "run.json").is_symlink()
-
-
-def test_sibling_failure_note_never_carries_exception_text(monkeypatch):
-    from brigade import runguard
-
-    needle = "https://user:credential-needle@example.invalid/provider"
-    future = Future()
-    future.set_exception(ValueError(needle))
-    retained = runguard.RetainRunLockError("lock retained")
-    notes = []
-    monkeypatch.setattr(run_transport, "_add_note", lambda error, note, *args: notes.append(note))
-    run_transport._note_sibling_failures({future: 0}, retained, None, None)
-    assert notes == ["sibling worker failure: internal-error: worker dispatch failed"]
 
 
 def test_purge_explicit_directory_requires_safe_run_metadata(tmp_path, capsys):

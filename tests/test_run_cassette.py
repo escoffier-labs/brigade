@@ -4,12 +4,13 @@ from __future__ import annotations
 
 import hashlib
 import json
+from contextlib import nullcontext
 from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
-from brigade import agents, config, run_journal
+from brigade import agents, config, run_journal, runguard
 from brigade.selection import Selection
 from brigade.roster import Agent
 
@@ -26,23 +27,30 @@ def auto_recording(tmp_path):
 def _record(run_dir: Path, **kwargs):
     from brigade import run_cassette
 
-    return run_cassette.record_result(
-        run_dir=run_dir,
-        workspace=kwargs.pop(
-            "cwd",
-            next(
-                (parent for parent in list(run_dir.parents)[:3] if config.config_path(parent).is_file()),
-                run_dir.parent.parent.parent,
-            ),
+    workspace = kwargs.pop(
+        "cwd",
+        next(
+            (parent for parent in list(run_dir.parents)[:3] if config.config_path(parent).is_file()),
+            run_dir.parent.parent.parent,
         ),
-        agent=kwargs.pop("agent", Agent(name="worker", cli="codex", role="write", model="test-model")),
-        task=kwargs.pop("task", "coordinator task"),
-        prompt=kwargs.pop("prompt", "injected brief and private prompt"),
-        result=kwargs.pop("result", agents.AgentResult(text="private-worker-answer", ok=True, transport="cli")),
-        read_only=True,
-        sandbox="read-only",
-        **kwargs,
     )
+    ownership = (
+        nullcontext()
+        if runguard.is_active_run_owner(workspace, run_dir)
+        else runguard.run_lock(workspace, run_dir=run_dir)
+    )
+    with ownership:
+        return run_cassette.record_result(
+            run_dir=run_dir,
+            workspace=workspace,
+            agent=kwargs.pop("agent", Agent(name="worker", cli="codex", role="write", model="test-model")),
+            task=kwargs.pop("task", "coordinator task"),
+            prompt=kwargs.pop("prompt", "injected brief and private prompt"),
+            result=kwargs.pop("result", agents.AgentResult(text="private-worker-answer", ok=True, transport="cli")),
+            read_only=True,
+            sandbox="read-only",
+            **kwargs,
+        )
 
 
 def _documents(run_dir):

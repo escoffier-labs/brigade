@@ -8,7 +8,7 @@ from threading import Event, Thread
 
 import pytest
 
-from brigade import aboyeur, agents, fleet_session_bootstrap, proc, run_journal, run_transport
+from brigade import aboyeur, agents, fleet_session_bootstrap, proc, run_journal, run_transport, runguard
 from brigade.roster import Agent, Roster
 from brigade.run_seat import SeatInvoker
 from tests.run_test_helpers import run_aboyeur_guarded
@@ -31,16 +31,17 @@ def test_retry_records_only_the_terminal_worker_result(tmp_path, monkeypatch, re
     roster = Roster(orchestrator="chef", agents={"worker": Agent(name="worker", cli="codex", role="write")})
     run_dir = tmp_path / ".brigade" / "runs" / "20261020-120000-cassette"
     run_journal.ensure_journal(run_dir / "events" / "lifecycle.jsonl")
-    result = run_transport.dispatch(
-        [run_transport.Assignment(worker="worker", task="task")],
-        roster,
-        build_prompt=lambda *args, **kw: "task",
-        run_appserver_worker=lambda *args, **kw: None,
-        event_writer=lambda *args, **kw: None,
-        reprobe_seat=lambda agent: reprobe,
-        cwd=tmp_path,
-        output_dir=run_dir,
-    )[0]
+    with runguard.run_lock(tmp_path, run_dir=run_dir):
+        result = run_transport.dispatch(
+            [run_transport.Assignment(worker="worker", task="task")],
+            roster,
+            build_prompt=lambda *args, **kw: "task",
+            run_appserver_worker=lambda *args, **kw: None,
+            event_writer=lambda *args, **kw: None,
+            reprobe_seat=lambda agent: reprobe,
+            cwd=tmp_path,
+            output_dir=run_dir,
+        )[0]
     assert len(calls) == (2 if reprobe else 1)
     docs = _documents(run_dir)
     assert len([d for d in docs if d["privacy_class"] == "public-metadata"]) == 1
@@ -88,17 +89,18 @@ def test_each_dispatched_worker_records_exact_injected_prompt_once(tmp_path, mon
     )
     run_dir = tmp_path / ".brigade" / "runs" / "20261020-120000-cassette"
     run_journal.ensure_journal(run_dir / "events" / "lifecycle.jsonl")
-    result = run_transport.dispatch(
-        [run_transport.Assignment(worker=name, task="coordinator task") for name in ("one", "two")],
-        roster,
-        build_prompt=lambda *args, **kw: "worker-prompt-needle",
-        run_appserver_worker=lambda *args, **kw: None,
-        event_writer=lambda *args, **kw: None,
-        cwd=tmp_path,
-        output_dir=run_dir,
-        direct=True,
-        read_only=True,
-    )
+    with runguard.run_lock(tmp_path, run_dir=run_dir):
+        result = run_transport.dispatch(
+            [run_transport.Assignment(worker=name, task="coordinator task") for name in ("one", "two")],
+            roster,
+            build_prompt=lambda *args, **kw: "worker-prompt-needle",
+            run_appserver_worker=lambda *args, **kw: None,
+            event_writer=lambda *args, **kw: None,
+            cwd=tmp_path,
+            output_dir=run_dir,
+            direct=True,
+            read_only=True,
+        )
     assert len(result) == 2 and all(r.ok for r in result)
     manifests = [d for d in _documents(run_dir) if d["privacy_class"] == "public-metadata"]
     assert len(manifests) == 2

@@ -10,6 +10,7 @@ import stat
 import sys
 import time
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator
 from uuid import uuid4
@@ -320,9 +321,20 @@ def _pinned_runs(workspace: Path) -> set[str] | None:
 def retain_private(workspace: Path, runs_root: Path, *, current: Path) -> int:
     """Keep newest N runs and at most D days, except outcome-pinned bodies."""
     try:
-        runs = validated_runs(runs_root)
-    except CassetteError:
-        print("cassette retention skipped: runs inventory exceeds scan cap", file=sys.stderr)
+        runs = []
+        for modified, name, summary in validated_runs(runs_root):
+            started = summary.get("started_at")
+            if started is not None:
+                try:
+                    parsed = datetime.fromisoformat(started)
+                    if parsed.tzinfo is None:
+                        parsed = parsed.replace(tzinfo=timezone.utc)
+                    modified = parsed.timestamp()
+                except (ValueError, OverflowError) as exc:
+                    raise CassetteError("runs inventory has invalid started_at") from exc
+            runs.append((modified, name, summary))
+    except CassetteError as exc:
+        print(f"cassette retention skipped: {exc}", file=sys.stderr)
         return 0
     runs.sort(key=lambda item: (item[0], item[1]), reverse=True)
     cutoff = time.time() - KEEP_DAYS * 86400

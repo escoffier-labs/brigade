@@ -18,7 +18,7 @@ from threading import Lock
 from typing import TYPE_CHECKING, Any, Callable, Iterator, Mapping
 from uuid import uuid4
 
-from . import agents, config, dirfd, run_audit, run_events, run_journal, worker_events
+from . import agents, config, dirfd, run_audit, run_events, run_journal, runguard, worker_events
 from . import run_cassette_store as store
 from .roster import Agent
 
@@ -196,9 +196,11 @@ def _journal_size(journal: Path) -> int:
     return info.st_size
 
 
-def _append_reference(run_dir: Path, ref: dict[str, Any]) -> None:
+def _append_reference(run_dir: Path, workspace: Path, ref: dict[str, Any]) -> None:
     from . import run_shadow
 
+    if not runguard.is_active_run_owner(workspace, run_dir):
+        raise store.CassetteError("cassette journal append requires the active run lock")
     journal = run_dir / "events" / "lifecycle.jsonl"
     report = run_journal.read_journal_bounded(journal)
     if report.chain_errors or report.partial_tail:
@@ -218,6 +220,7 @@ def _append_reference(run_dir: Path, ref: dict[str, Any]) -> None:
         payload=ref,
         idempotency_key=f"cassette:{uuid4().hex}",
         expected_previous_sequence=sequence,
+        workspace=workspace,
     )
     # Like live-control facts, neutral cassette facts advance shadow evidence
     # under the same pair/journal lock without changing run.json authority.
@@ -225,7 +228,7 @@ def _append_reference(run_dir: Path, ref: dict[str, Any]) -> None:
         run_shadow.record_shadow_comparison(run_dir, snapshot)
 
 
-def _stop(run_dir: Path) -> None:
+def _stop(run_dir: Path, workspace: Path) -> None:
     """A single bounded stop fact when storage or policy cannot admit a body."""
     print("cassette recording stopped: storage, classification, or byte cap", file=sys.stderr)
     try:
@@ -233,13 +236,13 @@ def _stop(run_dir: Path) -> None:
             return
         journal = run_dir / "events" / "lifecycle.jsonl"
         with store.journal_scope(run_dir):
-            _stop_bound(run_dir, journal)
+            _stop_bound(run_dir, workspace, journal)
     except Exception:
         # A full or unavailable journal cannot carry even a stop reference.
         pass
 
 
-def _stop_bound(run_dir: Path, journal: Path) -> None:
+def _stop_bound(run_dir: Path, workspace: Path, journal: Path) -> None:
     from . import run_lifecycle
 
     journaled = _journal_present(journal)
@@ -265,7 +268,7 @@ def _stop_bound(run_dir: Path, journal: Path) -> None:
             os.close(descriptor)
         dirfd.fsync_directory(parent)
         if fits and journaled:
-            _append_reference(run_dir, _reference(data, "public-metadata"))
+            _append_reference(run_dir, workspace, _reference(data, "public-metadata"))
 
 
 def record_result(
@@ -295,6 +298,7 @@ def record_result(
     try:
         ref = _record_result(
             run_dir=run_dir,
+            workspace=workspace,
             agent=agent,
             task=task,
             prompt=prompt,
@@ -308,7 +312,7 @@ def record_result(
             coordinator_prompt_sha256=coordinator_prompt_sha256,
         )
     except Exception:
-        _stop(run_dir)
+        _stop(run_dir, workspace)
         return None
     if ref is not None:
         store.retain_private_once(workspace, run_dir)
@@ -318,6 +322,7 @@ def record_result(
 def _record_result(
     *,
     run_dir: Path,
+    workspace: Path,
     agent: Agent,
     task: str,
     prompt: str,
@@ -455,10 +460,12 @@ def _record_result(
         raise store.CassetteError("cassette entry byte cap reached")
     journal = run_dir / "events" / "lifecycle.jsonl"
     with store.journal_scope(run_dir):
-        return _publish_blobs(run_dir, journal, blobs, data)
+        return _publish_blobs(run_dir, workspace, journal, blobs, data)
 
 
-def _publish_blobs(run_dir: Path, journal: Path, blobs: list[tuple[str, bytes]], data: bytes) -> dict[str, Any] | None:
+def _publish_blobs(
+    run_dir: Path, workspace: Path, journal: Path, blobs: list[tuple[str, bytes]], data: bytes
+) -> dict[str, Any] | None:
     from . import run_lifecycle
 
     journaled = _journal_present(journal)
@@ -492,21 +499,8 @@ def _publish_blobs(run_dir: Path, journal: Path, blobs: list[tuple[str, bytes]],
             store.publish(parent, raw)
         ref = _reference(data, "public-metadata")
         if journaled:
-            _append_reference(run_dir, ref)
+            _append_reference(run_dir, workspace, ref)
     return ref
-
-
-def failure_diagnostic(error: BaseException) -> str:
-    """Closed failure classes for notes that can be persisted by the scheduler."""
-    from . import run_budget
-
-    if isinstance(error, run_budget.BudgetPolicyError):
-        return "budget-policy: worker dispatch denied"
-    if isinstance(error, OSError):
-        return "transport-error: worker transport unavailable"
-    if isinstance(error, KeyboardInterrupt):
-        return "interrupted: worker dispatch interrupted"
-    return "internal-error: worker dispatch failed"
 
 
 def dispatch_failure(
@@ -517,13 +511,10 @@ def dispatch_failure(
     transport: str = "cli",
     requested_model: str | None = None,
 ) -> WorkerResult:
-    """Keep ordinary failures worker-local without persisting exception content."""
-    from . import proc, run_budget, runguard
+    """Shape a closed recorder-only failure without persisting exception content."""
+    from . import proc
     from .run_transport import WorkerResult
 
-    runguard.raise_if_retained_run_lock(error)
-    if isinstance(error, run_budget.BudgetPolicyError):
-        raise error
     if isinstance(error, proc.ProcessCancelledError):
         detail, failure_kind = "worker dispatch cancelled", "cancelled"
     elif isinstance(error, OSError):
@@ -557,19 +548,9 @@ def record_dispatch_result(
     codex_transport: str = "exec",
     coordinator_prompt_sha256: str | None = None,
 ) -> WorkerResult:
-    from . import run_budget, runguard
     from .run_receipts import agent_result_from_worker
 
-    assigned_agent = agent()
-    with _projection_window(run_dir, assigned_agent) as window:
-        try:
-            result = resolve()
-        except (runguard.RetainRunLockError, run_budget.BudgetPolicyError):
-            raise
-        except Exception as exc:
-            result = dispatch_failure(
-                exc, worker=assigned_agent.name, task=task, transport=transport(), requested_model=agent().model
-            )
+    def record(result: WorkerResult, window: _ProjectionWindow) -> None:
         if run_dir is not None:
             record_result(
                 run_dir=run_dir,
@@ -585,6 +566,24 @@ def record_dispatch_result(
                 projection_window=window,
                 coordinator_prompt_sha256=coordinator_prompt_sha256,
             )
+
+    assigned_agent = agent()
+    with _projection_window(run_dir, assigned_agent) as window:
+        try:
+            result = resolve()
+        except Exception as exc:
+            try:
+                record(
+                    dispatch_failure(
+                        exc, worker=assigned_agent.name, task=task, transport=transport(), requested_model=agent().model
+                    ),
+                    window,
+                )
+            except Exception:
+                pass
+            # Observation must never change dispatch or scheduler error semantics.
+            raise
+        record(result, window)
     return result
 
 

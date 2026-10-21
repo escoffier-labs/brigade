@@ -9,7 +9,7 @@ import time
 
 import pytest
 
-from brigade import agents, proc, run_journal, run_shadow
+from brigade import agents, proc, run_journal, run_shadow, runguard
 from brigade import run_cassette_store as store
 from brigade.roster import Agent, Roster
 from brigade.run_seat import SeatInvoker
@@ -210,6 +210,7 @@ def test_unexpected_recorder_exception_cannot_lose_completed_seat_result(tmp_pat
         process_registry=proc.ProcessRegistry(),
         output_dir=run,
     )
-    result = invoker.invoke(seat="worker", phase="research.plan", prompt="task", timeout=10)
+    with runguard.run_lock(tmp_path, run_dir=run):
+        result = invoker.invoke(seat="worker", phase="research.plan", prompt="task", timeout=10)
     assert result.ok and result.text == "completed answer"
     assert (run / "events" / "cassettes" / ".stopped").exists()
