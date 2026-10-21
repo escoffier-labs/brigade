@@ -7,12 +7,13 @@ import json
 import os
 import sqlite3
 import sys
+import threading
 from pathlib import Path
 
 import pytest
 
 from brigade import graphtrail_delta
-from brigade.claude_hooks import package, runtime
+from brigade.claude_hooks import dependencies, package, runtime
 from brigade.install import install_selection
 from brigade.selection import Selection
 
@@ -110,6 +111,45 @@ def test_explicit_write_records_unseen_callers_without_denying(target, monkeypat
 def test_managed_hooks_deliver_reads():
     for groups in (package.managed_groups(), package.managed_user_groups(Path("hook.sh"))):
         assert any("Read" in group["matcher"].split("|") for group in groups["PostToolUse"])
+
+
+def test_stalled_content_read_fails_open_before_hook_timeout(target, monkeypatch):
+    calls = graph(target, monkeypatch)
+    event(target, "SessionStart")
+    monkeypatch.setattr(dependencies, "CONTENT_TIMEOUT_SECONDS", 0.02, raising=False)
+    entered = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    original_open = Path.open
+    results = []
+
+    def stalled_open(path, *args, **kwargs):
+        if path == target / "caller.py":
+            entered.set()
+            assert release.wait(5)
+        return original_open(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "open", stalled_open)
+
+    def write():
+        try:
+            results.append(event(target, "PreToolUse", tool_name="Edit", tool_input={"file_path": "api.py"}))
+        finally:
+            finished.set()
+
+    worker = threading.Thread(target=write)
+    worker.start()
+    try:
+        assert entered.wait(2)
+        assert finished.wait(1), "a stalled content read consumed the hook worker budget"
+        check = runtime.read_session_state(target, "session-one")["dependency_checks"][-1]
+        assert check["unseen_dependents"] is None
+        assert check["reason"] == "content_check_incomplete"
+        assert results == [None]
+        assert calls == [("sync", ())]
+    finally:
+        release.set()
+        worker.join(2)
 
 
 @pytest.mark.parametrize(

@@ -5,6 +5,8 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+import threading
+from functools import partial
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -14,6 +16,7 @@ from .. import context_eval, graphtrail_delta, localio
 MAX_SEEN_FILES = 2048
 MAX_CHECKS = 32
 GRAPH_TIMEOUT_SECONDS = 2.0
+CONTENT_TIMEOUT_SECONDS = 0.5
 _STATE_KEYS = ("read_files", "brief_files", "dependency_checks")
 
 
@@ -127,20 +130,29 @@ def injected_brief_files(text: str) -> list[str]:
     return context_eval.extract_brief_files("\n".join(graph_lines))[:MAX_SEEN_FILES]
 
 
-def _content_matches_index(target: Path, db: Path) -> bool:
+def _content_matches_index(target: Path, db: Path, stopped: threading.Event) -> bool:
     """Verify SHA-256 content independently of the engine's size/mtime shortcut."""
     with sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True, timeout=0.1) as conn:
-        rows = conn.execute("SELECT path, content_hash FROM files").fetchall()
-    for path, expected in rows:
-        if not isinstance(path, str) or relative_path(target, path) != path:
-            return False
-        actual = hashlib.sha256((target / path).read_bytes()).hexdigest()
-        if actual != expected:
-            return False
-    return bool(rows)
+        count = 0
+        for path, expected in conn.execute("SELECT path, content_hash FROM files"):
+            if stopped.is_set() or not isinstance(path, str) or relative_path(target, path) != path:
+                return False
+            digest = hashlib.sha256()
+            with (target / path).open("rb") as source:
+                while not stopped.is_set():
+                    chunk = source.read(65536)
+                    if not chunk:
+                        break
+                    digest.update(chunk)
+            if stopped.is_set() or digest.hexdigest() != expected:
+                return False
+            count += 1
+        return count > 0
 
 
 def _dependents(target: Path, path: str) -> tuple[list[str] | None, str | None]:
+    from . import runtime
+
     db = target / ".graphtrail" / "graphtrail.db"
     if not db.is_file():
         return None, "no_index"
@@ -155,7 +167,18 @@ def _dependents(target: Path, path: str) -> tuple[list[str] | None, str | None]:
             return None, "sync_timed_out"
         if result.get("returncode") != 0:
             return None, "sync_failed"
-        if _content_matches_index(target, db):
+        # Bound even a single stalled filesystem read. Stream rows and content,
+        # and stop abandoned work when the filesystem becomes responsive again.
+        stopped = threading.Event()
+        matches = runtime._run_best_effort_bounded(
+            partial(_content_matches_index, target, db, stopped),
+            timeout=CONTENT_TIMEOUT_SECONDS,
+            default=None,
+            on_abandon=stopped.set,
+        )
+        if matches is None:
+            return None, "content_check_incomplete"
+        if matches:
             break
     else:
         return None, "stale_graph"
