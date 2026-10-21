@@ -23,7 +23,7 @@ def install_channel(env: Mapping[str, str]) -> str:
     if override in CHANNELS:
         return override
     prefix = Path(sys.prefix)
-    if (prefix / "pipx_metadata.json").is_file() or "pipx" in prefix.parts:
+    if (prefix / "pipx_metadata.json").is_file():
         return "pipx"
     try:
         with (prefix / "pyvenv.cfg").open(encoding="utf-8") as config:

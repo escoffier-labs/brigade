@@ -51,7 +51,7 @@ version and check/notice timestamps. It has no automatic expiry and can be
 deleted at any time. There is no local payload history or usage receipt because
 Tier 1 is not enabled.
 
-The controller is the maintainer identified by the contact in
+The controller is Solomon Neas (Escoffier Labs), reachable at the contact in
 [SECURITY.md](../SECURITY.md#reporting-a-vulnerability). Use that contact for
 privacy questions and erasure requests. Cloudflare processes the HTTPS request
 and hosts the Worker and its D1 observation table. There is no persistent
