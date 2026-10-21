@@ -91,3 +91,23 @@ def test_status_reads_only_newest_patrol_receipt(tmp_path, monkeypatch):
     status = care_cmd._entry_status(tmp_path, care_cmd._catalog_by_id()["run-patrol"])
     assert status["patrol_receipt"]["patrol_id"] == "20260820T120029-receipt"
     assert len(reads) == 1
+
+
+def test_explicit_crontab_selection_does_not_add_patrol(tmp_path):
+    body = care_cmd._crontab_body(workspace=tmp_path, entries=(care_cmd.CARE_ENTRIES[0],))
+    assert "run-patrol" not in body
+    assert len(body.splitlines()) == 2
+
+
+@pytest.mark.parametrize("backend", ["systemd", "launchd"])
+def test_unselected_patrol_does_not_write_or_pin_runbook(tmp_path, monkeypatch, capsys, backend):
+    monkeypatch.setattr(care_cmd, "_ensure_memory_care_runbooks", lambda target: 0)
+    monkeypatch.setattr(care_cmd, "_write_daily_observability_runbook", lambda target: 0)
+
+    def unexpected(*args):
+        pytest.fail("unselected patrol must not pin its runbook")
+
+    monkeypatch.setattr(runbook_cmd, "_pin_payload_from_runbook", unexpected)
+    assert care_cmd.install(target=tmp_path, backend=backend, home=tmp_path / "home") == 0
+    capsys.readouterr()
+    assert not (tmp_path / ".brigade/runbooks/run-patrol.json").exists()

@@ -119,3 +119,66 @@ def test_receipt_is_complete_before_publication(tmp_path, monkeypatch, capsys):
     assert runs_patrol.patrol(target=tmp_path, receipt=True, now=NOW, json_output=True) == 0
     report = json.loads(capsys.readouterr().out)
     assert published == [report]
+
+
+def test_report_receipt_survives_busy_apply_lock(tmp_path, monkeypatch, capsys):
+    from contextlib import contextmanager
+    from brigade import inbox_lock
+
+    @contextmanager
+    def busy(*args, **kwargs):
+        raise inbox_lock.InboxLockTimeout("another patrol is sending")
+        yield
+
+    monkeypatch.setattr(inbox_lock, "held_file_lock", busy)
+    assert runs_patrol.patrol(target=tmp_path, receipt=True, now=NOW, json_output=True) == 0
+    report = json.loads(capsys.readouterr().out)
+    assert json.loads((tmp_path / report["receipt"]).read_text()) == report
+    assert runs_patrol.patrol(target=tmp_path, apply="reap", now=NOW) == 2
+    assert "another patrol is sending" in capsys.readouterr().err
+
+
+def test_fences_for_many_lanes_do_not_hit_one_global_archive_cap(tmp_path, monkeypatch, capsys):
+    root = tmp_path / ".brigade/patrol"
+    actions = [
+        {
+            "lane_id": f"old-run-{i}",
+            "action": "escalate",
+            "scope": "local",
+            "idempotency_key": f"{i:064x}",
+            "attempted_at": (NOW - timedelta(days=8)).isoformat(),
+            "status": "applied",
+        }
+        for i in range(12)
+    ]
+    monkeypatch.setattr(runs_patrol_receipts, "RECEIPT_BYTE_LIMIT", 2000)
+    localio.write_json(
+        root / runs_patrol_receipts.FENCE_FILE, {"schema": "brigade.runs_patrol.v1", "actions": actions[:3]}
+    )
+    for i in range(1, 4):
+        localio.write_json(
+            root / f"20260801T12000{i}-old/patrol.json",
+            {
+                "schema": "brigade.runs_patrol.v1",
+                "observed_at": (NOW - timedelta(days=8)).isoformat(),
+                "actions": actions[i * 3 : i * 3 + 3],
+            },
+        )
+    assert runs_patrol.patrol(target=tmp_path, apply="reap", now=NOW) == 0
+    capsys.readouterr()
+    assert {item["idempotency_key"] for item in runs_patrol_actions._history(root)} == {
+        item["idempotency_key"] for item in actions
+    }
+    assert runs_patrol.patrol(target=tmp_path, apply="reap", now=NOW) == 0
+    capsys.readouterr()
+    assert json.loads((root / runs_patrol_receipts.FENCE_FILE).read_text())["actions"] == []
+    read = runs_patrol_receipts._read_payload
+    reads = []
+
+    def tracked(path):
+        reads.append(path)
+        return read(path)
+
+    monkeypatch.setattr(runs_patrol_receipts, "_read_payload", tracked)
+    assert runs_patrol_receipts.read_fences(root, lane_ids={"old-run-0"}) == [actions[0]]
+    assert len(reads) == 2  # Legacy archive plus this scan's single lane shard.

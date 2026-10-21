@@ -333,8 +333,11 @@ def test_hub_release_retries_after_refusal_or_missing_configuration(tmp_path, mo
 
     monkeypatch.setattr(fleet_claim_release, "_release_claim", release)
     first = _patrol(repo, capsys, apply="release-claim")
-    hub = next(item for item in first["actions"] if item["scope"] == "hub")
-    assert hub["status"] == ("refused" if initial == "unavailable" else "skipped")
+    if initial == "unavailable":
+        hub = next(item for item in first["actions"] if item["scope"] == "hub")
+        assert hub["status"] == "refused"
+    else:
+        assert first["actions"] == []
     available = True
     second = _patrol(repo, capsys, apply="release-claim")
     assert any(item["scope"] == "hub" and item["status"] == "applied" for item in second["actions"])
@@ -454,3 +457,113 @@ def test_record_only_escalation_deduplicates_after_one_delivery(tmp_path, monkey
     assert recorded["actions"][0]["status"] == "recorded"
     assert recorded["actions"][0]["escalation_number"] == 2
     assert _patrol(repo, capsys, apply="escalate", now=later + timedelta(minutes=10))["actions"] == []
+
+
+@pytest.mark.parametrize("case", ["orphaned", "normal-claim", "young-dead", "reaped"])
+def test_harmless_or_resolved_lanes_never_escalate(tmp_path, monkeypatch, capsys, case):
+    from brigade import fleet_client_messages
+
+    repo = _repo(tmp_path)
+    run = _write_run(
+        repo,
+        "20260820-120000-patrol01",
+        status="orphaned" if case == "orphaned" else "dispatching",
+        started_at=(NOW - timedelta(minutes=30)).isoformat() if case == "young-dead" else "2026-08-20T12:00:00+00:00",
+    )
+    if case != "orphaned":
+        _write_stale_lock(repo, run)
+    if case == "normal-claim":
+        _ledger(repo)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: case == "normal-claim")
+    sent = []
+    monkeypatch.setattr(fleet_client_messages, "send", lambda **kw: sent.append(kw) or {})
+    report = _patrol(
+        repo,
+        capsys,
+        apply="reap,escalate" if case == "reaped" else "escalate",
+        escalate_via="fleet-msg",
+        escalate_to="operator",
+        stall_after="30d" if case == "normal-claim" else "30m",
+    )
+    assert not any(action["action"] == "escalate" for action in report["actions"])
+    assert sent == []
+    if case == "normal-claim":
+        assert any(row["claim_id"] == "claim-1" and row["state"] == "unknown" for row in report["lanes"])
+
+
+def test_corrupt_evidence_unknown_still_escalates(tmp_path, capsys):
+    repo = _repo(tmp_path)
+    run = _write_run(repo, "20260820-120000-patrol01")
+    (run / "events").mkdir()
+    (run / "events/lifecycle.jsonl").write_text("not json\n")
+    report = _patrol(repo, capsys, apply="escalate")
+    assert report["lanes"][0]["state"] == "unknown"
+    assert report["actions"][0]["status"] == "recorded"
+
+
+def test_hub_release_without_synthetic_claim_id(tmp_path, monkeypatch, capsys):
+    from brigade import fleet_claim_release, fleet_client
+
+    repo = _repo(tmp_path)
+    run = _write_run(repo, "20260820-120000-patrol01", status="ok")
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.example.invalid"})
+    calls = []
+
+    def release(*args, **kwargs):
+        calls.append(kwargs)
+        print(json.dumps({"released": True}))
+        return 0
+
+    monkeypatch.setattr(fleet_claim_release, "_release_claim", release)
+    report = _patrol(repo, capsys, apply="release-claim")
+    assert report["actions"][0]["scope"] == "hub"
+    assert report["actions"][0]["status"] == "applied"
+    assert calls[0]["expected_run_dir"] == run
+    assert _patrol(repo, capsys, apply="release-claim")["actions"] == []
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("refresh_failure", ["snapshot", "journal"])
+def test_reap_success_survives_refresh_failure(tmp_path, monkeypatch, capsys, refresh_failure):
+    from brigade import runs_patrol_actions
+
+    repo = _repo(tmp_path)
+    run = _write_run(repo, "20260820-120000-patrol01", extra={"claim_id": "claim-1"})
+    _write_stale_lock(repo, run)
+    path = _ledger(repo)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+    if refresh_failure == "snapshot":
+        reap = runs_patrol_actions._reap
+
+        def unavailable_after_reap(*args, **kwargs):
+            result = reap(*args, **kwargs)
+            monkeypatch.setattr(runs_patrol_actions.run_reap, "_read_run_bytes", lambda path: (None, None))
+            return result
+
+        monkeypatch.setattr(runs_patrol_actions, "_reap", unavailable_after_reap)
+    else:
+
+        def corrupt(*args):
+            raise ValueError("journal became corrupt")
+
+        monkeypatch.setattr(runs_patrol_actions, "_journal_digest", corrupt)
+    report = _patrol(repo, capsys, apply="reap,release-claim,escalate")
+    assert json.loads((run / "run.json").read_text())["status"] == "orphaned"
+    action = report["actions"][0]
+    assert action["status"] == "applied"
+    assert action["after"]["state"] == "orphaned"
+    assert action["refresh_error"] == "ValueError"
+    assert len(report["actions"]) == 1
+    assert json.loads(path.read_text())["tasks"][0].get("claim")
+
+
+def test_unconfigured_hub_does_not_reserve_repeated_actions(tmp_path, monkeypatch, capsys):
+    from brigade import fleet_client
+
+    repo = _repo(tmp_path)
+    _write_run(repo, "20260820-120000-patrol01", status="ok", extra={"claim_id": "claim-1"})
+    _ledger(repo)
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {})
+    first = _patrol(repo, capsys, apply="release-claim")
+    assert [action["scope"] for action in first["actions"]] == ["ledger"]
+    assert _patrol(repo, capsys, apply="release-claim")["actions"] == []

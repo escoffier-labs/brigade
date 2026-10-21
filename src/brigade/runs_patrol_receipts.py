@@ -2,10 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import stat
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, Iterator
@@ -16,21 +17,33 @@ REPORT_RECEIPT_LIMIT = 144
 REPORT_RECEIPT_MAX_AGE = timedelta(days=7)
 RECEIPT_BYTE_LIMIT = 4 * 1024 * 1024
 FENCE_FILE = ".action-fences.json"
+FENCE_DIRECTORY = ".action-fences"
 FENCE_STATUSES = frozenset({"recorded", "pending", "failed", "applied"})
 FENCE_FIELDS = ("lane_id", "action", "scope", "idempotency_key", "attempted_at", "status")
 
 
 @contextmanager
-def receipt_lock(target: Path) -> Iterator[None]:
-    """Serialize publication, actions and retention before creating a receipt."""
+def receipt_lock(target: Path, *, report_only: bool = False) -> Iterator[bool]:
+    """Serialize actions and retention. Reports may publish while actions are busy.
+
+    A False result permits only atomic publication of a unique report receipt.
+    Retention waits for a later patrol that can acquire the action lock.
+    """
     root = target
     for part in (".brigade", "patrol"):
         root = root / part
         if root.is_symlink():
             raise ValueError("receipt path must not be symlinked")
         root.mkdir(mode=0o700, exist_ok=True)
-    with inbox_lock.held_file_lock(root / ".apply.lock", deadline_seconds=1):
-        yield
+    with ExitStack() as locks:
+        try:
+            locks.enter_context(inbox_lock.held_file_lock(root / ".apply.lock", deadline_seconds=1))
+        except inbox_lock.InboxLockTimeout:
+            if not report_only:
+                raise
+            yield False
+        else:
+            yield True
 
 
 def read_receipt(directory: Path) -> dict[str, Any] | None:
@@ -58,9 +71,59 @@ def _read_payload(path: Path) -> dict[str, Any] | None:
     return payload
 
 
-def read_fences(root: Path) -> list[dict[str, Any]]:
+def _fence_root(root: Path) -> Path:
+    directory = root / FENCE_DIRECTORY
+    if directory.is_symlink():
+        raise ValueError("patrol fence directory must not be symlinked")
+    return directory
+
+
+def _fence_path(directory: Path, lane_id: str) -> Path:
+    return directory / (hashlib.sha256(lane_id.encode()).hexdigest() + ".json")
+
+
+def read_fences(root: Path, *, lane_ids: set[str] | None = None) -> list[dict[str, Any]]:
+    # The legacy archive remains readable until a locked retention pass migrates it.
     payload = _read_payload(root / FENCE_FILE)
-    return payload["actions"] if payload is not None else []
+    actions = payload["actions"] if payload is not None else []
+    directory = _fence_root(root)
+    if directory.exists():
+        paths = directory.iterdir() if lane_ids is None else (_fence_path(directory, lane) for lane in lane_ids)
+        for path in paths:
+            payload = _read_payload(path)
+            if payload is not None:
+                actions.extend(payload["actions"])
+    return actions
+
+
+def _write_fences(path: Path, actions: list[dict[str, Any]]) -> None:
+    raw = json.dumps({"schema": "brigade.runs_patrol.v1", "actions": actions}, indent=2, sort_keys=True) + "\n"
+    if len(raw.encode()) > RECEIPT_BYTE_LIMIT:
+        raise ValueError("patrol fence archive exceeds byte limit")
+    localio.write_text_atomic(path, raw)
+
+
+def _archive_fences(root: Path, actions: list[dict[str, Any]], legacy: list[dict[str, Any]]) -> None:
+    """Keep each lane's lifetime fences without a shared archive size ceiling."""
+    groups: dict[str, list[dict[str, Any]]] = {}
+    for action in actions:
+        lane_id = action.get("lane_id")
+        groups.setdefault(lane_id if isinstance(lane_id, str) else "", []).append(action)
+    directory = _fence_root(root)
+    for lane_id, records in groups.items():
+        if not lane_id:
+            continue  # Preserve unidentified legacy records in the original archive.
+        directory.mkdir(mode=0o700, exist_ok=True)
+        path = _fence_path(directory, lane_id)
+        payload = _read_payload(path)
+        previous = payload["actions"] if payload is not None else []
+        combined = merge_fences([*previous, *records])
+        if combined != previous:
+            _write_fences(path, combined)
+    remaining = groups.get("", [])
+    if remaining != legacy:
+        # Publish all migrated shards before forgetting the legacy copies.
+        _write_fences(root / FENCE_FILE, remaining)
 
 
 def merge_fences(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -88,7 +151,8 @@ def prune_reports(root: Path, now: datetime, *, keep: Path, strict: bool = False
     """
     reports = 0
     expired: list[Path] = []
-    archived = read_fences(root)
+    legacy = _read_payload(root / FENCE_FILE)
+    archived = legacy["actions"] if legacy is not None else []
     actions = list(archived)
     for directory in sorted(root.iterdir(), key=lambda path: (path == keep, path.name), reverse=True):
         if directory.name.startswith("."):
@@ -110,12 +174,8 @@ def prune_reports(root: Path, now: datetime, *, keep: Path, strict: bool = False
         actions.extend(payload["actions"])
         expired.append(directory)
     fences = merge_fences(actions)
-    if fences != archived:
-        payload = {"schema": "brigade.runs_patrol.v1", "actions": fences}
-        raw = json.dumps(payload, indent=2, sort_keys=True) + "\n"
-        if len(raw.encode()) > RECEIPT_BYTE_LIMIT:
-            raise ValueError("patrol fence archive exceeds byte limit")
-        localio.write_text_atomic(root / FENCE_FILE, raw)
+    if fences or archived:
+        _archive_fences(root, fences, archived)
     for directory in expired:
         (directory / "patrol.json").unlink()
         try:

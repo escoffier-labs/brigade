@@ -41,6 +41,12 @@ def select(
     return entries
 
 
+def ensure_selected(target: Path, entries: tuple[CareEntry, ...]) -> int:
+    if any(item.entry_id == "run-patrol" for item in entries):
+        return write_runbook(target, RUNBOOK_REL, RUNBOOK_PAYLOAD)
+    return 0
+
+
 def write_runbook(target: Path, relative: str, payload: dict[str, Any]) -> int:
     """Materialize a validated, binary-pinned runbook only when missing."""
     dest = target / relative

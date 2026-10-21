@@ -162,12 +162,13 @@ def patrol(
         }
         raw = json.dumps(payload, indent=2, sort_keys=True)
         if receipt:
-            with runs_patrol_receipts.receipt_lock(target):
+            with runs_patrol_receipts.receipt_lock(target, report_only=not actions) as locked:
                 _write_receipt(target, patrol_id, raw)
                 written_receipt = target / payload["receipt"]
-                runs_patrol_receipts.prune_reports(
-                    written_receipt.parent.parent, clock, keep=written_receipt.parent, strict=bool(actions)
-                )
+                if locked:
+                    runs_patrol_receipts.prune_reports(
+                        written_receipt.parent.parent, clock, keep=written_receipt.parent, strict=bool(actions)
+                    )
                 if actions:
                     runs_patrol_actions.apply_actions(
                         target=target,

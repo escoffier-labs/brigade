@@ -566,7 +566,7 @@ def _crontab_body(
     home: Path | None = None,
     entries: tuple[CareEntry, ...] | None = None,
 ) -> str:
-    selected = care_patrol.select(entries or CARE_ENTRIES, None, "crontab", CareEntry)
+    selected = care_patrol.select(CARE_ENTRIES, None, "crontab", CareEntry) if entries is None else entries
     lines = [f"PATH={_path_prefix(home)}"]
     for entry in selected:
         lines.append(f"{entry.schedule} {_cron_command(entry, workspace=workspace)}")
@@ -676,9 +676,7 @@ def _ensure_care_runbooks(target: Path) -> int:
     rc = _ensure_memory_care_runbooks(target)
     if rc != 0:
         return rc
-    return _write_daily_observability_runbook(target) or care_patrol.write_runbook(
-        target, care_patrol.RUNBOOK_REL, care_patrol.RUNBOOK_PAYLOAD
-    )
+    return _write_daily_observability_runbook(target)
 
 
 def _latest_runbook_receipt(target: Path, runbook_id: str) -> dict[str, Any] | None:
@@ -1201,7 +1199,7 @@ def install(
     if _uses_schtasks(backend):
         return _windows_install(workspace=target, entries=entries, json_output=json_output, dry_run=dry_run)
 
-    rc = _ensure_care_runbooks(target)
+    rc = _ensure_care_runbooks(target) or care_patrol.ensure_selected(target, entries)
     if rc != 0:
         return rc
     if any(entry.entry_id == "memory-closeout" for entry in entries):

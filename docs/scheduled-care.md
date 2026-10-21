@@ -105,7 +105,8 @@ The schedule above uses systemd syntax. For launchd use
 `--schedule 'run-patrol=*/10 * * * *'`. On Windows the same entry prints a
 Task Scheduler plan with `/SC MINUTE /MO 10` and exits 3, like the other entries.
 
-Installation writes `.brigade/runbooks/run-patrol.json` with one report-only
+Installation writes `.brigade/runbooks/run-patrol.json` only when run-patrol is
+selected. It contains one report-only
 step:
 
 ```bash
@@ -117,8 +118,10 @@ To enable repairs, review the generated runbook and add an explicit
 `finalize-intent` is not implemented. Reinstall preserves an existing runbook.
 Patrol retains the newest 144 receipts for at most 7 days, including under
 `--apply`. Compact action fences survive pruning in
-`.brigade/patrol/.action-fences.json`. Apply reads that archive and at most the
-newest 144 receipts. Its first retention sweep migrates older action receipts.
+`.brigade/patrol/.action-fences/`, with one file per lane. Apply reads only the
+scanned lanes' fence files and at most the newest 144 receipts. Its first
+retention sweep also migrates the legacy `.action-fences.json` archive. Fences
+retain the lifetime escalation cap and have no shared size ceiling across lanes.
 Care status checks at most the newest 10 patrol receipt candidates and includes the latest valid patrol
 receipt and the latest runbook receipt.
 Two consecutive failed runbook receipts use care's existing repeated-failure

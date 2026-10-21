@@ -26,12 +26,12 @@ from .work_cmd import claiming, ledger
 
 ACTIONS = frozenset({"reap", "release-claim", "escalate"})
 TERMINAL = frozenset({"complete", "failed", "orphaned"})
-ESCALATE_STATES = frozenset({"dead", "orphaned", "stalled", "zombie", "stranded", "lost-worktree", "unknown"})
+ESCALATE_STATES = frozenset({"dead", "stalled", "zombie", "stranded", "lost-worktree", "unknown"})
 
 
-def _history(root: Path) -> list[dict[str, Any]]:
+def _history(root: Path, *, lane_ids: set[str] | None = None) -> list[dict[str, Any]]:
     """Fail closed on unreadable history rather than forgetting action fences."""
-    actions = runs_patrol_receipts.read_fences(root)
+    actions = runs_patrol_receipts.read_fences(root, lane_ids=lane_ids)
     directories = (directory for directory in root.iterdir() if not directory.name.startswith("."))
     for directory in nlargest(runs_patrol_receipts.REPORT_RECEIPT_LIMIT, directories):
         payload = runs_patrol_receipts.read_receipt(directory)
@@ -133,7 +133,9 @@ def _release_local(
         bound.close()
 
 
-def _release_hub(lane: Lane, row: dict[str, Any]) -> dict[str, Any]:
+def _hub_preflight(lane: Lane, row: dict[str, Any]) -> Path | dict[str, Any]:
+    if not fleet_client.load_fleet_config().get("hub_url"):
+        return {"status": "skipped", "reason": "no Hub configured"}
     if lane.run_dir is None or row["state"] not in TERMINAL or lane.run is None:
         return {"status": "refused", "reason": "no terminal run proof"}
     bound = run_reap._bind_contained_run_dir(lane.run_dir)
@@ -152,11 +154,16 @@ def _release_hub(lane: Lane, row: dict[str, Any]) -> dict[str, Any]:
                 return {"status": "refused", "reason": "journal changed since observation"}
     finally:
         bound.close()
-    if not fleet_client.load_fleet_config().get("hub_url"):
-        return {"status": "skipped", "reason": "no Hub configured"}
     workspace = runguard.resolve_run_lock_workspace(lane.run, lane.run_dir)
     if workspace is None:
         return {"status": "refused", "reason": "lock workspace unavailable"}
+    return workspace
+
+
+def _release_hub(lane: Lane, row: dict[str, Any]) -> dict[str, Any]:
+    workspace = _hub_preflight(lane, row)
+    if isinstance(workspace, dict):
+        return workspace
     output, errors = io.StringIO(), io.StringIO()
     with redirect_stdout(output), redirect_stderr(errors):
         code = fleet_claim_release._release_claim(
@@ -193,7 +200,7 @@ def apply_actions(
     """
     receipt = target / payload["receipt"]
     root = receipt.parent.parent
-    previous = _history(root)
+    previous = _history(root, lane_ids={lane.lane_id for lane in lanes})
     # Terminalize dead runs before considering claim release, regardless of
     # the operator's argument order. A refused reap never authorizes release.
     if "reap" in actions:
@@ -209,7 +216,7 @@ def apply_actions(
                     scope
                     for scope, eligible in (
                         ("ledger", lane.claim is not None and lane.task is not None),
-                        ("hub", lane.claim is not None or bool((lane.run or {}).get("claim_id"))),
+                        ("hub", lane.run_dir is not None and lane.run is not None),
                     )
                     if eligible
                 )
@@ -222,6 +229,10 @@ def apply_actions(
                 escalation_number = None
                 if action == "escalate":
                     if row["state"] not in ESCALATE_STATES:
+                        continue
+                    if row["state"] == "unknown" and not any(
+                        item.detail in {"evidence unavailable", "unreadable"} for item in lane.evidence
+                    ):
                         continue
                     escalations = [
                         item
@@ -248,6 +259,8 @@ def apply_actions(
                     and item.get("status") in {"pending", "applied", "failed"}
                     for item in previous
                 ):
+                    continue
+                if scope == "hub" and isinstance(_hub_preflight(lane, row), dict):
                     continue
                 record: dict[str, Any] = {
                     "lane_id": lane.lane_id,
@@ -293,30 +306,33 @@ def apply_actions(
                     after = {**before, **result.pop("after", {})}
                     record.update(result, after=after)
                     if record["status"] == "applied" and action == "reap":
-                        # Carry our sanctioned transition forward for a following
-                        # release without accepting an unrelated snapshot change.
-                        assert lane.run_dir is not None
-                        raw, meta = run_reap._read_run_bytes(lane.run_dir)
-                        if (
-                            raw is None
-                            or meta is None
-                            or meta.get("status") != "orphaned"
-                            or meta.get("orphaned_at") != record["result"]["orphaned_at"]
-                            or meta.get("claim_id") != (lane.run or {}).get("claim_id")
-                        ):
-                            raise ValueError("reaped snapshot changed before refresh")
-                        lane.run = meta
-                        lane.lock_state = "absent"
-                        journal_digest = _journal_digest(lane, now)
-                        lane.evidence = [
-                            replace(item, digest=run_reap._run_fingerprint(raw))
-                            if item.source == "run.json"
-                            else replace(item, digest=journal_digest)
-                            if item.source == "events/lifecycle.jsonl"
-                            else item
-                            for item in lane.evidence
-                        ]
-                        row = {**row, "state": "orphaned"}
+                        try:
+                            # Carry our sanctioned transition forward for a following
+                            # release without accepting an unrelated snapshot change.
+                            assert lane.run_dir is not None
+                            raw, meta = run_reap._read_run_bytes(lane.run_dir)
+                            if (
+                                raw is None
+                                or meta is None
+                                or meta.get("status") != "orphaned"
+                                or meta.get("orphaned_at") != record["result"]["orphaned_at"]
+                                or meta.get("claim_id") != (lane.run or {}).get("claim_id")
+                            ):
+                                raise ValueError("reaped snapshot changed before refresh")
+                            lane.run = meta
+                            lane.lock_state = "absent"
+                            journal_digest = _journal_digest(lane, now)
+                            lane.evidence = [
+                                replace(item, digest=run_reap._run_fingerprint(raw))
+                                if item.source == "run.json"
+                                else replace(item, digest=journal_digest)
+                                if item.source == "events/lifecycle.jsonl"
+                                else item
+                                for item in lane.evidence
+                            ]
+                            row = {**row, "state": "orphaned"}
+                        except (OSError, ValueError, RuntimeError) as exc:
+                            record["refresh_error"] = type(exc).__name__
                     elif record["status"] == "applied" and scope == "ledger":
                         lane.claim = None
                         lane.lock_state = "absent"
@@ -324,3 +340,5 @@ def apply_actions(
                     record.update(status="failed", reason=type(exc).__name__)
                 previous.append(record)
                 localio.write_json(receipt, payload)
+            if payload["actions"] and payload["actions"][-1].get("refresh_error"):
+                break
