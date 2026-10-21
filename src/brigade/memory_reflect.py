@@ -1,0 +1,183 @@
+"""Read-only memory reflection runs and retained candidate inspection."""
+
+from __future__ import annotations
+
+import argparse
+import json
+import re
+import uuid
+from datetime import datetime, timezone
+from pathlib import Path
+from typing import Any
+
+from . import memory_proposal_io as io
+from . import memory_reflect_candidates as derive
+from .memory_evidence_log import EvidenceLog
+
+ROOT = ".brigade/memory/reflect/runs"
+DEFAULT_LIMIT = 20
+MAX_LIMIT = 100
+
+
+def register(sub: argparse._SubParsersAction) -> None:
+    parser = sub.add_parser("reflect", help="Derive cited memory candidates without editing cards.")
+    commands = parser.add_subparsers(dest="memory_reflect_command", required=True)
+    for name in ("run", "status", "candidates", "show"):
+        command = commands.add_parser(name, help=f"{name.capitalize()} deterministic memory reflection candidates.")
+        command.add_argument("--target", "-t", type=Path, default=Path("."))
+        command.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+        if name == "run":
+            command.add_argument("--scope", help="Exact card frontmatter scope (missing scope means repo).")
+            command.add_argument("--limit", type=int, default=DEFAULT_LIMIT, help="Candidate limit from 1 to 100.")
+            command.add_argument("--dry-run", action="store_true", help="Print metadata diffs and duplicate summaries.")
+        elif name == "show":
+            command.add_argument("candidate_id")
+
+
+def run_payload(
+    *, target: Path, scope: str | None = None, limit: int = DEFAULT_LIMIT, dry_run: bool = False
+) -> dict[str, Any]:
+    if not 1 <= limit <= MAX_LIMIT:
+        raise ValueError("--limit must be from 1 to 100")
+    if scope is not None and (not scope.strip() or len(scope) > 1024 or any(ord(c) < 32 for c in scope)):
+        raise ValueError("invalid scope")
+    now = datetime.now(timezone.utc)
+    run_id = now.strftime("%Y%m%d-%H%M%S-%f") + "-" + uuid.uuid4().hex[:8]
+    relative = f"{ROOT}/{run_id}"
+    payload: dict[str, Any] = {
+        "schema": "brigade.memory-reflect-run.v1",
+        "run_id": run_id,
+        "started_at": now.isoformat(),
+        "scope": scope,
+        "limit": limit,
+        "dry_run": dry_run,
+        "receipt_path": f"{relative}/receipt.json",
+        "candidates_path": f"{relative}/candidates.jsonl",
+        "candidates": [],
+        "status": "failed",
+        "stage": "configuration",
+    }
+    try:
+        care = derive.configuration(target)
+        payload["stage"] = "evidence-log"
+        ledger = EvidenceLog(target)
+        payload["evidence_log"] = ledger.summary
+        if ledger.summary["unsupported"] or ledger.summary["warning_count"]:
+            raise ValueError("evidence log is incomplete or unreadable")
+        payload["stage"] = "cards"
+        cards = derive.read_cards(target, care, ledger, scope)
+        payload["stage"] = "candidates"
+        candidates = derive.generate(target, care, ledger, cards, limit)
+        payload["stage"] = "persist"
+        io.write_exclusive(target / payload["candidates_path"], b"".join(io.json_bytes(c) for c in candidates))
+        payload["candidates"] = candidates
+        payload["status"] = "completed"
+        payload["stage"] = "completed"
+    except derive.UnsafeState:
+        # A failure receipt here would itself violate the canonical-root boundary.
+        raise
+    except (OSError, ValueError, UnicodeError, RecursionError) as exc:
+        payload["error"] = str(exc)
+    payload["candidate_count"] = len(payload["candidates"])
+    # The receipt is the visibility boundary. Partial candidate output from a
+    # failed run is never returned by the inspection commands.
+    receipt = {key: value for key, value in payload.items() if key != "candidates"}
+    io.write_exclusive(target / payload["receipt_path"], io.json_bytes(receipt))
+    return payload
+
+
+def _runs(target: Path) -> list[dict[str, Any]]:
+    root = target / ROOT
+    try:
+        with io.directory(root):
+            paths = sorted(root.iterdir(), reverse=True)
+    except FileNotFoundError:
+        return []
+    if len(paths) > io.MAX_FILES:
+        raise ValueError("reflect run history limit exceeded")
+    runs: list[dict[str, Any]] = []
+    for path in paths:
+        if not re.fullmatch(r"\d{8}-\d{6}-\d{6}-[0-9a-f]{8}", path.name):
+            continue
+        try:
+            receipt = io.read_object(path / "receipt.json", private=True)
+        except FileNotFoundError:
+            continue  # A concurrent or interrupted run has not published a receipt.
+        count = receipt.get("candidate_count")
+        if (
+            receipt.get("run_id") != path.name
+            or receipt.get("schema") != "brigade.memory-reflect-run.v1"
+            or receipt.get("status") not in ("completed", "failed")
+            or type(count) is not int
+            or not 0 <= count <= MAX_LIMIT
+        ):
+            raise ValueError("reflect run receipt mismatch")
+        runs.append(receipt)
+    return runs
+
+
+def _candidates(target: Path, run: dict[str, Any]) -> list[dict[str, Any]]:
+    # Construct from the validated directory name, never from stored paths.
+    path = target / ROOT / run["run_id"] / "candidates.jsonl"
+    raw = io.text(path, limit=io.MAX_STATE_BYTES, private=True) or ""
+    candidates = [json.loads(line) for line in raw.splitlines()]
+    if len(candidates) != run["candidate_count"] or len(candidates) > MAX_LIMIT:
+        raise ValueError("reflect candidate count mismatch")
+    for candidate in candidates:
+        if not isinstance(candidate, dict) or candidate.get("schema") != "brigade.memory-reflect-candidate.v1":
+            raise ValueError("invalid retained reflect candidate")
+        stored_id = candidate.get("candidate_id")
+        content = {k: v for k, v in candidate.items() if k != "candidate_id"}
+        if stored_id != "candidate-" + io.sha256(io.json_bytes(content))[:24]:
+            raise ValueError("reflect candidate digest mismatch")
+    return candidates
+
+
+def inspect_payload(*, target: Path, command: str, candidate_id: str | None = None) -> dict[str, Any]:
+    if command == "show" and not re.fullmatch(r"candidate-[0-9a-f]{24}", candidate_id or ""):
+        raise ValueError("invalid candidate id")
+    runs = _runs(target)
+    if command == "status":
+        return {"status": "ok", "run_count": len(runs), "latest_run": runs[0] if runs else None}
+    successful = [run for run in runs if run["status"] == "completed"]
+    if command == "candidates":
+        return {
+            "status": "ok",
+            "run_id": successful[0]["run_id"] if successful else None,
+            "candidates": _candidates(target, successful[0]) if successful else [],
+        }
+    for run in successful:
+        for candidate in _candidates(target, run):
+            if candidate["candidate_id"] == candidate_id:
+                return candidate
+    raise ValueError("candidate not found")
+
+
+def dispatch(args: argparse.Namespace) -> int:
+    target = Path(args.target.absolute())
+    try:
+        with io.directory(target):
+            pass
+        if args.memory_reflect_command == "run":
+            payload = run_payload(target=target, scope=args.scope, limit=args.limit, dry_run=args.dry_run)
+        else:
+            payload = inspect_payload(
+                target=target, command=args.memory_reflect_command, candidate_id=getattr(args, "candidate_id", None)
+            )
+    except (OSError, ValueError, UnicodeError, RecursionError) as exc:
+        payload = {"status": "refused", "error": str(exc)}
+    if args.json:
+        print(json.dumps(payload, ensure_ascii=False, sort_keys=True, indent=2))
+    else:
+        print(f"memory reflect: {payload.get('status', payload.get('kind', 'ok'))}")
+        if "error" in payload:
+            print(f"error: {payload['error']}")
+        if "latest_run" in payload:
+            print(json.dumps(payload, sort_keys=True, indent=2))
+        candidates = payload.get("candidates", [payload] if "candidate_id" in payload else [])
+        for candidate in candidates:
+            print(f"{candidate['candidate_id']} {candidate['kind']}: {candidate['summary']}")
+            if getattr(args, "dry_run", False) or args.memory_reflect_command == "show":
+                if candidate["diff"]:
+                    print(candidate["diff"], end="" if candidate["diff"].endswith("\n") else "\n")
+    return 1 if payload.get("status") == "failed" else 2 if payload.get("status") == "refused" else 0

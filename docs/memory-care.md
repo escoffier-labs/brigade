@@ -17,6 +17,40 @@ brigade memory care closeout
 
 `init` writes `.brigade/memory-care.toml`. The config is host-local and should stay gitignored.
 
+## Deterministic reflection candidates
+
+`brigade memory reflect run --dry-run` derives `stale-newer-evidence`, `duplicate`,
+`reinforce`, and `opposite-polarity` candidates without editing cards or calling a
+model. It reads the pending-evidence log and canonical cards selected by
+`.brigade/memory-care.toml`. `--scope` matches the exact card frontmatter scope,
+with missing scope treated as `repo`. `--limit` bounds the retained candidates
+from 1 to 100, with a default of 20.
+
+Each candidate cites evidence resolved in the log or a local file, and
+`proof_count` counts distinct resolved ids. Missing pointers and external URLs do
+not count. Staleness uses `last_consolidated`, falling back to `last_reviewed` and
+its supported aliases. Date-only cutoffs require evidence on a later UTC date.
+Exact normalized fingerprints identify duplicates. Opposite-polarity evidence
+always produces a Tier 2 review flag and never decides which claim is correct.
+Cross-scope and mixed-trust duplicate groups also receive Tier 2.
+
+Runs retain `candidates.jsonl` and `receipt.json` under
+`.brigade/memory/reflect/runs/<run-id>/`, including dry runs. Dry runs print
+reproducible metadata diffs for evidence, proof count, and consolidation time,
+and `would merge` summaries for duplicates. Consolidation time in a preview is
+the newest cited evidence timestamp. A stale candidate with contrary evidence
+prints a review summary instead of a consolidation diff. No preview is applied.
+`memory reflect status` shows the latest receipt, `memory reflect candidates`
+lists the latest successful run, and `memory reflect show <candidate-id>` shows
+one retained candidate and its preview. All accept `--target` and `--json`.
+
+A stage failure records a failed receipt and leaves cards untouched. Incomplete
+runs never become visible candidates. Unsafe storage is refused when a receipt
+cannot be written safely, including when reflect storage overlaps a card root.
+Evidence-log warnings fail the run before candidates are persisted.
+Policy promotion, proposal creation, and model-authored changes are not available
+through these commands.
+
 ## Config
 
 The local config supports:
