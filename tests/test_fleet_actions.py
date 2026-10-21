@@ -201,7 +201,7 @@ def test_revocation_expires_unstarted_and_ack_does_not_verify(tmp_path):
 
 
 @pytest.mark.parametrize("expire_before_start", [False, True])
-def test_recovered_source_does_not_clear_unstarted_action(tmp_path, expire_before_start):
+def test_recovered_source_projection_does_not_imply_execution(tmp_path, expire_before_start):
     from datetime import datetime, timezone
 
     from brigade import fleet_action_auth as auth, fleet_hub_actions as actions
@@ -227,7 +227,10 @@ def test_recovered_source_does_not_clear_unstarted_action(tmp_path, expire_befor
             "UPDATE agent_actions SET created_at=? WHERE action_id=?", (actions.time.time() - 10, action["action_id"])
         )
 
-    assert actions.show(conn, action["action_id"])["verification"] == "pending"
+    projected = actions.show(conn, action["action_id"])
+    assert projected["verification"] == "condition-cleared"
+    assert projected["status"] == ("expired" if expire_before_start else "queued")
+    assert projected["started_at"] is None
     conn.close()
 
 
