@@ -98,6 +98,7 @@ def _native_metadata(interpreter: str, deadline: float) -> object:
         raise ObservationError("t3_python_unavailable")
     result = proc.run(
         [str(path), "-c", _NATIVE_PROGRAM],
+        cwd=path.parent,
         timeout=_remaining(deadline, cap=NATIVE_TIMEOUT_SECONDS),
         supervise_group=True,
     )

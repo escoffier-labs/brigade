@@ -118,6 +118,28 @@ def test_only_active_states_and_run_ids_count_not_archived_or_terminal(native_t3
     assert published[0].session_id == "run-only"
 
 
+@pytest.mark.parametrize("module_name", ["json", "t3_fleet"])
+def test_native_metadata_ignores_modules_in_caller_checkout(native_t3, tmp_path, monkeypatch, capsys, module_name):
+    from brigade.fleet_t3_observer import main
+
+    _, published, _, _ = native_t3
+    checkout = tmp_path / "untrusted-checkout"
+    checkout.mkdir()
+    marker = checkout / "module-executed"
+    (checkout / (module_name + ".py")).write_text(
+        "from pathlib import Path\n"
+        f"Path({str(marker)!r}).write_text('caller module executed')\n"
+        "raise RuntimeError('caller module executed')\n"
+    )
+    monkeypatch.chdir(checkout)
+    result = main(["--t3-python", sys.executable])
+    assert not marker.exists(), "native metadata imported a module from the caller checkout"
+    assert result == 0
+    report = json.loads(capsys.readouterr().out)
+    assert report["active_threads"] == 1 and report["total_threads"] == 1
+    assert not published
+
+
 @pytest.mark.parametrize(
     "patch",
     [

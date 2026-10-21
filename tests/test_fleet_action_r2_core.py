@@ -253,6 +253,67 @@ def test_compose_single_post_preserves_selected_destination_and_prompt(tmp_path)
         conn.close()
 
 
+@pytest.mark.parametrize(
+    "values,expected_target,expected_model",
+    [
+        ({}, "repair-t3", "fixture-seat"),
+        ({"model_id": ""}, "repair-t3", "fixture-seat"),
+        ({"target_id": "repair-t3-z", "model_id": "fixture-z-seat"}, "repair-t3-z", "fixture-z-seat"),
+        ({"target_id": "repair-openclaw"}, "repair-openclaw", ""),
+    ],
+)
+def test_compose_model_selection_belongs_to_chosen_destination(tmp_path, values, expected_target, expected_model):
+    from brigade import fleet_action_page as page, fleet_action_targets as targets, fleet_hub_model_roster as roster
+
+    conn, action, _, _ = run_action(tmp_path, t3=True, native=False)
+    source = action["request"]["source"]
+    roster.set_model_policy(
+        conn,
+        {
+            "action": "set",
+            "expected_revision": roster.raw_revision(conn),
+            "provider": "openai",
+            "model": "alternate-model",
+            "seat": "fixture-z-seat",
+            "enabled": True,
+            "reasoning": "high",
+            "t3_instance_id": "fixture-instance",
+            "t3_model": "alternate-native-model",
+        },
+    )
+    original = {k: v for k, v in action["request"]["target"].items() if k in targets.FIELDS}
+    original["models"].append({"id": "fixture-z-seat", "label": "alternate"})
+    twin = {**original, "target_id": "repair-t3-z", "label": "Second T3"}
+    claw = {
+        **original,
+        "target_id": "repair-openclaw",
+        "family": "openclaw",
+        "agent_id": "fixture-agent",
+        "models": [],
+    }
+    auth.grant_broker(conn, "node-fixture", [t["target_id"] for t in (original, twin, claw)], [source])
+    targets.sync(conn, "node-fixture", [original, twin, claw])
+    # Keep the initial destination T3 while also offering a non-T3 default.
+    catalog = targets.available(conn, source=source)
+    catalog.sort(key=lambda t: t["family"] != "t3")
+    body = page.compose(sources.resolve(conn, source), catalog, nonce="fixture", csrf="fixture", values=values)
+    submitted = fields(body)
+    selected = targets.selected(conn, submitted["target_id"], source, submitted["model_id"])
+    assert selected["target_id"] == expected_target
+    assert submitted["model_id"] == expected_model
+    model_select = re.search(r'<select name="model_id">(.*?)</select>', body, re.S).group(1)
+    selected_groups = [
+        label
+        for label, options in re.findall(r'<optgroup label="([^"]*)">(.*?)</optgroup>', model_select, re.S)
+        if re.search(r"<option[^>]* selected", options)
+    ]
+    assert selected_groups == ([selected["label"]] if expected_model else [])
+    assert len(re.findall(r"<option[^>]* selected", model_select)) == bool(expected_model)
+    with pytest.raises(auth.ActionError, match="target-unavailable"):
+        targets.selected(conn, "repair-t3-z", source, "")
+    conn.close()
+
+
 def test_inbox_status_does_not_claim_execution():
     from brigade.fleet_action_page import status
 

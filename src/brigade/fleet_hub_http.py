@@ -1000,7 +1000,10 @@ def make_handler(
                 )
                 from .fleet_deck_overview import page_alerts
 
-                action_sources = linked_subjects(conn, [a.source_ref for a in page_alerts(view, now)])
+                try:
+                    action_sources = linked_subjects(conn, [a.source_ref for a in page_alerts(view, now)])
+                except (FleetHubError, KeyError, TypeError, ValueError):
+                    action_sources = frozenset()
             except ClaimFenceError as exc:
                 self._send_json(503, {"error": str(exc), "reason": exc.reason})
                 return

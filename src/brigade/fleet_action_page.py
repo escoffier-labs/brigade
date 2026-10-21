@@ -101,6 +101,9 @@ def compose(
     }.items():
         body += hidden(name, value)
     body += f'<label>Agent type<select name="family">{family_options}</select></label><label>Destination<select name="target_id">{options}</select></label>'
+    model_id = values.get("model_id", "")
+    if chosen["family"] == "t3" and not model_id and chosen["models"]:
+        model_id = chosen["models"][0]["id"]
     model_options = '<option value="">Destination default (non-T3 agents)</option>'
     for target in choices:
         if target["family"] == "t3":
@@ -108,7 +111,7 @@ def compose(
                 f'<optgroup label="{esc(target["label"])}">'
                 + "".join(
                     f'<option value="{esc(m["id"])}"'
-                    + (" selected" if m["id"] == values.get("model_id") else "")
+                    + (" selected" if target == chosen and m["id"] == model_id else "")
                     + f">{esc(m['label'])} ({esc(m['id'])})</option>"
                     for m in target["models"]
                 )

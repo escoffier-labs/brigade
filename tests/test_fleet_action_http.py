@@ -5,8 +5,10 @@ import http.client
 import json
 import os
 import re
+import sqlite3
 import threading
 from contextlib import contextmanager
+from datetime import datetime, timezone
 from urllib.parse import urlencode
 
 import pytest
@@ -103,6 +105,49 @@ def test_real_forms_explicit_activation_and_escaped_prompt(tmp_path):
         conn = fleet_hub.open_db(path)
         assert conn.execute("SELECT count(*) FROM agent_actions").fetchone()[0] == 1
         conn.close()
+
+
+@pytest.mark.parametrize(
+    "failure", [fleet_hub.FleetHubError, KeyError, TypeError, ValueError, sqlite3.OperationalError]
+)
+def test_deck_optional_action_links_fail_without_losing_read_only_page(tmp_path, monkeypatch, failure):
+    from brigade import fleet_action_auth as auth, fleet_action_targets as targets
+    from tests.test_fleet_sync import _event
+
+    calls = []
+
+    def broken_links(conn, source_refs):
+        calls.append(source_refs)
+        raise failure("fixture optional policy failure")
+
+    with action_hub(tmp_path) as (address, path, _, _):
+        conn = fleet_hub.open_db(path)
+        source = {"kind": "run", "node_id": "node-fixture", "run_id": "failed-run"}
+        fleet_hub.store_events(
+            conn,
+            [
+                {
+                    **_event(node="node-fixture", run_id="failed-run", state="run.failed"),
+                    "ts": datetime.now(timezone.utc).isoformat(),
+                }
+            ],
+            caller_node="node-fixture",
+        )
+        target = json.loads(conn.execute("SELECT document FROM action_targets").fetchone()[0])
+        auth.grant_broker(conn, "node-fixture", ["repair"], [source])
+        targets.sync(conn, "node-fixture", [{**target, "subjects": [source]}])
+        conn.close()
+        code, _, body = request_http(address, "/deck")
+        assert code == 200 and "Have an agent fix this" in body
+        monkeypatch.setattr(targets, "linked_subjects", broken_links)
+        code, _, body = request_http(address, "/deck")
+        assert len(calls) == 1
+        assert auth.canonical(source) in calls[0]
+        if failure is sqlite3.OperationalError:
+            assert code == 500 and "hub database error" in body
+        else:
+            assert code == 200 and "Command Deck" in body
+            assert "Have an agent fix this" not in body and "/deck/actions/compose?" not in body
 
 
 @pytest.mark.parametrize(
