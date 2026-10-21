@@ -2,7 +2,11 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import os
+import sqlite3
+import sys
 from pathlib import Path
 
 import pytest
@@ -14,11 +18,21 @@ from brigade.selection import Selection
 
 
 @pytest.fixture
-def target(tmp_path: Path, monkeypatch) -> Path:
+def inherited_cache(tmp_path: Path, monkeypatch) -> Path:
+    cache = tmp_path / "unrelated-cache"
+    monkeypatch.setenv("XDG_CACHE_HOME", str(cache))
+    return cache
+
+
+@pytest.fixture
+def target(tmp_path: Path, monkeypatch, inherited_cache) -> Path:
     target = tmp_path / "repo"
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
     assert install_selection(target, Selection(depth="repo", harnesses=["claude"], owner="claude", includes=[])) == 0
     (target / "api.py").write_text("def serve(): pass\n")
     (target / "caller.py").write_text("from api import serve\nserve()\n")
+    (target / "tests").mkdir()
+    (target / "tests/test_api.py").write_text("from api import serve\ndef test_api(): assert serve()\n")
     monkeypatch.setattr(runtime.heartbeat, "on_event", lambda *args: None)
     monkeypatch.setattr(runtime.presence, "emit_presence", lambda *args: None)
     monkeypatch.setattr(runtime, "_run_recall", lambda *args: "")
@@ -33,7 +47,15 @@ def event(target: Path, name: str, **fields):
 def graph(target: Path, monkeypatch, **overrides):
     db = target / ".graphtrail" / "graphtrail.db"
     db.parent.mkdir()
-    db.touch()
+    with sqlite3.connect(db) as conn:
+        conn.execute("CREATE TABLE files(path TEXT, content_hash TEXT)")
+        conn.executemany(
+            "INSERT INTO files VALUES (?, ?)",
+            [
+                (path.relative_to(target).as_posix(), hashlib.sha256(path.read_bytes()).hexdigest())
+                for path in target.rglob("*.py")
+            ],
+        )
     monkeypatch.setattr(graphtrail_delta, "_graphtrail_bin", lambda: "graphtrail")
     report = {
         "changed_files": ["api.py"],
@@ -79,7 +101,7 @@ def test_explicit_write_records_unseen_callers_without_denying(target, monkeypat
     check = state["dependency_checks"][-1]
     assert check["file_path"] == "api.py"
     assert check["unseen_dependents"] == (["caller.py", "tests/test_api.py"] if seen == "unread" else [])
-    assert calls == [("sync", ("--force",)), ("affected", ("api.py",))]
+    assert calls == [("sync", ()), ("affected", ("api.py",))]
     # A subsequent event must preserve the observation rather than normalize it away.
     event(target, "PostToolUse", tool_name=tool, tool_input={key: str(target / "api.py")})
     assert runtime.read_session_state(target, "session-one")["dependency_checks"] == state["dependency_checks"]
@@ -181,6 +203,17 @@ def test_elided_graph_brief_does_not_mark_files_seen(target, monkeypatch):
 
 def test_dependency_check_forces_refresh_when_stat_metadata_could_be_unchanged(target, monkeypatch):
     graph(target, monkeypatch)
+    caller = target / "caller.py"
+    caller.write_text(caller.read_text().replace("serve()", "other()"))
+    db = target / ".graphtrail/graphtrail.db"
+    with sqlite3.connect(db) as conn:
+        conn.execute(
+            "UPDATE files SET content_hash = ? WHERE path = 'caller.py'",
+            (hashlib.sha256(caller.read_bytes()).hexdigest(),),
+        )
+    before = caller.stat()
+    caller.write_text(caller.read_text().replace("other()", "serve()"))
+    os.utime(caller, ns=(before.st_atime_ns, before.st_mtime_ns))
     original = graphtrail_delta._run_graphtrail
     forced = False
 
@@ -188,6 +221,12 @@ def test_dependency_check_forces_refresh_when_stat_metadata_could_be_unchanged(t
         nonlocal forced
         if command == "sync":
             forced = "--force" in extra
+            if forced:
+                with sqlite3.connect(db) as conn:
+                    conn.execute(
+                        "UPDATE files SET content_hash = ? WHERE path = 'caller.py'",
+                        (hashlib.sha256(caller.read_bytes()).hexdigest(),),
+                    )
         result = original(binary, db_path, command, *extra, **kwargs)
         # The engine may keep the old call graph if a same-size edit preserves mtime.
         if command == "affected" and not forced:
@@ -277,9 +316,35 @@ def test_read_completed_during_graph_query_is_excluded_from_record_and_warning(t
 @pytest.mark.parametrize("key", ["read_files", "brief_files", "dependency_checks"])
 @pytest.mark.parametrize("malformed", [None, 17, "not-a-list", [None, 17, {}]])
 def test_hook_repairs_malformed_observation_collections(target, key, malformed):
-    runtime.write_session_state(target, "session-one", {key: malformed})
+    event(target, "SessionStart", source="startup")
+    state = runtime.read_session_state(target, "session-one")
+    state[key] = malformed
+    runtime.write_session_state(target, "session-one", state)
     event(target, "PostToolUse", tool_name="Read", tool_input={"file_path": "caller.py"})
     state = runtime.read_session_state(target, "session-one")
     assert state["read_files"] == ["caller.py"]
     if key != "read_files":
         assert state.get(key, []) == []
+
+
+def test_fresh_incremental_graph_does_not_require_full_rebuild(target, monkeypatch):
+    graph(target, monkeypatch)
+    original = graphtrail_delta._run_graphtrail
+
+    def run(binary, db_path, command, *extra, **kwargs):
+        if command == "sync" and "--force" in extra:
+            return {"returncode": 124, "timed_out": True}
+        return original(binary, db_path, command, *extra, **kwargs)
+
+    monkeypatch.setattr(graphtrail_delta, "_run_graphtrail", run)
+    event(target, "PreToolUse", tool_name="Edit", tool_input={"file_path": "api.py"})
+    assert runtime.read_session_state(target, "session-one")["dependency_checks"][-1]["unseen_dependents"] == [
+        "caller.py",
+        "tests/test_api.py",
+    ]
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="XDG cache roots apply on Linux")
+def test_task_epochs_do_not_touch_inherited_cache(target, inherited_cache):
+    event(target, "SessionStart", source="startup")
+    assert not inherited_cache.exists()

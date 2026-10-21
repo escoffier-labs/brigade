@@ -2,7 +2,9 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
+import sqlite3
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
@@ -125,6 +127,19 @@ def injected_brief_files(text: str) -> list[str]:
     return context_eval.extract_brief_files("\n".join(graph_lines))[:MAX_SEEN_FILES]
 
 
+def _content_matches_index(target: Path, db: Path) -> bool:
+    """Verify SHA-256 content independently of the engine's size/mtime shortcut."""
+    with sqlite3.connect(db.resolve().as_uri() + "?mode=ro", uri=True, timeout=0.1) as conn:
+        rows = conn.execute("SELECT path, content_hash FROM files").fetchall()
+    for path, expected in rows:
+        if not isinstance(path, str) or relative_path(target, path) != path:
+            return False
+        actual = hashlib.sha256((target / path).read_bytes()).hexdigest()
+        if actual != expected:
+            return False
+    return bool(rows)
+
+
 def _dependents(target: Path, path: str) -> tuple[list[str] | None, str | None]:
     db = target / ".graphtrail" / "graphtrail.db"
     if not db.is_file():
@@ -132,16 +147,25 @@ def _dependents(target: Path, path: str) -> tuple[list[str] | None, str | None]:
     binary = graphtrail_delta._graphtrail_bin()
     if binary is None:
         return None, "graph_unavailable"
-    # Force content extraction: incremental sync can miss same-size edits within
-    # one mtime second. A failed refresh must never certify an old graph.
-    for command, extra in (("sync", ("--force",)), ("affected", (path,))):
-        result = graphtrail_delta._run_graphtrail(
-            binary, db, command, *extra, timeout=GRAPH_TIMEOUT_SECONDS, json_output=command == "affected"
-        )
+    # Incremental sync handles ordinary edits. Only force extraction when the
+    # independent content check finds edits the size/mtime shortcut missed.
+    for extra in ((), ("--force",)):
+        result = graphtrail_delta._run_graphtrail(binary, db, "sync", *extra, timeout=GRAPH_TIMEOUT_SECONDS)
         if result.get("timed_out"):
-            return None, f"{command}_timed_out"
+            return None, "sync_timed_out"
         if result.get("returncode") != 0:
-            return None, f"{command}_failed"
+            return None, "sync_failed"
+        if _content_matches_index(target, db):
+            break
+    else:
+        return None, "stale_graph"
+    result = graphtrail_delta._run_graphtrail(
+        binary, db, "affected", path, timeout=GRAPH_TIMEOUT_SECONDS, json_output=True
+    )
+    if result.get("timed_out"):
+        return None, "affected_timed_out"
+    if result.get("returncode") != 0:
+        return None, "affected_failed"
     report = json.loads(result["stdout"])
     if not isinstance(report, dict):
         return None, "invalid_graph_report"
