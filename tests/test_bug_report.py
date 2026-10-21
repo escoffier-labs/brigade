@@ -199,14 +199,14 @@ def test_legacy_unfenced_preview_requires_reprepare_before_network(report_env, m
     assert invoke(target, "--summary", "[link](https://example.com) @example-user", "--dry-run", "--json") == 0
     preview = result(capsys)
     path = Path(preview["preview_path"])
-    bundle = json.loads(path.with_name("bundle.json").read_text())
+    bundle = json.loads(path.with_name("bundle.json").read_text(encoding="utf-8"))
     # Emulate a digest-valid preview saved before literal Markdown rendering.
     old_markdown = f"### What happened\n\n{bundle['user']['summary']}\n\n### Full output\n\n{json.dumps(bundle)}\n"
-    path.write_text(old_markdown)
+    path.write_bytes(old_markdown.encode("utf-8"))
     receipt_path = Path(preview["receipt_path"])
-    receipt = json.loads(receipt_path.read_text())
+    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
     receipt["preview_digest"] = hashlib.sha256(old_markdown.encode()).hexdigest()
-    receipt_path.write_text(json.dumps(receipt))
+    receipt_path.write_bytes(json.dumps(receipt).encode("utf-8"))
     monkeypatch.setattr(mod, "gh", lambda *a: pytest.fail("unfenced preview reached network"))
     assert (
         cli.main(
@@ -536,8 +536,9 @@ def test_daily_cap_counts_repeated_report_attempts(report_env, monkeypatch, caps
     before = log.read_bytes()
     attempts = [json.loads(line) for line in before.splitlines()]
     assert len(attempts) == 5
-    assert log.stat().st_mode & 0o777 == 0o600
-    assert log.parent.stat().st_mode & 0o777 == 0o700
+    if os.name == "posix":
+        assert log.stat().st_mode & 0o777 == 0o600
+        assert log.parent.stat().st_mode & 0o777 == 0o700
     if transport_fails:
         assert {row["report_id"] for row in attempts} == {preview["report_id"]}
     else:
@@ -1293,15 +1294,15 @@ def test_older_prepared_vulnerability_is_blocked_before_network(report_env, monk
     assert invoke(target, "--dry-run", "--json") == 0
     preview = result(capsys)
     directory = Path(preview["preview_path"]).parent
-    bundle = json.loads((directory / "bundle.json").read_text())
+    bundle = json.loads((directory / "bundle.json").read_text(encoding="utf-8"))
     bundle["user"]["summary"] = "sandbox escape exposes private keys"
     markdown = mod.render(bundle)
-    (directory / "bundle.json").write_text(json.dumps(bundle))
-    (directory / "bundle.md").write_text(markdown)
-    receipt = json.loads((directory / "receipt.json").read_text())
+    (directory / "bundle.json").write_bytes(json.dumps(bundle).encode("utf-8"))
+    (directory / "bundle.md").write_bytes(markdown.encode("utf-8"))
+    receipt = json.loads((directory / "receipt.json").read_text(encoding="utf-8"))
     receipt["bundle_digest"] = mod.canonical_json_digest(bundle)
     receipt["preview_digest"] = hashlib.sha256(markdown.encode()).hexdigest()
-    (directory / "receipt.json").write_text(json.dumps(receipt))
+    (directory / "receipt.json").write_bytes(json.dumps(receipt).encode("utf-8"))
     monkeypatch.setattr(mod, "gh", lambda *args: pytest.fail("network for a vulnerability"))
     assert cli.main(["bug", "report", "--report-id", preview["report_id"], "--via", "gh"]) == 2
     assert "SECURITY.md" in capsys.readouterr().err
@@ -1424,15 +1425,15 @@ def test_older_prepared_control_title_blocked_before_network(report_env, monkeyp
     assert invoke(target, "--dry-run", "--json") == 0
     preview = result(capsys)
     directory = Path(preview["preview_path"]).parent
-    bundle = json.loads((directory / "bundle.json").read_text())
+    bundle = json.loads((directory / "bundle.json").read_text(encoding="utf-8"))
     bundle["user"]["title"] = "title" + control + "hidden"
     markdown = mod.render(bundle)
-    receipt = json.loads((directory / "receipt.json").read_text())
+    receipt = json.loads((directory / "receipt.json").read_text(encoding="utf-8"))
     receipt["bundle_digest"] = mod.canonical_json_digest(bundle)
     receipt["preview_digest"] = hashlib.sha256(markdown.encode()).hexdigest()
-    (directory / "bundle.json").write_text(json.dumps(bundle))
-    (directory / "bundle.md").write_text(markdown)
-    (directory / "receipt.json").write_text(json.dumps(receipt))
+    (directory / "bundle.json").write_bytes(json.dumps(bundle).encode("utf-8"))
+    (directory / "bundle.md").write_bytes(markdown.encode("utf-8"))
+    (directory / "receipt.json").write_bytes(json.dumps(receipt).encode("utf-8"))
     monkeypatch.setattr(mod, "gh", lambda *a: pytest.fail("unsafe title reached transport"))
     assert (
         cli.main(
@@ -1533,7 +1534,15 @@ def test_attempt_log_read_is_bounded_and_fails_closed(report_env, monkeypatch, c
     assert "60 KB" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize("kind", ["symlink", "hardlink", "public", "directory-symlink"])
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "symlink",
+        "hardlink",
+        pytest.param("public", marks=pytest.mark.skipif(os.name != "posix", reason="Private mode bits require POSIX")),
+        "directory-symlink",
+    ],
+)
 @pytest.mark.parametrize("fallback", [False, True])
 def test_submission_refuses_unsafe_attempt_log(report_env, monkeypatch, capsys, tmp_path, kind, fallback):
     from datetime import datetime, timezone
@@ -1603,6 +1612,8 @@ def test_last_error_reader_rejects_unsafe_or_oversized_files(report_env, monkeyp
         victim.write_text('{"command":"untrusted"}')
         path.symlink_to(victim)
     elif kind == "fifo":
+        if not hasattr(os, "mkfifo"):
+            pytest.skip("FIFO creation requires POSIX")
         os.mkfifo(path)
         # A no-writer FIFO would hang the vulnerable reader, so fail on an
         # ordinary Path.open before that operation can block.
@@ -1764,7 +1775,7 @@ def test_large_output_keeps_budgeted_newest_redacted_bytes(report_env, capsys, t
     assert invoke(target, "--include-output", str(log), "--dry-run", "--json") == 0
     preview = result(capsys)
     path = Path(preview["preview_path"])
-    bundle = json.loads(path.with_name("bundle.json").read_text())
+    bundle = json.loads(path.with_name("bundle.json").read_text(encoding="utf-8"))
     tail = bundle["user"]["output_tail"]
     assert tail.endswith("newest line")
     assert len(tail.encode()) <= 16 * 1024
