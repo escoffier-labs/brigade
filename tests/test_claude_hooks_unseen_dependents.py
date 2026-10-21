@@ -506,6 +506,51 @@ def test_compaction_restore_validates_and_retains_brief_observations(target, mon
     assert runtime.read_session_state(target, "session-one")["brief_files"] == expected
 
 
+@pytest.mark.parametrize("interleaving", ["none", "reread", "parallel_read", "stale_write"])
+def test_seen_file_cap_retains_recent_reads_for_dependency_checks(target, monkeypatch, interleaving):
+    monkeypatch.setattr(dependencies, "MAX_SEEN_FILES", 2)
+    for name in ("a.py", "m.py", "z.py", "zz.py"):
+        (target / name).write_text("def caller(): pass\n")
+    graph(target, monkeypatch, impacted_files=[{"file_path": "z.py"}], affected_tests=[])
+    event(target, "SessionStart", source="startup")
+    for name in ("a.py", "m.py"):
+        event(target, "PostToolUse", tool_name="Read", tool_input={"file_path": name})
+    if interleaving == "reread":
+        event(target, "PostToolUse", tool_name="Read", tool_input={"file_path": "a.py"})
+    elif interleaving == "parallel_read":
+        original = dependencies.record_read
+        interleaved = False
+
+        def read(*args):
+            nonlocal interleaved
+            if not interleaved:
+                interleaved = True
+                event(target, "PostToolUse", tool_name="Read", tool_input={"file_path": "zz.py"})
+            return original(*args)
+
+        monkeypatch.setattr(dependencies, "record_read", read)
+    if interleaving == "stale_write":
+        original_write = runtime._write_session_state_preserving_latch
+        interleaved = False
+
+        def write(repo, session_id, state, **kwargs):
+            nonlocal interleaved
+            if state.get("write_observed") and not interleaved:
+                interleaved = True
+                event(target, "PostToolUse", tool_name="Read", tool_input={"file_path": "z.py"})
+            return original_write(repo, session_id, state, **kwargs)
+
+        monkeypatch.setattr(runtime, "_write_session_state_preserving_latch", write)
+        event(target, "PostToolUse", tool_name="Edit", tool_input={"file_path": "api.py"})
+    else:
+        event(target, "PostToolUse", tool_name="Read", tool_input={"file_path": "z.py"})
+    expected = {"z.py", {"reread": "a.py", "parallel_read": "zz.py"}.get(interleaving, "m.py")}
+    assert set(runtime.read_session_state(target, "session-one")["read_files"]) == expected
+    result = event(target, "PreToolUse", tool_name="Edit", tool_input={"file_path": "api.py"})
+    assert runtime.read_session_state(target, "session-one")["dependency_checks"][-1]["unseen_dependents"] == []
+    assert result is None
+
+
 def test_fresh_incremental_graph_does_not_require_full_rebuild(target, monkeypatch):
     graph(target, monkeypatch)
     original = graphtrail_delta._run_graphtrail

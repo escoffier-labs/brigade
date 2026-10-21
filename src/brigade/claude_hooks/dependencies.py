@@ -48,18 +48,25 @@ def restore(state: dict[str, Any], persisted: dict[str, Any]) -> None:
             state[key] = (
                 _checks(persisted)[-MAX_CHECKS:]
                 if key == "dependency_checks"
-                else [item for item in _collection(persisted, key) if isinstance(item, str)][:MAX_SEEN_FILES]
+                else [item for item in _collection(persisted, key) if isinstance(item, str)][-MAX_SEEN_FILES:]
             )
 
 
-def merge_observations(state: dict[str, Any], current: dict[str, Any]) -> None:
+def merge_observations(
+    state: dict[str, Any], current: dict[str, Any], *, observed_fields: tuple[str, ...] = ()
+) -> None:
     """Merge observations and finalize new checks under the session lock."""
     if state.get("task_epoch") != current.get("task_epoch"):
         return
     seen: set[str] = set()
     for key in ("read_files", "brief_files"):
-        files = {item for source in (current, state) for item in _collection(source, key) if isinstance(item, str)}
-        state[key] = sorted(files)[:MAX_SEEN_FILES]
+        files = dict.fromkeys(item for item in _collection(current, key) if isinstance(item, str))
+        if key in observed_fields:
+            for item in _collection(state, key):
+                if isinstance(item, str):
+                    files.pop(item, None)
+                    files[item] = None
+        state[key] = list(files)[-MAX_SEEN_FILES:]
         seen.update(files)
     existing = {_check_key(check): check for check in _checks(current)}
     checks = dict(existing)
@@ -107,7 +114,7 @@ def record_read(target: Path, state: dict[str, Any], payload: dict[str, Any]) ->
     path = relative_path(target, tool_input.get("file_path"), payload.get("cwd"))
     if path is None:
         return False
-    state["read_files"] = sorted(set(state.get("read_files", [])) | {path})[:MAX_SEEN_FILES]
+    state["read_files"] = [path]
     return True
 
 

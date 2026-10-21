@@ -306,7 +306,7 @@ def _write_session_state_preserving_latch(
                         state.get("exercised_artifact_id"),
                         kind=state.get("exercised_artifact_kind", "skill"),
                     )
-            dependencies.merge_observations(updated, current_state)
+            dependencies.merge_observations(updated, current_state, observed_fields=patch_fields or ())
             if updated.get("task_epoch") == current_epoch:
                 # Completed writes are monotonic within a task. Observation
                 # hooks must not erase them or rewind the verification boundary.

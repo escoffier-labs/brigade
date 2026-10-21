@@ -2341,7 +2341,7 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
             read_recorded = dependencies.record_read(target, state, payload)
             artifact_recorded = _record_exercised_artifact(state, skill_id)
             if artifact_recorded or read_recorded:
-                fields: tuple[str, ...] = ("read_files",)
+                fields: tuple[str, ...] = ("read_files",) if read_recorded else ()
                 if artifact_recorded:
                     fields += ("exercised_artifact_id", "exercised_artifact_kind")
                 _write_session_state_preserving_latch(target, session_id, state, log_target=target, patch_fields=fields)
