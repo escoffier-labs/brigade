@@ -568,12 +568,11 @@ def test_receipt_refuses_symlinked_destination(tmp_path, capsys):
     assert list(outside.iterdir()) == []
 
 
-def test_missing_target_and_unsupported_apply(tmp_path, capsys):
+def test_missing_target_and_explicit_apply(tmp_path, capsys):
     assert cli.main(["runs", "patrol", "--target", str(tmp_path / "missing")]) == 2
     capsys.readouterr()
-    with pytest.raises(SystemExit) as exc:
-        cli.main(["runs", "patrol", "--target", str(tmp_path), "--apply", "reap"])
-    assert exc.value.code == 2
+    assert cli.main(["runs", "patrol", "--target", str(tmp_path), "--apply", "reap"]) == 0
+    assert list((tmp_path / ".brigade/patrol").glob("*/patrol.json"))
 
 
 @pytest.mark.parametrize("status,expected", [("ok", "complete"), ("failed", "failed")])

@@ -1,0 +1,277 @@
+"""Explicit patrol actions preserve reaper and claim fences."""
+
+from __future__ import annotations
+
+import json
+from datetime import timedelta
+
+import pytest
+
+from brigade import cli, localio, run_journal, runguard, runs_patrol
+from tests.test_run_reap import JOURNAL_REQUESTED, NOW, _repo, _write_run, _write_stale_lock
+from tests.test_runs_patrol import _ledger
+
+
+def _patrol(repo, capsys, *, apply, now=NOW, **kwargs):
+    code = runs_patrol.patrol(target=repo, now=now, json_output=True, apply=apply, **kwargs)
+    captured = capsys.readouterr()
+    assert code == 0, captured.err
+    return json.loads(captured.out)
+
+
+def test_apply_reap_uses_journal_writer_and_is_repeatable(tmp_path, monkeypatch, capsys):
+    repo = _repo(tmp_path)
+    run = _write_run(repo, "20260820-120000-patrol01", extra=JOURNAL_REQUESTED)
+    run_journal.append_event(
+        run / "events/lifecycle.jsonl",
+        run_id=run.name,
+        event_type="run.resumed",
+        payload={},
+        idempotency_key="started",
+        expected_previous_sequence=0,
+        recorded_at="2026-08-20T12:00:00.000000Z",
+    )
+    _write_stale_lock(repo, run)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+    report = _patrol(repo, capsys, apply="reap")
+    assert json.loads((run / "run.json").read_text())["status"] == "orphaned"
+    events = [json.loads(line) for line in (run / "events/lifecycle.jsonl").read_text().splitlines()]
+    assert events[-1]["event_type"] == "run.orphaned"
+    action = report["actions"][0]
+    assert action["action"] == "reap" and action["status"] == "applied"
+    assert action["before"]["state"] == "dead" and action["after"]["state"] == "orphaned"
+    assert len(action["idempotency_key"]) == 64
+    assert json.loads((repo / report["receipt"]).read_text()) == report
+    before = (run / "events/lifecycle.jsonl").read_bytes()
+    again = _patrol(repo, capsys, apply="reap")
+    assert not any(item["status"] == "applied" for item in again["actions"])
+    assert (run / "events/lifecycle.jsonl").read_bytes() == before
+
+
+@pytest.mark.parametrize("live,foreign", [(True, False), (False, True)])
+def test_apply_never_reaps_live_or_foreign_lock(tmp_path, monkeypatch, capsys, live, foreign):
+    repo = _repo(tmp_path)
+    run = _write_run(repo, "20260820-120000-patrol01")
+    lock = _write_stale_lock(repo, run)
+    if foreign:
+        owner = json.loads((lock / "owner.json").read_text())
+        owner["run_dir"] = str(run.parent / "20260820-120000-foreign1")
+        localio.write_json(lock / "owner.json", owner)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: live)
+    before = (run / "run.json").read_bytes(), (lock / "owner.json").read_bytes()
+    report = _patrol(repo, capsys, apply="reap,release-claim")
+    assert not any(item["status"] == "applied" for item in report["actions"])
+    assert ((run / "run.json").read_bytes(), (lock / "owner.json").read_bytes()) == before
+
+
+def test_release_claim_for_terminal_run(tmp_path, capsys):
+    repo = _repo(tmp_path)
+    _write_run(repo, "20260820-120000-patrol01", status="ok", extra={"claim_id": "claim-1"})
+    _ledger(repo)
+    report = _patrol(repo, capsys, apply="release-claim")
+    task = json.loads((repo / ".brigade/work/tasks.json").read_text())["tasks"][0]
+    assert task.get("claim") is None
+    assert task["updated_at"]
+    action = next(item for item in report["actions"] if item["action"] == "release-claim")
+    assert action["status"] == "applied"
+    assert action["before"]["claim_id"] == "claim-1" and action["after"]["claim_id"] is None
+
+
+def test_release_refuses_newer_claim(tmp_path, monkeypatch, capsys):
+    from brigade.work_cmd import ledger
+
+    repo = _repo(tmp_path)
+    _write_run(repo, "20260820-120000-patrol01", status="ok", extra={"claim_id": "claim-1"})
+    _ledger(repo)
+    read = ledger._read_task_ledger
+
+    def reclaimed(target):
+        value = read(target)
+        value["tasks"][0]["claim"]["claim_id"] = "claim-2"
+        return value
+
+    monkeypatch.setattr(ledger, "_read_task_ledger", reclaimed)
+    report = _patrol(repo, capsys, apply="release-claim")
+    assert not any(item["status"] == "applied" for item in report["actions"])
+    assert "claim" in json.loads((repo / ".brigade/work/tasks.json").read_text())["tasks"][0]
+
+
+def test_escalation_cooldown_cap_and_fleet_message_idempotence(tmp_path, monkeypatch, capsys):
+    from brigade import fleet_client_messages
+
+    repo = _repo(tmp_path)
+    run = _write_run(repo, "20260820-120000-patrol01")
+    _write_stale_lock(repo, run)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+    sent = []
+    monkeypatch.setattr(fleet_client_messages, "send", lambda **kwargs: sent.append(kwargs) or {"sent": True})
+    kwargs = {"escalate_via": "fleet-msg", "escalate_to": "operator"}
+    first = _patrol(repo, capsys, apply="escalate", **kwargs)
+    assert first["actions"][0]["status"] == "applied"
+    for hours in (0, 3, 4, 8):
+        _patrol(repo, capsys, apply="escalate", now=NOW + timedelta(hours=hours), **kwargs)
+    assert len(sent) == 2
+    assert sent[0]["client_id"] != sent[1]["client_id"]
+    assert all(item["recipient"] == "operator" for item in sent)
+
+
+def test_apply_validates_options_before_writing(tmp_path, capsys):
+    assert cli.main(["runs", "patrol", "--target", str(tmp_path), "--apply", "interrupt"]) == 2
+    assert "unknown action" in capsys.readouterr().err
+    assert not (tmp_path / ".brigade").exists()
+
+
+def test_apply_refuses_unwritable_receipt_before_mutation(tmp_path, monkeypatch, capsys):
+    repo = _repo(tmp_path)
+    run = _write_run(repo, "20260820-120000-patrol01")
+    _write_stale_lock(repo, run)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+    (repo / ".brigade/patrol").symlink_to(tmp_path, target_is_directory=True)
+    before = (run / "run.json").read_bytes()
+    assert runs_patrol.patrol(target=repo, now=NOW, apply="reap") == 2
+    assert "symlink" in capsys.readouterr().err
+    assert (run / "run.json").read_bytes() == before
+
+
+def test_reap_and_release_use_updated_run_evidence(tmp_path, monkeypatch, capsys):
+    repo = _repo(tmp_path)
+    run = _write_run(repo, "20260820-120000-patrol01", extra={"claim_id": "claim-1"})
+    _write_stale_lock(repo, run)
+    _ledger(repo)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+    report = _patrol(repo, capsys, apply="reap,release-claim")
+    task = json.loads((repo / ".brigade/work/tasks.json").read_text())["tasks"][0]
+    assert task.get("claim") is None, report["actions"]
+    assert json.loads((run / "run.json").read_text())["status"] == "orphaned"
+
+
+def test_release_rechecks_run_after_acquiring_lock(tmp_path, monkeypatch, capsys):
+    from tests.test_run_reap import _racing_lock_after_claim
+
+    repo = _repo(tmp_path)
+    run = _write_run(repo, "20260820-120000-patrol01", status="ok", extra={"claim_id": "claim-1"})
+    ledger = _ledger(repo)
+    monkeypatch.setattr(
+        runguard, "run_lock", _racing_lock_after_claim(run, lambda meta: meta.update(status="dispatching"))
+    )
+    report = _patrol(repo, capsys, apply="release-claim")
+    assert json.loads(ledger.read_text())["tasks"][0].get("claim"), report["actions"]
+    assert not any(item["status"] == "applied" for item in report["actions"])
+
+
+def test_unchanged_evidence_does_not_retry_uncertain_message(tmp_path, monkeypatch, capsys):
+    from brigade import fleet_client_messages
+
+    repo = _repo(tmp_path)
+    run = _write_run(repo, "20260820-120000-patrol01")
+    _write_stale_lock(repo, run)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+    sent = []
+
+    def ambiguous(**kwargs):
+        sent.append(kwargs)
+        raise RuntimeError("delivery response was lost")
+
+    monkeypatch.setattr(fleet_client_messages, "send", ambiguous)
+    kwargs = {"escalate_via": "fleet-msg", "escalate_to": "operator"}
+    first = _patrol(repo, capsys, apply="escalate", **kwargs)
+    assert first["actions"][0]["status"] == "failed"
+    assert first["actions"][0]["severity"] == "urgent"
+    assert first["actions"][0]["escalation_number"] == 1
+    second = _patrol(repo, capsys, apply="escalate", **kwargs)
+    assert second["actions"] == []
+    assert len(sent) == 1
+
+
+def test_pending_receipt_fences_a_crashed_patrol(tmp_path, monkeypatch, capsys):
+    repo = _repo(tmp_path)
+    run = _write_run(repo, "20260820-120000-patrol01")
+    _write_stale_lock(repo, run)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+    report = _patrol(repo, capsys, apply="escalate")
+    report["actions"][0]["status"] = "pending"
+    localio.write_json(repo / report["receipt"], report)
+    again = _patrol(repo, capsys, apply="escalate")
+    assert again["actions"] == []
+
+
+def test_release_refuses_a_live_terminal_owner(tmp_path, monkeypatch, capsys):
+    repo = _repo(tmp_path)
+    run = _write_run(repo, "20260820-120000-patrol01", status="ok", extra={"claim_id": "claim-1"})
+    _write_stale_lock(repo, run)
+    path = _ledger(repo)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: True)
+    before = path.read_bytes()
+    report = _patrol(repo, capsys, apply="release-claim")
+    assert path.read_bytes() == before
+    assert not any(item["status"] == "applied" for item in report["actions"])
+
+
+def test_claim_release_refuses_a_resumed_journal_with_stale_snapshot(tmp_path, monkeypatch, capsys):
+    from tests.test_run_reap import _racing_lock_after_claim
+
+    repo = _repo(tmp_path)
+    run = _write_run(repo, "20260820-120000-patrol01", status="ok", extra={"claim_id": "claim-1"})
+    path = _ledger(repo)
+    run_journal.append_event(
+        run / "events/lifecycle.jsonl",
+        run_id=run.name,
+        event_type="run.completed",
+        payload={"status": "ok"},
+        idempotency_key="complete",
+        expected_previous_sequence=0,
+        recorded_at="2026-08-20T12:00:00.000000Z",
+    )
+
+    def resume(meta):
+        run_journal.append_event(
+            run / "events/lifecycle.jsonl",
+            run_id=run.name,
+            event_type="run.resumed",
+            payload={},
+            idempotency_key="resume",
+            expected_previous_sequence=1,
+            recorded_at="2026-08-28T17:59:00.000000Z",
+        )
+
+    monkeypatch.setattr(runguard, "run_lock", _racing_lock_after_claim(run, resume))
+    report = _patrol(repo, capsys, apply="release-claim")
+    assert json.loads(path.read_text())["tasks"][0].get("claim"), report["actions"]
+
+
+def test_unreadable_history_refuses_actions_and_records_exit_disposition(tmp_path, monkeypatch, capsys):
+    repo = _repo(tmp_path)
+    run = _write_run(repo, "20260820-120000-patrol01")
+    _write_stale_lock(repo, run)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+    old = repo / ".brigade/patrol/old/patrol.json"
+    old.parent.mkdir(parents=True)
+    old.write_text("not json")
+    before = (run / "run.json").read_bytes()
+    assert runs_patrol.patrol(target=repo, now=NOW, apply="reap") == 2
+    assert "error: patrol:" in capsys.readouterr().err
+    assert (run / "run.json").read_bytes() == before
+    receipt = next(path for path in old.parent.parent.glob("*/patrol.json") if path != old)
+    assert json.loads(receipt.read_text())["exit_code"] == 2
+
+
+def test_reap_refresh_cannot_adopt_a_concurrent_nonterminal_snapshot(tmp_path, monkeypatch, capsys):
+    from brigade import runs_patrol_actions
+
+    repo = _repo(tmp_path)
+    run = _write_run(repo, "20260820-120000-patrol01", extra={"claim_id": "claim-1"})
+    _write_stale_lock(repo, run)
+    ledger = _ledger(repo)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+    reap = runs_patrol_actions._reap
+
+    def raced(*args, **kwargs):
+        result = reap(*args, **kwargs)
+        meta = json.loads((run / "run.json").read_text())
+        meta.update(status="dispatching")
+        localio.write_json(run / "run.json", meta)
+        return result
+
+    monkeypatch.setattr(runs_patrol_actions, "_reap", raced)
+    report = _patrol(repo, capsys, apply="reap,release-claim")
+    assert json.loads(ledger.read_text())["tasks"][0].get("claim"), report["actions"]

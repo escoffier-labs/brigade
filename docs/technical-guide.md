@@ -556,6 +556,39 @@ reused within each workspace. Evidence observation times identify collection
 start, which is also the freshness reference for that scan. Classification uses
 the clock after collection for run age and progress. JSON records elapsed
 collection time as `scan_duration_seconds`.
+
+Patrol is report-only unless `--apply` names actions:
+
+```bash
+brigade runs patrol --target . --json --apply reap,release-claim
+brigade runs patrol --target . --apply escalate --escalate-via fleet-msg --escalate-to operator
+```
+
+`reap` uses the same bound run directory, snapshot comparison, claimed lock,
+checkpoint, and `run.orphaned` writer as `runs reap`. Live or foreign locks are
+refused. Already orphaned runs need no second transition. `release-claim`
+requires an exact run-to-claim join and a terminal or dead run. The ledger write
+compares `claim_id` under its normal lock. Hub recovery uses the same local
+owner proof as `fleet claims --release`, also checks the lane's run directory,
+and fences deletion to the inspected claim generation. Patrol never forces a
+release. Hub rows on other nodes cannot pass this proof.
+
+`escalate` records severity and an escalation number. It sends a fleet message
+only when both `--escalate-via fleet-msg` and `--escalate-to PRINCIPAL` are set.
+Each lane permits at most 2 escalation attempts, at least 4 hours apart, even
+if its classification changes. Failed or uncertain sends consume that attempt.
+
+Applying actions always writes a patrol receipt. Each attempt records its
+scope, before and after state, timestamp, result, and an idempotency key derived
+from the lane, classification digest, and action. The second escalation also
+includes its escalation number in the key. A shared local lock serializes
+patrol actions. A durable pending record precedes every side effect, so a crash
+or an unchanged observation cannot repeat that attempt. Unreadable receipt
+history refuses further actions. Keep receipts to retain these fences.
+Findings and `--fail-on` refer to the initial scan, even when an action repairs
+a lane. No action terminates a process, removes a worktree, merges, or pushes.
+`finalize-intent` and `interrupt` are not available in this slice.
+
 JSON reports `truncated: true` when a source or result window
 is cut short. Text output warns, and `--fail-on unknown` returns 1 on truncation.
 Claims join runs only by exact `claim_id`. Current run writers omit that field,
@@ -564,8 +597,7 @@ An unmatched claim without independent worktree findings reports `unknown`
 with reason `no task-to-run join key`, regardless of age or other active runs.
 Claim age alone cannot establish `claim-without-run` until a verified join exists.
 Invalid options or an unreadable target return 2.
-Patrol does not repair runs or claims. Dispatch intents and Hub joins are
-reserved for later slices.
+Dispatch-intent collection and Hub lane joins are reserved for later slices.
 
 Use `brigade runs prune-worktrees --target /path/to/repo` to list Brigade-created
 detached worktrees that are safe to remove: clean, branch-backed, and older
