@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Iterator
 from uuid import uuid4
 
-from . import dirfd, run_dirfd
+from . import dirfd, receipt_schema, run_dirfd
 
 DIRECTORY = "cassettes"
 MAX_FILES = 8192
@@ -78,6 +78,8 @@ def journal_scope(run_dir: Path) -> Iterator[None]:
 
 def validated_runs(runs_root: Path) -> list[tuple[float, str, dict[str, Any]]]:
     """Bound the scan and admit identified runs, excluding hidden staging trees."""
+    from . import runs_cmd
+
     parent = dirfd.open_directory_chain(Path(os.path.abspath(runs_root)))
     try:
         names = dirfd.child_names(parent, 10001)
@@ -104,7 +106,16 @@ def validated_runs(runs_root: Path) -> list[tuple[float, str, dict[str, Any]]]:
                 metadata = json.loads(raw)
             except ValueError:
                 continue
-            if isinstance(metadata, dict) and metadata.get("run_id") == name:
+            # The artifact writer identifies runs by directory and schema, not run_id.
+            if isinstance(metadata, dict) and (
+                metadata.get("run_id") == name
+                or (
+                    "run_id" not in metadata
+                    and runs_cmd._is_bare_run_id(name)
+                    and metadata.get("schema") == receipt_schema.RUN_RECEIPT_SCHEMA
+                    and metadata.get("schema_version") == receipt_schema.RUN_RECEIPT_SCHEMA_VERSION
+                )
+            ):
                 started = metadata.get("started_at")
                 # Keep only the bounded sort field rather than every run body.
                 summary = {"started_at": started} if isinstance(started, str) and len(started) <= 128 else {}
@@ -326,12 +337,14 @@ def retain_private(workspace: Path, runs_root: Path, *, current: Path) -> int:
             started = summary.get("started_at")
             if started is not None:
                 try:
-                    parsed = datetime.fromisoformat(started)
+                    parsed = datetime.fromisoformat(started.replace("Z", "+00:00"))
                     if parsed.tzinfo is None:
                         parsed = parsed.replace(tzinfo=timezone.utc)
                     modified = parsed.timestamp()
-                except (ValueError, OverflowError) as exc:
-                    raise CassetteError("runs inventory has invalid started_at") from exc
+                except (ValueError, OverflowError, OSError):
+                    # A damaged timestamp affects only this run's age and order.
+                    # validated_runs already supplied its directory mtime.
+                    pass
             runs.append((modified, name, summary))
     except CassetteError as exc:
         print(f"cassette retention skipped: {exc}", file=sys.stderr)

@@ -253,6 +253,8 @@ def _stop_bound(run_dir: Path, workspace: Path, journal: Path) -> None:
     ):
         if _finished(run_dir):
             return
+        if journaled and not runguard.is_active_run_owner(workspace, run_dir):
+            return
         files = store.inventory(parent)
         names = {name for name, _ in files}
         if ".stopped" in names:
@@ -487,6 +489,8 @@ def _publish_blobs(
             raise store.CassetteError("cassette run byte cap reached")
         # Check journal admission before publishing any bodies.
         if journaled:
+            if not runguard.is_active_run_owner(workspace, run_dir):
+                raise store.CassetteError("cassette publication requires the active run lock")
             report = run_journal.read_journal_bounded(journal)
             if (
                 report.chain_errors
@@ -552,10 +556,13 @@ def record_dispatch_result(
 
     def record(result: WorkerResult, window: _ProjectionWindow) -> None:
         if run_dir is not None:
+            recording_agent = agent()
+            if recording_agent.name != assigned_agent.name:
+                window.unavailable = True
             record_result(
                 run_dir=run_dir,
                 workspace=workspace or Path.cwd(),
-                agent=agent(),
+                agent=recording_agent,
                 task=result.task,
                 prompt=prompt(),
                 result=agent_result_from_worker(result),

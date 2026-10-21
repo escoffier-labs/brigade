@@ -75,6 +75,7 @@ def test_lost_owner_cannot_append_cassette_or_shadow_fact(tmp_path, monkeypatch)
     )
     assert journal.read_bytes() == before
     assert not shadows
+    assert not list((run / "events" / "cassettes").glob("*"))
 
 
 @pytest.mark.parametrize("reason", ["age", "count"])
