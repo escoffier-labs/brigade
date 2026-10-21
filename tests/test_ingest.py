@@ -1092,13 +1092,16 @@ def test_promote_mints_stable_id_for_new_card_and_preserves_it_on_update(tmp_tar
     assert "replacement body" in updated
 
 
-def test_create_card_exact_fingerprint_reinforces_existing(tmp_target: Path, capsys):
+@pytest.mark.parametrize("archive_collision", [False, True])
+def test_create_card_exact_fingerprint_reinforces_existing(tmp_target: Path, capsys, archive_collision):
     """Exact content match reinforces the existing card instead of filing a duplicate."""
     from datetime import date
 
     from brigade.card_fingerprint import content_fingerprint
 
     inbox = _seed(tmp_target)
+    if archive_collision:
+        (inbox / "processed/2026-05-13-1100-dup.md").write_text("Previously processed handoff.\n")
     body = (
         "Always flush the shared widget cache after a schema migration completes "
         "otherwise application reads return stale rows for several minutes"
@@ -1168,6 +1171,18 @@ def test_create_card_exact_fingerprint_reinforces_existing(tmp_target: Path, cap
     assert f"fingerprint: {fp}" in text
     assert "2026-05-13-1100-dup.md" in text
     assert body in text
+    if os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW"):
+        rows = [
+            json.loads(line)
+            for line in (tmp_target / ".brigade/memory/reflect/evidence-log.jsonl").read_text().splitlines()
+        ]
+        assert len(rows) == 1
+        assert rows[0]["kind"] == "reinforced"
+        assert rows[0]["similarity"] == 1.0
+        assert rows[0]["card_path"] == "memory/cards/widget-cache.md"
+        evidence = tmp_target / rows[0]["evidence_id"]
+        assert evidence.parent == inbox / "processed"
+        assert body in evidence.read_text()
 
 
 def test_create_card_near_match_proposes_reinforce_without_writing(tmp_target: Path, capsys):
@@ -1196,6 +1211,10 @@ def test_create_card_near_match_proposes_reinforce_without_writing(tmp_target: P
         "2026-05-13-1101-near.md",
         _card_handoff_body("schema-flush-v2.md", "schema-flush-v2", reworded),
     )
+    assert ingest_mod.run(target=tmp_target, dry_run=True, promote_cards=True, route_documents=True) == 0
+    assert not (tmp_target / ".brigade/memory/reflect/evidence-log.jsonl").exists()
+    assert existing.read_text() == before
+    capsys.readouterr()
     assert ingest_mod.run(target=tmp_target, dry_run=False, promote_cards=True, route_documents=True) == 0
     out = capsys.readouterr().out
     assert "near-match reinforce proposal: memory/cards/schema-flush.md" in out
@@ -1204,6 +1223,17 @@ def test_create_card_near_match_proposes_reinforce_without_writing(tmp_target: P
     assert not (tmp_target / "memory" / "cards" / "schema-flush-v2.md").exists()
     inbox_files = list((tmp_target / "memory" / "handoff-inbox").glob("*.md"))
     assert len(inbox_files) == 1
+    if os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW"):
+        rows = [
+            json.loads(line)
+            for line in (tmp_target / ".brigade/memory/reflect/evidence-log.jsonl").read_text().splitlines()
+        ]
+        assert len(rows) == 1
+        assert rows[0]["kind"] == "near-match"
+        assert rows[0]["card_path"] == "memory/cards/schema-flush.md"
+        assert rows[0]["evidence_id"].endswith("2026-05-13-1101-near.md")
+        assert tmp_target / rows[0]["evidence_id"] == inbox_files[0]
+        assert 0.9 <= rows[0]["similarity"] < 1
 
 
 def test_create_card_below_threshold_still_promotes(tmp_target: Path):
@@ -1291,6 +1321,13 @@ def test_create_card_opposite_polarity_near_match_flags_contradiction(tmp_target
     assert "contradiction candidate vs memory/cards/foo-flag.md" in out
     assert "opposite polarity" in out
     assert "reinforce →" not in out
+    if os.open in os.supports_dir_fd and hasattr(os, "O_NOFOLLOW"):
+        rows = [
+            json.loads(line)
+            for line in (tmp_target / ".brigade/memory/reflect/evidence-log.jsonl").read_text().splitlines()
+        ]
+        assert len(rows) == 1
+        assert rows[0]["kind"] == "opposite-polarity"
     assert existing.read_text() == before
     assert not (tmp_target / "memory" / "cards" / "foo-flag-v2.md").exists()
 
@@ -1443,6 +1480,102 @@ def test_busy_proposal_lock_leaves_handoff_for_retry(tmp_target, monkeypatch):
     assert not (tmp_target / "memory/cards/busy.md").exists()
     assert not (inbox / "processed/busy-publication.md").exists()
     assert not list((tmp_target / "memory/review-inbox").glob("*.md"))
+
+
+@pytest.mark.skipif(
+    os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"), reason="safe descriptor IO required"
+)
+def test_reinforcement_keeps_pending_near_match_in_care_queue(tmp_target, monkeypatch, capsys):
+    from datetime import date, datetime, timezone
+
+    from brigade import memory_cmd, memory_evidence_log
+
+    class Clock(datetime):
+        current = datetime(2026, 10, 10, 12, tzinfo=timezone.utc)
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current
+
+    class LocalDate(date):
+        @classmethod
+        def today(cls):
+            return Clock.current.date()
+
+    monkeypatch.setattr(memory_evidence_log, "datetime", Clock)
+    monkeypatch.setattr(ingest_mod, "date", LocalDate)
+    inbox = _seed(tmp_target)
+    card = tmp_target / "memory/cards/example.md"
+    card.parent.mkdir(parents=True, exist_ok=True)
+    body = "Always flush the shared widget cache after every schema migration completes to avoid stale application rows"
+    card.write_text(f"---\ntopic: example\nlast_reviewed: 2026-10-01\n---\n\n# example\n\n{body}\n")
+    near = "pending-near.md"
+    _write_handoff(inbox, near, _card_handoff_body("near.md", "example", body.replace("Always", "Always please")))
+    assert ingest_mod.run(target=tmp_target, dry_run=False, promote_cards=True, route_documents=True) == 0
+    capsys.readouterr()
+    assert memory_cmd.scan(target=tmp_target, json_output=True) == 0
+    initial = json.loads(capsys.readouterr().out)
+    pending = [issue for issue in initial["issues"] if issue["issue_type"] == "unconsolidated-evidence"]
+    assert len(pending) == 1
+    evidence = list((tmp_target / "memory/handoff-inbox").glob(f"*{near}"))
+    assert len(evidence) == 1
+    assert pending[0]["evidence_references"] == [evidence[0].relative_to(tmp_target).as_posix()]
+
+    Clock.current = datetime(2026, 10, 12, 12, tzinfo=timezone.utc)
+    _write_handoff(inbox, "exact.md", _card_handoff_body("duplicate.md", "example", body))
+    assert ingest_mod.run(target=tmp_target, dry_run=False, promote_cards=True, route_documents=True) == 0
+    capsys.readouterr()
+    assert "last_reviewed: 2026-10-12" in card.read_text()
+    before = card.read_bytes(), card.stat().st_mtime_ns
+    assert memory_cmd.scan(target=tmp_target, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    pending_after = [issue for issue in payload["issues"] if issue["issue_type"] == "unconsolidated-evidence"]
+    assert len(pending_after) == 1
+    assert pending_after[0]["evidence_references"] == pending[0]["evidence_references"]
+    assert (card.read_bytes(), card.stat().st_mtime_ns) == before
+
+
+@pytest.mark.skipif(
+    os.open not in os.supports_dir_fd or not hasattr(os, "O_NOFOLLOW"), reason="safe descriptor IO required"
+)
+@pytest.mark.parametrize("kind", ["near-match", "reinforced"])
+def test_external_handoff_logs_identifier_without_evidence_body(tmp_path, kind):
+    owner, source = tmp_path / "owner", tmp_path / "writer"
+    _seed(owner)
+    inbox = _seed(source)
+    body = "Always flush the shared widget cache after every schema migration completes to avoid stale application rows"
+    card = owner / "memory/cards/example.md"
+    card.parent.mkdir(parents=True, exist_ok=True)
+    card.write_text(f"---\ntopic: example\n---\n\n# example\n\n{body}\n")
+    before = card.read_bytes()
+    handoff = _write_handoff(
+        inbox,
+        "external-evidence.md",
+        textwrap.dedent(
+            _card_handoff_body(
+                "new.md", "example", body.replace("Always", "Always please") if kind == "near-match" else body
+            )
+        ).replace(
+            "## Recommended memory action", "## Evidence\n\n- Private evidence body.\n\n## Recommended memory action"
+        ),
+    )
+    assert ingest_mod.ingest_into(source=source, owner=owner, stats=ingest_mod.IngestStats(), promote_cards=True) == 0
+    rows = [
+        json.loads(line) for line in (owner / ".brigade/memory/reflect/evidence-log.jsonl").read_text().splitlines()
+    ]
+    assert rows[0]["kind"] == kind
+    assert not handoff.exists()
+    ledger = (owner / ".brigade/memory/reflect/evidence-log.jsonl").read_text()
+    assert "Private evidence body." not in ledger
+    assert source.as_posix() not in ledger
+    if kind == "near-match":
+        evidence = owner / rows[0]["evidence_id"]
+        assert evidence.parent == owner / "memory/handoff-inbox"
+        assert "Private evidence body." in evidence.read_text()
+        assert card.read_bytes() == before
+    else:
+        assert re.fullmatch(r"sha256:[0-9a-f]{64}", rows[0]["evidence_id"])
+        assert "Private evidence body." in (inbox / "processed" / handoff.name).read_text()
 
 
 _PLAIN_HANDOFF = """\
