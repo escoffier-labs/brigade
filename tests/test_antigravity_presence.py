@@ -348,12 +348,23 @@ def test_hook_without_configured_hub_does_not_launch_publisher(workspace, monkey
     assert captured.out == captured.err == ""
 
 
+def _write_machine_identity():
+    path = fleet_client.home_identity_target() / ".brigade" / "node.toml"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        'node_id = "22222222-2222-4222-8222-222222222222"\nhostname = "example-node"\nplatform = "test"\nroles = []\n',
+        encoding="utf-8",
+    )
+    return path
+
+
 @pytest.mark.parametrize("credential", [None, "admin"])
 def test_hook_requires_node_or_admin_credential_before_spawning(workspace, monkeypatch, capsys, credential):
     monkeypatch.delenv("BRIGADE_FLEET_NODE_TOKEN", raising=False)
     monkeypatch.delenv("BRIGADE_FLEET_TOKEN", raising=False)
     if credential == "admin":
         monkeypatch.setenv("BRIGADE_FLEET_TOKEN", "example-admin-token")
+        _write_machine_identity()
     settings = fleet_client.load_fleet_settings()
     assert settings["hub_url"]
     assert bool(settings["node_token"] or settings["admin_token"]) is (credential is not None)
@@ -366,3 +377,60 @@ def test_hook_requires_node_or_admin_credential_before_spawning(workspace, monke
     assert len(launches) == (0 if credential is None else 1)
     captured = capsys.readouterr()
     assert captured.out == captured.err == ""
+
+
+@pytest.mark.parametrize("identity", ["absent", "invalid", "valid"])
+def test_admin_publisher_requires_claimable_machine_identity(workspace, monkeypatch, capsys, identity):
+    monkeypatch.delenv("BRIGADE_FLEET_NODE_TOKEN", raising=False)
+    monkeypatch.setenv("BRIGADE_FLEET_TOKEN", "example-admin-token")
+    if identity != "absent":
+        path = _write_machine_identity()
+        if identity == "invalid":
+            path.write_text("invalid node identity", encoding="utf-8")
+    launches = []
+    _stub_publisher_process(monkeypatch, lambda argv, **kw: launches.append(argv) or object())
+    monkeypatch.setattr(
+        sys, "stdin", io.StringIO(json.dumps({"conversationId": "conversation-1", "workspacePaths": [str(workspace)]}))
+    )
+    assert cli.main(["work", "presence-hook", "--harness", "antigravity", "--stdin", "--event", "start"]) == 0
+    assert len(launches) == (1 if identity == "valid" else 0)
+    captured = capsys.readouterr()
+    assert captured.out == captured.err == ""
+
+
+@pytest.mark.parametrize(("prune", "edited"), [(False, False), (True, False), (True, True)])
+def test_reconfigure_prunes_only_unedited_antigravity_hook(tmp_path, monkeypatch, prune, edited):
+    monkeypatch.setenv("BRIGADE_EXTRAS", "1")
+    assert cli.main(["init", "--target", str(tmp_path), "--depth", "repo", "--harnesses", "antigravity"]) == 0
+    path = tmp_path / ".agents" / "hooks.json"
+    doc = json.loads(path.read_text(encoding="utf-8"))
+    foreign = {"Stop": [{"type": "command", "command": "custom-hook"}]}
+    doc["foreign-hook"] = foreign
+    if edited:
+        doc["brigade-presence"]["enabled"] = False
+    owned = doc["brigade-presence"]
+    path.write_text(json.dumps(doc), encoding="utf-8")
+    argv = ["reconfigure", "--target", str(tmp_path), "--harnesses", "codex"]
+    if prune:
+        argv.append("--prune")
+    assert cli.main(argv) == 0
+    after = json.loads(path.read_text(encoding="utf-8"))
+    assert after["foreign-hook"] == foreign
+    if prune and not edited:
+        assert "brigade-presence" not in after
+    else:
+        assert after["brigade-presence"] == owned
+    first = path.read_bytes()
+    assert cli.main(argv) == 0
+    assert path.read_bytes() == first
+
+
+def test_prune_recovers_owned_hook_after_selection_already_changed(tmp_path, monkeypatch):
+    monkeypatch.setenv("BRIGADE_EXTRAS", "1")
+    assert cli.main(["init", "--target", str(tmp_path), "--depth", "repo", "--harnesses", "antigravity"]) == 0
+    argv = ["reconfigure", "--target", str(tmp_path), "--harnesses", "codex"]
+    assert cli.main(argv) == 0
+    path = tmp_path / ".agents" / "hooks.json"
+    assert "brigade-presence" in json.loads(path.read_text(encoding="utf-8"))
+    assert cli.main([*argv, "--prune"]) == 0
+    assert "brigade-presence" not in json.loads(path.read_text(encoding="utf-8"))

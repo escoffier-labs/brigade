@@ -16,14 +16,7 @@ HOOK_PATH = Path(".agents/hooks.json")
 _EVENT_MAP = {"PreInvocation": "start", "PostToolUse": "heartbeat", "PostInvocation": "heartbeat", "Stop": "heartbeat"}
 
 
-def install_hooks(target: Path) -> None:
-    """Merge our named hook, preserving foreign entries and edited configurations."""
-    path = target / HOOK_PATH
-    if path.is_symlink() or path.parent.is_symlink():
-        raise ValueError("Antigravity hook configuration must not be a symlink")
-    doc = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
-    if not isinstance(doc, dict):
-        raise ValueError("Antigravity hook configuration must be an object")
+def _managed_hook() -> dict[str, object]:
     managed: dict[str, object] = {}
     for event, mapped in _EVENT_MAP.items():
         handler = {
@@ -31,11 +24,40 @@ def install_hooks(target: Path) -> None:
             "command": f"brigade work presence-hook --harness antigravity --stdin --event {mapped}",
         }
         managed[event] = [{"matcher": "*", "hooks": [handler]}] if event == "PostToolUse" else [handler]
+    return managed
+
+
+def _read_hooks(path: Path) -> dict[str, object]:
+    if path.is_symlink() or path.parent.is_symlink():
+        raise ValueError("Antigravity hook configuration must not be a symlink")
+    doc = json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+    if not isinstance(doc, dict):
+        raise ValueError("Antigravity hook configuration must be an object")
+    return doc
+
+
+def install_hooks(target: Path) -> None:
+    """Merge our named hook, preserving foreign entries and edited configurations."""
+    path = target / HOOK_PATH
+    doc = _read_hooks(path)
+    managed = _managed_hook()
     if HOOK_NAME in doc:
         if doc[HOOK_NAME] != managed:
             raise ValueError("existing brigade-presence hook differs; preserved for review")
         return
     doc[HOOK_NAME] = managed
+    write_json(path, doc)
+
+
+def uninstall_hooks(target: Path) -> None:
+    """Remove only the unedited managed definition; keep the co-owned file."""
+    path = target / HOOK_PATH
+    doc = _read_hooks(path)
+    if HOOK_NAME not in doc:
+        return
+    if doc[HOOK_NAME] != _managed_hook():
+        raise ValueError("existing brigade-presence hook differs; preserved for review")
+    del doc[HOOK_NAME]
     write_json(path, doc)
 
 
@@ -45,7 +67,7 @@ def run_hook(event: str | None) -> None:
     agy does not include an event name in stdin. Installed handlers supply the
     normalized event. Stop refreshes presence; abandoned sessions expire by TTL.
     """
-    from .fleet_client import load_fleet_settings
+    from .fleet_client import _session_admin_write_node_id, load_fleet_settings
     from .fleet_session_presence import _read_bounded_json_object
 
     payload = _read_bounded_json_object()
@@ -53,6 +75,8 @@ def run_hook(event: str | None) -> None:
         return
     settings = load_fleet_settings()
     if not settings["hub_url"] or not (settings["node_token"] or settings["admin_token"]):
+        return
+    if not settings["node_token"] and _session_admin_write_node_id()[1] is not None:
         return
     session = payload.get("conversationId")
     roots = payload.get("workspacePaths")
