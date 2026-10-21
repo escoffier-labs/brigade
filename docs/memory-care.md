@@ -32,14 +32,19 @@ Each candidate cites evidence resolved to an existing file in a receipt or
 handoff root, an evidence root, or the local evidence bundle cache. A log row
 alone does not resolve its id. Missing pointers, hash-only ids, unrelated
 repository files, and external URLs do not count. `proof_count` counts
-distinct resolved supporting ids. `evidence_sources` records the matching root for
+distinct resolved supporting ids. Receipt prefixes and fragments are removed before
+deduplication and storage, and bundle aliases use `miseledger:<bundle>`.
+`evidence_sources` records the matching root for
 each id, or `evidence-bundle` for local cached evidence bundles. `proof_sources` counts distinct
 roots among the supporting ids. These source labels do not establish trust or
 independence. Handoff roots include all writer inboxes from the harness registry,
 `memory/handoff-inbox`, and local inboxes in `.brigade/handoff-sources.json`.
 Only `reinforced` and `outcome` log rows supply new support.
-Pending near matches appear in `review_evidence_ids` and never increase proof. Candidates
-citing near matches or contrary evidence are Tier 2 and have no metadata diff.
+Pending near matches appear in `review_evidence_ids` and never increase proof.
+Pending near matches and contrary ids still block when their files are missing.
+These pointers appear in `unresolved_evidence_ids` and do not supply proof or
+satisfy the requirement for resolved evidence. Candidates with either kind of
+pending flag are Tier 2 and have no metadata diff.
 Exact reinforcement is already applied by ingest, so its log rows alone do not
 produce reinforcement previews. A preview triggered by new outcome evidence
 also includes resolved reinforcement ids so its evidence list supports its proof count.
@@ -69,8 +74,14 @@ the newest cited evidence timestamp. A stale candidate with contrary evidence
 prints a review summary instead of a consolidation diff. No preview is applied.
 `memory reflect status` shows the latest receipt, `memory reflect candidates`
 lists the latest successful run, and `memory reflect show <candidate-id>` shows
-one retained candidate and its preview. Inspection reads the newest 1024 run
-directories, without deleting older runs. Invalid receipts are skipped and counted
+one retained candidate and its preview. After each run publishes its receipt,
+retention keeps at most 50 run directories from the past 30 days. The latest
+successful run is always kept, reserving one of those 50 slots even when it is
+older than 30 days. Unfinished directories older than 30 days are also removed.
+Recent unfinished runs and directories changed during cleanup are left alone.
+Links and unexpected files are never deleted. A cleanup failure returns `retention_warning`
+and leaves the published receipt available. Inspection reads the newest 1024 run
+directories. Invalid receipts are skipped and counted
 in the status payload's `invalid_runs`. Candidate inspection also skips runs with
 unreadable or corrupt candidate files and reports skipped runs in the listing's
 `invalid_runs`. Missing receipts indicate unfinished runs

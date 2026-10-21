@@ -159,7 +159,7 @@ def test_proof_and_consolidation_use_only_distinct_resolved_log_ids(tmp_path, ca
     assert code == 0
     assert {c["kind"] for c in payload["candidates"]} == {"stale-newer-evidence", "reinforce"}
     for candidate in payload["candidates"]:
-        assert candidate["evidence_ids"] == [ref]
+        assert candidate["evidence_ids"] == [ref.removeprefix("receipt:")]
         assert candidate["proof_count"] == 1
         assert "missing.json" not in candidate["diff"]
     assert "+last_consolidated: 2026-10-20T12:00:00Z" in payload["candidates"][0]["diff"]
@@ -183,7 +183,7 @@ def test_receipt_evidence_scope_limit_and_human_output(tmp_path, capsys):
     assert len(payload["candidates"]) == 1
     candidate = payload["candidates"][0]
     assert candidate["kind"] == "duplicate"
-    assert candidate["evidence_ids"] == [ref]
+    assert candidate["evidence_ids"] == [ref.removeprefix("receipt:")]
     assert candidate["proof_count"] == 1
     assert candidate["card_ids"] == ["alpha", "beta"]
     assert cli.main(["memory", "reflect", "run", "--target", str(tmp_path), "--dry-run"]) == 0
@@ -529,7 +529,7 @@ def test_only_evidence_items_resolve_without_size_limit(tmp_path, capsys, monkey
     assert code == 0
     assert bool(payload["candidates"]) == valid
     if valid:
-        assert payload["candidates"][0]["evidence_ids"] == [reference]
+        assert payload["candidates"][0]["evidence_ids"] == [reference.removeprefix("receipt:")]
         assert payload["candidates"][0]["proof_count"] == 1
 
 
@@ -786,3 +786,143 @@ def test_new_support_for_same_id_does_not_revive_reviewed_match(tmp_path, capsys
     assert code == 0
     assert {c["kind"] for c in payload["candidates"]} == {"stale-newer-evidence", "reinforce"}
     assert all(c["tier"] == 0 for c in payload["candidates"])
+
+
+@pytest.mark.parametrize("origin", ["card", "log"])
+@pytest.mark.parametrize("bundle", [False, True])
+def test_evidence_aliases_have_one_canonical_proof_id(tmp_path, capsys, monkeypatch, origin, bundle):
+    path = card(tmp_path, "left")
+    card(tmp_path, "right")
+    if bundle:
+        monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+        evidence(tmp_path, "cache/miseledger/evidence/example.json")
+        canonical = "miseledger:example"
+        refs = [canonical, "miseledger://evidence/example", canonical + "#step-2"]
+    else:
+        canonical = evidence(tmp_path, ".brigade/receipts/a.json")
+        refs = [canonical, "receipt:" + canonical, canonical + "#step-2"]
+    if origin == "card":
+        path.write_text(path.read_text().replace("evidence: []", "evidence: " + json.dumps(refs)))
+    else:
+        log(tmp_path, path, *((ref, "outcome", "2026-10-20T12:00:00Z") for ref in refs))
+    before = snapshot(tmp_path)
+    code, payload = command(tmp_path, capsys, "run", "--dry-run")
+    assert code == 0
+    assert payload["candidates"]
+    for candidate in payload["candidates"]:
+        assert candidate["proof_count"] == 1
+        assert candidate["evidence_ids"] == [canonical]
+        assert set(candidate["evidence_sources"]) == {canonical}
+    assert snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize("kind", ["near-match", "opposite-polarity"])
+def test_deleted_pending_evidence_still_blocks_metadata_previews(tmp_path, capsys, kind):
+    path = card(tmp_path, "left")
+    card(tmp_path, "right")
+    missing = evidence(tmp_path, "memory/handoff-inbox/pending.md")
+    support = evidence(tmp_path, ".brigade/receipts/support.json")
+    log(tmp_path, path, (missing, kind, "2026-10-19T12:00:00Z"), (support, "outcome", "2026-10-20T12:00:00Z"))
+    (tmp_path / missing).unlink()
+    before = snapshot(tmp_path)
+    code, payload = command(tmp_path, capsys, "run", "--dry-run")
+    assert code == 0
+    assert {"stale-newer-evidence", "reinforce", "duplicate"} <= {c["kind"] for c in payload["candidates"]}
+    for candidate in payload["candidates"]:
+        assert candidate["tier"] == 2
+        assert candidate["diff"] == ""
+        field = "contrary_ids" if kind == "opposite-polarity" else "review_evidence_ids"
+        assert candidate[field] == [missing]
+        assert candidate["unresolved_evidence_ids"] == [missing]
+        assert candidate["evidence_ids"] == [support]
+        assert candidate["proof_count"] == 1
+    assert snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize("failed", [False, True])
+def test_run_retention_caps_history_and_preserves_latest_success(tmp_path, capsys, failed):
+    from datetime import datetime, timedelta, timezone
+
+    from brigade import memory_proposal_io as io
+    from brigade import memory_reflect as reflect
+
+    now = datetime.now(timezone.utc)
+    root = tmp_path / reflect.ROOT
+
+    def retained(age, status):
+        started = now - timedelta(days=age)
+        ident = started.strftime("%Y%m%d-%H%M%S-%f") + "-12345678"
+        run = root / ident
+        io.write_exclusive(
+            run / "receipt.json",
+            io.json_bytes(
+                {"schema": "brigade.memory-reflect-run.v1", "run_id": ident, "status": status, "candidate_count": 0}
+            ),
+        )
+        io.write_exclusive(run / "candidates.jsonl", b"")
+        return run
+
+    old_success = retained(40, "completed")
+    old_failure = retained(45, "failed")
+    recent = [retained(index / 24, "failed") for index in range(1, 56)]
+    orphan = root / ((now - timedelta(days=60)).strftime("%Y%m%d-%H%M%S-%f") + "-12345678")
+    orphan.mkdir()
+    if failed:
+        (tmp_path / LOG_PATH).write_text("{broken\n")
+    before = snapshot(tmp_path)
+    code, payload = command(tmp_path, capsys, "run", "--dry-run")
+    assert code == int(failed)
+    assert len(list(root.iterdir())) == 50
+    assert not old_failure.exists()
+    assert not orphan.exists()
+    assert old_success.exists() == failed
+    assert all(path.exists() for path in recent[: 48 if failed else 49])
+    assert all(not path.exists() for path in recent[48 if failed else 49 :])
+    assert (tmp_path / payload["receipt_path"]).exists()
+    assert snapshot(tmp_path) == before
+
+
+def test_run_retention_expires_history_with_fewer_than_fifty_runs(tmp_path, capsys):
+    from datetime import datetime, timedelta, timezone
+
+    from brigade import memory_proposal_io as io
+    from brigade import memory_reflect as reflect
+
+    root = tmp_path / reflect.ROOT
+    old = datetime.now(timezone.utc) - timedelta(days=31)
+    ident = old.strftime("%Y%m%d-%H%M%S-%f") + "-12345678"
+    io.write_exclusive(
+        root / ident / "receipt.json",
+        io.json_bytes(
+            {"schema": "brigade.memory-reflect-run.v1", "run_id": ident, "status": "completed", "candidate_count": 0}
+        ),
+    )
+    code, payload = command(tmp_path, capsys, "run")
+    assert code == 0
+    assert [path.name for path in root.iterdir()] == [payload["run_id"]]
+
+
+def test_retention_leaves_runs_started_during_pruning(tmp_path, capsys, monkeypatch):
+    from datetime import datetime, timedelta, timezone
+
+    from brigade import memory_reflect as reflect
+
+    root = tmp_path / reflect.ROOT
+    concurrent_id = (datetime.now(timezone.utc) + timedelta(minutes=1)).strftime("%Y%m%d-%H%M%S-%f") + "-12345678"
+    concurrent = root / concurrent_id
+    original = os.scandir
+    scans = 0
+
+    def arriving_run(path):
+        nonlocal scans
+        if isinstance(path, int):
+            scans += 1
+            if scans == 2:
+                concurrent.mkdir()
+        return original(path)
+
+    monkeypatch.setattr(os, "scandir", arriving_run)
+    code, payload = command(tmp_path, capsys, "run")
+    assert code == 0
+    assert concurrent.is_dir()
+    assert (tmp_path / payload["receipt_path"]).exists()

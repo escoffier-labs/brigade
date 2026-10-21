@@ -156,6 +156,13 @@ def _evidence_roots(target: Path) -> tuple[str, ...]:
     return tuple(sorted(roots, key=lambda root: (-len(root), root)))
 
 
+def _evidence_id(ref: str) -> str:
+    """Use one identity for receipt prefixes, fragments and bundle aliases."""
+    cleaned = ref.removeprefix("receipt:").split("#", 1)[0]
+    bundle = memory_cmd._miseledger_evidence_id(cleaned)
+    return f"miseledger:{bundle}" if bundle is not None else Path(cleaned).as_posix()
+
+
 def _resolved(target: Path, refs: list[str], roots: tuple[str, ...]) -> dict[str, str]:
     result: dict[str, str] = {}
     if len(refs) > io.MAX_LIST:
@@ -169,7 +176,7 @@ def _resolved(target: Path, refs: list[str], roots: tuple[str, ...]) -> dict[str
                 path = memory_cmd._miseledger_evidence_path(bundle)
                 source = "evidence-bundle"
             else:
-                rel = io.relative(ref.removeprefix("receipt:").split("#", 1)[0])
+                rel = io.relative(ref)
                 source = next((root for root in roots if rel.startswith(root + "/")), "")
                 if not source:
                     continue
@@ -277,6 +284,7 @@ def _candidate(
         "proof_sources": len({sources[ref] for ref in proof}),
         "review_evidence_ids": review,
         "contrary_ids": sorted(set(contrary)),
+        "unresolved_evidence_ids": sorted((set(contrary) | set(review)) - sources.keys()),
         "tier": 2 if review_only else 0,
         "scope": scopes,
         "diff": "" if review_only else diff,
@@ -325,7 +333,7 @@ def _pending_rows(card: Card) -> list[dict[str, Any]]:
 def generate(
     target: Path, care: memory_cmd.MemoryCareConfig, ledger: EvidenceLog, cards: list[Card]
 ) -> list[dict[str, Any]]:
-    """Return stable candidates only when every cited id resolves locally."""
+    """Require resolved evidence for candidates, retaining unresolved blockers."""
     candidates: list[dict[str, Any]] = []
     citations: dict[str, list[str]] = {}
     contrary_by_card: dict[str, list[str]] = {}
@@ -335,7 +343,8 @@ def generate(
     roots = _evidence_roots(target)
     sources: dict[str, str] = {}
     for card in cards:
-        refs = memory_cmd._evidence_refs(card.meta)
+        refs = sorted({_evidence_id(ref) for ref in memory_cmd._evidence_refs(card.meta)})
+        card = replace(card, rows=[{**row, "evidence_id": _evidence_id(row["evidence_id"])} for row in card.rows])
         current = _resolved(target, refs, roots)
         sources.update(current)
         # Keep the newest distinct ids, independent of append order or aliases.
@@ -348,11 +357,17 @@ def generate(
         row_ids = set(resolved_rows)
         evidence = sorted(set(current) | row_ids)
         findings = ledger.findings(target, finding_config, card.path, card.identity, card.meta)
-        stale_ids = sorted(set(findings[0]["evidence_references"]) & row_ids) if findings else []
-        pending = set(stale_ids) - set(refs)
+        stale_ids = (
+            sorted({_evidence_id(ref) for ref in findings[0]["evidence_references"]} & row_ids) if findings else []
+        )
         pending_rows = _pending_rows(card)
-        contrary = sorted({row["evidence_id"] for row in pending_rows if row["kind"] == "opposite-polarity"} & pending)
-        review = sorted({row["evidence_id"] for row in pending_rows if row["kind"] == "near-match"} & pending)
+        contrary = sorted(
+            {row["evidence_id"] for row in pending_rows if row["kind"] == "opposite-polarity"} - set(refs)
+        )
+        review = sorted({row["evidence_id"] for row in pending_rows if row["kind"] == "near-match"} - set(refs))
+        blockers = sorted(set(contrary) | set(review))
+        for start in range(0, len(blockers), io.MAX_LIST):
+            sources.update(_resolved(target, blockers[start : start + io.MAX_LIST], roots))
         citations[card.path] = evidence
         contrary_by_card[card.path] = contrary
         review_by_card[card.path] = review
@@ -392,17 +407,18 @@ def generate(
                     proof,
                     contrary,
                     sources=sources,
-                    review=sorted(set(review) & set(proof)),
+                    review=review,
                     diff=_diff(card, {"evidence": sorted(set(refs) | set(proof)), "proof_count": len(proof)}),
                     summary="Append cited evidence and derive its distinct proof count.",
                 )
             )
-        if contrary:
+        resolved_contrary = sorted(set(contrary) & sources.keys())
+        if resolved_contrary:
             candidates.append(
                 _candidate(
                     "opposite-polarity",
                     [card],
-                    contrary,
+                    resolved_contrary,
                     contrary,
                     sources=sources,
                     summary="Opposite-polarity flag only. Human review must decide the relationship.",

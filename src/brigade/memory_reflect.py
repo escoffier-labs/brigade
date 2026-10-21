@@ -7,8 +7,9 @@ import heapq
 import json
 import os
 import re
+import stat
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +20,82 @@ from .memory_evidence_log import LOG_PATH, MAX_SCAN_BYTES, EvidenceLog
 ROOT = ".brigade/memory/reflect/runs"
 DEFAULT_LIMIT = 20
 MAX_LIMIT = 100
+RETAIN_RUNS = 50
+RETAIN_DAYS = 30
+RUN_NAME = re.compile(r"\d{8}-\d{6}-\d{6}-[0-9a-f]{8}")
+
+
+def _run_started(name: str) -> datetime | None:
+    if not RUN_NAME.fullmatch(name):
+        return None
+    try:
+        return datetime.strptime(name[:22], "%Y%m%d-%H%M%S-%f").replace(tzinfo=timezone.utc)
+    except ValueError:
+        return None
+
+
+def _prune_runs(target: Path, now: datetime) -> None:
+    """Bound derived history without following links or deleting unknown files."""
+    root = target / ROOT
+    newest: list[str] = []
+    successful: str | None = None
+    cutoff = now - timedelta(days=RETAIN_DAYS)
+    with io.directory(root) as parent:
+        with os.scandir(parent) as entries:
+            for entry in entries:
+                started = _run_started(entry.name)
+                if started is None or not entry.is_dir(follow_symlinks=False):
+                    continue
+                if started >= cutoff:
+                    heapq.heappush(newest, entry.name)
+                    if len(newest) > RETAIN_RUNS:
+                        heapq.heappop(newest)
+                try:
+                    receipt = io.read_object(root / entry.name / "receipt.json", private=True)
+                except (OSError, ValueError, UnicodeError, RecursionError):
+                    continue
+                if (
+                    receipt.get("schema") == "brigade.memory-reflect-run.v1"
+                    and receipt.get("run_id") == entry.name
+                    and receipt.get("status") == "completed"
+                    and type(receipt.get("candidate_count")) is int
+                    and 0 <= receipt["candidate_count"] <= MAX_LIMIT
+                    and (successful is None or entry.name > successful)
+                ):
+                    successful = entry.name
+        if successful is not None and successful not in newest:
+            if len(newest) == RETAIN_RUNS:
+                heapq.heappop(newest)
+            newest.append(successful)
+        keep = set(newest)
+        with os.scandir(parent) as entries:
+            for entry in entries:
+                started = _run_started(entry.name)
+                if (
+                    started is None
+                    or started > now
+                    or entry.name in keep
+                    or not entry.is_dir(follow_symlinks=False)
+                    or entry.stat(follow_symlinks=False).st_mtime > now.timestamp()
+                ):
+                    continue
+                with io.directory(root / entry.name) as run:
+                    names = os.listdir(run)
+                    if "receipt.json" not in names and started >= cutoff:
+                        continue  # Leave recent in-progress runs to publish their receipts.
+                    if set(names) - {"receipt.json", "candidates.jsonl"}:
+                        raise OSError("unexpected files in reflect run; retention stopped")
+                    for name in names:
+                        metadata = os.stat(name, dir_fd=run, follow_symlinks=False)
+                        if (
+                            not stat.S_ISREG(metadata.st_mode)
+                            or metadata.st_nlink != 1
+                            or metadata.st_uid != os.getuid()
+                        ):
+                            raise OSError("unsafe reflect run file; retention stopped")
+                    for name in names:
+                        os.unlink(name, dir_fd=run)
+                os.rmdir(entry.name, dir_fd=parent)
 
 
 def _evidence_log(target: Path) -> EvidenceLog:
@@ -124,6 +201,10 @@ def run_payload(
     # failed run is never returned by the inspection commands.
     receipt = {key: value for key, value in payload.items() if key != "candidates"}
     io.write_exclusive(target / payload["receipt_path"], io.json_bytes(receipt))
+    try:
+        _prune_runs(target, now)
+    except (OSError, ValueError):
+        payload["retention_warning"] = "reflect history could not be pruned safely"
     return payload
 
 
