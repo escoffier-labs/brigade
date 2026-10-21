@@ -60,9 +60,13 @@ def load_manifest(path: Path) -> dict[str, Any]:
         raise ActionError("invalid-executables", 400)
     executables = {}
     for key, default in DEFAULT_EXECUTABLES.items():
-        value = tools.get(key) or shutil.which(default) or default
-        if not isinstance(value, str):
+        value = tools[key] if key in tools else shutil.which(default) or default
+        if not isinstance(value, str) or not value or "\x00" in value:
             raise ActionError("invalid-executable", 400)
+        try:
+            os.fsencode(value)
+        except UnicodeEncodeError:
+            raise ActionError("invalid-executable", 400) from None
         executables[key] = value
     clean = []
     for item in data["targets"]:

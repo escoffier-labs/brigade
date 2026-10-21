@@ -70,6 +70,62 @@ def broker_fixture(tmp_path, monkeypatch, *, payload=None):
     return conn, path, log, action
 
 
+@pytest.mark.parametrize(
+    ("key", "value"),
+    [
+        ("t3", None),
+        ("openclaw", False),
+        ("brigade", 0),
+        ("systemd-run", []),
+        ("systemctl", {}),
+        ("t3", ""),
+        ("openclaw", "bad\x00path"),
+        ("brigade", "bad\ud800path"),
+    ],
+)
+def test_invalid_configured_executable_fails_before_transport(tmp_path, monkeypatch, key, value):
+    from brigade import fleet_action_auth as auth, fleet_action_runner as runner, fleet_client_actions as client
+
+    executable, log = fake_executable(tmp_path, {"status": "ok"})
+    path = manifest(tmp_path, executable, {"target_id": "fixture-target", "family": "t3"})
+    data = json.loads(path.read_text())
+    data["targets"] = []
+    data["executables"][key] = value
+    path.write_text(json.dumps(data))
+    monkeypatch.setattr(runner.shutil, "which", lambda _: str(executable))
+    monkeypatch.setattr(client, "request", lambda *_args, **_kwargs: pytest.fail("invalid manifest reached Hub"))
+
+    with pytest.raises(auth.ActionError, match="invalid-executable"):
+        runner.sync_targets(path)
+
+    assert not log.exists()
+    assert not (tmp_path / "journal").exists()
+
+
+def test_manifest_uses_path_default_only_for_omitted_executable(tmp_path, monkeypatch):
+    from brigade import fleet_action_runner as runner
+
+    executable, _ = fake_executable(tmp_path, {"status": "ok"})
+    path = manifest(tmp_path, executable, {"target_id": "fixture-target", "family": "t3"})
+    data = json.loads(path.read_text())
+    data["targets"] = []
+    configured = "path-\udcff"
+    data["executables"] = {"t3": str(executable), "brigade": configured}
+    path.write_text(json.dumps(data))
+    monkeypatch.setattr(runner.shutil, "which", lambda name: f"/ambient/{name}")
+
+    loaded = runner.load_manifest(path)
+
+    assert loaded["executables"]["t3"] == str(executable)
+    assert loaded["executables"]["brigade"] == configured
+    assert loaded["executables"]["openclaw"] == "/ambient/openclaw"
+    assert loaded["executables"]["systemctl"] == "/ambient/systemctl"
+
+    monkeypatch.setattr(runner.shutil, "which", lambda _: None)
+    loaded = runner.load_manifest(path)
+    assert loaded["executables"]["systemctl"] == "systemctl"
+
+
 @requires_posix
 def test_execute_protected_prompt_and_replay_cannot_repeat_turn(tmp_path, monkeypatch):
     from brigade import fleet_action_runner as runner, fleet_hub_actions as actions
