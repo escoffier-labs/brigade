@@ -13,6 +13,11 @@ from .wiring import resolve_wired_target
 
 HOOK_NAME = "brigade-presence"
 HOOK_PATH = Path(".agents/hooks.json")
+# agy-customizations/docs/hooks.md documents {} for PostToolUse, optional
+# message objects for SessionStart/PreInvocation, and Stop decisions other than
+# "continue" allowing the agent to stop. Live agy 1.4.3 denied tools on JSON
+# output, so these observational hooks keep stdout empty and always exit 0.
+# Never register PreToolUse: its required decision can block tools.
 _EVENT_MAP = {"PreInvocation": "start", "PostToolUse": "heartbeat", "PostInvocation": "heartbeat", "Stop": "heartbeat"}
 
 
