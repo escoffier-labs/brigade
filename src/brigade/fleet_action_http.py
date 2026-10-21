@@ -42,8 +42,20 @@ def handle_api(conn: sqlite3.Connection, caller: tuple[bool, str | None], payloa
         return {"granted": True}
     if op == "show":
         action = actions.show(conn, payload.get("action_id", ""))
-        if not admin and action["node_id"] != node_id:
-            raise ActionError("broker-scope-refused")
+        if not admin:
+            if action["node_id"] != node_id:
+                raise ActionError("broker-scope-refused")
+            if (
+                node_id is None
+                or not auth.active_node(conn, node_id)
+                or conn.execute(
+                    "SELECT 1 FROM action_broker_grants WHERE node_id=? AND revoked_at IS NULL", (node_id,)
+                ).fetchone()
+                is None
+            ):
+                raise ActionError("enrolled-broker-required")
+            if not auth.broker_allowed(conn, node_id, action["target_id"], action["request"]["source"]):
+                raise ActionError("broker-scope-refused")
         return action
     if (
         admin

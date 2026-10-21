@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 import re
 import secrets
@@ -19,6 +20,7 @@ from . import fleet_action_adapters as adapters, fleet_client, fleet_client_acti
 from .fleet_action_auth import ActionError, canonical, digest, opaque, selector
 
 MANIFEST_SCHEMA = "brigade.fleet_action_manifest.v1"
+AUTOMATIC_RECOVERY_LIFETIME = 24 * 60 * 60
 DEFAULT_EXECUTABLES = {
     "t3": "t3-fleet",
     "openclaw": "openclaw",
@@ -267,6 +269,21 @@ def _inbox_lookup(action: dict[str, Any], executable: Path) -> dict[str, Any]:
     return {"status": "unknown"}
 
 
+def _recovery_expired(started_at: Any, *, now: float | None = None) -> bool:
+    """Fail closed when the Hub's fixed start time cannot establish a safe age."""
+    if started_at is None:
+        return False
+    if isinstance(started_at, bool) or not isinstance(started_at, (int, float)):
+        return True
+    try:
+        timestamp = float(started_at)
+    except (OverflowError, TypeError, ValueError):
+        return True
+    if not math.isfinite(timestamp) or timestamp <= 0:
+        return True
+    return (time.time() if now is None else now) >= timestamp + AUTOMATIC_RECOVERY_LIFETIME
+
+
 def execute(path: Path, action_id: str, generation: int) -> dict[str, Any]:
     opaque(action_id)
     if type(generation) is not int or generation < 1:
@@ -289,6 +306,21 @@ def execute(path: Path, action_id: str, generation: int) -> dict[str, Any]:
         if local is None or local["public"]["binding_digest"] != target["binding_digest"]:
             raise ActionError("binding-changed", 409)
         executable = _tool(manifest, target["family"])
+        expired = _recovery_expired(action["started_at"])
+        if record.get("receipt") and record.get("phase") == "result":
+            if expired:
+                record["recovery_parked"] = True
+                _write(root, action_id, record, directory)
+            return _deliver_report(root, action_id, generation, record, directory)
+        if record.get("recovery_parked") is True or (
+            action["started_at"] is not None and record.get("phase") == "parked"
+        ):
+            return action
+        if expired:
+            record["phase"] = "parked"
+            record["recovery_parked"] = True
+            _write(root, action_id, record, directory)
+            return action
         if action["started_at"] is None and record.get("phase") in {"starting", "awaiting-reclaim"}:
             record["phase"] = "awaiting-reclaim"
             _write(root, action_id, record, directory)
@@ -308,8 +340,6 @@ def execute(path: Path, action_id: str, generation: int) -> dict[str, Any]:
             )
         ):
             return action
-        if record.get("receipt") and record.get("phase") == "result":
-            return _deliver_report(root, action_id, generation, record, directory)
         prompt: Path | None = None
         try:
             if action["started_at"] is not None or record.get("phase") in {"starting", "started", "reported"}:
@@ -442,6 +472,7 @@ def _reconcile(path: Path, manifest: dict[str, Any], deadline: float, tick_direc
                 phase = record.get("phase")
                 if (
                     phase in {"closed", "obsolete", "parked", "awaiting-reclaim", "held"}
+                    or record.get("recovery_parked") is True
                     or record.get("next_reconcile_at", 0) > time.time()
                 ):
                     continue
@@ -449,37 +480,47 @@ def _reconcile(path: Path, manifest: dict[str, Any], deadline: float, tick_direc
                     {"op": "show", "action_id": action_id}, timeout=min(2, deadline - time.monotonic())
                 )
                 if action["status"] in {"finished", "failed", "expired", "canceled"}:
-                    record["phase"] = "closed"
+                    if phase == "result" and record.get("receipt"):
+                        record["recovery_parked"] = True
+                    else:
+                        record["phase"] = "closed"
                 elif action["generation"] != record.get("generation"):
                     record["phase"] = "obsolete"
+                elif action["started_at"] is not None:
+                    recovery_expired = _recovery_expired(action["started_at"])
+                    if recovery_expired:
+                        if phase == "result" and record.get("receipt"):
+                            record["recovery_parked"] = True
+                        else:
+                            record["phase"] = "parked"
+                    else:
+                        receipt = record.get("receipt", {})
+                        inbox = action["request"]["target"]["capability"] == "inbox"
+                        if inbox and receipt.get("delivery") == "acknowledged":
+                            record["phase"] = "parked"
+                        elif phase in {"starting", "started", "result", "rejected"} or (
+                            phase == "reported"
+                            and (
+                                receipt.get("status") in {"accepted", "running", "needs-input"}
+                                or receipt.get("destination_ref")
+                                or (inbox and record.get("dispatch_attempted") and receipt.get("status") == "unknown")
+                            )
+                        ):
+                            record["next_reconcile_at"] = time.time() + (300 if inbox else 30)
+                            _write(root, action_id, record, directory)
+                            return int(
+                                _schedule(
+                                    path,
+                                    manifest,
+                                    action_id,
+                                    record["generation"],
+                                    timeout=min(2, deadline - time.monotonic()),
+                                )
+                            )
                 elif action["started_at"] is None:
                     if phase == "starting":
                         record["phase"] = "awaiting-reclaim"
                     # A claim that never started is reclaimable only by the Hub's next generation.
-                else:
-                    receipt = record.get("receipt", {})
-                    inbox = action["request"]["target"]["capability"] == "inbox"
-                    if inbox and receipt.get("delivery") == "acknowledged":
-                        record["phase"] = "parked"
-                    elif phase in {"starting", "started", "result", "rejected"} or (
-                        phase == "reported"
-                        and (
-                            receipt.get("status") in {"accepted", "running", "needs-input"}
-                            or receipt.get("destination_ref")
-                            or (inbox and record.get("dispatch_attempted") and receipt.get("status") == "unknown")
-                        )
-                    ):
-                        record["next_reconcile_at"] = time.time() + (300 if inbox else 30)
-                        _write(root, action_id, record, directory)
-                        return int(
-                            _schedule(
-                                path,
-                                manifest,
-                                action_id,
-                                record["generation"],
-                                timeout=min(2, deadline - time.monotonic()),
-                            )
-                        )
                 _write(root, action_id, record, directory)
         except (ActionError, fleet_client.FleetClientError, OSError, subprocess.SubprocessError):
             continue

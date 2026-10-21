@@ -152,6 +152,54 @@ def test_submit_csrf_revocation_and_stale_review_preserve_edit(tmp_path):
         conn.close()
 
 
+def test_non_admin_show_requires_live_broker_grant_after_start(tmp_path):
+    from brigade import fleet_action_auth as auth, fleet_action_http as api, fleet_hub_actions as actions
+    from brigade.fleet_action_auth import ActionError
+
+    conn, _, grant, request = setup_action(tmp_path)
+    action = actions.submit(conn, grant, request)
+    claimed = actions.claim(conn, "node-fixture")
+    actions.start(conn, "node-fixture", action["action_id"], claimed["generation"])
+    before = api.handle_api(conn, (False, "node-fixture"), {"op": "show", "action_id": action["action_id"]})
+    assert before["request"]["prompt"] == request["prompt"] and before["events"]
+    fleet_hub.add_node(conn, "other-node")
+    with pytest.raises(ActionError, match="broker-scope-refused"):
+        api.handle_api(conn, (False, "other-node"), {"op": "show", "action_id": action["action_id"]})
+    auth.revoke_broker(conn, "node-fixture")
+    with pytest.raises(ActionError, match="enrolled-broker-required"):
+        api.handle_api(conn, (False, "node-fixture"), {"op": "show", "action_id": action["action_id"]})
+    assert (
+        api.handle_api(conn, (True, None), {"op": "show", "action_id": action["action_id"]})["action_id"]
+        == action["action_id"]
+    )
+    conn.close()
+
+
+@pytest.mark.parametrize("narrow", ["target", "subject"])
+def test_non_admin_show_obeys_current_broker_scope_after_replacement(tmp_path, narrow):
+    from brigade import fleet_action_auth as auth, fleet_action_http as api, fleet_hub_actions as actions
+    from brigade.fleet_action_auth import ActionError
+
+    conn, _, grant, request = setup_action(tmp_path)
+    action = actions.submit(conn, grant, request)
+    claimed = actions.claim(conn, "node-fixture")
+    actions.start(conn, "node-fixture", action["action_id"], claimed["generation"])
+    source = request["source"]
+    auth.grant_broker(
+        conn,
+        "node-fixture",
+        ["elsewhere"] if narrow == "target" else ["repair"],
+        [{"kind": "telemetry", "node_id": "other-node"}] if narrow == "subject" else [source],
+    )
+    with pytest.raises(ActionError, match="broker-scope-refused"):
+        api.handle_api(conn, (False, "node-fixture"), {"op": "show", "action_id": action["action_id"]})
+    assert (
+        api.handle_api(conn, (True, None), {"op": "show", "action_id": action["action_id"]})["action_id"]
+        == action["action_id"]
+    )
+    conn.close()
+
+
 @_POSIX_BROKER
 def test_form_to_broker_fake_destination_and_receipt(tmp_path, monkeypatch):
     from brigade import fleet_action_runner as runner, fleet_client_actions as client

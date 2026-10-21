@@ -145,6 +145,16 @@ journal saves each observation's receipt and event ID before reporting it. A los
 Hub response retries that exact receipt and event ID. Deterministic report
 refusals retain an audit record. Authorization and fence refusals hold the job. T3 recovery uses the exact public
 request handle, using `status` for known states and `recover` for unknown states.
+Automatic recovery of any started action stops after 24 hours from the Hub's
+original `started_at`, including inbox lookup without a destination handle. The
+cutoff is fixed across observations and process restarts. At the cutoff the local
+journal parks the action without changing its Hub state or canceling the provider
+work; delayed execution jobs also check the cutoff before provider queries.
+Terminal Hub states close normally unless a durable report receipt is pending.
+That receipt remains available for exact event-ID replay, including after the
+cutoff, without provider lookup or redispatch. A malformed start timestamp also
+parks automatic recovery because its age cannot be established safely. Manual
+observation remains available through the existing action show path.
 OpenClaw uses the exact selected bot session key when registered, or an
 action-specific session key for a generic agent. Both use Gateway mode without
 `--deliver`. The session key provides correlation. Reusing it can create another

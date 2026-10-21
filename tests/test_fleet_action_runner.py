@@ -432,6 +432,418 @@ def test_tick_schedules_one_unique_transient_job_and_no_inline_turn(tmp_path, mo
 
 
 @requires_posix
+@pytest.mark.parametrize(
+    ("started_at", "scheduled"),
+    [
+        (1_699_913_601, 1),
+        (1_699_913_600, 0),
+        (1_699_913_599, 0),
+        ("malformed", 0),
+        (float("inf"), 0),
+        (float("-inf"), 0),
+        ("nan", 0),
+        (True, 0),
+    ],
+)
+@pytest.mark.parametrize("receipt_status", ["accepted", "running", "needs-input", "unknown"])
+def test_reconcile_parks_started_action_at_fixed_recovery_lifetime(
+    tmp_path, monkeypatch, started_at, scheduled, receipt_status
+):
+    from brigade import fleet_action_runner as runner, fleet_hub_actions as actions
+
+    conn, path, log, action = broker_fixture(tmp_path, monkeypatch)
+    monkeypatch.setattr(runner.time, "time", lambda: 1_700_000_000)
+    claimed = actions.claim(conn, "node-fixture")
+    actions.start(conn, "node-fixture", action["action_id"], claimed["generation"])
+    with conn:
+        conn.execute(
+            "UPDATE agent_actions SET status='running', started_at=? WHERE action_id=?",
+            (
+                started_at,
+                action["action_id"],
+            ),
+        )
+    root = path.parent / "journal"
+    with runner._journal_lock(root, action["action_id"]) as directory:
+        runner._write(
+            root,
+            action["action_id"],
+            {
+                "generation": claimed["generation"],
+                "phase": "reported",
+                "receipt": {"status": receipt_status, "destination_ref": "fixture-ref"},
+            },
+            directory,
+        )
+    result = runner.tick(path, budget_seconds=15, max_actions=1)
+    assert result["scheduled"] == scheduled
+    with runner._journal_lock(root, action["action_id"]) as directory:
+        record = runner._read(root, action["action_id"], directory)
+    if scheduled:
+        assert record["phase"] == "reported"
+    else:
+        assert record["phase"] == "parked"
+    assert (
+        conn.execute("SELECT status FROM agent_actions WHERE action_id=?", (action["action_id"],)).fetchone()[0]
+        == "running"
+    )
+    jobs = [
+        json.loads(line)["args"]
+        for line in log.read_text().splitlines()
+        if any(arg.startswith("--unit=brigade-action-") for arg in json.loads(line)["args"])
+    ]
+    assert len(jobs) == scheduled
+    assert runner.tick(path, budget_seconds=15, max_actions=1)["scheduled"] == 0
+    jobs = [
+        json.loads(line)["args"]
+        for line in log.read_text().splitlines()
+        if any(arg.startswith("--unit=brigade-action-") for arg in json.loads(line)["args"])
+    ]
+    assert len(jobs) == scheduled
+    if not scheduled:
+        with runner._journal_lock(root, action["action_id"]) as directory:
+            assert runner._read(root, action["action_id"], directory)["phase"] == "parked"
+    conn.close()
+
+
+@requires_posix
+@pytest.mark.parametrize("delivery", ["none", "acknowledged"])
+def test_inbox_unknown_noack_is_bounded_and_ack_fastpath_stays_parked(tmp_path, monkeypatch, delivery):
+    from brigade import fleet_action_runner as runner, fleet_hub_actions as actions
+    from tests.test_fleet_action_r2_core import inbox_action
+
+    conn, path, _, action = inbox_action(tmp_path, monkeypatch)
+    claimed = actions.claim(conn, "node-fixture")
+    actions.start(conn, "node-fixture", action["action_id"], claimed["generation"])
+    with conn:
+        conn.execute(
+            "UPDATE agent_actions SET status='unknown', started_at=? WHERE action_id=?",
+            (1_699_913_600, action["action_id"]),
+        )
+    monkeypatch.setattr(runner.time, "time", lambda: 1_700_000_000)
+    root = path.parent / "journal"
+    receipt = (
+        {"status": "unknown"}
+        if delivery == "none"
+        else {"status": "accepted", "delivery": "acknowledged", "destination_ref": "77"}
+    )
+    with runner._journal_lock(root, action["action_id"]) as directory:
+        runner._write(
+            root,
+            action["action_id"],
+            {
+                "generation": claimed["generation"],
+                "phase": "reported",
+                "dispatch_attempted": True,
+                "receipt": receipt,
+            },
+            directory,
+        )
+    result = runner.tick(path, budget_seconds=15, max_actions=1)
+    assert result["scheduled"] == 0
+    with runner._journal_lock(root, action["action_id"]) as directory:
+        parked = runner._read(root, action["action_id"], directory)
+    assert parked["phase"] == "parked"
+    assert parked["receipt"] == receipt
+    assert runner.tick(path, budget_seconds=15, max_actions=1)["scheduled"] == 0
+    assert (
+        conn.execute("SELECT status FROM agent_actions WHERE action_id=?", (action["action_id"],)).fetchone()[0]
+        == "unknown"
+    )
+    conn.close()
+
+
+@pytest.mark.parametrize("started_at", [True, "bad", float("nan"), float("inf"), float("-inf"), 10**1000])
+def test_recovery_age_malformed_values_fail_closed(started_at):
+    from brigade import fleet_action_runner as runner
+
+    assert runner._recovery_expired(started_at, now=1_700_000_000) is True
+
+
+@requires_posix
+def test_reconcile_closes_terminal_hub_action_without_reclassifying_it(tmp_path, monkeypatch):
+    from brigade import fleet_action_runner as runner, fleet_hub_actions as actions
+
+    conn, path, _, action = broker_fixture(tmp_path, monkeypatch)
+    claimed = actions.claim(conn, "node-fixture")
+    actions.start(conn, "node-fixture", action["action_id"], claimed["generation"])
+    with conn:
+        conn.execute(
+            "UPDATE agent_actions SET status='finished', started_at=? WHERE action_id=?",
+            (1_699_913_600, action["action_id"]),
+        )
+    monkeypatch.setattr(runner.time, "time", lambda: 1_700_000_000)
+    root = path.parent / "journal"
+    with runner._journal_lock(root, action["action_id"]) as directory:
+        runner._write(
+            root,
+            action["action_id"],
+            {
+                "generation": claimed["generation"],
+                "phase": "reported",
+                "receipt": {"status": "finished", "destination_ref": "fixture-ref"},
+            },
+            directory,
+        )
+    runner.tick(path, budget_seconds=15, max_actions=1)
+    with runner._journal_lock(root, action["action_id"]) as directory:
+        assert runner._read(root, action["action_id"], directory)["phase"] == "closed"
+    assert actions.show(conn, action["action_id"])["status"] == "finished"
+    conn.close()
+
+
+@requires_posix
+def test_cutoff_preserves_result_receipt_for_explicit_report_replay(tmp_path, monkeypatch):
+    from brigade import fleet_action_runner as runner, fleet_client_actions as client
+    from tests.test_fleet_action_r2_core import inbox_action
+
+    conn, path, log, action = inbox_action(tmp_path, monkeypatch)
+    from brigade import fleet_hub_actions as actions
+
+    claimed = actions.claim(conn, "node-fixture")
+    normal_invoke = runner.adapters.invoke
+    provider_calls = []
+
+    def ambiguous_send(executable, argv, **kwargs):
+        if argv[:3] == ["-m", "brigade.fleet_action_adapters", "--inbox-send"]:
+            provider_calls.append("send")
+            return {"error": "ambiguous"}
+        provider_calls.append("lookup")
+        return normal_invoke(executable, argv, **kwargs)
+
+    monkeypatch.setattr(runner.adapters, "invoke", ambiguous_send)
+    normal = client.request
+    lost_after_apply = False
+
+    def lose_applied_report(body, **kwargs):
+        nonlocal lost_after_apply
+        response = normal(body, **kwargs)
+        if body["op"] == "report" and not lost_after_apply:
+            lost_after_apply = True
+            raise OSError("fixture lost applied reply")
+        return response
+
+    monkeypatch.setattr(client, "request", lose_applied_report)
+    with pytest.raises(OSError, match="lost applied reply"):
+        runner.execute(path, action["action_id"], claimed["generation"])
+    root = path.parent / "journal"
+    with runner._journal_lock(root, action["action_id"]) as directory:
+        record = runner._read(root, action["action_id"], directory)
+        receipt = record["receipt"].copy()
+        assert record["phase"] == "result"
+    with conn:
+        conn.execute(
+            "UPDATE agent_actions SET started_at=? WHERE action_id=?",
+            (1_699_913_600, action["action_id"]),
+        )
+    monkeypatch.setattr(runner.time, "time", lambda: 1_700_000_000)
+    assert client.request({"op": "show", "action_id": action["action_id"]})["status"] == "unknown"
+    tick = runner.tick(path, budget_seconds=15, max_actions=1)
+    assert tick["scheduled"] == 0
+    with runner._journal_lock(root, action["action_id"]) as directory:
+        parked = runner._read(root, action["action_id"], directory)
+    assert parked["recovery_parked"] is True
+    assert parked["phase"] == "result" and parked["receipt"] == receipt
+    assert runner.tick(path, budget_seconds=15, max_actions=1)["scheduled"] == 0
+    monkeypatch.setattr(runner.adapters, "recover", lambda *_args: pytest.fail("parked replay queried provider"))
+    assert provider_calls == ["send"]
+    reports = []
+
+    def count_reports(body, **kwargs):
+        if body["op"] == "report":
+            reports.append(body["receipt"].copy())
+        return normal(body, **kwargs)
+
+    monkeypatch.setattr(client, "request", count_reports)
+    assert runner.execute(path, action["action_id"], claimed["generation"])["status"] == "unknown"
+    assert len(reports) == 1
+    assert reports[0]["event_id"] == receipt["event_id"]
+    assert reports[0] == receipt
+    assert provider_calls == ["send"]
+    assert runner.tick(path, budget_seconds=15, max_actions=1)["scheduled"] == 0
+    conn.close()
+
+
+@requires_posix
+def test_delayed_execution_after_cutoff_does_not_query_provider(tmp_path, monkeypatch):
+    from brigade import fleet_action_runner as runner, fleet_hub_actions as actions
+
+    conn, path, _, action = broker_fixture(tmp_path, monkeypatch)
+    claimed = actions.claim(conn, "node-fixture")
+    actions.start(conn, "node-fixture", action["action_id"], claimed["generation"])
+    with conn:
+        conn.execute(
+            "UPDATE agent_actions SET started_at=? WHERE action_id=?",
+            (1_699_913_600, action["action_id"]),
+        )
+    root = path.parent / "journal"
+    with runner._journal_lock(root, action["action_id"]) as directory:
+        runner._write(
+            root,
+            action["action_id"],
+            {
+                "generation": claimed["generation"],
+                "phase": "reported",
+                "receipt": {"status": "running", "destination_ref": "fixture-ref"},
+            },
+            directory,
+        )
+    monkeypatch.setattr(runner.time, "time", lambda: 1_700_000_000)
+    calls = []
+    monkeypatch.setattr(
+        runner.adapters,
+        "recover",
+        lambda *_args: calls.append("recover") or {"status": "running", "destination_ref": "fixture-ref"},
+    )
+    assert runner.execute(path, action["action_id"], claimed["generation"])["status"] == "dispatching"
+    assert calls == []
+    with runner._journal_lock(root, action["action_id"]) as directory:
+        assert runner._read(root, action["action_id"], directory)["phase"] == "parked"
+    conn.close()
+
+
+@requires_posix
+def test_delayed_inbox_execution_without_handle_does_not_lookup(tmp_path, monkeypatch):
+    from brigade import fleet_action_runner as runner, fleet_hub_actions as actions
+    from tests.test_fleet_action_r2_core import inbox_action
+
+    conn, path, _, action = inbox_action(tmp_path, monkeypatch)
+    claimed = actions.claim(conn, "node-fixture")
+    actions.start(conn, "node-fixture", action["action_id"], claimed["generation"])
+    with conn:
+        conn.execute(
+            "UPDATE agent_actions SET started_at=? WHERE action_id=?",
+            (1_699_913_600, action["action_id"]),
+        )
+    root = path.parent / "journal"
+    with runner._journal_lock(root, action["action_id"]) as directory:
+        runner._write(
+            root,
+            action["action_id"],
+            {
+                "generation": claimed["generation"],
+                "phase": "reported",
+                "dispatch_attempted": True,
+                "receipt": {"status": "unknown"},
+            },
+            directory,
+        )
+    monkeypatch.setattr(runner.time, "time", lambda: 1_700_000_000)
+    monkeypatch.setattr(runner.adapters, "invoke", lambda *_args, **_kwargs: pytest.fail("expired inbox lookup"))
+    assert runner.execute(path, action["action_id"], claimed["generation"])["status"] == "dispatching"
+    with runner._journal_lock(root, action["action_id"]) as directory:
+        parked = runner._read(root, action["action_id"], directory)
+    assert parked["phase"] == "parked" and parked["receipt"] == {"status": "unknown"}
+    conn.close()
+
+
+@requires_posix
+@pytest.mark.parametrize("kind", ["execution-ref", "inbox-no-handle"])
+def test_persisted_recovery_park_survives_clock_rollback(tmp_path, monkeypatch, kind):
+    from brigade import fleet_action_runner as runner, fleet_hub_actions as actions
+
+    if kind == "execution-ref":
+        conn, path, _, action = broker_fixture(tmp_path, monkeypatch)
+        receipt = {"status": "running", "destination_ref": "fixture-ref"}
+        hub_status = "running"
+    else:
+        from tests.test_fleet_action_r2_core import inbox_action
+
+        conn, path, _, action = inbox_action(tmp_path, monkeypatch)
+        receipt = {"status": "unknown"}
+        hub_status = "unknown"
+    claimed = actions.claim(conn, "node-fixture")
+    actions.start(conn, "node-fixture", action["action_id"], claimed["generation"])
+    with conn:
+        conn.execute(
+            "UPDATE agent_actions SET status=?, started_at=? WHERE action_id=?",
+            (hub_status, 1_699_913_600, action["action_id"]),
+        )
+    root = path.parent / "journal"
+    with runner._journal_lock(root, action["action_id"]) as directory:
+        runner._write(
+            root,
+            action["action_id"],
+            {
+                "generation": claimed["generation"],
+                "phase": "reported",
+                "dispatch_attempted": kind == "inbox-no-handle",
+                "receipt": receipt,
+            },
+            directory,
+        )
+    now = [1_700_000_000]
+    monkeypatch.setattr(runner.time, "time", lambda: now[0])
+    assert runner.tick(path, budget_seconds=15, max_actions=1)["scheduled"] == 0
+    with runner._journal_lock(root, action["action_id"]) as directory:
+        parked = runner._read(root, action["action_id"], directory)
+    assert parked["phase"] == "parked"
+
+    now[0] = 1_699_999_999
+    provider_calls = []
+    monkeypatch.setattr(
+        runner.adapters,
+        "recover",
+        lambda *_args: provider_calls.append("recover") or receipt,
+    )
+    monkeypatch.setattr(
+        runner,
+        "_inbox_lookup",
+        lambda *_args: provider_calls.append("inbox-lookup") or receipt,
+    )
+    assert runner.execute(path, action["action_id"], claimed["generation"])["status"] == hub_status
+    assert provider_calls == []
+    with runner._journal_lock(root, action["action_id"]) as directory:
+        assert runner._read(root, action["action_id"], directory)["phase"] == "parked"
+    assert actions.show(conn, action["action_id"])["status"] == hub_status
+    conn.close()
+
+
+@requires_posix
+@pytest.mark.parametrize("terminal", ["finished", "failed"])
+def test_terminal_hub_state_replays_exact_pending_result_after_cutoff(tmp_path, monkeypatch, terminal):
+    from brigade import fleet_action_runner as runner, fleet_client_actions as client, fleet_hub_actions as actions
+
+    conn, path, _, action = broker_fixture(tmp_path, monkeypatch)
+    claimed = actions.claim(conn, "node-fixture")
+    actions.start(conn, "node-fixture", action["action_id"], claimed["generation"])
+    receipt = {"event_id": "result_fixture", "status": terminal, "destination_ref": "fixture-ref"}
+    actions.report(conn, "node-fixture", action["action_id"], claimed["generation"], receipt)
+    with conn:
+        conn.execute(
+            "UPDATE agent_actions SET started_at=? WHERE action_id=?",
+            (1_699_913_600, action["action_id"]),
+        )
+    root = path.parent / "journal"
+    with runner._journal_lock(root, action["action_id"]) as directory:
+        runner._write(
+            root,
+            action["action_id"],
+            {"generation": claimed["generation"], "phase": "result", "receipt": receipt},
+            directory,
+        )
+    monkeypatch.setattr(runner.time, "time", lambda: 1_700_000_000)
+    monkeypatch.setattr(runner.adapters, "recover", lambda *_args: pytest.fail("terminal replay queried provider"))
+    monkeypatch.setattr(runner.adapters, "dispatch", lambda *_args: pytest.fail("terminal replay redispatched"))
+    reports = []
+    normal = client.request
+
+    def count_report(body, **kwargs):
+        if body["op"] == "report":
+            reports.append(body["receipt"].copy())
+        return normal(body, **kwargs)
+
+    monkeypatch.setattr(client, "request", count_report)
+    assert runner.tick(path, budget_seconds=15, max_actions=1)["scheduled"] == 0
+    with runner._journal_lock(root, action["action_id"]) as directory:
+        parked = runner._read(root, action["action_id"], directory)
+    assert parked["phase"] == "result" and parked["recovery_parked"] is True
+    assert runner.execute(path, action["action_id"], claimed["generation"])["status"] == terminal
+    assert reports == [receipt]
+    conn.close()
+
+
+@requires_posix
 def test_executor_unavailable_removes_target_instead_of_shell_fallback(tmp_path, monkeypatch):
     from brigade import fleet_action_runner as runner
 
