@@ -12,6 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The Command Deck separates counted queue exclusions from blocked jobs. Blocker and attempt-limit counts retain alerts, while routine backlog stays in queue details. Malformed exclusions remain actionable, and absent telemetry stays unknown. Hub snapshots report optional integration readiness coverage explicitly.
 - Deck verdicts use plain colored text. Provider icons use transparent, consistently sized marks, including the official Jules mascot and a neutral fallback for unknown agents.
 - Deck Activity separates managed jobs from reported agent sessions. Ready queue counts avoid duplicate totals and fold routine exclusions. Shared repository names across machines show neutral parallel activity, while reported shared modified paths retain warnings.
+- Retention diagnostics use the held run lock when a detached worker checkout and custom output directory hide the original workspace after a malformed or unreadable receipt. Stale recovery retains the saved failure detail.
+
 - Fleet claim renewal and release follow node-token rotation on the bound hub, including orphan-release retries, while retaining the last node credential when its token file is temporarily unavailable.
 
 ### Added

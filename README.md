@@ -23,7 +23,7 @@
   <img src="https://shieldcn.dev/badge/license-MIT-4e7247.svg?size=xs" alt="MIT license">
 </p>
 
-Brigade is a local CLI for people who point Claude Code, Codex, Cursor, and other agents at the same repos. Each harness keeps its own notes, its own MCP config, and its own idea of what "tests pass" means. Brigade gives them one ledger in the repo instead: what is ready, who claimed it, which commands actually ran and how they exited, and what the last session handed off.
+Brigade lets coding agents work autonomously across repos, machines, and cloud seats while the operator stays in control. You set policy, budgets, scopes, and gates, and can inspect or stop the work. Agents leave a record of what they did: verification receipts with real exit codes, run journals, claims, and lineage. For example, a Claude Code agent can hand a verify receipt to Codex in an [evidence package](docs/evidence-package.md), alongside a handoff that explains the change. Codex can check the package and receipt instead of trusting a sentence that says "tests pass."
 
 **Stable:** v0.30.0 (`brigade-cli==0.30.0` on PyPI, `@escoffier-labs/brigade@0.30.0` on npm). **Beta:** main is the 0.31 preview line (`0.31.0.devYYYYMMDD` wheels). See the [changelog](CHANGELOG.md) for what each release changed.
 
@@ -32,13 +32,13 @@ The downloads badge sums `brigade-cli` on PyPI (excluding mirrors) and `@escoffi
 ## What it does
 
 - **Ready work and safe claims.** `brigade work ready` lists unblocked tasks. Claims are atomic, so two agents cannot take the same item.
-- **Verification receipts.** A check run through Brigade records the command, the real exit code, and the Git state. An agent's "tests pass" becomes something you can open and read.
-- **Shared memory with an owner.** Agents write handoffs. The memory owner lints and files them. Safe notes can auto-file, and risky ones wait for review. Session-start recall is capped.
-- **One tool catalog, previewed first.** MCP servers, tools, and skills are defined once and shown as a dry run before Brigade writes them into each harness.
+- **Evidence between agents.** A check run through Brigade records the command, the real exit code, and the Git state. The next agent can inspect the receipt or verify an exported evidence package. Handoffs link that evidence to the work that remains.
+- **Shared memory with an owner.** Agents write handoffs with evidence sections. The memory owner lints and files them under the ingest policy. Safe notes can auto-file, and ambiguous notes enter a review queue. Session-start recall is capped.
+- **One tool catalog across harnesses.** MCP servers, tools, and skills are defined once. Projection plans preview each harness's config before sync writes it.
 - **Cloud agents tracked next to local ones.** Tasks you hand to Codex Cloud, Cursor cloud agents, or Jules are registered with their provider task ID and reconciled against provider and GitHub state, so they show up beside local runs instead of disappearing into another tab.
 - **Optional fleet view.** A self-hosted hub can arbitrate repo claims across machines and show runs, harness sessions, and cloud tasks on one board.
 
-Learning in Brigade means scoring skills against captured receipts, then promoting or rolling them back. It is not autonomous reflective memory.
+Learning in Brigade means scoring skills against eligible captured receipts, then promoting or rolling them back. Autonomous memory reflection is planned in [#1856](https://github.com/escoffier-labs/brigade/issues/1856).
 
 <details>
 <summary><b>Examples</b></summary>
@@ -158,7 +158,7 @@ Key: <img src="docs/assets/status-supported.svg" width="10" height="10" alt="Sup
 
 ## Scope
 
-Brigade is a local, file-first control plane. Nothing runs until you run a command or your own scheduler does. The work ledger is machine-local JSON, not a distributed task database, and the optional fleet hub coordinates claims and events without replacing local records. Run budgets apply only when declared. Brigade does not push to GitHub, publish packages, or send messages unless you use an explicit send action. Full boundaries: [execution model](docs/execution-model.md).
+Brigade coordinates agent work through local records and optional long-running services that the operator starts and can stop. The work ledger is machine-local JSON, and the fleet hub coordinates claims and events without replacing local records. Run budgets apply only when declared. Gates mark checkpoints where the operator wants approval. Agent work can continue within its authorized scope between those checkpoints, leaving receipts and journals for inspection. Full boundaries and service lifecycles: [execution model](docs/execution-model.md).
 
 Name collisions: this is `brigade-cli` from [escoffier-labs/brigade](https://github.com/escoffier-labs/brigade), not the archived CNCF Kubernetes Brigade, Spinabot Brigade, or the 2017 Python package that became Nornir.
 

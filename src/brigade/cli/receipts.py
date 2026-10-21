@@ -23,6 +23,12 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_verify.add_argument("--commit", help="Verify receipt trailers from a commit message.")
     p_verify.set_defaults(func=dispatch)
 
+    p_lineage = receipts_sub.add_parser("lineage", help="Walk recorded lineage for one local artifact.")
+    p_lineage.add_argument("subject", metavar="<kind>:<id>", help="Artifact kind and safe identity id.")
+    p_lineage.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+    p_lineage.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_lineage.set_defaults(func=dispatch)
+
     p_trailer = receipts_sub.add_parser("trailer", help="Print commit trailers for a run receipt.")
     p_trailer.add_argument("--run", required=True, help="The run id.")
     p_trailer.set_defaults(func=dispatch)
@@ -267,6 +273,10 @@ def dispatch(args) -> int:
             json_output=args.json,
             strict_approvals=args.strict_approvals,
         )
+    if args.receipts_command == "lineage":
+        from .. import receipts_lineage
+
+        return receipts_lineage.command(target=args.target, subject=args.subject, json_output=args.json)
     if args.receipts_command == "keygen":
         return receipts_cmd.keygen(target=args.target, force=args.force)
     if args.receipts_command == "export" and args.receipts_export_command == "attestation":

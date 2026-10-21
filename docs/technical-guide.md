@@ -24,10 +24,9 @@ This guide preserves the detailed command walkthroughs and operational notes tha
 </p>
 
 <p align="center">
-  <code>brigade</code> is a local operator-system CLI for agent workspaces.
-  It bootstraps the workspace, runs bounded multi-agent work, routes scanner
-  findings into reviewable queues, records release evidence, and keeps publish
-  decisions manual.
+  <code>brigade</code> coordinates autonomous agents within operator-defined scopes.
+  It connects local and cloud work through run journals, verification receipts,
+  and evidence-based handoffs. Operators place gates where approval is needed.
 </p>
 
 ## What this is
@@ -57,11 +56,11 @@ This README is dense, and a handful of words carry most of the weight. Learn the
 | **promote** | Move an item out of the queue into a real task or memory note. |
 | **receipt** | A local file logging that something happened, kept for audit and proof. |
 | **closeout** | Marking something reviewed or done so it stops nagging you. |
-| **gate** | A manual approval checkpoint; nothing risky happens without your yes. |
+| **gate** | A checkpoint the operator places where they want approval before work continues. |
 | **AFK** | Away from keyboard, a long unattended run the agent does solo. |
 | **station** | A subsystem of Brigade (memory, security, tokens, pantry) with its own commands. |
 
-Execution model: explicit invocation only. Brigade writes local files and review queues when asked. It does not publish, edit canonical memory, run a scheduler or daemon, run arbitrary commands, or touch remote servers on its own. Full boundary: [`docs/execution-model.md`](execution-model.md). That deliberate friction is what the rest of this doc keeps repeating.
+Execution model: the operator sets policy, budgets, scopes, and gates, then agents work within that authority. Receipts with real exit codes and run journals record what happened. Agents pass evidence packages and handoffs so the next agent can check their work. Commands and operator-started services share this model. Details: [`docs/execution-model.md`](execution-model.md).
 
 ## The design
 
@@ -106,7 +105,7 @@ Brigade has grown from a bootstrap kit into a local control plane for agent work
 - Operator notifications: optional `agent-notify` status and setup planning for private Discord, Telegram, or Signal notifications. `brigade work brief` and related status surfaces may report readiness or suggest the station; no command sends unless the operator uses an explicit send action.
 - Security and publish guards: content-guard integration, template audit, SARIF output, suppressions, accepted-risk closeouts, policy presets, prompt and instruction checks, MCP checks, supply-chain checks, and redacted reports.
 
-The common rule is deliberate friction: Brigade writes local receipts and review queues, but it does not start daemons, mutate remotes, edit canonical memory, run arbitrary commands, publish releases, or auto-promote findings without an explicit operator command. See [`docs/execution-model.md`](execution-model.md).
+The operator can inspect or stop work and place gates where approval is needed. Within an authorized scope, agents can keep working and pass verification evidence to each other. Local receipts and run journals retain the record even when coordination uses the fleet hub or cloud seats. Service lifecycles and record locations are in the [`execution model`](execution-model.md).
 
 ### Agent activity
 
@@ -117,6 +116,53 @@ The Agent Activity dashboard is visual-first: machine cards (one per configured 
 Use `brigade run cloud launch` to start Cursor Cloud or Jules work from a bounded private `--prompt-file`. Credentials come from the existing environment (`CURSOR_API_KEY` / `CURSOR_CLOUD_API_KEY` / `BG_AGENT_API_KEY`, or `JULES_API_KEY`) and are never CLI arguments. A missing key or unreadable prompt file makes no provider call. On a successful hub bind the command registers provider IDs, the prompt hash, the expected artifact, and the private lease holder used later by `sync`; launch JSON and `LaunchResult` never include that holder or the prompt text. `autoCreatePR` stays off unless `--auto-create-pr` is passed. Jules launch accepts `--no-plan-approval` so headless conductor launches can skip `requirePlanApproval`; the flag is rejected for Cursor Cloud. `brigade run cloud approve --provider jules --task <id>` wraps the existing `approve_plan` helper. Use `brigade run cloud register` / `adopt` (parser group `brigade run-cloud`) to record dispatches that were started outside this command. Codex Cloud register-on-dispatch is automatic from `codex-cloud` seats. Cursor Cloud uses the Agents API v1: `POST /v1/agents` accepts a client-supplied `agentId` in `bc-<uuid>` form for idempotent create; the adapter generates one per launch and sends it with `{"agentId": ..., "prompt": {"text": ...}, "repos": [{"url": ...}], "autoCreatePR": ...}`. `repos[].url` must be an absolute `https://github.com/owner/repo` URL; `owner/repo` is normalized and unsafe/non-GitHub strings are rejected before hub admission or provider mutation. The response is `{"agent": {"id", "latestRunId", ...}, "run": {"id", "status", ...}}`; both identifiers are bound to the local lease. A provider HTTP 4xx/5xx releases the unbound lease as `submit-failed`; a transport timeout, `OSError`, `TimeoutError`, or malformed/oversized response after POST is ambiguous, so the lease is held and the result reports `uncertain` with the client `agentId` preserved for later adoption. `GET /v1/agents` returns `items`. Run active states are `CREATING`/`RUNNING`; terminal states are `FINISHED`/`ERROR`/`CANCELLED`/`EXPIRED`. Cursor cloud remains an unwired source until a `CURSOR_API_KEY` / `CURSOR_CLOUD_API_KEY` / `BG_AGENT_API_KEY` exists, and when wired the status payload includes sanitized Cursor inventory keyed by agent id. Claude Cloud launch is disabled-by-policy; `claude_cloud` only parses local `claude agents --json --all` inventory, which is a local/background session list, not a documented cloud-task registry. It supports `sessionId` as the canonical id and `cwd` as the workspace while remaining backward-compatible with `id`/`workspace`/`status`. Local Claude inventory is not merged into cloud provider_tasks or Cloud Workers, and absolute `cwd` paths stay out of hub/dashboard payloads. Claude Cloud remains untracked/disabled until a structured bindable provider surface exists. `brigade run cloud status --json` joins the registry against best-effort provider state and GitHub branch/PR ground truth. `brigade run cloud sync` reads hub leases from the fleet client when a hub is configured and releases matching terminal leases; when no hub is reachable it stays purely observational and does not invent Needs You rows. `brigade run cloud sweep` writes a receipted report only. Nothing is deleted automatically. Stale READY entries (threshold `stale_ready_hours`, default 6) surface in `brigade work brief`.
 
 Jules Cloud uses the alpha `https://jules.googleapis.com/v1alpha` API with `X-Goog-Api-Key` authentication and a zero-runtime-dependency stdlib `urllib` adapter. Launch resolves the target repository first: `GET /sources` is a read-only probe whose rows are matched exactly (case-insensitively) on `githubRepo.owner` and `githubRepo.repo`, and the starting branch must be one the source lists, or else the source default, `main`, or a sole listed branch. If the repository is not connected, or the branch cannot be validated, there is no hub admission and no provider mutation. Only then does `POST /sessions` send `{"prompt": ..., "title": ..., "sourceContext": {"source": "sources/<connected-id>", "githubRepoContext": {"startingBranch": ...}}, "requirePlanApproval": ...}` using the exact connected `source.name` such as `sources/github-owner-repo`; the literal `USER` is not a valid source. `requirePlanApproval` stays true unless `--no-plan-approval` is passed. `automationMode` is omitted unless `autoCreatePR` is explicitly requested, in which case it is validated to `AUTO_CREATE_PR` and nothing else. The low-level `create_session` takes an already-validated `source_name` and `starting_branch` and does no discovery of its own; it requires a top-level `id` in the create response, which is bound immediately to the local hub lease via `fleet_client.bind_cloud`. The adapter never auto-approves plans, deletes sessions, pulls or applies patches, or creates PRs by default. Operators approve a waiting plan with `brigade run cloud approve --provider jules --task <id>`. `status` classifies a terminal session as `needs-plan-approval` only on positive evidence: a bounded `GET /sessions/{id}/activities` read must actually show a `planGenerated` activity with no `artifacts` activity, no outputs, no branch, and no pull request. That activity read is a second bounded phase of the observation, taken only for sessions whose label could still turn on plan evidence (terminal, no outputs, no PR url), capped at 10 sessions per observation, one page of 30 activities each, a 5s per-call deadline and a 15s wall-clock budget for the phase; newest-updated candidates win the cap. A session row itself never carries activity kinds, so without that read the evidence is unobservable. A failed or skipped activity read leaves activity evidence absent, and absent evidence never yields `needs-plan-approval`. When the provider explicitly reports no outputs and neither the provider nor GitHub reports a pull request or matching branch, `status` reports `needs-investigation`. Positive `planGenerated` evidence with no work artifact remains `needs-plan-approval`. Other completed sessions follow the ordinary `ready-to-land`/`stale` classification. This keeps an unreadable activity feed from being treated as proof that plan approval caused the stop. `status` surfaces the Jules session URL either way. A provider HTTP 4xx/5xx after `POST` releases the unbound lease as `submit-failed`; a transport timeout, `URLError`, `OSError`, `TimeoutError`, or malformed/oversized/id-less response is ambiguous, so the lease is held, exactly one `POST` is ever issued, and the result reports `uncertain` for later adoption. `GET /sessions` and `GET /sessions/{id}/activities` are bounded paginated reads (`pageSize` 1-100, at most 20 pages and 1000 items); `GET /sessions/{id}` reads a single session; `POST /sessions/{id}:approvePlan` sends an empty JSON body and accepts an empty success body. Session ids are rejected when empty or when they contain a path separator, and every path segment is percent-encoded with `safe=""`. A `base_url` override is accepted for tests and must be `https`, or `http` on loopback. Jules states are mapped to the common cloud state space: `QUEUED`/`PLANNING`/`AWAITING_PLAN_APPROVAL`/`AWAITING_USER_FEEDBACK`/`IN_PROGRESS`/`PAUSED`/`STATE_UNSPECIFIED` hold capacity, while `FAILED`/`COMPLETED` are terminal. Inventory is a positive signal only: a failed fetch or a truncated page walk simply omits ids, and an absent id is never read as terminal, so unknown or truncated inventory cannot release capacity. The tracker authority is `alpha REST` when `JULES_API_KEY` is set and `unwired` otherwise. Every provider payload is sanitized to ids, normalized state, bounded RFC 3339 timestamps, the source owner/repo/branches needed for matching, a validated `https://jules.google.com/...` session URL, and a validated `https://github.com/owner/repo/pull/N` URL, and an activity's id, timestamp and allowlisted oneof `kind`; prompts, titles, descriptions, activity payloads, artifacts, patches, shell output, raw response bodies, and credentials are dropped. Hosted lease labels are generated as `<provider>:<owner>/<repo>@<12-hex prompt digest>` (`cloud_tracker.lease_label`, capped at 120 characters), so neither Jules nor Cursor ever persists prompt text as a label.
+
+### Node-local GitHub reads
+
+`brigade.github_reader.GitHubReader` supplies the passive importers' GET transport.
+Construct it with a canonical repository, independently confirmed `visibility`,
+an injected `CommandRunner`, and a `BudgetLedger(Path(...))` outside version control.
+Use `SubprocessRunner()` for bounded local execution, or supply your own runner.
+The supplied runner uses Brigade's subprocess capture with no shell, capped
+stdout, discarded stderr, and a timeout. Put native `gh` and `octopool` executables
+on PATH without a `gh` shim. Construction makes no requests or auth changes.
+Custom runners must remove environment variables whose override is `None`.
+
+Public reads use `octopool request` after `octopool whoami` succeeds, cached for
+600 seconds. A failed or truncated relay command marks that health cache unhealthy.
+Private and unknown repositories never invoke Octopool.
+`get(path, params=..., max_bytes=..., max_age=120)` sends the freshness bound as
+`Cache-Control`. Only a named `merge_gating_reason` enables `OCTOPOOL_FRESH=1`
+and `max-age=0`. Other reads unset `OCTOPOOL_FRESH` in the child environment.
+Relay denials, 404s, fallback signals, and stale responses are
+inconclusive. Native fallback requires `allow_public_fallback=True`.
+See the [Octopool relay contract](https://docs.octopool.dev/relay.html).
+
+Native reads cache ETags and complete bodies per endpoint in the reader.
+The cache evicts the least recently used entries above 128 endpoints or 16 MiB
+of bodies. ETags reset with each reader instance, including one-shot CLI calls.
+Keep one long-lived reader per repository to reuse ETags and receive 304 savings.
+The ledger stores no ETags or bodies across readers or processes.
+A validated 304 returns the body with `state="not-modified"` and
+`upstream_status=304`. Importers retain pagination budgets and truncation marks.
+Readers sharing a credential class must use the same local SQLite ledger and
+hourly cap policy. Transactions serialize requests across processes. The rolling
+hourly cap counts attempts except validated native 304s, which remain visible in
+the request and ETag totals. Exhaustion returns `state="budget-exhausted"`
+without a request. Queue waits allow three runner timeouts plus a margin.
+If the lock wait expires, `get()` returns `state="queue-busy"` without a request.
+Persistent cooldowns honor `x-poll-interval`, `Retry-After`, and primary reset
+headers. A native 403 with `Retry-After` or zero remaining budget is
+returned as status 429 with `state="rate-limited"` and `upstream_status=403`,
+and excluded from denial totals. Deferred reads include `retry_at`.
+The adapter performs no automatic retries or sleeps.
+
+`observation()` returns a node observation fragment with hourly route, status,
+denial, fallback, ETag, and remaining/reset totals. For public readers,
+`observation(refresh_octopool_stats=True)` adds allowlisted numeric counters from
+`octopool stats --json`. Ledger rows exclude bodies, endpoints, credentials, and
+caller identities. Publication and node Hub-envelope integration remain follow-up
+work alongside migration of the three existing GitHub read implementations.
 
 ### Grok Bot local job queue
 
@@ -522,6 +568,11 @@ default. Pass `--strict-approvals` to also make stale, expired,
 indeterminate, or unapproved runs return nonzero. The default
 receipt-verification exit behavior is unchanged.
 
+Use `brigade receipts lineage <kind>:<id>` to inspect recorded plan, run,
+verify, outcome, handoff, and synthesis parents. The command reports broken
+links and digest mismatches without changing receipts. Pass `--json` for the
+versioned `brigade.receipts_lineage.v1` contract.
+
 Use `brigade runs reap --cwd /path/to/repo` to terminalize local runs whose
 recorded owner process is gone. Reap writes `status: orphaned` and a dirty-file
 count (filenames stay off the receipt) through the same run.json writer every
@@ -533,6 +584,40 @@ rather than migrated. It does not rewrite Hub history: `brigade fleet
 status --all` ages silent nonterminal rows to display-only `run.stale` after
 24h, separate from the 30-minute live-status window. `brigade work brief`
 lists orphaned runs and the recorded dirty count.
+
+Use `brigade runs patrol --target /path/to/repo` to report local run and
+ledger-claim lanes with timestamped evidence. It joins bounded run snapshots,
+lifecycle journals, lock owners, linked worktrees, and changed-file mtimes.
+Approval pauses and artifact collection report `waiting` unless a stale owner
+lock exceeds `--older-than`, which reports `dead`. Missing or unreadable
+required evidence reports `unknown`. Legacy runs can use event-file or worktree
+progress when no journal was requested. A terminal run that retains its
+own live lock beyond 60 seconds reports `zombie`. A stale lock remains
+cleanup evidence on the terminal outcome.
+
+The defaults are `--older-than 2h`, `--idle-after 15m`, `--stall-after 30m`,
+`--stranded-after 24h`, and `--limit 50`. `--json` emits
+`brigade.runs_patrol.v1`. `--receipt` saves that report under
+`.brigade/patrol/<id>/patrol.json`. `--fail-on dead,stalled` returns status 1
+when either state appears. Runs are scanned newest first by directory mtime,
+with up to 1,000 run snapshots and 1,000 linked worktrees per patrol. `--limit`
+bounds returned lanes and active claimed ledger tasks after the whole byte-capped
+ledger is read. Finished and cancelled tasks with retained claims are excluded.
+`--limit` does not bound run inspection cost. Lock and owner observations are
+reused within each workspace. Evidence observation times identify collection
+start, which is also the freshness reference for that scan. Classification uses
+the clock after collection for run age and progress. JSON records elapsed
+collection time as `scan_duration_seconds`.
+JSON reports `truncated: true` when a source or result window
+is cut short. Text output warns, and `--fail-on unknown` returns 1 on truncation.
+Claims join runs only by exact `claim_id`. Current run writers omit that field,
+so normal claims remain separate lanes until dispatch-intent integration (#1849).
+An unmatched claim without independent worktree findings reports `unknown`
+with reason `no task-to-run join key`, regardless of age or other active runs.
+Claim age alone cannot establish `claim-without-run` until a verified join exists.
+Invalid options or an unreadable target return 2.
+Patrol does not repair runs or claims. Dispatch intents and Hub joins are
+reserved for later slices.
 
 Use `brigade runs prune-worktrees --target /path/to/repo` to list Brigade-created
 detached worktrees that are safe to remove: clean, branch-backed, and older
@@ -976,7 +1061,7 @@ Task ledger commands:
 - `brigade work task add "..." --seat-class mechanical|judgment|review --spend-by <ISO-8601>` stores optional dispatch routing hints under task `metadata` (seat tier class, never a model id; quota spend-by deadline). Absent annotations change nothing. Graph nodes may set the same keys under `metadata`.
 - `brigade work task annotate <task-id> --seat-class … --spend-by …` updates those hints on an existing task; `--clear-seat-class` / `--clear-spend-by` remove them.
 - `brigade work task add --graph plan.json` atomically materializes tasks and edges from a JSON plan (`nodes` plus `edges`). Use `--dry-run` to validate without writing.
-- `brigade work ready [--campaign <name>] [--explain] [--parallel-safe] [--json]` lists pending tasks with no open readiness blockers. `blocks` edges gate readiness. Open blockers on a parent propagate to children through `parent-child` edges. `discovered-from` is provenance-only and never gates readiness. Ready items include `seat_class` / `spend_by` when annotated so a human or skill dispatcher can route without re-deriving the table; Brigade does not dispatch on its own. `--campaign <name>` aggregates ready work across member repos listed in `.brigade/campaigns/<name>.json` (or a campaign JSON path): task ids are repo-qualified as `member:local-id`, optional campaign-level cross-repo `blocks` edges gate readiness at aggregation time, and removing the campaign file changes nothing in member ledgers. Missing or unreadable configured members fail closed (nonzero) while reporting `member_errors`. Campaign edges are `blocks` only; endpoints must name existing member tasks. `--parallel-safe` adds a query-time partition of the ready set into dispatch waves by footprint intersection (exact file overlap; one-hop GraphTrail symbol impact when available; file-overlap-only degrade otherwise). Same wave is parallel-safe; cross-wave work must serialize. Empty footprints get an exclusive wave. Waves are never stored. With `--campaign`, `--parallel-safe` composes global wave N from each member's local wave N (campaign order) so intra-repo file and symbol-impact safety is preserved. Matching relative paths in separate repositories do not conflict. Empty footprints stay exclusive inside their member repository only. Per-member GraphTrail degradation is reported without discarding that member's file-overlap waves. Missing or unreadable members still fail closed before any waves are returned.
+- `brigade work ready [--campaign <name>] [--explain] [--parallel-safe] [--json]` lists pending tasks with no open readiness blockers. `blocks` edges gate readiness. Open blockers on a parent propagate to children through `parent-child` edges. `discovered-from` is provenance-only and never gates readiness. Ready items include `seat_class` / `spend_by` when annotated so a human or skill dispatcher can route without re-deriving the table. `work ready` reports candidates and waves without launching workers. `brigade run` executes dispatched tasks today. Automatic wave dispatch is planned in [#1849](https://github.com/escoffier-labs/brigade/issues/1849). `--campaign <name>` aggregates ready work across member repos listed in `.brigade/campaigns/<name>.json` (or a campaign JSON path): task ids are repo-qualified as `member:local-id`, optional campaign-level cross-repo `blocks` edges gate readiness at aggregation time, and removing the campaign file changes nothing in member ledgers. Missing or unreadable configured members fail closed (nonzero) while reporting `member_errors`. Campaign edges are `blocks` only. Endpoints must name existing member tasks. `--parallel-safe` adds a query-time partition of the ready set into dispatch waves by footprint intersection, using exact file overlap and one-hop code graph symbol impact when available. When code graph impact is unavailable, partitioning uses file overlap alone. Work in the same wave is parallel-safe. Cross-wave work must serialize. Empty footprints get an exclusive wave. Waves are never stored. With `--campaign`, `--parallel-safe` composes global wave N from each member's local wave N (campaign order) so intra-repo file and symbol-impact safety is preserved. Matching relative paths in separate repositories do not conflict. Empty footprints stay exclusive inside their member repository only. Per-member code graph degradation is reported without discarding that member's file-overlap waves. Missing or unreadable members still fail closed before any waves are returned.
 
   A missing `blocks` source or missing ancestor parent fails closed with `missing_dependency`, including blockers inherited from ancestors. Missing dependent targets stay informational. `--explain` and `--json` separate unfinished `blocking_dependencies` from unresolvable `missing_dependencies` per blocked task and retain `orphans`. Explained output names the affected ids and repair commands such as `brigade work task edge remove --id <edge-id>`. Claim and `work run --task-id` use the same resolver.
 
@@ -1004,6 +1089,7 @@ Import inbox commands:
 - `brigade work import context` frames raw links, transcripts, or terminal errors as untrusted local context, flags prompt-injection signals for review, and always lands the result in the inbox. Add `--from-miseledger "query"` to fetch Brigade receipt evidence from MiseLedger instead of inboxing pasted text. That mode prints a rendered untrusted evidence brief, or the raw evidence bundle with `--json`, and appends the rendered brief to the active work session notes when a session is open.
 - `brigade work import validate imports.jsonl` checks scanner output against [`docs/import-schema.md`](import-schema.md).
 - `brigade work import ingest imports.jsonl` ingests scanner output.
+- `brigade work import --from-bd-jsonl export.jsonl --bd-version 1.3.1` stages an additive Beads snapshot as pending inbox proposals. It validates the entire file and dependency graph before writing, preserves native edge types as proposals with bd IDs, and writes a versioned digest receipt under `.brigade/work/import-runs/`. Receipt storage requires POSIX descriptor-relative or Windows handle-relative operations. Hosts without either fail closed. Operational row changes alone do not duplicate proposals. Review and map proposed endpoints to native task IDs before applying edges. See [the dated re-check and import contract](research/beads-770-recheck.md).
 - `brigade memory care scan` scans local memory cards for stale, expired, undersourced, contradictory, missing-index-link, orphaned, oversized, missing-frontmatter, missing-reviewed, and missing-freshness issues without editing memory.
 - `brigade memory care plan-fixes` plans low-risk reviewed/freshness metadata repairs, reports top block-reason counts, unblocks freshness dates that can be derived from `last_reviewed + stale_after_days`, and writes no card files.
 - `brigade memory care import-issues` routes the latest memory-care refresh queue into the work inbox.
@@ -1070,7 +1156,7 @@ Scanner registry commands:
 - `brigade work sweep closeout <sweep-id|latest>` marks a sweep reviewed only after all actionable imports are no longer pending, or after the operator records explicit deferrals with `--defer <import-id>` or `--defer-all`.
 - `brigade work scanners doctor --import-issues` reports missing config, disabled required producers, bad commands, missing or stale output paths, schedule conflicts, failed or timed-out runs, malformed receipts, missing logs, and due scanners, then can import those health issues as local task imports.
 
-The scanner registry is explicit and local. Brigade does not install cron jobs, start a daemon, run scanners from `brief` or `doctor`, promote scanner output automatically, or mutate scanner output beyond the configured command's own behavior. `brigade work sweep` is still explicit foreground execution, not a scheduler, `sweep-review` is read-only, and sweep closeout records review state only.
+The scanner registry records configured commands and their output paths. `brigade work sweep` runs those commands in the foreground and leaves scanner receipts and a sweep report. `brief` and `doctor` inspect scanner state without launching scanners. `sweep-review` is read-only, and sweep closeout records review state. Schedule recurring sweeps through the operator's host scheduler. See [scheduled care](scheduled-care.md).
 
 Roadmap and repo-fleet commands:
 
@@ -1314,7 +1400,7 @@ For long AFK phase sessions, `brigade work phases schema --json` includes a `ses
 
 Release candidate compare checks include AFK session drift. If a candidate was built with one checkpoint, checkpoint-compare result, or session completion-gate state and the current local session evidence changes, `brigade release candidate compare` reports the stale session evidence before any manual publish step.
 
-The daily driver is local and explicit. It does not start daemons, run arbitrary commands, execute scanners, reviewers, tools, or fleet sweeps, mutate remotes, push, tag, publish, upload analytics, or edit canonical memory.
+The daily driver executes bounded local actions under its approval state and records each step for resume and closeout. Its action set excludes scanner, reviewer, tool, and fleet-sweep execution, remote writes, publishing, and canonical memory edits. Other Brigade command families own those workflows and their records.
 
 Run a direct work session with `brigade work run`.
 It opens a work session, resolves the next task, runs `brigade dogfood`, and closes completed ledger tasks after successful runs.
@@ -1403,7 +1489,7 @@ The export is deterministic and idempotent for unchanged receipts: records are s
 
 Export is fail-open per receipt. Malformed or unreadable receipt files produce one stderr warning each and are skipped, so one bad historical receipt does not block newer evidence. The command exits non-zero only when there are no receipt candidates under the target, the target or output path is invalid, or the output cannot be written.
 
-Verification and closeout are local gates. Brigade does not mutate CI, GitHub, reviewers, scanner promotions, handoff ingestion, daemons, or schedulers. Verification commands run only when explicitly requested.
+Verification records the check command, real exit code, logs, and Git state. Closeout checks that evidence against task acceptance criteria. An operator can place these checkpoints in an agent workflow without approving every intermediate step. These commands record local evidence without changing CI or GitHub review state.
 
 See [`docs/work-closeout.md`](work-closeout.md) for the verification command rules, closeout record contents, and ready-state checklist.
 
@@ -1940,8 +2026,8 @@ Each subsystem has a companion doc under [`docs/`](.) with the full local contra
 - [`docs/tool-catalog.md`](tool-catalog.md) - the portable tool catalog, call review, runtimes, and policy
 - [`docs/backup-health.md`](backup-health.md) - read-only backup health summaries and issue routing
 - [`docs/memory-care.md`](memory-care.md) - memory card decay scanning and refresh imports
-- [`docs/execution-model.md`](execution-model.md) - explicit-invocation boundary and external-scheduler ownership
-- [`docs/scheduled-care.md`](scheduled-care.md) - operator-owned cron, systemd, and CI recipes plus `brigade care` scaffold for the memory-care loop
+- [`docs/execution-model.md`](execution-model.md) - operator control, autonomous work, service lifecycles, and record locations
+- [`docs/scheduled-care.md`](scheduled-care.md) - operator-owned care schedules and runbook receipts, including the `brigade care` scaffold
 - [`docs/security.md`](security.md) - the agent workspace security scanner and evidence bundles
 - [`docs/content-guard-allow-markers.md`](content-guard-allow-markers.md) - inline and file-scoped content-guard allow comments
 - [`docs/inspiration-patterns.md`](inspiration-patterns.md) - neutral pattern families and source-pattern decisions

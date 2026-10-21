@@ -51,7 +51,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade profiles`: 2 command path(s)
 - `brigade projection`: 1 command path(s)
 - `brigade projects` (extras): 10 command path(s)
-- `brigade receipts`: 18 command path(s)
+- `brigade receipts`: 19 command path(s)
 - `brigade reconfigure`: 1 command path(s)
 - `brigade release` (extras): 23 command path(s)
 - `brigade repos` (extras): 74 command path(s)
@@ -62,7 +62,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade run`: 47 command path(s)
 - `brigade run-cloud` (deprecated; use `brigade run cloud`): 45 command path(s)
 - `brigade runbook` (extras): 5 command path(s)
-- `brigade runs`: 20 command path(s)
+- `brigade runs`: 21 command path(s)
 - `brigade scrub`: 1 command path(s)
 - `brigade search`: 6 command path(s)
 - `brigade security`: 16 command path(s)
@@ -440,6 +440,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade receipts export otel-genai`
 - `brigade receipts export package`
 - `brigade receipts keygen`
+- `brigade receipts lineage`
 - `brigade receipts trailer`
 - `brigade receipts verify`
 - `brigade receipts verify-agent-change`
@@ -675,6 +676,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade runs interrupt`
 - `brigade runs latest`
 - `brigade runs list`
+- `brigade runs patrol`
 - `brigade runs prune-worktrees`
 - `brigade runs reap`
 - `brigade runs recover`
