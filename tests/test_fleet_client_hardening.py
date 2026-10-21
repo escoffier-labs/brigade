@@ -504,3 +504,146 @@ class TestSpoolPathFallbackWithoutDirFd:
         monkeypatch.setattr(fleet_client, "_ensure_private_dir", fail_spool_setup)
         with pytest.raises(KeyboardInterrupt):
             fleet_client.report_event({"run_id": "r1", "state": "run.started"})
+
+
+def _hold_spool_lock(path, connection):
+    with fleet_client._spool_lock(Path(path)):
+        connection.send("locked")
+        connection.recv()
+    connection.close()
+
+
+def test_spool_lock_timeout_bounds_thread_contention(tmp_path):
+    import threading
+    import time
+
+    path = tmp_path / "spool" / "node.jsonl"
+    ready, release = threading.Event(), threading.Event()
+
+    def hold():
+        with fleet_client._spool_lock(path):
+            ready.set()
+            release.wait(5)
+
+    holder = threading.Thread(target=hold)
+    holder.start()
+    try:
+        assert ready.wait(5)
+        started = time.monotonic()
+        with pytest.raises(fleet_client.FleetClientError, match="^fleet spool lock timed out$"):
+            with fleet_client._spool_lock(path, timeout=0.04):
+                pytest.fail("entered held lock")
+        assert time.monotonic() - started < 1
+    finally:
+        release.set()
+        holder.join(5)
+    assert not holder.is_alive()
+    with fleet_client._spool_lock(path, timeout=0):
+        pass
+
+
+def test_spool_lock_timeout_bounds_process_contention_and_closes_descriptors(tmp_path, monkeypatch):
+    import multiprocessing
+
+    path = tmp_path / "spool" / "node.jsonl"
+    context = multiprocessing.get_context("spawn")
+    parent, child = context.Pipe()
+    holder = context.Process(target=_hold_spool_lock, args=(str(path), child))
+    holder.start()
+    descriptors = []
+    real_open = fleet_client.os.open
+
+    def record_open(*args, **kwargs):
+        fd = real_open(*args, **kwargs)
+        descriptors.append(fd)
+        return fd
+
+    try:
+        assert parent.poll(10) and parent.recv() == "locked"
+        monkeypatch.setattr(fleet_client.os, "open", record_open)
+        with pytest.raises(fleet_client.FleetClientError, match="^fleet spool lock timed out$"):
+            with fleet_client._spool_lock(path, timeout=0.04):
+                pytest.fail("entered held process lock")
+        assert descriptors
+        for fd in set(descriptors):
+            with pytest.raises(OSError):
+                os.fstat(fd)
+        assert fleet_client._SPOOL_PROCESS_LOCK.acquire(blocking=False)
+        fleet_client._SPOOL_PROCESS_LOCK.release()
+    finally:
+        parent.send("release")
+        holder.join(10)
+        if holder.is_alive():
+            holder.terminate()
+            holder.join(5)
+        parent.close()
+        child.close()
+    assert holder.exitcode == 0
+    with fleet_client._spool_lock(path, timeout=0):
+        pass
+
+
+@pytest.mark.parametrize("timeout", [-1, float("nan"), float("inf"), True, "1"])
+def test_spool_lock_rejects_invalid_timeout_before_storage(tmp_path, timeout):
+    path = tmp_path / "new" / "node.jsonl"
+    with pytest.raises(fleet_client.FleetClientError, match="^invalid fleet spool lock timeout$"):
+        with fleet_client._spool_lock(path, timeout=timeout):
+            pytest.fail("accepted invalid timeout")
+    assert not path.parent.exists()
+
+
+@pytest.mark.parametrize("timeout", [None, 0, 0.12])
+def test_spool_lock_windows_flags_and_bounded_retries(tmp_path, monkeypatch, timeout):
+    import errno
+    from types import SimpleNamespace
+
+    clock = [0.0]
+    calls, sleeps = [], []
+    windows = SimpleNamespace(LK_LOCK=1, LK_NBLCK=2, LK_UNLCK=3)
+
+    def locking(fd, mode, size):
+        calls.append((mode, size))
+        if mode == windows.LK_UNLCK:
+            return
+        if timeout is None and len(calls) > 1:
+            return
+        raise OSError(errno.EACCES, "busy")
+
+    def sleep(seconds):
+        assert 0 < seconds <= 0.05
+        sleeps.append(seconds)
+        clock[0] += seconds
+
+    windows.locking = locking
+    monkeypatch.setattr(fleet_client, "fcntl", None)
+    monkeypatch.setattr(fleet_client, "msvcrt", windows)
+    monkeypatch.setattr(fleet_client, "_ensure_private_dir", lambda path: None)
+    monkeypatch.setattr(fleet_client.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(fleet_client.time, "sleep", sleep)
+    path = tmp_path / "node.jsonl"
+    if timeout is None:
+        with fleet_client._spool_lock(path):
+            pass
+        assert calls == [(windows.LK_LOCK, 1), (windows.LK_LOCK, 1), (windows.LK_UNLCK, 1)]
+        assert sleeps == []
+    else:
+        with pytest.raises(fleet_client.FleetClientError, match="^fleet spool lock timed out$"):
+            with fleet_client._spool_lock(path, timeout=timeout):
+                pytest.fail("entered held Windows lock")
+        assert all(mode == windows.LK_NBLCK and size == 1 for mode, size in calls)
+        assert clock[0] == pytest.approx(timeout)
+        assert fleet_client._SPOOL_PROCESS_LOCK.acquire(blocking=False)
+        fleet_client._SPOOL_PROCESS_LOCK.release()
+
+
+def test_spool_lock_windows_bounded_success_unlocks(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    calls = []
+    windows = SimpleNamespace(LK_NBLCK=2, LK_UNLCK=3, locking=lambda fd, mode, size: calls.append((mode, size)))
+    monkeypatch.setattr(fleet_client, "fcntl", None)
+    monkeypatch.setattr(fleet_client, "msvcrt", windows)
+    monkeypatch.setattr(fleet_client, "_ensure_private_dir", lambda path: None)
+    with fleet_client._spool_lock(tmp_path / "node.jsonl", timeout=0):
+        pass
+    assert calls == [(windows.LK_NBLCK, 1), (windows.LK_UNLCK, 1)]

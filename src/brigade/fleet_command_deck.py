@@ -16,8 +16,6 @@ from pathlib import Path
 from typing import Mapping, Sequence
 
 from brigade.fleet_deck_brands import (
-    BRANDS,
-    UNKNOWN_BRAND,
     Brand,
     harness_brand,
     provider_brand,
@@ -242,20 +240,12 @@ UNKNOWN = "unknown"
 CONTROL_PLANE_SECTIONS = ("policy", "sessions", "machines", "quota", "routes", "queue", "integrations")
 
 
-# Badge rendering over the vendor brand table in ``fleet_deck_brands``: the
-# SVG geometry is a constant per brand, never built from user data. Unknown
-# brands render the neutral "??" monogram; every label and title below goes
-# through _esc, so hostile names never reach the markup unescaped.
+# SVG geometry is trusted constant data; labels and titles are always escaped.
 def _badge_html(brand: Brand, raw_name: str) -> str:
     title = raw_name.strip() or UNKNOWN
-    if brand.svg:
-        return (
-            f'<span class="badge badge-color-{_esc(brand.accent[1:])}" '
-            f'title="{_esc(title)}" aria-label="{_esc(brand.label)}">' + brand.svg + "</span>"
-        )
     return (
-        f'<span class="badge badge-color-{_esc(UNKNOWN_BRAND.accent[1:])}" '
-        f'title="{_esc(title)}">{_esc(UNKNOWN_BRAND.label)}</span>'
+        f'<span class="badge badge-icon" role="img" '
+        f'title="{_esc(title)}" aria-label="{_esc(brand.label)}">' + brand.svg + "</span>"
     )
 
 
@@ -320,12 +310,50 @@ class RouteDecision:
     state: str = UNKNOWN
 
 
+def _is_queue_exclusion(item: Mapping[str, object]) -> bool:
+    """Recognize the hub's Worklore scan buckets, leaving malformed blocks actionable."""
+    count = item.get("count")
+    reason = item.get("reason")
+    return (
+        _cp_text(item.get("id")) == UNKNOWN
+        and type(count) is int
+        and count > 0
+        and isinstance(reason, str)
+        and reason
+        in {
+            "acceptance-required",
+            "not-ready",
+            "not-eligible",
+            "manual-mode",
+            "blocker",
+            "attempt-limit",
+            "review-after",
+            "source-policy",
+        }
+    )
+
+
 @dataclass(frozen=True)
 class QueueState:
     eligible_count: str = UNKNOWN
     queued_count: str = UNKNOWN
     blocked: tuple[Mapping[str, object], ...] = ()
     blocked_known: bool = False
+
+    @property
+    def exclusions(self) -> tuple[Mapping[str, object], ...]:
+        """Counted scan exclusions have no job identity or observation timestamp."""
+        return tuple(item for item in self.blocked if _is_queue_exclusion(item))
+
+    @property
+    def blocked_items(self) -> tuple[Mapping[str, object], ...]:
+        """Keep individual blocks separate from aggregate eligibility exclusions."""
+        return tuple(item for item in self.blocked if not _is_queue_exclusion(item))
+
+    @property
+    def actionable_exclusions(self) -> tuple[Mapping[str, object], ...]:
+        """One counted alert per blocker or exhausted-attempt scan bucket."""
+        return tuple(item for item in self.exclusions if item.get("reason") in {"blocker", "attempt-limit"})
 
 
 @dataclass(frozen=True)
@@ -1450,7 +1478,8 @@ def attention_items(view: DeckView) -> tuple[str, ...]:
         items.extend(
             f"integration:{item.id}" for item in control_plane.integrations if item.routine_state == "needs-attention"
         )
-        items.extend(f"blocked:{item.get('reason', UNKNOWN)}" for item in control_plane.queue.blocked)
+        items.extend(f"blocked:{item.get('reason', UNKNOWN)}" for item in control_plane.queue.blocked_items)
+        items.extend(f"blocked:{item['reason']}" for item in control_plane.queue.actionable_exclusions)
     return tuple(items)
 
 
@@ -1469,7 +1498,7 @@ def deck_verdict(view: DeckView) -> str:
     return "ALL CLEAR"
 
 
-def render_control_plane(control_plane: ControlPlane | None) -> str:
+def render_control_plane(control_plane: ControlPlane | None, *, worklore_enabled: bool = True) -> str:
     """The control-plane panel. Missing telemetry renders as ``unknown``."""
     gaps = coverage_gaps(control_plane)
     gap_html = (
@@ -1534,7 +1563,7 @@ def render_control_plane(control_plane: ControlPlane | None) -> str:
     )
     blocked_rows = "".join(
         f"<li>{_esc(item.get('id', UNKNOWN))} &middot; {_esc(item.get('reason', UNKNOWN))}</li>"
-        for item in control_plane.queue.blocked
+        for item in control_plane.queue.blocked_items
     )
     queue_html = (
         f"<p>eligible {_esc(control_plane.queue.eligible_count)} &middot; queued "
@@ -1543,11 +1572,14 @@ def render_control_plane(control_plane: ControlPlane | None) -> str:
             f'<ul class="attention-list">{blocked_rows}</ul>'
             if blocked_rows
             else (
-                '<p class="empty">No blocked reasons reported.</p>'
+                '<p class="empty">Queue exclusions reported below.</p>'
+                if control_plane.queue.exclusions
+                else '<p class="empty">No blocked reasons reported.</p>'
                 if control_plane.queue.blocked_known
                 else '<p class="empty">Blocked reasons unknown.</p>'
             )
         )
+        + _queue_exclusions_html(control_plane.queue, worklore_enabled=worklore_enabled)
     )
     integration_rows = "".join(
         f"<li>{_esc(item.id)} &middot; routine {_esc(item.routine_state)} &middot; auth {_esc(item.auth_state)} "
@@ -1560,7 +1592,11 @@ def render_control_plane(control_plane: ControlPlane | None) -> str:
     integrations_html = (
         f'<ul class="attention-list">{integration_rows}</ul>'
         if integration_rows
-        else '<p class="empty">No integrations reported.</p>'
+        else (
+            '<p class="empty">No integration readiness reports in this snapshot.</p>'
+            if "integrations" in control_plane.present
+            else '<p class="empty">Integration readiness unknown: no telemetry section reported.</p>'
+        )
     )
     return (
         '<section class="panel" aria-labelledby="control-plane"><header><h2 id="control-plane">Control plane</h2>'
@@ -1581,6 +1617,20 @@ def render_control_plane(control_plane: ControlPlane | None) -> str:
         "only that pickup. Routine scheduling, observed pickup and report, queue age, and authentication are "
         "four separate facts; a pending away prompt is evidence that something needs attention.</p>"
         "</section>"
+    )
+
+
+def _queue_exclusions_html(queue: QueueState, *, worklore_enabled: bool) -> str:
+    """Queue eligibility status, not individual failed jobs or invented ages."""
+    rows = "".join(
+        f"<li>{_esc(_cp_text(item.get('count')))} excluded · {_esc(_cp_text(item.get('reason')))}</li>"
+        for item in queue.exclusions
+    )
+    if not rows:
+        return ""
+    work_link = ' · <a href="/deck/work">Work</a>' if worklore_enabled else ""
+    return (
+        f'<p class="station-meta">Queue exclusions (observed scan){work_link}</p><ul class="attention-list">{rows}</ul>'
     )
 
 
@@ -1618,17 +1668,10 @@ def _quota_effective_html(control_plane: ControlPlane) -> str:
     return f'<ul class="attention-list">{rows}</ul>'
 
 
-# Classes and declarations come only from the fixed brand table, never names
-# supplied by a run or provider. The shared document stamps this style's nonce.
-_STYLE = (
-    "".join(
-        f".badge-color-{accent[1:]} {{ background: {accent}; }}\n"
-        for accent in sorted({brand.accent for brand in BRANDS.values()} | {UNKNOWN_BRAND.accent})
-    )
-    + """
-.badge { display: inline-flex; align-items: center; justify-content: center; min-width: 26px; min-height: 22px; padding: 2px 6px; border-radius: 999px; color: var(--on-accent); font-size: 11px; font-weight: 800; letter-spacing: .04em; text-align: center; white-space: nowrap; }
-.badge svg { width: 18px; height: 18px; display: block; }
-.badge svg mask { mask-type: alpha; }
+# The shared document stamps this style's nonce.
+_STYLE = """
+.badge { display: inline-flex; flex: 0 0 20px; align-items: center; justify-content: center; width: 20px; height: 20px; padding: 0; vertical-align: middle; color: var(--ink); }
+.badge-icon svg { width: 20px; height: 20px; display: block; }
 .cloud-worker-card h3 .badge, .attention-list li .badge { margin-right: 6px; }
 .tile-facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--space-1) 10px; margin: 10px 0 0; color: var(--muted); font-size: 12px; }
 .tile-facts dt { color: var(--muted); }
@@ -1663,7 +1706,6 @@ th:nth-child(1) { width: 22%; } th:nth-child(2) { width: 20%; } th:nth-child(3) 
   .timeline li { grid-template-columns: 1fr; gap: 2px; }
 }
 """
-)
 
 
 def render_deck(view: DeckView, *, nonce: str, now: datetime, worklore_enabled: bool = True) -> str:

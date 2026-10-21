@@ -8,6 +8,7 @@ the shape mcp_server.ToolCaller expects.
 
 from __future__ import annotations
 
+import os
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -24,6 +25,7 @@ SERVER_NAME = "brigade-memory"
 CARD_URI_PREFIX = "card://"
 # User-store cards get their own scheme: "card://user:<rel>" would put a colon in the URI authority.
 USER_CARD_URI_PREFIX = "user-card://"
+_NATIVE_SEP = os.sep
 SEARCH_LIMIT = 20
 MAX_CONTENT_BYTES = 256 * 1024
 MAX_LIST_ITEMS = 50
@@ -52,12 +54,19 @@ _WRITE = {"readOnlyHint": False, "destructiveHint": False, "idempotentHint": Fal
 ToolResult = tuple[object, bool]
 
 
+def _posix(rel: str) -> str:
+    """Report card paths with forward slashes. Only the native separator is rewritten,
+    since a backslash is an ordinary filename character on POSIX."""
+    return rel.replace(_NATIVE_SEP, "/") if _NATIVE_SEP != "/" else rel
+
+
 def card_ref(origin: str, rel: str) -> str:
-    return f"{origin}:{rel}"
+    return f"{origin}:{_posix(rel)}"
 
 
 def card_uri(origin: str, rel: str) -> str:
     # Repo card:// URIs keep their historical unencoded form for existing clients.
+    rel = _posix(rel)
     return f"{CARD_URI_PREFIX}{rel}" if origin == REPO else f"{USER_CARD_URI_PREFIX}{quote(rel, safe='/')}"
 
 
@@ -300,7 +309,7 @@ class MemoryTools:
             if scope != "all" and store.origin != scope:
                 continue
             for path in _store_cards(store):
-                rel = str(path.relative_to(store.root))
+                rel = path.relative_to(store.root).as_posix()
                 items.append(
                     {
                         "path": rel,
@@ -325,6 +334,7 @@ class MemoryTools:
             # Uncapped so outside-the-store matches dropped here cannot crowd out real ones.
             payload = memory_cmd.search_cards_payload(store.root, query, limit=sys.maxsize, config=store.config)
             for match in payload["matches"]:
+                match = {**match, "path": _posix(match["path"])}
                 if not _inside(store.root / match["path"], store.root):
                     continue
                 ranked.append((rank, {**match, "origin": store.origin, "ref": card_ref(store.origin, match["path"])}))
@@ -430,7 +440,7 @@ class MemoryTools:
         return {
             "written": True,
             "origin": origin,
-            "path": str(path.relative_to(root)),
+            "path": path.relative_to(root).as_posix(),
             "id": payload["id"],
             "action": payload["action"],
         }, False

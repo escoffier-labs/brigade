@@ -26,6 +26,12 @@ class FakeHub:
         self.fail = False
         self.sent = True
 
+    def scope(self, *, agent=True) -> str:
+        return "fixture-message-scope"
+
+    def require_scope(self, scope, *, agent=True) -> None:
+        assert scope == self.scope(agent=agent)
+
     def sync(self) -> None:
         self.calls.append("sync")
 

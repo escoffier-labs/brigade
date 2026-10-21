@@ -19,9 +19,9 @@ def test_flush_without_configuration_leaves_spool_untouched(tmp_path, monkeypatc
     home = tmp_path / "state"
     monkeypatch.setenv("BRIGADE_HOME", str(home))
     monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": hub})
-    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: {"node_token": token})
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: {"hub_url": hub, "node_token": token})
 
-    spool = fleet_client_messages._spool_path("fixture-node", token)
+    spool = fleet_client_messages._spool_path("fixture-node", token, hub_url=hub)
     spool.parent.mkdir(parents=True, mode=0o700)
     # No current writer should queue with an empty credential. Even a leftover
     # record must remain untouched until flushing is configured.

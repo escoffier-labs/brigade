@@ -117,13 +117,31 @@ def test_brand_lookups_known_and_unknown() -> None:
     assert "viewBox" in deck.provider_brand("google").svg
     for unknown in ("nope", "", "   "):
         assert deck.harness_brand(unknown) == deck.provider_brand(unknown)
-        assert deck.harness_brand(unknown).label == "??"
-        assert deck.harness_brand(unknown).svg == ""
+        assert deck.harness_brand(unknown).label == "Agent"
+        assert "<svg" in deck.harness_brand(unknown).svg
         assert deck.harness_brand(unknown).accent == "#4b5563"
     # Normalization: underscores and cloud suffixes still resolve.
     assert deck.harness_brand("T3_Fleet").label == "T3 Fleet"
     assert deck.provider_brand("cursor-cloud").label == "Cursor"
     assert "<svg" in deck.provider_brand("cursor-cloud").svg
+
+
+def test_jules_mascot_resolves_for_harness_and_cloud_provider() -> None:
+    jules = deck.harness_brand("jules")
+    assert jules.label == "Jules"
+    assert jules == deck.provider_brand("jules-cloud")
+    assert jules.svg != brands.UNKNOWN_BRAND.svg
+    for render in (deck.harness_badge_html, deck.provider_badge_html):
+        badge = ElementTree.fromstring(render("jules"))
+        assert badge.attrib["aria-label"] == "Jules"
+        assert badge.attrib["role"] == "img"
+        assert badge.attrib["title"] == "jules"
+        svg = next(iter(badge))
+        assert svg.attrib["viewBox"] == "0 0 180 180"
+        # Self-contained vector geometry, with no resource or executable elements.
+        assert {element.tag for element in svg.iter()} <= {"svg", "path"}
+        assert all(not key.startswith("on") for element in svg.iter() for key in element.attrib)
+        assert all("href" not in key for element in svg.iter() for key in element.attrib)
 
 
 def test_badge_html_embeds_svg_and_escapes_title() -> None:
@@ -143,7 +161,10 @@ def test_hostile_brand_names_are_escaped() -> None:
     for html in (harness_html, provider_html):
         assert "<script>" not in html
         assert "&lt;script&gt;" in html
-        assert "??" in html
+        assert ">??<" not in html
+        assert 'aria-label="Agent"' in html
+        assert 'role="img"' in html
+        assert "<svg" in html
         badge = ElementTree.fromstring(html)
         assert "badge" in badge.attrib["class"].split()
         assert all("style" not in element.attrib for element in badge.iter())
@@ -272,7 +293,7 @@ def test_row_snapshot() -> None:
         '<div class="row-body"><p class="row-title">'
         f'<a href="/view/machines?node={NODE_A}&amp;repo=repo">repo</a></p>'
         '<p class="row-meta" title="opencode/muse-spark-1.3-contributor-free">'
-        '<span class="badge badge-color-2b6cb0" title="opencode" aria-label="OpenCode">' + oc.svg + "</span> "
+        '<span class="badge badge-icon" role="img" title="opencode" aria-label="OpenCode">' + oc.svg + "</span> "
         "muse13 · Example</p></div>"
         '<span class="row-time">10s</span></li>'
     )
@@ -312,4 +333,4 @@ def test_cloud_and_session_badges() -> None:
     )
     session_html = overview.render_sessions(sessions)
     assert "<svg" in session_html and 'aria-label="Claude"' in session_html
-    assert ">??<" in session_html
+    assert 'aria-label="Agent"' in session_html

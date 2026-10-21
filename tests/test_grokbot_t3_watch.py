@@ -625,3 +625,44 @@ def test_pass_budget_leaves_room_for_the_slowest_row():
     # A row that starts just inside the budget may still make a status call and post to every target.
     slowest_row = CALL_TIMEOUT + watch.MAX_TARGETS * watch.POST_TIMEOUT
     assert watch.PASS_BUDGET_SECONDS + slowest_row < watch.UNIT_TIMEOUT_SECONDS
+
+
+@pytest.mark.parametrize(
+    "elapsed,enabled,expected_timeout,failed",
+    [(0, True, 1, 0), (257.6, True, 0.4, 0), (258, True, None, 1), (301, True, None, 1), (0, False, None, 0)],
+)
+def test_flush_lock_wait_respects_unit_budget_after_request_wakes(
+    setup, monkeypatch, elapsed, enabled, expected_timeout, failed
+):
+    from types import SimpleNamespace
+
+    tmp_path, targets, ledger = setup
+    _record(ledger, "r1", state="succeeded")
+    runtime = SimpleNamespace(enabled=enabled, hub_token_file=tmp_path / "principal.token")
+    monkeypatch.setattr(watch, "_wake_hub_inbox", lambda **kwargs: None)
+    post = Post([])
+    flushed = []
+
+    def flush(action, **kwargs):
+        assert action == "flush_credential"
+        assert len(post.calls) == 1
+        flushed.append(kwargs)
+
+    monkeypatch.setattr(watch, "call_message", flush)
+    ticks = iter([0, 0, elapsed])
+    summary = watch.run_watch_once(
+        runner=Runner({}),
+        runtime=runtime,
+        ledger=ledger,
+        wake_targets=targets,
+        log_path=tmp_path / "w.jsonl",
+        post=post,
+        monotonic=lambda: next(ticks),
+    )
+    assert summary["woken"] == 1 and summary["failed"] == failed
+    if expected_timeout is None:
+        assert flushed == []
+    else:
+        assert len(flushed) == 1
+        assert flushed[0]["token_file"] == str(runtime.hub_token_file)
+        assert flushed[0]["lock_timeout"] == pytest.approx(expected_timeout)

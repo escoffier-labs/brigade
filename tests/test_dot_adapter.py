@@ -111,6 +111,10 @@ class Fixture(unittest.TestCase):
         self.runtime = replace(
             self.runtime, paths=replace(self.runtime.paths, workspace=self.workspace, state_dir=self.private, bin=bins)
         )
+        token = self.root / "adapter.token"
+        token.write_text("fixture-adapter-credential-" * 2)
+        token.chmod(0o600)
+        self.runtime = replace(self.runtime, hub=replace(self.runtime.hub, message_token_file=token))
         self.runner = FakeRunner()
         self.messages = FakeMessages(monkeypatch)
         self.adapter = self.make_adapter(self.dispatch)

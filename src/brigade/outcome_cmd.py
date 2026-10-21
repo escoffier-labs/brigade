@@ -22,7 +22,15 @@ import unicodedata
 from pathlib import Path
 from typing import Any
 
-from . import causal_receipt, localio, outcome as core, receipt_schema, scorecard as scorecard_mod, verify_trial
+from . import (
+    causal_receipt,
+    localio,
+    outcome as core,
+    outcome_projection,
+    receipt_schema,
+    scorecard as scorecard_mod,
+    verify_trial,
+)
 from .outcome_discovery import (
     _artifact_content_path_at,
     _artifact_id_has_controls,
@@ -1436,43 +1444,12 @@ def load_transitions(target: Path) -> list[core.StatusTransition]:
     status it moved to, and when. Malformed or partial receipts are skipped so
     one bad file cannot break the drift check.
     """
-    decisions = _decisions_dir(target)
-    if not decisions.is_dir():
-        return []
-    transitions: list[core.StatusTransition] = []
-    for path in sorted(decisions.glob("*.json")):
-        payload = localio.read_json_dict(path) or {}
-        artifact_id = payload.get("artifact_id")
-        new_status = payload.get("new_status")
-        created_at = payload.get("created_at")
-        route_policy = payload.get("route_policy")
-        if artifact_id and new_status and created_at:
-            transitions.append(
-                core.StatusTransition(
-                    str(artifact_id),
-                    str(new_status),
-                    str(created_at),
-                    route_policy=route_policy if isinstance(route_policy, dict) else None,
-                )
-            )
-    return transitions
+    return outcome_projection.load_transition_report(target)[0]
 
 
 def _status_drift(rebuilt: dict[str, dict], persisted: dict[str, dict]) -> list[dict]:
     """Return per-artifact differences between the rebuilt and persisted status."""
-    drift: list[dict] = []
-    for artifact_id in sorted(set(rebuilt) | set(persisted)):
-        want = rebuilt.get(artifact_id)
-        have = persisted.get(artifact_id)
-        if want == have:
-            continue
-        if want is None:
-            drift.append({"artifact_id": artifact_id, "issue": "only-in-status", "persisted": have})
-        elif have is None:
-            drift.append({"artifact_id": artifact_id, "issue": "missing-from-status", "rebuilt": want})
-        else:
-            drift.append({"artifact_id": artifact_id, "issue": "mismatch", "rebuilt": want, "persisted": have})
-    return drift
+    return outcome_projection.status_drift(rebuilt, persisted)
 
 
 def rebuild_status(*, target: Path, check: bool = False, json_output: bool = False) -> int:
@@ -2603,11 +2580,24 @@ def doctor(*, target: Path, json_output: bool = False) -> int:
             "repair_requires_operator_confirm": True,
         }
     payload["completed_ledger"] = completed_ledger
+    payload["status_projection"] = outcome_projection.load_status_projection_report(target)
     if json_output:
         print(json.dumps(payload, indent=2, sort_keys=True))
         return 0
     print(f"outcome doctor: {target}")
     print(f"receipts: {receipts_cmd.summary_detail(target)}")
+    projection = payload["status_projection"]
+    print(
+        "status_projection: "
+        f"reproducible={projection['reproducible']} legacy={projection['legacy']} "
+        f"rebuilt={projection['rebuilt_count']} persisted={projection['persisted_count']} "
+        f"skipped_receipts={projection['skipped_receipts']} status_valid={projection['status_valid']}"
+    )
+    for line in outcome_projection.status_drift_lines(projection["drift"]):
+        print(line)
+    skipped_names = projection["skipped_receipt_names"]
+    if skipped_names:
+        print(f"skipped_decision_receipts: {', '.join(skipped_names)}")
     if break_info is None:
         print("completed_ledger: ok")
     else:

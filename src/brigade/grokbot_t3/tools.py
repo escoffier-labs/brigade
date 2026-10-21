@@ -8,6 +8,8 @@ import threading
 from datetime import datetime, timezone
 from typing import Any, Callable
 
+from ..hub_messages import INBOX_TOOLS, HubMessageError
+from .inbox import HubInbox
 from . import contracts as c
 from .fleet import FleetCallError, FleetProtocolError, FleetTimeout, RevisionError
 from .ledger import Ledger
@@ -72,14 +74,37 @@ class T3DispatchTools:
             "t3_wait": self.wait,
         }
         try:
-            if name not in handlers:
+            if name in INBOX_TOOLS:
+                result = self._inbox_tool(name, c.PARSERS[name](arguments))
+            elif name not in handlers:
                 raise c.T3DispatchError("invalid_request")
-            result = handlers[name](c.PARSERS[name](arguments))
+            else:
+                result = handlers[name](c.PARSERS[name](arguments))
             if len(json.dumps(result, separators=(",", ":")).encode("utf-8")) > c.PUBLIC_RESULT_LIMIT:
                 raise c.T3DispatchError("unavailable")
             return result
         except c.T3DispatchError as exc:
             return exc.public_error()
+
+    def _inbox_tool(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
+        if self.runtime.hub_token_file is None:
+            raise c.T3DispatchError("hub-not-configured")
+        if name in {"inbox_ack", "inbox_reply", "message_send"}:
+            self._require_enabled()
+        hub = HubInbox(
+            token_file=str(self.runtime.hub_token_file), recipients=self.runtime.hub_recipients, clock=self.now
+        )
+        method = {
+            "inbox_list": "list",
+            "inbox_ack": "ack",
+            "inbox_reply": "reply",
+            "message_send": "send",
+            "message_status": "status",
+        }[name]
+        try:
+            return getattr(hub, method)(**args)
+        except HubMessageError as error:
+            raise c.T3DispatchError("hub-error", hub_code=error.hub_code) from None
 
     def _require_enabled(self) -> None:
         if not self.runtime.enabled:

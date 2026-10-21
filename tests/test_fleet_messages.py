@@ -17,6 +17,7 @@ from pathlib import Path
 
 import pytest
 
+from brigade import fleet_client_message_credentials as credentials
 from brigade import cli, fleet_client, fleet_client_messages, fleet_hub, fleet_hub_enrollment, fleet_hub_messages
 from brigade.cli import fleet_messages as fleet_messages_cli
 
@@ -119,7 +120,7 @@ def test_future_message_timestamp_returns_retryable_error_code(message_hub):
 
 
 def test_ack_requires_matching_response_message_id(monkeypatch):
-    monkeypatch.setattr(fleet_client_messages, "_settings", lambda: ("https://hub.invalid", "token", NODE_A))
+    monkeypatch.setattr(credentials, "message_settings", lambda _path=None: ("https://hub.invalid", "token", NODE_A))
     monkeypatch.setattr(fleet_client_messages, "_request", lambda *_args, **_kwargs: (200, {}))
 
     with pytest.raises(fleet_client.FleetClientError, match="did not confirm the requested message"):
@@ -156,7 +157,7 @@ def test_ack_requires_matching_response_message_id(monkeypatch):
     ],
 )
 def test_message_list_rejects_invalid_success_payload(monkeypatch, payload):
-    monkeypatch.setattr(fleet_client_messages, "_settings", lambda: ("https://hub.invalid", "token", NODE_A))
+    monkeypatch.setattr(credentials, "message_settings", lambda _path=None: ("https://hub.invalid", "token", NODE_A))
     monkeypatch.setattr(fleet_client_messages, "_request", lambda *_args, **_kwargs: (200, payload))
 
     with pytest.raises(fleet_client.FleetClientError, match="invalid message page"):
@@ -165,7 +166,7 @@ def test_message_list_rejects_invalid_success_payload(monkeypatch, payload):
 
 def test_message_list_rejects_id_before_requested_cursor(monkeypatch):
     payload = {"messages": [{"id": 5}], "next_cursor": 5}
-    monkeypatch.setattr(fleet_client_messages, "_settings", lambda: ("https://hub.invalid", "token", NODE_A))
+    monkeypatch.setattr(credentials, "message_settings", lambda _path=None: ("https://hub.invalid", "token", NODE_A))
     monkeypatch.setattr(fleet_client_messages, "_request", lambda *_args, **_kwargs: (200, payload))
 
     with pytest.raises(fleet_client.FleetClientError, match="invalid message page"):
@@ -174,7 +175,7 @@ def test_message_list_rejects_id_before_requested_cursor(monkeypatch):
 
 def test_message_list_accepts_consistent_cursor(monkeypatch):
     page = {"messages": [{"id": 7}, {"id": 9}], "next_cursor": 9}
-    monkeypatch.setattr(fleet_client_messages, "_settings", lambda: ("https://hub.invalid", "token", NODE_A))
+    monkeypatch.setattr(credentials, "message_settings", lambda _path=None: ("https://hub.invalid", "token", NODE_A))
     monkeypatch.setattr(fleet_client_messages, "_request", lambda *_args, **_kwargs: (200, page))
 
     assert fleet_client_messages.list_messages(after=5) == page
@@ -849,6 +850,7 @@ def test_message_post_does_not_follow_same_origin_redirect():
     class RedirectHandler(BaseHTTPRequestHandler):
         def do_POST(self):  # noqa: N802 - stdlib handler API
             requests.append(self.command)
+            self.rfile.read(int(self.headers.get("Content-Length", "0")))
             self.send_response(302)
             self.send_header("Location", "/redirect-target")
             self.send_header("Content-Length", "0")
@@ -959,11 +961,10 @@ def test_principal_add_reuses_pending_request_after_ambiguous_timeout(tmp_path, 
     with pytest.raises(fleet_client.FleetClientError, match="TimeoutError"):
         fleet_client_messages.manage_principal("add", name="researcher")
 
-    stable_path = fleet_client_messages._principal_pending_path("researcher", "admin-token")
-    legacy_path = stable_path.with_name(f"{NODE_A}.{stable_path.name}")
-    stable_path.rename(legacy_path)
-    # Recover retry state written by the older node-scoped format even after
-    # the home node identity changes.
+    stable_path = fleet_client_messages._principal_pending_path(
+        "researcher", "admin-token", hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    )
+    # Active scoped retry state survives a change in the home node identity.
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_B)
     deferred_request_ids = []
     enrolled = fleet_client_messages.manage_principal(
@@ -977,7 +978,80 @@ def test_principal_add_reuses_pending_request_after_ambiguous_timeout(tmp_path, 
     assert requests[0]["request_id"] == requests[1]["request_id"]
     assert requests[0]["token"] == requests[1]["token"]
     assert not stable_path.exists()
-    assert fleet_client._read_spool(legacy_path) == []
+
+
+@pytest.mark.parametrize("interruption", ["before-copy", "after-copy", "after-finalize"])
+def test_node_prefixed_principal_retry_cannot_resurrect_after_interruption(tmp_path, monkeypatch, interruption):
+    settings = {"hub_url": "https://a.invalid", "node_token": "", "admin_token": "fixture-admin"}
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: dict(settings))
+    pending = fleet_client_messages._pending_principal_request(
+        "fixture", settings["admin_token"], None, hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    )
+    active = fleet_client_messages._principal_pending_path(
+        "fixture", settings["admin_token"], hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    )
+    history = active.with_name(f"node-a.{active.name}")
+    original = active.read_bytes()
+    if interruption == "before-copy":
+        active.rename(history)
+    else:
+        history.write_bytes(original)
+        history.chmod(0o600)
+        if interruption == "after-finalize":
+            fleet_client_messages.finalize_principal_add("fixture", request_id=pending["request_id"])
+    active_bytes = active.read_bytes() if active.exists() else None
+    enrollments = []
+
+    def principal_request(hub, _admin, body):
+        if body["action"] == "get":
+            return 404, {"error": "missing"}
+        enrollments.append((hub, dict(body)))
+        return 201, {
+            "principal": {
+                "principal_id": "agent:fixture",
+                "name": "fixture",
+                "token": body["token"],
+                "enrollment_id": body["request_id"],
+            }
+        }
+
+    monkeypatch.setattr(fleet_client_messages, "_principal_admin_request", principal_request)
+    # Retrying repeatedly must preserve both sides of an interrupted migration.
+    for _ in range(2):
+        with pytest.raises(fleet_client.FleetClientError) as error:
+            fleet_client_messages.manage_principal("add", name="fixture")
+        assert str(error.value) == "node-prefixed principal retry requires reconciliation; left untouched"
+        assert history.read_bytes() == original
+        assert (active.read_bytes() if active.exists() else None) == active_bytes
+        assert enrollments == []
+
+    # The same admin credential at another endpoint gets independent retry state.
+    settings["hub_url"] = "https://b.invalid"
+    deferred = []
+    fleet_client_messages.manage_principal("add", name="fixture", _defer_finalize=True, _deferred_request_ids=deferred)
+    assert len(enrollments) == 1
+    assert enrollments[0][0] == "https://b.invalid"
+    assert deferred == [enrollments[0][1]["request_id"]]
+    assert deferred[0] != pending["request_id"]
+    other = fleet_client_messages._principal_pending_path(
+        "fixture", settings["admin_token"], hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    )
+    assert other != active
+    assert fleet_client._read_spool(other)[0]["request_id"] == deferred[0]
+    fleet_client_messages.finalize_principal_add("fixture", request_id=deferred[0])
+    assert not other.exists()
+    assert history.read_bytes() == original
+    assert (active.read_bytes() if active.exists() else None) == active_bytes
+
+    # A normalized return to the original endpoint must still refuse old history.
+    settings["hub_url"] = "https://a.invalid/"
+    with pytest.raises(fleet_client.FleetClientError) as error:
+        fleet_client_messages.manage_principal("add", name="fixture")
+    assert str(error.value) == "node-prefixed principal retry requires reconciliation; left untouched"
+    assert len(enrollments) == 1
+    assert history.read_bytes() == original
+    assert (active.read_bytes() if active.exists() else None) == active_bytes
 
 
 def test_principal_add_keeps_retry_state_until_response_matches_request(tmp_path, monkeypatch):
@@ -1011,7 +1085,9 @@ def test_principal_add_keeps_retry_state_until_response_matches_request(tmp_path
 
     with pytest.raises(fleet_client.FleetClientError, match="did not confirm the enrolled principal"):
         fleet_client_messages.manage_principal("add", name="researcher")
-    path = fleet_client_messages._principal_pending_path("researcher", "admin-token")
+    path = fleet_client_messages._principal_pending_path(
+        "researcher", "admin-token", hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    )
     assert fleet_client._read_spool(path)[0]["request_id"] == requests[0]["request_id"]
     monkeypatch.setattr(
         fleet_client,
@@ -1068,7 +1144,9 @@ def test_stale_principal_finalizer_preserves_new_enrollment_generation(tmp_path,
         "load_fleet_settings",
         lambda: {"hub_url": "https://hub.invalid", "node_token": "", "admin_token": "admin-token"},
     )
-    path = fleet_client_messages._principal_pending_path("researcher", "admin-token")
+    path = fleet_client_messages._principal_pending_path(
+        "researcher", "admin-token", hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    )
     with fleet_client._spool_lock(path) as dir_fd:
         fleet_client._write_spool_atomic(
             path, [{"name": "researcher", "request_id": "older-generation"}], dir_fd=dir_fd
@@ -1129,7 +1207,9 @@ def test_principal_revoke_reuses_generation_after_ambiguous_timeout(tmp_path, mo
 
     assert [body["expected_enrollment_id"] for body in revoke_requests] == ["a" * 32, "a" * 32]
     assert generation_reads == ["a" * 32]
-    assert not fleet_client_messages._principal_revocation_path("researcher", ADMIN).exists()
+    assert not fleet_client_messages._principal_revocation_path(
+        "researcher", ADMIN, hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    ).exists()
 
     fleet_client_messages.manage_principal("revoke", name="researcher")
     assert revoke_requests[-1]["expected_enrollment_id"] == "b" * 32
@@ -1205,10 +1285,14 @@ def test_offline_send_is_spooled_and_delivered_by_flush(tmp_path, monkeypatch):
     )
     assert queued["queued"] is True
     assert fleet_client_messages.flush(NODE_A) == 0
-    assert fleet_client_messages._spool_path(NODE_A).exists()
+    assert fleet_client_messages._spool_path(
+        NODE_A, fleet_client.load_fleet_settings()["node_token"], hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    ).exists()
     assert fleet_client_messages.flush(NODE_A) == 1
     assert len({attempt["client_id"] for attempt in attempts}) == 1
-    assert not fleet_client_messages._spool_path(NODE_A).exists()
+    assert not fleet_client_messages._spool_path(
+        NODE_A, fleet_client.load_fleet_settings()["node_token"], hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    ).exists()
 
 
 def test_send_refuses_before_post_when_full_spool_cannot_retain_retry(tmp_path, monkeypatch):
@@ -1219,7 +1303,9 @@ def test_send_refuses_before_post_when_full_spool_cannot_retain_retry(tmp_path, 
         "load_fleet_settings",
         lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
-    path = fleet_client_messages._spool_path(NODE_A, "node-secret")
+    path = fleet_client_messages._spool_path(
+        NODE_A, "node-secret", hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    )
     queued_for_b = {
         "action": "send",
         "to": NODE_B,
@@ -1270,7 +1356,9 @@ def test_send_does_not_post_until_spool_fsync_succeeds(tmp_path, monkeypatch, fa
         "load_fleet_settings",
         lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
-    path = fleet_client_messages._spool_path(NODE_A, "node-secret")
+    path = fleet_client_messages._spool_path(
+        NODE_A, "node-secret", hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    )
     with fleet_client._spool_lock(path):
         pass
     attempts = []
@@ -1337,7 +1425,9 @@ def test_ambiguous_spool_append_surfaces_client_id_without_posting(tmp_path, mon
 
     assert attempts == []
     retained_id = error.value.args[0].split("client_id ", 1)[1].split(";", 1)[0]
-    path = fleet_client_messages._spool_path(NODE_A, "node-secret")
+    path = fleet_client_messages._spool_path(
+        NODE_A, "node-secret", hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    )
     assert [entry["client_id"] for entry in fleet_client._read_spool(path)] == [retained_id]
 
 
@@ -1356,7 +1446,9 @@ def test_message_spool_refuses_overflow_without_evicting_queued_messages(tmp_pat
     ]
     encoded_size = len((fleet_client._encode(messages[0]) + "\n").encode("utf-8"))
     monkeypatch.setattr(fleet_client, "MAX_SPOOL_BYTES", encoded_size * 3 - 1)
-    path = fleet_client_messages._spool_path(NODE_A, "node-secret")
+    path = fleet_client_messages._spool_path(
+        NODE_A, "node-secret", hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    )
     with fleet_client._spool_lock(path) as dir_fd:
         assert fleet_client._spool_append_locked(path, messages[0], dir_fd=dir_fd)
         assert fleet_client._spool_append_locked(path, messages[1], dir_fd=dir_fd)
@@ -1398,7 +1490,9 @@ def test_new_send_reports_unauthorized_without_cross_credential_spooling(tmp_pat
             priority="normal",
         )
 
-    assert not fleet_client_messages._spool_path(NODE_A, "node-secret").exists()
+    assert not fleet_client_messages._spool_path(
+        NODE_A, "node-secret", hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    ).exists()
 
 
 @pytest.mark.parametrize(
@@ -1416,7 +1510,9 @@ def test_send_surfaces_unauthorized_while_draining_existing_spool(tmp_path, monk
         "load_fleet_settings",
         lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
-    path = fleet_client_messages._spool_path(NODE_A, "node-secret")
+    path = fleet_client_messages._spool_path(
+        NODE_A, "node-secret", hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    )
     old = {
         "action": "send",
         "to": NODE_B,
@@ -1459,7 +1555,9 @@ def test_send_surfaces_unauthorized_reply_lookup_while_draining(tmp_path, monkey
         "load_fleet_settings",
         lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
-    path = fleet_client_messages._spool_path(NODE_A, "node-secret")
+    path = fleet_client_messages._spool_path(
+        NODE_A, "node-secret", hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    )
     blocked = {
         "action": "send",
         "to": NODE_B,
@@ -1516,7 +1614,9 @@ def test_new_reply_surfaces_unauthorized_parent_lookup(tmp_path, monkeypatch, st
         "load_fleet_settings",
         lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
-    path = fleet_client_messages._spool_path(NODE_A, "node-secret")
+    path = fleet_client_messages._spool_path(
+        NODE_A, "node-secret", hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    )
     old = {
         "action": "send",
         "to": NODE_B,
@@ -1563,7 +1663,7 @@ def test_spool_flush_keeps_message_during_recipient_revocation(message_hub, tmp_
         reference=None,
         priority="normal",
     )
-    path = fleet_client_messages._spool_path(NODE_A, token_a)
+    path = fleet_client_messages._spool_path(NODE_A, token_a, hub_url=fleet_client.load_fleet_settings()["hub_url"])
     assert queued["queued"] is True
 
     with sqlite3.connect(db) as conn:
@@ -1606,7 +1706,9 @@ def test_retryable_send_is_spooled_instead_of_reported_delivered(status, tmp_pat
     )
 
     assert result["queued"] is True
-    queued = fleet_client._read_spool(fleet_client_messages._spool_path(NODE_A, "node-secret"))
+    queued = fleet_client._read_spool(
+        fleet_client_messages._spool_path(NODE_A, "node-secret", hub_url=fleet_client.load_fleet_settings()["hub_url"])
+    )
     assert len(queued) == 1
     assert queued[0]["subject"] == "Keep for retry"
     assert queued[0]["client_id"] == result["client_id"]
@@ -1630,7 +1732,9 @@ def test_send_spools_success_response_without_matching_client_id(tmp_path, monke
         priority="normal",
     )
 
-    path = fleet_client_messages._spool_path(NODE_A, "node-secret")
+    path = fleet_client_messages._spool_path(
+        NODE_A, "node-secret", hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    )
     queued = fleet_client._read_spool(path)
     assert result["queued"] is True
     assert len(queued) == 1
@@ -1646,7 +1750,9 @@ def test_retryable_spool_flush_keeps_message_queued(status, tmp_path, monkeypatc
         "load_fleet_settings",
         lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
-    path = fleet_client_messages._spool_path(NODE_A, "node-secret")
+    path = fleet_client_messages._spool_path(
+        NODE_A, "node-secret", hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    )
     message = {
         "action": "send",
         "to": NODE_B,
@@ -1675,7 +1781,9 @@ def test_spool_flush_keeps_message_when_success_response_does_not_confirm_client
         "load_fleet_settings",
         lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
-    path = fleet_client_messages._spool_path(NODE_A, "node-secret")
+    path = fleet_client_messages._spool_path(
+        NODE_A, "node-secret", hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    )
     message = {
         "action": "send",
         "to": NODE_B,
@@ -1698,7 +1806,9 @@ def test_spool_flush_drops_forbidden_send_and_delivers_next_message(tmp_path, mo
         "load_fleet_settings",
         lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
-    path = fleet_client_messages._spool_path(NODE_A, "node-secret")
+    path = fleet_client_messages._spool_path(
+        NODE_A, "node-secret", hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    )
     enqueued_at = datetime.now(timezone.utc).isoformat()
     forbidden = {"action": "send", "client_id": "forbidden", "enqueued_at": enqueued_at}
     reply = {"action": "reply", "client_id": "valid-reply", "enqueued_at": enqueued_at}
@@ -1747,7 +1857,9 @@ def test_queued_messages_are_not_replayed_with_replaced_node_credentials(tmp_pat
         reference=None,
         priority="normal",
     )
-    first_path = fleet_client_messages._spool_path(NODE_A)
+    first_path = fleet_client_messages._spool_path(
+        NODE_A, fleet_client.load_fleet_settings()["node_token"], hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    )
     assert queued["queued"] is True
     assert first_path.is_file()
 
@@ -1791,7 +1903,11 @@ def test_queued_messages_survive_home_node_identity_change(tmp_path, monkeypatch
         reference=None,
         priority="normal",
     )
-    original_path = fleet_client_messages._spool_path(current_node)
+    original_path = fleet_client_messages._spool_path(
+        current_node,
+        fleet_client.load_fleet_settings()["node_token"],
+        hub_url=fleet_client.load_fleet_settings()["hub_url"],
+    )
     assert queued["queued"] is True
     assert original_path.is_file()
 
@@ -1804,7 +1920,14 @@ def test_queued_messages_survive_home_node_identity_change(tmp_path, monkeypatch
         priority="normal",
     )
 
-    assert fleet_client_messages._spool_path(current_node) == original_path
+    assert (
+        fleet_client_messages._spool_path(
+            current_node,
+            fleet_client.load_fleet_settings()["node_token"],
+            hub_url=fleet_client.load_fleet_settings()["hub_url"],
+        )
+        == original_path
+    )
     assert attempts[:2] == [queued["client_id"], queued["client_id"]]
     assert attempts[2] != queued["client_id"]
     assert newer["message"]["client_id"] == attempts[2]
@@ -1853,7 +1976,9 @@ def test_message_flush_preserves_malformed_spool(tmp_path, monkeypatch):
         "load_fleet_settings",
         lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
-    path = fleet_client_messages._spool_path(NODE_A)
+    path = fleet_client_messages._spool_path(
+        NODE_A, fleet_client.load_fleet_settings()["node_token"], hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    )
     path.parent.mkdir(parents=True)
     original = b'{"client_id":\n'
     path.write_bytes(original)
@@ -1872,7 +1997,9 @@ def test_flush_reports_spools_scoped_to_replaced_credentials(tmp_path, monkeypat
         "load_fleet_settings",
         lambda: {"hub_url": "https://hub.invalid", "node_token": "node-token-b", "admin_token": ""},
     )
-    old_path = fleet_client_messages._spool_path(NODE_A, "node-token-a")
+    old_path = fleet_client_messages._spool_path(
+        NODE_A, "node-token-a", hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    )
     old_message = {
         "action": "send",
         "to": NODE_B,
@@ -1957,8 +2084,17 @@ def test_principal_management_uses_hard_wall_clock_deadline(monkeypatch):
 
 
 def test_spool_flush_obeys_aggregate_wall_clock_budget(tmp_path, monkeypatch):
+    from brigade.fleet_client_message_credentials import MessageAuthority
+
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: dict(hub_url="https://hub.invalid", node_token="node-token", admin_token=""),
+    )
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
+    message_authority = MessageAuthority.capture()
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
-    path = fleet_client_messages._spool_path(NODE_A, "node-token")
+    path = fleet_client_messages._spool_path(NODE_A, "node-token", hub_url="https://hub.invalid")
     now = datetime.now(timezone.utc).isoformat()
     with fleet_client._spool_lock(path) as dir_fd:
         for index in range(4):
@@ -1985,7 +2121,7 @@ def test_spool_flush_obeys_aggregate_wall_clock_budget(tmp_path, monkeypatch):
 
     monkeypatch.setattr(fleet_client_messages, "_request", request)
 
-    delivered = fleet_client_messages._flush_locked(path, "https://hub.invalid", "node-token")
+    delivered = fleet_client_messages._flush_locked(path, message_authority)
 
     assert timeouts == [5.0, 5.0, 2.0]
     assert delivered == 3
@@ -2045,8 +2181,17 @@ def test_new_send_flushes_older_spooled_messages_first(tmp_path, monkeypatch):
 
 
 def test_spool_flush_skips_recipient_quota_without_reordering_that_recipient(tmp_path, monkeypatch):
+    from brigade.fleet_client_message_credentials import MessageAuthority
+
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: dict(hub_url="https://hub.invalid", node_token="node-token", admin_token=""),
+    )
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
+    message_authority = MessageAuthority.capture()
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
-    path = fleet_client_messages._spool_path(NODE_A, "node-token")
+    path = fleet_client_messages._spool_path(NODE_A, "node-token", hub_url="https://hub.invalid")
     now = datetime.now(timezone.utc).isoformat()
     messages = [
         {"action": "send", "to": NODE_B, "client_id": "blocked-1", "enqueued_at": now},
@@ -2070,15 +2215,24 @@ def test_spool_flush_skips_recipient_quota_without_reordering_that_recipient(tmp
 
     monkeypatch.setattr(fleet_client_messages, "_request", request)
 
-    assert fleet_client_messages._flush_locked(path, "https://hub.invalid", "node-token") == 1
+    assert fleet_client_messages._flush_locked(path, message_authority) == 1
 
     assert attempts == ["blocked-1", "deliver-1"]
     assert [message["client_id"] for message in fleet_client._read_spool(path)] == ["blocked-1", "blocked-2"]
 
 
 def test_spool_flush_resolves_reply_before_blocked_recipient_delivery(tmp_path, monkeypatch):
+    from brigade.fleet_client_message_credentials import MessageAuthority
+
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: dict(hub_url="https://hub.invalid", node_token="node-token", admin_token=""),
+    )
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
+    message_authority = MessageAuthority.capture()
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
-    path = fleet_client_messages._spool_path(NODE_A, "node-token")
+    path = fleet_client_messages._spool_path(NODE_A, "node-token", hub_url="https://hub.invalid")
     now = datetime.now(timezone.utc).isoformat()
     messages = [
         {"action": "send", "to": NODE_B, "client_id": "blocked-send", "enqueued_at": now},
@@ -2103,16 +2257,25 @@ def test_spool_flush_resolves_reply_before_blocked_recipient_delivery(tmp_path, 
 
     monkeypatch.setattr(fleet_client_messages, "_request", request)
 
-    assert fleet_client_messages._flush_locked(path, "https://hub.invalid", "node-token") == 0
+    assert fleet_client_messages._flush_locked(path, message_authority) == 0
 
     assert attempts == ["send", "list"]
     assert [message["client_id"] for message in fleet_client._read_spool(path)] == ["blocked-send", "blocked-reply"]
 
 
 def test_spool_reply_recipient_lookup_obeys_drain_deadline_and_batch_limit(tmp_path, monkeypatch):
+    from brigade.fleet_client_message_credentials import MessageAuthority
+
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: dict(hub_url="https://hub.invalid", node_token="node-token", admin_token=""),
+    )
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
+    message_authority = MessageAuthority.capture()
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
     monkeypatch.setattr(fleet_client_messages, "monotonic", iter((0.0, 0.0, 0.0, 11.0)).__next__)
-    path = fleet_client_messages._spool_path(NODE_A, "node-token")
+    path = fleet_client_messages._spool_path(NODE_A, "node-token", hub_url="https://hub.invalid")
     now = datetime.now(timezone.utc).isoformat()
     messages = [
         {"action": "send", "to": NODE_B, "client_id": "blocked-send", "enqueued_at": now},
@@ -2139,7 +2302,7 @@ def test_spool_reply_recipient_lookup_obeys_drain_deadline_and_batch_limit(tmp_p
 
     monkeypatch.setattr(fleet_client_messages, "_request", request)
 
-    assert fleet_client_messages._flush_locked(path, "https://hub.invalid", "node-token", max_messages=2) == 0
+    assert fleet_client_messages._flush_locked(path, message_authority, max_messages=2) == 0
 
     assert attempts == [("send", None), ("list", 1.0)]
     assert [message["client_id"] for message in fleet_client._read_spool(path)] == [
@@ -2150,8 +2313,17 @@ def test_spool_reply_recipient_lookup_obeys_drain_deadline_and_batch_limit(tmp_p
 
 
 def test_spool_drops_reply_when_parent_is_gone_and_continues_other_recipients(tmp_path, monkeypatch):
+    from brigade.fleet_client_message_credentials import MessageAuthority
+
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: dict(hub_url="https://hub.invalid", node_token="node-token", admin_token=""),
+    )
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
+    message_authority = MessageAuthority.capture()
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
-    path = fleet_client_messages._spool_path(NODE_A, "node-token")
+    path = fleet_client_messages._spool_path(NODE_A, "node-token", hub_url="https://hub.invalid")
     now = datetime.now(timezone.utc).isoformat()
     messages = [
         {"action": "send", "to": NODE_B, "client_id": "inactive-send", "enqueued_at": now},
@@ -2177,7 +2349,7 @@ def test_spool_drops_reply_when_parent_is_gone_and_continues_other_recipients(tm
 
     monkeypatch.setattr(fleet_client_messages, "_request", request)
 
-    assert fleet_client_messages._flush_locked(path, "https://hub.invalid", "node-token") == 1
+    assert fleet_client_messages._flush_locked(path, message_authority) == 1
 
     assert attempts == ["send", "list", "send"]
     assert [message["client_id"] for message in fleet_client._read_spool(path)] == ["inactive-send"]
@@ -2193,7 +2365,9 @@ def test_new_send_does_not_probe_unresolved_replies_after_spool_batch_limit(tmp_
     )
     monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.invalid"})
     monkeypatch.setattr(fleet_client_messages, "MESSAGE_BATCH_SIZE", 1)
-    path = fleet_client_messages._spool_path(NODE_A, "node-secret")
+    path = fleet_client_messages._spool_path(
+        NODE_A, "node-secret", hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    )
     now = datetime.now(timezone.utc).isoformat()
     messages = [
         {"action": "send", "to": NODE_B, "client_id": "old-send", "enqueued_at": now},
@@ -2236,7 +2410,9 @@ def test_new_send_only_waits_behind_blocked_messages_for_its_recipient(tmp_path,
         lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
     monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.invalid"})
-    path = fleet_client_messages._spool_path(NODE_A, "node-secret")
+    path = fleet_client_messages._spool_path(
+        NODE_A, "node-secret", hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    )
     old = {
         "action": "send",
         "to": NODE_B,
@@ -2286,7 +2462,9 @@ def test_new_reply_waits_only_behind_blocked_messages_for_its_recipient(tmp_path
         lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
     monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.invalid"})
-    path = fleet_client_messages._spool_path(NODE_A, "node-secret")
+    path = fleet_client_messages._spool_path(
+        NODE_A, "node-secret", hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    )
     old = {
         "action": "send",
         "to": NODE_B,
@@ -2369,7 +2547,13 @@ def test_interrupted_spool_drain_preserves_new_message(tmp_path, monkeypatch, ac
                 priority="normal",
             )
 
-    pending = fleet_client._read_spool(fleet_client_messages._spool_path(NODE_A))
+    pending = fleet_client._read_spool(
+        fleet_client_messages._spool_path(
+            NODE_A,
+            fleet_client.load_fleet_settings()["node_token"],
+            hub_url=fleet_client.load_fleet_settings()["hub_url"],
+        )
+    )
     assert len(pending) == 2
     assert pending[0]["client_id"] == older["client_id"]
     assert pending[1]["action"] == action
@@ -2413,8 +2597,14 @@ def test_reply_flushes_older_spooled_messages_first(tmp_path, monkeypatch):
 
 @pytest.mark.skipif(sys.platform == "win32", reason="Locked directory descriptors are POSIX-only; Windows uses paths")
 def test_ordered_send_uses_the_locked_directory_descriptor(tmp_path, monkeypatch):
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: dict(hub_url="https://hub.invalid", node_token="node-secret", admin_token=""),
+    )
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
-    spool = fleet_client_messages._spool_path(NODE_A, "node-secret")
+    spool = fleet_client_messages._spool_path(NODE_A, "node-secret", hub_url="https://hub.invalid")
     spool.parent.mkdir(parents=True)
     older = {"action": "send", "client_id": "older", "enqueued_at": datetime.now(timezone.utc).isoformat()}
     newer = {"action": "send", "client_id": "newer"}
@@ -2442,7 +2632,7 @@ def test_ordered_send_uses_the_locked_directory_descriptor(tmp_path, monkeypatch
     monkeypatch.setattr(Path, "is_symlink", reject_symlink_probe)
     monkeypatch.setattr(fleet_client_messages, "_request", request)
 
-    fleet_client_messages._send_ordered(newer, "https://hub.invalid", "node-secret", NODE_A)
+    fleet_client_messages._send_ordered(newer, credentials.MessageAuthority.capture())
 
     assert attempts == ["older", "newer"]
 
@@ -2456,7 +2646,9 @@ def test_new_send_bounds_opportunistic_spool_drain(tmp_path, monkeypatch):
         lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
     monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.invalid"})
-    spool = fleet_client_messages._spool_path(NODE_A)
+    spool = fleet_client_messages._spool_path(
+        NODE_A, fleet_client.load_fleet_settings()["node_token"], hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    )
     now = datetime.now(timezone.utc).isoformat()
     with fleet_client._spool_lock(spool) as dir_fd:
         for index in range(fleet_client_messages.MESSAGE_BATCH_SIZE + 1):
@@ -2524,7 +2716,9 @@ def test_future_timestamp_rejection_keeps_queued_message_for_retry(tmp_path, mon
         priority="normal",
     )
     assert queued["queued"] is True
-    spool = fleet_client_messages._spool_path(NODE_A)
+    spool = fleet_client_messages._spool_path(
+        NODE_A, fleet_client.load_fleet_settings()["node_token"], hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    )
     assert fleet_client._read_spool(spool) == [attempts[0]]
 
     clock_skewed = False
@@ -2565,7 +2759,9 @@ def test_interrupted_send_is_spooled_before_reraising(tmp_path, monkeypatch, act
                 17, body="Preserve this request", subject="Re: interrupted", reference=None, priority="normal"
             )
 
-    spool = fleet_client_messages._spool_path(NODE_A)
+    spool = fleet_client_messages._spool_path(
+        NODE_A, fleet_client.load_fleet_settings()["node_token"], hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    )
     assert fleet_client._read_spool(spool) == attempted
 
 
@@ -2632,7 +2828,9 @@ def test_invalid_offline_reply_is_not_claimed_queued(
             reference=reference,
             priority=priority,
         )
-    assert not fleet_client_messages._spool_path(NODE_A).exists()
+    assert not fleet_client_messages._spool_path(
+        NODE_A, fleet_client.load_fleet_settings()["node_token"], hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    ).exists()
 
 
 def test_reply_preserves_enqueue_time_and_rejects_expired_delivery(message_hub):
@@ -2775,6 +2973,7 @@ def test_principal_add_retry_state_finalizes_only_after_successful_output(monkey
         "manage_principal",
         lambda *_args, **kwargs: (
             kwargs["_deferred_request_ids"].append("enrollment-generation"),
+            kwargs["_deferred_paths"].append(Path("fixture-pending.jsonl")),
             events.append(("managed", kwargs.get("_defer_finalize"))),
             {"principal": {"token": "one-time-token"}},
         )[-1],
@@ -2782,7 +2981,7 @@ def test_principal_add_retry_state_finalizes_only_after_successful_output(monkey
     monkeypatch.setattr(
         fleet_client_messages,
         "finalize_principal_add",
-        lambda _name, *, request_id: events.append(("finalized", request_id)),
+        lambda _name, *, request_id, pending_path: events.append(("finalized", request_id)),
     )
 
     assert fleet_messages_cli._principal_add(args) == 0
@@ -2817,8 +3016,17 @@ def test_principal_add_retry_state_finalizes_only_after_successful_output(monkey
 
 
 def test_spool_rejection_log_escapes_hub_control_characters(tmp_path, monkeypatch, caplog):
+    from brigade.fleet_client_message_credentials import MessageAuthority
+
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_settings",
+        lambda: dict(hub_url="https://hub.invalid", node_token="node-token", admin_token=""),
+    )
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
+    message_authority = MessageAuthority.capture()
     monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path)
-    path = fleet_client_messages._spool_path(NODE_A, "node-token")
+    path = fleet_client_messages._spool_path(NODE_A, "node-token", hub_url="https://hub.invalid")
     message = {
         "action": "send",
         "to": NODE_B,
@@ -2835,10 +3043,11 @@ def test_spool_rejection_log_escapes_hub_control_characters(tmp_path, monkeypatc
         lambda *_args, **_kwargs: (400, {"error": "rejected\x1b[31mmessage"}),
     )
 
-    fleet_client_messages._flush_locked(path, "https://hub.invalid", "node-token")
+    fleet_client_messages._flush_locked(path, message_authority)
 
     assert "\x1b" not in caplog.text
-    assert "\\x1b[31m" in caplog.text
+    assert "rejected\\x1b[31mmessage" not in caplog.text
+    assert "hub_rejected" in caplog.text
 
 
 def test_message_body_file_read_is_bounded(monkeypatch):
@@ -2863,7 +3072,9 @@ def test_offline_send_does_not_claim_queued_when_spool_is_unsafe(tmp_path, monke
         "load_fleet_settings",
         lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
-    spool = fleet_client_messages._spool_path(NODE_A)
+    spool = fleet_client_messages._spool_path(
+        NODE_A, fleet_client.load_fleet_settings()["node_token"], hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    )
     spool.parent.mkdir(mode=0o700)
     target = tmp_path / "outside.jsonl"
     target.write_text("keep", encoding="utf-8")
@@ -2906,7 +3117,9 @@ def test_offline_send_validates_fields_before_claiming_queued(tmp_path, monkeypa
             reference=None,
             priority="normal",
         )
-    assert not fleet_client_messages._spool_path(NODE_A).exists()
+    assert not fleet_client_messages._spool_path(
+        NODE_A, fleet_client.load_fleet_settings()["node_token"], hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    ).exists()
 
 
 def test_flush_discards_messages_older_than_retention(tmp_path, monkeypatch):
@@ -2916,7 +3129,9 @@ def test_flush_discards_messages_older_than_retention(tmp_path, monkeypatch):
         "load_fleet_settings",
         lambda: {"hub_url": "https://hub.invalid", "node_token": "node-secret", "admin_token": ""},
     )
-    spool = fleet_client_messages._spool_path(NODE_A)
+    spool = fleet_client_messages._spool_path(
+        NODE_A, fleet_client.load_fleet_settings()["node_token"], hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    )
     expired = {
         "action": "send",
         "to": NODE_B,
@@ -3034,7 +3249,9 @@ def test_message_transports_guard_bearer_urls_before_request(action, hub_url, tm
         token = "node-token" if action in ("send", "reply", "list") else ADMIN
         assert requests[0].get_header("Authorization") == f"Bearer {token}"
     if action in ("send", "reply"):
-        assert not fleet_client_messages._spool_path(NODE_A, "node-token").exists()
+        assert not fleet_client_messages._spool_path(
+            NODE_A, "node-token", hub_url=fleet_client.load_fleet_settings()["hub_url"]
+        ).exists()
 
 
 @pytest.mark.parametrize("label", [None, "Original label"])
@@ -3078,7 +3295,9 @@ def test_principal_add_recovers_committed_request_after_label_change_and_conflic
     monkeypatch.setattr(fleet_client, "_run_with_deadline", lose_first_response)
     with pytest.raises(fleet_client.FleetClientError, match="TimeoutError"):
         fleet_client_messages.manage_principal("add", name="recoverable", label=label)
-    path = fleet_client_messages._principal_pending_path("recoverable", ADMIN)
+    path = fleet_client_messages._principal_pending_path(
+        "recoverable", ADMIN, hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    )
     pending = fleet_client._read_spool(path)
     if conflict:
         with pytest.raises(fleet_client.FleetClientError, match="conflict"):
@@ -3132,7 +3351,9 @@ def test_principal_add_clears_pending_request_after_definitive_validation_error(
     monkeypatch.setattr(fleet_client, "_hub_open", hub_open)
     with pytest.raises(fleet_client.FleetClientError, match="invalid label"):
         fleet_client_messages.manage_principal("add", name="researcher", label="")
-    path = fleet_client_messages._principal_pending_path("researcher", ADMIN)
+    path = fleet_client_messages._principal_pending_path(
+        "researcher", ADMIN, hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    )
     assert not path.exists()
 
     enrolled = fleet_client_messages.manage_principal("add", name="researcher", label="Corrected label")
@@ -3191,7 +3412,9 @@ def test_principal_add_retries_after_revoked_pending_enrollment(tmp_path, monkey
     assert first_request_id != requests[1]["request_id"]
     assert requests[1]["label"] == "Current label"
     assert enrolled["principal"]["token"] == requests[1]["token"]
-    assert not fleet_client_messages._principal_pending_path("researcher", ADMIN).exists()
+    assert not fleet_client_messages._principal_pending_path(
+        "researcher", ADMIN, hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    ).exists()
 
 
 def test_principal_revoke_clears_local_pending_enrollment(tmp_path, monkeypatch):
@@ -3202,8 +3425,12 @@ def test_principal_revoke_clears_local_pending_enrollment(tmp_path, monkeypatch)
         "load_fleet_settings",
         lambda: {"hub_url": "https://hub.invalid", "node_token": "", "admin_token": ADMIN},
     )
-    pending_path = fleet_client_messages._principal_pending_path("researcher", ADMIN)
-    pending = fleet_client_messages._pending_principal_request("researcher", ADMIN, None)
+    pending_path = fleet_client_messages._principal_pending_path(
+        "researcher", ADMIN, hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    )
+    pending = fleet_client_messages._pending_principal_request(
+        "researcher", ADMIN, None, hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    )
     generation = pending["request_id"]
 
     class Response(BytesIO):
@@ -3236,7 +3463,9 @@ def test_principal_revoke_preserves_concurrent_replacement_add(tmp_path, monkeyp
         "load_fleet_settings",
         lambda: {"hub_url": "https://hub.invalid", "node_token": "", "admin_token": ADMIN},
     )
-    add_path = fleet_client_messages._principal_pending_path("researcher", ADMIN)
+    add_path = fleet_client_messages._principal_pending_path(
+        "researcher", ADMIN, hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    )
     add_path.parent.mkdir(parents=True)
     replacement = {
         "name": "researcher",
@@ -3330,10 +3559,48 @@ def test_message_reads_forward_explicit_timeouts(monkeypatch):
 
     monkeypatch.setattr(fleet_client_messages, "_request", request)
     monkeypatch.setattr(
-        fleet_client_messages, "_settings", lambda token_file=None: ("https://hub.example.test", "token", "node")
+        credentials, "message_settings", lambda token_file=None: ("https://hub.example.test", "token", "node")
     )
     fleet_client_messages.list_messages(after=0, timeout=1.5)
     fleet_client_messages.ack(7, timeout=0.5)
     fleet_client_messages.list_messages(after=0)
     # Omitting the timeout keeps the client's default transport timeout.
     assert seen == [("list", 1.5), ("ack", 0.5), ("list", None)]
+
+
+@pytest.mark.parametrize("lock_timeout", [None, 0, 0.25])
+def test_flush_credential_forwards_optional_lock_timeout(tmp_path, monkeypatch, lock_timeout):
+    from contextlib import contextmanager
+
+    path = tmp_path / "messages.jsonl"
+    path.touch()
+    calls = []
+    monkeypatch.setattr(credentials, "message_settings", lambda *args: ("https://hub.example.test", "x" * 64, "node-a"))
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.example.test"})
+    monkeypatch.setattr(fleet_client_messages, "_spool_path", lambda *args, **kwargs: path)
+    monkeypatch.setattr(fleet_client_messages, "_warn_inactive_spools", lambda *args: None)
+    monkeypatch.setattr(fleet_client_messages, "_flush_locked", lambda *args, **kwargs: 7)
+
+    @contextmanager
+    def lock(path, *, timeout=None):
+        calls.append(timeout)
+        yield None
+
+    monkeypatch.setattr(fleet_client, "_spool_lock", lock)
+    assert fleet_client_messages.flush_credential(lock_timeout=lock_timeout) == 7
+    assert calls == [lock_timeout]
+
+
+@pytest.mark.parametrize("lock_timeout", [-1, float("nan"), float("inf"), True])
+@pytest.mark.parametrize("credential", [True, False])
+def test_flush_rejects_invalid_lock_timeout_before_settings(monkeypatch, lock_timeout, credential):
+    def forbidden():
+        pytest.fail("settings accessed before timeout validation")
+
+    monkeypatch.setattr(credentials, "message_settings", forbidden)
+    monkeypatch.setattr(fleet_client, "load_fleet_config", forbidden)
+    with pytest.raises(fleet_client.FleetClientError, match="^invalid fleet spool lock timeout$"):
+        if credential:
+            fleet_client_messages.flush_credential(lock_timeout=lock_timeout)
+        else:
+            fleet_client_messages.flush("node-a", lock_timeout=lock_timeout)
