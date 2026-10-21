@@ -8,6 +8,7 @@ import platform
 import re
 import subprocess
 import sys
+import tempfile
 from datetime import datetime, timezone
 from itertools import islice
 from pathlib import Path
@@ -139,24 +140,29 @@ def _failed_verify(target: Path) -> dict[str, Any] | None:
     return max(failed, key=lambda item: item[0])[1] if failed else None
 
 
-def collect_doctor(target: Path) -> dict[str, Any]:
+def collect_diagnostics(target: Path) -> dict[str, Any]:
     # General Doctor callbacks can enumerate whole run trees, follow configured
     # roots, read arbitrary files, or contact services. Run only report-specific
     # fixed-path checks, each in a killable process with a hard deadline.
     checks: list[dict[str, str]] = []
-    for name in ("bootstrap", "agents-quality", "security-config"):
-        try:
-            result = subprocess.run(
-                [sys.executable, "-m", "brigade.bug_doctor", str(target), name, str(_DOCTOR_ENTRY_LIMIT)],
-                stdin=subprocess.DEVNULL,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.DEVNULL,
-                timeout=_DOCTOR_CHECK_TIMEOUT,
-                check=True,
-            )
-            checks.extend(json.loads(result.stdout))
-        except (OSError, ValueError, subprocess.SubprocessError):
-            checks.append({"status": "WARN", "name": f"bug diagnostics: {name} budget or check unavailable"})
+    target = target.resolve()
+    # Never import packages from an affected workspace or PYTHONPATH. The
+    # private empty cwd also protects older Python module-launch semantics.
+    with tempfile.TemporaryDirectory(prefix="brigade-bug-diagnostics-") as cwd:
+        for name in ("bootstrap", "agents-quality", "security-config"):
+            try:
+                result = subprocess.run(
+                    [sys.executable, "-I", "-m", "brigade.bug_doctor", str(target), name, str(_DOCTOR_ENTRY_LIMIT)],
+                    cwd=cwd,
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.DEVNULL,
+                    timeout=_DOCTOR_CHECK_TIMEOUT,
+                    check=True,
+                )
+                checks.extend(json.loads(result.stdout))
+            except (OSError, ValueError, subprocess.SubprocessError):
+                checks.append({"status": "WARN", "name": f"bug diagnostics: {name} budget or check unavailable"})
     return {
         "target": "<target>",
         "checks": checks,
@@ -172,9 +178,9 @@ def recent_failures(target: Path) -> dict[str, Any]:
 
 
 def collect(
-    target: Path, *, summary: str, title: str, kind: str, doctor: dict[str, Any], output: str
+    target: Path, *, summary: str, title: str, kind: str, diagnostics: dict[str, Any], output: str
 ) -> dict[str, Any]:
-    # Only these fields may cross the reporting boundary. Doctor's other fields,
+    # Only these fields may cross the reporting boundary. Diagnostic details,
     # task text, stdout, roster config, and environment mappings are never copied.
     return {
         "schema": "brigade.bug-report.v1",
@@ -190,14 +196,14 @@ def collect(
             "release": platform.release(),
             "arch": platform.machine(),
         },
-        "doctor": {
+        "bug_diagnostics": {
             "target": "<target>",
             "checks": [
                 {"name": str(c.get("name", "")), "status": str(c.get("status", ""))}
-                for c in islice(doctor.get("checks", []), _PROJECTION_ROW_LIMIT)
+                for c in islice(diagnostics.get("checks", []), _PROJECTION_ROW_LIMIT)
                 if isinstance(c, dict) and c.get("status") in {"FAIL", "WARN"}
             ],
-            "summary": {key: doctor.get("summary", {}).get(key, 0) for key in ("failed", "warn")},
+            "summary": {key: diagnostics.get("summary", {}).get(key, 0) for key in ("failed", "warn")},
         },
         "recent_failures": recent_failures(target),
         "last_error": bug_last_error.read(),

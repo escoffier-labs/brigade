@@ -86,26 +86,33 @@ def test_local_username_is_case_insensitive_with_boundaries(tmp_path, monkeypatc
     assert_clean(redacted)
 
 
-@pytest.mark.parametrize("secret", ["q", "qx", "qxy", "x-y", "q\nx", 'q"x', "q\u2603x"])
-def test_short_secret_blocks_second_scan_without_corrupting_text(tmp_path, monkeypatch, secret):
-    monkeypatch.setenv("TEST_CREDENTIAL", secret)
-    text = f"prefix{secret}postfix"
-    redacted = Redactor(tmp_path).text(text)
-    assert redacted == text
-    for candidate in (redacted, json.dumps({"detail": redacted}), json.dumps({"detail": redacted}, ensure_ascii=False)):
-        with pytest.raises(ReportBlocked, match="TEST_CREDENTIAL") as blocked:
-            assert_clean(candidate)
-        assert secret not in str(blocked.value)
+@pytest.mark.parametrize(
+    "name,value",
+    [
+        ("TEST_CREDENTIAL", "q"),
+        ("TEST_PASSWORD", 'q"x'),
+        ("TEST_KEY", "12345678"),
+        ("TEST_TOKEN", "false"),
+        ("TOKENIZERS_PARALLELISM", "false"),
+        ("KEYTIMEOUT", "1"),
+        ("MONKEY_MODE", "ordinary-value"),
+    ],
+)
+def test_ordinary_environment_values_do_not_block_or_corrupt_text(tmp_path, monkeypatch, name, value):
+    monkeypatch.setenv(name, value)
+    text = f"prefix{value}postfix"
+    assert Redactor(tmp_path).text(text) == text
+    assert_clean(text)
 
 
 def test_long_secret_is_scrubbed_inside_words(tmp_path, monkeypatch):
-    monkeypatch.setenv("TEST_CREDENTIAL", "qxyz")
-    redacted = Redactor(tmp_path).text("prefixqxyzpostfix")
+    monkeypatch.setenv("TEST_CREDENTIAL", "qxyz-credential")
+    redacted = Redactor(tmp_path).text("prefixqxyz-credentialpostfix")
     assert redacted == "prefix<local>postfix"
     assert_clean(redacted)
 
 
-@pytest.mark.parametrize("secret", ["qxyp", 'qx"yp', "qx\nyp", "qx\u2603yp"])
+@pytest.mark.parametrize("secret", ["qxyp-secret", 'qx"yp-secret', "qx\nyp-secret", "qx\u2603yp-secret"])
 def test_second_scan_checks_long_environment_secrets_and_json_variants(monkeypatch, secret):
     monkeypatch.setenv("TEST_CREDENTIAL", secret)
     for candidate in (secret, json.dumps(secret), json.dumps(secret, ensure_ascii=False)):

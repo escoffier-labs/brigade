@@ -1374,7 +1374,10 @@ def test_operator_quickstart_prepares_new_user_workspace(tmp_path, capsys):
     assert any(step["id"] == "verify-opencode" for step in payload["steps"])
     assert payload["issue_report"]["brigade_version"]
     assert payload["issue_report"]["status"] == "ok"
-    assert payload["issue_report"]["report_command"] == "brigade bug report --dry-run"
+    assert (
+        payload["issue_report"]["report_command"]
+        == 'brigade bug report --summary "What happened and what you expected" --dry-run'
+    )
     assert str(tmp_path) not in json.dumps(payload["issue_report"])
     assert (tmp_path / ".brigade" / "config.json").is_file()
     assert (tmp_path / ".brigade" / "daily.toml").is_file()
@@ -1901,4 +1904,4 @@ def test_quickstart_issue_report_excludes_private_commands_and_details(tmp_path)
         }
     )
     assert private not in json.dumps(report)
-    assert report["report_command"] == "brigade bug report --dry-run"
+    assert report["report_command"] == 'brigade bug report --summary "What happened and what you expected" --dry-run'

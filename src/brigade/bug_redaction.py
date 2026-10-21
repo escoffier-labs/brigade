@@ -17,7 +17,8 @@ from .guard.engine import scan_text
 from .guard.policy import Policy
 from .guard.types import GuardResult, Rule, ScanOptions
 
-_SECRET_ENV_NAME = re.compile(r"TOKEN|KEY|SECRET|PASSWORD|PASS|CREDENTIAL", re.I)
+_SECRET_ENV_NAME = re.compile(r"(?:^|_)(?:TOKEN|KEY|SECRET|PASSWORD|PASS|CREDENTIALS?)(?:_|$)", re.I)
+_ORDINARY_ENV_VALUE = re.compile(r"(?:true|false|yes|no|on|off|[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)", re.I)
 _TERMINAL_CONTROLS = re.compile(r"[\x00-\x08\x0b-\x1f\x7f-\x9f\u200e\u200f\u202a-\u202e\u2066-\u2069]")
 
 
@@ -60,6 +61,14 @@ class ReportBlocked(ValueError):
     """A report could not be proved safe to share."""
 
 
+def _environment_secrets() -> dict[str, str]:
+    return {
+        name: value
+        for name, value in os.environ.items()
+        if _SECRET_ENV_NAME.search(name) and len(value) >= 8 and not _ORDINARY_ENV_VALUE.fullmatch(value)
+    }
+
+
 def assert_terminal_safe(value: Any) -> None:
     """Reject legacy prepared fields that could control a preview or gh output."""
     if isinstance(value, str) and _TERMINAL_CONTROLS.search(value):
@@ -75,9 +84,7 @@ def assert_terminal_safe(value: Any) -> None:
 def assert_clean(text: str) -> None:
     """Scan the final bytes independently, ignoring embedded allow directives."""
     assert_terminal_safe(text)
-    for name, value in os.environ.items():
-        if not _SECRET_ENV_NAME.search(name) or not value:
-            continue
+    for name, value in _environment_secrets().items():
         # Rendered JSON may disclose the same value with quotes, control bytes,
         # or non-ASCII characters escaped.
         variants = (value, json.dumps(value)[1:-1], json.dumps(value, ensure_ascii=False)[1:-1])
@@ -112,12 +119,11 @@ class Redactor:
             self.hostname,
             self.username,
         }
-        values.update(value for key, value in os.environ.items() if _SECRET_ENV_NAME.search(key) and len(value) >= 4)
+        values.update(_environment_secrets().values())
         self.literals = sorted((value for value in values if value and value not in {"/", "\\"}), key=len, reverse=True)
 
     def text(self, text: str) -> str:
         for literal in self.literals:
-            # Short secrets are checked by the second scan rather than replaced.
             # Bare user names need boundaries to avoid corrupting identifiers.
             pattern = re.escape(literal)
             if literal == self.username or (len(literal) <= 3 and literal.isalnum()):

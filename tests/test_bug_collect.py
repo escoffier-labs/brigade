@@ -302,7 +302,7 @@ def test_bug_doctor_never_reads_configured_external_logs(tmp_path, monkeypatch, 
         return original(path, *args, **kwargs)
 
     monkeypatch.setattr(Path, "open", deny_external_read)
-    payload = bug_collect.collect_doctor(target)
+    payload = bug_collect.collect_diagnostics(target)
     assert payload["checks"]
     assert all(set(check) == {"name", "status"} for check in payload["checks"])
     assert "Example" not in json.dumps(payload)
@@ -316,12 +316,12 @@ def test_doctor_bundle_projection_drops_all_detail_text(tmp_path):
         title="Report",
         kind="bug",
         output="",
-        doctor={
+        diagnostics={
             "checks": [{"name": "profile", "status": "WARN", "detail": "customer Example project Sample"}],
             "summary": {"failed": 0, "warn": 1},
         },
     )
-    assert bundle["doctor"]["checks"] == [{"name": "profile", "status": "WARN"}]
+    assert bundle["bug_diagnostics"]["checks"] == [{"name": "profile", "status": "WARN"}]
 
 
 @pytest.mark.parametrize("hazard", ["runs", "agents"])
@@ -344,7 +344,7 @@ def test_report_doctor_avoids_unbounded_general_checks(tmp_path, monkeypatch, ha
             return original(path, *args, **kwargs)
 
         monkeypatch.setattr(Path, "read_text", bounded)
-    report = bug_collect.collect_doctor(tmp_path)
+    report = bug_collect.collect_diagnostics(tmp_path)
     assert report["checks"]
     if hazard == "agents":
         assert {"status": "WARN", "name": "agents-quality: AGENTS.md"} in report["checks"]
@@ -366,7 +366,7 @@ def test_report_doctor_kills_checks_at_deadline(tmp_path, monkeypatch):
 
     monkeypatch.setattr(subprocess, "run", stalled_check)
     started = time.monotonic()
-    report = bug_collect.collect_doctor(tmp_path)
+    report = bug_collect.collect_diagnostics(tmp_path)
     assert deadlines and all(0 < value <= 2 for value in deadlines)
     assert time.monotonic() - started < 3
     assert report["checks"] and all(check["status"] == "WARN" for check in report["checks"])
@@ -405,3 +405,36 @@ def test_report_doctor_agents_read_is_byte_bounded(tmp_path, monkeypatch):
 
     monkeypatch.setattr(os, "read", bounded)
     assert bug_doctor.check(tmp_path, "agents-quality") == [{"status": "WARN", "name": "agents-quality: AGENTS.md"}]
+
+
+@pytest.mark.parametrize("source", ["cwd", "pythonpath"])
+def test_diagnostics_do_not_import_workspace_package(tmp_path, monkeypatch, source):
+    import subprocess
+    from pathlib import Path
+
+    target = tmp_path / "workspace"
+    package = target / "brigade"
+    package.mkdir(parents=True)
+    marker = tmp_path / "executed"
+    (package / "__init__.py").write_text(f"from pathlib import Path\nPath({str(marker)!r}).touch()\n")
+    if source == "cwd":
+        monkeypatch.chdir(target)
+    else:
+        monkeypatch.setenv("PYTHONPATH", str(target))
+    original = subprocess.run
+    workdirs = []
+
+    def run(argv, **kwargs):
+        cwd = kwargs.get("cwd")
+        if cwd is not None:
+            directory = Path(cwd)
+            assert directory != target and target not in directory.parents
+            assert not list(directory.iterdir())
+            workdirs.append(directory)
+        return original(argv, **kwargs)
+
+    monkeypatch.setattr(subprocess, "run", run)
+    diagnostics = bug_collect.collect_diagnostics(target)
+    assert not marker.exists()
+    assert {"name": "bootstrap: AGENTS.md", "status": "FAIL"} in diagnostics["checks"]
+    assert workdirs and all(not directory.exists() for directory in workdirs)

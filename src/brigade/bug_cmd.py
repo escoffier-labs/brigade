@@ -14,10 +14,10 @@ import uuid
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
-from urllib.parse import urlencode
+from urllib.parse import quote, urlencode
 
 from . import __version__, bug_io
-from .bug_collect import collect, collect_doctor
+from .bug_collect import collect, collect_diagnostics
 from .bug_redaction import Redactor, ReportBlocked, assert_clean, assert_terminal_safe
 from .component_paths import data_root
 from .localio import canonical_json_digest, write_json, write_text_atomic
@@ -30,7 +30,7 @@ URL_BUDGET = 6000
 EMAIL_BUDGET = 1800
 BUNDLE_CAP = 60 * 1024
 _SECURITY = re.compile(
-    r"\b(?:security|vulnerabilit\w*|exploit\w*|CVE-\d{4}-\d+|"
+    r"\b(?:security (?:vulnerability|issue)|vulnerabilit\w*|exploit\w*|CVE-\d{4}-\d+|"
     r"(?:SQL|command|code|shell|LDAP|template) injection|(?:(?:remote|arbitrary) )?code execution|"
     r"(?:authentication|authorization|auth) bypass|privilege escalation|cross[- ]site (?:scripting|request forgery)|"
     r"XSS|CSRF|SSRF|RCE|XXE|insecure deserialization|directory traversal|path traversal|"
@@ -66,11 +66,12 @@ def _normalize_fingerprint(text: str) -> str:
     return " ".join(text.split())
 
 
-def fingerprint(last_error: dict[str, Any] | None, check_names: list[str]) -> str:
+def fingerprint(last_error: dict[str, Any] | None, check_names: list[str], summary: str = "") -> str:
     error = last_error or {}
     identity = [
         error.get("command", ""),
         error.get("exception_type", ""),
+        hashlib.sha256(_normalize_fingerprint(summary).casefold().encode()).hexdigest(),
         sorted(_normalize_fingerprint(name) for name in check_names),
         _normalize_fingerprint(str(error.get("message_head", ""))),
         ".".join(__version__.split(".")[:2]),
@@ -97,7 +98,7 @@ def render(bundle: dict[str, Any]) -> str:
         f"### Python version\n\n{_code_block(runtime['python'])}\n\n"
         f"### OS\n\n{_code_block(' '.join(runtime[key] for key in ('os', 'release', 'arch')))}\n\n"
         f"### Fingerprint\n\n{bundle['fingerprint']}\n\n"
-        f"### Doctor summary\n\n{_code_block(json.dumps(bundle['doctor'], ensure_ascii=False, indent=2, sort_keys=True), 'json')}\n\n"
+        f"### Bug diagnostics\n\n{_code_block(json.dumps(bundle['bug_diagnostics'], ensure_ascii=False, indent=2, sort_keys=True), 'json')}\n\n"
         f"### Full output\n\n{_code_block(json.dumps(bundle, ensure_ascii=False, indent=2, sort_keys=True), 'json')}\n"
     )
 
@@ -146,7 +147,8 @@ def _bounded_link(
             base
             + "?"
             + urlencode(
-                {**fixed, **{key: _code_block(value) if key in fenced else value for key, value in values.items()}}
+                {**fixed, **{key: _code_block(value) if key in fenced else value for key, value in values.items()}},
+                quote_via=quote,
             )
         )
         if len(link.encode("utf-8")) <= budget:
@@ -184,10 +186,10 @@ def destination_link(via: str, bundle: dict[str, Any]) -> str:
             "title": _prose(bundle["user"]["title"]),
             "what-happened": bundle["user"]["summary"],
             "logs": "Full redacted bundle: attach the local bundle.md shown by Brigade.\n"
-            + json.dumps(bundle["doctor"], ensure_ascii=False),
+            + json.dumps(bundle["bug_diagnostics"], ensure_ascii=False),
         },
         URL_BUDGET,
-        fenced=("what-happened", "logs"),
+        fenced=("what-happened",),
     )
 
 
@@ -315,7 +317,7 @@ def _check_security(bundle: dict[str, Any]) -> None:
         raise ReportBlocked("Bug report blocked: report security concerns privately using SECURITY.md")
     if any(
         c.get("status") == "FAIL" and _SECURITY.search(str(c.get("name")) + " " + str(c.get("detail")))
-        for c in bundle.get("doctor", {}).get("checks", [])
+        for c in bundle.get("bug_diagnostics", {}).get("checks", [])
     ):
         raise ReportBlocked("Bug report blocked: security-category failure, use SECURITY.md")
 
@@ -331,6 +333,8 @@ def _load_prepared(report_id: str) -> tuple[Path, dict[str, Any], str, dict[str,
         not isinstance(bundle, dict)
         or not isinstance(receipt, dict)
         or bundle.get("schema") != "brigade.bug-report.v1"
+        or "doctor" in bundle
+        or not isinstance(bundle.get("bug_diagnostics"), dict)
         or receipt.get("schema") != "brigade.bug-report-receipt.v1"
         or receipt.get("report_id") != report_id
         or receipt.get("bundle_digest") != canonical_json_digest(bundle)
@@ -338,7 +342,7 @@ def _load_prepared(report_id: str) -> tuple[Path, dict[str, Any], str, dict[str,
     ):
         raise ReportBlocked("Bug report blocked: prepared bundle digest mismatch, prepare a new preview")
     for rows, keys in (
-        (bundle.get("doctor", {}).get("checks", []), {"name", "status"}),
+        (bundle.get("bug_diagnostics", {}).get("checks", []), {"name", "status"}),
         (bundle.get("recent_failures", {}).get("runs", []), {"id", "status"}),
     ):
         if any(not isinstance(row, dict) or set(row) != keys for row in rows):
@@ -360,13 +364,13 @@ def _prepare(args: argparse.Namespace) -> tuple[Path, dict[str, Any], str, dict[
     if any(_SECURITY.search(text) for text in (summary, args.title or "", output)):
         raise ReportBlocked("Bug report blocked: report security concerns privately using SECURITY.md")
     target = args.target.resolve()
-    doctor = collect_doctor(target)
+    diagnostics = collect_diagnostics(target)
     collected = collect(
         target,
         summary=summary,
         title=args.title or "Brigade bug report",
         kind=args.kind,
-        doctor=doctor,
+        diagnostics=diagnostics,
         output=output,
     )
     _check_security(collected)
@@ -376,7 +380,9 @@ def _prepare(args: argparse.Namespace) -> tuple[Path, dict[str, Any], str, dict[
     bundle["schema"] = "brigade.bug-report.v1"
     bundle["brigade"]["version"] = __version__
     bundle["fingerprint"] = fingerprint(
-        bundle["last_error"], [c["name"] for c in bundle["doctor"]["checks"] if c["status"] == "FAIL"]
+        bundle["last_error"],
+        [c["name"] for c in bundle["bug_diagnostics"]["checks"] if c["status"] == "FAIL"],
+        bundle["user"]["summary"],
     )
     markdown = render(bundle)
     encoded = json.dumps(bundle, ensure_ascii=False, indent=2, sort_keys=True) + "\n"

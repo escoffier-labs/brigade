@@ -17,7 +17,7 @@ from brigade import cli
 def report_env(tmp_path, monkeypatch):
     from brigade import bug_cmd
 
-    # A host's short credential must not block unrelated fixture reports.
+    # Host credentials must not influence unrelated fixture reports.
     for name in os.environ:
         if re.search(r"TOKEN|KEY|SECRET|PASSWORD|PASS|CREDENTIAL", name, re.I):
             monkeypatch.delenv(name)
@@ -26,7 +26,7 @@ def report_env(tmp_path, monkeypatch):
     monkeypatch.setenv("BRIGADE_BUG_REPORT", "ask")
     monkeypatch.setattr(
         bug_cmd,
-        "collect_doctor",
+        "collect_diagnostics",
         lambda target: {
             "target": "<target>",
             "checks": [{"status": "FAIL", "name": "profile", "detail": "missing file 123"}],
@@ -257,30 +257,20 @@ def test_adversarial_values_scrubbed_before_persistence(report_env, monkeypatch,
 
 
 @pytest.mark.parametrize("stage", ["preview", "prepared"])
-def test_embedded_short_secret_blocks_report(report_env, monkeypatch, capsys, stage):
-    mod, target = report_env
-    monkeypatch.delenv("TEST_CREDENTIAL", raising=False)
+def test_short_environment_value_allows_report(report_env, monkeypatch, capsys, stage):
+    _, target = report_env
     flags = ["--summary", "prefixqxypostfix", "--dry-run", "--json"]
-    before = None
     if stage == "prepared":
         assert invoke(target, *flags) == 0
         preview = result(capsys)
-        before = Path(preview["receipt_path"]).read_bytes()
-        flags = ["--report-id", preview["report_id"], "--yes", "--not-security", "--via", "gh"]
+        flags = ["--report-id", preview["report_id"], "--dry-run", "--json"]
     monkeypatch.setenv("TEST_CREDENTIAL", "qxy")
-    monkeypatch.setattr(mod, "gh", lambda *a: pytest.fail("blocked report reached gh"))
     status = cli.main(["bug", "report", *flags]) if stage == "prepared" else invoke(target, *flags)
-    assert status == 2
-    captured = capsys.readouterr()
-    assert "TEST_CREDENTIAL" in captured.err
-    assert "qxy" not in captured.out + captured.err
-    if before is None:
-        assert not list(Path(mod.data_root()).rglob("bundle.json"))
-    else:
-        assert Path(preview["receipt_path"]).read_bytes() == before
+    assert status == 0
+    assert "prefixqxypostfix" in result(capsys)["preview_markdown"]
 
 
-@pytest.mark.parametrize("secret", ["qxyp", 'qx"yp', "qx\nyp", "qx\u2603yp"])
+@pytest.mark.parametrize("secret", ["qxyp-secret", 'qx"yp-secret', "qx\nyp-secret", "qx\u2603yp-secret"])
 def test_delayed_submission_blocks_new_long_environment_secret(report_env, monkeypatch, capsys, secret):
     mod, target = report_env
     assert invoke(target, "--summary", f"Unexpected marker {secret}", "--dry-run", "--json") == 0
@@ -346,7 +336,9 @@ def test_fingerprint_normalizes_volatile_values(first_path, second_path):
         "message_head": f"failed {first_path} id abcd1234 123",
     }
     second = {**first, "message_head": f"failed {second_path} id ffff9876 999"}
-    assert fingerprint(first, ["profile"]) == fingerprint(second, ["profile"])
+    assert fingerprint(first, ["profile"], first["message_head"]) == fingerprint(
+        second, ["profile"], second["message_head"]
+    )
     assert fingerprint(first, ["profile"]) != fingerprint(first, ["memory"])
 
 
@@ -406,7 +398,7 @@ def test_security_doctor_failure_refused(report_env, monkeypatch, capsys):
     mod, target = report_env
     monkeypatch.setattr(
         mod,
-        "collect_doctor",
+        "collect_diagnostics",
         lambda target: {
             "checks": [{"status": "FAIL", "name": "security: exposed credential", "detail": "unsafe"}],
             "summary": {},
@@ -427,7 +419,7 @@ def test_never_disables_submission_but_allows_local_preview(report_env, monkeypa
 
 @pytest.mark.parametrize("via,budget", [("url", 6000), ("email", 1800)])
 def test_encoded_destinations_bounded_and_bundle_available(report_env, capsys, via, budget):
-    from urllib.parse import parse_qs, urlsplit
+    from urllib.parse import parse_qs, unquote, urlsplit
     from brigade.bug_cmd import BUG_EMAIL
 
     _, target = report_env
@@ -437,11 +429,17 @@ def test_encoded_destinations_bounded_and_bundle_available(report_env, capsys, v
     assert Path(out["preview_path"]).is_file()
     if via == "email":
         assert urlsplit(out["destination_url"]).path == BUG_EMAIL
+        decoded = dict(item.split("=", 1) for item in urlsplit(out["destination_url"]).query.split("&"))
+        assert unquote(decoded["subject"]) == "Brigade bug report"
+        assert "界 ? & # " in unquote(decoded["body"])
+        assert "+" not in out["destination_url"]
     else:
         fields = parse_qs(urlsplit(out["destination_url"]).query)
         assert fields["template"] == ["bug.yml"]
         assert fields["fingerprint"] == [out["fingerprint"]]
-        for key in ("what-happened", "logs"):
+        assert not fields["logs"][0].startswith("```")
+        assert not fields["logs"][0].endswith("```")
+        for key in ("what-happened",):
             lines = fields[key][0].splitlines()
             fence = lines[0].removesuffix("text")
             assert re.fullmatch(r"`{3,}", fence)
@@ -586,7 +584,7 @@ def test_closed_projection_drops_unlisted_doctor_and_last_error_fields(report_en
     )
     monkeypatch.setattr(
         mod,
-        "collect_doctor",
+        "collect_diagnostics",
         lambda target: {
             "private": "private-top-field",
             "checks": [{"status": "WARN", "name": "profile", "detail": "warning", "raw": "private-check-field"}],
@@ -610,7 +608,7 @@ def test_older_prepared_diagnostic_fields_require_new_preview(report_env, monkey
     receipt_path = Path(preview["receipt_path"])
     bundle = json.loads(bundle_path.read_text())
     if field == "doctor-detail":
-        bundle["doctor"]["checks"][0]["detail"] = "customer Example project Sample"
+        bundle["bug_diagnostics"]["checks"][0]["detail"] = "customer Example project Sample"
     else:
         bundle["recent_failures"]["runs"] = [{"id": "run-1", "status": "failed", "seat": "example-production"}]
     markdown = mod.render(bundle)
@@ -679,9 +677,9 @@ def test_concurrent_submissions_share_daily_limit(report_env, monkeypatch, capsy
 
 
 @pytest.mark.parametrize("source", ["sidecar", "registry", "host"])
-def test_real_doctor_temp_workspace_dry_run_is_network_free(report_env, monkeypatch, capsys, source):
+def test_real_diagnostics_temp_workspace_dry_run_is_network_free(report_env, monkeypatch, capsys, source):
     from brigade import doctor, managed, registry
-    from brigade.bug_collect import collect_doctor
+    from brigade.bug_collect import collect_diagnostics
     from brigade.station import DoctorContext, Station
 
     mod, target = report_env
@@ -702,24 +700,24 @@ def test_real_doctor_temp_workspace_dry_run_is_network_free(report_env, monkeypa
     monkeypatch.setattr(
         registry, "all_stations", lambda: (*original, network_station) if source == "registry" else original
     )
-    monkeypatch.setattr(mod, "collect_doctor", collect_doctor)
+    monkeypatch.setattr(mod, "collect_diagnostics", collect_diagnostics)
     assert invoke(target, "--dry-run", "--json") == 0
     out = result(capsys)
     bundle = json.loads(Path(out["preview_path"]).with_name("bundle.json").read_text())
-    assert bundle["doctor"]["target"] == "<target>"
-    assert bundle["doctor"]["checks"]
-    assert all(c["status"] in {"FAIL", "WARN"} for c in bundle["doctor"]["checks"])
+    assert bundle["bug_diagnostics"]["target"] == "<target>"
+    assert bundle["bug_diagnostics"]["checks"]
+    assert all(c["status"] in {"FAIL", "WARN"} for c in bundle["bug_diagnostics"]["checks"])
 
 
-def test_real_doctor_prepared_report_allows_security_config_warning(report_env, monkeypatch, capsys):
-    from brigade.bug_collect import collect_doctor
+def test_real_diagnostics_prepared_report_allows_security_config_warning(report_env, monkeypatch, capsys):
+    from brigade.bug_collect import collect_diagnostics
 
     mod, target = report_env
-    monkeypatch.setattr(mod, "collect_doctor", collect_doctor)
+    monkeypatch.setattr(mod, "collect_diagnostics", collect_diagnostics)
     assert invoke(target, "--dry-run", "--json") == 0
     preview = result(capsys)
     bundle = json.loads(Path(preview["preview_path"]).with_name("bundle.json").read_text())
-    assert any(c["status"] == "WARN" and c["name"].startswith("security:") for c in bundle["doctor"]["checks"])
+    assert any(c["status"] == "WARN" and c["name"].startswith("security:") for c in bundle["bug_diagnostics"]["checks"])
     assert (
         cli.main(
             ["bug", "report", "--report-id", preview["report_id"], "--yes", "--not-security", "--via", "url", "--json"]
@@ -908,7 +906,7 @@ def test_submit_uses_approved_bundle_without_recollecting(report_env, monkeypatc
     preview = result(capsys)
     log.write_text("unreviewed output")
     bug_last_error.error_path().write_text('{"command": "unreviewed"}')
-    monkeypatch.setattr(mod, "collect_doctor", lambda *a: pytest.fail("doctor recollected"))
+    monkeypatch.setattr(mod, "collect_diagnostics", lambda *a: pytest.fail("doctor recollected"))
     monkeypatch.setattr(mod, "collect", lambda *a, **k: pytest.fail("bundle recollected"))
     bodies = []
 
@@ -990,6 +988,8 @@ def test_report_failure_preserves_previous_error(report_env, monkeypatch, capsys
     "narrative",
     [
         "SQL injection",
+        "security vulnerability",
+        "security issue",
         "code execution in the ingester",
         "personal data leaks into a workspace",
         "CVE-2026-12345",
@@ -1311,6 +1311,8 @@ def test_older_prepared_vulnerability_is_blocked_before_network(report_env, monk
         "Escaped quotes render incorrectly",
         "The traversal order changes between runs",
         "Deserialization fails on an empty receipt",
+        "brigade security enrich crashes",
+        "security.toml fails to parse",
     ],
 )
 def test_benign_ui_language_allows_report(report_env, capsys, summary):
@@ -1609,3 +1611,53 @@ def test_last_error_reader_rejects_unsafe_or_oversized_files(report_env, monkeyp
     else:
         path.write_text("[" * 2000 + "]" * 2000)
     assert bug_last_error.read() is None
+
+
+def test_dry_run_with_ordinary_developer_environment(report_env, monkeypatch, capsys):
+    from brigade.bug_collect import collect_diagnostics
+
+    mod, target = report_env
+    monkeypatch.setattr(mod, "collect_diagnostics", collect_diagnostics)
+    for name, value in {
+        "TOKENIZERS_PARALLELISM": "false",
+        "KEYTIMEOUT": "1",
+        "TEST_KEY": "1",
+        "TEST_TOKEN": "false",
+        "TEST_PASSWORD": "short",
+        "TEST_CREDENTIAL": "12345678",
+        "MONKEY_MODE": "ordinary-value",
+        "SHELL": "/bin/bash",
+        "TERM": "xterm-256color",
+        "SHLVL": "1",
+    }.items():
+        monkeypatch.setenv(name, value)
+    assert invoke(target, "--summary", "false 1 short 12345678 ordinary-value", "--dry-run", "--json") == 0
+    preview = result(capsys)
+    bundle = json.loads(Path(preview["preview_path"]).with_name("bundle.json").read_text())
+    assert bundle["user"]["summary"] == "false 1 short 12345678 ordinary-value"
+    assert bundle["bug_diagnostics"]["checks"]
+    assert "doctor" not in bundle
+    assert preview["submitted"] is False
+
+
+def test_security_config_last_error_allows_ordinary_report(report_env, capsys):
+    from brigade import bug_last_error
+
+    mod, target = report_env
+    mod.write_json(bug_last_error.error_path(), {"message_head": "invalid .brigade/security.toml: syntax"})
+    assert invoke(target, "--dry-run", "--json") == 0
+    assert result(capsys)["report_id"]
+
+
+def test_different_reports_with_same_last_error_do_not_share_cooldown(report_env, monkeypatch, capsys):
+    from brigade import bug_last_error
+
+    mod, target = report_env
+    bug_last_error.record("doctor", 1, ValueError("profile missing"))
+    monkeypatch.setattr(mod, "gh", lambda *a: "[]")
+    assert submit_prepared(target, capsys, "--via", "url", "--json", summary="Prompt stops responding") == 0
+    first = result(capsys)
+    assert submit_prepared(target, capsys, "--via", "url", "--json", summary="Profile output is truncated") == 0
+    second = result(capsys)
+    assert first["fingerprint"] != second["fingerprint"]
+    assert first["submitted"] and second["submitted"]

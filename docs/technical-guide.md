@@ -1916,12 +1916,15 @@ brigade bug report --target . --summary "What happened and what you expected" --
 The command prints the complete `brigade.bug-report.v1` bundle and saves
 `bundle.json`, `bundle.md`, and `receipt.json` under the user data directory at
 `brigade/bug-reports/<report_id>/`. It includes the Brigade version and channel,
-Python and OS versions, doctor failures and warnings, up to five failed run
+Python and OS versions, bounded bug diagnostics, up to five failed run
 identifiers, the latest failing verification receipt identifier and digest,
-and the last local CLI error. Doctor entries contain only check names and
-statuses, with summary counts. Collection excludes general memory checks that
-can read configured external logs. Failed run entries contain only identifiers
-and failure kinds. Task text and worker output are excluded.
+and the last local CLI error. The `bug_diagnostics` section contains names,
+statuses, and counts for bootstrap file presence, AGENTS.md quality, and
+security-config presence. It does not contain full `brigade doctor` output.
+General Doctor checks can read configured external logs and are excluded.
+Each diagnostic subprocess uses isolated Python mode and a private empty
+working directory, with a two-second deadline. Failed run entries contain only
+identifiers and failure kinds. Task text and worker output are excluded.
 `--include-output FILE` adds only a redacted tail of a file you choose, bounded
 to 200 lines and a 60 KB input read. The complete rendered bundle is capped at
 60 KB. Selected inputs must be regular files, with no linked path components.
@@ -1938,6 +1941,13 @@ and escapes terminal controls such as ANSI, OSC, and carriage returns before
 persistence and preview. It scans the final JSON and Markdown again. Any
 remaining finding or scanner error blocks the report. Review every field anyway. Redaction cannot identify
 every private name in free text. Use SECURITY.md for vulnerabilities.
+Environment-secret checks require credential name segments separated by `_`
+and values of at least eight characters. Boolean and numeric settings are
+excluded. Recognizable token patterns are still scanned independently.
+
+Quickstart JSON now provides `issue_report.report_command` in place of
+`issue_report.github_issue_url`. The command includes a summary placeholder
+that you replace with the observed problem and expected behavior.
 
 Use `--report-id REPORT_ID` to reuse the saved preview without recollecting
 diagnostics. Replace `REPORT_ID` with the identifier printed during preparation.
@@ -1988,6 +1998,8 @@ records each attempt before transport, including retries of the same report
 ID and failed transports. The limit reads only today's and yesterday's logs,
 at most five records and 60 KB per log. A pending submission also blocks
 retries for five minutes.
+The fingerprint includes a hash of the normalized, redacted summary so that
+different reports sharing the same last error can be submitted independently.
 `BRIGADE_BUG_REPORT=never` disables sharing while allowing `--dry-run` and
 `--via file`. No doctor, status command, or hook starts bug reporting.
 

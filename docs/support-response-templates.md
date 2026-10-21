@@ -38,9 +38,13 @@ discussing the report.
 
 ## Doctor Not Ready
 
-Use the same bug report command above. The bundle includes doctor failures and
-warnings. Inspect the full preview before sharing it. For a vulnerability or
-exposed credential, follow SECURITY.md instead of filing a public issue.
+Use the same bug report command above. The bundle includes bounded checks for
+bootstrap files, AGENTS.md quality, and security-config presence under
+`bug_diagnostics`. It does not include full Doctor output. For a failing hook,
+profile, or component, use `--include-output FILE` to add the relevant output
+from a file you choose. Inspect the full preview before sharing it. For a
+vulnerability or exposed credential, follow SECURITY.md instead of filing a
+public issue.
 
 ## What Files Do I Commit?
 
