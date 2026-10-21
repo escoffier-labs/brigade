@@ -53,8 +53,13 @@ def load_manifest(path: Path) -> dict[str, Any]:
     data = read_protected(path)
     if data.get("schema") != MANIFEST_SCHEMA or set(data) - {"schema", "journal_dir", "targets", "executables"}:
         raise ActionError("invalid-manifest", 400)
-    if not isinstance(data.get("journal_dir"), str) or not Path(data["journal_dir"]).is_absolute():
+    journal_dir = data.get("journal_dir")
+    if not isinstance(journal_dir, str) or not Path(journal_dir).is_absolute() or "\x00" in journal_dir:
         raise ActionError("invalid-journal-path", 400)
+    try:
+        os.fsencode(journal_dir)
+    except UnicodeEncodeError:
+        raise ActionError("invalid-journal-path", 400) from None
     if not isinstance(data.get("targets"), list) or len(data["targets"]) > 100:
         raise ActionError("invalid-targets", 400)
     tools = data.get("executables", {})

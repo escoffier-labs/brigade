@@ -103,6 +103,65 @@ def test_invalid_configured_executable_fails_before_transport(tmp_path, monkeypa
     assert not (tmp_path / "journal").exists()
 
 
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        "x\x00y",
+        pytest.param(
+            "\ud800",
+            marks=pytest.mark.skipif(
+                os.name != "posix", reason="filesystem encoding accepts this surrogate on Windows"
+            ),
+        ),
+    ],
+)
+def test_invalid_journal_path_fails_before_target_sync(tmp_path, monkeypatch, suffix):
+    from brigade import fleet_action_auth as auth, fleet_action_runner as runner, fleet_client_actions as client
+
+    executable, _ = fake_executable(tmp_path, {"status": "ok"})
+    path = manifest(tmp_path, executable, {"target_id": "fixture-target", "family": "t3"})
+    data = json.loads(path.read_text())
+    data["journal_dir"] = str(tmp_path / suffix)
+    data["targets"] = []
+    path.write_text(json.dumps(data))
+    monkeypatch.setattr(client, "request", lambda *_args, **_kwargs: pytest.fail("invalid manifest reached Hub"))
+
+    with pytest.raises(auth.ActionError, match="invalid-journal-path"):
+        runner.sync_targets(path)
+
+    assert not (tmp_path / "journal").exists()
+
+
+def test_manifest_accepts_filesystem_encodable_unicode_journal_path(tmp_path):
+    from brigade import fleet_action_runner as runner
+
+    executable, _ = fake_executable(tmp_path, {"status": "ok"})
+    path = manifest(tmp_path, executable, {"target_id": "fixture-target", "family": "t3"})
+    journal_dir = str(tmp_path / "journal-雪")
+    data = json.loads(path.read_text())
+    data["journal_dir"] = journal_dir
+    data["targets"] = []
+    path.write_text(json.dumps(data))
+
+    assert runner.load_manifest(path)["journal_dir"] == journal_dir
+
+
+@pytest.mark.skipif(os.name != "posix", reason="surrogateescape paths are POSIX filesystem paths")
+def test_manifest_accepts_filesystem_surrogateescape_journal_path(tmp_path):
+    from brigade import fleet_action_runner as runner
+
+    executable, _ = fake_executable(tmp_path, {"status": "ok"})
+    path = manifest(tmp_path, executable, {"target_id": "fixture-target", "family": "t3"})
+    journal_dir = str(tmp_path / "journal-\udcff")
+    os.fsencode(journal_dir)
+    data = json.loads(path.read_text())
+    data["journal_dir"] = journal_dir
+    data["targets"] = []
+    path.write_text(json.dumps(data))
+
+    assert runner.load_manifest(path)["journal_dir"] == journal_dir
+
+
 @requires_posix
 def test_manifest_uses_path_default_only_for_omitted_executable(tmp_path, monkeypatch):
     from brigade import fleet_action_runner as runner
