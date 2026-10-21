@@ -61,6 +61,12 @@ def scan_text(text: str, policy: Policy | None = None, options: ScanOptions | No
                 match.group(0), _line_at(text, start, end)
             ):
                 continue
+            if (
+                rule.id == "private-hostname"
+                and not any(rule is custom_rule for custom_rule in active_policy.custom_rules)
+                and not _hostname_context(text, start, end)
+            ):
+                continue
             if _inside_ranges(start, end, skipped_ranges):
                 continue
             if _overlaps(start, end, occupied):
@@ -240,6 +246,50 @@ def _line_at(text: str, start: int, end: int) -> str:
     line_start = text.rfind("\n", 0, start) + 1
     line_end = text.find("\n", end)
     return text[line_start:] if line_end == -1 else text[line_start:line_end]
+
+
+def _hostname_context(text: str, start: int, end: int) -> bool:
+    """Keep textual hosts while avoiding unquoted attribute expressions.
+
+    This is a lexical heuristic, not a source parser. Bare dotted identifiers,
+    call arguments, interpolation expressions and table names are intentionally
+    skipped. Quoted strings, URLs, prose and host-related config values remain
+    detectable. A bare hostname with no textual context is ambiguous and skipped.
+    """
+    line = _line_at(text, start, end)
+    column = start - (text.rfind("\n", 0, start) + 1)
+    before, after = line[:column], line[column + end - start :]
+    if re.search(r"[a-z][a-z0-9+.-]*://[^\s]*$", before, re.IGNORECASE):
+        return True
+    # These delimiters introduce expressions, including expressions inside
+    # interpolated strings. Check them before accepting a surrounding quote.
+    if re.search(r"\bf[\"'][^\n]*\{[^}]*$", before, re.IGNORECASE):
+        return False
+    if before.rstrip().endswith(("[", "{")):
+        return False
+    if _quote_at(line, column, None) is not None:
+        return True
+    # Prose punctuation is valid around a host, including commas and
+    # parenthesized examples. An identifier immediately before '(' is a call.
+    if re.search(r"\b(?:return|if|const|let|var|assert|import)\b", before):
+        return False
+    if re.fullmatch(r"\s*(?:[a-z]+[,:]?\s+)+(?:\(\s*)?", before, re.IGNORECASE):
+        return True
+    if before.rstrip().endswith("("):
+        return False
+    if re.match(r"\s*(?:=|\?)", after):
+        return False
+    if re.fullmatch(
+        r"\s*(?:[a-z][a-z0-9]*[_-])*(?:host|hostname|server|endpoint|domain|url|address)\s*[:=]\s*",
+        before,
+        re.IGNORECASE,
+    ):
+        return True
+    if re.search(r"[(){}\[\];=]|\b(?:return|const|let|var|assert|import)\b", before):
+        return False
+    if re.match(r"\s*[,)}\];]", after):
+        return False
+    return bool(re.search(r"[a-z]{2,}\s+$", before, re.IGNORECASE) or re.match(r"\s+[a-z]{2,}\b", after, re.IGNORECASE))
 
 
 def _line_for_offset(starts: list[int], offset: int) -> int:

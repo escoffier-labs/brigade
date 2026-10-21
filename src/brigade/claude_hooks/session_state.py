@@ -10,7 +10,7 @@ from pathlib import Path
 from typing import Any, Callable, Iterator
 
 from .. import inbox_lock, localio
-from . import anchored_io, envelope
+from . import anchored_io, dependencies, envelope
 
 _SESSION_STATE_PROCESS_LOCKS_GUARD = threading.Lock()
 _SESSION_STATE_PROCESS_LOCKS: dict[str, threading.Lock] = {}
@@ -276,13 +276,52 @@ def _write_session_state_preserving_latch(
     state: dict[str, Any],
     *,
     log_target: Path | None = None,
+    patch_fields: tuple[str, ...] | None = None,
 ) -> bool:
-    """Write state without allowing an older payload to clear the timeout latch."""
+    """Save state, or patch observer-owned fields, preserving concurrent evidence."""
     try:
         with _rt()._session_state_lock(target, session_id):
             current = _rt().read_session_state(target, session_id)
             current_state = current if isinstance(current, dict) else {}
             updated = dict(state)
+            current_epoch = current_state.get("task_epoch")
+            if patch_fields is not None and updated.get("task_epoch") != current_epoch:
+                return False
+            if (
+                current_epoch is not None
+                and updated.get("task_epoch") != current_epoch
+                and current_epoch == _rt()._current_task_epoch(session_id)
+            ):
+                # A newer dispatched task completed while this hook was running.
+                return False
+            if patch_fields is not None:
+                updated = dict(current_state)
+                artifact_keys = {"exercised_artifact_id", "exercised_artifact_kind"}
+                for key in patch_fields:
+                    if key in state and key not in artifact_keys:
+                        updated[key] = state[key]
+                if "exercised_artifact_id" in patch_fields:
+                    _rt()._record_exercised_artifact(
+                        updated,
+                        state.get("exercised_artifact_id"),
+                        kind=state.get("exercised_artifact_kind", "skill"),
+                    )
+            dependencies.merge_observations(updated, current_state, observed_fields=patch_fields or ())
+            if updated.get("task_epoch") == current_epoch:
+                # Completed writes are monotonic within a task. Observation
+                # hooks must not erase them or rewind the verification boundary.
+                if current_state.get("write_observed") is True:
+                    updated["write_observed"] = True
+                now = localio.utc_now()
+                for key in ("last_write_at", "last_attributed_write_at", "last_verification_write_at"):
+                    current_stamp = localio.parse_iso_datetime(current_state.get(key))
+                    next_stamp = localio.parse_iso_datetime(updated.get(key))
+                    if (
+                        current_stamp is not None
+                        and current_stamp <= now
+                        and (next_stamp is None or current_stamp > next_stamp)
+                    ):
+                        updated[key] = current_state[key]
             current_count = current_state.get("hook_timeout_count")
             next_count = updated.get("hook_timeout_count")
             counts = [
@@ -319,6 +358,7 @@ def _write_session_state_preserving_latch(
                 current_state.get("hook_latch_announced") is True or updated.get("hook_latch_announced") is True
             )
             _rt().write_session_state(target, session_id, updated)
+            dependencies.restore(state, updated)
             return True
     except inbox_lock.InboxLockTimeout:
         if log_target is not None:

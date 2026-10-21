@@ -110,6 +110,34 @@ DEFAULT_RULES: tuple[Rule, ...] = (
         description="Filesystem path under a user home directory.",
     ),
     Rule(
+        id="windows-home-path",
+        category="pii",
+        # Quotes bound paths with spaced directory leaves. Without quotes,
+        # spaces need a following separator or filename extension so prose
+        # after the path is not consumed. Both raw and escaped slashes work.
+        pattern=(
+            r"(?<![\w.-])(?:(?<=(?P<windows_quote>[\"'`]))|(?<![\"'`]))"
+            r"[A-Z]:\\{1,2}Users\\{1,2}"
+            r"(?(windows_quote)"
+            r"[A-Za-z0-9._-](?:(?!(?P=windows_quote))[^\r\n<>:|?*])*?(?=(?P=windows_quote))"
+            r"|"
+            r"(?:[A-Za-z0-9._@+-]+(?: +[A-Za-z0-9._@+-]+)*\\{1,2})*"
+            r"(?:[A-Za-z0-9_@+-]+(?:[ .]+[A-Za-z0-9_@+-]+)*?\.[A-Za-z0-9]+"
+            r"(?![\w-]|\.[\w-])|[A-Za-z0-9._@+-]+)"
+            r")"
+        ),
+        replacement="<PRIVATE_HOME_PATH>",
+        description="Windows filesystem path under a user home directory.",
+        flags=re.IGNORECASE,
+    ),
+    Rule(
+        id="root-path",
+        category="infrastructure",
+        pattern=r"(?<![\w.-])/root(?:/[A-Za-z0-9._@+-]+)+",
+        replacement="[redacted-root-path]",
+        description="Filesystem path under the root user's home directory.",
+    ),
+    Rule(
         id="email",
         category="pii",
         # (?!:\S) keeps SSH/scp remotes like git@github.com:owner/repo.git from
@@ -184,10 +212,35 @@ DEFAULT_RULES: tuple[Rule, ...] = (
         flags=re.IGNORECASE,
     ),
     Rule(
+        id="bare-token-prefix",
+        category="secret",
+        pattern=(
+            r"\b(?:github_pat_[A-Za-z0-9_]{20,}|gh[pousr]_[A-Za-z0-9]{20,}"
+            r"|xox[baprs]-[A-Za-z0-9-]{8,}|sk-(?:live|test|proj|ant)-[A-Za-z0-9_-]{8,}"
+            r"|AKIA[A-Z0-9]{16})\b"
+        ),
+        replacement="[redacted-secret]",
+        description="Credential with a well-known provider token prefix.",
+        flags=re.IGNORECASE,
+    ),
+    Rule(
         id="private-key-block",
         category="secret",
         pattern=r"-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----",
         replacement="[redacted-private-key]",
         description="PEM private key block.",
+    ),
+    Rule(
+        id="private-hostname",
+        # engine._hostname_context skips code-shaped identifiers. Bare dotted
+        # names without string, URL, prose or config context are ambiguous.
+        category="infrastructure",
+        pattern=(
+            r"(?<![\w.-])(?:[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?\.)+"
+            r"(?:local|internal|lan|corp|home|intranet|localdomain)(?![\w-]|\.[\w-]|\()"
+        ),
+        replacement="[redacted-host]",
+        description="Private or local fully qualified hostname.",
+        flags=re.IGNORECASE,
     ),
 )

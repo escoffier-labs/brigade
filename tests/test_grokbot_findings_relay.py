@@ -55,7 +55,7 @@ PREVIEW_RESULT_KEYS = {"eligible", "known", "created", "limit", "relays"}
 NOW = datetime(2026, 8, 28, 16, 0, tzinfo=timezone.utc)
 LEAK_TOKENS = (
     PRIVATE_TITLE,
-    "ghp_exampleNotARealToken0000000000000001",
+    "ghp_exampleNotARealToken0000000000000001",  # content-guard: allow bare-token-prefix
     "192.0.2.10",
     "curl http://example.invalid/secret",
     "hunter2-example",
@@ -240,7 +240,7 @@ def test_apply_writes_full_untrusted_body_and_calls_unchanged_report_event(tmp_p
     assert len(drafts) == 1
     text = drafts[0].read_text(encoding="utf-8")
     assert PRIVATE_TITLE in text
-    assert "ghp_exampleNotARealToken0000000000000001" in text
+    assert "ghp_exampleNotARealToken0000000000000001" in text  # content-guard: allow bare-token-prefix
     assert external_calls == []
     assert captured == [_expected_event(record)]
     event = captured[0]

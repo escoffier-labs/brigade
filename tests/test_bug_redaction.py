@@ -20,8 +20,8 @@ def isolated_secret_environment(monkeypatch):
 @pytest.mark.parametrize(
     "value,rule",
     [
-        (r"C:\Users\example-user\private file.txt", "windows-home-path"),
-        ("/root/private", "root-home-path"),
+        (r"C:\Users\example-user\private file.txt", "windows-home-path"),  # content-guard: allow windows-home-path
+        ("/root/private", "root-home-path"),  # content-guard: allow root-path
         ("ghp_" + "a" * 36, "bare-token"),
         ("gho_" + "a" * 36, "bare-token"),
         ("ghu_" + "a" * 36, "bare-token"),
@@ -31,7 +31,7 @@ def isolated_secret_environment(monkeypatch):
         ("sk-" + "c" * 32, "bare-token"),
         ("AKIA" + "A" * 16, "bare-token"),
         ("xoxb-" + "1234567890-" * 3, "bare-token"),
-        ("build.private.internal", "private-hostname"),
+        ("build.private.internal", "private-hostname"),  # content-guard: allow private-hostname
         ("hostname: build-node", "private-hostname"),
     ],
 )
@@ -46,11 +46,16 @@ def test_report_leak_patterns(value, rule, tmp_path):
 
 
 @pytest.mark.parametrize(
-    "value",
-    [r"C:\Users\example-user\private.txt", "/root/private", "ghp_" + "a" * 36, "build.private.internal"],
+    "value,expected_rules",
+    [
+        (r"C:\Users\example-user\private.txt", ["windows-home-path"]),  # content-guard: allow windows-home-path
+        ("/root/private", ["root-path"]),  # content-guard: allow root-path
+        ("ghp_" + "a" * 36, ["bare-token-prefix"]),
+        ("build.private.internal", []),  # content-guard: allow private-hostname
+    ],
 )
-def test_bug_detectors_do_not_change_repository_guard(value):
-    assert not scan_text(value).findings
+def test_repository_guard_results_for_bug_detector_shapes(value, expected_rules):
+    assert [finding.rule_id for finding in scan_text(value).findings] == expected_rules
 
 
 def test_python_home_call_is_not_a_hostname():

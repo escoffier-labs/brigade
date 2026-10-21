@@ -865,7 +865,7 @@ def test_memory_inventory_redacts_hostile_frontmatter_contract_fields(tmp_path, 
         tmp_path,
         "memory/cards/hostile.md",
         title=f"/home/secret/{long_title}",
-        category="C:\\Users\\secret\\ops",
+        category="C:\\Users\\secret\\ops",  # content-guard: allow windows-home-path
         tags=["~/secret-tag", "safe-tag", "normal\nmultiline"],
         source_harness="/var/lib/harness",
         source_handoff="/tmp/escape.md",

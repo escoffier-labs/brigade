@@ -47,7 +47,17 @@ Runtime users need Node 22 or newer, as declared in the launcher's `engines` fie
 
 The atomic initialized marker binds the full wheel SHA, uv version, Python version/build and the private identity file's path, bytes and hash. Warm startup validates the payload, interpreter, actual sysconfig purelib and identity file, then skips uv. Missing or mismatched state reprovisions or fails. Provisioning errors cannot create a success marker. uv owns concurrent installation locking.
 
-The identity file is a minimal `.pth` inside only the private tool venv's actual site-packages. It marks Brigade as npm-managed for the launcher and that interpreter's normal or isolated `-m brigade` respawns. It is written atomically before the initialized marker. System, pipx, caller, development and shared managed-base environments are not modified. `brigade update` refuses npm-managed installations before state, network or pipx work. Install another exact version with npm install or npx. Passive pipx update checks are disabled by interpreter-local identity.
+The identity file is a minimal `.pth` inside only the private tool venv's actual site-packages. It marks Brigade as npm-managed for the launcher and that interpreter's normal or isolated `-m brigade` respawns. It is written atomically before the initialized marker. System, pipx, caller, development and shared managed-base environments are not modified. `brigade update` refuses npm-managed installations before state, network or pipx work. Install another exact version with npm install or npx.
+
+The current CLI contract permits a detached passive refresh with one GET to the version endpoint, a 5 second timeout, and a cache update. npm update notices and cached work-brief hints stay suppressed. Counted requests keep the existing Brigade User-Agent and carry `X-Brigade-Channel: npm`. `DO_NOT_TRACK=1` or `BRIGADE_TELEMETRY=0` sends a generic User-Agent without the channel header. `BRIGADE_NO_UPDATE_CHECK=1` or a nonempty `CI` skips the request. See [Python CLI telemetry](../../docs/telemetry.md) for fields, retention, and the pending Worker channel support. The bundled 0.30.0 wheel predates this contract. New npm artifacts must bundle a CLI wheel with this behavior to pass the updated acceptance gate.
+
+The acceptance harness mocks the version endpoint and process launch, denies sockets, and exercises real cache writes in normal and isolated npm interpreter respawns. A focused offline run against an already provisioned npm interpreter is available without package artifacts or Python downloads:
+
+```sh
+node npm/feasibility/acceptance.cjs --artifacts /tmp/unused-artifacts --out /tmp/npm-version-check --version-check-python /absolute/private/python
+```
+
+That mode verifies only the version-check contract. The full native acceptance run remains required for package qualification.
 
 The application runs through the private absolute interpreter with `-I` and receives the caller's original environment. Verification children receive that same environment. The launcher adds neither `BRIGADE_DISTRIBUTION` nor `BRIGADE_NO_UPDATE_CHECK`. Existing caller values remain caller preferences. Python isolated mode prevents user-site and Python environment overrides from redirecting Brigade itself. Other interpreters invoked by user commands retain their own behavior.
 

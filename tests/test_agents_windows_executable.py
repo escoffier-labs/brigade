@@ -258,7 +258,7 @@ def test_resolve_executable_accepts_native_windows_claude_exe(monkeypatch):
 
 def test_resolve_executable_accepts_npm_node_wrapper_codex_exe(monkeypatch):
     """Real fleet shape: `codex` resolves to a node-hosted .exe under npm."""
-    resolved = r"C:\Users\fleet\AppData\Roaming\npm\node_modules\@openai\codex\bin\codex.exe"
+    resolved = r"C:\Users\fleet\AppData\Roaming\npm\node_modules\@openai\codex\bin\codex.exe"  # content-guard: allow windows-home-path
     monkeypatch.setattr(sys, "platform", "win32")
     monkeypatch.setattr(proc, "which", _fake_windows_which({"codex": resolved}))
 
@@ -278,7 +278,7 @@ def test_resolve_executable_ps1_shim_needs_per_seat_command_override(monkeypatch
     (node.exe plus the seat entrypoint, see #1115) resolves to a runnable
     exe so dispatch can proceed.
     """
-    shim = r"C:\Users\fleet\AppData\Roaming\npm\cursor-agent.ps1"
+    shim = r"C:\Users\fleet\AppData\Roaming\npm\cursor-agent.ps1"  # content-guard: allow windows-home-path
     node = r"C:\Cursor\versions\current\node.exe"
     entrypoint = r"C:\Cursor\versions\current\index.js"
 
