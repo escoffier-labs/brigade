@@ -1374,7 +1374,11 @@ def test_operator_quickstart_prepares_new_user_workspace(tmp_path, capsys):
     assert any(step["id"] == "verify-opencode" for step in payload["steps"])
     assert payload["issue_report"]["brigade_version"]
     assert payload["issue_report"]["status"] == "ok"
-    assert payload["issue_report"]["github_issue_url"].endswith("/issues/new/choose")
+    assert (
+        payload["issue_report"]["report_command"]
+        == 'brigade bug report --target TARGET --summary "What happened and what you expected" --dry-run'
+    )
+    assert str(tmp_path) not in json.dumps(payload["issue_report"])
     assert (tmp_path / ".brigade" / "config.json").is_file()
     assert (tmp_path / ".brigade" / "daily.toml").is_file()
     assert (tmp_path / ".brigade" / "reviews.toml").is_file()
@@ -1880,3 +1884,27 @@ def test_migration_consolidate_keeps_scanner_commit_landing_before_publication(t
     assert final["surf-review-1"]["status"] == "dismissed"
     assert "scan-mig-1" in final, f"scanner commit deleted by migration consolidate: {sorted(final)}"
     assert final["scan-mig-1"]["status"] == "pending"
+
+
+def test_quickstart_issue_report_excludes_private_commands_and_details(tmp_path):
+    from brigade.operator_cmd.lifecycle import _quickstart_issue_report
+
+    private = str(tmp_path / "private-workspace")
+    report = _quickstart_issue_report(
+        {
+            "steps": [
+                {
+                    "id": "doctor",
+                    "status": "failed",
+                    "return_code": 1,
+                    "payload": {"top_issue": {"name": "profile", "detail": "missing " + private}},
+                }
+            ],
+            "next_commands": ["brigade doctor --target " + private],
+        }
+    )
+    assert private not in json.dumps(report)
+    assert (
+        report["report_command"]
+        == 'brigade bug report --target TARGET --summary "What happened and what you expected" --dry-run'
+    )
