@@ -867,12 +867,19 @@ def _station_read(conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str)
         )
         if permitted(str(row[0]))
     ]
-    node_ids = {node["node_id"] for node in nodes}
+    # Only an agent limited to named nodes needs a bound node list, and that list
+    # is bounded by its grants. Everyone else filters to active nodes by subquery.
+    all_nodes_visible = not caller.startswith("agent:") or bool({"*", "node:*"} & patterns)
+    node_ids = None if all_nodes_visible else {node["node_id"] for node in nodes}
     fields = ("node_id", "harness", "session_id", "repo_identity", "repo_label", "branch", "state", "heartbeat_at")
     sessions = [
         {field: row[field] for field in fields}
         for row in fleet_hub_sessions.list_sessions(
-            conn, include_all=include_all, node_ids=node_ids, text_filter=query or None
+            conn,
+            include_all=include_all,
+            node_ids=node_ids,
+            text_filter=query or None,
+            active_nodes_only=True,
         )
     ]
     needle = query.casefold()

@@ -887,3 +887,46 @@ def test_each_tool_call_captures_one_authority(stations, monkeypatch):
     captures.clear()
     call(b, "fleet_inbox", unacked_only=True, wait_secs=1)
     assert len(captures) == 1
+
+
+def test_who_binds_node_lists_only_for_named_grants(hub, monkeypatch):
+    from brigade import fleet_hub_sessions
+
+    _base, _ta, _tb, db = hub
+    conn = fleet_hub.open_db(db)
+    try:
+        fleet_hub_messages.add_principal(conn, {"name": "named", "may_send_to": [NODE_B]})
+        fleet_hub_messages.add_principal(conn, {"name": "wild", "may_send_to": ["node:*"]})
+        fleet_hub.add_node(conn, "gone-node")
+        fleet_hub_sessions.handle_session(
+            conn,
+            {
+                "action": "upsert",
+                "harness": "codex",
+                "session_id": "gone-session",
+                "repo_identity": "local:" + "e" * 64,
+                "identity_scope": "node",
+                "repo_label": "gone",
+                "checkout_path": "/example/repo",
+                "branch": "main",
+                "dirty_paths": [],
+                "dirty_truncated": False,
+            },
+            caller_node="gone-node",
+        )
+        fleet_hub.revoke_node(conn, "gone-node")
+        seen = []
+        original = fleet_hub_sessions.list_sessions
+
+        def spy(conn, **kwargs):
+            seen.append(kwargs.get("node_ids"))
+            return original(conn, **kwargs)
+
+        monkeypatch.setattr(fleet_hub_sessions, "list_sessions", spy)
+        for caller in (NODE_A, "agent:wild", "agent:named"):
+            status, who = fleet_hub_messages.handle(conn, {"action": "who", "all": True}, caller=caller)
+            assert status == 200
+            assert "gone-session" not in [row["session_id"] for row in who["sessions"]]
+        assert seen == [None, None, {NODE_B}]
+    finally:
+        conn.close()

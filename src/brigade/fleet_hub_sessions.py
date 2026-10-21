@@ -124,6 +124,7 @@ def list_sessions(
     now_epoch: float | None = None,
     node_ids: set[str] | None = None,
     text_filter: str | None = None,
+    active_nodes_only: bool = False,
 ) -> list[dict[str, object]]:
     """Active unexpired sessions, or history when ``include_all`` is set.
 
@@ -139,6 +140,10 @@ def list_sessions(
             return []
         node_filter = "AND node_id IN (" + ",".join("?" for _ in node_ids) + ") "
         params.extend(sorted(node_ids))
+    if active_nodes_only:
+        # A subquery rather than a bound list, so the roster size never meets
+        # SQLite's bound-parameter limit.
+        node_filter += "AND node_id IN (SELECT node_id FROM nodes WHERE revoked_at IS NULL) "
     text_clause = ""
     if text_filter:
         # instr() rather than LIKE, so % and _ in the filter are literal.
