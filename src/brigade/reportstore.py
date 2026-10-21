@@ -115,14 +115,22 @@ def latest_bundles(
     bundles: list[dict[str, Any]] = []
     if _dir_names_are_timestamp_prefixed(children):
         boundary: str | None = None
+        unkeyed: list[dict[str, Any]] = []
         for child in children:
             if boundary is not None and timestamp_prefix(child.name) != boundary:
                 break
             payload = read(child)
-            if payload is not None:
-                bundles.append(payload)
+            if payload is None:
+                continue
+            if not sort_key(payload):
+                # A payload with no created_at or id sorts after every keyed bundle,
+                # so it cannot end the scan.
+                unkeyed.append(payload)
+                continue
+            bundles.append(payload)
             if boundary is None and len(bundles) >= limit:
                 boundary = timestamp_prefix(child.name)
+        bundles.extend(unkeyed)
     else:
         for child in children:
             payload = read(child)

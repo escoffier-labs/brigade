@@ -130,3 +130,38 @@ def test_latest_release_receipt_orders_same_second_runs_by_started_at(tmp_path: 
     assert latest is not None
     assert latest["run_id"] == "aaa"
     assert sorted(decoded) == ["20260805-140000-release-aaa", "20260805-140000-release-zzz"]
+
+
+def test_latest_candidate_skips_newest_bundle_without_ordering_fields(tmp_path: Path):
+    root = tmp_path / ".brigade" / "release" / "candidates"
+    _write(
+        root / "20260805-130000-candidate-good" / "EVIDENCE.json",
+        {"candidate_id": "20260805-130000-candidate-good", "created_at": "2026-08-05T13:00:00+00:00"},
+    )
+    _write(root / "20260805-140000-candidate-damaged" / "EVIDENCE.json", {"status": "draft"})
+
+    latest = evidence._latest_candidate(tmp_path)
+
+    assert latest is not None
+    assert latest["candidate_id"] == "20260805-130000-candidate-good"
+
+
+def test_latest_release_receipt_skips_newest_receipt_without_ordering_fields(tmp_path: Path):
+    root = tmp_path / ".brigade" / "release" / "runs"
+    _write(root / "20260805-130000-release-good" / "receipt.json", {"run_id": "good"})
+    _write(root / "20260805-140000-release-damaged" / "receipt.json", {"status": "failed"})
+
+    latest = evidence._latest_release_receipt(tmp_path)
+
+    assert latest is not None
+    assert latest["run_id"] == "good"
+
+
+def test_latest_release_receipt_returns_unkeyed_receipt_when_nothing_else_exists(tmp_path: Path):
+    root = tmp_path / ".brigade" / "release" / "runs"
+    _write(root / "20260805-140000-release-damaged" / "receipt.json", {"status": "failed"})
+
+    latest = evidence._latest_release_receipt(tmp_path)
+
+    assert latest is not None
+    assert latest["status"] == "failed"

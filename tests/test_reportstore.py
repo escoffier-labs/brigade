@@ -217,3 +217,14 @@ def test_latest_bundles_orders_same_second_bundles_by_created_at(tmp_path: Path)
 
     assert [b["report_id"] for b in newest] == ["aaa"]
     assert [b["report_id"] for b in two] == ["aaa", "zzz"]
+
+
+def test_latest_bundles_unkeyed_payload_does_not_end_the_fast_scan(tmp_path: Path):
+    _bundle(tmp_path, "20260716-110000-report-good", {"report_id": "good", "created_at": "2026-07-16T11:00:00+00:00"})
+    _bundle(tmp_path, "20260716-120000-report-damaged", {"status": "warn"})
+
+    newest = reportstore.latest_bundles([tmp_path], _read, id_field="report_id", limit=1)
+    both = reportstore.latest_bundles([tmp_path], _read, id_field="report_id", limit=2)
+
+    assert [b.get("report_id") for b in newest] == ["good"]
+    assert [b.get("report_id") for b in both] == ["good", None]

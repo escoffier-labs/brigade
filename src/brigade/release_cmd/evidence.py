@@ -80,16 +80,27 @@ def _latest_release_receipt(target: Path) -> dict[str, Any] | None:
     if not reportstore._dir_names_are_timestamp_prefixed(children):
         receipts = _release_receipts(target)
         return receipts[0] if receipts else None
+
+    def sort_key(item: dict[str, Any]) -> str:
+        return str(item.get("started_at") or item.get("run_id") or "")
+
     newest: list[dict[str, Any]] = []
+    unkeyed: list[dict[str, Any]] = []
     boundary: str | None = None
     for child in children:
         if boundary is not None and reportstore.timestamp_prefix(child.name) != boundary:
             break
         receipt = _read_release_receipt(child)
-        if isinstance(receipt, dict):
-            newest.append(receipt)
-            boundary = boundary or reportstore.timestamp_prefix(child.name)
-    newest.sort(key=lambda item: str(item.get("started_at") or item.get("run_id") or ""), reverse=True)
+        if not isinstance(receipt, dict):
+            continue
+        if not sort_key(receipt):
+            # A receipt with no started_at or run_id sorts after every keyed receipt.
+            unkeyed.append(receipt)
+            continue
+        newest.append(receipt)
+        boundary = boundary or reportstore.timestamp_prefix(child.name)
+    newest.sort(key=sort_key, reverse=True)
+    newest.extend(unkeyed)
     return newest[0] if newest else None
 
 
