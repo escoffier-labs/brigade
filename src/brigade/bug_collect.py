@@ -14,7 +14,7 @@ from itertools import islice
 from pathlib import Path
 from typing import Any
 
-from . import __version__, bug_io, bug_last_error, extras, telemetry_export
+from . import __version__, bug_io, bug_last_error, component_paths, extras, telemetry_export
 from .localio import canonical_json_digest
 
 _DOCTOR_CHECK_TIMEOUT = 5.0
@@ -179,6 +179,21 @@ def recent_failures(target: Path) -> dict[str, Any]:
     return {"runs": _failed_runs(target), "verify": _failed_verify(target)}
 
 
+def _install_channel() -> str:
+    # The updater persists the installed channel separately from the version.
+    # Read only bounded local metadata. Missing or stale state proves neither
+    # stable nor beta, including source checkouts without an update record.
+    state = _object(Path(component_paths.update_state_path(component_paths.data_root())))
+    if (
+        state is not None
+        and state.get("schema_version") == 1
+        and state.get("cli_coordinate") == __version__
+        and state.get("channel") in ("stable", "beta")
+    ):
+        return str(state["channel"])
+    return "unknown"
+
+
 def collect(
     target: Path, *, summary: str, title: str, kind: str, diagnostics: dict[str, Any], output: str
 ) -> dict[str, Any]:
@@ -188,7 +203,7 @@ def collect(
         "schema": "brigade.bug-report.v1",
         "brigade": {
             "version": __version__,
-            "channel": "beta" if "dev" in __version__ else "stable",
+            "channel": _install_channel(),
             "distribution": "brigade-cli",
             "extras": extras.enabled(),
         },

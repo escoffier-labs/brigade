@@ -1303,9 +1303,7 @@ def test_older_prepared_vulnerability_is_blocked_before_network(report_env, monk
     receipt["preview_digest"] = hashlib.sha256(markdown.encode()).hexdigest()
     (directory / "receipt.json").write_text(json.dumps(receipt))
     monkeypatch.setattr(mod, "gh", lambda *args: pytest.fail("network for a vulnerability"))
-    assert (
-        cli.main(["bug", "report", "--report-id", preview["report_id"], "--yes", "--not-security", "--via", "gh"]) == 2
-    )
+    assert cli.main(["bug", "report", "--report-id", preview["report_id"], "--via", "gh"]) == 2
     assert "SECURITY.md" in capsys.readouterr().err
 
 
@@ -1321,6 +1319,8 @@ def test_older_prepared_vulnerability_is_blocked_before_network(report_env, monk
         "Deserialization fails on an empty receipt",
         "brigade security enrich crashes",
         "security.toml fails to parse",
+        "memory leak when listing skill keys",
+        "status exposes the wrong token count",
     ],
 )
 def test_benign_ui_language_allows_report(report_env, capsys, summary):
@@ -1657,15 +1657,15 @@ def test_security_config_last_error_allows_ordinary_report(report_env, capsys):
     assert result(capsys)["report_id"]
 
 
-def test_same_failure_with_different_summaries_shares_fingerprint_and_cooldown(report_env, monkeypatch, capsys):
+def test_same_failure_with_normalized_summary_shares_fingerprint_and_cooldown(report_env, monkeypatch, capsys):
     from brigade import bug_last_error
 
     mod, target = report_env
     bug_last_error.record("doctor", 1, ValueError("profile missing"))
     monkeypatch.setattr(mod, "gh", lambda *a: "[]")
-    assert submit_prepared(target, capsys, "--via", "url", "--json", summary="Prompt stops responding") == 0
+    assert submit_prepared(target, capsys, "--via", "url", "--json", summary="Profile output stops at row 123") == 0
     first = result(capsys)
-    assert invoke(target, "--summary", "Profile output is truncated", "--dry-run", "--json") == 0
+    assert invoke(target, "--summary", "PROFILE output stops at row 999", "--dry-run", "--json") == 0
     second = result(capsys)
     assert first["fingerprint"] == second["fingerprint"]
     assert (

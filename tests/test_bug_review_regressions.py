@@ -30,16 +30,23 @@ def test_described_bugs_use_normalized_summary_without_failure_facts(report_env,
     assert fingerprints[0] != fingerprints[2]
 
 
-@pytest.mark.parametrize("identity", [{"command": "doctor", "exit_code": 1}, {"exception_type": "ValueError"}])
-def test_failure_facts_override_summary_fallback(report_env, monkeypatch, capsys, identity):
+@pytest.mark.parametrize(
+    "identity",
+    [
+        None,
+        {"command": "work verify run", "exit_code": 1},
+        {"command": "doctor", "exit_code": 1, "exception_type": "ValueError"},
+    ],
+)
+def test_different_summaries_distinguish_shared_failure_facts(report_env, monkeypatch, capsys, identity):
     mod, target = report_env
-    monkeypatch.setattr(mod, "collect_diagnostics", lambda target: {"checks": [], "summary": {}})
-    mod.write_json(bug_last_error.error_path(), identity)
+    if identity is not None:
+        mod.write_json(bug_last_error.error_path(), identity)
     fingerprints = []
     for summary in ("wrong count", "missing heading"):
         assert invoke(target, "--summary", summary, "--dry-run", "--json") == 0
         fingerprints.append(result(capsys)["fingerprint"])
-    assert fingerprints[0] == fingerprints[1]
+    assert fingerprints[0] != fingerprints[1]
 
 
 @pytest.mark.parametrize("hostname", ["main", "brigade", "exampleuser"])
@@ -150,3 +157,90 @@ def test_healthy_minimal_workspace_has_no_optional_file_warnings(tmp_path, confi
         row for name in ("bootstrap", "agents-quality", "security-config") for row in bug_doctor.check(tmp_path, name)
     ]
     assert checks == []
+
+
+@pytest.mark.parametrize("error_type", ["incomplete", "bad-status", "url"])
+def test_api_protocol_failure_still_previews(report_env, monkeypatch, capsys, error_type):
+    from http.client import BadStatusLine, IncompleteRead
+    from urllib.error import URLError
+
+    mod, target = report_env
+    error = {
+        "incomplete": IncompleteRead(b"private bytes"),
+        "bad-status": BadStatusLine("private bytes"),
+        "url": URLError("private bytes"),
+    }[error_type]
+
+    def fetch(*args, **kwargs):
+        raise error
+
+    monkeypatch.setattr(mod, "urlopen", fetch)
+    assert invoke(target, "--via", "url", "--json") == 0
+    preview = result(capsys)
+    assert preview["dedup_status"] == "dedup skipped"
+    assert "### Full output" in preview["preview_markdown"]
+    assert not preview["submitted"]
+    assert "private bytes" not in json.dumps(preview)
+
+
+@pytest.mark.parametrize(
+    "channel,coordinate,expected",
+    [
+        ("stable", None, "stable"),
+        ("beta", None, "beta"),
+        ("beta", "0.0.0", "unknown"),
+        ("invalid", None, "unknown"),
+        (None, None, "unknown"),
+    ],
+)
+def test_report_channel_uses_matching_install_state(report_env, capsys, channel, coordinate, expected):
+    from brigade import __version__, component_paths
+
+    mod, target = report_env
+    if channel is not None:
+        mod.write_json(
+            Path(component_paths.update_state_path(mod.data_root())),
+            {"schema_version": 1, "channel": channel, "cli_coordinate": coordinate or __version__},
+        )
+    assert invoke(target, "--dry-run", "--json") == 0
+    preview = result(capsys)
+    bundle = json.loads(Path(preview["preview_path"]).with_name("bundle.json").read_text())
+    assert bundle["brigade"]["channel"] == expected
+
+
+@pytest.mark.parametrize("interactive", [False, True])
+@pytest.mark.parametrize("field", ["summary", "last_error", "probe"])
+def test_not_security_overrides_classifier_through_saved_submission(
+    report_env, monkeypatch, capsys, interactive, field
+):
+    mod, target = report_env
+    narrative = "credential leak in the displayed count"
+    flags = ["--summary", narrative] if field == "summary" else []
+    if field == "last_error":
+        bug_last_error.record("status", 1, ValueError(narrative))
+    elif field == "probe":
+        monkeypatch.setattr(
+            mod,
+            "collect_diagnostics",
+            lambda target: {"checks": [{"name": "security issue in count display", "status": "FAIL"}], "summary": {}},
+        )
+    assert invoke(target, *flags, "--not-security", "--dry-run", "--json") == 0
+    preview = result(capsys)
+    monkeypatch.setattr(sys.stdin, "isatty", lambda: interactive)
+    monkeypatch.setattr(sys.stdout, "isatty", lambda: interactive)
+    monkeypatch.setattr("builtins.input", lambda prompt: "n" if "vulnerability" in prompt else "y")
+    monkeypatch.setattr(mod, "gh", lambda *args: "[]")
+    assert (
+        cli.main(["bug", "report", "--report-id", preview["report_id"], "--not-security", "--yes", "--via", "url"]) == 0
+    )
+    capsys.readouterr()
+    receipt = json.loads(Path(preview["receipt_path"]).read_text())
+    assert receipt["submitted"]
+    assert receipt["security_confirmation"] == {"mode": "prompt" if interactive else "flag", "not_security": True}
+
+
+def test_not_security_never_overrides_explicit_security_kind(report_env, capsys):
+    mod, target = report_env
+    assert invoke(target, "--kind", "security", "--not-security", "--dry-run") == 2
+    assert "SECURITY.md" in capsys.readouterr().err
+    assert not list(Path(mod.data_root()).rglob("bundle.json"))

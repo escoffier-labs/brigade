@@ -12,8 +12,10 @@ import subprocess
 import sys
 import uuid
 from datetime import datetime, timedelta, timezone
+from http.client import HTTPException
 from pathlib import Path
 from typing import Any
+from urllib.error import URLError
 from urllib.parse import quote, urlencode
 from urllib.request import Request, urlopen
 
@@ -31,6 +33,7 @@ URL_BUDGET = 6000
 EMAIL_BUDGET = 1800
 BUNDLE_CAP = 60 * 1024
 OUTPUT_TAIL_CAP = 16 * 1024
+_CREDENTIAL = r"(?:private[- ]keys?|(?:API|access|refresh|auth(?:entication)?|session)[- ](?:keys?|tokens?)|credentials?|secrets?|personal data)"
 _SECURITY = re.compile(
     r"\b(?:security (?:vulnerability|issue)|vulnerabilit\w*|exploit\w*|CVE-\d{4}-\d+|"
     r"(?:SQL|command|code|shell|LDAP|template) injection|(?:(?:remote|arbitrary) )?code execution|"
@@ -39,8 +42,9 @@ _SECURITY = re.compile(
     r"symlink (?:race|attack|vulnerability)|TOCTOU|(?:sandbox|container) escape|"
     r"(?:elevated|unauthorized) privileges?|"
     r"arbitrary file (?:access|read|write|overwrite)|(?:read\w*|writ\w*) outside|guard bypass|"
-    r"(?:leak\w*|expos\w*)[^.\n]{0,80}\b(?:keys?|tokens?|credentials?|secrets?|personal data)|"
-    r"(?:private[- ]keys?|credentials?|tokens?|secrets?|personal data)[^.\n]{0,80}\b(?:leak\w*|expos\w*)|"
+    rf"(?:leak\w*|expos\w*|disclos\w*)[^.\n]{{0,80}}\b{_CREDENTIAL}|"
+    rf"{_CREDENTIAL}[^.\n]{{0,80}}\b(?:leak\w*|expos\w*|disclos\w*)|"
+    r"leak of (?:keys?|tokens?)|"
     r"buffer overflow|use[- ]after[- ]free|denial[- ]of[- ]service)\b",
     re.I,
 )
@@ -76,9 +80,8 @@ def fingerprint(last_error: dict[str, Any] | None, check_names: list[str], summa
         error.get("exit_code"),
         sorted(_normalize_fingerprint(name) for name in check_names),
         ".".join(__version__.split(".")[:2]),
+        hashlib.sha256(_normalize_fingerprint(summary.lower()).encode()).hexdigest(),
     ]
-    if not (error.get("command") or error.get("exception_type") or check_names):
-        identity.append(_normalize_fingerprint(summary.lower()))
     return "bf-" + hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:12]
 
 
@@ -152,7 +155,7 @@ def _duplicates(bundle: dict[str, Any], redactor: Redactor) -> tuple[list[dict[s
                 }
             )
         return found, "searched"
-    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
+    except (OSError, URLError, HTTPException, ValueError, KeyError, TypeError, subprocess.SubprocessError):
         return [], "dedup skipped"
 
 
@@ -331,11 +334,15 @@ def _read_bounded(path: Path) -> bytes:
         raise ReportBlocked("Bug report blocked: selected input exceeds 60 KB") from None
 
 
-def _check_security(bundle: dict[str, Any]) -> None:
+def _check_security(bundle: dict[str, Any], *, not_security: bool = False) -> None:
     user = bundle.get("user", {})
+    if user.get("kind") == "security":
+        raise ReportBlocked("Bug report blocked: report security concerns privately using SECURITY.md")
+    if not_security:
+        return
     texts = [str(user.get(key, "")) for key in ("summary", "title", "output_tail")]
     texts.append(str((bundle.get("last_error") or {}).get("message_head", "")))
-    if user.get("kind") == "security" or any(_SECURITY.search(text) for text in texts):
+    if any(_SECURITY.search(text) for text in texts):
         raise ReportBlocked("Bug report blocked: report security concerns privately using SECURITY.md")
     if any(
         c.get("status") == "FAIL" and _SECURITY.search(str(c.get("name")) + " " + str(c.get("detail")))
@@ -344,7 +351,7 @@ def _check_security(bundle: dict[str, Any]) -> None:
         raise ReportBlocked("Bug report blocked: security-category failure, use SECURITY.md")
 
 
-def _load_prepared(report_id: str) -> tuple[Path, dict[str, Any], str, dict[str, Any]]:
+def _load_prepared(report_id: str, *, not_security: bool = False) -> tuple[Path, dict[str, Any], str, dict[str, Any]]:
     if re.fullmatch(r"[0-9a-f]{32}", report_id) is None:
         raise ReportBlocked("Bug report blocked: invalid --report-id")
     directory = Path(data_root()).resolve() / "brigade" / "bug-reports" / report_id
@@ -377,7 +384,7 @@ def _load_prepared(report_id: str) -> tuple[Path, dict[str, Any], str, dict[str,
     assert_terminal_safe(bundle)
     assert_clean(json.dumps(bundle, ensure_ascii=False, sort_keys=True))
     assert_clean(markdown)
-    _check_security(bundle)
+    _check_security(bundle, not_security=not_security)
     if markdown != render(bundle):
         raise ReportBlocked("Bug report blocked: outdated preview rendering, prepare a new preview")
     return directory, bundle, markdown, receipt
@@ -388,7 +395,7 @@ def _prepare(args: argparse.Namespace) -> tuple[Path, dict[str, Any], str, dict[
     output = _output_tail(args.include_output)
     if not summary.strip():
         raise ReportBlocked("Bug report blocked: a nonempty --summary or --summary-file is required")
-    if any(_SECURITY.search(text) for text in (summary, args.title or "", output)):
+    if not args.not_security and any(_SECURITY.search(text) for text in (summary, args.title or "", output)):
         raise ReportBlocked("Bug report blocked: report security concerns privately using SECURITY.md")
     target = args.target.resolve()
     diagnostics = collect_diagnostics(target)
@@ -400,7 +407,7 @@ def _prepare(args: argparse.Namespace) -> tuple[Path, dict[str, Any], str, dict[
         diagnostics=diagnostics,
         output=output,
     )
-    _check_security(collected)
+    _check_security(collected, not_security=args.not_security)
     redactor = Redactor(target)
     bundle = redactor.project(collected)
     # Schema and package metadata are fixed public constants, not local input.
@@ -467,7 +474,9 @@ def _report(args: argparse.Namespace) -> int:
         raise ReportBlocked(
             "Bug report blocked: --yes also requires --not-security. Use SECURITY.md for vulnerabilities"
         )
-    directory, bundle, markdown, receipt = _load_prepared(args.report_id) if args.report_id else _prepare(args)
+    directory, bundle, markdown, receipt = (
+        _load_prepared(args.report_id, not_security=args.not_security) if args.report_id else _prepare(args)
+    )
     root = directory.parent
     report_id = directory.name
     receipt_path = directory / "receipt.json"
@@ -533,7 +542,7 @@ def _report(args: argparse.Namespace) -> int:
             duplicate_choice="comment" if comment_on else "new",
         )
         with held_file_lock(root / "submission.lock", deadline_seconds=1):
-            _load_prepared(report_id)
+            _load_prepared(report_id, not_security=args.not_security)
             now = datetime.now(timezone.utc)
             _limit_submissions(root, bundle["fingerprint"], now)
             receipt["attempted_at"] = now.isoformat()

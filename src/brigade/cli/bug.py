@@ -28,7 +28,7 @@ def register(sub: argparse._SubParsersAction) -> None:
     report.add_argument(
         "--not-security",
         action="store_true",
-        help="Assert this is not a vulnerability report. Required for non-interactive --yes.",
+        help="Override vulnerability keyword matches for an ordinary bug. Required for non-interactive --yes.",
     )
     report.set_defaults(func=dispatch)
 

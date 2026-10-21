@@ -1964,10 +1964,13 @@ through `gh search issues`, with the unauthenticated GitHub search API as a
 fallback when `gh` fails or is unavailable. API reads have a 10-second timeout
 and a 60 KB response cap. Search failure prints `dedup skipped`. A dry run
 makes no network calls. Fingerprints use the recorded command, exception type,
-exit code, failing probe names, and Brigade minor version. When no command,
-exception type, or failing probe exists, the fingerprint also uses the lowercased
-summary with paths, digits, and identifiers normalized. Different descriptions
-of the same recorded failure retain the same fingerprint.
+exit code, failing probe names, Brigade minor version, and a hash of the lowercased
+summary with paths, digits, and identifiers normalized. Different bugs with the
+same failing command or probe receive different fingerprints. Repeats with the
+same normalized summary and failure facts retain the same fingerprint.
+The bundle channel comes from the updater's local install state when its version
+matches the running CLI. Missing or stale state reports `unknown` instead of
+assuming a stable release.
 With an interactive terminal, review the destination
 and answer "Is this a security vulnerability? [y/N]" before sharing. Answering
 yes blocks submission and points to SECURITY.md. The keyword classifier also
@@ -1985,6 +1988,10 @@ brigade bug report --report-id REPORT_ID --json --yes --not-security --via gh
 
 `--yes` requires `--report-id`. Non-interactive submission also requires
 `--not-security`, asserting that the report does not describe a vulnerability.
+For an ordinary bug that triggers the vulnerability keyword classifier, pass
+`--not-security` during preparation and again when submitting the saved preview.
+This override works with an interactive terminal too. Explicit `--kind security`
+reports are always refused. Redaction and the second scan still apply.
 An interactive submission asks the security question even with `--yes`.
 Brigade verifies the stored JSON and Markdown digests and scans both again,
 including every nonempty secret-named environment value mounted since preparation,
@@ -2015,8 +2022,8 @@ records each attempt before transport, including retries of the same report
 ID and failed transports. The limit reads only today's and yesterday's logs,
 at most five records and 60 KB per log. A pending submission also blocks
 retries for five minutes.
-Reports with the same failure facts share a fingerprint and cooldown even
-when their summaries differ.
+Reports with the same failure facts and normalized summary share a fingerprint
+and cooldown.
 `BRIGADE_BUG_REPORT=never` disables sharing while allowing `--dry-run` and
 `--via file`. No doctor, status command, or hook starts bug reporting.
 
