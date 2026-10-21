@@ -977,7 +977,7 @@ def test_search_install_args_keep_npm_scope_distinction():
 
 def test_code_search_api_doctor_reads_http_health(monkeypatch):
     t = managed.resolve("code-search-api")
-    monkeypatch.setenv("CODE_SEARCH_API_URL", "http://search.local")
+    monkeypatch.setenv("CODE_SEARCH_API_URL", "http://search.local")  # content-guard: allow private-hostname
     seen = {}
 
     class FakeResponse:
@@ -998,7 +998,7 @@ def test_code_search_api_doctor_reads_http_health(monkeypatch):
     monkeypatch.setattr(managed.urllib.request, "urlopen", fake_urlopen)
     ctx = DoctorContext(target=Path("/tmp/ws"), selection=None, harnesses=[])
     results = t.doctor(ctx)
-    assert seen == {"url": "http://search.local/api/health", "timeout": 2.0}
+    assert seen == {"url": "http://search.local/api/health", "timeout": 2.0}  # content-guard: allow private-hostname
     assert any(status == "OK" and "chunks=12" in detail for status, _, detail in results)
 
 

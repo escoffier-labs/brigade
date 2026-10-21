@@ -248,13 +248,13 @@ def test_redact_bounded_output_redacts_unterminated_multiline_assignment_at_cap(
 
 
 def test_redact_text_removes_json_escaped_windows_private_paths_without_over_redacting(probe) -> None:
-    private_path = r'{"path":"C:\\Users\\name\\.ssh\\id_rsa"}'
+    private_path = r'{"path":"C:\\Users\\name\\.ssh\\id_rsa"}'  # content-guard: allow windows-home-path
     benign_assignment = 'monkey = "a b c"'
     benign_path = r'{"path":"D:\\workspace\\monkey\\keyboard"}'
 
     result = probe.redact_text("\n".join([private_path, benign_assignment, benign_path]))
 
-    assert r"C:\\Users\\name" not in result
+    assert r"C:\\Users\\name" not in result  # content-guard: allow windows-home-path
     assert r'{"path":"[HOME]\\.ssh\\id_rsa"}' in result
     assert benign_assignment in result
     assert benign_path in result
@@ -275,8 +275,8 @@ def test_redact_text_removes_forward_slash_and_mixed_windows_private_paths(probe
 @pytest.mark.parametrize(
     "private_path",
     [
-        r"C:\Users\Jane Doe\.ssh\id_rsa",
-        r"C:\\Users\\Jane Doe\\.ssh\\id_rsa",
+        r"C:\Users\Jane Doe\.ssh\id_rsa",  # content-guard: allow windows-home-path
+        r"C:\\Users\\Jane Doe\\.ssh\\id_rsa",  # content-guard: allow windows-home-path
         "C:/Users/Jane Doe/.ssh/id_rsa",
         r"C:\Users/Jane Doe/.ssh/id_rsa",
     ],
@@ -830,7 +830,9 @@ def test_run_deep_probes_launch_oserror_emits_bounded_redacted_receipt_and_conti
             },
         },
     )
-    launch_error = OSError(r'KEY = "a b c"; {"path":"C:\\Users\\name\\.ssh\\id_rsa"}')
+    launch_error = OSError(
+        r'KEY = "a b c"; {"path":"C:\\Users\\name\\.ssh\\id_rsa"}'  # content-guard: allow windows-home-path
+    )
     with (
         mock.patch.object(probe.shutil, "which", return_value="/fake/bin/codex"),
         mock.patch.object(
@@ -1062,7 +1064,7 @@ def test_run_deep_probes_invalid_fixture_refuses_unsafe_discovery_args_without_l
 
 
 def test_probe_fixture_redacts_invalid_deep_probe_echo_and_refused_command(probe, schema) -> None:
-    private_command = r"C:\Users\Jane Doe\bin\tool"
+    private_command = r"C:\Users\Jane Doe\bin\tool"  # content-guard: allow windows-home-path
     secret = "fake-credential-value"
     fixture = _fixture_with_deep_probes(
         harness_id="invalid-redacted-deep-probe-cli",
@@ -1081,7 +1083,7 @@ def test_probe_fixture_redacts_invalid_deep_probe_echo_and_refused_command(probe
 
     serialized = json.dumps(result)
     assert private_command not in serialized
-    assert "C:\\Users\\Jane Doe" not in serialized
+    assert "C:\\Users\\Jane Doe" not in serialized  # content-guard: allow windows-home-path
     assert secret not in serialized
     assert result["deep_probes"]["instruction"]["discovery"]["command"] == r"[HOME]\bin\tool"
     assert result["deep_probes"]["instruction"]["credential"] == "[REDACTED]"
@@ -1089,7 +1091,7 @@ def test_probe_fixture_redacts_invalid_deep_probe_echo_and_refused_command(probe
 
 
 def test_probe_fixture_sanitizes_credential_names_and_private_paths_in_validation_errors(probe, schema) -> None:
-    private_path = r"C:\Users\Jane Doe\.ssh\id_rsa"
+    private_path = r"C:\Users\Jane Doe\.ssh\id_rsa"  # content-guard: allow windows-home-path
     fixture = _fixture_with_deep_probes(
         harness_id="invalid-redacted-validation-errors-cli",
         deep_probes={
@@ -1103,7 +1105,7 @@ def test_probe_fixture_sanitizes_credential_names_and_private_paths_in_validatio
 
     validation_errors = "\n".join(result["validation_errors"])
     assert "api_key" not in validation_errors
-    assert "C:\\Users\\Jane Doe" not in validation_errors
+    assert "C:\\Users\\Jane Doe" not in validation_errors  # content-guard: allow windows-home-path
     assert "[HOME]" in validation_errors
 
 

@@ -9,9 +9,9 @@ import (
 )
 
 func TestRedactTextClasses(t *testing.T) {
-	text := "token=abc123 email demo@example.com url https://private.example.com/path host build.internal"
+	text := "token=abc123 email demo@example.com url https://private.example.com/path host build.internal" // content-guard: allow private-hostname
 	got := RedactText(text, Options{RedactSecrets: true, RedactEmails: true, RedactURLs: true, RedactHostnames: true})
-	for _, forbidden := range []string{"abc123", "demo@example.com", "https://private.example.com/path", "build.internal"} {
+	for _, forbidden := range []string{"abc123", "demo@example.com", "https://private.example.com/path", "build.internal"} { // content-guard: allow private-hostname
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("redaction leaked %q in %q", forbidden, got)
 		}
@@ -22,7 +22,7 @@ func TestApplyRedactionCoversMetadataArtifactsAndLinks(t *testing.T) {
 	rec := adapter.Record{
 		Collection: adapter.Collection{Metadata: Metadata(map[string]any{"directory": "/home/demo/project"})},
 		Item: adapter.Item{
-			Text:     "api_key=abc123 contact demo@example.com https://private.example.com/path build.internal",
+			Text:     "api_key=abc123 contact demo@example.com https://private.example.com/path build.internal", // content-guard: allow private-hostname
 			Metadata: Metadata(map[string]any{"cwd": "/home/demo/project", "url": "https://private.example.com/path"}),
 		},
 		Raw: adapter.RawRef{Path: "/home/demo/project/session.json"},
@@ -34,7 +34,7 @@ func TestApplyRedactionCoversMetadataArtifactsAndLinks(t *testing.T) {
 		}},
 		Links: []adapter.Link{{
 			URL:  "https://private.example.com/link",
-			Text: "build.internal",
+			Text: "build.internal", // content-guard: allow private-hostname
 		}},
 	}
 	summary := "summary for demo@example.com"
@@ -52,7 +52,7 @@ func TestApplyRedactionCoversMetadataArtifactsAndLinks(t *testing.T) {
 		t.Fatal(err)
 	}
 	got := string(encoded)
-	for _, forbidden := range []string{"/home/demo/project", "abc123", "demo@example.com", "https://private.example.com", "build.internal"} {
+	for _, forbidden := range []string{"/home/demo/project", "abc123", "demo@example.com", "https://private.example.com", "build.internal"} { // content-guard: allow private-hostname
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("redaction leaked %q in %q", forbidden, got)
 		}

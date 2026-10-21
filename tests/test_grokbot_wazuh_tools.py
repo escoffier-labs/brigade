@@ -13,7 +13,7 @@ from brigade.grokbot_wazuh.store import WazuhStore
 from brigade.grokbot_wazuh.tools import WazuhTriageTools
 
 NOW = datetime(2026, 8, 28, 16, 0, tzinfo=timezone.utc)
-SECRET = "ghp_exampleNotARealToken0000000000000001"
+SECRET = "ghp_exampleNotARealToken0000000000000001"  # content-guard: allow bare-token-prefix
 FORBIDDEN_PUBLIC = {
     "body",
     "title",

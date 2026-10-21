@@ -10,6 +10,13 @@ import sys
 import time
 from pathlib import Path
 
+import pytest
+
+
+pytestmark = pytest.mark.skipif(
+    os.name == "nt", reason="POSIX Bash hook requires /usr/bin/bash, symlinked Unix utilities, and POSIX PATH"
+)
+
 
 HOOK = Path(__file__).parents[1] / "src" / "brigade" / "templates" / "grok" / "hooks" / "brigade-work.sh"
 
