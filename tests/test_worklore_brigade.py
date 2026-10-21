@@ -164,7 +164,11 @@ def test_malformed_and_path_shaped_dependencies_are_dropped_without_leaking() ->
         identity=IDENTITY,
         edges=[
             {"source": "abc123", "target": "/var/lib/secret-task", "type": "blocks"},
-            {"source": "abc123", "target": r"C:\Users\operator\task", "type": "blocks"},
+            {
+                "source": "abc123",
+                "target": r"C:\Users\operator\task",  # content-guard: allow windows-home-path
+                "type": "blocks",
+            },
             {"source": "abc123", "target": "ok-dep", "type": "/home/operator/type"},
             {"source": "abc123", "target": "bad#id", "type": "blocks"},
             {"source": "abc123", "target": "has/slash", "type": "blocks"},
@@ -211,7 +215,7 @@ def test_normalize_rejects_home_paths_and_receipt_bodies() -> None:
         adapter.normalize_task(
             {
                 "id": "bad3",
-                "text": r"notes in C:\Users\operator",
+                "text": r"notes in C:\Users\operator",  # content-guard: allow windows-home-path
                 "status": "pending",
                 "acceptance": ["x"],
             },
@@ -235,7 +239,7 @@ def test_normalize_rejects_home_paths_and_receipt_bodies() -> None:
                 "id": "bad5",
                 "text": "Safe title",
                 "status": "pending",
-                "acceptance": [r"notes in C:\Users\operator"],
+                "acceptance": [r"notes in C:\Users\operator"],  # content-guard: allow windows-home-path
             },
             identity=IDENTITY,
             edges=[],
@@ -321,7 +325,15 @@ def test_campaign_qualified_task_ids_are_accepted() -> None:
 
 @pytest.mark.parametrize(
     "task_id",
-    ["", "#hash", "has/slash", r"has\slash", "has space", "/abs/path", r"C:\Users\task"],
+    [
+        "",
+        "#hash",
+        "has/slash",
+        r"has\slash",
+        "has space",
+        "/abs/path",
+        r"C:\Users\task",  # content-guard: allow windows-home-path
+    ],
 )
 def test_invalid_task_ids_are_rejected(task_id: str) -> None:
     with pytest.raises(adapter.BrigadeObservationError, match="field-bound"):

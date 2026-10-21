@@ -1,3 +1,5 @@
+> Historical note: this draft describes an earlier release. See [Python CLI telemetry](telemetry.md) for the current version-check data flow.
+
 # Brigade Announcement Posts
 
 Channel-ready text, rewritten 2026-06-09 in the README's voice. The origin story is the hook; lead with it, not the feature list. Numbers below are real and public-safe. Update version numbers before posting.
@@ -55,7 +57,7 @@ If you run more than one coding agent you know the problem: each tool learns a l
 
 The two incidents that taught me the rules: an auto-promotion job bloated my always-loaded memory index to 41KB (12KB budget) and every session silently started with truncated memory; and 195 handoff notes sat unread for weeks because the ingester's repo allowlist was hardcoded and nothing warned. Review gates and loud coverage checks are not features, they are scar tissue.
 
-Brigade is that setup as one `pipx install brigade-cli`. Agents (Codex, Claude Code, OpenCode, Cursor, Aider, Goose, Copilot CLI, and more) write handoff notes to local inboxes; Brigade lints them, scans them for secrets and prompt-injection signals, routes safe ones to durable memory via one canonical owner, and queues the rest for your review. Everything is plain markdown and JSON receipts in your repo. No daemon, no server, no telemetry, nothing leaves your machine.
+Brigade is that setup as one `pipx install brigade-cli`. Agents (Codex, Claude Code, OpenCode, Cursor, Aider, Goose, Copilot CLI, and more) write handoff notes to local inboxes; Brigade lints them, scans them for secrets and prompt-injection signals, routes safe ones to durable memory via one canonical owner, and queues the rest for your review. Everything is plain markdown and JSON receipts in your repo. No daemon, no server, memory and receipts stay on your machine (the CLI makes a passive version check, see docs/telemetry.md).
 
 There is also an adoption path for people who already have a homegrown setup: it inventories your crons, scripts, and inboxes read-only and produces a migration plan instead of stomping on what works. I used exactly that path to cut my own production workspace over this week.
 

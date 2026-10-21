@@ -214,14 +214,14 @@ func TestGenerateDirectorySkipsSessionDiffArraysSilently(t *testing.T) {
 }
 
 func TestGenerateRedactsAllClasses(t *testing.T) {
-	content := `{"info":{"id":"x","directory":"/home/demo/private"},"messages":[{"info":{"id":"m1","role":"user"},"parts":[{"type":"text","text":"token=abc123 email demo@example.com url https://private.example.com/path host build.internal"}]}]}`
+	content := `{"info":{"id":"x","directory":"/home/demo/private"},"messages":[{"info":{"id":"m1","role":"user"},"parts":[{"type":"text","text":"token=abc123 email demo@example.com url https://private.example.com/path host build.internal"}]}]}` // content-guard: allow private-hostname
 	path := writeTemp(t, "opencode.json", content)
 	records, _ := generate(t, path, sources.Options{RedactPaths: true, RedactSecrets: true, RedactEmails: true, RedactURLs: true, RedactHostnames: true})
 	if len(records) != 1 {
 		t.Fatalf("records = %d, want 1", len(records))
 	}
 	got := records[0].Item.Text + " " + string(records[0].Item.Metadata)
-	for _, forbidden := range []string{"abc123", "demo@example.com", "https://private.example.com/path", "build.internal", "/home/demo/private"} {
+	for _, forbidden := range []string{"abc123", "demo@example.com", "https://private.example.com/path", "build.internal", "/home/demo/private"} { // content-guard: allow private-hostname
 		if strings.Contains(got, forbidden) {
 			t.Fatalf("redaction leaked %q in %q", forbidden, got)
 		}

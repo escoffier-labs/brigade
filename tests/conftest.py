@@ -157,6 +157,7 @@ def _no_update_check_for_suite(monkeypatch):
     Tests that exercise the notify path opt back in by deleting the variable.
     """
     monkeypatch.setenv("BRIGADE_NO_UPDATE_CHECK", "1")
+    monkeypatch.setenv("BRIGADE_TELEMETRY", "0")
 
 
 @pytest.fixture(autouse=True)

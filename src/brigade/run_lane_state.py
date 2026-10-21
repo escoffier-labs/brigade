@@ -1,6 +1,6 @@
 """Read-only, node-local lane evidence and patrol classification.
 
-``intent`` is reserved for the dispatcher's task-to-run join. Collection never
+Dispatch intents optionally supply the task-to-run join. Collection never
 repairs a lock, refreshes a claim, activates a journal, or updates a Git index.
 """
 
@@ -463,12 +463,18 @@ def _collect_run(
     return lane
 
 
-def collect_lanes(target: Path, *, now: datetime | None = None, limit: int = 50) -> Lanes:
+def collect_lanes(
+    target: Path,
+    *,
+    now: datetime | None = None,
+    limit: int = 50,
+    dispatch_intents: list[dict[str, Any]] | None = None,
+) -> Lanes:
     """Join a bounded local run window, ledger claims and recorded worktrees.
 
     Malformed directory names and symlinked run directories are skipped. An
-    unreadable snapshot in a valid directory is an unknown lane. Hub access,
-    dispatch intent reads, and all mutations belong to later slices.
+    unreadable snapshot in a valid directory is an unknown lane. Hub access
+    and all mutations belong to the caller. Dispatch intents join exact runs.
     """
     if not 1 <= limit <= MAX_LIMIT:
         raise ValueError(f"limit must be between 1 and {MAX_LIMIT}")
@@ -505,6 +511,36 @@ def collect_lanes(target: Path, *, now: datetime | None = None, limit: int = 50)
             lanes.append(
                 _collect_run(root / name, target, clock, worktrees, worktree_error, cache, lock_cache, git_workspace)
             )
+    # Optional caller input supports reconciliation. Patrol discovers the same
+    # local receipts by default, without changing them or activating journals.
+    intent_rows: list[tuple[dict[str, Any], str | None]] = []
+    if dispatch_intents is not None:
+        intent_rows = [(item, None) for item in dispatch_intents[:RUN_SCAN_LIMIT]]
+        lanes.truncated |= len(dispatch_intents) > RUN_SCAN_LIMIT
+    else:
+        dispatch_root = target / ".brigade/dispatch"
+        if dispatch_root.exists() and not dispatch_root.is_symlink():
+            for path in dispatch_root.glob("dispatch-*/intents/*.json"):
+                if len(intent_rows) >= RUN_SCAN_LIMIT:
+                    lanes.truncated = True
+                    break
+                if path.parent.is_symlink() or path.parent.parent.is_symlink():
+                    continue
+                try:
+                    item, digest = _read_json(path)
+                    intent_rows.append((item, digest))
+                except (OSError, ValueError):
+                    continue
+    by_run = {lane.run_dir.name: lane for lane in lanes if lane.run_dir is not None}
+    for item, intent_digest in intent_rows:
+        intent_run_id = item.get("run_id")
+        lane = by_run.get(intent_run_id) if isinstance(intent_run_id, str) else None
+        if lane is not None and isinstance(item.get("task_id"), str):
+            if lane.intent is not None:
+                lane.errors.append("multiple dispatch intents for run")
+                continue
+            lane.intent = item
+            lane.evidence.append(Evidence("dispatch:intent", clock, "dispatch task-to-run join", digest=intent_digest))
     ledger_path = target / ".brigade/work/tasks.json"
     if ledger_path.parent.is_symlink():
         raise ValueError("ledger directory must not be symlinked")
@@ -529,6 +565,15 @@ def collect_lanes(target: Path, *, now: datetime | None = None, limit: int = 50)
             by_claim: dict[str, list[Lane]] = {}
             for lane in lanes:
                 key = lane.run.get("claim_id") if lane.run else None
+                if lane.intent is not None:
+                    intent_id = lane.intent.get("intent_id")
+                    intent_claim = lane.intent.get("claim_id") or (
+                        "dispatch-" + intent_id if isinstance(intent_id, str) else None
+                    )
+                    if key is not None and key != intent_claim:
+                        lane.errors.append("run and dispatch claim disagree")
+                    else:
+                        key = intent_claim
                 if isinstance(key, str) and key:
                     by_claim.setdefault(key, []).append(lane)
             join_unverified = scan_full or any(lane.run_dir is not None and lane.errors for lane in lanes)
@@ -536,7 +581,11 @@ def collect_lanes(target: Path, *, now: datetime | None = None, limit: int = 50)
             for task, claim in claimed_tasks[-limit:]:
                 # A task can be reclaimed. Only the exact claim generation can
                 # join a run, never the task id shared with a completed run.
-                matches = by_claim.get(claim["claim_id"], [])
+                matches = [
+                    lane
+                    for lane in by_claim.get(claim["claim_id"], [])
+                    if lane.intent is None or lane.intent.get("task_id") == task["id"]
+                ]
                 if not matches:
                     matches = [Lane(f"claim:{claim['claim_id']}")]
                     lanes.extend(matches)

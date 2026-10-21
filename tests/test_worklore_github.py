@@ -132,7 +132,7 @@ def test_normalize_rejects_tokens_home_paths_and_http_urls() -> None:
             {
                 **base,
                 "url": "https://github.com/escoffier-labs/brigade/issues/1",
-                "title": r"notes in C:\Users\operator",
+                "title": r"notes in C:\Users\operator",  # content-guard: allow windows-home-path
             }
         )
     with pytest.raises(gh.GitHubObservationError, match="private-data"):
@@ -140,7 +140,7 @@ def test_normalize_rejects_tokens_home_paths_and_http_urls() -> None:
             {
                 **base,
                 "url": "https://github.com/escoffier-labs/brigade/issues/1",
-                "body": r"see C:\Users\operator\secret",
+                "body": r"see C:\Users\operator\secret",  # content-guard: allow windows-home-path
             }
         )
 

@@ -61,7 +61,11 @@ def test_hostname_boundaries_preserve_identifiers(tmp_path, monkeypatch, hostnam
 
 def test_unclean_error_replaces_previous_record_with_minimal_current_error(report_env, monkeypatch):
     bug_last_error.record("doctor", 1, ValueError("previous error"))
-    monkeypatch.setattr(bug_last_error, "frames", lambda tb: ["brigade.internal:main:12"])
+    monkeypatch.setattr(
+        bug_last_error,
+        "frames",
+        lambda tb: ["brigade.internal:main:12"],  # content-guard: allow private-hostname
+    )
     bug_last_error.record("work verify", 2, RuntimeError("current error"))
     record = bug_last_error.read()
     assert record["command"] == "work verify"

@@ -51,7 +51,7 @@ FORBIDDEN_PUBLIC = {
 LEAK_TOKENS = (
     SECRET,
     PRIVATE_TITLE,
-    "ghp_exampleNotARealToken0000000000000001",
+    "ghp_exampleNotARealToken0000000000000001",  # content-guard: allow bare-token-prefix
     "192.0.2.10",
     "http://example.invalid/secret",
     "hunter2-example",

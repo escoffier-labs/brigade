@@ -565,7 +565,7 @@ def test_parse_stream_clears_stale_model_after_rejected_explicit_update():
                 "params": {
                     "update": {
                         "sessionUpdate": "config_option_update",
-                        "modelId": "ghp_FAKE0123456789abcdefghijklmnopqrstuvwxyz",
+                        "modelId": "ghp_FAKE0123456789abcdefghijklmnopqrstuvwxyz",  # content-guard: allow bare-token-prefix
                     }
                 },
             },
@@ -1093,7 +1093,7 @@ def test_parse_stream_rejects_malformed_jsonrpc_responses(response):
 
 
 def test_parse_stream_drops_unrecognized_event_labels():
-    credential = "ghp_FAKE0123456789abcdefghijklmnopqrstuvwxyz"
+    credential = "ghp_FAKE0123456789abcdefghijklmnopqrstuvwxyz"  # content-guard: allow bare-token-prefix
     parsed, error = acpx_adapter.parse_stream(
         _stream(
             {"jsonrpc": "2.0", "method": "session/prompt", "id": "req", "params": {}},
@@ -1323,7 +1323,7 @@ def test_run_cursor_uses_sanitized_bounded_structured_error_without_stderr(monke
 
 
 def test_failed_run_redacts_credential_shaped_provider_diagnostic(monkeypatch, tmp_path):
-    credential = "ghp_FAKE0123456789abcdefghijklmnopqrstuvwxyz"
+    credential = "ghp_FAKE0123456789abcdefghijklmnopqrstuvwxyz"  # content-guard: allow bare-token-prefix
     stream = _stream(
         {"jsonrpc": "2.0", "id": "init-1", "result": {"protocolVersion": 1}},
         {"jsonrpc": "2.0", "method": "session/prompt", "id": "req-1", "params": {}},
