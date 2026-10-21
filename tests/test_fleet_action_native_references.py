@@ -1,6 +1,7 @@
 """T3-native references survive Hub storage and recovery without another submit."""
 
 import json
+import os
 
 import pytest
 
@@ -20,8 +21,13 @@ from tests.test_fleet_sync import _event
 REFERENCE = "a" * 64 + "-" + "b" * 64 + "-12345678-1234-1234-1234-123456789abc"
 
 
+requires_posix = pytest.mark.skipif(
+    os.name != "posix", reason="Broker execution requires POSIX private files, process groups, and systemd"
+)
+
+
 @pytest.fixture
-def t3_broker(roster_target, tmp_path, monkeypatch):
+def t3_hub(roster_target):
     conn = roster_target
     fleet_hub.store_events(
         conn,
@@ -39,15 +45,10 @@ def t3_broker(roster_target, tmp_path, monkeypatch):
     grant = auth.grant_operator(conn, "operator@example.test", [{"target_id": "repair-t3", "subject": source}])
     target = json.loads(conn.execute("SELECT document FROM action_targets").fetchone()[0])
     target["subjects"] = [source]
-    exe, log = fake_executable(tmp_path, {})
-    path = manifest(
-        tmp_path,
-        exe,
-        target,
-        binding={key: target[key] for key in ("host", "repository", "repo_identity", "source_revision")},
-    )
-    monkeypatch.setattr(client, "request", lambda body, **kwargs: handle_api(conn, (False, "node-fixture"), body))
-    runner.sync_targets(path)
+    from brigade import fleet_action_targets as targets
+
+    target["binding_digest"] = auth.digest(auth.canonical(targets.native_identity(target)))
+    targets.sync(conn, "node-fixture", [target])
     action = actions.submit(
         conn,
         grant,
@@ -62,10 +63,26 @@ def t3_broker(roster_target, tmp_path, monkeypatch):
         },
     )
     claimed = actions.claim(conn, "node-fixture")
-    return conn, path, exe, log, action, claimed["generation"]
+    return conn, target, action, claimed["generation"]
+
+
+@pytest.fixture
+def t3_broker(t3_hub, tmp_path, monkeypatch):
+    conn, target, action, generation = t3_hub
+    exe, log = fake_executable(tmp_path, {})
+    path = manifest(
+        tmp_path,
+        exe,
+        target,
+        binding={key: target[key] for key in ("host", "repository", "repo_identity", "source_revision")},
+    )
+    monkeypatch.setattr(client, "request", lambda body, **kwargs: handle_api(conn, (False, "node-fixture"), body))
+    runner.sync_targets(path)
+    return conn, path, exe, log, action, generation
 
 
 @pytest.mark.parametrize("unknown_error", [False, True])
+@requires_posix
 def test_full_length_t3_handle_survives_report_readback_and_recovery(t3_broker, unknown_error):
     conn, path, exe, log, action, generation = t3_broker
     assert len(REFERENCE) == 166
@@ -99,6 +116,7 @@ def test_full_length_t3_handle_survives_report_readback_and_recovery(t3_broker, 
 @pytest.mark.parametrize(
     "reason", [["operator selection"], {}, True, 1, None, "x" * 201, "bad\x00reason", "\ud800", "\udfff"]
 )
+@requires_posix
 def test_invalid_override_reason_fails_before_any_execution_effect(t3_broker, monkeypatch, reason):
     conn, path, _, log, action, generation = t3_broker
     manifest_data = json.loads(path.read_text())
@@ -119,6 +137,7 @@ def test_invalid_override_reason_fails_before_any_execution_effect(t3_broker, mo
 
 
 @pytest.mark.parametrize("reason", [None, "", "explicit operator selection", "x" * 200, "operator 🧭 selection"])
+@requires_posix
 def test_optional_valid_override_reason_reaches_t3_unchanged(t3_broker, reason):
     conn, path, exe, log, action, generation = t3_broker
     manifest_data = json.loads(path.read_text())
@@ -138,6 +157,7 @@ def test_optional_valid_override_reason_reaches_t3_unchanged(t3_broker, reason):
 
 
 @pytest.mark.parametrize("schema", [None, "wrong.result.v9", "t3-fleet.error.v1"])
+@requires_posix
 def test_t3_success_requires_result_schema(tmp_path, schema):
     payload = {
         "request_id": "fixture-host-fixture-controller-12345678-1234-1234-1234-123456789abc",
@@ -151,8 +171,8 @@ def test_t3_success_requires_result_schema(tmp_path, schema):
 
 
 @pytest.mark.parametrize("reference", [REFERENCE + "x", REFERENCE + "\n", "peer:fixture", "x" * 166])
-def test_hub_rejects_non_native_t3_reference_grammar(t3_broker, reference):
-    conn, _, _, _, action, generation = t3_broker
+def test_hub_rejects_non_native_t3_reference_grammar(t3_hub, reference):
+    conn, _, action, generation = t3_hub
     actions.start(conn, "node-fixture", action["action_id"], generation)
     with pytest.raises(ActionError, match="invalid-t3-reference"):
         actions.report(
@@ -194,6 +214,7 @@ def test_long_t3_grammar_does_not_widen_generic_identities_or_other_providers(tm
 
 
 @pytest.mark.parametrize("code", ["invalid_config", "invalid_request", "policy_rejected", "target_busy"])
+@requires_posix
 def test_proven_preaccept_refusal_is_closed_failed_without_native_detail(tmp_path, code):
     exe = json_executable(
         tmp_path, {"schema": "t3-fleet.error.v1", "error": {"code": code, "message": "private detail"}}, code=3
@@ -205,6 +226,7 @@ def test_proven_preaccept_refusal_is_closed_failed_without_native_detail(tmp_pat
 
 
 @pytest.mark.parametrize("code", ["host_unavailable", "internal_error", "unknown_state", "unrecognized"])
+@requires_posix
 def test_unproven_or_ambiguous_refusal_keeps_unknown_acceptance(tmp_path, code):
     exe = json_executable(tmp_path, {"schema": "t3-fleet.error.v1", "error": {"code": code}}, code=3)
     with pytest.raises(ActionError, match="transport-acceptance-unknown"):
@@ -224,6 +246,7 @@ def test_t3_submit_deadline_leaves_lease_margin(tmp_path, monkeypatch):
 
 
 @pytest.mark.parametrize("exit_code", [0, 1])
+@requires_posix
 def test_openclaw_failed_turn_retains_its_real_native_run_id(tmp_path, exit_code):
     exe = json_executable(tmp_path, {"status": "error", "runId": "fixture-failed-native-run"}, code=exit_code)
     action = {"action_id": "aa_fixture", "request": {"target": {"family": "openclaw"}}}

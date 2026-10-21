@@ -10,7 +10,7 @@ from dataclasses import asdict
 
 import pytest
 
-from brigade import fleet_client
+from brigade import fleet_client, proc
 from tests._home import set_home
 
 
@@ -34,6 +34,17 @@ def native_cli(tmp_path, monkeypatch):
         lambda snapshot: published.append(snapshot) or fleet_client.SessionWriteResult(ok=True),
     )
 
+    # Translate only this fake CLI; retain proc.run's real subprocess supervision.
+    script = tmp_path / "openclaw"
+    real_run = proc.run
+
+    def run_fixture(argv, **kwargs):
+        if argv[0] == "openclaw":
+            argv = [sys.executable, str(script), *argv[1:]]
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(proc, "run", run_fixture)
+
     def configure(rows=None, *, has_more=False, total=None, agents=None, mode="ok"):
         if rows is None:
             rows = [{"sessionId": "native-session.v2", "agentId": "main", "updatedAt": int(time.time() * 1000)}]
@@ -45,7 +56,6 @@ def native_cli(tmp_path, monkeypatch):
         }
         if agents is None:
             agents = [{"id": "main", "workspace": str(workspace)}]
-        script = tmp_path / "openclaw"
         script.write_text(
             f"#!{sys.executable}\n"
             "import json, sys, time\n"
@@ -214,8 +224,14 @@ def test_spawned_workspace_does_not_claim_shared_dirty_files(native_cli, capsys)
     subprocess.run(["git", "init", "-q", str(actual)], check=True)
     (actual / "other-session.txt").write_text("unrelated dirty content")
     marker = actual / "monitor-invoked"
-    monitor = actual / "monitor"
-    monitor.write_text(f"#!{sys.executable}\nfrom pathlib import Path\nPath({str(marker)!r}).touch()\n")
+    monitor = actual / ("monitor.cmd" if os.name == "nt" else "monitor")
+    # Git executes configured monitors through its shell; use a native Windows command.
+    body = (
+        f'@echo off\r\ntype nul > "{marker}"\r\n'
+        if os.name == "nt"
+        else (f"#!{sys.executable}\nfrom pathlib import Path\nPath({str(marker)!r}).touch()\n")
+    )
+    monitor.write_text(body, encoding="utf-8")
     monitor.chmod(0o700)
     subprocess.run(["git", "-C", str(actual), "config", "core.fsmonitor", str(monitor)], check=True)
     configure(

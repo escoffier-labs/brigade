@@ -1,12 +1,18 @@
 """Review regressions at the action authority and durable broker boundaries."""
 
 import json
+import os
 
 import pytest
 
 from brigade import fleet_hub
 from brigade.fleet_action_auth import ActionError
 from tests.test_fleet_actions import setup_action, seed_t3_roster
+
+
+requires_posix = pytest.mark.skipif(
+    os.name != "posix", reason="Broker execution requires POSIX private files, process groups, and systemd"
+)
 
 
 def test_target_id_cannot_rebind_even_after_withdrawal(tmp_path):
@@ -25,6 +31,7 @@ def test_target_id_cannot_rebind_even_after_withdrawal(tmp_path):
     conn.close()
 
 
+@requires_posix
 def test_manifest_public_agent_must_match_native_binding(tmp_path):
     from brigade import fleet_action_runner as runner
     from tests.test_fleet_action_runner import fake_executable, manifest
@@ -39,6 +46,7 @@ def test_manifest_public_agent_must_match_native_binding(tmp_path):
     conn.close()
 
 
+@requires_posix
 def test_accepted_inbox_does_not_starve_next_queued_action(tmp_path, monkeypatch):
     from brigade import (
         fleet_action_auth as auth,
@@ -90,6 +98,7 @@ def test_accepted_inbox_does_not_starve_next_queued_action(tmp_path, monkeypatch
     conn.close()
 
 
+@requires_posix
 def test_lost_prestart_response_can_reclaim_without_replaying_old_generation(tmp_path, monkeypatch):
     from brigade import fleet_action_runner as runner, fleet_client_actions as client, fleet_hub_actions as actions
     from tests.test_fleet_action_runner import broker_fixture
@@ -154,6 +163,7 @@ def test_run_selector_admits_future_exact_node_repo_and_deck_source(tmp_path):
     conn.close()
 
 
+@requires_posix
 def test_catalog_metadata_refresh_does_not_expire_queued_request(tmp_path, monkeypatch):
     from brigade import fleet_action_runner as runner, fleet_hub_actions as actions
     from tests.test_fleet_action_runner import broker_fixture
@@ -359,6 +369,7 @@ def test_later_success_never_verifies_a_different_failed_run(tmp_path, state):
     conn.close()
 
 
+@requires_posix
 def test_t3_repository_scope_and_sha_refresh_keep_frozen_request_revision(tmp_path, monkeypatch):
     from brigade import fleet_action_auth as auth, fleet_action_sources as sources, fleet_action_targets as targets
     from brigade import fleet_action_runner as runner, fleet_client_actions as client, fleet_hub_actions as actions
@@ -488,6 +499,7 @@ def test_execution_unknown_does_not_erase_previous_running_transition(tmp_path):
     conn.close()
 
 
+@requires_posix
 def test_known_unknown_t3_reference_reconciles_without_another_submit(tmp_path, monkeypatch):
     from brigade import fleet_action_auth as auth, fleet_action_sources as sources, fleet_action_runner as runner
     from brigade import fleet_client_actions as client, fleet_hub_actions as actions, fleet_hub_policy, fleet_policy

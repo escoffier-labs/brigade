@@ -49,7 +49,7 @@ def _dispatch(target, capsys, *options):
 
 
 def _snapshot(target):
-    return {str(path.relative_to(target)): path.read_bytes() for path in target.rglob("*") if path.is_file()}
+    return {path.relative_to(target).as_posix(): path.read_bytes() for path in target.rglob("*") if path.is_file()}
 
 
 def test_dry_run_only_writes_two_receipts_with_stable_canonical_digest(dispatch_target, capsys):

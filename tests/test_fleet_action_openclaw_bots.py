@@ -1,6 +1,7 @@
 """Exact bot destinations stay inside protected bindings and permanent identities."""
 
 import json
+import os
 
 import pytest
 
@@ -18,6 +19,11 @@ from tests.test_fleet_actions import setup_action
 
 BOT_KEY = "agent:fixture-agent:clawchat:A1111111-b222-4333-8444-555555555555"
 OTHER_KEY = "agent:fixture-agent:clawchat:aaaaaaaa-bbbb-4ccc-8ddd-eeeeeeeeeeee"
+
+
+requires_posix = pytest.mark.skipif(
+    os.name != "posix", reason="Broker execution requires POSIX private files, process groups, and systemd"
+)
 
 
 def setup_action_schema(tmp_path):
@@ -45,6 +51,7 @@ def bot(tmp_path, monkeypatch):
     conn.close()
 
 
+@requires_posix
 def test_chosen_bot_runs_exact_native_session_once_and_keeps_run_handle(bot):
     conn, path, _, log, grant, request = bot
     runner.sync_targets(path)
@@ -84,7 +91,10 @@ def test_chosen_bot_runs_exact_native_session_once_and_keeps_run_handle(bot):
 @pytest.mark.parametrize("replacement", [OTHER_KEY, None])
 def test_bot_target_id_cannot_rebind_after_withdrawal(bot, replacement):
     conn, path, _, _, _, _ = bot
-    runner.sync_targets(path)
+    public = json.loads(path.read_text())["targets"][0]["public"]
+    targets.sync(
+        conn, "node-fixture", [{**public, "binding_digest": digest(canonical(targets.native_identity(public)))}]
+    )
     original = targets.available(conn)[0]
     original.pop("node_id")
     changed = {**original, "session_key": replacement}
@@ -112,14 +122,17 @@ def test_bot_target_id_cannot_rebind_after_withdrawal(bot, replacement):
         "x" * 129,
     ],
 )
-def test_manifest_and_hub_reject_invalid_bot_session_keys(bot, key):
+@pytest.mark.parametrize("boundary", ["hub", pytest.param("manifest", marks=requires_posix)])
+def test_manifest_and_hub_reject_invalid_bot_session_keys(bot, boundary, key):
     conn, path, _, _, _, _ = bot
     data = json.loads(path.read_text())
     data["targets"][0]["public"]["session_key"] = key
     data["targets"][0]["binding"]["session_key"] = key
     path.write_text(json.dumps(data))
-    with pytest.raises(ActionError, match="invalid-openclaw-session-key"):
-        runner.load_manifest(path)
+    if boundary == "manifest":
+        with pytest.raises(ActionError, match="invalid-openclaw-session-key"):
+            runner.load_manifest(path)
+        return
     public = {**data["targets"][0]["public"], "binding_digest": "a" * 64}
     with pytest.raises(ActionError, match="invalid-openclaw-session-key"):
         targets.sync(conn, "node-fixture", [public])
@@ -127,19 +140,23 @@ def test_manifest_and_hub_reject_invalid_bot_session_keys(bot, key):
 
 
 @pytest.mark.parametrize("agent", ["fixture.agent", "fixture:agent", "-fixture", "a" * 65])
-def test_manifest_and_hub_reject_non_native_agent_syntax(bot, agent):
+@pytest.mark.parametrize("boundary", ["hub", pytest.param("manifest", marks=requires_posix)])
+def test_manifest_and_hub_reject_non_native_agent_syntax(bot, boundary, agent):
     conn, path, _, _, _, _ = bot
     data = json.loads(path.read_text())
     for part in ("public", "binding"):
         data["targets"][0][part].update(agent_id=agent, session_key=BOT_KEY.replace("fixture-agent", agent))
     path.write_text(json.dumps(data))
-    with pytest.raises(ActionError, match="invalid-openclaw-agent"):
-        runner.load_manifest(path)
+    if boundary == "manifest":
+        with pytest.raises(ActionError, match="invalid-openclaw-agent"):
+            runner.load_manifest(path)
+        return
     with pytest.raises(ActionError, match="invalid-openclaw-agent"):
         targets.sync(conn, "node-fixture", [{**data["targets"][0]["public"], "binding_digest": "a" * 64}])
 
 
 @pytest.mark.parametrize("public_key,binding_key", [(BOT_KEY, OTHER_KEY), (BOT_KEY, None), (None, BOT_KEY)])
+@requires_posix
 def test_manifest_refuses_different_or_missing_public_bot_identity(bot, public_key, binding_key):
     _, path, _, _, _, _ = bot
     data = json.loads(path.read_text())
@@ -155,7 +172,10 @@ def test_manifest_refuses_different_or_missing_public_bot_identity(bot, public_k
 
 def test_bot_key_cannot_be_supplied_by_operator_submission(bot):
     conn, path, _, _, grant, request = bot
-    runner.sync_targets(path)
+    public = json.loads(path.read_text())["targets"][0]["public"]
+    targets.sync(
+        conn, "node-fixture", [{**public, "binding_digest": digest(canonical(targets.native_identity(public)))}]
+    )
     with pytest.raises(ActionError, match="invalid-submission"):
         actions.submit(conn, grant, {**request, "session_key": OTHER_KEY})
     assert conn.execute("SELECT count(*) FROM agent_actions").fetchone()[0] == 0
@@ -172,6 +192,7 @@ def test_bot_catalog_requires_owned_enrolled_broker_and_explicit_target_grant(bo
         handle_api(conn, (False, "node-fixture"), {"op": "targets-sync", "targets": [public]})
 
 
+@requires_posix
 def test_bot_key_does_not_replace_missing_native_run_id_or_allow_resubmit(bot, monkeypatch):
     conn, path, exe, log, grant, request = bot
     fake_executable(path.parent, {"status": "completed", "sessionKey": BOT_KEY}, name=exe.name)
@@ -190,6 +211,7 @@ def test_bot_key_does_not_replace_missing_native_run_id_or_allow_resubmit(bot, m
     assert len(log.read_text().splitlines()) == 1
 
 
+@requires_posix
 def test_generic_agent_manifest_identity_and_action_session_are_unchanged(tmp_path):
     conn, _, _, _ = setup_action_schema(tmp_path)
     target = json.loads(conn.execute("SELECT document FROM action_targets").fetchone()[0])

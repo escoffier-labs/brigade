@@ -1,6 +1,7 @@
 """R2 regressions at source, broker journal, ledger, and browser boundaries."""
 
 import json
+import os
 import re
 import sys
 from pathlib import Path
@@ -17,7 +18,14 @@ from tests.test_fleet_action_http import action_hub, enable, fields, request_htt
 from tests.test_fleet_sync import _event
 
 
-def run_action(tmp_path, *, state="run.completed", exit_status=1, t3=False, monkeypatch=None, repo="repo/fixture"):
+requires_posix = pytest.mark.skipif(
+    os.name != "posix", reason="Broker execution requires POSIX private files, process groups, and systemd"
+)
+
+
+def run_action(
+    tmp_path, *, state="run.completed", exit_status=1, t3=False, monkeypatch=None, repo="repo/fixture", native=True
+):
     from brigade import fleet_action_targets as targets, fleet_hub_policy, fleet_policy
     from brigade import fleet_action_runner as runner, fleet_client_actions as client
     from brigade.fleet_action_http import handle_api
@@ -57,7 +65,7 @@ def run_action(tmp_path, *, state="run.completed", exit_status=1, t3=False, monk
     grant = auth.grant_operator(conn, "operator@example.test", [{"target_id": target["target_id"], "subject": source}])
     targets.sync(conn, "node-fixture", [target])
     path = log = None
-    if t3:
+    if t3 and native:
         exe, log = fake_executable(
             tmp_path,
             {
@@ -134,6 +142,7 @@ def test_exact_source_success_can_verify_itself(tmp_path, repo, completion):
     conn.close()
 
 
+@requires_posix
 def test_native_regression_keeps_running_then_finishes_with_one_submit(tmp_path, monkeypatch):
     from brigade import fleet_action_runner as runner
 
@@ -162,6 +171,7 @@ def test_native_regression_keeps_running_then_finishes_with_one_submit(tmp_path,
     conn.close()
 
 
+@requires_posix
 def test_refused_stale_outbox_is_audited_then_polled_again(tmp_path, monkeypatch):
     from brigade import fleet_action_runner as runner, fleet_client_actions as client
 
@@ -193,7 +203,7 @@ def test_refused_stale_outbox_is_audited_then_polled_again(tmp_path, monkeypatch
 
 
 def test_t3_closed_refusal_and_lease_contract(tmp_path, monkeypatch):
-    conn, action, _, _ = run_action(tmp_path, t3=True, monkeypatch=monkeypatch)
+    conn, action, _, _ = run_action(tmp_path, t3=True, native=False)
     claim = actions.claim(conn, "node-fixture")
     started = actions.start(conn, "node-fixture", action["action_id"], claim["generation"])
     assert started["claim_until"] - started["started_at"] >= 240
@@ -287,6 +297,7 @@ def inbox_action(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("queued", [False, True])
 @pytest.mark.parametrize("found", [False, True])
+@requires_posix
 def test_attempted_inbox_send_only_reads_stable_id_and_never_invents_pending(tmp_path, monkeypatch, found, queued):
     from brigade import fleet_action_runner as runner
 
@@ -322,6 +333,7 @@ def test_attempted_inbox_send_only_reads_stable_id_and_never_invents_pending(tmp
 
 
 @pytest.mark.parametrize("failure", ["broker-scope-refused", "fence-refused", "source-changed"])
+@requires_posix
 def test_terminal_report_refusal_is_held_without_repeat_calls(tmp_path, monkeypatch, failure):
     from brigade import fleet_action_runner as runner, fleet_client_actions as client
 
@@ -346,6 +358,7 @@ def test_terminal_report_refusal_is_held_without_repeat_calls(tmp_path, monkeypa
     conn.close()
 
 
+@requires_posix
 def test_stale_generation_is_held_without_repeated_hub_calls(tmp_path, monkeypatch):
     from brigade import fleet_action_runner as runner, fleet_client_actions as client
 
@@ -371,7 +384,7 @@ def test_stale_generation_is_held_without_repeated_hub_calls(tmp_path, monkeypat
     "code", [None, "unknown_state", "host_unavailable", "fabricated", ["policy_rejected"], {"code": "policy_rejected"}]
 )
 def test_no_reference_failure_needs_closed_t3_preaccept_code(tmp_path, monkeypatch, code):
-    conn, action, _, _ = run_action(tmp_path, t3=True, monkeypatch=monkeypatch)
+    conn, action, _, _ = run_action(tmp_path, t3=True, native=False)
     claim = actions.claim(conn, "node-fixture")
     actions.start(conn, "node-fixture", action["action_id"], claim["generation"])
     receipt = {"event_id": "refusal", "status": "failed"}
@@ -383,6 +396,7 @@ def test_no_reference_failure_needs_closed_t3_preaccept_code(tmp_path, monkeypat
     conn.close()
 
 
+@requires_posix
 def test_queued_native_state_preserves_latest_hub_state_beyond_history_page(tmp_path, monkeypatch):
     from brigade import fleet_action_runner as runner
 
@@ -428,6 +442,7 @@ def test_queued_native_state_preserves_latest_hub_state_beyond_history_page(tmp_
     conn.close()
 
 
+@requires_posix
 def test_repeated_native_state_after_unknown_is_a_new_observation_not_old_ack(tmp_path, monkeypatch):
     from brigade import fleet_action_runner as runner
 

@@ -1,6 +1,7 @@
 """Fake executables prove argv, durable dispatch fences and transient job behavior."""
 
 import json
+import os
 import stat
 import sys
 from datetime import datetime, timezone
@@ -11,6 +12,11 @@ import pytest
 from tests.test_fleet_actions import setup_action
 
 
+requires_posix = pytest.mark.skipif(
+    os.name != "posix", reason="Broker execution requires POSIX private files, process groups, and systemd"
+)
+
+
 def fake_executable(tmp_path, payload, *, name="fake-tool"):
     log = tmp_path / (name + ".log")
     executable = tmp_path / name
@@ -19,7 +25,7 @@ def fake_executable(tmp_path, payload, *, name="fake-tool"):
         "args=sys.argv[1:]\nrecord={'args':args}\n"
         "for flag in ('--prompt-file','--message-file','--body-file'):\n"
         " if flag in args:\n"
-        "  p=Path(args[args.index(flag)+1]);record['prompt']=p.read_text();record['mode']=stat.S_IMODE(p.stat().st_mode)\n"
+        "  p=Path(args[args.index(flag)+1]);record['prompt']=p.read_text(encoding='utf-8');record['mode']=stat.S_IMODE(p.stat().st_mode)\n"
         "with open(" + repr(str(log)) + ",'a') as stream: stream.write(json.dumps(record)+'\\n')\n"
         "print(" + repr(json.dumps(payload)) + ")\n"
     )
@@ -64,6 +70,7 @@ def broker_fixture(tmp_path, monkeypatch, *, payload=None):
     return conn, path, log, action
 
 
+@requires_posix
 def test_execute_protected_prompt_and_replay_cannot_repeat_turn(tmp_path, monkeypatch):
     from brigade import fleet_action_runner as runner, fleet_hub_actions as actions
 
@@ -82,6 +89,7 @@ def test_execute_protected_prompt_and_replay_cannot_repeat_turn(tmp_path, monkey
     conn.close()
 
 
+@requires_posix
 def test_ambiguous_acceptance_is_unknown_and_never_redispatched(tmp_path, monkeypatch):
     from brigade import fleet_action_runner as runner, fleet_hub_actions as actions
 
@@ -99,6 +107,7 @@ def test_ambiguous_acceptance_is_unknown_and_never_redispatched(tmp_path, monkey
     conn.close()
 
 
+@requires_posix
 def test_revoke_before_start_never_invokes_destination(tmp_path, monkeypatch):
     from brigade import fleet_action_auth as auth, fleet_action_runner as runner, fleet_hub_actions as actions
 
@@ -111,6 +120,7 @@ def test_revoke_before_start_never_invokes_destination(tmp_path, monkeypatch):
     conn.close()
 
 
+@requires_posix
 def test_tick_schedules_one_unique_transient_job_and_no_inline_turn(tmp_path, monkeypatch):
     from brigade import fleet_action_runner as runner
 
@@ -125,6 +135,7 @@ def test_tick_schedules_one_unique_transient_job_and_no_inline_turn(tmp_path, mo
     conn.close()
 
 
+@requires_posix
 def test_executor_unavailable_removes_target_instead_of_shell_fallback(tmp_path, monkeypatch):
     from brigade import fleet_action_runner as runner
 
@@ -153,6 +164,7 @@ def test_executor_unavailable_removes_target_instead_of_shell_fallback(tmp_path,
         ("dot", {"message": {"id": 42, "client_id": "aa_fixture", "acked_at": "now"}}, "accepted"),
     ],
 )
+@requires_posix
 def test_supported_transport_contracts(tmp_path, monkeypatch, family, payload, expected):
     from brigade import fleet_action_adapters as adapters
 
@@ -167,7 +179,7 @@ def test_supported_transport_contracts(tmp_path, monkeypatch, family, payload, e
 
     monkeypatch.setattr(adapters, "invoke", invoke)
     prompt = tmp_path / "prompt"
-    prompt.write_text("hostile $(touch nowhere) `echo bad` 雪")
+    prompt.write_text("hostile $(touch nowhere) `echo bad` 雪", encoding="utf-8")
     prompt.chmod(0o600)
     target = {"family": family, "principal": "agent:fixture", "capability": "inbox" if family != "t3" else "execution"}
     binding = {
@@ -219,6 +231,7 @@ def test_cli_registers_actions_without_permitting_shell_input():
 
 @pytest.mark.parametrize("family", ["dot", "grokbot"])
 @pytest.mark.parametrize("found", [False, True])
+@requires_posix
 def test_inbox_recovery_without_reference_only_reads_stable_id(tmp_path, family, found):
     from brigade import fleet_action_adapters as adapters
 
@@ -237,6 +250,7 @@ def test_inbox_recovery_without_reference_only_reads_stable_id(tmp_path, family,
     )
 
 
+@requires_posix
 def test_lost_report_response_replays_saved_receipt_without_another_turn(tmp_path, monkeypatch):
     from brigade import fleet_action_runner as runner, fleet_client_actions as client, fleet_hub_actions as actions
 
@@ -262,6 +276,7 @@ def test_lost_report_response_replays_saved_receipt_without_another_turn(tmp_pat
 
 
 @pytest.mark.parametrize("family", ["dot", "grokbot"])
+@requires_posix
 def test_initial_inbox_send_leaves_unrelated_credential_spool_untouched(tmp_path, monkeypatch, capsys, family):
     from brigade import fleet_action_adapters as adapters, fleet_client, fleet_client_messages as messages
     from brigade import fleet_client_message_credentials as credentials
@@ -301,7 +316,7 @@ def test_initial_inbox_send_leaves_unrelated_credential_spool_untouched(tmp_path
             return messages.send(
                 recipient=argv[argv.index("--to") + 1],
                 subject=argv[argv.index("--subject") + 1],
-                body=prompt.read_text(),
+                body=prompt.read_text(encoding="utf-8"),
                 reference="aa_fixture",
                 priority="normal",
                 thread="aa_fixture",
@@ -315,7 +330,7 @@ def test_initial_inbox_send_leaves_unrelated_credential_spool_untouched(tmp_path
 
     monkeypatch.setattr(adapters, "invoke", invoke)
     prompt = tmp_path / "prompt"
-    prompt.write_text("hostile $(touch nowhere) `echo bad` 雪")
+    prompt.write_text("hostile $(touch nowhere) `echo bad` 雪", encoding="utf-8")
     action = {"action_id": "aa_fixture", "request": {"target": {"family": family, "principal": "agent:fixture"}}}
     receipt = adapters.dispatch(action, {}, tmp_path / "unused-brigade", prompt)
     assert receipt == {"status": "accepted", "delivery": "delivered", "destination_ref": "42"}
@@ -359,6 +374,7 @@ def inbox_args(prompt):
 
 
 @pytest.mark.parametrize("failure", ["outage", "wrong-client", "queued"])
+@requires_posix
 def test_inbox_helper_unknown_never_queues_or_retries(tmp_path, monkeypatch, capsys, inbox_online_api, failure):
     from brigade import fleet_action_adapters as adapters, fleet_client, fleet_client_messages as messages
 
@@ -390,10 +406,18 @@ def test_inbox_helper_unknown_never_queues_or_retries(tmp_path, monkeypatch, cap
 
 
 @pytest.mark.parametrize(
-    "malformed", ["flags", "client", "recipient", "oversize", "utf8", "empty", "missing", "fifo", "symlink"]
+    "malformed",
+    [
+        "flags",
+        "client",
+        "recipient",
+        *[
+            pytest.param(case, marks=requires_posix)
+            for case in ("oversize", "utf8", "empty", "missing", "fifo", "symlink")
+        ],
+    ],
 )
 def test_inbox_helper_rejects_malformed_input_before_transport(tmp_path, monkeypatch, capsys, malformed):
-    import os
     from brigade import (
         fleet_action_adapters as adapters,
         fleet_client_messages as messages,
@@ -437,6 +461,7 @@ def test_inbox_helper_rejects_malformed_input_before_transport(tmp_path, monkeyp
     "hub,allowed",
     [("http://remote.example.test", False), ("https://hub.example.test", True), ("http://127.0.0.1", True)],
 )
+@requires_posix
 def test_inbox_helper_retains_transport_endpoint_guard(tmp_path, monkeypatch, capsys, inbox_online_api, hub, allowed):
     import io
     from brigade import fleet_action_adapters as adapters, fleet_client, fleet_client_message_credentials as credentials
@@ -461,6 +486,7 @@ def test_inbox_helper_retains_transport_endpoint_guard(tmp_path, monkeypatch, ca
     )
 
 
+@requires_posix
 def test_inbox_helper_validates_captured_authority_before_transport(tmp_path, monkeypatch, capsys):
     from brigade import fleet_action_adapters as adapters, fleet_client_message_credentials as credentials
     from brigade import fleet_client_messages as messages
@@ -483,6 +509,7 @@ def test_inbox_helper_validates_captured_authority_before_transport(tmp_path, mo
     assert json.loads(capsys.readouterr().out) == {"error": "transport-acceptance-unknown"}
 
 
+@requires_posix
 def test_inbox_helper_unknown_private_api_fails_closed(tmp_path, monkeypatch, capsys):
     from brigade import fleet_action_adapters as adapters, fleet_client_messages as messages
 
@@ -492,5 +519,43 @@ def test_inbox_helper_unknown_private_api_fails_closed(tmp_path, monkeypatch, ca
     monkeypatch.setattr(messages, "_online", unsupported)
     prompt = tmp_path / "body"
     prompt.write_text("data only")
+    assert adapters._inbox_main(inbox_args(prompt)) == 1
+    assert json.loads(capsys.readouterr().out) == {"error": "transport-acceptance-unknown"}
+
+
+def test_native_transport_refuses_non_posix_before_process_launch(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from brigade import fleet_action_adapters as adapters
+    from brigade.fleet_action_auth import ActionError
+
+    monkeypatch.setattr(adapters, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(adapters.subprocess, "Popen", lambda *a, **kw: pytest.fail("unsupported transport launched"))
+    with pytest.raises(ActionError, match="transport-platform-unsupported"):
+        adapters.invoke(tmp_path / "unused", [])
+
+
+def test_broker_journal_refuses_non_posix_before_file_access(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+    from brigade import fleet_action_runner as runner
+    from brigade.fleet_action_auth import ActionError
+
+    monkeypatch.setattr(runner, "os", SimpleNamespace(name="nt"))
+    monkeypatch.setattr(
+        runner.fleet_client, "_ensure_private_dir", lambda *a: pytest.fail("unsupported journal opened")
+    )
+    with pytest.raises(ActionError, match="transient-executor-unavailable"):
+        with runner._journal_lock(tmp_path / "journal", "fixture"):
+            pytest.fail("unsupported journal acquired")
+    assert not (tmp_path / "journal").exists()
+
+
+def test_inbox_helper_without_secure_file_flags_refuses_before_transport(tmp_path, monkeypatch, capsys):
+    from types import SimpleNamespace
+    from brigade import fleet_action_adapters as adapters
+
+    prompt = tmp_path / "body"
+    prompt.write_text("data only", encoding="utf-8")
+    monkeypatch.setattr(adapters, "os", SimpleNamespace(O_RDONLY=0))
+    monkeypatch.setattr(adapters, "_inbox_online", lambda *a: pytest.fail("unsupported file access reached transport"))
     assert adapters._inbox_main(inbox_args(prompt)) == 1
     assert json.loads(capsys.readouterr().out) == {"error": "transport-acceptance-unknown"}
