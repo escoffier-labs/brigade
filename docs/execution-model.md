@@ -55,6 +55,7 @@ separate Brigade stop subcommand for the foreground servers.
 | Skills MCP over stdio | `brigade skills serve-mcp --stdio` | The MCP host closes stdin or terminates its child. Ctrl+C also stops an interactive process. | Read-only registry responses over stdout. No per-read verification receipt. |
 | Skills MCP over HTTP | `brigade skills serve-mcp --http` | Ctrl+C, or stop the owning service. | Read-only registry responses over loopback HTTP. No per-read verification receipt. |
 | Grok Bot MCP listener | `brigade run cloud grokbot serve --instance operator` or `brigade run cloud grokbot serve --pack <pack-id>` | Ctrl+C, or stop the owning service. | Role listeners journal call decisions to stderr and job transitions to the hub. Packs use their own records, such as the T3 dispatch SQLite ledger. |
+| Dispatch watch | `brigade work dispatch --watch --worker <seat> --interval 5` | SIGTERM or Ctrl+C stops launches. Children detach by default. `--drain-wait` waits for them. | Holds `dispatch.lock` for the loop. Supervisor events link immutable tick plans and record launched and finalized intents, budget denials, and session close. |
 | Run watch | `brigade runs watch <run-id>` | Ends when the run reaches a terminal state, or stop with Ctrl+C. | Prints observations from run artifacts, or newline-delimited JSON with `--json`. It can recover stale artifact collection and update the affected run's records. |
 
 The shipped hub command is `brigade fleet serve`. The listener requires its
@@ -63,6 +64,31 @@ protected bearer configuration. The HTTP memory and skills servers require
 `BRIGADE_MCP_HTTP_TOKEN`. See the [Grok Bot operating guide](grokbot-operating-guide.md)
 and [MCP transport guide](technical-guide.md#streamable-http-for-the-read-only-mcp-servers)
 for setup. These commands do not enable every service during installation.
+
+Run dispatch watch under a service manager when it should survive terminal
+closure. Give it an explicit target, an available worker seat, and a committed
+base. For example, a systemd user unit can use:
+
+```ini
+[Service]
+Type=simple
+WorkingDirectory=/path/to/repository
+ExecStart=/path/to/venv/bin/brigade work dispatch --target /path/to/repository --worker coder --watch --interval 5 --spawn-delay 1
+Restart=always
+RestartSec=5
+KillMode=process
+```
+
+`KillMode=process` sends the stop signal to the dispatcher while its children
+retain their process groups. This allows the default detach behavior. Add
+`--drain-wait` to wait for children instead, and set `TimeoutStopSec` to cover
+the expected child runtime. Both SIGTERM and SIGINT stop new launches and write
+a close receipt. Each tick checks the installed Brigade version and exits
+cleanly when it changes. `Restart=always` starts a new process with the updated
+installation. The dispatcher sleeps between ticks even when no task is ready.
+`--max-total` and `--deadline` bound the whole watch session, including retries.
+A service manager that restarts after a budget exit starts a new session with
+new limits. Use a stop policy appropriate for a bounded campaign.
 
 ## Receipts and provenance
 

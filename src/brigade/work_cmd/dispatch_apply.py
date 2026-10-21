@@ -225,6 +225,9 @@ class Apply:
         self.started = time.monotonic()
         self.last_launch: float | None = None
         self.adopted: set[Path] = set()
+        self.can_launch: Callable[[], bool] = lambda: True
+        self.reservation_allowed: Callable[[], bool] = lambda: True
+        self.pause: Callable[[float], None] = time.sleep
 
     def observe(self) -> None:
         lanes = run_lane_state.collect_lanes(self.target, limit=run_lane_state.MAX_LIMIT)
@@ -338,6 +341,12 @@ class Apply:
         return False
 
     def advance(self, path: Path, row: dict[str, Any], session: dict[str, Any]) -> None:
+        if row["state"] in {"planned", "claimed", "workspace_ready", "launching"} and self.last_launch is not None:
+            remaining = session.get("spawn_delay", 0) - (time.monotonic() - self.last_launch)
+            if remaining > 0:
+                self.pause(remaining)
+        if not self.can_launch() or (not row.get("run_dir") and not self.reservation_allowed()):
+            return
         try:
             self._advance(path, row, session)
         except (ValueError, OSError) as exc:
@@ -353,7 +362,19 @@ class Apply:
                 if exc.exit_code == 13:
                     store.transition(path, row, "lost_race")
                     return
-                raise
+                _finish(
+                    self.target,
+                    path,
+                    row,
+                    "failed",
+                    {
+                        "status": "failed",
+                        "failure_kind": "claim-refused",
+                        "failure_phase": "dispatch",
+                        "error": str(exc),
+                    },
+                )
+                return
             if row["state"] == "planned":
                 store.transition(path, row, "claimed", claimed_item_revision=claim["claim"]["item_revision"])
         worktree = Path(row["worktree"])
@@ -381,6 +402,8 @@ class Apply:
             run_dir = Path(row["run_dir"])
             if (run_dir / "run.json").exists() or (run_dir / "dispatch-launch.json").exists():
                 self.refresh(path, row, session)
+                return
+            if not self.can_launch():
                 return
             run_dir.mkdir(parents=True, exist_ok=True)
             store.transition(path, row, "launching")
@@ -481,7 +504,7 @@ class Apply:
         if store.child_alive(row):
             raise ValueError("adopted child is still active, claim retained")
 
-    def session(self, directory: Path, *, no_wait: bool = False) -> int:
+    def session(self, directory: Path, *, no_wait: bool = False, launch: bool = True) -> int:
         store.events(directory, repair_tail=True)
         session, plan = store.read(directory / "session.json"), store.read(directory / "plan.json")
         rows = [(path, store.read(path)) for path in sorted((directory / "intents").glob("*.json"))]
@@ -524,11 +547,11 @@ class Apply:
                 denied = True
             return False
 
-        def launch(item: dict[str, Any]) -> None:
+        def launch_item(item: dict[str, Any]) -> None:
             delay = session.get("spawn_delay", 0)
             if self.last_launch is not None and delay:
-                time.sleep(max(0, delay - (time.monotonic() - self.last_launch)))
-            if not budget_allows():
+                self.pause(max(0, delay - (time.monotonic() - self.last_launch)))
+            if not self.can_launch() or not self.reservation_allowed() or not budget_allows():
                 return
             if item["rank"] >= plan["dispatch_count"] and not any(
                 existing["task_id"] == item["task_id"] for _, existing in rows
@@ -547,25 +570,29 @@ class Apply:
                 if store.supervised(row):
                     if self.refresh(path, row, session):
                         continue
-                    if session.get("deadline") is not None and elapsed_seconds() >= session["deadline"]:
+                    if launch and session.get("deadline") is not None and elapsed_seconds() >= session["deadline"]:
                         budget_allows()
                         self.cancel(rows, session, timeout=True)
                         break
-                    self.advance(path, row, session)
+                    if launch:
+                        self.advance(path, row, session)
                 else:
                     self.refresh(path, row, session)
             attempted = {row["task_id"] for _, row in rows}
             accepted = sum(row["state"] != "lost_race" for _, row in rows)
             for item in plan["candidates"]:
+                if not launch or not self.can_launch():
+                    break
                 if accepted >= plan["dispatch_count"]:
                     break
                 if item["task_id"] in attempted:
                     continue
-                launch(item)
+                launch_item(item)
                 attempted.add(item["task_id"])
                 accepted = sum(row["state"] != "lost_race" for _, row in rows)
             if no_wait:
-                self._retry(directory, session, plan, rows, launch)
+                if launch:
+                    self._retry(directory, session, plan, rows, launch_item)
                 if all(not store.supervised(row) for _, row in rows):
                     session["finished_at"] = localio.utc_now_iso()
                     localio.write_json(directory / "session.json", session)
@@ -583,7 +610,7 @@ class Apply:
                         break
                 for path, row in list(rows):
                     self.refresh(path, row, session)
-                retried = self._retry(directory, session, plan, rows, launch)
+                retried = self._retry(directory, session, plan, rows, launch_item) if launch else False
                 if not retried and not self.adopted and all(not store.supervised(row) for _, row in rows):
                     break
                 time.sleep(0.05)
@@ -639,12 +666,12 @@ class Apply:
                     )
         return len(rows) > before
 
-    def reconcile(self, *, no_wait: bool) -> int:
+    def reconcile(self, *, no_wait: bool, launch: bool = True) -> int:
         self.observe()
         result = 0
         for directory in store.sessions(self.target):
             session = store.read(directory / "session.json")
-            if session.get("dry_run"):
+            if session.get("dry_run") or session.get("watch"):
                 continue
             # Terminal rows may still have a claim-release side effect pending.
             for path in (directory / "intents").glob("*.json"):
@@ -652,7 +679,7 @@ class Apply:
                 if row["state"] in store.TERMINAL:
                     self.refresh(path, row, session)
             if not session.get("finished_at"):
-                result = max(result, self.session(directory, no_wait=no_wait))
+                result = max(result, self.session(directory, no_wait=no_wait, launch=launch))
                 if not store.read(directory / "session.json").get("finished_at"):
                     self.adopted.add(directory)
         return result

@@ -10,11 +10,20 @@ from pathlib import Path
 from typing import Any, Iterator
 from uuid import uuid4
 
-from .. import localio, runguard, run_events, worker_failure
+from .. import localio, runguard, worker_failure
 from ..inbox_lock import InboxLockTimeout, held_file_lock
 
 TERMINAL = frozenset({"completed", "failed", "canceled", "orphaned", "lost_race", "unknown"})
 ACTIVE = frozenset({"planned", "claimed", "workspace_ready", "launching", "running"})
+MAX_EVENT_BYTES = 64 * 1024 * 1024
+MAX_EVENT_LINE_BYTES = 1024 * 1024
+MAX_EVENTS = 100_000
+
+
+def _canonical(value: dict[str, Any]) -> bytes:
+    # Dispatch uses JSON booleans in terminal taxonomy. Lifecycle canonical
+    # encoding excludes them, so retain its byte format with normal JSON types.
+    return json.dumps(value, sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False).encode("utf-8")
 
 
 def root(target: Path) -> Path:
@@ -84,46 +93,71 @@ def live_children(target: Path) -> int:
     return sum(row["state"] in {"launching", "running", "unknown"} and child_alive(row) for _, row in intents(target))
 
 
-def events(directory: Path, *, repair_tail: bool = False) -> list[dict[str, Any]]:
+def events(directory: Path, *, repair_tail: bool = False, last_only: bool = False) -> list[dict[str, Any]]:
+    """Validate bounded records, ignoring an incomplete tail for readers.
+
+    Only a lease holder may request repair. Readers leave a concurrent writer's
+    partial append untouched. Append needs only the last validated envelope.
+    """
     path = directory / "events.jsonl"
     if not path.exists():
         return []
-    raw = path.read_bytes()
-    if raw and not raw.endswith(b"\n"):
-        if not repair_tail:
-            raise ValueError("dispatch events have a partial tail")
-        raw = raw[: raw.rfind(b"\n") + 1]
-        with path.open("r+b") as stream:
-            stream.truncate(len(raw))
-            stream.flush()
-            os.fsync(stream.fileno())
     rows: list[dict[str, Any]] = []
     previous = None
-    for line in raw.splitlines():
-        row = json.loads(line)
-        digest = row.pop("digest")
-        if row["previous_digest"] != previous or row["sequence"] != len(rows) + 1:
-            raise ValueError("dispatch event chain is broken")
-        if hashlib.sha256(run_events.canonical_bytes(row)).hexdigest() != digest:
-            raise ValueError("dispatch event digest mismatch")
-        row["digest"] = digest
-        rows.append(row)
-        previous = digest
+    size = 0
+    sequence = 0
+    with path.open("r+b" if repair_tail else "rb") as stream:
+        if os.fstat(stream.fileno()).st_size > MAX_EVENT_BYTES:
+            raise ValueError("dispatch event byte bound exceeded")
+        while line := stream.readline(MAX_EVENT_LINE_BYTES + 1):
+            if size + len(line) > MAX_EVENT_BYTES or len(line) > MAX_EVENT_LINE_BYTES:
+                raise ValueError("dispatch event byte bound exceeded")
+            if not line.endswith(b"\n"):
+                if repair_tail:
+                    stream.truncate(size)
+                    stream.flush()
+                    os.fsync(stream.fileno())
+                break
+            sequence += 1
+            if sequence > MAX_EVENTS:
+                raise ValueError("dispatch event count bound exceeded")
+            try:
+                row = json.loads(line)
+                digest = row.pop("digest")
+                if row["previous_digest"] != previous or row["sequence"] != sequence:
+                    raise ValueError("dispatch event chain is broken")
+                if hashlib.sha256(_canonical(row)).hexdigest() != digest:
+                    raise ValueError("dispatch event digest mismatch")
+            except (KeyError, TypeError, AttributeError, UnicodeError) as exc:
+                raise ValueError("invalid dispatch event envelope") from exc
+            row["digest"] = digest
+            if last_only:
+                rows[:] = [row]
+            else:
+                rows.append(row)
+            previous = digest
+            size += len(line)
     return rows
 
 
 def event(directory: Path, name: str, payload: dict[str, Any]) -> None:
-    rows = events(directory, repair_tail=True)
-    row = {
-        "sequence": len(rows) + 1,
+    rows = events(directory, repair_tail=True, last_only=True)
+    row: dict[str, Any] = {
+        "sequence": rows[-1]["sequence"] + 1 if rows else 1,
         "event_type": name,
         "recorded_at": localio.utc_now_iso(),
         "previous_digest": rows[-1]["digest"] if rows else None,
         "payload": payload,
     }
-    row["digest"] = hashlib.sha256(run_events.canonical_bytes(row)).hexdigest()
+    if row["sequence"] > MAX_EVENTS:
+        raise ValueError("dispatch event count bound exceeded")
+    row["digest"] = hashlib.sha256(_canonical(row)).hexdigest()
+    line = _canonical(row) + b"\n"
+    path = directory / "events.jsonl"
+    if len(line) > MAX_EVENT_LINE_BYTES or (path.stat().st_size if path.exists() else 0) + len(line) > MAX_EVENT_BYTES:
+        raise ValueError("dispatch event byte bound exceeded")
     with (directory / "events.jsonl").open("ab") as stream:
-        stream.write(run_events.canonical_bytes(row) + b"\n")
+        stream.write(line)
         stream.flush()
         os.fsync(stream.fileno())
 
@@ -135,7 +169,11 @@ def transition(path: Path, intent: dict[str, Any], state: str, **updates: Any) -
     event(
         path.parent.parent,
         "work.dispatch.intent",
-        {"intent_id": intent["intent_id"], "state": state, "state_seq": intent["state_seq"]},
+        {
+            **{key: intent.get(key) for key in ("intent_id", "task_id", "claim_id", "run_id", "branch", "terminal")},
+            "state": state,
+            "state_seq": intent["state_seq"],
+        },
     )
     localio.write_json(path, intent)
 
@@ -237,7 +275,9 @@ def reset(*, target: Path, task_id: str, reason: str, json_output: bool = False,
         raise ValueError("--reason must be nonempty")
     with dispatch_lock(target):
         tasks = locking._read_task_ledger(target)["tasks"]
-        matches = [task["id"] for task in tasks if task["id"].startswith(task_id)]
+        matches = [task["id"] for task in tasks if task["id"] == task_id] or [
+            task["id"] for task in tasks if task["id"].startswith(task_id)
+        ]
         if len(matches) != 1:
             raise ValueError(f"task id not found or ambiguous: {task_id}")
         unknown = (
