@@ -672,6 +672,17 @@ def collect_lanes(
         lane.intent_scan_complete = intent_scan_complete
         if not intent_scan_complete:
             lane.evidence.append(Evidence("dispatch:intents", clock, "intent scan incomplete"))
+        if lane.run_dir is not None and lane.intent is None:
+            try:
+                (lane.run_dir / "dispatch-launch.json").lstat()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                pass
+            lane.intent_scan_complete = False
+            lane.evidence.append(
+                Evidence("dispatch-launch.json", clock, "dispatch launch receipt without scanned intent")
+            )
     lanes.truncated |= len(lanes) > limit
     # Run rows retain newest-first order. Truncation is explicit even when
     # the output window leaves no room for unmatched claim rows.

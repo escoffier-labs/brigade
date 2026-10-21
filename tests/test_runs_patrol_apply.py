@@ -865,3 +865,120 @@ def test_unconfigured_hub_does_not_reserve_repeated_actions(tmp_path, monkeypatc
     first = _patrol(repo, capsys, apply="release-claim")
     assert [action["scope"] for action in first["actions"]] == ["ledger"]
     assert _patrol(repo, capsys, apply="release-claim")["actions"] == []
+
+
+@pytest.mark.parametrize("scope", ["ledger", "hub"])
+@pytest.mark.parametrize("receipt_kind", ["file", "symlink", "directory", "permission", "not-directory", "os-error"])
+def test_release_refuses_dispatch_receipt_without_scanned_intent(tmp_path, monkeypatch, capsys, scope, receipt_kind):
+    from pathlib import Path
+
+    from brigade import fleet_claim_release, fleet_client
+
+    repo = _repo(tmp_path)
+    run = _write_run(repo, "20260820-120000-patrol01", status="ok", extra={"claim_id": "claim-1"})
+    ledger = _ledger(repo)
+    receipt = run / "dispatch-launch.json"
+    if receipt_kind == "file":
+        receipt.write_text("{}")
+    elif receipt_kind == "symlink":
+        receipt.symlink_to(run / "missing-receipt")
+    elif receipt_kind == "directory":
+        receipt.mkdir()
+    else:
+        lstat = Path.lstat
+        error = {"permission": PermissionError, "not-directory": NotADirectoryError, "os-error": OSError}[receipt_kind]
+
+        def unavailable(path, *args, **kwargs):
+            if path == receipt:
+                raise error("receipt unavailable")
+            return lstat(path, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "lstat", unavailable)
+    before = ledger.read_bytes()
+    calls = []
+    monkeypatch.setattr(
+        fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.example.invalid"} if scope == "hub" else {}
+    )
+
+    def release(*args, **kwargs):
+        calls.append(kwargs)
+        print(json.dumps({"released": True}))
+        return 0
+
+    monkeypatch.setattr(fleet_claim_release, "_release_claim", release)
+    report = _patrol(repo, capsys, apply="release-claim")
+    action = next(item for item in report["actions"] if item["scope"] == "ledger")
+    assert action["status"] == "refused"
+    assert action["reason"] == "intent scan incomplete, dispatch ownership unverified"
+    lane = report["lanes"][0]
+    assert lane["intent"] is None
+    assert any(
+        item["source"] == "dispatch-launch.json" and item["detail"] == "dispatch launch receipt without scanned intent"
+        for item in lane["evidence"]
+    )
+    assert ledger.read_bytes() == before
+    assert calls == []
+    assert not any(item["status"] == "applied" for item in report["actions"])
+
+
+@pytest.mark.parametrize("scope", ["ledger", "hub"])
+def test_release_without_dispatch_receipt_is_not_fenced_by_other_lane(tmp_path, monkeypatch, capsys, scope):
+    from brigade import fleet_claim_release, fleet_client
+
+    repo = _repo(tmp_path)
+    ordinary = _write_run(repo, "20260820-120000-patrol01", status="ok", extra={"claim_id": "claim-1"})
+    protected = _write_run(repo, "20260820-120000-patrol02", status="ok")
+    (protected / "dispatch-launch.json").write_text("{}")
+    ledger = _ledger(repo)
+    calls = []
+    monkeypatch.setattr(
+        fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.example.invalid"} if scope == "hub" else {}
+    )
+
+    def release(*args, **kwargs):
+        calls.append(kwargs["expected_run_dir"])
+        print(json.dumps({"released": True}))
+        return 0
+
+    monkeypatch.setattr(fleet_claim_release, "_release_claim", release)
+    report = _patrol(repo, capsys, apply="release-claim")
+    action = next(item for item in report["actions"] if item["scope"] == "ledger")
+    assert action["status"] == "applied"
+    assert json.loads(ledger.read_text())["tasks"][0].get("claim") is None
+    assert calls == ([ordinary] if scope == "hub" else [])
+
+
+@pytest.mark.parametrize("scope", ["ledger", "hub"])
+def test_dispatch_receipt_preserves_joined_intent_refusal_reason(tmp_path, monkeypatch, capsys, scope):
+    from brigade import fleet_claim_release, fleet_client
+
+    repo = _repo(tmp_path)
+    run = _write_run(repo, "20260820-120000-patrol01", status="ok", extra={"claim_id": "claim-1"})
+    (run / "dispatch-launch.json").write_text("{}")
+    ledger = _ledger(repo)
+    intent = repo / ".brigade/dispatch/dispatch-example/intents/intent-1.json"
+    intent.parent.mkdir(parents=True)
+    localio.write_json(
+        intent,
+        {"intent_id": "intent-1", "run_id": run.name, "task_id": "task-1", "claim_id": "claim-1", "state": "running"},
+    )
+    before = ledger.read_bytes(), intent.read_bytes()
+    calls = []
+    monkeypatch.setattr(
+        fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.example.invalid"} if scope == "hub" else {}
+    )
+
+    def release(*args, **kwargs):
+        calls.append(kwargs)
+        print(json.dumps({"released": True}))
+        return 0
+
+    monkeypatch.setattr(fleet_claim_release, "_release_claim", release)
+    report = _patrol(repo, capsys, apply="release-claim")
+    action = next(item for item in report["actions"] if item["scope"] == "ledger")
+    assert action["status"] == "refused"
+    assert action["reason"] == "dispatch owns intent claim finalization"
+    assert report["lanes"][0]["intent"]["state"] == "running"
+    assert not any(item["source"] == "dispatch-launch.json" for item in report["lanes"][0]["evidence"])
+    assert (ledger.read_bytes(), intent.read_bytes()) == before
+    assert calls == []
