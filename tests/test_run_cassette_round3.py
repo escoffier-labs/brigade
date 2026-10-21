@@ -59,7 +59,7 @@ def test_interrupt_preserves_chained_retained_lock_error(tmp_path, monkeypatch, 
     assert caught is retained
 
 
-def test_seat_invoker_prompt_digest_is_informational_only(tmp_path, monkeypatch):
+def test_seat_invoker_key_tracks_coordinator_prompt(tmp_path, monkeypatch):
     monkeypatch.setattr(agents, "run_agent", lambda *a, **kw: agents.AgentResult(text="answer", ok=True))
     run = tmp_path / ".brigade" / "runs" / "current"
     invoker = SeatInvoker(
@@ -80,7 +80,8 @@ def test_seat_invoker_prompt_digest_is_informational_only(tmp_path, monkeypatch)
         )
         assert manifest["coordinator_prompt_sha256"] == hashlib.sha256(prompt.encode()).hexdigest()
         keys.append(manifest["key"])
-    assert keys[0] == keys[1] == keys[2]
+    assert keys[0] == keys[2]
+    assert keys[0] != keys[1]
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX hard-link publication")
