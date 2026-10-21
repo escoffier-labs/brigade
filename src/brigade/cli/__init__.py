@@ -241,16 +241,7 @@ def main(argv=None) -> int:
     parser = _build_parser()
     if not parse_argv:
         print(_START_HERE, file=sys.stderr)
-    try:
-        args = parser.parse_args(parse_argv)
-    except SystemExit as exc:
-        if exc.code:
-            from .. import bug_last_error
-
-            command = bug_last_error.command_path(parser, parse_argv)
-            if command != "bug report":
-                bug_last_error.record(command, 2)
-        raise
+    args = parser.parse_args(parse_argv)
     if engine_args is not None:
         args.engine_args = engine_args
 

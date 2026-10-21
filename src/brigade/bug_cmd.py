@@ -74,14 +74,18 @@ def _normalize_fingerprint(text: str) -> str:
 
 def fingerprint(last_error: dict[str, Any] | None, check_names: list[str], summary: str = "") -> str:
     error = last_error or {}
+    has_failure_facts = bool(
+        error.get("command") or error.get("exception_type") or error.get("exit_code") is not None or check_names
+    )
     identity = [
         error.get("command", ""),
         error.get("exception_type", ""),
         error.get("exit_code"),
         sorted(_normalize_fingerprint(name) for name in check_names),
         ".".join(__version__.split(".")[:2]),
-        hashlib.sha256(_normalize_fingerprint(summary.lower()).encode()).hexdigest(),
     ]
+    if not has_failure_facts:
+        identity.append(hashlib.sha256(_normalize_fingerprint(summary.lower()).encode()).hexdigest())
     return "bf-" + hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:12]
 
 
@@ -266,6 +270,19 @@ def _limit_submissions(root: Path, fp: str, now: datetime) -> None:
                 pass
         if attempt["fingerprint"] == fp or pending:
             raise ReportBlocked("Bug report blocked: fingerprint cooldown is 5 minutes")
+
+
+def _pending_receipt_exists(root: Path, fp: str, now: datetime) -> bool:
+    for attempt in _attempts(root, now) + _attempts(root, now - timedelta(days=1)):
+        if attempt["fingerprint"] != fp:
+            continue
+        try:
+            receipt = json.loads(_read_bounded(root / attempt["report_id"] / "receipt.json"))
+        except (OSError, ValueError, TypeError):
+            continue
+        if isinstance(receipt, dict) and receipt.get("status") == "pending":
+            return True
+    return False
 
 
 def _output_tail(path: Path | None) -> str:
@@ -544,6 +561,8 @@ def _report(args: argparse.Namespace) -> int:
         with held_file_lock(root / "submission.lock", deadline_seconds=1):
             _load_prepared(report_id, not_security=args.not_security)
             now = datetime.now(timezone.utc)
+            if duplicates and _pending_receipt_exists(root, bundle["fingerprint"], now):
+                raise ReportBlocked("Bug report blocked: matching issue found for a pending submission")
             _limit_submissions(root, bundle["fingerprint"], now)
             receipt["attempted_at"] = now.isoformat()
             attempts = root / "attempts"

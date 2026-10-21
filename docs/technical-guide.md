@@ -2050,10 +2050,10 @@ through `gh search issues`, with the unauthenticated GitHub search API as a
 fallback when `gh` fails or is unavailable. API reads have a 10-second timeout
 and a 60 KB response cap. Search failure prints `dedup skipped`. A dry run
 makes no network calls. Fingerprints use the recorded command, exception type,
-exit code, failing probe names, Brigade minor version, and a hash of the lowercased
-summary with paths, digits, and identifiers normalized. Different bugs with the
-same failing command or probe receive different fingerprints. Repeats with the
-same normalized summary and failure facts retain the same fingerprint.
+exit code, failing probe names, and Brigade minor version when failure facts
+exist. The normalized summary hash is used only when those facts are absent.
+Reports with the same failure facts share a fingerprint even when their
+summaries differ.
 The bundle channel comes from the updater's local install state when its version
 matches the running CLI. Missing or stale state reports `unknown` instead of
 assuming a stable release.
@@ -2106,10 +2106,11 @@ sharing to five attempts per UTC day and one per fingerprint every five
 minutes. An append-only `attempts/YYYY-MM-DD.jsonl` log under `bug-reports/`
 records each attempt before transport, including retries of the same report
 ID and failed transports. The limit reads only today's and yesterday's logs,
-at most five records and 60 KB per log. A pending submission also blocks
-retries for five minutes.
-Reports with the same failure facts and normalized summary share a fingerprint
-and cooldown.
+at most five records and 60 KB per log. A pending submission blocks retries
+for five minutes. After that window, Brigade searches for its fingerprint
+before another attempt. If a matching issue exists, it blocks the retry to
+avoid filing the issue twice. Usage errors do not replace the last recorded CLI
+failure.
 `BRIGADE_BUG_REPORT=never` disables sharing while allowing `--dry-run` and
 `--via file`. No doctor, status command, or hook starts bug reporting.
 

@@ -38,15 +38,28 @@ def test_described_bugs_use_normalized_summary_without_failure_facts(report_env,
         {"command": "doctor", "exit_code": 1, "exception_type": "ValueError"},
     ],
 )
-def test_different_summaries_distinguish_shared_failure_facts(report_env, monkeypatch, capsys, identity):
+def test_different_summaries_share_fingerprint_when_failure_facts_exist(report_env, monkeypatch, capsys, identity):
     mod, target = report_env
+    monkeypatch.setattr(mod, "collect_diagnostics", lambda target: {"checks": [], "summary": {}})
     if identity is not None:
         mod.write_json(bug_last_error.error_path(), identity)
     fingerprints = []
     for summary in ("wrong count", "missing heading"):
         assert invoke(target, "--summary", summary, "--dry-run", "--json") == 0
         fingerprints.append(result(capsys)["fingerprint"])
-    assert fingerprints[0] != fingerprints[1]
+    assert (fingerprints[0] == fingerprints[1]) is (identity is not None)
+
+
+def test_usage_error_preserves_real_failure_diagnostic(report_env, capsys):
+    bug_last_error.record("doctor", 1, ValueError("profile failed"))
+    with pytest.raises(SystemExit) as exc:
+        cli.main(["doctor", "--not-a-real-option"])
+    assert exc.value.code == 2
+    capsys.readouterr()
+    diagnostic = bug_last_error.read()
+    assert diagnostic["command"] == "doctor"
+    assert diagnostic["exception_type"] == "ValueError"
+    assert diagnostic["message_head"] == "profile failed"
 
 
 @pytest.mark.parametrize("hostname", ["main", "brigade", "exampleuser"])

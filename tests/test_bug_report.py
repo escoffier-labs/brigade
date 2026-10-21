@@ -573,6 +573,32 @@ def test_failed_transport_leaves_pending_receipt_for_cooldown(report_env, monkey
     assert "cooldown" in capsys.readouterr().err
 
 
+def test_pending_submission_with_matching_issue_is_not_filed_again(report_env, monkeypatch, capsys):
+    mod, target = report_env
+    issue = {"number": 321, "title": "same failure", "state": "open"}
+    issue_creates = []
+
+    def fake(*args):
+        if args[:2] == ("search", "issues"):
+            return "[]" if not issue_creates else json.dumps([issue])
+        issue_creates.append(args)
+        raise OSError("response lost after submission")
+
+    monkeypatch.setattr(mod, "gh", fake)
+    assert submit_prepared(target, capsys, "--via", "gh", "--json") == 2
+    capsys.readouterr()
+    logs = Path(mod.data_root()) / "brigade" / "bug-reports" / "attempts"
+    log = next(logs.glob("*.jsonl"))
+    record = json.loads(log.read_text())
+    from datetime import datetime, timedelta, timezone
+
+    record["attempted_at"] = (datetime.now(timezone.utc) - timedelta(minutes=6)).isoformat()
+    log.write_text(json.dumps(record) + "\n")
+    assert submit_prepared(target, capsys, "--via", "gh", "--json") == 2
+    assert "matching issue found" in capsys.readouterr().err
+    assert len(issue_creates) == 1
+
+
 def test_closed_projection_drops_unlisted_doctor_and_last_error_fields(report_env, monkeypatch, capsys):
     from brigade import bug_last_error
 
@@ -776,15 +802,12 @@ def test_last_error_scrubs_all_parsed_paths_and_unknown_absolute_paths(
     assert "private" not in result(capsys)["preview_markdown"].lower()
 
 
-def test_parser_failure_records_only_resolved_command(report_env):
+def test_parser_failure_does_not_create_last_error(report_env):
     from brigade import bug_last_error
 
     with pytest.raises(SystemExit):
         cli.main(["version", "--unknown-private-value"])
-    record = json.loads(bug_last_error.error_path().read_text())
-    assert record["command"] == "version"
-    assert record["exit_code"] == 2
-    assert "private-value" not in json.dumps(record)
+    assert not bug_last_error.error_path().exists()
 
 
 def test_recent_failures_uses_projected_ids_and_verify_digest(report_env, capsys):
