@@ -20,14 +20,14 @@ def isolated_providers(monkeypatch):
     monkeypatch.setattr(cloud_tracker, "observe_github", lambda target: {"branches": [], "prs": []})
 
 
-def _register(target: Path, task_id: str, *, provider: str = "codex-cloud") -> None:
+def _register(target: Path, task_id: str, *, provider: str = "codex-cloud", hours_ago: float = 12) -> None:
     cloud_tracker.register(
         target,
         provider=provider,
         task_id=task_id,
         label="registered task",
         prompt_hash="sha256:" + "a" * 64,
-        dispatched_at=(NOW - timedelta(hours=12)).isoformat(),
+        dispatched_at=(NOW - timedelta(hours=hours_ago)).isoformat(),
     )
 
 
@@ -43,7 +43,7 @@ def test_brief_limits_inventory_and_checks_only_missing_registered_tasks(monkeyp
         limits.append(max_items)
         return codex_cloud.ListTasksResult([{"id": "task_present", "state": "running"}])
 
-    def run_text(command, *, cwd):
+    def run_text(command, *, cwd, timeout=30.0):
         assert command[:3] == ["codex", "cloud", "status"]
         assert cwd == tmp_path
         status_ids.append(command[3])
@@ -121,6 +121,58 @@ def test_failed_codex_status_diagnostic_is_not_a_task_state(monkeypatch, tmp_pat
     observation = cloud_tracker.observe_provider("codex-cloud", tmp_path, **kwargs)
 
     assert observation.tasks == {}
+
+
+def test_brief_probes_only_the_newest_registered_tasks(monkeypatch, tmp_path):
+    for index in range(cloud_tracker.BRIEF_STATUS_PROBE_LIMIT + 3):
+        _register(tmp_path, f"task_{index:02d}", hours_ago=index + 1)
+    monkeypatch.setattr(codex_cloud, "list_tasks", lambda **kwargs: codex_cloud.ListTasksResult([]))
+    probed: list[str] = []
+
+    def fake_run(command, *, cwd=None, timeout=30.0):
+        probed.append(command[-1])
+        return 0, "[READY] task", ""
+
+    monkeypatch.setattr(cloud_tracker, "_run_text", fake_run)
+
+    observation = cloud_tracker.observe_provider("codex-cloud", tmp_path, codex_max_items=codex_cloud.MAX_LIST_LIMIT)
+
+    newest = [f"task_{index:02d}" for index in range(cloud_tracker.BRIEF_STATUS_PROBE_LIMIT)]
+    assert probed == newest
+    assert sorted(observation.tasks) == newest
+
+
+def test_brief_status_probes_share_one_time_budget(monkeypatch, tmp_path):
+    for index in range(3):
+        _register(tmp_path, f"task_{index:02d}", hours_ago=index + 1)
+    monkeypatch.setattr(codex_cloud, "list_tasks", lambda **kwargs: codex_cloud.ListTasksResult([]))
+    clock = [1000.0]
+    monkeypatch.setattr(cloud_tracker.time, "monotonic", lambda: clock[0])
+    timeouts: list[float] = []
+
+    def slow_run(command, *, cwd=None, timeout=30.0):
+        timeouts.append(timeout)
+        clock[0] += 6.0
+        return 0, "[READY] task", ""
+
+    monkeypatch.setattr(cloud_tracker, "_run_text", slow_run)
+
+    observation = cloud_tracker.observe_provider("codex-cloud", tmp_path, codex_max_items=codex_cloud.MAX_LIST_LIMIT)
+
+    budget = cloud_tracker.BRIEF_STATUS_PROBE_BUDGET_SECONDS
+    assert timeouts == [budget, budget - 6.0]
+    assert sorted(observation.tasks) == ["task_00", "task_01"]
+
+
+def test_default_status_fallback_probes_every_registered_task(monkeypatch, tmp_path):
+    for index in range(cloud_tracker.BRIEF_STATUS_PROBE_LIMIT + 2):
+        _register(tmp_path, f"task_{index:02d}", hours_ago=index + 1)
+    monkeypatch.setattr(codex_cloud, "list_tasks", lambda **kwargs: codex_cloud.ListTasksResult([]))
+    monkeypatch.setattr(cloud_tracker, "_run_text", lambda *a, **k: (0, "[READY] task", ""))
+
+    observation = cloud_tracker.observe_provider("codex-cloud", tmp_path)
+
+    assert len(observation.tasks) == cloud_tracker.BRIEF_STATUS_PROBE_LIMIT + 2
 
 
 @pytest.mark.parametrize("entrypoint", ["observe_provider", "observe_provider_details", "observe_providers"])

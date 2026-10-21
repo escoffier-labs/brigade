@@ -6,6 +6,7 @@ import hashlib
 import json
 import re
 import subprocess
+import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1414,15 +1415,38 @@ def _parse_codex_cloud_list(stdout: str) -> dict[str, Any]:
     return tasks
 
 
-def _observe_missing_codex_tasks(target: Path, tasks: dict[str, Any]) -> None:
+# The brief probes at most this many registered tasks missing from its one-page
+# inventory, newest dispatch first, within one shared wall-clock budget.
+BRIEF_STATUS_PROBE_LIMIT = 5
+BRIEF_STATUS_PROBE_BUDGET_SECONDS = 10.0
+
+
+def _observe_missing_codex_tasks(target: Path, tasks: dict[str, Any], *, bounded: bool = False) -> None:
     from . import codex_cloud
 
-    # Failure or absence never implies a terminal state.
-    for entry in load_registry(target)["entries"]:
-        task_id = entry.get("task_id")
-        if not isinstance(task_id, str) or entry.get("provider") != "codex-cloud" or task_id in tasks:
-            continue
-        scode, sout, serr = _run_text(["codex", "cloud", "status", task_id], cwd=target)
+    # Failure or absence never implies a terminal state, so an unprobed task stays
+    # unobserved rather than guessed.
+    missing = [
+        entry
+        for entry in load_registry(target)["entries"]
+        if isinstance(entry.get("task_id"), str)
+        and entry.get("provider") == "codex-cloud"
+        and entry["task_id"] not in tasks
+    ]
+    deadline: float | None = None
+    if bounded:
+        missing.sort(key=lambda entry: str(entry.get("dispatched_at") or ""), reverse=True)
+        del missing[BRIEF_STATUS_PROBE_LIMIT:]
+        deadline = time.monotonic() + BRIEF_STATUS_PROBE_BUDGET_SECONDS
+    for entry in missing:
+        task_id = entry["task_id"]
+        if deadline is None:
+            scode, sout, serr = _run_text(["codex", "cloud", "status", task_id], cwd=target)
+        else:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            scode, sout, serr = _run_text(["codex", "cloud", "status", task_id], cwd=target, timeout=remaining)
         blob = (sout + "\n" + serr).strip()
         if scode != 0 and not blob:
             continue
@@ -1452,7 +1476,9 @@ def _codex_cloud_observation(target: Path, *, codex_max_items: int | None = None
         for row in inventory.tasks
         if isinstance(row.get("id"), str)
     }
-    if not tasks or codex_max_items is not None:
+    if codex_max_items is not None:
+        _observe_missing_codex_tasks(target, tasks, bounded=True)
+    elif not tasks:
         _observe_missing_codex_tasks(target, tasks)
     if not inventory.ok:
         reason = inventory.reason or "provider-error"
