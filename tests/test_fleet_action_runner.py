@@ -3,6 +3,8 @@
 import json
 import stat
 import sys
+from datetime import datetime, timezone
+from pathlib import Path
 
 import pytest
 
@@ -147,14 +149,23 @@ def test_executor_unavailable_removes_target_instead_of_shell_fallback(tmp_path,
             },
             "running",
         ),
-        ("grokbot", {"queued": True, "client_id": "aa_fixture"}, "accepted"),
+        ("grokbot", {"message": {"id": 41, "client_id": "aa_fixture"}}, "accepted"),
         ("dot", {"message": {"id": 42, "client_id": "aa_fixture", "acked_at": "now"}}, "accepted"),
     ],
 )
-def test_supported_transport_contracts(tmp_path, family, payload, expected):
+def test_supported_transport_contracts(tmp_path, monkeypatch, family, payload, expected):
     from brigade import fleet_action_adapters as adapters
 
     executable, log = fake_executable(tmp_path, payload)
+    normal = adapters.invoke
+
+    def invoke(tool, argv, **kw):
+        if family != "t3":
+            assert tool == Path(sys.executable)
+            assert argv[:3] == ["-m", "brigade.fleet_action_adapters", "--inbox-send"]
+        return normal(executable, argv, **kw)
+
+    monkeypatch.setattr(adapters, "invoke", invoke)
     prompt = tmp_path / "prompt"
     prompt.write_text("hostile $(touch nowhere) `echo bad` 雪")
     prompt.chmod(0o600)
@@ -179,7 +190,7 @@ def test_supported_transport_contracts(tmp_path, family, payload, expected):
     else:
         assert args[args.index("--client-id") + 1] == "aa_fixture"
         assert args[args.index("--to") + 1] == "agent:fixture"
-        assert receipt["delivery"] in {"pending", "acknowledged"}
+        assert receipt["delivery"] in {"delivered", "acknowledged"}
 
 
 def test_cli_registers_actions_without_permitting_shell_input():
@@ -248,3 +259,238 @@ def test_lost_report_response_replays_saved_receipt_without_another_turn(tmp_pat
     assert len(log.read_text().splitlines()) == 1
     assert conn.execute("SELECT count(*) FROM action_events WHERE event_id LIKE 'result_%'").fetchone()[0] == 1
     conn.close()
+
+
+@pytest.mark.parametrize("family", ["dot", "grokbot"])
+def test_initial_inbox_send_leaves_unrelated_credential_spool_untouched(tmp_path, monkeypatch, capsys, family):
+    from brigade import fleet_action_adapters as adapters, fleet_client, fleet_client_messages as messages
+    from brigade import fleet_client_message_credentials as credentials
+
+    monkeypatch.setattr(
+        credentials, "message_settings", lambda *a, **kw: ("https://hub.example.test", "x" * 32, "fixture")
+    )
+    monkeypatch.setattr(fleet_client, "spool_path", lambda node: tmp_path / "spool" / "node.jsonl")
+    authority = credentials.MessageAuthority.capture()
+    spool = messages._spool_path(authority.node_id, authority.token, hub_url=authority.hub)
+    spool.parent.mkdir(mode=0o700)
+    old = {
+        "action": "send",
+        "to": "agent:other",
+        "subject": "Unrelated old subject",
+        "body": "old body",
+        "ref": "old",
+        "thread": "old",
+        "priority": "normal",
+        "client_id": "old-client",
+        "enqueued_at": datetime.now(timezone.utc).isoformat(),
+    }
+    original = (json.dumps(old) + "\n").encode()
+    spool.write_bytes(original)
+    spool.chmod(0o600)
+    seen = []
+
+    def request(hub, token, body, **kw):
+        seen.append(body.copy())
+        return 200, {"message": {"id": 42, "client_id": body["client_id"]}}
+
+    monkeypatch.setattr(messages, "_request", request)
+
+    def invoke(executable, argv, **kw):
+        if argv[:3] == ["fleet", "msg", "send"]:
+            # Exercise the actual old route, including its credential-wide drain.
+            return messages.send(
+                recipient=argv[argv.index("--to") + 1],
+                subject=argv[argv.index("--subject") + 1],
+                body=prompt.read_text(),
+                reference="aa_fixture",
+                priority="normal",
+                thread="aa_fixture",
+                client_id="aa_fixture",
+            )
+        assert executable == Path(sys.executable)
+        assert argv[:3] == ["-m", "brigade.fleet_action_adapters", "--inbox-send"]
+        assert kw == {"timeout": 15}
+        assert adapters._inbox_main(argv[2:]) == 0
+        return json.loads(capsys.readouterr().out)
+
+    monkeypatch.setattr(adapters, "invoke", invoke)
+    prompt = tmp_path / "prompt"
+    prompt.write_text("hostile $(touch nowhere) `echo bad` 雪")
+    action = {"action_id": "aa_fixture", "request": {"target": {"family": family, "principal": "agent:fixture"}}}
+    receipt = adapters.dispatch(action, {}, tmp_path / "unused-brigade", prompt)
+    assert receipt == {"status": "accepted", "delivery": "delivered", "destination_ref": "42"}
+    assert seen == [
+        {
+            "action": "send",
+            "to": "agent:fixture",
+            "subject": "Repair alert aa_fixture",
+            "body": "hostile $(touch nowhere) `echo bad` 雪",
+            "ref": "aa_fixture",
+            "thread": "aa_fixture",
+            "client_id": "aa_fixture",
+            "priority": "normal",
+        }
+    ]
+    assert spool.read_bytes() == original
+
+
+@pytest.fixture(params=["authority", "legacy"])
+def inbox_online_api(request, monkeypatch):
+    from brigade import fleet_client_message_credentials as credentials, fleet_client_messages as messages
+
+    settings = ("https://hub.example.test", "x" * 32, "fixture")
+    monkeypatch.setattr(credentials, "message_settings", lambda *a, **kw: settings)
+    if request.param == "legacy":
+        # Exact older co-versioned private API: settings selection is inside _online.
+        def online(body, *, token_file=None, timeout=None):
+            assert token_file is None
+            hub, token, _ = credentials.message_settings(token_file)
+            status, payload = messages._request(hub, token, body, timeout=timeout)
+            if status != 200:
+                raise RuntimeError("private upstream error")
+            return payload
+
+        monkeypatch.setattr(messages, "_online", online)
+    return request.param
+
+
+def inbox_args(prompt):
+    return ["--inbox-send", "--to", "agent:fixture", "--client-id", "aa_fixture", "--body-file", str(prompt)]
+
+
+@pytest.mark.parametrize("failure", ["outage", "wrong-client", "queued"])
+def test_inbox_helper_unknown_never_queues_or_retries(tmp_path, monkeypatch, capsys, inbox_online_api, failure):
+    from brigade import fleet_action_adapters as adapters, fleet_client, fleet_client_messages as messages
+
+    attempts = []
+
+    def request(hub, token, body, **kw):
+        attempts.append(body)
+        if failure == "outage":
+            raise OSError("private credential and prompt details")
+        return 200, (
+            {"queued": True, "client_id": "aa_fixture"}
+            if failure == "queued"
+            else {"message": {"id": 42, "client_id": "wrong-client"}}
+        )
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("online helper must not access any spool")
+
+    monkeypatch.setattr(messages, "_request", request)
+    for name in ("send", "_send_ordered", "_drain_locked", "_queue_locked", "flush", "_spool_path"):
+        monkeypatch.setattr(messages, name, forbidden)
+    monkeypatch.setattr(fleet_client, "_read_spool", forbidden)
+    prompt = tmp_path / "body"
+    prompt.write_text("data only")
+    assert adapters._inbox_main(inbox_args(prompt)) == 1
+    assert json.loads(capsys.readouterr().out) == {"error": "transport-acceptance-unknown"}
+    assert len(attempts) == 1
+    assert sorted(path.name for path in tmp_path.iterdir()) == ["body"]
+
+
+@pytest.mark.parametrize(
+    "malformed", ["flags", "client", "recipient", "oversize", "utf8", "empty", "missing", "fifo", "symlink"]
+)
+def test_inbox_helper_rejects_malformed_input_before_transport(tmp_path, monkeypatch, capsys, malformed):
+    import os
+    from brigade import (
+        fleet_action_adapters as adapters,
+        fleet_client_messages as messages,
+        fleet_hub_messages as limits,
+    )
+
+    prompt = tmp_path / "body"
+    prompt.write_text("data only")
+    args = inbox_args(prompt)
+    if malformed == "flags":
+        args += ["--arbitrary", "private-data"]
+    elif malformed == "client":
+        args[4] = "invalid client id"
+    elif malformed == "recipient":
+        args[2] = " "
+    elif malformed == "oversize":
+        prompt.write_bytes(b"x" * (limits.BODY_LIMIT + 1))
+    elif malformed == "utf8":
+        prompt.write_bytes(b"\xff")
+    elif malformed == "empty":
+        prompt.write_text(" ")
+    elif malformed == "missing":
+        prompt.unlink()
+    elif malformed == "fifo":
+        prompt.unlink()
+        os.mkfifo(prompt)
+    elif malformed == "symlink":
+        prompt.rename(tmp_path / "other")
+        prompt.symlink_to(tmp_path / "other")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("malformed data must fail before credential capture or transport")
+
+    monkeypatch.setattr(messages.MessageAuthority, "capture", forbidden)
+    monkeypatch.setattr(messages, "_online", forbidden)
+    assert adapters._inbox_main(args) == 1
+    assert json.loads(capsys.readouterr().out) == {"error": "transport-acceptance-unknown"}
+
+
+@pytest.mark.parametrize(
+    "hub,allowed",
+    [("http://remote.example.test", False), ("https://hub.example.test", True), ("http://127.0.0.1", True)],
+)
+def test_inbox_helper_retains_transport_endpoint_guard(tmp_path, monkeypatch, capsys, inbox_online_api, hub, allowed):
+    import io
+    from brigade import fleet_action_adapters as adapters, fleet_client, fleet_client_message_credentials as credentials
+
+    monkeypatch.setattr(credentials, "message_settings", lambda *a, **kw: (hub, "x" * 32, "fixture"))
+    opened = []
+
+    def hub_open(request, **kw):
+        opened.append(request.full_url)
+        response = io.BytesIO(b'{"message":{"id":42,"client_id":"aa_fixture"}}')
+        response.status = 200
+        return response
+
+    monkeypatch.setattr(fleet_client, "_hub_open", hub_open)
+    prompt = tmp_path / "body"
+    prompt.write_text("data only")
+    assert adapters._inbox_main(inbox_args(prompt)) == (0 if allowed else 1)
+    output = json.loads(capsys.readouterr().out)
+    assert opened == ([hub + "/messages"] if allowed else [])
+    assert output == (
+        {"message": {"id": 42, "client_id": "aa_fixture"}} if allowed else {"error": "transport-acceptance-unknown"}
+    )
+
+
+def test_inbox_helper_validates_captured_authority_before_transport(tmp_path, monkeypatch, capsys):
+    from brigade import fleet_action_adapters as adapters, fleet_client_message_credentials as credentials
+    from brigade import fleet_client_messages as messages
+
+    calls = []
+
+    def validate(self):
+        calls.append("validate")
+        raise credentials.MessageAuthorityError("private rotated credential")
+
+    monkeypatch.setattr(
+        credentials, "message_settings", lambda *a, **kw: ("https://hub.example.test", "x" * 32, "fixture")
+    )
+    monkeypatch.setattr(credentials.MessageAuthority, "validate", validate)
+    monkeypatch.setattr(messages, "_request", lambda *a, **kw: pytest.fail("invalid authority reached transport"))
+    prompt = tmp_path / "body"
+    prompt.write_text("data only")
+    assert adapters._inbox_main(inbox_args(prompt)) == 1
+    assert calls == ["validate"]
+    assert json.loads(capsys.readouterr().out) == {"error": "transport-acceptance-unknown"}
+
+
+def test_inbox_helper_unknown_private_api_fails_closed(tmp_path, monkeypatch, capsys):
+    from brigade import fleet_action_adapters as adapters, fleet_client_messages as messages
+
+    def unsupported(body, **kwargs):
+        pytest.fail("unknown private contract must never be called")
+
+    monkeypatch.setattr(messages, "_online", unsupported)
+    prompt = tmp_path / "body"
+    prompt.write_text("data only")
+    assert adapters._inbox_main(inbox_args(prompt)) == 1
+    assert json.loads(capsys.readouterr().out) == {"error": "transport-acceptance-unknown"}

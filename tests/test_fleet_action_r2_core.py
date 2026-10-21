@@ -2,6 +2,8 @@
 
 import json
 import re
+import sys
+from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 
@@ -290,20 +292,28 @@ def test_attempted_inbox_send_only_reads_stable_id_and_never_invents_pending(tmp
 
     conn, path, log, action = inbox_action(tmp_path, monkeypatch)
     claim = actions.claim(conn, "node-fixture")
-    if queued:
-        fake_executable(tmp_path, {"queued": True, "client_id": action["action_id"]})
-    assert runner.execute(path, action["action_id"], claim["generation"])["status"] == (
-        "accepted" if queued else "unknown"
-    )
+    normal = runner.adapters.invoke
+    helper_calls = []
+
+    def invoke(executable, argv, **kwargs):
+        if argv[:3] == ["-m", "brigade.fleet_action_adapters", "--inbox-send"]:
+            assert executable == Path(sys.executable)
+            helper_calls.append(argv)
+            return {"queued": True, "client_id": action["action_id"]} if queued else {"error": "ambiguous"}
+        return normal(executable, argv, **kwargs)
+
+    monkeypatch.setattr(runner.adapters, "invoke", invoke)
+    # Queue-only output is no longer an accepted initial-action receipt.
+    assert runner.execute(path, action["action_id"], claim["generation"])["status"] == "unknown"
     fake_executable(
         tmp_path, {"messages": [{"id": 7, "client_id": action["action_id"], "acked_at": None}] if found else []}
     )
     result = runner.execute(path, action["action_id"], claim["generation"])
     calls = [json.loads(line)["args"][:3] for line in log.read_text().splitlines()]
-    # The ordinary CLI spool timer owns queued delivery, never action recovery.
-    assert calls == [["fleet", "msg", "send"], ["fleet", "msg", "sent"]]
+    assert len(helper_calls) == 1
+    assert calls == [["fleet", "msg", "sent"]]
     assert result["status"] == ("accepted" if found else "unknown")
-    assert result["delivery"] == ("delivered" if found else "pending" if queued else "none")
+    assert result["delivery"] == ("delivered" if found else "none")
     journal = json.loads((tmp_path / "journal" / (action["action_id"] + ".jsonl")).read_text())
     assert journal["receipt"]["status"] == ("accepted" if found else "unknown")
     if not found:

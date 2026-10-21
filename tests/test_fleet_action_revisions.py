@@ -73,7 +73,14 @@ def test_accepted_inbox_does_not_starve_next_queued_action(tmp_path, monkeypatch
     monkeypatch.setattr(client, "request", lambda body, **kwargs: handle_api(conn, (False, "node-fixture"), body))
     runner.sync_targets(path)
     first = actions.submit(conn, grant, {**request, "target_id": "fixture-inbox"})
-    fake_executable(tmp_path, {"queued": True, "client_id": first["action_id"]})
+    normal = runner.adapters.invoke
+
+    def invoke(executable, argv, **kwargs):
+        if argv[:3] == ["-m", "brigade.fleet_action_adapters", "--inbox-send"]:
+            return {"message": {"id": 42, "client_id": first["action_id"]}}
+        return normal(executable, argv, **kwargs)
+
+    monkeypatch.setattr(runner.adapters, "invoke", invoke)
     claimed = actions.claim(conn, "node-fixture")
     runner.execute(path, first["action_id"], claimed["generation"])
     second = actions.submit(conn, grant, {**request, "client_id": "second-click"})

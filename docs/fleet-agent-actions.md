@@ -150,9 +150,11 @@ action-specific session key for a generic agent. Both use Gateway mode without
 `--deliver`. The session key provides correlation. Reusing it can create another
 turn.
 
-Inbox messages use the action ID as their stable client ID and thread. Locally
-spooled messages remain pending delivery. Reconciliation only reads sent-message
-status for that stable ID. It never sends again or flushes the credential's spool.
+Inbox messages use the action ID as their stable client ID and thread. Initial
+dispatch sends exactly one message online without reading or writing the local
+spool. A transport failure leaves acceptance unknown and does not queue or retry.
+Reconciliation only reads sent-message status for that stable ID. It never sends
+again or flushes the credential's spool.
 Without a matching receipt, execution stays unknown. Delivery and acknowledgement never imply execution.
 A finished destination execution still displays verification pending. Only fresh
 Hub telemetry evidence for the original subject may clear a telemetry condition.

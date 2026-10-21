@@ -2,12 +2,15 @@
 
 from __future__ import annotations
 
+import inspect
 import json
 import os
 import re
 import selectors
 import signal
+import stat
 import subprocess
+import sys
 import time
 from pathlib import Path
 from typing import Any
@@ -228,29 +231,20 @@ def dispatch(action: dict[str, Any], binding: dict[str, Any], executable: Path, 
             "destination_ref": opaque(payload["runId"]),
         }
     payload = invoke(
-        executable,
+        Path(sys.executable),
         [
-            "fleet",
-            "msg",
-            "send",
+            "-m",
+            "brigade.fleet_action_adapters",
+            "--inbox-send",
             "--to",
             target["principal"],
-            "--subject",
-            "Repair alert " + action_id,
-            "--body-file",
-            str(prompt),
-            "--ref",
-            action_id,
-            "--thread",
-            action_id,
             "--client-id",
             action_id,
-            "--json",
+            "--body-file",
+            str(prompt),
         ],
         timeout=15,
     )
-    if payload.get("queued") is True and payload.get("client_id") == action_id:
-        return {"status": "accepted", "delivery": "pending"}
     message = payload.get("message")
     if not isinstance(message, dict) or message.get("client_id") != action_id or type(message.get("id")) is not int:
         raise ActionError("transport-acceptance-unknown", 409)
@@ -259,6 +253,97 @@ def dispatch(action: dict[str, Any], binding: dict[str, Any], executable: Path, 
         "delivery": "acknowledged" if message.get("acked_at") else "delivered",
         "destination_ref": str(message["id"]),
     }
+
+
+def _inbox_online(message: dict[str, Any]) -> dict[str, Any]:
+    """Exactly one online call, supporting only the two co-versioned private APIs.
+
+    The older broker backport selects credentials inside _online. Current builds
+    capture and validate immutable authority before transport. Neither route may
+    fall back after an exception, since acceptance may already have occurred.
+    """
+    from . import fleet_client_messages as messages
+
+    online: Any = messages._online
+    parameters = list(inspect.signature(online).parameters.values())
+    parameter = inspect.Parameter
+    if (
+        len(parameters) != 3
+        or parameters[0].name != "body"
+        or parameters[0].kind != parameter.POSITIONAL_OR_KEYWORD
+        or parameters[0].default is not parameter.empty
+        or parameters[1].kind != parameter.KEYWORD_ONLY
+        or parameters[2].name != "timeout"
+        or parameters[2].kind != parameter.KEYWORD_ONLY
+        or parameters[2].default is not None
+    ):
+        raise ValueError
+    if parameters[1].name == "authority" and parameters[1].default is parameter.empty:
+        authority = messages.MessageAuthority.capture()
+        authority.validate()
+        return online(message, authority=authority, timeout=10)
+    if parameters[1].name == "token_file" and parameters[1].default is None:
+        return online(message, token_file=None, timeout=10)
+    raise ValueError
+
+
+def _inbox_main(argv: list[str]) -> int:
+    """Private subprocess entry point: data file in, minimal receipt out, no spool.
+
+    Argument errors and upstream failures use closed output, never provider prose
+    or tracebacks. The parent retains pipe caps and process-group supervision.
+    """
+    from . import fleet_client_messages as messages, fleet_hub_messages as limits
+
+    try:
+        if (
+            len(argv) != 7
+            or argv[0:2] != ["--inbox-send", "--to"]
+            or argv[3] != "--client-id"
+            or argv[5] != "--body-file"
+        ):
+            raise ValueError
+        client_id = messages._client_id(argv[4])
+        recipient = limits._text(argv[2], "to", 256)
+        subject = limits._text("Repair alert " + client_id, "subject", limits.SUBJECT_LIMIT)
+        reference = limits._text(client_id, "ref", limits.REF_LIMIT)
+        metadata = messages._wire_metadata(thread=client_id)
+        flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK
+        fd = os.open(argv[6], flags)
+        with os.fdopen(fd, "rb") as stream:
+            info = os.fstat(stream.fileno())
+            if not stat.S_ISREG(info.st_mode) or info.st_size > limits.BODY_LIMIT:
+                raise ValueError
+            raw = stream.read(limits.BODY_LIMIT + 1)
+        body = limits._text(raw.decode("utf-8"), "body", limits.BODY_LIMIT)
+        message = {
+            "action": "send",
+            "to": recipient,
+            "subject": subject,
+            "body": body,
+            "ref": reference,
+            "priority": "normal",
+            "client_id": client_id,
+            **metadata,
+        }
+        payload = _inbox_online(message)
+        response = payload.get("message")
+        if (
+            payload.get("queued") is True
+            or not isinstance(response, dict)
+            or response.get("client_id") != client_id
+            or type(response.get("id")) is not int
+            or not 1 <= response["id"] <= limits.MAX_SQLITE_INTEGER
+        ):
+            raise ValueError
+        receipt = {"id": response["id"], "client_id": client_id}
+        if response.get("acked_at"):
+            receipt["acked_at"] = True
+        print(json.dumps({"message": receipt}))
+        return 0
+    except Exception:
+        print(json.dumps({"error": "transport-acceptance-unknown"}))
+        return 1
 
 
 def recover(action: dict[str, Any], executable: Path, reference: str | None) -> dict[str, Any]:
@@ -296,3 +381,7 @@ def recover(action: dict[str, Any], executable: Path, reference: str | None) -> 
             else {"status": "accepted", "delivery": "delivered", "destination_ref": reference}
         )
     return {"status": "unknown", **({"destination_ref": reference} if reference else {})}
+
+
+if __name__ == "__main__":
+    raise SystemExit(_inbox_main(sys.argv[1:]))
