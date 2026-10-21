@@ -416,14 +416,14 @@ def test_allowlist_only_fails_closed_for_malformed_baseline(allowlist_repo, caps
     assert "allowlist check error:" in capsys.readouterr().err
 
 
-@pytest.mark.parametrize(("count", "expected"), [(182, 0), (183, 2)])
+@pytest.mark.parametrize(("count", "expected"), [(181, 0), (182, 2)])
 def test_allowlist_only_initial_creation_uses_historical_cap(allowlist_repo, capsys, count, expected):
     repo, allowlist, commit = allowlist_repo
     base = commit(None)
     allowlist.write_text(_allowlist_payload([f"test_initial_{i}.py" for i in range(count)]), encoding="utf-8")
     assert windows_pytest.main(_allowlist_mode_argv(repo, allowlist, base)) == expected
     if expected:
-        assert "initial allowlist exceeds 182 historical entries" in capsys.readouterr().err
+        assert "initial allowlist exceeds 181 historical entries" in capsys.readouterr().err
 
 
 def test_full_windows_harness_still_requires_record(capsys):

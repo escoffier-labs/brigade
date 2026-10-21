@@ -548,6 +548,11 @@ def run_presence_hook(
 ) -> int:
     """Publish or end one interactive session. Always exits 0 for adapter safety."""
     try:
+        if harness == "antigravity" and stdin:
+            from .antigravity_presence import run_hook
+
+            run_hook(event)
+            return 0
         if harness == "cursor" and stdin and context == "cursor-work-loop":
             _run_cursor_presence_hook()
             return 0

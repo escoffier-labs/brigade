@@ -12,6 +12,7 @@ _PATH_TOKEN_RE = re.compile(
 )
 _BACKTICK_RE = re.compile(r"`([^`\n]+)`")
 _CODE_EXTENSIONS = {
+    ".astro",
     ".bash",
     ".c",
     ".cc",

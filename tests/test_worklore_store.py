@@ -1412,7 +1412,10 @@ def test_observation_validator_rejects_controls_private_paths_and_credentials(tm
         (_github_observation(11, title="reset \x1b[2J title"), "field-bound"),
         (_github_observation(12, title="see /home/operator/notes"), "private-data"),
         (_github_observation(13, title="see /Users/operator/notes"), "private-data"),
-        (_github_observation(14, title=r"see C:\Users\operator\notes"), "private-data"),
+        (
+            _github_observation(14, title=r"see C:\Users\operator\notes"),  # content-guard: allow windows-home-path
+            "private-data",
+        ),
         (_github_observation(15, description="%USERPROFILE%\\secrets"), "private-data"),
         (_github_observation(16, display_ref="ghp_" + "a" * 36), "private-data"),
         (_github_observation(17, description="api_key=" + "A" * 24), "private-data"),

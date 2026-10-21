@@ -41,6 +41,16 @@ def test_build_draft_refuses_overwrite(tmp_path: Path, monkeypatch):
         drafts.build_draft(**kwargs)
 
 
+def test_forced_draft_preserves_lf_bytes(tmp_path: Path, monkeypatch):
+    _freeze(monkeypatch)
+    kwargs = dict(target=tmp_path, title="Same", summary="S.", content="Body.\nNext line.", inbox=str(tmp_path / "in"))
+    path = Path(drafts.build_draft(**kwargs)["path"])
+    original = path.read_bytes()
+    assert b"\n" in original and b"\r" not in original
+    drafts.build_draft(**kwargs, force=True)
+    assert path.read_bytes() == original
+
+
 def test_build_draft_validates_inputs(tmp_path: Path):
     with pytest.raises(ValueError, match="--target-card is required"):
         drafts.build_draft(target=tmp_path, title="T", summary="S.", content="Body.", action="create-card")

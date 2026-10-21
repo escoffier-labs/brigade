@@ -515,7 +515,7 @@ def test_care_windows_printed_schtasks_match_each_schedule_hint(tmp_path, monkey
 
 def test_schtasks_create_command_is_well_formed_for_every_catalog_entry(tmp_path):
     """Emitted lines must use /IT (not /NP) and an absolute cmd.exe /TR."""
-    workspace = Path(r"C:\Users\operator\project")
+    workspace = Path(r"C:\Users\operator\project")  # content-guard: allow windows-home-path
     for entry in (*care_cmd.CARE_ENTRIES, *care_cmd.MEMORY_JOB_ENTRIES):
         command = care_cmd._schtasks_create_command(entry, workspace=workspace)
         flags = EXPECTED_SCHTASKS_FLAGS[entry.schedule]
@@ -532,12 +532,15 @@ def test_schtasks_create_command_is_well_formed_for_every_catalog_entry(tmp_path
 
 def test_care_windows_printed_path_uses_single_backslashes(tmp_path):
     entry = care_cmd.CARE_ENTRIES[0]
-    workspace = Path(r"C:\Users\operator\project")
+    workspace = Path(r"C:\Users\operator\project")  # content-guard: allow windows-home-path
     command = care_cmd._schtasks_create_command(entry, workspace=workspace)
-    assert r"C:\Users\operator\project" in command
+    assert r"C:\Users\operator\project" in command  # content-guard: allow windows-home-path
     assert r"C:\\Users" not in command
-    spaced = care_cmd._schtasks_create_command(entry, workspace=Path(r"C:\Users\operator\my project"))
-    assert r"cd /d \"C:\Users\operator\my project\"" in spaced
+    spaced = care_cmd._schtasks_create_command(
+        entry,
+        workspace=Path(r"C:\Users\operator\my project"),  # content-guard: allow windows-home-path
+    )
+    assert r"cd /d \"C:\Users\operator\my project\"" in spaced  # content-guard: allow windows-home-path
     assert r"C:\\Users" not in spaced
     assert "/F:String" not in command
     assert "/RL" not in command

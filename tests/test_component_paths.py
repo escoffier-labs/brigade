@@ -66,23 +66,23 @@ def test_default_detection_uses_platform_system_for_macos(_mock_system):
 
 
 def test_windows_defaults_use_localappdata():
-    env = {"LOCALAPPDATA": r"C:\Users\alice\AppData\Local"}
+    env = {"LOCALAPPDATA": r"C:\Users\alice\AppData\Local"}  # content-guard: allow windows-home-path
     data = component_paths.data_root(env=env, system="windows")
     cache = component_paths.cache_root(env=env, system="windows")
-    assert data == r"C:\Users\alice\AppData\Local"
-    assert cache == r"C:\Users\alice\AppData\Local"
+    assert data == r"C:\Users\alice\AppData\Local"  # content-guard: allow windows-home-path
+    assert cache == r"C:\Users\alice\AppData\Local"  # content-guard: allow windows-home-path
 
 
 def test_windows_managed_executable_appends_exe_for_drive_path():
-    root = r"C:\Users\alice\AppData\Local"
+    root = r"C:\Users\alice\AppData\Local"  # content-guard: allow windows-home-path
     path = component_paths.managed_executable_path(root, "miseledger")
-    assert path == r"C:\Users\alice\AppData\Local\brigade\bin\miseledger.exe"
+    assert path == r"C:\Users\alice\AppData\Local\brigade\bin\miseledger.exe"  # content-guard: allow windows-home-path
 
 
 def test_windows_managed_executable_does_not_double_append_exe():
-    root = r"C:\Users\alice\AppData\Local"
+    root = r"C:\Users\alice\AppData\Local"  # content-guard: allow windows-home-path
     path = component_paths.managed_executable_path(root, "miseledger.exe")
-    assert path == r"C:\Users\alice\AppData\Local\brigade\bin\miseledger.exe"
+    assert path == r"C:\Users\alice\AppData\Local\brigade\bin\miseledger.exe"  # content-guard: allow windows-home-path
 
 
 def test_windows_managed_executable_appends_exe_for_unc_root():

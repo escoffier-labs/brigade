@@ -190,10 +190,10 @@ def test_unclaimed_in_progress_work_does_not_supply_occupied_footprint(dispatch_
     assert [item["task_id"] for item in plan["selected"]] == ["task-1"]
 
 
-def test_no_dry_run_refuses_launch_without_writes(dispatch_target, capsys):
+def test_apply_requires_explicit_routing_without_writes(dispatch_target, capsys):
     before = _snapshot(dispatch_target)
     assert cli.main(["work", "dispatch", "--target", str(dispatch_target)]) == 2
-    assert "follow-up slice of #1849" in capsys.readouterr().err
+    assert "--worker or --seat-map" in capsys.readouterr().err
     assert _snapshot(dispatch_target) == before
 
 
