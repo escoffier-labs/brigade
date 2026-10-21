@@ -21,6 +21,10 @@ from .session.lifecycle import _render_task_run_prompt
 CONTRACT = "\n\nDispatch contract:\n- Leave changes uncommitted.\n- Do not push.\n- Do not touch other tasks.\n"
 
 
+class ChildJournalError(ValueError):
+    """A lane needs inspection before its terminal receipt can be trusted."""
+
+
 def _git(cwd: Path, *args: str) -> str:
     result = proc.run(["git", *args], cwd=cwd, timeout=120)
     if result.code != 0 or result.output_limit_exceeded:
@@ -48,7 +52,9 @@ def _new_intent(
         "seat": item["seat"],
         "base_sha": session["base_sha"],
         "branch": f"brigade/dispatch/{slug}-{intent_id[:8]}",
-        "worktree": str(runguard.brigade_worktree_root() / f"task-{slug}-{intent_id[:8]}"),
+        "worktree": str(
+            runguard.brigade_worktree_root() / f"{runguard.git_root(target).name}-task-{slug}-{intent_id[:8]}"
+        ),
         "run_id": None,
         "run_dir": None,
         "pid": None,
@@ -72,7 +78,7 @@ def _release(target: Path, row: dict[str, Any]) -> None:
 def _finish(
     target: Path, path: Path, row: dict[str, Any], state: str, meta: dict[str, Any], *, commit: bool = False
 ) -> None:
-    if row["state"] in store.TERMINAL:
+    if row["state"] in store.TERMINAL - {"unknown"}:
         # Repeating release closes the crash window between terminal publication
         # and ledger mutation. A newer claim generation cannot match this CAS.
         if row["state"] in {"failed", "orphaned", "canceled"}:
@@ -122,6 +128,8 @@ def _finish(
         "infrastructure": infrastructure,
         "changes": changes,
     }
+    if meta.get("error"):
+        terminal["error"] = meta["error"]
     store.transition(path, row, state, terminal=terminal)
     if state != "completed":
         _release(target, row)
@@ -129,9 +137,12 @@ def _finish(
 
 def _terminal_meta(run_dir: Path) -> dict[str, Any] | None:
     meta = localio.read_json_dict(run_dir / "run.json")
-    if meta is None or not runs_cmd._run_display_is_terminal(run_dir, meta):
+    try:
+        terminal = runs_cmd._terminal_lifecycle_event(run_dir)
+    except ValueError as exc:
+        raise ChildJournalError(str(exc)) from exc
+    if meta is None or (terminal is None and not runs_cmd._run_display_is_terminal(run_dir, meta)):
         return None
-    terminal = runs_cmd._terminal_lifecycle_event(run_dir)
     if terminal is not None:
         label = terminal.event_type.rsplit(".", 1)[-1]
         status = terminal.payload.get("status")
@@ -182,10 +193,34 @@ class Apply:
         self.lanes = {lane.run_dir.name: lane for lane in lanes if lane.run_dir is not None}
 
     def refresh(self, path: Path, row: dict[str, Any], session: dict[str, Any]) -> bool:
-        if row["state"] in store.TERMINAL:
+        try:
+            return self._refresh(path, row, session)
+        except ChildJournalError as exc:
+            store.transition(path, row, "unknown", terminal={"error": str(exc)})
+            return True
+        except (ValueError, OSError) as exc:
+            self._intent_error(path, row, "receipt-update-error", exc)
+            return True
+
+    def _intent_error(self, path: Path, row: dict[str, Any], kind: str, exc: Exception) -> None:
+        child = self.children.get(row["intent_id"])
+        if child is not None:
+            proc.terminate_process_tree(child)
+        elif store.child_alive(row):
+            self._cancel_adopted(row)
+        _finish(
+            self.target,
+            path,
+            row,
+            "failed",
+            {"status": "failed", "failure_kind": kind, "failure_phase": "dispatch", "error": str(exc)},
+        )
+
+    def _refresh(self, path: Path, row: dict[str, Any], session: dict[str, Any]) -> bool:
+        if row["state"] in store.TERMINAL - {"unknown"}:
             _finish(self.target, path, row, row["state"], {}, commit=session.get("commit", False))
             return True
-        if row["state"] not in {"workspace_ready", "launching", "running"} or not row.get("run_dir"):
+        if row["state"] not in {"workspace_ready", "launching", "running", "unknown"} or not row.get("run_dir"):
             return False
         run_dir = Path(row["run_dir"])
         receipt = localio.read_json_dict(run_dir / "dispatch-launch.json")
@@ -257,7 +292,7 @@ class Apply:
                     path,
                     row,
                     "orphaned",
-                    _terminal_meta(run_dir) or {"status": "orphaned", "failure_kind": "dispatch-orphaned"},
+                    _terminal_meta(run_dir) or {"status": "orphaned", "failure_kind": "owner-process-exited"},
                 )
             return True
         if alive and row["state"] != "running":
@@ -265,18 +300,24 @@ class Apply:
         return False
 
     def advance(self, path: Path, row: dict[str, Any], session: dict[str, Any]) -> None:
+        try:
+            self._advance(path, row, session)
+        except (ValueError, OSError) as exc:
+            self._intent_error(path, row, "spawn-error", exc)
+
+    def _advance(self, path: Path, row: dict[str, Any], session: dict[str, Any]) -> None:
         if self.refresh(path, row, session):
             return
         if row["state"] in {"planned", "claimed", "workspace_ready", "launching"}:
             try:
-                locking._claim_task(self.target, row["task_id"], actor=row["seat"], claim_id=row["claim_id"])
+                claim = locking._claim_task(self.target, row["task_id"], actor=row["seat"], claim_id=row["claim_id"])
             except claiming.ClaimError as exc:
                 if exc.exit_code == 13:
                     store.transition(path, row, "lost_race")
                     return
                 raise
             if row["state"] == "planned":
-                store.transition(path, row, "claimed")
+                store.transition(path, row, "claimed", claimed_item_revision=claim["claim"]["item_revision"])
         worktree = Path(row["worktree"])
         if row["state"] == "claimed":
             worktree.parent.mkdir(parents=True, exist_ok=True)
@@ -363,7 +404,7 @@ class Apply:
                     "failed" if timeout else "canceled",
                     {
                         "status": "timeout" if timeout else "canceled",
-                        "failure_kind": "budget-exhausted" if timeout else "operator-canceled",
+                        "failure_kind": "budget-exhausted" if timeout else "operator-cancelled",
                     },
                 )
 
@@ -444,6 +485,12 @@ class Apply:
                 time.sleep(max(0, delay - (time.monotonic() - self.last_launch)))
             if not budget_allows():
                 return
+            if item["rank"] >= plan["dispatch_count"] and not any(
+                existing["task_id"] == item["task_id"] for _, existing in rows
+            ):
+                # Publish promotion before creating an intent that recovery
+                # can launch without returning through this function.
+                store.event(directory, "work.dispatch.backfill", {"task_id": item["task_id"]})
             path, row = _new_intent(self.target, directory, session, plan, item)
             rows.append((path, row))
             self.advance(path, row, session)
@@ -473,7 +520,7 @@ class Apply:
                 attempted.add(item["task_id"])
                 accepted = sum(row["state"] != "lost_race" for _, row in rows)
             if no_wait:
-                return int(any(row["state"] in {"failed", "orphaned"} for _, row in rows))
+                return int(any(row["state"] in {"failed", "orphaned", "unknown"} for _, row in rows))
             while True:
                 if session.get("deadline") is not None and elapsed_seconds() >= session["deadline"]:
                     self.cancel(rows, session, timeout=True)
@@ -487,11 +534,14 @@ class Apply:
         except KeyboardInterrupt:
             self.cancel(rows, session)
             return 130
+        except Exception:
+            self.cancel(rows, session)
+            raise
         if all(row["state"] in store.TERMINAL for _, row in rows):
             session["finished_at"] = localio.utc_now_iso()
             localio.write_json(directory / "session.json", session)
         latest = {row["task_id"]: row for _, row in sorted(rows, key=lambda pair: pair[1]["attempt_no"])}
-        return int(any(row["state"] in {"failed", "orphaned"} for row in latest.values()))
+        return int(any(row["state"] in {"failed", "orphaned", "unknown"} for row in latest.values()))
 
     def _retry(
         self,
@@ -507,7 +557,12 @@ class Apply:
             if not attempts:
                 continue
             latest = max(attempts, key=lambda row: row["attempt_no"])
-            if latest["state"] == "failed" and latest.get("terminal", {}).get("infrastructure") is True:
+            terminal = latest.get("terminal") or {}
+            if (
+                latest["state"] == "failed"
+                and terminal.get("infrastructure") is True
+                and terminal.get("failure_kind") != "receipt-update-error"
+            ):
                 if len(attempts) < 3:
                     launch(item)
                 elif not latest.get("retry_exhausted"):

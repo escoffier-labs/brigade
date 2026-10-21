@@ -10,10 +10,10 @@ from pathlib import Path
 from typing import Any, Iterator
 from uuid import uuid4
 
-from .. import localio, runguard, run_events
+from .. import localio, runguard, run_events, worker_failure
 from ..inbox_lock import InboxLockTimeout, held_file_lock
 
-TERMINAL = frozenset({"completed", "failed", "canceled", "orphaned", "lost_race"})
+TERMINAL = frozenset({"completed", "failed", "canceled", "orphaned", "lost_race", "unknown"})
 ACTIVE = frozenset({"planned", "claimed", "workspace_ready", "launching", "running"})
 
 
@@ -75,7 +75,7 @@ def child_alive(intent: dict[str, Any]) -> bool:
 
 
 def live_children(target: Path) -> int:
-    return sum(row["state"] in {"launching", "running"} and child_alive(row) for _, row in intents(target))
+    return sum(row["state"] in {"launching", "running", "unknown"} and child_alive(row) for _, row in intents(target))
 
 
 def events(directory: Path, *, repair_tail: bool = False) -> list[dict[str, Any]]:
@@ -134,12 +134,17 @@ def transition(path: Path, intent: dict[str, Any], state: str, **updates: Any) -
     localio.write_json(path, intent)
 
 
-def failure_counts(target: Path) -> dict[str, int]:
+def _resets(target: Path) -> dict[str, str]:
     resets: dict[str, str] = {}
     for path in (root(target) / "resets").glob("*.json"):
         row = read(path)
         task_id = row["task_id"]
         resets[task_id] = max(resets.get(task_id, ""), row["created_at"])
+    return resets
+
+
+def failure_counts(target: Path) -> dict[str, int]:
+    resets = _resets(target)
     counts: dict[str, int] = {}
     for _, row in intents(target):
         task_id = row["task_id"]
@@ -147,16 +152,40 @@ def failure_counts(target: Path) -> dict[str, int]:
             continue
         if row["state"] == "completed":
             counts[task_id] = 0
-        elif row["state"] in {"failed", "orphaned"} and row.get("terminal", {}).get("infrastructure") is not True:
-            counts[task_id] = counts.get(task_id, 0) + 1
+        elif row["state"] == "failed":
+            terminal = row.get("terminal") or {}
+            if (
+                terminal.get("infrastructure") is not True
+                and terminal.get("failure_kind") not in worker_failure.RUN_POLICY_TERMINAL_FAILURE_KINDS
+            ):
+                counts[task_id] = counts.get(task_id, 0) + 1
     return counts
 
 
 def exclusions(target: Path) -> dict[str, str]:
+    from . import claiming
+    from .ledger import locking
+
     result = {task_id: "circuit-breaker" for task_id, count in failure_counts(target).items() if count >= 3}
+    tasks = {task["id"]: task for task in locking._read_task_ledger(target)["tasks"]}
+    resets = _resets(target)
     for _, row in intents(target):
-        if row["state"] in ACTIVE or row["state"] == "completed":
-            result[row["task_id"]] = "completed-unlanded" if row["state"] == "completed" else "active-intent"
+        task_id = row["task_id"]
+        if row["state"] in ACTIVE or row["state"] == "unknown":
+            result[task_id] = "active-intent"
+        elif row["state"] == "completed" and row["created_at"] > resets.get(task_id, ""):
+            task = tasks.get(task_id, {})
+            claim = claiming.claim_record(task)
+            # Claiming increments the planned revision once. Older receipts
+            # predate the explicit claimed revision field.
+            revision = row.get("claimed_item_revision", row["task_item_revision"] + 1)
+            if (
+                task.get("status") == "in_progress"
+                and claim is not None
+                and claim["claim_id"] == row["claim_id"]
+                and task.get("item_revision") == revision
+            ):
+                result[task_id] = "completed-unlanded"
     return result
 
 

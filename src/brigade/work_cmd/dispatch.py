@@ -152,6 +152,8 @@ def dispatch(
     commit: bool = False,
 ) -> int:
     try:
+        if not dry_run and sys.platform == "win32":
+            raise ValueError("work dispatch apply is unsupported on Windows. Use --dry-run to plan.")
         target = target.expanduser().resolve()
         if not target.is_dir():
             raise ValueError(f"target is not a directory: {target}")
