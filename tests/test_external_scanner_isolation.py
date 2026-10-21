@@ -103,3 +103,34 @@ def test_release_missing_external_initializer_is_actionable(tmp_path, monkeypatc
     result = ci._run_content_guard_check(tmp_path, name="tip", policy="public-repo")
     assert result["status"] == "fail", "a broken configured scanner must remain a failed check"
     assert result["exit_code"] != 0
+
+
+@pytest.mark.parametrize("surface", ["hook-health", "release-plan"])
+def test_incomplete_external_scanner_is_unavailable_in_status(tmp_path, monkeypatch, capsys, surface):
+    from brigade import release_cmd
+
+    checkout = tmp_path / "scanner checkout"
+    (checkout / "policies").mkdir(parents=True)
+    (checkout / "policies/public-repo.json").write_text("{}")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    subprocess.run(["git", "init", "-q", str(workspace)], check=True)
+    subprocess.run(["git", "-C", str(workspace), "config", "core.hooksPath", "hooks"], check=True)
+    hook = workspace / "hooks/pre-push"
+    hook.parent.mkdir()
+    hook.write_text("#!/bin/sh\n# content-guard managed hook\nexit 2\n")
+    hook.chmod(0o755)
+    monkeypatch.setenv("CONTENT_GUARD_DIR", str(checkout))
+    if surface == "hook-health":
+        payload = scrub.hook_status(workspace)
+        assert payload["available"] is False, payload
+        assert all(check["name"] != "content_guard_ready" for check in payload["checks"])
+    else:
+        release_cmd.plan(target=workspace, base_ref=None, json_output=True)
+        payload = json.loads(capsys.readouterr().out)
+        assert any("content_guard" in warning for warning in payload["warnings"]), payload
+    check = next(check for check in payload["checks"] if check["name"].startswith("content_guard"))
+    assert check["status"] == "warn"
+    assert "initializer not found" in check["detail"]
+    assert str(checkout / "src/content_guard/__init__.py") in check["detail"]
+    assert scrub.available() is False

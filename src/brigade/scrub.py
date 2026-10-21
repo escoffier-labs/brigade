@@ -47,7 +47,7 @@ def _scanner_env() -> dict[str, str]:
 
 
 def available() -> bool:
-    return scanner_dir().is_dir()
+    return scanner_dir().is_dir() and external_package_error() is None
 
 
 def external_package_error() -> str | None:
@@ -99,7 +99,7 @@ def hook_status(target: Path, policy: str = "public-repo") -> dict[str, Any]:
     suggestions: list[str] = []
     external_configured = bool(os.environ.get("CONTENT_GUARD_DIR"))
     if not available():
-        detail = (
+        detail = external_package_error() or (
             f"CONTENT_GUARD_DIR points at missing content-guard checkout: {scanner_dir()}"
             if external_configured
             else f"embedded content guard not found at {scanner_dir()}"

@@ -259,6 +259,80 @@ function Invoke-PrintedSchtasksBatch {
     }
 }
 
+function Read-EncodedCarePlan {
+    param([string]$Line)
+    $prefix = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NonInteractive -EncodedCommand '
+    if (-not $Line.StartsWith($prefix, [StringComparison]::Ordinal)) { return $null }
+    $encoded = $Line.Substring($prefix.Length)
+    if ($encoded -cnotmatch '^[A-Za-z0-9+/]+={0,2}$') { throw 'invalid care plan base64/options' }
+    $bytes = [Convert]::FromBase64String($encoded)
+    if ($bytes.Length % 2 -ne 0 -or [Convert]::ToBase64String($bytes) -cne $encoded) {
+        throw 'care plan must contain canonical UTF-16LE base64'
+    }
+    $unicode = New-Object System.Text.UnicodeEncoding($false, $false, $true)
+    return $unicode.GetString($bytes)
+}
+
+function Assert-EncodedCarePlan {
+    param([string]$Script, [string]$TaskName, [string]$Schedule,
+        [string]$Python, [string]$Initializer, [string]$Approved, [string]$Workspace)
+    # Decode Windows argv with the OS parser, independently of Python's renderer.
+    if (-not ('BrigadeAcceptance.NativeArgv' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+namespace BrigadeAcceptance {
+    public static class NativeArgv {
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr CommandLineToArgvW(string value, out int count);
+        [DllImport("kernel32.dll")] private static extern IntPtr LocalFree(IntPtr value);
+        public static string[] Parse(string value) {
+            int count;
+            IntPtr pointer = CommandLineToArgvW("probe.exe " + value, out count);
+            if (pointer == IntPtr.Zero) throw new System.ComponentModel.Win32Exception();
+            try {
+                string[] result = new string[count - 1];
+                for (int i = 1; i < count; i++)
+                    result[i - 1] = Marshal.PtrToStringUni(Marshal.ReadIntPtr(pointer, i * IntPtr.Size));
+                return result;
+            } finally { LocalFree(pointer); }
+        }
+    }
+}
+'@
+    }
+    $literal = "'(?:[^']|'')*'"
+    $argumentMatch = [regex]::Match($Script, ('\$action\.Arguments=(?<value>' + $literal + ');'))
+    if (-not $argumentMatch.Success) { throw "care action arguments missing for $TaskName" }
+    $rawArguments = $argumentMatch.Groups['value'].Value
+    $arguments = $rawArguments.Substring(1, $rawArguments.Length - 2).Replace("''", "'")
+    $pythonLiteral = "'" + $Python.Replace("'", "''") + "'"
+    $cwdLiteral = "'" + (Split-Path -Parent $Initializer).Replace("'", "''") + "'"
+    # Exact script grammar rejects extra commands/options, elevated/noninteractive
+    # principals, executable lookup, or a live action during schtasks creation.
+    $expected = "`$ErrorActionPreference='Stop'; & 'C:\Windows\System32\schtasks.exe' /Create /TN '$TaskName' " +
+        "/TR 'C:\Windows\System32\cmd.exe /d /c exit 1' $Schedule /RU `$env:USERNAME /IT /F; " +
+        'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; ' +
+        '$service=New-Object -ComObject Schedule.Service; $service.Connect(); ' +
+        '$folder=$service.GetFolder(''\''); ' +
+        "`$definition=`$folder.GetTask('$TaskName').Definition; " +
+        '$action=$definition.Actions.Item(1); ' +
+        "`$action.Path=$pythonLiteral; `$action.Arguments=$rawArguments; `$action.WorkingDirectory=$cwdLiteral; " +
+        "`$folder.RegisterTaskDefinition('$TaskName',`$definition,6,`$null,`$null,3,`$null) | Out-Null"
+    if ($Script -cne $expected) { throw "unexpected encoded care creation/action for $TaskName" }
+    $bootstrap = 'import importlib.util as u,os,pathlib as p,runpy as r,sys as s;' +
+        'i,m=s.argv.pop(1),s.argv.pop(1);f=u.spec_from_file_location(m.partition(''.'')[0],i);' +
+        'd=p.Path(f.origin).resolve().parent;os.chdir(d);s.path.append(str(d.parent));' +
+        'q=u.module_from_spec(f);s.modules[f.name]=q;f.loader.exec_module(q);' +
+        'r.run_module(m,run_name=''__main__'',alter_sys=True)'
+    $expectedArgv = @('-I', '-c', $bootstrap, $Initializer, 'brigade', 'runbook', 'run', '--approved', $Approved, '--target', $Workspace)
+    $actualArgv = [BrigadeAcceptance.NativeArgv]::Parse($arguments)
+    if ($actualArgv.Count -ne $expectedArgv.Count) { throw "wrong care argv length for $TaskName" }
+    for ($index = 0; $index -lt $expectedArgv.Count; $index++) {
+        if ($actualArgv[$index] -cne $expectedArgv[$index]) { throw "wrong care argv[$index] for $TaskName" }
+    }
+}
+
 function Invoke-ExternalCommand {
     param(
         [scriptblock]$Command,
@@ -1060,29 +1134,52 @@ finally:
             "BrigadeCare-daily-observability"    = "/SC DAILY /ST 08:00"
             "BrigadeCare-nightly-ops"            = "/SC DAILY /ST 04:00"
         }
+        $expectedRunbooks = @{
+            "BrigadeCare-daily-care" = ".brigade/memory-care/runbooks/daily-care-pass.json"
+            "BrigadeCare-ingest-sweep" = ".brigade/memory-care/runbooks/ingest-sweep.json"
+            "BrigadeCare-weekly-outcome-ratchet" = ".brigade/memory-care/runbooks/weekly-outcome-ratchet.json"
+            "BrigadeCare-daily-observability" = ".brigade/memory-care/runbooks/daily-observability.json"
+            "BrigadeCare-nightly-ops" = ".brigade/runbooks/nightly-maintenance.json"
+        }
+        $carePython = Get-InstalledBrigadePython -PipxHome $env:PIPX_HOME
+        $careInitializer = & $carePython -I -c "import brigade,pathlib; print(pathlib.Path(brigade.__file__).resolve())"
+        if ($LASTEXITCODE -ne 0) { throw "cannot identify installed care package" }
+        $createByTask = @{}
         foreach ($taskName in $expectedSchedules.Keys) {
-            $createLine = $careInstallLines | Where-Object { $_ -match [regex]::Escape("/TN `"$taskName`"") } | Select-Object -First 1
-            if (-not $createLine) {
-                throw "care install missing schtasks /Create for $taskName"
+            $matchesForTask = @($careInstallLines | Where-Object {
+                $decoded = Read-EncodedCarePlan -Line $_
+                if ($null -ne $decoded) { $decoded.Contains("/TN '$taskName' ") }
+                else { $_ -match [regex]::Escape("/TN `"$taskName`"") }
+            })
+            if ($matchesForTask.Count -ne 1) { throw "care install expected one /Create for $taskName" }
+            $createLine = [string]$matchesForTask[0]
+            $decoded = Read-EncodedCarePlan -Line $createLine
+            if ($null -ne $decoded) {
+                $approved = [IO.Path]::GetFullPath((Join-Path $workRepo $expectedRunbooks[$taskName]))
+                Assert-EncodedCarePlan -Script $decoded -TaskName $taskName -Schedule $expectedSchedules[$taskName] `
+                    -Python $carePython -Initializer $careInitializer -Approved $approved -Workspace $workRepo
             }
-            if ($createLine -notmatch [regex]::Escape($expectedSchedules[$taskName])) {
-                throw "care install schedule mismatch for ${taskName}: $createLine"
+            else {
+                if ($createLine -notmatch [regex]::Escape($expectedSchedules[$taskName])) {
+                    throw "care install schedule mismatch for ${taskName}: $createLine"
+                }
+                if ($createLine -notmatch '/RU "%USERNAME%" /IT') {
+                    throw "care install missing /RU /IT pair for ${taskName}: $createLine"
+                }
+                if ($createLine -match "/NP") {
+                    throw "care install must emit /IT not /NP (S4U /NP requires elevation) for ${taskName}: $createLine"
+                }
+                if ($createLine -match "/RL") {
+                    throw "care install must not emit /RL for ${taskName}: $createLine"
+                }
+                if ($createLine -notmatch [regex]::Escape("C:\Windows\System32\cmd.exe")) {
+                    throw "care install /TR must use absolute cmd.exe for ${taskName}: $createLine"
+                }
+                if ($createLine -match "C:\\\\") {
+                    throw "care install emitted doubled backslashes for ${taskName}: $createLine"
+                }
             }
-            if ($createLine -notmatch '/RU "%USERNAME%" /IT') {
-                throw "care install missing /RU /IT pair for ${taskName}: $createLine"
-            }
-            if ($createLine -match "/NP") {
-                throw "care install must emit /IT not /NP (S4U /NP requires elevation) for ${taskName}: $createLine"
-            }
-            if ($createLine -match "/RL") {
-                throw "care install must not emit /RL for ${taskName}: $createLine"
-            }
-            if ($createLine -notmatch [regex]::Escape("C:\Windows\System32\cmd.exe")) {
-                throw "care install /TR must use absolute cmd.exe for ${taskName}: $createLine"
-            }
-            if ($createLine -match "C:\\\\") {
-                throw "care install emitted doubled backslashes for ${taskName}: $createLine"
-            }
+            $createByTask[$taskName] = $createLine
         }
 
         $careJsonOut = Join-Path $acceptRoot "care-install.json"
@@ -1119,7 +1216,7 @@ finally:
             throw "care status --json backend=$($careStatus.backend), expected schtasks"
         }
 
-        $createDaily = $careInstallLines | Where-Object { $_ -match '^schtasks /Create /TN "BrigadeCare-daily-care"' } | Select-Object -First 1
+        $createDaily = $createByTask["BrigadeCare-daily-care"]
         if (-not $createDaily) {
             throw "care install missing BrigadeCare-daily-care /Create line"
         }
