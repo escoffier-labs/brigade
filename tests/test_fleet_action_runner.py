@@ -103,6 +103,7 @@ def test_invalid_configured_executable_fails_before_transport(tmp_path, monkeypa
     assert not (tmp_path / "journal").exists()
 
 
+@requires_posix
 @pytest.mark.parametrize(
     "suffix",
     [
@@ -132,6 +133,7 @@ def test_invalid_journal_path_fails_before_target_sync(tmp_path, monkeypatch, su
     assert not (tmp_path / "journal").exists()
 
 
+@requires_posix
 def test_manifest_accepts_filesystem_encodable_unicode_journal_path(tmp_path):
     from brigade import fleet_action_runner as runner
 
