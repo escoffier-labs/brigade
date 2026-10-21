@@ -165,6 +165,9 @@ def patrol(
             with runs_patrol_receipts.receipt_lock(target):
                 _write_receipt(target, patrol_id, raw)
                 written_receipt = target / payload["receipt"]
+                runs_patrol_receipts.prune_reports(
+                    written_receipt.parent.parent, clock, keep=written_receipt.parent, strict=bool(actions)
+                )
                 if actions:
                     runs_patrol_actions.apply_actions(
                         target=target,
@@ -178,7 +181,6 @@ def patrol(
                         escalate_to=escalate_to,
                     )
                     raw = json.dumps(payload, indent=2, sort_keys=True)
-                runs_patrol_receipts.prune_reports(written_receipt.parent.parent, clock)
     except (OSError, ValueError, RuntimeError, OverflowError) as exc:
         if written_receipt is not None and payload is not None:
             payload.update(exit_code=2, error=type(exc).__name__)

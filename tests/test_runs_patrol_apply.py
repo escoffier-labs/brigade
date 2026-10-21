@@ -133,13 +133,14 @@ def test_apply_refuses_unwritable_receipt_before_mutation(tmp_path, monkeypatch,
     assert (run / "run.json").read_bytes() == before
 
 
-def test_reap_and_release_use_updated_run_evidence(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("actions", ["reap,release-claim", "release-claim,reap"])
+def test_reap_and_release_use_updated_run_evidence(tmp_path, monkeypatch, capsys, actions):
     repo = _repo(tmp_path)
     run = _write_run(repo, "20260820-120000-patrol01", extra={"claim_id": "claim-1"})
     _write_stale_lock(repo, run)
     _ledger(repo)
     monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
-    report = _patrol(repo, capsys, apply="reap,release-claim")
+    report = _patrol(repo, capsys, apply=actions)
     task = json.loads((repo / ".brigade/work/tasks.json").read_text())["tasks"][0]
     assert task.get("claim") is None, report["actions"]
     assert json.loads((run / "run.json").read_text())["status"] == "orphaned"
@@ -150,6 +151,8 @@ def test_release_rechecks_run_after_acquiring_lock(tmp_path, monkeypatch, capsys
 
     repo = _repo(tmp_path)
     run = _write_run(repo, "20260820-120000-patrol01", status="ok", extra={"claim_id": "claim-1"})
+    _write_stale_lock(repo, run)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
     ledger = _ledger(repo)
     monkeypatch.setattr(
         runguard, "run_lock", _racing_lock_after_claim(run, lambda meta: meta.update(status="dispatching"))
@@ -183,7 +186,8 @@ def test_unchanged_evidence_does_not_retry_uncertain_message(tmp_path, monkeypat
     assert len(sent) == 1
 
 
-def test_pending_receipt_fences_a_crashed_patrol(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("days", [0, 8])
+def test_pending_receipt_fences_a_crashed_patrol(tmp_path, monkeypatch, capsys, days):
     repo = _repo(tmp_path)
     run = _write_run(repo, "20260820-120000-patrol01")
     _write_stale_lock(repo, run)
@@ -191,8 +195,31 @@ def test_pending_receipt_fences_a_crashed_patrol(tmp_path, monkeypatch, capsys):
     report = _patrol(repo, capsys, apply="escalate")
     report["actions"][0]["status"] = "pending"
     localio.write_json(repo / report["receipt"], report)
-    again = _patrol(repo, capsys, apply="escalate")
-    assert again["actions"] == []
+    again = _patrol(repo, capsys, apply="escalate", now=NOW + timedelta(days=days))
+    if days:
+        # The archived uncertain attempt still consumes the first delivery.
+        assert again["actions"][0]["escalation_number"] == 2
+        assert again["actions"][0]["idempotency_key"] != report["actions"][0]["idempotency_key"]
+    else:
+        assert again["actions"] == []
+
+
+def test_escalation_budget_survives_receipt_retention(tmp_path, monkeypatch, capsys):
+    from brigade import fleet_client_messages, runs_patrol_receipts
+
+    repo = _repo(tmp_path)
+    run = _write_run(repo, "20260820-120000-patrol01")
+    _write_stale_lock(repo, run)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+    monkeypatch.setattr(runs_patrol_receipts, "REPORT_RECEIPT_LIMIT", 1)
+    sent = []
+    monkeypatch.setattr(fleet_client_messages, "send", lambda **kwargs: sent.append(kwargs) or {"sent": True})
+    kwargs = {"escalate_via": "fleet-msg", "escalate_to": "operator"}
+    _patrol(repo, capsys, apply="escalate", **kwargs)
+    _patrol(repo, capsys, apply="escalate", now=NOW + timedelta(hours=4), **kwargs)
+    again = _patrol(repo, capsys, apply="escalate", now=NOW + timedelta(days=8), **kwargs)
+    assert again["actions"] == [] and len(sent) == 2
+    assert len(list((repo / ".brigade/patrol").glob("*/patrol.json"))) == 1
 
 
 def test_release_refuses_a_live_terminal_owner(tmp_path, monkeypatch, capsys):
@@ -212,6 +239,8 @@ def test_claim_release_refuses_a_resumed_journal_with_stale_snapshot(tmp_path, m
 
     repo = _repo(tmp_path)
     run = _write_run(repo, "20260820-120000-patrol01", status="ok", extra={"claim_id": "claim-1"})
+    _write_stale_lock(repo, run)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
     path = _ledger(repo)
     run_journal.append_event(
         run / "events/lifecycle.jsonl",
@@ -239,12 +268,16 @@ def test_claim_release_refuses_a_resumed_journal_with_stale_snapshot(tmp_path, m
     assert json.loads(path.read_text())["tasks"][0].get("claim"), report["actions"]
 
 
-def test_unreadable_history_refuses_actions_and_records_exit_disposition(tmp_path, monkeypatch, capsys):
+@pytest.mark.parametrize("old_name", ["old", "000-old"])
+def test_unreadable_history_refuses_actions_and_records_exit_disposition(tmp_path, monkeypatch, capsys, old_name):
+    from brigade import runs_patrol_receipts
+
     repo = _repo(tmp_path)
     run = _write_run(repo, "20260820-120000-patrol01")
     _write_stale_lock(repo, run)
     monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
-    old = repo / ".brigade/patrol/old/patrol.json"
+    monkeypatch.setattr(runs_patrol_receipts, "REPORT_RECEIPT_LIMIT", 1)
+    old = repo / f".brigade/patrol/{old_name}/patrol.json"
     old.parent.mkdir(parents=True)
     old.write_text("not json")
     before = (run / "run.json").read_bytes()
@@ -282,7 +315,7 @@ def test_hub_release_retries_after_refusal_or_missing_configuration(tmp_path, mo
     from brigade import fleet_claim_release, fleet_client
 
     repo = _repo(tmp_path)
-    _write_run(repo, "20260820-120000-patrol01", status="ok")
+    _write_run(repo, "20260820-120000-patrol01", status="ok", extra={"claim_id": "claim-1"})
     available = False
     calls = []
     monkeypatch.setattr(
@@ -342,7 +375,9 @@ def test_lock_acquisition_refusal_can_retry_ledger_release(tmp_path, monkeypatch
     from contextlib import contextmanager
 
     repo = _repo(tmp_path)
-    _write_run(repo, "20260820-120000-patrol01", status="ok", extra={"claim_id": "claim-1"})
+    run = _write_run(repo, "20260820-120000-patrol01", status="ok", extra={"claim_id": "claim-1"})
+    _write_stale_lock(repo, run)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
     path = _ledger(repo)
     real_lock = runguard.run_lock
 
@@ -359,3 +394,63 @@ def test_lock_acquisition_refusal_can_retry_ledger_release(tmp_path, monkeypatch
     second = _patrol(repo, capsys, apply="release-claim")
     assert any(item["scope"] == "ledger" and item["status"] == "applied" for item in second["actions"])
     assert json.loads(path.read_text())["tasks"][0].get("claim") is None
+
+
+@pytest.mark.parametrize("actions", ["release-claim", "reap,release-claim"])
+def test_release_preserves_dead_run_proof_when_reap_does_not_succeed(tmp_path, monkeypatch, capsys, actions):
+    from brigade import run_reap
+
+    repo = _repo(tmp_path)
+    run = _write_run(repo, "20260820-120000-patrol01", extra={"claim_id": "claim-1"})
+    lock = _write_stale_lock(repo, run)
+    ledger = _ledger(repo)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+    monkeypatch.setattr(run_reap, "_preflight", lambda *args, **kwargs: "ambiguous")
+    before = (run / "run.json").read_bytes(), (lock / "owner.json").read_bytes(), ledger.read_bytes()
+    report = _patrol(repo, capsys, apply=actions)
+    assert ((run / "run.json").read_bytes(), (lock / "owner.json").read_bytes(), ledger.read_bytes()) == before
+    assert not any(item["action"] == "release-claim" for item in report["actions"])
+
+
+def test_ineligible_actions_do_not_write_attempts_or_query_hub(tmp_path, monkeypatch, capsys):
+    from brigade import fleet_claim_release
+
+    repo = _repo(tmp_path)
+    _write_run(repo, "20260820-120000-patrol01", status="ok")
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("a lane without an observed claim must not query the Hub")
+
+    monkeypatch.setattr(fleet_claim_release, "_release_claim", unexpected)
+    report = _patrol(repo, capsys, apply="reap,release-claim")
+    assert report["actions"] == []
+
+
+def test_terminal_release_does_not_acquire_an_absent_run_lock(tmp_path, monkeypatch, capsys):
+    repo = _repo(tmp_path)
+    _write_run(repo, "20260820-120000-patrol01", status="ok", extra={"claim_id": "claim-1"})
+    ledger = _ledger(repo)
+
+    def unexpected(*args, **kwargs):
+        pytest.fail("terminal claim release must leave an absent workspace lock available")
+
+    monkeypatch.setattr(runguard, "run_lock", unexpected)
+    _patrol(repo, capsys, apply="release-claim")
+    assert json.loads(ledger.read_text())["tasks"][0].get("claim") is None
+    assert not (repo / ".brigade/run.lock").exists()
+
+
+def test_record_only_escalation_deduplicates_after_one_delivery(tmp_path, monkeypatch, capsys):
+    from brigade import fleet_client_messages
+
+    repo = _repo(tmp_path)
+    run = _write_run(repo, "20260820-120000-patrol01")
+    _write_stale_lock(repo, run)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+    monkeypatch.setattr(fleet_client_messages, "send", lambda **kwargs: {"sent": True})
+    _patrol(repo, capsys, apply="escalate", escalate_via="fleet-msg", escalate_to="operator")
+    later = NOW + timedelta(hours=4)
+    recorded = _patrol(repo, capsys, apply="escalate", now=later)
+    assert recorded["actions"][0]["status"] == "recorded"
+    assert recorded["actions"][0]["escalation_number"] == 2
+    assert _patrol(repo, capsys, apply="escalate", now=later + timedelta(minutes=10))["actions"] == []

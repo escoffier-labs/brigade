@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+from heapq import nlargest
 from contextlib import ExitStack, redirect_stderr, redirect_stdout
 from dataclasses import replace
 from datetime import datetime, timedelta
@@ -30,14 +31,13 @@ ESCALATE_STATES = frozenset({"dead", "orphaned", "stalled", "zombie", "stranded"
 
 def _history(root: Path) -> list[dict[str, Any]]:
     """Fail closed on unreadable history rather than forgetting action fences."""
-    actions: list[dict[str, Any]] = []
-    for directory in root.iterdir():
-        if directory.name.startswith("."):
-            continue
+    actions = runs_patrol_receipts.read_fences(root)
+    directories = (directory for directory in root.iterdir() if not directory.name.startswith("."))
+    for directory in nlargest(runs_patrol_receipts.REPORT_RECEIPT_LIMIT, directories):
         payload = runs_patrol_receipts.read_receipt(directory)
         if payload is not None:
             actions.extend(payload["actions"])
-    return actions
+    return runs_patrol_receipts.merge_fences(actions)
 
 
 def _state(lane: Lane, row: dict[str, Any]) -> dict[str, Any]:
@@ -85,27 +85,29 @@ def _release_local(
 ) -> dict[str, Any]:
     if lane.claim is None or lane.task is None:
         return {"status": "skipped", "reason": "no ledger claim"}
-    if lane.run_dir is None or row["state"] not in TERMINAL | {"dead"}:
-        return {"status": "refused", "reason": "claim has no terminal or dead run proof"}
+    if lane.run_dir is None or row["state"] not in TERMINAL:
+        return {"status": "refused", "reason": "claim has no terminal run proof"}
     bound = run_reap._bind_contained_run_dir(lane.run_dir)
     if bound is None:
         return {"status": "refused", "reason": "run directory could not be bound"}
     try:
-        # Ledger CAS and run binding stay held through the write. Taking the run
-        # lock also excludes a concurrent resume after the dead-owner proof.
+        # Ledger CAS and run binding stay held through the write. Claim only a
+        # stale lock, leaving an absent workspace lock available to new runs.
         with ledger._task_ledger_lock(target), run_reap._bound_transaction(bound):
             raw, meta = run_reap._read_bound_run_bytes(bound)
             expected = next((item.digest for item in lane.evidence if item.source == "run.json"), None)
             if raw is None or meta is None or run_reap._run_fingerprint(raw) != expected:
                 return {"status": "refused", "reason": "run changed since observation"}
             workspace = runguard.resolve_run_lock_workspace(meta, lane.run_dir)
-            if workspace is None or runguard.run_lock_state(workspace, lane.run_dir) not in {"stale", "absent"}:
+            lock_state = runguard.run_lock_state(workspace, lane.run_dir) if workspace else None
+            if workspace is None or lock_state not in {"stale", "absent"}:
                 return {"status": "refused", "reason": "live or foreign run lock"}
             with ExitStack() as locks:
                 try:
-                    locks.enter_context(
-                        runguard.run_lock(workspace, run_dir=lane.run_dir, wait_seconds=0, stale_action="claim")
-                    )
+                    if lock_state == "stale":
+                        locks.enter_context(
+                            runguard.run_lock(workspace, run_dir=lane.run_dir, wait_seconds=0, stale_action="claim")
+                        )
                 except runguard.RunLockError:
                     return {"status": "refused", "reason": "run lock acquisition refused"}
                 if not bound.still_bound():
@@ -118,6 +120,8 @@ def _release_local(
                 )
                 if _journal_digest(lane, now) != expected_journal:
                     return {"status": "refused", "reason": "journal changed since observation"}
+                if lock_state == "absent" and runguard.run_lock_state(workspace, lane.run_dir) != "absent":
+                    return {"status": "refused", "reason": "run lock changed since observation"}
                 current = ledger._read_task_ledger(target)
                 task = next((task for task in current["tasks"] if task.get("id") == lane.task["id"]), None)
                 if task is None:
@@ -130,8 +134,8 @@ def _release_local(
 
 
 def _release_hub(lane: Lane, row: dict[str, Any]) -> dict[str, Any]:
-    if lane.run_dir is None or row["state"] not in TERMINAL | {"dead"} or lane.run is None:
-        return {"status": "refused", "reason": "no terminal or dead run proof"}
+    if lane.run_dir is None or row["state"] not in TERMINAL or lane.run is None:
+        return {"status": "refused", "reason": "no terminal run proof"}
     bound = run_reap._bind_contained_run_dir(lane.run_dir)
     if bound is None:
         return {"status": "refused", "reason": "run directory could not be bound"}
@@ -190,9 +194,27 @@ def apply_actions(
     receipt = target / payload["receipt"]
     root = receipt.parent.parent
     previous = _history(root)
+    # Terminalize dead runs before considering claim release, regardless of
+    # the operator's argument order. A refused reap never authorizes release.
+    if "reap" in actions:
+        actions = ["reap", *(action for action in actions if action != "reap")]
     for lane, row in zip(lanes, rows, strict=True):
         for action in actions:
-            scopes = ("ledger", "hub") if action == "release-claim" else ("local",)
+            if action == "reap" and row["state"] != "dead":
+                continue
+            if action == "release-claim":
+                if row["state"] not in TERMINAL:
+                    continue
+                scopes = tuple(
+                    scope
+                    for scope, eligible in (
+                        ("ledger", lane.claim is not None and lane.task is not None),
+                        ("hub", lane.claim is not None or bool((lane.run or {}).get("claim_id"))),
+                    )
+                    if eligible
+                )
+            else:
+                scopes = ("local",)
             for scope in scopes:
                 before = _state(lane, row)
                 base = hashlib.sha256(f"{lane.lane_id}|{row['classification_digest']}|{action}".encode()).hexdigest()
@@ -200,10 +222,6 @@ def apply_actions(
                 escalation_number = None
                 if action == "escalate":
                     if row["state"] not in ESCALATE_STATES:
-                        continue
-                    if not escalate_via and any(
-                        item.get("idempotency_key") == base and item.get("status") == "recorded" for item in previous
-                    ):
                         continue
                     escalations = [
                         item
@@ -220,6 +238,10 @@ def apply_actions(
                     escalation_number = len(escalations) + 1
                     if escalations:
                         key = hashlib.sha256(f"{base}|{escalation_number}".encode()).hexdigest()
+                    if not escalate_via and any(
+                        item.get("idempotency_key") == key and item.get("status") == "recorded" for item in previous
+                    ):
+                        continue
                 elif any(
                     item.get("idempotency_key") == key
                     and item.get("scope") == scope

@@ -619,9 +619,12 @@ brigade runs patrol --target . --apply escalate --escalate-via fleet-msg --escal
 `reap` uses the same bound run directory, snapshot comparison, claimed lock,
 checkpoint, and `run.orphaned` writer as `runs reap`. Live or foreign locks are
 refused. Already orphaned runs need no second transition. `release-claim`
-requires an exact run-to-claim join and a terminal or dead run. The ledger write
-compares `claim_id` under its normal lock. Hub recovery uses the same local
-owner proof as `fleet claims --release`, also checks the lane's run directory,
+requires an exact run-to-claim join and a terminal run. When both actions are
+selected, patrol reaps first regardless of argument order. A refused reap
+preserves the dead run's lock and claim. The ledger write compares `claim_id`
+under its normal lock. An absent run lock is rechecked without acquiring it.
+Hub recovery requires an observed ledger claim or run `claim_id` and uses the
+same local owner proof as `fleet claims --release`, also checks the lane's run directory,
 and fences deletion to the inspected claim generation. Patrol never forces a
 release. Hub rows on other nodes cannot pass this proof.
 
@@ -642,8 +645,12 @@ attempt. Refused and skipped actions can retry after proving their fences again.
 Corrupt receipt files refuse further actions. Unpublished receipt directories
 are ignored, and receipt files are published atomically.
 
-Patrol retains the newest 144 report-only receipts for at most 7 days.
-Receipts containing actions remain as retry fences. Publication, actions and
+Patrol retains the newest 144 receipts for at most 7 days, including under
+`--apply`. Before pruning, it saves compact action fences in
+`.brigade/patrol/.action-fences.json`. Refused and skipped records are discarded.
+Apply reads that archive and at most the newest 144 receipts. The first retention
+sweep migrates older action receipts. The archive has a 4 MiB cap and refuses
+further actions if it cannot be read or updated. Publication, actions and
 retention share a local lock. Care status and work brief read at most the newest
 10 receipt candidates and stop at the first valid receipt.
 Findings and `--fail-on` refer to the initial scan, even when an action repairs
