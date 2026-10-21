@@ -468,6 +468,24 @@ def test_refresh_privacy_headers_keep_version_fetch(tmp_path, monkeypatch, extra
     assert update_notify.available_update(env=_env(tmp_path))["latest"] == "99.0.0"
 
 
+@pytest.mark.parametrize("optout", [{"DO_NOT_TRACK": "1"}, {"BRIGADE_TELEMETRY": "0"}])
+def test_default_refresh_child_preserves_supplied_environment(tmp_path, monkeypatch, optout):
+    monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+    monkeypatch.delenv("BRIGADE_TELEMETRY", raising=False)
+    monkeypatch.setenv("BRIGADE_INSTALL_CHANNEL", "pip")
+    environment = _env(tmp_path, BRIGADE_INSTALL_CHANNEL="plugin", **optout)
+    original = environment.copy()
+    children = []
+    monkeypatch.setattr(update_notify.subprocess, "Popen", lambda *a, **kw: children.append(kw["env"]))
+
+    update_notify.maybe_notify(["work"], 0, env=environment, now=100.0, stderr=io.StringIO())
+
+    assert len(children) == 1
+    child_env = children[0]
+    assert {key: child_env.get(key) for key in original} == original
+    assert environment == original
+
+
 def test_npm_refreshes_without_notice_and_preserves_channel_in_child(tmp_path, monkeypatch):
     from brigade import distribution
 
