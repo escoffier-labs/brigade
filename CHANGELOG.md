@@ -19,6 +19,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Deck Activity separates managed jobs from reported agent sessions. Ready queue counts avoid duplicate totals and fold routine exclusions. Shared repository names across machines show neutral parallel activity, while reported shared modified paths retain warnings.
 - Retention diagnostics use the held run lock when a detached worker checkout and custom output directory hide the original workspace after a malformed or unreadable receipt. Stale recovery retains the saved failure detail.
 - The content guard recognizes host-related assignment keys behind shell declaration prefixes (`export`, `readonly`, and Windows batch `set`), so `export HOSTNAME=<host>` is detected like its bare assignment; arbitrary keys, code expressions, and call arguments stay skipped.
+- The content guard no longer flags interpolated member expressions inside formatted URL strings as private hostnames; literal URL, prose, string, and configuration hostname detection is unchanged.
 
 - Fleet claim renewal and release follow node-token rotation on the bound hub, including orphan-release retries, while retaining the last node credential when its token file is temporarily unavailable.
 

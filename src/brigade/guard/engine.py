@@ -259,12 +259,13 @@ def _hostname_context(text: str, start: int, end: int) -> bool:
     line = _line_at(text, start, end)
     column = start - (text.rfind("\n", 0, start) + 1)
     before, after = line[:column], line[column + end - start :]
-    if re.search(r"[a-z][a-z0-9+.-]*://[^\s]*$", before, re.IGNORECASE):
-        return True
-    # These delimiters introduce expressions, including expressions inside
-    # interpolated strings. Check them before accepting a surrounding quote.
+    # Interpolated member expressions stay code-shaped even inside a URL
+    # context: an f-string prefix with an open brace introduces an expression,
+    # so reject it before accepting a URL or a surrounding quote (#1918).
     if re.search(r"\bf[\"'][^\n]*\{[^}]*$", before, re.IGNORECASE):
         return False
+    if re.search(r"[a-z][a-z0-9+.-]*://[^\s]*$", before, re.IGNORECASE):
+        return True
     if before.rstrip().endswith(("[", "{")):
         return False
     if _quote_at(line, column, None) is not None:

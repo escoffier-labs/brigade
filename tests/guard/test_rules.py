@@ -519,6 +519,30 @@ class MissingLeakShapeTests(unittest.TestCase):
                 text = before + host + after
                 self.assertNotIn("private-hostname", {f.rule_id for f in scan_text(text).findings})
 
+    def test_url_interpolated_member_expressions_stay_code_shaped(self) -> None:
+        """#1918: the URL-context acceptance must not run before interpolation
+        rejection, or a formatted-URL member expression becomes a finding."""
+        for text in (
+            'f"https://{db.local}/path"',
+            'f"https://{cfg.db.local}/path"',
+            "f'https://{db.local}/path'",
+            "url = f\"https://{db.local}/api\"",
+        ):
+            with self.subTest(text=text):
+                result = scan_text(text)
+                self.assertNotIn("private-hostname", {f.rule_id for f in result.findings})
+                redacting = scan_text(text, policy=Policy(rules={"private-hostname": "redact"}))
+                self.assertEqual(redacting.redacted_text, text)
+
+    def test_literal_url_hostname_context_still_matches(self) -> None:
+        # Controls from the existing detection surface, next to the new skips.
+        for text in (
+            "https://db.home/path",  # content-guard: allow private-hostname
+            '"https://db.home/path"',  # content-guard: allow private-hostname
+        ):
+            with self.subTest(text=text):
+                self.assertIn("private-hostname", {f.rule_id for f in scan_text(text).findings})
+
     def test_nested_interpolation_remains_code_shaped(self) -> None:
         result = scan_text(
             'lines.append(f\'token_file = "{(self.home / "node.token").as_posix()}"\')'  # content-guard: allow private-hostname
