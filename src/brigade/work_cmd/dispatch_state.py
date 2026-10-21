@@ -5,7 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+from collections import OrderedDict
 from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterator
 from uuid import uuid4
@@ -18,6 +21,58 @@ ACTIVE = frozenset({"planned", "claimed", "workspace_ready", "launching", "runni
 MAX_EVENT_BYTES = 64 * 1024 * 1024
 MAX_EVENT_LINE_BYTES = 1024 * 1024
 MAX_EVENTS = 100_000
+
+
+@dataclass(frozen=True)
+class _EventHead:
+    sequence: int
+    digest: str | None
+    identity: tuple[int, int, int, int, int] | None
+
+    @property
+    def size(self) -> int:
+        return self.identity[2] if self.identity is not None else 0
+
+
+# At most 32 small heads per active lease. No payloads or cross-lease trust.
+_EVENT_HEADS: ContextVar[tuple[Path, OrderedDict[Path, _EventHead]] | None] = ContextVar(
+    "dispatch_event_heads", default=None
+)
+
+
+def _identity(stat: os.stat_result) -> tuple[int, int, int, int, int]:
+    return stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns
+
+
+def _file_identity(path: Path) -> tuple[int, int, int, int, int] | None:
+    try:
+        return _identity(path.stat())
+    except FileNotFoundError:
+        return None
+
+
+def _lease_heads(directory: Path) -> OrderedDict[Path, _EventHead] | None:
+    lease = _EVENT_HEADS.get()
+    return lease[1] if lease is not None and directory.is_relative_to(lease[0]) else None
+
+
+def _event_head(directory: Path) -> _EventHead:
+    path = directory / "events.jsonl"
+    heads = _lease_heads(directory)
+    identity = _file_identity(path)
+    cached = heads.pop(directory, None) if heads is not None else None
+    if heads is not None and cached is not None and cached.identity == identity:
+        heads[directory] = cached
+        return cached
+    rows = events(directory, repair_tail=True, last_only=True)
+    validated = _file_identity(path)
+    if validated != identity:
+        # Repair can truncate the tail. Validate the repaired file under a
+        # stable identity before retaining a head, including concurrent edits.
+        rows = events(directory, repair_tail=True, last_only=True)
+        if _file_identity(path) != validated:
+            raise ValueError("dispatch event file changed during validation")
+    return _EventHead(rows[-1]["sequence"] if rows else 0, rows[-1]["digest"] if rows else None, validated)
 
 
 def _canonical(value: dict[str, Any]) -> bytes:
@@ -37,7 +92,11 @@ def dispatch_lock(target: Path) -> Iterator[None]:
     try:
         with held_file_lock(path, deadline_seconds=0):
             path.write_text(str(os.getpid()) + "\n")
-            yield
+            token = _EVENT_HEADS.set((root(target).resolve(), OrderedDict()))
+            try:
+                yield
+            finally:
+                _EVENT_HEADS.reset(token)
     except InboxLockTimeout as exc:
         holder = path.read_text().strip() if path.is_file() else "unknown"
         raise ValueError(f"dispatch.lock is held by pid {holder}") from exc
@@ -140,42 +199,78 @@ def events(directory: Path, *, repair_tail: bool = False, last_only: bool = Fals
     return rows
 
 
+class EventCapacityError(ValueError):
+    """A valid log has insufficient room for another complete envelope."""
+
+    def __init__(self, message: str, directory: Path | None = None) -> None:
+        super().__init__(message)
+        self.directory = directory
+
+
+def event_room(directory: Path, *, reserve_events: int) -> bool:
+    """Reserve worst-case legal envelopes without consuming or raising limits."""
+    head = _event_head(directory.resolve())
+    return (
+        head.sequence + reserve_events <= MAX_EVENTS
+        and head.size + reserve_events * MAX_EVENT_LINE_BYTES <= MAX_EVENT_BYTES
+    )
+
+
 def event(directory: Path, name: str, payload: dict[str, Any]) -> None:
-    rows = events(directory, repair_tail=True, last_only=True)
+    directory = directory.resolve()
+    head = _event_head(directory)
     row: dict[str, Any] = {
-        "sequence": rows[-1]["sequence"] + 1 if rows else 1,
+        "sequence": head.sequence + 1,
         "event_type": name,
         "recorded_at": localio.utc_now_iso(),
-        "previous_digest": rows[-1]["digest"] if rows else None,
+        "previous_digest": head.digest,
         "payload": payload,
     }
     if row["sequence"] > MAX_EVENTS:
-        raise ValueError("dispatch event count bound exceeded")
+        raise EventCapacityError("dispatch event count bound exceeded", directory)
     row["digest"] = hashlib.sha256(_canonical(row)).hexdigest()
     line = _canonical(row) + b"\n"
+    if len(line) > MAX_EVENT_LINE_BYTES or head.size + len(line) > MAX_EVENT_BYTES:
+        raise EventCapacityError("dispatch event byte bound exceeded", directory)
     path = directory / "events.jsonl"
-    if len(line) > MAX_EVENT_LINE_BYTES or (path.stat().st_size if path.exists() else 0) + len(line) > MAX_EVENT_BYTES:
-        raise ValueError("dispatch event byte bound exceeded")
-    with (directory / "events.jsonl").open("ab") as stream:
+    heads = _lease_heads(directory)
+    if heads is not None:
+        heads.pop(directory, None)
+    with path.open("ab") as stream:
+        before = _identity(os.fstat(stream.fileno()))
+        if (head.identity is not None and before != head.identity) or (head.identity is None and before[2] != 0):
+            raise ValueError("dispatch event file changed before append")
         stream.write(line)
         stream.flush()
         os.fsync(stream.fileno())
+        identity = _identity(os.fstat(stream.fileno()))
+    if identity[2] != head.size + len(line) or _file_identity(path) != identity:
+        raise ValueError("dispatch event file changed during append")
+    if heads is not None:
+        heads[directory] = _EventHead(row["sequence"], row["digest"], identity)
+        if len(heads) > 32:
+            heads.popitem(last=False)
 
 
 def transition(path: Path, intent: dict[str, Any], state: str, **updates: Any) -> None:
-    intent.update(updates, state=state, state_seq=intent.get("state_seq", 0) + 1, updated_at=localio.utc_now_iso())
+    next_intent = dict(intent)
+    next_intent.update(updates, state=state, state_seq=intent.get("state_seq", 0) + 1, updated_at=localio.utc_now_iso())
     # The receipt is a write-ahead transition. If replacement is interrupted,
     # recovery repeats the idempotent side effect from the older snapshot.
     event(
         path.parent.parent,
         "work.dispatch.intent",
         {
-            **{key: intent.get(key) for key in ("intent_id", "task_id", "claim_id", "run_id", "branch", "terminal")},
+            **{
+                key: next_intent.get(key)
+                for key in ("intent_id", "task_id", "claim_id", "run_id", "branch", "terminal")
+            },
             "state": state,
-            "state_seq": intent["state_seq"],
+            "state_seq": next_intent["state_seq"],
         },
     )
-    localio.write_json(path, intent)
+    localio.write_json(path, next_intent)
+    intent.update(next_intent)
 
 
 def _resets(target: Path) -> dict[str, str]:

@@ -666,3 +666,357 @@ def test_watch_rejects_invalid_pid_launch_evidence(apply_target, capsys, pid, so
         assert engine.refresh(path, row, session)
         assert row["state"] == "unknown"
         assert not watcher.snapshot()[row["intent_id"]][0]
+
+
+def test_event_appends_scan_existing_chain_once_per_lease(tmp_path, monkeypatch):
+    directory = store.root(tmp_path) / "dispatch-cache"
+    directory.mkdir(parents=True)
+    store.event(directory, "work.dispatch.planned", {})
+    validate = store.events
+    scans = []
+
+    def counted(path, **kwargs):
+        scans.append((path / "events.jsonl").stat().st_size)
+        return validate(path, **kwargs)
+
+    monkeypatch.setattr(store, "events", counted)
+    with store.dispatch_lock(tmp_path):
+        for tick in range(30):
+            store.event(directory, "work.dispatch.tick", {"tick": tick})
+    assert len(scans) == 1
+    assert len(validate(directory)) == 31
+    with store.dispatch_lock(tmp_path):
+        store.event(directory, "work.dispatch.closed", {})
+    assert len(scans) == 2
+    store.event(directory, "work.dispatch.closed", {})
+    store.event(directory, "work.dispatch.closed", {})
+    assert len(scans) == 4
+    assert len(validate(directory)) == 34
+
+
+@pytest.mark.parametrize("change", ["replace", "rewrite", "append", "truncate"])
+def test_event_lease_revalidates_unexpected_file_changes(tmp_path, change):
+    directory = store.root(tmp_path) / "dispatch-cache"
+    directory.mkdir(parents=True)
+    log = directory / "events.jsonl"
+    with store.dispatch_lock(tmp_path):
+        store.event(directory, "work.dispatch.planned", {})
+        original = log.read_bytes()
+        if change == "replace":
+            replacement = directory / "replacement"
+            replacement.write_bytes(original.replace(b"planned", b"changed"))
+            replacement.replace(log)
+        elif change == "rewrite":
+            st = log.stat()
+            log.write_bytes(original.replace(b"planned", b"changed"))
+            os.utime(log, ns=(st.st_atime_ns, st.st_mtime_ns + 1_000_000))
+        elif change == "append":
+            with log.open("ab") as stream:
+                stream.write(b'{"partial":')
+        else:
+            log.write_bytes(b"")
+        if change in {"replace", "rewrite"}:
+            with pytest.raises(ValueError, match="digest mismatch"):
+                store.event(directory, "work.dispatch.tick", {})
+            assert log.read_bytes() == original.replace(b"planned", b"changed")
+        else:
+            store.event(directory, "work.dispatch.tick", {})
+            rows = store.events(directory)
+            assert len(rows) == (2 if change == "append" else 1)
+            assert rows[-1]["event_type"] == "work.dispatch.tick"
+
+
+@pytest.mark.parametrize("bound", ["count", "bytes"])
+def test_watch_closes_before_parent_event_capacity_is_exhausted(apply_target, fake_watch, capsys, monkeypatch, bound):
+    _tasks(apply_target, [[f"file-{i}.py"] for i in range(20)])
+    monkeypatch.setattr(store, "MAX_EVENT_LINE_BYTES", 1024)
+    monkeypatch.setattr(store, "MAX_EVENTS", 12 if bound == "count" else 100)
+    monkeypatch.setattr(store, "MAX_EVENT_BYTES", 9000 if bound == "bytes" else 100_000)
+    directory = _watch(apply_target, capsys, "--max", "1", "--interval", "0.2", "--deadline", "20", "--drain-wait")
+    session = store.read(directory / "session.json")
+    assert session["close_reason"] == "event-capacity"
+    assert session["finished_at"]
+    assert 1 < len(fake_watch.launches) < 20
+    rows = store.events(directory)
+    assert len(rows) <= store.MAX_EVENTS
+    assert (directory / "events.jsonl").stat().st_size <= store.MAX_EVENT_BYTES
+    assert rows[-1]["event_type"] == "work.dispatch.closed"
+    assert rows[-1]["payload"]["reason"] == "event-capacity"
+    assert sum(row["event_type"] == "work.dispatch.planned" for row in rows) >= 3
+    assert not any(row["event_type"] == "work.dispatch.tick_error" for row in rows)
+    ticks = [row["payload"] for row in rows if row["event_type"] == "work.dispatch.tick"]
+    assert sum(len(row["launched"]) for row in ticks) == len(fake_watch.launches)
+    assert sum(len(row["finalized"]) for row in ticks) == len(fake_watch.launches)
+    assert all(row["state"] == "completed" for _, row in store.intents(apply_target))
+
+
+def test_watch_persists_close_receipt_when_log_has_no_room(apply_target, fake_watch, monkeypatch, capsys):
+    _tasks(apply_target, [])
+
+    def fill_bound():
+        parent = next(p for p in store.sessions(apply_target) if store.read(p / "session.json").get("watch"))
+        monkeypatch.setattr(store, "MAX_EVENTS", len(store.events(parent)))
+        fake_watch.hooks.remove(fill_bound)
+        fake_watch.stop()
+
+    fake_watch.hooks.append(fill_bound)
+    directory = _watch(apply_target, capsys, "--interval", "0.2")
+    session = store.read(directory / "session.json")
+    assert session["finished_at"] and session["close_reason"] == "SIGTERM"
+    assert len(store.events(directory)) <= store.MAX_EVENTS
+
+
+def test_watch_close_failure_preserves_original_exception_and_session_receipt(apply_target, monkeypatch):
+    from brigade.work_cmd.dispatch_watch import Watch
+
+    directory = store.root(apply_target) / "dispatch-close-error"
+    directory.mkdir(parents=True)
+    session = {"dispatch_id": directory.name}
+    localio.write_json(directory / "session.json", session)
+    watcher = Watch(apply.Apply(apply_target), directory, session, interval=0.1, drain_wait=False)
+    event = store.event
+
+    def fail_close(path, name, payload):
+        if name == "work.dispatch.closed":
+            raise OSError("closing storage failed")
+        return event(path, name, payload)
+
+    def interrupted():
+        raise KeyboardInterrupt("original interruption")
+
+    monkeypatch.setattr(store, "event", fail_close)
+    with pytest.raises(KeyboardInterrupt, match="original interruption"):
+        watcher.run(interrupted)
+    saved = store.read(directory / "session.json")
+    assert saved["finished_at"] and saved["close_reason"] == "error"
+
+
+@pytest.mark.parametrize("bound", ["count", "bytes"])
+@pytest.mark.parametrize("phase", ["main", "drain"])
+def test_foreign_session_capacity_is_not_a_graceful_watch_close(apply_target, monkeypatch, capsys, bound, phase):
+    from brigade.work_cmd.dispatch_watch import Watch
+
+    assert cli.main(["work", "dispatch", "--target", str(apply_target), "--worker", "coder", "--dry-run"]) == 0
+    capsys.readouterr()
+    (child,) = store.sessions(apply_target)
+    child_session = store.read(child / "session.json")
+    child_session.update(dry_run=False, deadline=0 if phase == "main" else None)
+    localio.write_json(child / "session.json", child_session)
+    if phase == "drain":
+        plan = store.read(child / "plan.json")
+        path, row = apply._new_intent(apply_target, child, child_session, plan, plan["selected"][0])
+        run_dir = child / "finished-run"
+        run_dir.mkdir()
+        store.transition(path, row, "running", pid=2147483647, run_id="finished-run", run_dir=str(run_dir))
+        localio.write_json(
+            run_dir / "run.json",
+            {"status": "ok", "cwd": row["worktree"], "finished_at": localio.utc_now_iso()},
+        )
+        assert not child_session.get("watch") and not child_session.get("finished_at")
+        assert store.supervised(row) and not store.child_alive(row)
+        assert apply._terminal_meta(run_dir)["status"] == "ok"
+    monkeypatch.setattr(store, "MAX_EVENT_LINE_BYTES", 1024)
+    monkeypatch.setattr(store, "MAX_EVENTS", 12 if bound == "count" else 100)
+    monkeypatch.setattr(store, "MAX_EVENT_BYTES", 9000 if bound == "bytes" else 100_000)
+    while True:
+        try:
+            store.event(child, "work.dispatch.tick", {})
+        except store.EventCapacityError:
+            break
+    parent = store.root(apply_target) / "dispatch-parent"
+    parent.mkdir()
+    session = {"created_at": "2026-01-01", "dispatch_id": parent.name, "watch": True}
+    localio.write_json(parent / "session.json", session)
+    engine = apply.Apply(apply_target)
+    watcher = Watch(engine, parent, session, interval=0.1, drain_wait=True)
+    if phase == "drain":
+        watcher.reason = "error"
+        with pytest.raises(store.EventCapacityError, match="bound exceeded") as caught:
+            watcher.run(lambda: pytest.fail("main loop must be skipped during drain"))
+        assert caught.value.directory == child.resolve()
+    else:
+        # Stop after the first failed tick; drain must not launch a new intent.
+        monkeypatch.setattr(watcher, "pause", lambda seconds: setattr(watcher, "reason", "SIGTERM"))
+        assert watcher.run(lambda: engine.reconcile(no_wait=True)) != 0
+    saved = store.read(parent / "session.json")
+    rows = store.events(parent)
+    assert saved["finished_at"] and saved["close_reason"] == ("error" if phase == "drain" else "SIGTERM")
+    assert saved["close_reason"] != "event-capacity"
+    assert all(event["payload"].get("reason") != "event-capacity" for event in rows)
+    assert rows[-1]["event_type"] == "work.dispatch.closed"
+    assert rows[-1]["payload"]["reason"] == saved["close_reason"]
+    assert rows[-1]["payload"]["drain_wait"] is True
+    errors = [row for row in rows if row["event_type"] == "work.dispatch.tick_error"]
+    assert len(errors) == (1 if phase == "main" else 0)
+    if phase == "main":
+        assert errors[0]["payload"]["error_type"] == "EventCapacityError"
+        assert "bound exceeded" in errors[0]["payload"]["error"]
+
+
+def test_watch_clean_close_io_failure_records_error(apply_target, fake_watch, monkeypatch):
+    from brigade.work_cmd.dispatch_watch import Watch
+
+    _tasks(apply_target, [])
+    directory = store.root(apply_target) / "dispatch-close-io-error"
+    directory.mkdir(parents=True)
+    session = {"created_at": "2026-01-01", "dispatch_id": directory.name, "watch": True}
+    localio.write_json(directory / "session.json", session)
+    watcher = Watch(apply.Apply(apply_target), directory, session, interval=0.1, drain_wait=False)
+    event = store.event
+
+    def fail_close(path, name, payload):
+        if name == "work.dispatch.closed":
+            raise OSError("closing storage failed")
+        return event(path, name, payload)
+
+    def stop_normally():
+        watcher.stop_waiting = True
+        return 0
+
+    monkeypatch.setattr(store, "event", fail_close)
+    monkeypatch.setattr(watcher, "capacity_allows", lambda: False)
+    with pytest.raises(OSError, match="closing storage failed"):
+        watcher.run(stop_normally)
+    saved = store.read(directory / "session.json")
+    assert saved["finished_at"] and saved["close_reason"] == "error"
+
+
+@pytest.mark.parametrize("bound", ["count", "bytes"])
+def test_capacity_failure_keeps_intent_session_and_claim_consistent(apply_target, monkeypatch, capsys, bound):
+    assert cli.main(["work", "dispatch", "--target", str(apply_target), "--worker", "coder", "--dry-run"]) == 0
+    capsys.readouterr()
+    (directory,) = store.sessions(apply_target)
+    session = store.read(directory / "session.json")
+    session.update(dry_run=False, deadline=None)
+    localio.write_json(directory / "session.json", session)
+    plan = store.read(directory / "plan.json")
+    path, row = apply._new_intent(apply_target, directory, session, plan, plan["selected"][0])
+    claim = apply.locking._claim_task(apply_target, row["task_id"], actor=row["seat"], claim_id=row["claim_id"])
+    run_dir = directory / "finished-run"
+    run_dir.mkdir()
+    store.transition(
+        path,
+        row,
+        "running",
+        pid=2147483647,
+        run_id="finished-run",
+        run_dir=str(run_dir),
+        claimed_item_revision=claim["claim"]["item_revision"],
+    )
+    localio.write_json(run_dir / "run.json", {"status": "ok", "finished_at": localio.utc_now_iso()})
+    before = dict(row)
+    ledger = apply.locking._read_task_ledger(apply_target)
+    log = (directory / "events.jsonl").read_bytes()
+    if bound == "count":
+        monkeypatch.setattr(store, "MAX_EVENTS", len(store.events(directory)))
+    else:
+        monkeypatch.setattr(store, "MAX_EVENT_BYTES", len(log))
+    engine = apply.Apply(apply_target)
+    engine.continue_on_error = True
+    observed = []
+    refresh = engine.refresh
+
+    def capture_refresh(path, current, session):
+        observed.append(current)
+        return refresh(path, current, session)
+
+    monkeypatch.setattr(engine, "refresh", capture_refresh)
+    with pytest.raises(store.EventCapacityError, match="bound exceeded"):
+        engine.session(directory, no_wait=True, launch=False)
+    assert observed == [before]
+    assert row == store.read(path) == before
+    assert row["state"] == "running" and store.supervised(observed[0])
+    assert store.read(directory / "session.json") == session
+    assert not session.get("finished_at")
+    assert apply.locking._read_task_ledger(apply_target) == ledger
+    task = next(task for task in ledger["tasks"] if task["id"] == row["task_id"])
+    assert claiming.claim_record(task)["claim_id"] == row["claim_id"]
+    assert (directory / "events.jsonl").read_bytes() == log
+
+
+def test_transition_write_failure_keeps_snapshot_and_retry_sequence(tmp_path, monkeypatch):
+    path = tmp_path / "intents" / "intent.json"
+    path.parent.mkdir()
+    row = {"intent_id": "intent", "state": "running", "state_seq": 3, "updated_at": "before", "terminal": None}
+    localio.write_json(path, row)
+    before = dict(row)
+    write = localio.write_json
+
+    def fail_write(destination, value):
+        if destination == path:
+            raise OSError("snapshot replacement failed")
+        return write(destination, value)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(localio, "write_json", fail_write)
+        with pytest.raises(OSError, match="snapshot replacement failed"):
+            store.transition(path, row, "completed", terminal={"run_status": "ok"})
+    assert row == store.read(path) == before
+    (first,) = store.events(tmp_path)
+    assert first["payload"]["state"] == "completed"
+    assert first["payload"]["state_seq"] == 4
+    store.transition(path, row, "completed", terminal={"run_status": "ok"})
+    assert row == store.read(path)
+    assert row["state"] == "completed" and row["state_seq"] == 4
+    events = store.events(tmp_path)
+    assert len(events) == 2
+    assert events[0]["payload"] == events[1]["payload"]
+
+
+@pytest.fixture
+def exit_after_observation(apply_target, fake_watch, monkeypatch):
+    """A child that exits right after the drain reconcile saw it alive."""
+    exited = []
+    drains = []
+    reconcile = apply.Apply.reconcile
+
+    def observing_reconcile(engine, *, no_wait, launch=True):
+        result = reconcile(engine, no_wait=no_wait, launch=launch)
+        if not launch:
+            drains.append((no_wait, launch, bool(exited)))
+            if not exited:
+                exited.append(True)  # Between this reconcile and the live-children check.
+                if fake_watch.interrupt:
+                    fake_watch.stop()
+        return result
+
+    def refresh(engine, path, row, session):
+        if row["state"] == "running" and exited:
+            store.transition(path, row, "completed", terminal={"run_status": "ok"})
+        return row["state"] in store.TERMINAL
+
+    fake_watch.interrupt = False
+    monkeypatch.setattr(store, "child_alive", lambda row: row["state"] == "running" and not exited)
+    monkeypatch.setattr(apply.Apply, "_refresh", refresh)
+    monkeypatch.setattr(apply.Apply, "reconcile", observing_reconcile)
+    return drains
+
+
+def test_drain_finalizes_child_that_exits_after_the_last_observation(
+    apply_target, fake_watch, exit_after_observation, capsys
+):
+    _tasks(apply_target, [["a.py"]])
+    directory = _watch(apply_target, capsys, "--max-total", "1", "--drain-wait", "--interval", "0.1")
+    # The quiescent exit costs exactly one further non-waiting, non-launching pass.
+    assert exit_after_observation == [(True, False, False), (True, False, True)]
+    assert len(fake_watch.launches) == 1
+    ((_, intent),) = store.intents(apply_target)
+    assert intent["state"] == "completed" and intent["terminal"] == {"run_status": "ok"}
+    session = store.read(directory / "session.json")
+    assert session["close_reason"] == "max-total" and session["launched"] == 1 and session["finished_at"]
+    events = store.events(directory)
+    assert events[-1]["event_type"] == "work.dispatch.closed"
+    assert events[-1]["payload"]["live_children"] == 0
+    finalized = [
+        key for event in events if event["event_type"] == "work.dispatch.tick" for key in event["payload"]["finalized"]
+    ]
+    assert finalized == [intent["intent_id"]]
+
+
+def test_drain_hard_interrupt_skips_the_quiescence_reconcile(apply_target, fake_watch, exit_after_observation, capsys):
+    _tasks(apply_target, [["a.py"]])
+    fake_watch.interrupt = True
+    directory = _watch(apply_target, capsys, "--max-total", "1", "--drain-wait", "--interval", "0.1")
+    assert exit_after_observation == [(True, False, False)]
+    assert store.intents(apply_target)[0][1]["state"] == "running"
+    assert store.read(directory / "session.json")["finished_at"]

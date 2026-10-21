@@ -161,6 +161,19 @@ class Watch:
             for _, row in store.intents(self.engine.target)
         )
 
+    def capacity_allows(self) -> bool:
+        # One tick can write planned, error, tick, and budget denial. Keep
+        # two further envelopes for the final drain snapshot and close.
+        if not store.event_room(self.directory, reserve_events=6):
+            self.reason = self.reason or "event-capacity"
+            return False
+        return True
+
+    def own_capacity(self, exc: store.EventCapacityError) -> bool:
+        # Only this watch's own log is a graceful capacity close; a child
+        # session's full log raised through a tick is a real failure.
+        return exc.directory == self.directory.resolve()
+
     def run(self, tick: Callable[[], int]) -> int:
         previous = {sig: signal.getsignal(sig) for sig in (signal.SIGTERM, signal.SIGINT)}
 
@@ -171,6 +184,7 @@ class Watch:
                 self.stop_waiting = True
 
         result = 0
+        failure: BaseException | None = None
         try:
             for sig in previous:
                 signal.signal(sig, stop)
@@ -179,15 +193,21 @@ class Watch:
             self.engine.pause = self.pause
             self.engine.continue_on_error = True
             store.event(self.directory, "work.dispatch.opened", {"version": self.version})
-            while self.can_launch(check_version=True) and self.budget_allows():
+            while self.can_launch(check_version=True) and self.capacity_allows() and self.budget_allows():
                 try:
                     result = max(result, tick())
                 except Exception as exc:
-                    store.event(
-                        self.directory,
-                        "work.dispatch.tick_error",
-                        {"tick": self.tick_no, "error_type": type(exc).__name__, "error": str(exc)},
-                    )
+                    if isinstance(exc, store.EventCapacityError) and self.own_capacity(exc):
+                        self.reason = self.reason or "event-capacity"
+                        break
+                    try:
+                        store.event(
+                            self.directory,
+                            "work.dispatch.tick_error",
+                            {"tick": self.tick_no, "error_type": type(exc).__name__, "error": str(exc)},
+                        )
+                    except BaseException:
+                        raise exc from None
                     result = max(result, 1)
                 self.record_tick()
                 if self.budget_allows():
@@ -196,30 +216,65 @@ class Watch:
             # intents, retries, or resuming a pre-launch intent.
             while not self.stop_waiting:
                 result = max(result, self.engine.reconcile(no_wait=True, launch=False))
-                self.record_tick()
-                if not self.drain_wait or not store.live_children(self.engine.target):
+                # Near the bound, aggregate drain observations into the final
+                # tick instead of consuming its reserved envelope each poll.
+                if store.event_room(self.directory, reserve_events=3):
+                    self.record_tick()
+                if not self.drain_wait:
+                    break
+                if not store.live_children(self.engine.target):
+                    # A child can exit after the reconcile above observed it
+                    # alive. This watch owns the dispatch lock and launches
+                    # nothing while draining, so no live child can appear:
+                    # one more pass finalizes whatever just exited.
+                    if not self.stop_waiting:
+                        result = max(result, self.engine.reconcile(no_wait=True, launch=False))
                     break
                 time.sleep(min(0.1, self.interval))
-        except BaseException:
+        except store.EventCapacityError as exc:
+            if not self.own_capacity(exc):
+                failure = exc
+                self.reason = self.reason or "error"
+                raise
+            self.reason = self.reason or "event-capacity"
+        except BaseException as exc:
+            failure = exc
             self.reason = self.reason or "error"
             raise
         finally:
             try:
-                self.record_tick()
-                self.session.update(
-                    finished_at=localio.utc_now_iso(), close_reason=self.reason or "stopped", launched=self.launched()
-                )
-                store.event(
-                    self.directory,
-                    "work.dispatch.closed",
-                    {
-                        "reason": self.session["close_reason"],
-                        "drain_wait": self.drain_wait,
-                        "live_children": store.live_children(self.engine.target),
-                        "claimed_prelaunch_intents": self.claimed_prelaunch_intents(),
-                    },
-                )
-                localio.write_json(self.directory / "session.json", self.session)
+                try:
+                    self.record_tick()
+                    store.event(
+                        self.directory,
+                        "work.dispatch.closed",
+                        {
+                            "reason": self.reason or "stopped",
+                            "drain_wait": self.drain_wait,
+                            "live_children": store.live_children(self.engine.target),
+                            "claimed_prelaunch_intents": self.claimed_prelaunch_intents(),
+                        },
+                    )
+                except store.EventCapacityError as exc:
+                    if not self.own_capacity(exc):
+                        self.reason = self.reason or "error"
+                        raise
+                    self.reason = self.reason or "event-capacity"
+                except BaseException:
+                    self.reason = self.reason or "error"
+                    raise
+                finally:
+                    # The session receipt is independent of event-log space,
+                    # including a pre-existing full log or closing I/O error.
+                    self.session.update(
+                        finished_at=localio.utc_now_iso(),
+                        close_reason=self.reason or "stopped",
+                        launched=self.launched(),
+                    )
+                    localio.write_json(self.directory / "session.json", self.session)
+            except BaseException:
+                if failure is None:
+                    raise
             finally:
                 for sig, handler in previous.items():
                     signal.signal(sig, handler)

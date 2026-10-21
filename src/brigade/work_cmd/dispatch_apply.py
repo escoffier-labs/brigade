@@ -416,6 +416,8 @@ class Apply:
             argv = _child_argv(row, session, _render_task_run_prompt(task) + CONTRACT)
             try:
                 with (run_dir / "dispatch-child.log").open("ab") as log:
+                    if not self.can_launch():
+                        return
                     child = subprocess.Popen(
                         [sys.executable, "-m", "brigade.work_cmd.dispatch_child", str(run_dir), *argv],
                         stdin=subprocess.DEVNULL,

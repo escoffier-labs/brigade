@@ -54,7 +54,15 @@ with runguard.run_lock(cwd, run_dir=run, wait_seconds=0):
     if os.environ.get('FAKE_DISPATCH_INFRA'): meta['failure_kind'] = 'provider-error'
     meta['failure_kind'] = os.environ.get('FAKE_DISPATCH_KIND', meta.get('failure_kind'))
     (run / 'run.json').write_text(json.dumps(meta))
-    time.sleep(float(os.environ.get('FAKE_DISPATCH_AFTER_TERMINAL', '0')))
+    release_file = os.environ.get('FAKE_DISPATCH_RELEASE_FILE')
+    if release_file:
+        deadline = time.monotonic() + 30
+        while not Path(release_file).exists():
+            if time.monotonic() >= deadline:
+                raise TimeoutError('dispatch test did not release child')
+            time.sleep(0.005)
+    else:
+        time.sleep(float(os.environ.get('FAKE_DISPATCH_AFTER_TERMINAL', '0')))
 """
     )
     executable.chmod(0o755)
@@ -471,20 +479,51 @@ def test_full_event_digest_corruption_refuses_resume(apply_target, capsys, monke
 
 
 def test_terminal_run_waits_for_child_exit_before_closeout(apply_target, capsys, monkeypatch):
-    monkeypatch.setenv("FAKE_DISPATCH_AFTER_TERMINAL", "0.5")
-    _apply(apply_target, capsys, "--no-wait")
-    (intent,) = _intents(apply_target)
-    run_dir = Path(intent["run_dir"])
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline:
-        meta = localio.read_json_dict(run_dir / "run.json")
-        if meta and meta.get("status") == "ok":
-            break
-        time.sleep(0.01)
-    _apply(apply_target, capsys, "--no-wait", "--max", "0")
-    assert _intents(apply_target)[0]["state"] == "running"
-    _apply(apply_target, capsys, "--max", "0")
-    assert _intents(apply_target)[0]["state"] == "completed"
+    release_file = apply_target / "release-child"
+    monkeypatch.setenv("FAKE_DISPATCH_RELEASE_FILE", str(release_file))
+    popen = subprocess.Popen
+    children = []
+
+    def launch(argv, *args, **kwargs):
+        child = popen(argv, *args, **kwargs)
+        if "brigade.work_cmd.dispatch_child" in argv:
+            children.append(child)
+        return child
+
+    monkeypatch.setattr(subprocess, "Popen", launch)
+    try:
+        _apply(apply_target, capsys, "--no-wait")
+        (intent,) = _intents(apply_target)
+        (child,) = children
+        assert child.pid == intent["pid"]
+        run_dir = Path(intent["run_dir"])
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            meta = localio.read_json_dict(run_dir / "run.json")
+            if meta and meta.get("status") == "ok":
+                break
+            time.sleep(0.01)
+        else:
+            pytest.fail("child did not publish terminal run.json")
+        assert child.poll() is None
+        assert runguard._pid_is_active(intent["pid"])
+        _apply(apply_target, capsys, "--no-wait", "--max", "0")
+        assert _intents(apply_target)[0]["state"] == "running"
+        release_file.touch()
+        child.wait(timeout=5)
+        assert not runguard._pid_is_active(intent["pid"])
+        _apply(apply_target, capsys, "--max", "0")
+        assert _intents(apply_target)[0]["state"] == "completed"
+    finally:
+        release_file.touch()
+        for child in children:
+            if child.poll() is None:
+                child.terminate()
+            try:
+                child.wait(timeout=2)
+            except subprocess.TimeoutExpired:
+                child.kill()
+                child.wait(timeout=2)
 
 
 def test_branch_head_drift_is_kept_for_review(apply_target, capsys, monkeypatch):
@@ -676,3 +715,52 @@ def test_expired_session_does_not_spawn_a_saved_planned_intent(apply_target, cap
     _apply(apply_target, capsys, "--max", "0", expected=1)
     assert launches == []
     assert work_cmd._read_task_ledger(apply_target)["tasks"][0]["status"] == "pending"
+
+
+@pytest.mark.parametrize("reason", ["SIGTERM", "version-changed"])
+def test_stop_during_prompt_preparation_leaves_claim_resumable(apply_target, capsys, monkeypatch, reason):
+    from brigade.work_cmd import dispatch_apply as apply, dispatch_state as store
+    from brigade.work_cmd.dispatch_watch import Watch
+
+    _apply(apply_target, capsys, "--dry-run")
+    (directory,) = store.sessions(apply_target)
+    session = store.read(directory / "session.json")
+    session.update(dry_run=False, no_wait=True)
+    localio.write_json(directory / "session.json", session)
+    plan = store.read(directory / "plan.json")
+    engine = apply.Apply(apply_target)
+    watcher = Watch(engine, directory, session, interval=0.1, drain_wait=False)
+    engine.can_launch = watcher.can_launch
+    engine.reservation_allowed = watcher.reserve
+    render = apply._render_task_run_prompt
+    launches = []
+    popen = subprocess.Popen
+
+    def stop_preparing(task):
+        watcher.reason = reason
+        return render(task)
+
+    def counted(argv, *args, **kwargs):
+        if "brigade.work_cmd.dispatch_child" in argv:
+            launches.append(argv)
+        return popen(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", counted)
+    monkeypatch.setattr(apply, "_render_task_run_prompt", stop_preparing)
+    path, row = apply._new_intent(apply_target, directory, session, plan, plan["selected"][0])
+    engine.advance(path, row, session)
+    assert not launches
+    saved = store.read(path)
+    assert saved["state"] == "launching" and not saved["pid"]
+    assert not saved.get("released")
+    claim = apply.locking._read_task_ledger(apply_target)["tasks"][0]["claim"]["claim_id"]
+    assert claim == saved["claim_id"]
+    watcher.count_launches(watcher.snapshot())
+    assert watcher.launched() == 0
+
+    monkeypatch.setattr(apply, "_render_task_run_prompt", render)
+    assert apply.Apply(apply_target).session(directory) == 0
+    saved = store.read(path)
+    assert saved["state"] == "completed" and saved["claim_id"] == claim
+    assert len(launches) == 1
+    assert (Path(saved["run_dir"]) / "launch-count").read_text() == "launch\n"
