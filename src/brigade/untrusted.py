@@ -4,15 +4,15 @@
 Any content Brigade pulls from outside a trusted author (web pages, tool
 output, retrieved documents, saved memories, skill text, handoff notes) may
 carry injected instructions. `wrap_untrusted` fences such content with a
-content-derived boundary and a do-not-follow preamble before it reaches a
+random per-call boundary and a do-not-follow preamble before it reaches a
 model; `scan_untrusted` reports whether the content looks like it carries
 injection-style instructions. Standard library only.
 """
 
 from __future__ import annotations
 
-import hashlib
 import re
+import secrets
 from dataclasses import dataclass
 from typing import Iterable, List, Optional
 
@@ -38,6 +38,7 @@ SOURCE_KINDS = (
     "memory",
     "skill",
     "handoff",
+    "peer-message",
 )
 
 _MARKER_MAX = 80
@@ -52,9 +53,9 @@ def wrap_untrusted(
 ) -> str:
     """Frame `content` as untrusted data for safe inclusion in a model prompt.
 
-    The fence delimiter is derived from a hash of the (truncated) content, so
-    injected text cannot predict or forge the closing marker to escape the
-    block. Truncation is always explicit. `goal` renders in the trusted
+    The fence delimiter is random for each call. Embedded fence prefixes are
+    neutralized so even a guessed closing marker cannot escape the block.
+    Truncation is always explicit. `goal` renders in the trusted
     preamble, outside the fence.
     """
     if source_kind not in SOURCE_KINDS:
@@ -64,9 +65,10 @@ def wrap_untrusted(
     if max_chars is not None and len(text) > max_chars:
         text = text[:max_chars]
         truncated = True
-    digest = hashlib.sha256(text.encode("utf-8")).hexdigest()[:8]
-    open_fence = f"<<UNTRUSTED-{digest}>>"
-    close_fence = f"<<END-UNTRUSTED-{digest}>>"
+    text = text.replace("<<UNTRUSTED-", "[UNTRUSTED-").replace("<<END-UNTRUSTED-", "[END-UNTRUSTED-")
+    marker = secrets.token_hex(16)
+    open_fence = f"<<UNTRUSTED-{marker}>>"
+    close_fence = f"<<END-UNTRUSTED-{marker}>>"
 
     parts: List[str] = []
     if goal is not None:
