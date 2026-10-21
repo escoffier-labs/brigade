@@ -54,7 +54,8 @@ def graph(target: Path, monkeypatch, **overrides):
             "INSERT INTO files VALUES (?, ?)",
             [
                 (path.relative_to(target).as_posix(), hashlib.sha256(path.read_bytes()).hexdigest())
-                for path in target.rglob("*.py")
+                for path in target.rglob("*")
+                if path.suffix in {".py", ".astro"}
             ],
         )
     monkeypatch.setattr(graphtrail_delta, "_graphtrail_bin", lambda: "graphtrail")
@@ -283,8 +284,13 @@ def test_dependency_check_forces_refresh_when_stat_metadata_could_be_unchanged(t
     ]
 
 
-def test_native_graph_sections_mark_only_injected_paths_seen(target, monkeypatch):
-    graph(target, monkeypatch)
+@pytest.mark.parametrize("caller_path", ["caller.py", "src/pages/index.astro"])
+def test_native_graph_sections_mark_only_injected_paths_seen(target, monkeypatch, caller_path):
+    caller = target / caller_path
+    if caller.suffix == ".astro":
+        caller.parent.mkdir(parents=True, exist_ok=True)
+        caller.write_text("---\nimport { serve } from '../../api';\nserve();\n---\n")
+    graph(target, monkeypatch, impacted_files=[{"file_path": caller_path, "min_hops": 1}])
     monkeypatch.setattr(
         runtime,
         "_run_brief",
@@ -292,13 +298,13 @@ def test_native_graph_sections_mark_only_injected_paths_seen(target, monkeypatch
             "## Code graph context (GraphTrail, read-only)\n"
             "Task: inspect outside.py\n"
             "_schema v1 - 1 entry points - 0 callers - 0 callees - 1 related files_\n"
-            "## Entry points\n- caller - caller.py:2\n"
+            f"## Entry points\n- caller - {caller_path}:2\n"
             "## Related files\n- tests/test_api.py\n"
             "## Next task\n- outside.py\n"
         ),
     )
     event(target, "SessionStart")
-    assert runtime.read_session_state(target, "session-one")["brief_files"] == ["caller.py", "tests/test_api.py"]
+    assert runtime.read_session_state(target, "session-one")["brief_files"] == [caller_path, "tests/test_api.py"]
     event(target, "PreToolUse", tool_name="Edit", tool_input={"file_path": "api.py"})
     assert runtime.read_session_state(target, "session-one")["dependency_checks"][-1]["unseen_dependents"] == []
 
