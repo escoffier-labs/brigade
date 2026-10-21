@@ -247,6 +247,73 @@ class JwtTokenRuleTests(unittest.TestCase):
 
 
 class MissingLeakShapeTests(unittest.TestCase):
+    def test_windows_spaced_paths_are_completely_redacted(self) -> None:
+        for separator in ("\\", "\\\\"):
+            for components in (
+                ("Example User", "Private Folder", "secret.txt"),
+                ("example-user", "Private Folder", "secret file.txt"),
+                ("Example User",),
+                ("Example User", "Private Folder"),
+            ):
+                path = "C:" + separator + separator.join(("Users", *components))
+                for quote in ('"', "'", "`"):
+                    text = f"Config at {quote}{path}{quote}, then continue."
+                    with self.subTest(separator=separator, components=components, quote=quote):
+                        result = scan_text(text, policy=Policy(rules={"windows-home-path": "redact"}))
+                        self.assertEqual([finding.match for finding in result.findings], [path])
+                        self.assertEqual(
+                            result.redacted_text,
+                            f"Config at {quote}<PRIVATE_HOME_PATH>{quote}, then continue.",
+                        )
+
+    def test_unquoted_windows_spaced_paths_preserve_surrounding_text(self) -> None:
+        for separator in ("\\", "\\\\"):
+            path = "C:" + separator + separator.join(("Users", "Example User", "Private Folder", "secret file.txt"))
+            for before, after in (
+                ("Config at ", " for logs."),
+                ("Config at ", ", then continue."),
+                ("Config at (", ") for logs."),
+                ("Config at [", "]; then continue."),
+                ("Config at ", " then consult docs.md."),
+                ("Config at ", "\nNext line."),
+            ):
+                with self.subTest(separator=separator, before=before, after=after):
+                    result = scan_text(before + path + after, policy=Policy(rules={"windows-home-path": "redact"}))
+                    self.assertEqual([finding.match for finding in result.findings], [path])
+                    self.assertEqual(result.redacted_text, before + "<PRIVATE_HOME_PATH>" + after)
+
+    def test_compound_hostname_config_keys_match_without_broadening_code_context(self) -> None:
+        host = "fixture-db" + ".internal"
+        for key in (
+            "DATABASE_HOST",
+            "INTERNAL_API_HOST",
+            "database-host",
+            "database_hostname",
+            "internal-api-endpoint",
+        ):
+            for assignment in ("=", ": "):
+                with self.subTest(key=key, assignment=assignment):
+                    text = f"{key}{assignment}{host}"
+                    result = scan_text(text)
+                    self.assertEqual([finding.rule_id for finding in result.findings], ["private-hostname"])
+                    self.assertEqual(result.redacted_text, f"{key}{assignment}[redacted-host]")
+
+        for before, after in (
+            ("arbitrary_value=", ""),
+            ("DATABASE_HOSTNAME_SUFFIX=", ""),
+            ("DATABASE_GHOST=", ""),
+            ("DATABASEHOST=", ""),
+            ("obj.DATABASE_HOST=", ""),
+            ("const DATABASE_HOST=", ";"),
+            ("callback(", ")"),
+            ("DATABASE_HOST=", ".example.com"),
+        ):
+            with self.subTest(before=before, after=after):
+                self.assertNotIn(
+                    "private-hostname",
+                    {finding.rule_id for finding in scan_text(before + host + after).findings},
+                )
+
     def test_windows_home_path_matches(self) -> None:
         result = scan_text(
             r"Config at C:\Users\example-user\.config\tool.json"  # content-guard: allow windows-home-path
@@ -296,6 +363,11 @@ class MissingLeakShapeTests(unittest.TestCase):
     def test_windows_home_path_negatives(self) -> None:
         for text in (r"C:\Projects\demo", r"C:\Users", r"XC:\Users\demo"):
             with self.subTest(text=text):
+                self.assertNotIn("windows-home-path", {f.rule_id for f in scan_text(text).findings})
+
+        for separator in ("\\", "\\\\", "\\\\\\\\"):
+            text = '"C:' + separator + "Users" + separator + '"'
+            with self.subTest(separator=separator):
                 self.assertNotIn("windows-home-path", {f.rule_id for f in scan_text(text).findings})
 
     def test_root_path_negatives(self) -> None:

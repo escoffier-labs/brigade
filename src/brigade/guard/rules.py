@@ -112,7 +112,20 @@ DEFAULT_RULES: tuple[Rule, ...] = (
     Rule(
         id="windows-home-path",
         category="pii",
-        pattern=r"(?<![\w.-])[A-Z]:\\{1,2}Users\\{1,2}[A-Za-z0-9._-]+(?:\\{1,2}[^\s\"'`<>:]+)*",
+        # Quotes bound paths with spaced directory leaves. Without quotes,
+        # spaces need a following separator or filename extension so prose
+        # after the path is not consumed. Both raw and escaped slashes work.
+        pattern=(
+            r"(?<![\w.-])(?:(?<=(?P<windows_quote>[\"'`]))|(?<![\"'`]))"
+            r"[A-Z]:\\{1,2}Users\\{1,2}"
+            r"(?(windows_quote)"
+            r"[A-Za-z0-9._-](?:(?!(?P=windows_quote))[^\r\n<>:|?*])*?(?=(?P=windows_quote))"
+            r"|"
+            r"(?:[A-Za-z0-9._@+-]+(?: +[A-Za-z0-9._@+-]+)*\\{1,2})*"
+            r"(?:[A-Za-z0-9_@+-]+(?:[ .]+[A-Za-z0-9_@+-]+)*?\.[A-Za-z0-9]+"
+            r"(?![\w-]|\.[\w-])|[A-Za-z0-9._@+-]+)"
+            r")"
+        ),
         replacement="<PRIVATE_HOME_PATH>",
         description="Windows filesystem path under a user home directory.",
         flags=re.IGNORECASE,

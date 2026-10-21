@@ -275,7 +275,11 @@ def _hostname_context(text: str, start: int, end: int) -> bool:
         return False
     if re.match(r"\s*(?:=|\?)", after):
         return False
-    if re.fullmatch(r"\s*(?:host|hostname|server|endpoint|domain|url|address)\s*[:=]\s*", before, re.IGNORECASE):
+    if re.fullmatch(
+        r"\s*(?:[a-z][a-z0-9]*[_-])*(?:host|hostname|server|endpoint|domain|url|address)\s*[:=]\s*",
+        before,
+        re.IGNORECASE,
+    ):
         return True
     if re.search(r"[(){}\[\];=]|\b(?:return|const|let|var|assert|import)\b", before):
         return False
