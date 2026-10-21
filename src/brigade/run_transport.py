@@ -1408,14 +1408,15 @@ def _add_note(error: BaseException, note: str, output_dir: Path | None, cwd: Pat
     # Workers have joined before these diagnostics are saved. Keep them out of
     # run.json so retention cannot invalidate journal/checkpoint projections.
     try:
-        run_meta = localio.read_json_dict(output_dir / "run.json") or {}
+        try:
+            run_meta = localio.read_json_dict(output_dir / "run.json") or {}
+        except (OSError, ValueError, RecursionError):
+            run_meta = {}
         workspace = runguard.resolve_run_lock_workspace(run_meta, output_dir, fallback=cwd)
         if workspace is None:
             return
-        owner = runguard.read_lock_owner(runguard.lock_path(workspace))
+        owner = runguard.read_run_lock_owner(workspace, output_dir)
         if owner is None or owner.get("pid") != os.getpid():
-            return
-        if not runguard._owner_matches_run(owner, output_dir.expanduser().resolve()):
             return
         owner_token = owner.get("owner_token")
         if not isinstance(owner_token, str) or not owner_token:
