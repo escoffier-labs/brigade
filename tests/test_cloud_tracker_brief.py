@@ -1,0 +1,130 @@
+"""Codex observation budgets keep registered tasks visible in work briefs."""
+
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+
+import pytest
+
+from brigade import cloud_tracker, codex_cloud
+
+
+NOW = datetime(2026, 8, 12, 20, tzinfo=timezone.utc)
+
+
+@pytest.fixture
+def isolated_providers(monkeypatch):
+    empty = cloud_tracker.ProviderObservation(False, False, "unconfigured", {})
+    monkeypatch.setattr(cloud_tracker, "_cursor_cloud_observation", lambda target: empty)
+    monkeypatch.setattr(cloud_tracker, "_jules_cloud_observation", lambda target: empty)
+    monkeypatch.setattr(cloud_tracker, "_grokbot_cloud_observation", lambda: empty)
+    monkeypatch.setattr(cloud_tracker, "observe_github", lambda target: {"branches": [], "prs": []})
+
+
+def _register(target: Path, task_id: str, *, provider: str = "codex-cloud") -> None:
+    cloud_tracker.register(
+        target,
+        provider=provider,
+        task_id=task_id,
+        label="registered task",
+        prompt_hash="sha256:" + "a" * 64,
+        dispatched_at=(NOW - timedelta(hours=12)).isoformat(),
+    )
+
+
+def test_brief_limits_inventory_and_checks_only_missing_registered_tasks(monkeypatch, tmp_path, isolated_providers):
+    for task_id in ("task_present", "task_missing"):
+        _register(tmp_path, task_id)
+    _register(tmp_path, "agent_other", provider="cursor-cloud")
+    limits = []
+    status_ids = []
+
+    def list_tasks(*, cwd, max_items=codex_cloud.DEFAULT_MAX_ITEMS):
+        assert cwd == tmp_path
+        limits.append(max_items)
+        return codex_cloud.ListTasksResult([{"id": "task_present", "state": "running"}])
+
+    def run_text(command, *, cwd):
+        assert command[:3] == ["codex", "cloud", "status"]
+        assert cwd == tmp_path
+        status_ids.append(command[3])
+        return 0, "[RUNNING] registered task", ""
+
+    monkeypatch.setattr(codex_cloud, "list_tasks", list_tasks)
+    monkeypatch.setattr(cloud_tracker, "_run_text", run_text)
+
+    result = cloud_tracker.stale_entries_for_brief(tmp_path, now=NOW)
+
+    assert "error" not in result
+    assert limits == [codex_cloud.MAX_LIST_LIMIT]
+    assert status_ids == ["task_missing"]
+
+
+def test_brief_reports_stale_ready_task_outside_first_page(monkeypatch, tmp_path, isolated_providers):
+    _register(tmp_path, "task_old_ready")
+    cloud_tracker.set_stale_ready_hours(tmp_path, 6)
+    monkeypatch.setattr(
+        codex_cloud,
+        "list_tasks",
+        lambda **kwargs: codex_cloud.ListTasksResult([{"id": "task_newer", "state": "running"}]),
+    )
+    monkeypatch.setattr(cloud_tracker, "_run_text", lambda *a, **k: (0, "[READY] registered task", ""))
+
+    result = cloud_tracker.stale_entries_for_brief(tmp_path, now=NOW)
+
+    assert result["stale_count"] == 1
+    row = result["stale_entries"][0]
+    assert row["task_id"] == "task_old_ready"
+    assert row["provider_state"] == "ready"
+    assert row["classification"] == "stale"
+
+
+@pytest.mark.parametrize("bounded", [False, True])
+def test_nonzero_codex_status_with_output_still_reports_state(monkeypatch, tmp_path, bounded):
+    # `codex cloud status` exits 1 for tasks in an error state but still prints `[ERROR] <title>`.
+    _register(tmp_path, "task_errored")
+    monkeypatch.setattr(codex_cloud, "list_tasks", lambda **kwargs: codex_cloud.ListTasksResult([]))
+    monkeypatch.setattr(cloud_tracker, "_run_text", lambda *a, **k: (1, "[ERROR] Add a feature", ""))
+    kwargs = {"codex_max_items": codex_cloud.MAX_LIST_LIMIT} if bounded else {}
+
+    observation = cloud_tracker.observe_provider("codex-cloud", tmp_path, **kwargs)
+
+    assert observation.tasks == {"task_errored": {"state": "error", "ready_at": None}}
+
+
+@pytest.mark.parametrize("bounded", [False, True])
+def test_failed_codex_status_without_output_supplies_no_evidence(monkeypatch, tmp_path, bounded):
+    _register(tmp_path, "task_unobserved")
+    monkeypatch.setattr(codex_cloud, "list_tasks", lambda **kwargs: codex_cloud.ListTasksResult([]))
+    monkeypatch.setattr(cloud_tracker, "_run_text", lambda *a, **k: (1, "", ""))
+    kwargs = {"codex_max_items": codex_cloud.MAX_LIST_LIMIT} if bounded else {}
+
+    observation = cloud_tracker.observe_provider("codex-cloud", tmp_path, **kwargs)
+
+    assert observation.tasks == {}
+    assert (observation.configured, observation.reachable, observation.reason) == (True, True, None)
+
+
+@pytest.mark.parametrize("entrypoint", ["observe_provider", "observe_provider_details", "observe_providers"])
+def test_default_observation_keeps_full_inventory(monkeypatch, tmp_path, isolated_providers, entrypoint):
+    _register(tmp_path, "task_outside_inventory")
+    limits = []
+
+    def list_tasks(*, cwd, max_items=codex_cloud.DEFAULT_MAX_ITEMS):
+        limits.append(max_items)
+        return codex_cloud.ListTasksResult([{"id": "task_inventory", "state": "running"}])
+
+    def unexpected_status(*a, **k):
+        pytest.fail("nonempty default inventory must not trigger registered-task status calls")
+
+    monkeypatch.setattr(codex_cloud, "list_tasks", list_tasks)
+    monkeypatch.setattr(cloud_tracker, "_run_text", unexpected_status)
+    if entrypoint == "observe_provider":
+        tasks = cloud_tracker.observe_provider("codex-cloud", tmp_path).tasks
+    elif entrypoint == "observe_provider_details":
+        observations, _ = cloud_tracker.observe_provider_details(tmp_path, ignored_legacy_option=True)
+        tasks = observations["codex-cloud"].tasks
+    else:
+        tasks, _, _ = cloud_tracker.observe_providers(tmp_path, ignored_legacy_option=True)
+
+    assert limits == [codex_cloud.DEFAULT_MAX_ITEMS]
+    assert tasks == {"task_inventory": {"state": "running", "ready_at": None}}
