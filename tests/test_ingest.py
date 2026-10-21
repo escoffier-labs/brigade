@@ -1879,7 +1879,7 @@ def test_archive_refuses_tracked_handoff_after_transient_identity_error(tmp_path
     handoff = _write_handoff(inbox, "tracked.md", _PLAIN_HANDOFF)
     original = handoff.read_bytes()
     _git(tmp_path, "add", "--", "inbox/tracked.md")
-    stat = Path.stat
+    lstat = Path.lstat
     injected = False
 
     def fail_once(path, *args, **kwargs):
@@ -1887,9 +1887,9 @@ def test_archive_refuses_tracked_handoff_after_transient_identity_error(tmp_path
         if path == handoff and not injected:
             injected = True
             raise OSError(errno.EIO, "identity lookup failed", str(path))
-        return stat(path, *args, **kwargs)
+        return lstat(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "stat", fail_once)
+    monkeypatch.setattr(Path, "lstat", fail_once)
     with pytest.raises(ingest_mod.TrackedHandoffError):
         ingest_mod._archive(handoff, inbox / "processed")
 
@@ -1915,7 +1915,7 @@ def test_archive_refuses_indexed_name_deleted_and_recreated_during_check(tmp_pat
         indexed.rename(handoff)
     index_before = _git(tmp_path, "ls-files", "--stage", "-z").stdout
     status_before = _git(tmp_path, "status", "--porcelain").stdout
-    stat = Path.stat
+    lstat = Path.lstat
     injected = False
 
     def delete_and_recreate_once(path, *args, **kwargs):
@@ -1925,12 +1925,12 @@ def test_archive_refuses_indexed_name_deleted_and_recreated_during_check(tmp_pat
             handoff.unlink()
             try:
                 # Model the indexed spelling resolving to the case alias.
-                return stat(handoff, *args, **kwargs)
+                return lstat(handoff, *args, **kwargs)
             finally:
                 handoff.write_bytes(original)
-        return stat(path, *args, **kwargs)
+        return lstat(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "stat", delete_and_recreate_once)
+    monkeypatch.setattr(Path, "lstat", delete_and_recreate_once)
     with pytest.raises(ingest_mod.TrackedHandoffError):
         ingest_mod._archive(handoff, inbox / "processed")
 

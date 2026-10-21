@@ -77,22 +77,22 @@ def test_archive_refuses_case_alias_recreated_after_identity_read(
     original = handoff.read_bytes()
     index_before = _git(tmp_path, "ls-files", "--stage", "-z")
     status_before = _git(tmp_path, "status", "--porcelain")
-    stat = Path.stat
+    lstat = Path.lstat
     injected = False
 
     def replace_after_read(path, *args, **kwargs):
         nonlocal injected
         if str(path) == str(indexed) and not injected:
             injected = True
-            observed = stat(handoff, *args, **kwargs)
+            observed = lstat(handoff, *args, **kwargs)
             # Keep the old inode alive so the replacement has a new identity.
             handoff.rename(tmp_path / "old-handoff")
             handoff.write_bytes(original)
-            assert stat(handoff).st_ino != observed.st_ino
+            assert lstat(handoff).st_ino != observed.st_ino
             return observed
-        return stat(path, *args, **kwargs)
+        return lstat(path, *args, **kwargs)
 
-    monkeypatch.setattr(Path, "stat", replace_after_read)
+    monkeypatch.setattr(Path, "lstat", replace_after_read)
     with pytest.raises(ingest.TrackedHandoffError):
         ingest._archive(handoff, inbox / "processed")
 
