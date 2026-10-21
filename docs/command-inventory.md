@@ -668,6 +668,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade runs interrupt`
 - `brigade runs latest`
 - `brigade runs list`
+- `brigade runs patrol`
 - `brigade runs prune-worktrees`
 - `brigade runs reap`
 - `brigade runs recover`

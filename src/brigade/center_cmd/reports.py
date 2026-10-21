@@ -305,7 +305,7 @@ def _report_markdown(payload: dict[str, Any]) -> str:
             "## Boundaries",
             "",
             "- local report only",
-            "- no daemon",
+            "- report generation runs once and writes local artifacts",
             "- no web server",
             "- no remote mutation",
             "- no automatic promotion",
