@@ -117,6 +117,53 @@ Use `brigade run cloud launch` to start Cursor Cloud or Jules work from a bounde
 
 Jules Cloud uses the alpha `https://jules.googleapis.com/v1alpha` API with `X-Goog-Api-Key` authentication and a zero-runtime-dependency stdlib `urllib` adapter. Launch resolves the target repository first: `GET /sources` is a read-only probe whose rows are matched exactly (case-insensitively) on `githubRepo.owner` and `githubRepo.repo`, and the starting branch must be one the source lists, or else the source default, `main`, or a sole listed branch. If the repository is not connected, or the branch cannot be validated, there is no hub admission and no provider mutation. Only then does `POST /sessions` send `{"prompt": ..., "title": ..., "sourceContext": {"source": "sources/<connected-id>", "githubRepoContext": {"startingBranch": ...}}, "requirePlanApproval": ...}` using the exact connected `source.name` such as `sources/github-owner-repo`; the literal `USER` is not a valid source. `requirePlanApproval` stays true unless `--no-plan-approval` is passed. `automationMode` is omitted unless `autoCreatePR` is explicitly requested, in which case it is validated to `AUTO_CREATE_PR` and nothing else. The low-level `create_session` takes an already-validated `source_name` and `starting_branch` and does no discovery of its own; it requires a top-level `id` in the create response, which is bound immediately to the local hub lease via `fleet_client.bind_cloud`. The adapter never auto-approves plans, deletes sessions, pulls or applies patches, or creates PRs by default. Operators approve a waiting plan with `brigade run cloud approve --provider jules --task <id>`. `status` classifies a terminal session as `needs-plan-approval` only on positive evidence: a bounded `GET /sessions/{id}/activities` read must actually show a `planGenerated` activity with no `artifacts` activity, no outputs, no branch, and no pull request. That activity read is a second bounded phase of the observation, taken only for sessions whose label could still turn on plan evidence (terminal, no outputs, no PR url), capped at 10 sessions per observation, one page of 30 activities each, a 5s per-call deadline and a 15s wall-clock budget for the phase; newest-updated candidates win the cap. A session row itself never carries activity kinds, so without that read the evidence is unobservable. A failed or skipped activity read leaves activity evidence absent, and absent evidence never yields `needs-plan-approval`. When the provider explicitly reports no outputs and neither the provider nor GitHub reports a pull request or matching branch, `status` reports `needs-investigation`. Positive `planGenerated` evidence with no work artifact remains `needs-plan-approval`. Other completed sessions follow the ordinary `ready-to-land`/`stale` classification. This keeps an unreadable activity feed from being treated as proof that plan approval caused the stop. `status` surfaces the Jules session URL either way. A provider HTTP 4xx/5xx after `POST` releases the unbound lease as `submit-failed`; a transport timeout, `URLError`, `OSError`, `TimeoutError`, or malformed/oversized/id-less response is ambiguous, so the lease is held, exactly one `POST` is ever issued, and the result reports `uncertain` for later adoption. `GET /sessions` and `GET /sessions/{id}/activities` are bounded paginated reads (`pageSize` 1-100, at most 20 pages and 1000 items); `GET /sessions/{id}` reads a single session; `POST /sessions/{id}:approvePlan` sends an empty JSON body and accepts an empty success body. Session ids are rejected when empty or when they contain a path separator, and every path segment is percent-encoded with `safe=""`. A `base_url` override is accepted for tests and must be `https`, or `http` on loopback. Jules states are mapped to the common cloud state space: `QUEUED`/`PLANNING`/`AWAITING_PLAN_APPROVAL`/`AWAITING_USER_FEEDBACK`/`IN_PROGRESS`/`PAUSED`/`STATE_UNSPECIFIED` hold capacity, while `FAILED`/`COMPLETED` are terminal. Inventory is a positive signal only: a failed fetch or a truncated page walk simply omits ids, and an absent id is never read as terminal, so unknown or truncated inventory cannot release capacity. The tracker authority is `alpha REST` when `JULES_API_KEY` is set and `unwired` otherwise. Every provider payload is sanitized to ids, normalized state, bounded RFC 3339 timestamps, the source owner/repo/branches needed for matching, a validated `https://jules.google.com/...` session URL, and a validated `https://github.com/owner/repo/pull/N` URL, and an activity's id, timestamp and allowlisted oneof `kind`; prompts, titles, descriptions, activity payloads, artifacts, patches, shell output, raw response bodies, and credentials are dropped. Hosted lease labels are generated as `<provider>:<owner>/<repo>@<12-hex prompt digest>` (`cloud_tracker.lease_label`, capped at 120 characters), so neither Jules nor Cursor ever persists prompt text as a label.
 
+### Node-local GitHub reads
+
+`brigade.github_reader.GitHubReader` supplies the passive importers' GET transport.
+Construct it with a canonical repository, independently confirmed `visibility`,
+an injected `CommandRunner`, and a `BudgetLedger(Path(...))` outside version control.
+Use `SubprocessRunner()` for bounded local execution, or supply your own runner.
+The supplied runner uses Brigade's subprocess capture with no shell, capped
+stdout, discarded stderr, and a timeout. Put native `gh` and `octopool` executables
+on PATH without a `gh` shim. Construction makes no requests or auth changes.
+Custom runners must remove environment variables whose override is `None`.
+
+Public reads use `octopool request` after `octopool whoami` succeeds, cached for
+600 seconds. A failed or truncated relay command marks that health cache unhealthy.
+Private and unknown repositories never invoke Octopool.
+`get(path, params=..., max_bytes=..., max_age=120)` sends the freshness bound as
+`Cache-Control`. Only a named `merge_gating_reason` enables `OCTOPOOL_FRESH=1`
+and `max-age=0`. Other reads unset `OCTOPOOL_FRESH` in the child environment.
+Relay denials, 404s, fallback signals, and stale responses are
+inconclusive. Native fallback requires `allow_public_fallback=True`.
+See the [Octopool relay contract](https://docs.octopool.dev/relay.html).
+
+Native reads cache ETags and complete bodies per endpoint in the reader.
+The cache evicts the least recently used entries above 128 endpoints or 16 MiB
+of bodies. ETags reset with each reader instance, including one-shot CLI calls.
+Keep one long-lived reader per repository to reuse ETags and receive 304 savings.
+The ledger stores no ETags or bodies across readers or processes.
+A validated 304 returns the body with `state="not-modified"` and
+`upstream_status=304`. Importers retain pagination budgets and truncation marks.
+Readers sharing a credential class must use the same local SQLite ledger and
+hourly cap policy. Transactions serialize requests across processes. The rolling
+hourly cap counts attempts except validated native 304s, which remain visible in
+the request and ETag totals. Exhaustion returns `state="budget-exhausted"`
+without a request. Queue waits allow three runner timeouts plus a margin.
+If the lock wait expires, `get()` returns `state="queue-busy"` without a request.
+Persistent cooldowns honor `x-poll-interval`, `Retry-After`, and primary reset
+headers. A native 403 with `Retry-After` or zero remaining budget is
+returned as status 429 with `state="rate-limited"` and `upstream_status=403`,
+and excluded from denial totals. Deferred reads include `retry_at`.
+The adapter performs no automatic retries or sleeps.
+
+`observation()` returns a node observation fragment with hourly route, status,
+denial, fallback, ETag, and remaining/reset totals. For public readers,
+`observation(refresh_octopool_stats=True)` adds allowlisted numeric counters from
+`octopool stats --json`. Ledger rows exclude bodies, endpoints, credentials, and
+caller identities. Publication and node Hub-envelope integration remain follow-up
+work alongside migration of the three existing GitHub read implementations.
+
 ### Grok Bot local job queue
 
 `brigade run cloud grokbot` creates a private local queue contract. It does not call a live provider, commission Grok Bot, or add a synchronous roster seat. The Brigade package now includes a role-scoped MCP listener for that queue. It runs as its own process while queue authority remains in the selected local Brigade target. See [Grok Bot MCP listener](grokbot-mcp.md) for installation, operations, and Cloudflare boundaries, and [Grok Bot operating guide](grokbot-operating-guide.md) for the pack reference, queue actor authorization, lifecycle semantics, finding delivery, and Bot configuration.
