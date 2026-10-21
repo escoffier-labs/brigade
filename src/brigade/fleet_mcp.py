@@ -314,13 +314,17 @@ class FleetMcp:
             # Upstream failures may contain URLs, credentials, or attacker-controlled text.
             return _tool_error(exc), True
 
+    def _authority(self) -> messages.MessageAuthority:
+        # Same capture the public message functions use for a token file.
+        return messages._authority(None, self.token_file, None)
+
     def _call(
         self, name: str, args: dict[str, Any], ids: list[int], message_id: int | None, reply_to: int | None
     ) -> dict[str, Any]:
         if name == "fleet_who":
-            return _frame_directory(messages._online({"action": "who", **args}, token_file=self.token_file))
+            return _frame_directory(messages._online({"action": "who", **args}, authority=self._authority()))
         if name == "fleet_claims":
-            return _frame_directory(messages._online({"action": "claims", **args}, token_file=self.token_file))
+            return _frame_directory(messages._online({"action": "claims", **args}, authority=self._authority()))
         if name == "fleet_send":
             result = messages.send(
                 recipient=args["to"],
