@@ -49,7 +49,10 @@ def run_hook(event: str | None) -> None:
     from .fleet_session_presence import _read_bounded_json_object
 
     payload = _read_bounded_json_object()
-    if payload is None or event not in {"start", "heartbeat"} or not load_fleet_settings().get("hub_url"):
+    if payload is None or event not in {"start", "heartbeat"}:
+        return
+    settings = load_fleet_settings()
+    if not settings["hub_url"] or not (settings["node_token"] or settings["admin_token"]):
         return
     session = payload.get("conversationId")
     roots = payload.get("workspacePaths")
