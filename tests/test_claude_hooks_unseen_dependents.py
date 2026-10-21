@@ -392,6 +392,32 @@ def test_read_completed_during_graph_query_is_excluded_from_record_and_warning(t
     assert runtime.read_session_state(target, "session-one")["dependency_checks"][-1] == check
 
 
+@pytest.mark.parametrize("earlier_write", [False, True])
+def test_read_cannot_erase_or_rewind_concurrent_write_evidence(target, monkeypatch, earlier_write):
+    event(target, "SessionStart", source="startup")
+    if earlier_write:
+        monkeypatch.setattr(runtime.localio, "utc_now_iso", lambda: "2025-01-01T00:00:00+00:00")
+        event(target, "PostToolUse", tool_name="Edit", tool_input={"file_path": "api.py"})
+    original = dependencies.record_read
+    written = {}
+    fields = ("write_observed", "last_write_at", "last_attributed_write_at", "last_verification_write_at")
+
+    def read_after_write(repo, state, payload):
+        monkeypatch.setattr(runtime.localio, "utc_now_iso", lambda: "2025-01-02T00:00:00+00:00")
+        (target / "api.py").write_text("def serve(): return 1\n")
+        event(target, "PostToolUse", tool_name="Edit", tool_input={"file_path": "api.py"})
+        saved = runtime.read_session_state(target, "session-one")
+        written.update({key: saved[key] for key in fields})
+        return original(repo, state, payload)
+
+    monkeypatch.setattr(dependencies, "record_read", read_after_write)
+    event(target, "PostToolUse", tool_name="Read", tool_input={"file_path": "caller.py"})
+    state = runtime.read_session_state(target, "session-one")
+    assert {key: state.get(key) for key in fields} == written
+    assert state["read_files"] == ["caller.py"]
+    assert event(target, "Stop")["decision"] == "block"
+
+
 @pytest.mark.parametrize("key", ["read_files", "brief_files", "dependency_checks"])
 @pytest.mark.parametrize("malformed", [None, 17, "not-a-list", [None, 17, {}]])
 def test_hook_repairs_malformed_observation_collections(target, key, malformed):

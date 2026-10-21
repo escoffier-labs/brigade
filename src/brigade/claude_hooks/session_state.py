@@ -295,6 +295,21 @@ def _write_session_state_preserving_latch(
                 # A newer dispatched task completed while this hook was running.
                 return False
             dependencies.merge_observations(updated, current_state)
+            if updated.get("task_epoch") == current_epoch:
+                # Completed writes are monotonic within a task. Observation
+                # hooks must not erase them or rewind the verification boundary.
+                if current_state.get("write_observed") is True:
+                    updated["write_observed"] = True
+                now = localio.utc_now()
+                for key in ("last_write_at", "last_attributed_write_at", "last_verification_write_at"):
+                    current_stamp = localio.parse_iso_datetime(current_state.get(key))
+                    next_stamp = localio.parse_iso_datetime(updated.get(key))
+                    if (
+                        current_stamp is not None
+                        and current_stamp <= now
+                        and (next_stamp is None or current_stamp > next_stamp)
+                    ):
+                        updated[key] = current_state[key]
             current_count = current_state.get("hook_timeout_count")
             next_count = updated.get("hook_timeout_count")
             counts = [
