@@ -1,6 +1,6 @@
 # New User Quickstart
 
-Brigade is local-first. Local-first means local data on the operator-controlled machine first, before any external service; that machine can be a laptop, workstation, or VPS. The first run should create local config and handoff inboxes without starting services or touching remotes; workspace, `--full`, and pack-based installs can also project portable tools or skills.
+Brigade helps agents work autonomously across machines and cloud seats while the operator controls policy and scope. Verification receipts, run journals, and handoffs with evidence let the next agent check what happened. Brigade also serves memory and skills over MCP and syncs harness projections. Start by creating local config and handoff inboxes on a machine you control. Workspace, `--full`, and pack-based installs can also project portable tools or skills. Fleet services and remote work can be enabled separately.
 
 The target can be a code repo, an OpenClaw or Hermes memory workspace, a VPS operator directory, or another local workspace you control. Repo installs are common, but they are not the only supported shape.
 

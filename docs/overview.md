@@ -1,6 +1,6 @@
 # Brigade Overview
 
-The full tour: every station, diagram, and workflow. The [README](../README.md) is the short landing page. This document goes deeper. The detailed command walkthrough is in the [technical guide](technical-guide.md). Adjacent-product matrices live in [comparison](comparison.md). Brigade runs only on explicit invocation: [execution model](execution-model.md).
+The full tour: every station, diagram, and workflow. The [README](../README.md) is the short landing page. This document goes deeper. The detailed command walkthrough is in the [technical guide](technical-guide.md). Adjacent-product matrices live in [comparison](comparison.md). Agents work within operator-defined scopes and pass receipts and handoffs with evidence. One-shot commands and long-running services share the [execution model](execution-model.md).
 
 ## Project identity
 
@@ -34,10 +34,12 @@ Ordinary runs have no hard run-budget unless one is declared. When declared, onl
 ## Stack At A Glance
 
 <p align="center">
-  <img src="assets/stack-at-a-glance-workflow.svg" alt="Brigade stack at a glance: writer harnesses pass through the Brigade review gate to a memory owner, durable memory, local work sessions, scanners, and release evidence" width="900">
+  <img src="assets/stack-at-a-glance-workflow.svg" alt="Brigade memory workflow: writer handoffs pass through ingest policy to a memory owner, with local work sessions, scanners, and release evidence" width="900">
 </p>
 
 <p align="center"><em>Generated from <code>docs/assets/workflows/stack-at-a-glance.json</code> with <code>plating workflow</code>.</em></p>
+
+The memory gate checks handoffs under ingest policy. Safe handoffs auto-file, while ambiguous material enters review. Agent work between configured gates leaves verification receipts and run journals. An agent can pass an [evidence package](evidence-package.md) with its handoff so the next agent can check the result.
 
 > Brigade was extracted from the [**solos-cookbook**](https://github.com/escoffier-labs/solos-cookbook), a documented 24/7 multi-agent stack running in production. If you want the full picture of how Brigade fits into a real setup, start there, and a star helps other people find it.
 >
@@ -245,7 +247,7 @@ flowchart LR
 
 ### Keeping Cards Fresh
 
-Memory degrades. Cards go stale, lose their backing evidence, or get superseded. `brigade memory care scan` is a read-only sweep over the card roots that checks freshness metadata (`reviewed`, `fresh_until`, confidence, evidence) and flags stale, expired, undersourced, contradictory, orphaned, and oversized cards. Flagged cards land in a refresh queue that routes into the work inbox, so a card that needs review shows up in the daily plan instead of rotting unnoticed. Brigade never edits or deletes a card automatically: the operator either refreshes it with a new reviewed date or archives it and drops the index entry.
+Memory degrades. Cards go stale, lose their backing evidence, or get superseded. `brigade memory care scan` is a read-only sweep over the card roots that checks freshness metadata (`reviewed`, `fresh_until`, confidence, evidence) and flags stale, expired, undersourced, contradictory, orphaned, and oversized cards. Flagged cards land in a refresh queue that routes into the work inbox, so a card that needs review shows up in the daily plan instead of rotting unnoticed. The scan writes findings and queue state without editing cards. An assigned agent or the operator can use those findings to refresh a card with supporting evidence or archive it and update the index. Autonomous memory reflection is planned in [#1856](https://github.com/escoffier-labs/brigade/issues/1856).
 
 ```mermaid
 flowchart LR
@@ -254,7 +256,7 @@ flowchart LR
     ISSUES["issues<br/>stale · expired · undersourced<br/>contradictory · orphaned · oversized"]
     QUEUE["refresh queue"]
     INBOX["work inbox<br/>daily plan candidates"]
-    OPERATOR["operator review"]
+    OPERATOR["assigned agent or operator<br/>inspect evidence"]
     REFRESH["card refreshed<br/>reviewed date updated"]
     ARCHIVE["card archived<br/>index entry removed"]
 
@@ -442,14 +444,14 @@ Full command list in [Repo fleet](repo-fleet.md).
 
 ## Tool Catalog
 
-`brigade tools` describes local callable tools, slash commands, skills, scripts, and MCP configs across harnesses, then gates execution behind an approval queue. `brigade tools defaults` refreshes built-in portable tool entries while preserving custom repo tools.
+`brigade tools` describes local callable tools, slash commands, skills, scripts, and MCP configs across harnesses, and records approved script or local MCP calls through its call queue. This tool-call workflow has an approval gate. It does not place every Brigade action in that queue. `brigade tools defaults` refreshes built-in portable tool entries while preserving custom repo tools.
 
 ```mermaid
 flowchart LR
     SOURCE["tools/<br/>tracked portable sources"]
     CATALOG[".brigade/tools.toml<br/>catalog"]
     PROJECT["sync-tools<br/>harness projections"]
-    APPROVAL["call plan / queue<br/>operator approval"]
+    APPROVAL["tool-call gate<br/>plan / queue / approve"]
     RUN["run receipt<br/>logs · replay · checkpoints"]
 
     SOURCE --> CATALOG --> PROJECT
@@ -466,8 +468,8 @@ flowchart LR
 
 - Discovery is read-only: `list`, `search`, `describe`, `contracts`.
 - Projections write reviewed harness-specific tool docs. There is no auto-sync.
-- Script calls move through plan, queue, approve, run, with run receipts and replay.
-- Runtimes are supervised explicitly. Brigade never auto-starts MCP servers or stores auth.
+- Script calls use the catalog's plan, queue, approve, run workflow, with run receipts and replay. Other command families have their own scope and gates.
+- The operator starts and stops managed runtimes. PID metadata and logs remain available for inspection. See [service lifecycles](execution-model.md#long-running-modes).
 
 Details in [Tool catalog](tool-catalog.md).
 

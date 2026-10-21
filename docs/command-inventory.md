@@ -17,6 +17,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 
 - `brigade add`: 1 command path(s)
 - `brigade budgets` (extras): 2 command path(s)
+- `brigade bug`: 1 command path(s)
 - `brigade care`: 3 command path(s)
 - `brigade center` (extras): 30 command path(s)
 - `brigade chat` (extras): 7 command path(s)
@@ -28,7 +29,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade dogfood` (extras): 1 command path(s)
 - `brigade evidence`: 12 command path(s)
 - `brigade extras`: 3 command path(s)
-- `brigade fleet`: 74 command path(s)
+- `brigade fleet`: 75 command path(s)
 - `brigade friction` (extras): 3 command path(s)
 - `brigade governance`: 1 command path(s)
 - `brigade guard`: 1 command path(s)
@@ -51,7 +52,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade profiles`: 2 command path(s)
 - `brigade projection`: 1 command path(s)
 - `brigade projects` (extras): 10 command path(s)
-- `brigade receipts`: 18 command path(s)
+- `brigade receipts`: 19 command path(s)
 - `brigade reconfigure`: 1 command path(s)
 - `brigade release` (extras): 23 command path(s)
 - `brigade repos` (extras): 74 command path(s)
@@ -62,7 +63,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade run`: 47 command path(s)
 - `brigade run-cloud` (deprecated; use `brigade run cloud`): 45 command path(s)
 - `brigade runbook` (extras): 5 command path(s)
-- `brigade runs`: 20 command path(s)
+- `brigade runs`: 21 command path(s)
 - `brigade scrub`: 1 command path(s)
 - `brigade search`: 6 command path(s)
 - `brigade security`: 16 command path(s)
@@ -75,7 +76,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade untrusted` (extras): 2 command path(s)
 - `brigade update`: 1 command path(s)
 - `brigade version`: 1 command path(s)
-- `brigade work`: 157 command path(s)
+- `brigade work`: 160 command path(s)
 - `brigade workflow` (extras): 3 command path(s)
 
 ## Commands
@@ -83,6 +84,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade add`
 - `brigade budgets check` (extras)
 - `brigade budgets show` (extras)
+- `brigade bug report`
 - `brigade care install`
 - `brigade care status`
 - `brigade care uninstall`
@@ -203,6 +205,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade fleet export`
 - `brigade fleet flush`
 - `brigade fleet grokbot enroll-actor`
+- `brigade fleet mcp`
 - `brigade fleet models admit`
 - `brigade fleet models bindings`
 - `brigade fleet models default set`
@@ -432,6 +435,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade receipts export otel-genai`
 - `brigade receipts export package`
 - `brigade receipts keygen`
+- `brigade receipts lineage`
 - `brigade receipts trailer`
 - `brigade receipts verify`
 - `brigade receipts verify-agent-change`
@@ -667,6 +671,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade runs interrupt`
 - `brigade runs latest`
 - `brigade runs list`
+- `brigade runs patrol`
 - `brigade runs prune-worktrees`
 - `brigade runs reap`
 - `brigade runs recover`
@@ -802,6 +807,9 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade work claim`
 - `brigade work closeout`
 - `brigade work dispatch`
+- `brigade work dispatch-reset`
+- `brigade work dispatch-show`
+- `brigade work dispatches`
 - `brigade work doctor`
 - `brigade work end`
 - `brigade work hook-run`

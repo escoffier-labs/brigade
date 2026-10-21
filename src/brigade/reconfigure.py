@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import shutil
+import sys
 from pathlib import Path
 
 from .config import load_config
@@ -42,6 +43,13 @@ def reconfigure(target: Path, new_selection: Selection, prune: bool) -> int:
 
     # Prune removed harnesses if requested.
     if prune:
+        if "antigravity" not in new_harnesses:
+            from .antigravity_presence import uninstall_hooks
+
+            try:
+                uninstall_hooks(target)
+            except (OSError, ValueError) as exc:
+                print(f"warning: unable to prune Antigravity presence hooks: {exc}", file=sys.stderr)
         for h in sorted(removed):
             wdir = _WRITER_DIRS.get(h)
             if wdir and (target / wdir).is_dir():

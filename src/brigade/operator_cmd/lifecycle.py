@@ -711,7 +711,6 @@ def _quickstart_issue_report(payload: dict[str, Any]) -> dict[str, Any]:
             if isinstance(top_issue, dict):
                 item["top_issue"] = {
                     "name": top_issue.get("name"),
-                    "detail": top_issue.get("detail"),
                 }
         step_summaries.append(item)
     return {
@@ -723,9 +722,8 @@ def _quickstart_issue_report(payload: dict[str, Any]) -> dict[str, Any]:
         "dry_run": payload.get("dry_run"),
         "force": payload.get("force"),
         "steps": step_summaries,
-        "next_commands": payload.get("next_commands") or [],
-        "github_issue_url": "https://github.com/escoffier-labs/brigade/issues/new/choose",
-        "privacy_note": "Review before sharing. Do not paste tokens, private hostnames, or unredacted absolute paths.",
+        "report_command": 'brigade bug report --target TARGET --summary "What happened and what you expected" --dry-run',
+        "privacy_note": "Prepare and review a redacted bug report before sharing diagnostics.",
     }
 
 

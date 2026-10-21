@@ -11,12 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - The Command Deck separates counted queue exclusions from blocked jobs. Blocker and attempt-limit counts retain alerts, while routine backlog stays in queue details. Malformed exclusions remain actionable, and absent telemetry stays unknown. Hub snapshots report optional integration readiness coverage explicitly.
 - Deck verdicts use plain colored text. Provider icons use transparent, consistently sized marks, including the official Jules mascot and a neutral fallback for unknown agents.
+- Retention diagnostics use the held run lock when a detached worker checkout and custom output directory hide the original workspace after a malformed or unreadable receipt. Stale recovery retains the saved failure detail.
+
 - Fleet claim renewal and release follow node-token rotation on the bound hub, including orphan-release retries, while retaining the last node credential when its token file is temporarily unavailable.
 
 ### Added
 
 - Claude work-loop hooks track explicit file reads and record unseen callers before Edit, Write, or NotebookEdit. Checks warn without denying edits, and unavailable or incomplete graphs record a null result with a reason.
 
+- Antigravity sessions publish Fleet Hub presence through silent, detached hooks installed by `brigade init --harnesses antigravity`; Stop refreshes presence until the session expires by TTL.
 - The `t3-dispatch` connector can read, acknowledge, reply to, send, and check Fleet Hub messages through an optional owner-only principal file. Its one-minute watcher wakes configured targets with message counts and sender ids, retries failed wakes, and keeps message bodies and subjects out of notifications.
 
 - `brigade memory serve-mcp --http` and `brigade skills serve-mcp --http` serve the read-only MCP tools over a stateless loopback Streamable HTTP endpoint (`POST /mcp`, `GET /healthz`) for MCP hosts that cannot spawn a stdio process. The server binds only `127.0.0.1` or `::1`, requires a bearer token from `BRIGADE_MCP_HTTP_TOKEN` (32 characters or more, never a flag), rejects non-loopback `Host` and `Origin` headers, and caps request bodies at 1 MiB. `--stdio` is unchanged.

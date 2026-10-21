@@ -409,6 +409,9 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Replace an existing destination run directory with the same run id.",
     )
     p_runs_import.add_argument("--json", action="store_true", help="Emit machine-readable JSON.")
+    from .. import runs_patrol
+
+    runs_patrol.register(runs_sub)
     p_runs_reap = runs_sub.add_parser(
         "reap",
         help="Terminalize local runs whose recorded owner process is gone.",
@@ -594,6 +597,10 @@ def dispatch(args) -> int:
             force=args.force,
             json_output=args.json,
         )
+    if args.runs_command == "patrol":
+        from .. import runs_patrol
+
+        return runs_patrol.dispatch(args)
     if args.runs_command == "reap":
         from .. import run_reap
 
