@@ -514,7 +514,6 @@ jobs:
       - fleet-hub-container
       - component-manifest-provenance
       - content-guard
-      - repo-metadata
       - install-from-source
       - quickstart-smoke
       - windows-native-acceptance
