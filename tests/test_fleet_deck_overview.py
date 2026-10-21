@@ -4,6 +4,8 @@ import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+import pytest
+
 from brigade import fleet_command_deck as deck
 from brigade import fleet_deck_overview as overview
 from brigade import fleet_deck_shell
@@ -289,6 +291,73 @@ def test_attention_and_collision_alerts_match_the_attention_items_count():
     assert len(counted) == len(deck.attention_items(view))
 
 
+@pytest.mark.parametrize("identified", [False, True])
+@pytest.mark.parametrize("reason", ["not-ready", "blocker", "attempt-limit"])
+def test_queue_exclusions_preserve_actionable_aggregates_and_identified_blocks(identified, reason):
+    blocked = [{"reason": reason, "count": 3}]
+    if identified:
+        blocked.append({"id": "job-1", "reason": "not-ready"})
+    plane = deck.control_plane_from_snapshot(
+        {
+            "policy": {},
+            "sessions": [],
+            "machines": [],
+            "quota": [],
+            "routes": [],
+            "queue": {"eligible_count": 2, "queued_count": 2, "blocked": blocked},
+            "integrations": [],
+            "authority": {"active": True, "status": "active"},
+        }
+    )
+    view = _view(plane=plane)
+    actionable = reason in {"blocker", "attempt-limit"}
+    count = int(actionable) + int(identified)
+    expected = f"NEEDS ATTENTION ({count})" if count else "ALL CLEAR"
+    assert deck.deck_verdict(view) == overview.verdict_text(view, NOW) == expected
+    alerts = overview.page_alerts(view, NOW)
+    expected_alerts = [("blocked", "job-1")] if identified else []
+    if actionable:
+        expected_alerts.append(("blocked", "3 work items blocked"))
+    assert [(item.kind, item.title) for item in alerts] == expected_alerts
+    if actionable:
+        assert alerts[-1].detail == reason
+    html = deck.render_deck(view, nonce="nonce", now=NOW)
+    assert f"Active alerts ({count})" in html
+    assert "Queue exclusions" in html and 'href="/deck/work"' in html
+    assert f"3 excluded · {reason}" in html
+    assert 'class="row-title">unknown<' not in html
+    assert "none blocked" not in html
+    details = deck.render_control_plane(plane)
+    assert "3 excluded" in details
+    assert "No blocked reasons reported" not in details
+    assert f"unknown &middot; {reason}" not in details
+    if not identified:
+        assert "first observed unknown" not in html
+
+
+@pytest.mark.parametrize("count", [True, False, None, "3", 0, -1, 1.5])
+@pytest.mark.parametrize("reason", ["not-ready", "blocker", "attempt-limit", "unrecognized"])
+def test_malformed_aggregate_blocks_are_not_silently_cleared(count, reason):
+    queue = deck.QueueState(
+        eligible_count="0", queued_count="0", blocked=({"reason": reason, "count": count},), blocked_known=True
+    )
+    view = _view(plane=_plane(queue=queue))
+    assert deck.deck_verdict(view) == overview.verdict_text(view, NOW) == "NEEDS ATTENTION (1)"
+    assert [(alert.kind, alert.detail) for alert in overview.page_alerts(view, NOW) if alert.kind == "blocked"] == [
+        ("blocked", reason)
+    ]
+
+
+@pytest.mark.parametrize("reason", ["unrecognized", " blocker ", "not-ready\n", None, [], {}])
+def test_unknown_aggregate_reason_is_not_silently_cleared(reason):
+    queue = deck.QueueState(
+        eligible_count="0", queued_count="0", blocked=({"reason": reason, "count": 3},), blocked_known=True
+    )
+    view = _view(plane=_plane(queue=queue))
+    assert deck.deck_verdict(view) == overview.verdict_text(view, NOW) == "NEEDS ATTENTION (1)"
+    assert len([alert for alert in overview.page_alerts(view, NOW) if alert.kind == "blocked"]) == 1
+
+
 def test_missing_control_plane_is_an_alert_not_silence():
     alerts = overview.page_alerts(_view(), NOW)
     assert [(alert.kind, alert.title) for alert in alerts] == [("coverage", "Control-plane snapshot missing")]
@@ -358,7 +427,7 @@ def test_verdict_counts_attention_items_and_stale_telemetry_together():
     entry = deck.RailEntry(kind="failed", node_id=NODE_A, repo="skillet", run_id="r9", detail="external.failed")
     with_failure = _view(view.stations, plane=view.control_plane, rail=(entry,))
     assert overview.verdict_text(with_failure, NOW) == "NEEDS ATTENTION (2)"
-    assert 'verdict-pill--attention">NEEDS ATTENTION (2)' in overview.render_header(with_failure, NOW)
+    assert 'verdict-status--attention">NEEDS ATTENTION (2)' in overview.render_header(with_failure, NOW)
 
 
 def test_verdict_falls_back_to_the_deck_verdict_when_nothing_needs_attention():
@@ -378,7 +447,7 @@ def test_verdict_falls_back_to_the_deck_verdict_when_nothing_needs_attention():
         }
     )
     assert overview.verdict_text(_view(plane=full), NOW) == "ALL CLEAR"
-    assert "verdict-pill--clear" in overview.render_header(_view(plane=full), NOW)
+    assert "verdict-status--clear" in overview.render_header(_view(plane=full), NOW)
 
 
 def test_an_enrolled_station_missing_from_the_machines_snapshot_is_never_all_clear():

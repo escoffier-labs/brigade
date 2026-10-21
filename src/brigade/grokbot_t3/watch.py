@@ -14,9 +14,13 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..grokbot_feed import _NoRedirect
+from ..fleet_client_messages import MESSAGE_DRAIN_DEADLINE_SECONDS
+from ..hub_messages import HubMessageError, call_message
 from . import contracts as c
 from .fleet import CALL_TIMEOUT, FleetCallError, FleetTimeout
-from .ledger import Ledger, wake_target_id
+from .ledger import HUB_PENDING_LIMIT, Ledger, wake_target_id
+from .inbox import HubInbox
+from .runtime_config import Runtime
 from . import runtime_config
 from .runtime_config import read_owner_file
 
@@ -29,7 +33,9 @@ POST_TIMEOUT = 8
 # The watcher unit's TimeoutStartSec. The budget is checked only before each row starts, so reserve the
 # slowest row (a status call plus a post to every target) and startup and shutdown time.
 UNIT_TIMEOUT_SECONDS = 300
-PASS_BUDGET_SECONDS = float(UNIT_TIMEOUT_SECONDS - CALL_TIMEOUT - MAX_TARGETS * POST_TIMEOUT - 30)
+SHUTDOWN_MARGIN_SECONDS = 30
+FLUSH_LOCK_TIMEOUT_SECONDS = 1.0
+PASS_BUDGET_SECONDS = float(UNIT_TIMEOUT_SECONDS - CALL_TIMEOUT - MAX_TARGETS * POST_TIMEOUT - SHUTDOWN_MARGIN_SECONDS)
 MAX_ATTEMPTS = 30
 Post = Callable[[str, str, dict[str, Any]], int]
 
@@ -105,9 +111,86 @@ def _append_log(path: Path, record: dict[str, Any]) -> None:
         os.close(fd)
 
 
+def _wake_hub_inbox(
+    *,
+    runtime: Runtime,
+    ledger: Ledger,
+    wake_targets: dict[str, list[dict[str, str]]],
+    log_path: Path,
+    clock: Callable[[], datetime],
+    post: Post,
+    summary: dict[str, int],
+) -> None:
+    if runtime.hub_token_file is None:
+        return
+    summary["checked"] += 1
+    hub = HubInbox(token_file=str(runtime.hub_token_file))
+    authority = hub.capture()
+    scope = authority.scope
+    targets = wake_targets.get(runtime.hub_wake_target, [])
+    if not targets:
+        raise c.T3DispatchError("invalid_request")
+    for target in targets:
+        target_id = wake_target_id(target["url"])
+        pending = ledger.pending_hub_wake(scope, target_id)
+        after = max(ledger.hub_wake_cursor(scope, target_id), pending[-1]["id"] if pending else 0)
+        if len(pending) < HUB_PENDING_LIMIT:
+            try:
+                # Each endpoint discovers independently, so a failed endpoint can retain its
+                # bounded batch without blocking healthy endpoints at the same old ids.
+                for page, _ in hub.pages(after=after, authority=authority):
+                    if any(len(row["sender"].encode("utf-8")) > 256 for row in page):
+                        raise c.T3DispatchError("hub-error")
+                    hub.require_authority(authority)
+                    ledger.queue_hub_wake(scope, target_id, page)
+                    pending = ledger.pending_hub_wake(scope, target_id)
+                    if len(pending) >= HUB_PENDING_LIMIT:
+                        break
+            except Exception as error:
+                if isinstance(error, HubMessageError) and error.code in {
+                    "hub_credential_changed",
+                    "hub_credential_invalid",
+                }:
+                    raise
+                summary["failed"] += 1
+        # A failed POST remains retryable even if the Hub now omits acknowledged messages
+        # or a later page fetch failed. No message content is retained in the ledger.
+        pending = ledger.pending_hub_wake(scope, target_id)
+        if not pending:
+            continue
+        body = {
+            "kind": "hub-inbox",
+            "count": len(pending),
+            "latest_id": pending[-1]["id"],
+            "sender_ids": sorted({row["sender"] for row in pending}),
+        }
+        try:
+            key = read_key(target["key_file"])
+            hub.require_authority(authority)
+            code = post(target["url"], key, body)
+        except Exception as error:
+            if isinstance(error, HubMessageError) and error.code in {
+                "hub_credential_changed",
+                "hub_credential_invalid",
+            }:
+                raise
+            code = 0
+        hub.require_authority(authority)
+        if code == 200:
+            ledger.mark_hub_notified(scope, target_id, body["latest_id"])
+            summary["woken"] += 1
+        else:
+            summary["failed"] += 1
+        try:
+            _append_log(log_path, {"at": clock().isoformat(timespec="seconds"), **body, "statuses": [code]})
+        except OSError:
+            pass
+
+
 def run_watch_once(
     *,
     runner: Any,
+    runtime: Runtime | None = None,
     ledger: Ledger,
     wake_targets: dict[str, list[dict[str, str]]],
     log_path: Path,
@@ -119,6 +202,26 @@ def run_watch_once(
     clock = now or (lambda: datetime.now(timezone.utc))
     summary = {"checked": 0, "woken": 0, "failed": 0}
     started = monotonic()
+    if runtime is not None:
+        try:
+            _wake_hub_inbox(
+                runtime=runtime,
+                ledger=ledger,
+                wake_targets=wake_targets,
+                log_path=log_path,
+                clock=clock,
+                post=post,
+                summary=summary,
+            )
+        except Exception:
+            # Never let Hub credentials, outages or malformed pages starve request notifications.
+            summary["failed"] += 1
+            try:
+                _append_log(
+                    log_path, {"at": clock().isoformat(timespec="seconds"), "kind": "hub-inbox", "error": "hub-error"}
+                )
+            except OSError:
+                pass
     rows = ledger.pending_notifications()
     for index, row in enumerate(rows):
         if monotonic() - started >= budget_seconds:
@@ -226,4 +329,21 @@ def run_watch_once(
                     ledger.mark_notified(row["request_id"], state, clock())
             else:
                 ledger.record_status_poll(row["request_id"], failed=True)
+    if runtime is not None and runtime.enabled and runtime.hub_token_file is not None:
+        # Request wakes run first: a competing sender's spool lock must not hold them up.
+        # Reserve the existing network-drain deadline and shutdown margin before waiting.
+        remaining = (
+            UNIT_TIMEOUT_SECONDS - (monotonic() - started) - MESSAGE_DRAIN_DEADLINE_SECONDS - SHUTDOWN_MARGIN_SECONDS
+        )
+        if remaining <= 0:
+            summary["failed"] += 1
+        else:
+            try:
+                call_message(
+                    "flush_credential",
+                    token_file=str(runtime.hub_token_file),
+                    lock_timeout=min(FLUSH_LOCK_TIMEOUT_SECONDS, remaining),
+                )
+            except Exception:
+                summary["failed"] += 1
     return summary

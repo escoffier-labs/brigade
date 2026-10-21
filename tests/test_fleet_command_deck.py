@@ -1308,6 +1308,23 @@ def test_unknown_integration_state_is_a_coverage_gap_not_active():
     assert "integration readiness" in deck.coverage_gaps(plane)
 
 
+@pytest.mark.parametrize("reported", [False, True])
+def test_optional_integration_telemetry_is_distinct_from_a_missing_section(reported):
+    snapshot = _control_plane_snapshot(integrations=[], authority={"active": True, "status": "active"})
+    if not reported:
+        del snapshot["integrations"]
+    plane = deck.control_plane_from_snapshot(snapshot)
+    assert ("integrations" in deck.coverage_gaps(plane)) is not reported
+    html = deck.render_deck(_empty_view(plane), nonce="nonce", now=NOW)
+    if reported:
+        assert "No integration readiness reports in this snapshot" in html
+        assert "Worklore queue sourcing" not in html
+        assert "ALL CLEAR" in html
+    else:
+        assert "Integration readiness unknown" in html
+        assert "COVERAGE UNKNOWN (1)" in html
+
+
 def test_machine_capacity_and_idle_reasons_render():
     view = _empty_view(deck.control_plane_from_snapshot(_control_plane_snapshot()))
     html = deck.render_deck(view, nonce="nonce", now=NOW)

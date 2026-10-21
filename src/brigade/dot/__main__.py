@@ -6,10 +6,11 @@ from pathlib import Path
 import sqlite3
 import sys
 import time
-from uuid import uuid4
+from dataclasses import replace
+import hashlib
 
 from .contracts import MAX_MESSAGE_BYTES, DotError
-from .hub_inbox import HubInbox
+from .hub_inbox import HubInbox, default_subject
 from .lifecycle import _load_config
 from .state import BridgeState
 from .watch import gaps, load, parse_time, run_watch_once
@@ -22,11 +23,13 @@ def _notify(args, runtime):
         hub = HubInbox(state, runtime.hub)
         if args.wait is not None:
             deadline, cursor, succeeded = time.monotonic() + args.timeout, args.wait, False
+            authority = hub.capture(agent=False)
             while True:
+                hub.require_authority(authority)
                 try:
                     # Each poll is bounded by the CLI deadline, with at least 2 s so --timeout 0 checks once.
                     poll_deadline = max(deadline, time.monotonic() + 2.0)
-                    replies, cursor = hub.wait_replies(args.wait, cursor, deadline=poll_deadline)
+                    replies, cursor = hub.wait_replies(args.wait, cursor, deadline=poll_deadline, authority=authority)
                     succeeded = True
                 except DotError as error:
                     if error.code not in ("hub_unavailable", "hub_quota"):
@@ -50,9 +53,54 @@ def _notify(args, runtime):
             if len(raw) > MAX_MESSAGE_BYTES:
                 raise DotError("invalid_request")
             message = raw.decode("utf-8").removesuffix("\n")
-        cid = uuid4().hex
-        row = hub.notify(args.sender, message, args.thread, args.priority, args.subject, args.ref, args.kind, cid)
-        pending = state.hub_messages(unacked_only=True, limit=1, node_id=runtime.hub.node_id)["unacked_total"]
+        node_authority = hub.capture(agent=False)
+        try:
+            agent_authority = hub.capture()
+        except DotError:
+            agent_authority = None
+        # Identical retries retain identity even after an ambiguous committed send or rotation.
+        cid = hashlib.sha256(
+            json.dumps(
+                [
+                    node_authority.hub.rstrip("/"),
+                    node_authority.node_id,
+                    runtime.hub.principal,
+                    args.sender,
+                    message,
+                    args.thread,
+                    args.priority,
+                    args.subject or default_subject(message, args.kind, args.sender),
+                    args.ref,
+                    args.kind,
+                ],
+                ensure_ascii=True,
+                separators=(",", ":"),
+            ).encode()
+        ).hexdigest()[:32]
+        if agent_authority is not None:
+            node_authority = replace(node_authority, companions=(agent_authority,))
+        hub.require_authority(node_authority)
+        row = hub.notify(
+            args.sender,
+            message,
+            args.thread,
+            args.priority,
+            args.subject,
+            args.ref,
+            args.kind,
+            cid,
+            node_authority=node_authority,
+            agent_authority=agent_authority,
+        )
+        hub.require_authority(node_authority)
+        pending = 0
+        if agent_authority is not None:
+            hub.require_authority(agent_authority)
+            pending = state.hub_messages(
+                unacked_only=True, limit=1, node_id=runtime.hub.node_id, scope=agent_authority.scope
+            )["unacked_total"]
+            hub.require_authority(agent_authority)
+        hub.require_authority(node_authority)
         result = {"ok": True, "id": row["id"] if row else None, "unacked": pending}
         if row is None:
             result.update(queued=True, client_id=cid)
