@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import sys
 
 import pytest
 
@@ -45,6 +46,18 @@ def test_patrol_is_optional_except_in_atomic_crontab(tmp_path, monkeypatch, caps
     monkeypatch.setattr(care_cmd, "_ensure_care_runbooks", lambda target: 0)
     assert care_cmd.install(target=tmp_path, backend="crontab", entry_ids=["run-patrol"]) == 2
     assert "atomic managed block" in capsys.readouterr().err
+
+
+@pytest.mark.parametrize("brigade_available", [True, False])
+def test_crontab_entry_rejection_leaves_target_unchanged(tmp_path, monkeypatch, capsys, brigade_available):
+    target = tmp_path / "workspace"
+    target.mkdir()
+    monkeypatch.setattr(care_cmd, "_read_crontab", lambda: ("", None))
+    monkeypatch.setattr(runbook_cmd.shutil, "which", lambda command: sys.executable if brigade_available else None)
+
+    assert care_cmd.install(target=target, backend="crontab", entry_ids=["run-patrol"]) == 2
+    assert "atomic managed block" in capsys.readouterr().err
+    assert list(target.iterdir()) == []
 
 
 def test_patrol_windows_plan(tmp_path, capsys):

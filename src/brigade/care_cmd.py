@@ -1166,6 +1166,13 @@ def install(
             file=sys.stderr,
         )
         return 3
+    if backend == "crontab" and entry_ids:
+        print(
+            "error: care --entry is not supported on the crontab backend; "
+            "crontab remains one atomic managed block. Use systemd or launchd.",
+            file=sys.stderr,
+        )
+        return 2
     adopted: list[dict[str, Any]] = []
     if not entry_ids:
         if backend == "systemd":
@@ -1218,13 +1225,6 @@ def install(
         )
 
     if backend == "crontab":
-        if entry_ids:
-            print(
-                "error: care --entry is not supported on the crontab backend; "
-                "crontab remains one atomic managed block. Use systemd or launchd.",
-                file=sys.stderr,
-            )
-            return 2
         return _install_crontab(
             target=target,
             dry_run=dry_run,
