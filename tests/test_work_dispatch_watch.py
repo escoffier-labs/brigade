@@ -471,3 +471,127 @@ def test_watch_close_reports_claimed_prelaunch_intents(apply_target, fake_watch,
     assert closed["claimed_prelaunch_intents"] == 1
     (task,) = work_cmd._read_task_ledger(apply_target)["tasks"]
     assert task["claim"]
+
+
+def test_watch_real_child_releases_each_intent_once_and_reports_outcome(apply_target, monkeypatch, capsys):
+    from pathlib import Path
+
+    monkeypatch.setenv("FAKE_DISPATCH_STATUS", "failed")
+    claims, releases = [], []
+    claim, release = apply.locking._claim_task, apply.locking._release_tasks
+
+    def counted_claim(*args, **kwargs):
+        result = claim(*args, **kwargs)
+        claims.append(kwargs["claim_id"])
+        return result
+
+    def counted_release(*args, **kwargs):
+        result = release(*args, **kwargs)
+        releases.extend(kwargs["claim_ids"])
+        return result
+
+    monkeypatch.setattr(apply.locking, "_claim_task", counted_claim)
+    monkeypatch.setattr(apply.locking, "_release_tasks", counted_release)
+    assert (
+        cli.main(
+            [
+                "work",
+                "dispatch",
+                "--watch",
+                "--target",
+                str(apply_target),
+                "--worker",
+                "coder",
+                "--max",
+                "1",
+                "--interval",
+                "0.05",
+                "--max-total",
+                "2",
+                "--drain-wait",
+                "--json",
+            ]
+        )
+        == 1
+    )
+    payload = json.loads(capsys.readouterr().out)
+    rows = store.intents(apply_target)
+    assert len(rows) == 2
+    assert len(claims) == len(set(claims)) == 2
+    assert sorted(releases) == sorted(claims)
+    assert all(row["state"] == "failed" and row["released"] for _, row in rows)
+    assert all((Path(row["run_dir"]) / "launch-count").read_text() == "launch\n" for _, row in rows)
+    assert payload["launched"] == 2
+    assert payload["close_reason"] == "max-total"
+    assert set(payload["tick_sessions"]) == {path.parent.parent.name for path, _ in rows}
+    assert "plan" not in payload
+    events = store.events(store.root(apply_target) / payload["dispatch_id"])
+    ticks = [row["payload"] for row in events if row["event_type"] == "work.dispatch.tick"]
+    assert sum(len(tick["launched"]) for tick in ticks) == 2
+    assert sum(len(tick["finalized"]) for tick in ticks) == 2
+
+
+def test_watch_pause_does_not_rescan_history_or_poll_metadata_on_every_wake(apply_target, fake_watch, monkeypatch):
+    watcher = fake_watch.module.Watch(
+        apply.Apply(apply_target), apply_target, {"max_total": 2}, interval=5, drain_wait=False
+    )
+    scans, versions = [], []
+    intents = store.intents
+
+    def scan(target):
+        scans.append(target)
+        return intents(target)
+
+    def version():
+        versions.append(fake_watch.clock[0])
+        return "test-version"
+
+    monkeypatch.setattr(store, "intents", scan)
+    monkeypatch.setattr(fake_watch.module, "installed_version", version)
+    watcher.pause(0.9)
+    assert not scans
+    assert len(versions) <= 1
+
+
+def test_watch_ceiling_counts_launches_within_one_tick(apply_target, fake_watch, capsys):
+    _tasks(apply_target, [["a.py"], ["b.py"], ["c.py"]])
+    directory = _watch(apply_target, capsys, "--max", "3", "--max-total", "1")
+    assert len(fake_watch.launches) == 1
+    assert store.read(directory / "session.json")["launched"] == 1
+
+
+def test_watch_ceiling_includes_resumed_reserved_children(apply_target, monkeypatch, capsys):
+    import subprocess
+
+    from tests.test_work_dispatch_apply import DispatchCrash
+
+    _tasks(apply_target, [["a.py"], ["b.py"]])
+    assert cli.main(["work", "dispatch", "--dry-run", "--target", str(apply_target), "--worker", "coder"]) == 0
+    capsys.readouterr()
+    (directory,) = store.sessions(apply_target)
+    session = store.read(directory / "session.json")
+    session.update(dry_run=False, no_wait=True)
+    localio.write_json(directory / "session.json", session)
+    plan = store.read(directory / "plan.json")
+    engine = apply.Apply(apply_target)
+    popen = subprocess.Popen
+
+    def interrupted(argv, *args, **kwargs):
+        if "brigade.work_cmd.dispatch_child" in argv:
+            raise DispatchCrash()
+        return popen(argv, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(subprocess, "Popen", interrupted)
+        for item in plan["selected"]:
+            path, row = apply._new_intent(apply_target, directory, session, plan, item)
+            with pytest.raises(DispatchCrash):
+                engine.advance(path, row, session)
+    assert len(store.intents(apply_target)) == 2
+    assert all(row["run_dir"] and not row["pid"] for _, row in store.intents(apply_target))
+
+    watch_dir = _watch(apply_target, capsys, "--max-total", "1", "--drain-wait", "--interval", "0.05")
+    rows = store.intents(apply_target)
+    assert store.read(watch_dir / "session.json")["launched"] == 1
+    assert sum(row["state"] == "completed" for _, row in rows) == 1
+    assert sum(row["state"] == "launching" and not row["pid"] for _, row in rows) == 1

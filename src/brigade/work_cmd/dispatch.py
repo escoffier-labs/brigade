@@ -259,6 +259,8 @@ def dispatch(
                 "interval": interval,
                 "drain_wait": drain_wait,
             }
+            if watch:
+                session["tick_sessions"] = []
             directory.mkdir(parents=True, exist_ok=False)
             localio.write_json_exclusive(directory / "plan.json", plan)
             localio.write_json_exclusive(directory / "session.json", session)
@@ -307,6 +309,7 @@ def dispatch(
                         tick_dir.mkdir(parents=True, exist_ok=False)
                         localio.write_json_exclusive(tick_dir / "plan.json", tick_plan)
                         localio.write_json_exclusive(tick_dir / "session.json", tick_session)
+                        session["tick_sessions"].append(tick_id)
                         dispatch_state.event(
                             directory,
                             "work.dispatch.planned",
@@ -328,7 +331,17 @@ def dispatch(
         else:
             print(f"error: {exc}", file=sys.stderr)
         return 2
-    if json_output:
+    if watch and json_output:
+        print(
+            json.dumps(
+                {key: session[key] for key in ("dispatch_id", "launched", "close_reason", "tick_sessions")}, indent=2
+            )
+        )
+    elif watch:
+        print(f"dispatch: {dispatch_id}")
+        print(f"launched: {session['launched']}, close_reason: {session['close_reason']}")
+        print("tick_sessions: " + ", ".join(session["tick_sessions"]))
+    elif json_output:
         print(json.dumps({"dispatch_id": dispatch_id, "plan": plan}, indent=2, sort_keys=True))
     else:
         print(f"dispatch: {dispatch_id}")

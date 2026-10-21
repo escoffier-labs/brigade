@@ -79,10 +79,11 @@ def _finish(
     target: Path, path: Path, row: dict[str, Any], state: str, meta: dict[str, Any], *, commit: bool = False
 ) -> None:
     if row["state"] in store.TERMINAL - {"unknown"}:
-        # Repeating release closes the crash window between terminal publication
-        # and ledger mutation. A newer claim generation cannot match this CAS.
-        if row["state"] in {"failed", "orphaned", "canceled"}:
+        # Legacy receipts and crashes before recording release still reconcile.
+        # Publish the marker only after the ledger mutation succeeds.
+        if row["state"] in {"failed", "orphaned", "canceled"} and not row.get("released"):
             _release(target, row)
+            store.transition(path, row, row["state"], released=True)
         return
     kind, phase = worker_failure.resolve_run_failure_taxonomy(meta)
     infrastructure = worker_failure.run_failure_is_infrastructure_at_read_time(kind, phase) is True
@@ -136,6 +137,7 @@ def _finish(
     store.transition(path, row, state, terminal=terminal)
     if state != "completed":
         _release(target, row)
+        store.transition(path, row, state, released=True)
 
 
 def _session_result(rows: list[tuple[Path, dict[str, Any]]]) -> int:
@@ -346,7 +348,7 @@ class Apply:
             remaining = session.get("spawn_delay", 0) - (time.monotonic() - self.last_launch)
             if remaining > 0:
                 self.pause(remaining)
-        if not self.can_launch() or (not row.get("run_dir") and not self.reservation_allowed()):
+        if not self.can_launch() or (not row.get("pid") and not self.reservation_allowed()):
             return
         try:
             self._advance(path, row, session)
@@ -679,7 +681,7 @@ class Apply:
                 # Terminal rows may still have a claim-release side effect pending.
                 for path in (directory / "intents").glob("*.json"):
                     row = store.read(path)
-                    if row["state"] in store.TERMINAL:
+                    if row["state"] in store.TERMINAL and not row.get("released"):
                         self.refresh(path, row, session)
                 if not session.get("finished_at"):
                     result = max(result, self.session(directory, no_wait=no_wait, launch=launch))

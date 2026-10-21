@@ -74,7 +74,7 @@ base. For example, a systemd user unit can use:
 Type=simple
 WorkingDirectory=/path/to/repository
 ExecStart=/path/to/venv/bin/brigade work dispatch --target /path/to/repository --worker coder --watch --interval 5 --spawn-delay 1
-Restart=always
+Restart=on-failure
 RestartSec=5
 KillMode=process
 ```
@@ -89,12 +89,18 @@ children detached. Unexpected tick errors are recorded as
 to continue. A close receipt includes `claimed_prelaunch_intents`, the count
 of intents that still hold a claim without a child. The next dispatch invocation
 resumes those intents using their saved plans and worktrees.
-Each tick checks the installed Brigade version and exits
-cleanly when it changes. `Restart=always` starts a new process with the updated
-installation. The dispatcher sleeps between ticks even when no task is ready.
-`--max-total` and `--deadline` bound the whole watch session, including retries.
-A service manager that restarts after a budget exit starts a new session with
-new limits. Use a stop policy appropriate for a bounded campaign.
+Each tick checks the installed Brigade version and closes watch when it changes.
+The dispatcher sleeps between ticks even when no task is ready. `--max-total`
+and `--deadline` bound one watch process, including retries. Use `Restart=no`
+when either ceiling must stop the service. A failed child or tick keeps the exit
+status at 1 even when watch closes for a ceiling, version change, or signal.
+`Restart=on-failure` can therefore restart a ceiling close, and `Restart=always`
+restarts every close. Each restart gives watch a fresh launch ceiling and deadline.
+Restart the unit explicitly after updating Brigade when `Restart=no` is set.
+Infrastructure retry exhaustion is retained across ticks within one watch
+process. Restarting watch resets those exclusions and permits another initial
+launch plus two retries for each affected task. Non-infrastructure task breakers
+remain persisted across restarts.
 
 ## Receipts and provenance
 

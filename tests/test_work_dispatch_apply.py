@@ -85,6 +85,33 @@ def _intents(target):
     ]
 
 
+def test_terminal_release_recovers_legacy_receipts_and_retries_only_after_failure(apply_target, capsys, monkeypatch):
+    from brigade.work_cmd import dispatch_apply as apply, dispatch_state as store
+
+    monkeypatch.setenv("FAKE_DISPATCH_STATUS", "failed")
+    _apply(apply_target, capsys, expected=1)
+    ((path, row),) = store.intents(apply_target)
+    row.pop("released", None)  # Legacy receipt or crash before recording release.
+    localio.write_json(path, row)
+    release = apply._release
+    attempts = []
+
+    def flaky_release(target, intent):
+        attempts.append(intent["claim_id"])
+        if len(attempts) == 1:
+            raise OSError("release unavailable")
+        release(target, intent)
+
+    monkeypatch.setattr(apply, "_release", flaky_release)
+    with pytest.raises(OSError, match="release unavailable"):
+        apply._finish(apply_target, path, row, "failed", {})
+    assert not store.read(path).get("released")
+    apply.Apply(apply_target).reconcile(no_wait=True, launch=False)
+    assert store.read(path)["released"] is True
+    apply.Apply(apply_target).reconcile(no_wait=True, launch=False)
+    assert len(attempts) == 2
+
+
 def test_apply_keeps_claim_and_branch_with_uncommitted_diff(apply_target, capsys):
     result = _apply(apply_target, capsys)
     (intent,) = _intents(apply_target)

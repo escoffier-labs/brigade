@@ -33,8 +33,10 @@ class Watch:
         self.stop_waiting = False
         self.version = installed_version()
         self.started = time.monotonic()
-        self.initial_runs = {row["intent_id"] for _, row in store.intents(engine.target) if row.get("run_dir")}
+        self.next_version_check = self.started + 1
         self.seen = self.snapshot()
+        self.initial_runs = {key for key, (has_run, _) in self.seen.items() if has_run}
+        self.launch_count = 0
         self.tick_no = 0
         self.denied = False
 
@@ -42,10 +44,16 @@ class Watch:
         return {row["intent_id"]: (bool(row.get("pid")), row["state"]) for _, row in store.intents(self.engine.target)}
 
     def launched(self) -> int:
-        return sum(
-            bool(row.get("run_dir")) and row["intent_id"] not in self.initial_runs
-            for _, row in store.intents(self.engine.target)
-        )
+        return self.launch_count
+
+    def reserve(self) -> bool:
+        # Reservations can happen several times within a tick, including retry
+        # and resumed launches. Refresh here, never on every pause wake.
+        self.count_launches(self.snapshot())
+        return self.budget_allows()
+
+    def count_launches(self, current: dict[str, tuple[bool, str]]) -> None:
+        self.launch_count = sum(has_run and key not in self.initial_runs for key, (has_run, _) in current.items())
 
     def exclusions(self) -> dict[str, str]:
         """Keep exhausted infrastructure retries bounded across watch ticks."""
@@ -60,9 +68,12 @@ class Watch:
             if path.parent.parent in own_sessions and row.get("retry_exhausted")
         }
 
-    def can_launch(self) -> bool:
-        if self.reason is None and installed_version() != self.version:
-            self.reason = "version-changed"
+    def can_launch(self, *, check_version: bool = False) -> bool:
+        now = time.monotonic()
+        if self.reason is None and (check_version or now >= self.next_version_check):
+            self.next_version_check = now + 1
+            if installed_version() != self.version:
+                self.reason = "version-changed"
         return self.reason is None
 
     def budget_allows(self) -> bool:
@@ -109,6 +120,7 @@ class Watch:
 
     def record_tick(self) -> None:
         current = self.snapshot()
+        self.count_launches(current)
         launched = [key for key, (has_run, _) in current.items() if has_run and not self.seen.get(key, (False, ""))[0]]
         finalized = [
             key
@@ -154,11 +166,11 @@ class Watch:
             for sig in previous:
                 signal.signal(sig, stop)
             self.engine.can_launch = self.can_launch
-            self.engine.reservation_allowed = self.budget_allows
+            self.engine.reservation_allowed = self.reserve
             self.engine.pause = self.pause
             self.engine.continue_on_error = True
             store.event(self.directory, "work.dispatch.opened", {"version": self.version})
-            while self.budget_allows():
+            while self.can_launch(check_version=True) and self.budget_allows():
                 try:
                     result = max(result, tick())
                 except Exception as exc:
@@ -185,7 +197,9 @@ class Watch:
         finally:
             try:
                 self.record_tick()
-                self.session.update(finished_at=localio.utc_now_iso(), close_reason=self.reason or "stopped")
+                self.session.update(
+                    finished_at=localio.utc_now_iso(), close_reason=self.reason or "stopped", launched=self.launched()
+                )
                 store.event(
                     self.directory,
                     "work.dispatch.closed",
