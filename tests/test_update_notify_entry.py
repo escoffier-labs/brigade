@@ -30,6 +30,7 @@ def notify_entry(tmp_path, monkeypatch):
     (startup / "sitecustomize.py").write_text(
         "import json, os, subprocess\n"
         "from pathlib import Path\n"
+        "from types import SimpleNamespace\n"
         "from brigade import update_notify\n"
         "if os.environ.get('TEST_HOSTILE_PYTHONPATH'):\n"
         "    os.environ['PYTHONPATH'] = os.environ['TEST_WORKSPACE']\n"
@@ -48,7 +49,10 @@ def notify_entry(tmp_path, monkeypatch):
         "    if refresh:\n"
         "        process.wait(timeout=15)\n"
         "    return process\n"
-        "subprocess.Popen = observed_popen\n",
+        # Windows asyncio subclasses subprocess.Popen. Only instrument the
+        # notifier's module reference, preserving the real stdlib class.
+        "update_notify.subprocess = SimpleNamespace(**vars(subprocess))\n"
+        "update_notify.subprocess.Popen = observed_popen\n",
         encoding="utf-8",
     )
     monkeypatch.delenv("BRIGADE_NO_UPDATE_CHECK", raising=False)
