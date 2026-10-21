@@ -18,6 +18,7 @@ from typing import Any, Iterator
 
 from . import fleet_action_adapters as adapters, fleet_client, fleet_client_actions as client
 from .fleet_action_auth import ActionError, canonical, digest, opaque, selector
+from .fleet_hub_messages import MAX_SQLITE_INTEGER
 
 MANIFEST_SCHEMA = "brigade.fleet_action_manifest.v1"
 AUTOMATIC_RECOVERY_LIFETIME = 24 * 60 * 60
@@ -250,13 +251,19 @@ def _deliver_report(
     return result
 
 
-def _inbox_lookup(action: dict[str, Any], executable: Path) -> dict[str, Any]:
+def _inbox_lookup(
+    action: dict[str, Any], executable: Path, root: Path, record: dict[str, Any], directory: int
+) -> dict[str, Any]:
     # Read only after a durable send attempt. A missing acknowledgement never permits another send or flush.
-    cursor = 0
+    cursor = record.get("inbox_lookup_after", 0)
+    if type(cursor) is not int or not 0 <= cursor <= MAX_SQLITE_INTEGER:
+        cursor = 0
     for _ in range(10):
         payload = adapters.invoke(executable, ["fleet", "msg", "sent", "--after", str(cursor), "--json"], timeout=15)
         messages = payload.get("messages", [])
-        for message in messages if isinstance(messages, list) else []:
+        if not isinstance(messages, list) or not messages:
+            break
+        for message in messages:
             if (
                 isinstance(message, dict)
                 and message.get("client_id") == action["action_id"]
@@ -268,9 +275,12 @@ def _inbox_lookup(action: dict[str, Any], executable: Path) -> dict[str, Any]:
                     "destination_ref": str(message["id"]),
                 }
         next_cursor = payload.get("next_cursor")
-        if type(next_cursor) is not int or next_cursor <= cursor or not messages:
+        if type(next_cursor) is not int or not cursor < next_cursor <= MAX_SQLITE_INTEGER:
             break
         cursor = next_cursor
+        # Checkpoint each observed page under the action lock, including before a later transport failure.
+        record["inbox_lookup_after"] = cursor
+        _write(root, action["action_id"], record, directory)
     return {"status": "unknown"}
 
 
@@ -352,7 +362,7 @@ def execute(path: Path, action_id: str, generation: int) -> dict[str, Any]:
                 if reference or (target["capability"] == "inbox" and record.get("dispatch_attempted")):
                     try:
                         receipt = (
-                            _inbox_lookup(action, executable)
+                            _inbox_lookup(action, executable, root, record, directory)
                             if target["capability"] == "inbox" and not reference
                             else adapters.recover(action, executable, reference)
                         )

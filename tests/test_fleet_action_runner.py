@@ -614,6 +614,100 @@ def test_inbox_unknown_noack_is_bounded_and_ack_fastpath_stays_parked(tmp_path, 
     conn.close()
 
 
+@requires_posix
+@pytest.mark.parametrize("interrupted", [False, True])
+def test_handle_free_inbox_recovery_resumes_durable_pages(tmp_path, monkeypatch, interrupted):
+    from brigade import fleet_action_runner as runner, fleet_client_messages as messages, fleet_hub_actions as actions
+    from tests.test_fleet_action_r2_core import inbox_action
+
+    conn, path, _, action = inbox_action(tmp_path, monkeypatch)
+    claim = actions.claim(conn, "node-fixture")
+    sends, cursors = [], []
+    failed = False
+
+    def invoke(executable, argv, **kwargs):
+        nonlocal failed
+        assert kwargs == {"timeout": 15}
+        if argv[:3] == ["-m", "brigade.fleet_action_adapters", "--inbox-send"]:
+            sends.append(argv)
+            return {"error": "fixture lost send response"}
+        assert argv[:4] == ["fleet", "msg", "sent", "--after"] and argv[-1] == "--json"
+        after = int(argv[4])
+        cursors.append(after)
+        if interrupted and after == 200 and not failed:
+            failed = True
+            raise OSError("fixture interrupted pagination")
+        page = [{"id": i, "client_id": "older-message"} for i in range(after + 1, min(after + 100, 1100) + 1)]
+        if after == 1100:
+            page = [{"id": 1101, "client_id": action["action_id"], "acked_at": "now"}]
+        return {"messages": page, "next_cursor": page[-1]["id"] if page else after}
+
+    monkeypatch.setattr(runner.adapters, "invoke", invoke)
+    assert runner.execute(path, action["action_id"], claim["generation"])["status"] == "unknown"
+    root = path.parent / "journal"
+    with runner._journal_lock(root, action["action_id"]) as directory:
+        attempted = runner._read(root, action["action_id"], directory)
+    assert attempted["dispatch_attempted"] is True
+    assert "destination_ref" not in attempted["receipt"]
+    monkeypatch.setattr(runner.adapters, "dispatch", lambda *a: pytest.fail("recovery dispatched again"))
+    for name in ("send", "flush", "_spool_path", "_drain_locked"):
+        monkeypatch.setattr(messages, name, lambda *a, **kw: pytest.fail("recovery touched message spool"))
+
+    assert runner.execute(path, action["action_id"], claim["generation"])["status"] == "unknown"
+    expected = [0, 100, 200] if interrupted else list(range(0, 1000, 100))
+    assert cursors == expected
+    # Reload the durable record, as a fresh executor does, rather than carrying an in-memory cursor.
+    with runner._journal_lock(root, action["action_id"]) as directory:
+        saved = runner._read(root, action["action_id"], directory)
+    assert saved["inbox_lookup_after"] == (200 if interrupted else 1000)
+    assert saved["phase"] == "reported" and saved["receipt"]["status"] == "unknown"
+    cursors.clear()
+    result = runner.execute(path, action["action_id"], claim["generation"])
+    assert cursors == list(range(200 if interrupted else 1000, 1101, 100))
+    assert len(cursors) <= 10 and len(sends) == 1
+    assert result["status"] == "accepted" and result["destination_ref"] == "1101"
+    assert result["delivery"] == "acknowledged"
+    conn.close()
+
+
+@requires_posix
+@pytest.mark.parametrize(
+    "page",
+    [
+        {"messages": [], "next_cursor": 100},
+        {"messages": {"id": 1}, "next_cursor": 100},
+        *[
+            {"messages": [{"id": 1, "client_id": "older-message"}], "next_cursor": cursor}
+            for cursor in (None, True, -1, 0, "100", 1 << 63)
+        ],
+    ],
+)
+def test_handle_free_inbox_recovery_stops_on_invalid_page_cursor(tmp_path, monkeypatch, page):
+    from brigade import fleet_action_runner as runner, fleet_hub_actions as actions
+    from tests.test_fleet_action_r2_core import inbox_action
+
+    conn, path, _, action = inbox_action(tmp_path, monkeypatch)
+    claim = actions.claim(conn, "node-fixture")
+    monkeypatch.setattr(runner.adapters, "invoke", lambda *a, **kw: {"error": "fixture lost send response"})
+    assert runner.execute(path, action["action_id"], claim["generation"])["status"] == "unknown"
+    cursors = []
+
+    def invoke(executable, argv, **kwargs):
+        assert argv[:4] == ["fleet", "msg", "sent", "--after"]
+        cursors.append(int(argv[4]))
+        return page
+
+    monkeypatch.setattr(runner.adapters, "invoke", invoke)
+    assert runner.execute(path, action["action_id"], claim["generation"])["status"] == "unknown"
+    assert cursors == [0]
+    root = path.parent / "journal"
+    with runner._journal_lock(root, action["action_id"]) as directory:
+        saved = runner._read(root, action["action_id"], directory)
+    assert saved.get("inbox_lookup_after", 0) == 0
+    assert "destination_ref" not in saved["receipt"] and "delivery" not in saved["receipt"]
+    conn.close()
+
+
 @pytest.mark.parametrize("started_at", [True, "bad", float("nan"), float("inf"), float("-inf"), 10**1000])
 def test_recovery_age_malformed_values_fail_closed(started_at):
     from brigade import fleet_action_runner as runner
