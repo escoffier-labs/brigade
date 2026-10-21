@@ -61,7 +61,11 @@ def scan_text(text: str, policy: Policy | None = None, options: ScanOptions | No
                 match.group(0), _line_at(text, start, end)
             ):
                 continue
-            if rule.id == "private-hostname" and not _hostname_context(text, start, end):
+            if (
+                rule.id == "private-hostname"
+                and not any(rule is custom_rule for custom_rule in active_policy.custom_rules)
+                and not _hostname_context(text, start, end)
+            ):
                 continue
             if _inside_ranges(start, end, skipped_ranges):
                 continue

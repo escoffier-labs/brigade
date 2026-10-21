@@ -21,28 +21,30 @@ brigade X.Y.Z
 
 ## Quickstart Warned Or Failed
 
-Please rerun quickstart with JSON and paste only the redacted `issue_report` object:
+Please prepare a local bug report in the affected workspace:
 
 ```bash
-brigade operator quickstart --target . --harnesses codex --json
-brigade operator doctor --target . --profile local-operator --json
-brigade handoff doctor --target . --json
+brigade bug report --target . --summary "What happened and what you expected" --dry-run
 ```
 
-If you selected a different harness list, use that same `--harnesses` value in the rerun. Quickstart should only watch the writer harnesses you selected, so missing unwired side-harness folders should not warn.
+Review the complete preview for private information. Reuse its printed report
+identifier with `brigade bug report --report-id REPORT_ID` to search for
+duplicates and choose a destination. Use
+`--include-output FILE` only for a log you want included. The command redacts
+its tail before saving it. Answer the security question before sharing.
+For agent submission, approve the preview and confirm this is an ordinary
+defect before using `--yes --not-security`. Include the fingerprint when
+discussing the report.
 
 ## Doctor Not Ready
 
-Please paste the redacted JSON from:
-
-```bash
-brigade operator doctor --target . --profile local-operator --json
-brigade tools doctor --target . --json
-brigade skills doctor --target . --json
-brigade security doctor --target . --json
-```
-
-The fields that matter most are `ready`, `blocking_issue_count`, `blockers`, `tool_health`, and `security_issue_count`.
+Use the same bug report command above. The bundle includes bounded local health
+probes for bootstrap files, AGENTS.md quality, and security-config file type under
+`bug_diagnostics`. It does not include full Doctor output. For a failing hook,
+profile, or component, use `--include-output FILE` to add the relevant output
+from a file you choose. Inspect the full preview before sharing it. For a
+vulnerability or exposed credential, follow SECURITY.md instead of filing a
+public issue.
 
 ## What Files Do I Commit?
 

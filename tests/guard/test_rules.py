@@ -6,6 +6,7 @@ from pathlib import Path
 
 from brigade.guard.engine import scan_text
 from brigade.guard.policy import Policy, load_policy
+from brigade.guard.types import Rule
 
 
 class LoopbackSplitTests(unittest.TestCase):
@@ -428,6 +429,24 @@ class MissingLeakShapeTests(unittest.TestCase):
     def test_json_encoded_windows_home_path_matches(self) -> None:
         result = scan_text(r'"Config at C:\\Users\\demo\\.config\\tool.json"')  # content-guard: allow windows-home-path
         self.assertIn("windows-home-path", {f.rule_id for f in result.findings})
+
+    def test_custom_hostname_rule_keeps_code_shaped_matches(self) -> None:
+        text = "obj.local"  # content-guard: allow private-hostname
+        self.assertEqual(scan_text(text).findings, [])
+        policy = Policy(
+            custom_rules=[
+                Rule(
+                    id="private-hostname",
+                    category="infrastructure",
+                    pattern=r"\bobj\.local\b",
+                    replacement="[redacted-host]",
+                )
+            ]
+        )
+        result = scan_text(text, policy=policy)
+        self.assertEqual([finding.rule_id for finding in result.findings], ["private-hostname"])
+        self.assertTrue(result.blocked)
+        self.assertEqual(result.redacted_text, "[redacted-host]")
 
     def test_hostname_code_contexts_are_skipped(self) -> None:
         for text in (

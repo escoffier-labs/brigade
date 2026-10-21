@@ -1,8 +1,8 @@
 """Opt-in scheduler scaffold for scheduled memory care (issue #759).
 
 ``brigade care install|status|uninstall`` writes and audits user-owned
-scheduler entries. Brigade never runs a daemon; the operator's crontab,
-systemd user timers, or Task Scheduler remains the trigger.
+scheduler entries. These care jobs use the host scheduler as their trigger.
+Runbook receipts record step exit codes independently of long-running services.
 
 Default entries match ``docs/scheduled-care.md``. Recipes that ship as
 memory-care runbooks invoke those runbooks so each scheduled fire writes a

@@ -216,10 +216,10 @@ OVERVIEW_CSS = """
 .crumbs { margin: 0 0 var(--space-1); color: var(--muted); font-size: 12px; }
 .page-head h1 { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); margin: 0; }
 .page-sub { margin: var(--space-1) 0 0; color: var(--muted); }
-.verdict-pill { padding: 2px var(--space-3); border: 1px solid var(--line); border-radius: 999px; font-size: 11px; font-weight: 800; letter-spacing: .06em; }
-.verdict-pill--attention { border-color: var(--warn-line); background: var(--warn-surface); color: var(--signal); }
-.verdict-pill--unknown { color: var(--muted); }
-.verdict-pill--clear { border-color: var(--ok); color: var(--ok); }
+.verdict-status { font-size: 11px; font-weight: 800; letter-spacing: .06em; }
+.verdict-status--attention { color: var(--signal); }
+.verdict-status--unknown { color: var(--muted); }
+.verdict-status--clear { color: var(--ok); }
 .refresh-link { margin-left: var(--space-2); color: var(--muted); }
 .cards { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: var(--space-4); }
 .card { min-width: 0; padding: var(--space-4); border: 1px solid var(--line-quiet); background: var(--surface); }

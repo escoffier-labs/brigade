@@ -71,13 +71,13 @@ def test_prompt_marks_content_untrusted():
     assert "untrusted" in llm.prompts[0].lower()
 
 
-def test_prompt_uses_hash_fence():
+def test_prompt_uses_random_fence():
     import re
 
     llm = FakeLlm('{"summary": "s", "evidence": "e"}')
     source = _envelope(uri="u", content="some page body", trust="web")
     extract.extract_finding(llm, goal="g", source=source)
-    assert re.search(r"<<UNTRUSTED-[0-9a-f]{8}>>", llm.prompts[0])
+    assert re.search(r"<<UNTRUSTED-[0-9a-f]{16,}>>", llm.prompts[0])
 
 
 def test_extract_finding_keeps_source_identity(fake_llm) -> None:

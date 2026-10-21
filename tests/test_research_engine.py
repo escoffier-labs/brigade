@@ -374,7 +374,7 @@ def test_adversarial_source_is_wrapped_in_synthesis_and_review() -> None:
     assert caught.value.failure_kind == "review-rejected"
     assert synth_prompts and review_prompts
     body_fence = re.compile(
-        r"<<UNTRUSTED-[0-9a-f]{8}>>\n(?P<body>.*?)\n<<END-UNTRUSTED-[0-9a-f]{8}>>",
+        r"<<UNTRUSTED-[0-9a-f]{16,}>>\n(?P<body>.*?)\n<<END-UNTRUSTED-[0-9a-f]{16,}>>",
         re.DOTALL,
     )
     for prompt in (synth_prompts[0], review_prompts[0]):
@@ -385,7 +385,7 @@ def test_adversarial_source_is_wrapped_in_synthesis_and_review() -> None:
 
 def _assert_needle_only_inside_fences(prompt: str, needle: str) -> None:
     body_fence = re.compile(
-        r"<<UNTRUSTED-[0-9a-f]{8}>>\n(?P<body>.*?)\n<<END-UNTRUSTED-[0-9a-f]{8}>>",
+        r"<<UNTRUSTED-[0-9a-f]{16,}>>\n(?P<body>.*?)\n<<END-UNTRUSTED-[0-9a-f]{16,}>>",
         re.DOTALL,
     )
     bodies = [match.group("body") for match in body_fence.finditer(prompt)]

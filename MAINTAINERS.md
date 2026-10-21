@@ -16,7 +16,7 @@ Maintainers are responsible for:
 - keeping releases, tags, and PyPI packaging healthy
 - enforcing the Code of Conduct
 - triaging security reports through the private disclosure process
-- protecting Brigade's local-first and review-gated design boundaries
+- keeping autonomous agent work within operator-defined scopes and gates, with inspectable receipts, journals, and evidence-based handoffs
 
 ## Project status
 

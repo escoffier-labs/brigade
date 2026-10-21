@@ -81,8 +81,8 @@ Beads now documents persistent project memory (`bd remember`, `bd prime`) as of 
 
 ## Brigade scope (honest limits)
 
-- Local file-first control plane. No required daemon. Optional foreground serve commands cover Center, Run View, and the fleet hub.
-- Scheduling is external, except optional operator-owned, target-scoped care registrations.
+- Agent coordination across machines and cloud seats, with local receipts and run journals. The operator starts and stops long-running fleet, dashboard, and MCP services.
+- Operators set policy, scopes, and gates. External schedulers can trigger care runbooks through target-scoped registrations, with runbook receipts for each run.
 - Work ledger is machine-local JSON, not a distributed Beads/Dolt store.
 - An optional fleet hub aggregates run events and arbitrates repo claims. The fleet board can show external harness sessions. Local journals stay authoritative. An optional Dolt sink exports hub history. It is not the work ledger.
 - An approved Grok Bot scout feed enqueues labeled GitHub issues only after `--apply`. It does not invent tasks or read issue prose.

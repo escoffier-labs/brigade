@@ -1,7 +1,8 @@
 # Scheduled Memory Care
 
-The schedule belongs to the operator. Brigade only runs when invoked. Copy one
-of the recipes below into your own crontab, user timer, or CI job after
+The operator chooses when scheduled care runs and which runbooks it may execute.
+Each runbook run records step exit codes and log paths for later inspection. Copy
+one of the recipes below into your own crontab, user timer, or CI job after
 `brigade init` wires the target, or explicitly opt in with
 `brigade care install --target .`. With the default `auto` backend it installs
 systemd user timers on Linux or launchd agents on macOS. On Windows it prints
@@ -10,8 +11,9 @@ an unsupported scheduler. Use the manual crontab recipes on this page
 when cron is your trigger.
 Systemd and launchd registrations are namespaced by a hash of the absolute target path, so
 status and uninstall operate only on that target. Uninstalling a missing
-registration is a clear no-op. Brigade still does not own a daemon or
-background supervisor.
+registration is a clear no-op. These care registrations use the host scheduler.
+Brigade also has operator-started long-running fleet and MCP services, described
+in the [execution model](execution-model.md).
 
 Prerequisites:
 

@@ -22,6 +22,11 @@ from .. import fleet_hub_messages
 
 
 def register(fleet_sub: argparse._SubParsersAction) -> None:
+    # The fleet MCP station is the agent-facing side of messaging; registering
+    # it here keeps cli/fleet.py under the module size ceiling.
+    from ..fleet_mcp import register as register_mcp
+
+    register_mcp(fleet_sub)
     parser = fleet_sub.add_parser("msg", help="Send and manage durable Fleet Hub messages.")
     sub = parser.add_subparsers(dest="msg_command", metavar="<msg-command>")
     sub.required = True
@@ -238,6 +243,7 @@ def _principal_add(args: argparse.Namespace) -> int:
     from .. import fleet_client_messages
 
     deferred_request_ids: list[str] = []
+    deferred_paths: list[Path] = []
 
     return _result(
         args,
@@ -248,9 +254,10 @@ def _principal_add(args: argparse.Namespace) -> int:
             may_send_to=getattr(args, "may_send_to", None),
             _defer_finalize=True,
             _deferred_request_ids=deferred_request_ids,
+            _deferred_paths=deferred_paths,
         ),
         after_output=lambda: fleet_client_messages.finalize_principal_add(
-            args.name, request_id=deferred_request_ids[-1]
+            args.name, request_id=deferred_request_ids[-1], pending_path=deferred_paths[-1]
         ),
     )
 

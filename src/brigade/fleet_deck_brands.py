@@ -1,7 +1,7 @@
 """Vendor brand marks for the Fleet Command Deck badges.
 
-The SVG geometry below was transcribed from T3 Code's ``Icons.tsx``
-(T3 Code 0.0.39-nightly.20260906.1303, MIT-licensed project). Each mark is
+Vendor SVG geometry comes from T3 Code's ``Icons.tsx`` and the official
+Jules favicon. The T3 source is version 0.0.39-nightly.20260906.1303 (MIT-licensed project). Each mark is
 the trademark of its owner and is used only to identify that provider or
 harness; see ``docs/assets/brands/README.md`` for the mapping and
 provenance. Antigravity's T3 icon is a raster PNG, so the Gemini mark
@@ -19,10 +19,10 @@ from dataclasses import dataclass
 
 @dataclass(frozen=True)
 class Brand:
-    """One deck badge brand: display label, inline SVG, pill accent."""
+    """One deck badge brand: display label, inline SVG, provenance palette color."""
 
     label: str
-    svg: str  # "" means: render the neutral "??" monogram instead.
+    svg: str  # Trusted, self-contained vector markup.
     accent: str  # Palette colors are lowercase six-digit #hex values.
 
 
@@ -70,45 +70,13 @@ _OPENAI_SVG = (
 )
 
 _GEMINI_SVG = (
-    '<svg viewBox="0 0 296 298" fill="none"><mask id="gemini__a" width="296" height="298" x="0" y="0" mas'
-    'kUnits="userSpaceOnUse" ><path fill="#3186FF" d="M141.201 4.886c2.282-6.17 1'
-    "1.042-6.071 13.184.148l5.985 17.37a184.004 184.004 0 0 0 111.257 113.049l19.304 6.997c6.143 2.227 6."
-    "156 10.91.02 13.155l-19.35 7.082a184.001 184.001 0 0 0-109.495 109.385l-7.573 20.629c-2.241 6.105-10"
-    ".869 6.121-13.133.025l-7.908-21.296a184 184 0 0 0-109.02-108.658l-19.698-7.239c-6.102-2.243-6.118-10"
-    '.867-.025-13.132l20.083-7.467A183.998 183.998 0 0 0 133.291 26.28l7.91-21.394Z" /></mask><g mask="ur'
-    'l(#gemini__a)"><g filter="url(#gemini__b)"><ellipse cx="163" cy="149" fill="#3689FF" rx="196" ry="15'
-    '9" /></g><g filter="url(#gemini__c)"><ellipse cx="33.5" cy="142.5" fill="#F6C013" rx="68.5" ry="72.5'
-    '" /></g><g filter="url(#gemini__d)"><ellipse cx="19.5" cy="148.5" fill="#F6C013" rx="68.5" ry="72.5"'
-    ' /></g><g filter="url(#gemini__e)"><path fill="#FA4340" d="M194 10.5C172 82.5 65.5 134.333 22.5 135L'
-    '144-66l50 76.5Z" /></g><g filter="url(#gemini__f)"><path fill="#FA4340" d="M190.5-12.5C168.5 59.5 62'
-    ' 111.333 19 112L140.5-89l50 76.5Z" /></g><g filter="url(#gemini__g)"><path fill="#14BB69" d="M194.5 '
-    '279.5C172.5 207.5 66 155.667 23 155l121.5 201 50-76.5Z" /></g><g filter="url(#gemini__h)"><path fill'
-    '="#14BB69" d="M196.5 320.5C174.5 248.5 68 196.667 25 196l121.5 201 50-76.5Z" /></g></g><defs><filter'
-    ' id="gemini__b" width="464" height="390" x="-69" y="-46" color-interpolation-filters="sRGB" filterUn'
-    'its="userSpaceOnUse" ><feFlood floodOpacity="0" result="BackgroundImageFix" /><feBlend in="SourceGra'
-    'phic" in2="BackgroundImageFix" result="shape" /><feGaussianBlur result="effect1_foregroundBlur_69_17'
-    '998" stdDeviation="18" /></filter><filter id="gemini__c" width="265" height="273" x="-99" y="6" colo'
-    'r-interpolation-filters="sRGB" filterUnits="userSpaceOnUse" ><feFlood floodOpacity="0" result="Backg'
-    'roundImageFix" /><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape" /><feGaussianBl'
-    'ur result="effect1_foregroundBlur_69_17998" stdDeviation="32" /></filter><filter id="gemini__d" widt'
-    'h="265" height="273" x="-113" y="12" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse"'
-    ' ><feFlood floodOpacity="0" result="BackgroundImageFix" /><feBlend in="SourceGraphic" in2="Backgroun'
-    'dImageFix" result="shape" /><feGaussianBlur result="effect1_foregroundBlur_69_17998" stdDeviation="3'
-    '2" /></filter><filter id="gemini__e" width="299.5" height="329" x="-41.5" y="-130" color-interpolati'
-    'on-filters="sRGB" filterUnits="userSpaceOnUse" ><feFlood floodOpacity="0" result="BackgroundImageFix'
-    '" /><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape" /><feGaussianBlur result="ef'
-    'fect1_foregroundBlur_69_17998" stdDeviation="32" /></filter><filter id="gemini__f" width="299.5" hei'
-    'ght="329" x="-45" y="-153" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse" ><feFlood'
-    ' floodOpacity="0" result="BackgroundImageFix" /><feBlend in="SourceGraphic" in2="BackgroundImageFix"'
-    ' result="shape" /><feGaussianBlur result="effect1_foregroundBlur_69_17998" stdDeviation="32" /></fil'
-    'ter><filter id="gemini__g" width="299.5" height="329" x="-41" y="91" color-interpolation-filters="sR'
-    'GB" filterUnits="userSpaceOnUse" ><feFlood floodOpacity="0" result="BackgroundImageFix" /><feBlend i'
-    'n="SourceGraphic" in2="BackgroundImageFix" result="shape" /><feGaussianBlur result="effect1_foregrou'
-    'ndBlur_69_17998" stdDeviation="32" /></filter><filter id="gemini__h" width="299.5" height="329" x="-'
-    '39" y="132" color-interpolation-filters="sRGB" filterUnits="userSpaceOnUse" ><feFlood floodOpacity="'
-    '0" result="BackgroundImageFix" /><feBlend in="SourceGraphic" in2="BackgroundImageFix" result="shape"'
-    ' /><feGaussianBlur result="effect1_foregroundBlur_69_17998" stdDeviation="32" /></filter></defs></sv'
-    "g>"
+    '<svg viewBox="0 0 296 298" fill="currentColor"><path d="'
+    "M141.201 4.886c2.282-6.17 11.042-6.071 13.184.148l5.985 17.37a184.004 184.004 0 0 0 111.257 113."
+    "049l19.304 6.997c6.143 2.227 6.156 10.91.02 13.155l-19.35 7.082a184.001 184.001 0 0 0-109.495 10"
+    "9.385l-7.573 20.629c-2.241 6.105-10.869 6.121-13.133.025l-7.908-21.296a184 184 0 0 0-109.02-108."
+    "658l-19.698-7.239c-6.102-2.243-6.118-10.867-.025-13.132l20.083-7.467A183.998 183.998 0 0 0 133.2"
+    "91 26.28l7.91-21.394Z"
+    '" /></svg>'
 )
 
 _GROK_SVG = (
@@ -145,15 +113,36 @@ _CURSOR_SVG = (
     'Z" /></svg>'
 )
 
-_OPENCODE_SVG = (
-    '<svg viewBox="0 0 32 40"><g clip-path="url(#opencode__clip0_1311_94969)"><path d="M24 32H8V16H24V32Z'
-    '" fill="#4B4646" /><path d="M24 8H8V32H24V8ZM32 40H0V0H32V40Z" fill="#F1ECEC" /></g><defs><clipPath '
-    'id="opencode__clip0_1311_94969"><rect width="32" height="40" fill="white" /></clipPath></defs></svg>'
-)
+_OPENCODE_SVG = '<svg viewBox="0 0 32 40" fill="currentColor"><path d="M24 8H8V32H24V8ZM32 40H0V0H32V40Z" /></svg>'
+
 
 _T3_SVG = (
-    '<svg viewBox="0 0 24 24" fill="currentColor"><text x="12" y="17" text-anchor="middle" font-size="12"'
-    ' font-weight="800" font-family="inherit">T3</text></svg>'
+    '<svg viewBox="0 0 24 24" fill="currentColor"><text x="12" y="18" text-anchor="middle" font-size="16"'
+    ' font-weight="700" font-family="ui-sans-serif, system-ui, sans-serif">T3</text></svg>'
+)
+
+_JULES_SVG = (
+    '<svg viewBox="0 0 180 180" fill="none"><path d="M90 5.625C117.928 5.625 140.625 28.3219 140.625 '
+    "56.25V115.312H39.375V56.25C39.375 28.3219 62.0719 5.625 90 5.625ZM64.6875 73.125C60.0469 73.125 "
+    "56.25 77.85 56.25 83.6719C56.25 89.4938 60.0469 94.2188 64.6875 94.2188C69.3281 94.2188 73.125 8"
+    "9.4938 73.125 83.6719C73.125 77.85 69.3281 73.125 64.6875 73.125ZM115.312 73.125C110.672 73.125 "
+    "106.875 77.85 106.875 83.6719C106.875 89.4938 110.672 94.2188 115.312 94.2188C119.953 94.2188 12"
+    '3.75 89.4938 123.75 83.6719C123.75 77.85 119.953 73.125 115.312 73.125Z" fill="#715CD7"/><path d'
+    '="M47.8125 90V153.281C47.8125 160.284 42.1594 165.938 35.1562 165.938C28.1531 165.938 22.5 160.2'
+    '84 22.5 153.281V149.062" stroke="#715CD7" stroke-width="16.875" stroke-miterlimit="10" stroke-li'
+    'necap="round"/><path d="M132.188 90V153.281C132.188 160.284 137.841 165.938 144.844 165.938C151.'
+    '847 165.938 157.5 160.284 157.5 153.281V149.062" stroke="#715CD7" stroke-width="16.875" stroke-m'
+    'iterlimit="10" stroke-linecap="round"/><path d="M75.9087 98.4375V149.062" stroke="#715CD7" strok'
+    'e-width="16.875" stroke-miterlimit="10" stroke-linecap="round"/><path d="M104.091 98.4375V149.06'
+    '2" stroke="#715CD7" stroke-width="16.875" stroke-miterlimit="10" stroke-linecap="round"/></svg>'
+)
+
+_AGENT_SVG = (
+    '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.75"'
+    ' stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="6" width="16" height="14" rx="3" />'
+    '<path d="M12 3v3M8 16h8M2 11h2M20 11h2" />'
+    '<circle cx="8.5" cy="11" r="1" fill="currentColor" stroke="none" />'
+    '<circle cx="15.5" cy="11" r="1" fill="currentColor" stroke="none" /></svg>'
 )
 
 BRANDS: dict[str, Brand] = {
@@ -167,6 +156,7 @@ BRANDS: dict[str, Brand] = {
     "t3-fleet": Brand("T3 Fleet", _T3_SVG, "#7c3aed"),
     "grokbot": Brand("Grokbot", _GROKBOT_SVG, "#52525b"),
     "grok-bot": Brand("Grokbot", _GROKBOT_SVG, "#52525b"),
+    "jules": Brand("Jules", _JULES_SVG, "#715cd7"),
     # Provider keys.
     "anthropic": Brand("Anthropic", _CLAUDE_SVG, "#9a6a2f"),
     "openai": Brand("OpenAI", _OPENAI_SVG, "#2f6f4f"),
@@ -174,7 +164,7 @@ BRANDS: dict[str, Brand] = {
     "google": Brand("Google", _GEMINI_SVG, "#1e293b"),
 }
 
-UNKNOWN_BRAND = Brand("??", "", "#4b5563")
+UNKNOWN_BRAND = Brand("Agent", _AGENT_SVG, "#4b5563")
 
 
 def normalize_key(value: str) -> str:
@@ -183,17 +173,17 @@ def normalize_key(value: str) -> str:
 
 
 def lookup_brand(key: str) -> Brand:
-    """Brand for a normalized key; unknown keys get the neutral monogram."""
+    """Brand for a normalized key; unknown keys get the neutral agent mark."""
     return BRANDS.get(normalize_key(key), UNKNOWN_BRAND)
 
 
 def harness_brand(harness: str) -> Brand:
-    """Brand for a harness name; unknown harnesses are grey."""
+    """Brand for a harness name; unknown harnesses get a neutral agent mark."""
     return lookup_brand(harness)
 
 
 def provider_brand(provider: str) -> Brand:
-    """Brand for a model provider; unknown providers are grey."""
+    """Brand for a model provider; unknown providers get a neutral agent mark."""
     key = normalize_key(provider)
     if key not in BRANDS and key.endswith("-cloud"):
         key = key[: -len("-cloud")]
