@@ -220,8 +220,64 @@ def test_scheduler_replay_keeps_partial_output_private_and_reserves_cleanup(tmp_
         assert base64.b64encode(value).decode() not in rendered
 
 
+def _scheduled_extras_config(monkeypatch, workspace):
+    from brigade import care_launchers
+    from brigade.isolated_exec import module_argv, trusted_cwd
+
+    config = (workspace / "private-config").resolve()
+    with monkeypatch.context() as parent:
+        parent.setenv("XDG_CONFIG_HOME", str(config))
+        enabled = subprocess.run(
+            module_argv("brigade", "extras", "on"), cwd=trusted_cwd(), capture_output=True, text=True, timeout=30
+        )
+    assert enabled.returncode == 0, "fixture extras opt-in failed"
+    marker = config / "brigade/extras"
+    assert marker.is_file()
+
+    def configured_argv(*args, **kwargs):
+        argv = module_argv(*args, **kwargs)
+        # Scheduler does not inherit pytest's BRIGADE_EXTRAS=1. Locate only
+        # this fixture's persistent opt-in, before the unchanged isolated
+        # bootstrap. This is explicit test configuration, not product opt-in.
+        argv[3] = f"import os;os.environ['XDG_CONFIG_HOME']={str(config)!r};" + argv[3]
+        return argv
+
+    monkeypatch.setattr(care_launchers, "module_argv", configured_argv)
+    return marker
+
+
+def test_scheduled_extras_configuration_does_not_escape_its_scope(tmp_path, monkeypatch):
+    from brigade import care_launchers
+    from brigade.isolated_exec import trusted_cwd
+
+    monkeypatch.delenv("BRIGADE_EXTRAS", raising=False)
+    empty_config = tmp_path / "unconfigured"
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(empty_config))
+    with monkeypatch.context() as scoped:
+        _scheduled_extras_config(scoped, tmp_path / "scheduled-fixture")
+        enabled = subprocess.run(
+            care_launchers.module_argv("brigade", "runbook", "--help"),
+            cwd=trusted_cwd(),
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        assert enabled.returncode == 0 and "usage: brigade runbook" in enabled.stdout
+    disabled = subprocess.run(
+        care_launchers.module_argv("brigade", "runbook", "--help"),
+        cwd=trusted_cwd(),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert disabled.returncode == 2 and "extras surface, which is disabled" in disabled.stderr
+    assert os.environ["XDG_CONFIG_HOME"] == str(empty_config)
+    assert "BRIGADE_EXTRAS" not in os.environ and not (empty_config / "brigade/extras").exists()
+
+
 @pytest.mark.skipif(sys.platform != "win32", reason="requires native Windows Task Scheduler")
-def test_native_scheduler_diagnostic_replay():
+@pytest.mark.parametrize("extras_on", [True, False], ids=["configured", "unconfigured"])
+def test_native_scheduler_diagnostic_replay(monkeypatch, extras_on):
     from brigade.care_launchers import runbook_argv
     from brigade.isolated_exec import trusted_cwd
 
@@ -229,6 +285,9 @@ def test_native_scheduler_diagnostic_replay():
     # any ACL. The replay observation must not repair the state it measures.
     system32 = Path(os.environ["SystemRoot"]) / "System32"
     with _owned_replay_workspace(Path(__file__).resolve().parents[1]) as workspace:
+        marker = _scheduled_extras_config(monkeypatch, workspace)
+        if not extras_on:
+            marker.unlink()
         entry = dataclasses.replace(care_cmd.CARE_ENTRIES[0], entry_id="replay-" + secrets.token_hex(8))
         approved = workspace / entry.runbook_rel
         approved.parent.mkdir(parents=True)
@@ -280,12 +339,18 @@ def test_native_scheduler_diagnostic_replay():
             assert report["task_absent_after_delete"], report
             assert report["elapsed_seconds"] <= 15, report
             assert report["wrapper_reached"] and report["process_started"], report
-            assert report["actual_exit"] == 0, report
+            assert "actual_exit" in report, report
             assert report["principal_matches"] and report["settings_match"], report
             assert report["principal_sid_matches"], report
             assert all(row["readable"] for row in report["read_probes"]), report
-            assert not any(report["stderr_flags"].values()), report
-            assert len(list((workspace / ".brigade/runbooks/runs").glob("*/receipt.json"))) == 1
+            if extras_on:
+                assert report["actual_exit"] == 0, report
+                assert not any(report["stderr_flags"].values()), report
+                assert len(list((workspace / ".brigade/runbooks/runs").glob("*/receipt.json"))) == 1
+            else:
+                assert report["actual_exit"] == 2, report
+                assert report["stderr_flags"]["extras_disabled"], report
+                assert not list((workspace / ".brigade/runbooks/runs").glob("*/receipt.json"))
             after = subprocess.check_output(
                 [str(system32 / "schtasks.exe"), "/Query", "/TN", care_cmd._schtasks_task_name(entry), "/XML"],
                 text=True,
@@ -1513,6 +1578,7 @@ def test_native_schtasks_roundtrip_runs_isolated_approved_runbook(tmp_path, monk
         text=True,
         timeout=15,
     )
+    _scheduled_extras_config(monkeypatch, workspace)
     marker = tmp_path / "shadow-executed"
     payload = f"from pathlib import Path\nPath({str(marker)!r}).touch()\n"
     (workspace / "brigade.py").write_text(payload)
