@@ -16,7 +16,7 @@ from typing import Any
 from . import memory_cmd
 from . import memory_proposal_io as io
 from .card_fingerprint import _upsert_frontmatter_fields, content_fingerprint, normalize_card_content
-from .card_identity import CardIdentity, card_identity
+from .card_identity import CardIdentity, card_identity, identity_collision_aliases
 from .memory_evidence_log import EvidenceLog, _timestamp
 
 
@@ -64,28 +64,39 @@ def read_cards(
         raise ValueError("canonical corpus file limit exceeded")
     cards: list[Card] = []
     size = 0
-    identities: dict[str, list[str]] = {}
     skipped: list[dict[str, str]] = []
     for path in paths:
-        raw = io.read_bytes(path, limit=io.MAX_CARD_BYTES)
+        rel = path.relative_to(target).as_posix()
+        try:
+            raw = io.read_bytes(path, limit=io.MAX_CARD_BYTES)
+        except ValueError as exc:
+            if str(exc) != "file size limit exceeded":
+                raise
+            skipped.append({"path": rel, "reason": "canonical card byte limit exceeded"})
+            continue
         assert raw is not None
         size += len(raw)
         if size > io.MAX_CORPUS_BYTES:
             raise ValueError("canonical corpus byte limit exceeded")
-        text = raw.decode("utf-8")
-        meta, valid = memory_cmd._parse_frontmatter(text.replace("\r\n", "\n"))
-        if scope is not None and meta.get("scope", "repo") != scope:
+        try:
+            text = raw.decode("utf-8")
+        except UnicodeDecodeError:
+            skipped.append({"path": rel, "reason": "canonical card is not UTF-8"})
             continue
-        rel = path.relative_to(target).as_posix()
+        meta, valid = memory_cmd._parse_frontmatter(text.replace("\r\n", "\n"))
         if not valid:
-            skipped.append({"path": rel, "reason": "malformed canonical frontmatter"})
+            if scope is None or meta.get("scope", "repo") == scope:
+                skipped.append({"path": rel, "reason": "malformed canonical frontmatter"})
             continue
         identity = card_identity(meta, rel)
-        identities.setdefault(identity.card_id, []).append(rel)
         rows = [row for key in (identity.card_id, *identity.aliases) for row in ledger.by_identity.get(key, [])]
         cards.append(Card(rel, text, meta, identity, rows))
-    ambiguous = {path for paths in identities.values() if len(paths) > 1 for path in paths}
-    skipped.extend({"path": path, "reason": "ambiguous canonical card identity"} for path in sorted(ambiguous))
+    collisions = identity_collision_aliases([(card.path, card.identity) for card in cards])
+    ambiguous = {path for paths in collisions.values() for path in paths}
+    cards = [card for card in cards if scope is None or card.meta.get("scope", "repo") == scope]
+    skipped.extend(
+        {"path": card.path, "reason": "ambiguous canonical card identity"} for card in cards if card.path in ambiguous
+    )
     return [card for card in cards if card.path not in ambiguous], sorted(skipped, key=lambda item: item["path"])
 
 
@@ -103,15 +114,12 @@ EVIDENCE_ROOTS = (
 )
 
 
-def _resolved(target: Path, refs: list[str], logged: set[str]) -> list[str]:
+def _resolved(target: Path, refs: list[str]) -> list[str]:
     result: set[str] = set()
     if len(refs) > io.MAX_LIST:
         raise ValueError("card evidence list limit exceeded")
     for ref in refs:
         if not ref or len(ref) > 1024 or any(ord(c) < 32 for c in ref):
-            continue
-        if ref in logged:
-            result.add(ref)
             continue
         try:
             bundle = memory_cmd._miseledger_evidence_id(ref)
@@ -130,7 +138,13 @@ def _resolved(target: Path, refs: list[str], logged: set[str]) -> list[str]:
 
 
 def _structured_preview(card: Card) -> bool:
-    """The scalar upserter cannot safely replace YAML continuation blocks."""
+    """Refuse citation formats the scalar evidence upserter cannot preserve."""
+    for key in ("evidence", "sources", "source", "refs", "links"):
+        value = card.meta.get(key)
+        if value not in (None, ""):
+            if key != "evidence" or (isinstance(value, str) and value.startswith("[")):
+                return True
+            break
     active = ""
     for line in card.text.replace("\r\n", "\n").split("\n")[1:]:
         if line.strip() == "---":
@@ -227,12 +241,6 @@ def generate(
     target: Path, care: memory_cmd.MemoryCareConfig, ledger: EvidenceLog, cards: list[Card]
 ) -> list[dict[str, Any]]:
     """Return stable candidates only when every cited id resolves locally."""
-    logged = {
-        row["evidence_id"]
-        for rows in ledger.by_identity.values()
-        for row in rows
-        if row["kind"] in {"reinforced", "outcome"}
-    }
     candidates: list[dict[str, Any]] = []
     citations: dict[str, list[str]] = {}
     contrary_by_card: dict[str, list[str]] = {}
@@ -241,19 +249,19 @@ def generate(
     finding_config = replace(care, enabled_checks=("unconsolidated-evidence",))
     for card in cards:
         refs = memory_cmd._evidence_refs(card.meta)
-        current = _resolved(target, refs, logged)
-        row_ids = {row["evidence_id"] for row in card.rows}
+        current = _resolved(target, refs)
+        row_ids = set(_resolved(target, sorted({row["evidence_id"] for row in card.rows})))
         evidence = sorted(set(current) | row_ids)
-        contrary = sorted({row["evidence_id"] for row in card.rows if row["kind"] == "opposite-polarity"})
-        review = sorted({row["evidence_id"] for row in card.rows if row["kind"] == "near-match"})
+        contrary = sorted({row["evidence_id"] for row in card.rows if row["kind"] == "opposite-polarity"} & row_ids)
+        review = sorted({row["evidence_id"] for row in card.rows if row["kind"] == "near-match"} & row_ids)
         citations[card.path] = evidence
         contrary_by_card[card.path] = contrary
         review_by_card[card.path] = review
         if normalize_card_content(card.text):
             groups.setdefault(content_fingerprint(card.text), []).append(card)
         findings = ledger.findings(target, finding_config, card.path, card.identity, card.meta)
-        if findings:
-            stale_ids = findings[0]["evidence_references"]
+        stale_ids = sorted(set(findings[0]["evidence_references"]) & row_ids) if findings else []
+        if stale_ids:
             fields: dict[str, Any] = {
                 "evidence": sorted(set(refs) | set(stale_ids)),
                 "proof_count": len(set(current) | set(stale_ids)),
@@ -272,11 +280,9 @@ def generate(
                     summary="Review matched evidence newer than the last consolidation or review.",
                 )
             )
-        supporting = (
-            {row["evidence_id"] for row in card.rows if row["kind"] in {"reinforced", "outcome"}}
-            - set(contrary)
-            - set(review)
-        )
+        supporting = {
+            row["evidence_id"] for row in card.rows if row["kind"] in {"reinforced", "outcome"}
+        } & row_ids - set(contrary) - set(review)
         already_reinforced = {row["evidence_id"] for row in card.rows if row["kind"] == "reinforced"}
         additions = supporting - set(refs) - already_reinforced
         if additions:

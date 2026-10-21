@@ -27,7 +27,14 @@ def card(target: Path, name: str, *, body="Keep the cache warm.", extra="", scop
     return path
 
 
-def log(target: Path, path: Path, *items: tuple[str, str, str]) -> None:
+def evidence(target: Path, ref: str) -> str:
+    path = target / ref.removeprefix("receipt:")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{}\n")
+    return ref
+
+
+def log(target: Path, path: Path, *items: tuple[str, str, str], identity: str | None = None) -> None:
     ledger = target / LOG_PATH
     ledger.parent.mkdir(parents=True, exist_ok=True)
     with ledger.open("a") as handle:
@@ -36,7 +43,7 @@ def log(target: Path, path: Path, *items: tuple[str, str, str]) -> None:
                 json.dumps(
                     dict(
                         ts=ts,
-                        card_id=path.stem,
+                        card_id=identity or path.stem,
                         card_path=path.relative_to(target).as_posix(),
                         evidence_id=ident,
                         kind=kind,
@@ -63,8 +70,8 @@ def snapshot(target):
 
 def test_run_persists_deterministic_candidates_and_metadata_diffs(tmp_path, capsys):
     path = card(tmp_path, "cache")
-    log(tmp_path, path, ("e-new", "outcome", "2026-10-20T12:00:00Z"))
-    log(tmp_path, path, ("e-new", "outcome", "2026-10-20T12:00:00Z"))
+    log(tmp_path, path, (evidence(tmp_path, ".brigade/receipts/e-new.json"), "outcome", "2026-10-20T12:00:00Z"))
+    log(tmp_path, path, (evidence(tmp_path, ".brigade/receipts/e-new.json"), "outcome", "2026-10-20T12:00:00Z"))
     (path.parent / "attachment.bin").write_bytes(b"\x00\xff")
     before = snapshot(tmp_path)
     code, first = command(tmp_path, capsys, "run", "--dry-run")
@@ -76,12 +83,12 @@ def test_run_persists_deterministic_candidates_and_metadata_diffs(tmp_path, caps
         assert candidate["schema"] == "brigade.memory-reflect-candidate.v1"
         assert candidate["card_ids"] == ["cache"]
         assert candidate["base_sha256"] == {"cache": hashlib.sha256(path.read_bytes()).hexdigest()}
-        assert candidate["evidence_ids"] == ["e-new"]
+        assert candidate["evidence_ids"] == [".brigade/receipts/e-new.json"]
         assert candidate["proof_count"] == 1
         assert candidate["contrary_ids"] == []
         assert candidate["tier"] == 0
         assert "--- a/memory/cards/cache.md\n+++ b/memory/cards/cache.md\n" in candidate["diff"]
-        assert '+evidence: ["e-new"]' in candidate["diff"]
+        assert '+evidence: [".brigade/receipts/e-new.json"]' in candidate["diff"]
         assert "+proof_count: 1" in candidate["diff"]
     assert "+last_consolidated: 2026-10-20T12:00:00Z" in candidates["stale-newer-evidence"]["diff"]
     code, second = command(tmp_path, capsys, "run")
@@ -103,7 +110,11 @@ def test_resolution_duplicates_and_polarity_flags(tmp_path, capsys):
     card(tmp_path, "right", body="KEEP the cache warm!")
     card(tmp_path, "uncited-a", body="Another claim.")
     card(tmp_path, "uncited-b", body="Another claim.")
-    log(tmp_path, left, ("e-against", "opposite-polarity", "2026-10-21T00:00:00Z"))
+    log(
+        tmp_path,
+        left,
+        (evidence(tmp_path, ".brigade/receipts/e-against.json"), "opposite-polarity", "2026-10-21T00:00:00Z"),
+    )
     before = snapshot(tmp_path)
     code, payload = command(tmp_path, capsys, "run", "--dry-run")
     assert code == 0
@@ -113,11 +124,45 @@ def test_resolution_duplicates_and_polarity_flags(tmp_path, capsys):
     assert "would merge" in duplicates[0]["summary"]
     flags = [c for c in payload["candidates"] if c["kind"] == "opposite-polarity"]
     assert len(flags) == 1
-    assert flags[0]["contrary_ids"] == ["e-against"]
+    assert flags[0]["contrary_ids"] == [".brigade/receipts/e-against.json"]
     assert flags[0]["tier"] == 2
     assert flags[0]["diff"] == ""
     assert not any(c["kind"] == "reinforce" for c in payload["candidates"])
     assert snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize("kind", ["outcome", "reinforced", "near-match", "opposite-polarity"])
+@pytest.mark.parametrize("ref", [".brigade/receipts/missing.json", "sha256:" + "0" * 64])
+def test_unresolved_log_ids_never_create_candidates(tmp_path, capsys, kind, ref):
+    path = card(tmp_path, "cache")
+    card(tmp_path, "duplicate")
+    path.write_text(path.read_text().replace("evidence: []", f'evidence: ["{ref}"]'))
+    log(tmp_path, path, (ref, kind, "2026-10-20T12:00:00Z"))
+    before = snapshot(tmp_path)
+    code, payload = command(tmp_path, capsys, "run", "--dry-run")
+    assert code == 0
+    assert payload["candidates"] == []
+    assert snapshot(tmp_path) == before
+
+
+def test_proof_and_consolidation_use_only_distinct_resolved_log_ids(tmp_path, capsys):
+    path = card(tmp_path, "cache")
+    ref = evidence(tmp_path, "receipt:.brigade/receipts/passed.json")
+    log(
+        tmp_path,
+        path,
+        (ref, "outcome", "2026-10-20T12:00:00Z"),
+        (ref, "outcome", "2026-10-20T12:00:00Z"),
+        (".brigade/receipts/missing.json", "outcome", "2026-10-21T12:00:00Z"),
+    )
+    code, payload = command(tmp_path, capsys, "run", "--dry-run")
+    assert code == 0
+    assert {c["kind"] for c in payload["candidates"]} == {"stale-newer-evidence", "reinforce"}
+    for candidate in payload["candidates"]:
+        assert candidate["evidence_ids"] == [ref]
+        assert candidate["proof_count"] == 1
+        assert "missing.json" not in candidate["diff"]
+    assert "+last_consolidated: 2026-10-20T12:00:00Z" in payload["candidates"][0]["diff"]
 
 
 def test_receipt_evidence_scope_limit_and_human_output(tmp_path, capsys):
@@ -152,7 +197,7 @@ def test_stage_failure_records_failed_and_preserves_cards(tmp_path, capsys, monk
     from brigade import memory_proposal_io as io
 
     path = card(tmp_path, "cache")
-    log(tmp_path, path, ("e-new", "near-match", "2026-10-20T12:00:00Z"))
+    log(tmp_path, path, (evidence(tmp_path, ".brigade/receipts/e-new.json"), "near-match", "2026-10-20T12:00:00Z"))
     if failure == "ledger":
         with (tmp_path / LOG_PATH).open("a") as handle:
             handle.write("{broken\n")
@@ -188,7 +233,7 @@ def test_stage_failure_records_failed_and_preserves_cards(tmp_path, capsys, monk
 )
 def test_staleness_uses_consolidation_cutoff_not_card_age(tmp_path, capsys, extra, ts, stale):
     path = card(tmp_path, "cache", extra=extra)
-    log(tmp_path, path, ("e-cutoff", "near-match", ts))
+    log(tmp_path, path, (evidence(tmp_path, ".brigade/receipts/e-cutoff.json"), "near-match", ts))
     code, payload = command(tmp_path, capsys, "run")
     assert code == 0
     assert any(c["kind"] == "stale-newer-evidence" for c in payload["candidates"]) == stale
@@ -218,7 +263,7 @@ def test_overlapping_card_root_refuses_without_writing_under_it(tmp_path, capsys
 def test_human_dry_run_prints_diff_and_preserves_crlf_body(tmp_path, capsys):
     path = card(tmp_path, "cache", body="Keep the cache warm.\n\n---\nBody separator.")
     path.write_bytes(path.read_bytes().replace(b"\n", b"\r\n"))
-    log(tmp_path, path, ("e-new", "outcome", "2026-10-20T12:00:00Z"))
+    log(tmp_path, path, (evidence(tmp_path, ".brigade/receipts/e-new.json"), "outcome", "2026-10-20T12:00:00Z"))
     before = snapshot(tmp_path)
     assert cli.main(["memory", "reflect", "run", "--target", str(tmp_path), "--dry-run"]) == 0
     output = capsys.readouterr().out
@@ -230,7 +275,7 @@ def test_human_dry_run_prints_diff_and_preserves_crlf_body(tmp_path, capsys):
 
 def test_log_path_alias_survives_adoption_of_stable_identity(tmp_path, capsys):
     path = card(tmp_path, "cache")
-    log(tmp_path, path, ("e-before-id", "outcome", "2026-10-20T12:00:00Z"))
+    log(tmp_path, path, (evidence(tmp_path, ".brigade/receipts/e-before-id.json"), "outcome", "2026-10-20T12:00:00Z"))
     stable_id = "card-00000000-0000-4000-8000-000000000001"
     path.write_text(path.read_text().replace("topic: cache", f"id: {stable_id}\ntopic: cache"))
     before = snapshot(tmp_path)
@@ -239,7 +284,34 @@ def test_log_path_alias_survives_adoption_of_stable_identity(tmp_path, capsys):
     assert {c["kind"] for c in payload["candidates"]} == {"stale-newer-evidence", "reinforce"}
     for candidate in payload["candidates"]:
         assert candidate["card_ids"] == [stable_id]
-        assert candidate["evidence_ids"] == ["e-before-id"]
+        assert candidate["evidence_ids"] == [".brigade/receipts/e-before-id.json"]
+    assert snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize("scope", [None, "repo", "workspace"])
+@pytest.mark.parametrize("collision", ["stable-id", "path-alias"])
+def test_identity_collisions_are_checked_across_scopes(tmp_path, capsys, scope, collision):
+    stable_id = "card-00000000-0000-4000-8000-000000000001"
+    if collision == "stable-id":
+        first = card(tmp_path, "first", extra=f"id: {stable_id}\n")
+        second = card(tmp_path, "second", scope="workspace", extra=f"id: {stable_id}\n")
+        identity = stable_id
+    else:
+        first = card(tmp_path, "renamed", extra=f'id: {stable_id}\naliases: ["memory/cards/second.md"]\n')
+        second = card(tmp_path, "second", scope="workspace")
+        identity = None
+    ref = evidence(tmp_path, ".brigade/receipts/support.json")
+    log(tmp_path, second, (ref, "outcome", "2026-10-20T12:00:00Z"), identity=identity)
+    before = snapshot(tmp_path)
+    args = ["--scope", scope] if scope else []
+    code, payload = command(tmp_path, capsys, "run", "--dry-run", *args)
+    assert code == 0
+    assert payload["candidates"] == []
+    selected = [p for p in (first, second) if scope is None or (p == first) == (scope == "repo")]
+    assert payload["skipped_cards"] == sorted(
+        [{"path": p.relative_to(tmp_path).as_posix(), "reason": "ambiguous canonical card identity"} for p in selected],
+        key=lambda item: item["path"],
+    )
     assert snapshot(tmp_path) == before
 
 
@@ -257,7 +329,7 @@ def test_malformed_receipt_refuses_inspection_without_crashing(tmp_path, capsys)
 def test_pending_matches_are_review_only_and_never_proof(tmp_path, capsys):
     path = card(tmp_path, "cache")
     ids = [f"memory/handoff-inbox/pending-{i}.md" for i in range(3)]
-    log(tmp_path, path, *((ident, "near-match", "2026-10-20T12:00:00Z") for ident in ids))
+    log(tmp_path, path, *((evidence(tmp_path, ident), "near-match", "2026-10-20T12:00:00Z") for ident in ids))
     code, payload = command(tmp_path, capsys, "run", "--dry-run")
     assert code == 0
     assert [c["kind"] for c in payload["candidates"]] == ["stale-newer-evidence"]
@@ -273,7 +345,7 @@ def test_log_scan_window_is_informational_but_malformed_rows_fail(tmp_path, caps
     from brigade.memory_evidence_log import MAX_SCAN_BYTES
 
     path = card(tmp_path, "cache")
-    log(tmp_path, path, ("e-new", "outcome", "2026-10-20T12:00:00Z"))
+    log(tmp_path, path, (evidence(tmp_path, ".brigade/receipts/e-new.json"), "outcome", "2026-10-20T12:00:00Z"))
     ledger = tmp_path / LOG_PATH
     tail = ledger.read_bytes() + (b"{broken\n" if malformed else b"")
     ledger.write_bytes(b"x" * (MAX_SCAN_BYTES + 10) + b"\n" + tail)
@@ -287,7 +359,7 @@ def test_log_scan_window_is_informational_but_malformed_rows_fail(tmp_path, caps
 
 def test_bad_cards_are_reported_without_blocking_healthy_cards(tmp_path, capsys):
     healthy = card(tmp_path, "healthy")
-    log(tmp_path, healthy, ("e-new", "outcome", "2026-10-20T12:00:00Z"))
+    log(tmp_path, healthy, (evidence(tmp_path, ".brigade/receipts/e-new.json"), "outcome", "2026-10-20T12:00:00Z"))
     broken = card(tmp_path, "notes")
     broken.write_text("Notes without frontmatter.\n")
     unclosed = card(tmp_path, "unclosed")
@@ -312,13 +384,49 @@ def test_bad_cards_are_reported_without_blocking_healthy_cards(tmp_path, capsys)
     assert scoped["skipped_cards"] == []
 
 
+@pytest.mark.parametrize("bad_kind", ["encoding", "oversized"])
+def test_unreadable_cards_are_skipped_without_blocking_healthy_cards(tmp_path, capsys, bad_kind):
+    from brigade import memory_proposal_io as io
+
+    healthy = card(tmp_path, "healthy")
+    ref = evidence(tmp_path, ".brigade/receipts/support.json")
+    log(tmp_path, healthy, (ref, "outcome", "2026-10-20T12:00:00Z"))
+    broken = card(tmp_path, "broken")
+    if bad_kind == "encoding":
+        broken.write_bytes(b"---\ntopic: caf\xe9\n---\nClaim.\n")
+        reason = "canonical card is not UTF-8"
+    else:
+        broken.write_bytes(b"x" * (io.MAX_CARD_BYTES + 1))
+        reason = "canonical card byte limit exceeded"
+    before = snapshot(tmp_path)
+    code, payload = command(tmp_path, capsys, "run", "--dry-run")
+    assert code == 0
+    assert payload["skipped_cards"] == [{"path": "memory/cards/broken.md", "reason": reason}]
+    assert {c["kind"] for c in payload["candidates"]} == {"stale-newer-evidence", "reinforce"}
+    assert all(c["card_ids"] == ["healthy"] for c in payload["candidates"])
+    assert snapshot(tmp_path) == before
+
+
+def test_corpus_byte_limit_still_fails_the_run(tmp_path, capsys, monkeypatch):
+    from brigade import memory_proposal_io as io
+
+    path = card(tmp_path, "cache")
+    monkeypatch.setattr(io, "MAX_CORPUS_BYTES", path.stat().st_size - 1)
+    before = snapshot(tmp_path)
+    code, payload = command(tmp_path, capsys, "run")
+    assert code == 1
+    assert payload["stage"] == "cards"
+    assert payload["error"] == "canonical corpus byte limit exceeded"
+    assert snapshot(tmp_path) == before
+
+
 def test_inspection_reads_recent_history_after_directory_limit(tmp_path, capsys):
     root = tmp_path / ".brigade/memory/reflect/runs"
     root.mkdir(parents=True)
     for index in range(1025):
         (root / f"20260101-000000-{index:06d}-12345678").mkdir()
     path = card(tmp_path, "cache")
-    log(tmp_path, path, ("e-new", "outcome", "2026-10-20T12:00:00Z"))
+    log(tmp_path, path, (evidence(tmp_path, ".brigade/receipts/e-new.json"), "outcome", "2026-10-20T12:00:00Z"))
     _, run = command(tmp_path, capsys, "run")
     code, status = command(tmp_path, capsys, "status")
     assert code == 0
@@ -328,11 +436,24 @@ def test_inspection_reads_recent_history_after_directory_limit(tmp_path, capsys)
     assert command(tmp_path, capsys, "show", ident)[1]["candidate_id"] == ident
 
 
-@pytest.mark.parametrize("block", ["evidence:\n  - old", "evidence :\n  - old", "evidence:\n- old"])
-def test_block_list_metadata_has_no_unsafe_preview(tmp_path, capsys, block):
+@pytest.mark.parametrize(
+    "block",
+    [
+        "evidence:\n  - old",
+        "evidence :\n  - old",
+        "evidence:\n- old",
+        "evidence: [a.md, b.md]",
+        'sources: [".brigade/receipts/old.json"]',
+        "source: .brigade/receipts/old.json",
+        'refs: [".brigade/receipts/old.json"]',
+        'links: [".brigade/receipts/old.json"]',
+    ],
+)
+def test_structured_or_alternate_citations_have_no_unsafe_preview(tmp_path, capsys, block):
     path = card(tmp_path, "cache")
     path.write_text(path.read_text().replace("evidence: []", block))
-    log(tmp_path, path, ("e-new", "outcome", "2026-10-20T12:00:00Z"))
+    evidence(tmp_path, ".brigade/receipts/old.json")
+    log(tmp_path, path, (evidence(tmp_path, ".brigade/receipts/e-new.json"), "outcome", "2026-10-20T12:00:00Z"))
     before = snapshot(tmp_path)
     code, payload = command(tmp_path, capsys, "run", "--dry-run")
     assert code == 0
@@ -345,15 +466,19 @@ def test_block_list_metadata_has_no_unsafe_preview(tmp_path, capsys, block):
 def test_exact_reinforcement_is_already_cited(tmp_path, capsys, new_outcome):
     path = card(tmp_path, "cache")
     path.write_text(path.read_text().replace("evidence: []", 'evidence: [".claude/memory-handoffs/old.md"]'))
-    log(tmp_path, path, (".claude/memory-handoffs/processed/old.md", "reinforced", "2026-10-20T12:00:00Z"))
+    log(
+        tmp_path,
+        path,
+        (evidence(tmp_path, ".claude/memory-handoffs/processed/old.md"), "reinforced", "2026-10-20T12:00:00Z"),
+    )
     if new_outcome:
-        log(tmp_path, path, ("e-outcome", "outcome", "2026-10-21T12:00:00Z"))
+        log(tmp_path, path, (evidence(tmp_path, ".brigade/receipts/e-outcome.json"), "outcome", "2026-10-21T12:00:00Z"))
     code, payload = command(tmp_path, capsys, "run")
     assert code == 0
     if new_outcome:
         candidate = next(c for c in payload["candidates"] if c["kind"] == "reinforce")
         assert candidate["proof_count"] == 2
-        assert '+evidence: [".claude/memory-handoffs/old.md", "e-outcome"]' in candidate["diff"]
+        assert '+evidence: [".brigade/receipts/e-outcome.json", ".claude/memory-handoffs/old.md"]' in candidate["diff"]
     else:
         assert payload["candidates"] == []
 
@@ -389,7 +514,7 @@ def test_only_evidence_items_resolve_without_size_limit(tmp_path, capsys, monkey
 def test_limit_reports_omissions_and_prioritizes_stale_evidence(tmp_path, capsys):
     path = card(tmp_path, "cache")
     card(tmp_path, "duplicate")
-    log(tmp_path, path, ("e-new", "outcome", "2026-10-20T12:00:00Z"))
+    log(tmp_path, path, (evidence(tmp_path, ".brigade/receipts/e-new.json"), "outcome", "2026-10-20T12:00:00Z"))
     code, payload = command(tmp_path, capsys, "run", "--limit", "1")
     assert code == 0
     assert payload["total_candidates"] == 3
@@ -399,7 +524,7 @@ def test_limit_reports_omissions_and_prioritizes_stale_evidence(tmp_path, capsys
 
 def test_trailing_slash_card_root_is_accepted(tmp_path, capsys):
     path = card(tmp_path, "cache")
-    log(tmp_path, path, ("e-new", "outcome", "2026-10-20T12:00:00Z"))
+    log(tmp_path, path, (evidence(tmp_path, ".brigade/receipts/e-new.json"), "outcome", "2026-10-20T12:00:00Z"))
     config = tmp_path / ".brigade/memory-care.toml"
     config.write_text('card_roots = ["memory/cards/"]\n')
     code, payload = command(tmp_path, capsys, "run")
@@ -411,7 +536,7 @@ def test_trailing_slash_card_root_is_accepted(tmp_path, capsys):
 def test_duplicate_cross_scope_or_mixed_trust_requires_review(tmp_path, capsys, extra, scope):
     left = card(tmp_path, "left", extra="trust_label: reviewed\n")
     card(tmp_path, "right", extra=extra, scope=scope)
-    log(tmp_path, left, ("e-support", "reinforced", "2026-10-20T12:00:00Z"))
+    log(tmp_path, left, (evidence(tmp_path, ".brigade/receipts/e-support.json"), "reinforced", "2026-10-20T12:00:00Z"))
     code, payload = command(tmp_path, capsys, "run")
     assert code == 0
     duplicate = next(c for c in payload["candidates"] if c["kind"] == "duplicate")

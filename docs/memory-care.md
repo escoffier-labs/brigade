@@ -28,21 +28,27 @@ from 1 to 100, with a default of 20. Receipts include `total_candidates` and
 `truncated`. Priority is opposite-polarity flags, stale evidence, reinforcement,
 then duplicates, with stable ordering within each class.
 
-Each candidate cites evidence resolved in the log, a receipt or handoff root,
-an evidence root, or the local evidence bundle cache. Missing pointers,
-unrelated repository files, and external URLs do not count. `proof_count` counts
-distinct supporting ids. Only `reinforced` and `outcome` log rows supply support.
+Each candidate cites evidence resolved to an existing file in a receipt or
+handoff root, an evidence root, or the local evidence bundle cache. A log row
+alone does not resolve its id. Missing pointers, hash-only ids, unrelated
+repository files, and external URLs do not count. `proof_count` counts
+distinct resolved supporting ids. Only `reinforced` and `outcome` log rows supply support.
 Near matches appear in `review_evidence_ids` and never increase proof. Candidates
 citing near matches or contrary evidence are Tier 2 and have no metadata diff.
 Exact reinforcement is already applied by ingest, so its log rows do not propose
 appending another pointer for the archived handoff.
+The `outcome` row kind is reserved for future outcome capture. No production
+command writes it yet, so ingest alone cannot produce `reinforce` candidates
+in this slice.
 Staleness uses `last_consolidated`, falling back to `last_reviewed` and
 its supported aliases. Date-only cutoffs require evidence on a later UTC date.
 Exact normalized fingerprints identify duplicates. Opposite-polarity evidence
 always produces a Tier 2 review flag and never decides which claim is correct.
 Cross-scope and mixed-trust duplicate groups also receive Tier 2. Trust declarations
-include `trust_label` and nested provenance metadata. Block-style metadata lists
-that the scalar preview writer cannot preserve also force Tier 2 with no diff.
+include `trust_label` and nested provenance metadata. Block-style metadata lists,
+unparsed YAML flow lists, and citations through `sources`, `source`, `refs`, or
+`links` also force Tier 2 with no diff because the scalar evidence preview cannot
+preserve them.
 
 Runs retain `candidates.jsonl` and `receipt.json` under
 `.brigade/memory/reflect/runs/<run-id>/`, including dry runs. Dry runs print
@@ -58,12 +64,18 @@ directories, without deleting older runs. All accept `--target` and `--json`.
 A stage failure records a failed receipt and leaves cards untouched. Incomplete
 runs never become visible candidates. Unsafe storage is refused when a receipt
 cannot be written safely, including when reflect storage overlaps a card root.
-Malformed or missing frontmatter and ambiguous card identities are skipped and
-listed by path in the receipt's `skipped_cards`. Scope filtering precedes those
-checks. The evidence log's 4 MiB scan window is informational and recorded as
+Malformed or missing frontmatter, invalid UTF-8, oversized cards, and ambiguous
+card identities are skipped and listed by path in the receipt's `skipped_cards`.
+Identity collisions include ids and aliases across all valid cards before scope
+filtering. Corpus-wide file and byte limits still fail the run.
+The evidence log's 4 MiB scan window is informational and recorded as
 `scan_window_truncated`. Malformed rows inside that window, unreadable logs,
 and logs changed during a scan still fail the run. No log rotation or compaction
-command is provided in this slice.
+command is provided in this slice. To recover from a malformed row, pause writers
+and back up `.brigade/memory/reflect/evidence-log.jsonl`. Manually quarantine the
+invalid line outside the log, or truncate an incomplete final line. Preserve
+valid rows, then rerun reflection before resuming writers. Rows with an unknown
+`kind` also require recovery or a Brigade version that supports that kind.
 Policy promotion, proposal creation, and model-authored changes are not available
 through these commands.
 
