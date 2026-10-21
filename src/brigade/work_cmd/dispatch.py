@@ -202,7 +202,7 @@ def dispatch(
         with nullcontext() if dry_run else dispatch_state.dispatch_lock(target):
             engine = Apply(target)
             if not dry_run:
-                result = engine.reconcile(no_wait=no_wait)
+                result = engine.reconcile(no_wait=True)
                 if result == 130:
                     print(
                         json.dumps({"status": "canceled"}) if json_output else "dispatch canceled during reconciliation"

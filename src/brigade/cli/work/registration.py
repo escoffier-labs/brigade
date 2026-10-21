@@ -549,6 +549,11 @@ def register(sub: argparse._SubParsersAction) -> None:
         if name == "dispatch-reset":
             parser.add_argument("task_id", help="Task id or unique prefix.")
             parser.add_argument("--reason", required=True, help="Reason for resetting the breaker.")
+            parser.add_argument(
+                "--release-unknown",
+                action="store_true",
+                help="Release inspected unknown intents only when their children have exited.",
+            )
 
     p_work_claim = work_sub.add_parser(
         "claim",

@@ -638,7 +638,11 @@ def _dispatch_impl(args) -> int:
         try:
             if args.work_command == "dispatch-reset":
                 return dispatch_state.reset(
-                    target=args.target.resolve(), task_id=args.task_id, reason=args.reason, json_output=args.json
+                    target=args.target.resolve(),
+                    task_id=args.task_id,
+                    reason=args.reason,
+                    json_output=args.json,
+                    release_unknown=args.release_unknown,
                 )
             return dispatch_state.status(
                 target=args.target.resolve(), dispatch_id=getattr(args, "dispatch_id", None), json_output=args.json

@@ -58,12 +58,12 @@ def test_removed_finished_worktree_does_not_wedge_reconciliation(apply_target, c
     _apply(apply_target, capsys)
     _, row = _unfinished(apply_target)
     subprocess.run(["git", "worktree", "remove", "--force", row["worktree"]], cwd=apply_target, check=True)
-    _apply(apply_target, capsys, "--max", "0", expected=1)
+    _apply(apply_target, capsys, "--max", "0")
     (row,) = _intents(apply_target)
-    assert row["state"] == "failed"
-    assert row["terminal"]["failure_kind"] == "receipt-update-error"
-    assert row["terminal"]["infrastructure"] is True
-    assert work_cmd._read_task_ledger(apply_target)["tasks"][0]["status"] == "pending"
+    assert row["state"] == "completed"
+    assert row["terminal"]["changes"]["needs_review"] is True
+    assert row["terminal"]["changes"]["commit_error"]
+    assert work_cmd._read_task_ledger(apply_target)["tasks"][0]["status"] == "in_progress"
     _apply(apply_target, capsys, "--max", "0")
 
 

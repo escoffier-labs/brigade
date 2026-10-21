@@ -65,13 +65,19 @@ def process_identity(pid: int) -> tuple[str | None, str | None]:
 def child_alive(intent: dict[str, Any]) -> bool:
     launch = localio.read_json_dict(Path(intent["run_dir"]) / "dispatch-launch.json") if intent.get("run_dir") else None
     pid = launch.get("pid") if launch else intent.get("pid")
-    if not isinstance(pid, int) or pid <= 0:
+    expected = launch.get("process_token") if launch else intent.get("process_token")
+    if type(pid) is not int or pid <= 0:
+        pid, expected = intent.get("pid"), intent.get("process_token")
+    if type(pid) is not int or pid <= 0:
         return False
     state, token = process_identity(pid)
-    expected = launch.get("process_token") if launch else intent.get("process_token")
     if state == "Z" or (expected is not None and token is not None and expected != token):
         return False
     return runguard._pid_is_active(pid)
+
+
+def supervised(intent: dict[str, Any]) -> bool:
+    return intent["state"] not in TERMINAL or (intent["state"] == "unknown" and child_alive(intent))
 
 
 def live_children(target: Path) -> int:
@@ -224,7 +230,7 @@ def status(*, target: Path, dispatch_id: str | None = None, json_output: bool = 
     return 0
 
 
-def reset(*, target: Path, task_id: str, reason: str, json_output: bool = False) -> int:
+def reset(*, target: Path, task_id: str, reason: str, json_output: bool = False, release_unknown: bool = False) -> int:
     from .ledger import locking
 
     if not reason.strip():
@@ -234,14 +240,25 @@ def reset(*, target: Path, task_id: str, reason: str, json_output: bool = False)
         matches = [task["id"] for task in tasks if task["id"].startswith(task_id)]
         if len(matches) != 1:
             raise ValueError(f"task id not found or ambiguous: {task_id}")
+        unknown = (
+            [(path, row) for path, row in intents(target) if row["task_id"] == matches[0] and row["state"] == "unknown"]
+            if release_unknown
+            else []
+        )
+        if any(child_alive(row) for _, row in unknown):
+            raise ValueError("cannot release an unknown intent while its child is alive")
         receipt = {
             "schema": "brigade.work_dispatch_reset.v1",
             "task_id": matches[0],
             "reason": reason.strip(),
             "created_at": localio.utc_now_iso(),
+            "released_unknown": [row["intent_id"] for _, row in unknown],
         }
         path = root(target) / "resets" / f"{uuid4().hex}.json"
         path.parent.mkdir(parents=True, exist_ok=True)
         localio.write_json_exclusive(path, receipt)
+        for intent_path, row in unknown:
+            transition(intent_path, row, "canceled", recovery={"reset_receipt": str(path), "reason": reason.strip()})
+            locking._release_tasks(target, task_ids=[row["task_id"]], claim_ids=[row["claim_id"]])
     print(json.dumps(receipt) if json_output else f"reset: {matches[0]} ({reason.strip()})")
     return 0

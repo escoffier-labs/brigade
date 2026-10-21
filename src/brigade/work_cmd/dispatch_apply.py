@@ -93,34 +93,37 @@ def _finish(
         changes["needs_review"] = True
     worktree = Path(row["worktree"])
     if state == "completed":
-        changes["diff_stat"] = _git(worktree, "diff", "--stat", row["base_sha"])
-        changes["untracked"] = _git(worktree, "ls-files", "--others", "--exclude-standard")
-        head = _git(worktree, "rev-parse", "HEAD")
-        if head != row["base_sha"]:
-            changes["needs_review"] = True
-            changes["head"] = head
-        elif commit and _git(worktree, "status", "--porcelain"):
-            # Child credentials and sandbox are no longer involved. A crash
-            # after this commit is recognized as HEAD drift on recovery.
-            paths: set[str] = set()
-            for arguments in (
-                ("diff", "--name-only", "-z", "HEAD"),
-                ("ls-files", "--others", "--exclude-standard", "-z"),
-            ):
-                result = proc.run(["git", *arguments], cwd=worktree, timeout=30)
-                if result.code != 0 or result.output_limit_exceeded:
-                    raise ValueError("could not enumerate dispatch changes for commit")
-                paths.update(
-                    name
-                    for name in result.stdout.split("\0")
-                    if name and name != ".brigade" and not name.startswith(".brigade/")
-                )
-            if paths:
-                ordered_paths = sorted(paths)
-                for start in range(0, len(ordered_paths), 100):
-                    _git(worktree, "add", "-A", "--", *ordered_paths[start : start + 100])
-                _git(worktree, "commit", "--only", "-m", f"feat: dispatch {row['task_id']}", "--", *ordered_paths)
-                changes["commit"] = _git(worktree, "rev-parse", "HEAD")
+        try:
+            changes["diff_stat"] = _git(worktree, "diff", "--stat", row["base_sha"])
+            changes["untracked"] = _git(worktree, "ls-files", "--others", "--exclude-standard")
+            head = _git(worktree, "rev-parse", "HEAD")
+            if head != row["base_sha"]:
+                changes["needs_review"] = True
+                changes["head"] = head
+            elif commit and _git(worktree, "status", "--porcelain"):
+                # Child credentials and sandbox are no longer involved. A crash
+                # after this commit is recognized as HEAD drift on recovery.
+                paths: set[str] = set()
+                for arguments in (
+                    ("diff", "--name-only", "-z", "HEAD"),
+                    ("ls-files", "--others", "--exclude-standard", "-z"),
+                ):
+                    result = proc.run(["git", *arguments], cwd=worktree, timeout=30)
+                    if result.code != 0 or result.output_limit_exceeded:
+                        raise ValueError("could not enumerate dispatch changes for commit")
+                    paths.update(
+                        name
+                        for name in result.stdout.split("\0")
+                        if name and name != ".brigade" and not name.startswith(".brigade/")
+                    )
+                if paths:
+                    ordered_paths = sorted(paths)
+                    for start in range(0, len(ordered_paths), 100):
+                        _git(worktree, "add", "-A", "--", *ordered_paths[start : start + 100])
+                    _git(worktree, "commit", "--only", "-m", f"feat: dispatch {row['task_id']}", "--", *ordered_paths)
+                    changes["commit"] = _git(worktree, "rev-parse", "HEAD")
+        except (ValueError, OSError) as exc:
+            changes.update(commit_error=str(exc), commit_failed=True, needs_review=True)
     terminal = {
         "run_status": meta.get("status"),
         "failure_kind": kind,
@@ -133,6 +136,40 @@ def _finish(
     store.transition(path, row, state, terminal=terminal)
     if state != "completed":
         _release(target, row)
+
+
+def _session_result(rows: list[tuple[Path, dict[str, Any]]]) -> int:
+    latest = {row["task_id"]: row for _, row in sorted(rows, key=lambda pair: pair[1]["attempt_no"])}
+    return int(any(row["state"] in {"failed", "orphaned", "unknown"} for row in latest.values()))
+
+
+def _terminal_state(meta: dict[str, Any]) -> str:
+    status = meta.get("status")
+    if status in runs_cmd._SUCCESS_STATUSES | {"completed", "complete"}:
+        return "completed"
+    return "orphaned" if status == "orphaned" else "failed"
+
+
+def _child_argv(row: dict[str, Any], session: dict[str, Any], prompt: str) -> list[str]:
+    argv = [
+        sys.executable,
+        "-m",
+        "brigade",
+        "run",
+        "--worker",
+        row["seat"],
+        "--cwd",
+        row["worktree"],
+        "--output-dir",
+        row["run_dir"],
+        "--roster",
+        session["roster_path"],
+        "--wait",
+        "0",
+    ]
+    if session.get("run_budget"):
+        argv += ["--run-budget", session["run_budget"]]
+    return [*argv, prompt]
 
 
 def _terminal_meta(run_dir: Path) -> dict[str, Any] | None:
@@ -187,6 +224,7 @@ class Apply:
         self.lanes: dict[str, run_lane_state.Lane] = {}
         self.started = time.monotonic()
         self.last_launch: float | None = None
+        self.adopted: set[Path] = set()
 
     def observe(self) -> None:
         lanes = run_lane_state.collect_lanes(self.target, limit=run_lane_state.MAX_LIMIT)
@@ -196,8 +234,9 @@ class Apply:
         try:
             return self._refresh(path, row, session)
         except ChildJournalError as exc:
-            store.transition(path, row, "unknown", terminal={"error": str(exc)})
-            return True
+            if row["state"] != "unknown":
+                store.transition(path, row, "unknown", terminal={"error": str(exc)})
+            return not store.child_alive(row)
         except (ValueError, OSError) as exc:
             self._intent_error(path, row, "receipt-update-error", exc)
             return True
@@ -224,8 +263,12 @@ class Apply:
             return False
         run_dir = Path(row["run_dir"])
         receipt = localio.read_json_dict(run_dir / "dispatch-launch.json")
-        if receipt is not None and row.get("pid") != receipt["pid"]:
-            store.transition(path, row, "running", pid=receipt["pid"], process_token=receipt.get("process_token"))
+        if receipt is not None:
+            pid = receipt.get("pid")
+            if type(pid) is not int or pid <= 0:
+                raise ChildJournalError("dispatch launch receipt has no valid positive integer pid")
+            if row.get("pid") != pid:
+                store.transition(path, row, "running", pid=pid, process_token=receipt.get("process_token"))
         child = self.children.get(row["intent_id"])
         if child is not None:
             child.poll()  # Reap owned children before checking PID liveness.
@@ -234,12 +277,7 @@ class Apply:
         if meta is not None:
             if alive:
                 return False
-            state = (
-                "completed"
-                if meta.get("status") in runs_cmd._SUCCESS_STATUSES | {"completed", "complete"}
-                else ("orphaned" if meta.get("status") == "orphaned" else "failed")
-            )
-            _finish(self.target, path, row, state, meta, commit=session.get("commit", False))
+            _finish(self.target, path, row, _terminal_state(meta), meta, commit=session.get("commit", False))
             return True
         if receipt is not None and receipt.get("launch_error") and not alive:
             _finish(
@@ -273,7 +311,7 @@ class Apply:
                     self.target,
                     path,
                     row,
-                    "completed" if meta.get("status") in runs_cmd._SUCCESS_STATUSES else "failed",
+                    _terminal_state(meta),
                     meta,
                     commit=session.get("commit", False),
                 )
@@ -349,23 +387,7 @@ class Apply:
             task = next(
                 task for task in locking._read_task_ledger(self.target)["tasks"] if task["id"] == row["task_id"]
             )
-            argv = [
-                "brigade",
-                "run",
-                "--worker",
-                row["seat"],
-                "--cwd",
-                row["worktree"],
-                "--output-dir",
-                row["run_dir"],
-                "--roster",
-                session["roster_path"],
-                "--wait",
-                "0",
-            ]
-            if session.get("run_budget"):
-                argv += ["--run-budget", session["run_budget"]]
-            argv.append(_render_task_run_prompt(task) + CONTRACT)
+            argv = _child_argv(row, session, _render_task_run_prompt(task) + CONTRACT)
             try:
                 with (run_dir / "dispatch-child.log").open("ab") as log:
                     child = subprocess.Popen(
@@ -392,26 +414,49 @@ class Apply:
     def cancel(
         self, rows: list[tuple[Path, dict[str, Any]]], session: dict[str, Any], *, timeout: bool = False
     ) -> None:
-        self.registry.cancel()
+        remaining = []
+        registry = proc.ProcessRegistry()
         for path, row in rows:
-            if row["state"] not in store.TERMINAL:
-                if row["intent_id"] not in self.children and store.child_alive(row):
-                    self._cancel_adopted(row)
-                _finish(
-                    self.target,
-                    path,
-                    row,
-                    "failed" if timeout else "canceled",
-                    {
-                        "status": "timeout" if timeout else "canceled",
-                        "failure_kind": "budget-exhausted" if timeout else "operator-cancelled",
-                    },
-                )
+            try:
+                self.refresh(path, row, session)
+            except KeyboardInterrupt:
+                pass  # A repeated interrupt must not prevent cancellation.
+            if row["state"] not in store.TERMINAL or row["state"] == "unknown":
+                remaining.append((path, row))
+                child = self.children.get(row["intent_id"])
+                if child is not None:
+                    registry.register(child, seat=row["seat"])
+        registry.cancel()
+        for path, row in remaining:
+            if row["intent_id"] not in self.children and store.child_alive(row):
+                self._cancel_adopted(row)
+            # A child can publish success while cancellation is in flight.
+            # Only read terminal evidence here. A dead nonterminal child was
+            # canceled by us and must not be classified as an orphan.
+            try:
+                meta = _terminal_meta(Path(row["run_dir"])) if row.get("run_dir") else None
+            except ChildJournalError:
+                meta = None
+            _finish(
+                self.target,
+                path,
+                row,
+                _terminal_state(meta) if meta is not None else ("failed" if timeout else "canceled"),
+                meta
+                if meta is not None
+                else {
+                    "status": "timeout" if timeout else "canceled",
+                    "failure_kind": "budget-exhausted" if timeout else "operator-cancelled",
+                },
+                commit=session.get("commit", False),
+            )
 
     def _cancel_adopted(self, row: dict[str, Any]) -> None:
         receipt = localio.read_json_dict(Path(row["run_dir"]) / "dispatch-launch.json")
         pid = receipt.get("pid") if receipt else row.get("pid")
-        if not isinstance(pid, int) or not store.child_alive(row):
+        if type(pid) is not int or pid <= 0:
+            pid = row.get("pid")
+        if type(pid) is not int or pid <= 0 or not store.child_alive(row):
             return
         if os.name == "nt":
             result = proc.run(["taskkill", "/PID", str(pid), "/T", "/F"], timeout=5)
@@ -499,7 +544,7 @@ class Apply:
             # Existing intents are resumed from their saved plan, not the now
             # claimed ledger. Even a plan-only interrupted apply gets here.
             for path, row in rows:
-                if row["state"] in store.ACTIVE:
+                if store.supervised(row):
                     if self.refresh(path, row, session):
                         continue
                     if session.get("deadline") is not None and elapsed_seconds() >= session["deadline"]:
@@ -520,28 +565,46 @@ class Apply:
                 attempted.add(item["task_id"])
                 accepted = sum(row["state"] != "lost_race" for _, row in rows)
             if no_wait:
-                return int(any(row["state"] in {"failed", "orphaned", "unknown"} for _, row in rows))
+                self._retry(directory, session, plan, rows, launch)
+                if all(not store.supervised(row) for _, row in rows):
+                    session["finished_at"] = localio.utc_now_iso()
+                    localio.write_json(directory / "session.json", session)
+                return _session_result(rows)
+            prior_result = 0
             while True:
+                for previous in sorted(self.adopted):
+                    previous_result = self.session(previous, no_wait=True)
+                    if store.read(previous / "session.json").get("finished_at"):
+                        prior_result = max(prior_result, previous_result)
+                        self.adopted.discard(previous)
                 if session.get("deadline") is not None and elapsed_seconds() >= session["deadline"]:
                     self.cancel(rows, session, timeout=True)
-                    break
+                    if not self.adopted:
+                        break
                 for path, row in list(rows):
                     self.refresh(path, row, session)
                 retried = self._retry(directory, session, plan, rows, launch)
-                if not retried and all(row["state"] in store.TERMINAL for _, row in rows):
+                if not retried and not self.adopted and all(not store.supervised(row) for _, row in rows):
                     break
                 time.sleep(0.05)
         except KeyboardInterrupt:
             self.cancel(rows, session)
+            self._cancel_previous()
             return 130
         except Exception:
             self.cancel(rows, session)
+            self._cancel_previous()
             raise
-        if all(row["state"] in store.TERMINAL for _, row in rows):
+        if all(not store.supervised(row) for _, row in rows):
             session["finished_at"] = localio.utc_now_iso()
             localio.write_json(directory / "session.json", session)
-        latest = {row["task_id"]: row for _, row in sorted(rows, key=lambda pair: pair[1]["attempt_no"])}
-        return int(any(row["state"] in {"failed", "orphaned", "unknown"} for row in latest.values()))
+        return max(prior_result, _session_result(rows))
+
+    def _cancel_previous(self) -> None:
+        for directory in sorted(self.adopted):
+            session = store.read(directory / "session.json")
+            rows = [(path, store.read(path)) for path in (directory / "intents").glob("*.json")]
+            self.cancel(rows, session)
 
     def _retry(
         self,
@@ -590,4 +653,6 @@ class Apply:
                     self.refresh(path, row, session)
             if not session.get("finished_at"):
                 result = max(result, self.session(directory, no_wait=no_wait))
+                if not store.read(directory / "session.json").get("finished_at"):
+                    self.adopted.add(directory)
         return result

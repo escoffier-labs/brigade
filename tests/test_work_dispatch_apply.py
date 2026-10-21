@@ -13,6 +13,7 @@ from pathlib import Path
 import pytest
 
 from brigade import cli, localio, runguard, work_cmd
+from tests._posix import requires_process_groups
 from tests.test_work_dispatch import _tasks, dispatch_target  # noqa: F401
 from tests.work_cmd_test_helpers import _init_git_repo
 
@@ -30,7 +31,7 @@ def apply_target(dispatch_target, monkeypatch, tmp_path):  # noqa: F811
         check=True,
     )
     monkeypatch.setattr(runguard, "brigade_worktree_root", lambda: tmp_path / "worktrees")
-    executable = tmp_path / "bin" / "brigade"
+    executable = tmp_path / "bin" / "fake_run.py"
     executable.parent.mkdir()
     executable.write_text(
         f"#!{sys.executable}\n"
@@ -57,7 +58,15 @@ with runguard.run_lock(cwd, run_dir=run, wait_seconds=0):
 """
     )
     executable.chmod(0o755)
-    monkeypatch.setenv("PATH", str(executable.parent) + os.pathsep + os.environ["PATH"])
+    popen = subprocess.Popen
+
+    def launch(argv, *args, **kwargs):
+        if "brigade.work_cmd.dispatch_child" in argv:
+            assert argv[4:8] == [sys.executable, "-m", "brigade", "run"]
+            argv = [*argv[:4], sys.executable, str(executable), *argv[7:]]
+        return popen(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", launch)
     _tasks(target, [["base.txt"]])
     return target
 
@@ -349,6 +358,7 @@ def test_live_child_consumes_capacity_in_next_plan(apply_target, capsys, monkeyp
     _apply(apply_target, capsys, "--max", "0")
 
 
+@requires_process_groups
 def test_orphaned_child_is_finalized_and_claim_released(apply_target, capsys, monkeypatch):
     monkeypatch.setenv("FAKE_DISPATCH_SLEEP", "60")
     _apply(apply_target, capsys, "--no-wait")
@@ -551,7 +561,13 @@ def test_duplicate_bootstrap_never_executes_same_child_twice(apply_target, capsy
     (intent,) = _intents(apply_target)
     run_dir = Path(intent["run_dir"])
     argv = json.loads((run_dir / "argv.json").read_text())
-    child = subprocess.run([sys.executable, "-m", "brigade.work_cmd.dispatch_child", str(run_dir), *argv], check=False)
+    from brigade.work_cmd import dispatch_apply as apply, dispatch_state as store
+
+    session = store.read(next((apply_target / ".brigade/dispatch").glob("dispatch-*/session.json")))
+    command = apply._child_argv(intent, session, argv[-1])
+    child = subprocess.run(
+        [sys.executable, "-m", "brigade.work_cmd.dispatch_child", str(run_dir), *command], check=False
+    )
     assert child.returncode == 0
     assert (run_dir / "launch-count").read_text() == "launch\n"
 
@@ -594,7 +610,7 @@ def test_resumed_intent_does_not_launch_after_claim_reassignment(apply_target, c
 
 
 def test_child_rejected_before_run_metadata_is_infrastructure(apply_target, capsys):
-    executable = apply_target / "bin/brigade"
+    executable = apply_target / "bin/fake_run.py"
     executable.write_text(f"#!{sys.executable}\nraise SystemExit(2)\n")
     _apply(apply_target, capsys, expected=1)
     rows = _intents(apply_target)
