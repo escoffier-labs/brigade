@@ -1594,7 +1594,7 @@ def _goal_scaffold_markdown(payload: dict[str, Any]) -> str:
             "",
             "Safety boundaries:",
             "- No remote mutation except a final normal push when explicitly required by the phase goal.",
-            "- No daemon, scheduler, automatic promotion, automatic memory edits, or arbitrary command execution.",
+            "- This session does not install schedules, automatically promote findings, edit canonical memory, or execute arbitrary commands.",
             "- Do not copy raw logs, private paths, raw scanner output, private evidence, tokens, hostnames, private repo names, owner names, or org names into public files.",
             "",
             "Acceptance:",

@@ -70,7 +70,7 @@ def hardening_plan_payload(target: Path) -> dict[str, Any]:
         "workstreams": HARDENING_WORKSTREAMS,
         "phases": phases,
         "safety_boundaries": [
-            "no daemon",
+            "hardening planning runs once and returns a local plan",
             "no scheduler mutation",
             "no web UI",
             "no database",

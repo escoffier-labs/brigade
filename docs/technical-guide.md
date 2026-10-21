@@ -24,10 +24,9 @@ This guide preserves the detailed command walkthroughs and operational notes tha
 </p>
 
 <p align="center">
-  <code>brigade</code> is a local operator-system CLI for agent workspaces.
-  It bootstraps the workspace, runs bounded multi-agent work, routes scanner
-  findings into reviewable queues, records release evidence, and keeps publish
-  decisions manual.
+  <code>brigade</code> coordinates autonomous agents within operator-defined scopes.
+  It connects local and cloud work through run journals, verification receipts,
+  and evidence-based handoffs. Operators place gates where approval is needed.
 </p>
 
 ## What this is
@@ -57,11 +56,11 @@ This README is dense, and a handful of words carry most of the weight. Learn the
 | **promote** | Move an item out of the queue into a real task or memory note. |
 | **receipt** | A local file logging that something happened, kept for audit and proof. |
 | **closeout** | Marking something reviewed or done so it stops nagging you. |
-| **gate** | A manual approval checkpoint; nothing risky happens without your yes. |
+| **gate** | A checkpoint the operator places where they want approval before work continues. |
 | **AFK** | Away from keyboard, a long unattended run the agent does solo. |
 | **station** | A subsystem of Brigade (memory, security, tokens, pantry) with its own commands. |
 
-Execution model: explicit invocation only. Brigade writes local files and review queues when asked. It does not publish, edit canonical memory, run a scheduler or daemon, run arbitrary commands, or touch remote servers on its own. Full boundary: [`docs/execution-model.md`](execution-model.md). That deliberate friction is what the rest of this doc keeps repeating.
+Execution model: the operator sets policy, budgets, scopes, and gates, then agents work within that authority. Receipts with real exit codes and run journals record what happened. Agents pass evidence packages and handoffs so the next agent can check their work. Commands and operator-started services share this model. Details: [`docs/execution-model.md`](execution-model.md).
 
 ## The design
 
@@ -106,7 +105,7 @@ Brigade has grown from a bootstrap kit into a local control plane for agent work
 - Operator notifications: optional `agent-notify` status and setup planning for private Discord, Telegram, or Signal notifications. `brigade work brief` and related status surfaces may report readiness or suggest the station; no command sends unless the operator uses an explicit send action.
 - Security and publish guards: content-guard integration, template audit, SARIF output, suppressions, accepted-risk closeouts, policy presets, prompt and instruction checks, MCP checks, supply-chain checks, and redacted reports.
 
-The common rule is deliberate friction: Brigade writes local receipts and review queues, but it does not start daemons, mutate remotes, edit canonical memory, run arbitrary commands, publish releases, or auto-promote findings without an explicit operator command. See [`docs/execution-model.md`](execution-model.md).
+The operator can inspect or stop work and place gates where approval is needed. Within an authorized scope, agents can keep working and pass verification evidence to each other. Local receipts and run journals retain the record even when coordination uses the fleet hub or cloud seats. Service lifecycles and record locations are in the [`execution model`](execution-model.md).
 
 ### Agent activity
 
@@ -522,6 +521,11 @@ default. Pass `--strict-approvals` to also make stale, expired,
 indeterminate, or unapproved runs return nonzero. The default
 receipt-verification exit behavior is unchanged.
 
+Use `brigade receipts lineage <kind>:<id>` to inspect recorded plan, run,
+verify, outcome, handoff, and synthesis parents. The command reports broken
+links and digest mismatches without changing receipts. Pass `--json` for the
+versioned `brigade.receipts_lineage.v1` contract.
+
 Use `brigade runs reap --cwd /path/to/repo` to terminalize local runs whose
 recorded owner process is gone. Reap writes `status: orphaned` and a dirty-file
 count (filenames stay off the receipt) through the same run.json writer every
@@ -533,6 +537,40 @@ rather than migrated. It does not rewrite Hub history: `brigade fleet
 status --all` ages silent nonterminal rows to display-only `run.stale` after
 24h, separate from the 30-minute live-status window. `brigade work brief`
 lists orphaned runs and the recorded dirty count.
+
+Use `brigade runs patrol --target /path/to/repo` to report local run and
+ledger-claim lanes with timestamped evidence. It joins bounded run snapshots,
+lifecycle journals, lock owners, linked worktrees, and changed-file mtimes.
+Approval pauses and artifact collection report `waiting` unless a stale owner
+lock exceeds `--older-than`, which reports `dead`. Missing or unreadable
+required evidence reports `unknown`. Legacy runs can use event-file or worktree
+progress when no journal was requested. A terminal run that retains its
+own live lock beyond 60 seconds reports `zombie`. A stale lock remains
+cleanup evidence on the terminal outcome.
+
+The defaults are `--older-than 2h`, `--idle-after 15m`, `--stall-after 30m`,
+`--stranded-after 24h`, and `--limit 50`. `--json` emits
+`brigade.runs_patrol.v1`. `--receipt` saves that report under
+`.brigade/patrol/<id>/patrol.json`. `--fail-on dead,stalled` returns status 1
+when either state appears. Runs are scanned newest first by directory mtime,
+with up to 1,000 run snapshots and 1,000 linked worktrees per patrol. `--limit`
+bounds returned lanes and active claimed ledger tasks after the whole byte-capped
+ledger is read. Finished and cancelled tasks with retained claims are excluded.
+`--limit` does not bound run inspection cost. Lock and owner observations are
+reused within each workspace. Evidence observation times identify collection
+start, which is also the freshness reference for that scan. Classification uses
+the clock after collection for run age and progress. JSON records elapsed
+collection time as `scan_duration_seconds`.
+JSON reports `truncated: true` when a source or result window
+is cut short. Text output warns, and `--fail-on unknown` returns 1 on truncation.
+Claims join runs only by exact `claim_id`. Current run writers omit that field,
+so normal claims remain separate lanes until dispatch-intent integration (#1849).
+An unmatched claim without independent worktree findings reports `unknown`
+with reason `no task-to-run join key`, regardless of age or other active runs.
+Claim age alone cannot establish `claim-without-run` until a verified join exists.
+Invalid options or an unreadable target return 2.
+Patrol does not repair runs or claims. Dispatch intents and Hub joins are
+reserved for later slices.
 
 Use `brigade runs prune-worktrees --target /path/to/repo` to list Brigade-created
 detached worktrees that are safe to remove: clean, branch-backed, and older
@@ -976,7 +1014,7 @@ Task ledger commands:
 - `brigade work task add "..." --seat-class mechanical|judgment|review --spend-by <ISO-8601>` stores optional dispatch routing hints under task `metadata` (seat tier class, never a model id; quota spend-by deadline). Absent annotations change nothing. Graph nodes may set the same keys under `metadata`.
 - `brigade work task annotate <task-id> --seat-class … --spend-by …` updates those hints on an existing task; `--clear-seat-class` / `--clear-spend-by` remove them.
 - `brigade work task add --graph plan.json` atomically materializes tasks and edges from a JSON plan (`nodes` plus `edges`). Use `--dry-run` to validate without writing.
-- `brigade work ready [--campaign <name>] [--explain] [--parallel-safe] [--json]` lists pending tasks with no open readiness blockers. `blocks` edges gate readiness. Open blockers on a parent propagate to children through `parent-child` edges. `discovered-from` is provenance-only and never gates readiness. Ready items include `seat_class` / `spend_by` when annotated so a human or skill dispatcher can route without re-deriving the table; Brigade does not dispatch on its own. `--campaign <name>` aggregates ready work across member repos listed in `.brigade/campaigns/<name>.json` (or a campaign JSON path): task ids are repo-qualified as `member:local-id`, optional campaign-level cross-repo `blocks` edges gate readiness at aggregation time, and removing the campaign file changes nothing in member ledgers. Missing or unreadable configured members fail closed (nonzero) while reporting `member_errors`. Campaign edges are `blocks` only; endpoints must name existing member tasks. `--parallel-safe` adds a query-time partition of the ready set into dispatch waves by footprint intersection (exact file overlap; one-hop GraphTrail symbol impact when available; file-overlap-only degrade otherwise). Same wave is parallel-safe; cross-wave work must serialize. Empty footprints get an exclusive wave. Waves are never stored. With `--campaign`, `--parallel-safe` composes global wave N from each member's local wave N (campaign order) so intra-repo file and symbol-impact safety is preserved. Matching relative paths in separate repositories do not conflict. Empty footprints stay exclusive inside their member repository only. Per-member GraphTrail degradation is reported without discarding that member's file-overlap waves. Missing or unreadable members still fail closed before any waves are returned.
+- `brigade work ready [--campaign <name>] [--explain] [--parallel-safe] [--json]` lists pending tasks with no open readiness blockers. `blocks` edges gate readiness. Open blockers on a parent propagate to children through `parent-child` edges. `discovered-from` is provenance-only and never gates readiness. Ready items include `seat_class` / `spend_by` when annotated so a human or skill dispatcher can route without re-deriving the table. `work ready` reports candidates and waves without launching workers. `brigade run` executes dispatched tasks today. Automatic wave dispatch is planned in [#1849](https://github.com/escoffier-labs/brigade/issues/1849). `--campaign <name>` aggregates ready work across member repos listed in `.brigade/campaigns/<name>.json` (or a campaign JSON path): task ids are repo-qualified as `member:local-id`, optional campaign-level cross-repo `blocks` edges gate readiness at aggregation time, and removing the campaign file changes nothing in member ledgers. Missing or unreadable configured members fail closed (nonzero) while reporting `member_errors`. Campaign edges are `blocks` only. Endpoints must name existing member tasks. `--parallel-safe` adds a query-time partition of the ready set into dispatch waves by footprint intersection, using exact file overlap and one-hop code graph symbol impact when available. When code graph impact is unavailable, partitioning uses file overlap alone. Work in the same wave is parallel-safe. Cross-wave work must serialize. Empty footprints get an exclusive wave. Waves are never stored. With `--campaign`, `--parallel-safe` composes global wave N from each member's local wave N (campaign order) so intra-repo file and symbol-impact safety is preserved. Matching relative paths in separate repositories do not conflict. Empty footprints stay exclusive inside their member repository only. Per-member code graph degradation is reported without discarding that member's file-overlap waves. Missing or unreadable members still fail closed before any waves are returned.
 
   A missing `blocks` source or missing ancestor parent fails closed with `missing_dependency`, including blockers inherited from ancestors. Missing dependent targets stay informational. `--explain` and `--json` separate unfinished `blocking_dependencies` from unresolvable `missing_dependencies` per blocked task and retain `orphans`. Explained output names the affected ids and repair commands such as `brigade work task edge remove --id <edge-id>`. Claim and `work run --task-id` use the same resolver.
 
@@ -1070,7 +1108,7 @@ Scanner registry commands:
 - `brigade work sweep closeout <sweep-id|latest>` marks a sweep reviewed only after all actionable imports are no longer pending, or after the operator records explicit deferrals with `--defer <import-id>` or `--defer-all`.
 - `brigade work scanners doctor --import-issues` reports missing config, disabled required producers, bad commands, missing or stale output paths, schedule conflicts, failed or timed-out runs, malformed receipts, missing logs, and due scanners, then can import those health issues as local task imports.
 
-The scanner registry is explicit and local. Brigade does not install cron jobs, start a daemon, run scanners from `brief` or `doctor`, promote scanner output automatically, or mutate scanner output beyond the configured command's own behavior. `brigade work sweep` is still explicit foreground execution, not a scheduler, `sweep-review` is read-only, and sweep closeout records review state only.
+The scanner registry records configured commands and their output paths. `brigade work sweep` runs those commands in the foreground and leaves scanner receipts and a sweep report. `brief` and `doctor` inspect scanner state without launching scanners. `sweep-review` is read-only, and sweep closeout records review state. Schedule recurring sweeps through the operator's host scheduler. See [scheduled care](scheduled-care.md).
 
 Roadmap and repo-fleet commands:
 
@@ -1314,7 +1352,7 @@ For long AFK phase sessions, `brigade work phases schema --json` includes a `ses
 
 Release candidate compare checks include AFK session drift. If a candidate was built with one checkpoint, checkpoint-compare result, or session completion-gate state and the current local session evidence changes, `brigade release candidate compare` reports the stale session evidence before any manual publish step.
 
-The daily driver is local and explicit. It does not start daemons, run arbitrary commands, execute scanners, reviewers, tools, or fleet sweeps, mutate remotes, push, tag, publish, upload analytics, or edit canonical memory.
+The daily driver executes bounded local actions under its approval state and records each step for resume and closeout. Its action set excludes scanner, reviewer, tool, and fleet-sweep execution, remote writes, publishing, and canonical memory edits. Other Brigade command families own those workflows and their records.
 
 Run a direct work session with `brigade work run`.
 It opens a work session, resolves the next task, runs `brigade dogfood`, and closes completed ledger tasks after successful runs.
@@ -1403,7 +1441,7 @@ The export is deterministic and idempotent for unchanged receipts: records are s
 
 Export is fail-open per receipt. Malformed or unreadable receipt files produce one stderr warning each and are skipped, so one bad historical receipt does not block newer evidence. The command exits non-zero only when there are no receipt candidates under the target, the target or output path is invalid, or the output cannot be written.
 
-Verification and closeout are local gates. Brigade does not mutate CI, GitHub, reviewers, scanner promotions, handoff ingestion, daemons, or schedulers. Verification commands run only when explicitly requested.
+Verification records the check command, real exit code, logs, and Git state. Closeout checks that evidence against task acceptance criteria. An operator can place these checkpoints in an agent workflow without approving every intermediate step. These commands record local evidence without changing CI or GitHub review state.
 
 See [`docs/work-closeout.md`](work-closeout.md) for the verification command rules, closeout record contents, and ready-state checklist.
 
@@ -1940,8 +1978,8 @@ Each subsystem has a companion doc under [`docs/`](.) with the full local contra
 - [`docs/tool-catalog.md`](tool-catalog.md) - the portable tool catalog, call review, runtimes, and policy
 - [`docs/backup-health.md`](backup-health.md) - read-only backup health summaries and issue routing
 - [`docs/memory-care.md`](memory-care.md) - memory card decay scanning and refresh imports
-- [`docs/execution-model.md`](execution-model.md) - explicit-invocation boundary and external-scheduler ownership
-- [`docs/scheduled-care.md`](scheduled-care.md) - operator-owned cron, systemd, and CI recipes plus `brigade care` scaffold for the memory-care loop
+- [`docs/execution-model.md`](execution-model.md) - operator control, autonomous work, service lifecycles, and record locations
+- [`docs/scheduled-care.md`](scheduled-care.md) - operator-owned care schedules and runbook receipts, including the `brigade care` scaffold
 - [`docs/security.md`](security.md) - the agent workspace security scanner and evidence bundles
 - [`docs/content-guard-allow-markers.md`](content-guard-allow-markers.md) - inline and file-scoped content-guard allow comments
 - [`docs/inspiration-patterns.md`](inspiration-patterns.md) - neutral pattern families and source-pattern decisions
