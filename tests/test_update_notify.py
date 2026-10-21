@@ -326,6 +326,7 @@ def _run_brief(tmp_path, cache_home: Path, monkeypatch, capsys) -> str:
 
     set_home(monkeypatch, str(cache_home))
     monkeypatch.setenv("XDG_CACHE_HOME", str(cache_home / "cache"))
+    monkeypatch.setenv("LOCALAPPDATA", str(cache_home / "cache"))
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
     monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
