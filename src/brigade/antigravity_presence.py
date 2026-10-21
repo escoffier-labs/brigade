@@ -130,6 +130,7 @@ def _spawn_publisher(target: Path, session: str, event: str) -> None:
         creationflags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     subprocess.Popen(  # Do not wait: the Hub must never block agy or inherit its pipes.
         argv,
+        cwd=Path(__file__).resolve().parent,  # Keep the workspace off Python's implicit import path.
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,

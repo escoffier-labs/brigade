@@ -305,6 +305,33 @@ def test_hook_process_returns_while_detached_publisher_is_blocked(workspace, tmp
             time.sleep(0.01)
 
 
+@pytest.mark.parametrize("shadow", ["brigade.py", "brigade/__init__.py"])
+def test_publisher_does_not_import_workspace_copy(workspace, tmp_path, monkeypatch, capsys, shadow):
+    executed = tmp_path / "workspace-code-executed"
+    shadow_path = workspace / shadow
+    shadow_path.parent.mkdir(parents=True, exist_ok=True)
+    shadow_path.write_text(f"from pathlib import Path\nPath({str(executed)!r}).touch()\n", encoding="utf-8")
+    processes = []
+
+    def spawn(argv, **kwargs):
+        process = subprocess.Popen(argv, **kwargs)
+        processes.append(process)
+        return process
+
+    _stub_publisher_process(monkeypatch, spawn)
+    monkeypatch.chdir(workspace)
+    monkeypatch.setattr(
+        sys, "stdin", io.StringIO(json.dumps({"conversationId": "conversation-1", "workspacePaths": [str(workspace)]}))
+    )
+    assert cli.main(["work", "presence-hook", "--harness", "antigravity", "--stdin", "--event", "start"]) == 0
+    assert len(processes) == 1
+    result = processes[0].wait(timeout=10)
+    assert not executed.exists(), "publisher executed the workspace's Brigade copy"
+    assert result == 0
+    captured = capsys.readouterr()
+    assert captured.out == captured.err == ""
+
+
 def test_hook_finds_unique_wired_workspaces_after_unwired_roots(workspace, tmp_path, monkeypatch, capsys):
     unwired = tmp_path / "unwired"
     unwired.mkdir()
