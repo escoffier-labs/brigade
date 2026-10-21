@@ -83,6 +83,10 @@ def _journal_digest(lane: Lane, now: datetime) -> str | None:
 def _release_local(
     lane: Lane, row: dict[str, Any], thresholds: Thresholds, now: datetime, target: Path
 ) -> dict[str, Any]:
+    if lane.intent is not None:
+        return {"status": "refused", "reason": "dispatch owns intent claim finalization"}
+    if not lane.intent_scan_complete:
+        return {"status": "refused", "reason": "intent scan incomplete, dispatch ownership unverified"}
     if lane.claim is None or lane.task is None:
         return {"status": "skipped", "reason": "no ledger claim"}
     if lane.run_dir is None or row["state"] not in TERMINAL:
@@ -134,6 +138,10 @@ def _release_local(
 
 
 def _hub_preflight(lane: Lane, row: dict[str, Any]) -> Path | dict[str, Any]:
+    if lane.intent is not None:
+        return {"status": "refused", "reason": "dispatch owns intent claim finalization"}
+    if not lane.intent_scan_complete:
+        return {"status": "refused", "reason": "intent scan incomplete, dispatch ownership unverified"}
     if not fleet_client.load_fleet_config().get("hub_url"):
         return {"status": "skipped", "reason": "no Hub configured"}
     if lane.run_dir is None or row["state"] not in TERMINAL or lane.run is None:
@@ -206,6 +214,7 @@ def apply_actions(
     if "reap" in actions:
         actions = ["reap", *(action for action in actions if action != "reap")]
     for lane, row in zip(lanes, rows, strict=True):
+        refresh_failed = False
         for action in actions:
             if action == "reap" and row["state"] != "dead":
                 continue
@@ -333,6 +342,7 @@ def apply_actions(
                             row = {**row, "state": "orphaned"}
                         except (OSError, ValueError, RuntimeError) as exc:
                             record["refresh_error"] = type(exc).__name__
+                            refresh_failed = True
                     elif record["status"] == "applied" and scope == "ledger":
                         lane.claim = None
                         lane.lock_state = "absent"
@@ -340,5 +350,5 @@ def apply_actions(
                     record.update(status="failed", reason=type(exc).__name__)
                 previous.append(record)
                 localio.write_json(receipt, payload)
-            if payload["actions"] and payload["actions"][-1].get("refresh_error"):
+            if refresh_failed:
                 break

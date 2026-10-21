@@ -86,6 +86,7 @@ class Lane:
     progress_errors: list[str] = field(default_factory=list)
     evidence: list[Evidence] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    intent_scan_complete: bool = False
 
 
 class Lanes(list[Lane]):
@@ -514,28 +515,71 @@ def collect_lanes(
     # Optional caller input supports reconciliation. Patrol discovers the same
     # local receipts by default, without changing them or activating journals.
     intent_rows: list[tuple[dict[str, Any], str | None]] = []
+    intent_scan_complete = True
+    intent_scan_truncated = False
     if dispatch_intents is not None:
         intent_rows = [(item, None) for item in dispatch_intents[:RUN_SCAN_LIMIT]]
-        lanes.truncated |= len(dispatch_intents) > RUN_SCAN_LIMIT
+        intent_scan_complete = len(dispatch_intents) <= RUN_SCAN_LIMIT
+        lanes.truncated |= not intent_scan_complete
     else:
         dispatch_root = target / ".brigade/dispatch"
-        if dispatch_root.exists() and not dispatch_root.is_symlink():
-            for path in dispatch_root.glob("dispatch-*/intents/*.json"):
-                if len(intent_rows) >= RUN_SCAN_LIMIT:
-                    lanes.truncated = True
-                    break
-                if path.parent.is_symlink() or path.parent.parent.is_symlink():
-                    continue
-                try:
-                    item, digest = _read_json(path)
-                    intent_rows.append((item, digest))
-                except (OSError, ValueError):
-                    continue
+        try:
+            try:
+                root_info = dispatch_root.lstat()
+            except FileNotFoundError:
+                root_info = None
+            if root_info is not None:
+                if not stat.S_ISDIR(root_info.st_mode):
+                    raise ValueError("unsafe dispatch root")
+                inspected = 0
+                with os.scandir(dispatch_root) as dispatches:
+                    for index, entry in enumerate(dispatches):
+                        if index >= RUN_SCAN_LIMIT:
+                            lanes.truncated = True
+                            intent_scan_complete = False
+                            break
+                        if not entry.name.startswith("dispatch-"):
+                            continue
+                        if not entry.is_dir(follow_symlinks=False):
+                            raise ValueError("unsafe dispatch directory")
+                        intent_root = dispatch_root / entry.name / "intents"
+                        try:
+                            info = intent_root.lstat()
+                        except FileNotFoundError:
+                            continue
+                        if not stat.S_ISDIR(info.st_mode):
+                            raise ValueError("unsafe intent directory")
+                        with os.scandir(intent_root) as paths:
+                            for candidate in paths:
+                                # Failed reads and junk consume the same budget.
+                                if inspected >= RUN_SCAN_LIMIT:
+                                    lanes.truncated = True
+                                    intent_scan_truncated = True
+                                    intent_scan_complete = False
+                                    break
+                                inspected += 1
+                                if not candidate.name.endswith(".json"):
+                                    continue
+                                try:
+                                    item, digest = _read_json(intent_root / candidate.name)
+                                    intent_rows.append((item, digest))
+                                except (OSError, ValueError, RuntimeError, RecursionError):
+                                    intent_scan_complete = False
+                        if intent_scan_truncated:
+                            break
+        except (OSError, ValueError, RuntimeError, RecursionError):
+            intent_scan_complete = False
     by_run = {lane.run_dir.name: lane for lane in lanes if lane.run_dir is not None}
     for item, intent_digest in intent_rows:
         intent_run_id = item.get("run_id")
+        if intent_run_id is not None and (not isinstance(intent_run_id, str) or not intent_run_id):
+            intent_scan_complete = False
+            continue
         lane = by_run.get(intent_run_id) if isinstance(intent_run_id, str) else None
-        if lane is not None and isinstance(item.get("task_id"), str):
+        if lane is not None:
+            if not isinstance(item.get("task_id"), str) or not item["task_id"]:
+                intent_scan_complete = False
+                continue
             if lane.intent is not None:
                 lane.errors.append("multiple dispatch intents for run")
                 continue
@@ -612,6 +656,10 @@ def collect_lanes(
                 lanes.append(Lane("ledger", errors=["ledger unreadable"]))
             for lane in lanes:
                 lane.evidence.append(Evidence(".brigade/work/tasks.json", clock, "unreadable"))
+    for lane in lanes:
+        lane.intent_scan_complete = intent_scan_complete
+        if not intent_scan_complete:
+            lane.evidence.append(Evidence("dispatch:intents", clock, "intent scan incomplete"))
     lanes.truncated |= len(lanes) > limit
     # Run rows retain newest-first order. Truncation is explicit even when
     # the output window leaves no room for unmatched claim rows.

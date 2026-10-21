@@ -906,3 +906,40 @@ def test_dispatch_intent_joins_only_exact_run_and_claim_generation(tmp_path, cla
     else:
         assert joined.task is None
         assert len(lanes) == 2
+
+
+@pytest.mark.parametrize("supplied", [False, True])
+def test_intent_scan_budget_counts_unreadable_candidates(tmp_path, monkeypatch, supplied):
+    from brigade import run_lane_state
+
+    repo = _repo(tmp_path)
+    _write_run(repo, "20260820-120000-patrol01", status="ok")
+    root = repo / ".brigade/dispatch/dispatch-example/intents"
+    root.mkdir(parents=True)
+    for index in range(4):
+        (root / f"intent-{index}.json").write_text("{bad JSON")
+    monkeypatch.setattr(run_lane_state, "RUN_SCAN_LIMIT", 2)
+    read = run_lane_state._read_json
+    reads = []
+
+    def counted(path):
+        if path.parent == root:
+            reads.append(path)
+        return read(path)
+
+    monkeypatch.setattr(run_lane_state, "_read_json", counted)
+    lanes = run_lane_state.collect_lanes(repo, now=NOW, dispatch_intents=[{}] * 3 if supplied else None)
+    assert len(reads) <= 2
+    assert lanes.truncated
+    assert not lanes[0].intent_scan_complete
+
+
+def test_output_truncation_does_not_imply_incomplete_intent_scan(tmp_path):
+    from brigade.run_lane_state import collect_lanes
+
+    repo = _repo(tmp_path)
+    _write_run(repo, "20260820-120000-patrol01", status="ok")
+    _write_run(repo, "20260820-120001-patrol02", status="ok")
+    lanes = collect_lanes(repo, now=NOW, limit=1)
+    assert lanes.truncated
+    assert lanes[0].intent_scan_complete

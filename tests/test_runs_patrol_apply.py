@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from datetime import timedelta
 
 import pytest
@@ -75,6 +76,140 @@ def test_release_claim_for_terminal_run(tmp_path, capsys):
     action = next(item for item in report["actions"] if item["action"] == "release-claim")
     assert action["status"] == "applied"
     assert action["before"]["claim_id"] == "claim-1" and action["after"]["claim_id"] is None
+
+
+@pytest.mark.parametrize("state,status", [("completed", "ok"), ("failed", "failed")])
+@pytest.mark.parametrize("scope", ["ledger", "hub"])
+def test_release_preserves_dispatch_intent_ownership(tmp_path, monkeypatch, capsys, state, status, scope):
+    from brigade import fleet_claim_release, fleet_client
+
+    repo = _repo(tmp_path)
+    run = _write_run(repo, "20260820-120000-patrol01", status=status, extra={"claim_id": "claim-1"})
+    path = _ledger(repo)
+    intent = repo / ".brigade/dispatch/dispatch-example/intents/intent-1.json"
+    intent.parent.mkdir(parents=True)
+    localio.write_json(
+        intent,
+        {"intent_id": "intent-1", "run_id": run.name, "task_id": "task-1", "claim_id": "claim-1", "state": state},
+    )
+    before = path.read_bytes(), intent.read_bytes()
+    calls = []
+    monkeypatch.setattr(
+        fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.example.invalid"} if scope == "hub" else {}
+    )
+
+    def release(*args, **kwargs):
+        calls.append(kwargs)
+        print(json.dumps({"released": True}))
+        return 0
+
+    monkeypatch.setattr(fleet_claim_release, "_release_claim", release)
+    report = _patrol(repo, capsys, apply="release-claim")
+    assert report["lanes"][0]["intent"]["state"] == state
+    assert calls == []
+    task = json.loads(path.read_text())["tasks"][0]
+    assert task["status"] == "in_progress"
+    assert task["claim"]["claim_id"] == "claim-1"
+    assert (path.read_bytes(), intent.read_bytes()) == before
+    assert not any(action["status"] == "applied" for action in report["actions"])
+
+
+@pytest.mark.parametrize("scope", ["ledger", "hub"])
+@pytest.mark.parametrize(
+    "scan",
+    [
+        "unreadable",
+        "truncated",
+        "root-link",
+        "dispatch-link",
+        "intents-link",
+        "root-file",
+        "complete",
+        "run-id-number",
+        "run-id-list",
+        "run-id-object",
+        "run-id-empty",
+        "task-id-missing",
+        "task-id-null",
+        "task-id-number",
+        "task-id-empty",
+        "planned",
+    ],
+)
+def test_release_requires_complete_intent_scan(tmp_path, monkeypatch, capsys, scope, scan):
+    from contextlib import contextmanager
+
+    from brigade import fleet_claim_release, fleet_client, run_lane_state
+
+    repo = _repo(tmp_path)
+    run = _write_run(repo, "20260820-120000-patrol01", status="ok", extra={"claim_id": "claim-1"})
+    ledger = _ledger(repo)
+    root = repo / ".brigade/dispatch"
+    intent = root / "dispatch-example/intents/z-intent.json"
+    intent.parent.mkdir(parents=True)
+    localio.write_json(
+        intent,
+        {"intent_id": "intent-1", "run_id": run.name, "task_id": "task-1", "claim_id": "claim-1", "state": "completed"},
+    )
+    if scan == "unreadable":
+        intent.write_text("{broken JSON")
+    elif scan == "truncated":
+        localio.write_json(intent.with_name("a-unrelated.json"), {"task_id": "other", "run_id": "other"})
+        monkeypatch.setattr(run_lane_state, "RUN_SCAN_LIMIT", 1)
+        scandir = os.scandir
+
+        @contextmanager
+        def ordered(path):
+            with scandir(path) as entries:
+                yield iter(sorted(entries, key=lambda entry: entry.name))
+
+        monkeypatch.setattr(os, "scandir", ordered)
+    elif scan.endswith("-link"):
+        path = {"root-link": root, "dispatch-link": intent.parent.parent, "intents-link": intent.parent}[scan]
+        moved = tmp_path / "saved-intents"
+        path.rename(moved)
+        path.symlink_to(moved, target_is_directory=True)
+    elif scan == "root-file":
+        root.rename(tmp_path / "saved-intents")
+        root.write_text("not a directory")
+    elif scan.startswith("run-id-"):
+        row = json.loads(intent.read_text())
+        row["run_id"] = {"run-id-number": 42, "run-id-list": [], "run-id-object": {}, "run-id-empty": ""}[scan]
+        localio.write_json(intent, row)
+    elif scan.startswith("task-id-"):
+        row = json.loads(intent.read_text())
+        if scan == "task-id-missing":
+            del row["task_id"]
+        else:
+            row["task_id"] = {"task-id-null": None, "task-id-number": 42, "task-id-empty": ""}[scan]
+        localio.write_json(intent, row)
+    elif scan == "planned":
+        localio.write_json(intent, {"task_id": "other", "run_id": None, "state": "planned"})
+    else:
+        # A complete scan with unrelated intents establishes this run has none.
+        localio.write_json(intent, {"task_id": "other", "run_id": "other"})
+    before = ledger.read_bytes()
+    calls = []
+    monkeypatch.setattr(
+        fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.example.invalid"} if scope == "hub" else {}
+    )
+
+    def release(*args, **kwargs):
+        calls.append(kwargs)
+        print(json.dumps({"released": True}))
+        return 0
+
+    monkeypatch.setattr(fleet_claim_release, "_release_claim", release)
+    report = _patrol(repo, capsys, apply="release-claim")
+    assert report["lanes"][0]["state"] == "complete"
+    if scan in {"complete", "planned"}:
+        assert json.loads(ledger.read_text())["tasks"][0].get("claim") is None
+        assert len(calls) == (scope == "hub")
+    else:
+        assert calls == []
+        assert ledger.read_bytes() == before
+        assert not any(action["status"] == "applied" for action in report["actions"])
+        assert any(item["detail"] == "intent scan incomplete" for item in report["lanes"][0]["evidence"])
 
 
 def test_release_refuses_newer_claim(tmp_path, monkeypatch, capsys):
@@ -555,6 +690,42 @@ def test_reap_success_survives_refresh_failure(tmp_path, monkeypatch, capsys, re
     assert action["refresh_error"] == "ValueError"
     assert len(report["actions"]) == 1
     assert json.loads(path.read_text())["tasks"][0].get("claim")
+
+
+def test_reap_refresh_failure_does_not_skip_later_lane_escalation(tmp_path, monkeypatch, capsys):
+    from brigade import runs_patrol_actions
+
+    repo = _repo(tmp_path)
+    later = _write_run(repo, "20260820-120000-patrol01")
+    _write_stale_lock(repo, later)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+    reap = runs_patrol_actions._reap
+    monkeypatch.setattr(runs_patrol_actions, "_reap", lambda *args: {"status": "failed", "reason": "reap unavailable"})
+    prior = _patrol(repo, capsys, apply="reap")
+    assert prior["actions"][0]["status"] == "failed"
+    monkeypatch.setattr(runs_patrol_actions, "_reap", reap)
+
+    workspace = tmp_path / "other-workspace"
+    workspace.mkdir()
+    first = _write_run(repo, "20260820-120000-patrol02", extra={"lock_workspace": str(workspace)})
+    _write_stale_lock(workspace, first)
+    os.utime(later, (NOW.timestamp(), NOW.timestamp()))
+    os.utime(first, (NOW.timestamp() + 1, NOW.timestamp() + 1))
+
+    def unavailable_journal(*args):
+        raise ValueError("journal unavailable after reap")
+
+    monkeypatch.setattr(runs_patrol_actions, "_journal_digest", unavailable_journal)
+    report = _patrol(repo, capsys, apply="reap,release-claim,escalate")
+    assert [lane["run_id"] for lane in report["lanes"]] == [first.name, later.name]
+    assert report["actions"][0]["status"] == "applied"
+    assert report["actions"][0]["refresh_error"] == "ValueError"
+    assert any(
+        action["lane_id"] == report["lanes"][1]["lane_id"]
+        and action["action"] == "escalate"
+        and action["status"] == "recorded"
+        for action in report["actions"]
+    )
 
 
 def test_unconfigured_hub_does_not_reserve_repeated_actions(tmp_path, monkeypatch, capsys):

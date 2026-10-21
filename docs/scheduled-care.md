@@ -132,6 +132,7 @@ The crontab backend keeps one atomic managed block. `care install --backend
 crontab` without `--entry` includes run-patrol in that block. `--entry
 run-patrol` still refuses crontab. Systemd and launchd default installs retain
 the existing five-recipe set until run-patrol is explicitly selected.
+Existing CARE crontab blocks show as stale after upgrading, and `brigade care install --target .` refreshes the managed block.
 
 Related docs: [memory care](memory-care.md), [scanner registry](scanner-registry.md), [operator center](operator-center.md), [agents guide](agents-guide.md), [execution model](execution-model.md).
 
