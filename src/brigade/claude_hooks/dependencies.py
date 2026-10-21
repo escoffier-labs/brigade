@@ -114,7 +114,9 @@ def record_read(target: Path, state: dict[str, Any], payload: dict[str, Any]) ->
     path = relative_path(target, tool_input.get("file_path"), payload.get("cwd"))
     if path is None:
         return False
-    state["read_files"] = [path]
+    files = dict.fromkeys(item for item in _collection(state, "read_files") if isinstance(item, str))
+    files.pop(path, None)
+    state["read_files"] = [*files, path][-MAX_SEEN_FILES:]
     return True
 
 

@@ -2342,6 +2342,9 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
             artifact_recorded = _record_exercised_artifact(state, skill_id)
             if artifact_recorded or read_recorded:
                 fields: tuple[str, ...] = ("read_files",) if read_recorded else ()
+                if read_recorded:
+                    # Only this read refreshes recency in the locked merge.
+                    state["read_files"] = state["read_files"][-1:]
                 if artifact_recorded:
                     fields += ("exercised_artifact_id", "exercised_artifact_kind")
                 _write_session_state_preserving_latch(target, session_id, state, log_target=target, patch_fields=fields)
