@@ -81,3 +81,52 @@ def test_latest_release_receipt_falls_back_to_started_at_for_other_dir_names(tmp
 
 def test_latest_release_receipt_without_runs_root(tmp_path: Path):
     assert evidence._latest_release_receipt(tmp_path) is None
+
+
+def test_latest_candidate_orders_same_second_candidates_by_created_at(tmp_path: Path):
+    root = tmp_path / ".brigade" / "release" / "candidates"
+    _write(
+        root / "20260805-130000-candidate-older" / "EVIDENCE.json",
+        {"candidate_id": "20260805-130000-candidate-older", "created_at": "2026-08-05T13:00:00+00:00"},
+    )
+    # Same second: the random suffix sorts "zzz" first, but "aaa" was created later.
+    _write(
+        root / "20260805-140000-candidate-zzz" / "EVIDENCE.json",
+        {"candidate_id": "20260805-140000-candidate-zzz", "created_at": "2026-08-05T14:00:00.100000+00:00"},
+    )
+    _write(
+        root / "20260805-140000-candidate-aaa" / "EVIDENCE.json",
+        {"candidate_id": "20260805-140000-candidate-aaa", "created_at": "2026-08-05T14:00:00.900000+00:00"},
+    )
+
+    latest = evidence._latest_candidate(tmp_path)
+
+    assert latest is not None
+    assert latest["candidate_id"] == "20260805-140000-candidate-aaa"
+
+
+def test_latest_release_receipt_orders_same_second_runs_by_started_at(tmp_path: Path, monkeypatch):
+    root = tmp_path / ".brigade" / "release" / "runs"
+    _write(root / "20260805-130000-release-older" / "receipt.json", {"run_id": "older"})
+    _write(
+        root / "20260805-140000-release-zzz" / "receipt.json",
+        {"run_id": "zzz", "started_at": "2026-08-05T14:00:00.100000+00:00"},
+    )
+    _write(
+        root / "20260805-140000-release-aaa" / "receipt.json",
+        {"run_id": "aaa", "started_at": "2026-08-05T14:00:00.900000+00:00"},
+    )
+    decoded: list[str] = []
+    original = evidence._read_release_receipt
+
+    def counting_read(path: Path):
+        decoded.append(path.name)
+        return original(path)
+
+    monkeypatch.setattr(evidence, "_read_release_receipt", counting_read)
+
+    latest = evidence._latest_release_receipt(tmp_path)
+
+    assert latest is not None
+    assert latest["run_id"] == "aaa"
+    assert sorted(decoded) == ["20260805-140000-release-aaa", "20260805-140000-release-zzz"]

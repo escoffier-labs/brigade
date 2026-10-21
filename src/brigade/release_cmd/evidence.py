@@ -70,7 +70,8 @@ def _release_receipts(target: Path) -> list[dict[str, Any]]:
 
 def _latest_release_receipt(target: Path) -> dict[str, Any] | None:
     # commands.run names each run dir from the same datetime it stores as started_at,
-    # so name order is start order and only the newest receipt needs decoding.
+    # so name order is start order to the second and only the newest second needs
+    # decoding. Runs within that second are ordered by their precise started_at.
     # Other layouts keep the full started_at sort.
     root = _release_runs_root(target)
     if not root.is_dir():
@@ -79,11 +80,17 @@ def _latest_release_receipt(target: Path) -> dict[str, Any] | None:
     if not reportstore._dir_names_are_timestamp_prefixed(children):
         receipts = _release_receipts(target)
         return receipts[0] if receipts else None
+    newest: list[dict[str, Any]] = []
+    boundary: str | None = None
     for child in children:
+        if boundary is not None and reportstore.timestamp_prefix(child.name) != boundary:
+            break
         receipt = _read_release_receipt(child)
         if isinstance(receipt, dict):
-            return receipt
-    return None
+            newest.append(receipt)
+            boundary = boundary or reportstore.timestamp_prefix(child.name)
+    newest.sort(key=lambda item: str(item.get("started_at") or item.get("run_id") or ""), reverse=True)
+    return newest[0] if newest else None
 
 
 def _resolve_release_receipt(target: Path, run_id: str) -> tuple[dict[str, Any] | None, str | None]:
