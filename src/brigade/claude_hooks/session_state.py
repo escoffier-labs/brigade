@@ -276,16 +276,16 @@ def _write_session_state_preserving_latch(
     state: dict[str, Any],
     *,
     log_target: Path | None = None,
-    require_same_epoch: bool = False,
+    patch_fields: tuple[str, ...] | None = None,
 ) -> bool:
-    """Write state without allowing an older payload to clear the timeout latch."""
+    """Save state, or patch observer-owned fields, preserving concurrent evidence."""
     try:
         with _rt()._session_state_lock(target, session_id):
             current = _rt().read_session_state(target, session_id)
             current_state = current if isinstance(current, dict) else {}
             updated = dict(state)
             current_epoch = current_state.get("task_epoch")
-            if require_same_epoch and updated.get("task_epoch") != current_epoch:
+            if patch_fields is not None and updated.get("task_epoch") != current_epoch:
                 return False
             if (
                 current_epoch is not None
@@ -294,6 +294,18 @@ def _write_session_state_preserving_latch(
             ):
                 # A newer dispatched task completed while this hook was running.
                 return False
+            if patch_fields is not None:
+                updated = dict(current_state)
+                artifact_keys = {"exercised_artifact_id", "exercised_artifact_kind"}
+                for key in patch_fields:
+                    if key in state and key not in artifact_keys:
+                        updated[key] = state[key]
+                if "exercised_artifact_id" in patch_fields:
+                    _rt()._record_exercised_artifact(
+                        updated,
+                        state.get("exercised_artifact_id"),
+                        kind=state.get("exercised_artifact_kind", "skill"),
+                    )
             dependencies.merge_observations(updated, current_state)
             if updated.get("task_epoch") == current_epoch:
                 # Completed writes are monotonic within a task. Observation

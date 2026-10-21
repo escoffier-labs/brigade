@@ -2072,7 +2072,9 @@ def _additional_context(
         state = read_session_state(target, session_id) or {}
         if state.get("task_epoch") == task_epoch:
             state["brief_files"] = sorted(set(state.get("brief_files", [])) | set(files))[: dependencies.MAX_SEEN_FILES]
-            _write_session_state_preserving_latch(target, session_id, state, log_target=target, require_same_epoch=True)
+            _write_session_state_preserving_latch(
+                target, session_id, state, log_target=target, patch_fields=("brief_files",)
+            )
     return result
 
 
@@ -2237,7 +2239,9 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
             brief_text = _run_brief(target)
             recall_text = _run_recall(target, payload)
             state["briefed"] = True
-            _write_session_state_preserving_latch(target, session_id, state, log_target=target)
+            _write_session_state_preserving_latch(
+                target, session_id, state, log_target=target, patch_fields=("briefed",)
+            )
             records = _restore_brief_records(brief_text)
             if recall_text.strip():
                 records.extend(_brief_records(recall_text))
@@ -2255,7 +2259,7 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
         brief_text = _run_brief(target)
         recall_text = _run_recall(target, payload)
         state["briefed"] = True
-        _write_session_state_preserving_latch(target, session_id, state, log_target=target)
+        _write_session_state_preserving_latch(target, session_id, state, log_target=target, patch_fields=("briefed",))
         records = _brief_records(brief_text)
         if recall_text.strip():
             records.extend(_brief_records(recall_text))
@@ -2276,7 +2280,9 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
             # to this session instead of a shared worktree delta (#959).
             state["pending_write_at"] = localio.utc_now_iso()
             check_id = dependencies.record_write(target, state, payload)
-            if not _write_session_state_preserving_latch(target, session_id, state, log_target=target):
+            if not _write_session_state_preserving_latch(
+                target, session_id, state, log_target=target, patch_fields=("pending_write_at", "dependency_checks")
+            ):
                 return None
             warning = dependencies.warning_for_check(state, check_id)
             return _additional_context(event, warning, target=target, session_id=session_id) if warning else None
@@ -2332,8 +2338,12 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
         if tool_name == "Read":
             skill_id = _skill_id_from_skill_path(target, post_tool_input.get("file_path"))
             read_recorded = dependencies.record_read(target, state, payload)
-            if _record_exercised_artifact(state, skill_id) or read_recorded:
-                _write_session_state_preserving_latch(target, session_id, state, log_target=target)
+            artifact_recorded = _record_exercised_artifact(state, skill_id)
+            if artifact_recorded or read_recorded:
+                fields: tuple[str, ...] = ("read_files",)
+                if artifact_recorded:
+                    fields += ("exercised_artifact_id", "exercised_artifact_kind")
+                _write_session_state_preserving_latch(target, session_id, state, log_target=target, patch_fields=fields)
             return None
         if tool_name == "Bash" and (_is_routed_verify(command) or _is_brigade_run(command)):
             if _is_routed_verify(command):

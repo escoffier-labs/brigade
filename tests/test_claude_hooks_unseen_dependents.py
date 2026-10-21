@@ -418,6 +418,60 @@ def test_read_cannot_erase_or_rewind_concurrent_write_evidence(target, monkeypat
     assert event(target, "Stop")["decision"] == "block"
 
 
+@pytest.mark.parametrize("observer", ["read", "brief", "write_check"])
+@pytest.mark.parametrize("transition", ["start", "finish"])
+def test_observer_preserves_pending_bash_lifecycle(target, monkeypatch, observer, transition):
+    graph(target, monkeypatch)
+    event(target, "SessionStart", source="startup")
+    bash = {"tool_name": "Bash", "tool_input": {"command": "custom-generator"}}
+    if transition == "finish":
+        event(target, "PreToolUse", **bash)
+    expected_pending = {}
+
+    def overlap():
+        if transition == "start":
+            event(target, "PreToolUse", **bash)
+        else:
+            (target / "api.py").write_text("def serve(): return 1\n")
+            event(target, "PostToolUse", **bash)
+        current = runtime.read_session_state(target, "session-one")
+        expected_pending.update({key: value for key, value in current.items() if key.startswith("pending_bash_")})
+
+    if observer == "read":
+        original = dependencies.record_read
+
+        def read(*args):
+            overlap()
+            return original(*args)
+
+        monkeypatch.setattr(dependencies, "record_read", read)
+        event(target, "PostToolUse", tool_name="Read", tool_input={"file_path": "caller.py"})
+    elif observer == "brief":
+
+        def brief(*args):
+            overlap()
+            return "_schema v1: 1 entry points - 1 edges_\n- caller.py\n"
+
+        monkeypatch.setattr(runtime, "_run_brief", brief)
+        event(target, "SessionStart", source="compact")
+    else:
+        original_query = dependencies._dependents
+
+        def dependents(*args):
+            overlap()
+            return original_query(*args)
+
+        monkeypatch.setattr(dependencies, "_dependents", dependents)
+        event(target, "PreToolUse", tool_name="Edit", tool_input={"file_path": "api.py"})
+    state = runtime.read_session_state(target, "session-one")
+    assert {key: value for key, value in state.items() if key.startswith("pending_bash_")} == expected_pending
+    if transition == "start":
+        (target / "api.py").write_text("def serve(): return 1\n")
+        event(target, "PostToolUse", **bash)
+    assert runtime.read_session_state(target, "session-one")["write_observed"] is True
+    assert event(target, "Stop")["decision"] == "block"
+
+
 @pytest.mark.parametrize("key", ["read_files", "brief_files", "dependency_checks"])
 @pytest.mark.parametrize("malformed", [None, 17, "not-a-list", [None, 17, {}]])
 def test_hook_repairs_malformed_observation_collections(target, key, malformed):
