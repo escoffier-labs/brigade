@@ -35,8 +35,11 @@ repository files, and external URLs do not count. `proof_count` counts
 distinct resolved supporting ids. Only `reinforced` and `outcome` log rows supply support.
 Near matches appear in `review_evidence_ids` and never increase proof. Candidates
 citing near matches or contrary evidence are Tier 2 and have no metadata diff.
-Exact reinforcement is already applied by ingest, so its log rows do not propose
-appending another pointer for the archived handoff.
+Exact reinforcement is already applied by ingest, so its log rows alone do not
+produce reinforcement previews. A preview triggered by new outcome evidence
+also includes resolved reinforcement ids so its evidence list supports its proof count.
+Reflection considers the newest 64 distinct log evidence ids per card by timestamp,
+with evidence ids breaking ties. Older ids remain in the log.
 The `outcome` row kind is reserved for future outcome capture. No production
 command writes it yet, so ingest alone cannot produce `reinforce` candidates
 in this slice.
@@ -59,13 +62,20 @@ prints a review summary instead of a consolidation diff. No preview is applied.
 `memory reflect status` shows the latest receipt, `memory reflect candidates`
 lists the latest successful run, and `memory reflect show <candidate-id>` shows
 one retained candidate and its preview. Inspection reads the newest 1024 run
-directories, without deleting older runs. All accept `--target` and `--json`.
+directories, without deleting older runs. Invalid receipts are skipped and counted
+in the status payload's `invalid_runs`. Missing receipts indicate unfinished runs
+and are not counted as invalid. All accept `--target` and `--json`.
+Text previews escape terminal control characters except newlines, carriage returns,
+and tabs. Stored candidates retain the original diff text.
 
 A stage failure records a failed receipt and leaves cards untouched. Incomplete
 runs never become visible candidates. Unsafe storage is refused when a receipt
 cannot be written safely, including when reflect storage overlaps a card root.
-Malformed or missing frontmatter, invalid UTF-8, oversized cards, and ambiguous
-card identities are skipped and listed by path in the receipt's `skipped_cards`.
+Malformed or missing frontmatter, invalid UTF-8, oversized cards, permission-denied
+cards, files with multiple hard links, cards with more than 64 evidence references,
+and ambiguous card identities are skipped and listed by path with a reason in the
+receipt's `skipped_cards`. Cards changed during an exact read still fail the run.
+Retry after the writer finishes.
 Identity collisions include ids and aliases across all valid cards before scope
 filtering. Corpus-wide file and byte limits still fail the run.
 The evidence log's 4 MiB scan window is informational and recorded as

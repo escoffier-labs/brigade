@@ -127,7 +127,7 @@ def run_payload(
     return payload
 
 
-def _runs(target: Path) -> list[dict[str, Any]]:
+def _runs(target: Path) -> tuple[list[dict[str, Any]], int]:
     root = target / ROOT
     try:
         with io.directory(root):
@@ -136,8 +136,9 @@ def _runs(target: Path) -> list[dict[str, Any]]:
                 (path for path in root.iterdir() if re.fullmatch(r"\d{8}-\d{6}-\d{6}-[0-9a-f]{8}", path.name)),
             )
     except FileNotFoundError:
-        return []
+        return [], 0
     runs: list[dict[str, Any]] = []
+    invalid = 0
     for path in paths:
         if not re.fullmatch(r"\d{8}-\d{6}-\d{6}-[0-9a-f]{8}", path.name):
             continue
@@ -145,6 +146,9 @@ def _runs(target: Path) -> list[dict[str, Any]]:
             receipt = io.read_object(path / "receipt.json", private=True)
         except FileNotFoundError:
             continue  # A concurrent or interrupted run has not published a receipt.
+        except (OSError, ValueError, UnicodeError, RecursionError):
+            invalid += 1
+            continue
         count = receipt.get("candidate_count")
         if (
             receipt.get("run_id") != path.name
@@ -153,9 +157,10 @@ def _runs(target: Path) -> list[dict[str, Any]]:
             or type(count) is not int
             or not 0 <= count <= MAX_LIMIT
         ):
-            raise ValueError("reflect run receipt mismatch")
+            invalid += 1
+            continue
         runs.append(receipt)
-    return runs
+    return runs, invalid
 
 
 def _candidates(target: Path, run: dict[str, Any]) -> list[dict[str, Any]]:
@@ -178,9 +183,14 @@ def _candidates(target: Path, run: dict[str, Any]) -> list[dict[str, Any]]:
 def inspect_payload(*, target: Path, command: str, candidate_id: str | None = None) -> dict[str, Any]:
     if command == "show" and not re.fullmatch(r"candidate-[0-9a-f]{24}", candidate_id or ""):
         raise ValueError("invalid candidate id")
-    runs = _runs(target)
+    runs, invalid = _runs(target)
     if command == "status":
-        return {"status": "ok", "run_count": len(runs), "latest_run": runs[0] if runs else None}
+        return {
+            "status": "ok",
+            "run_count": len(runs),
+            "invalid_runs": invalid,
+            "latest_run": runs[0] if runs else None,
+        }
     successful = [run for run in runs if run["status"] == "completed"]
     if command == "candidates":
         return {
@@ -193,6 +203,13 @@ def inspect_payload(*, target: Path, command: str, candidate_id: str | None = No
             if candidate["candidate_id"] == candidate_id:
                 return candidate
     raise ValueError("candidate not found")
+
+
+def _terminal_text(value: str) -> str:
+    return "".join(
+        f"\\x{ord(char):02x}" if (ord(char) < 32 or 127 <= ord(char) <= 159) and char not in "\n\r\t" else char
+        for char in value
+    )
 
 
 def dispatch(args: argparse.Namespace) -> int:
@@ -213,13 +230,13 @@ def dispatch(args: argparse.Namespace) -> int:
     else:
         print(f"memory reflect: {payload.get('status', payload.get('kind', 'ok'))}")
         if "error" in payload:
-            print(f"error: {payload['error']}")
+            print(_terminal_text(f"error: {payload['error']}"))
         if "latest_run" in payload:
             print(json.dumps(payload, sort_keys=True, indent=2))
         candidates = payload.get("candidates", [payload] if "candidate_id" in payload else [])
         for candidate in candidates:
-            print(f"{candidate['candidate_id']} {candidate['kind']}: {candidate['summary']}")
+            print(_terminal_text(f"{candidate['candidate_id']} {candidate['kind']}: {candidate['summary']}"))
             if getattr(args, "dry_run", False) or args.memory_reflect_command == "show":
                 if candidate["diff"]:
-                    print(candidate["diff"], end="" if candidate["diff"].endswith("\n") else "\n")
+                    print(_terminal_text(candidate["diff"]), end="" if candidate["diff"].endswith("\n") else "\n")
     return 1 if payload.get("status") == "failed" else 2 if payload.get("status") == "refused" else 0

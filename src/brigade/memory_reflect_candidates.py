@@ -69,6 +69,14 @@ def read_cards(
         rel = path.relative_to(target).as_posix()
         try:
             raw = io.read_bytes(path, limit=io.MAX_CARD_BYTES)
+        except PermissionError:
+            skipped.append({"path": rel, "reason": "canonical card is unreadable"})
+            continue
+        except OSError as exc:
+            if str(exc) != "file must be regular and single-link":
+                raise
+            skipped.append({"path": rel, "reason": str(exc)})
+            continue
         except ValueError as exc:
             if str(exc) != "file size limit exceeded":
                 raise
@@ -87,6 +95,9 @@ def read_cards(
         if not valid:
             if scope is None or meta.get("scope", "repo") == scope:
                 skipped.append({"path": rel, "reason": "malformed canonical frontmatter"})
+            continue
+        if len(memory_cmd._evidence_refs(meta)) > io.MAX_LIST:
+            skipped.append({"path": rel, "reason": "card evidence list limit exceeded"})
             continue
         identity = card_identity(meta, rel)
         rows = [row for key in (identity.card_id, *identity.aliases) for row in ledger.by_identity.get(key, [])]
@@ -250,7 +261,12 @@ def generate(
     for card in cards:
         refs = memory_cmd._evidence_refs(card.meta)
         current = _resolved(target, refs)
-        row_ids = set(_resolved(target, sorted({row["evidence_id"] for row in card.rows})))
+        # Keep the newest distinct ids, independent of append order or aliases.
+        newest = dict.fromkeys(
+            row["evidence_id"]
+            for row in sorted(card.rows, key=lambda row: (_sort_timestamp(row["ts"]), row["evidence_id"]), reverse=True)
+        )
+        row_ids = set(_resolved(target, list(newest)[: io.MAX_LIST]))
         evidence = sorted(set(current) | row_ids)
         contrary = sorted({row["evidence_id"] for row in card.rows if row["kind"] == "opposite-polarity"} & row_ids)
         review = sorted({row["evidence_id"] for row in card.rows if row["kind"] == "near-match"} & row_ids)
@@ -294,7 +310,7 @@ def generate(
                     proof,
                     contrary,
                     review=sorted(set(review) & set(proof)),
-                    diff=_diff(card, {"evidence": sorted(set(refs) | additions), "proof_count": len(proof)}),
+                    diff=_diff(card, {"evidence": sorted(set(refs) | set(proof)), "proof_count": len(proof)}),
                     summary="Append cited evidence and derive its distinct proof count.",
                 )
             )
