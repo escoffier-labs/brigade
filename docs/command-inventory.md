@@ -51,7 +51,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade profiles`: 2 command path(s)
 - `brigade projection`: 1 command path(s)
 - `brigade projects` (extras): 10 command path(s)
-- `brigade receipts`: 18 command path(s)
+- `brigade receipts`: 19 command path(s)
 - `brigade reconfigure`: 1 command path(s)
 - `brigade release` (extras): 23 command path(s)
 - `brigade repos` (extras): 74 command path(s)
@@ -432,6 +432,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade receipts export otel-genai`
 - `brigade receipts export package`
 - `brigade receipts keygen`
+- `brigade receipts lineage`
 - `brigade receipts trailer`
 - `brigade receipts verify`
 - `brigade receipts verify-agent-change`
