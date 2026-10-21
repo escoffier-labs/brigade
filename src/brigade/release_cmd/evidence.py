@@ -69,8 +69,21 @@ def _release_receipts(target: Path) -> list[dict[str, Any]]:
 
 
 def _latest_release_receipt(target: Path) -> dict[str, Any] | None:
-    receipts = _release_receipts(target)
-    return receipts[0] if receipts else None
+    # commands.run names each run dir from the same datetime it stores as started_at,
+    # so name order is start order and only the newest receipt needs decoding.
+    # Other layouts keep the full started_at sort.
+    root = _release_runs_root(target)
+    if not root.is_dir():
+        return None
+    children = sorted((path for path in root.iterdir() if path.is_dir()), key=lambda path: path.name, reverse=True)
+    if not reportstore._dir_names_are_timestamp_prefixed(children):
+        receipts = _release_receipts(target)
+        return receipts[0] if receipts else None
+    for child in children:
+        receipt = _read_release_receipt(child)
+        if isinstance(receipt, dict):
+            return receipt
+    return None
 
 
 def _resolve_release_receipt(target: Path, run_id: str) -> tuple[dict[str, Any] | None, str | None]:
@@ -99,7 +112,12 @@ def _release_candidates(target: Path, *, include_archived: bool = False) -> list
 
 
 def _latest_candidate(target: Path) -> dict[str, Any] | None:
-    candidates = _release_candidates(target)
+    candidates = reportstore.latest_bundles(
+        [_release_candidates_root(target)],
+        _read_candidate,
+        id_field="candidate_id",
+        skip_child=lambda name: name == "archive",
+    )
     return candidates[0] if candidates else None
 
 

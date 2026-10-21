@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Work briefs read only the newest release candidate and release run instead of decoding every bundle, and the harness-wiring scan skips its per-ancestor worktree check for files that are not wiring documents. On a checkout with a large release history the brief ran about 3x faster with 60% lower peak memory.
 - Handoff drafts use consistent LF line endings on Windows for both creation and forced replacement.
 - The Command Deck separates counted queue exclusions from blocked jobs. Blocker and attempt-limit counts retain alerts, while routine backlog stays in queue details. Malformed exclusions remain actionable, and absent telemetry stays unknown. Hub snapshots report optional integration readiness coverage explicitly.
 - Deck verdicts use plain colored text. Provider icons use transparent, consistently sized marks, including the official Jules mascot and a neutral fallback for unknown agents.
