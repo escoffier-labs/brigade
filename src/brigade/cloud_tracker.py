@@ -1426,7 +1426,13 @@ def _observe_missing_codex_tasks(target: Path, tasks: dict[str, Any]) -> None:
         blob = (sout + "\n" + serr).strip()
         if scode != 0 and not blob:
             continue
-        state = codex_cloud._scan_status(blob)  # noqa: SLF001 - shared status scanner
+        # A failed probe still prints `[ERROR] <title>` for errored tasks, but a
+        # diagnostic such as "request failed" is not a task state, so a nonzero
+        # exit only counts with a structured bracket or status line.
+        if scode == 0:
+            state = codex_cloud._scan_status(blob)  # noqa: SLF001 - shared status scanner
+        else:
+            state = codex_cloud._verified_status(blob)  # noqa: SLF001 - shared status scanner
         if state is not None:
             tasks[task_id] = {"state": state, "ready_at": None}
 

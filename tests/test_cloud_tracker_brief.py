@@ -104,6 +104,25 @@ def test_failed_codex_status_without_output_supplies_no_evidence(monkeypatch, tm
     assert (observation.configured, observation.reachable, observation.reason) == (True, True, None)
 
 
+@pytest.mark.parametrize("bounded", [False, True])
+@pytest.mark.parametrize(
+    "diagnostic",
+    [
+        "Error: http error: get_task_details failed: GET https://example.invalid/tasks/task_x failed: 404 Not Found",
+        "Error: authentication failed",
+    ],
+)
+def test_failed_codex_status_diagnostic_is_not_a_task_state(monkeypatch, tmp_path, bounded, diagnostic):
+    _register(tmp_path, "task_unobserved")
+    monkeypatch.setattr(codex_cloud, "list_tasks", lambda **kwargs: codex_cloud.ListTasksResult([]))
+    monkeypatch.setattr(cloud_tracker, "_run_text", lambda *a, **k: (1, "", diagnostic))
+    kwargs = {"codex_max_items": codex_cloud.MAX_LIST_LIMIT} if bounded else {}
+
+    observation = cloud_tracker.observe_provider("codex-cloud", tmp_path, **kwargs)
+
+    assert observation.tasks == {}
+
+
 @pytest.mark.parametrize("entrypoint", ["observe_provider", "observe_provider_details", "observe_providers"])
 def test_default_observation_keeps_full_inventory(monkeypatch, tmp_path, isolated_providers, entrypoint):
     _register(tmp_path, "task_outside_inventory")
