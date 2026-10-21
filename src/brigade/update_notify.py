@@ -106,7 +106,10 @@ def _spawn_refresh() -> None:
         {"start_new_session": True} if os.name == "posix" else {"creationflags": 0x00000008}  # DETACHED_PROCESS
     )
     subprocess.Popen(
-        [sys.executable, "-m", "brigade", "update", "--notify-refresh"],
+        # Isolated mode excludes cwd, PYTHONPATH, and user site packages. Use
+        # the installed package directory as cwd as well, never the workspace.
+        [sys.executable, "-I", "-m", "brigade", "update", "--notify-refresh"],
+        cwd=Path(__file__).resolve().parent,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,

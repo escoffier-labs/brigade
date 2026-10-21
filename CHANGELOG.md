@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Update-check refreshes isolate Python imports from workspace files, `PYTHONPATH`, and user site packages. Agent hook commands skip update notices and refreshes entirely.
 - The Command Deck separates counted queue exclusions from blocked jobs. Blocker and attempt-limit counts retain alerts, while routine backlog stays in queue details. Malformed exclusions remain actionable, and absent telemetry stays unknown. Hub snapshots report optional integration readiness coverage explicitly.
 - Deck verdicts use plain colored text. Provider icons use transparent, consistently sized marks, including the official Jules mascot and a neutral fallback for unknown agents.
 - Retention diagnostics use the held run lock when a detached worker checkout and custom output directory hide the original workspace after a malformed or unreadable receipt. Stale recovery retains the saved failure detail.
