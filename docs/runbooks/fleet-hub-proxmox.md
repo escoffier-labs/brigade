@@ -700,3 +700,101 @@ returns the existing queued result. A different payload fails locally with
 delivery. JSON errors have a non-null local code for token-file validation,
 admin-token refusal, client-ID validation, spool conflicts, and other invalid
 arguments. Transport failures use `hub_unavailable`.
+
+## Fleet MCP station
+
+`brigade fleet mcp` exposes `fleet_who`, `fleet_send`, `fleet_inbox`, `fleet_ack`,
+`fleet_reply`, `fleet_sent`, and `fleet_claims` through the shared MCP harness.
+Stdio is the default. Message bodies are fenced as `peer-message` data, with
+sender attribution outside the body and injection scan findings in `scan`.
+Findings remain visible alongside the message.
+
+The station uses the same credential resolution as `fleet msg`: an explicit
+`--principal-token-file PATH`, then `BRIGADE_FLEET_MESSAGE_TOKEN_FILE`, then the
+configured node token. Tool arguments cannot select a sender or credential.
+Admin credentials are refused. Agent recipient discovery follows send grants.
+The hub must support the message API's `who` and `claims` read actions. Directory
+results omit local checkout paths and credential material. Claims are a read-only
+fleet snapshot available to authenticated message principals.
+
+For Claude Code:
+
+```bash
+claude mcp add --transport stdio fleet -- brigade fleet mcp
+```
+
+For Codex, add this to `config.toml`:
+
+```toml
+[mcp_servers.fleet]
+command = "brigade"
+args = ["fleet", "mcp"]
+```
+
+For Cursor, add this server to the MCP configuration:
+
+```json
+{
+  "mcpServers": {
+    "fleet": {
+      "command": "brigade",
+      "args": ["fleet", "mcp"]
+    }
+  }
+}
+```
+
+To use loopback Streamable HTTP, set a separate MCP bearer token with at least
+32 characters. The Fleet Hub credential stays in its existing protected store.
+
+```bash
+export BRIGADE_MCP_HTTP_TOKEN="$(openssl rand -hex 32)"
+brigade fleet mcp --http --host 127.0.0.1 --port 8933
+```
+
+From another terminal with the same MCP token set:
+
+```bash
+curl --fail http://127.0.0.1:8933/mcp \
+  -H "Authorization: Bearer $BRIGADE_MCP_HTTP_TOKEN" \
+  -H 'Content-Type: application/json' \
+  --data '{"jsonrpc":"2.0","id":1,"method":"tools/list"}'
+```
+
+The HTTP listener rejects non-loopback binds, untrusted Host/Origin headers,
+and missing or incorrect bearer tokens. It is stateless and serves no SSE stream.
+
+`fleet_send` accepts `to`, `body`, and optional `reply_to`, `kind`, and `thread`.
+It supplies the subject `Fleet message` and normal priority. `reply_to` must be
+an inbox message from `to`. Sends and replies use the existing durable offline
+spool and report `delivery` as `delivered` or `spooled`. `fleet_ack` accepts an
+array of decimal message ID strings and returns a result for each ID, including
+failures. Successful acknowledgements remain recorded when another ID fails.
+Reads never acknowledge messages. Tool errors expose a fixed hub error code,
+HTTP status, and `permanent`/`transient` classification without exception text.
+Older hubs that accept a send but omit its requested `reply_to` produce
+`reply_to_ignored: true`. Unsupported directory reads report HTTP 400.
+
+`fleet_inbox` defaults to unread messages. Its optional `wait_secs` is bounded
+at 120 seconds and polls with delays of 1, 2, 4, then at most 5 seconds. Network
+reads have a minimum timeout of 2 seconds, capped at the client's flush timeout.
+A final read can therefore outlast the wait deadline by that timeout. A failed
+poll after the first read returns the last good page. When polling finds unread
+mail, it returns the page containing that arrival even for a full-history read.
+`fleet_inbox` and `fleet_sent` accept an optional decimal-string `after` cursor
+(default `"0"`) and return `next_cursor` as a decimal string. Both return up to
+one hub page, with `limit` from 1 to 100. Pass `next_cursor` as `after` to read
+subsequent pages, or acknowledge consumed inbox messages to advance unread mail.
+
+Message results combine subject, reference, and body inside one untrusted data
+block in `body`. The original `subject` and `ref` fields are omitted. Scans cover
+all three fields and report counts without repeating peer-authored excerpts.
+Fences use random per-call markers and neutralize embedded fence prefixes.
+
+Node credentials can deliberately list all active agent principals and their
+labels through `fleet_who`. Agent credentials see only recipients allowed by
+their grants. Session filtering by permitted nodes happens before the row limit.
+Node `fleet_claims` results match `GET /claims`, including active Grok Bot lease
+rows. Agent claim results include only granted owner nodes and omit `job`,
+`session`, and `owner_conductor`. Directory and claim reads use a read transaction
+that checks the caller's active status within the same snapshot.

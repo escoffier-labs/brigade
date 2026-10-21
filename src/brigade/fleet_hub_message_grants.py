@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import re
 import sqlite3
+from collections.abc import Iterable
 from datetime import datetime, timezone
 from typing import Any
 
@@ -57,11 +58,18 @@ def grants_for(conn: sqlite3.Connection, principal_id: str) -> list[str]:
     ]
 
 
+def permits(patterns: Iterable[str], sender: str, recipient: str) -> bool:
+    """Pure grant check, so callers filtering many rows can load patterns once."""
+    if not sender.startswith("agent:"):
+        return True
+    allowed = {recipient, "*", "agent:*" if recipient.startswith("agent:") else "node:*"}
+    return recipient != sender and bool(allowed.intersection(patterns))
+
+
 def require_granted(conn: sqlite3.Connection, sender: str, recipient: str) -> None:
     if not sender.startswith("agent:"):
         return
-    allowed = {recipient, "*", "agent:*" if recipient.startswith("agent:") else "node:*"}
-    if recipient == sender or not allowed.intersection(grants_for(conn, sender)):
+    if not permits(grants_for(conn, sender), sender, recipient):
         raise messages.MessageForbidden(
             "recipient is not permitted by send grants", code="message_recipient_not_permitted"
         )

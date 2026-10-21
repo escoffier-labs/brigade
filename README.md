@@ -94,6 +94,8 @@ brigade setup
 
 Then follow the [install guide](https://brigade.tools/docs/getting-started/install) or [QUICKSTART.md](QUICKSTART.md). To let your coding agent do the setup, hand it [first 10 minutes](docs/first-10-minutes.md) and the [agents guide](docs/agents-guide.md).
 
+If setup fails, run `brigade bug report --summary "What happened and what you expected" --dry-run` in the affected workspace. Review the complete redacted preview before sharing. See [bug reports](docs/technical-guide.md#bug-reports).
+
 For preview builds on a pipx install, run `brigade update --channel beta`. Details: [update channels](docs/update-channels.md).
 
 ## MCP servers

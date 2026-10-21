@@ -42,6 +42,13 @@ body:
       render: shell
     validations:
       required: false
+  - type: input
+    id: fingerprint
+    attributes:
+      label: Fingerprint
+      description: Optional bf- fingerprint from brigade bug report.
+    validations:
+      required: false
   - type: checkboxes
     id: scrub
     attributes:

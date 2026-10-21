@@ -22,6 +22,11 @@ from .. import fleet_hub_messages
 
 
 def register(fleet_sub: argparse._SubParsersAction) -> None:
+    # The fleet MCP station is the agent-facing side of messaging; registering
+    # it here keeps cli/fleet.py under the module size ceiling.
+    from ..fleet_mcp import register as register_mcp
+
+    register_mcp(fleet_sub)
     parser = fleet_sub.add_parser("msg", help="Send and manage durable Fleet Hub messages.")
     sub = parser.add_subparsers(dest="msg_command", metavar="<msg-command>")
     sub.required = True
