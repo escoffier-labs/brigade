@@ -13,6 +13,7 @@ import shutil
 import stat
 import tempfile
 from collections.abc import Callable
+from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -133,6 +134,11 @@ class _LockOwnership:
     owner_token: str
     device: int
     inode: int
+
+
+# Diagnostic writes on the scheduler thread must find the actual held lease,
+# even when a worker checkout and unreadable receipt hide its workspace.
+_active_run_lock: ContextVar[tuple[Path, _LockOwnership] | None] = ContextVar("active_run_lock", default=None)
 
 
 def _git(cwd: Path, *args: str, timeout: float = 30.0) -> proc.Result:
@@ -541,6 +547,25 @@ def _owner_matches_run(owner: dict[str, object] | None, run_dir: Path) -> bool:
         return False
     recorded = owner.get("run_dir")
     return isinstance(recorded, str) and Path(recorded).expanduser().resolve() == run_dir
+
+
+def read_run_lock_owner(workspace: Path, run_dir: Path) -> dict[str, object] | None:
+    """Read the matching diagnostic owner, preferring this context's held lease.
+
+    Context-local binding preserves nested locks and does not discover or
+    select another worktree's lease. Revalidate the published token so a
+    replacement owner cannot authorize this context's diagnostic write.
+    """
+    active = _active_run_lock.get()
+    path = active[0] if active is not None else lock_path(workspace)
+    owner = read_lock_owner(path)
+    if not _owner_matches_run(owner, run_dir.expanduser().resolve()):
+        return None
+    if owner is None or owner.get("pid") != os.getpid():
+        return None
+    if active is not None and owner.get("owner_token") != active[1].owner_token:
+        return None
+    return owner
 
 
 def is_active_run_owner(workspace: Path, run_dir: Path) -> bool:
@@ -1386,6 +1411,7 @@ def run_lock(
         stale_action=stale_action,
     )
     retain_lock = False
+    context_token = _active_run_lock.set((path, ownership)) if ownership is not None else None
     try:
         yield path
     except BaseException as exc:
@@ -1394,6 +1420,8 @@ def run_lock(
             raise_if_retained_run_lock(exc)
         raise
     finally:
+        if context_token is not None:
+            _active_run_lock.reset(context_token)
         if ownership is not None and not retain_lock:
             _release_lock(path, ownership)
 
