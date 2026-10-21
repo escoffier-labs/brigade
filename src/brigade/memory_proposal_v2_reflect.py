@@ -37,16 +37,22 @@ def propose_payload(*, target: Path, candidate_id: str, reason: str) -> dict[str
     if candidate["kind"] not in ("stale-newer-evidence", "reinforce", "duplicate"):
         raise legacy.ProposalError("no valid deterministic ops for candidate kind")
     ops = []
-    for source in sources:
+    translated = sources[:1] if candidate["kind"] == "duplicate" else sources
+    for source in translated:
         anchored = delta.anchor_text(source["text"], source["path"])
         addressable = delta.blocks(anchored)
         if not addressable:
             continue
         block = addressable[0]
         base = dict(card_path=source["path"], block_id=block.block_id, expected_block_hash=block.sha256)
-        refs = sorted(set(candidate["evidence_ids"]) - set(source["metadata"].get("evidence", [])))
-        if refs:
-            ops.append(dict(type="append_evidence", **base, evidence_ids=refs))
+        refs = candidate["evidence_ids"]
+        if candidate["kind"] == "stale-newer-evidence" or set(refs) - set(source["metadata"].get("evidence", [])):
+            append = dict(type="append_evidence", **base, evidence_ids=refs)
+            if candidate["kind"] == "stale-newer-evidence":
+                stamp = v2._consolidated_at(target, source, refs)
+                if stamp:
+                    append["last_consolidated"] = stamp
+            ops.append(append)
         if candidate["kind"] == "duplicate" and source == sources[0]:
             ops.extend(dict(type="merge_exact_duplicates", **base, other_card=other["path"]) for other in sources[1:])
     if not ops:
@@ -60,4 +66,5 @@ def propose_payload(*, target: Path, candidate_id: str, reason: str) -> dict[str
         anchor_blocks=True,
         reason=reason,
         reflect={"run_id": run_id, "candidate_id": candidate_id},
+        expected_source_sha256={source["path"]: candidate["base_sha256"][source["id"]] for source in sources},
     )

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import difflib
+import copy
 import posixpath
 import uuid
 from pathlib import Path
@@ -13,6 +14,7 @@ from . import memory_cmd, memory_proposals as legacy
 from . import memory_proposal_io as io
 from . import memory_proposal_v2_ops as delta
 from .card_identity import IdentityIndex, card_identity
+from .card_fingerprint import strip_frontmatter
 from .handoff_cmd.drafts import _render_handoff_draft
 from .memory_reflect_candidates import _evidence_roots, _resolved
 from .selection import WRITER_INBOXES
@@ -62,9 +64,16 @@ def _sources(
     return sources, paths
 
 
-def _evidence(target: Path, ops: list[dict[str, Any]]) -> dict[str, str]:
+def _evidence(target: Path, ops: list[dict[str, Any]], sources: list[dict[str, Any]]) -> dict[str, str]:
     refs: set[str] = set()
+    addressed: set[str] = set()
     for op in ops:
+        if not isinstance(op, dict) or op.get("type") not in ("append_evidence", "merge_exact_duplicates"):
+            continue
+        keys = ("card_path", "other_card") if op["type"] == "merge_exact_duplicates" else ("card_path",)
+        addressed.update(op[key] for key in keys if isinstance(op.get(key), str))
+    packets = [*ops, *[{"evidence_ids": s["metadata"].get("evidence", [])} for s in sources if s["path"] in addressed]]
+    for op in packets:
         values = op.get("evidence_ids", []) if isinstance(op, dict) else []
         if isinstance(values, list) and len(values) <= io.MAX_LIST:
             refs.update(ref for ref in values if isinstance(ref, str) and len(ref) <= 1024)
@@ -84,6 +93,36 @@ def _evidence(target: Path, ops: list[dict[str, Any]]) -> dict[str, str]:
         except (OSError, ValueError):
             continue
     return digests
+
+
+def _consolidated_at(target: Path, source: dict[str, Any], refs: list[str]) -> str | None:
+    from .memory_reflect import _evidence_log
+    from .memory_reflect_candidates import Card, _evidence_id, _pending_rows, _sort_timestamp, _timestamp
+
+    ledger = _evidence_log(target)
+    if ledger.summary["unsupported"] or ledger.summary["invalid_warning_count"]:
+        raise legacy.ProposalError("evidence log is incomplete or unreadable")
+    rows = [row for key in (source.get("id"), *source.get("aliases", [])) for row in ledger.by_identity.get(key, [])]
+    stamps = [row["ts"] for row in rows if row["kind"] != "reinforced" and _evidence_id(row["evidence_id"]) in refs]
+    if not stamps:
+        return None
+    stamp = max(stamps, key=_sort_timestamp)
+    card = Card(
+        source["path"], source["text"], source["metadata"], card_identity(source["metadata"], source["path"]), rows
+    )
+    pending = _pending_rows(card)
+    if _timestamp(card.meta.get("last_consolidated")) is None:
+        value = memory_cmd._frontmatter_value(card.meta, "last_reviewed", "last_reviewed_at", "reviewed_at")
+        if not isinstance(value, str) or _timestamp(value) is None:
+            pending = rows
+    if any(
+        row["kind"] != "reinforced"
+        and _sort_timestamp(row["ts"]) <= _sort_timestamp(stamp)
+        and _evidence_id(row["evidence_id"]) not in refs
+        for row in pending
+    ):
+        raise legacy.ProposalError("consolidation would hide uncited pending evidence")
+    return stamp
 
 
 def _references(
@@ -164,9 +203,23 @@ def _derived(
         if text is not None and text != source["text"]:
             delta.reservations(text)
             contributing = [source, *[s for s in sources if removed.get(s["path"]) == path]]
-            after = legacy._derive_merge_provenance(
-                text, contributing if len(contributing) > 1 else contributing * 2, path, proposal_id
-            )
+            after = text
+            if len(contributing) > 1 or delta.claim_body(text) != delta.claim_body(source["text"]):
+                after = legacy._derive_merge_provenance(
+                    text, contributing if len(contributing) > 1 else contributing * 2, path, proposal_id
+                )
+            elif text[legacy._body_offset(text) :] != source["text"][legacy._body_offset(source["text"]) :]:
+                # Anchors change integrity bytes without changing the verified claim
+                # or its origin. Rebind declared hashes while retaining provenance.
+                fields = copy.deepcopy(
+                    {key: source["metadata"][key] for key in ("provenance", "metadata") if key in source["metadata"]}
+                )
+                for key, value in fields.items():
+                    env = value if key == "provenance" else value["provenance"]
+                    env["hashes"]["content"] = io.sha256(strip_frontmatter(text.replace("\r\n", "\n")).encode())
+                if fields:
+                    after = legacy._update_metadata(text, legacy._encoded_fields(fields))
+            legacy._admit(after, legacy._meta(after))
             if len(after.encode()) > io.MAX_CARD_BYTES:
                 raise legacy.ProposalError("derived card byte limit exceeded")
             result[path] = after
@@ -184,17 +237,21 @@ def compose(
     reason: str,
     proposal_id: str,
     reflect: dict[str, str] | None = None,
+    expected_source_sha256: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     if not isinstance(ops, list) or len(ops) > io.MAX_LIST or not isinstance(anchor_blocks, bool):
         raise legacy.ProposalError("invalid or oversized op packet")
     sources, paths = _sources(target, care, source_paths)
+    source_sha256 = {s["path"]: s["sha256"] for s in sources}
+    if expected_source_sha256 is not None and source_sha256 != expected_source_sha256:
+        raise legacy.ProposalError("candidate base hash drift")
     scope = legacy._scope([sources[0], sources[0]], {}, binding)
     for source in sources[1:]:
         legacy._scope([sources[0], source], {}, binding)
     texts: dict[str, str | None] = {
         s["path"]: delta.anchor_text(s["text"], s["path"]) if anchor_blocks else s["text"] for s in sources
     }
-    evidence = _evidence(target, ops)
+    evidence = _evidence(target, ops, sources)
     accepted, dropped = [], []
     removed: dict[str, str] = {}
     for number, op in enumerate(ops):
@@ -202,7 +259,11 @@ def compose(
         try:
             if not isinstance(op, dict):
                 raise legacy.ProposalError("op must be an object")
-            delta.apply_op(trial, op, resolved=set(evidence))
+            source = next((s for s in sources if s["path"] == op.get("card_path")), {})
+            consolidated_at = (
+                _consolidated_at(target, source, op.get("evidence_ids", [])) if "last_consolidated" in op else None
+            )
+            delta.apply_op(trial, op, resolved=set(evidence), consolidated_at=consolidated_at)
             if trial == texts:
                 raise legacy.ProposalError("op has no delta")
             trial_removed = dict(removed)
@@ -219,7 +280,7 @@ def compose(
             dropped.append({"index": number, "reason": "invalid, unresolved, stale or empty op"})
     if not accepted and (ops or not any(texts[s["path"]] != s["text"] for s in sources)):
         raise legacy.ProposalError("no valid delta ops remain")
-    evidence = _evidence(target, accepted)
+    evidence = _evidence(target, accepted, sources)
     texts = _derived(texts, sources, removed, proposal_id)
     references, fences = _references(target, care, paths, texts, removed)
     changes = [legacy._change(s["path"], s["text"], texts[s["path"]]) for s in sources if texts[s["path"]] != s["text"]]
@@ -284,6 +345,7 @@ def validate_live(target: Path, proposal: dict[str, Any]) -> None:
         reason=proposal["reason"],
         proposal_id=proposal["id"],
         reflect=proposal["reflect"],
+        expected_source_sha256={s["path"]: s["sha256"] for s in proposal["sources"]},
     )
     if any(fresh[key] != proposal[key] for key in fresh if key != "dropped_ops"):
         raise legacy.ProposalError("proposal source, block, evidence or reference drift")
@@ -301,6 +363,7 @@ def create_payload(
     anchor_blocks: bool,
     reason: str,
     reflect: dict[str, str] | None = None,
+    expected_source_sha256: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     target = legacy._target(target)
     reason = legacy._reason(reason)
@@ -317,6 +380,7 @@ def create_payload(
         reason=reason,
         proposal_id=ident,
         reflect=reflect,
+        expected_source_sha256=expected_source_sha256,
     )
     writers = sorted(h for h in binding["available_scope"]["harnesses"] if h in WRITER_INBOXES)
     if not writers and any(

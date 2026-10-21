@@ -14,6 +14,11 @@ ANCHOR_ID = re.compile(r"c-[0-9a-f]{6}\Z")
 MAX_ANCHORS = 4096
 
 
+def claim_body(text: str) -> str:
+    """Ignore only inert block anchors, preserving every other body byte."""
+    return re.sub(r" \^c-[0-9a-f]{6}(?=\r?$)", "", text[legacy._body_offset(text) :], flags=re.MULTILINE)
+
+
 @dataclass(frozen=True)
 class Block:
     start: int
@@ -120,7 +125,9 @@ def _list(meta: dict[str, Any], key: str) -> list[str]:
     return value
 
 
-def apply_op(texts: dict[str, str | None], op: dict[str, Any], *, resolved: set[str]) -> None:
+def apply_op(
+    texts: dict[str, str | None], op: dict[str, Any], *, resolved: set[str], consolidated_at: str | None = None
+) -> None:
     """Apply one fully validated op to a private copy, or raise without publishing."""
     common = {"type", "card_path", "block_id", "expected_block_hash"}
     extras = {
@@ -132,7 +139,8 @@ def apply_op(texts: dict[str, str | None], op: dict[str, Any], *, resolved: set[
         "merge_exact_duplicates": {"other_card"},
     }
     kind = op.get("type")
-    if not isinstance(kind, str) or kind not in extras or set(op) != common | extras[kind]:
+    fields = set(op) - ({"last_consolidated"} if kind == "append_evidence" else set())
+    if not isinstance(kind, str) or kind not in extras or fields != common | extras[kind]:
         raise legacy.ProposalError("invalid typed op schema")
     path = io.relative(op["card_path"])
     text = texts[path]
@@ -165,7 +173,12 @@ def apply_op(texts: dict[str, str | None], op: dict[str, Any], *, resolved: set[
         merged = sorted(set(_list(legacy._meta(text), "evidence")) | set(refs))
         if len(merged) > io.MAX_LIST:
             raise legacy.ProposalError("evidence list limit exceeded")
-        text = legacy._update_metadata(text, {"evidence": merged})
+        updates: dict[str, Any] = {"evidence": merged, "proof_count": len(set(merged) & resolved)}
+        if "last_consolidated" in op:
+            if consolidated_at is None or op["last_consolidated"] != consolidated_at:
+                raise legacy.ProposalError("consolidation timestamp does not match cited evidence")
+            updates["last_consolidated"] = consolidated_at
+        text = legacy._update_metadata(text, updates)
     elif kind == "replace_block":
         replacement = op["text"] + " ^" + str(block.block_id)
         text = text[: block.start] + replacement + text[block.end :]
@@ -186,12 +199,7 @@ def apply_op(texts: dict[str, str | None], op: dict[str, Any], *, resolved: set[
         if kind == "supersede_card":
             text = legacy._update_metadata(text, {"status": "superseded", "superseded_by": other})
         else:
-            from .card_fingerprint import normalize_card_content
-
-            def claims(value: str) -> str:
-                return normalize_card_content(re.sub(r" \^c-[0-9a-f]{6}(?=\r?$)", "", value, flags=re.MULTILINE))
-
-            if claims(text) != claims(other_text):
+            if " ".join(claim_body(text).split()) != " ".join(claim_body(other_text).split()):
                 raise legacy.ProposalError("merge requires exact duplicate claims")
             meta, other_meta = legacy._meta(text), legacy._meta(other_text)
             from .card_identity import card_identity
@@ -207,6 +215,7 @@ def apply_op(texts: dict[str, str | None], op: dict[str, Any], *, resolved: set[
                 {
                     "aliases": aliases,
                     "evidence": refs,
+                    "proof_count": len(set(refs) & resolved),
                     "claim_anchor_ids": sorted(reservations(text) | reservations(other_text)),
                 },
             )

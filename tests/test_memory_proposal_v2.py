@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import hashlib
+import difflib
 import json
 import re
 from pathlib import Path
 
 import pytest
 
-from brigade import cli, memory_proposals as api, obsidian_vault
+from brigade import cli, memory_proposals as api, obsidian_vault, memory_reflect
 from brigade.projection import kernel
 from tests.test_memory_proposal_capabilities import SAFE_DIRECTORY_CAPABILITY
 from tests.test_memory_reflect import card, evidence, log
@@ -191,8 +192,11 @@ def test_stale_review_and_failure_restore_every_card(tmp_path, monkeypatch):
     assert path.read_bytes() == before[path]
 
 
-def test_reflect_propose_retains_run_candidate_and_uses_existing_decisions(tmp_path, capsys):
-    path = setup(tmp_path, anchored=False)
+@pytest.mark.parametrize("anchored,already_cited", [(False, False), (True, False), (True, True)])
+def test_reflect_propose_retains_run_candidate_and_uses_existing_decisions(tmp_path, capsys, anchored, already_cited):
+    path = setup(tmp_path, anchored=anchored)
+    if already_cited:
+        path.write_text(path.read_text().replace("evidence: []", 'evidence: [".brigade/receipts/support.json"]'))
     log(tmp_path, path, (".brigade/receipts/support.json", "outcome", "2026-10-20T12:00:00Z"))
     assert cli.main(["memory", "reflect", "run", "--target", str(tmp_path), "--json"]) == 0
     run = json.loads(capsys.readouterr().out)
@@ -217,8 +221,44 @@ def test_reflect_propose_retains_run_candidate_and_uses_existing_decisions(tmp_p
     proposal = json.loads(capsys.readouterr().out)
     assert proposal["reflect"] == {"run_id": run["run_id"], "candidate_id": candidate["candidate_id"]}
     assert path.read_bytes() == before
+    if anchored:
+        assert proposal["diff"] == candidate["diff"]
     assert apply(tmp_path, proposal)["status"] == "committed"
     assert ".brigade/receipts/support.json" in path.read_text()
+    assert "last_consolidated: 2026-10-20T12:00:00Z" in path.read_text()
+    assert "proof_count: 1" in path.read_text()
+    applied_diff = "".join(
+        difflib.unified_diff(
+            before.decode().splitlines(keepends=True),
+            path.read_bytes().decode().splitlines(keepends=True),
+            fromfile="a/" + PATH,
+            tofile="b/" + PATH,
+        )
+    )
+    assert applied_diff.encode() == proposal["diff"].encode()
+    assert memory_reflect.run_payload(target=tmp_path)["candidates"] == []
+
+
+def test_consolidation_preview_does_not_use_a_later_machine_reinforcement(tmp_path):
+    from brigade.memory_proposal_v2_reflect import propose_payload
+
+    path = setup(tmp_path)
+    ref = evidence(tmp_path, ".brigade/receipts/existing.json")
+    path.write_text(path.read_text().replace("evidence: []", f"evidence: {json.dumps([ref])}"))
+    log(
+        tmp_path,
+        path,
+        (".brigade/receipts/support.json", "outcome", "2026-10-20T12:00:00Z"),
+        (ref, "reinforced", "2026-10-21T12:00:00Z"),
+    )
+    candidate = memory_reflect.run_payload(target=tmp_path)["candidates"][0]
+    proposal = propose_payload(
+        target=tmp_path, candidate_id=candidate["candidate_id"], reason="Review pending evidence."
+    )
+    assert proposal["diff"] == candidate["diff"]
+    assert apply(tmp_path, proposal)["status"] == "committed"
+    assert "last_consolidated: 2026-10-20T12:00:00Z" in path.read_text()
+    assert "proof_count: 2" in path.read_text()
 
 
 @pytest.mark.parametrize("count", [8, 9])
@@ -284,6 +324,256 @@ def test_rejection_is_terminal_and_decision_scope_is_v2(tmp_path):
         api.review_payload(**values, reason="Attempt to reverse rejection.")
     with pytest.raises(api.ProposalError, match="rejected"):
         api.apply_payload(**values)
+
+
+@pytest.mark.parametrize("channel", ["trust", "trust_label", "provenance", "metadata"])
+@pytest.mark.parametrize("change", ["append", "anchor"])
+def test_evidence_append_preserves_verified_trust_and_original_provenance(tmp_path, channel, change):
+    from brigade.card_fingerprint import strip_frontmatter
+    from tests.test_memory_proposals import declared_sources
+
+    if channel in ("provenance", "metadata"):
+        path = card(tmp_path, "current", body=CLAIM if change == "append" else "Keep the cache warm.")
+        card(tmp_path, "previous", body=CLAIM)
+        declared_sources((tmp_path, None), labels=("verified", "verified"), nested=channel == "metadata")
+        evidence(tmp_path, ".brigade/receipts/support.json")
+    else:
+        path = setup(tmp_path, anchored=change == "append")
+        path.write_text(path.read_text().replace("---\n", f"---\n{channel}: verified\n", 1))
+    original = api._meta(path.read_text())[channel]
+    append = op("append_evidence", evidence_ids=[".brigade/receipts/support.json"])
+    append["card_path"] = path.relative_to(tmp_path).as_posix()
+    proposal = create(
+        tmp_path, [append] if change == "append" else [], paths=[append["card_path"]], anchors=change == "anchor"
+    )
+    assert apply(tmp_path, proposal)["status"] == "committed"
+    if change == "anchor" and channel in ("provenance", "metadata"):
+        envelope = original if channel == "provenance" else original["provenance"]
+        envelope["hashes"]["content"] = hashlib.sha256(strip_frontmatter(path.read_text()).encode()).hexdigest()
+    assert api._meta(path.read_text())[channel] == original
+    api._admit(path.read_text(), api._meta(path.read_text()))
+
+
+def test_reflect_propose_rechecks_candidate_base_after_translation(tmp_path, monkeypatch):
+    from brigade import memory_proposal_v2 as v2, memory_proposal_v2_reflect as reflect
+
+    path = setup(tmp_path)
+    path.write_text(path.read_text() + "\nSecond human claim. ^c-456def\n")
+    log(tmp_path, path, (".brigade/receipts/support.json", "outcome", "2026-10-20T12:00:00Z"))
+    candidate = memory_reflect.run_payload(target=tmp_path)["candidates"][0]
+    original = v2.create_payload
+
+    def human_edit(**kwargs):
+        path.write_text(path.read_text().replace("Second human claim.", "Updated human claim."))
+        return original(**kwargs)
+
+    monkeypatch.setattr(v2, "create_payload", human_edit)
+    with pytest.raises(api.ProposalError, match="base hash drift"):
+        reflect.propose_payload(target=tmp_path, candidate_id=candidate["candidate_id"], reason="Review support.")
+    assert "Updated human claim." in path.read_text()
+    assert not list((tmp_path / ".brigade/memory/proposals").glob("*/revision-1.json"))
+
+
+def test_duplicate_candidate_only_appends_evidence_to_the_survivor(tmp_path):
+    from brigade.memory_proposal_v2_reflect import propose_payload
+
+    path = setup(tmp_path, anchored=False)
+    other = card(tmp_path, "other")
+    for source, ref in ((path, ".brigade/receipts/support.json"), (other, ".brigade/receipts/other.json")):
+        evidence(tmp_path, ref)
+        source.write_text(source.read_text().replace("evidence: []", f"evidence: {json.dumps([ref])}"))
+    candidate = next(c for c in memory_reflect.run_payload(target=tmp_path)["candidates"] if c["kind"] == "duplicate")
+    proposal = propose_payload(target=tmp_path, candidate_id=candidate["candidate_id"], reason="Merge exact copies.")
+    assert proposal["dropped_ops"] == []
+    assert [o["type"] for o in proposal["ops"]] == ["append_evidence", "merge_exact_duplicates"]
+    assert apply(tmp_path, proposal)["status"] == "committed"
+    assert api._meta(path.read_text())["evidence"] == [".brigade/receipts/other.json", ".brigade/receipts/support.json"]
+    assert api._meta(path.read_text())["proof_count"] == "2"
+    assert not other.exists()
+
+
+@pytest.mark.parametrize("kind", ["outcome", "opposite-polarity"])
+def test_manual_consolidation_cannot_hide_uncited_pending_evidence(tmp_path, kind):
+    path = setup(tmp_path)
+    log(
+        tmp_path,
+        path,
+        (".brigade/receipts/uncited.json", kind, "2026-10-20T11:00:00Z"),
+        (".brigade/receipts/support.json", "outcome", "2026-10-20T12:00:00Z"),
+    )
+    before = path.read_bytes()
+    with pytest.raises(api.ProposalError, match="no valid"):
+        create(
+            tmp_path,
+            [
+                op(
+                    "append_evidence",
+                    evidence_ids=[".brigade/receipts/support.json"],
+                    last_consolidated="2026-10-20T12:00:00Z",
+                )
+            ],
+        )
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("kind", ["outcome", "opposite-polarity"])
+def test_reference_less_consolidation_cannot_hide_uncited_evidence(tmp_path, kind):
+    path = setup(tmp_path)
+    path.write_text(path.read_text().replace("last_reviewed: 2026-10-01\n", ""))
+    assert "last_consolidated" not in api._meta(path.read_text())
+    log(
+        tmp_path,
+        path,
+        (".brigade/receipts/uncited.json", kind, "2026-10-20T11:00:00Z"),
+        (".brigade/receipts/support.json", "outcome", "2026-10-20T12:00:00Z"),
+    )
+    before = path.read_bytes()
+    with pytest.raises(api.ProposalError, match="no valid"):
+        create(
+            tmp_path,
+            [
+                op(
+                    "append_evidence",
+                    evidence_ids=[".brigade/receipts/support.json"],
+                    last_consolidated="2026-10-20T12:00:00Z",
+                )
+            ],
+        )
+    assert path.read_bytes() == before
+
+
+def test_reference_less_consolidation_cannot_hide_uncited_outcome_and_contradiction(tmp_path):
+    path = setup(tmp_path)
+    path.write_text(path.read_text().replace("last_reviewed: 2026-10-01\n", ""))
+    assert "last_consolidated" not in api._meta(path.read_text())
+    log(
+        tmp_path,
+        path,
+        (".brigade/receipts/earlier.json", "outcome", "2026-10-20T10:00:00Z"),
+        (".brigade/receipts/contrary.json", "opposite-polarity", "2026-10-20T11:00:00Z"),
+        (".brigade/receipts/support.json", "outcome", "2026-10-20T12:00:00Z"),
+    )
+    before = path.read_bytes()
+    with pytest.raises(api.ProposalError, match="no valid"):
+        create(
+            tmp_path,
+            [
+                op(
+                    "append_evidence",
+                    evidence_ids=[".brigade/receipts/support.json"],
+                    last_consolidated="2026-10-20T12:00:00Z",
+                )
+            ],
+        )
+    assert path.read_bytes() == before
+
+
+def test_reference_less_consolidation_accepts_all_evidence_up_to_stamp(tmp_path):
+    path = setup(tmp_path)
+    path.write_text(path.read_text().replace("last_reviewed: 2026-10-01\n", ""))
+    assert "last_consolidated" not in api._meta(path.read_text())
+    refs = [
+        evidence(tmp_path, ".brigade/receipts/earlier.json"),
+        evidence(tmp_path, ".brigade/receipts/contrary.json"),
+        ".brigade/receipts/support.json",
+    ]
+    log(
+        tmp_path,
+        path,
+        (refs[0], "outcome", "2026-10-20T10:00:00Z"),
+        (refs[1], "opposite-polarity", "2026-10-20T11:00:00Z"),
+        (refs[2], "outcome", "2026-10-20T12:00:00Z"),
+        (".brigade/receipts/future.json", "opposite-polarity", "2026-10-21T12:00:00Z"),
+    )
+    before = path.read_bytes()
+    proposal = create(
+        tmp_path,
+        [
+            op(
+                "append_evidence",
+                evidence_ids=refs,
+                last_consolidated="2026-10-20T12:00:00Z",
+            )
+        ],
+    )
+    assert path.read_bytes() == before
+    assert apply(tmp_path, proposal)["status"] == "committed"
+    assert api._meta(path.read_text())["last_consolidated"] == "2026-10-20T12:00:00Z"
+    assert api._meta(path.read_text())["evidence"] == sorted(refs)
+
+
+def test_manual_consolidation_does_not_require_historical_or_future_evidence(tmp_path):
+    path = setup(tmp_path)
+    path.write_text(path.read_text().replace("evidence: []", "evidence: []\nlast_consolidated: 2026-10-19T12:00:00Z"))
+    log(
+        tmp_path,
+        path,
+        (".brigade/receipts/historical.json", "opposite-polarity", "2026-10-19T12:00:00Z"),
+        (".brigade/receipts/support.json", "outcome", "2026-10-20T12:00:00Z"),
+        (".brigade/receipts/future.json", "opposite-polarity", "2026-10-21T12:00:00Z"),
+    )
+    proposal = create(
+        tmp_path,
+        [
+            op(
+                "append_evidence",
+                evidence_ids=[".brigade/receipts/support.json"],
+                last_consolidated="2026-10-20T12:00:00Z",
+            )
+        ],
+    )
+    assert apply(tmp_path, proposal)["status"] == "committed"
+    assert api._meta(path.read_text())["last_consolidated"] == "2026-10-20T12:00:00Z"
+    assert api._meta(path.read_text())["evidence"] == [".brigade/receipts/support.json"]
+
+
+@pytest.mark.parametrize("append", [False, True])
+def test_duplicate_merge_counts_distinct_resolved_refs_from_both_sources(tmp_path, append):
+    path = setup(tmp_path)
+    other = card(tmp_path, "other", body="Keep the cache warm. ^c-456def")
+    support, second, missing = (
+        ".brigade/receipts/support.json",
+        ".brigade/receipts/other.json",
+        ".brigade/receipts/missing.json",
+    )
+    evidence(tmp_path, second)
+    for source, refs in ((path, [support, support]), (other, [support, second, missing])):
+        source.write_text(source.read_text().replace("evidence: []", f"evidence: {json.dumps(refs)}\nproof_count: 99"))
+    ops = [op("append_evidence", evidence_ids=[support])] if append else []
+    ops.append(op("merge_exact_duplicates", other_card="memory/cards/other.md"))
+    proposal = create(tmp_path, ops, paths=[PATH, "memory/cards/other.md"])
+    assert set(proposal["op_evidence"]) == {support, second}
+    assert apply(tmp_path, proposal)["status"] == "committed"
+    assert api._meta(path.read_text())["proof_count"] == "2"
+    assert api._meta(path.read_text())["evidence"] == sorted([support, second, missing])
+    assert not other.exists()
+
+
+@pytest.mark.parametrize("channel", ["provenance", "metadata"])
+@pytest.mark.parametrize("hashes", ["absent", None, [], "invalid"])
+def test_anchor_proposal_refuses_malformed_provenance_hashes(tmp_path, channel, hashes):
+    path = setup(tmp_path, anchored=False)
+    envelope = {"trust": {"label": "verified", "injection_status": "clean"}}
+    if hashes != "absent":
+        envelope["hashes"] = hashes
+    value = envelope if channel == "provenance" else {"provenance": envelope}
+    path.write_text(path.read_text().replace("---\n", f"---\n{channel}: {json.dumps(value)}\n", 1))
+    before = path.read_bytes()
+    with pytest.raises(api.ProposalError, match="source provenance trust is ineligible"):
+        create(tmp_path, anchors=True)
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("left,right", [("x == y", "x != y"), ("retry -1", "retry 1"), ("Cache", "cache")])
+def test_exact_duplicate_merge_preserves_punctuation_and_case(tmp_path, left, right):
+    path = card(tmp_path, "cache", body=left + " ^c-123abc")
+    other = card(tmp_path, "other", body=right + " ^c-456def")
+    merge = op("merge_exact_duplicates", other_card="memory/cards/other.md")
+    merge["expected_block_hash"] = hashlib.sha256((left + " ^c-123abc").encode()).hexdigest()
+    before = {p: p.read_bytes() for p in (path, other)}
+    with pytest.raises(api.ProposalError, match="no valid"):
+        create(tmp_path, [merge], paths=[PATH, "memory/cards/other.md"])
+    assert {p: p.read_bytes() for p in before} == before
 
 
 def test_cli_anchor_create_and_stale_reflect_propose(tmp_path, capsys):

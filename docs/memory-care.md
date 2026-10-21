@@ -124,6 +124,10 @@ candidates and exact duplicate merges. It refuses contrary evidence, unresolved
 near matches, and candidates that would require invented claim wording. Sources
 must share a configured card root and matching declared scope. Existing trust
 admission checks still apply. No proposal is automatically reviewed or applied.
+Candidate base hashes are rechecked under the proposal lock. Stale-evidence
+consolidations update `last_consolidated` from the newest cited pending evidence
+timestamp and derive `proof_count` from distinct resolved evidence ids.
+Machine reinforcement timestamps do not advance this consolidation timestamp.
 
 Use the existing decision path for both v1 and v2:
 
@@ -156,6 +160,9 @@ to its card and survives claim replacement. Removed ids remain reserved in
 at most 4096 reserved ids. Exhaustion refuses the proposal. Vault projection
 preserves anchors in the generated note body. Projection remains one-way and
 cannot authorize canonical edits.
+Evidence-only changes preserve existing trust and provenance. Anchor-only
+changes also preserve them and update envelope content hashes for the new bytes.
+Claim changes and duplicate merges derive reviewed provenance.
 
 V2 accepts one to eight distinct source cards through repeated `--source`
 options. Use `--ops-file <path>` for a bounded JSON list of typed operations.
@@ -166,15 +173,16 @@ Operations are evaluated in order against the proposed state.
 
 | Type | Additional fields | Result |
 | --- | --- | --- |
-| `append_evidence` | `evidence_ids` list | Add resolved, scan-clean evidence pointers to card metadata. |
+| `append_evidence` | `evidence_ids` list, optional `last_consolidated` | Add resolved, scan-clean evidence pointers and derive `proof_count`. A supplied timestamp must match the newest cited non-reinforcement evidence-log timestamp for the card. |
 | `replace_block` | `text` | Replace one claim, retain its anchor, and append a `previously X, now Y` history line. |
 | `remove_block` | None | Remove one claim, reserve its id, and append its previous wording to history. |
 | `add_previously` | `text` | Append a supplied previous wording to history. |
 | `supersede_card` | `other_card` | Mark the addressed card superseded by another retained source card. |
-| `merge_exact_duplicates` | `other_card` | Merge matching normalized claims into the addressed card and remove the other source. |
+| `merge_exact_duplicates` | `other_card` | Merge exact claims into the addressed card and remove the other source. |
 
 Replacement and history text must be a single unanchored paragraph or bullet.
-Exact duplicate comparison ignores block anchors. Duplicate merges retain
+Exact duplicate comparison ignores block anchors and normalizes whitespace.
+Case and punctuation must match. Duplicate merges retain
 aliases, evidence, and anchor reservations. Supported Markdown index references
 are rewritten to the survivor. Unsupported or ambiguous removed-card references
 are refused.
