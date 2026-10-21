@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import re
 import secrets
@@ -39,6 +40,17 @@ _WAKE_EPOCHS: dict[str, int] = {}
 _ACTIVE_WAITERS: dict[str, int] = {}
 _SOURCE_WAITERS: dict[str, int] = {}
 _LOCAL = threading.local()
+
+
+def _source_cap_applies(source_ip: str) -> bool:
+    """Loopback peers are a local reverse proxy (such as Tailscale Serve) whose
+    clients are indistinguishable, so only the per-caller and global caps apply."""
+    try:
+        return not ipaddress.ip_address(source_ip).is_loopback
+    except ValueError:
+        return True
+
+
 _PRINCIPAL_NAME_RE = re.compile(r"^[a-z][a-z0-9._-]{0,62}$")
 _SENDER_LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _THREAD_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/#-]{0,127}$")
@@ -788,7 +800,7 @@ def list_messages(
         if (
             active >= MAX_WAITERS_PER_CALLER
             or sum(_ACTIVE_WAITERS.values()) >= MAX_WAITERS
-            or source_active >= MAX_WAITERS_PER_SOURCE
+            or (_source_cap_applies(source_ip) and source_active >= MAX_WAITERS_PER_SOURCE)
         ):
             raise MessageQuotaError("message wait capacity reached", code="message_wait_capped")
         condition = _WAKE_CONDITIONS.get(recipient)

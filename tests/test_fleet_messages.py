@@ -3895,6 +3895,9 @@ def test_list_wait_caps_across_callers(message_hub, monkeypatch, cap):
     base, token_a, token_b, _db = message_hub
     if cap == "global":
         monkeypatch.setattr(fleet_hub_messages, "MAX_WAITERS", 1, raising=False)
+    else:
+        # The test hub is reached over loopback, which is exempt; treat it as a remote peer.
+        monkeypatch.setattr(fleet_hub_messages, "_source_cap_applies", lambda _source_ip: True)
     results = []
     tokens = [token_b] if cap == "global" else [token_b, token_a]
     threads = [
@@ -3931,6 +3934,41 @@ def test_list_wait_caps_across_callers(message_hub, monkeypatch, cap):
         200,
         {"messages": [], "next_cursor": 100},
     )
+
+
+def test_source_cap_skips_loopback_proxy_peers():
+    assert not fleet_hub_messages._source_cap_applies("127.0.0.1")
+    assert not fleet_hub_messages._source_cap_applies("::1")
+    assert fleet_hub_messages._source_cap_applies("100.64.0.5")
+    assert fleet_hub_messages._source_cap_applies("192.0.2.10")
+    assert fleet_hub_messages._source_cap_applies("")
+
+
+def test_list_wait_loopback_callers_share_no_source_cap(message_hub, monkeypatch):
+    base, token_a, token_b, _db = message_hub
+    monkeypatch.setattr(fleet_hub_messages, "MAX_WAITERS_PER_SOURCE", 1)
+    results = []
+    threads = [
+        threading.Thread(
+            target=lambda token=token: results.append(_request(base, token, {"action": "list", "wait_ms": 3000})),
+            daemon=True,
+        )
+        for token in (token_b, token_a)
+    ]
+    try:
+        for thread, recipient in zip(threads, [NODE_B, NODE_A], strict=True):
+            thread.start()
+            _wait_for_active_waiters(recipient, 1)
+    finally:
+        for token, recipient in [(token_a, NODE_B), (token_b, NODE_A)]:
+            assert (
+                _request(base, token, {"action": "send", "to": recipient, "subject": "Release", "body": "Wake"})[0]
+                == 201
+            )
+        for thread in threads:
+            thread.join(timeout=4)
+            assert not thread.is_alive()
+    assert [status for status, _payload in results] == [200, 200]
 
 
 def test_wait_capped_client_and_cli_exit_without_retry(message_hub, monkeypatch, capsys):
