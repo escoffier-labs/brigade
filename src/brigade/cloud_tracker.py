@@ -1429,6 +1429,8 @@ def _codex_cloud_observation(target: Path, *, codex_max_items: int | None = None
         inventory = codex_cloud.list_tasks(
             cwd=target,
             max_items=codex_cloud.DEFAULT_MAX_ITEMS if codex_max_items is None else codex_max_items,
+            # A bounded read takes one page; cursor pages are slow on the provider side.
+            max_pages=codex_cloud.MAX_LIST_PAGES if codex_max_items is None else 1,
         )
     except Exception:  # noqa: BLE001 - observation must stay bounded
         return ProviderObservation(True, False, "transport-failure", {})

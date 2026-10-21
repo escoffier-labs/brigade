@@ -38,9 +38,9 @@ def test_brief_limits_inventory_and_checks_only_missing_registered_tasks(monkeyp
     limits = []
     status_ids = []
 
-    def list_tasks(*, cwd, max_items=codex_cloud.DEFAULT_MAX_ITEMS):
+    def list_tasks(*, cwd, max_items=codex_cloud.DEFAULT_MAX_ITEMS, max_pages=codex_cloud.MAX_LIST_PAGES):
         assert cwd == tmp_path
-        limits.append(max_items)
+        limits.append((max_items, max_pages))
         return codex_cloud.ListTasksResult([{"id": "task_present", "state": "running"}])
 
     def run_text(command, *, cwd, timeout=30.0):
@@ -55,7 +55,7 @@ def test_brief_limits_inventory_and_checks_only_missing_registered_tasks(monkeyp
     result = cloud_tracker.stale_entries_for_brief(tmp_path, now=NOW)
 
     assert "error" not in result
-    assert limits == [codex_cloud.MAX_LIST_LIMIT]
+    assert limits == [(codex_cloud.MAX_LIST_LIMIT, 1)]
     assert status_ids == ["task_missing"]
 
 
@@ -199,8 +199,8 @@ def test_default_observation_keeps_full_inventory(monkeypatch, tmp_path, isolate
     _register(tmp_path, "task_outside_inventory")
     limits = []
 
-    def list_tasks(*, cwd, max_items=codex_cloud.DEFAULT_MAX_ITEMS):
-        limits.append(max_items)
+    def list_tasks(*, cwd, max_items=codex_cloud.DEFAULT_MAX_ITEMS, max_pages=codex_cloud.MAX_LIST_PAGES):
+        limits.append((max_items, max_pages))
         return codex_cloud.ListTasksResult([{"id": "task_inventory", "state": "running"}])
 
     def unexpected_status(*a, **k):
@@ -216,5 +216,5 @@ def test_default_observation_keeps_full_inventory(monkeypatch, tmp_path, isolate
     else:
         tasks, _, _ = cloud_tracker.observe_providers(tmp_path, ignored_legacy_option=True)
 
-    assert limits == [codex_cloud.DEFAULT_MAX_ITEMS]
+    assert limits == [(codex_cloud.DEFAULT_MAX_ITEMS, codex_cloud.MAX_LIST_PAGES)]
     assert tasks == {"task_inventory": {"state": "running", "ready_at": None}}
