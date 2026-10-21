@@ -595,3 +595,74 @@ def test_watch_ceiling_includes_resumed_reserved_children(apply_target, monkeypa
     assert store.read(watch_dir / "session.json")["launched"] == 1
     assert sum(row["state"] == "completed" for _, row in rows) == 1
     assert sum(row["state"] == "launching" and not row["pid"] for _, row in rows) == 1
+
+
+def test_watch_restart_excludes_bootstrapped_child_from_fresh_budget(apply_target, monkeypatch, capsys):
+    import subprocess
+    from pathlib import Path
+
+    from tests.test_work_dispatch_apply import DispatchCrash
+
+    _tasks(apply_target, [["a.py"], ["b.py"], ["c.py"]])
+    assert cli.main(["work", "dispatch", "--dry-run", "--target", str(apply_target), "--worker", "coder"]) == 0
+    capsys.readouterr()
+    (directory,) = store.sessions(apply_target)
+    session = store.read(directory / "session.json")
+    session.update(dry_run=False, no_wait=True)
+    localio.write_json(directory / "session.json", session)
+    plan = store.read(directory / "plan.json")
+    path, row = apply._new_intent(apply_target, directory, session, plan, plan["selected"][0])
+    popen = subprocess.Popen
+
+    def interrupted(argv, *args, **kwargs):
+        if "brigade.work_cmd.dispatch_child" in argv:
+            raise DispatchCrash()
+        return popen(argv, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(subprocess, "Popen", interrupted)
+        with pytest.raises(DispatchCrash):
+            apply.Apply(apply_target).advance(path, row, session)
+    assert row["state"] == "launching" and row["pid"] is None
+    run_dir = Path(row["run_dir"])
+    localio.write_json(run_dir / "dispatch-launch.json", {"pid": 2147483647, "process_token": "exited-child"})
+    localio.write_json(
+        run_dir / "run.json",
+        {"status": "ok", "cwd": row["worktree"], "finished_at": localio.utc_now_iso()},
+    )
+    assert not store.child_alive(row)
+
+    watch_dir = _watch(apply_target, capsys, "--max-total", "2", "--drain-wait", "--interval", "0.05")
+    assert store.read(path)["pid"] == 2147483647  # Real reconciliation adopted the bootstrap identity.
+    ticks = [event["payload"] for event in store.events(watch_dir) if event["event_type"] == "work.dispatch.tick"]
+    launched = [intent for tick in ticks for intent in tick["launched"]]
+    assert row["intent_id"] not in launched
+    new_rows = [intent for _, intent in store.intents(apply_target) if intent["intent_id"] != row["intent_id"]]
+    assert len(new_rows) == len(launched) == 2
+    assert all(intent["pid"] and intent["state"] == "completed" for intent in new_rows)
+    assert store.read(watch_dir / "session.json")["launched"] == 2
+    assert store.read(watch_dir / "session.json")["close_reason"] == "max-total"
+
+
+@pytest.mark.parametrize("pid", [True, False, 0, -1, "123", None, 1.5, {}])
+@pytest.mark.parametrize("source", ["intent", "bootstrap"])
+def test_watch_rejects_invalid_pid_launch_evidence(apply_target, capsys, pid, source):
+    from brigade.work_cmd.dispatch_watch import Watch
+
+    assert cli.main(["work", "dispatch", "--dry-run", "--target", str(apply_target), "--worker", "coder"]) == 0
+    capsys.readouterr()
+    (directory,) = store.sessions(apply_target)
+    session, plan = store.read(directory / "session.json"), store.read(directory / "plan.json")
+    path, row = apply._new_intent(apply_target, directory, session, plan, plan["selected"][0])
+    run_dir = apply_target / "reserved"
+    run_dir.mkdir()
+    store.transition(path, row, "launching", run_dir=str(run_dir), pid=pid if source == "intent" else None)
+    if source == "bootstrap":
+        localio.write_json(run_dir / "dispatch-launch.json", {"pid": pid})
+    engine = apply.Apply(apply_target)
+    watcher = Watch(engine, directory, session, interval=0.1, drain_wait=False)
+    assert not watcher.snapshot()[row["intent_id"]][0]
+    if source == "bootstrap":
+        assert engine.refresh(path, row, session)
+        assert row["state"] == "unknown"
+        assert not watcher.snapshot()[row["intent_id"]][0]

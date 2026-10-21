@@ -41,7 +41,16 @@ class Watch:
         self.denied = False
 
     def snapshot(self) -> dict[str, tuple[bool, str]]:
-        return {row["intent_id"]: (bool(row.get("pid")), row["state"]) for _, row in store.intents(self.engine.target)}
+        result = {}
+        for _, row in store.intents(self.engine.target):
+            pid = row.get("pid")
+            if (type(pid) is not int or pid <= 0) and row.get("run_dir"):
+                # The bootstrap can publish its PID before the dispatcher
+                # persists it. Exit does not erase that historical launch.
+                receipt = localio.read_json_dict(Path(row["run_dir"]) / "dispatch-launch.json")
+                pid = receipt.get("pid") if receipt is not None else None
+            result[row["intent_id"]] = (type(pid) is int and pid > 0, row["state"])
+        return result
 
     def launched(self) -> int:
         return self.launch_count
