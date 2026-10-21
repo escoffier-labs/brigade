@@ -501,7 +501,7 @@ def register(sub: argparse._SubParsersAction) -> None:
         help="Partition the ready set into dispatch waves by footprint intersection.",
     )
     p_work_ready.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
-    p_work_dispatch = work_sub.add_parser("dispatch", help="Plan one ready wave and write a dispatch receipt.")
+    p_work_dispatch = work_sub.add_parser("dispatch", help="Dispatch one ready wave into branch-backed worktrees.")
     p_work_dispatch.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
     p_work_dispatch.add_argument("--wave", type=int, default=None, help="Pin a zero-based dispatch wave.")
     p_work_dispatch.add_argument(
@@ -518,9 +518,43 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_work_dispatch.add_argument(
         "--dry-run",
         action="store_true",
-        help="Write only session.json and plan.json. Required until launching is implemented.",
+        help="Write only session.json and plan.json without claiming or launching.",
     )
     p_work_dispatch.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+    p_work_dispatch.add_argument("--base", default="HEAD", help="Committed base ref for child worktrees.")
+    p_work_dispatch.add_argument(
+        "--run-budget", type=Path, default=None, help="Budget declaration passed to each child."
+    )
+    p_work_dispatch.add_argument(
+        "--max-total", type=int, default=None, help="Maximum child launches per session, including retries."
+    )
+    p_work_dispatch.add_argument("--deadline", type=float, default=None, help="Session wall-clock limit in seconds.")
+    p_work_dispatch.add_argument("--spawn-delay", type=float, default=0, help="Seconds between child launches.")
+    p_work_dispatch.add_argument(
+        "--no-wait", action="store_true", help="Leave children running and return after launch."
+    )
+    p_work_dispatch.add_argument(
+        "--commit", action="store_true", help="Commit successful child changes locally after exit."
+    )
+    for name, help_text in (
+        ("dispatches", "List dispatch sessions and tripped task breakers."),
+        ("dispatch-show", "Show a dispatch session, intents, and event receipts."),
+        ("dispatch-reset", "Reset a task circuit breaker with a reason receipt."),
+    ):
+        parser = work_sub.add_parser(name, help=help_text)
+        parser.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to inspect.")
+        parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
+        if name == "dispatch-show":
+            parser.add_argument("dispatch_id", help="Dispatch id, unique prefix, or latest.")
+        if name == "dispatch-reset":
+            parser.add_argument("task_id", help="Task id or unique prefix.")
+            parser.add_argument("--reason", required=True, help="Reason for resetting the breaker.")
+            parser.add_argument(
+                "--release-unknown",
+                action="store_true",
+                help="Release inspected unknown intents only when their children have exited.",
+            )
+
     p_work_claim = work_sub.add_parser(
         "claim",
         help="Atomically claim a ready work task (pending → in_progress with assignee).",
