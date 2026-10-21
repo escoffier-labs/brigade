@@ -831,8 +831,15 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     p_work_task_edge_list.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
     p_work_import = work_sub.add_parser("import", help="Add, list, show, or promote scanner-ready work imports.")
+    p_work_import.add_argument("--from-bd-jsonl", type=Path, help="Stage an additive bd export snapshot in the inbox.")
+    p_work_import.add_argument("--bd-version", help="Version of bd that produced the export, such as 1.3.1.")
+    p_work_import.add_argument(
+        "--target", "-t", dest="bd_target", type=Path, help="Repo or workspace for --from-bd-jsonl."
+    )
+    p_work_import.add_argument(
+        "--json", dest="bd_json", action="store_true", help="Print --from-bd-jsonl results as JSON."
+    )
     import_sub = p_work_import.add_subparsers(dest="import_command", metavar="<import-command>")
-    import_sub.required = True
     p_work_import_add = import_sub.add_parser("add", help="Add a local work import.")
     p_work_import_add.add_argument("text", nargs="+", help="Import text.")
     p_work_import_add.add_argument("--target", "-t", type=Path, default=Path("."), help="Repo or workspace to update.")

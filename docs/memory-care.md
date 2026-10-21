@@ -37,6 +37,7 @@ The local config supports:
 Memory care can emit:
 
 - `stale`
+- `unconsolidated-evidence`
 - `expired`
 - `undersourced`
 - `contradictory`
@@ -46,6 +47,14 @@ Memory care can emit:
 - `missing-frontmatter`
 - `missing-reviewed`
 - `missing-freshness`
+
+`unconsolidated-evidence` flags cards with matched evidence newer than `last_consolidated`, falling back to `last_reviewed` when consolidation metadata is absent or invalid. Cards with neither a valid consolidation date nor a valid review date are unassessable. Date-only references compare each log timestamp's UTC calendar date with the stored date. Ingest sets reinforced `last_reviewed` dates using the local calendar, so evidence from the same local day can fall on a later UTC date. Timestamp references compare exact instants. Each finding lists evidence ids in `evidence_references`, uses the existing refresh queue fingerprint and dedupe rules, and is counted by `memory care status`.
+
+Reinforcement records do not appear in `evidence_references`. When a card lacks a valid `last_consolidated` and has a reinforcement dated on or after its review reference, care treats that reference as a possible automatic bump. Date-only review references use the reinforcement's local calendar date for this check. Care retains all non-reinforcement evidence for review because the earlier review date is unknown. Set `last_consolidated` after consolidation to establish an explicit cutoff.
+
+Existing `.brigade/memory-care.toml` files with an explicit `enabled_checks` list must add `"unconsolidated-evidence"` to enable this check. Upgrade every Brigade installation that reads the config before adding it, because older versions reject unknown check names. A missing `enabled_checks` field uses the installed version's defaults. Status prints `unconsolidated-evidence: disabled` when the check is absent from the enabled list, and JSON status includes `enabled_checks`.
+
+Ingest appends body-free near-match, opposite-polarity, and reinforcement records to `.brigade/memory/reflect/evidence-log.jsonl`. Each row contains a timestamp, card identity and path alias, evidence id, match kind, and similarity. Evidence ids for files inside the target are relative paths to the review inbox copy or processed archive. Archives outside the target use `sha256:` ids derived from their absolute paths, without storing those paths. These hashes identify records but cannot be opened as file pointers. Cards without stable ids retain their legacy identity and path. Reading or appending the log never edits cards. Existing exact-match reinforcement still updates card metadata. Rows are limited to 4 KiB. Care reads only the newest 4 MiB of the log, skipping any partial row at the cutoff. Older evidence can fall outside this window. Exceeding the scan limit adds one warning to `evidence_log.warning_count`. Malformed or oversized rows inside the window also add counted warnings. Unsafe or non-regular paths are refused. Log IO follows the proposal storage rules and fails closed when safe directory descriptors are unavailable, including Windows. Care reports this capability limit as `evidence_log.unsupported: true`, without counting it as an invalid line.
 
 Contradiction detection is deliberately conservative. Brigade only flags explicit duplicate card identities or metadata hints, not LLM-inferred factual conflicts.
 

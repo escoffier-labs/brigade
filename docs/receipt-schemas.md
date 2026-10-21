@@ -1036,6 +1036,22 @@ It is not a second provenance envelope. Compact JSON is capped at 65536 bytes.
 | `id` | string | yes | Safe identity label. Matches `parent_manifest.id` |
 | `parents` | array | yes | Same parent-object schema as the causal receipt |
 
+`brigade receipts lineage <kind>:<id> [--target .] [--json]` reads these
+artifacts and walks recorded causal parents without modifying them. JSON uses
+`brigade.receipts_lineage.v1` with `schema_version: 1`, the requested subject,
+bounded hops, and optional `message`, `truncated`, or child-run `run_lineage`.
+Each hop exposes only its source, relation, parent identity, link, status, and
+bounded diagnostic. Status is `ok`, `broken`, or `digest_mismatch`. Legacy
+artifacts without `causal_receipt` report `no lineage recorded`.
+Handoff lookup uses writer inboxes and configured dogfood or run handoff inboxes.
+Outcome lookup streams the ledger with a 1 MiB limit per row. Worker results
+without a companion receipt resolve as leaves from their recorded worker identity,
+with a 64 MiB limit on `worker-results.json`.
+Worker lookup scans the first 500 results and marks the report `truncated`
+when more results exist. Receipts must match the requested subject kind and ID.
+Verify receipts and parent manifests use their IDs for direct lookup.
+Text output includes diagnostics and a notice when a walk limit is reached.
+
 ## Run View read contracts (#631)
 
 Versioned, read-only CLI JSON contracts for higher-level surfaces (the Center

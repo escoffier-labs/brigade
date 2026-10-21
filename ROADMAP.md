@@ -1,6 +1,6 @@
 # Brigade Roadmap
 
-Brigade is built as a practical daily workflow first, then a portable setup other people can adapt. The core direction: one command to start, predictable local artifacts, reviewable memory handoffs, and enough inspection to trust the loop during normal work.
+Brigade lets agents work autonomously within scopes the operator controls. Receipts and run journals show what happened, while evidence packages and handoffs give the next agent a checkable starting point. The same records connect local work to fleet workers and cloud seats.
 
 This file is direction-only. The full per-feature completion detail through v0.8.x (every implemented, strengthened, and started bullet) lives in the [roadmap archive](docs/roadmap-archive.md). The generated list of every public command is in [docs/command-inventory.md](docs/command-inventory.md).
 
@@ -13,11 +13,11 @@ This file is direction-only. The full per-feature completion detail through v0.8
 - **scanner**: an automation that goes looking for useful work.
 - **import / inbox**: a holding queue where found work waits for your review.
 - **receipt**: a local file logging that something happened, kept for audit and proof.
-- **gate**: a manual approval checkpoint; nothing risky happens without your yes.
+- **gate**: a checkpoint the operator places where they want approval before work continues.
 - **station**: an optional sidecar tool Brigade installs and health-checks (pantry, tokens, content guard, …) without folding its runtime into the Python package. The Code and Evidence engines are not stations: they ship inside Brigade under `engines/`.
 - **dogfood**: Brigade being used on itself or the maintainer's real setup.
 
-Execution model: Brigade runs only on explicit invocation. An external scheduler may call its primitives and runbooks. Brigade is not a daemon. Details: [docs/execution-model.md](docs/execution-model.md).
+Execution model: the operator sets policy and starts commands or long-running services. Agents carry out authorized work and leave receipts, journals, and handoffs with evidence. External schedulers can trigger care runbooks. Details: [docs/execution-model.md](docs/execution-model.md).
 
 ## Where things stand
 

@@ -21,6 +21,7 @@ COMMAND_GROUPS: list[tuple[str, list[str]]] = [
             "ingest",
             "memory",
             "doctor",
+            "bug",
             "version",
             "status",
             "profiles",

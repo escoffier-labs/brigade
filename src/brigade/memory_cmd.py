@@ -36,6 +36,7 @@ from .card_identity import (
     valid_card_id,
 )
 from .templates import template_root
+from .memory_evidence_log import EvidenceLog
 from .memory_care_plan import (
     PLANABLE_METADATA_FIXES,
     format_block_reasons,
@@ -56,6 +57,7 @@ MEMORY_CARE_RUNBOOK_NAMES = (
 LEGACY_OUTPUT_PATH = "memory/cards/decay"
 CHECKS = (
     "stale",
+    "unconsolidated-evidence",
     "expired",
     "undersourced",
     "contradictory",
@@ -504,14 +506,6 @@ def _safe_summary(text: str) -> str:
 def _priority(issue_type: str, severity: str) -> str:
     if severity == "high" or issue_type in {"expired", "missing-index-link"}:
         return "high"
-    if issue_type in {
-        "missing-frontmatter",
-        "missing-reviewed",
-        "missing-freshness",
-        "oversized-card",
-        "contradictory",
-    }:
-        return "normal"
     return "normal"
 
 
@@ -608,7 +602,7 @@ def _scan_payload(target: Path, config: MemoryCareConfig) -> dict[str, Any]:
     identities: list[tuple[str, CardIdentity]] = []
     identities_by_path: dict[str, CardIdentity] = {}
     enabled = set(config.enabled_checks)
-
+    evidence_log = EvidenceLog(target)
     for path in cards:
         rel = str(path.relative_to(target))
         text = path.read_text(encoding="utf-8", errors="replace")
@@ -640,6 +634,7 @@ def _scan_payload(target: Path, config: MemoryCareConfig) -> dict[str, Any]:
             )
         reviewed = _parse_date(_frontmatter_value(meta, "last_reviewed", "last_reviewed_at", "reviewed_at"))
         row["last_reviewed"] = reviewed.isoformat() if reviewed else None
+        issues.extend(evidence_log.findings(target, config, rel, identity, meta))
         if has_frontmatter and "missing-reviewed" in enabled and reviewed is None:
             issues.append(
                 _issue(
@@ -860,6 +855,7 @@ def _scan_payload(target: Path, config: MemoryCareConfig) -> dict[str, Any]:
         "counts": dict(sorted(counts.items())),
         "metadata": metadata_summary,
         "identity_collisions": identity_collision_aliases(identities),
+        "evidence_log": evidence_log.summary,
         "cards": card_rows,
         "issues": issues,
     }
@@ -1161,6 +1157,12 @@ def health(target: Path) -> dict[str, Any]:
         "valid": not any(check["status"] == "fail" for check in checks),
         "issue_count": len(issues),
         "scan_issue_count": scan_issue_count,
+        "enabled_checks": list(config.enabled_checks),
+        "counts": (
+            scan_payload["counts"]
+            if isinstance(scan_payload, dict) and isinstance(scan_payload.get("counts"), dict)
+            else {}
+        ),
         "queue_count": queue_count,
         "top_issue": top_issue or (issues[0] if issues else None),
         "checks": checks,
@@ -1195,6 +1197,10 @@ def status(*, target: Path, json_output: bool = False) -> int:
     print(f"queue_path: {payload['queue_path']}")
     issue_count = payload["issue_count"]
     print(f"health: {'ok' if issue_count == 0 else str(issue_count) + ' issue(s)'}")
+    evidence_count = payload["counts"].get("unconsolidated-evidence", 0)
+    if "unconsolidated-evidence" not in payload["enabled_checks"]:
+        evidence_count = "disabled"
+    print(f"unconsolidated-evidence: {evidence_count}")
     metadata_value = payload.get("metadata")
     metadata = metadata_value if isinstance(metadata_value, dict) else {}
     reviewed_value = metadata.get("reviewed_dates")
