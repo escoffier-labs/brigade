@@ -272,7 +272,10 @@ def _limit_submissions(root: Path, fp: str, now: datetime) -> None:
             raise ReportBlocked("Bug report blocked: fingerprint cooldown is 5 minutes")
 
 
-def _pending_receipt_exists(root: Path, fp: str, now: datetime) -> bool:
+def _pending_receipt_exists(
+    root: Path, fp: str, now: datetime, current_receipt: dict[str, Any], comment_on: int | None
+) -> bool:
+    receipts = [current_receipt]
     for attempt in _attempts(root, now) + _attempts(root, now - timedelta(days=1)):
         if attempt["fingerprint"] != fp:
             continue
@@ -280,9 +283,21 @@ def _pending_receipt_exists(root: Path, fp: str, now: datetime) -> bool:
             receipt = json.loads(_read_bounded(root / attempt["report_id"] / "receipt.json"))
         except (OSError, ValueError, TypeError):
             continue
-        if isinstance(receipt, dict) and receipt.get("status") == "pending":
-            return True
-    return False
+        if isinstance(receipt, dict):
+            receipts.append(receipt)
+    return any(
+        receipt.get("status") == "pending"
+        and receipt.get("destination") == "gh"
+        and (
+            comment_on is None
+            or (
+                receipt.get("duplicate_choice") == "comment"
+                # Older comment receipts did not record their target.
+                and receipt.get("comment_on") in {None, comment_on}
+            )
+        )
+        for receipt in receipts
+    )
 
 
 def _output_tail(path: Path | None) -> str:
@@ -555,22 +570,27 @@ def _report(args: argparse.Namespace) -> int:
             receipt["consent"]["mode"] = "flag"
             if not interactive:
                 receipt["security_confirmation"] = {"mode": "flag", "not_security": True}
-        receipt.update(
-            destination=via,
-            status="pending",
-            duplicate_choice="comment" if comment_on else "new",
-        )
         with held_file_lock(root / "submission.lock", deadline_seconds=1):
-            _load_prepared(report_id, not_security=args.not_security)
+            _, _, _, current_receipt = _load_prepared(report_id, not_security=args.not_security)
             now = datetime.now(timezone.utc)
             _limit_submissions(root, bundle["fingerprint"], now)
-            if comment_on is None and _pending_receipt_exists(root, bundle["fingerprint"], now):
-                if fingerprint_match:
+            pending = _pending_receipt_exists(root, bundle["fingerprint"], now, current_receipt, comment_on)
+            if comment_on is not None and pending:
+                raise ReportBlocked("Bug report blocked: cannot confirm whether the pending comment landed")
+            if comment_on is None:
+                if fingerprint_match and (pending or (args.yes and via == "gh")):
                     raise ReportBlocked(
-                        f"Bug report blocked: matching issue found for a pending submission: {duplicates[0]['url']}"
+                        f"Bug report blocked: matching issue found: {duplicates[0]['url']}. "
+                        "Use --comment-on with a shown duplicate to add the report to that issue"
                     )
-                if dedup_status != "searched":
+                if pending and dedup_status != "searched":
                     raise ReportBlocked("Bug report blocked: cannot confirm whether the pending submission landed")
+            receipt.update(
+                destination=via,
+                status="pending",
+                duplicate_choice="comment" if comment_on else "new",
+                comment_on=comment_on,
+            )
             receipt["attempted_at"] = now.isoformat()
             attempts = root / "attempts"
             record = {key: receipt[key] for key in ("report_id", "fingerprint", "attempted_at")}

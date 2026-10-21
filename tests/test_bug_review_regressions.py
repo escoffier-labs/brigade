@@ -54,7 +54,7 @@ def test_different_summaries_share_fingerprint_when_failure_facts_exist(report_e
 def test_usage_error_preserves_real_failure_diagnostic(report_env, capsys):
     bug_last_error.record("doctor", 1, ValueError("profile failed"))
     with pytest.raises(SystemExit) as exc:
-        cli.main(["doctor", "--not-a-real-option"])
+        cli.main(["version", "--json"])
     assert exc.value.code == 2
     capsys.readouterr()
     diagnostic = bug_last_error.read()
@@ -63,8 +63,9 @@ def test_usage_error_preserves_real_failure_diagnostic(report_env, capsys):
     assert diagnostic["message_head"] == "profile failed"
 
 
-@pytest.mark.parametrize("retry", ["search-fails", "fallback-only", "comment"])
-def test_pending_submission_retry_after_cooldown(report_env, monkeypatch, capsys, retry):
+@pytest.mark.parametrize("age_days", [0, 2])
+@pytest.mark.parametrize("retry", ["search-fails", "fallback-only", "comment", "match"])
+def test_pending_submission_retry_after_cooldown(report_env, monkeypatch, capsys, retry, age_days):
     mod, target = report_env
     now = datetime(2026, 1, 1, 12, tzinfo=timezone.utc)
 
@@ -99,13 +100,16 @@ def test_pending_submission_retry_after_cooldown(report_env, monkeypatch, capsys
     assert cli.main(args) == 2
     capsys.readouterr()
     assert json.loads(Path(preview["receipt_path"]).read_text())["status"] == "pending"
-    now += timedelta(minutes=6)
+    now += timedelta(days=age_days, minutes=6)
     if retry == "comment":
         args += ["--comment-on", "321"]
-    expected = 2 if retry == "search-fails" else 0
+    expected = 2 if retry in {"search-fails", "match"} else 0
     assert cli.main(args) == expected
-    if retry == "search-fails":
-        assert "cannot confirm" in capsys.readouterr().err
+    if expected == 2:
+        error = capsys.readouterr().err
+        assert ("cannot confirm" if retry == "search-fails" else "matching issue found") in error
+        if retry == "match":
+            assert "--comment-on" in error
         assert json.loads(Path(preview["receipt_path"]).read_text())["status"] == "pending"
     else:
         submitted = result(capsys)
@@ -115,6 +119,96 @@ def test_pending_submission_retry_after_cooldown(report_env, monkeypatch, capsys
     comments = [call for call in calls if call[:2] == ("issue", "comment")]
     assert len(creates) == (2 if retry == "fallback-only" else 1)
     assert len(comments) == (1 if retry == "comment" else 0)
+
+
+def test_yes_requires_explicit_comment_when_fingerprint_already_exists(report_env, monkeypatch, capsys):
+    mod, target = report_env
+    issue = {"number": 321, "title": "same failure", "state": "open"}
+    monkeypatch.setattr(mod, "gh", lambda *args: json.dumps([issue]))
+    monkeypatch.setattr(mod, "_submit", lambda *args: pytest.fail("duplicate issue submitted"))
+    assert invoke(target, "--dry-run", "--json") == 0
+    preview = result(capsys)
+    assert (
+        cli.main(["bug", "report", "--report-id", preview["report_id"], "--yes", "--not-security", "--via", "gh"]) == 2
+    )
+    assert "--comment-on" in capsys.readouterr().err
+    assert json.loads(Path(preview["receipt_path"]).read_text())["status"] == "prepared"
+
+
+@pytest.mark.parametrize("reuse_report", [False, True])
+@pytest.mark.parametrize("comment_on", [321, 322])
+def test_pending_comment_retry_requires_confirmation(report_env, monkeypatch, capsys, reuse_report, comment_on):
+    mod, target = report_env
+    now = datetime(2026, 1, 1, 12, tzinfo=timezone.utc)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    monkeypatch.setattr(mod, "datetime", Clock)
+    comments = []
+
+    def fake_gh(*args):
+        if args[:2] == ("search", "issues"):
+            return json.dumps([{"number": number, "title": "same failure", "state": "open"} for number in (321, 322)])
+        assert args[:2] == ("issue", "comment")
+        comments.append(args)
+        if len(comments) == 1:
+            raise OSError("comment outcome unknown")
+        return ""
+
+    monkeypatch.setattr(mod, "gh", fake_gh)
+    assert invoke(target, "--dry-run", "--json") == 0
+    preview = result(capsys)
+    args = ["bug", "report", "--report-id", preview["report_id"], "--yes", "--not-security", "--via", "gh", "--json"]
+    assert cli.main([*args, "--comment-on", "321"]) == 2
+    capsys.readouterr()
+    now += timedelta(days=2 if reuse_report else 0, minutes=6)
+    if not reuse_report:
+        assert invoke(target, "--dry-run", "--json") == 0
+        args[3] = result(capsys)["report_id"]
+    assert cli.main([*args, "--comment-on", str(comment_on)]) == (2 if comment_on == 321 else 0)
+    if comment_on == 321:
+        assert "cannot confirm" in capsys.readouterr().err
+        assert len(comments) == 1
+        assert json.loads(Path(preview["receipt_path"]).read_text())["status"] == "pending"
+    else:
+        assert result(capsys)["destination_url"] == mod.ISSUES_URL + "/322"
+        assert len(comments) == 2
+
+
+@pytest.mark.parametrize("reuse_report", [False, True])
+@pytest.mark.parametrize("via", ["url", "email"])
+def test_failed_link_handoff_can_retry_without_duplicate_search(report_env, monkeypatch, capsys, reuse_report, via):
+    mod, target = report_env
+    now = datetime(2026, 1, 1, 12, tzinfo=timezone.utc)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    monkeypatch.setattr(mod, "datetime", Clock)
+    budget_name = "URL_BUDGET" if via == "url" else "EMAIL_BUDGET"
+    budget = getattr(mod, budget_name)
+    monkeypatch.setattr(mod, budget_name, 1)
+    assert invoke(target, "--dry-run", "--json") == 0
+    preview = result(capsys)
+    args = ["bug", "report", "--report-id", preview["report_id"], "--yes", "--not-security", "--via", via, "--json"]
+    assert cli.main(args) == 2
+    assert "destination URL exceeds budget" in capsys.readouterr().err
+    assert json.loads(Path(preview["receipt_path"]).read_text())["status"] == "pending"
+    now += timedelta(minutes=6)
+    monkeypatch.setattr(mod, budget_name, budget)
+    if not reuse_report:
+        assert invoke(target, "--dry-run", "--json") == 0
+        args[3] = result(capsys)["report_id"]
+    assert cli.main(args) == 0
+    submitted = result(capsys)
+    assert submitted["dedup_status"] == "dedup skipped"
+    assert submitted["destination_url"].startswith(mod.ISSUES_URL + "/new?" if via == "url" else "mailto:")
+    assert json.loads(Path(submitted["receipt_path"]).read_text())["status"] == "handoff"
 
 
 @pytest.mark.parametrize("hostname", ["main", "brigade", "exampleuser"])
