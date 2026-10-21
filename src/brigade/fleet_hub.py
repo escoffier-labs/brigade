@@ -117,7 +117,7 @@ from .fleet_hub_status import (
     latest_status as latest_status,
 )
 
-SCHEMA_VERSION = 34
+SCHEMA_VERSION = 36
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
@@ -653,6 +653,10 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     fleet_hub_messages.ensure_schema(conn)
     # v31 -> v32 adds model_policy.t3_model (native T3 launch model) through
     # fleet_hub_model_roster.ensure_schema's additive column migration.
+    # v34 -> v36: aggregate snapshots and compact weekly administrator history.
+    from . import fleet_admin_stats
+
+    fleet_admin_stats.ensure_schema(conn)
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 
@@ -1847,6 +1851,9 @@ def make_server(
     else:
         deck_config = fleet_command_deck.DeckConfig()
     init_db(Path(db_path)).close()
+    from . import fleet_admin_stats
+
+    fleet_admin_stats.maintain(Path(db_path).expanduser())
     return BoundedThreadingHTTPServer(
         (host, port),
         make_handler(
@@ -1901,10 +1908,11 @@ def run(
     print(
         f"brigade fleet hub listening on {bound_host}:{bound_port} (db {Path(db_path).expanduser()}; {mode}; {tailscale_mode})"
     )
-    from . import fleet_hub_grokbot
+    from . import fleet_admin_stats, fleet_hub_grokbot
 
     sweeper_stop = threading.Event()
     sweeper_thread = fleet_hub_grokbot.start_expiry_sweeper(Path(db_path).expanduser(), stop=sweeper_stop)
+    stats_thread = fleet_admin_stats.start_retention_sweeper(Path(db_path).expanduser(), stop=sweeper_stop)
     try:
         server.serve_forever()
     except KeyboardInterrupt:
@@ -1912,5 +1920,6 @@ def run(
     finally:
         sweeper_stop.set()
         sweeper_thread.join(timeout=5)
+        stats_thread.join(timeout=5)
         server.server_close()
     return 0

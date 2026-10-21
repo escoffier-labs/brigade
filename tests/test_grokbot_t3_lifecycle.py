@@ -138,6 +138,19 @@ def test_authenticated_mcp_submit_and_recent_cross_threads(tmp_path):
         )
         assert response.status_code == 200
         assert "error" not in response.json()
+        response = client.post("/mcp", json={"jsonrpc": "2.0", "id": 5, "method": "tools/list"})
+        listed = {tool["name"]: tool for tool in response.json()["result"]["tools"]}
+        assert set(listed) == set(lifecycle.c.TOOLS)
+        assert set(listed["message_send"]["inputSchema"]["properties"]) == {
+            "to",
+            "subject",
+            "body",
+            "ref",
+            "priority",
+            "thread",
+            "kind",
+            "client_id",
+        }
         authorization = client.headers.pop("authorization")
         try:
             response = client.post(
@@ -328,3 +341,24 @@ def test_install_intake_cli(tmp_path, monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out) == {
         "units": ["brigade-grokbot-t3-intake.service", "brigade-grokbot-t3-intake.timer"]
     }
+
+
+@pytest.mark.parametrize("missing_tool", [None, "message_send"])
+@pytest.mark.usefixtures("t3_platform_admission")
+def test_canary_requires_complete_hub_tool_inventory(tmp_path, monkeypatch, missing_tool):
+    from brigade import grokbot_ops
+
+    monkeypatch.setattr(lifecycle, "_load_runtime_config", lambda target: (_config(), SECRET, None))
+    monkeypatch.setattr(
+        grokbot_ops, "_request_json", lambda *args, **kwargs: {"ok": True, "service": lifecycle.c.SERVICE_NAME}
+    )
+    monkeypatch.setattr(grokbot_ops, "_anonymous_health_status", lambda *args: 401)
+    monkeypatch.setattr(
+        grokbot_ops, "_tools_list", lambda *args: [{"name": name} for name in lifecycle.c.TOOLS if name != missing_tool]
+    )
+    result = lifecycle.canary(tmp_path)
+    assert result["ok"] is (missing_tool is None)
+    if missing_tool:
+        assert result["reason"] == "inventory-mismatch"
+    else:
+        assert {"inbox_list", "inbox_ack", "inbox_reply", "message_send", "message_status"} <= set(result["tools"])

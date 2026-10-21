@@ -3,6 +3,8 @@ import re
 import unicodedata
 from typing import Any, Callable
 
+from ..hub_messages import MAX_MESSAGE_BYTES as MAX_MESSAGE_BYTES
+
 PACK_ID = "dot"
 SERVICE_NAME = "dot-t3"
 SERVER_VERSION = "0.28.0"
@@ -10,7 +12,6 @@ DEFAULT_BIND = "127.0.0.1:8779"
 MAX_PROMPT_BYTES = 24576
 MAX_CARD_FILE_BYTES = 1024 * 1024
 MAX_HANDOFF_BYTES = 16384
-MAX_MESSAGE_BYTES = 8192
 
 
 ERROR_MESSAGES = {

@@ -52,7 +52,9 @@ def test_credential_precedence_and_spool_scope(configured, tmp_path, monkeypatch
     assert node_matches is True
     assert env_matches is True
     assert flag_matches is True
-    assert client._spool_path(NODE_A, flag[1]) != client._spool_path(NODE_A, env[1])
+    assert client._spool_path(
+        NODE_A, flag[1], hub_url=fleet_client.load_fleet_settings()["hub_url"]
+    ) != client._spool_path(NODE_A, env[1], hub_url=fleet_client.load_fleet_settings()["hub_url"])
 
 
 @pytest.mark.parametrize(
@@ -209,10 +211,12 @@ def test_flush_credential_and_empty_spool_warnings(configured, tmp_path, monkeyp
     monkeypatch.setattr(client, "_request", deliver)
     assert cli.main(["fleet", "msg", "flush", "--token-file", str(path), "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == {"delivered": 1}
-    empty = client._spool_path(NODE_A, "empty-fixture")
+    empty = client._spool_path(NODE_A, "empty-fixture", hub_url=fleet_client.load_fleet_settings()["hub_url"])
     empty.touch(mode=0o600)
     caplog.clear()
-    client._warn_inactive_spools(NODE_A, client._spool_path(NODE_A, "active-fixture"))
+    client._warn_inactive_spools(
+        NODE_A, client._spool_path(NODE_A, "active-fixture", hub_url=fleet_client.load_fleet_settings()["hub_url"])
+    )
     assert "other credentials remain queued" not in caplog.text
 
 
@@ -261,7 +265,7 @@ def test_client_grants_and_show_use_admin(hub, tmp_path, monkeypatch):
 
 
 def test_sender_recipient_quota_does_not_block_other_recipients(configured, monkeypatch, tmp_path):
-    path = client._spool_path(NODE_A, "fixture-node")
+    path = client._spool_path(NODE_A, "fixture-node", hub_url=fleet_client.load_fleet_settings()["hub_url"])
     from datetime import datetime, timezone
 
     records = [
@@ -386,7 +390,7 @@ def test_queued_client_id_retry_is_unique_and_conflicts_locally(configured, monk
 
     first = submit()
     assert submit() == first
-    path = client._spool_path(NODE_A, "fixture-node")
+    path = client._spool_path(NODE_A, "fixture-node", hub_url=fleet_client.load_fleet_settings()["hub_url"])
     original = fleet_client._read_spool(path)
     assert len(original) == 1
     with pytest.raises(client.FleetMessageHubError) as error:
@@ -411,7 +415,7 @@ def test_spooled_client_id_cannot_discard_other_recipient(configured, monkeypatc
     assert client.send(recipient=NODE_A, **fields)["queued"] is True
     with pytest.raises(client.FleetMessageHubError, match="client_id"):
         client.send(recipient=NODE_B, **fields)
-    path = client._spool_path(NODE_A, "fixture-node")
+    path = client._spool_path(NODE_A, "fixture-node", hub_url=fleet_client.load_fleet_settings()["hub_url"])
     assert [row["to"] for row in fleet_client._read_spool(path)] == [NODE_A]
     assert NODE_B not in calls
     assert "message" in client.send(recipient=NODE_B, **{**fields, "client_id": "other"})
@@ -523,7 +527,7 @@ def test_enrollment_grants_conflict_clears_stale_pending(hub, tmp_path, monkeypa
         client.manage_principal("add", name="fixture", may_send_to=[NODE_A])
     assert error.value.status == 409
     assert error.value.code == "principal_enrollment_grants_changed"
-    path = client._principal_pending_path("fixture", ADMIN)
+    path = client._principal_pending_path("fixture", ADMIN, hub_url=fleet_client.load_fleet_settings()["hub_url"])
     assert fleet_client._read_spool(path) == []
     # The stale replay is gone. The current principal remains inspectable and can be re-enrolled explicitly.
     assert client.show_principal("fixture")["principal"]["may_send_to"] == [NODE_B]
@@ -565,7 +569,7 @@ def test_disappearing_legacy_spool_does_not_abort_send(configured, monkeypatch):
 
 
 def test_confirmed_spool_removal_preserves_other_entry_with_same_client_id(configured):
-    path = client._spool_path(NODE_A, "fixture-node")
+    path = client._spool_path(NODE_A, "fixture-node", hub_url=fleet_client.load_fleet_settings()["hub_url"])
     confirmed = {"action": "send", "client_id": "legacy-duplicate", "to": NODE_A, "body": "First"}
     other = {**confirmed, "to": NODE_B, "body": "Second"}
     with fleet_client._spool_lock(path) as fd:
@@ -597,3 +601,151 @@ def test_windows_skips_posix_mode_and_owner_bits_only(configured, tmp_path, monk
     else:
         with pytest.raises(fleet_client.FleetClientError):
             credentials.read_message_token_file(str(path))
+
+
+def test_captured_authority_is_frozen_secret_safe_and_validation_never_adopts(configured, tmp_path):
+    from dataclasses import FrozenInstanceError
+
+    sentinel = "SENTINEL_SECRET_NEVER_ECHO_" * 2
+    path = token_file(tmp_path, value=sentinel)
+    authority = credentials.MessageAuthority.capture(str(path))
+    assert sentinel not in repr(authority) and str(path) not in repr(authority)
+    with pytest.raises(FrozenInstanceError):
+        authority.token = "replacement"
+    path.write_text("rotated_" * 8)
+    with pytest.raises(credentials.MessageAuthorityError) as error:
+        authority.validate()
+    assert error.value.code == "token_scope_changed"
+    assert sentinel not in str(error.value) + repr(error.value)
+    assert authority.token == sentinel  # Comparison never adopts current credentials.
+
+
+@pytest.mark.parametrize("operation", ["send", "flush", "list"])
+def test_upstream_errors_never_expose_authority_in_errors_logs_or_spool(
+    configured, tmp_path, monkeypatch, caplog, operation
+):
+    sentinel = "SENTINEL_SECRET_NEVER_ECHO_" * 2
+    path = token_file(tmp_path, value=sentinel)
+    params = dict(
+        recipient=NODE_B, subject="subject", body="body", reference=None, priority="normal", client_id="stable"
+    )
+    if operation == "flush":
+        monkeypatch.setattr(client, "_request", lambda *a, **k: (503, {}))
+        assert client.send(**params, token_file=str(path))["queued"]
+    monkeypatch.setattr(client, "_request", lambda *a, **k: (400, {"error": sentinel, "code": sentinel}))
+    if operation == "flush":
+        assert client.flush_credential(str(path)) == 0
+        visible = caplog.text
+    else:
+        with pytest.raises(credentials.FleetMessageHubError) as error:
+            if operation == "send":
+                client.send(**params, token_file=str(path))
+            else:
+                client.list_messages(token_file=str(path))
+        visible = caplog.text + str(error.value) + repr(error.value)
+    persisted = "".join(p.read_text() for p in (tmp_path / "state").rglob("*.jsonl"))
+    assert sentinel not in visible + persisted
+
+
+def test_deferred_cli_finalize_never_adopts_changed_endpoint(configured, tmp_path, monkeypatch, capsys):
+    settings = dict(hub_url="https://hub.invalid", node_token="fixture-node", admin_token="fixture-admin")
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: dict(settings))
+    requests = []
+
+    def admin_request(hub, token, body):
+        requests.append(hub)
+        if body["action"] == "get":
+            return 404, {}
+        return 200, {
+            "principal": dict(
+                name="fixture", principal_id="agent:fixture", enrollment_id=body["request_id"], token=body["token"]
+            )
+        }
+
+    original_finalize = client.finalize_principal_add
+
+    def finalize(*args, **kwargs):
+        settings["hub_url"] = "https://other.invalid"
+        return original_finalize(*args, **kwargs)
+
+    monkeypatch.setattr(client, "_principal_admin_request", admin_request)
+    monkeypatch.setattr(client, "finalize_principal_add", finalize)
+    # Successful output delivery cannot finalize against a newly selected endpoint.
+    assert cli.main(["fleet", "msg", "principals", "add", "fixture", "--json"]) == 1
+    capsys.readouterr()
+    assert requests == ["https://hub.invalid"] * 2
+    pending = list((tmp_path / "state").rglob("principal-*.jsonl"))
+    assert len(pending) == 1 and fleet_client._read_spool(pending[0])
+
+
+def test_exception_text_and_unknown_code_from_transport_are_closed(configured, monkeypatch, caplog):
+    sentinel = "SENTINEL_SECRET_NEVER_ECHO_" * 2
+
+    def request(*args, **kwargs):
+        raise credentials.FleetMessageHubError(sentinel, status=403, code=sentinel)
+
+    monkeypatch.setattr(client, "_request", request)
+    with pytest.raises(credentials.FleetMessageHubError) as error:
+        client.list_messages()
+    assert sentinel not in str(error.value) + repr(error.value) + caplog.text
+    assert error.value.code is None
+
+
+def test_node_flush_keeps_node_authority_with_message_override(configured, tmp_path, monkeypatch):
+    params = dict(
+        recipient=NODE_B, subject="subject", body="body", reference=None, priority="normal", client_id="node-retry"
+    )
+    monkeypatch.setattr(client, "_request", lambda *a, **k: (503, {}))
+    assert client.send(**params)["queued"]
+    principal = token_file(tmp_path)
+    monkeypatch.setenv(credentials.ENV_TOKEN_FILE, str(principal))
+    calls = []
+
+    def request(hub, token, body, **kwargs):
+        calls.append(token == "fixture-node")
+        return 200, {"message": {"client_id": body["client_id"]}}
+
+    monkeypatch.setattr(client, "_request", request)
+    assert client.flush(NODE_A) == 1
+    assert calls == [True]
+
+
+@pytest.mark.parametrize("phase", ["replay", "reply-lookup"])
+def test_rotation_between_replay_requests_stops_and_retains_original_spool(configured, tmp_path, monkeypatch, phase):
+    from datetime import datetime, timezone
+
+    path = token_file(tmp_path)
+    authority = credentials.MessageAuthority.capture(str(path))
+    spool = client._spool_path(NODE_A, authority.token, hub_url=authority.hub)
+    stamp = datetime.now(timezone.utc).isoformat()
+    queued = [
+        dict(action="send", to=NODE_B, client_id="first", enqueued_at=stamp),
+        dict(action="reply", id=9, client_id="reply", enqueued_at=stamp),
+    ]
+    with fleet_client._spool_lock(spool) as descriptor:
+        fleet_client._write_spool_atomic(spool, queued, dir_fd=descriptor)
+    original = spool.read_bytes()
+    calls = []
+
+    def request(hub, token, body, **kwargs):
+        calls.append(body["action"])
+        if phase == "reply-lookup" and body["action"] == "send":
+            return 429, {"code": "message_recipient_quota", "recipient": NODE_B}
+        path.write_text("y" * 64)
+        if body["action"] == "list":
+            return 200, {"messages": [{"id": 9, "sender": NODE_A}], "next_cursor": 9}
+        return 200, {"message": {"client_id": body["client_id"]}}
+
+    monkeypatch.setattr(client, "_request", request)
+    with pytest.raises(credentials.MessageAuthorityError) as error:
+        client.flush_credential(str(path))
+    assert error.value.code == "token_scope_changed"
+    assert calls == (["send"] if phase == "replay" else ["send", "list"])
+    assert spool.read_bytes() == original
+
+
+def test_unconfigured_message_cli_keeps_local_error_contract(configured, monkeypatch, capsys):
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: dict(hub_url="", node_token="", admin_token=""))
+    assert cli.main(["fleet", "msg", "list", "--json"]) == 1
+    result = json.loads(capsys.readouterr().out)
+    assert result["status"] is None and result["code"] == "invalid_argument"

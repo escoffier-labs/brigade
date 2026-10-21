@@ -83,6 +83,14 @@ def test_rejects_symlink(tmp_path):
 @pytest.mark.parametrize(
     "overrides",
     [
+        {"hub_recipients": []},
+        {"hub_recipients": {"host-a": "bad-node-id"}},
+        {"hub_recipients": {"bad alias": "00000000-0000-4000-8000-000000000001"}},
+        {"hub_recipients": {str(i): "00000000-0000-4000-8000-000000000001" for i in range(17)}},
+        {"hub_token_file": "relative.token"},
+        {"hub_token_file": None},
+        {"hub_wake_target": "bad\nname"},
+        {"hub_wake_target": ""},
         {"default_seat": "nope"},
         {"fallback_seat": "dsflash"},
         {"fallback_seat": "missing"},
@@ -190,3 +198,15 @@ def test_intake_rejects_non_github_remote(tmp_path):
     payload["repositories"]["brigade"]["remote"] = "https://example.com/team/brigade.git"
     with pytest.raises(c.T3DispatchError):
         rc.parse_runtime(payload)
+
+
+def test_hub_aliases_default_empty_and_preserve_node_id(tmp_path):
+    runtime = rc.parse_runtime(runtime_payload(tmp_path))
+    assert runtime.hub_recipients == {}
+    assert runtime.hub_wake_target == "default"
+    assert runtime.hub_token_file is None
+    aliases = {"host-a": "00000000-0000-4000-8000-000000000001"}
+    configured = rc.parse_runtime(runtime_payload(tmp_path, hub_recipients=aliases))
+    assert configured.hub_recipients == aliases
+    aliases.clear()
+    assert configured.hub_recipients == {"host-a": "00000000-0000-4000-8000-000000000001"}
