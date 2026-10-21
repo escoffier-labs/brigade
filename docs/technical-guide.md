@@ -1922,12 +1922,17 @@ and the last local CLI error. The `bug_diagnostics` section contains names,
 statuses, and counts for bootstrap file presence, AGENTS.md quality, and
 security-config presence. It does not contain full `brigade doctor` output.
 General Doctor checks can read configured external logs and are excluded.
-Each diagnostic subprocess uses isolated Python mode and a private empty
-working directory, with a two-second deadline. Failed run entries contain only
+Each diagnostic subprocess uses the parent's package location and a private
+empty working directory with Python safe-path handling and a five-second
+deadline. User site-packages remain available. Inherited `PYTHONPATH` is replaced
+with the parent's package location. Failed run entries contain only
 identifiers and failure kinds. Task text and worker output are excluded.
 `--include-output FILE` adds only a redacted tail of a file you choose, bounded
-to 200 lines and a 60 KB input read. The complete rendered bundle is capped at
-60 KB. Selected inputs must be regular files, with no linked path components.
+to 200 lines and a 60 KB input read. After redaction, it keeps the newest
+16 KB or less to fit the complete rendered bundle's 60 KB cap. The bundle's
+`included_output` records the bytes kept and whether that redacted tail was
+truncated. Selected inputs must be regular, single-link files. Ancestors may
+be symlinks, but the final file cannot be a symlink.
 Nonblocking reads check descriptor identity and reject files changed during
 reading. `--summary-file FILE` rejects inputs larger than 60 KB before reading
 or decoding them. Diagnostic receipt reads stop at 256 KB per
@@ -1952,7 +1957,9 @@ that you replace with the observed problem and expected behavior.
 Use `--report-id REPORT_ID` to reuse the saved preview without recollecting
 diagnostics. Replace `REPORT_ID` with the identifier printed during preparation.
 Run without `--dry-run` to search GitHub for the visible `bf-` fingerprint
-through `gh search issues`. Search failure prints `dedup skipped`. A dry run
+through `gh search issues`, with the unauthenticated GitHub search API as a
+fallback when `gh` fails or is unavailable. API reads have a 10-second timeout
+and a 60 KB response cap. Search failure prints `dedup skipped`. A dry run
 makes no network calls. With an interactive terminal, review the destination
 and answer "Is this a security vulnerability? [y/N]" before sharing. Answering
 yes blocks submission and points to SECURITY.md. The keyword classifier also
@@ -1975,8 +1982,8 @@ including every nonempty secret-named environment value mounted since preparatio
 before any network call. New summaries, titles,
 and output files cannot be combined with `--report-id`.
 Without a terminal and `--yes`, the command prepares local files and searches
-GitHub through `gh search issues`, sending the fingerprint and, if needed,
-the exception type and command path. It does not submit a report. Use
+GitHub through `gh search issues` or the unauthenticated search API, sending
+the fingerprint and, if needed, the exception type and command path. It does not submit a report. Use
 `--dry-run` or `--via file` to avoid this outbound query.
 `--via auto` prefers authenticated `gh`, then a prefilled issue URL.
 `--via gh` creates an issue without requesting label permissions.
@@ -1990,7 +1997,8 @@ send email. Attach the printed full bundle path when using a shortened link.
 Receipts record the bundle digest, detector counts, destination, duplicates
 shown, and consent mode (`prompt`, `flag`, or `none`). The separate
 `security_confirmation` records its mode and whether the submitter asserted
-that this is not a vulnerability report. A pending receipt means
+that this is not a vulnerability report. A submitted receipt cannot be
+resubmitted and preserves its original issue URL. A pending receipt means
 the remote result is uncertain. Check it before retrying. Local controls limit
 sharing to five attempts per UTC day and one per fingerprint every five
 minutes. An append-only `attempts/YYYY-MM-DD.jsonl` log under `bug-reports/`
@@ -1998,15 +2006,18 @@ records each attempt before transport, including retries of the same report
 ID and failed transports. The limit reads only today's and yesterday's logs,
 at most five records and 60 KB per log. A pending submission also blocks
 retries for five minutes.
-The fingerprint includes a hash of the normalized, redacted summary so that
-different reports sharing the same last error can be submitted independently.
+The fingerprint uses failure facts: command path, exit code, exception type,
+failing check names, and Brigade minor version. Summaries and error messages
+do not affect it. Different descriptions of the same failure share a cooldown.
 `BRIGADE_BUG_REPORT=never` disables sharing while allowing `--dry-run` and
 `--via file`. No doctor, status command, or hook starts bug reporting.
 
 Failures from `bug report` preserve the previous diagnostic. Other CLI failures
 overwrite the local `brigade/last-error.json` with the resolved
-command names, exit code, exception type, redacted message head, and frames
-inside Brigade. The record contains no command arguments and is never uploaded
+command names, exit code, exception type, redacted message head, frames
+inside Brigade, and a UTC `recorded_at` timestamp. Reports omit timestamped
+errors older than 24 hours or dated in the future. Legacy records without a
+timestamp have unknown age. The record contains no command arguments and is never uploaded
 automatically. You can delete it and past report directories at any time.
 
 ### Privacy
@@ -2018,7 +2029,7 @@ publication from `brigade work brief` when a Codex thread id and hub are configu
 The normal exception is your own configured tooling:
 
 - `brigade bug report --dry-run` collects and redacts locally, then writes a complete preview and receipt without network calls
-- an explicit bug report can search for its fingerprint through GitHub's `gh` client, then send the reviewed bundle to a public issue only after confirmation or `--yes --not-security`
+- an explicit bug report can search for its fingerprint through GitHub's `gh` client or unauthenticated search API, then send the reviewed bundle to a public issue only after confirmation or `--yes --not-security`
 - URL and email report destinations print shortened links and the full local bundle path for manual attachment
 - CLI failures update a local redacted error record without uploading or prompting
 - the `pre-push` hook runs Brigade's embedded content guard before commits leave the machine

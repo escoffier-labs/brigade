@@ -2,7 +2,7 @@
 
 No directory enumeration or configured source traversal is allowed here. Each
 invocation probes at most eight named entries and reads at most 64 KiB. The
-collector runs each check in a subprocess with a two-second deadline.
+collector runs each check in a subprocess with a five-second deadline.
 """
 
 from __future__ import annotations

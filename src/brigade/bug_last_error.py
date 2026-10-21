@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import json
 import re
+from datetime import datetime, timezone
 from pathlib import Path
 from types import TracebackType
 from typing import Any
@@ -17,7 +18,7 @@ _LAST_ERROR_BYTE_LIMIT = 64 * 1024
 
 
 def error_path() -> Path:
-    return Path(data_root()) / "brigade" / "last-error.json"
+    return Path(data_root()).resolve() / "brigade" / "last-error.json"
 
 
 def command_path(parser: argparse.ArgumentParser, argv: list[str]) -> str:
@@ -77,6 +78,7 @@ def record(
         )
         message = redactor.text(message)[:500]
         payload = {
+            "recorded_at": datetime.now(timezone.utc).isoformat(),
             "command": command,
             "exit_code": exit_code,
             "exception_type": type(exc).__name__ if exc is not None else None,
@@ -97,7 +99,17 @@ def read() -> dict[str, Any] | None:
         return None
     if not isinstance(value, dict):
         return None
+    recorded_at = value.get("recorded_at")
+    if recorded_at is not None:
+        try:
+            when = datetime.fromisoformat(recorded_at)
+            age = (datetime.now(timezone.utc) - when).total_seconds()
+            if age < 0 or age > 24 * 3600:
+                return None
+        except (TypeError, ValueError):
+            return None
     return {
+        "recorded_at": recorded_at,
         "command": str(value.get("command", ""))[:200],
         "exit_code": value.get("exit_code") if type(value.get("exit_code")) is int else 1,
         "exception_type": str(value.get("exception_type") or "")[:100],

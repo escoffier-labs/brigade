@@ -1,7 +1,7 @@
 """Bounded regular-file reads and durable append-only bug-report state.
 
-POSIX retains held no-follow parent descriptors. The Windows fallback uses
-the journal's checked path open, with regular-file and identity checks. As
+Ancestors may be symlinks. POSIX holds resolved no-follow parent descriptors.
+The Windows fallback uses the journal's checked path open, with regular-file and identity checks. As
 with that fallback, ancestor checks cannot exclude a concurrent path swap.
 """
 
@@ -69,6 +69,8 @@ def _fallback_file(path: Path, flags: int, *, private: bool = False) -> Iterator
 
 @contextmanager
 def _read_file(path: Path) -> Iterator[int]:
+    # Resolve ancestors only. The selected final component must stay no-follow.
+    path = path.parent.resolve() / path.name
     if _supports_dirfd():
         with private_io.directory(path.parent) as parent:
             fd = os.open(path.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=parent)

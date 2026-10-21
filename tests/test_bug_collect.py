@@ -367,7 +367,7 @@ def test_report_doctor_kills_checks_at_deadline(tmp_path, monkeypatch):
     monkeypatch.setattr(subprocess, "run", stalled_check)
     started = time.monotonic()
     report = bug_collect.collect_diagnostics(tmp_path)
-    assert deadlines and all(0 < value <= 2 for value in deadlines)
+    assert deadlines and all(0 < value <= 5 for value in deadlines)
     assert time.monotonic() - started < 3
     assert report["checks"] and all(check["status"] == "WARN" for check in report["checks"])
     assert all("budget" in check["name"] for check in report["checks"])

@@ -15,6 +15,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from urllib.parse import quote, urlencode
+from urllib.request import Request, urlopen
 
 from . import __version__, bug_io
 from .bug_collect import collect, collect_diagnostics
@@ -29,6 +30,7 @@ ISSUES_URL = f"https://github.com/{REPOSITORY}/issues"
 URL_BUDGET = 6000
 EMAIL_BUDGET = 1800
 BUNDLE_CAP = 60 * 1024
+OUTPUT_TAIL_CAP = 16 * 1024
 _SECURITY = re.compile(
     r"\b(?:security (?:vulnerability|issue)|vulnerabilit\w*|exploit\w*|CVE-\d{4}-\d+|"
     r"(?:SQL|command|code|shell|LDAP|template) injection|(?:(?:remote|arbitrary) )?code execution|"
@@ -66,14 +68,13 @@ def _normalize_fingerprint(text: str) -> str:
     return " ".join(text.split())
 
 
-def fingerprint(last_error: dict[str, Any] | None, check_names: list[str], summary: str = "") -> str:
+def fingerprint(last_error: dict[str, Any] | None, check_names: list[str]) -> str:
     error = last_error or {}
     identity = [
         error.get("command", ""),
         error.get("exception_type", ""),
-        hashlib.sha256(_normalize_fingerprint(summary).casefold().encode()).hexdigest(),
+        error.get("exit_code"),
         sorted(_normalize_fingerprint(name) for name in check_names),
-        _normalize_fingerprint(str(error.get("message_head", ""))),
         ".".join(__version__.split(".")[:2]),
     ]
     return "bf-" + hashlib.sha256(json.dumps(identity, sort_keys=True).encode()).hexdigest()[:12]
@@ -103,6 +104,26 @@ def render(bundle: dict[str, Any]) -> str:
     )
 
 
+def _search_issues(query: str) -> list[Any]:
+    try:
+        raw = json.loads(
+            gh("search", "issues", query, "--repo", REPOSITORY, "--json", "number,title,state,url", "--limit", "10")
+        )
+    except (OSError, subprocess.SubprocessError):
+        url = "https://api.github.com/search/issues?" + urlencode(
+            {"q": f"repo:{REPOSITORY} is:issue {query}", "per_page": "10"}
+        )
+        request = Request(url, headers={"Accept": "application/vnd.github+json", "User-Agent": "brigade-cli"})
+        with urlopen(request, timeout=10) as response:
+            body = response.read(BUNDLE_CAP + 1)
+        if len(body) > BUNDLE_CAP:
+            raise ValueError("search response exceeds budget") from None
+        raw = json.loads(body)["items"]
+    if not isinstance(raw, list):
+        raise ValueError("invalid search")
+    return raw
+
+
 def _duplicates(bundle: dict[str, Any], redactor: Redactor) -> tuple[list[dict[str, Any]], str]:
     try:
         queries = [bundle["fingerprint"]]
@@ -111,11 +132,7 @@ def _duplicates(bundle: dict[str, Any], redactor: Redactor) -> tuple[list[dict[s
             queries.append(f"{error['exception_type']} {error['command']}")
         raw = []
         for query in queries:
-            raw = json.loads(
-                gh("search", "issues", query, "--repo", REPOSITORY, "--json", "number,title,state,url", "--limit", "10")
-            )
-            if not isinstance(raw, list):
-                raise ValueError("invalid search")
+            raw = _search_issues(query)
             if raw:
                 break
         found = []
@@ -133,7 +150,7 @@ def _duplicates(bundle: dict[str, Any], redactor: Redactor) -> tuple[list[dict[s
                 }
             )
         return found, "searched"
-    except (OSError, ValueError, subprocess.SubprocessError):
+    except (OSError, ValueError, KeyError, TypeError, subprocess.SubprocessError):
         return [], "dedup skipped"
 
 
@@ -325,7 +342,7 @@ def _check_security(bundle: dict[str, Any]) -> None:
 def _load_prepared(report_id: str) -> tuple[Path, dict[str, Any], str, dict[str, Any]]:
     if re.fullmatch(r"[0-9a-f]{32}", report_id) is None:
         raise ReportBlocked("Bug report blocked: invalid --report-id")
-    directory = Path(data_root()) / "brigade" / "bug-reports" / report_id
+    directory = Path(data_root()).resolve() / "brigade" / "bug-reports" / report_id
     bundle = json.loads(_read_bounded(directory / "bundle.json"))
     markdown = _read_bounded(directory / "bundle.md").decode("utf-8")
     receipt = json.loads(_read_bounded(directory / "receipt.json"))
@@ -341,6 +358,11 @@ def _load_prepared(report_id: str) -> tuple[Path, dict[str, Any], str, dict[str,
         or receipt.get("preview_digest") != hashlib.sha256(markdown.encode()).hexdigest()
     ):
         raise ReportBlocked("Bug report blocked: prepared bundle digest mismatch, prepare a new preview")
+    if receipt.get("status") == "submitted":
+        issue_url = str(receipt.get("issue_url", ""))
+        if re.fullmatch(re.escape(ISSUES_URL) + r"/[1-9][0-9]*", issue_url) is None:
+            issue_url = "check the local receipt"
+        raise ReportBlocked(f"Bug report blocked: already submitted: {issue_url}")
     for rows, keys in (
         (bundle.get("bug_diagnostics", {}).get("checks", []), {"name", "status"}),
         (bundle.get("recent_failures", {}).get("runs", []), {"id", "status"}),
@@ -382,15 +404,24 @@ def _prepare(args: argparse.Namespace) -> tuple[Path, dict[str, Any], str, dict[
     bundle["fingerprint"] = fingerprint(
         bundle["last_error"],
         [c["name"] for c in bundle["bug_diagnostics"]["checks"] if c["status"] == "FAIL"],
-        bundle["user"]["summary"],
     )
-    markdown = render(bundle)
-    encoded = json.dumps(bundle, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
-    if max(len(encoded.encode()), len(markdown.encode())) > BUNDLE_CAP:
-        raise ReportBlocked("Bug report blocked: redacted bundle exceeds 60 KB")
+    user = bundle["user"]
+    tail = user["output_tail"].encode("utf-8")
+    budget = OUTPUT_TAIL_CAP
+    while True:
+        user["output_tail"] = tail[-budget:].decode("utf-8", errors="ignore") if budget else ""
+        kept = len(user["output_tail"].encode("utf-8"))
+        bundle["included_output"] = {"bytes_kept": kept, "truncated": len(tail) > kept}
+        markdown = render(bundle)
+        encoded = json.dumps(bundle, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        if max(len(encoded.encode()), len(markdown.encode())) <= BUNDLE_CAP:
+            break
+        if not budget or not tail:
+            raise ReportBlocked("Bug report blocked: redacted bundle exceeds 60 KB")
+        budget //= 2
     assert_clean(encoded)
     assert_clean(markdown)
-    root = Path(data_root()) / "brigade" / "bug-reports"
+    root = Path(data_root()).resolve() / "brigade" / "bug-reports"
     directory = root / uuid.uuid4().hex
     directory.mkdir(parents=True, mode=0o700)
     write_text_atomic(directory / "bundle.json", encoded)
@@ -496,6 +527,7 @@ def _report(args: argparse.Namespace) -> int:
             duplicate_choice="comment" if comment_on else "new",
         )
         with held_file_lock(root / "submission.lock", deadline_seconds=1):
+            _load_prepared(report_id)
             now = datetime.now(timezone.utc)
             _limit_submissions(root, bundle["fingerprint"], now)
             receipt["attempted_at"] = now.isoformat()
