@@ -686,16 +686,14 @@ def test_abandoned_overflow_increment_is_recovered_by_next_fold(tmp_path: Path, 
     holder = threading.Thread(target=hold_session_lock)
     holder.start()
     assert acquired.wait(timeout=2)
-    pending_path = session_state._pending_increment_path(target, "s")
     process = mp.get_context("fork").Process(target=_record_hook_timeout_in_fork, args=(target, "s"))
     try:
         process.start()
-        # Sidecar is written immediately before the overflow lock wait. Combined
-        # with a still-live child, this proves we are killing mid-wait rather
-        # than reaping a child that already exhausted its retry and exited.
+        # Wait for the pending marker to be persisted while the writer is still
+        # blocked on the overflow lock, before killing it mid-wait.
         thread_sync.wait_for_predicate(
-            lambda: pending_path.is_file() and process.is_alive(),
-            description="overflow child wrote *.json.timeouts.pending and is still in the lock wait",
+            lambda: session_state._pending_timeout_count(target, "s") >= 1 and process.is_alive(),
+            description="overflow marker is persisted and the writer is still blocked on the lock",
         )
         assert process.is_alive()
         assert process.exitcode is None
