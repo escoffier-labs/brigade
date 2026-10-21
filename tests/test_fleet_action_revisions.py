@@ -31,6 +31,46 @@ def test_target_id_cannot_rebind_even_after_withdrawal(tmp_path):
     conn.close()
 
 
+def test_sync_rejects_non_utf8_labels_and_preserves_unicode(tmp_path):
+    from brigade import fleet_action_auth as auth, fleet_action_targets as targets
+
+    conn, _, _, request = setup_action(tmp_path)
+    original = json.loads(conn.execute("SELECT document FROM action_targets").fetchone()[0])
+    label = "Agent 日本語 😀"
+    targets.sync(conn, "node-fixture", [{**original, "label": label}])
+    assert targets.available(conn)[0]["label"] == label
+
+    with pytest.raises(ActionError, match="invalid-label"):
+        targets.sync(conn, "node-fixture", [{**original, "label": "bad\ud800"}])
+    assert targets.available(conn)[0]["label"] == label
+
+    model_target = {
+        **original,
+        "target_id": "repair-t3",
+        "family": "t3",
+        "host": "fixture-host",
+        "repository": "fixture-repo",
+        "repo_identity": "repo/fixture",
+        "source_revision": "a" * 40,
+        "models": [{"id": "fixture-seat", "label": "Modèle 😀"}],
+    }
+    auth.grant_broker(conn, "node-fixture", ["repair-t3"], [request["source"]])
+    targets.sync(conn, "node-fixture", [model_target])
+    stored_model = json.loads(
+        conn.execute("SELECT document FROM action_targets WHERE target_id='repair-t3'").fetchone()[0]
+    )["models"][0]
+    assert stored_model["label"] == "Modèle 😀"
+    with pytest.raises(ActionError, match="invalid-model"):
+        targets.sync(conn, "node-fixture", [{**model_target, "models": [{"id": "fixture-seat", "label": "bad\ud800"}]}])
+    assert (
+        json.loads(conn.execute("SELECT document FROM action_targets WHERE target_id='repair-t3'").fetchone()[0])[
+            "models"
+        ][0]["label"]
+        == "Modèle 😀"
+    )
+    conn.close()
+
+
 @requires_posix
 def test_manifest_public_agent_must_match_native_binding(tmp_path):
     from brigade import fleet_action_runner as runner

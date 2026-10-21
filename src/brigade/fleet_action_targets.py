@@ -152,6 +152,10 @@ def sync(conn: sqlite3.Connection, node_id: str, records: Any) -> None:
             or any(ord(c) < 32 for c in item["label"])
         ):
             raise ActionError("invalid-label", 400)
+        try:
+            item["label"].encode("utf-8")
+        except UnicodeEncodeError:
+            raise ActionError("invalid-label", 400) from None
         if not isinstance(item["binding_digest"], str) or re.fullmatch("[0-9a-f]{64}", item["binding_digest"]) is None:
             raise ActionError("invalid-binding", 400)
         if not isinstance(item["subjects"], list) or not 1 <= len(item["subjects"]) <= 100:
@@ -175,6 +179,10 @@ def sync(conn: sqlite3.Connection, node_id: str, records: Any) -> None:
             opaque(model["id"])
             if not isinstance(model["label"], str) or not 1 <= len(model["label"]) <= 128:
                 raise ActionError("invalid-model", 400)
+            try:
+                model["label"].encode("utf-8")
+            except UnicodeEncodeError:
+                raise ActionError("invalid-model", 400) from None
         if item["family"] != "t3" and item["models"]:
             raise ActionError("model-override-unsupported", 400)
         if item["capability"] == "inbox":
