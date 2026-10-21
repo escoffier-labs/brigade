@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-from brigade import cloud_tracker, codex_cloud
+from brigade import cloud_codex_probes, cloud_tracker, codex_cloud
 
 
 NOW = datetime(2026, 8, 12, 20, tzinfo=timezone.utc)
@@ -124,7 +124,7 @@ def test_failed_codex_status_diagnostic_is_not_a_task_state(monkeypatch, tmp_pat
 
 
 def test_brief_probes_only_the_newest_registered_tasks(monkeypatch, tmp_path):
-    for index in range(cloud_tracker.BRIEF_STATUS_PROBE_LIMIT + 3):
+    for index in range(cloud_codex_probes.BRIEF_STATUS_PROBE_LIMIT + 3):
         _register(tmp_path, f"task_{index:02d}", hours_ago=index + 1)
     monkeypatch.setattr(codex_cloud, "list_tasks", lambda **kwargs: codex_cloud.ListTasksResult([]))
     probed: list[str] = []
@@ -137,13 +137,13 @@ def test_brief_probes_only_the_newest_registered_tasks(monkeypatch, tmp_path):
 
     observation = cloud_tracker.observe_provider("codex-cloud", tmp_path, codex_max_items=codex_cloud.MAX_LIST_LIMIT)
 
-    newest = [f"task_{index:02d}" for index in range(cloud_tracker.BRIEF_STATUS_PROBE_LIMIT)]
+    newest = [f"task_{index:02d}" for index in range(cloud_codex_probes.BRIEF_STATUS_PROBE_LIMIT)]
     assert probed == newest
     assert sorted(observation.tasks) == newest
 
 
 def test_brief_probe_cap_counts_each_task_once(monkeypatch, tmp_path):
-    for _ in range(cloud_tracker.BRIEF_STATUS_PROBE_LIMIT):
+    for _ in range(cloud_codex_probes.BRIEF_STATUS_PROBE_LIMIT):
         _register(tmp_path, "task_duplicated", hours_ago=1)
     _register(tmp_path, "task_other_ready", hours_ago=48)
     monkeypatch.setattr(codex_cloud, "list_tasks", lambda **kwargs: codex_cloud.ListTasksResult([]))
@@ -166,7 +166,7 @@ def test_brief_status_probes_share_one_time_budget(monkeypatch, tmp_path):
         _register(tmp_path, f"task_{index:02d}", hours_ago=index + 1)
     monkeypatch.setattr(codex_cloud, "list_tasks", lambda **kwargs: codex_cloud.ListTasksResult([]))
     clock = [1000.0]
-    monkeypatch.setattr(cloud_tracker.time, "monotonic", lambda: clock[0])
+    monkeypatch.setattr(cloud_codex_probes.time, "monotonic", lambda: clock[0])
     timeouts: list[float] = []
 
     def slow_run(command, *, cwd=None, timeout=30.0):
@@ -178,20 +178,20 @@ def test_brief_status_probes_share_one_time_budget(monkeypatch, tmp_path):
 
     observation = cloud_tracker.observe_provider("codex-cloud", tmp_path, codex_max_items=codex_cloud.MAX_LIST_LIMIT)
 
-    budget = cloud_tracker.BRIEF_STATUS_PROBE_BUDGET_SECONDS
+    budget = cloud_codex_probes.BRIEF_STATUS_PROBE_BUDGET_SECONDS
     assert timeouts == [budget, budget - 6.0]
     assert sorted(observation.tasks) == ["task_00", "task_01"]
 
 
 def test_default_status_fallback_probes_every_registered_task(monkeypatch, tmp_path):
-    for index in range(cloud_tracker.BRIEF_STATUS_PROBE_LIMIT + 2):
+    for index in range(cloud_codex_probes.BRIEF_STATUS_PROBE_LIMIT + 2):
         _register(tmp_path, f"task_{index:02d}", hours_ago=index + 1)
     monkeypatch.setattr(codex_cloud, "list_tasks", lambda **kwargs: codex_cloud.ListTasksResult([]))
     monkeypatch.setattr(cloud_tracker, "_run_text", lambda *a, **k: (0, "[READY] task", ""))
 
     observation = cloud_tracker.observe_provider("codex-cloud", tmp_path)
 
-    assert len(observation.tasks) == cloud_tracker.BRIEF_STATUS_PROBE_LIMIT + 2
+    assert len(observation.tasks) == cloud_codex_probes.BRIEF_STATUS_PROBE_LIMIT + 2
 
 
 @pytest.mark.parametrize("entrypoint", ["observe_provider", "observe_provider_details", "observe_providers"])

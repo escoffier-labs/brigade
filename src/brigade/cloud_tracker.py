@@ -6,7 +6,6 @@ import hashlib
 import json
 import re
 import subprocess
-import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -1415,54 +1414,12 @@ def _parse_codex_cloud_list(stdout: str) -> dict[str, Any]:
     return tasks
 
 
-# The brief probes at most this many registered tasks missing from its one-page
-# inventory, newest dispatch first, within one shared wall-clock budget.
-BRIEF_STATUS_PROBE_LIMIT = 5
-BRIEF_STATUS_PROBE_BUDGET_SECONDS = 10.0
-
-
 def _observe_missing_codex_tasks(target: Path, tasks: dict[str, Any], *, bounded: bool = False) -> None:
-    from . import codex_cloud
+    from . import cloud_codex_probes
 
-    # Failure or absence never implies a terminal state, so an unprobed task stays
-    # unobserved rather than guessed.
-    # The registry can hold several rows for one task, so keep each task's newest
-    # registration and probe it once.
-    by_task: dict[str, dict[str, Any]] = {}
-    for entry in load_registry(target)["entries"]:
-        task_id = entry.get("task_id")
-        if not isinstance(task_id, str) or entry.get("provider") != "codex-cloud" or task_id in tasks:
-            continue
-        known = by_task.get(task_id)
-        if known is None or str(entry.get("dispatched_at") or "") > str(known.get("dispatched_at") or ""):
-            by_task[task_id] = entry
-    missing = list(by_task.values())
-    deadline: float | None = None
-    if bounded:
-        missing.sort(key=lambda entry: str(entry.get("dispatched_at") or ""), reverse=True)
-        del missing[BRIEF_STATUS_PROBE_LIMIT:]
-        deadline = time.monotonic() + BRIEF_STATUS_PROBE_BUDGET_SECONDS
-    for entry in missing:
-        task_id = entry["task_id"]
-        if deadline is None:
-            scode, sout, serr = _run_text(["codex", "cloud", "status", task_id], cwd=target)
-        else:
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            scode, sout, serr = _run_text(["codex", "cloud", "status", task_id], cwd=target, timeout=remaining)
-        blob = (sout + "\n" + serr).strip()
-        if scode != 0 and not blob:
-            continue
-        # A failed probe still prints `[ERROR] <title>` for errored tasks, but a
-        # diagnostic such as "request failed" is not a task state, so a nonzero
-        # exit only counts with a structured bracket or status line.
-        if scode == 0:
-            state = codex_cloud._scan_status(blob)  # noqa: SLF001 - shared status scanner
-        else:
-            state = codex_cloud._verified_status(blob)  # noqa: SLF001 - shared status scanner
-        if state is not None:
-            tasks[task_id] = {"state": state, "ready_at": None}
+    cloud_codex_probes.observe_missing_tasks(
+        load_registry(target)["entries"], tasks, run_text=_run_text, cwd=target, bounded=bounded
+    )
 
 
 def _codex_cloud_observation(target: Path, *, codex_max_items: int | None = None) -> ProviderObservation:
