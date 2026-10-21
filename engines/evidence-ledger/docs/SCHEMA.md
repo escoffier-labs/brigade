@@ -76,7 +76,7 @@ The canonical compact JSON encoding (UTF-8, no whitespace, HTML escaping disable
 
 ### Absolute-path ban
 
-`locator.value` must be repo-relative or a non-file URI. `Validate` rejects POSIX absolute paths (`/etc/passwd`), Windows drive paths (`C:\\Users\\foo`), UNC paths (`\\host\share\file`), and `file:` URIs. <!-- content-guard: allow windows-home-path -->
+`locator.value` must be repo-relative or a non-file URI. `Validate` rejects POSIX absolute paths (`/etc/passwd`), Windows drive paths (`C:\\Users\\<user>`), UNC paths (`\\host\share\file`), and `file:` URIs.
 
 ### Authority rule
 
