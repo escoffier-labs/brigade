@@ -1046,7 +1046,7 @@ brigade operator status --profile internal-dogfood --target .
 brigade daily status --target .
 ```
 
-`brigade operator quickstart` is the first-user path. It runs the repo template install, writes local operator config, scaffolds the MCP catalog and dogfood/work-loop config, projects harness files, verifies handoff writer inboxes for selected harnesses, and prints the next commands. Workspace, `--full`, and pack-based quickstarts also import built-in portable tools and skills. It is local-only: no daemons, hooks, publishing, pushing, tagging, or remote mutation. JSON output includes a compact `issue_report` object that users can review, redact, and paste into the GitHub quickstart issue form.
+`brigade operator quickstart` is the first-user path. It runs the repo template install, writes local operator config, scaffolds the MCP catalog and dogfood/work-loop config, projects harness files, verifies handoff writer inboxes for selected harnesses, and prints the next commands. Workspace, `--full`, and pack-based quickstarts also import built-in portable tools and skills. It is local-only: no daemons, hooks, publishing, pushing, tagging, or remote mutation. For a failed quickstart, use `brigade bug report --summary "What happened and what you expected" --dry-run` to prepare and review a redacted report.
 
 Task ledger commands:
 
@@ -1991,6 +1991,138 @@ summary: 14 checks, 0 failed, 0 manual
 
 Anything `[warn]` is fine; `[fail]` means the install is incomplete. The `openclaw` and `hermes` harnesses add their own checks on top.
 
+### Bug reports
+
+Start with a local preview in the affected workspace:
+
+```bash
+brigade bug report --target . --summary "What happened and what you expected" --dry-run
+```
+
+The command prints the complete `brigade.bug-report.v1` bundle and saves
+`bundle.json`, `bundle.md`, and `receipt.json` under the user data directory at
+`brigade/bug-reports/<report_id>/`. It includes the Brigade version and channel,
+Python and OS versions, bounded local health probes, up to five failed run
+identifiers, the latest failing verification receipt identifier and digest,
+and the last local CLI error. The `bug_diagnostics` section contains names,
+statuses, and counts for bootstrap file presence, AGENTS.md quality, and
+security-config file type. Missing optional bootstrap files and absent security
+configuration produce no warning. These probes do not validate security
+configuration or contain full `brigade doctor` output.
+General Doctor checks can read configured external logs and are excluded.
+Each diagnostic subprocess uses the parent's package location and a private
+empty working directory with Python safe-path handling and a five-second
+deadline. User site-packages remain available. Inherited `PYTHONPATH` is replaced
+with the parent's package location. Failed run entries contain only
+identifiers and failure kinds. Task text and worker output are excluded.
+`--include-output FILE` adds only a redacted tail of a file you choose, bounded
+to 200 lines and a 60 KB input read. After redaction, it keeps the newest
+16 KB or less to fit the complete rendered bundle's 60 KB cap. The bundle's
+`included_output` records the bytes kept and whether that redacted tail was
+truncated. Selected inputs must be regular, single-link files. Ancestors may
+be symlinks, but the final file cannot be a symlink.
+Nonblocking reads check descriptor identity. Log tails can change during reading,
+but replacing the file is rejected. Exact reads reject content changes.
+`--summary-file FILE` rejects inputs larger than 60 KB before reading
+or decoding them. Diagnostic receipt reads stop at 256 KB per
+file. Each run or verification reader examines at most 20,000 directory entries,
+reads the newest 64 directories in that window, and processes at most 512
+worker or command entries. Older or oversized receipts can be omitted.
+
+The report uses a fixed field allowlist, removes known local literals and
+credential references, applies the origin redactor with `origin=unknown`,
+and escapes terminal controls such as ANSI, OSC, and carriage returns before
+persistence and preview. It scans the final JSON and Markdown again. Any
+remaining finding or scanner error blocks the report. Review every field anyway. Redaction cannot identify
+every private name in free text. Use SECURITY.md for vulnerabilities.
+Environment-secret checks require credential name segments separated by `_`
+and values of at least eight characters. Boolean and numeric settings are
+excluded. Recognizable token patterns are still scanned independently.
+
+Quickstart JSON now provides `issue_report.report_command` in place of
+`issue_report.github_issue_url`. Replace its `TARGET` placeholder with the affected
+workspace and its summary placeholder with the observed problem and expected behavior.
+
+Use `--report-id REPORT_ID` to reuse the saved preview without recollecting
+diagnostics. Replace `REPORT_ID` with the identifier printed during preparation.
+Run without `--dry-run` to search GitHub for the visible `bf-` fingerprint
+through `gh search issues`, with the unauthenticated GitHub search API as a
+fallback when `gh` fails or is unavailable. API reads have a 10-second timeout
+and a 60 KB response cap. Search failure prints `dedup skipped`. A dry run
+makes no network calls. Fingerprints use the recorded command, exception type,
+exit code, failing probe names, Brigade minor version, and a hash of the lowercased
+summary with paths, digits, and identifiers normalized. Different bugs with the
+same failing command or probe receive different fingerprints. Repeats with the
+same normalized summary and failure facts retain the same fingerprint.
+The bundle channel comes from the updater's local install state when its version
+matches the running CLI. Missing or stale state reports `unknown` instead of
+assuming a stable release.
+With an interactive terminal, review the destination
+and answer "Is this a security vulnerability? [y/N]" before sharing. Answering
+yes blocks submission and points to SECURITY.md. The keyword classifier also
+blocks recognized vulnerability descriptions, but it cannot recognize every
+vulnerability. Confirm the complete preview separately before sharing. For a
+shown duplicate, select its number to comment or choose `new` or `abort`.
+End-of-input or Ctrl-C cancels the report with a fixed message.
+Agents must show the complete
+preview to the user and receive a clear yes before using `--yes`:
+
+```bash
+brigade bug report --summary-file description.txt --json --dry-run
+brigade bug report --report-id REPORT_ID --json --yes --not-security --via gh
+```
+
+`--yes` requires `--report-id`. Non-interactive submission also requires
+`--not-security`, asserting that the report does not describe a vulnerability.
+For an ordinary bug that triggers the vulnerability keyword classifier, pass
+`--not-security` during preparation and again when submitting the saved preview.
+This override works with an interactive terminal too. Explicit `--kind security`
+reports are always refused. Redaction and the second scan still apply.
+An interactive submission asks the security question even with `--yes`.
+Brigade verifies the stored JSON and Markdown digests and scans both again,
+including every nonempty secret-named environment value mounted since preparation,
+before any network call. New summaries, titles,
+and output files cannot be combined with `--report-id`.
+Without a terminal and `--yes`, the command prepares local files and searches
+GitHub through `gh search issues` or the unauthenticated search API, sending
+the fingerprint and, if needed, the exception type and command path. It does not submit a report. Use
+`--dry-run` or `--via file` to avoid this outbound query.
+`--via auto` prefers authenticated `gh`, then a prefilled issue URL.
+`--via gh` creates an issue without requesting label permissions.
+`--comment-on N --via gh` comments only on a duplicate returned by the search.
+`--via url` prints a prefilled `bug.yml` URL bounded to 6,000 encoded bytes.
+`--via email` prints a `mailto:` link to the maintainer, bounded to 1,800 encoded
+bytes. These links hand off to your browser or mail client. Brigade does not
+send email. Attach the printed full bundle path when using a shortened link.
+`--via file` always keeps the report local. This command never creates a gist.
+
+Receipts record the bundle digest, detector counts, destination, duplicates
+shown, and consent mode (`prompt`, `flag`, or `none`). The separate
+`security_confirmation` records its mode and whether the submitter asserted
+that this is not a vulnerability report. A submitted receipt cannot be
+resubmitted and preserves its original issue URL. A pending receipt means
+the remote result is uncertain. Check it before retrying. Local controls limit
+sharing to five attempts per UTC day and one per fingerprint every five
+minutes. An append-only `attempts/YYYY-MM-DD.jsonl` log under `bug-reports/`
+records each attempt before transport, including retries of the same report
+ID and failed transports. The limit reads only today's and yesterday's logs,
+at most five records and 60 KB per log. A pending submission also blocks
+retries for five minutes.
+Reports with the same failure facts and normalized summary share a fingerprint
+and cooldown.
+`BRIGADE_BUG_REPORT=never` disables sharing while allowing `--dry-run` and
+`--via file`. No doctor, status command, or hook starts bug reporting.
+
+Failures from `bug report` preserve the previous diagnostic. Other CLI failures
+overwrite the local `brigade/last-error.json` with the resolved
+command names, exit code, exception type, redacted message head, frames
+inside Brigade, and a UTC `recorded_at` timestamp. Reports omit timestamped
+errors older than 24 hours or dated in the future. Legacy records without a
+timestamp have unknown age. If the payload fails its clean check, the writer
+clears the message and frames and scans again. If that scan fails, it removes
+the previous record. The record contains no command arguments and is never uploaded
+automatically. You can delete it and past report directories at any time.
+
 ### Privacy
 
 Bootstrap templates are packaged with the install and can be applied offline.
@@ -1999,6 +2131,10 @@ publication from `brigade work brief` when a Codex thread id and hub are configu
 
 The normal exception is your own configured tooling:
 
+- `brigade bug report --dry-run` collects and redacts locally, then writes a complete preview and receipt without network calls
+- an explicit bug report can search for its fingerprint through GitHub's `gh` client or unauthenticated search API, then send the reviewed bundle to a public issue only after confirmation or `--yes --not-security`
+- URL and email report destinations print shortened links and the full local bundle path for manual attachment
+- CLI failures update a local redacted error record without uploading or prompting
 - the `pre-push` hook runs Brigade's embedded content guard before commits leave the machine
 - `brigade security enrich` can call MISP only when you explicitly configure and run the `misp` provider
 - `brigade setup` fetches native components, and configured model runs invoke their provider CLIs

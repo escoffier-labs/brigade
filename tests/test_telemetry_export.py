@@ -575,3 +575,36 @@ def test_run_only_projection_is_unchanged(tmp_path):
     assert otel_with_extra[0] == _RUN_ONLY_OTEL_ROW
     assert oi_with_extra[0] == _RUN_ONLY_OPENINFERENCE_ROW
     assert len(otel_with_extra) > 1 and len(oi_with_extra) > 1
+
+
+@pytest.mark.parametrize("projection", ["otel-genai", "openinference"])
+@pytest.mark.parametrize("source", ["runs", "verify"])
+def test_public_export_keeps_all_receipts_and_rows(tmp_path, capsys, projection, source):
+    root = tmp_path / ".brigade" / ("runs" if source == "runs" else "work/verify-runs")
+    root.mkdir(parents=True)
+    for i in range(1030):
+        (root / f"noise-{i}").touch()
+    for i in range(65):
+        if source == "runs":
+            directory = _run(tmp_path, run_id=f"run-{i:03}")
+            path = directory / "worker-results.json"
+            key = "results"
+        else:
+            path = _verify_receipt(tmp_path, f"verify-{i:03}")
+            key = "commands"
+        if i == 0:
+            receipt = json.loads(path.read_text())
+            receipt[key] *= 513
+            receipt["ignored_output"] = "x" * (256 * 1024)
+            path.write_text(json.dumps(receipt))
+    assert cli.main(["receipts", "export", projection, "--target", str(tmp_path)]) == 0
+    raw = capsys.readouterr().out
+    rows = [json.loads(line) for line in raw.splitlines()]
+    assert len(rows) == 577
+    if source == "runs":
+        assert rows[0]["trace_id"] == telemetry_export._ids("run-000", "worker", 1)[0]
+        assert rows[-1]["trace_id"] == telemetry_export._ids("run-064", "worker", 1)[0]
+    else:
+        assert rows[0]["attributes"]["brigade.receipt.id"] == "verify-000"
+        assert rows[-1]["attributes"]["brigade.receipt.id"] == "verify-064"
+    assert "ignored_output" not in raw
