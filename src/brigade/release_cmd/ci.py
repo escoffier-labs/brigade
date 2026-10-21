@@ -275,7 +275,7 @@ def _content_guard_command(
         return None, env, f"content guard policy not found: {policy_path}"
     module = scrub.scanner_module()
     if introduced and base_ref:
-        history_args = ["--history", "--range", f"{base_ref}..HEAD", "--policy", str(policy_path)]
+        history_args = ["--history", "--range", f"{base_ref}..HEAD", "--policy", str(policy_path.resolve())]
         if module == "brigade.guard":
             return module_argv("brigade.guard.git_scan_target", str(target.resolve()), *history_args), env, None
         return (

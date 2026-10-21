@@ -134,3 +134,59 @@ def test_incomplete_external_scanner_is_unavailable_in_status(tmp_path, monkeypa
     assert "initializer not found" in check["detail"]
     assert str(checkout / "src/content_guard/__init__.py") in check["detail"]
     assert scrub.available() is False
+
+
+@pytest.mark.parametrize("scanner", ["embedded", "external"])
+def test_release_history_resolves_literal_policy_from_caller(tmp_path, monkeypatch, scanner):
+    import shutil
+
+    from brigade import guard
+    from brigade.isolated_exec import trusted_cwd
+
+    caller = tmp_path / "caller"
+    policy = caller / "policies/strict.json"
+    policy.parent.mkdir(parents=True)
+    policy.write_text(json.dumps({"known_hosts": ["history-probe.invalid"]}))
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    # A different policy at the same relative path must never replace the
+    # caller's explicit policy when the isolated child enters the Git target.
+    decoy = workspace / "policies/strict.json"
+    decoy.parent.mkdir()
+    decoy.write_text("{}")
+    subprocess.run(["git", "init", "-q", str(workspace)], check=True)
+
+    def git(*args):
+        return subprocess.check_output(
+            ["git", "-C", str(workspace), "-c", "user.name=Test", "-c", "user.email=test@example.invalid", *args],
+            text=True,
+        ).strip()
+
+    git("add", ".")
+    git("commit", "-qm", "initial")
+    base = git("rev-parse", "HEAD")
+    note = workspace / "note.md"
+    note.write_text("history-probe.invalid\n")
+    git("add", "note.md")
+    git("commit", "-qm", "introduce history probe")
+    note.write_text("clean tip\n")
+    git("add", "note.md")
+    git("commit", "-qm", "clean tip")
+    if scanner == "external":
+        checkout = tmp_path / "scanner checkout"
+        # Exercise the real history scanner as a separately configured
+        # package, including policy parsing, Git ranges and removed content.
+        shutil.copytree(Path(guard.__file__).parent, checkout / "src/content_guard")
+        monkeypatch.setenv("CONTENT_GUARD_DIR", str(checkout))
+    else:
+        monkeypatch.delenv("CONTENT_GUARD_DIR", raising=False)
+    monkeypatch.chdir(caller)
+    result = ci._run_content_guard_check(workspace, name="introduced", policy="policies/strict.json", base_ref=base)
+    assert result["exit_code"] == 1, result
+    assert result["status"] == "fail"
+    assert "known-host" in result["stdout_summary"], result
+    argv = result["argv"]
+    assert argv[1] == "-I"
+    assert argv[argv.index("--policy") + 1] == str(policy.resolve())
+    assert argv[argv.index("--range") + 1] == f"{base}..HEAD"
+    assert caller != workspace != Path(trusted_cwd())
