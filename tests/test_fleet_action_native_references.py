@@ -96,6 +96,45 @@ def test_full_length_t3_handle_survives_report_readback_and_recovery(t3_broker, 
     assert "private provider detail" not in auth.canonical(final)
 
 
+@pytest.mark.parametrize("reason", [["operator selection"], {}, True, 1, None, "x" * 201, "bad\x00reason"])
+def test_invalid_override_reason_fails_before_any_execution_effect(t3_broker, monkeypatch, reason):
+    conn, path, _, log, action, generation = t3_broker
+    manifest_data = json.loads(path.read_text())
+    manifest_data["targets"][0]["binding"]["override_reason"] = reason
+    path.write_text(json.dumps(manifest_data))
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("invalid manifest must fail before journal, Hub requests, or provider effects")
+
+    monkeypatch.setattr(runner, "_journal_lock", forbidden)
+    monkeypatch.setattr(client, "request", forbidden)
+    monkeypatch.setattr(adapters, "dispatch", forbidden)
+    with pytest.raises(ActionError, match="invalid-override-reason"):
+        runner.execute(path, action["action_id"], generation)
+    assert actions.show(conn, action["action_id"])["started_at"] is None
+    assert not (path.parent / "journal").exists()
+    assert not log.exists()
+
+
+@pytest.mark.parametrize("reason", [None, "", "explicit operator selection", "x" * 200])
+def test_optional_valid_override_reason_reaches_t3_unchanged(t3_broker, reason):
+    conn, path, exe, log, action, generation = t3_broker
+    manifest_data = json.loads(path.read_text())
+    if reason is not None:
+        manifest_data["targets"][0]["binding"]["override_reason"] = reason
+    path.write_text(json.dumps(manifest_data))
+    fake_executable(
+        path.parent, {"schema": "t3-fleet.result.v1", "request_id": REFERENCE, "state": "running"}, name=exe.name
+    )
+    result = runner.execute(path, action["action_id"], generation)
+    assert result["status"] == "running" and result["destination_ref"] == REFERENCE
+    args = json.loads(log.read_text())["args"]
+    if reason:
+        assert args[args.index("--override-reason") + 1] == reason
+    else:
+        assert "--override-reason" not in args
+
+
 @pytest.mark.parametrize("schema", [None, "wrong.result.v9", "t3-fleet.error.v1"])
 def test_t3_success_requires_result_schema(tmp_path, schema):
     payload = {

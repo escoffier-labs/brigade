@@ -88,10 +88,12 @@ def show(conn: sqlite3.Connection, action_id: str) -> dict[str, Any]:
     action["schema"] = SCHEMA
     action["events"] = [
         {"generation": row[0], "event_id": row[1], "receipt": json.loads(row[2]), "at": row[3]}
-        for row in conn.execute(
-            "SELECT generation, event_id, document, created_at FROM action_events "
-            "WHERE action_id=? ORDER BY created_at, event_id LIMIT 100",
-            (action_id,),
+        for row in reversed(
+            conn.execute(
+                "SELECT generation, event_id, document, created_at FROM action_events "
+                "WHERE action_id=? ORDER BY created_at DESC, event_id DESC, generation DESC LIMIT 100",
+                (action_id,),
+            ).fetchall()
         )
     ]
     return action

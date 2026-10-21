@@ -93,6 +93,45 @@ def test_immutable_submission_exact_retry_and_scope(tmp_path):
     conn.close()
 
 
+@pytest.mark.parametrize("tied_timestamps", [False, True])
+def test_history_keeps_newest_receipts_in_chronological_total_order(tmp_path, monkeypatch, tied_timestamps):
+    from brigade import fleet_hub_actions as actions
+
+    conn, _, grant, request = setup_action(tmp_path)
+    action = actions.submit(conn, grant, request)
+    action_id = action["action_id"]
+    generation = actions.claim(conn, "node-fixture")["generation"]
+    actions.start(conn, "node-fixture", action_id, generation)
+    # Events may reuse an id in different generations at the same timestamp.
+    with conn:
+        for old_generation in (3, 2):
+            actions._event(conn, action_id, old_generation, "poll_005", {"status": "dispatching"})
+        conn.execute("UPDATE action_events SET created_at=0")
+        if tied_timestamps:
+            conn.execute("UPDATE action_events SET created_at=1 WHERE event_id='poll_005'")
+    receipts = []
+    for index in range(105):
+        receipt = {
+            "event_id": f"poll_{index:03}",
+            "status": "finished" if index == 104 else "running",
+            "destination_ref": "fixture-turn",
+        }
+        monkeypatch.setattr(actions.time, "time", lambda now=1 if tied_timestamps else index + 1: now)
+        actions.report(conn, "node-fixture", action_id, generation, receipt)
+        receipts.append(receipt)
+    result = actions.show(conn, action_id)
+    assert result["status"] == "finished" and result["verification"] == "pending"
+    assert len(result["events"]) == 100
+    if tied_timestamps:
+        assert (result["events"][0]["event_id"], result["events"][0]["generation"]) == ("poll_005", 3)
+        assert [event["receipt"] for event in result["events"][1:]] == receipts[6:]
+    else:
+        assert [event["receipt"] for event in result["events"]] == receipts[-100:]
+    assert result["events"][-1]["receipt"]["status"] == "finished"
+    assert conn.execute("SELECT count(*) FROM action_events").fetchone()[0] == 110
+    conn.close()
+
+
 def test_stale_revision_requires_review_not_silent_refresh(tmp_path):
     from brigade import fleet_hub_actions as actions
     from brigade.fleet_action_auth import ActionError
