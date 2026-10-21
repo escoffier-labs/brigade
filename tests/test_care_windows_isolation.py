@@ -4,9 +4,11 @@ import base64
 import csv
 import dataclasses
 import hashlib
+import hmac
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import sys
@@ -22,37 +24,72 @@ from brigade import care_cmd
 
 @pytest.mark.parametrize("query_fails", [False, True])
 def test_scheduler_diagnostics_never_discloses_query_output(tmp_path, monkeypatch, query_fails):
-    private = r"C:\diagnostic-fixture\private-install"
+    private = r"C:\hostedtoolcache\windows\Python\3.12.10\x64"
     sid = "S-1-5-21-111111111-222222222-333333333-1001"
+    keys = []
+    entropy = secrets.token_bytes
+
+    def fresh_key(size):
+        key = entropy(size)
+        keys.append(key)
+        return key
 
     def query(*args, **kwargs):
-        if query_fails:
-            raise subprocess.TimeoutExpired(
-                private, 12, output=json.dumps({"task": {"last_result": 2147942405}}) + "\n" + sid, stderr=private
-            )
-        return subprocess.CompletedProcess(
-            args[0],
-            0,
-            json.dumps({"task": {"last_result": 2147942405}, "identity": sid, "path": private}),
-            private,
+        invocation = json.dumps([args, kwargs])
+        for key in keys:
+            assert key.hex() not in invocation
+            assert base64.b64encode(key).decode() not in invocation
+        payload = json.dumps(
+            {
+                "task": {"last_result": 2147942405},
+                "identity": sid,
+                "identity_again": sid,
+                "path": private,
+                "path_again": private,
+                "common_digest": hashlib.sha256(sid.encode()).hexdigest(),
+                "apparently_prehashed_sha256": hashlib.sha256(sid.encode()).hexdigest(),
+            }
         )
+        if query_fails:
+            raise subprocess.TimeoutExpired(private, 12, output=payload + "\n" + sid, stderr=private)
+        return subprocess.CompletedProcess(args[0], 0, payload, private)
 
+    monkeypatch.setattr(secrets, "token_bytes", fresh_key)
     monkeypatch.setattr(subprocess, "run", query)
-    report = _scheduler_diagnostics(
-        system32=tmp_path,
-        task_name="BrigadeCare-diagnostic-fixture",
-        workspace=tmp_path,
-        executable=sys.executable,
-        arguments="-I -c private-bootstrap",
-        working_directory=tmp_path,
-        timeline=[],
-    )
-    rendered = json.dumps(report)
-    assert json.dumps(private)[1:-1] not in rendered
-    assert sid not in rendered
-    if query_fails:
-        assert report["error_type"] == "TimeoutExpired"
-    assert report["task"]["last_result"] == 2147942405
+    reports = [
+        _scheduler_diagnostics(
+            system32=tmp_path,
+            task_name="BrigadeCare-diagnostic-fixture",
+            workspace=tmp_path,
+            executable=sys.executable,
+            arguments="-I -c private-bootstrap",
+            working_directory=tmp_path,
+            timeline=[],
+        )
+        for _ in range(2)
+    ]
+    for report in reports:
+        rendered = json.dumps(report)
+        assert json.dumps(private)[1:-1] not in rendered
+        assert sid not in rendered
+        assert report["identity"] == report["identity_again"]
+        assert report["path"] == report["path_again"]
+        assert report["task"]["last_result"] == 2147942405
+        assert report["query_stderr_sha256"] == report["path"]["redacted_sha256"]
+        if query_fails:
+            assert report["error_type"] == "TimeoutExpired"
+    assert reports[0]["identity"] != reports[1]["identity"], "identifiers must be unlinkable between reports"
+    assert reports[0]["path"] != reports[1]["path"]
+    assert reports[0]["query_stdout_sha256"] != reports[1]["query_stdout_sha256"]
+    assert reports[0]["query_stderr_sha256"] != reports[1]["query_stderr_sha256"]
+    assert len(keys) == 2
+    assert all(len(key) == 32 for key in keys)
+    rendered = json.dumps(reports)
+    for value in (private, sid):
+        assert hashlib.sha256(value.encode()).hexdigest() not in rendered
+    for key in keys:
+        assert key.hex() not in rendered
+        assert base64.b64encode(key).decode() not in rendered
 
 
 def _scheduler_diagnostics(*, system32, task_name, workspace, executable, arguments, working_directory, timeline):
@@ -76,10 +113,14 @@ def _scheduler_diagnostics(*, system32, task_name, workspace, executable, argume
         + r"""
 $ErrorActionPreference='Stop'
 $out=@{}
+# Both entropy and the HMAC key stay inside this collector process.
+$key=New-Object byte[] 32
+$rng=[Security.Cryptography.RandomNumberGenerator]::Create()
+try {$rng.GetBytes($key)} finally {$rng.Dispose()}
+$hasher=[Security.Cryptography.HMACSHA256]::new($key)
+[Array]::Clear($key,0,$key.Length)
 function Hash($s) {
-    $sha=[Security.Cryptography.SHA256]::Create()
-    try { ([BitConverter]::ToString($sha.ComputeHash([Text.Encoding]::UTF8.GetBytes([string]$s)))).Replace('-','').ToLower() }
-    finally { $sha.Dispose() }
+    ([BitConverter]::ToString($hasher.ComputeHash([Text.Encoding]::UTF8.GetBytes([string]$s)))).Replace('-','').ToLower()
 }
 function Probe($name, [scriptblock]$block) {
     try { $out[$name]=& $block }
@@ -219,8 +260,18 @@ Probe 'processes' {
             created_utc=$_.CreationDate.ToUniversalTime().ToString('o')}
     })
 }
+$hasher.Dispose()
 """
     )
+
+    # A separate fresh key also protects partial/error output and unknown
+    # strings in the Python boundary. Neither key is an input or output.
+    private_key = secrets.token_bytes(32)
+
+    def private_digest(value):
+        if isinstance(value, str):
+            value = value.encode()
+        return hmac.new(private_key, value or b"", hashlib.sha256).hexdigest()
 
     def sanitize(value, key=""):
         if isinstance(value, dict):
@@ -228,8 +279,8 @@ Probe 'processes' {
         if isinstance(value, list):
             return [sanitize(v, key) for v in value]
         if isinstance(value, str):
-            if re.fullmatch(r"[0-9a-f]{64}", value):
-                return value
+            if key.endswith("_sha256") and re.fullmatch(r"[0-9a-f]{64}", value):
+                return private_digest(value)
             if key.endswith("utc") and re.fullmatch(r"[0-9T:.+Z-]+", value):
                 return value
             if key == "role" and re.fullmatch(
@@ -258,7 +309,7 @@ Probe 'processes' {
                 return value
             if key == "error_type" and re.fullmatch(r"System\.[A-Za-z.]+", value):
                 return value
-            return {"redacted_sha256": hashlib.sha256(value.encode()).hexdigest()}
+            return {"redacted_sha256": private_digest(value)}
         return value
 
     report = {"timeline": timeline, "collector_pid": os.getpid()}
@@ -290,10 +341,13 @@ Probe 'processes' {
         )
         report["query_exit"] = query.returncode
         collect(query.stdout)
+        report["query_stdout_sha256"] = private_digest(query.stdout)
         # Failed queries can echo arguments, accounts or paths. Hash only.
-        report["query_stderr_sha256"] = hashlib.sha256(query.stderr.encode()).hexdigest()
+        report["query_stderr_sha256"] = private_digest(query.stderr)
     except subprocess.TimeoutExpired as exc:
         collect(exc.stdout)
+        report["query_stdout_sha256"] = private_digest(exc.stdout)
+        report["query_stderr_sha256"] = private_digest(exc.stderr)
         report["error_type"] = type(exc).__name__
     except Exception as exc:
         report["error_type"] = type(exc).__name__
