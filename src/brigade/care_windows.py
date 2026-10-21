@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
 CMD_EXE = r"C:\Windows\System32\cmd.exe"
 POWERSHELL_EXE = r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe"
+SCHTASKS_EXE = r"C:\Windows\System32\schtasks.exe"
 
 
 def task_run(entry: CareEntry, *, workspace: Path) -> str:
@@ -42,8 +43,12 @@ def create_command(entry: CareEntry, *, command: str, name: str, schedule: str, 
     def literal(value: str) -> str:
         return "'" + value.replace("'", "''") + "'"
 
+    account = account.replace('"%USERNAME%"', "$env:USERNAME")
     script = (
         "$ErrorActionPreference='Stop'; "
+        f"& {literal(SCHTASKS_EXE)} /Create /TN {literal(name)} "
+        f"/TR {literal(CMD_EXE + ' /d /c exit 1')} {schedule} {account} /F; "
+        "if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; "
         "$service=New-Object -ComObject Schedule.Service; $service.Connect(); "
         "$folder=$service.GetFolder('\\'); "
         f"$definition=$folder.GetTask({literal(name)}).Definition; "
@@ -53,7 +58,5 @@ def create_command(entry: CareEntry, *, command: str, name: str, schedule: str, 
         f"$folder.RegisterTaskDefinition({literal(name)},$definition,6,$null,$null,3,$null) | Out-Null"
     )
     encoded = base64.b64encode(script.encode("utf-16le")).decode("ascii")
-    return (
-        f'schtasks /Create /TN "{name}" /TR "{CMD_EXE} /d /c exit 1" {schedule} {account} /F'
-        f' && "{POWERSHELL_EXE}" -NoProfile -NonInteractive -EncodedCommand {encoded}'
-    )
+    # A bare absolute executable path parses in both cmd and PowerShell 5.1.
+    return f"{POWERSHELL_EXE} -NoProfile -NonInteractive -EncodedCommand {encoded}"

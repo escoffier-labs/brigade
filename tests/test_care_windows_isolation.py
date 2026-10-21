@@ -30,7 +30,8 @@ def test_schtasks_runbook_pins_interpreter_and_absolute_paths(tmp_path):
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="requires native Windows Task Scheduler")
-def test_native_schtasks_roundtrip_runs_isolated_approved_runbook(tmp_path, monkeypatch):
+@pytest.mark.parametrize("shell", ["cmd", "powershell"])
+def test_native_schtasks_roundtrip_runs_isolated_approved_runbook(tmp_path, monkeypatch, capsys, shell):
     workspace = tmp_path / "workspace spaces & literal%pct% ! ^ (test)"
     workspace.mkdir()
     # Elevated pytest temp ACLs can exclude the scheduler's filtered user
@@ -64,10 +65,23 @@ def test_native_schtasks_roundtrip_runs_isolated_approved_runbook(tmp_path, monk
             }
         )
     )
-    command = care_cmd._schtasks_create_command(entry, workspace=workspace)
+    assert care_cmd._windows_install(workspace=workspace, entries=(entry,), json_output=False, dry_run=True) == 3
+    printed = capsys.readouterr().out
+    command = next(line for line in printed.splitlines() if "-EncodedCommand " in line)
     batch = tmp_path / "create-care.cmd"
     batch.write_text(command + "\r\n", encoding="utf-8")
-    create = subprocess.run([str(batch)], capture_output=True, text=True, timeout=30)
+    create_argv = (
+        [str(batch)]
+        if shell == "cmd"
+        else [
+            str(system32 / "WindowsPowerShell/v1.0/powershell.exe"),
+            "-NoProfile",
+            "-NonInteractive",
+            "-Command",
+            command,
+        ]
+    )
+    create = subprocess.run(create_argv, capture_output=True, text=True, timeout=30)
     try:
         assert create.returncode == 0, create.stdout + create.stderr
         query = subprocess.run(

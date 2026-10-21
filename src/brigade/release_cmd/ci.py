@@ -259,6 +259,9 @@ def _content_guard_command(
     env: dict[str, str] = {}
     if not scanner_dir.is_dir():
         return None, env, f"content guard not available at {scanner_dir}"
+    package_error = scrub.external_package_error()
+    if package_error:
+        return None, env, package_error
     policy_ref = Path(policy)
     if os.environ.get("CONTENT_GUARD_DIR") and policy_ref.parent == Path("."):
         policy_name = policy_ref.name if policy_ref.suffix == ".json" else f"{policy_ref.name}.json"
@@ -322,6 +325,15 @@ def _run_content_guard_check(
     base_ref: str | None = None,
 ) -> dict[str, Any]:
     introduced = name == "introduced"
+    package_error = scrub.external_package_error()
+    if package_error:
+        return {
+            "name": f"content_guard_{name}",
+            "status": FAIL,
+            "detail": package_error,
+            "available": False,
+            "exit_code": 2,
+        }
     argv, env_updates, error = _content_guard_command(target, policy=policy, introduced=introduced, base_ref=base_ref)
     if error or argv is None:
         return {"name": f"content_guard_{name}", "status": WARN, "detail": error or "not available", "available": False}

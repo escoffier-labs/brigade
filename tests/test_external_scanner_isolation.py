@@ -74,3 +74,32 @@ def test_external_scanner_uses_configured_package(tmp_path, monkeypatch, entry, 
         assert Path(executed["repo"]) == workspace
     else:
         assert str(workspace) in executed["args"]
+
+
+def test_missing_external_initializer_reports_actionable_json(tmp_path, monkeypatch, capsys):
+    from brigade import cli
+
+    checkout = tmp_path / "scanner checkout"
+    checkout.mkdir()
+    monkeypatch.setenv("CONTENT_GUARD_DIR", str(checkout))
+    result = cli.main(["scrub", "--target", str(tmp_path), "--json", "--no-receipt"])
+    captured = capsys.readouterr()
+    assert result != 0
+    payload = json.loads(captured.out)
+    assert "initializer not found" in payload["detail"]
+    assert str(checkout / "src/content_guard/__init__.py") in payload["detail"]
+    assert "Traceback" not in captured.err
+
+
+def test_release_missing_external_initializer_is_actionable(tmp_path, monkeypatch):
+    checkout = tmp_path / "scanner checkout"
+    (checkout / "policies").mkdir(parents=True)
+    (checkout / "policies/public-repo.json").write_text("{}")
+    monkeypatch.setenv("CONTENT_GUARD_DIR", str(checkout))
+    argv, _, error = ci._content_guard_command(tmp_path, policy="public-repo", introduced=False, base_ref=None)
+    assert argv is None
+    assert "initializer not found" in error
+    assert str(checkout / "src/content_guard/__init__.py") in error
+    result = ci._run_content_guard_check(tmp_path, name="tip", policy="public-repo")
+    assert result["status"] == "fail", "a broken configured scanner must remain a failed check"
+    assert result["exit_code"] != 0

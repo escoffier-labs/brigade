@@ -176,7 +176,8 @@ def test_release_guard_tip_ignores_gitignored_scratch(tmp_path, monkeypatch):
 
 def test_release_guard_broken_external_scanner_is_unavailable_warning(tmp_path, monkeypatch):
     checkout = tmp_path / "content-guard"
-    (checkout / "src").mkdir(parents=True)
+    (checkout / "src/content_guard").mkdir(parents=True)
+    (checkout / "src/content_guard/__init__.py").write_text("")
     (checkout / "policies").mkdir()
     (checkout / "policies" / "public-repo.json").write_text("{}")
     monkeypatch.setenv("CONTENT_GUARD_DIR", str(checkout))
@@ -207,7 +208,8 @@ def test_release_guard_malformed_embedded_policy_is_unavailable_warning(tmp_path
 
 def test_release_guard_external_checkout_requires_explicit_override(tmp_path, monkeypatch):
     checkout = tmp_path / "content-guard"
-    (checkout / "src").mkdir(parents=True)
+    (checkout / "src/content_guard").mkdir(parents=True)
+    (checkout / "src/content_guard/__init__.py").write_text("")
     (checkout / "policies").mkdir()
     (checkout / "policies" / "public-repo.json").write_text("{}")
     monkeypatch.setenv("CONTENT_GUARD_DIR", str(checkout))

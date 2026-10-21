@@ -50,6 +50,15 @@ def available() -> bool:
     return scanner_dir().is_dir()
 
 
+def external_package_error() -> str | None:
+    """Diagnose an incomplete configured checkout before starting Python."""
+    if scanner_module() == "content_guard" and scanner_dir().is_dir():
+        initializer = scanner_dir() / "src/content_guard/__init__.py"
+        if not initializer.is_file():
+            return f"content-guard package initializer not found: {initializer}"
+    return None
+
+
 def policy_path(repo_target: Path, policy: str = "public-repo") -> Path:
     return _resolve_policy(repo_target.expanduser().resolve(), scanner_dir(), policy)
 
@@ -240,9 +249,10 @@ def run_scan(scan_target: Path, *, repo_target: Path | None = None, policy: str 
     scan_target = scan_target.expanduser().resolve()
     repo_target = repo_target.expanduser().resolve() if repo_target is not None else scan_target
     scanner = scanner_dir()
-    if not scanner.is_dir():
+    package_error = external_package_error()
+    if not scanner.is_dir() or package_error:
         external_configured = bool(os.environ.get("CONTENT_GUARD_DIR"))
-        detail = (
+        detail = package_error or (
             f"CONTENT_GUARD_DIR points at missing content-guard checkout: {scanner}"
             if external_configured
             else f"embedded content guard not found at {scanner}"
