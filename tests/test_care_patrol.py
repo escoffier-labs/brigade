@@ -63,3 +63,31 @@ def test_status_includes_latest_direct_patrol_receipt(tmp_path, capsys):
     status = care_cmd._entry_status(tmp_path, entry)
     assert status["patrol_receipt"]["patrol_id"] == receipt["patrol_id"]
     assert status["patrol_receipt"]["exit_code"] == 0
+
+
+def test_status_reads_only_newest_patrol_receipt(tmp_path, monkeypatch):
+    from brigade import localio, run_lane_state
+
+    root = tmp_path / ".brigade/patrol"
+    for index in range(30):
+        path = root / f"20260820T1200{index:02d}-receipt/patrol.json"
+        localio.write_json(
+            path,
+            {
+                "schema": "brigade.runs_patrol.v1",
+                "patrol_id": path.parent.name,
+                "observed_at": f"2026-08-20T12:00:{index:02d}+00:00",
+                "exit_code": 0,
+            },
+        )
+    read = run_lane_state._read_json
+    reads = []
+
+    def tracked(path):
+        reads.append(path)
+        return read(path)
+
+    monkeypatch.setattr(run_lane_state, "_read_json", tracked)
+    status = care_cmd._entry_status(tmp_path, care_cmd._catalog_by_id()["run-patrol"])
+    assert status["patrol_receipt"]["patrol_id"] == "20260820T120029-receipt"
+    assert len(reads) == 1

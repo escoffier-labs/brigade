@@ -575,16 +575,25 @@ release. Hub rows on other nodes cannot pass this proof.
 
 `escalate` records severity and an escalation number. It sends a fleet message
 only when both `--escalate-via fleet-msg` and `--escalate-to PRINCIPAL` are set.
-Each lane permits at most 2 escalation attempts, at least 4 hours apart, even
-if its classification changes. Failed or uncertain sends consume that attempt.
+Without a transport, the receipt marks the escalation `recorded` and leaves
+the delivery budget available. Each lane permits at most 2 delivery attempts,
+at least 4 hours apart, even if its classification changes. Failed or uncertain
+sends consume that attempt.
 
 Applying actions always writes a patrol receipt. Each attempt records its
 scope, before and after state, timestamp, result, and an idempotency key derived
 from the lane, classification digest, and action. The second escalation also
 includes its escalation number in the key. A shared local lock serializes
 patrol actions. A durable pending record precedes every side effect, so a crash
-or an unchanged observation cannot repeat that attempt. Unreadable receipt
-history refuses further actions. Keep receipts to retain these fences.
+or an unchanged observation cannot repeat an applied, pending, or failed
+attempt. Refused and skipped actions can retry after proving their fences again.
+Corrupt receipt files refuse further actions. Unpublished receipt directories
+are ignored, and receipt files are published atomically.
+
+Patrol retains the newest 144 report-only receipts for at most 7 days.
+Receipts containing actions remain as retry fences. Publication, actions and
+retention share a local lock. Care status and work brief read at most the newest
+10 receipt candidates and stop at the first valid receipt.
 Findings and `--fail-on` refer to the initial scan, even when an action repairs
 a lane. No action terminates a process, removes a worktree, merges, or pushes.
 `finalize-intent` and `interrupt` are not available in this slice.

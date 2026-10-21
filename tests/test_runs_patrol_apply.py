@@ -275,3 +275,87 @@ def test_reap_refresh_cannot_adopt_a_concurrent_nonterminal_snapshot(tmp_path, m
     monkeypatch.setattr(runs_patrol_actions, "_reap", raced)
     report = _patrol(repo, capsys, apply="reap,release-claim")
     assert json.loads(ledger.read_text())["tasks"][0].get("claim"), report["actions"]
+
+
+@pytest.mark.parametrize("initial", ["unavailable", "unconfigured"])
+def test_hub_release_retries_after_refusal_or_missing_configuration(tmp_path, monkeypatch, capsys, initial):
+    from brigade import fleet_claim_release, fleet_client
+
+    repo = _repo(tmp_path)
+    _write_run(repo, "20260820-120000-patrol01", status="ok")
+    available = False
+    calls = []
+    monkeypatch.setattr(
+        fleet_client,
+        "load_fleet_config",
+        lambda: {"hub_url": "https://hub.example.invalid"} if available or initial == "unavailable" else {},
+    )
+
+    def release(*args, **kwargs):
+        calls.append(kwargs)
+        if not available:
+            return 2
+        print(json.dumps({"released": True}))
+        return 0
+
+    monkeypatch.setattr(fleet_claim_release, "_release_claim", release)
+    first = _patrol(repo, capsys, apply="release-claim")
+    hub = next(item for item in first["actions"] if item["scope"] == "hub")
+    assert hub["status"] == ("refused" if initial == "unavailable" else "skipped")
+    available = True
+    second = _patrol(repo, capsys, apply="release-claim")
+    assert any(item["scope"] == "hub" and item["status"] == "applied" for item in second["actions"])
+    _patrol(repo, capsys, apply="release-claim")
+    assert len(calls) == (2 if initial == "unavailable" else 1)
+    assert calls[-1]["force"] is False and calls[-1]["expected_run_dir"] is not None
+
+
+def test_undelivered_escalation_does_not_consume_delivery_budget(tmp_path, monkeypatch, capsys):
+    from brigade import fleet_client_messages
+
+    repo = _repo(tmp_path)
+    run = _write_run(repo, "20260820-120000-patrol01")
+    _write_stale_lock(repo, run)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+    first = _patrol(repo, capsys, apply="escalate")
+    assert first["actions"][0]["status"] == "recorded"
+    assert _patrol(repo, capsys, apply="escalate")["actions"] == []
+    sent = []
+    monkeypatch.setattr(fleet_client_messages, "send", lambda **kwargs: sent.append(kwargs) or {"sent": True})
+    delivered = _patrol(repo, capsys, apply="escalate", escalate_via="fleet-msg", escalate_to="operator")
+    assert delivered["actions"][0]["status"] == "applied"
+    assert delivered["actions"][0]["escalation_number"] == 1
+    assert len(sent) == 1
+
+
+def test_incomplete_receipt_directory_does_not_block_apply(tmp_path, monkeypatch, capsys):
+    repo = _repo(tmp_path)
+    run = _write_run(repo, "20260820-120000-patrol01")
+    _write_stale_lock(repo, run)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+    (repo / ".brigade/patrol/20260820T120000-incomplete").mkdir(parents=True)
+    report = _patrol(repo, capsys, apply="reap")
+    assert report["actions"][0]["status"] == "applied"
+
+
+def test_lock_acquisition_refusal_can_retry_ledger_release(tmp_path, monkeypatch, capsys):
+    from contextlib import contextmanager
+
+    repo = _repo(tmp_path)
+    _write_run(repo, "20260820-120000-patrol01", status="ok", extra={"claim_id": "claim-1"})
+    path = _ledger(repo)
+    real_lock = runguard.run_lock
+
+    @contextmanager
+    def unavailable(*args, **kwargs):
+        raise runguard.RunLockError("another writer acquired the lock")
+        yield
+
+    monkeypatch.setattr(runguard, "run_lock", unavailable)
+    first = _patrol(repo, capsys, apply="release-claim")
+    assert first["actions"][0]["status"] == "refused"
+    assert json.loads(path.read_text())["tasks"][0].get("claim")
+    monkeypatch.setattr(runguard, "run_lock", real_lock)
+    second = _patrol(repo, capsys, apply="release-claim")
+    assert any(item["scope"] == "ledger" and item["status"] == "applied" for item in second["actions"])
+    assert json.loads(path.read_text())["tasks"][0].get("claim") is None

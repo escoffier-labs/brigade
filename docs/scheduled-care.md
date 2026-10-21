@@ -115,7 +115,10 @@ brigade runs patrol --target . --json --receipt --fail-on stalled,zombie,dead
 To enable repairs, review the generated runbook and add an explicit
 `--apply reap,release-claim` to its step. `escalate` can also be selected.
 `finalize-intent` is not implemented. Reinstall preserves an existing runbook.
-Care status includes the latest patrol receipt and the latest runbook receipt.
+Patrol retains the newest 144 report-only receipts for at most 7 days.
+Receipts with action records remain as retry fences. Care status checks at most
+the newest 10 patrol receipt candidates and includes the latest valid patrol
+receipt and the latest runbook receipt.
 Two consecutive failed runbook receipts use care's existing repeated-failure
 reporting in work brief and Center. A selected patrol finding returns 1 and
 therefore fails that scheduled runbook step.

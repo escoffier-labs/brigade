@@ -75,7 +75,8 @@ def receipt_fields(target: Path, entry: CareEntry, last_runbook: dict[str, Any] 
     root = target / ".brigade/patrol"
     latest: tuple[str, dict[str, Any]] | None = None
     if not root.is_symlink() and not root.parent.is_symlink() and root.is_dir():
-        for directory in root.iterdir():
+        # IDs sort by creation time. Bound parsing even with a large fence archive.
+        for directory in sorted(root.iterdir(), reverse=True)[:10]:
             if directory.is_symlink() or not directory.is_dir():
                 continue
             path = directory / "patrol.json"
@@ -94,6 +95,7 @@ def receipt_fields(target: Path, entry: CareEntry, last_runbook: dict[str, Any] 
                             "receipt_path": str(path),
                         },
                     )
+                    break
             except (OSError, ValueError):
                 continue
     summary = latest[1] if latest else None

@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import sys
 from dataclasses import asdict
 from datetime import datetime
@@ -14,7 +13,7 @@ from uuid import uuid4
 
 from . import localio, run_reap, runs_cmd
 from .run_lane_state import STATES, Thresholds, classify, collect_lanes
-from . import runs_patrol_actions
+from . import runs_patrol_actions, runs_patrol_receipts
 
 SCHEMA = "brigade.runs_patrol.v1"
 
@@ -64,9 +63,10 @@ def _write_receipt(target: Path, patrol_id: str, raw: str) -> None:
         if parent.is_symlink():
             raise ValueError("receipt path must not be symlinked")
         parent.mkdir(mode=0o700, exist_ok=True)
-    fd = os.open(parent / "patrol.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as stream:
-        stream.write(raw + "\n")
+    path = parent / "patrol.json"
+    if path.exists() or path.is_symlink():
+        raise ValueError("patrol receipt already exists")
+    localio.write_text_atomic(path, raw + "\n")
 
 
 def patrol(
@@ -162,21 +162,23 @@ def patrol(
         }
         raw = json.dumps(payload, indent=2, sort_keys=True)
         if receipt:
-            _write_receipt(target, patrol_id, raw)
-            written_receipt = target / payload["receipt"]
-        if actions:
-            runs_patrol_actions.apply_actions(
-                target=target,
-                lanes=lanes,
-                rows=rows,
-                payload=payload,
-                actions=actions,
-                thresholds=thresholds,
-                now=clock,
-                escalate_via=escalate_via,
-                escalate_to=escalate_to,
-            )
-            raw = json.dumps(payload, indent=2, sort_keys=True)
+            with runs_patrol_receipts.receipt_lock(target):
+                _write_receipt(target, patrol_id, raw)
+                written_receipt = target / payload["receipt"]
+                if actions:
+                    runs_patrol_actions.apply_actions(
+                        target=target,
+                        lanes=lanes,
+                        rows=rows,
+                        payload=payload,
+                        actions=actions,
+                        thresholds=thresholds,
+                        now=clock,
+                        escalate_via=escalate_via,
+                        escalate_to=escalate_to,
+                    )
+                    raw = json.dumps(payload, indent=2, sort_keys=True)
+                runs_patrol_receipts.prune_reports(written_receipt.parent.parent, clock)
     except (OSError, ValueError, RuntimeError, OverflowError) as exc:
         if written_receipt is not None and payload is not None:
             payload.update(exit_code=2, error=type(exc).__name__)
