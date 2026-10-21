@@ -238,6 +238,7 @@ def _principal_add(args: argparse.Namespace) -> int:
     from .. import fleet_client_messages
 
     deferred_request_ids: list[str] = []
+    deferred_paths: list[Path] = []
 
     return _result(
         args,
@@ -248,9 +249,10 @@ def _principal_add(args: argparse.Namespace) -> int:
             may_send_to=getattr(args, "may_send_to", None),
             _defer_finalize=True,
             _deferred_request_ids=deferred_request_ids,
+            _deferred_paths=deferred_paths,
         ),
         after_output=lambda: fleet_client_messages.finalize_principal_add(
-            args.name, request_id=deferred_request_ids[-1]
+            args.name, request_id=deferred_request_ids[-1], pending_path=deferred_paths[-1]
         ),
     )
 

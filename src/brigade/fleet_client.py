@@ -111,6 +111,8 @@ from .fleet_client_spool import append_record as _append_spool_record
 from .fleet_client_spool import ensure_directory as _ensure_spool_directory
 from .fleet_client_spool import fsync_parent as _fsync_spool_parent
 from .fleet_client_spool import parse_records as _parse_spool_records
+from .fleet_client_spool_lock import _spool_lock as _spool_lock
+from .fleet_client_spool_lock import _validate_spool_lock_timeout as _validate_spool_lock_timeout
 from . import toml_compat as tomllib
 from .fleet_claim_lifecycle import (
     CLAIM_FENCE_REFUSALS,
@@ -597,48 +599,6 @@ def _open_private(path: Path, flags: int, *, dir_fd: int | None = None) -> int:
         os.close(fd)
         raise
     return fd
-
-
-@contextmanager
-def _spool_lock(path: Path) -> Iterator[int | None]:
-    """Guard a spool across processes and threads.
-
-    Yields a validated directory descriptor for relative I/O, or None on Windows.
-    """
-    dir_fd = _ensure_private_dir(path.parent)
-    lock_name = path.name + ".lock"
-    try:
-        with _SPOOL_PROCESS_LOCK:
-            if dir_fd is not None:
-                fd = os.open(lock_name, os.O_RDWR | os.O_CREAT | _O_NOFOLLOW | _O_CLOEXEC, 0o600, dir_fd=dir_fd)
-            else:  # pragma: no cover - Windows
-                fd = os.open(str(path.with_name(lock_name)), os.O_RDWR | os.O_CREAT | _O_CLOEXEC, 0o600)
-            locked = False
-            try:
-                if fcntl is not None:
-                    fcntl.flock(fd, fcntl.LOCK_EX)
-                    locked = True
-                elif msvcrt is not None:  # pragma: no cover - Windows
-                    while True:
-                        try:
-                            msvcrt.locking(fd, msvcrt.LK_LOCK, 1)
-                            locked = True
-                            break
-                        except OSError:
-                            continue
-                yield dir_fd
-            finally:
-                try:
-                    if locked:
-                        if fcntl is not None:
-                            fcntl.flock(fd, fcntl.LOCK_UN)
-                        elif msvcrt is not None:  # pragma: no cover - Windows
-                            msvcrt.locking(fd, msvcrt.LK_UNLCK, 1)
-                finally:
-                    os.close(fd)
-    finally:
-        if dir_fd is not None:
-            os.close(dir_fd)
 
 
 def _encode(event: dict[str, Any]) -> str:

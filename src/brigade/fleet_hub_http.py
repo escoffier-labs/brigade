@@ -20,7 +20,7 @@ from typing import Any
 from urllib.parse import parse_qs, urlencode
 
 from . import fleet_hub_enrollment as enrollment
-from . import fleet_claim_display
+from . import fleet_claim_display, fleet_admin_stats_http
 from . import (
     fleet_command_deck,
     fleet_dashboard,
@@ -1471,6 +1471,9 @@ def make_handler(
             if path == "/deck/work":
                 self._serve_work(query)
                 return
+            if path == "/deck/stats":
+                fleet_admin_stats_http.serve(self, Path(db_path), query)
+                return
             if path == "/deck/owners":
                 self._serve_owners_page(query)
                 return
@@ -1657,6 +1660,9 @@ def make_handler(
                 return
             if path == "/deck/policy":
                 self._post_policy_page()
+                return
+            if path == "/stats":
+                fleet_admin_stats_http.post(self, Path(db_path), query)
                 return
             if path.startswith("/work/"):
                 self._handle_worklore()

@@ -7,10 +7,11 @@ import os
 import re
 import stat
 import sys
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Mapping
+from uuid import UUID
 
 from .contracts import CALLER_RE, NAME_RE, REF_RE, T3DispatchError
 
@@ -76,6 +77,9 @@ class Runtime:
     wake_path: Path
     writable_paths: tuple[str, ...]
     intake: IntakePolicy | None = None
+    hub_token_file: Path | None = None
+    hub_wake_target: str = "default"
+    hub_recipients: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
 
 
 def _bad() -> T3DispatchError:
@@ -192,10 +196,32 @@ def _intake(value: object, repositories: Mapping[str, Repository], max_open: int
     )
 
 
+def _hub_recipients(value: object) -> Mapping[str, str]:
+    if not isinstance(value, dict) or len(value) > 16:
+        raise _bad()
+    parsed = {}
+    for name, node_id in value.items():
+        if not isinstance(name, str) or not NAME_RE.fullmatch(name) or not isinstance(node_id, str):
+            raise _bad()
+        try:
+            if str(UUID(node_id)) != node_id:
+                raise _bad()
+        except ValueError:
+            raise _bad() from None
+        parsed[name] = node_id
+    return MappingProxyType(parsed)
+
+
 def parse_runtime(payload: object) -> Runtime:
-    if not isinstance(payload, dict) or set(payload) - {"intake"} != RUNTIME_KEYS:
+    if (
+        not isinstance(payload, dict)
+        or set(payload) - {"intake", "hub_token_file", "hub_wake_target", "hub_recipients"} != RUNTIME_KEYS
+    ):
         raise _bad()
     if payload["schema"] != RUNTIME_SCHEMA:
+        raise _bad()
+    wake_target = payload.get("hub_wake_target", "default")
+    if not isinstance(wake_target, str) or not CALLER_RE.fullmatch(wake_target):
         raise _bad()
     seats = _names(payload["seats"])
     default_seat = payload["default_seat"]
@@ -210,6 +236,9 @@ def parse_runtime(payload: object) -> Runtime:
     repositories = _repositories(payload["repositories"])
     max_open = _int(payload["max_open"], 1, 20)
     return Runtime(
+        hub_token_file=Path(_abs(payload["hub_token_file"])) if "hub_token_file" in payload else None,
+        hub_wake_target=wake_target,
+        hub_recipients=_hub_recipients(payload.get("hub_recipients", {})),
         enabled=_bool(payload["enabled"]),
         t3_fleet_bin=_abs(payload["t3_fleet_bin"]),
         git_bin=_abs(payload["git_bin"]),

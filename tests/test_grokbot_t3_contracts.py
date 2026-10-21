@@ -15,6 +15,11 @@ def _submit(**overrides):
 
 def test_tool_set_is_closed():
     assert c.TOOLS == {
+        "inbox_list",
+        "inbox_ack",
+        "inbox_reply",
+        "message_send",
+        "message_status",
         "t3_approve",
         "t3_answer",
         "t3_capacity",

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
+import hashlib
 import hmac
 import os
 import re
@@ -14,13 +16,38 @@ ENV_TOKEN_FILE = "BRIGADE_FLEET_MESSAGE_TOKEN_FILE"
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{32,512}")
 
 
+MESSAGE_CODES = frozenset(
+    {
+        "message_recipient_not_permitted",
+        "message_sender_recipient_quota",
+        "message_recipient_quota",
+        "message_sender_quota",
+        "message_recipient_inactive",
+        "message_recipient_unknown",
+        "message_sender_inactive",
+        "message_not_found",
+        "message_timestamp_future",
+        "token_file_invalid",
+        "admin_token_refused",
+        "token_scope_changed",
+        "spool_conflict",
+        "client_id_invalid",
+        "invalid_argument",
+        "hub_unavailable",
+        "principal_enrollment_changed",
+        "principal_enrollment_revoked",
+        "principal_enrollment_grants_changed",
+    }
+)
+
+
 class FleetMessageHubError(fleet_client.FleetClientError):
     """A message operation failure with structured status and code."""
 
     def __init__(self, message: str, *, status: int | None = None, code: str | None = None) -> None:
         super().__init__(message)
         self.status = status
-        self.code = code
+        self.code = code if isinstance(code, str) and code in MESSAGE_CODES else None
 
 
 def read_message_token_file(path: str) -> str:
@@ -61,18 +88,18 @@ def read_message_token_file(path: str) -> str:
             os.close(fd)
 
 
-def message_settings(token_file: str | None) -> tuple[str, str, str]:
+def message_settings(token_file: str | None, *, node_credential: bool = False) -> tuple[str, str, str]:
     settings = fleet_client.load_fleet_settings()
     hub = settings.get("hub_url", "")
     if not hub:
-        raise fleet_client.FleetClientError("no fleet hub configured (~/.brigade/fleet.toml [fleet] hub_url)")
-    path = token_file if token_file is not None else os.environ.get(ENV_TOKEN_FILE)
+        raise MessageNotConfiguredError("no fleet hub configured (~/.brigade/fleet.toml [fleet] hub_url)")
+    path = None if node_credential else token_file if token_file is not None else os.environ.get(ENV_TOKEN_FILE)
     if path is not None:
         token = read_message_token_file(path)
     else:
         token = settings.get("node_token", "")
         if not token:
-            raise fleet_client.FleetClientError("no fleet node token configured")
+            raise MessageNotConfiguredError("no fleet node token configured")
     admin = settings.get("admin_token", "")
     if admin and hmac.compare_digest(token.encode("utf-8"), admin.encode("utf-8")):
         raise FleetMessageHubError(
@@ -87,3 +114,77 @@ def message_settings(token_file: str | None) -> tuple[str, str, str]:
     if path is not None and scope == "unknown":
         scope = "message-principal"
     return hub, token, scope
+
+
+def message_scope(hub: str, token: str) -> str:
+    """Opaque identity of a (Hub endpoint, credential) pair, framed so no two pairs collide."""
+    framed = b"brigade-message-scope-v1"
+    # The endpoint is normalized exactly as the transport builds its request URL.
+    for part in (hub.rstrip("/"), token):
+        raw = part.encode("utf-8")
+        framed += len(raw).to_bytes(4, "big") + raw
+    return hashlib.sha256(framed).hexdigest()
+
+
+class MessageAuthorityError(FleetMessageHubError):
+    """A closed credential failure, never an outage eligible for queue-success."""
+
+
+class MessageNotConfiguredError(MessageAuthorityError):
+    """An unconfigured node flush is a no-op, without touching its old spool."""
+
+
+@dataclass(frozen=True)
+class MessageAuthority:
+    """One operation's immutable transport authority; never put it in persistent data."""
+
+    hub: str = field(repr=False)
+    token: str = field(repr=False)
+    node_id: str = field(repr=False)
+    token_file: str | None = field(default=None, repr=False)
+    node_only: bool = field(default=False, repr=False)
+    node_credential: bool = field(default=False, repr=False)
+    companions: tuple[MessageAuthority, ...] = field(default=(), repr=False)
+
+    @property
+    def scope(self) -> str:
+        return message_scope(self.hub, self.token)
+
+    @classmethod
+    def capture(
+        cls, token_file: str | None = None, *, node_only: bool = False, node_credential: bool = False
+    ) -> MessageAuthority:
+        if node_only and ENV_TOKEN_FILE in os.environ:
+            raise MessageAuthorityError("message credential invalid", code="token_file_invalid")
+        try:
+            hub, token, node_id = (
+                message_settings(None, node_credential=True)
+                if node_only or node_credential
+                else message_settings(token_file)
+            )
+        except MessageNotConfiguredError:
+            raise
+        except fleet_client.FleetClientError as error:
+            raise MessageAuthorityError(
+                "message credential invalid", code=getattr(error, "code", None) or "token_file_invalid"
+            ) from None
+        return cls(hub, token, node_id, token_file, node_only, node_only or node_credential)
+
+    def validate(self) -> None:
+        """Read current credentials only to compare, never to select an operation's authority."""
+        if self.node_only and ENV_TOKEN_FILE in os.environ:
+            raise MessageAuthorityError("message credential invalid", code="token_file_invalid")
+        try:
+            hub, token, node_id = (
+                message_settings(None, node_credential=True)
+                if self.node_credential
+                else message_settings(self.token_file)
+            )
+        except fleet_client.FleetClientError as error:
+            raise MessageAuthorityError(
+                "message credential invalid", code=getattr(error, "code", None) or "token_file_invalid"
+            ) from None
+        if not hmac.compare_digest(message_scope(hub, token), self.scope) or node_id != self.node_id:
+            raise MessageAuthorityError("message credential changed", code="token_scope_changed")
+        for companion in self.companions:
+            companion.validate()
