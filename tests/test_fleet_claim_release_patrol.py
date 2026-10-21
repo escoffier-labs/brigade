@@ -3,11 +3,14 @@
 from __future__ import annotations
 
 import json
+from datetime import timedelta
 
 import pytest
 
 from brigade import fleet_claim_release, fleet_client, runguard
 from tests.test_run_reap import _repo, _write_run, _write_stale_lock
+from tests.test_run_reap import NOW
+from tests.test_runs_patrol_apply import _patrol
 
 NODE = "11111111-1111-4111-8111-111111111111"
 OTHER_NODE = "22222222-2222-4222-8111-222222222222"
@@ -86,3 +89,170 @@ def test_patrol_hub_refuses_changed_run_evidence(tmp_path, monkeypatch):
     result = runs_patrol_actions._release_hub(lane, {"state": "complete"})
     assert result["status"] == "refused"
     assert not released
+
+
+@pytest.mark.parametrize("reason", ["no-claim", "foreign-owner", "different-run-generation"])
+@pytest.mark.parametrize("days", [0, 8])
+def test_stable_hub_observation_fences_ticks_and_retention(tmp_path, monkeypatch, capsys, reason, days):
+    from brigade import localio, runs_patrol_receipts
+
+    repo = _repo(tmp_path)
+    run = _write_run(repo, "20260820-120000-patrol01", status="ok")
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.invalid"})
+    monkeypatch.setattr(fleet_client, "find_workspace_for_path", lambda path: None)
+    monkeypatch.setattr(fleet_client, "resolve_claim_target", lambda path: "test-target")
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda *args: NODE)
+    owner = (
+        None
+        if reason == "no-claim"
+        else {
+            "owner_node": OTHER_NODE if reason == "foreign-owner" else NODE,
+            "owner_conductor": "example",
+            "acquired_at": "generation-1",
+            "holder": "private-holder",
+        }
+    )
+    probes, releases = [], []
+
+    def inspect(*args, **kwargs):
+        probes.append((args, kwargs))
+        return fleet_client.ClaimDecision(
+            granted=True, reason="ok", claim=owner, lock_run_dir=str(run.parent / "another-run")
+        )
+
+    monkeypatch.setattr(fleet_client, "inspect_claim", inspect)
+    monkeypatch.setattr(fleet_client, "release_claim", lambda *args, **kwargs: releases.append(kwargs))
+    first = _patrol(repo, capsys, apply="release-claim")
+    action = first["actions"][0]
+    assert action["scope"] == "hub" and action["status"] == "observed"
+    assert action["result"]["reason"] == reason
+    assert action["result"]["owner"] == (
+        None if owner is None else {key: owner[key] for key in ("owner_node", "owner_conductor", "acquired_at")}
+    )
+    second = _patrol(repo, capsys, apply="release-claim", now=NOW + timedelta(minutes=10, days=days))
+    assert second["actions"] == []
+    assert len(probes) == 1 and releases == []
+    root = repo / ".brigade/patrol"
+    if days:
+        assert not (repo / first["receipt"]).exists()
+        assert runs_patrol_receipts.read_fences(root)[0]["status"] == "observed"
+    else:
+        assert sum(len(json.loads(path.read_text())["actions"]) for path in root.glob("*/patrol.json")) == 1
+    # Changed terminal evidence must authorize one new observation for the same lane.
+    meta = json.loads((run / "run.json").read_text())
+    localio.write_json(run / "run.json", {**meta, "status": "failed"})
+    changed = _patrol(repo, capsys, apply="release-claim", now=NOW + timedelta(minutes=20, days=days))
+    assert changed["lanes"][0]["classification_digest"] != first["lanes"][0]["classification_digest"]
+    assert changed["actions"][0]["idempotency_key"] != action["idempotency_key"]
+    assert changed["actions"][0]["status"] == "observed"
+    assert _patrol(repo, capsys, apply="release-claim", now=NOW + timedelta(minutes=30, days=days))["actions"] == []
+    # A new run generation is a new lane and classification even with identical status.
+    _write_run(repo, "20260820-120000-patrol02", status="failed")
+    generation = _patrol(repo, capsys, apply="release-claim", now=NOW + timedelta(minutes=40, days=days))
+    assert len(generation["actions"]) == 1
+    assert generation["actions"][0]["lane_id"] == "20260820-120000-patrol02"
+    assert generation["actions"][0]["status"] == "observed"
+    assert _patrol(repo, capsys, apply="release-claim", now=NOW + timedelta(minutes=50, days=days))["actions"] == []
+    assert len(probes) == 3 and releases == []
+
+
+@pytest.mark.parametrize(
+    "reason", ["no-hub", "no-identity", "auth-failed", "hub-unavailable", "invalid", "quota", "other-error"]
+)
+def test_transient_hub_observation_retries_next_tick(tmp_path, monkeypatch, capsys, reason):
+    repo = _repo(tmp_path)
+    _write_run(repo, "20260820-120000-patrol01", status="ok")
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.invalid"})
+    monkeypatch.setattr(fleet_client, "find_workspace_for_path", lambda path: None)
+    monkeypatch.setattr(fleet_client, "resolve_claim_target", lambda path: "test-target")
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda *args: NODE)
+    probes, releases = [], []
+
+    def inspect(*args, **kwargs):
+        probes.append((args, kwargs))
+        return fleet_client.ClaimDecision(granted=False, reason=reason)
+
+    monkeypatch.setattr(fleet_client, "inspect_claim", inspect)
+    monkeypatch.setattr(fleet_client, "release_claim", lambda *args, **kwargs: releases.append(kwargs))
+    for minutes in (0, 10):
+        report = _patrol(repo, capsys, apply="release-claim", now=NOW + timedelta(minutes=minutes))
+        assert report["actions"][0]["status"] == "refused"
+    assert len(probes) == 2 and releases == []
+
+
+@pytest.mark.parametrize("lock_run_dir", [None, ""])
+def test_missing_hub_run_generation_stays_retryable(tmp_path, monkeypatch, capsys, lock_run_dir):
+    repo = _repo(tmp_path)
+    _write_run(repo, "20260820-120000-patrol01", status="ok")
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.invalid"})
+    monkeypatch.setattr(fleet_client, "find_workspace_for_path", lambda path: None)
+    monkeypatch.setattr(fleet_client, "resolve_claim_target", lambda path: "test-target")
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda *args: NODE)
+    probes = []
+
+    def inspect(*args, **kwargs):
+        probes.append(kwargs)
+        return fleet_client.ClaimDecision(
+            granted=True,
+            reason="ok",
+            claim={"owner_node": NODE, "acquired_at": "generation-1"},
+            lock_run_dir=lock_run_dir,
+        )
+
+    monkeypatch.setattr(fleet_client, "inspect_claim", inspect)
+    for minutes in (0, 10):
+        report = _patrol(repo, capsys, apply="release-claim", now=NOW + timedelta(minutes=minutes))
+        assert report["actions"][0]["status"] == "refused"
+    assert len(probes) == 2
+
+
+@pytest.mark.parametrize("output", ["", "not-json", "[]", "null", '{"reason": []}', '{"reason": "quota"}'])
+def test_unstructured_hub_release_refusal_stays_retryable(tmp_path, monkeypatch, capsys, output):
+    repo = _repo(tmp_path)
+    _write_run(repo, "20260820-120000-patrol01", status="ok")
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.invalid"})
+    calls = []
+
+    def release(*args, **kwargs):
+        calls.append(kwargs)
+        print(output)
+        return 1
+
+    monkeypatch.setattr(fleet_claim_release, "_release_claim", release)
+    for minutes in (0, 10):
+        report = _patrol(repo, capsys, apply="release-claim", now=NOW + timedelta(minutes=minutes))
+        assert report["actions"][0]["status"] == "refused"
+    assert len(calls) == 2
+
+
+@pytest.mark.parametrize("shape", ["no-claim", "foreign-owner", "different-run-generation"])
+@pytest.mark.parametrize("reason", ["missing", "held"])
+def test_unconfirmed_hub_inspection_never_becomes_stable_fence(tmp_path, monkeypatch, capsys, reason, shape):
+    repo = _repo(tmp_path)
+    run = _write_run(repo, "20260820-120000-patrol01", status="ok")
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.invalid"})
+    monkeypatch.setattr(fleet_client, "find_workspace_for_path", lambda path: None)
+    monkeypatch.setattr(fleet_client, "resolve_claim_target", lambda path: "test-target")
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda *args: NODE)
+    owner = (
+        None
+        if shape == "no-claim"
+        else {
+            "owner_node": OTHER_NODE if shape == "foreign-owner" else NODE,
+            "owner_conductor": "example",
+            "acquired_at": "generation-1",
+        }
+    )
+    lock_run_dir = str(run.parent / "another-run") if shape == "different-run-generation" else None
+    probes, releases = [], []
+
+    def inspect(*args, **kwargs):
+        probes.append((args, kwargs))
+        return fleet_client.ClaimDecision(granted=False, reason=reason, claim=owner, lock_run_dir=lock_run_dir)
+
+    monkeypatch.setattr(fleet_client, "inspect_claim", inspect)
+    monkeypatch.setattr(fleet_client, "release_claim", lambda *args, **kwargs: releases.append(kwargs))
+    for minutes in (0, 10):
+        report = _patrol(repo, capsys, apply="release-claim", now=NOW + timedelta(minutes=minutes))
+        assert report["actions"][0]["status"] == "refused"
+    assert len(probes) == 2 and releases == []

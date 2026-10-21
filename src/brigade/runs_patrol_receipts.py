@@ -18,7 +18,7 @@ REPORT_RECEIPT_MAX_AGE = timedelta(days=7)
 RECEIPT_BYTE_LIMIT = 4 * 1024 * 1024
 FENCE_FILE = ".action-fences.json"
 FENCE_DIRECTORY = ".action-fences"
-FENCE_STATUSES = frozenset({"recorded", "pending", "failed", "applied"})
+FENCE_STATUSES = frozenset({"recorded", "pending", "failed", "observed", "applied"})
 FENCE_FIELDS = ("lane_id", "action", "scope", "idempotency_key", "attempted_at", "status")
 
 
@@ -129,7 +129,7 @@ def _archive_fences(root: Path, actions: list[dict[str, Any]], legacy: list[dict
 def merge_fences(actions: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """Collapse duplicate receipt/archive records without weakening a fence."""
     merged: dict[tuple[str, str], dict[str, Any]] = {}
-    priority = {"recorded": 0, "pending": 1, "failed": 2, "applied": 3}
+    priority = {"recorded": 0, "pending": 1, "failed": 2, "observed": 3, "applied": 4}
     for action in actions:
         status = action.get("status")
         if status not in FENCE_STATUSES:

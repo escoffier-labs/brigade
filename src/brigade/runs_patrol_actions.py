@@ -182,9 +182,32 @@ def _release_hub(lane: Lane, row: dict[str, Any]) -> dict[str, Any]:
             as_json=True,
             expected_run_dir=lane.run_dir,
         )
+    refused = {"status": "refused", "reason": "Hub claim release refused"}
+    try:
+        result = json.loads(output.getvalue())
+    except ValueError:
+        return refused
+    if not isinstance(result, dict):
+        return refused
     if code:
-        return {"status": "refused", "reason": "Hub claim release refused"}
-    result = json.loads(output.getvalue())
+        reason = result.get("reason")
+        owner = result.get("owner")
+        if (
+            reason in ("no-claim", "foreign-owner", "different-run-generation")
+            and result.get("released") is False
+            and (owner is None or isinstance(owner, dict))
+        ):
+            summary = (
+                {
+                    key: value
+                    for key in ("owner_node", "owner_conductor", "acquired_at")
+                    if isinstance(value := owner.get(key), str)
+                }
+                if isinstance(owner, dict)
+                else None
+            )
+            return {"status": "observed", "result": {"released": False, "reason": reason, "owner": summary}}
+        return refused
     return {"status": "applied" if result.get("released") else "skipped", "result": result}
 
 
@@ -265,7 +288,7 @@ def apply_actions(
                 elif any(
                     item.get("idempotency_key") == key
                     and item.get("scope") == scope
-                    and item.get("status") in {"pending", "applied", "failed"}
+                    and item.get("status") in {"pending", "applied", "failed", "observed"}
                     for item in previous
                 ):
                     continue

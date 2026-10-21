@@ -167,6 +167,8 @@ def _release_claim(
                     "claim": None,
                     "owner": probe.claim,
                 }
+                if expected_run_dir is not None and probe.granted:
+                    receipt["reason"] = "no-claim" if probe.claim is None else "foreign-owner"
                 print(_json.dumps(receipt, indent=2, sort_keys=True))
             if probe.claim is None:
                 print(
@@ -184,6 +186,23 @@ def _release_claim(
         if expected_run_dir is not None and (
             not probe.lock_run_dir or Path(probe.lock_run_dir).expanduser().resolve() != expected_run_dir.resolve()
         ):
+            # A missing generation is unknown, not evidence of a different run.
+            if as_json and probe.granted and probe.lock_run_dir:
+                print(
+                    _json.dumps(
+                        {
+                            "target": target,
+                            "released": False,
+                            "forced": False,
+                            "node_id": node_id,
+                            "claim": None,
+                            "owner": probe.claim,
+                            "reason": "different-run-generation",
+                        },
+                        indent=2,
+                        sort_keys=True,
+                    )
+                )
             print("error: claim belongs to a different run generation", file=sys.stderr)
             return 1
         if probe.lock_run_dir:
