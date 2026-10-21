@@ -16,8 +16,8 @@ container. Pushes and pull requests retain path filtering. Public pull requests
 and merge-group jobs continue to use hosted runners.
 
 Preserve current branch protections, review requirements, and conversation
-resolution requirements throughout the pilot. Queue preparation does not require
-an aggregate check or replacement of the existing 20 required statuses.
+resolution requirements throughout the pilot. The queue was prepared while the
+20 per-job statuses were still required. `ci-gate` replaced them afterward.
 
 ## Required aggregate
 
@@ -115,8 +115,8 @@ queue for the exact `main` branch with these settings:
 - Merge only non-failing pull requests.
 - Status-check timeout: 90 minutes.
 
-Retain all current 20 required statuses and all existing review and conversation
-requirements. Confirm a real merge-group run creates the existing required
+Retain the required `ci-gate` status (see [Required aggregate](#required-aggregate))
+and all existing review and conversation requirements. Confirm a real merge-group run creates the existing required
 checks and runs all four component classes on hosted runners. Record its run URL,
 head SHA, classifications, check conclusions, and duration before treating queue
 preparation as operational proof.
