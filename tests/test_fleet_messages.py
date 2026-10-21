@@ -3852,7 +3852,9 @@ def test_client_and_cli_list_wait_timeout_margin_cap_and_old_hub_compat(monkeypa
 
     monkeypatch.setattr(fleet_client_messages, "_request", fake_request)
     monkeypatch.setattr(
-        fleet_client_messages, "_settings", lambda token_file=None: ("https://hub.example.test", "token", NODE_A)
+        credentials,
+        "message_settings",
+        lambda token_file=None, **_kw: ("https://hub.example.test", "token", NODE_A),
     )
 
     page = fleet_client_messages.list_messages(after=3, unacked=True, wait_ms=5000)
@@ -3934,7 +3936,7 @@ def test_list_wait_caps_across_callers(message_hub, monkeypatch, cap):
 def test_wait_capped_client_and_cli_exit_without_retry(message_hub, monkeypatch, capsys):
     base, _token_a, token_b, _db = message_hub
     monkeypatch.setattr(fleet_hub_messages, "MAX_WAITERS_PER_CALLER", 0)
-    monkeypatch.setattr(fleet_client_messages, "_settings", lambda token_file=None: (base, token_b, NODE_B))
+    monkeypatch.setattr(credentials, "message_settings", lambda token_file=None, **_kw: (base, token_b, NODE_B))
     with pytest.raises(fleet_client_messages.FleetMessageHubError) as caught:
         fleet_client_messages.list_messages(wait_ms=100)
     assert caught.value.status == 429
