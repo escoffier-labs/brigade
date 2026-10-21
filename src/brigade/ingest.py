@@ -567,6 +567,7 @@ def _execute(
     dry_run: bool,
 ) -> Action:
     from .inbox_lock import InboxLockTimeout
+    from .memory_evidence_log import log_match
 
     name = handoff_path.name
     # Re-check before destination writes as well as at the final archive boundary.
@@ -609,7 +610,7 @@ def _execute(
                 today=date.today(),
                 evidence_pointer=evidence_pointer,
             )
-            _archive(handoff_path, processed_dir)
+            log_match(target, outcome.match, _archive(handoff_path, processed_dir))
         return Action("reinforced", summary)
 
     if outcome.kind == "routed":
@@ -638,6 +639,7 @@ def _execute(
                 f"<!-- routed from {handoff_path.name}\n     reason: {outcome.reason}\n     routed-at: {slug} -->\n\n"
             )
             dest.write_text(header + original, encoding="utf-8")
+            log_match(target, outcome.match, dest)
             _archive(handoff_path, processed_dir)
         # Both inboxed and skipped are now archived; classify them uniformly.
         return Action("inboxed", summary)
@@ -833,7 +835,7 @@ def _list_handoffs(handoffs_dir: Path) -> tuple[List[Path], List[Path]]:
     return out, tracked
 
 
-def _archive(src: Path, processed_dir: Path) -> None:
+def _archive(src: Path, processed_dir: Path) -> Path:
     # Re-check right before the move: a file tracked after listing must stay.
     if _is_tracked(src, _git_tracked_files(src.parent)):
         raise TrackedHandoffError(f"refusing to archive git-tracked handoff {src}")
@@ -843,6 +845,7 @@ def _archive(src: Path, processed_dir: Path) -> None:
         stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
         dest = processed_dir / f"{src.stem}-{stamp}{src.suffix}"
     shutil.move(str(src), dest)
+    return dest
 
 
 def _report(stats: IngestStats, dry_run: bool) -> None:
