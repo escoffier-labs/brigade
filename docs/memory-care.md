@@ -17,6 +17,100 @@ brigade memory care closeout
 
 `init` writes `.brigade/memory-care.toml`. The config is host-local and should stay gitignored.
 
+## Deterministic reflection candidates
+
+`brigade memory reflect run --dry-run` derives `stale-newer-evidence`, `duplicate`,
+`reinforce`, and `opposite-polarity` candidates without editing cards or calling a
+model. It reads the pending-evidence log and canonical cards selected by
+`.brigade/memory-care.toml`. `--scope` matches the exact card frontmatter scope,
+with missing scope treated as `repo`. `--limit` bounds the retained candidates
+from 1 to 100, with a default of 20. Receipts include `total_candidates` and
+`truncated`. Priority is opposite-polarity flags, stale evidence, reinforcement,
+then duplicates, with stable ordering within each class.
+
+Each candidate cites evidence resolved to an existing file in a receipt or
+handoff root, an evidence root, or the local evidence bundle cache. A log row
+alone does not resolve its id. Missing pointers, hash-only ids, unrelated
+repository files, and external URLs do not count. `proof_count` counts
+distinct resolved supporting ids. Receipt prefixes and fragments are removed before
+deduplication and storage, and bundle aliases use `miseledger:<bundle>`.
+`evidence_sources` records the matching root for
+each id, or `evidence-bundle` for local cached evidence bundles. `proof_sources` counts distinct
+roots among the supporting ids. These source labels do not establish trust or
+independence. Handoff roots include all writer inboxes from the harness registry,
+`memory/handoff-inbox`, and local inboxes in `.brigade/handoff-sources.json`.
+Only `reinforced` and `outcome` log rows supply new support.
+Pending near matches appear in `review_evidence_ids` and never increase proof.
+Pending near matches and contrary ids still block when their files are missing.
+These pointers appear in `unresolved_evidence_ids` and do not supply proof or
+satisfy the requirement for resolved evidence. Candidates with either kind of
+pending flag are Tier 2 and have no metadata diff.
+Exact reinforcement is already applied by ingest, so its log rows alone do not
+produce reinforcement previews. A preview triggered by new outcome evidence
+also includes resolved reinforcement ids so its evidence list supports its proof count.
+Reflection considers the newest 64 distinct log evidence ids per card by timestamp,
+with evidence ids breaking ties. Older ids remain in the log.
+The `outcome` row kind is reserved for future outcome capture. No production
+command writes it yet, so ingest alone cannot produce `reinforce` candidates
+in this slice.
+Staleness uses `last_consolidated`, falling back to `last_reviewed` and
+its supported aliases. Date-only cutoffs require evidence on a later UTC date.
+Near-match and opposite-polarity flags use the same cutoff, including the care
+scanner's automatic reinforcement exception. Rows already cited by the card do
+not remain pending flags. Newer support for an id does not revive its older flag.
+Exact normalized fingerprints identify duplicates. Opposite-polarity evidence
+that remains pending produces a Tier 2 review flag and never decides which claim is correct.
+Cross-scope and mixed-trust duplicate groups also receive Tier 2. Trust declarations
+include `trust_label` and nested provenance metadata. Block-style metadata lists,
+unparsed YAML flow lists, and citations through `sources`, `source`, `refs`, or
+`links` also force Tier 2 with no diff because the scalar evidence preview cannot
+preserve them.
+
+Runs retain `candidates.jsonl` and `receipt.json` under
+`.brigade/memory/reflect/runs/<run-id>/`, including dry runs. Dry runs print
+reproducible metadata diffs for evidence, proof count, and consolidation time,
+and `would merge` summaries for duplicates. Consolidation time in a preview is
+the newest cited evidence timestamp. A stale candidate with contrary evidence
+prints a review summary instead of a consolidation diff. No preview is applied.
+`memory reflect status` shows the latest receipt, `memory reflect candidates`
+lists the latest successful run, and `memory reflect show <candidate-id>` shows
+one retained candidate and its preview. After each run publishes its receipt,
+retention keeps at most 50 run directories from the past 30 days. The latest
+successful run is always kept, reserving one of those 50 slots even when it is
+older than 30 days. Unfinished directories older than 30 days are also removed.
+Recent unfinished runs and directories changed during cleanup are left alone.
+Links and unexpected files are never deleted. A cleanup failure returns `retention_warning`
+and leaves the published receipt available. Inspection reads the newest 1024 run
+directories. Invalid receipts are skipped and counted
+in the status payload's `invalid_runs`. Candidate inspection also skips runs with
+unreadable or corrupt candidate files and reports skipped runs in the listing's
+`invalid_runs`. Missing receipts indicate unfinished runs
+and are not counted as invalid. All accept `--target` and `--json`.
+Text previews escape terminal control characters except newlines, carriage returns,
+and tabs. Stored candidates retain the original diff text.
+
+A stage failure records a failed receipt and leaves cards untouched. Incomplete
+runs never become visible candidates. Unsafe storage is refused when a receipt
+cannot be written safely, including when reflect storage overlaps a card root.
+Malformed or missing frontmatter, invalid UTF-8, oversized cards, permission-denied
+cards, files with multiple hard links, cards with more than 64 evidence references,
+and ambiguous card identities are skipped and listed by path with a reason in the
+receipt's `skipped_cards`. Cards changed during an exact read still fail the run.
+Malformed or excessively nested trust JSON is treated as unknown trust.
+Retry after the writer finishes.
+Identity collisions include ids and aliases across all valid cards before scope
+filtering. Corpus-wide file and byte limits still fail the run.
+The evidence log's 4 MiB scan window is informational and recorded as
+`scan_window_truncated`. Malformed rows inside that window, unreadable logs,
+and logs changed during a scan still fail the run. No log rotation or compaction
+command is provided in this slice. To recover from a malformed row, pause writers
+and back up `.brigade/memory/reflect/evidence-log.jsonl`. Manually quarantine the
+invalid line outside the log, or truncate an incomplete final line. Preserve
+valid rows, then rerun reflection before resuming writers. Rows with an unknown
+`kind` also require recovery or a Brigade version that supports that kind.
+Policy promotion, proposal creation, and model-authored changes are not available
+through these commands.
+
 ## Config
 
 The local config supports:

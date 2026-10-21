@@ -892,7 +892,7 @@ def test_derivative_counts_redaction_matches_separately_from_removed_fields(tmp_
         source=source,
         out=out,
         # Synthetic input. content-guard: allow email content-guard: allow api-key-assignment
-        recipient='contact operator@contoso.example api_key="sk-test-abcdefghijklmnopqrstuv"',
+        recipient='contact operator@contoso.example api_key="sk-test-abcdefghijklmnopqrstuv"',  # content-guard: allow bare-token-prefix
         authority="approved-case-7",
         lawful_basis="contract",
         necessity="review",
@@ -903,7 +903,7 @@ def test_derivative_counts_redaction_matches_separately_from_removed_fields(tmp_
     assert report.removed_fields == transformation["removed_fields"] == 3
     assert report.redaction_occurrences == transformation["redaction_occurrences"] == 2
     assert "operator@contoso.example" not in raw  # content-guard: allow email
-    assert "sk-test-abcdefghijklmnopqrstuv" not in raw
+    assert "sk-test-abcdefghijklmnopqrstuv" not in raw  # content-guard: allow bare-token-prefix
 
 
 def test_derivative_refuses_export_inside_source_package(tmp_path: Path) -> None:

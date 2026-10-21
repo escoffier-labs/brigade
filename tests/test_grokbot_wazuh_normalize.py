@@ -24,7 +24,7 @@ def _alert(**overrides: object) -> dict[str, object]:
 
 
 def test_normalized_record_has_required_finding_fields_and_redacted_body():
-    secret = "ghp_exampleNotARealToken0000000000000001"
+    secret = "ghp_exampleNotARealToken0000000000000001"  # content-guard: allow bare-token-prefix
     alert = parse_ingest_input(
         {
             "alerts": [

@@ -82,10 +82,10 @@ def test_lifecycle_edges_are_closed() -> None:
         "/home/operator/notes",
         "/home",
         "see /Users/operator/notes",
-        r"C:\Users\operator\notes",
+        r"C:\Users\operator\notes",  # content-guard: allow windows-home-path
         "C:/Users/operator/notes",
         "file:///home/operator/notes",
-        'path="/root/.ssh/id_ed25519"',
+        'path="/root/.ssh/id_ed25519"',  # content-guard: allow root-path
         "%USERPROFILE%\\AppData",
     ],
 )
@@ -113,9 +113,9 @@ def test_ordinary_identities_are_not_private_paths(value: str) -> None:
     [
         "ghp_" + "a" * 36,
         "github_pat_" + "b" * 30,
-        "xoxb-1234567890-abcdef",
+        "xoxb-1234567890-abcdef",  # content-guard: allow bare-token-prefix
         "sk-" + "c" * 32,
-        "AKIAIOSFODNN7EXAMPLE",
+        "AKIAIOSFODNN7EXAMPLE",  # content-guard: allow bare-token-prefix
         "ASIAIOSFODNN7EXAMPLE",
         "-----BEGIN OPENSSH PRIVATE KEY-----",
         "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.abcdefghij",

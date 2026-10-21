@@ -1173,7 +1173,7 @@ def test_outcome_registry_dir_symlink_to_trusted_skill_is_not_fingerprinted(tmp_
 
 def test_capture_unknown_skill_warning_sanitizes_windows_paths_on_posix(tmp_path, capsys):
     _write_verify_receipt(tmp_path)
-    leaked = r"C:\Users\victim\.claude\skills\secret-skill\SKILL.md"
+    leaked = r"C:\Users\victim\.claude\skills\secret-skill\SKILL.md"  # content-guard: allow windows-home-path
 
     assert outcome_cmd.capture(target=tmp_path, artifact_id=leaked, json_output=True) == 0
     err = capsys.readouterr().err

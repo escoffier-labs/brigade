@@ -54,7 +54,6 @@
     "test_friction_cmd.py",
     "test_governance_inventory.py",
     "test_graphtrail_delta.py",
-    "test_grok_hook_runtime.py",
     "test_grokbot_backup_actions.py",
     "test_grokbot_backup_adapters.py",
     "test_grokbot_backup_ledger.py",

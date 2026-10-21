@@ -17,10 +17,10 @@ from brigade import runs_diff
 
 
 PLANTED_ENV_VALUE = "planted-env-OPENAI-not-a-real-key"
-PLANTED_SECRET = "sk-live-EXAMPLESECRETVALUE99"
+PLANTED_SECRET = "sk-live-EXAMPLESECRETVALUE99"  # content-guard: allow bare-token-prefix
 PLANTED_HOME = "/home/example-user/.config/brigade/secret.env"
 PLANTED_ABS_HOME = "/home/someuser"
-PLANTED_WIN_HOME = r"C:\Users\win-user"
+PLANTED_WIN_HOME = r"C:\Users\win-user"  # content-guard: allow windows-home-path
 PLANTED_WIN_HOME_FWD = "C:/Users/win-user"
 PLANTED_DOUBLE_SLASH_HOME = "/home//alice"
 PLANTED_SPACED_HOME = "/Users/John Smith"

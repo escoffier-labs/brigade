@@ -438,7 +438,7 @@ def test_export_refuses_unknown_method_with_bounded_diagnostic(tmp_path: Path):
         (
             "auto_declined_with_secrets",
             [
-                "sk-live-EXAMPLESECRETVALUE99",
+                "sk-live-EXAMPLESECRETVALUE99",  # content-guard: allow bare-token-prefix
                 "Bearer ",
                 "Cookie",
                 "OPENAI_API_KEY",
@@ -448,17 +448,17 @@ def test_export_refuses_unknown_method_with_bounded_diagnostic(tmp_path: Path):
         ),
         (
             "turn_completed_with_provider_error",
-            ["provider dump", "sk-live-EXAMPLESECRETVALUE99", "Bearer "],
+            ["provider dump", "sk-live-EXAMPLESECRETVALUE99", "Bearer "],  # content-guard: allow bare-token-prefix
         ),
         (
             "item_completed_agent_message_private",
-            ["sk-live-EXAMPLESECRETVALUE99", "Secret plan", "exfiltrate"],
+            ["sk-live-EXAMPLESECRETVALUE99", "Secret plan", "exfiltrate"],  # content-guard: allow bare-token-prefix
         ),
         (
             "item_completed_commandExecution_adversarial",
             [
                 "/home/example-user",
-                "sk-live-EXAMPLESECRETVALUE99",
+                "sk-live-EXAMPLESECRETVALUE99",  # content-guard: allow bare-token-prefix
                 "Bearer ",
             ],
         ),
@@ -596,7 +596,7 @@ def test_export_discovers_nested_worker_stream_and_writes_scrubbed_sidecar(tmp_p
     blob = scrubbed_path.read_text(encoding="utf-8")
     for snippet in (
         "Bearer ",
-        "sk-live-EXAMPLESECRETVALUE99",
+        "sk-live-EXAMPLESECRETVALUE99",  # content-guard: allow bare-token-prefix
         "/home/example-user",
         "OPENAI_API_KEY",
         "raw user prompt",

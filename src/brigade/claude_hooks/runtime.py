@@ -20,7 +20,7 @@ from typing import Any, BinaryIO, Callable, Iterator
 from .. import localio
 from ..component_paths import cache_root
 from ..wiring import expand_user_path, resolve_wired_target
-from . import anchored_io, compaction_marker, envelope, heartbeat, presence
+from . import anchored_io, compaction_marker, dependencies, envelope, heartbeat, presence
 from .fingerprint import repo_worktree_fingerprint
 from .package import PACKAGE_REF
 from .paths import is_operator_home, resolved_path
@@ -1952,6 +1952,7 @@ def _normalize_state(
         normalized["started_at"] = started.isoformat()
     normalized["briefed"] = payload.get("briefed") is True
     normalized["write_observed"] = payload.get("write_observed") is True
+    dependencies.restore(normalized, payload)
     pending_fp = payload.get("pending_bash_fingerprint")
     if isinstance(pending_fp, str) and pending_fp:
         normalized["pending_bash_fingerprint"] = pending_fp
@@ -2052,11 +2053,12 @@ def _additional_context(
     *,
     target: Path,
     session_id: str,
+    task_epoch: str | None = None,
     records: list[str] | None = None,
 ) -> dict[str, Any]:
     max_chars, max_items = envelope.resolve_caps()
     payload_records = records if records is not None else [text]
-    return envelope.additional_context_envelope(
+    result = envelope.additional_context_envelope(
         event,
         payload_records,
         target=target,
@@ -2064,6 +2066,17 @@ def _additional_context(
         max_chars=max_chars,
         max_items=max_items,
     )
+    shown = result.get("hookSpecificOutput", {}).get("additionalContext", "")
+    files = dependencies.injected_brief_files(shown) if event in {"SessionStart", "UserPromptSubmit"} else []
+    if files:
+        state = read_session_state(target, session_id) or {}
+        if state.get("task_epoch") == task_epoch:
+            # The locked patch writer validates and merges persisted paths.
+            state["brief_files"] = files
+            _write_session_state_preserving_latch(
+                target, session_id, state, log_target=target, patch_fields=("brief_files",)
+            )
+    return result
 
 
 def _unwired_init_hint(payload: dict[str, Any]) -> dict[str, Any] | None:
@@ -2149,6 +2162,7 @@ def _handle_user_prompt_submit(payload: dict[str, Any], *, pin: Path | None = No
     session_id = payload.get("session_id")
     if not isinstance(session_id, str) or not session_id:
         return None
+    task_epoch = _current_task_epoch(session_id)
     workspace = compaction_marker.cheap_workspace_root(payload.get("cwd"))
     if workspace is None:
         return None
@@ -2173,6 +2187,7 @@ def _handle_user_prompt_submit(payload: dict[str, Any], *, pin: Path | None = No
             brief_text,
             target=target,
             session_id=session_id,
+            task_epoch=task_epoch,
             records=_restore_brief_records(brief_text),
         )
         return _attach_claim(result, claim)
@@ -2225,7 +2240,9 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
             brief_text = _run_brief(target)
             recall_text = _run_recall(target, payload)
             state["briefed"] = True
-            _write_session_state_preserving_latch(target, session_id, state, log_target=target)
+            _write_session_state_preserving_latch(
+                target, session_id, state, log_target=target, patch_fields=("briefed",)
+            )
             records = _restore_brief_records(brief_text)
             if recall_text.strip():
                 records.extend(_brief_records(recall_text))
@@ -2235,6 +2252,7 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
                 combined,
                 target=target,
                 session_id=session_id,
+                task_epoch=task_epoch,
                 records=records,
             )
         if state.get("briefed"):
@@ -2242,7 +2260,7 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
         brief_text = _run_brief(target)
         recall_text = _run_recall(target, payload)
         state["briefed"] = True
-        _write_session_state_preserving_latch(target, session_id, state, log_target=target)
+        _write_session_state_preserving_latch(target, session_id, state, log_target=target, patch_fields=("briefed",))
         records = _brief_records(brief_text)
         if recall_text.strip():
             records.extend(_brief_records(recall_text))
@@ -2251,6 +2269,7 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
             brief_text if not recall_text.strip() else f"{brief_text}\n{recall_text}",
             target=target,
             session_id=session_id,
+            task_epoch=task_epoch,
             records=records,
         )
 
@@ -2261,8 +2280,13 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
             # Heartbeat so a concurrent session can attribute the coming write
             # to this session instead of a shared worktree delta (#959).
             state["pending_write_at"] = localio.utc_now_iso()
-            _write_session_state_preserving_latch(target, session_id, state, log_target=target)
-            return None
+            check_id = dependencies.record_write(target, state, payload)
+            if not _write_session_state_preserving_latch(
+                target, session_id, state, log_target=target, patch_fields=("pending_write_at", "dependency_checks")
+            ):
+                return None
+            warning = dependencies.warning_for_check(state, check_id)
+            return _additional_context(event, warning, target=target, session_id=session_id) if warning else None
         if tool_name != "Bash":
             return None
         raw_tool_input = payload.get("tool_input")
@@ -2314,8 +2338,16 @@ def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = No
         command = post_tool_input.get("command")
         if tool_name == "Read":
             skill_id = _skill_id_from_skill_path(target, post_tool_input.get("file_path"))
-            if _record_exercised_artifact(state, skill_id):
-                _write_session_state_preserving_latch(target, session_id, state, log_target=target)
+            read_recorded = dependencies.record_read(target, state, payload)
+            artifact_recorded = _record_exercised_artifact(state, skill_id)
+            if artifact_recorded or read_recorded:
+                fields: tuple[str, ...] = ("read_files",) if read_recorded else ()
+                if read_recorded:
+                    # Only this read refreshes recency in the locked merge.
+                    state["read_files"] = state["read_files"][-1:]
+                if artifact_recorded:
+                    fields += ("exercised_artifact_id", "exercised_artifact_kind")
+                _write_session_state_preserving_latch(target, session_id, state, log_target=target, patch_fields=fields)
             return None
         if tool_name == "Bash" and (_is_routed_verify(command) or _is_brigade_run(command)):
             if _is_routed_verify(command):
