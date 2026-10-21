@@ -387,7 +387,15 @@ def test_serve_no_open_skips_browser(
     assert opened == []
 
 
-def test_bind_failure_prints_exact_address_error(workspace: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_bind_failure_prints_exact_address_error(
+    workspace: Path,
+    capsys: pytest.CaptureFixture[str],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unexpected_serve_forever(self: ThreadingHTTPServer) -> None:
+        pytest.fail("occupied port unexpectedly entered serve_forever")
+
+    monkeypatch.setattr(ThreadingHTTPServer, "serve_forever", unexpected_serve_forever)
     blocker = runs_serve.make_server(cwd=workspace, port=0)
     port = blocker.server_address[1]
     try:
