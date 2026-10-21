@@ -677,6 +677,25 @@ def test_malformed_inspect_response_is_retryable_hub_unavailable(monkeypatch, pa
 
 
 @pytest.mark.parametrize(
+    "owner_node",
+    ["unknown", " ", "bad id", "a\x00b", "a\x1fb", "a\x7fb", "node\n", "-lead", ".lead", "_lead", "x" * 129, "né"],
+)
+def test_invalid_inspect_owner_is_retryable_hub_unavailable(monkeypatch, owner_node):
+    decision = _inspect_with(monkeypatch, {"inspected": True, "claim": {"owner_node": owner_node}})
+    assert decision.granted is False
+    assert decision.reason == "hub-unavailable"
+    assert decision.claim is None
+
+
+@pytest.mark.parametrize("owner_node", ["a", "fake-node", "Node_1.x-2", "x" * 128])
+def test_valid_inspect_owner_is_granted(monkeypatch, owner_node):
+    claim = {"owner_node": owner_node}
+    decision = _inspect_with(monkeypatch, {"inspected": True, "claim": claim})
+    assert decision.granted is True and decision.reason == "ok"
+    assert decision.claim == claim
+
+
+@pytest.mark.parametrize(
     "claim",
     [None, {"owner_node": "other-node"}, {"owner_node": "fake-node"}, {"target": "t", "owner_node": "n"}],
 )

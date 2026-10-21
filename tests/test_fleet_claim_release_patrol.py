@@ -283,3 +283,58 @@ def test_malformed_inspect_response_is_retried_not_fenced_as_no_claim(tmp_path, 
     assert actions == ["inspect", "inspect"]
     assert report["actions"][0]["status"] == "observed"
     assert report["actions"][0]["result"]["reason"] == "no-claim"
+
+
+@pytest.mark.parametrize("owner_node", ["unknown", " ", "bad id", "a\x00b", "node\n", "x" * 129, "-lead"])
+def test_invalid_inspect_owner_is_retried_without_foreign_owner_fence(tmp_path, monkeypatch, capsys, owner_node):
+    from brigade import runs_patrol_receipts
+
+    repo = _repo(tmp_path)
+    _write_run(repo, "20260820-120000-patrol01", status="ok")
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.invalid", "token": "fake"})
+    monkeypatch.setattr(fleet_client, "find_workspace_for_path", lambda path: None)
+    monkeypatch.setattr(fleet_client, "resolve_claim_target", lambda path: "test-target")
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda *args: NODE)
+    monkeypatch.setattr(fleet_client, "_run_with_deadline", lambda fn, **kw: fn())
+    actions = []
+    response = {"inspected": True, "claim": {"owner_node": owner_node}, "owned": False}
+
+    def endpoint(url, token, body, *, timeout):
+        actions.append(body["action"])
+        return 200, response
+
+    monkeypatch.setattr(fleet_client, "_post_claim_blocking", endpoint)
+    report = _patrol(repo, capsys, apply="release-claim", now=NOW)
+    assert report["actions"][0]["status"] == "refused"
+    assert actions == ["inspect"]
+    assert not runs_patrol_receipts.read_fences(repo / ".brigade/patrol")
+    response = {"inspected": True, "claim": None, "owned": False}
+    report = _patrol(repo, capsys, apply="release-claim", now=NOW + timedelta(minutes=10))
+    assert actions == ["inspect", "inspect"]
+    assert report["actions"][0]["status"] == "observed"
+    assert report["actions"][0]["result"]["reason"] == "no-claim"
+
+
+def test_valid_legacy_inspect_owner_stably_fences_as_foreign_owner(tmp_path, monkeypatch, capsys):
+    repo = _repo(tmp_path)
+    _write_run(repo, "20260820-120000-patrol01", status="ok")
+    monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.invalid", "token": "fake"})
+    monkeypatch.setattr(fleet_client, "find_workspace_for_path", lambda path: None)
+    monkeypatch.setattr(fleet_client, "resolve_claim_target", lambda path: "test-target")
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda *args: NODE)
+    monkeypatch.setattr(fleet_client, "_run_with_deadline", lambda fn, **kw: fn())
+    actions = []
+
+    def endpoint(url, token, body, *, timeout):
+        actions.append(body["action"])
+        return 200, {"inspected": True, "claim": {"owner_node": "other-node"}, "owned": False}
+
+    monkeypatch.setattr(fleet_client, "_post_claim_blocking", endpoint)
+    report = _patrol(repo, capsys, apply="release-claim", now=NOW)
+    action = report["actions"][0]
+    assert action["scope"] == "hub" and action["status"] == "observed"
+    assert action["result"]["reason"] == "foreign-owner"
+    assert action["result"]["owner"] == {"owner_node": "other-node"}
+    assert json.loads((repo / report["receipt"]).read_text())["actions"][0]["status"] == "observed"
+    assert _patrol(repo, capsys, apply="release-claim", now=NOW + timedelta(minutes=10))["actions"] == []
+    assert actions == ["inspect"]

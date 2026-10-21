@@ -1170,7 +1170,14 @@ def _claim_op(
         if action == "inspect":
             held = payload.get("claim")
             owner_node = held.get("owner_node") if isinstance(held, dict) else None
-            if "claim" not in payload or (held is not None and not (isinstance(owner_node, str) and owner_node)):
+            if "claim" not in payload or (
+                held is not None
+                and not (
+                    isinstance(owner_node, str)
+                    and _node_id_is_claimable(owner_node)
+                    and _CLAIM_ID_RE.fullmatch(owner_node)
+                )
+            ):
                 return ClaimDecision(
                     granted=False,
                     reason="hub-unavailable",
