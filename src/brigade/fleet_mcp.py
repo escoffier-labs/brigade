@@ -202,7 +202,12 @@ def _frame_directory(value: Any, key: str | None = None) -> Any:
 
 
 def poll_inbox(
-    *, wait_secs: int, unacked_only: bool, token_file: str | None, after: int = 0, limit: int | None = None
+    *,
+    wait_secs: int,
+    unacked_only: bool,
+    authority: messages.MessageAuthority,
+    after: int = 0,
+    limit: int | None = None,
 ) -> dict[str, Any]:
     """Bounded list polling; replace here when the hub gains long-poll support."""
     deadline = monotonic() + wait_secs
@@ -212,7 +217,7 @@ def poll_inbox(
         return messages.list_messages(
             after=after,
             unacked=unacked,
-            token_file=token_file,
+            authority=authority,
             timeout=min(fleet_client.FLUSH_TIMEOUT_SECONDS, max(remaining, 2.0)) if wait_secs else None,
         )
 
@@ -321,10 +326,12 @@ class FleetMcp:
     def _call(
         self, name: str, args: dict[str, Any], ids: list[int], message_id: int | None, reply_to: int | None
     ) -> dict[str, Any]:
+        # One captured credential for the whole tool call, as the message layer requires.
+        authority = self._authority()
         if name == "fleet_who":
-            return _frame_directory(messages._online({"action": "who", **args}, authority=self._authority()))
+            return _frame_directory(messages._online({"action": "who", **args}, authority=authority))
         if name == "fleet_claims":
-            return _frame_directory(messages._online({"action": "claims", **args}, authority=self._authority()))
+            return _frame_directory(messages._online({"action": "claims", **args}, authority=authority))
         if name == "fleet_send":
             result = messages.send(
                 recipient=args["to"],
@@ -335,7 +342,7 @@ class FleetMcp:
                 kind=args.get("kind"),
                 thread=args.get("thread"),
                 reply_to=reply_to,
-                token_file=self.token_file,
+                authority=authority,
             )
         elif name == "fleet_reply":
             assert message_id is not None
@@ -345,14 +352,14 @@ class FleetMcp:
                 subject=None,
                 reference=None,
                 priority="normal",
-                token_file=self.token_file,
+                authority=authority,
             )
         elif name == "fleet_ack":
             results = []
             acked = []
             for item in ids:
                 try:
-                    message = messages.ack(item, token_file=self.token_file)["message"]
+                    message = messages.ack(item, authority=authority)["message"]
                 except Exception as exc:
                     results.append({"id": str(item), "ok": False, **_tool_error(exc)})
                 else:
@@ -361,14 +368,14 @@ class FleetMcp:
             return {"messages": acked, "results": results}
         elif name == "fleet_sent":
             return _page_limit(
-                messages.sent(after=int(args.get("after", "0")), token_file=self.token_file), args.get("limit", 100)
+                messages.sent(after=int(args.get("after", "0")), authority=authority), args.get("limit", 100)
             )
         else:
             return _page_limit(
                 poll_inbox(
                     wait_secs=args.get("wait_secs", 0),
                     unacked_only=args.get("unacked_only", True),
-                    token_file=self.token_file,
+                    authority=authority,
                     after=int(args.get("after", "0")),
                     limit=args.get("limit", 100),
                 ),

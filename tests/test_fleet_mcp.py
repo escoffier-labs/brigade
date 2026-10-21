@@ -868,3 +868,22 @@ def test_claims_page_stays_under_the_byte_budget(monkeypatch):
     monkeypatch.setattr(fleet_hub_messages, "CLAIMS_PAGE_MAX_BYTES", 10)
     single = fleet_hub_messages._claims_page(rows, limit=500)
     assert len(single["claims"]) == 1 and single["truncated"]
+
+
+def test_each_tool_call_captures_one_authority(stations, monkeypatch):
+    a, b = stations
+    ids = [str(call(a, "fleet_send", to=NODE_B, body=f"m{index}")["message"]["id"]) for index in range(3)]
+    original = fleet_client_messages.MessageAuthority.capture
+    captures = []
+
+    def counting(token_file=None, **kwargs):
+        captures.append(token_file)
+        return original(token_file, **kwargs)
+
+    monkeypatch.setattr(fleet_client_messages.MessageAuthority, "capture", staticmethod(counting))
+    result = call(b, "fleet_ack", ids=ids)
+    assert [row["ok"] for row in result["results"]] == [True, True, True]
+    assert len(captures) == 1
+    captures.clear()
+    call(b, "fleet_inbox", unacked_only=True, wait_secs=1)
+    assert len(captures) == 1
