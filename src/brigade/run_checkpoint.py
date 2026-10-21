@@ -23,7 +23,7 @@ from pathlib import Path
 from typing import Any, Mapping
 from uuid import uuid4
 
-from brigade import run_events, run_journal, runguard
+from brigade import dirfd, run_events, run_journal, runguard
 from brigade.run_events import _HEX64, _bound
 
 CHECKPOINT_EVENT_TYPE = "run.snapshot.checkpointed"
@@ -721,7 +721,7 @@ def _cleanup_temp(
         if parent_fd is None:
             os.unlink(tmp_path)
         else:
-            os.unlink(tmp_path.name, dir_fd=parent_fd)
+            dirfd.unlink_child(parent_fd, tmp_path.name)
     except FileNotFoundError:
         # Preserve Path.unlink(missing_ok=True) semantics while using the
         # same os.unlink boundary on every supported Python version.
@@ -758,9 +758,8 @@ def _abort_with_cleanup(
 
 
 def _descriptor_relative_publish_available() -> bool:
-    """Whether link/unlink can be issued relative to a held directory descriptor."""
-    supports: frozenset[Any] = frozenset(getattr(os, "supports_dir_fd", ()))
-    return os.link in supports and os.unlink in supports
+    """Whether no-replace publication can use a held directory descriptor."""
+    return dirfd.available()
 
 
 def _bound_checkpoint_dir_fd(cp_dir: Path) -> int | None:
@@ -788,8 +787,9 @@ def publish_checkpoint_file(run_dir: Path, run_json_bytes: bytes) -> Path:
 
     Creates the 0o700 ``recovery-checkpoints`` directory (no-follow mkdir),
     writes to a 0o600 same-directory temp, fsyncs, publishes by atomic
-    no-replace ``os.link``, applies POSIX-guarded directory fsync, and unlinks
-    the temp followed by another directory fsync. On ``EEXIST`` the existing
+    no-replace publication (a held-parent rename when bound, otherwise
+    ``os.link``), applies POSIX-guarded directory fsync, and cleans up the
+    temp followed by another directory fsync. On ``EEXIST`` the existing
     final file is opened through the same no-follow regular single-link fd
     hardening and required to be byte and digest equal (a safe matching
     collision is a no-op that still unlinks the temp and fsyncs the
@@ -826,18 +826,24 @@ def publish_checkpoint_file(run_dir: Path, run_json_bytes: bytes) -> Path:
             tmp_path = Path(tmp_name)
         else:
             tmp_path = cp_dir / f".checkpoint.{uuid4().hex}.tmp"
-            fd = os.open(
+            fd = dirfd.open_child_file(
+                parent_fd,
                 tmp_path.name,
-                os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | _O_NOFOLLOW | _O_CLOEXEC | getattr(os, "O_BINARY", 0),
                 run_journal._FILE_MODE,
-                dir_fd=parent_fd,
             )
     except OSError as exc:
         raise CheckpointError(_bound("cannot create checkpoint temp"), category="temp-create") from exc
     primary: CheckpointError | None = None
     try:
         try:
-            run_journal._chmod_fd_or_path(fd, tmp_path, run_journal._FILE_MODE)
+            if parent_fd is None:
+                run_journal._chmod_fd_or_path(fd, tmp_path, run_journal._FILE_MODE)
+            elif run_journal._HAS_FCHMOD:
+                os.fchmod(fd, run_journal._FILE_MODE)
+            # Bound exclusive creation already requests POSIX 0600. On NT,
+            # inherit the held private parent's ACL; never resolve tmp_path
+            # again for mode enforcement after opening through parent_fd.
         except run_journal.RunJournalError as exc:
             raise CheckpointError(_bound("checkpoint temp chmod failed"), category="chmod") from exc
         except OSError as exc:
@@ -865,11 +871,11 @@ def publish_checkpoint_file(run_dir: Path, run_json_bytes: bytes) -> Path:
         if parent_fd is None:
             os.link(tmp_path, final_path)
         else:
-            os.link(
+            dirfd.replace_children(
+                parent_fd,
                 tmp_path.name,
                 final_path.name,
-                src_dir_fd=parent_fd,
-                dst_dir_fd=parent_fd,
+                replace=False,
             )
     except FileExistsError:
         try:
