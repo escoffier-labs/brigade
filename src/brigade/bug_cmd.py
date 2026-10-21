@@ -133,7 +133,7 @@ def _search_issues(query: str) -> list[Any]:
     return raw
 
 
-def _duplicates(bundle: dict[str, Any], redactor: Redactor) -> tuple[list[dict[str, Any]], str]:
+def _duplicates(bundle: dict[str, Any], redactor: Redactor) -> tuple[list[dict[str, Any]], str, bool]:
     try:
         queries = [bundle["fingerprint"]]
         error = bundle.get("last_error") or {}
@@ -158,9 +158,9 @@ def _duplicates(bundle: dict[str, Any], redactor: Redactor) -> tuple[list[dict[s
                     "state": "closed" if str(item.get("state")).lower() == "closed" else "open",
                 }
             )
-        return found, "searched"
+        return found, "searched", bool(found) and query == bundle["fingerprint"]
     except (OSError, URLError, HTTPException, ValueError, KeyError, TypeError, subprocess.SubprocessError):
-        return [], "dedup skipped"
+        return [], "dedup skipped", False
 
 
 def _bounded_link(
@@ -498,8 +498,10 @@ def _report(args: argparse.Namespace) -> int:
     report_id = directory.name
     receipt_path = directory / "receipt.json"
     # Nothing remote happens until the saved bundle's digest and both serialized forms pass.
-    duplicates, dedup_status = (
-        ([], "dedup skipped") if args.dry_run or args.via == "file" else _duplicates(bundle, Redactor(args.target))
+    duplicates, dedup_status, fingerprint_match = (
+        ([], "dedup skipped", False)
+        if args.dry_run or args.via == "file"
+        else _duplicates(bundle, Redactor(args.target))
     )
     receipt["duplicates"] = duplicates
     if not args.json:
@@ -561,9 +563,14 @@ def _report(args: argparse.Namespace) -> int:
         with held_file_lock(root / "submission.lock", deadline_seconds=1):
             _load_prepared(report_id, not_security=args.not_security)
             now = datetime.now(timezone.utc)
-            if duplicates and _pending_receipt_exists(root, bundle["fingerprint"], now):
-                raise ReportBlocked("Bug report blocked: matching issue found for a pending submission")
             _limit_submissions(root, bundle["fingerprint"], now)
+            if comment_on is None and _pending_receipt_exists(root, bundle["fingerprint"], now):
+                if fingerprint_match:
+                    raise ReportBlocked(
+                        f"Bug report blocked: matching issue found for a pending submission: {duplicates[0]['url']}"
+                    )
+                if dedup_status != "searched":
+                    raise ReportBlocked("Bug report blocked: cannot confirm whether the pending submission landed")
             receipt["attempted_at"] = now.isoformat()
             attempts = root / "attempts"
             record = {key: receipt[key] for key in ("report_id", "fingerprint", "attempted_at")}

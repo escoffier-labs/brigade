@@ -1284,16 +1284,15 @@ def test_dispatch_system_exit_records_only_failure(report_env, monkeypatch, code
         assert record["exception_type"] == "SystemExit"
 
 
-def test_dispatch_parser_error_replaces_stale_diagnostic(report_env):
+def test_dispatch_parser_error_preserves_real_failure_diagnostic(report_env):
     from brigade import bug_last_error
 
     bug_last_error.record("doctor", 1, RuntimeError("previous"))
+    previous = bug_last_error.error_path().read_bytes()
     with pytest.raises(SystemExit) as caught:
         cli.main(["version", "--json"])
     assert caught.value.code == 2
-    record = json.loads(bug_last_error.error_path().read_text())
-    assert record["command"] == "version"
-    assert record["exit_code"] == 2
+    assert bug_last_error.error_path().read_bytes() == previous
 
 
 def test_report_dispatch_system_exit_preserves_previous_error(report_env, monkeypatch):
@@ -1509,10 +1508,14 @@ def test_attempt_cooldown_crosses_utc_midnight(report_env, monkeypatch, capsys, 
     assert "cooldown" in capsys.readouterr().err
     now += timedelta(minutes=4)
     assert cli.main(args) == (2 if transport_fails else 0)
-    capsys.readouterr()
+    captured = capsys.readouterr()
     logs = Path(mod.data_root()) / "brigade" / "bug-reports" / "attempts"
     assert len((logs / "2026-01-01.jsonl").read_text().splitlines()) == 1
-    assert len((logs / "2026-01-02.jsonl").read_text().splitlines()) == 1
+    if transport_fails:
+        assert "cannot confirm" in captured.err
+        assert not (logs / "2026-01-02.jsonl").exists()
+    else:
+        assert len((logs / "2026-01-02.jsonl").read_text().splitlines()) == 1
 
 
 @pytest.mark.parametrize("fallback", [False, True])

@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import sys
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -60,6 +61,60 @@ def test_usage_error_preserves_real_failure_diagnostic(report_env, capsys):
     assert diagnostic["command"] == "doctor"
     assert diagnostic["exception_type"] == "ValueError"
     assert diagnostic["message_head"] == "profile failed"
+
+
+@pytest.mark.parametrize("retry", ["search-fails", "fallback-only", "comment"])
+def test_pending_submission_retry_after_cooldown(report_env, monkeypatch, capsys, retry):
+    mod, target = report_env
+    now = datetime(2026, 1, 1, 12, tzinfo=timezone.utc)
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return now
+
+    monkeypatch.setattr(mod, "datetime", Clock)
+    bug_last_error.record("doctor", 1, ValueError("profile failed"))
+    calls = []
+    issue = {"number": 321, "title": "same command failure", "state": "open"}
+
+    def fake_gh(*args):
+        calls.append(args)
+        if args[:2] == ("search", "issues"):
+            if now.minute == 0:
+                return "[]"
+            if retry == "search-fails":
+                raise OSError("search unavailable")
+            if retry == "fallback-only" and args[2].startswith("bf-"):
+                return "[]"
+            return json.dumps([issue])
+        if now.minute == 0:
+            raise OSError("submission outcome unknown")
+        return mod.ISSUES_URL + "/322"
+
+    monkeypatch.setattr(mod, "gh", fake_gh)
+    assert invoke(target, "--dry-run", "--json") == 0
+    preview = result(capsys)
+    args = ["bug", "report", "--report-id", preview["report_id"], "--yes", "--not-security", "--via", "gh", "--json"]
+    assert cli.main(args) == 2
+    capsys.readouterr()
+    assert json.loads(Path(preview["receipt_path"]).read_text())["status"] == "pending"
+    now += timedelta(minutes=6)
+    if retry == "comment":
+        args += ["--comment-on", "321"]
+    expected = 2 if retry == "search-fails" else 0
+    assert cli.main(args) == expected
+    if retry == "search-fails":
+        assert "cannot confirm" in capsys.readouterr().err
+        assert json.loads(Path(preview["receipt_path"]).read_text())["status"] == "pending"
+    else:
+        submitted = result(capsys)
+        assert submitted["submitted"]
+        assert submitted["destination_url"] == mod.ISSUES_URL + ("/321" if retry == "comment" else "/322")
+    creates = [call for call in calls if call[:2] == ("issue", "create")]
+    comments = [call for call in calls if call[:2] == ("issue", "comment")]
+    assert len(creates) == (2 if retry == "fallback-only" else 1)
+    assert len(comments) == (1 if retry == "comment" else 0)
 
 
 @pytest.mark.parametrize("hostname", ["main", "brigade", "exampleuser"])

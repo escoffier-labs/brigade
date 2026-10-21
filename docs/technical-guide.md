@@ -2108,9 +2108,11 @@ records each attempt before transport, including retries of the same report
 ID and failed transports. The limit reads only today's and yesterday's logs,
 at most five records and 60 KB per log. A pending submission blocks retries
 for five minutes. After that window, Brigade searches for its fingerprint
-before another attempt. If a matching issue exists, it blocks the retry to
-avoid filing the issue twice. Usage errors do not replace the last recorded CLI
-failure.
+before another attempt. If a fingerprint match exists or the search fails,
+it blocks creation of another issue. A match from the broader command and
+exception search alone does not block the retry. Use `--comment-on` with a
+shown duplicate to add the report to that issue. Usage errors, including
+handler validation errors, do not replace the last recorded CLI failure.
 `BRIGADE_BUG_REPORT=never` disables sharing while allowing `--dry-run` and
 `--via file`. No doctor, status command, or hook starts bug reporting.
 
