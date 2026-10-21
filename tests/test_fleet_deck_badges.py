@@ -105,6 +105,7 @@ def test_brand_lookups_known_and_unknown() -> None:
     assert "viewBox" in codex.svg
     assert deck.harness_brand("opencode").svg != ""
     assert deck.harness_brand("t3-fleet").label == "T3 Fleet"
+    assert deck.harness_brand("t3").label == "T3 Code"
     assert ">T3<" in deck.harness_brand("t3-fleet").svg
     grokbot = deck.harness_brand("grokbot")
     assert grokbot.svg == deck.harness_brand("grok").svg.replace(

@@ -341,9 +341,12 @@ Harness coverage: Claude `SessionStart` / relevant `PostToolUse` / accepted
 tracker. Overlap warnings require matching repository identity and at least
 one identical dirty path. They are advisory only.
 
-The Command Deck renders a separate Interactive sessions panel and marks repo
-rows with exact live dirty-path overlap. Those rows never join `LiveRun`,
-station `busy`, cloud capacity, run collisions, or outcome history.
+The Command Deck's Activity panel separates managed jobs from reported agent
+sessions, grouped by node, harness, and session id. Each group's checkout
+memberships stay in native details. The first eight groups are visible, with
+the rest folded. At 500 memberships, the list may be capped and the session
+total is unknown. Exact live dirty-path overlap warns on job and repo rows.
+Presence never joins `LiveRun`, station `busy`, cloud capacity, or outcome history.
 
 ## Phase 3 surface
 
@@ -357,8 +360,10 @@ phone over Tailscale:
   elapsed, last event).
 - `GET /view/repos` — one row per observed repo: where it is running (node,
   seat/harness, state, elapsed), its claim (owner node, conductor, TTL
-  remaining), its last outcome, and a `collision` flag when two nodes have
-  live runs on one repo or a live run is not on the claim owner.
+  remaining), its last outcome, and neutral `parallel activity` details when
+  active runs on two machines report the same nonempty repo label. This does
+  not prove repository identity or conflicting files, and adds no attention
+  priority. Claim-owner differences remain visible in the claim and run columns.
 - Attention buckets: `failed`, `awaiting approval` (`run.paused`,
   `approval.requested`, `approval.held`), `unknown`, `stale` (non-terminal with no event
   for 30 min, or a T3 observation older than 900 seconds), `running`, `queued`,

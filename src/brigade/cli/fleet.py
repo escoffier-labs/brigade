@@ -90,15 +90,13 @@ def register(sub: argparse._SubParsersAction) -> None:
     fleet_sub.required = True
     fleet_admin_stats_collector.register(fleet_sub)
     from .fleet_dot import register as register_dot
-
-    register_dot(fleet_sub)
-
+    from .fleet_actions import register as register_actions
     from .fleet_events import register as register_events
-
-    register_events(fleet_sub)
-
     from .fleet_campaign import register as register_campaign
 
+    register_dot(fleet_sub)
+    register_actions(fleet_sub)
+    register_events(fleet_sub)
     register_campaign(fleet_sub)
 
     p_serve = fleet_sub.add_parser(

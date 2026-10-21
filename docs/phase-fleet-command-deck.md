@@ -33,7 +33,7 @@ Goals:
 2. Exactly three named host stations in fixed operator-configured order, each with capacity 6, 4, and 4 respectively, sourced from CT-local operator config rather than inference.
 3. Host identity resolved from enrollment and labels. raw UUIDs demoted to tooltip/detail level only.
 4. Live-only operating picture. terminal runs appear only in a bounded recent-outcome timeline and the attention rail.
-5. Claim ownership, TTL remaining, and collision visibility on both the deck and the secondary repo view.
+5. Claim ownership, TTL remaining, and parallel activity visibility on both the deck and the secondary repo view.
 6. Unknown or cloud-origin observers visible but segregated, never counted as machines.
 7. Same security posture as today: tailnet-only bind, bearer-or-cookie auth, identical CSP and header set, read-only GET routes, nothing secret rendered.
 8. Zero runtime dependencies preserved: stdlib HTTP + SQLite + server-rendered HTML, working with JavaScript disabled.
@@ -59,7 +59,7 @@ Each question maps to one region of section 5:
 | Q2 | Are all three hosts reporting, and how full is each? | Station headers: `5/6 busy`, `heard 20s ago` |
 | Q3 | What is each host working on right now? | Active task tiles per station |
 | Q4 | What needs me and where is it? | Attention rail entries naming host, repo, state |
-| Q5 | Are two machines stepping on one repo? | Collision markers on tiles and the repo view |
+| Q5 | Which machines report the same repo label? | Neutral parallel activity details on job rows and the repo view. Exact dirty-path overlap remains a separate warning. |
 | Q6 | Did recent work land or fail? | Recent outcome timeline (bounded window) |
 
 Five seconds assumes the tailnet path and a warm browser. the page must render fully from HTML with scripts blocked, since the inline script only ticks timers.
@@ -69,7 +69,7 @@ Five seconds assumes the tailnet path and a warm browser. the page must render f
 Two routes, one mental model:
 
 - `GET /deck`: the operating picture. Global status bar, three stations in fixed order, attention rail, recent outcome timeline, other observers (collapsed).
-- `GET /deck/repos`: the secondary repo view. One row per claim target or live repo: owner, TTL, who is on it now, collision flag.
+- `GET /deck/repos`: the secondary repo view. One row per claim target or live repo: owner, TTL, who is on it now, parallel activity and exact-overlap flags.
 
 Navigation between them is two text links in the deck header. Query parameters stay minimal: none on `/deck` in slice 1 except optional `?compact=1` deferred. `/deck/repos` accepts none. Filters exist only as links that preset nothing (no filter form on the deck. the legacy boards keep theirs).
 
@@ -85,10 +85,9 @@ Navigation between them is two text links in the deck header. Query parameters s
 | [tile] [tile] [tile]               [tile] [tile]                   [tile]                   |
 | [tile] [tile]                                                                               |
 +------------------------------------------------------------------------------------------+
-| NEEDS YOU (3)                                                                              |
+| NEEDS YOU (2)                                                                              |
 | x failed   C  repo-d   run-kilo   12m ago                                                   |
 | ? awaiting B  repo-b   run-bravo   approval.requested                                       |
-| ! collision A/B  repo-a  claim held by A, live on both                                      |
 +------------------------------------------------------------------------------------------+
 | RECENT OUTCOMES                                                                            |
 | 12:01 succeeded repo-a A · 11:58 failed repo-d C · 11:40 interrupted repo-c B               |
@@ -118,7 +117,7 @@ Stations share one grid row at this width. tiles wrap inside each station.
 | STATION C 1/4 busy · heard 12s     |
 | | tile ...                         |
 +------------------------------------+
-| NEEDS YOU (3)                      |
+| NEEDS YOU (2)                      |
 | x failed C repo-d run-kilo 12m     |
 | ...                                |
 +------------------------------------+
@@ -135,21 +134,21 @@ On phone, stations stack vertically and each tile is a full-width block. nothing
 
 Ordered top to bottom. Every region is an HTML landmark or labelled section so keyboard order matches visual order.
 
-1. Global status bar (highest weight). Verdict word derived from the worst signal present: `NEEDS ATTENTION (n)` when the rail is non-empty, otherwise `ALL CLEAR`. Beside it: total slots busy across configured stations (`7/14`), the UTC data-as-of stamp, refresh note, and the two navigation links. This bar carries the strongest background treatment on the page and is the first `<h1>`-adjacent element.
+1. Global status bar (highest weight). Verdict word derived from the worst signal present: `NEEDS ATTENTION (n)` when the rail contains actionable entries, otherwise `ALL CLEAR`. Beside it: total slots busy across configured stations (`7/14`), the UTC data-as-of stamp, refresh note, and the two navigation links. This bar carries the strongest background treatment on the page and is the first `<h1>`-adjacent element.
 2. Three named host stations in fixed config order. Equal visual size. a station never reorders based on activity. Header per station: display name (large, human label), resolved identity detail (enrolled label or shortened node id, small monospace, title attribute carries the full node id), utilization `n/cap busy`, and last-heard age from `MAX(received_at)`.
 3. Host health/utilization encoding: utilization renders as text plus a segmented bar of `cap` cells, filled = occupied. Over-capacity fills past the bar end and adds an `over` marker. Last-heard ages over 15 minutes get a quiet marker. there is deliberately no "offline" state (see section 6 freshness rules).
-4. Active task tiles. One tile per live run under its station, sorted by the existing bucket rank (`failed` > `awaiting approval` > `stale` > `running` > `queued`. `interrupted` and `succeeded` never appear here because they are terminal). A suffix failure such as `run.dispatch.failed` remains a live failed tile until a later exact lifecycle terminal event arrives. Tile content: repo name (primary line), seat/harness chip, state badge reusing the existing bucket vocabulary and colors, elapsed time, run id in small monospace with full value in `title`. If an active claim row exists for the tile's repo target: second line with owner node name, conductor if set, and TTL remaining (`claim: A · orch · 11m left`). If the collision predicate holds: a `! collision` badge on the tile edge. Run cards carry 18px vendor-mark badges (harness plus provider, geometry transcribed from T3 Code's MIT-licensed `Icons.tsx`; provenance and mapping in `docs/assets/brands/README.md`) in the right-hand column with the model name beneath; unknown keys render the neutral `??` monogram.
+4. Active task tiles. One tile per live run under its station, sorted by the existing bucket rank (`failed` > `awaiting approval` > `stale` > `running` > `queued`. `interrupted` and `succeeded` never appear here because they are terminal). A suffix failure such as `run.dispatch.failed` remains a live failed tile until a later exact lifecycle terminal event arrives. Tile content: repo name (primary line), seat/harness chip, state badge reusing the existing bucket vocabulary and colors, elapsed time, run id in small monospace with full value in `title`. If an active claim row exists for the tile's repo target: second line with owner node name, conductor if set, and TTL remaining (`claim: A · orch · 11m left`). When live runs on multiple machines report the same repo label, show neutral `parallel activity` details naming the machines. State `File overlap unknown.` only when exact overlap is not reported. When reported repository identity and dirty paths match, show `Shared modified paths reported` on the job row and explain the evidence in its details. Matching labels do not prove repository identity or conflicting files. Run cards carry 18px vendor-mark badges (harness plus provider, geometry transcribed from T3 Code's MIT-licensed `Icons.tsx`, with provenance and mapping in `docs/assets/brands/README.md`) in the right-hand column with the model name beneath. Unknown keys render the neutral `??` monogram.
 
 ![Run cards with vendor-mark badges](assets/deck/run-cards-badges.png)
 
 ![Unknown run card with monogram fallback](assets/deck/run-card-unknown.png)
-5. Attention rail. Flat list directly under the stations, entries sorted failed, then awaiting approval, then stale, then collisions. Each entry is a plain-text line naming host short name, repo, run id, state, and age. Sources: failed terminal runs within the lookback window (capped 10, newest first), live awaiting-approval runs, live stale runs, and every current collision. Empty state is the sentence `Nothing needs you.` not a blank region.
-6. Claim collision visibility. Collisions appear in three places by design: the tile badge (section 5 item 4), a dedicated rail entry type, and the collision-first sort of `/deck/repos`. Visual marker is the existing failed-red border style. text always names both parties (`held by X, live on X and Y`).
+5. Attention rail. Flat list directly under the stations, entries sorted failed, then awaiting approval, then stale. Each entry is a plain-text line naming host short name, repo, run id, state, and age. Sources: failed terminal runs within the lookback window (capped 10, newest first), live awaiting-approval runs, live stale runs. Parallel activity entries are informational and excluded from alerts, attention counts, and verdicts. Empty state is the sentence `Nothing needs you.` not a blank region.
+6. Parallel activity visibility. The broad cross-machine predicate ignores claims and compares repo labels only. It produces `parallel` entries for job-row context, including activity without a claim, and neutral flags in `/deck/repos`. This signal carries no conflict border or attention marker. Exact dirty-path overlap from reported session presence remains a separate warning. Neither a matching label nor the absence of an overlap report proves checkout safety.
 7. Recent outcome timeline. One line per terminal run in the bounded window (default last 20 by event `ts` descending): stamp, outcome badge, repo, station short name, run id. Terminal means `run.completed`, `run.failed`, `run.interrupted` exactly as `TERMINAL_STATES` defines today (`src/brigade/fleet_hub.py:159`).
 8. Other observers (lowest weight). A native `<details>` element titled `Other observers (n)` listing up to 8 observed-but-unconfigured node ids, most recently heard first, each with shortened id and last-heard age. Rendered after the timeline. excluded from every count.
 9. Footer link row: `classic boards` linking to `/view/machines` and `/view/repos`. Keep it until the operator explicitly approves removal. root promotion alone does not remove it.
 
-Secondary repo view (`/deck/repos`): a single table, collisions first then by target name. Columns: target, owner (station name plus conductor), TTL remaining, live now (station names plus states), flags (`! collision`). Rows cover the union of active claim targets and repos with live runs. empty state `No claims or live repos.` Expired claims are absent because the deck consumes active claims only.
+Secondary repo view (`/deck/repos`): a single table, exact dirty-path overlaps first then by target name. Columns: target, owner (station name plus conductor), TTL remaining, live now (station names plus states), flags (`parallel activity`, with `! overlap` reserved for exact dirty-path overlap). Rows cover the union of active claim targets and repos with live runs. empty state `No claims or live repos.` Expired claims are absent because the deck consumes active claims only.
 
 ## 6. Data semantics
 
@@ -269,11 +268,11 @@ New file `tests/test_fleet_command_deck.py`, mirroring the fixture style of `tes
 5. `test_terminal_runs_stay_out_of_operating_picture`: seed completed, failed, and interrupted runs. default page omits them from tiles. timeline lists them newest first. failed ones appear in the rail. `succeeded` never appears in the rail.
 6. `test_unknown_observers_do_not_inflate_counts`: with strangers seeded, the status bar slot total counts only configured stations and the summary never contains the word `machines`.
 7. `test_recent_outcome_timeline_bounded`: insert more terminal runs than `outcome_window` via `/events` batching. assert the timeline renders exactly the configured cap and the helper applies its LIMIT (call the module's bounded-query function directly against the fixture DB and assert row count).
-8. `test_repo_view_collision_first`: seed a claim by station A with live runs on both A and B. assert `/deck/repos` lists that target first with the collision flag and names both parties. assert an expired claim is absent.
+8. `test_parallel_activity_is_neutral_and_observers_and_expired_claims`: seed live runs with the same repo label on A and B, with and without a claim. Assert neutral parallel activity with machine names on job and repo rows, no collision alert, and no extra attention count. Assert an expired claim is absent. Preserve exact dirty-path overlap warnings.
 9. `test_no_secrets_in_any_deck_page`: for every deck route and credential combination, assert the token, cookie value, and a seeded holder token are absent from the body.
 10. `test_control_characters_and_labels_are_escaped`: enroll a label containing a control character and angle brackets. assert the rendered label is stripped of control characters and entity-escaped. assert a hostile query string cannot break the page.
 
-Pure-function tests accompany them (config parsing/validation table test, state vocabulary table test, collision predicate test, utilization formatter). After the suite passes locally: `ruff check`, `ruff format --check`, `mypy`, and the focused pytest selection, then the full `./scripts/verify` gate before review. Route dispatch additions need one regression assertion in the hub tests that legacy `/`, `/view/machines`, `/view/repos` responses are unchanged.
+Pure-function tests accompany them (config parsing/validation table test, state vocabulary table test, parallel activity predicate test, utilization formatter). After the suite passes locally: `ruff check`, `ruff format --check`, `mypy`, and the focused pytest selection, then the full `./scripts/verify` gate before review. Route dispatch additions need one regression assertion in the hub tests that legacy `/`, `/view/machines`, `/view/repos` responses are unchanged.
 
 Browser acceptance (manual, or optionally scripted later with the existing `research` Playwright extra. not a CI gate):
 
@@ -300,7 +299,7 @@ Measurable checks, all verifiable from the test plan and a live canary:
 - AC2: Page shows exactly the three CT-configured station names in config order with capacities 6, 4, 4 rendered as `n/cap busy`. no real host name is hardcoded in repository files.
 - AC3: With seeded strangers, slot totals and station counts exclude them. strangers appear only under Other observers, capped at 8.
 - AC4: Default page contains zero terminal-run tiles. timeline shows at most `outcome_window` entries. rail shows failures within lookback, capped at 10.
-- AC5: A cross-node live-on-claimed-target scenario renders the collision marker on the tile, a rail entry, and the first row of `/deck/repos` naming both parties.
+- AC5: Cross-machine live runs reporting the same repo label render neutral parallel activity and machine context on job and repo rows, with or without a claim. This alone adds no alert or attention count and asserts no repository identity or file conflict. Exact dirty-path overlap warnings remain visible.
 - AC6: No response body contains the admin token, any node token, any cookie value, or any holder token (automated assertion).
 - AC7: Labels with control characters and markup render stripped and escaped (automated assertion).
 - AC8: Deck queries apply their stated limits (automated assertions against the helpers with oversized seeds).
