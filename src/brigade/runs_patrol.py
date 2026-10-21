@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import sys
+from collections import Counter
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
@@ -107,6 +108,8 @@ def patrol(
                 "task_id": runs_cmd._clean_str(lane.task.get("id"), 240) if lane.task else None,
                 "claim_id": runs_cmd._clean_str(lane.claim.get("claim_id"), 240) if lane.claim else None,
                 "intent": lane.intent,
+                "hub_claim": lane.hub_claim,
+                "display_only": lane.display_only,
                 "state": classification.state,
                 "reason": runs_cmd._clean_str(classification.reason, 240),
                 "infrastructure_failure": classification.infrastructure_failure,
@@ -152,3 +155,15 @@ def patrol(
     if lanes.truncated and not json_output:
         print("Patrol scan or lane report truncated. Increase --limit or inspect sources directly.")
     return exit_code
+
+
+def brief_summary(target: Path) -> dict[str, object]:
+    """Bound the brief to ten local snapshots, with no Hub reads or receipt."""
+    started = run_reap._utc_now(None)
+    try:
+        lanes = collect_lanes(target, now=started, limit=10, scan_limit=10, include_hub=False)
+        clock = run_reap._utc_now(None)
+        counts = Counter(classify(lane, clock, Thresholds(), observation_started_at=started).state for lane in lanes)
+        return {"counts": dict(sorted(counts.items())), "truncated": lanes.truncated}
+    except (OSError, ValueError, RuntimeError, OverflowError):
+        return {"counts": {"unknown": 1}, "truncated": False}
