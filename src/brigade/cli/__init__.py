@@ -26,6 +26,7 @@ from .. import extras as _extras_mod
 from . import (
     init as _init_group,
     doctor as _doctor_group,
+    bug as _bug_group,
     version as _version_group,
     status as _status_group,
     profiles as _profiles_group,
@@ -146,6 +147,7 @@ def _build_parser() -> argparse.ArgumentParser:
 
     _init_group.register(sub)
     _doctor_group.register(sub)
+    _bug_group.register(sub)
     _version_group.register(sub)
     _status_group.register(sub)
     _profiles_group.register(sub)
@@ -239,7 +241,16 @@ def main(argv=None) -> int:
     parser = _build_parser()
     if not parse_argv:
         print(_START_HERE, file=sys.stderr)
-    args = parser.parse_args(parse_argv)
+    try:
+        args = parser.parse_args(parse_argv)
+    except SystemExit as exc:
+        if exc.code:
+            from .. import bug_last_error
+
+            command = bug_last_error.command_path(parser, parse_argv)
+            if command != "bug report":
+                bug_last_error.record(command, 2)
+        raise
     if engine_args is not None:
         args.engine_args = engine_args
 
@@ -251,7 +262,23 @@ def main(argv=None) -> int:
     if func is None:
         parser.error(f"unknown command: {args.command}")
         return 2
-    exit_code = func(args)
+    from .. import bug_last_error
+
+    command = bug_last_error.command_path(parser, parse_argv)
+    try:
+        exit_code = func(args)
+    except SystemExit as exc:
+        if exc.code not in (None, 0) and command != "bug report":
+            bug_last_error.record(command, exc.code if isinstance(exc.code, int) else 1, exc, args=args)
+        raise
+    except Exception as exc:
+        if command != "bug report":
+            bug_last_error.record(command, 1, exc, args=args)
+        raise
+    if command == "bug report":
+        return exit_code
+    if exit_code:
+        bug_last_error.record(command, exit_code, args=args)
     try:
         from .. import update_notify
 

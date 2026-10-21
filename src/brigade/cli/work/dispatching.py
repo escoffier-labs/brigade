@@ -632,6 +632,24 @@ def _dispatch_impl(args) -> int:
             parallel_safe=args.parallel_safe,
             json_output=args.json,
         )
+    if args.work_command in {"dispatches", "dispatch-show", "dispatch-reset"}:
+        from ...work_cmd import dispatch_state
+
+        try:
+            if args.work_command == "dispatch-reset":
+                return dispatch_state.reset(
+                    target=args.target.resolve(),
+                    task_id=args.task_id,
+                    reason=args.reason,
+                    json_output=args.json,
+                    release_unknown=args.release_unknown,
+                )
+            return dispatch_state.status(
+                target=args.target.resolve(), dispatch_id=getattr(args, "dispatch_id", None), json_output=args.json
+            )
+        except (OSError, ValueError) as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            return 2
     if args.work_command == "dispatch":
         from ...work_cmd.dispatch import dispatch as plan_dispatch
 
@@ -642,6 +660,13 @@ def _dispatch_impl(args) -> int:
             batch_size=args.batch_size,
             worker=args.worker,
             seat_map=args.seat_map,
+            base=args.base,
+            run_budget=args.run_budget,
+            max_total=args.max_total,
+            deadline=args.deadline,
+            spawn_delay=args.spawn_delay,
+            no_wait=args.no_wait,
+            commit=args.commit,
             dry_run=args.dry_run,
             json_output=args.json,
         )
@@ -772,6 +797,22 @@ def _dispatch_impl(args) -> int:
         args._brigade_parser.error(f"unknown task command: {args.task_command}")
         return 2
     if args.work_command == "import":
+        if args.from_bd_jsonl is not None:
+            if args.import_command is not None or not args.bd_version:
+                args._brigade_parser.error("--from-bd-jsonl requires --bd-version and cannot take an import subcommand")
+            args.json = args.bd_json  # The shared ledger error handler reads this destination.
+            from ...work_cmd.import_bd import import_bd_jsonl
+
+            return import_bd_jsonl(
+                target=args.bd_target or Path("."),
+                input_path=args.from_bd_jsonl,
+                bd_version=args.bd_version,
+                json_output=args.bd_json,
+            )
+        if args.bd_target is not None or args.bd_json:
+            args._brigade_parser.error("parent --target and --json require --from-bd-jsonl")
+        if args.bd_version or args.import_command is None:
+            args._brigade_parser.error("work import requires a subcommand or --from-bd-jsonl with --bd-version")
         if args.import_command == "add":
             return work_cmd.import_add(
                 target=args.target,

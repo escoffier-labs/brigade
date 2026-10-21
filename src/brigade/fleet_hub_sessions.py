@@ -109,21 +109,62 @@ def handle_session(
     return 200, {"session": payload}
 
 
+# Columns fleet_who returns, so the SQL filter matches what the caller sees.
+_FILTER_COLUMNS = ("node_id", "harness", "session_id", "repo_identity", "repo_label", "branch", "state", "heartbeat_at")
+
+
+def _casefold(value: object) -> str:
+    return str(value).casefold() if value is not None else ""
+
+
 def list_sessions(
     conn: sqlite3.Connection,
     *,
     include_all: bool = False,
     now_epoch: float | None = None,
+    node_ids: set[str] | None = None,
+    text_filter: str | None = None,
+    active_nodes_only: bool = False,
 ) -> list[dict[str, object]]:
-    """Active unexpired sessions, or history when ``include_all`` is set."""
+    """Active unexpired sessions, or history when ``include_all`` is set.
+
+    ``node_ids`` and ``text_filter`` apply before the row limit, so a narrow
+    grant or filter still finds older matching sessions.
+    """
     now = fleet_hub._now_epoch() if now_epoch is None else now_epoch
     limit = LIST_HISTORY_LIMIT if include_all else LIST_ACTIVE_LIMIT
+    node_filter = ""
+    params: list[Any] = [int(include_all), now]
+    if node_ids is not None:
+        if not node_ids:
+            return []
+        node_filter = "AND node_id IN (" + ",".join("?" for _ in node_ids) + ") "
+        params.extend(sorted(node_ids))
+    if active_nodes_only:
+        # A subquery rather than a bound list, so the roster size never meets
+        # SQLite's bound-parameter limit.
+        node_filter += "AND node_id IN (SELECT node_id FROM nodes WHERE revoked_at IS NULL) "
+    text_clause = ""
+    if text_filter:
+        # instr() rather than LIKE, so % and _ in the filter are literal.
+        # SQLite lower() folds ASCII only; register Python casefold so the SQL
+        # filter matches the Unicode-aware filter callers apply afterwards.
+        conn.create_function("brigade_casefold", 1, _casefold, deterministic=True)
+        text_clause = (
+            "AND instr(brigade_casefold("
+            + " || char(31) || ".join(f"coalesce({column}, '')" for column in _FILTER_COLUMNS)
+            + "), ?) > 0 "
+        )
+        params.append(text_filter.casefold())
+    params.append(limit)
     rows = conn.execute(
         f"SELECT {_SESSION_COLUMNS} FROM interactive_sessions "
         "WHERE (? = 1 OR (state = 'active' AND expires_at > ?)) "
-        "ORDER BY heartbeat_at DESC, started_at DESC, node_id, harness, session_id "
+        + node_filter
+        + text_clause
+        + "ORDER BY heartbeat_at DESC, started_at DESC, node_id, harness, session_id "
         "LIMIT ?",
-        (int(include_all), now, limit),
+        params,
     ).fetchall()
     return [_session_payload(row, now=now) for row in rows]
 

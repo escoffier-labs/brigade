@@ -222,6 +222,8 @@ brigade doctor: target /home/you/agent-kitchen
 
 A `[fail]` line means the install is incomplete; `[warn]` is informational; `[todo]` means the check needs your attention.
 
+If setup fails, run `brigade bug report --target . --summary "What happened and what you expected" --dry-run` in the affected workspace. Review the complete redacted preview before sharing. See [bug reports](docs/technical-guide.md#bug-reports) for submission options.
+
 ## Reconfiguring
 
 To change which harnesses are installed on an existing target:

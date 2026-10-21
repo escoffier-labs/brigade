@@ -35,7 +35,7 @@ QUERIES = {
  AND a.version != b.version AND a.first_seen < b.first_seen
  GROUP BY a.week, a.version, b.version ORDER BY a.week DESC, a.version, b.version LIMIT 12000""",
 }
-ANALYTICS_QUERY = """query Stats($account: String!, $worker: String!, $start: Time!, $end: Time!) {
+ANALYTICS_QUERY = """query Stats($account: string!, $worker: string!, $start: Time!, $end: Time!) {
  viewer { accounts(filter: {accountTag: $account}) {
  workersInvocationsAdaptive(limit: 10000, filter: {scriptName: $worker, datetime_geq: $start, datetime_lt: $end}, orderBy: [date_ASC]) {
  dimensions { date } sum { requests errors }

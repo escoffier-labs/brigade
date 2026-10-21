@@ -1,0 +1,28 @@
+name: label-cli-bugs
+
+on:
+  issues:
+    types: [opened]
+
+permissions:
+  issues: write
+
+jobs:
+  label-cli-bugs:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for fingerprint and label
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GH_REPO: ${{ github.repository }}
+          ISSUE_NUMBER: ${{ github.event.issue.number }}
+          ISSUE_BODY: ${{ github.event.issue.body }}
+        run: |
+          if printf "%s\n" "$ISSUE_BODY" | grep -qE '^bf-[0-9a-f]{12}$'; then
+            echo "Fingerprint found, applying labels..."
+            # ensure from-cli label exists idempotently
+            gh label create "from-cli" --color "E99695" --description "Issues filed from the Brigade CLI" || true
+            gh issue edit "$ISSUE_NUMBER" --add-label "bug,from-cli"
+          else
+            echo "No valid fingerprint found."
+          fi

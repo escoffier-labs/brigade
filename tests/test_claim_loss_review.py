@@ -11,6 +11,7 @@ import threading
 import time
 from contextlib import contextmanager
 from datetime import timedelta
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -720,6 +721,121 @@ def test_sibling_retention_records_replaced_budget_denial(tmp_path, monkeypatch,
         assert not diagnostic_path.exists()
     else:
         _assert_retention_diagnostic_recovery(tmp_path, run_dir, original_bytes, monkeypatch)
+
+
+@pytest.mark.parametrize("scheduler", ["waves", "dag"])
+@pytest.mark.parametrize("receipt_state", ["malformed", "unreadable"])
+@pytest.mark.parametrize("linked_origin", [False, True])
+def test_retention_diagnostic_survives_worker_worktree(tmp_path, monkeypatch, scheduler, receipt_state, linked_origin):
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    subprocess.run(["git", "init", "-q"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=repo, check=True)
+    subprocess.run(["git", "config", "user.name", "Test User"], cwd=repo, check=True)
+    (repo / "tracked.txt").write_text("base\n")
+    subprocess.run(["git", "add", "tracked.txt"], cwd=repo, check=True)
+    subprocess.run(["git", "commit", "-qm", "base"], cwd=repo, check=True)
+    workspace = repo
+    if linked_origin:
+        workspace = runguard.create_detached_worktree(repo, tmp_path / "original-workspace")
+    worktree = runguard.create_detached_worktree(workspace, tmp_path / "worker-worktree")
+    run_dir = tmp_path / "custom-output"
+    run_dir.mkdir()
+    run_json = run_dir / "run.json"
+    original = b"{broken" if receipt_state == "malformed" else b'{"status": "dispatching"}'
+    run_json.write_bytes(original)
+    read_json_dict = localio.read_json_dict
+
+    def unreadable_receipt(path):
+        if path == run_json and receipt_state == "unreadable":
+            raise PermissionError("run receipt is unreadable")
+        return read_json_dict(path)
+
+    monkeypatch.setattr(localio, "read_json_dict", unreadable_receipt)
+    retained = runguard.RetainRunLockError("worker receipt unavailable")
+    started = threading.Barrier(2)
+
+    def worker(cli_ref, *args, **kwargs):
+        started.wait(timeout=5)
+        if cli_ref == "codex":
+            raise run_budget.BudgetPolicyError(
+                "token ceiling reached", code="budget_denied", dimension="tokens", exhausted=True, request_id="req-1"
+            )
+        raise retained
+
+    monkeypatch.setattr(agents, "run_agent", worker)
+    with pytest.raises(runguard.RetainRunLockError) as raised:
+        with runguard.run_lock(workspace, run_dir=run_dir):
+            run_transport.dispatch(
+                [
+                    run_transport.Assignment(worker="reviewer", task="review", stage=1, covers=("review",)),
+                    run_transport.Assignment(worker="coder", task="inspect", stage=1, covers=("inspect",)),
+                ],
+                _roster(),
+                build_prompt=lambda *args, **kwargs: "inspect",
+                run_appserver_worker=lambda *args, **kwargs: pytest.fail("unused app-server"),
+                event_writer=lambda *args, **kwargs: None,
+                cwd=worktree,
+                output_dir=run_dir,
+                scheduler=scheduler,
+                route_dependencies={"review": (), "inspect": ()},
+            )
+    assert raised.value is retained
+    assert runguard.lock_path(workspace).exists()
+    assert run_json.read_bytes() == original
+    saved = json.loads((run_dir / runguard.RETENTION_DIAGNOSTICS_NAME).read_text())
+    owner = runguard.read_lock_owner(runguard.lock_path(workspace))
+    assert saved["owner_token"] == owner["owner_token"]
+    assert any("BudgetPolicyError: token ceiling reached" in note for note in saved["diagnostics"])
+    monkeypatch.setattr(localio, "read_json_dict", read_json_dict)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+    assert runguard.recover_stale_run(workspace, run_dir) is True
+    recovered = json.loads(run_json.read_text())
+    assert recovered["status"] == "failed"
+    if receipt_state == "malformed":
+        assert Path(recovered["recovery_preserved_artifact"]).read_bytes() == original
+    if dirfd.posix_available() and getattr(os, "O_NONBLOCK", 0):
+        assert "BudgetPolicyError: token ceiling reached" in recovered["failure"]["detail"]
+    assert not runguard.lock_path(workspace).exists()
+
+
+def test_retention_diagnostic_lock_context_restores_nested_owner(tmp_path):
+    outer_workspace, inner_workspace = tmp_path / "outer-workspace", tmp_path / "inner-workspace"
+    outer_run, inner_run = tmp_path / "outer-output", tmp_path / "inner-output"
+    outer_run.mkdir()
+    inner_run.mkdir()
+    error = runguard.RetainRunLockError("receipt unavailable")
+    with pytest.raises(runguard.RetainRunLockError):
+        with runguard.run_lock(outer_workspace, run_dir=outer_run):
+            with runguard.run_lock(inner_workspace, run_dir=inner_run):
+                run_transport._add_note(error, "inner failure", inner_run, tmp_path)
+            run_transport._add_note(error, "outer failure", outer_run, tmp_path)
+            raise error
+    outer_sidecar = outer_run / runguard.RETENTION_DIAGNOSTICS_NAME
+    original = outer_sidecar.read_bytes()
+    assert (
+        json.loads(original)["owner_token"]
+        == runguard.read_lock_owner(runguard.lock_path(outer_workspace))["owner_token"]
+    )
+    assert (inner_run / runguard.RETENTION_DIAGNOSTICS_NAME).exists()
+    # The retained lease still exists, but the context must no longer select it.
+    run_transport._add_note(error, "outside the lock context", outer_run, tmp_path)
+    assert outer_sidecar.read_bytes() == original
+
+
+@pytest.mark.parametrize("field", ["pid", "run_dir", "owner_token"])
+def test_retention_diagnostic_rejects_replaced_context_owner(tmp_path, field):
+    workspace, run_dir = tmp_path / "workspace", tmp_path / "output"
+    run_dir.mkdir()
+    with runguard.run_lock(workspace, run_dir=run_dir) as lock:
+        owner_file = lock / "owner.json"
+        owner = json.loads(owner_file.read_text())
+        owner[field] = {"pid": os.getpid() + 1, "run_dir": str(tmp_path / "other-run"), "owner_token": "replacement"}[
+            field
+        ]
+        owner_file.write_text(json.dumps(owner))
+        run_transport._add_note(RuntimeError("failure"), "diagnostic", run_dir, workspace)
+        assert not (run_dir / runguard.RETENTION_DIAGNOSTICS_NAME).exists()
 
 
 @pytest.mark.parametrize("scheduler", ["waves", "dag"])
