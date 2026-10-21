@@ -22,8 +22,17 @@ def install_channel(env: Mapping[str, str]) -> str:
     override = env.get("BRIGADE_INSTALL_CHANNEL")
     if override in CHANNELS:
         return override
-    if "pipx" in Path(sys.prefix).parts:
+    prefix = Path(sys.prefix)
+    if (prefix / "pipx_metadata.json").is_file() or "pipx" in prefix.parts:
         return "pipx"
+    try:
+        with (prefix / "pyvenv.cfg").open(encoding="utf-8") as config:
+            for line in config.read(4096).splitlines():
+                key, separator, value = line.partition("=")
+                if key.strip() == "uv" and separator and value.strip():
+                    return "uvx"
+    except (OSError, UnicodeError):
+        pass
     if {"site-packages", "dist-packages"}.intersection(Path(__file__).parts):
         return "pip"
     return "source"

@@ -91,7 +91,8 @@ HTTPS GET to `https://check.brigade.tools/v1/version`. The request has no query
 parameters or body. Its User-Agent carries the Brigade version and OS name,
 with the same bytes as earlier clients. A separate `X-Brigade-Channel` header carries a closed label:
 `pipx`, `pip`, `uvx`, `npm`, `source`, or `plugin`. The current Worker ignores
-that header. See [Python CLI telemetry](telemetry.md) for channel detection and
+that header. Channel recording requires the separate Worker update to ship.
+See [Python CLI telemetry](telemetry.md) for channel detection and
 the complete field list.
 When the User-Agent exactly matches the Brigade CLI format, the Worker records a
 daily version observation: ISO week and UTC day, version, first and last UTC
