@@ -23,7 +23,8 @@ from . import run_cassette_store as store
 from .roster import Agent
 
 if TYPE_CHECKING:
-    from .run_transport import WorkerResult
+    from .roster import Roster
+    from .run_transport import Assignment, WorkerResult
 
 SCHEMA_VERSION = 1
 SCHEMA = "brigade.run-cassette.v1"
@@ -538,13 +539,52 @@ def dispatch_failure(
     )
 
 
+@dataclass
+class DispatchRecording:
+    agent: Agent
+    prompt: str | None = None
+
+
+def dispatch_recorder(
+    resolve: Callable[[Assignment, list[WorkerResult], DispatchRecording], WorkerResult],
+    *,
+    roster: Roster,
+    run_dir: Path | None,
+    workspace: Path | None,
+    read_only: bool,
+    sandbox: str | None,
+    transport: Callable[[Agent], str],
+    codex_transport: str,
+    coordinator_prompt_sha256: str | None,
+) -> Callable[[Assignment, list[WorkerResult]], WorkerResult]:
+    """Observe the final worker result without changing retry or scheduler flow."""
+
+    def run_one(assignment: Assignment, prior_results: list[WorkerResult]) -> WorkerResult:
+        recording = DispatchRecording(roster.agents[assignment.worker])
+        return record_dispatch_result(
+            lambda: resolve(assignment, prior_results, recording),
+            run_dir=run_dir,
+            workspace=workspace,
+            agent=lambda: recording.agent,
+            prompt=lambda: recording.prompt,
+            task=assignment.task,
+            transport=lambda: transport(recording.agent),
+            read_only=read_only,
+            sandbox=sandbox,
+            codex_transport=codex_transport,
+            coordinator_prompt_sha256=coordinator_prompt_sha256,
+        )
+
+    return run_one
+
+
 def record_dispatch_result(
     resolve: Callable[[], WorkerResult],
     *,
     run_dir: Path | None,
     workspace: Path | None,
     agent: Callable[[], Agent],
-    prompt: Callable[[], str],
+    prompt: Callable[[], str | None],
     task: str,
     transport: Callable[[], str],
     read_only: bool,
@@ -555,7 +595,7 @@ def record_dispatch_result(
     from .run_receipts import agent_result_from_worker
 
     def record(result: WorkerResult, window: _ProjectionWindow) -> None:
-        if run_dir is not None:
+        if run_dir is not None and (sent_prompt := prompt()) is not None:
             recording_agent = agent()
             if recording_agent.name != assigned_agent.name:
                 window.unavailable = True
@@ -564,7 +604,7 @@ def record_dispatch_result(
                 workspace=workspace or Path.cwd(),
                 agent=recording_agent,
                 task=result.task,
-                prompt=prompt(),
+                prompt=sent_prompt,
                 result=agent_result_from_worker(result),
                 read_only=read_only,
                 sandbox=sandbox,

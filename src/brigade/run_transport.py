@@ -680,7 +680,9 @@ def dispatch(
                 except Exception:
                     pass
 
-    def run_one(assignment: Assignment, prior_results: list[WorkerResult]) -> WorkerResult:
+    def _run_one(
+        assignment: Assignment, prior_results: list[WorkerResult], recording: run_cassette.DispatchRecording
+    ) -> WorkerResult:
         agent = roster.agents[assignment.worker]
         if quarantine_state.is_quarantined(assignment.worker):
             return WorkerResult(
@@ -780,8 +782,7 @@ def dispatch(
         approval_correlation_marker = secrets.token_urlsafe(32)
         # invoke() and finish() share remote routing facts only for the current attempt.
         remote_disposition: list[dict[str, Any] | None] = [None]
-        recording_agent = [agent]
-        sent_prompt = [prompt]
+        recording.agent, recording.prompt = agent, prompt
 
         def _invoke_external(
             selected_agent: Agent,
@@ -806,7 +807,7 @@ def dispatch(
             from . import fleet_session_bootstrap
 
             try:
-                selected_prompt = sent_prompt[0] = fleet_session_bootstrap.ensure_prompt(
+                selected_prompt = recording.prompt = fleet_session_bootstrap.ensure_prompt(
                     selected_prompt,
                     cli_ref=cli_ref,
                     model=selected_agent.model,
@@ -881,7 +882,7 @@ def dispatch(
                     session_binding_id=session_binding_id,
                 )
             if selected_agent.cli == "codex" and appserver is not None:
-                approval_prompt = sent_prompt[0] = (
+                approval_prompt = recording.prompt = (
                     f"{selected_prompt}\n\n"
                     "Approval correlation rule: prefix every Brigade CLI command in this turn with "
                     f"`BRIGADE_APPROVAL_CORRELATION={approval_correlation_marker}`. "
@@ -1046,7 +1047,7 @@ def dispatch(
             resume_session_id: str | None = None,
         ) -> agents.AgentResult:
             """Record transport facts around exactly one real external call."""
-            recording_agent[0] = selected_agent
+            recording.agent = selected_agent
             proc.check_cancellation(process_registry)
             blocked = _selected_agent_preflight(
                 selected_agent,
@@ -1056,7 +1057,7 @@ def dispatch(
             )
             if blocked is not None:
                 return blocked
-            remote_disposition[0], sent_prompt[0] = None, selected_prompt
+            remote_disposition[0], recording.prompt = None, selected_prompt
             attempt = on_dispatch_requested(selected_agent) if on_dispatch_requested is not None else None
             try:
                 # The fleet route is resolved before the model lease is entered.
@@ -1178,143 +1179,142 @@ def dispatch(
                 remote=remote_disposition[0],
             )
 
-        def resolve() -> WorkerResult:
-            initial_started = _attempt_timestamp()
-            result = invoke(agent, prompt)
-            initial_finished = _attempt_timestamp()
-            recovery_candidate = direct and effective_read_only and agent.cli == "grok" and agent.transport == "direct"
-            if not recovery_candidate:
-                if result.ok:
-                    return finish(result, agent)
-                finished = finish(result, agent)
-                if _is_appserver_output_limit(result):
-                    # #1144/#1200: an over-cap capture is a transport artifact, not
-                    # a seat-health signal. Preserved text was delivered as ok only
-                    # when turn/completed was observed; otherwise it rides along as
-                    # an ok=False diagnostic. Either way, neither same-seat retry
-                    # nor quarantine applies.
-                    return finished
-                failure = failure_for_worker_result(finished)
-                decision = decide_retry(failure, seat=assignment.worker, state=quarantine_state)
-                if not decision.should_retry_same_seat:
-                    return finished
-                return _apply_same_seat_retry(
-                    assignment=assignment,
-                    agent=agent,
-                    prompt=prompt,
-                    first_result=result,
-                    first_started=initial_started,
-                    first_finished=initial_finished,
-                    invoke=invoke,
-                    finish=finish,
-                    quarantine_state=quarantine_state,
-                    reprobe_seat=reprobe_seat,
-                    on_failed_attempt_persisted=on_failed_attempt_persisted,
-                )
-            attempts = [
-                _worker_attempt(
-                    kind="initial",
-                    worker=agent,
-                    task=assignment.task,
-                    result=result,
-                    started_at=initial_started,
-                    finished_at=initial_finished,
-                    selected=result.ok,
-                )
-            ]
-            if result.ok or not _is_direct_grok_invalid_final(
-                agent, result, direct=direct, read_only=effective_read_only
-            ):
-                return finish(result, agent, attempts)
-            if not result.session_id:
-                missing_session = replace(
-                    result,
-                    detail="grok invalid-final result did not include the session id required for exact continuation",
-                    failure_kind="grok-session-missing",
-                )
-                return finish(missing_session, agent, attempts)
-            continuation_started = _attempt_timestamp()
-            continuation = invoke(agent, _GROK_CONTINUATION_PROMPT, resume_session_id=result.session_id)
-            continuation_finished = _attempt_timestamp()
-            attempts.append(
-                _worker_attempt(
-                    kind="continuation",
-                    worker=agent,
-                    task=assignment.task,
-                    result=continuation,
-                    started_at=continuation_started,
-                    finished_at=continuation_finished,
-                    selected=continuation.ok,
-                )
+        initial_started = _attempt_timestamp()
+        result = invoke(agent, prompt)
+        initial_finished = _attempt_timestamp()
+        recovery_candidate = direct and effective_read_only and agent.cli == "grok" and agent.transport == "direct"
+        if not recovery_candidate:
+            if result.ok:
+                return finish(result, agent)
+            finished = finish(result, agent)
+            if _is_appserver_output_limit(result):
+                # #1144/#1200: an over-cap capture is a transport artifact, not
+                # a seat-health signal. Preserved text was delivered as ok only
+                # when turn/completed was observed; otherwise it rides along as
+                # an ok=False diagnostic. Either way, neither same-seat retry
+                # nor quarantine applies.
+                return finished
+            failure = failure_for_worker_result(finished)
+            decision = decide_retry(failure, seat=assignment.worker, state=quarantine_state)
+            if not decision.should_retry_same_seat:
+                return finished
+            return _apply_same_seat_retry(
+                assignment=assignment,
+                agent=agent,
+                prompt=prompt,
+                first_result=result,
+                first_started=initial_started,
+                first_finished=initial_finished,
+                invoke=invoke,
+                finish=finish,
+                quarantine_state=quarantine_state,
+                reprobe_seat=reprobe_seat,
+                on_failed_attempt_persisted=on_failed_attempt_persisted,
             )
-            if continuation.ok or not _is_direct_grok_invalid_final(
-                agent, continuation, direct=direct, read_only=effective_read_only
-            ):
-                return finish(continuation, agent, attempts)
-            fallback_name = agent.invalid_final_fallback
-            if fallback_name is None:
-                missing_fallback = replace(
-                    continuation,
-                    detail="grok continuation also lacked a structured final; invalid_final_fallback is not configured",
-                    failure_phase="dispatch",
-                    failure_kind="grok-fallback-missing",
-                )
-                return finish(missing_fallback, agent, attempts)
-            recording_agent[0] = fallback_agent = roster.agents[fallback_name]
-            fallback_cloudflare_detail = agents.cloudflare_ai_gateway_preflight_detail(fallback_agent.model)
-            if fallback_cloudflare_detail is not None:
-                # Route through finish() so the accumulated grok attempt history and
-                # elapsed duration are preserved in the persisted WorkerResult.
-                return finish(
-                    agents.AgentResult(
-                        text="",
-                        ok=False,
-                        detail=fallback_cloudflare_detail,
-                        failure_phase="preflight",
-                        failure_kind="provider-config",
-                    ),
-                    fallback_agent,
-                    attempts,
-                )
-            fallback_prompt = build_prompt(
-                fallback_agent,
-                assignment,
-                prior_results=prior_results,
-                read_only=read_only,
-                direct=direct,
-                code_graph=code_graph,
-                drift_impact=drift_impact,
-                evidence=evidence,
-            )
-            fallback_started = _attempt_timestamp()
-            fallback_result = invoke(fallback_agent, fallback_prompt)
-            fallback_finished = _attempt_timestamp()
-            attempts.append(
-                _worker_attempt(
-                    kind="fallback",
-                    worker=fallback_agent,
-                    task=assignment.task,
-                    result=fallback_result,
-                    started_at=fallback_started,
-                    finished_at=fallback_finished,
-                    selected=fallback_result.ok,
-                )
-            )
-            return finish(fallback_result, fallback_agent, attempts)
 
-        return run_cassette.record_dispatch_result(
-            resolve,
-            coordinator_prompt_sha256=coordinator_prompt_sha256,
-            run_dir=output_dir,
-            workspace=policy_workspace or cwd,
-            codex_transport=codex_transport or roster.codex_transport,
-            agent=lambda: recording_agent[0],
-            prompt=lambda: sent_prompt[0],
-            task=assignment.task,
-            transport=lambda: _receipt_transport(recording_agent[0], appserver=appserver),
-            read_only=read_only,
-            sandbox=sandbox or ("read-only" if effective_read_only else None),
+        attempts = [
+            _worker_attempt(
+                kind="initial",
+                worker=agent,
+                task=assignment.task,
+                result=result,
+                started_at=initial_started,
+                finished_at=initial_finished,
+                selected=result.ok,
+            )
+        ]
+        if result.ok or not _is_direct_grok_invalid_final(agent, result, direct=direct, read_only=effective_read_only):
+            return finish(result, agent, attempts)
+        if not result.session_id:
+            missing_session = replace(
+                result,
+                detail="grok invalid-final result did not include the session id required for exact continuation",
+                failure_kind="grok-session-missing",
+            )
+            return finish(missing_session, agent, attempts)
+
+        continuation_started = _attempt_timestamp()
+        continuation = invoke(agent, _GROK_CONTINUATION_PROMPT, resume_session_id=result.session_id)
+        continuation_finished = _attempt_timestamp()
+        attempts.append(
+            _worker_attempt(
+                kind="continuation",
+                worker=agent,
+                task=assignment.task,
+                result=continuation,
+                started_at=continuation_started,
+                finished_at=continuation_finished,
+                selected=continuation.ok,
+            )
         )
+        if continuation.ok or not _is_direct_grok_invalid_final(
+            agent, continuation, direct=direct, read_only=effective_read_only
+        ):
+            return finish(continuation, agent, attempts)
+
+        fallback_name = agent.invalid_final_fallback
+        if fallback_name is None:
+            missing_fallback = replace(
+                continuation,
+                detail="grok continuation also lacked a structured final; invalid_final_fallback is not configured",
+                failure_phase="dispatch",
+                failure_kind="grok-fallback-missing",
+            )
+            return finish(missing_fallback, agent, attempts)
+
+        recording.agent = fallback_agent = roster.agents[fallback_name]
+        fallback_cloudflare_detail = agents.cloudflare_ai_gateway_preflight_detail(fallback_agent.model)
+        if fallback_cloudflare_detail is not None:
+            # Route through finish() so the accumulated grok attempt history and
+            # elapsed duration are preserved in the persisted WorkerResult.
+            return finish(
+                agents.AgentResult(
+                    text="",
+                    ok=False,
+                    detail=fallback_cloudflare_detail,
+                    failure_phase="preflight",
+                    failure_kind="provider-config",
+                ),
+                fallback_agent,
+                attempts,
+            )
+        fallback_prompt = build_prompt(
+            fallback_agent,
+            assignment,
+            prior_results=prior_results,
+            read_only=read_only,
+            direct=direct,
+            code_graph=code_graph,
+            drift_impact=drift_impact,
+            evidence=evidence,
+        )
+        fallback_started = _attempt_timestamp()
+        fallback_result = invoke(fallback_agent, fallback_prompt)
+        fallback_finished = _attempt_timestamp()
+        attempts.append(
+            _worker_attempt(
+                kind="fallback",
+                worker=fallback_agent,
+                task=assignment.task,
+                result=fallback_result,
+                started_at=fallback_started,
+                finished_at=fallback_finished,
+                selected=fallback_result.ok,
+            )
+        )
+        return finish(fallback_result, fallback_agent, attempts)
+
+    run_one = run_cassette.dispatch_recorder(
+        _run_one,
+        roster=roster,
+        run_dir=output_dir,
+        workspace=policy_workspace or cwd,
+        codex_transport=codex_transport or roster.codex_transport,
+        read_only=read_only,
+        sandbox=sandbox or ("read-only" if (read_only if sandbox_read_only is None else sandbox_read_only) else None),
+        transport=lambda agent: _receipt_transport(agent, appserver=appserver),
+        coordinator_prompt_sha256=coordinator_prompt_sha256,
+    )
 
     if not assignments:
         return []
@@ -1449,6 +1449,8 @@ def _add_note(error: BaseException, note: str, output_dir: Path | None, cwd: Pat
 
 
 def _describe_failure(error: BaseException) -> str:
+    if isinstance(error, run_budget.BudgetPolicyError):
+        return "budget-policy: worker dispatch denied"
     try:
         detail = str(error)[:200]
         return f"{type(error).__name__}: {detail}" if detail else type(error).__name__
