@@ -262,3 +262,10 @@ def test_bound_posix_publish_fsyncs_final_link_before_unlinking_temp(tmp_path, m
     assert events == ["link", "fsync", "unlink", "fsync"]
     assert final.stat().st_nlink == 1
     assert list(final.parent.iterdir()) == [final]
+
+
+@pytest.mark.skipif(not dirfd.posix_available(), reason="requires POSIX descriptor-relative links")
+def test_bound_posix_publish_requires_link_dir_fd_support(monkeypatch):
+    assert run_checkpoint._descriptor_relative_publish_available()
+    monkeypatch.setattr(os, "supports_dir_fd", set(os.supports_dir_fd) - {os.link})
+    assert not run_checkpoint._descriptor_relative_publish_available()

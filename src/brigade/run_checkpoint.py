@@ -759,7 +759,11 @@ def _abort_with_cleanup(
 
 def _descriptor_relative_publish_available() -> bool:
     """Whether no-replace publication can use a held directory descriptor."""
-    return dirfd.available()
+    if not dirfd.available():
+        return False
+    # POSIX bound publication links descriptor-relative before unlinking the
+    # temp, so it also needs dir_fd support for os.link.
+    return not dirfd.posix_available() or os.link in os.supports_dir_fd
 
 
 def _bound_checkpoint_dir_fd(cp_dir: Path) -> int | None:
