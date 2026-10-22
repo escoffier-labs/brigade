@@ -54,6 +54,7 @@ def unfence(value):
 
 
 def test_cli_stdio_inventory_and_http_config(monkeypatch, capsys):
+    monkeypatch.setenv("BRIGADE_EXTRAS", "all")
     monkeypatch.setattr(
         "sys.stdin", io.StringIO(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}) + "\n")
     )
@@ -67,6 +68,7 @@ def test_cli_stdio_inventory_and_http_config(monkeypatch, capsys):
         "fleet_reply",
         "fleet_sent",
         "fleet_claims",
+        "fleet_ask_user",
     }
     assert all(tool["inputSchema"]["additionalProperties"] is False for tool in tools)
     monkeypatch.delenv("BRIGADE_MCP_HTTP_TOKEN", raising=False)

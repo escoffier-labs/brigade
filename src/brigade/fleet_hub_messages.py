@@ -1094,12 +1094,17 @@ def handle(
     caller: str | None,
     open_conn: Callable[[], sqlite3.Connection] | None = None,
     source_ip: str = "",
+    authenticated_generation: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
     if caller is None:
         return 403, {"error": "a node principal is required"}
     if not isinstance(raw, dict):
         raise MessageError("message request must be an object")
     action = raw.get("action")
+    if action in ("question_create", "question_status", "question_desktop"):
+        from . import fleet_hub_questions
+
+        return fleet_hub_questions.handle(conn, raw, caller=caller, authenticated_generation=authenticated_generation)
     if action in ("who", "claims"):
         return 200, _as_active_principal(conn, caller, lambda: _station_read(conn, raw, caller=caller), read_only=True)
     if action == "send":

@@ -1,0 +1,422 @@
+"""Ask workflow through MCP, real inbox waits, and bounded desktop helpers."""
+
+from __future__ import annotations
+
+import json
+import re
+import sqlite3
+import sys
+import threading
+import time
+from pathlib import Path
+
+import pytest
+
+from brigade import fleet_client, fleet_client_messages, fleet_hub_messages, fleet_mcp
+from tests.test_fleet_messages import NODE_A, NODE_B, _request, _wait_for_active_waiters
+from tests.test_mcp_http import _start
+
+pytest_plugins = ["tests._fleet_message_fixtures"]
+
+
+@pytest.fixture
+def station(hub, tmp_path, monkeypatch):
+    monkeypatch.setenv("BRIGADE_EXTRAS", "all")
+    monkeypatch.setenv("BRIGADE_FLEET_OPERATOR_RECIPIENT", NODE_B)
+    monkeypatch.delenv("BRIGADE_FLEET_MESSAGE_TOKEN_FILE", raising=False)
+    monkeypatch.delenv("DISPLAY", raising=False)
+    monkeypatch.delenv("WAYLAND_DISPLAY", raising=False)
+    monkeypatch.setattr(
+        fleet_client, "load_fleet_settings", lambda: {"hub_url": hub[0], "node_token": hub[1], "admin_token": ""}
+    )
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
+    monkeypatch.setattr(fleet_client, "spool_path", lambda _node: tmp_path / "spool" / "events.jsonl")
+    from brigade import fleet_ask_user
+
+    # Run dialog stand-ins through Python on every platform. Windows does not
+    # execute shebang scripts directly; the process and argv checks stay real.
+    original_popen = fleet_ask_user.subprocess.Popen
+
+    def launch_fixture(argv, *args, **kwargs):
+        if isinstance(argv, list) and argv and Path(argv[0]).parent == tmp_path:
+            argv = [sys.executable, *argv]
+        return original_popen(argv, *args, **kwargs)
+
+    monkeypatch.setattr(fleet_ask_user.subprocess, "Popen", launch_fixture)
+    return fleet_mcp.FleetMcp()
+
+
+def invoke(station, **args):
+    return station.call("fleet_ask_user", {"question": "Proceed?", "timeout_secs": 2, **args})
+
+
+def pending(hub):
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        rows = _request(hub[0], hub[2], {"action": "list"})[1]["messages"]
+        if rows:
+            return rows[-1]
+        time.sleep(0.01)
+    raise AssertionError("question was not delivered")
+
+
+def test_headless_reply_wakes_existing_wait_and_is_fenced(station, hub):
+    results = []
+    thread = threading.Thread(target=lambda: results.append(invoke(station)), daemon=True)
+    thread.start()
+    question = pending(hub)
+    assert question["sender"] == NODE_A and question["kind"] == "question"
+    _wait_for_active_waiters(NODE_A, 1)
+    assert _request(hub[0], hub[2], {"action": "reply", "id": question["id"], "body": "Yes"})[0] == 201
+    thread.join(timeout=3)
+    assert not thread.is_alive()
+    result, error = results[0]
+    assert not error and result["status"] == "answered"
+    assert result["source"] == "operator_reply"
+    assert "peer-message" in result["answer"] and "<<UNTRUSTED-" in result["answer"] and "Yes" in result["answer"]
+    assert "question" not in result
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        {"caller": NODE_B},
+        {"operator": NODE_A},
+        {"answer": "Forged"},
+        {"source": "operator_reply"},
+        {"timeout_secs": True},
+        {"timeout_secs": 121},
+        {"question": "x" * 4097},
+    ],
+)
+def test_mcp_rejects_identity_and_invalid_questions_before_effects(station, hub, args):
+    result, error = invoke(station, **args)
+    assert error and "error" in result
+    assert _request(hub[0], hub[2], {"action": "list"})[1]["messages"] == []
+
+
+def test_timeout_is_hub_recorded_and_retry_does_not_restart(station, hub):
+    started = time.monotonic()
+    result, error = invoke(station, timeout_secs=1, request_id="timeout-retry")
+    assert not error and result["status"] == "timeout"
+    assert time.monotonic() - started < 3
+    again, error = invoke(station, timeout_secs=1, request_id="timeout-retry")
+    assert not error and again == result
+    with sqlite3.connect(hub[3]) as conn:
+        assert conn.execute("SELECT status,answer FROM fleet_questions").fetchone() == ("timeout", None)
+        assert conn.execute("SELECT COUNT(*) FROM fleet_questions").fetchone()[0] == 1
+
+
+def stable_answer(result):
+    """Compare audit fields and enclosed data while preserving random fence nonces."""
+    match = re.search(r"<<UNTRUSTED-([0-9a-f]+)>>\n(.*)\n<<END-UNTRUSTED-\1>>", result["answer"], re.S)
+    assert match and "peer-message" in result["answer"]
+    return {**result, "answer": match.group(2)}
+
+
+def executable(tmp_path, name, body):
+    path = tmp_path / name
+    path.write_text(f"#!{sys.executable}\n" + body)
+    path.chmod(0o700)
+    return str(path)
+
+
+def test_desktop_literal_argv_hub_audit_and_no_duplicate_dialog(station, hub, tmp_path, monkeypatch):
+    from brigade import fleet_ask_user
+
+    record = tmp_path / "argv.json"
+    dialog = executable(
+        tmp_path,
+        "zenity",
+        "import json,sys,sqlite3\nfrom pathlib import Path\n"
+        f"with sqlite3.connect({str(hub[3])!r}) as conn:\n assert conn.execute('SELECT COUNT(*) FROM fleet_questions').fetchone()[0] == 1\n"
+        f"Path({str(record)!r}).write_text(json.dumps(sys.argv))\nprint('Local answer')\n",
+    )
+    monkeypatch.setenv("DISPLAY", ":99")
+    monkeypatch.setattr(fleet_ask_user.shutil, "which", lambda name: dialog if name == "zenity" else None)
+    result, error = invoke(station, question="<b>Plain</b>\u202e\x01 $(echo data)", request_id="desktop")
+    assert not error and result["source"] == "caller_reported_desktop"
+    argv = json.loads(record.read_text())
+    assert "--entry" in argv and "--no-markup" in argv
+    text = argv[argv.index("--text") + 1]
+    assert "<b>Plain</b>" in text and "$(echo data)" in text
+    assert "\u202e" not in text and "\x01" not in text
+    assert NODE_A in text and result["question_id"] in text and "recorded" in text
+    with sqlite3.connect(hub[3]) as conn:
+        assert conn.execute("SELECT answer,source FROM fleet_questions").fetchone() == (
+            "Local answer",
+            "caller_reported_desktop",
+        )
+    record.unlink()
+    assert stable_answer(
+        invoke(station, question="<b>Plain</b>\u202e\x01 $(echo data)", request_id="desktop")[0]
+    ) == stable_answer(result)
+    assert not record.exists()
+
+
+@pytest.mark.parametrize("mode", ["missing", "cancel", "failure", "notify", "kdialog"])
+def test_desktop_fallbacks_and_kdialog(station, hub, tmp_path, monkeypatch, mode):
+    from brigade import fleet_ask_user
+
+    record = tmp_path / "notice"
+    binary = executable(
+        tmp_path,
+        "helper",
+        f"from pathlib import Path\nPath({str(record)!r}).write_text('ran')\n"
+        + ("print('KDE answer')\n" if mode == "kdialog" else "raise SystemExit(1)\n"),
+    )
+    monkeypatch.setenv("WAYLAND_DISPLAY", "wayland-test")
+    monkeypatch.setattr(
+        fleet_ask_user.shutil,
+        "which",
+        lambda name: (
+            binary
+            if (
+                (mode in {"cancel", "failure"} and name == "zenity")
+                or (mode == "notify" and name == "notify-send")
+                or (mode == "kdialog" and name == "kdialog")
+            )
+            else None
+        ),
+    )
+    results = []
+    thread = threading.Thread(target=lambda: results.append(invoke(station, question="<b>Question</b>")), daemon=True)
+    thread.start()
+    question = pending(hub)
+    if mode != "kdialog":
+        assert _request(hub[0], hub[2], {"action": "reply", "id": question["id"], "body": "Inbox answer"})[0] == 201
+    thread.join(timeout=3)
+    assert not thread.is_alive()
+    result, error = results[0]
+    assert not error and result["status"] == "answered"
+    assert result["source"] == ("caller_reported_desktop" if mode == "kdialog" else "operator_reply")
+    if mode == "notify":
+        assert record.exists()
+
+
+def test_no_online_audit_no_prompt_or_spool_and_error_can_resume(station, tmp_path, monkeypatch):
+    from brigade import fleet_ask_user
+
+    monkeypatch.setenv("DISPLAY", ":99")
+    monkeypatch.setattr(
+        fleet_ask_user.shutil, "which", lambda _name: (_ for _ in ()).throw(AssertionError("prompt before audit"))
+    )
+    monkeypatch.setattr(
+        fleet_client_messages,
+        "_request",
+        lambda *_a, **_kw: (_ for _ in ()).throw(fleet_client.FleetClientError("private detail")),
+    )
+    result, error = invoke(station, request_id="retry-online")
+    assert error and result["request_id"] == "retry-online"
+    assert "private detail" not in json.dumps(result)
+    assert not (tmp_path / "spool").exists()
+
+
+def test_wait_cap_backoff_and_acked_answer(station, hub, monkeypatch):
+    monkeypatch.setattr(fleet_hub_messages, "MAX_WAITERS_PER_CALLER", 0)
+    requests = []
+    original = fleet_client_messages._request
+
+    def counted(*args, **kwargs):
+        requests.append(args[2]["action"])
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(fleet_client_messages, "_request", counted)
+    results = []
+    thread = threading.Thread(target=lambda: results.append(invoke(station)), daemon=True)
+    thread.start()
+    question = pending(hub)
+    time.sleep(0.1)
+    code, reply = _request(hub[0], hub[2], {"action": "reply", "id": question["id"], "body": "Already acknowledged"})
+    assert code == 201
+    _request(hub[0], hub[1], {"action": "ack", "id": reply["message"]["id"]})
+    thread.join(timeout=3)
+    assert not thread.is_alive()
+    result, error = results[0]
+    assert not error and result["status"] == "answered"
+    assert requests.count("list") <= 4
+
+
+def test_http_tool_inventory_and_call_use_shared_guards(station, monkeypatch):
+    for http in _start(monkeypatch, lambda: fleet_mcp.serve_mcp(http=True, port=0)):
+        status, _headers, body = http.rpc({"jsonrpc": "2.0", "id": 1, "method": "tools/list"})
+        assert status == 200
+        assert "fleet_ask_user" in {tool["name"] for tool in json.loads(body)["result"]["tools"]}
+        status, _, _ = http.rpc({"jsonrpc": "2.0", "id": 2, "method": "tools/list"}, token=None)
+        assert status == 401
+        status, _, body = http.rpc(
+            {
+                "jsonrpc": "2.0",
+                "id": 3,
+                "method": "tools/call",
+                "params": {"name": "fleet_ask_user", "arguments": {"question": "Proceed?", "timeout_secs": 1}},
+            }
+        )
+        assert status == 200
+        result = json.loads(body)["result"]
+        assert not result["isError"]
+        assert json.loads(result["content"][0]["text"])["status"] == "timeout"
+
+
+@pytest.mark.parametrize("mode", ["timeout", "oversized", "invalid_utf8"])
+def test_desktop_bad_output_or_timeout_never_returns_unaudited_answer(station, hub, tmp_path, monkeypatch, mode):
+    from brigade import fleet_ask_user
+
+    body = {
+        "timeout": "import time\ntime.sleep(20)\n",
+        "oversized": "print('x' * 70000)\n",
+        "invalid_utf8": "import sys\nsys.stdout.buffer.write(b'\\xff')\n",
+    }[mode]
+    binary = executable(tmp_path, "dialog", body)
+    monkeypatch.setenv("DISPLAY", ":99")
+    monkeypatch.setattr(fleet_ask_user.shutil, "which", lambda name: binary if name == "zenity" else None)
+    started = time.monotonic()
+    result, error = invoke(station, timeout_secs=1)
+    assert not error and result["status"] == "timeout"
+    assert "answer" not in result and time.monotonic() - started < 3
+    with sqlite3.connect(hub[3]) as conn:
+        assert conn.execute("SELECT status,answer FROM fleet_questions").fetchone() == ("timeout", None)
+
+
+def test_desktop_answer_audit_failure_returns_resume_ids_and_hides_answer(station, hub, tmp_path, monkeypatch):
+    from brigade import fleet_ask_user
+
+    binary = executable(tmp_path, "dialog", "print('Do not leak this local answer')\n")
+    monkeypatch.setenv("DISPLAY", ":99")
+    monkeypatch.setattr(fleet_ask_user.shutil, "which", lambda name: binary if name == "zenity" else None)
+    original = fleet_client_messages._request
+
+    def failing_audit(*args, **kwargs):
+        if args[2]["action"] == "question_desktop":
+            raise fleet_client.FleetClientError("outage")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(fleet_client_messages, "_request", failing_audit)
+    result, error = invoke(station, request_id="retry-desktop-audit")
+    assert error and result["question_id"] and result["request_id"] == "retry-desktop-audit"
+    assert "Do not leak" not in json.dumps(result)
+    with sqlite3.connect(hub[3]) as conn:
+        assert conn.execute("SELECT status,answer FROM fleet_questions").fetchone() == ("pending", None)
+
+
+def test_pending_outage_preserves_question_id_for_retry(station, hub, monkeypatch):
+    original = fleet_client_messages._request
+
+    def outage(*args, **kwargs):
+        if args[2]["action"] == "list":
+            raise fleet_client.FleetClientError("outage")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(fleet_client_messages, "_request", outage)
+    result, error = invoke(station, request_id="pending-retry")
+    assert error and result["question_id"] and result["request_id"] == "pending-retry"
+    question = pending(hub)
+    assert _request(hub[0], hub[2], {"action": "reply", "id": question["id"], "body": "Recovered"})[0] == 201
+    recovered, error = invoke(station, request_id="pending-retry")
+    assert not error and recovered["question_id"] == result["question_id"] and recovered["status"] == "answered"
+
+
+def test_agent_mcp_uses_existing_credential_and_hub_operator_agent(station, hub, tmp_path, monkeypatch):
+    from brigade import fleet_hub
+
+    with fleet_hub.open_db(hub[3]) as conn:
+        operator = fleet_hub_messages.add_principal(conn, {"name": "operator", "may_send_to": ["agent:asker"]})
+        asker = fleet_hub_messages.add_principal(conn, {"name": "asker", "may_send_to": ["agent:operator"]})
+    monkeypatch.setenv("BRIGADE_FLEET_OPERATOR_RECIPIENT", "agent:operator")
+    token_file = tmp_path / "asker.token"
+    token_file.write_text(asker["token"])
+    token_file.chmod(0o600)
+    agent = fleet_mcp.FleetMcp(token_file=str(token_file))
+    results = []
+    thread = threading.Thread(target=lambda: results.append(invoke(agent)), daemon=True)
+    thread.start()
+    deadline = time.monotonic() + 3
+    while time.monotonic() < deadline:
+        rows = _request(hub[0], operator["token"], {"action": "list"})[1]["messages"]
+        if rows:
+            break
+        time.sleep(0.01)
+    assert rows and rows[0]["sender"] == "agent:asker"
+    assert (
+        _request(hub[0], operator["token"], {"action": "reply", "id": rows[0]["id"], "body": "Agent reply"})[0] == 201
+    )
+    thread.join(timeout=3)
+    assert not thread.is_alive()
+    result, error = results[0]
+    assert not error and result["answered_by"] == "agent:operator" and result["source"] == "operator_reply"
+
+
+def test_two_concurrent_creates_offer_only_one_desktop_attempt(station, hub, tmp_path, monkeypatch):
+    from brigade import fleet_ask_user
+
+    marker = tmp_path / "dialog-count"
+    binary = executable(
+        tmp_path,
+        "dialog",
+        "from pathlib import Path\nimport time\n"
+        f"with Path({str(marker)!r}).open('a') as output: output.write('opened\\n')\n"
+        "time.sleep(0.2)\nprint('One dialog')\n",
+    )
+    monkeypatch.setenv("DISPLAY", ":99")
+    monkeypatch.setattr(fleet_ask_user.shutil, "which", lambda name: binary if name == "zenity" else None)
+    results = []
+    threads = [
+        threading.Thread(target=lambda: results.append(invoke(station, request_id="concurrent")), daemon=True)
+        for _ in range(2)
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=3)
+        assert not thread.is_alive()
+    assert len(results) == 2 and all(not error and result["status"] == "answered" for result, error in results)
+    assert stable_answer(results[0][0]) == stable_answer(results[1][0])
+    assert marker.read_text() == "opened\n"
+
+
+def test_station_limits_concurrent_asks_without_creating_third_audit(station, hub):
+    results = []
+    threads = [
+        threading.Thread(target=lambda key=key: results.append(invoke(station, request_id=key)), daemon=True)
+        for key in ("first", "second")
+    ]
+    try:
+        for thread in threads:
+            thread.start()
+        _wait_for_active_waiters(NODE_A, 2)
+        result, error = invoke(station, request_id="third")
+        assert error and result["code"] == "question_station_busy" and result["request_id"] == "third"
+        rows = _request(hub[0], hub[2], {"action": "list"})[1]["messages"]
+        assert len(rows) == 2
+        for row in rows:
+            assert _request(hub[0], hub[2], {"action": "reply", "id": row["id"], "body": "Answered"})[0] == 201
+    finally:
+        for thread in threads:
+            thread.join(timeout=3)
+            assert not thread.is_alive()
+    assert all(not error and result["status"] == "answered" for result, error in results)
+
+
+def test_creation_delay_uses_backoff_until_hub_timeout(station, hub, monkeypatch):
+    from brigade import fleet_ask_user
+
+    original = fleet_client_messages._request
+    clock = time.monotonic
+    offset = 0
+    statuses = []
+
+    def delayed_create(*args, **kwargs):
+        nonlocal offset
+        result = original(*args, **kwargs)
+        if args[2]["action"] == "question_create":
+            # Creation consumed more of the caller's budget than the hub's.
+            offset = 2
+        if args[2]["action"] == "question_status":
+            statuses.append(clock())
+        return result
+
+    monkeypatch.setattr(fleet_ask_user, "monotonic", lambda: clock() + offset)
+    monkeypatch.setattr(fleet_client_messages, "_request", delayed_create)
+    result, error = invoke(station, timeout_secs=1)
+    assert not error and result["status"] == "timeout"
+    assert len(statuses) <= 8

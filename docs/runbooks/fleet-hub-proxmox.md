@@ -798,3 +798,44 @@ Node `fleet_claims` results match `GET /claims`, including active Grok Bot lease
 rows. Agent claim results include only granted owner nodes and omit `job`,
 `session`, and `owner_conductor`. Directory and claim reads use a read transaction
 that checks the caller's active status within the same snapshot.
+
+
+### Operator questions
+
+`fleet_ask_user` accepts `question`, optional `timeout_secs` from 1 to 120
+(default 60), and an optional `request_id`. It returns `status: answered` with
+a fenced `answer`, or `status: timeout`, together with hub audit identifiers.
+The caller comes from the station's existing node or agent credential. Tool
+arguments cannot choose a caller, operator, credential, answer, or answer source.
+
+Set `BRIGADE_FLEET_OPERATOR_RECIPIENT` in the **hub service environment** to an
+existing enrolled node ID or agent principal, for example `agent:operator`.
+The operator must be active and different from the caller. Agent send grants
+must permit the question and the operator's reply. The station sends each
+question to that recipient's inbox and records its audit atomically before
+opening a desktop prompt. Questions are never spooled for later prompting.
+
+On a Linux desktop with `DISPLAY` or `WAYLAND_DISPLAY`, the station tries an
+installed `zenity` entry dialog or `kdialog` input box. Text is displayed as data
+under a fixed title with the authenticated caller and question ID. Missing,
+failed, cancelled, or timed-out dialogs fall back to the operator inbox. An
+installed `notify-send` can announce that inbox question. No desktop dependency
+is installed. The operator answers by replying to the question message with
+`fleet_reply` or the existing message CLI.
+
+The hub records the first answer received before its deadline. A desktop answer
+has source `caller_reported_desktop`; an authenticated inbox reply has source
+`operator_reply`. Desktop input is not proof of operator credential ownership.
+The audit copies the question, answer, identities, source, and timestamps, so
+acknowledging or pruning message links cannot erase an accepted answer. Audit
+retention is 90 days. Expired pending questions become timeout records on the
+next question operation, without a background timer.
+
+The wait uses the existing inbox long-poll in slices of at most 20 seconds and
+never acknowledges unrelated messages. Each station permits two concurrent
+asks. The entire call shares a five-second transport and cleanup grace beyond
+`timeout_secs`. An outage returns a structured error with `request_id` and,
+when creation was confirmed, `question_id`. Retry the same question and timeout
+with that `request_id` to resume its audit and original deadline. Retries do not
+create another question or open another dialog. Only the credential generation
+that created a question can resume it after an outage.

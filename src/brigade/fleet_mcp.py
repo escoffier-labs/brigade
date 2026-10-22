@@ -7,7 +7,8 @@ from time import monotonic, sleep
 from typing import Any
 
 from . import fleet_client, fleet_client_messages as messages, mcp_server
-from .fleet_hub_messages import MAX_SQLITE_INTEGER, MAX_WAIT_MS
+from .fleet_hub_messages import MAX_SQLITE_INTEGER, MAX_WAIT_MS, MessageError
+from .fleet_ask_user import AskUser, AskUserError
 from .untrusted import scan_untrusted, wrap_untrusted
 
 DEFAULT_PORT = 8933
@@ -34,6 +35,16 @@ def tool_specs() -> list[dict[str, Any]]:
     boolean = {"type": "boolean"}
     limit = {"type": "integer", "minimum": 1, "maximum": 100, "default": 100}
     definitions = [
+        (
+            "fleet_ask_user",
+            "Ask the configured operator, recording an answer or timeout on the hub.",
+            {
+                "question": text,
+                "timeout_secs": {"type": "integer", "minimum": 1, "maximum": 120, "default": 60},
+                "request_id": text,
+            },
+            ["question"],
+        ),
         (
             "fleet_who",
             "List interactive sessions and permitted active recipients.",
@@ -279,6 +290,13 @@ def _page_limit(payload: dict[str, Any], limit: int) -> dict[str, Any]:
 
 
 def _tool_error(exc: Exception) -> dict[str, Any]:
+    if isinstance(exc, AskUserError):
+        return {
+            "error": str(exc),
+            "code": exc.code,
+            "request_id": exc.request_id,
+            **({"question_id": exc.question_id} if exc.question_id else {}),
+        }
     if isinstance(exc, messages.FleetMessageHubError):
         status = exc.status if isinstance(exc.status, int) and 400 <= exc.status <= 599 else None
         code = exc.code if isinstance(exc.code, str) and exc.code in _SAFE_ERROR_CODES else "hub_rejected"
@@ -305,6 +323,7 @@ def _tool_error(exc: Exception) -> dict[str, Any]:
 class FleetMcp:
     def __init__(self, *, token_file: str | None = None) -> None:
         self.token_file = token_file
+        self._ask_user = AskUser()
 
     def callbacks(self) -> dict[str, Any]:
         return {
@@ -333,7 +352,7 @@ class FleetMcp:
                 _message_id(arguments["after"], allow_zero=True)
             payload = self._call(name, arguments, ids, message_id, reply_to)
             return _frame(payload), False
-        except _InvalidArguments as exc:
+        except (_InvalidArguments, MessageError) as exc:
             return {"error": str(exc)}, True
         except Exception as exc:
             # Upstream failures may contain URLs, credentials, or attacker-controlled text.
@@ -348,6 +367,8 @@ class FleetMcp:
     ) -> dict[str, Any]:
         # One captured credential for the whole tool call, as the message layer requires.
         authority = self._authority()
+        if name == "fleet_ask_user":
+            return self._ask_user.ask(authority=authority, **args)
         if name == "fleet_who":
             return _frame_directory(messages._online({"action": "who", **args}, authority=authority))
         if name == "fleet_claims":

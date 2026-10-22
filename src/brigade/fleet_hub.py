@@ -117,7 +117,7 @@ from .fleet_hub_status import (
     latest_status as latest_status,
 )
 
-SCHEMA_VERSION = 37
+SCHEMA_VERSION = 38
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
@@ -287,6 +287,9 @@ def _missing_additive_columns(conn: sqlite3.Connection) -> list[str]:
         for name, ddl in _ADDITIVE_INDEXES
         if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?", (name,)).fetchone() is None
     )
+    from . import fleet_hub_questions
+
+    missing.extend(fleet_hub_questions.missing_schema(conn))
     return missing
 
 
@@ -651,6 +654,9 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     # recoverable principal enrollment and an unacked-recipient index.
     # v30 -> v31 adds message metadata columns and external agent send grants.
     fleet_hub_messages.ensure_schema(conn)
+    from . import fleet_hub_questions
+
+    fleet_hub_questions.ensure_schema(conn)
     # v31 -> v32 adds model_policy.t3_model (native T3 launch model) through
     # fleet_hub_model_roster.ensure_schema's additive column migration.
     # v34 -> v36: aggregate snapshots and compact weekly administrator history.
