@@ -350,6 +350,8 @@ _INDEX_STATEMENTS = (
     "CREATE INDEX IF NOT EXISTS work_items_burn ON work_items (burn_eligible)",
     "CREATE INDEX IF NOT EXISTS work_items_ready_at ON work_items (ready_at)",
     "CREATE INDEX IF NOT EXISTS work_events_work_id ON work_events (work_id)",
+    # Cover take's cross-item event-key probe without scanning the event history.
+    "CREATE INDEX IF NOT EXISTS work_events_event_work ON work_events (event_id, work_id)",
     "CREATE INDEX IF NOT EXISTS work_events_seq ON work_events (seq)",
     "CREATE INDEX IF NOT EXISTS work_events_work_seq ON work_events (work_id, seq)",
     "CREATE INDEX IF NOT EXISTS work_links_external ON work_links (link_type, external_key)",

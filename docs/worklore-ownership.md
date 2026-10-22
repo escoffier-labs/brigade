@@ -3,7 +3,9 @@
 An operator can offer a Worklore item to an enrolled node. The named node accepts
 with a private nonce, then records checkpoints, offers a handoff, or releases
 ownership. The Hub records these actions as immutable events in its existing
-`work_events` table. This protocol requires no schema migration.
+`work_events` table. Hub schema 41 adds a nonunique covering index on
+`(event_id, work_id)` for campaign take key lookups. Startup upgrades existing
+databases without changing stored events or the item-scoped event primary key.
 
 Ownership grants authority to mutate this Hub metadata. It does not establish
 filesystem exclusivity, prove that a process stopped, authenticate a verification

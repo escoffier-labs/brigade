@@ -14,6 +14,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Index campaign take event-key lookups without scanning Worklore history. Hub startup upgrades existing databases to schema 41 and preserves stored events.
 - Fence campaign execution and attempt writes to the current holder grant, refuse member specification drift, and reserve take capacity for progress and release. Campaign operators can recover a stranded reservation with explicit quiescence acknowledgement and an audited evidence reference.
 
 - Daily status preserves local work counts when an optional health snapshot times out. Windows pytest artifacts include flushed test-phase timings and stack dumps, and timeout summaries identify the last test or session phase.
