@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import time
 from dataclasses import dataclass, replace
 from pathlib import Path
@@ -127,6 +128,7 @@ class SeatInvoker:
                 [assignment],
                 roster,
                 build_prompt=build_prompt,
+                coordinator_prompt_sha256=hashlib.sha256(prompt.encode("utf-8")).hexdigest(),
                 run_appserver_worker=_unsupported_appserver,
                 event_writer=_no_events,
                 cwd=self.cwd,

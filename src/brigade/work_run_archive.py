@@ -17,7 +17,7 @@ import stat
 from pathlib import Path, PurePosixPath
 from typing import Any, Mapping
 
-from . import __version__, localio, receipt_schema, run_checkpoint, run_journal, worker_events
+from . import __version__, localio, receipt_schema, run_cassette, run_checkpoint, run_journal, worker_events
 
 WORK_RUN_ARCHIVE_SCHEMA = "brigade.work-run"
 WORK_RUN_ARCHIVE_SCHEMA_VERSION = 1
@@ -196,6 +196,10 @@ def assert_lifecycle_journal_authentic(payload_root: Path) -> None:
 def _assert_export_privacy_tree(payload_root: Path) -> None:
     """Run checkpoint, worker-stream, and lifecycle export-privacy gates."""
     run_checkpoint.assert_export_tree_has_no_checkpoint_bodies(payload_root)
+    try:
+        run_cassette.assert_export_safe(payload_root)
+    except run_cassette.store.CassetteError as exc:
+        raise WorkRunArchiveError(str(exc), category="export-privacy") from exc
     try:
         worker_events.assert_export_tree_has_no_raw_worker_streams(payload_root)
     except worker_events.WorkerEventError as exc:
@@ -457,6 +461,10 @@ def export_run(
         # Crashed checkpoint temps cannot become truthful refs; the strip
         # helper removes them unread (#646).
         run_checkpoint.strip_checkpoint_bodies_for_export(payload_root)
+        try:
+            run_cassette.strip_for_export(payload_root)
+        except run_cassette.store.CassetteError as exc:
+            raise WorkRunArchiveError(str(exc), category="export-privacy") from exc
         try:
             worker_events.project_worker_streams_for_export(payload_root)
         except worker_events.WorkerEventError as exc:
@@ -831,6 +839,9 @@ def _copy_run_tree_refuse_special(source: Path, dest: Path) -> None:
         ignored: set[str] = set()
         base = Path(directory)
         for name in names:
+            if base == source / "events" and name == run_cassette.store.DIRECTORY:
+                ignored.add(name)
+                continue
             path = base / name
             try:
                 st = path.lstat()
