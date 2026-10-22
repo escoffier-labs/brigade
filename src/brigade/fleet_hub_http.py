@@ -11,7 +11,9 @@ import importlib.resources
 import json
 import re
 import secrets
+import socket
 import sqlite3
+import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler
 from pathlib import Path
@@ -61,6 +63,12 @@ from .fleet_hub import (
     _TAILSCALE_IDENTITY_HEADER,
     _TAILSCALE_IDENTITY_MAX_LEN,
 )
+
+
+# Rejected uploads may finish within these bounds after the response's FIN.
+# Neither a huge declaration nor a trickling peer may retain a handler forever.
+_REJECT_DRAIN_BYTES = 1024 * 1024
+_REJECT_DRAIN_SECONDS = 0.25
 
 
 def _is_loopback_address(address: str) -> bool:
@@ -228,6 +236,56 @@ def make_handler(
         # Idle-socket guard: a peer that connects and never sends a request
         # line cannot pin a handler thread forever (pre-auth).
         timeout = 30
+
+        def send_response(self, code: int, message: str | None = None) -> None:
+            super().send_response(code, message)
+            headers = getattr(self, "headers", None)
+            self._drain_on_close = (
+                code >= 400
+                and headers is not None
+                and bool(headers.get_all("Content-Length", []) or headers.get_all("Transfer-Encoding", []))
+            )
+            if self._drain_on_close:
+                self.close_connection = True
+                self.send_header("Connection", "close")
+
+        def finish(self) -> None:
+            try:
+                if getattr(self, "_drain_on_close", False):
+                    self._drain_rejected_body()
+            finally:
+                super().finish()
+
+        def _drain_rejected_body(self) -> None:
+            """Send the response's FIN before discarding bounded late upload bytes.
+
+            A full close with unread socket data can reset the connection while
+            the client is still sending, hiding the HTTP rejection. This shared
+            cleanup also covers auth, framing and delegated-route refusals.
+            Bytes already buffered by rfile are out of the kernel receive queue,
+            so read directly from the socket without waiting for a declared size
+            that may be invalid, ambiguous, enormous, or already partly read.
+            """
+            previous_timeout = self.connection.gettimeout()
+            try:
+                self.wfile.flush()
+                self.connection.shutdown(socket.SHUT_WR)
+                deadline = time.monotonic() + _REJECT_DRAIN_SECONDS
+                remaining = _REJECT_DRAIN_BYTES
+                while remaining > 0:
+                    seconds = deadline - time.monotonic()
+                    if seconds <= 0:
+                        break
+                    self.connection.settimeout(seconds)
+                    chunk = self.connection.recv(min(65536, remaining))
+                    if not chunk:
+                        break
+                    remaining -= len(chunk)
+            except OSError:
+                # Timeouts and peers that have already closed need no cleanup.
+                pass
+            finally:
+                self.connection.settimeout(previous_timeout)
 
         def log_message(self, fmt: str, *log_args: Any) -> None:  # quiet by default
             pass
