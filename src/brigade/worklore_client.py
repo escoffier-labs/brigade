@@ -37,8 +37,10 @@ __all__ = [
     "WorkloreClientError",
     "add_link",
     "burn_queue",
+    "create_campaign",
     "create_item",
     "delete_link",
+    "get_campaign",
     "get_item",
     "get_ownership",
     "ownership_action",
@@ -53,6 +55,7 @@ __all__ = [
     "LIST_PAGE_SIZE",
     "MAX_ERROR_RESPONSE_BYTES",
     "MAX_RESPONSE_BYTES",
+    "list_campaigns",
     "list_items",
     "list_items_all",
     "load_fleet_settings",
@@ -227,6 +230,20 @@ def create_item(body: Mapping[str, Any], *, idempotency_key: str | None = None) 
         body=body,
         idempotency_key=key,
     )
+
+
+def create_campaign(body: Mapping[str, Any]) -> dict[str, Any]:
+    """Create a campaign and its missing members. Re-running adds only what is missing."""
+    return _request("POST", "/work/campaigns", token=_token(admin=False), body=body, timeout=IMPORT_TIMEOUT_SECONDS)
+
+
+def list_campaigns(*, limit: int | None = None) -> dict[str, Any]:
+    query = {"limit": str(limit)} if limit is not None else None
+    return _request("GET", "/work/campaigns", token=_token(), query=query)
+
+
+def get_campaign(campaign_key: str) -> dict[str, Any]:
+    return _request("GET", "/work/campaigns/" + urllib.parse.quote(campaign_key, safe=""), token=_token())
 
 
 def get_item(

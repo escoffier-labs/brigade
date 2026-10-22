@@ -105,7 +105,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from . import fleet_command_deck, fleet_hub_events, fleet_hub_preference, worklore_store
+from . import fleet_command_deck, fleet_hub_events, fleet_hub_preference, worklore_campaigns, worklore_store
 from .fleet_execution_context import serialize_context
 from .fleet_hub_event_bounds import oversized_event_field
 from .fleet_hub_server import BoundedThreadingHTTPServer
@@ -117,7 +117,7 @@ from .fleet_hub_status import (
     latest_status as latest_status,
 )
 
-SCHEMA_VERSION = 39
+SCHEMA_VERSION = 40
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
@@ -638,6 +638,8 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     # running hub rather than needing one that will not start.
     # v18 -> v19: research/security/scout role columns on run_preference (roster page).
     worklore_store.ensure_schema(conn)
+    # v39 -> v40: campaign membership tables (#1128). Additive; items stay in Worklore.
+    worklore_campaigns.ensure_schema(conn)
     # v19 -> v20: control-plane policy revisions, the CAS pointer, and session
     # policy receipts. Additive tables only; the legacy model_policy roster and
     # its admission path are untouched and still authoritative for launches.
