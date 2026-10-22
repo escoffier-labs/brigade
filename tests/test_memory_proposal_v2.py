@@ -786,3 +786,22 @@ def test_duplicate_candidate_refuses_when_the_merge_would_be_dropped(tmp_path):
         propose_payload(target=tmp_path, candidate_id=candidate["candidate_id"], reason="Merge near copies.")
     assert {p: p.read_bytes() for p in before} == before
     assert not list((tmp_path / ".brigade/memory/proposals").glob("*/revision-1.json"))
+
+
+@pytest.mark.parametrize("body", ["  # Heading\n", "   > quoted text\n", "   | a | b |\n"])
+def test_indented_headings_quotes_and_tables_are_not_anchored(body):
+    from brigade import memory_proposal_v2_ops as delta
+
+    assert delta.blocks("---\ntopic: x\n---\n" + body) == []
+
+
+def test_exact_duplicate_merge_keeps_citations_from_alternate_evidence_fields(tmp_path):
+    path = card(tmp_path, "cache", body=CLAIM)
+    other = card(tmp_path, "other", body=CLAIM.replace("123abc", "456def"))
+    ref = evidence(tmp_path, ".brigade/receipts/other.json")
+    other.write_text(other.read_text().replace("evidence: []", f"sources: {json.dumps([ref])}"))
+    merge = op("merge_exact_duplicates", other_card="memory/cards/other.md")
+    proposal = create(tmp_path, [merge], paths=[PATH, "memory/cards/other.md"])
+    assert apply(tmp_path, proposal)["status"] == "committed"
+    assert ref in api._meta(path.read_text())["evidence"]
+    assert not other.exists()

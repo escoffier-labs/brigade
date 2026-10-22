@@ -79,7 +79,9 @@ def blocks(text: str) -> list[Block]:
             continue
         code = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
         bullet = re.match(r"^ {0,3}(?:[-+*]|\d+[.)])\s+", line)
-        excluded = not stripped or index in table or bool(re.match(r"^(?:#{1,6}\s|>|\||previously\b| {4}|\t)", line))
+        excluded = (
+            not stripped or index in table or bool(re.match(r"^(?: {0,3}(?:#{1,6}\s|>|\|)|previously\b| {4}|\t)", line))
+        )
         if fence or code or excluded or bullet:
             finish()
         if code:
@@ -229,12 +231,15 @@ def apply_op(
             if " ".join(claim_body(text).split()) != " ".join(claim_body(other_text).split()):
                 raise legacy.ProposalError("merge requires exact duplicate claims")
             meta, other_meta = legacy._meta(text), legacy._meta(other_text)
+            from . import memory_cmd
             from .card_identity import card_identity
 
             identity = card_identity(other_meta, other)
             own = card_identity(meta, path)
             aliases = sorted((set(_list(meta, "aliases")) | {identity.card_id, *identity.aliases}) - {own.card_id})
-            refs = sorted(set(_list(meta, "evidence")) | set(_list(other_meta, "evidence")))
+            _list(meta, "evidence"), _list(other_meta, "evidence")
+            # Citations may live in any field the canonical reader supports.
+            refs = sorted(set(memory_cmd._evidence_refs(meta)) | set(memory_cmd._evidence_refs(other_meta)))
             if len(aliases) > io.MAX_LIST or len(refs) > io.MAX_LIST:
                 raise legacy.ProposalError("merged metadata list limit exceeded")
             text = legacy._update_metadata(
