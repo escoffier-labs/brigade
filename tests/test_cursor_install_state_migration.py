@@ -5,8 +5,10 @@ from __future__ import annotations
 import json
 from pathlib import Path
 
+import pytest
+
 from brigade import __version__ as BRIGADE_VERSION
-from brigade import cli, harness_profile_cmd, harness_profiles
+from brigade import cli, cursor_user_cmd, harness_profile_cmd, harness_profiles
 from tests._home import set_home
 
 
@@ -298,3 +300,94 @@ def test_legacy_install_on_v2_state_reports_actionable_recovery(tmp_path, monkey
     assert "harness sync --target cursor" in conflict["detail"]
     assert "harness uninstall --target cursor" in conflict["detail"]
     assert "schema_version 2" in conflict["detail"]
+
+
+_LIFECYCLE_EVENTS = ("sessionStart", "postToolUse", "sessionEnd")
+_USER_SYNC = ["harness", "sync", "--target", "cursor", "--scope", "user", "--write", "--json"]
+
+
+def _prior_migrated_state(home: Path, workspace: Path, capsys, *, versioned: bool) -> tuple[Path, Path]:
+    """Rebuild what the earlier profile sync left behind: v2 state owning only sessionStart."""
+    legacy = _legacy_state(home, capsys)
+    state_path = home / ".cursor" / "brigade" / "install-state.json"
+    migrated = harness_profile_cmd.migrate_legacy_cursor_install_state(
+        state=legacy, workspace=workspace, harness="cursor"
+    )
+    for event in ("postToolUse", "sessionEnd"):
+        del migrated["generated"][f"hooks.json#{event}"]
+    state_path.write_text(json.dumps(migrated))
+    hooks_path = home / ".cursor" / "hooks.json"
+    doc = json.loads(hooks_path.read_text())
+    assert set(doc["hooks"]) == set(_LIFECYCLE_EVENTS)
+    if not versioned:
+        doc.pop("version", None)
+        hooks_path.write_text(json.dumps(doc))
+    return state_path, hooks_path
+
+
+def _owned_hook_events(state_path: Path) -> set[str]:
+    generated = json.loads(state_path.read_text())["generated"]
+    return {key.removeprefix("hooks.json#") for key in generated if key.startswith("hooks.json#")}
+
+
+@pytest.mark.parametrize("versioned", [True, False], ids=["versioned", "versionless"])
+def test_upgrade_sync_claims_legacy_lifecycle_entries_without_adopt(tmp_path, monkeypatch, capsys, versioned):
+    home = _use_home(monkeypatch, tmp_path)
+    workspace = _workspace(tmp_path)
+    state_path, hooks_path = _prior_migrated_state(home, workspace, capsys, versioned=versioned)
+    assert _owned_hook_events(state_path) == {"sessionStart"}
+
+    assert cli.main([*_USER_SYNC, "--workspace", str(workspace)]) == 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["ready"] is True
+    assert payload["results"][0]["conflicts"] == []
+    assert _owned_hook_events(state_path) == set(_LIFECYCLE_EVENTS)
+    doc = json.loads(hooks_path.read_text())
+    assert doc["version"] == 1
+    for event in _LIFECYCLE_EVENTS:
+        assert len(doc["hooks"][event]) == 1
+
+    assert cli.main([*_USER_SYNC, "--workspace", str(workspace)]) == 0
+    assert json.loads(capsys.readouterr().out)["results"][0]["status"] == "current"
+
+
+def test_upgrade_sync_never_claims_an_edited_lifecycle_entry(tmp_path, monkeypatch, capsys):
+    home = _use_home(monkeypatch, tmp_path)
+    workspace = _workspace(tmp_path)
+    state_path, hooks_path = _prior_migrated_state(home, workspace, capsys, versioned=True)
+    doc = json.loads(hooks_path.read_text())
+    edited = {"command": "exec brigade work presence-hook --harness cursor --stdin --context my-own-edit"}
+    doc["hooks"]["postToolUse"] = [edited]
+    hooks_path.write_text(json.dumps(doc))
+
+    assert cli.main([*_USER_SYNC, "--workspace", str(workspace)]) == 0
+    capsys.readouterr()
+
+    after = json.loads(hooks_path.read_text())["hooks"]
+    assert after["postToolUse"][0] == edited
+    state = json.loads(state_path.read_text())["generated"]
+    managed_fingerprint = state["hooks.json#postToolUse"]["entry_fingerprint"]
+    assert managed_fingerprint != cursor_user_cmd._digest_value(edited)
+    assert [cursor_user_cmd._digest_value(entry) for entry in after["postToolUse"][1:]] == [managed_fingerprint]
+
+
+def test_sync_without_a_legacy_migration_still_requires_adopt(tmp_path, monkeypatch, capsys):
+    home = _use_home(monkeypatch, tmp_path)
+    workspace = _workspace(tmp_path)
+    state_path, _hooks_path = _prior_migrated_state(home, workspace, capsys, versioned=False)
+    state = json.loads(state_path.read_text())
+    state["instructions"].pop("legacy_migrated")
+    state["skills"]["brigade-work"].pop("legacy_migrated")
+    state["mcp"] = {name: {**record, "legacy_migrated": None} for name, record in state["mcp"].items()}
+    for record in state["generated"].values():
+        record.pop("legacy_migrated", None)
+    state_path.write_text(json.dumps(state))
+
+    assert cli.main([*_USER_SYNC, "--workspace", str(workspace)]) != 0
+    payload = json.loads(capsys.readouterr().out)
+
+    assert payload["ready"] is False
+    names = {item["name"] for item in payload["results"][0]["conflicts"] if item.get("surface") == "hook"}
+    assert names == {"postToolUse", "sessionEnd"}
+    assert "version" not in json.loads((home / ".cursor" / "hooks.json").read_text())

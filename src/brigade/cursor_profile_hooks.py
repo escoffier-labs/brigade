@@ -75,6 +75,19 @@ def migrate_legacy_install_state(*, state: dict[str, Any], workspace: Path, harn
     return migrated
 
 
+def _legacy_migration_recorded(state: dict[str, Any]) -> bool:
+    """True when stored state carries a record stamped by the legacy install migration."""
+    for section in ("instructions", "skills", "generated", "mcp"):
+        value = state.get(section)
+        if not isinstance(value, dict):
+            continue
+        if value.get("legacy_migrated") is True:
+            return True
+        if any(isinstance(record, dict) and record.get("legacy_migrated") is True for record in value.values()):
+            return True
+    return False
+
+
 def plan(profile, state: dict[str, Any], *, adopt: bool) -> dict[str, Any]:
     """Plan each managed event while preserving co-owned hook entries."""
     from . import cursor_user_cmd
@@ -117,6 +130,9 @@ def plan(profile, state: dict[str, Any], *, adopt: bool) -> dict[str, Any]:
     conflicts: list[dict[str, Any]] = []
     actions: dict[str, dict[str, Any]] = {}
     next_records: dict[str, dict[str, str]] = {}
+    # The earlier profile sync migrated only sessionStart, so the legacy installer's identical
+    # postToolUse and sessionEnd entries have no ownership record. Claim them on upgrade.
+    legacy_migrated = _legacy_migration_recorded(state)
     for event, entry in hook.entries.items():
         item: dict[str, Any] = {"surface": "hook", "path": str(path), "name": event}
         entries = hooks.get(event)
@@ -134,6 +150,12 @@ def plan(profile, state: dict[str, Any], *, adopt: bool) -> dict[str, Any]:
                 item.update(status="current", action="none")
             elif adopt:
                 item.update(status="adopted", action="none")
+            elif legacy_migrated and "entry_fingerprint" not in record:
+                item.update(
+                    status="adopted",
+                    action="none",
+                    detail=f"claimed the {event} entry placed by the legacy Cursor installer",
+                )
             else:
                 item.update(
                     status="conflict",
