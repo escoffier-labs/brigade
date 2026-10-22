@@ -46,7 +46,9 @@ JSON object that maps a `repos.toml` id to override text. An unknown id is refus
 
 `--dry-run` writes nothing. It prints the request it would send and, when a Hub is
 configured, makes one read to mark which members already exist and whether the spec
-would be refused. A failed read is reported in the output.
+or immutable offer would be refused. JSON reports `spec_changed` and `offer_changed`.
+Text names `campaign-spec-changed` and `campaign-offer-conflict` independently when
+both differ. A failed read or unreadable stored offer is reported as unchecked.
 
 ## Idempotency
 

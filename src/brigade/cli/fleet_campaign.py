@@ -295,7 +295,8 @@ def _request_body(args: argparse.Namespace) -> dict[str, Any]:
 def _hub_marks(body: dict[str, Any]) -> dict[str, Any]:
     """One Hub read to mark which members already exist; a failure is reported, never raised."""
     from .. import worklore_client
-    from ..worklore_campaigns import spec_fingerprint
+    from ..worklore_campaigns import parse_offer, spec_fingerprint
+    from ..worklore_validate import WorkloreValidationError
 
     if not worklore_client.load_fleet_settings().get("hub_url"):
         return {"checked": False, "reason": "no fleet hub configured"}
@@ -303,7 +304,13 @@ def _hub_marks(body: dict[str, Any]) -> dict[str, Any]:
         shown = worklore_client.get_campaign(str(body["campaign_key"]))
     except worklore_client.WorkloreClientError as exc:
         if exc.code == "not-found":
-            return {"checked": True, "campaign_exists": False, "existing": [], "spec_changed": False}
+            return {
+                "checked": True,
+                "campaign_exists": False,
+                "existing": [],
+                "spec_changed": False,
+                "offer_changed": False,
+            }
         return {"checked": False, "error": _text(exc), **({"code": exc.code} if exc.code else {})}
     except worklore_client.FleetClientError as exc:
         return {"checked": False, "error": _text(exc)}
@@ -311,12 +318,23 @@ def _hub_marks(body: dict[str, Any]) -> dict[str, Any]:
     members = shown.get("members") if isinstance(shown, dict) else None
     if not isinstance(stored, dict) or not isinstance(members, list):
         return {"checked": False, "error": "unexpected hub response"}
+    offer_changed = False
+    if "offer" in body:
+        if "offer" not in stored:
+            return {"checked": False, "error": "unexpected hub response"}
+        if stored["offer"] is not None:
+            try:
+                stored_offer = parse_offer(stored["offer"])
+            except WorkloreValidationError:
+                return {"checked": False, "error": "unexpected hub response"}
+            offer_changed = stored_offer != body["offer"]
     wanted = spec_fingerprint(str(body.get("description", "")), list(body["acceptance"]))
     return {
         "checked": True,
         "campaign_exists": True,
         "existing": sorted(str(m.get("repo")) for m in members if isinstance(m, dict)),
         "spec_changed": stored.get("spec_fingerprint") != wanted,
+        "offer_changed": offer_changed,
     }
 
 
@@ -362,8 +380,13 @@ def _create(args: argparse.Namespace) -> int:
         print(f"dry run: campaign {_text(body['campaign_key'])}, {len(members)} member(s), nothing written")
         if not hub.get("checked"):
             print(f"hub not checked: {_text(hub.get('error') or hub.get('reason'))}")
-        elif hub.get("spec_changed"):
-            print("warning: spec differs from the stored campaign; create would be refused (campaign-spec-changed)")
+        else:
+            if hub.get("spec_changed"):
+                print("warning: spec differs from the stored campaign; create would be refused (campaign-spec-changed)")
+            if hub.get("offer_changed"):
+                print(
+                    "warning: offer differs from the stored campaign; create would be refused (campaign-offer-conflict)"
+                )
         for member in members:
             print(f"  {_text(member['repo'])}  {'existing' if member['exists'] else 'new'}")
         print(json.dumps(body, sort_keys=True, indent=2))
