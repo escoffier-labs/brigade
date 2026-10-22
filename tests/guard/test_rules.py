@@ -542,6 +542,11 @@ class MissingLeakShapeTests(unittest.TestCase):
         for text in (
             "f\"{fetch('https://db.home/path')}\"",  # content-guard: allow private-hostname
             "f\"https://{lookup('db.home')}/path\"",  # content-guard: allow private-hostname
+            # A literal brace or an escaped quote earlier in the expression.
+            "f\"https://{lookup('{','db.home')}/path\"",  # content-guard: allow private-hostname
+            "f\"https://{lookup('can\\'t','db.home')}/path\"",  # content-guard: allow private-hostname
+            # Doubled braces are literal text, not an expression (#1962).
+            'print(f"{{")  # see https://db.home/x',  # content-guard: allow private-hostname
         ):
             with self.subTest(text=text):
                 self.assertIn("private-hostname", {f.rule_id for f in scan_text(text).findings})

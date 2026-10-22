@@ -242,15 +242,44 @@ def _line_starts(text: str) -> list[int]:
     return starts
 
 
-def _inside_nested_literal(expression: str) -> bool:
-    """Return whether an interpolation expression ends inside a quoted literal."""
-    quote = None
-    for char in expression:
-        if quote is None and char in "\"'":
+def _interpolation_state(before: str) -> tuple[bool, bool] | None:
+    """Return (inside an expression, inside a quoted literal in it) for the
+    f-string still open at the end of ``before``, or None when none is open."""
+    for prefix in re.finditer(r"\b(rf|fr|f)([\"'])", before, re.IGNORECASE):
+        state = _scan_fstring(before, prefix.end(), prefix.group(2), "r" in prefix.group(1).lower())
+        if state is not None:
+            return state
+    return None
+
+
+def _scan_fstring(text: str, index: int, outer: str, raw: bool) -> tuple[bool, bool] | None:
+    depth = 0
+    quote: str | None = None
+    while index < len(text):
+        char = text[index]
+        if quote is not None:
+            if char == "\\":
+                index += 1
+            elif char == quote:
+                quote = None
+        elif depth == 0:
+            if char == "\\" and not raw:
+                index += 1
+            elif char == outer:
+                return None
+            elif char == "{":
+                if text.startswith("{", index + 1):
+                    index += 1
+                else:
+                    depth = 1
+        elif char in "\"'":
             quote = char
-        elif char == quote:
-            quote = None
-    return quote is not None
+        elif char == "{":
+            depth += 1
+        elif char == "}":
+            depth -= 1
+        index += 1
+    return depth > 0, quote is not None
 
 
 def _line_at(text: str, start: int, end: int) -> str:
@@ -271,14 +300,14 @@ def _hostname_context(text: str, start: int, end: int) -> bool:
     column = start - (text.rfind("\n", 0, start) + 1)
     before, after = line[:column], line[column + end - start :]
     url_context = re.search(r"[a-z][a-z0-9+.-]*://[^\s]*$", before, re.IGNORECASE)
-    # An f-string prefix with an open brace introduces an expression. The brace
-    # must sit inside that same literal, so an earlier f-string or dict on the
-    # line cannot hide a later host. A bare member expression stays code-shaped
-    # even inside a formatted URL (#1918); a host quoted inside the expression
-    # keeps the URL context it had before, and is skipped without one.
-    interpolation = re.search(r"\b(?:rf|fr|f)([\"'])(?:(?!\1)[^\n])*\{([^}]*)$", before, re.IGNORECASE)
-    if interpolation:
-        return bool(url_context) and _inside_nested_literal(interpolation.group(2))
+    # An f-string with an open brace introduces an expression; ``{{`` is an
+    # escaped brace and a closed literal does not count. A bare member
+    # expression stays code-shaped even inside a formatted URL (#1918); a host
+    # quoted inside the expression keeps the URL context it had before, and is
+    # skipped without one.
+    interpolation = _interpolation_state(before)
+    if interpolation is not None and interpolation[0]:
+        return bool(url_context) and interpolation[1]
     if url_context:
         return True
     if before.rstrip().endswith(("[", "{")):
