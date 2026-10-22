@@ -850,3 +850,32 @@ def test_saved_reflect_candidate_is_refused_after_new_contrary_evidence(tmp_path
         propose_payload(target=tmp_path, candidate_id=candidate["candidate_id"], reason="Merge exact copies.")
     assert {p: p.read_bytes() for p in before} == before
     assert not list((tmp_path / ".brigade/memory/proposals").glob("*/revision-1.json"))
+
+
+def test_null_block_id_cannot_address_an_unanchored_claim(tmp_path):
+    path = setup(tmp_path, anchored=False)
+    before = path.read_bytes()
+    null = op("replace_block", text="Keep the cache cold.")
+    null["block_id"] = None
+    null["expected_block_hash"] = hashlib.sha256(b"Keep the cache warm.").hexdigest()
+    with pytest.raises(api.ProposalError, match="no valid"):
+        create(tmp_path, [null])
+    assert path.read_bytes() == before
+    assert not list((tmp_path / ".brigade/memory/proposals").glob("*/revision-1.json"))
+
+
+def test_duplicate_merge_refuses_when_a_retained_card_links_a_removed_block(tmp_path):
+    path = card(tmp_path, "cache", body=CLAIM)
+    other = card(tmp_path, "other", body=CLAIM.replace("123abc", "456def"))
+    linker = card(tmp_path, "linker", body="See [[other#^c-456def]] for the claim.")
+    before = {p: p.read_bytes() for p in (path, other, linker)}
+    merge = op("merge_exact_duplicates", other_card="memory/cards/other.md")
+    with pytest.raises(api.ProposalError, match="link to a removed claim block"):
+        create(tmp_path, [merge], paths=[PATH, "memory/cards/other.md"])
+    assert {p: p.read_bytes() for p in before} == before
+
+
+def test_link_reference_definitions_are_not_anchored():
+    from brigade import memory_proposal_v2_ops as delta
+
+    assert delta.blocks("---\ntopic: x\n---\n[support]: https://example.com\n") == []

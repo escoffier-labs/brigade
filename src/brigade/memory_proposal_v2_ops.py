@@ -80,7 +80,9 @@ def blocks(text: str) -> list[Block]:
         code = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
         bullet = re.match(r"^ {0,3}(?:[-+*]|\d+[.)])\s+", line)
         excluded = (
-            not stripped or index in table or bool(re.match(r"^(?: {0,3}(?:#{1,6}\s|>|\|)|previously\b| {4}|\t)", line))
+            not stripped
+            or index in table
+            or bool(re.match(r"^(?: {0,3}(?:#{1,6}\s|>|\||\[[^\]\n]+\]:\s)|previously\b| {4}|\t)", line))
         )
         if fence or code or excluded or bullet:
             finish()
@@ -175,6 +177,8 @@ def apply_op(
     text = texts[path]
     if text is None:
         raise legacy.ProposalError("op addresses a removed card")
+    if not isinstance(op["block_id"], str) or not ANCHOR_ID.fullmatch(op["block_id"]):
+        raise legacy.ProposalError("op block id is not a valid claim anchor")
     found = [block for block in blocks(text) if block.block_id == op["block_id"]]
     if len(found) != 1 or found[0].sha256 != op["expected_block_hash"]:
         raise legacy.ProposalError("block id or expected block hash mismatch")

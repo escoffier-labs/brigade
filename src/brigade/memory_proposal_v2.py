@@ -5,6 +5,7 @@ from __future__ import annotations
 import difflib
 import copy
 import posixpath
+import re
 import uuid
 from pathlib import Path
 from typing import Any
@@ -153,6 +154,31 @@ def _consolidated_at(target: Path, source: dict[str, Any], refs: list[str]) -> s
     ):
         raise legacy.ProposalError("consolidation would hide uncited pending evidence")
     return stamp
+
+
+def _refuse_dangling_block_links(
+    paths: list[Path],
+    target: Path,
+    texts: dict[str, str | None],
+    sources: list[dict[str, Any]],
+    removed: dict[str, str],
+) -> None:
+    """Refuse a merge when a retained card links to a block anchor the survivor body lacks."""
+    originals = {s["path"]: s["text"] for s in sources}
+    gone: set[str] = set()
+    for loser, survivor in removed.items():
+        survivor_text = texts[survivor] or ""
+        kept = set(re.findall(r"\^(c-[0-9a-f]{6})\b", survivor_text))
+        gone |= set(re.findall(r"\^(c-[0-9a-f]{6})\b", originals[loser])) - kept
+    if not gone:
+        return
+    for path in paths:
+        rel = path.relative_to(target).as_posix()
+        if rel in removed:
+            continue
+        text = texts[rel] if rel in texts else io.text(path, limit=io.MAX_CARD_BYTES, absent=True)
+        if text and gone & set(re.findall(r"#\^(c-[0-9a-f]{6})\b", text)):
+            raise legacy.ProposalError("merge would break a link to a removed claim block")
 
 
 def _references(
@@ -317,6 +343,7 @@ def compose(
         raise legacy.ProposalError("no valid delta ops remain")
     evidence = _evidence(target, accepted, sources)
     texts = _derived(texts, sources, removed, proposal_id)
+    _refuse_dangling_block_links(paths, target, texts, sources, removed)
     references, fences = _references(target, care, paths, texts, removed)
     changes = [legacy._change(s["path"], s["text"], texts[s["path"]]) for s in sources if texts[s["path"]] != s["text"]]
     changes.extend(references)
