@@ -128,7 +128,9 @@ def fetch_json(url: str, *, token: str, body: dict[str, Any] | None = None) -> A
         raise ValueError("oversized CI request")
     request = urllib.request.Request(url, data=data, headers=headers)
     try:
-        with urllib.request.build_opener(NoRedirect()).open(request, timeout=30) as response:
+        with urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect()).open(
+            request, timeout=30
+        ) as response:
             raw = response.read(MAX_BYTES + 1)
         if len(raw) > MAX_BYTES:
             raise ValueError("oversized CI response")

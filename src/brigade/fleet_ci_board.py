@@ -120,7 +120,9 @@ def validate_snapshot(raw: Any) -> dict[str, Any]:
     for pr in pulls:
         if not isinstance(pr, dict) or _object_id(pr.get("number")) is None or _head(pr.get("head_sha")) is None:
             raise ValueError("invalid CI PR head")
-        clean_pulls.append({"number": pr["number"], "head_sha": _head(pr["head_sha"])})
+        clean_pulls.append(
+            {"number": pr["number"], "head_sha": _head(pr["head_sha"]), "updated_at": _timestamp(pr.get("updated_at"))}
+        )
     clean_required = []
     for check in required:
         if not isinstance(check, dict) or _text(check.get("context"), 255) is None:
@@ -436,8 +438,27 @@ def _pr_event(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
     if not result or not result[0]:
         return
     snapshot = json.loads(result[0])
-    if _order_time(row["updated_at"]) < _order_time(snapshot["observed_at"]):
+    current = next((p for p in snapshot["pulls"] if p["number"] == row["object_id"]), None)
+    if current is None and row["action"] == "closed":
         return
+    provider_updated = current.get("updated_at") if current else None
+    if provider_updated:
+        if _order_time(row["updated_at"]) <= _order_time(provider_updated):
+            return
+    elif snapshot.get("repair_started_at"):
+        # A complete repair can establish absence without a provider close
+        # timestamp. A delayed reopen cannot prove membership is newer. Missing
+        # provider time for an existing head is equally ambiguous.
+        snapshot.update(pulls_complete=False, complete=False, reason="PR-event-order-unknown")
+        conn.execute("UPDATE ci_repo_state SET snapshot=? WHERE repo=?", (json.dumps(snapshot), row["repo"]))
+        return
+    else:
+        # Legacy snapshots have no provider ordering fence. Compare only Hub
+        # receipts and explicitly retain unknown inventory scope.
+        boundary = snapshot.get("received_at")
+        if not boundary or _order_time(row["observed_at"]) < _order_time(boundary):
+            return
+        snapshot.update(pulls_complete=False, complete=False, reason="PR-event-order-unknown")
     pulls = [p for p in snapshot["pulls"] if p["number"] != row["object_id"]]
     if row["action"] != "closed":
         pulls.append(
@@ -446,6 +467,7 @@ def _pr_event(conn: sqlite3.Connection, row: dict[str, Any]) -> None:
                 "head_sha": row["head_sha"],
                 "source": row["source"],
                 "observed_at": row["observed_at"],
+                "updated_at": row["updated_at"],
             }
         )
     snapshot["pulls"] = pulls
@@ -594,8 +616,12 @@ def _latest_run(snapshot: dict[str, Any], runs: list[dict[str, Any]]) -> dict[st
             r
             for r in runs
             if r["head_sha"] == snapshot.get("head_sha")
+            and r.get("head_branch") in (None, snapshot.get("default_branch"))
             and r.get("creation_known")
-            and _order_time(r["created_at"]) > _order_time(snapshot["observed_at"])
+            and anchor.get("creation_known")
+            and _order_time(r["created_at"]) > _order_time(anchor["created_at"])
+            and snapshot.get("received_at")
+            and _order_time(r["observed_at"]) > _order_time(snapshot["received_at"])
         ]
         return max(newer, key=lambda r: (_order_time(r["created_at"]), r["attempt"]), default=anchor)
     runs = [

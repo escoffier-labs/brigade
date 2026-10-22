@@ -370,3 +370,56 @@ def test_default_branch_with_slash_is_encoded_in_paths_but_raw_in_workflow_query
     else:
         assert parse_qs(urlsplit(run[7]).query)["branch"] == [branch]
         assert all(c[0] == "gh" for c in provider.calls)
+
+
+def test_ci_bearers_reach_http_hub_without_environment_proxy(tmp_path, monkeypatch):
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+    from brigade import fleet_ci_node as node
+
+    hub_requests, proxy_requests = [], []
+
+    def handler(records, location):
+        class Handler(BaseHTTPRequestHandler):
+            def respond(self):
+                self.rfile.read(int(self.headers.get("Content-Length", "0")))
+                records.append((self.command, self.path, self.headers.get("Authorization")))
+                body = json.dumps({"location": location}).encode()
+                self.send_response(200)
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            do_GET = do_POST = respond
+
+            def log_message(self, *args):
+                pass
+
+        return Handler
+
+    hub = ThreadingHTTPServer(("localhost", 0), handler(hub_requests, "hub"))
+    proxy = ThreadingHTTPServer(("localhost", 0), handler(proxy_requests, "proxy"))
+    threads = [
+        threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+        for server in (hub, proxy)
+    ]
+    for thread in threads:
+        thread.start()
+    try:
+        proxy_url = f"http://localhost:{proxy.server_port}"
+        for key in ("HTTP_PROXY", "http_proxy", "HTTPS_PROXY", "https_proxy", "ALL_PROXY", "all_proxy"):
+            monkeypatch.setenv(key, proxy_url)
+        for key in ("NO_PROXY", "no_proxy"):
+            monkeypatch.setenv(key, "")
+        origin = f"http://localhost:{hub.server_port}"
+        node_result = node.fetch_json(origin + "/ci", token="example-node", body={"events": []})
+        admin_result = node.fetch_json(origin + "/ci/work", token="example-admin")
+        assert proxy_requests == []
+        assert hub_requests == [("POST", "/ci", "Bearer example-node"), ("GET", "/ci/work", "Bearer example-admin")]
+        assert node_result == admin_result == {"location": "hub"}
+    finally:
+        for server in (hub, proxy):
+            server.shutdown()
+            server.server_close()
+        for thread in threads:
+            thread.join(timeout=2)

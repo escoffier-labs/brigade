@@ -8,7 +8,7 @@ from urllib.parse import quote
 
 from . import fleet_ci_board as board
 from .claude_actions_evidence import _text
-from .claude_review_evidence import _head, _object_id
+from .claude_review_evidence import _head, _object_id, _timestamp
 from .github_reader import GitHubReader
 
 PAGE_SIZE = 100
@@ -225,7 +225,9 @@ def reconcile_repo(
             head = pr.get("head")
             if _object_id(pr.get("number")) is None or not isinstance(head, dict) or _head(head.get("sha")) is None:
                 raise Unavailable("PR-scope-unknown")
-            snapshot["pulls"].append({"number": pr["number"], "head_sha": _head(head["sha"])})
+            snapshot["pulls"].append(
+                {"number": pr["number"], "head_sha": _head(head["sha"]), "updated_at": _timestamp(pr.get("updated_at"))}
+            )
         snapshot["pulls_complete"] = True
     except Unavailable as exc:
         errors.append(str(exc))

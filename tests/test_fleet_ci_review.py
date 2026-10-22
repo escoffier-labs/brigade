@@ -592,3 +592,134 @@ def test_each_repo_repair_marker_uses_hub_time_plus_nonnegative_monotonic_elapse
     assert result == {"reconciled": 2, "incomplete": 0}
     assert posted[0]["repair_started_at"] == NOW
     assert posted[1]["repair_started_at"] == expected
+
+
+@pytest.mark.parametrize("action", ["closed", "synchronize"])
+def test_ahead_node_clock_cannot_suppress_newer_provider_pr_update(tmp_path, action):
+    conn = fleet_hub.init_db(tmp_path / "hub.db")
+    ci.store(
+        conn,
+        {
+            "repositories": [
+                observation(
+                    observed_at="2026-10-21T13:00:00Z",
+                    repair_started_at=NOW,
+                    pulls=[{"number": 5, "head_sha": OLD, "updated_at": NOW}],
+                )
+            ]
+        },
+        now="2026-10-21T12:01:00Z",
+    )
+    pr = dict(
+        repo="example/public",
+        event="pull_request",
+        pr_number=5,
+        action=action,
+        head_sha=HEAD,
+        status="unknown",
+        updated_at="2026-10-21T12:02:00Z",
+    )
+    ci.store(conn, {"events": [pr]}, now="2026-10-21T12:03:00Z")
+    pulls = ci.load_view(conn, now="2026-10-21T12:03:00Z")["repositories"][0]["pulls"]
+    assert [p["head_sha"] for p in pulls] == ([] if action == "closed" else [HEAD])
+    conn.close()
+
+
+@pytest.mark.parametrize("action,repaired_head", [("synchronize", HEAD), ("closed", HEAD), ("reopened", None)])
+def test_late_old_pr_delivery_after_repair_cannot_undo_head_or_closed_inventory(tmp_path, action, repaired_head):
+    conn = fleet_hub.init_db(tmp_path / "hub.db")
+    pulls = (
+        []
+        if repaired_head is None
+        else [{"number": 5, "head_sha": repaired_head, "updated_at": "2026-10-21T12:04:00Z"}]
+    )
+    ci.store(
+        conn,
+        {
+            "repositories": [
+                observation(observed_at="2026-10-21T11:00:00Z", repair_started_at="2026-10-21T12:05:00Z", pulls=pulls)
+            ]
+        },
+        now="2026-10-21T12:06:00Z",
+    )
+    old = dict(
+        repo="example/public",
+        event="pull_request",
+        pr_number=5,
+        action=action,
+        head_sha=OLD,
+        status="unknown",
+        updated_at="2026-10-21T12:03:00Z",
+    )
+    ci.store(conn, {"events": [old]}, now="2026-10-21T12:07:00Z")
+    current = ci.load_view(conn, now="2026-10-21T12:07:00Z")["repositories"][0]["pulls"]
+    assert [p["head_sha"] for p in current] == ([] if repaired_head is None else [repaired_head])
+    conn.close()
+
+
+@pytest.mark.parametrize("updated", [NOW, None])
+def test_reconcile_preserves_optional_provider_pr_timestamp_through_hub(tmp_path, updated):
+    class PullProvider(Provider):
+        def __call__(self, argv, **kw):
+            if argv[:2] != ["octopool", "whoami"]:
+                path = argv[argv.index("--path") + 1] if argv[0] == "octopool" else argv[7].split("?")[0]
+                if path.endswith("/pulls"):
+                    self.calls.append(list(argv))
+                    return reply(argv, 200, [{"number": 5, "head": {"sha": OLD}, "updated_at": updated}])
+            return super().__call__(argv, **kw)
+
+    payload = repair.reconcile_repo(reader(tmp_path, PullProvider()), now="2026-10-21T13:00:00Z")
+    assert payload["repositories"][0]["pulls"][0].get("updated_at") == updated
+    conn = fleet_hub.init_db(tmp_path / "hub.db")
+    ci.store(conn, payload, now="2026-10-21T12:01:00Z")
+    stored = json.loads(conn.execute("SELECT snapshot FROM ci_repo_state").fetchone()[0])
+    assert stored["pulls"][0].get("updated_at") == updated
+    conn.close()
+
+
+@pytest.mark.parametrize("branch,expected", [(None, 12), ("main", 12), ("feature", 11)])
+def test_ahead_node_clock_does_not_hide_new_workflow_or_promote_late_old_completion(tmp_path, branch, expected):
+    conn = fleet_hub.init_db(tmp_path / "hub.db")
+    ci.store(
+        conn,
+        {
+            "source": "github-reconcile",
+            "events": [dict(event(), created_at=NOW)],
+            "repositories": [observation(observed_at="2026-10-21T13:00:00Z", latest_run_id=11)],
+        },
+        now="2026-10-21T12:01:00Z",
+    )
+    newer = dict(
+        event(),
+        run_id=12,
+        status="queued",
+        conclusion=None,
+        head_branch=branch,
+        created_at="2026-10-21T12:02:00Z",
+        updated_at="2026-10-21T12:02:00Z",
+    )
+    ci.store(conn, {"events": [newer]}, now="2026-10-21T12:03:00Z")
+    assert ci.load_view(conn, now="2026-10-21T12:03:00Z")["repositories"][0]["latest_run"]["object_id"] == expected
+    old = dict(
+        event(), run_id=10, created_at="2026-10-21T11:59:00Z", updated_at="2026-10-21T12:04:00Z", head_branch="main"
+    )
+    ci.store(conn, {"events": [old]}, now="2026-10-21T12:05:00Z")
+    assert ci.load_view(conn, now="2026-10-21T12:05:00Z")["repositories"][0]["latest_run"]["object_id"] == expected
+    conn.close()
+
+
+def test_workflow_evidence_received_before_repair_cannot_override_rest_anchor(tmp_path):
+    conn = fleet_hub.init_db(tmp_path / "hub.db")
+    history = dict(event(), run_id=12, created_at="2026-10-21T12:02:00Z", updated_at="2026-10-21T12:02:00Z")
+    ci.store(conn, {"events": [history]}, now="2026-10-21T12:03:00Z")
+    ci.store(
+        conn,
+        {
+            "source": "github-reconcile",
+            "events": [dict(event(), created_at=NOW)],
+            "repositories": [observation(observed_at="2026-10-21T11:00:00Z", latest_run_id=11)],
+        },
+        now="2026-10-21T12:04:00Z",
+    )
+    assert ci.load_view(conn, now="2026-10-21T12:04:00Z")["repositories"][0]["latest_run"]["object_id"] == 11
+    conn.close()
