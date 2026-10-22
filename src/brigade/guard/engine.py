@@ -242,6 +242,17 @@ def _line_starts(text: str) -> list[int]:
     return starts
 
 
+def _inside_nested_literal(expression: str) -> bool:
+    """Return whether an interpolation expression ends inside a quoted literal."""
+    quote = None
+    for char in expression:
+        if quote is None and char in "\"'":
+            quote = char
+        elif char == quote:
+            quote = None
+    return quote is not None
+
+
 def _line_at(text: str, start: int, end: int) -> str:
     line_start = text.rfind("\n", 0, start) + 1
     line_end = text.find("\n", end)
@@ -259,15 +270,16 @@ def _hostname_context(text: str, start: int, end: int) -> bool:
     line = _line_at(text, start, end)
     column = start - (text.rfind("\n", 0, start) + 1)
     before, after = line[:column], line[column + end - start :]
-    # Interpolated member expressions stay code-shaped even inside a URL
-    # context: an f-string prefix with an open brace introduces an expression,
-    # so reject it before accepting a URL or a surrounding quote (#1918). The
-    # brace must sit inside that same literal, so an earlier f-string or dict
-    # elsewhere on the line cannot hide a later URL host, and a URL literal
-    # quoted inside the expression keeps its URL context.
-    if re.search(r"\b(?:rf|fr|f)([\"'])(?:(?!\1)[^\n])*\{(?:(?!://)[^}])*$", before, re.IGNORECASE):
-        return False
-    if re.search(r"[a-z][a-z0-9+.-]*://[^\s]*$", before, re.IGNORECASE):
+    url_context = re.search(r"[a-z][a-z0-9+.-]*://[^\s]*$", before, re.IGNORECASE)
+    # An f-string prefix with an open brace introduces an expression. The brace
+    # must sit inside that same literal, so an earlier f-string or dict on the
+    # line cannot hide a later host. A bare member expression stays code-shaped
+    # even inside a formatted URL (#1918); a host quoted inside the expression
+    # keeps the URL context it had before, and is skipped without one.
+    interpolation = re.search(r"\b(?:rf|fr|f)([\"'])(?:(?!\1)[^\n])*\{([^}]*)$", before, re.IGNORECASE)
+    if interpolation:
+        return bool(url_context) and _inside_nested_literal(interpolation.group(2))
+    if url_context:
         return True
     if before.rstrip().endswith(("[", "{")):
         return False
