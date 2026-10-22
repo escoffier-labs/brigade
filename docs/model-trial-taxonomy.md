@@ -34,7 +34,8 @@ the headline score stats.
 ## Process exit
 0 = only accepted/unscored. 1 = ≥1 deterministic non-pass (rejected or non-timeout
 execution_error), no measurement failures. 3 = any measurement failure; dominates 1 (matches
-brigade run exit-3).
+brigade run exit-3). 4 = the trial stopped before launching every cell (≥1 `not_run` cell) and had
+no measurement failures; it dominates 1 and 0 so an incomplete trial never reads as a pass.
 
 ## Regrade
 brigade model trial regrade <output-dir> re-runs graders against stored run/final.txt (verified
@@ -68,3 +69,21 @@ Caps, counted as retries after the first attempt per cell (`model_trials.RETRY_C
 
 A cell that reaches its cap stays in its failed state and keeps counting in
 measurement_failures.
+
+## Drain (not_run)
+A running trial can be told to stop launching cells without losing work in flight:
+
+- `brigade model trial drain <output-dir>` writes `drain.json` into the artifact directory, or
+- the first SIGINT or SIGTERM delivered to the runner process requests the same drain. The
+  handlers are then restored, so a second signal hard-stops the process. A terminal Ctrl-C also
+  reaches the seat subprocess in the foreground process group, so use `drain` or a plain
+  `kill -TERM <runner-pid>` when in-flight cells must finish.
+
+The runner checks before each launch and before each retry. The cell in flight finishes, is graded,
+and is recorded normally. Every cell that has not started is written as `state: not_run` with
+`not_run_reason: drained`. `not_run` is not one of the six terminal states and is not a failure:
+it has no run_dir, no failure_reason, and no score, it is counted under its own key in summary.json,
+and it is not part of measurement_failures. `resume` launches `not_run` cells (and cells left
+`running` by a killed runner). A cell that already has a finished record is never overwritten with
+`not_run`, and a retry that is due when the drain arrives is not started. A stale `drain.json` is
+removed when the next `run` or `resume` starts.

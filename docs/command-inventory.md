@@ -371,6 +371,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade memory vault-search`
 - `brigade memory vault-show`
 - `brigade model scorecard`
+- `brigade model trial drain`
 - `brigade model trial plan`
 - `brigade model trial regrade`
 - `brigade model trial resume`

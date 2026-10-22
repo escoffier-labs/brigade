@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - `brigade model trial run|resume --retry-transient` re-runs `adapter_error` and timeout-reason `execution_error` cells as new attempts (caps: 2 and 1), keeping each failed attempt in the cell's `prior_attempts` record. Deterministic results are never retried.
+- `brigade model trial drain <output-dir>` and the first SIGINT or SIGTERM to a running trial stop it from launching new cells while in-flight cells finish and record results. Unlaunched cells are recorded as `not_run` (not a failure), `resume` launches them, and an incomplete trial exits 4.
 
 ### Fixed
 

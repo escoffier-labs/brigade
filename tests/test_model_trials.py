@@ -1128,3 +1128,126 @@ def test_cli_retry_transient_flag_reaches_execute_for_run_and_resume_only(tmp_pa
     else:
         raise AssertionError("plan must not accept --retry-transient")
     capsys.readouterr()
+
+
+# --- #1977: clean drain -------------------------------------------------------
+
+
+def _three_cell_manifest(tmp_path):
+    manifest = _manifest()
+    manifest["trials"] = 3
+    manifest_path = tmp_path / "eval.json"
+    manifest_path.write_text(json.dumps(manifest))
+    return manifest_path
+
+
+def _cells_by_trial(root):
+    cells = [json.loads(path.read_text()) for path in (root / "cells").glob("*/cell.json")]
+    return {cell["trial"]: cell for cell in cells}
+
+
+def _drain_during_first_cell(monkeypatch, trigger):
+    calls: list[str] = []
+
+    def fake_run(task, roster, **kwargs):
+        calls.append(kwargs["output_dir"].parent.parent.parent.name)
+        if len(calls) == 1:
+            trigger()
+        return _write_outcome(kwargs["output_dir"], "ok")
+
+    monkeypatch.setattr(model_trials.aboyeur, "run", fake_run)
+    return calls
+
+
+def test_drain_marker_lets_in_flight_cell_finish_and_marks_rest_not_run(tmp_path, monkeypatch):
+    manifest_path = _three_cell_manifest(tmp_path)
+    root = tmp_path / "results"
+    calls = _drain_during_first_cell(monkeypatch, lambda: model_trials.request_drain(root))
+    rc = model_trials.execute(manifest_path, _roster(), workspace=tmp_path, output_dir=root, resume=False)
+    assert len(calls) == 1
+    cells = _cells_by_trial(root)
+    assert cells[1]["state"] == "accepted"
+    for trial in (2, 3):
+        assert cells[trial]["state"] == "not_run"
+        assert cells[trial]["not_run_reason"] == "drained"
+        assert "run_dir" not in cells[trial]
+        assert "failure_reason" not in cells[trial]
+    summary = json.loads((root / "summary.json").read_text())
+    assert summary["counts"] == {"accepted": 1, "not_run": 2}
+    assert summary["measurement_failures"] == 0
+    # An incomplete trial must not look like a clean pass.
+    assert rc == model_trials.EXIT_INCOMPLETE == 4
+
+
+def test_sigterm_drains_then_restores_the_previous_handlers(tmp_path, monkeypatch):
+    import os
+    import signal
+
+    manifest_path = _three_cell_manifest(tmp_path)
+    root = tmp_path / "results"
+    before = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+    calls = _drain_during_first_cell(monkeypatch, lambda: os.kill(os.getpid(), signal.SIGTERM))
+    rc = model_trials.execute(manifest_path, _roster(), workspace=tmp_path, output_dir=root, resume=False)
+    assert len(calls) == 1
+    assert rc == 4
+    cells = _cells_by_trial(root)
+    assert cells[1]["state"] == "accepted"
+    assert [cells[t]["state"] for t in (2, 3)] == ["not_run", "not_run"]
+    assert {sig: signal.getsignal(sig) for sig in before} == before
+
+
+def test_resume_after_drain_runs_only_the_unlaunched_cells(tmp_path, monkeypatch):
+    manifest_path = _three_cell_manifest(tmp_path)
+    root = tmp_path / "results"
+    _drain_during_first_cell(monkeypatch, lambda: model_trials.request_drain(root))
+    assert model_trials.execute(manifest_path, _roster(), workspace=tmp_path, output_dir=root, resume=False) == 4
+    calls = _scripted_run(monkeypatch, ["ok"])
+    # The drain marker from the earlier run must not stop the resume.
+    assert model_trials.execute(manifest_path, _roster(), workspace=tmp_path, output_dir=root, resume=True) == 0
+    assert len(calls) == 2
+    assert {cell["state"] for cell in _cells_by_trial(root).values()} == {"accepted"}
+
+
+def test_drain_keeps_existing_terminal_records_and_skips_retries(tmp_path, monkeypatch):
+    manifest_path = _three_cell_manifest(tmp_path)
+    root = tmp_path / "results"
+    _scripted_run(monkeypatch, ["adapter"])
+    assert model_trials.execute(manifest_path, _roster(), workspace=tmp_path, output_dir=root, resume=False) == 3
+    states = {t: c["state"] for t, c in _cells_by_trial(root).items()}
+    assert set(states.values()) == {"adapter_error"}
+
+    calls: list[int] = []
+
+    def fake_run(task, roster, **kwargs):
+        calls.append(1)
+        model_trials.request_drain(root)
+        return _write_outcome(kwargs["output_dir"], "adapter")
+
+    monkeypatch.setattr(model_trials.aboyeur, "run", fake_run)
+    rc = model_trials.execute(
+        manifest_path, _roster(), workspace=tmp_path, output_dir=root, resume=True, retry_transient=True
+    )
+    # One retry started before the drain; no inline retry follows it, and the
+    # other failed cells keep their terminal records instead of becoming not_run.
+    assert len(calls) == 1
+    assert {c["state"] for c in _cells_by_trial(root).values()} == {"adapter_error"}
+    assert rc == 3
+
+
+def test_request_drain_writes_marker_and_cli_drain_command(tmp_path, capsys):
+    root = tmp_path / "results"
+    assert cli.main(["model", "trial", "drain", str(root)]) == 2
+    assert "no trial plan" in capsys.readouterr().err
+    root.mkdir()
+    (root / "plan.json").write_text("{}")
+    assert cli.main(["model", "trial", "drain", str(root)]) == 0
+    marker = json.loads((root / model_trials.DRAIN_MARKER).read_text())
+    assert marker["schema"] == model_trials.DRAIN_SCHEMA
+    assert isinstance(marker["requested_at"], str)
+    assert "drain requested" in capsys.readouterr().out
+
+
+def test_process_exit_incomplete_sits_between_measurement_and_deterministic_failures():
+    assert model_trials.process_exit({"measurement_failures": 0, "counts": {"accepted": 1, "not_run": 1}}) == 4
+    assert model_trials.process_exit({"measurement_failures": 0, "counts": {"rejected": 1, "not_run": 1}}) == 4
+    assert model_trials.process_exit({"measurement_failures": 1, "counts": {"adapter_error": 1, "not_run": 1}}) == 3

@@ -5,13 +5,16 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import signal
 import statistics
 import sys
+import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterator, Mapping
 
 from . import aboyeur, localio, run_budget, runguard
 from .roster import Roster
@@ -26,6 +29,13 @@ MEASUREMENT_STATES = frozenset({"adapter_error", "grader_error"})
 # Retry caps for --retry-transient: the most retries (attempts after the first)
 # allowed for a cell whose latest attempt failed for the named transient kind.
 RETRY_CAPS: dict[str, int] = {"adapter_error": 2, "timeout": 1}
+# A cell that was never launched. Not a terminal state: resume launches it.
+NOT_RUN_STATE = "not_run"
+NOT_RUN_DRAINED = "drained"
+DRAIN_MARKER = "drain.json"
+DRAIN_SCHEMA = "brigade.eval_drain.v1"
+# Process exit for a trial that stopped before launching every cell.
+EXIT_INCOMPLETE = 4
 
 
 @dataclass(frozen=True)
@@ -589,6 +599,8 @@ def process_exit(summary: dict[str, Any]) -> int:
     counts = summary.get("counts")
     if not isinstance(counts, dict):
         return 0
+    if counts.get(NOT_RUN_STATE, 0) > 0:
+        return EXIT_INCOMPLETE
     if counts.get("rejected", 0) > 0 or counts.get("execution_error", 0) > 0:
         return 1
     return 0
@@ -665,6 +677,91 @@ def build_plan(manifest_path: Path, roster: Roster, output_dir: Path) -> tuple[d
         "stale_cells": stale,
     }
     return payload, cells
+
+
+def request_drain(output_dir: Path) -> Path:
+    """Ask a running trial to stop launching cells; in-flight cells finish and record results."""
+    output_dir = output_dir.expanduser().resolve()
+    marker = output_dir / DRAIN_MARKER
+    localio.write_json(
+        marker,
+        {"schema": DRAIN_SCHEMA, "requested_at": datetime.now(timezone.utc).isoformat()},
+    )
+    return marker
+
+
+class _Drain:
+    """Drain request state: a marker file written by `trial drain`, or SIGINT/SIGTERM to the runner."""
+
+    def __init__(self, output_dir: Path) -> None:
+        self.marker = output_dir / DRAIN_MARKER
+        self.signaled = False
+
+    def clear_stale_marker(self) -> None:
+        self.marker.unlink(missing_ok=True)
+
+    def requested(self) -> bool:
+        return self.signaled or self.marker.exists()
+
+    @contextmanager
+    def signals(self) -> Iterator[None]:
+        """Turn the first SIGINT or SIGTERM into a drain request, then restore the previous handlers.
+
+        A second signal therefore gets the original behavior and hard-stops the trial. Handlers
+        can only be installed from the main thread, so other callers rely on the marker file.
+        """
+        if threading.current_thread() is not threading.main_thread():
+            yield
+            return
+        previous: dict[int, Any] = {}
+
+        def restore() -> None:
+            for signum, handler in previous.items():
+                signal.signal(signum, handler if handler is not None else signal.SIG_DFL)
+
+        def handler(signum: int, frame: Any) -> None:
+            self.signaled = True
+            restore()
+            sys.stderr.write(
+                "drain requested: finishing in-flight cells and launching no more (signal again to abort)\n"
+            )
+
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous[signum] = signal.getsignal(signum)
+            signal.signal(signum, handler)
+        try:
+            yield
+        finally:
+            restore()
+
+
+def _mark_not_run(
+    cell: CellSpec,
+    cell_dir: Path,
+    current: dict[str, Any] | None,
+    plan: dict[str, Any],
+    *,
+    reason: str,
+    stopped_by: str | None = None,
+) -> bool:
+    """Record an unlaunched cell as not_run. Never overwrites a finished attempt's record."""
+    if current is not None and current.get("state") not in {"running", NOT_RUN_STATE}:
+        return False
+    payload: dict[str, Any] = {
+        "schema": CELL_SCHEMA,
+        **cell.payload(),
+        "state": NOT_RUN_STATE,
+        "not_run_reason": reason,
+        "manifest_digest": plan["manifest_digest"],
+    }
+    if stopped_by is not None:
+        payload["stopped_by"] = stopped_by
+    attempt = (current or {}).get("attempt")
+    if isinstance(attempt, int) and not isinstance(attempt, bool) and attempt > 0:
+        payload["attempt"] = attempt
+    cell_dir.mkdir(parents=True, exist_ok=True)
+    localio.write_json(cell_dir / "cell.json", payload)
+    return True
 
 
 class _TrialAbort(Exception):
@@ -808,43 +905,56 @@ def execute(
             f"note: {len(plan['stale_cells'])} stale cell(s) from the previous plan kept and counted in summary",
             file=sys.stderr,
         )
-    for cell in cells:
-        cell_dir = output_dir / "cells" / cell.cell_id
-        current = _load_json(cell_dir / "cell.json")
-        history: list[dict[str, Any]] = []
-        if resume and current is not None and _resume_skip_state(str(current.get("state", ""))):
-            if not (retry_transient and _retry_allowed(current)):
+    drain = _Drain(output_dir)
+    drain.clear_stale_marker()
+    not_run = 0
+    with drain.signals():
+        for cell in cells:
+            cell_dir = output_dir / "cells" / cell.cell_id
+            current = _load_json(cell_dir / "cell.json")
+            history: list[dict[str, Any]] = []
+            if resume and current is not None and _resume_skip_state(str(current.get("state", ""))):
+                if not (retry_transient and _retry_allowed(current)):
+                    continue
+                history = [*_prior_attempts(current), _attempt_summary(current)]
+            elif resume and current is not None and current.get("state") in REGRADEABLE_STATES:
+                try:
+                    _regrade_cell_from_disk(cell_dir, cell, plan)
+                except ValueError as exc:
+                    print(f"error: {exc}", file=sys.stderr)
+                    return 2
                 continue
-            history = [*_prior_attempts(current), _attempt_summary(current)]
-        elif resume and current is not None and current.get("state") in REGRADEABLE_STATES:
+            if drain.requested():
+                if _mark_not_run(cell, cell_dir, current, plan, reason=NOT_RUN_DRAINED):
+                    not_run += 1
+                continue
+            if isinstance(current, dict) and isinstance(current.get("started_at"), str):
+                started_at = current["started_at"]
+            else:
+                started_at = datetime.now(timezone.utc).isoformat()
             try:
-                _regrade_cell_from_disk(cell_dir, cell, plan)
-            except ValueError as exc:
-                print(f"error: {exc}", file=sys.stderr)
-                return 2
-            continue
-        if isinstance(current, dict) and isinstance(current.get("started_at"), str):
-            started_at = current["started_at"]
-        else:
-            started_at = datetime.now(timezone.utc).isoformat()
-        try:
-            while True:
-                payload = _run_attempt(
-                    cell,
-                    roster=roster,
-                    plan=plan,
-                    workspace=workspace,
-                    output_dir=output_dir,
-                    cell_dir=cell_dir,
-                    started_at=started_at,
-                    history=history,
-                    run_budget_payload=run_budget_payload,
-                )
-                if not (retry_transient and _retry_allowed(payload)):
-                    break
-                history = [*_prior_attempts(payload), _attempt_summary(payload)]
-        except _TrialAbort as abort:
-            return abort.code
+                while True:
+                    payload = _run_attempt(
+                        cell,
+                        roster=roster,
+                        plan=plan,
+                        workspace=workspace,
+                        output_dir=output_dir,
+                        cell_dir=cell_dir,
+                        started_at=started_at,
+                        history=history,
+                        run_budget_payload=run_budget_payload,
+                    )
+                    if drain.requested() or not (retry_transient and _retry_allowed(payload)):
+                        break
+                    history = [*_prior_attempts(payload), _attempt_summary(payload)]
+            except _TrialAbort as abort:
+                return abort.code
+    if not_run:
+        print(
+            f"drained: {not_run} cell(s) not run; `brigade model trial resume` launches them",
+            file=sys.stderr,
+        )
     summary = summarize(output_dir)
     localio.write_json(output_dir / "summary.json", summary)
     return process_exit(summary)
