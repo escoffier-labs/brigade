@@ -179,12 +179,13 @@ def test_only_operator_reply_can_answer_and_grants_apply(hub):
     )
 
 
-def test_schema_37_migration_and_current_version_selfheal(hub):
+@pytest.mark.parametrize("version", [37, 40])
+def test_legacy_migration_and_current_version_selfheal(hub, version):
     db = hub[3]
     with sqlite3.connect(db) as conn:
         conn.execute("DROP TRIGGER IF EXISTS fleet_questions_reply")
         conn.execute("DROP TABLE IF EXISTS fleet_questions")
-        conn.execute("PRAGMA user_version=37")
+        conn.execute(f"PRAGMA user_version={version}")
     fleet_hub.init_db(db).close()
     assert create(hub)[0] == 201
     with sqlite3.connect(db) as conn:

@@ -804,7 +804,7 @@ that checks the caller's active status within the same snapshot.
 
 `fleet_ask_user` accepts `question`, optional `timeout_secs` from 1 to 120
 (default 60), and an optional `request_id`. It returns `status: answered` with
-a fenced `answer`, or `status: timeout`, together with hub audit identifiers.
+the exact operator `answer`, or `status: timeout`, together with hub audit identifiers.
 The caller comes from the station's existing node or agent credential. Tool
 arguments cannot choose a caller, operator, credential, answer, or answer source.
 
@@ -832,7 +832,12 @@ remaining alive.
 
 The hub records the first answer received before its deadline. A desktop answer
 has source `caller_reported_desktop`. An authenticated inbox reply has source
-`operator_reply`. Desktop input is not proof of operator credential ownership.
+`operator_reply`. Only an accepted reply from the configured operator has
+`operator_authenticated: true` and returns the exact answer as operator input.
+The result includes the hub-selected `operator` and authenticated `answered_by`.
+A peer message cannot set these audit fields or answer another recipient's question.
+Desktop input is not proof of operator credential ownership. It returns
+`operator_authenticated: false` and keeps its answer inside a peer-content fence.
 The audit copies the question, answer, identities, source, and timestamps, so
 acknowledging or pruning message links cannot erase an accepted answer. Audit
 retention removes records older than 90 days on the next question operation.

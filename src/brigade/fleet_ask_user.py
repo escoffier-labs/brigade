@@ -179,8 +179,14 @@ def _terminal(record: dict[str, Any]) -> dict[str, Any] | None:
     result = {key: record[key] for key in ("status", "question_id", "request_id", "message_id", "deadline")}
     if record["status"] == "answered":
         answer = record["answer"]
+        # Only the hub's accepted reply from its configured operator carries
+        # operator authority. A desktop report uses the asking credential and
+        # cannot prove who entered it, so it retains the peer-content fence.
+        operator_authenticated = record["source"] == "operator_reply" and record["answered_by"] == record["operator"]
         result.update(
-            answer=wrap_untrusted(answer, source_kind="peer-message"),
+            answer=answer if operator_authenticated else wrap_untrusted(answer, source_kind="peer-message"),
+            operator=record["operator"],
+            operator_authenticated=operator_authenticated,
             source=record["source"],
             answered_by=record["answered_by"],
             answer_id=record["answer_id"],
