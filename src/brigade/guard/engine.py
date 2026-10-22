@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import bisect
-import functools
 import re
 from typing import NamedTuple
 
@@ -243,128 +242,27 @@ def _line_starts(text: str) -> list[int]:
     return starts
 
 
-_STRING_PREFIXES = {"", "r", "b", "u", "br", "rb", "f", "rf", "fr"}
-
-
-def _lex_fstring_fields(segment: str, stack: list[list], stop_depth: int = -1) -> str:
-    """Advance a stack of literal and replacement-field frames over segment.
-
-    Frames are ["str" | "fstr", delimiter] for literals, ["expr", depth] for a
-    replacement field's expression with its bracket depth, and ["spec", 0] for
-    the format specification after a top-level ':'. Returns "comment" when a
-    line comment starts in code, "closed" as soon as the stack shrinks to
-    ``stop_depth`` frames, and "end" otherwise.
-    """
-    index = 0
-    while index < len(segment):
-        char = segment[index]
-        top = stack[-1] if stack else None
-        if top is None or top[0] == "expr":
-            if segment.startswith(_TRAILING_COMMENT_PREFIXES, index):
-                return "comment"
-            if char in _SINGLE_QUOTES:
-                delimiter = char * 3 if segment.startswith(char * 3, index) else char
-                start = index
-                while start and segment[start - 1].isalpha():
-                    start -= 1
-                prefix = segment[start:index].lower()
-                if start and (segment[start - 1].isalnum() or segment[start - 1] == "_"):
-                    prefix = "?"
-                fstring = char != "`" and "f" in prefix and prefix in _STRING_PREFIXES
-                stack.append(["fstr" if fstring else "str", delimiter])
-                index += len(delimiter)
-                continue
-            if top is not None:
-                if char in "([{":
-                    top[1] += 1
-                elif char in ")]" and top[1]:
-                    top[1] -= 1
-                elif char == "}":
-                    if top[1]:
-                        top[1] -= 1
-                    else:
-                        stack.pop()
-                        if len(stack) <= stop_depth:
-                            return "closed"
-                elif char == ":" and not top[1] and not segment.startswith(":=", index):
-                    top[0] = "spec"
-        elif top[0] == "spec":
-            if char == "{":
-                stack.append(["expr", 0])
-            elif char == "}":
-                stack.pop()
-                if len(stack) <= stop_depth:
-                    return "closed"
-        elif char == "\\":
-            # A backslash stops an escaped delimiter from closing the literal,
-            # raw or not, but never hides an f-string brace.
-            brace_next = top[0] == "fstr" and segment.startswith(("{", "}"), index + 1)
-            index += 1 if brace_next else 2
-            continue
-        elif segment.startswith(top[1], index):
-            stack.pop()
-            if len(stack) <= stop_depth:
-                return "closed"
-            index += len(top[1])
-            continue
-        elif top[0] == "fstr" and char == "{":
-            if segment.startswith("{{", index):
-                index += 2
-                continue
-            stack.append(["expr", 0])
-        index += 1
-    return "end"
-
-
-def _interpolation_state(before: str, after: str, frames: tuple[tuple, ...] = ()) -> bool | None:
-    """Report where a match sits inside an f-string replacement field: None
-    when outside any field, False in bare expression code, True in literal text
-    within it (a quoted literal or a format spec). ``frames`` is the lexer state
-    carried into the line from an earlier one."""
-    stack = [list(frame) for frame in frames]
-    if _lex_fstring_fields(before, stack) == "comment":
-        return None
-    fields = [position for position, frame in enumerate(stack) if frame[0] in ("expr", "spec")]
-    if not fields:
-        return None
-    literal = stack[-1][0] != "expr"
-    # Only a field the line actually closes counts: an incomplete f-string
-    # example in prose, a comment, or another language keeps normal detection.
-    if _lex_fstring_fields(after, stack, stop_depth=fields[-1]) != "closed":
-        return None
-    return literal
-
-
-@functools.lru_cache(maxsize=8)
-def _line_start_frames(text: str) -> dict[int, tuple[tuple, ...]]:
-    """Lexer state at the start of each line that begins inside a multi-line
-    literal or replacement field: a triple-quoted literal, or a single-quoted
-    one continued by a trailing backslash."""
-    if not any(quote in text for quote in _TRIPLE_QUOTES) and not re.search(r"\\\r?\n", text):
-        return {}
-    states: dict[int, tuple[tuple, ...]] = {}
-    stack: list[list] = []
-    offset = 0
-    for line in text.split("\n"):
-        content = line.rstrip("\r")
-        _lex_fstring_fields(content, stack)
-        # Single-delimiter literals, and any fields inside them, end at the line
-        # unless a trailing backslash continues them.
-        continued = len(content) - len(content.rstrip("\\")) & 1
-        for position, frame in enumerate(stack):
-            if frame[0] in ("str", "fstr") and len(frame[1]) == 1 and not continued:
-                del stack[position:]
-                break
-        offset += len(line) + 1
-        if stack:
-            states[offset] = tuple(tuple(frame) for frame in stack)
-    return states
-
-
 def _line_at(text: str, start: int, end: int) -> str:
     line_start = text.rfind("\n", 0, start) + 1
     line_end = text.find("\n", end)
     return text[line_start:] if line_end == -1 else text[line_start:line_end]
+
+
+# An f-string opening quote with no other quote between it and the field.
+_FSTRING_OPEN = re.compile(r"""(?<!\w)(?:[rR]?[fF]|[fF][rR])(?:\"\"\"|'''|"|')[^"'\n]*$""")
+# The rest of a field after its expression: '=', a conversion, a format spec
+# with at most simple nested fields, then the closing brace.
+_FIELD_CLOSE = re.compile(r"""\s*=?\s*(?:![rsa])?(?::(?:[^{}"'\n]|\{[A-Za-z_][\w.]*\})*)?\}""")
+
+
+def _whole_fstring_field(before: str, after: str) -> bool:
+    """Whether a match is the entire expression of one f-string field."""
+    opener = before.rstrip()
+    braces = len(opener) - len(opener.rstrip("{"))
+    # '{{' is a literal brace, so only an odd run opens a replacement field.
+    if braces % 2 == 0:
+        return False
+    return bool(_FSTRING_OPEN.search(opener[:-braces]) and _FIELD_CLOSE.match(after))
 
 
 def _hostname_context(text: str, start: int, end: int) -> bool:
@@ -378,16 +276,14 @@ def _hostname_context(text: str, start: int, end: int) -> bool:
     line = _line_at(text, start, end)
     column = start - (text.rfind("\n", 0, start) + 1)
     before, after = line[:column], line[column + end - start :]
-    url_context = re.search(r"[a-z][a-z0-9+.-]*://[^\s]*$", before, re.IGNORECASE)
-    # Inside an f-string replacement field, a bare member expression stays
-    # code-shaped even within a formatted URL (#1918); a host quoted inside the
-    # expression keeps the URL context it had before, and is skipped without one.
-    line_start = text.rfind("\n", 0, start) + 1
-    nested_literal = _interpolation_state(before, after, _line_start_frames(text).get(line_start, ()))
-    if nested_literal is not None:
-        return bool(url_context) and nested_literal
-    if url_context:
-        return True
+    if re.search(r"[a-z][a-z0-9+.-]*://[^\s]*$", before, re.IGNORECASE):
+        # A replacement field holding only the host is an expression even in a
+        # formatted URL (#1918). Any other URL context keeps matching.
+        return not _whole_fstring_field(before, after)
+    # These delimiters introduce expressions, including expressions inside
+    # interpolated strings. Check them before accepting a surrounding quote.
+    if re.search(r"\bf[\"'][^\n]*\{[^}]*$", before, re.IGNORECASE):
+        return False
     if before.rstrip().endswith(("[", "{")):
         return False
     if _quote_at(line, column, None) is not None:

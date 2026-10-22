@@ -529,17 +529,16 @@ class MissingLeakShapeTests(unittest.TestCase):
             'url = f"https://{db.local}/api"',  # content-guard: allow private-hostname
             'rf"https://{db.local}/path"',  # content-guard: allow private-hostname
             'fr"https://{db.local}/path"',  # content-guard: allow private-hostname
-            # A URL literal earlier in the same expression must not re-enable the host.
-            "f\"https://{resolve('https://fallback.invalid',cfg.db.local)}/path\"",  # content-guard: allow private-hostname
-            # Nested, raw-escaped, and triple-quoted formatted strings.
+            # Nested and triple-quoted formatted strings, and an earlier field.
             "f\"https://{f'{cfg.db.local}'}/\"",  # content-guard: allow private-hostname
-            'rf"\\"https://{cfg.db.local}/path\\""',  # content-guard: allow private-hostname
             'f"""https://{cfg.db.local}/path"""',  # content-guard: allow private-hostname
-            # Brackets keep ':' inside the expression; a nested spec field is code.
             'f"https://{d[1:2]}/{cfg.db.local}"',  # content-guard: allow private-hostname
+            # Whitespace, '=', conversions, format specs, and an escaped brace before the field.
+            'f"https://{ cfg.db.local }/p"',  # content-guard: allow private-hostname
+            'f"https://{cfg.db.local=}/p"',  # content-guard: allow private-hostname
+            'f"https://{cfg.db.local!r}/p"',  # content-guard: allow private-hostname
             'f"https://{cfg.db.local:>{width}}/p"',  # content-guard: allow private-hostname
-            # A line inside an earlier line's triple-quoted f-string.
-            's = f"""\nhttps://{cfg.db.local}/p\n"""',  # content-guard: allow private-hostname
+            'f"https://{{{cfg.db.local}}}/p"',  # content-guard: allow private-hostname
         ):
             with self.subTest(text=text):
                 result = scan_text(text)
@@ -573,6 +572,15 @@ class MissingLeakShapeTests(unittest.TestCase):
             's = "abc \\\nf"{(use https://db.home/x"',  # content-guard: allow private-hostname
             # A complete-looking example in a comment is still comment text.
             '// f"{(use https://db.home/x)}"',  # content-guard: allow private-hostname
+            # Only a field holding the host alone is skipped; anything else in a
+            # formatted URL keeps the URL detection main already had.
+            "f\"https://{resolve('https://fallback.invalid',db.home)}/path\"",  # content-guard: allow private-hostname
+            'rf"\\"https://{db.home}/path\\""',  # content-guard: allow private-hostname
+            's = f"""\nhttps://{db.home}/p\n"""',  # content-guard: allow private-hostname
+            'f"https://{db.home[0]}/p"',  # content-guard: allow private-hostname
+            'f"https://{db.home or x}/p"',  # content-guard: allow private-hostname
+            '"https://{db.home}/p"',  # content-guard: allow private-hostname
+            "`https://${db.home}/p`",  # content-guard: allow private-hostname
         ):
             with self.subTest(text=text):
                 self.assertIn("private-hostname", {f.rule_id for f in scan_text(text).findings})
