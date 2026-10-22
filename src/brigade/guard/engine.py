@@ -262,7 +262,13 @@ def _whole_fstring_field(before: str, after: str) -> bool:
     # '{{' is a literal brace, so only an odd run opens a replacement field.
     if braces % 2 == 0:
         return False
-    return bool(_FSTRING_OPEN.search(opener[:-braces]) and _FIELD_CLOSE.match(after))
+    stem = opener[:-braces]
+    match = _FSTRING_OPEN.search(stem)
+    # The prefix must start a literal in code, not sit inside another string or
+    # a comment, and the literal must still be open at the brace.
+    if match is None or _quote_at(stem, match.start(), None) is not None:
+        return False
+    return _quote_at(stem, len(stem), None) is not None and bool(_FIELD_CLOSE.match(after))
 
 
 def _hostname_context(text: str, start: int, end: int) -> bool:

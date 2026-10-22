@@ -529,8 +529,7 @@ class MissingLeakShapeTests(unittest.TestCase):
             'url = f"https://{db.local}/api"',  # content-guard: allow private-hostname
             'rf"https://{db.local}/path"',  # content-guard: allow private-hostname
             'fr"https://{db.local}/path"',  # content-guard: allow private-hostname
-            # Nested and triple-quoted formatted strings, and an earlier field.
-            "f\"https://{f'{cfg.db.local}'}/\"",  # content-guard: allow private-hostname
+            # A triple-quoted formatted string, and an earlier field.
             'f"""https://{cfg.db.local}/path"""',  # content-guard: allow private-hostname
             'f"https://{d[1:2]}/{cfg.db.local}"',  # content-guard: allow private-hostname
             # Whitespace, '=', conversions, format specs, and an escaped brace before the field.
@@ -581,6 +580,12 @@ class MissingLeakShapeTests(unittest.TestCase):
             'f"https://{db.home or x}/p"',  # content-guard: allow private-hostname
             '"https://{db.home}/p"',  # content-guard: allow private-hostname
             "`https://${db.home}/p`",  # content-guard: allow private-hostname
+            # f-string text inside an ordinary string or a comment is not an f-string.
+            "hint = 'f\"https://{db.home}/path\"'",  # content-guard: allow private-hostname
+            '# f"https://{db.home}/path"',  # content-guard: allow private-hostname
+            '// f"https://{db.home}/path"',  # content-guard: allow private-hostname
+            # A nested f-string inside another literal keeps main's detection.
+            "f\"https://{f'{db.home}'}/\"",  # content-guard: allow private-hostname
         ):
             with self.subTest(text=text):
                 self.assertIn("private-hostname", {f.rule_id for f in scan_text(text).findings})
