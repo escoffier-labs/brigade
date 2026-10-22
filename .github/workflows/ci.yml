@@ -1144,8 +1144,36 @@ jobs:
             cat .pr-tier-shadow/summary.md >> "$GITHUB_STEP_SUMMARY"
             exit 2
           fi
-      - name: Retain shadow evidence
+      - name: Validate shadow artifact tree
+        id: artifact_safety
         if: always() && steps.comparison.outputs.upload_safe == 'true'
+        run: |
+          python3 -I -S - <<'PY'
+          import os
+          from pathlib import Path
+          import stat
+
+          try:
+              root = Path(".pr-tier-shadow")
+              if not stat.S_ISDIR(root.lstat().st_mode):
+                  raise ValueError("artifact root is not a directory")
+              pending = [root]
+              while pending:
+                  path = pending.pop()
+                  mode = path.lstat().st_mode
+                  if stat.S_ISDIR(mode):
+                      with os.scandir(path) as entries:
+                          pending.extend(Path(entry.path) for entry in entries)
+                  elif not stat.S_ISREG(mode):
+                      raise ValueError("artifact contains a link or special file")
+              with open(os.environ["GITHUB_OUTPUT"], "a", encoding="utf-8") as output:
+                  output.write("upload_safe=true\n")
+          except (OSError, ValueError):
+              print("Shadow artifact upload disabled: unsafe or unreadable evidence tree.")
+              raise SystemExit(2) from None
+          PY
+      - name: Retain shadow evidence
+        if: always() && steps.comparison.outputs.upload_safe == 'true' && steps.artifact_safety.outputs.upload_safe == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: pr-tier-shadow-${{ github.run_id }}-${{ github.run_attempt }}

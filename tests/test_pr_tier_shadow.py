@@ -5,7 +5,6 @@ import datetime as datetime_module
 from datetime import datetime
 from http.client import HTTPException, IncompleteRead
 import json
-import os
 from pathlib import Path
 import re
 import shutil
@@ -287,9 +286,22 @@ def test_retained_full_replaces_old_artifact_without_following_symlinks(
     assert {path.name: path.read_bytes() for path in cache.iterdir()} == expected
 
 
-@pytest.mark.parametrize("scenario", ["output-symlink", "unlink-failure", "normal-incomplete"])
+@pytest.mark.parametrize(
+    "scenario",
+    [
+        "output-symlink",
+        "unlink-failure",
+        "nested-file",
+        "nested-directory",
+        "deeper-link",
+        "dangling-link",
+        "root-after-finalize",
+        "normal-complete",
+        "normal-incomplete",
+    ],
+)
 def test_workflow_upload_uses_safe_directory_even_when_comparison_is_incomplete(
-    tmp_path, monkeypatch, prefetch, scenario
+    tmp_path, monkeypatch, prefetch, evidence, scenario
 ):
     bash = shutil.which("bash")
     if bash is None:
@@ -302,18 +314,25 @@ def test_workflow_upload_uses_safe_directory_even_when_comparison_is_incomplete(
     sentinel = outside / "private.txt"
     sentinel.write_text("must not be uploaded")
     output = tmp_path / ".pr-tier-shadow"
-    if scenario == "normal-incomplete":
-        shadow.guard(output, now=shadow.TRIAL_START)  # Missing selected results remains incomplete.
-    else:
+    if scenario in {"output-symlink", "unlink-failure"}:
         output.symlink_to(outside, target_is_directory=True)
+    else:
+        report = shadow.guard(output, now=shadow.TRIAL_START)
+        if scenario == "normal-complete":
+            report["identity"] = IDENTITY
+            shadow.write_json(output / "report.json", report)
+            shadow.write_json(output / "pytest-results.json", evidence[3])
+        if scenario == "nested-file":
+            (output / "leak").symlink_to(sentinel)
+        elif scenario == "nested-directory":
+            (output / "leak").symlink_to(outside, target_is_directory=True)
+        elif scenario == "deeper-link":
+            nested = output / "nested/deep"
+            nested.mkdir(parents=True)
+            (nested / "leak").symlink_to(outside, target_is_directory=True)
+        elif scenario == "dangling-link":
+            (output / "dangling").symlink_to(outside / "missing")
     (tmp_path / "scripts").symlink_to(ROOT / "scripts", target_is_directory=True)
-    if scenario == "unlink-failure":
-        tools = tmp_path / "tools"
-        tools.mkdir()
-        rm = tools / "rm"
-        rm.write_text("#!/bin/sh\nexit 1\n")
-        rm.chmod(0o755)
-        monkeypatch.setenv("PATH", str(tools) + os.pathsep + os.environ["PATH"])
     step_output = tmp_path / "step-output"
     summary = tmp_path / "summary"
     monkeypatch.setenv("GITHUB_OUTPUT", str(step_output))
@@ -323,31 +342,62 @@ def test_workflow_upload_uses_safe_directory_even_when_comparison_is_incomplete(
     comparison, upload = job.split("      - name: Compare exact attempt and write summary\n", 1)[1].split(
         "      - name: Retain shadow evidence\n", 1
     )
+    validation = None
+    if "      - name: Validate shadow artifact tree\n" in comparison:
+        comparison, validation = comparison.split("      - name: Validate shadow artifact tree\n", 1)
     script = textwrap.dedent(comparison.split("        run: |\n", 1)[1])
+    if scenario == "unlink-failure":
+        # A function intercepts the command in this Bash process on Windows too.
+        script = "rm() { printf '%s\n' 'forced unlink failure' >&2; return 1; }\n" + script
     result = subprocess.run([bash, "-e", "-c", script], cwd=tmp_path, capture_output=True, text=True, timeout=30)
     values = dict(line.split("=", 1) for line in step_output.read_text().splitlines()) if step_output.exists() else {}
-    condition = re.search(r"^        if: (.+)$", upload, re.M)[1]
-    expression = (
-        condition.replace("always()", "True")
-        .replace("steps.comparison.outputs.upload_safe", repr(values.get("upload_safe", "")))
-        .replace("&&", "and")
-    )
-    eligible = eval(expression, {"__builtins__": {}}, {})
+    safety_values = {}
+
+    def condition(section):
+        expression = re.search(r"^        if: (.+)$", section, re.M)[1]
+        expression = (
+            expression.replace("always()", "True")
+            .replace("steps.comparison.outputs.upload_safe", repr(values.get("upload_safe", "")))
+            .replace("steps.artifact_safety.outputs.upload_safe", repr(safety_values.get("upload_safe", "")))
+            .replace("&&", "and")
+        )
+        return eval(expression, {"__builtins__": {}}, {})
+
+    if scenario == "root-after-finalize":
+        shutil.rmtree(output)
+        output.symlink_to(outside, target_is_directory=True)
+    if validation is not None and condition(validation):
+        assert "env:" not in validation
+        source = textwrap.dedent(validation.split("python3 -I -S - <<'PY'\n", 1)[1].rsplit("          PY", 1)[0])
+        safety_output = tmp_path / "safety-output"
+        monkeypatch.setenv("GITHUB_OUTPUT", str(safety_output))
+        safety = subprocess.run(
+            [sys.executable, "-I", "-S", "-"], input=source, cwd=tmp_path, capture_output=True, text=True, timeout=30
+        )
+        if safety_output.exists():
+            safety_values = dict(line.split("=", 1) for line in safety_output.read_text().splitlines())
+        assert safety.returncode == (0 if scenario in {"output-symlink", "normal-complete", "normal-incomplete"} else 2)
+    eligible = condition(upload)
     assert sentinel.read_text() == "must not be uploaded"
     assert list(outside.iterdir()) == [sentinel]
     assert {path.name: path.read_bytes() for path in cache.iterdir()} == expected_cache
     if scenario == "unlink-failure":
-        assert result.returncode != 0
+        assert "forced unlink failure" in result.stderr
+        assert result.returncode == 1
+        assert output.is_symlink()
+        assert eligible is False
+    elif scenario in {"nested-file", "nested-directory", "deeper-link", "dangling-link", "root-after-finalize"}:
+        assert result.returncode == 2, result.stderr
         assert eligible is False
     else:
-        assert result.returncode == 2, result.stderr
+        assert result.returncode == (0 if scenario == "normal-complete" else 2), result.stderr
         assert output.is_dir() and not output.is_symlink()
-        assert eligible is True  # Ordinary incomplete comparisons still upload.
+        assert eligible is True  # Complete and incomplete comparisons still upload.
         assert "path: .pr-tier-shadow/" in upload
         assert not (output / "private.txt").exists()
         report = json.loads((output / "report.json").read_text())
-        assert report["comparison"]["status"] == "incomplete"
-        assert report["comparison"]["full_only_candidate_count"] is None
+        assert report["comparison"]["status"] == ("complete" if scenario == "normal-complete" else "incomplete")
+        assert report["comparison"]["full_only_candidate_count"] == (0 if scenario == "normal-complete" else None)
         assert {path.name: path.read_bytes() for path in (output / "full").iterdir()} == expected_cache
         if scenario == "output-symlink":
             assert any("symlink" in error for error in report["comparison"]["errors"])

@@ -135,6 +135,8 @@ or flaky and never asserts zero real misses.
 The observation is self-reported by PR-controlled tests and scripts, which can
 forge its evidence after prefetch. The read-only token is used before those
 processes start and is absent from their environment.
+The final tokenless scan rejects root and nested symlinks without following
+them. PR-controlled writers can change the tree after this check.
 Adversarial changes require independent reproduction in a trusted environment
 before these observations can support a decision.
 
