@@ -706,3 +706,83 @@ def test_anchor_reservation_limit_refuses_before_card_write(tmp_path):
     with pytest.raises(api.ProposalError, match="anchor reservation"):
         create(tmp_path, anchors=True)
     assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        "Name | Value\n--- | ---\ncache | warm\n",
+        "Name | Value\n:-: | --:\ncache | warm",
+        "Title\n=====\n",
+        "Title\n-----\n",
+        "Multi line\nheading\n=====\n",
+    ],
+)
+def test_tables_without_leading_pipe_and_setext_headings_are_not_anchored(tmp_path, body):
+    from brigade import memory_proposal_v2_ops as delta
+
+    text = f"---\ntopic: x\nscope: repo\nlast_reviewed: 2026-10-01\nevidence: []\n---\n{body}"
+    assert delta.blocks(text) == []
+    assert delta.anchor_text(text, PATH) == text
+
+
+def test_table_exclusion_leaves_adjacent_prose_addressable():
+    from brigade import memory_proposal_v2_ops as delta
+
+    text = "---\ntopic: x\n---\nA | B\n--- | ---\n1 | 2\n\nKeep the cache warm.\n"
+    assert [b.text for b in delta.blocks(text)] == ["Keep the cache warm."]
+
+
+def test_merge_provenance_revision_cleared_when_any_source_differs():
+    from brigade import evidence_redaction, provenance
+
+    def envelope(revision):
+        return provenance.build_envelope(
+            source_system="brigade",
+            source_kind="memory-card",
+            source_producer="operator",
+            origin="workspace",
+            repository_id="repo-example",
+            repository_revision=revision,
+            session_id=None,
+            session_harness=None,
+            collection_id="memory",
+            item_id="memory/cards/x.md",
+            locator_kind="repo-relative",
+            locator_value="memory/cards/x.md",
+            attribution="observed",
+            modality="human-written",
+            trust_label="reviewed",
+            trust_assigned_by="operator",
+            trust_assigned_at=None,
+            injection_status="clean",
+            injection_count=0,
+            injection_rules=[],
+            text="Keep the cache warm.",
+            raw_bytes=None,
+            content_scope="item.text.utf8.v1",
+            captured_at=None,
+            ingested_at=None,
+            redaction=evidence_redaction.apply_origin_redaction("Keep the cache warm.", origin="workspace").record(),
+        )
+
+    sources = [{"metadata": {"provenance": envelope(r)}} for r in ("r1", "r1", "r2")]
+    after = "---\ntopic: x\nscope: repo\nlast_reviewed: 2026-10-01\nevidence: []\n---\nKeep the cache warm.\n"
+    merged = api._derive_merge_provenance(after, sources, "memory/cards/x.md", "proposal-x")
+    assert api._meta(merged)["provenance"]["repository"].get("revision") is None
+
+
+def test_duplicate_candidate_refuses_when_the_merge_would_be_dropped(tmp_path):
+    from brigade.memory_proposal_v2_reflect import propose_payload
+
+    path = setup(tmp_path, anchored=False)
+    other = card(tmp_path, "other", body="keep the cache warm.")
+    for source, ref in ((path, ".brigade/receipts/support.json"), (other, ".brigade/receipts/other.json")):
+        evidence(tmp_path, ref)
+        source.write_text(source.read_text().replace("evidence: []", f"evidence: {json.dumps([ref])}"))
+    candidate = next(c for c in memory_reflect.run_payload(target=tmp_path)["candidates"] if c["kind"] == "duplicate")
+    before = {p: p.read_bytes() for p in (path, other)}
+    with pytest.raises(api.ProposalError, match="refusing a partial proposal"):
+        propose_payload(target=tmp_path, candidate_id=candidate["candidate_id"], reason="Merge near copies.")
+    assert {p: p.read_bytes() for p in before} == before
+    assert not list((tmp_path / ".brigade/memory/proposals").glob("*/revision-1.json"))

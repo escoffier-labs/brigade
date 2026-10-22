@@ -12,6 +12,8 @@ from . import memory_proposals as legacy
 ANCHOR = re.compile(r" \^(c-[0-9a-f]{6})$")
 ANCHOR_ID = re.compile(r"c-[0-9a-f]{6}\Z")
 MAX_ANCHORS = 4096
+SETEXT = re.compile(r"^ {0,3}(?:=+|-{2,})[ \t]*\r?$")
+TABLE_DELIMITER = re.compile(r"^ {0,3}\|?[ \t]*:?-+:?[ \t]*(?:\|[ \t]*:?-+:?[ \t]*)*\|?[ \t]*\r?$")
 
 
 def claim_body(text: str) -> str:
@@ -31,6 +33,24 @@ class Block:
         return io.sha256(self.text.encode())
 
 
+def _table_lines(lines: list[str]) -> set[int]:
+    """Index GFM table rows, including tables whose rows omit the leading pipe."""
+    found: set[int] = set()
+    for i, line in enumerate(lines):
+        if "|" not in line or not TABLE_DELIMITER.match(line) or i == 0 or "|" not in lines[i - 1]:
+            continue
+        j = i - 1
+        while j >= 0 and "|" in lines[j] and lines[j].strip():
+            found.add(j)
+            j -= 1
+        found.add(i)
+        j = i + 1
+        while j < len(lines) and "|" in lines[j] and lines[j].strip():
+            found.add(j)
+            j += 1
+    return found
+
+
 def blocks(text: str) -> list[Block]:
     """Address paragraphs and individual bullets, excluding code and history."""
     result: list[Block] = []
@@ -48,11 +68,18 @@ def blocks(text: str) -> list[Block]:
             result.append(Block(start, start + len(value), value, match[1] if match else None))
             start = None
 
-    for line in lines:
+    table = _table_lines(lines)
+    for index, line in enumerate(lines):
         stripped = line.strip()
+        if fence is None and start is not None and SETEXT.match(line):
+            # The underline turns the open paragraph into a heading; neither is a claim.
+            start = None
+            offset += len(line)
+            end = offset
+            continue
         code = re.match(r"^ {0,3}(`{3,}|~{3,})", line)
         bullet = re.match(r"^ {0,3}(?:[-+*]|\d+[.)])\s+", line)
-        excluded = not stripped or bool(re.match(r"^(?:#{1,6}\s|>|\||previously\b| {4}|\t)", line))
+        excluded = not stripped or index in table or bool(re.match(r"^(?:#{1,6}\s|>|\||previously\b| {4}|\t)", line))
         if fence or code or excluded or bullet:
             finish()
         if code:

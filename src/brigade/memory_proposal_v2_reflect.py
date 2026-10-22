@@ -67,4 +67,6 @@ def propose_payload(*, target: Path, candidate_id: str, reason: str) -> dict[str
         reason=reason,
         reflect={"run_id": run_id, "candidate_id": candidate_id},
         expected_source_sha256={source["path"]: candidate["base_sha256"][source["id"]] for source in sources},
+        # A duplicate candidate must merge; a proposal that drops the merge would leave it open.
+        strict_ops=candidate["kind"] == "duplicate",
     )

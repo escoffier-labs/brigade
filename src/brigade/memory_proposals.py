@@ -568,7 +568,9 @@ def _derive_merge_provenance(after: str, sources: list[dict[str, Any]], survivor
         source_producer="brigade",
         origin="workspace",
         repository_id=repositories[0]["id"],
-        repository_revision=repositories[0].get("revision") if repositories[0] == repositories[1] else None,
+        repository_revision=repositories[0].get("revision")
+        if all(r == repositories[0] for r in repositories)
+        else None,
         session_id=None,
         session_harness=None,
         collection_id="memory-proposals",

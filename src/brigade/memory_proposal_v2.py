@@ -238,6 +238,7 @@ def compose(
     proposal_id: str,
     reflect: dict[str, str] | None = None,
     expected_source_sha256: dict[str, str] | None = None,
+    strict_ops: bool = False,
 ) -> dict[str, Any]:
     if not isinstance(ops, list) or len(ops) > io.MAX_LIST or not isinstance(anchor_blocks, bool):
         raise legacy.ProposalError("invalid or oversized op packet")
@@ -278,6 +279,8 @@ def compose(
             accepted.append(op)
         except (ValueError, KeyError, TypeError, OSError):
             dropped.append({"index": number, "reason": "invalid, unresolved, stale or empty op"})
+    if strict_ops and dropped:
+        raise legacy.ProposalError("generated ops were dropped; refusing a partial proposal")
     if not accepted and (ops or not any(texts[s["path"]] != s["text"] for s in sources)):
         raise legacy.ProposalError("no valid delta ops remain")
     evidence = _evidence(target, accepted, sources)
@@ -364,6 +367,7 @@ def create_payload(
     reason: str,
     reflect: dict[str, str] | None = None,
     expected_source_sha256: dict[str, str] | None = None,
+    strict_ops: bool = False,
 ) -> dict[str, Any]:
     target = legacy._target(target)
     reason = legacy._reason(reason)
@@ -381,6 +385,7 @@ def create_payload(
         proposal_id=ident,
         reflect=reflect,
         expected_source_sha256=expected_source_sha256,
+        strict_ops=strict_ops,
     )
     writers = sorted(h for h in binding["available_scope"]["harnesses"] if h in WRITER_INBOXES)
     if not writers and any(
