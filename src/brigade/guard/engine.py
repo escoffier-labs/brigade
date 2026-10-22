@@ -250,9 +250,10 @@ def _line_at(text: str, start: int, end: int) -> str:
 
 # An f-string opening quote with no other quote between it and the field.
 _FSTRING_OPEN = re.compile(r"""(?<!\w)(?:[rR]?[fF]|[fF][rR])(?:\"\"\"|'''|"|')[^"'\n]*$""")
-# Positions where prose does not put an f-string: line start, '=', `return`,
-# a call paren right after a name, or a bracket opened after '=' or '('.
-_FSTRING_POSITION = re.compile(r"(?:^|=|\breturn|\w\(|[=(]\s*[\[{])\s*$")
+# Positions where prose does not put an f-string: line start, '=', a
+# `return` statement, a call paren right after a name, or a bracket opened
+# after '=' or '('.
+_FSTRING_POSITION = re.compile(r"(?:^|=|(?:^|;)\s*return|\w\(|[=(]\s*[\[{])\s*$")
 # The rest of a field after its expression: '=', a conversion, a format spec
 # with at most simple nested fields, then the closing brace.
 _FIELD_CLOSE = re.compile(r"""\s*=?\s*(?:![rsa])?(?::(?:[^{}"'\n]|\{[A-Za-z_][\w.]*\})*)?\}""")
@@ -270,6 +271,9 @@ def _whole_fstring_field(before: str, after: str) -> bool:
     # The prefix must start a literal in an expression position, not in prose,
     # another string, or a comment, and the literal must still be open at the brace.
     if match is None or not _FSTRING_POSITION.search(stem[: match.start()]):
+        return False
+    # `_quote_at` stops at '#' and '//' comments but not at a trailing '/*'.
+    if "/*" in stem[: match.start()]:
         return False
     if stem.lstrip().startswith(_LINE_START_COMMENT_PREFIXES) or _quote_at(stem, match.start(), None) is not None:
         return False

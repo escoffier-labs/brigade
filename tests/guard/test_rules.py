@@ -543,6 +543,7 @@ class MissingLeakShapeTests(unittest.TestCase):
             'urls = [f"https://{cfg.db.local}/x"]',  # content-guard: allow private-hostname
             'return f"https://{cfg.db.local}/x"',  # content-guard: allow private-hostname
             'get(url=f"https://{cfg.db.local}/x")',  # content-guard: allow private-hostname
+            'x = 1; return f"https://{cfg.db.local}/x"',  # content-guard: allow private-hostname
         ):
             with self.subTest(text=text):
                 result = scan_text(text)
@@ -605,6 +606,8 @@ class MissingLeakShapeTests(unittest.TestCase):
             '[f"https://{db.home}/x"](link)',  # content-guard: allow private-hostname
             '{"url": f"https://{db.home}/x"}',  # content-guard: allow private-hostname
             'base + f"https://{db.home}/x"',  # content-guard: allow private-hostname
+            'Please return f"https://{db.home}/x"',  # content-guard: allow private-hostname
+            'const x = 1; /* sample = f"https://{db.home}/x" */',  # content-guard: allow private-hostname
         ):
             with self.subTest(text=text):
                 self.assertIn("private-hostname", {f.rule_id for f in scan_text(text).findings})
