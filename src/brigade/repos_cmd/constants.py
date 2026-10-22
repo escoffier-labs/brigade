@@ -79,6 +79,7 @@ class SweepCommand:
     label: str
     argv: list[str]
     timeout: int = 120
+    builtin: bool = False
 
 
 @dataclass(frozen=True)

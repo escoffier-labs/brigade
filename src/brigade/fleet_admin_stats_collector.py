@@ -40,6 +40,13 @@ ANALYTICS_QUERY = """query Stats($account: string!, $worker: string!, $start: Ti
  workersInvocationsAdaptive(limit: 10000, filter: {scriptName: $worker, datetime_geq: $start, datetime_lt: $end}, orderBy: [date_ASC]) {
  dimensions { date } sum { requests errors }
  } } } }"""
+VIEWER_QUERY = "query CredentialCheck { viewer { accounts { accountTag } } }"
+STATUS_ANALYTICS_QUERY = """query Status($account: string!, $worker: string!, $start: Time!, $end: Time!) {
+ viewer { accounts(filter: {accountTag: $account}) {
+ workersInvocationsAdaptive(limit: 10000, filter: {scriptName: $worker, datetime_geq: $start, datetime_lt: $end}, orderBy: [date_ASC]) {
+ dimensions { date } sum { requests errors }
+ } } } }"""
+STATUS_QUERY = "SELECT COUNT(*) AS row_count FROM version_observations WHERE internal = 0"
 _MAX_RESPONSE = 4 * 1024 * 1024
 
 
@@ -51,12 +58,54 @@ def wrangler_argv(database: str, query: str) -> list[str]:
     return ["wrangler", "d1", "execute", database, "--remote", "--json", "--command", QUERIES[query]]
 
 
+def status_wrangler_argv(worker: str | None, database: str | None, action: str) -> list[str]:
+    """Build only the named read operations used by the Deck status panel."""
+    if action in ("deployments-status", "deployments-list", "versions-list"):
+        if not isinstance(worker, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", worker):
+            raise ValueError("invalid stats Worker setting")
+        return {
+            "deployments-status": ["wrangler", "deployments", "status", "--name", worker, "--json"],
+            "deployments-list": ["wrangler", "deployments", "list", "--name", worker, "--json"],
+            "versions-list": ["wrangler", "versions", "list", "--name", worker, "--json"],
+        }[action]
+    if action in ("d1-info", "d1-counts"):
+        if not isinstance(database, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", database):
+            raise ValueError("invalid stats database setting")
+        if action == "d1-info":
+            return ["wrangler", "d1", "info", database, "--json"]
+        return ["wrangler", "d1", "execute", database, "--remote", "--json", "--command", STATUS_QUERY]
+    raise ValueError("unknown Cloudflare status read")
+
+
+def _status_read(argv: list[str]) -> bool:
+    if any(not isinstance(part, str) for part in argv):
+        return False
+    if len(argv) == 6 and argv[:3] in (["wrangler", "deployments", "status"], ["wrangler", "deployments", "list"]):
+        if argv[3] != "--name" or argv[5] != "--json":
+            return False
+        action = "deployments-status" if argv[2] == "status" else "deployments-list"
+        return argv == status_wrangler_argv(argv[4], None, action)
+    if len(argv) == 6 and argv[:3] == ["wrangler", "versions", "list"]:
+        return (
+            argv[3] == "--name" and argv[5] == "--json" and argv == status_wrangler_argv(argv[4], None, "versions-list")
+        )
+    if len(argv) == 5 and argv[:3] == ["wrangler", "d1", "info"]:
+        return argv[4] == "--json" and argv == status_wrangler_argv(None, argv[3], "d1-info")
+    return len(argv) == 8 and argv[-1] == STATUS_QUERY and argv == status_wrangler_argv(None, argv[3], "d1-counts")
+
+
 def run_wrangler(argv: list[str], *, account: str | None = None, token_envs: tuple[str, ...] = ()) -> Any:
     """Only the exact generated read vector is executable. Never print tool output."""
-    if not isinstance(argv, list) or len(argv) != 8 or argv[-1] not in QUERIES.values():
+    if not isinstance(argv, list):
         raise ValueError("command outside stats read allowlist")
-    query = next(key for key, sql in QUERIES.items() if sql == argv[-1])
-    if argv != wrangler_argv(argv[3], query) or not argv[-1].lstrip().startswith(("SELECT ", "WITH ")):
+    status_read = _status_read(argv)
+    query = next((key for key, sql in QUERIES.items() if len(argv) == 8 and sql == argv[-1]), None)
+    existing_read = (
+        query is not None
+        and argv == wrangler_argv(argv[3], query)
+        and argv[-1].lstrip().startswith(("SELECT ", "WITH "))
+    )
+    if not status_read and not existing_read:
         raise ValueError("command outside stats read allowlist")
     env = {
         key: value
@@ -72,7 +121,7 @@ def run_wrangler(argv: list[str], *, account: str | None = None, token_envs: tup
     try:
         return json.loads(_bounded_output(argv, env))
     except (OSError, subprocess.SubprocessError, ValueError):
-        raise ValueError("D1 read failed") from None
+        raise ValueError("Cloudflare read failed" if status_read else "D1 read failed") from None
 
 
 def _bounded_output(argv: list[str], env: dict[str, str]) -> bytes:
@@ -219,6 +268,190 @@ def _analytics(settings: dict[str, Any], now: datetime) -> list[dict[str, Any]]:
     return [daily[key] for key in sorted(daily)]
 
 
+def _status_time(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+_WORKER_READS = ("deployments-status", "deployments-list", "versions-list")
+_D1_READS = ("d1-info", "d1-counts")
+_GRAPHQL = "https://api.cloudflare.com/client/v4/graphql"
+_NAME = re.compile(r"[A-Za-z0-9._+-]{1,128}")
+
+
+def _active_deployment(current: Any, deployments: Any) -> dict[str, Any] | None:
+    """`deployments status --json` is the deployment object itself. Fall back to
+    the newest entry of `deployments list --json`, a raw array."""
+    if isinstance(current, dict) and isinstance(current.get("versions"), list):
+        return current
+    entries = [d for d in deployments if isinstance(d, dict)] if isinstance(deployments, list) else []
+    stamped = [(when, d) for d in entries if (when := _status_time(d.get("created_on"))) is not None]
+    if stamped:
+        return max(stamped, key=lambda item: item[0])[1]
+    return entries[0] if len(entries) == 1 else None
+
+
+def _single_version(deployment: dict[str, Any] | None) -> str | None:
+    """The two-field panel can name one version. A gradual deployment splits traffic
+    across several, so it reports no version rather than an arbitrary one."""
+    versions = deployment.get("versions") if deployment else None
+    if not isinstance(versions, list) or len(versions) != 1 or not isinstance(versions[0], dict):
+        return None
+    candidate = versions[0].get("version_id") or versions[0].get("id")
+    return candidate if isinstance(candidate, str) and _NAME.fullmatch(candidate) else None
+
+
+def _published_at(versions: Any, version_id: str | None) -> str | None:
+    """`versions list --json` is a raw array with the time under metadata.created_on."""
+    for version in versions if isinstance(versions, list) and version_id else []:
+        if isinstance(version, dict) and version_id in (version.get("id"), version.get("version_id")):
+            metadata = version.get("metadata")
+            return _status_time(metadata.get("created_on") if isinstance(metadata, dict) else None)
+    return None
+
+
+def _row_count(payload: Any) -> int | None:
+    try:
+        rows = _results(payload)
+        count = rows[0].get("row_count") if len(rows) == 1 else None
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return None
+    return count if type(count) is int and count >= 0 else None
+
+
+def _worker_analytics(account: str, worker: str, token: str, now: datetime) -> tuple[bool, int | None, int | None]:
+    """Return (token can see the configured account, requests, errors) for 24 hours."""
+    try:
+        viewer = fetch_json(_GRAPHQL, body={"query": VIEWER_QUERY}, token=token)
+        accounts = viewer["data"]["viewer"]["accounts"]
+        if viewer.get("errors") or not isinstance(accounts, list):
+            return False, None, None
+        if not any(isinstance(row, dict) and row.get("accountTag") == account for row in accounts):
+            return False, None, None
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return False, None, None
+    try:
+        payload = fetch_json(
+            _GRAPHQL,
+            body={
+                "query": STATUS_ANALYTICS_QUERY,
+                "variables": {
+                    "account": account,
+                    "worker": worker,
+                    "start": (now - timedelta(hours=24)).isoformat(),
+                    "end": now.isoformat(),
+                },
+            },
+            token=token,
+        )
+        rows = payload["data"]["viewer"]["accounts"]
+        if payload.get("errors") or len(rows) != 1 or len(rows[0]["workersInvocationsAdaptive"]) >= 10000:
+            return True, None, None
+        sums = [row["sum"] for row in rows[0]["workersInvocationsAdaptive"]]
+        requests, errors = [s["requests"] for s in sums], [s["errors"] for s in sums]
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return True, None, None
+    if not all(type(value) is int and value >= 0 for value in requests + errors):
+        return True, None, None
+    return True, sum(requests), sum(errors)
+
+
+def _credential_state(
+    *, worker: bool, database: bool, worker_read: bool, d1_read: bool, token: bool, viewer: bool
+) -> str:
+    """Decide credential health from per-resource access.
+
+    A configured Worker needs a Wrangler read and an Analytics token whose viewer
+    lists the configured account. A configured database needs one Wrangler read.
+    Every configured resource accessible: available. A missing Analytics token for
+    a Worker, or an Analytics token that works while no Wrangler read does (no
+    Wrangler login): unavailable. Anything else is a failure whose cause cannot be
+    told from an outage: unknown. Unconfigured resources never count either way.
+    """
+    if (not worker or (worker_read and viewer)) and (not database or d1_read):
+        return "available"
+    if (worker and not token) or (viewer and not (worker_read or d1_read)):
+        return "unavailable"
+    return "unknown"
+
+
+def cloudflare_status(settings: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any] | None:
+    """Return only validated Cloudflare status fields; never retain CLI or API payloads.
+
+    Each configured resource is read on its own, so one failed read leaves only its
+    own cells unknown. No Worker and no database configured means no observation.
+    """
+    if settings.get("status_panel") is not True:
+        return None
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    worker, database = (
+        settings[key] if isinstance(settings.get(key), str) and settings[key] else None
+        for key in ("worker", "database")
+    )
+    if not worker and not database:
+        return None
+    repository_head = settings.get("repository_head")
+    token_key, account = settings.get("analytics_token_env"), settings.get("account")
+    token = os.environ.get(token_key, "") if isinstance(token_key, str) else ""
+    token_envs = tuple(
+        settings[key] for key in ("analytics_token_env", "d1_token_env") if isinstance(settings.get(key), str)
+    )
+
+    def read(actions: tuple[str, ...]) -> dict[str, Any]:
+        """Successful reads by action. A failed read is simply absent."""
+        done = {}
+        for action in actions:
+            try:
+                done[action] = run_wrangler(
+                    status_wrangler_argv(worker, database, action), account=account, token_envs=token_envs
+                )
+            except (ValueError, KeyError, TypeError, AttributeError):
+                pass
+        return done
+
+    worker_reads = read(_WORKER_READS) if worker else {}
+    d1_reads = read(_D1_READS) if database else {}
+    version_id = _single_version(
+        _active_deployment(worker_reads.get("deployments-status"), worker_reads.get("deployments-list"))
+    )
+    viewer, requests, errors = (
+        _worker_analytics(account, worker, token, now)
+        if worker and token and isinstance(account, str)
+        else (False, None, None)
+    )
+    result: dict[str, Any] = {
+        "collected_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "credential": _credential_state(
+            worker=bool(worker),
+            database=bool(database),
+            worker_read=bool(worker_reads),
+            d1_read=bool(d1_reads),
+            token=bool(token),
+            viewer=viewer,
+        ),
+        "worker_version": version_id,
+        "worker_published_at": _published_at(worker_reads.get("versions-list"), version_id),
+        "repository_head": repository_head
+        if isinstance(repository_head, str) and _NAME.fullmatch(repository_head)
+        else None,
+        "d1_rows": _row_count(d1_reads["d1-counts"]) if "d1-counts" in d1_reads else None,
+        # No available read-only source reports a D1 purge event time. Keep it
+        # unknown rather than present the newest data date as a purge.
+        "last_purge": None,
+        "requests_24h": requests,
+        "errors_24h": errors,
+    }
+    stats._cloudflare(result)
+    return result
+
+
 def collect(settings: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
     """Unavailable providers stay unknown. Successful empty queries never imply zero."""
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
@@ -280,7 +513,12 @@ def collect(settings: dict[str, Any], *, now: datetime | None = None) -> dict[st
             sources.append("downloads")
         except (ValueError, KeyError, TypeError, AttributeError):
             downloads = {"pypi": None, "npm": None}
-    return stats.snapshot(taken_at=now, source_set=sources, weeks=weeks, daily=daily, downloads=downloads)
+    cloudflare = cloudflare_status(settings, now=now)
+    if cloudflare is not None:
+        sources.append("cloudflare")
+    return stats.snapshot(
+        taken_at=now, source_set=sources, weeks=weeks, daily=daily, downloads=downloads, cloudflare=cloudflare
+    )
 
 
 def _histogram(rows: list[dict[str, Any]] | None, week: str, *, upgrades: bool) -> list[dict[str, Any]] | None:

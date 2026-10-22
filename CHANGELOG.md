@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Brigade self-invocations isolate Python imports from workspace files and `PYTHONPATH`, using the running installation with `-I` so `pip --user` installs keep working. This covers hooks, update refreshes, detached runs, dispatch, dashboard access, embedded scanners, and generated service commands. Agent hook commands skip update notices and refreshes entirely.
 - Work briefs read only the newest release candidate and release run instead of decoding every bundle, and the harness-wiring scan skips its per-ancestor worktree check for files that are not wiring documents. On a checkout with a large release history the brief ran about 3x faster with 60% lower peak memory.
 - Work briefs limit Codex Cloud inventory to the newest page and check registered tasks missing from that page individually, preserving stale-task warnings without full inventory pagination.
 - Handoff drafts use consistent LF line endings on Windows for both creation and forced replacement.
@@ -22,6 +23,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Live Fleet Hub inbox delivery (#1887 slice 3): new unread mail reaches running Claude Code sessions through the managed `UserPromptSubmit` and `PostToolUse` hooks, and Codex sessions through `brigade work presence-hook --harness codex --stdin --context fleet-inbox`. Messages are fenced as untrusted peer content, shown once per session from a private cursor file, never acknowledged by delivery, and fetched with one 2 second hub request behind a 60 second failure backoff. See `docs/fleet-inbox-delivery.md`.
+- Add an operator CI board with exact-head required checks, PR rollups, node-only relay pulls and budgeted on-demand reconciliation. Hub refresh queues work without outbound calls, and private repository names stay operator-only.
+
 - Claude work-loop hooks track explicit file reads and record unseen callers before Edit, Write, or NotebookEdit. Checks warn without denying edits, and unavailable or incomplete graphs record a null result with a reason.
 
 - Antigravity sessions publish Fleet Hub presence through silent, detached hooks installed by `brigade init --harnesses antigravity`; Stop refreshes presence until the session expires by TTL.

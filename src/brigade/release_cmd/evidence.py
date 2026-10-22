@@ -15,6 +15,7 @@ from .. import (
     repos_cmd,
     research_cmd,
     roadmap_cmd,
+    scrub,
     tools_cmd,
     work_cmd,
 )
@@ -705,7 +706,12 @@ def _payload(target: Path, *, base_ref: str | None, run_checks: bool, policy: st
         checks.append(version_tag_check(target))
     elif not _ci_mod._content_guard_available(target):
         checks.append(
-            {"name": "content_guard", "status": WARN, "detail": "content-guard not available", "available": False}
+            {
+                "name": "content_guard",
+                "status": WARN,
+                "detail": scrub.external_package_error() or "content-guard not available",
+                "available": False,
+            }
         )
     blockers, warnings = _assess(evidence, checks, _docs_warnings(target, base_ref))
     return {

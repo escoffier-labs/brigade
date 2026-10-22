@@ -29,7 +29,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade dogfood` (extras): 1 command path(s)
 - `brigade evidence`: 12 command path(s)
 - `brigade extras`: 3 command path(s)
-- `brigade fleet`: 83 command path(s)
+- `brigade fleet`: 85 command path(s)
 - `brigade friction` (extras): 3 command path(s)
 - `brigade governance`: 1 command path(s)
 - `brigade guard`: 1 command path(s)
@@ -63,7 +63,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade run`: 47 command path(s)
 - `brigade run-cloud` (deprecated; use `brigade run cloud`): 45 command path(s)
 - `brigade runbook` (extras): 5 command path(s)
-- `brigade runs`: 21 command path(s)
+- `brigade runs`: 22 command path(s)
 - `brigade scrub`: 1 command path(s)
 - `brigade search`: 6 command path(s)
 - `brigade security`: 16 command path(s)
@@ -205,6 +205,8 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade fleet actions tick`
 - `brigade fleet campaign inspect`
 - `brigade fleet campaign preview`
+- `brigade fleet ci pull`
+- `brigade fleet ci reconcile`
 - `brigade fleet claims`
 - `brigade fleet cloud set`
 - `brigade fleet dot report`
@@ -674,6 +676,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade runbook resume` (extras)
 - `brigade runbook run` (extras)
 - `brigade runs audit`
+- `brigade runs cassette purge`
 - `brigade runs child`
 - `brigade runs diff`
 - `brigade runs events`

@@ -1569,6 +1569,7 @@ def run(
                 assignments,
                 roster,
                 cwd=cwd,
+                policy_workspace=lock_workspace,
                 read_only=read_only,
                 sandbox_read_only=sandbox_read_only,
                 sandbox=sandbox,
@@ -1601,6 +1602,7 @@ def run(
                 output_dir=output_dir,
                 model_lease=lease_model_agent,
                 remote_transport=remote_transport,
+                codex_transport=transport_for_payload,
             )
             check_cancellation()
         except runguard.RetainRunLockError:

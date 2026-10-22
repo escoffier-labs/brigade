@@ -15,7 +15,7 @@ from pathlib import Path
 from typing import Any, Callable, Protocol
 from urllib.parse import urlparse
 
-from . import agents, localio, message_envelope, proc, receipt_schema, run_budget, run_control, runguard
+from . import agents, localio, message_envelope, proc, receipt_schema, run_budget, run_cassette, run_control, runguard
 from .roster import Agent, Roster, is_cli_allowed, timeout_for
 from .seat_health_policy import SeatQuarantineState, decide_retry, failure_for_worker_result
 
@@ -588,6 +588,9 @@ def dispatch(
     output_dir: Path | None = None,
     model_lease: Callable[[Agent], Any] | None = None,
     remote_transport: RemoteTransport | None = None,
+    coordinator_prompt_sha256: str | None = None,
+    codex_transport: str | None = None,
+    policy_workspace: Path | None = None,
 ) -> list[WorkerResult]:
     """Dispatch staged assignments while keeping transport policy in one module.
 
@@ -605,7 +608,6 @@ def dispatch(
     ``quarantine_state`` / ``reprobe_seat`` implement the #474 same-seat-once
     retry bound: persist the failed attempt, re-probe, then allow at most one
     same-seat retry before quarantining the seat for the rest of the run.
-
     ``remote_transport`` resolves the central fleet route for a seat *before*
     the ``model_lease`` context is entered. When policy selected another
     machine the work is delegated there and no local lease or provider call is
@@ -678,7 +680,9 @@ def dispatch(
                 except Exception:
                     pass
 
-    def run_one(assignment: Assignment, prior_results: list[WorkerResult]) -> WorkerResult:
+    def _run_one(
+        assignment: Assignment, prior_results: list[WorkerResult], recording: run_cassette.DispatchRecording
+    ) -> WorkerResult:
         agent = roster.agents[assignment.worker]
         if quarantine_state.is_quarantined(assignment.worker):
             return WorkerResult(
@@ -776,10 +780,9 @@ def dispatch(
         started = time.monotonic()
         effective_read_only = read_only if sandbox_read_only is None else sandbox_read_only
         approval_correlation_marker = secrets.token_urlsafe(32)
-        # Set by the most recent invoke() and read by the finish() that maps it,
-        # so a delegated attempt's routing/handoff facts reach its own receipt
-        # and a following local attempt does not inherit them.
+        # invoke() and finish() share remote routing facts only for the current attempt.
         remote_disposition: list[dict[str, Any] | None] = [None]
+        recording.agent, recording.prompt = agent, prompt
 
         def _invoke_external(
             selected_agent: Agent,
@@ -821,6 +824,8 @@ def dispatch(
                     requested_model=selected_agent.model,
                     reasoning=selected_agent.reasoning,
                 )
+            if resume_session_id is None:
+                recording.prompt = selected_prompt
             if selected_agent.transport == "acpx":
                 from . import acpx_adapter
 
@@ -857,8 +862,7 @@ def dispatch(
                     **cloud_dispatch_kwargs,
                 )
             if selected_agent.env is not None:
-                # Env seats always dispatch through the direct CLI path. The
-                # app-server session cannot apply per-seat env safely.
+                # Env seats use direct CLI because app-server cannot apply per-seat env.
                 env_kwargs: dict[str, Any] = {}
                 if sandbox is not None:
                     env_kwargs["sandbox"] = sandbox
@@ -880,7 +884,7 @@ def dispatch(
                     session_binding_id=session_binding_id,
                 )
             if selected_agent.cli == "codex" and appserver is not None:
-                approval_prompt = (
+                approval_prompt = recording.prompt = (
                     f"{selected_prompt}\n\n"
                     "Approval correlation rule: prefix every Brigade CLI command in this turn with "
                     f"`BRIGADE_APPROVAL_CORRELATION={approval_correlation_marker}`. "
@@ -1045,6 +1049,7 @@ def dispatch(
             resume_session_id: str | None = None,
         ) -> agents.AgentResult:
             """Record transport facts around exactly one real external call."""
+            recording.agent = selected_agent
             proc.check_cancellation(process_registry)
             blocked = _selected_agent_preflight(
                 selected_agent,
@@ -1055,6 +1060,8 @@ def dispatch(
             if blocked is not None:
                 return blocked
             remote_disposition[0] = None
+            if resume_session_id is None:
+                recording.prompt = selected_prompt
             attempt = on_dispatch_requested(selected_agent) if on_dispatch_requested is not None else None
             try:
                 # The fleet route is resolved before the model lease is entered.
@@ -1259,7 +1266,7 @@ def dispatch(
             )
             return finish(missing_fallback, agent, attempts)
 
-        fallback_agent = roster.agents[fallback_name]
+        recording.agent = fallback_agent = roster.agents[fallback_name]
         fallback_cloudflare_detail = agents.cloudflare_ai_gateway_preflight_detail(fallback_agent.model)
         if fallback_cloudflare_detail is not None:
             # Route through finish() so the accumulated grok attempt history and
@@ -1300,6 +1307,18 @@ def dispatch(
             )
         )
         return finish(fallback_result, fallback_agent, attempts)
+
+    run_one = run_cassette.dispatch_recorder(
+        _run_one,
+        roster=roster,
+        run_dir=output_dir,
+        workspace=policy_workspace or cwd,
+        codex_transport=codex_transport or roster.codex_transport,
+        read_only=read_only,
+        sandbox=sandbox or ("read-only" if (read_only if sandbox_read_only is None else sandbox_read_only) else None),
+        transport=lambda agent: _receipt_transport(agent, appserver=appserver),
+        coordinator_prompt_sha256=coordinator_prompt_sha256,
+    )
 
     if not assignments:
         return []
@@ -1435,12 +1454,14 @@ def _add_note(error: BaseException, note: str, output_dir: Path | None, cwd: Pat
 
 
 def _describe_failure(error: BaseException) -> str:
+    summary = "budget-policy: worker dispatch denied" if isinstance(error, run_budget.BudgetPolicyError) else None
     try:
         detail = str(error)[:200]
-        return f"{type(error).__name__}: {detail}" if detail else type(error).__name__
+        description = f"{type(error).__name__}: {detail}" if detail else type(error).__name__
+        return f"{summary} ({description})" if summary else description
     except BaseException:
         # Even an interrupted formatter must not replace lock retention.
-        return type(error).__name__
+        return summary or type(error).__name__
 
 
 def _raise_retained_future_error(
