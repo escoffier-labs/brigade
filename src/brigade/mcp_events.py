@@ -18,6 +18,7 @@ runtime and uses only the standard library:
 from __future__ import annotations
 
 import base64
+import contextlib
 import hashlib
 import hmac
 import http.client
@@ -25,6 +26,7 @@ import ipaddress
 import json
 import socket
 import ssl
+import threading
 import time
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
@@ -180,32 +182,72 @@ def resolve_callback(parts: SplitResult, policy: CallbackPolicy) -> list[str]:
     return ips
 
 
+def _remaining(deadline: float) -> float:
+    left = deadline - time.monotonic()
+    if left <= 0:
+        raise TimeoutError("callback_deadline_exceeded")
+    return left
+
+
 class _PinnedHTTPSConnection(http.client.HTTPSConnection):
     """Connect to a validated IP while verifying the certificate against the original hostname."""
 
-    def __init__(self, host: str, port: int, *, address: str, timeout: float) -> None:
+    def __init__(self, host: str, port: int, *, address: str, deadline: float) -> None:
         self._tls = ssl.create_default_context()
-        super().__init__(host, port, timeout=timeout, context=self._tls)
+        super().__init__(host, port, timeout=_remaining(deadline), context=self._tls)
         self._address = address
+        self._deadline = deadline
 
     def connect(self) -> None:
-        sock = socket.create_connection((self._address, self.port), self.timeout)
+        sock = socket.create_connection((self._address, self.port), _remaining(self._deadline))
+        sock.settimeout(_remaining(self._deadline))
         self.sock = self._tls.wrap_socket(sock, server_hostname=self.host)
 
 
 class _PinnedHTTPConnection(http.client.HTTPConnection):
-    def __init__(self, host: str, port: int, *, address: str, timeout: float) -> None:
-        super().__init__(host, port, timeout=timeout)
+    def __init__(self, host: str, port: int, *, address: str, deadline: float) -> None:
+        super().__init__(host, port, timeout=_remaining(deadline))
         self._address = address
+        self._deadline = deadline
 
     def connect(self) -> None:
-        self.sock = socket.create_connection((self._address, self.port), self.timeout)
+        self.sock = socket.create_connection((self._address, self.port), _remaining(self._deadline))
+
+
+def _read_response(connection: http.client.HTTPConnection, deadline: float) -> tuple[int, bytes]:
+    """Read status and a bounded body, re-arming the socket timeout to the time left before every read.
+
+    ``read1`` returns whatever is available instead of waiting for a full chunk, so a receiver that
+    drips one byte per idle interval cannot stretch the exchange past the overall deadline.
+    """
+    assert connection.sock is not None
+    connection.sock.settimeout(_remaining(deadline))
+    response = connection.getresponse()
+    if response.getheader("Content-Encoding", "identity").lower() != "identity":
+        raise ValueError("callback_response_encoded")
+    chunks: list[bytes] = []
+    size = 0
+    while True:
+        if connection.sock is not None:
+            connection.sock.settimeout(_remaining(deadline))
+        else:
+            _remaining(deadline)
+        chunk = response.read1(_READ_CHUNK)
+        if not chunk:
+            return response.status, b"".join(chunks)
+        size += len(chunk)
+        if size > MAX_RESPONSE_BYTES:
+            raise ValueError("callback_response_too_large")
+        chunks.append(chunk)
 
 
 def post_webhook(
     url: str, body: bytes, headers: Mapping[str, str], policy: CallbackPolicy, *, timeout: float = 10.0
 ) -> tuple[int, bytes]:
     """POST once to a validated callback. Never follows redirects, uses no proxy, bounds the response.
+
+    ``timeout`` is one overall deadline for connect, TLS, send, headers and body: per-read idle
+    timeouts alone would let a slow-drip receiver pin the caller indefinitely.
 
     Raises ``ValueError`` for a rejected URL, address, or oversized body, and
     ``OSError`` (including timeouts) for transport failures.
@@ -219,30 +261,33 @@ def post_webhook(
     target = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
     connection: http.client.HTTPConnection
     if parts.scheme == "https":
-        connection = _PinnedHTTPSConnection(parts.hostname, parts.port or 443, address=address, timeout=timeout)
+        connection = _PinnedHTTPSConnection(parts.hostname, parts.port or 443, address=address, deadline=deadline)
     else:
-        connection = _PinnedHTTPConnection(parts.hostname, parts.port or 80, address=address, timeout=timeout)
+        connection = _PinnedHTTPConnection(parts.hostname, parts.port or 80, address=address, deadline=deadline)
+    expired = threading.Event()
+
+    def abort() -> None:
+        # Unblocks a recv stuck mid-header or mid-handshake, which no per-call timeout can bound.
+        expired.set()
+        sock = connection.sock
+        if sock is not None:
+            with contextlib.suppress(OSError):
+                sock.shutdown(socket.SHUT_RDWR)
+
+    watchdog = threading.Timer(timeout, abort)
+    watchdog.daemon = True
+    watchdog.start()
     try:
         connection.request(
             "POST", target, body=body, headers={**headers, "Accept-Encoding": "identity", "Connection": "close"}
         )
-        response = connection.getresponse()
-        if response.getheader("Content-Encoding", "identity").lower() != "identity":
-            raise ValueError("callback_response_encoded")
-        chunks: list[bytes] = []
-        size = 0
-        while True:
-            if time.monotonic() > deadline:
-                raise TimeoutError("callback_response_slow")
-            chunk = response.read(_READ_CHUNK)
-            if not chunk:
-                break
-            size += len(chunk)
-            if size > MAX_RESPONSE_BYTES:
-                raise ValueError("callback_response_too_large")
-            chunks.append(chunk)
-        return response.status, b"".join(chunks)
-    except http.client.HTTPException as error:
-        raise OSError("callback_protocol_error") from error
+        return _read_response(connection, deadline)
+    except (OSError, http.client.HTTPException) as error:
+        if expired.is_set() or time.monotonic() >= deadline:
+            raise TimeoutError("callback_deadline_exceeded") from error
+        if isinstance(error, http.client.HTTPException):
+            raise OSError("callback_protocol_error") from error
+        raise
     finally:
+        watchdog.cancel()
         connection.close()

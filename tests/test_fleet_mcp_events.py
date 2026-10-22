@@ -267,6 +267,65 @@ def test_post_does_not_follow_redirects_and_bounds_the_response(receiver: Receiv
         server.server_close()
 
 
+def _drip_server(*, drip_headers: bool) -> ThreadingHTTPServer:
+    class Drip(BaseHTTPRequestHandler):
+        def log_message(self, *_args: Any) -> None:
+            return
+
+        def do_POST(self) -> None:  # noqa: N802
+            self.rfile.read(int(self.headers["Content-Length"]))
+            try:
+                if drip_headers:
+                    for byte in b"HTTP/1.1 200 OK\r\nX-Pad: " + b"a" * 200:
+                        self.wfile.write(bytes([byte]))
+                        self.wfile.flush()
+                        time.sleep(0.3)
+                    return
+                self.send_response(200)
+                self.send_header("Content-Length", "1000")
+                self.end_headers()
+                self.wfile.flush()
+                for _ in range(1000):
+                    self.wfile.write(b"x")
+                    self.wfile.flush()
+                    time.sleep(0.3)
+            except OSError:
+                return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Drip)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+@pytest.mark.parametrize("drip_headers", [False, True], ids=["slow_body", "slow_headers"])
+def test_post_enforces_one_overall_deadline_against_a_slow_drip_receiver(
+    drip_headers: bool, receiver: Receiver
+) -> None:
+    """Each byte arrives inside the socket idle window, so only an overall deadline can stop the read."""
+    server = _drip_server(drip_headers=drip_headers)
+    try:
+        policy = mcp_events.CallbackPolicy(frozenset({"127.0.0.1"}), allow_loopback_http=True)
+        url = f"http://127.0.0.1:{server.server_address[1]}/drip"
+        started = time.monotonic()
+        with pytest.raises(TimeoutError):
+            mcp_events.post_webhook(url, b"{}", {}, policy, timeout=1.0)
+        assert time.monotonic() - started < 1.5
+        # The caller is free again: the next delivery to a fast receiver goes straight through.
+        status, _ = mcp_events.post_webhook(receiver.url, b"{}", {}, policy, timeout=1.0)
+        assert 200 <= status < 300
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_post_still_succeeds_against_a_fast_receiver(receiver: Receiver) -> None:
+    policy = mcp_events.CallbackPolicy(frozenset({"127.0.0.1"}), allow_loopback_http=True)
+    started = time.monotonic()
+    status, _ = mcp_events.post_webhook(receiver.url, b"{}", {}, policy, timeout=1.0)
+    assert 200 <= status < 300 and time.monotonic() - started < 1.0
+
+
 def test_dot_pack_still_uses_the_shared_signer() -> None:
     from brigade.dot import webhooks
 
