@@ -24,7 +24,14 @@ from typing import Any, Iterator
 
 import pytest
 
-from brigade import fleet_client, fleet_client_messages, fleet_hub, fleet_hub_events, fleet_hub_events_dispatch, fleet_hub_messages
+from brigade import (
+    fleet_client,
+    fleet_client_messages,
+    fleet_hub,
+    fleet_hub_events,
+    fleet_hub_events_dispatch,
+    fleet_hub_messages,
+)
 from brigade import mcp_events, mcp_server
 from brigade.fleet_mcp import FleetMcp
 from tests.test_fleet_messages import NODE_A, NODE_B
