@@ -239,6 +239,49 @@ def test_snapshot_rechecks_grants_revocation_and_query_binding(directory):
             messages.handle(directory, raw, caller=caller)
 
 
+@pytest.mark.parametrize("kind", ["node", "agent"])
+def test_snapshot_rejects_cursor_after_caller_reenrollment(directory, kind):
+    roster(directory, 3)
+    name = "paging-reader"
+    if kind == "node":
+        original, _ = fleet_hub.add_node(directory, name)
+        caller = original["node_id"]
+    else:
+        original = messages.add_principal(directory, {"name": name, "may_send_to": ["*"]})
+        caller = original["principal_id"]
+    status, first = messages.handle(directory, {"action": "who", "limit": 1}, caller=caller)
+    assert status == 200 and first["next_cursor"]
+
+    if kind == "node":
+        fleet_hub.revoke_node(directory, name)
+        replacement, token = fleet_hub.add_node(directory, name)
+        assert replacement["node_id"] == caller
+        assert fleet_hub.lookup_node_token(directory, token) == (caller, False)
+    else:
+        messages.revoke_principal(
+            directory, {"action": "revoke", "name": name, "expected_enrollment_id": original["enrollment_id"]}
+        )
+        replacement = messages.add_principal(
+            directory, {"name": name, "expected_enrollment_id": original["enrollment_id"], "may_send_to": ["*"]}
+        )
+        assert replacement["principal_id"] == caller
+        assert messages.lookup_principal_token(directory, replacement["token"]) == caller
+
+    with pytest.raises(messages.MessageError, match="cursor"):
+        messages.handle(directory, {"action": "who", "cursor": first["next_cursor"]}, caller=caller)
+    status, fresh = messages.handle(directory, {"action": "who", "limit": 1}, caller=caller)
+    assert status == 200 and fresh["next_cursor"]
+    status, rest = messages.handle(directory, {"action": "who", "cursor": fresh["next_cursor"]}, caller=caller)
+    assert status == 200 and rest["next_cursor"] is None
+    assert [row["node_id"] for row in fresh["nodes"] + rest["nodes"]] == [
+        "node-0000",
+        "node-0001",
+        "node-0002",
+        *([name] if kind == "node" else []),
+        "reader-node",
+    ]
+
+
 def test_snapshot_capacity_expiry_and_schema_migration(directory, monkeypatch):
     from brigade import fleet_hub_paging
 

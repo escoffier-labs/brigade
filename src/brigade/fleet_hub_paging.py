@@ -46,8 +46,17 @@ def page_limit(raw: dict[str, Any]) -> int:
     return limit
 
 
-def query_hash(raw: dict[str, Any]) -> str:
-    query = [raw["action"], raw.get("all", False), raw.get("filter", "").casefold()]
+def query_hash(conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str) -> str:
+    # Bind to the current credential without putting its fingerprint in the cursor.
+    statement = (
+        "SELECT token_hash FROM fleet_message_principals WHERE principal_id=? AND revoked_at IS NULL"
+        if caller.startswith("agent:")
+        else "SELECT token_sha256 FROM nodes WHERE node_id=? AND revoked_at IS NULL"
+    )
+    credential = conn.execute(statement, (caller,)).fetchone()
+    if credential is None:
+        raise MessageError("paging caller is not active")
+    query = [raw["action"], raw.get("all", False), raw.get("filter", "").casefold(), credential[0]]
     return hashlib.sha256(json.dumps(query).encode()).hexdigest()
 
 
@@ -77,7 +86,7 @@ def load(
     snapshot_id, offsets = value
     row = conn.execute(
         "SELECT payload FROM fleet_read_snapshots WHERE snapshot_id=? AND caller=? AND query_hash=? AND expires_at>?",
-        (snapshot_id, caller, query_hash(raw), fleet_hub._now_epoch()),
+        (snapshot_id, caller, query_hash(conn, raw, caller=caller), fleet_hub._now_epoch()),
     ).fetchone()
     if row is None:
         raise MessageError("paging cursor is invalid or expired")
@@ -160,7 +169,7 @@ def page(
     if more and snapshot_id is None:
         if not snapshot_write:
             raise SnapshotWriteRequired
-        snapshot_id = _save(conn, data, caller=caller, binding=query_hash(raw))
+        snapshot_id = _save(conn, data, caller=caller, binding=query_hash(conn, raw, caller=caller))
     cursor = (
         base64.urlsafe_b64encode(json.dumps([snapshot_id, offsets], separators=(",", ":")).encode()).decode()
         if more
