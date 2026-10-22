@@ -579,6 +579,7 @@ def make_handler(
             *,
             content_type: str = "text/html; charset=utf-8",
             nonce: str | None = None,
+            referrer_policy: str = "no-referrer",
             extra_headers: dict[str, str] | None = None,
         ) -> None:
             """Dashboard response with the same security headers as ``center serve``."""
@@ -593,7 +594,7 @@ def make_handler(
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Security-Policy", csp)
             self.send_header("X-Content-Type-Options", "nosniff")
-            self.send_header("Referrer-Policy", "no-referrer")
+            self.send_header("Referrer-Policy", referrer_policy)
             self.send_header("Cache-Control", "no-store")
             self.send_header("Vary", "Cookie")
             for key, value in (extra_headers or {}).items():
@@ -981,6 +982,28 @@ def make_handler(
                     except (FleetHubError, sqlite3.Error, KeyError, ValueError) as exc:
                         policy_error = f"the policy authority could not be read ({type(exc).__name__})"
                 control_plane = control_plane_from_hub(conn)
+                from .fleet_action_targets import linked_subjects
+
+                view = fleet_command_deck.build_view(
+                    frozen_deck,
+                    live_runs=live_runs,
+                    claims=claims,
+                    enrolled_labels=enrolled_labels,
+                    last_heard=last_heard,
+                    outcomes=outcomes,
+                    failed_outcomes=failed_outcomes,
+                    observers=observers,
+                    now=now,
+                    cloud_workers=cloud_workers,
+                    interactive_sessions=interactive_sessions,
+                    control_plane=control_plane,
+                )
+                from .fleet_deck_overview import page_alerts
+
+                try:
+                    action_sources = linked_subjects(conn, [a.source_ref for a in page_alerts(view, now)])
+                except (FleetHubError, KeyError, TypeError, ValueError):
+                    action_sources = frozenset()
             except ClaimFenceError as exc:
                 self._send_json(503, {"error": str(exc), "reason": exc.reason})
                 return
@@ -989,20 +1012,6 @@ def make_handler(
                 return
             finally:
                 conn.close()
-            view = fleet_command_deck.build_view(
-                frozen_deck,
-                live_runs=live_runs,
-                claims=claims,
-                enrolled_labels=enrolled_labels,
-                last_heard=last_heard,
-                outcomes=outcomes,
-                failed_outcomes=failed_outcomes,
-                observers=observers,
-                now=now,
-                cloud_workers=cloud_workers,
-                interactive_sessions=interactive_sessions,
-                control_plane=control_plane,
-            )
             nonce = secrets.token_urlsafe(16)
             if repos_page:
                 page = fleet_repo_policy_page.render(
@@ -1015,7 +1024,7 @@ def make_handler(
                 )
             else:
                 page = fleet_command_deck.render_deck(
-                    view, nonce=nonce, now=now, worklore_enabled=worklore_http.enabled()
+                    view, nonce=nonce, now=now, worklore_enabled=worklore_http.enabled(), action_sources=action_sources
                 )
             self._send_html(200, page, nonce=nonce)
 
@@ -1447,6 +1456,11 @@ def make_handler(
             path, _, query = self.path.partition("?")
             if self._refuse_token_query(query):
                 return
+            if path.startswith("/deck/actions/"):
+                from . import fleet_action_http
+
+                fleet_action_http.route(self, Path(db_path), token)
+                return
             if path == "/enroll":
                 self._serve_enrollment(query)
                 return
@@ -1649,6 +1663,11 @@ def make_handler(
             path, _, query = self.path.partition("?")
             if self._refuse_token_query(query):
                 return
+            if path.startswith("/deck/actions/") or path == "/actions":
+                from . import fleet_action_http
+
+                fleet_action_http.route(self, Path(db_path), token)
+                return
             if path == "/enroll":
                 self._post_enrollment(query)
                 return
@@ -1737,7 +1756,13 @@ def make_handler(
                 elif path == "/sessions":
                     status, body_payload = handle_session(conn, parsed, caller_node=caller_node)
                 elif path == "/messages":
-                    status, body_payload = fleet_hub_messages.handle(conn, parsed, caller=caller_node)
+                    status, body_payload = fleet_hub_messages.handle(
+                        conn,
+                        parsed,
+                        caller=caller_node,
+                        open_conn=lambda: open_db(Path(db_path)),
+                        source_ip=self.client_address[0],
+                    )
                 elif path == "/message-principals":
                     status, body_payload = fleet_hub_messages.handle_principal_admin(conn, parsed)
                 elif path == "/cloud":

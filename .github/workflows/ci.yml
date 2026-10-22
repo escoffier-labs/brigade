@@ -372,7 +372,11 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        python: ["3.10", "3.11", "3.12"]
+        # Pull requests run the Python 3.12 shards, which also carry coverage.
+        # Merge groups and pushes to main run every supported Python, so 3.10
+        # and 3.11 run on the combined change in the queue (and again on the
+        # push to main) rather than on every pull request push.
+        python: ${{ fromJSON(github.event_name == 'pull_request' && '["3.12"]' || '["3.10", "3.11", "3.12"]') }}
         shard: [0, 1, 2, 3]
     steps:
       - uses: actions/checkout@v7
@@ -476,6 +480,9 @@ jobs:
       matrix:
         python: ["3.10", "3.11", "3.12"]
     steps:
+      - name: Note Python shards deferred to the merge queue
+        if: ${{ github.event_name == 'pull_request' && matrix.python != '3.12' }}
+        run: echo "::notice::Python ${{ matrix.python }} shards run in the merge queue, not on pull requests."
       - name: Require shards, coverage, and cosign integration
         env:
           CHANGES_RESULT: ${{ needs.changes.result }}
@@ -500,8 +507,10 @@ jobs:
             fi
           fi
 
-  # Shadow aggregate: keep all existing required checks and matrix names.
-  # ci-gate is not required until GitHub deliberate-failure checks are complete.
+  # Required aggregate: ci-gate is the only required status check on main.
+  # It replaced the 20 per-job contexts after the GitHub deliberate-failure
+  # checks in docs/runbooks/ci-runner-pilot.md passed. Keep its needs list
+  # equal to the policy set below; a mismatch fails closed.
   ci-gate:
     if: always()
     needs:

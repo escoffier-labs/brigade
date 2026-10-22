@@ -52,6 +52,8 @@ STALE_LOCK_RECONCILE_MAX_AGE = timedelta(hours=24)
 # ground truth (issue #1165).
 _UNTRACKED_ENUM_BUDGET_BYTES = proc.MAX_DELIMITED_BYTES
 _UNTRACKED_ENUM_TIMEOUT_SECONDS = 120.0
+_WINDOWS_LOCK_RELEASE_RETRY_SECONDS = 1.0
+_WINDOWS_LOCK_RELEASE_RETRY_INTERVAL_SECONDS = 0.025
 
 # Receipt copies of a snapshot summarize path sets beyond this many entries so
 # run.json and pre-run-snapshot.json stay bounded; totals make the truncation
@@ -1348,17 +1350,27 @@ def _acquire_lock(
 
 
 def _release_lock(path: Path, ownership: _LockOwnership) -> None:
-    try:
-        visible = path.stat()
-    except OSError:
-        return
-    if visible.st_dev != ownership.device or visible.st_ino != ownership.inode:
-        return
     release_path = path.with_name(f".{path.name}.{ownership.owner_token}.release")
-    try:
-        path.rename(release_path)
-    except FileNotFoundError:
-        return
+    deadline = time.monotonic() + _WINDOWS_LOCK_RELEASE_RETRY_SECONDS
+    while True:
+        try:
+            visible = path.stat()
+        except OSError:
+            return
+        if visible.st_dev != ownership.device or visible.st_ino != ownership.inode:
+            return
+        try:
+            path.rename(release_path)
+            break
+        except FileNotFoundError:
+            return
+        except PermissionError as error:
+            if getattr(error, "winerror", None) not in {5, 32}:
+                raise
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                raise
+            time.sleep(min(_WINDOWS_LOCK_RELEASE_RETRY_INTERVAL_SECONDS, remaining))
     try:
         released = release_path.stat()
     except OSError:

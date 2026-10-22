@@ -634,6 +634,12 @@ class N8nActionStore:
             self._consumed_identity = _pin_identity(self._consumed_identity, consumed)
             approvals = _walk_directory(self._approvals, create=False, private=True, on_error=_environment_invalid)
             self._approvals_identity = _pin_identity(self._approvals_identity, approvals)
+            configured_root = _walk_directory(self._root, create=False, private=True, on_error=_action_state_invalid)
+            try:
+                if _file_identity(os.fstat(configured_root)) != self._root_identity:
+                    _action_state_invalid()
+            finally:
+                _close_fd(configured_root)
             return _HeldState(root, proposals, consumed, approvals)
         except Exception:
             if approvals != -1:
