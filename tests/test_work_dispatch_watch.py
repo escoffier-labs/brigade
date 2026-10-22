@@ -1049,3 +1049,29 @@ def test_exclusions_read_only_own_unsettled_ticks(tmp_path, monkeypatch):
     assert dispatch_watch.Watch.exclusions(watch) == {"task-dispatch-a": "infra-retries-exhausted"}
     assert len(reads) - first < first  # The finished tick is not reread.
     assert watch.settled_ticks == {"dispatch-a"}
+
+
+def test_final_spawn_gate_rechecks_reservation(apply_target, monkeypatch, capsys):
+    import subprocess
+
+    assert cli.main(["work", "dispatch", "--target", str(apply_target), "--worker", "coder", "--dry-run"]) == 0
+    capsys.readouterr()
+    (directory,) = store.sessions(apply_target)
+    session = store.read(directory / "session.json")
+    session.update(dry_run=False, deadline=None)
+    localio.write_json(directory / "session.json", session)
+    engine = apply.Apply(apply_target)
+    answers = iter([True, False])
+    engine.reservation_allowed = lambda: next(answers, False)
+    spawned = []
+    popen = subprocess.Popen
+
+    def guarded(argv, *args, **kwargs):
+        if "brigade.work_cmd.dispatch_child" in argv:
+            spawned.append(argv)
+        return popen(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", guarded)
+    engine.session(directory, no_wait=True)
+    assert not spawned
+    assert not [row for _, row in store.intents(apply_target) if row.get("pid")]

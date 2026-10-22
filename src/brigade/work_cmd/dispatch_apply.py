@@ -442,7 +442,9 @@ class Apply:
             argv = _child_argv(row, session, _render_task_run_prompt(task) + CONTRACT)
             try:
                 with (run_dir / "dispatch-child.log").open("ab") as log:
-                    if not self.can_launch():
+                    # Worktree setup and prompt rendering take time. Re-check the
+                    # watch deadline and launch ceiling at the final gate.
+                    if not self.can_launch() or (not row.get("pid") and not self.reservation_allowed()):
                         return
                     child = subprocess.Popen(
                         [sys.executable, "-m", "brigade.work_cmd.dispatch_child", str(run_dir), *argv],
