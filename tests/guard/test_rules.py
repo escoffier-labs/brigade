@@ -535,6 +535,9 @@ class MissingLeakShapeTests(unittest.TestCase):
             "f\"https://{f'{cfg.db.local}'}/\"",  # content-guard: allow private-hostname
             'rf"\\"https://{cfg.db.local}/path\\""',  # content-guard: allow private-hostname
             'f"""https://{cfg.db.local}/path"""',  # content-guard: allow private-hostname
+            # Brackets keep ':' inside the expression; a nested spec field is code.
+            'f"https://{d[1:2]}/{cfg.db.local}"',  # content-guard: allow private-hostname
+            'f"https://{cfg.db.local:>{width}}/p"',  # content-guard: allow private-hostname
         ):
             with self.subTest(text=text):
                 result = scan_text(text)
@@ -553,6 +556,9 @@ class MissingLeakShapeTests(unittest.TestCase):
             'print(f"{{")  # see https://db.home/x',  # content-guard: allow private-hostname
             # An f-prefix inside an ordinary string does not open a field.
             'hint = "start with f\'{name"; url = "https://db.home/x"',  # content-guard: allow private-hostname
+            # Comment text is not lexed, and a format spec is literal text.
+            "# start with f'{name; see https://db.home/x",  # content-guard: allow private-hostname
+            'f"result={value:https://db.home/path}"',  # content-guard: allow private-hostname
         ):
             with self.subTest(text=text):
                 self.assertIn("private-hostname", {f.rule_id for f in scan_text(text).findings})

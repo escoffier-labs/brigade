@@ -248,14 +248,17 @@ _STRING_PREFIXES = {"", "r", "b", "u", "br", "rb", "f", "rf", "fr"}
 def _interpolation_state(before: str) -> bool | None:
     """Lex the line up to a match and report where it ends inside an f-string
     replacement field: None when outside any field, False in bare expression
-    code, True inside a quoted literal within the expression."""
-    # Frames: ("str", delimiter) or ("fstr", delimiter) for literals, and
-    # ("expr", depth) for a replacement field with nested brace depth.
+    code, True in literal text within it (a quoted literal or a format spec)."""
+    # Frames: ["str" | "fstr", delimiter] for literals, ["expr", depth] for a
+    # replacement field's expression with bracket depth, and ["spec", 0] for
+    # its format specification after a top-level ':'.
     stack: list[list] = []
     index = 0
     while index < len(before):
         char = before[index]
         top = stack[-1] if stack else None
+        if top is None and char == "#":
+            break
         if top is None or top[0] == "expr":
             if char in "\"'":
                 delimiter = char * 3 if before.startswith(char * 3, index) else char
@@ -269,13 +272,23 @@ def _interpolation_state(before: str) -> bool | None:
                 stack.append([kind, delimiter])
                 index += len(delimiter)
                 continue
-            if top is not None and char == "{":
-                top[1] += 1
-            elif top is not None and char == "}":
-                if top[1]:
+            if top is not None:
+                if char in "([{":
+                    top[1] += 1
+                elif char in ")]" and top[1]:
                     top[1] -= 1
-                else:
-                    stack.pop()
+                elif char == "}":
+                    if top[1]:
+                        top[1] -= 1
+                    else:
+                        stack.pop()
+                elif char == ":" and not top[1] and not before.startswith(":=", index):
+                    top[0] = "spec"
+        elif top[0] == "spec":
+            if char == "{":
+                stack.append(["expr", 0])
+            elif char == "}":
+                stack.pop()
         elif char == "\\":
             # Raw literals keep the backslash, but it still stops an escaped
             # delimiter from closing the literal.
@@ -291,7 +304,7 @@ def _interpolation_state(before: str) -> bool | None:
                 continue
             stack.append(["expr", 0])
         index += 1
-    if not any(frame[0] == "expr" for frame in stack):
+    if not any(frame[0] in ("expr", "spec") for frame in stack):
         return None
     return stack[-1][0] != "expr"
 
