@@ -1115,16 +1115,25 @@ jobs:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: python scripts/pr_tier_shadow.py run --output .pr-tier-shadow
       - name: Compare exact attempt and write summary
+        id: comparison
         if: always()
         run: |
+          rejected_output=false
           if [ -L .pr-tier-shadow ]; then
-            echo 'Shadow output directory is a symlink' >&2
-            exit 2
+            rm -- .pr-tier-shadow
+            rejected_output=true
           fi
           mkdir -p .pr-tier-shadow
           rm -rf -- .pr-tier-shadow/full
           if [ -d "$RUNNER_TEMP/pr-tier-full" ]; then
             cp -R -- "$RUNNER_TEMP/pr-tier-full" .pr-tier-shadow/full
+          fi
+          echo 'upload_safe=true' >> "$GITHUB_OUTPUT"
+          if [ "$rejected_output" = true ]; then
+            echo '{"trial_status":"unknown","comparison":{"status":"incomplete","full_only_candidate_count":null,"confirmed_real_miss_count":null,"errors":["shadow output directory was a symlink"]}}' > .pr-tier-shadow/report.json
+            echo 'PR test tier shadow: incomplete, rejected symlink output directory.' > .pr-tier-shadow/summary.md
+            cat .pr-tier-shadow/summary.md >> "$GITHUB_STEP_SUMMARY"
+            exit 2
           fi
           if [ -f scripts/pr_tier_shadow.py ]; then
             python3 scripts/pr_tier_shadow.py finalize --output .pr-tier-shadow --full-evidence "$RUNNER_TEMP/pr-tier-full"
@@ -1136,7 +1145,7 @@ jobs:
             exit 2
           fi
       - name: Retain shadow evidence
-        if: always()
+        if: always() && steps.comparison.outputs.upload_safe == 'true'
         uses: actions/upload-artifact@v7
         with:
           name: pr-tier-shadow-${{ github.run_id }}-${{ github.run_attempt }}

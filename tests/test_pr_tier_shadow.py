@@ -5,6 +5,7 @@ import datetime as datetime_module
 from datetime import datetime
 from http.client import HTTPException, IncompleteRead
 import json
+import os
 from pathlib import Path
 import re
 import shutil
@@ -271,6 +272,7 @@ def test_retained_full_replaces_old_artifact_without_following_symlinks(
         bash = shutil.which("bash")
         if bash is None:
             pytest.skip("Ubuntu shadow workflow retention requires Bash")
+        monkeypatch.setenv("GITHUB_OUTPUT", str(tmp_path / "step-output"))
         job = (ROOT / ".github/workflows/ci.yml").read_text().split("  pr-tier-shadow:\n", 1)[1]
         script = job.split("      - name: Compare exact attempt and write summary\n", 1)[1]
         script = textwrap.dedent(script.split("        run: |\n", 1)[1].split("          if [ -f scripts/", 1)[0])
@@ -283,6 +285,72 @@ def test_retained_full_replaces_old_artifact_without_following_symlinks(
     assert sentinel.read_text() == "untouched"
     assert list(outside.iterdir()) == [sentinel]
     assert {path.name: path.read_bytes() for path in cache.iterdir()} == expected
+
+
+@pytest.mark.parametrize("scenario", ["output-symlink", "unlink-failure", "normal-incomplete"])
+def test_workflow_upload_uses_safe_directory_even_when_comparison_is_incomplete(
+    tmp_path, monkeypatch, prefetch, scenario
+):
+    bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("Ubuntu shadow workflow comparison requires Bash")
+    execute, _, _, _, cache = prefetch
+    execute()
+    expected_cache = {path.name: path.read_bytes() for path in cache.iterdir()}
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "private.txt"
+    sentinel.write_text("must not be uploaded")
+    output = tmp_path / ".pr-tier-shadow"
+    if scenario == "normal-incomplete":
+        shadow.guard(output, now=shadow.TRIAL_START)  # Missing selected results remains incomplete.
+    else:
+        output.symlink_to(outside, target_is_directory=True)
+    (tmp_path / "scripts").symlink_to(ROOT / "scripts", target_is_directory=True)
+    if scenario == "unlink-failure":
+        tools = tmp_path / "tools"
+        tools.mkdir()
+        rm = tools / "rm"
+        rm.write_text("#!/bin/sh\nexit 1\n")
+        rm.chmod(0o755)
+        monkeypatch.setenv("PATH", str(tools) + os.pathsep + os.environ["PATH"])
+    step_output = tmp_path / "step-output"
+    summary = tmp_path / "summary"
+    monkeypatch.setenv("GITHUB_OUTPUT", str(step_output))
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    monkeypatch.delenv("GH_TOKEN", raising=False)
+    job = (ROOT / ".github/workflows/ci.yml").read_text().split("  pr-tier-shadow:\n", 1)[1]
+    comparison, upload = job.split("      - name: Compare exact attempt and write summary\n", 1)[1].split(
+        "      - name: Retain shadow evidence\n", 1
+    )
+    script = textwrap.dedent(comparison.split("        run: |\n", 1)[1])
+    result = subprocess.run([bash, "-e", "-c", script], cwd=tmp_path, capture_output=True, text=True, timeout=30)
+    values = dict(line.split("=", 1) for line in step_output.read_text().splitlines()) if step_output.exists() else {}
+    condition = re.search(r"^        if: (.+)$", upload, re.M)[1]
+    expression = (
+        condition.replace("always()", "True")
+        .replace("steps.comparison.outputs.upload_safe", repr(values.get("upload_safe", "")))
+        .replace("&&", "and")
+    )
+    eligible = eval(expression, {"__builtins__": {}}, {})
+    assert sentinel.read_text() == "must not be uploaded"
+    assert list(outside.iterdir()) == [sentinel]
+    assert {path.name: path.read_bytes() for path in cache.iterdir()} == expected_cache
+    if scenario == "unlink-failure":
+        assert result.returncode != 0
+        assert eligible is False
+    else:
+        assert result.returncode == 2, result.stderr
+        assert output.is_dir() and not output.is_symlink()
+        assert eligible is True  # Ordinary incomplete comparisons still upload.
+        assert "path: .pr-tier-shadow/" in upload
+        assert not (output / "private.txt").exists()
+        report = json.loads((output / "report.json").read_text())
+        assert report["comparison"]["status"] == "incomplete"
+        assert report["comparison"]["full_only_candidate_count"] is None
+        assert {path.name: path.read_bytes() for path in (output / "full").iterdir()} == expected_cache
+        if scenario == "output-symlink":
+            assert any("symlink" in error for error in report["comparison"]["errors"])
 
 
 def log(index, *, failed=None, checkout=SHA):
