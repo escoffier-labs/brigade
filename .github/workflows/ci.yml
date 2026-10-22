@@ -334,6 +334,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v7
+        with:
+          # The allowlist ratchet reads the test merge's first parent on pull requests.
+          fetch-depth: 2
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
@@ -353,9 +356,29 @@ jobs:
         run: |
           git fetch --no-tags --depth=1 origin ${{ github.base_ref || 'main' }}
           python scripts/check_size_ratchet_baseline.py --base-ref origin/${{ github.base_ref || 'main' }}
+      - name: Resolve allowlist base
+        id: allowlist-base
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          EVENT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.before }}
+        run: |
+          set -euo pipefail
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            # Compare with the base tip GitHub merged into. pull_request.base.sha can
+            # trail main and would blame this pull request for allowlist growth on main.
+            if [ "$(git rev-parse HEAD^2 2>/dev/null)" != "$PR_HEAD_SHA" ]; then
+              echo "::error::HEAD is not the pull request test merge"
+              exit 1
+            fi
+            base=$(git rev-parse HEAD^1)
+          else
+            base=$EVENT_BASE_SHA
+          fi
+          echo "sha=$base" >> "$GITHUB_OUTPUT"
       - name: Windows allowlist ratchet
         env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}
+          BASE_SHA: ${{ steps.allowlist-base.outputs.sha }}
         run: |
           set -euo pipefail
           if [ -z "$BASE_SHA" ]; then
