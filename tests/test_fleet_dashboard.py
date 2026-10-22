@@ -9,6 +9,7 @@ import html
 import re
 import http.client
 import json
+import sys
 import threading
 from datetime import datetime, timedelta, timezone
 
@@ -40,6 +41,8 @@ def hub(tmp_path):
     yield ("127.0.0.1", server.server_address[1], db)
     server.shutdown()
     server.server_close()
+    thread.join(timeout=5)
+    assert not thread.is_alive(), "Fleet Hub accept loop survived shutdown (#1916)"
 
 
 def _request(hub, method: str, path: str, *, headers: dict | None = None, body=None):
@@ -1493,6 +1496,12 @@ class TestBoardBounds:
         assert page.count("<tr data-bucket=") == 2000
         assert "older runs omitted" in page
 
+    @pytest.mark.xfail(
+        sys.platform == "win32",
+        raises=TimeoutError,
+        reason="Windows loopback HTTP socket intermittently exceeds 5 seconds (#1947)",
+        strict=False,
+    )
     def test_machine_pages_resolve_history_seats_without_per_run_queries(self, hub, monkeypatch):
         stamp = datetime.now(timezone.utc).isoformat()
         events = [

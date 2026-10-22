@@ -5,12 +5,12 @@ from __future__ import annotations
 import json
 import os
 import stat
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Mapping, NoReturn
 
 from .. import grokbot_mcp, grokbot_ops, grokbot_paths
+from ..isolated_exec import module_argv, trusted_cwd
 from .actions import ObsidianExecutor
 from .adapters import ExcalidrawAdapter, NativeMcpClient, NativeMcpPort, allowlisted_excalidraw_env
 from .excalidraw_client import create_excalidraw_stdio_client
@@ -462,12 +462,11 @@ def canary(target: Path, *, timeout: int | None = None) -> dict[str, Any]:
 
 
 def render_unit(target: Path, *, python: str | None = None) -> str:
+    target = target.expanduser().resolve()
     instance = _load_validated_instance(target)
     reference = instance["bearer"]
     bind = instance["bind"]
-    args = [
-        python or sys.executable,
-        "-m",
+    args = module_argv(
         "brigade",
         "run",
         "cloud",
@@ -479,7 +478,8 @@ def render_unit(target: Path, *, python: str | None = None) -> str:
         str(target),
         "--bind",
         bind,
-    ]
+        python=python,
+    )
     for host in instance.get("allowed_hosts", []):
         args += ["--allow-host", host]
     for origin in instance.get("allowed_origins", []):
@@ -508,7 +508,7 @@ def render_unit(target: Path, *, python: str | None = None) -> str:
         "\n"
         "[Service]\n"
         "Type=simple\n"
-        f"ExecStart={exec_start}\n"
+        f"WorkingDirectory={grokbot_ops._systemd_quote(str(trusted_cwd()))}\nExecStart={exec_start}\n"
         f"{grokbot_ops.LISTENER_RECOVERY_SERVICE_FRAGMENT}"
         "KillMode=mixed\n"
         "TimeoutStopSec=20\n"

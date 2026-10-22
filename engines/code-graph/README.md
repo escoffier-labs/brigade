@@ -135,7 +135,7 @@ The server exposes fifteen tools. This list is verified against the live `tools/
 | `impact` | `symbol` (`depth` optional, default 1, clamped to 1..5) | Combined callers and callees of a symbol (the blast radius of a change), with `hops` on each edge, plus how `symbol` resolved. |
 | `context` | `task` (`limit` optional, default 12, `format`, `personalized`, and `max_chars` optional) | A context pack: matching entry points plus their caller/callee neighborhood and related files. |
 | `stats` | none | Counts of files, symbols, edges, imports, schema version, sync metadata, and per-language file counts. |
-| `doctor` | none | Freshness contract for the graph: schema status, resolver status, last sync age, branch drift, pending file changes, ignored entries, skipped and parse-error files, and `FRESH`/`STALE`/`NEEDS-MIGRATION` verdict. |
+| `doctor` | none | Freshness contract for the graph: schema status, resolver status, last sync age, branch drift and HEAD movement, pending file changes, ignored entries, skipped and parse-error files, per-language coverage, and `FRESH`/`STALE`/`NEEDS-MIGRATION` verdict. |
 | `file_neighbors` | `path` | Files connected to an indexed file by incoming or outgoing call edges. |
 | `dead_code` | none (`limit` optional, default 100) | Callables with no incoming call edges. A candidate list, not proof: dynamic dispatch, exports, and entry points are invisible to call edges. |
 | `cycles` | none | File-level dependency cycles from cross-file call edges, grouped into strongly connected components. |
@@ -147,6 +147,8 @@ The server exposes fifteen tools. This list is verified against the live `tools/
 Every tool additionally accepts an optional `repo` or `db` selector for multi-repo use.
 `doctor`, `repos`, and `diff` do not accept `refresh`; `doctor` reports staleness and leaves refresh to the query tools that opt into it.
 MCP `callers`, `callees`, and `impact` also accept an optional `limit` to bound returned edges. The CLI does not expose this option.
+MCP `callers`, `callees`, `impact`, and `affected` responses carry a top-level `freshness` object: `synced_at`, `age_seconds`, `branch_moved`, `head_moved`, `pending_files`, and `verdict`. It reuses the `doctor` contract, so the verdict is the same one `doctor` would give (`FRESH`, `STALE`, or `NEEDS-MIGRATION`). `head_moved` is informational: a commit over already-indexed content stays `FRESH`, while files it changed count in `pending_files`. If the check itself fails, the verdict is `UNKNOWN` with an `error` string and the query still answers. The CLI JSON output does not include this object.
+Doctor JSON includes `coverage`, keyed by language: `files`, `symbols`, `call_sites`, `resolved_call_sites`, `unresolved_call_sites`, and `cross_file_edges`, attributed to the calling file's language. A call site is resolved when it produced at least one edge. Unresolved sites include standard-library and third-party calls the graph never indexes, so compare languages against each other rather than reading the rate as an absolute. When the schema needs migration or resolver state is stale, `coverage` is `{}` and text output omits coverage rows until sync repairs the graph. Empty coverage indicates that counts are unavailable.
 Call-edge tools cap each direction at 500 real edges. When a traversal is capped, the `edges` array includes a final row with `kind: "truncated"`.
 
 ### Symbol resolution

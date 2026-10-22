@@ -485,6 +485,16 @@ def install_selection(
         except (OSError, ValueError) as exc:
             print(f"warning: unable to wire Antigravity presence hooks: {exc}", file=sys.stderr)
 
+    if wire_skills and "cursor" in selection.harnesses:
+        from .cursor_user_cmd import install_project_presence_hooks
+
+        error = install_project_presence_hooks(target)
+        if error:
+            print(
+                f"warning: unable to wire project-scoped Cursor presence hooks; check .cursor/hooks.json ({error})",
+                file=sys.stderr,
+            )
+
     if update_gitignore:
         result = apply_gitignore(target, selection, use_git_exclude=use_git_exclude)
         print(f"brigade: gitignore {result}")

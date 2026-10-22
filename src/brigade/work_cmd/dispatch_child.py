@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import subprocess
 import sys
 from pathlib import Path
 
@@ -27,6 +28,11 @@ def main() -> int:
             # A second bootstrap can never exec after this exclusive receipt,
             # even when the first parent died before observing its PID.
             try:
+                if os.name == "nt":
+                    # Windows exec neither quotes argv nor keeps this PID
+                    # alive until the replacement exits. Supervise the child
+                    # so the receipt remains live and -c stays one argument.
+                    return subprocess.call(sys.argv[2:])
                 os.execvpe(sys.argv[2], sys.argv[2:], os.environ)
             except OSError as exc:
                 localio.write_json(receipt, {**identity, "launch_error": str(exc)})

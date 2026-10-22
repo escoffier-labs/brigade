@@ -316,10 +316,22 @@ def _cursor_wiring(target: Path) -> tuple[dict[str, Any], list[str], bool, bool]
             issues.append(f"stale {surface}")
 
     hooks_doc, _ = cursor_user_cmd._read_json_object(root / "hooks.json")
-    hook_entries: object = None
-    if hooks_doc is not None and isinstance(hooks_doc.get("hooks"), dict):
-        hook_entries = hooks_doc["hooks"].get("sessionStart")
-    hook_current = isinstance(hook_entries, list) and cursor_user_cmd._hook_entry(root) in hook_entries
+    hooks = None
+    if hooks_doc is not None:
+        # Cursor loads none of a user document that fails the shared validator,
+        # and a versionless one is not loaded until sync repairs it.
+        document_error, needs_version = cursor_user_cmd.user_hooks_document_status(hooks_doc)
+        if not document_error and not needs_version:
+            hooks = hooks_doc.get("hooks")
+    hook_current = all(
+        cursor_user_cmd.project_presence_hook_installed(target, event)
+        or (
+            isinstance(hooks, dict)
+            and isinstance(hooks.get(event), list)
+            and cursor_user_cmd._hook_entry(root) in hooks[event]
+        )
+        for event in cursor_user_cmd._MANAGED_HOOK_EVENTS
+    )
     if not hook_current:
         missing = missing or not (root / "hooks.json").exists()
         stale = stale or (root / "hooks.json").exists()

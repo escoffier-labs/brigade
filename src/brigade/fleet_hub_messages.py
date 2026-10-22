@@ -16,6 +16,7 @@ import threading
 from time import monotonic
 from typing import Any, TypeGuard
 
+from . import fleet_hub_events
 from .fleet_hub_server import MAX_HANDLER_THREADS
 
 SUBJECT_LIMIT = 200
@@ -705,6 +706,8 @@ def send(
             (sender, client_id, now.isoformat()),
         )
         result = _fetch(conn, message_id) or {}
+        # Same transaction as the insert, so an event exists exactly when the message does.
+        fleet_hub_events.record_message_created(conn, result)
         if opened:
             conn.commit()
             _notify_recipient(recipient)
@@ -1126,6 +1129,8 @@ def handle(
     if not isinstance(raw, dict):
         raise MessageError("message request must be an object")
     action = raw.get("action")
+    if isinstance(action, str) and action.startswith("events_"):
+        return fleet_hub_events.handle(conn, raw, caller=caller)
     if action in ("who", "claims"):
         from .fleet_hub_paging import SnapshotWriteRequired
 

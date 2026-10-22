@@ -6,13 +6,13 @@ import hmac
 import json
 import os
 import stat
-import sys
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Callable, Mapping
 
 from . import grokbot_findings, grokbot_findings_relay, grokbot_mcp, grokbot_ops
+from .isolated_exec import module_argv, trusted_cwd
 
 PACK_ID = "operations-relay"
 DEFAULT_BIND = "127.0.0.1:8777"
@@ -315,12 +315,11 @@ def canary(target: Path, *, timeout: int | None = None) -> dict[str, Any]:
 
 
 def render_unit(target: Path, *, python: str | None = None) -> str:
+    target = target.expanduser().resolve()
     instance = _load_validated_instance(target)
     reference = instance["bearer"]
     bind = instance["bind"]
-    args = [
-        python or sys.executable,
-        "-m",
+    args = module_argv(
         "brigade",
         "run",
         "cloud",
@@ -332,7 +331,8 @@ def render_unit(target: Path, *, python: str | None = None) -> str:
         str(target),
         "--bind",
         bind,
-    ]
+        python=python,
+    )
     for host in instance.get("allowed_hosts", []):
         args += ["--allow-host", host]
     for origin in instance.get("allowed_origins", []):
@@ -357,7 +357,7 @@ def render_unit(target: Path, *, python: str | None = None) -> str:
         "After=network.target\n\n"
         "[Service]\n"
         "Type=simple\n"
-        f"ExecStart={exec_start}\n"
+        f"WorkingDirectory={grokbot_ops._systemd_quote(str(trusted_cwd()))}\nExecStart={exec_start}\n"
         "Restart=on-failure\n"
         "NoNewPrivileges=yes\n"
         "PrivateTmp=yes\n"

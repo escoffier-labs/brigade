@@ -158,6 +158,8 @@ ATTEMPT_RUN_ID_MAX = 128
 # Every attempt action consumes a durable event. This ceiling applies to new writes, including
 # privileged ones, so a stream of distinct run ids cannot make one item's event log unbounded.
 ITEM_MAX_ATTEMPT_EVENTS = 100
+# An item at this many recorded attempts is not retried silently.
+ATTEMPT_LIMIT = 2
 
 _ITEM_COLUMNS = (
     "work_id",
@@ -688,7 +690,7 @@ def exclusion_bucket(
     blocker = item.get("blocker")
     if isinstance(blocker, str) and blocker:
         return "blocker"
-    if int(item["attempt_count"]) >= 2:
+    if int(item["attempt_count"]) >= ATTEMPT_LIMIT:
         return "attempt-limit"
     if _review_after_future(item.get("review_after"), now=now):
         return "review-after"

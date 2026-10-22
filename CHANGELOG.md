@@ -7,9 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Memory care config accepts `read_only_paths` globs for policy or operator-owned cards. Scan, `plan-fixes`, and `backfill` skip matching cards, `memory proposal create` and `apply` refuse them with an error naming the pattern, and `memory care status` and `doctor` list the active patterns (#1976).
+
 ### Fixed
 
 - Fleet MCP directory and claim reads return bounded pages with continuation cursors, so callers can walk a roster or claim snapshot that exceeds one response.
+- Daily status preserves local work counts when an optional health snapshot times out. Windows pytest artifacts include flushed test-phase timings and stack dumps, and timeout summaries identify the last test or session phase.
+- Cursor project initialization and user-scope harness sync install all three presence lifecycle hooks into versioned hook documents, preserve foreign entries, validate the whole project document before it suppresses the user hook, and migrate hook ownership by event.
+- Brigade self-invocations isolate Python imports from workspace files and `PYTHONPATH`, using the running installation with `-I` so `pip --user` installs keep working. This covers hooks, update refreshes, detached runs, dispatch, dashboard access, embedded scanners, and generated service commands. Agent hook commands skip update notices and refreshes entirely.
 - Work briefs read only the newest release candidate and release run instead of decoding every bundle, and the harness-wiring scan skips its per-ancestor worktree check for files that are not wiring documents. On a checkout with a large release history the brief ran about 3x faster with 60% lower peak memory.
 - Work briefs limit Codex Cloud inventory to the newest page and check registered tasks missing from that page individually, preserving stale-task warnings without full inventory pagination.
 - Handoff drafts use consistent LF line endings on Windows for both creation and forced replacement.
@@ -17,10 +24,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Deck verdicts use plain colored text. Provider icons use transparent, consistently sized marks, including the official Jules mascot and a neutral fallback for unknown agents.
 - Deck Activity separates managed jobs from reported agent sessions. Ready queue counts avoid duplicate totals and fold routine exclusions. Shared repository names across machines show neutral parallel activity, while reported shared modified paths retain warnings.
 - Retention diagnostics use the held run lock when a detached worker checkout and custom output directory hide the original workspace after a malformed or unreadable receipt. Stale recovery retains the saved failure detail.
+- The content guard recognizes host-related assignment keys behind shell declaration prefixes (`export`, `readonly`, and Windows batch `set`), so `export HOSTNAME=<host>` is detected like its bare assignment; arbitrary keys, code expressions, and call arguments stay skipped.
+- The content guard no longer flags a private hostname in a formatted URL when an f-string replacement field holds only that expression, such as `f"https://{cfg.db.host}/path"`; every other URL, prose, string, and configuration hostname is still detected.
 
 - Fleet claim renewal and release follow node-token rotation on the bound hub, including orphan-release retries, while retaining the last node credential when its token file is temporarily unavailable.
 
 ### Added
+
+- Live Fleet Hub inbox delivery (#1887 slice 3): new unread mail reaches running Claude Code sessions through the managed `UserPromptSubmit` and `PostToolUse` hooks, and Codex sessions through `brigade work presence-hook --harness codex --stdin --context fleet-inbox`. Messages are fenced as untrusted peer content, shown once per session from a private cursor file, never acknowledged by delivery, and fetched with one 2 second hub request behind a 60 second failure backoff. See `docs/fleet-inbox-delivery.md`.
+- The fleet MCP station serves MCP Events (`events/list`, `events/subscribe`, `events/unsubscribe`) behind `brigade fleet mcp --events`, with subscriptions stored on the Fleet Hub (schema 39) and signed Standard Webhooks delivery for `message.created`, `claim.expired` and `run.failed`. The hub keeps events off until `BRIGADE_FLEET_EVENTS_CALLBACK_HOSTS` names exact callback hosts. The shared MCP transport now accepts protocol version `2026-07-28` (`server/discover`, `Mcp-Method` and `Mcp-Name` header checks) and the dot pack reuses the shared signing and callback code. See `docs/fleet-mcp-events.md`. (#1887)
+- Add an operator CI board with exact-head required checks, PR rollups, node-only relay pulls and budgeted on-demand reconciliation. Hub refresh queues work without outbound calls, and private repository names stay operator-only.
 
 - Claude work-loop hooks track explicit file reads and record unseen callers before Edit, Write, or NotebookEdit. Checks warn without denying edits, and unavailable or incomplete graphs record a null result with a reason.
 

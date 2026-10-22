@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__, component_paths, distribution, localio, telemetry_usage
+from .isolated_exec import module_argv, trusted_cwd
 
 CHECK_URL = "https://check.brigade.tools/v1/version"
 CHECK_INTERVAL_SECONDS = 24 * 60 * 60
@@ -102,16 +103,17 @@ def _refresh_gated(argv: list[str], env: Mapping[str, str]) -> bool:
     return False
 
 
-def _spawn_refresh() -> None:
+def _spawn_refresh(env: Mapping[str, str]) -> None:
     detach: dict[str, Any] = (
         {"start_new_session": True} if os.name == "posix" else {"creationflags": 0x00000008}  # DETACHED_PROCESS
     )
     subprocess.Popen(
-        [sys.executable, "-m", "brigade", "update", "--notify-refresh"],
+        module_argv("brigade", "update", "--notify-refresh"),
+        cwd=trusted_cwd(),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
-        env={**os.environ, "BRIGADE_INSTALL_CHANNEL": telemetry_usage.install_channel(os.environ)},
+        env={**env, "BRIGADE_INSTALL_CHANNEL": telemetry_usage.install_channel(env)},
         **detach,
     )
 
@@ -137,7 +139,7 @@ def maybe_notify(
         environment = os.environ if env is None else env
         err = sys.stderr if stderr is None else stderr
         current_time = time.time() if now is None else now
-        spawn_refresh = _spawn_refresh if spawn is None else spawn
+        spawn_refresh = (lambda: _spawn_refresh(environment)) if spawn is None else spawn
         command_argv = list(argv)
 
         if _refresh_gated(command_argv, environment):
