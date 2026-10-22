@@ -879,3 +879,14 @@ def test_link_reference_definitions_are_not_anchored():
     from brigade import memory_proposal_v2_ops as delta
 
     assert delta.blocks("---\ntopic: x\n---\n[support]: https://example.com\n") == []
+
+
+def test_oversized_cited_evidence_list_is_refused_not_skipped(tmp_path):
+    path = setup(tmp_path, anchored=True)
+    refs = [f".brigade/receipts/r{i}.json" for i in range(65)]
+    path.write_text(path.read_text().replace("evidence: []", f"evidence: {json.dumps(refs)}"))
+    before = path.read_bytes()
+    with pytest.raises(api.ProposalError):
+        create(tmp_path, [op("replace_block", text="Keep the cache cold.")])
+    assert path.read_bytes() == before
+    assert not list((tmp_path / ".brigade/memory/proposals").glob("*/revision-1.json"))

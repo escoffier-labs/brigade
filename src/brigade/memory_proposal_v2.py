@@ -73,10 +73,10 @@ def _evidence(target: Path, ops: list[dict[str, Any]], sources: list[dict[str, A
             continue
         # Every claim-changing op binds the cited evidence of each card it addresses.
         addressed.update(op[key] for key in ("card_path", "other_card") if isinstance(op.get(key), str))
-    packets = [
-        *ops,
-        *[{"evidence_ids": memory_cmd._evidence_refs(s["metadata"])} for s in sources if s["path"] in addressed],
-    ]
+    cited = {s["path"]: memory_cmd._evidence_refs(s["metadata"]) for s in sources if s["path"] in addressed}
+    if any(len(values) > io.MAX_LIST for values in cited.values()):
+        raise legacy.ProposalError("addressed card cites too many evidence references to bind")
+    packets = [*ops, *[{"evidence_ids": values} for values in cited.values()]]
     for op in packets:
         values = op.get("evidence_ids", []) if isinstance(op, dict) else []
         if isinstance(values, list) and len(values) <= io.MAX_LIST:
