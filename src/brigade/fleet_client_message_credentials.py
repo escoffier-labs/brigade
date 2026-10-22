@@ -26,6 +26,7 @@ MESSAGE_CODES = (
             "message_sender_quota",
             "message_wait_capped",
             "question_station_busy",
+            "question_operator_invalid",
             "question_request_conflict",
             "question_not_owned",
             "message_recipient_inactive",

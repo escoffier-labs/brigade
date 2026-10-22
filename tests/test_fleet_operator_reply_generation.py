@@ -57,6 +57,12 @@ def test_operator_rotation_after_http_authentication_rejects_inflight_reply(
 ):
     operator, token, rotate = operator_enrollment
     code, question = create(hub)
+    if operator == NODE_B:
+        assert code == 403 and "dedicated active agent:" in question["error"]
+        with sqlite3.connect(hub[3]) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM fleet_questions").fetchone() == (0,)
+            assert conn.execute("SELECT COUNT(*) FROM fleet_messages").fetchone() == (0,)
+        return
     assert code == 201
     raw = reply_request(action, question["message_id"])
     authenticated, resume = threading.Event(), threading.Event()
@@ -102,6 +108,12 @@ def test_operator_rotation_after_http_authentication_rejects_inflight_reply(
 def test_trusted_library_reply_without_authenticated_generation_still_works(hub, operator_enrollment, action):
     operator, _token, rotate = operator_enrollment
     code, question = create(hub)
+    if operator == NODE_B:
+        assert code == 403 and "dedicated active agent:" in question["error"]
+        with sqlite3.connect(hub[3]) as conn:
+            assert conn.execute("SELECT COUNT(*) FROM fleet_questions").fetchone() == (0,)
+            assert conn.execute("SELECT COUNT(*) FROM fleet_messages").fetchone() == (0,)
+        return
     assert code == 201
     rotate()
     with fleet_hub.open_db(hub[3]) as conn:

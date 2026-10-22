@@ -809,15 +809,21 @@ The caller comes from the station's existing node or agent credential. Tool
 arguments cannot choose a caller, operator, credential, answer, or answer source.
 
 Set `BRIGADE_FLEET_OPERATOR_RECIPIENT` in the **hub service environment** to an
-existing enrolled node ID or agent principal, for example `agent:operator`.
-The operator must be active and different from the caller. Agent send grants
-must permit the question and the operator's reply. The station sends each
+existing dedicated `agent:` message principal, for example `agent:operator`.
+Node IDs and the admin are rejected. Enroll this principal separately and keep
+its token in the operator-only inbox client. No fleet station, hook, or MCP
+server should load it by default. The operator must be active and different
+from the caller. Agent send grants must permit the question and the operator's reply. The station sends each
 question to that recipient's inbox and records its audit atomically before
 opening a desktop prompt. Questions are never spooled for later prompting.
+Automatic live inbox delivery skips `kind=question`, so agent sessions are
+never prompted to answer operator questions.
 
 On a Linux desktop with `DISPLAY` or `WAYLAND_DISPLAY`, the station tries an
 installed `zenity` entry dialog or `kdialog` input box. Text is displayed as data
-under a fixed title with the authenticated caller and question ID. Missing,
+under a fixed title with the authenticated caller and question ID on the first
+line. The preview is limited to 512 characters and eight lines. The dialog
+points to the full question in the operator's hub inbox. Missing,
 failed, cancelled, or timed-out dialogs fall back to the operator inbox. An
 installed `notify-send` can announce that inbox question. No desktop dependency
 is installed. The operator answers by replying to the question message with
@@ -831,20 +837,35 @@ Zenity also receives its own timeout. Kdialog cleanup depends on the station
 remaining alive.
 
 The hub records the first answer received before its deadline. A desktop answer
-has source `caller_reported_desktop`. An authenticated inbox reply has source
+is local input from a human at the asking machine. Its result has
+`source: "desktop"`, `operator_authenticated: false`, and
+`answered_at_local_desktop: true`, inside a `desktop-local` content fence.
+The hub audit records it as `caller_reported_desktop`. An authenticated inbox
+reply has source
 `operator_reply`. Only an accepted reply from the configured operator has
 `operator_authenticated: true` and returns the exact answer as operator input.
 The result includes the hub-selected `operator` and authenticated `answered_by`.
 A peer message cannot set these audit fields or answer another recipient's question.
-Desktop input is not proof of operator credential ownership. It returns
-`operator_authenticated: false` and keeps its answer inside a peer-content fence.
+Desktop input does not verify operator identity. Hub-inbox answers from the
+dedicated operator principal are operator-authenticated against the hub.
 The audit copies the question, answer, identities, source, and timestamps, so
 acknowledging or pruning message links cannot erase an accepted answer. Audit
 retention removes records older than 90 days on the next question operation.
 Expired pending questions also become timeout records on that operation,
-without a background timer. Question messages remain in the operator inbox
+without a background timer. A late operator reply records the first
+`late_answer_message_id` and `late_answered_at`, including when the reply
+arrives before the next status read. It remains a timeout and is never
+returned as an authoritative answer. Question messages remain in the operator
+inbox
 until the operator acknowledges them, including questions answered on the
 desktop or timed out. Existing inbox quotas apply.
+
+Operator authority currently depends on hub-returned fields. Questions and
+answers are stored in plaintext in `fleet_questions`, and the reply trigger
+copies the message body into `answer`. A compromised hub or anyone with write
+access to its database could fabricate an operator-authenticated answer.
+Signed, sealed answers are planned in the [agent mesh design, slice 7b
+(PR #2013)](https://github.com/escoffier-labs/brigade/pull/2013).
 
 The wait uses the existing inbox long-poll in slices of at most 20 seconds and
 never acknowledges unrelated messages. The hub permits two pending questions

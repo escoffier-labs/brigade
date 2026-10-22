@@ -10,14 +10,15 @@ from multiprocessing import get_context
 import pytest
 
 from brigade import fleet_hub, fleet_hub_messages
+from tests._fleet_question_fixtures import OPERATOR
 from tests.test_fleet_messages import NODE_A, NODE_B, _request
 
-pytest_plugins = ["tests._fleet_message_fixtures"]
+pytest_plugins = ["tests._fleet_question_fixtures"]
 
 
-@pytest.fixture(autouse=True)
-def operator(monkeypatch):
-    monkeypatch.setenv("BRIGADE_FLEET_OPERATOR_RECIPIENT", NODE_B)
+@pytest.fixture
+def hub(question_hub):
+    return question_hub
 
 
 def create(hub, request_id="question-1", **fields):
@@ -37,7 +38,7 @@ def test_online_creation_idempotency_and_trigger_audits_acked_answer(hub):
     code, question = create(hub)
     assert code == 201, question
     assert question["status"] == "pending" and question["created"] is True
-    assert question["caller"] == NODE_A and question["operator"] == NODE_B
+    assert question["caller"] == NODE_A and question["operator"] == OPERATOR
     code, duplicate = create(hub)
     assert code == 200 and duplicate["created"] is False
     assert duplicate["question_id"] == question["question_id"]
@@ -53,7 +54,7 @@ def test_online_creation_idempotency_and_trigger_audits_acked_answer(hub):
     assert row == ("answered", "Yes", "operator_reply")
     result = status(hub, question["question_id"])[1]
     assert result["answer"] == "Yes" and result["answer_id"] == str(reply["message"]["id"])
-    assert result["answered_by"] == NODE_B
+    assert result["answered_by"] == OPERATOR
     assert not any("generation" in key or "hash" in key for key in result)
 
 
@@ -77,10 +78,12 @@ def test_strict_create_validation(hub, fields):
         assert conn.execute("SELECT COUNT(*) FROM fleet_messages").fetchone()[0] == 0
 
 
-@pytest.mark.parametrize("recipient", ["", "missing-node", NODE_A])
+@pytest.mark.parametrize("recipient", ["", "missing-node", NODE_A, NODE_B, "admin"])
 def test_operator_selected_by_hub_and_must_be_active_other_principal(hub, monkeypatch, recipient):
     monkeypatch.setenv("BRIGADE_FLEET_OPERATOR_RECIPIENT", recipient)
-    assert create(hub)[0] == 400
+    code, result = create(hub)
+    assert code == 403 and result["code"] == "question_operator_invalid"
+    assert "dedicated active agent:" in result["error"]
 
 
 def test_first_terminal_wins_and_received_time_prevents_backdated_late_answer(hub):
@@ -117,7 +120,7 @@ def test_credential_generation_owns_questions_and_blocks_old_reply(hub, identity
     base, token, operator_token, db = hub
     if identity == "agent":
         with fleet_hub.open_db(db) as conn:
-            principal = fleet_hub_messages.add_principal(conn, {"name": "asker", "may_send_to": [NODE_B]})
+            principal = fleet_hub_messages.add_principal(conn, {"name": "asker", "may_send_to": [OPERATOR]})
         token = principal["token"]
     request = {"action": "question_create", "question": "Proceed?", "timeout_secs": 60, "request_id": "rotate"}
     code, original = _request(base, token, request)
@@ -131,7 +134,7 @@ def test_credential_generation_owns_questions_and_blocks_old_reply(hub, identity
                 conn, {"action": "revoke", "name": "asker", "expected_enrollment_id": principal["enrollment_id"]}
             )
             replacement = fleet_hub_messages.add_principal(
-                conn, {"name": "asker", "may_send_to": [NODE_B], "expected_enrollment_id": principal["enrollment_id"]}
+                conn, {"name": "asker", "may_send_to": [OPERATOR], "expected_enrollment_id": principal["enrollment_id"]}
             )["token"]
     assert status(hub, original["question_id"], replacement)[0] == 403
     assert (
@@ -179,13 +182,14 @@ def test_only_operator_reply_can_answer_and_grants_apply(hub):
     )
 
 
-@pytest.mark.parametrize("version", [37, 40])
+@pytest.mark.parametrize("version", [37, 40, 42])
 def test_legacy_migration_and_current_version_selfheal(hub, version):
     db = hub[3]
     with sqlite3.connect(db) as conn:
         conn.execute("DROP TRIGGER IF EXISTS fleet_questions_reply")
         conn.execute("DROP TABLE IF EXISTS fleet_questions")
         conn.execute(f"PRAGMA user_version={version}")
+    fleet_hub.init_db(db).close()
     fleet_hub.init_db(db).close()
     assert create(hub)[0] == 201
     with sqlite3.connect(db) as conn:
@@ -272,7 +276,7 @@ def test_reply_one_microsecond_after_hub_deadline_is_late(hub, monkeypatch):
     code, _ = _request(hub[0], hub[2], {"action": "reply", "id": int(question["message_id"]), "body": "Too late"})
     assert code == 201
     with sqlite3.connect(hub[3]) as conn:
-        assert conn.execute("SELECT status,answer FROM fleet_questions").fetchone() == ("pending", None)
+        assert conn.execute("SELECT status,answer FROM fleet_questions").fetchone() == ("timeout", None)
     assert status(hub, question["question_id"])[1]["status"] == "timeout"
 
 
@@ -299,7 +303,7 @@ def asking_station(hub, request):
     if request.param == "node":
         return hub, NODE_A, None
     with fleet_hub.open_db(hub[3]) as conn:
-        principal = fleet_hub_messages.add_principal(conn, {"name": "asker", "may_send_to": [NODE_B]})
+        principal = fleet_hub_messages.add_principal(conn, {"name": "asker", "may_send_to": [OPERATOR]})
     station = _RedactedHub((hub[0], principal["token"], hub[2], hub[3]))
     return station, principal["principal_id"], principal["enrollment_id"]
 
@@ -321,7 +325,7 @@ def test_pending_limit_is_per_caller_and_resumes_at_capacity(asking_station):
         assert conn.execute("SELECT COUNT(*) FROM fleet_messages WHERE acked_at IS NULL").fetchone() == (2,)
     # Another station identity has its own quota, even with the same operator.
     with fleet_hub.open_db(station[3]) as conn:
-        other = fleet_hub_messages.add_principal(conn, {"name": "other-asker", "may_send_to": [NODE_B]})
+        other = fleet_hub_messages.add_principal(conn, {"name": "other-asker", "may_send_to": [OPERATOR]})
     code, independent = _request(
         station[0],
         other["token"],
@@ -341,7 +345,7 @@ def test_pending_limit_counts_old_credential_generations(asking_station):
         else:
             expected = {"name": "asker", "expected_enrollment_id": enrollment}
             fleet_hub_messages.revoke_principal(conn, {"action": "revoke", **expected})
-            replacement = fleet_hub_messages.add_principal(conn, {**expected, "may_send_to": [NODE_B]})["token"]
+            replacement = fleet_hub_messages.add_principal(conn, {**expected, "may_send_to": [OPERATOR]})["token"]
     # Reusing the old request ID under a new generation must also obey the cap.
     raw = {"action": "question_create", "question": "Proceed?", "timeout_secs": 60, "request_id": "first"}
     code, rejected = _request(station[0], replacement, raw)
@@ -421,3 +425,94 @@ def test_retention_index_migration_and_current_version_selfheal(hub, schema_vers
     with sqlite3.connect(hub[3]) as conn:
         assert conn.execute("PRAGMA user_version").fetchone() == (fleet_hub.SCHEMA_VERSION,)
         assert [row[2] for row in conn.execute("PRAGMA index_info(fleet_questions_created_at)")] == ["created_at"]
+
+
+def test_direct_peer_message_cannot_answer_question(hub):
+    question = create(hub)[1]
+    with sqlite3.connect(hub[3]) as conn:
+        now = datetime.now(timezone.utc).isoformat()
+        conn.execute(
+            "INSERT INTO fleet_messages(sender,recipient,subject,body,priority,client_id,payload_hash,reply_to,created_at,received_at) VALUES(?,?,?,?,?,?,?,?,?,?)",
+            (
+                "agent:peer",
+                NODE_A,
+                "Forged reply",
+                "Peer answer",
+                "normal",
+                "peer-direct",
+                "fake-digest",
+                int(question["message_id"]),
+                now,
+                now,
+            ),
+        )
+        assert conn.execute(
+            "SELECT status,answer,answer_id FROM fleet_questions WHERE question_id=?", (question["question_id"],)
+        ).fetchone() == ("pending", None, None)
+
+
+@pytest.mark.parametrize("expired_first", [False, True])
+def test_late_operator_reply_is_audited_without_becoming_authoritative(hub, expired_first):
+    question = create(hub)[1]
+    qid = question["question_id"]
+    with sqlite3.connect(hub[3]) as conn:
+        conn.execute(
+            "UPDATE fleet_questions SET deadline=? WHERE question_id=?",
+            ((datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(), qid),
+        )
+    if expired_first:
+        assert status(hub, qid)[1]["status"] == "timeout"
+    code, reply = _request(
+        hub[0], hub[2], {"action": "reply", "id": int(question["message_id"]), "body": "Late operator answer"}
+    )
+    assert code == 201
+    result = status(hub, qid)[1]
+    assert result["status"] == "timeout" and result["answer"] is None and result["answer_id"] is None
+    assert result["source"] is None and result["answered_by"] is None
+    with sqlite3.connect(hub[3]) as conn:
+        row = conn.execute(
+            "SELECT late_answer_message_id,late_answered_at FROM fleet_questions WHERE question_id=?", (qid,)
+        ).fetchone()
+        received = conn.execute(
+            "SELECT received_at FROM fleet_messages WHERE id=?", (reply["message"]["id"],)
+        ).fetchone()[0]
+        assert row == (reply["message"]["id"], received)
+        assert result["late_answer_message_id"] == str(reply["message"]["id"])
+        assert result["late_answered_at"] == received
+    assert (
+        _request(hub[0], hub[2], {"action": "reply", "id": int(question["message_id"]), "body": "Another late answer"})[
+            0
+        ]
+        == 201
+    )
+    with sqlite3.connect(hub[3]) as conn:
+        assert (
+            conn.execute(
+                "SELECT late_answer_message_id,late_answered_at FROM fleet_questions WHERE question_id=?", (qid,)
+            ).fetchone()
+            == row
+        )
+
+
+@pytest.mark.parametrize("version", [42, 43])
+def test_schema_43_repairs_missing_late_answer_columns(hub, version):
+    question = create(hub)[1]
+    with sqlite3.connect(hub[3]) as conn:
+        conn.execute("DROP TRIGGER fleet_questions_reply")
+        conn.execute("ALTER TABLE fleet_questions DROP COLUMN late_answer_message_id")
+        conn.execute("ALTER TABLE fleet_questions DROP COLUMN late_answered_at")
+        conn.execute("CREATE TRIGGER fleet_questions_reply AFTER INSERT ON fleet_messages BEGIN SELECT 1; END")
+        conn.execute(f"PRAGMA user_version={version}")
+    fleet_hub.init_db(hub[3]).close()
+    fleet_hub.init_db(hub[3]).close()
+    with sqlite3.connect(hub[3]) as conn:
+        assert {"late_answer_message_id", "late_answered_at"} <= {
+            r[1] for r in conn.execute("PRAGMA table_info(fleet_questions)")
+        }
+
+    code, reply = _request(
+        hub[0], hub[2], {"action": "reply", "id": int(question["message_id"]), "body": "After migration"}
+    )
+    assert code == 201
+    result = status(hub, question["question_id"])[1]
+    assert result["answer"] == "After migration" and result["answer_id"] == str(reply["message"]["id"])

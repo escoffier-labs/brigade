@@ -117,7 +117,7 @@ from .fleet_hub_status import (
     latest_status as latest_status,
 )
 
-SCHEMA_VERSION = 41
+SCHEMA_VERSION = 43
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
@@ -640,6 +640,8 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     # new writes still enforce the ceiling, and an operator unlinks the excess on a
     # running hub rather than needing one that will not start.
     # v18 -> v19: research/security/scout role columns on run_preference (roster page).
+    # v40 -> v41: covering event-id index for campaign take's cross-item key probe.
+    # v41 -> v42: indexed immutable execution identity checks after link retention.
     worklore_store.ensure_schema(conn)
     # v39 -> v40: campaign membership tables (#1128). Additive; items stay in Worklore.
     worklore_campaigns.ensure_schema(conn)
@@ -669,7 +671,7 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     fleet_hub_messages.ensure_schema(conn)
     from . import fleet_hub_questions
 
-    # v40 -> v41: audited operator questions and terminal-answer trigger.
+    # v42 -> v43: audited operator questions and terminal-answer trigger.
     fleet_hub_questions.ensure_schema(conn)
     # v31 -> v32 adds model_policy.t3_model (native T3 launch model) through
     # fleet_hub_model_roster.ensure_schema's additive column migration.

@@ -27,6 +27,10 @@ TRANSPORT_GRACE = fleet_client.FLUSH_TIMEOUT_SECONDS
 class AskUserError(fleet_client.FleetClientError):
     def __init__(self, *, request_id: str, question_id: str | None = None, code: str = "question_unavailable") -> None:
         guidance = {
+            "question_operator_invalid": (
+                "Configure the hub operator recipient as a dedicated agent: message principal. "
+                "Keep its token in the operator-only inbox client."
+            ),
             "question_request_conflict": (
                 "Request conflicts with an existing question. Resume with the same request_id and the original "
                 "question and timeout_secs. Use a new request_id for a new question."
@@ -125,7 +129,14 @@ def _process(argv: list[str], *, deadline: float, stop: Callable[[], bool]) -> s
 def _desktop(question: str, record: dict[str, Any], *, deadline: float, stop: Callable[[], bool]) -> str | None:
     if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
         return None
-    text = _plain(f"{record['caller']} | Question {record['question_id']}\nAnswers are recorded.\n\n{question}")
+    preview = "\n".join(_plain(question).splitlines()[:8])[:512]
+    if preview != _plain(question):
+        preview += "\n[truncated]"
+    text = (
+        f"{record['caller']} | Question {record['question_id']}\n"
+        "Answers are recorded. The full question is in the operator's hub inbox.\n\n"
+        f"{preview}"
+    )
     zenity = shutil.which("zenity")
     kdialog = shutil.which("kdialog") if not zenity else None
     if zenity:
@@ -148,10 +159,10 @@ def _desktop(question: str, record: dict[str, Any], *, deadline: float, stop: Ca
             stop=stop,
         )
     elif kdialog:
-        # Qt AutoText stops at the first newline, so a fixed plain first line
-        # keeps even literal tags plain. QInputDialog's QLabel buddy consumes
+        # Qt AutoText stops at the first newline. The hub-bound caller and ID
+        # form a plain first line. QInputDialog's QLabel buddy consumes
         # ampersand mnemonics, for which Qt's native literal escape is &&.
-        encoded = ("Brigade operator question\n" + text).replace("&", "&&")
+        encoded = text.replace("&", "&&")
         answer = _process(
             [kdialog, "--title", "Brigade operator question", "--inputbox", encoded],
             deadline=deadline,
@@ -181,18 +192,23 @@ def _terminal(record: dict[str, Any]) -> dict[str, Any] | None:
         answer = record["answer"]
         # Only the hub's accepted reply from its configured operator carries
         # operator authority. A desktop report uses the asking credential and
-        # cannot prove who entered it, so it retains the peer-content fence.
+        # cannot prove operator identity, so it has its own local-input fence.
         operator_authenticated = record["source"] == "operator_reply" and record["answered_by"] == record["operator"]
+        desktop = record["source"] == "caller_reported_desktop"
         result.update(
-            answer=answer if operator_authenticated else wrap_untrusted(answer, source_kind="peer-message"),
+            answer=answer
+            if operator_authenticated
+            else wrap_untrusted(answer, source_kind="desktop-local" if desktop else "peer-message"),
             operator=record["operator"],
             operator_authenticated=operator_authenticated,
-            source=record["source"],
+            source="desktop" if desktop else record["source"],
             answered_by=record["answered_by"],
             answer_id=record["answer_id"],
             answered_at=record["answered_at"],
             scan={"flagged": scan_untrusted(answer).flagged},
         )
+        if desktop:
+            result["answered_at_local_desktop"] = True
     return result
 
 
@@ -224,7 +240,16 @@ class AskUser:
                 remaining = hard_deadline - monotonic()
                 if remaining <= 0:
                     raise AskUserError(request_id=request_id, question_id=question_id)
-                return messages._online(body, authority=authority, timeout=min(TRANSPORT_GRACE, remaining))
+                response = messages._online(body, authority=authority, timeout=min(TRANSPORT_GRACE, remaining))
+                returned_id = response.get("question_id")
+                if (
+                    response.get("request_id") != request_id
+                    or not isinstance(returned_id, str)
+                    or questions._QUESTION_ID.fullmatch(returned_id) is None
+                    or (question_id is not None and returned_id != question_id)
+                ):
+                    raise AskUserError(request_id=request_id, question_id=question_id)
+                return response
 
             record = online(
                 {
@@ -320,6 +345,7 @@ class AskUser:
                     "message_sender_quota",
                     "message_sender_recipient_quota",
                     "question_station_busy",
+                    "question_operator_invalid",
                     "question_request_conflict",
                     "question_not_owned",
                     "message_recipient_not_permitted",

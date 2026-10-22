@@ -10,8 +10,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Added
 
 - Memory care config accepts `read_only_paths` globs for policy or operator-owned cards. Scan, `plan-fixes`, and `backfill` skip matching cards, `memory proposal create` and `apply` refuse them with an error naming the pattern, and `memory care status` and `doctor` list the active patterns (#1976).
+- Bound campaign member self-assignment with operator offers, per-node concurrency, expiring generation-fenced ownership, and idempotent takes. Member detail responses now link back to their campaign.
 
 ### Fixed
+
+- Preserve campaign execution bindings after the 50-link retention window, including against trusted observations and cross-item relinks. Hub schema 42 adds an indexed history lookup without rewriting stored events.
+- Index campaign take event-key lookups without scanning Worklore history. Hub startup upgrades existing databases to schema 41 and preserves stored events.
+- Fence campaign execution and attempt writes to the current holder grant, refuse member specification drift, and reserve take capacity for progress and release. Campaign operators can recover a stranded reservation with explicit quiescence acknowledgement and an audited evidence reference.
 
 - Daily status preserves local work counts when an optional health snapshot times out. Windows pytest artifacts include flushed test-phase timings and stack dumps, and timeout summaries identify the last test or session phase.
 - Cursor project initialization and user-scope harness sync install all three presence lifecycle hooks into versioned hook documents, preserve foreign entries, validate the whole project document before it suppresses the user hook, and migrate hook ownership by event.

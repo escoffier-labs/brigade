@@ -86,13 +86,13 @@ def _fence_split(text: str) -> tuple[str, list[str]]:
 
 
 def test_new_mail_is_delivered_once_framed_as_untrusted_peer_content(fleet):
-    mid = _send(fleet, INJECTION, kind="question", thread="issue:1887")
+    mid = _send(fleet, INJECTION, kind="completion", thread="issue:1887")
 
     text = delivery.deliver("claude", "session-1", "UserPromptSubmit", now=T0)
 
     assert text is not None
     outside, fenced = _fence_split(text)
-    assert f"Message {mid} from {NODE_B} (question)" in outside
+    assert f"Message {mid} from {NODE_B} (completion)" in outside
     assert "flagged" in outside
     # Sender-chosen text only appears inside the fence, never in the trusted frame.
     assert len(fenced) == 1 and INJECTION in fenced[0] and "issue:1887" in fenced[0]
@@ -1022,3 +1022,20 @@ def test_codex_hook_fails_open_when_the_hub_is_down(fleet, monkeypatch, capsys):
 
     assert json.loads(out) == {}
     assert time.monotonic() - started < delivery.HUB_TIMEOUT_SECONDS + 2
+
+
+@pytest.mark.parametrize("questions_only", [False, True])
+def test_live_delivery_skips_operator_questions_without_acknowledging(fleet, questions_only):
+    qid = _send(fleet, "Operator-only question", kind="question")
+    note = None if questions_only else _send(fleet, "Session note", kind="completion")
+    text = delivery.deliver("claude", "question-session", "UserPromptSubmit", now=T0)
+    if questions_only:
+        assert text is None
+    else:
+        assert text is not None and f"Message {note} from" in text
+        assert "Operator-only question" not in text and f"Message {qid} from" not in text
+    assert delivery.deliver("claude", "question-session", "UserPromptSubmit", now=T0 + 1) is None
+    inbox = _tool(fleet.receiver, "fleet_inbox")["messages"]
+    assert next(row for row in inbox if row["id"] == qid)["acked_at"] is None
+    state = json.loads(delivery.state_path("claude", "question-session").read_text())
+    assert state["cursor"] == (qid if questions_only else note)
