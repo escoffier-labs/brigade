@@ -65,12 +65,27 @@ def register(sub: argparse._SubParsersAction) -> None:
             default=None,
             help="Path to a brigade.run_budget.v1 JSON declaration for each trial cell.",
         )
+        if command in {"run", "resume"}:
+            parser.add_argument(
+                "--retry-transient",
+                action="store_true",
+                help=(
+                    "Re-run adapter_error and timeout cells as new attempts (original attempt kept; "
+                    "capped per cell). Deterministic results are never retried."
+                ),
+            )
         parser.set_defaults(func=_dispatch_trial)
     for command in ("show", "summary"):
         parser = trial_sub.add_parser(command, help=f"{command.title()} trial artifacts.")
         parser.add_argument("output_dir", type=Path, help="Trial artifact directory.")
         parser.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
         parser.set_defaults(func=_dispatch_trial)
+    p_drain = trial_sub.add_parser(
+        "drain",
+        help="Ask a running trial to launch no more cells; in-flight cells finish and record results.",
+    )
+    p_drain.add_argument("output_dir", type=Path, help="Trial artifact directory.")
+    p_drain.set_defaults(func=_dispatch_trial)
     p_regrade = trial_sub.add_parser(
         "regrade", help="Re-run graders from stored trial output without re-running seats."
     )
@@ -107,6 +122,14 @@ def _dispatch_trial(args) -> int:
             for state, count in payload["counts"].items():
                 print(f"{state}: {count}")
         return 0
+    if args.trial_command == "drain":
+        output_dir = args.output_dir.expanduser().resolve()
+        if not (output_dir / "plan.json").is_file():
+            print(f"error: no trial plan at {output_dir}", file=sys.stderr)
+            return 2
+        marker = model_trials.request_drain(output_dir)
+        print(f"drain requested: {marker}")
+        return 0
     if args.trial_command == "regrade":
         return model_trials.regrade(args.output_dir)
 
@@ -131,6 +154,8 @@ def _dispatch_trial(args) -> int:
     }
     if run_budget_payload is not None:
         execute_kwargs["run_budget_payload"] = run_budget_payload
+    if getattr(args, "retry_transient", False):
+        execute_kwargs["retry_transient"] = True
     return model_trials.execute(
         args.manifest,
         roster,

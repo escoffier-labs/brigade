@@ -708,6 +708,25 @@ no-card
     return path
 
 
+# Set by an outer caller (the model trial drain) that owns SIGTERM for the whole process.
+# While set, a terminal SIGTERM handler asks it first: True means the signal was taken as a
+# drain request, so the run records nothing and keeps going. None keeps the default behavior.
+_sigterm_deferral: Callable[[], bool] | None = None
+
+
+@contextmanager
+def defer_terminal_sigterm(request: Callable[[], bool]) -> Iterator[None]:
+    """Let ``request`` claim SIGTERM before any terminal handler records and exits the run."""
+
+    global _sigterm_deferral
+    previous = _sigterm_deferral
+    _sigterm_deferral = request
+    try:
+        yield
+    finally:
+        _sigterm_deferral = previous
+
+
 @contextmanager
 def terminal_sigterm_handler(
     output_dir: Path | None,
@@ -726,6 +745,9 @@ def terminal_sigterm_handler(
     previous = signal.getsignal(signal.SIGTERM)
 
     def handle_sigterm(signum: int, frame: object) -> None:  # noqa: ARG001
+        deferral = _sigterm_deferral
+        if deferral is not None and deferral():
+            return
         if should_record is not None and not should_record():
             raise SystemExit(128 + signum)
         if before_record is not None:
