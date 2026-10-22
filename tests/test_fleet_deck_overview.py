@@ -7,6 +7,8 @@ from pathlib import Path
 
 import pytest
 
+from brigade.fleet_deck_icons import NAV_ICONS
+
 from brigade import fleet_command_deck as deck
 from brigade import fleet_deck_overview as overview
 from brigade import fleet_deck_shell
@@ -961,8 +963,8 @@ def test_sidebar_nav_marks_the_active_page_and_hides_work_when_off():
     view = _mixed_view()
     html = overview.render_sidebar(view, "repos", NOW, worklore_enabled=False)
     assert '<nav class="deck-nav" aria-label="Command Deck">' in html
-    assert '<a href="/deck/repos" aria-current="page">repos</a>' in html
-    assert '<a href="/deck">overview <span class="nav-count">3</span></a>' in html
+    assert f'<a href="/deck/repos" aria-current="page">{NAV_ICONS["repos"]}repos</a>' in html
+    assert f'<a href="/deck">{NAV_ICONS["overview"]}overview <span class="nav-count">3</span></a>' in html
     assert html.count("aria-current") == 1
     assert "/deck/work" not in html
     for href in ("/deck/roster", "/deck/policy", "/view/machines"):
@@ -985,19 +987,19 @@ def test_sidebar_machine_tree_shows_dots_summaries_children_and_cloud():
     assert 'Cloud <span class="nav-count">2</span>' in html
     assert 'class="tree-meta">0/4<' in html and 'class="tree-meta">1/3 · open<' in html
     assert html.count("data-filter-row") == 5
-    assert "Hub telemetry 1m ago" in html
+    assert 'class="mono sidebar-telemetry">telemetry 1m<' in html
 
 
 def test_sidebar_without_a_view_is_navigation_only():
     html = overview.render_sidebar(None, "roster", NOW, worklore_enabled=False)
-    assert "tree-list" not in html and "data-tree-filter" not in html and "Hub telemetry" not in html
-    assert '<a href="/deck/roster" aria-current="page">roster</a>' in html
-    assert '<a href="/deck">overview</a>' in html
+    assert "tree-list" not in html and "data-tree-filter" not in html and "sidebar-telemetry" not in html
+    assert f'<a href="/deck/roster" aria-current="page">{NAV_ICONS["roster"]}roster</a>' in html
+    assert f'<a href="/deck">{NAV_ICONS["overview"]}overview</a>' in html
 
 
 def test_sidebar_footer_says_unknown_without_telemetry_and_escapes_labels():
     html = overview.render_sidebar(_view([_station(NODE_A, HOSTILE, 2)]), "overview", NOW, worklore_enabled=True)
-    assert "Hub telemetry unknown" in html
+    assert "telemetry unknown" in html
     assert HOSTILE not in html and "&lt;script&gt;" in html
 
 
@@ -1214,3 +1216,42 @@ def test_future_queue_exclusion_reason_falls_back_to_raw_value(monkeypatch):
     assert "2 excluded from ready queue" in html
     assert "manual-mode" in html
     assert ">Ready queue<" in html
+
+
+@pytest.mark.parametrize("view", [_mixed_view(), None])
+def test_sidebar_resources_link_out_safely(view):
+    html = overview.render_sidebar(view, "overview", NOW, worklore_enabled=True)
+    for href in (
+        "https://brigade.tools/docs",
+        "https://github.com/escoffier-labs/brigade/issues/new?template=bug.yml",
+        "https://github.com/escoffier-labs/brigade",
+    ):
+        assert html.count(f'href="{href}"') == 1
+        assert f'href="{href}" target="_blank" rel="noopener noreferrer"' in html
+    assert html.count("<nav") == 1
+
+
+def test_sidebar_meta_shows_version_and_flags_stale_telemetry():
+    import brigade
+
+    machine = _machine("linux-a", NODE_A, last_observed_at=_stamp(120))
+    view = _view(plane=_plane([machine]), stale_after_seconds=60)
+    html = overview.render_sidebar(view, "overview", NOW, worklore_enabled=True)
+    assert "sidebar-meta--stale" in html and "telemetry stale 2m" in html
+    assert f"v{brigade.__version__}" in html
+    fresh = overview.render_sidebar(replace(view, stale_after_seconds=1800), "overview", NOW, worklore_enabled=True)
+    assert "sidebar-meta--stale" not in fresh and "telemetry 2m" in fresh
+
+
+@pytest.mark.parametrize("plane", [None, _plane([_machine("linux-a", NODE_A, last_observed_at="unreadable")])])
+def test_sidebar_meta_is_unknown_without_a_control_plane(plane):
+    html = overview.render_sidebar(_view(plane=plane), "overview", NOW, worklore_enabled=True)
+    assert "telemetry unknown" in html and "sidebar-meta--stale" not in html
+
+
+def test_every_nav_item_has_an_icon_and_a_text_label():
+    from brigade.fleet_deck_sidebar import NAV_ITEMS
+
+    html = overview.render_sidebar(_mixed_view(), "overview", NOW, worklore_enabled=True)
+    for key, _href, label in NAV_ITEMS:
+        assert NAV_ICONS[key] + label in html

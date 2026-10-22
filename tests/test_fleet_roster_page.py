@@ -15,6 +15,8 @@ from datetime import datetime, timezone
 
 import pytest
 
+from brigade.fleet_deck_icons import NAV_ICONS
+
 from brigade import fleet_command_deck, fleet_hub, fleet_hub_preference, fleet_hub_roster_page
 from brigade import fleet_hub_model_roster, fleet_hub_policy, fleet_policy, fleet_policy_page
 
@@ -244,7 +246,7 @@ def test_roster_page_requires_auth_and_renders_every_block(tmp_path):
 def test_roster_page_deck_nav_links_to_it(tmp_path):
     with _hub(tmp_path) as (hub, _db):
         deck = _request(hub, "GET", "/deck", headers=_bearer())[2]
-        assert '<a href="/deck/roster">roster</a>' in deck
+        assert f'<a href="/deck/roster">{NAV_ICONS["roster"]}roster</a>' in deck
 
 
 def test_retired_seats_leave_the_table_and_legacy_selectors_but_keep_history(tmp_path):

@@ -1792,14 +1792,14 @@ def _document(
     *view* feeds the sidebar machine tree; pages that never build a
     ``DeckView`` pass ``None`` and get the navigation only.
     """
-    # Imported here because fleet_deck_overview imports this module for its types.
-    from . import fleet_deck_overview
+    # Imported here because the sidebar imports this module for its types.
+    from . import fleet_deck_sidebar
 
     if worklore_enabled is None:
         from . import worklore_http
 
         worklore_enabled = worklore_http.enabled()
-    sidebar = fleet_deck_overview.render_sidebar(view, active, now, worklore_enabled=worklore_enabled)
+    sidebar = fleet_deck_sidebar.render_sidebar(view, active, now, worklore_enabled=worklore_enabled)
     return fleet_deck_shell.deck_page(
         title,
         active,

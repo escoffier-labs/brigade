@@ -12,6 +12,8 @@ from contextlib import contextmanager
 
 import pytest
 
+from brigade.fleet_deck_icons import NAV_ICONS
+
 from brigade import fleet_command_deck as deck
 from brigade import fleet_repo_policy_page as repos_page
 from brigade import fleet_hub
@@ -837,7 +839,7 @@ def test_command_deck_is_root_and_legacy_boards_stay_under_view(tmp_path):
         assert 'href="/view/machines"' in root and 'href="/view/repos"' in root
         # Root is the deck itself, so the sidebar marks Overview current; what
         # must not exist is a legacy board served from root.
-        assert '<a href="/deck" aria-current="page">overview <span class="nav-count">' in root
+        assert f'<a href="/deck" aria-current="page">{NAV_ICONS["overview"]}overview <span class="nav-count">' in root
         assert 'href="/machines"' not in root and 'href="/repos"' not in root
         for path, title in (
             ("/view/machines", "Fleet: Machines"),
