@@ -16,9 +16,10 @@ import sqlite3
 import time
 from datetime import datetime, timezone
 from http.server import BaseHTTPRequestHandler
+from io import BufferedIOBase
 from pathlib import Path
 from collections.abc import Callable
-from typing import Any
+from typing import Any, cast
 from urllib.parse import parse_qs, urlencode
 
 from . import fleet_hub_enrollment as enrollment
@@ -65,10 +66,26 @@ from .fleet_hub import (
 )
 
 
-# Rejected uploads may finish within these bounds after the response's FIN.
+# Rejected uploads may finish within these bounds during handler cleanup.
 # Neither a huge declaration nor a trickling peer may retain a handler forever.
 _REJECT_DRAIN_BYTES = 1024 * 1024
 _REJECT_DRAIN_SECONDS = 0.25
+
+
+class _RequestBodyReader:
+    """Count body reads while preserving the buffered stream's other operations."""
+
+    def __init__(self, stream: BufferedIOBase) -> None:
+        self.stream = stream
+        self.bytes_read = 0
+
+    def read(self, size: int = -1) -> bytes:
+        data = self.stream.read(size)
+        self.bytes_read += len(data)
+        return data
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self.stream, name)
 
 
 def _is_loopback_address(address: str) -> bool:
@@ -237,17 +254,43 @@ def make_handler(
         # line cannot pin a handler thread forever (pre-auth).
         timeout = 30
 
+        def parse_request(self) -> bool:
+            if not super().parse_request():
+                return False
+            # Header parsing is complete. All Hub body readers use read(),
+            # including the delegated JSON and action adapters.
+            self.rfile = cast(BufferedIOBase, _RequestBodyReader(self.rfile))
+            return True
+
+        def _has_unread_body(self) -> bool:
+            lengths = self.headers.get_all("Content-Length", [])
+            if self.headers.get_all("Transfer-Encoding", []) or len(lengths) != 1:
+                return True
+            try:
+                length = int(lengths[0])
+            except ValueError:
+                return True
+            return length < 0 or length > getattr(self.rfile, "bytes_read", 0)
+
         def send_response(self, code: int, message: str | None = None) -> None:
             super().send_response(code, message)
             headers = getattr(self, "headers", None)
-            self._drain_on_close = (
+            self._rejected_body = (
                 code >= 400
                 and headers is not None
                 and bool(headers.get_all("Content-Length", []) or headers.get_all("Transfer-Encoding", []))
             )
-            if self._drain_on_close:
+            self._drain_on_close = self._rejected_body and self._has_unread_body()
+            if self._rejected_body:
                 self.close_connection = True
+
+        def end_headers(self) -> None:
+            # send_error supplies its own Connection header after send_response.
+            if getattr(self, "_rejected_body", False) and not any(
+                line.lower().startswith(b"connection:") for line in getattr(self, "_headers_buffer", [])
+            ):
                 self.send_header("Connection", "close")
+            super().end_headers()
 
         def finish(self) -> None:
             try:
@@ -257,7 +300,7 @@ def make_handler(
                 super().finish()
 
         def _drain_rejected_body(self) -> None:
-            """Send the response's FIN before discarding bounded late upload bytes.
+            """Flush the rejection, then discard bounded late upload bytes.
 
             A full close with unread socket data can reset the connection while
             the client is still sending, hiding the HTTP rejection. This shared
@@ -269,7 +312,12 @@ def make_handler(
             previous_timeout = self.connection.gettimeout()
             try:
                 self.wfile.flush()
-                self.connection.shutdown(socket.SHUT_WR)
+                # A TCP half-close on SSLSocket bypasses TLS close_notify and
+                # can hide the rejection behind SSLEOFError during an upload.
+                # TLS drains first and uses the server's normal close path.
+                # socketserver.shutdown_request still calls SHUT_WR at close.
+                if not isinstance(self.connection, ssl.SSLSocket):
+                    self.connection.shutdown(socket.SHUT_WR)
                 deadline = time.monotonic() + _REJECT_DRAIN_SECONDS
                 remaining = _REJECT_DRAIN_BYTES
                 while remaining > 0:
