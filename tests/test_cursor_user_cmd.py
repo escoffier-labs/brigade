@@ -557,41 +557,6 @@ def test_user_cursor_hook_does_not_suppress_legacy_project_entry(tmp_path, monke
     assert "additional_context" in output
 
 
-def test_project_cursor_install_rejects_hooks_config_too_large_to_detect(tmp_path):
-    workspace = tmp_path
-    hooks_path = workspace / ".cursor" / "hooks.json"
-    hooks_path.parent.mkdir()
-    original = json.dumps(
-        {"version": 1, "hooks": {"beforeSubmitPrompt": [{"command": "keep", "padding": "x" * 1_048_576}]}}
-    )
-    hooks_path.write_text(original)
-    assert hooks_path.stat().st_size > 1_048_576
-
-    error = cursor_user_cmd.install_project_presence_hooks(workspace)
-
-    assert error == "existing hooks configuration exceeds 1 MiB size limit"
-    assert hooks_path.read_text() == original
-    assert not cursor_user_cmd.project_presence_hook_installed(workspace, "sessionStart")
-
-
-def test_project_cursor_presence_detection_streams_large_hook_config(tmp_path):
-    workspace = tmp_path
-    assert cursor_user_cmd.install_project_presence_hooks(workspace) is None
-    hooks_path = workspace / ".cursor" / "hooks.json"
-    doc = json.loads(hooks_path.read_text())
-    doc["hooks"] = {
-        "beforeSubmitPrompt": [{"command": "keep", "padding": "x" * 1_048_576}],
-        **doc["hooks"],
-    }
-    hooks_path.write_text(json.dumps(doc))
-    assert hooks_path.stat().st_size > 1_048_576
-
-    assert all(
-        cursor_user_cmd.project_presence_hook_installed(workspace, event)
-        for event in cursor_user_cmd._MANAGED_HOOK_EVENTS
-    )
-
-
 def test_cursor_project_and_user_hooks_publish_once_when_both_scopes_are_installed(tmp_path, monkeypatch, capsys):
     workspace = _wire_cursor_workspace(tmp_path)
     managed_project_hook = {

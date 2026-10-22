@@ -317,8 +317,13 @@ def _cursor_wiring(target: Path) -> tuple[dict[str, Any], list[str], bool, bool]
 
     hooks_doc, _ = cursor_user_cmd._read_json_object(root / "hooks.json")
     hooks = hooks_doc.get("hooks") if hooks_doc is not None else None
-    hook_current = isinstance(hooks, dict) and all(
-        isinstance(hooks.get(event), list) and cursor_user_cmd._hook_entry(root) in hooks[event]
+    hook_current = all(
+        cursor_user_cmd.project_presence_hook_installed(target, event)
+        or (
+            isinstance(hooks, dict)
+            and isinstance(hooks.get(event), list)
+            and cursor_user_cmd._hook_entry(root) in hooks[event]
+        )
         for event in cursor_user_cmd._MANAGED_HOOK_EVENTS
     )
     if not hook_current:

@@ -5,7 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 from pathlib import Path
-from typing import Any, Iterator
+from typing import Any
 
 from . import __version__, component_bins, harness_profiles, localio
 
@@ -13,9 +13,8 @@ STATE_VERSION = 1
 MANAGED_MCP_NAMES = ("brigade", "graphtrail", "miseledger")
 _MANAGED_HOOK_EVENTS = ("sessionStart", "postToolUse", "sessionEnd")
 _MAX_HOOKS_JSON_BYTES = 1_048_576
-_JSON_SCAN_CHUNK_CHARS = 65_536
-_JSON_SCAN_STRING_CHARS = 4_096
-_JSON_SCAN_MAX_DEPTH = 256
+_HOOKS_DOCUMENT_VERSION = 1
+_OVERSIZE_ERROR = "hooks configuration exceeds 1 MiB size limit"
 _MANAGED_HOOK_COMMAND = "exec brigade work presence-hook --harness cursor --stdin --context cursor-work-loop"
 _PROJECT_HOOK_COMMAND = "exec brigade work presence-hook --harness cursor --stdin --context cursor-work-loop-project"
 _LEGACY_HOOK_COMMAND = _MANAGED_HOOK_COMMAND
@@ -202,140 +201,52 @@ def _read_json_object(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     return payload, None
 
 
-def _json_tokens(stream: Any) -> Iterator[tuple[str, str | None]]:
-    """Yield bounded-size JSON tokens while consuming a text stream."""
-    chunk = ""
-    offset = 0
-
-    def next_char() -> str | None:
-        nonlocal chunk, offset
-        if offset >= len(chunk):
-            chunk = stream.read(_JSON_SCAN_CHUNK_CHARS)
-            offset = 0
-            if not chunk:
-                return None
-        char = chunk[offset]
-        offset += 1
-        return char
-
-    while (char := next_char()) is not None:
-        if char.isspace():
-            continue
-        if char in "{}[]:,":
-            yield char, None
-            continue
-        if char == '"':
-            raw: list[str] = []
-            escaped = False
-            oversized = False
-            while (char := next_char()) is not None:
-                if char == '"' and not escaped:
-                    break
-                if len(raw) < _JSON_SCAN_STRING_CHARS:
-                    raw.append(char)
-                else:
-                    oversized = True
-                if escaped:
-                    escaped = False
-                elif char == "\\":
-                    escaped = True
-            else:
-                raise ValueError("unterminated JSON string")
-            if oversized:
-                yield "string", None
-            else:
-                yield "string", json.loads('"' + "".join(raw) + '"')
-            continue
-        raw = [char]
-        oversized = False
-        while (char := next_char()) is not None and not (char.isspace() or char in ",]}:"):
-            if len(raw) < _JSON_SCAN_STRING_CHARS:
-                raw.append(char)
-            else:
-                oversized = True
-        if char is not None:
-            offset -= 1
-        yield "scalar", None if oversized else "".join(raw)
-
-
-def _hooks_have_project_event(path: Path, event: str) -> bool:
-    """Find a project command in one event with bounded memory use."""
-    frames: list[dict[str, Any]] = []
-    skip_depth = 0
+def _load_hooks_document(path: Path) -> tuple[dict[str, Any] | None, str | None]:
+    """Read a Cursor hooks.json whole, with a size ceiling; absent means a new document."""
     try:
-        with path.open(encoding="utf-8") as stream:
-            for kind, value in _json_tokens(stream):
-                if skip_depth:
-                    if kind in {"{", "["}:
-                        skip_depth += 1
-                    elif kind in {"}", "]"}:
-                        skip_depth -= 1
-                    continue
-                if not frames:
-                    if kind != "{":
-                        return False
-                    frames.append({"kind": "object", "tag": "root", "state": "key", "key": None})
-                    continue
+        with path.open("rb") as stream:
+            raw = stream.read(_MAX_HOOKS_JSON_BYTES + 1)
+    except FileNotFoundError:
+        return {}, None
+    except OSError as exc:
+        return None, str(exc)
+    if len(raw) > _MAX_HOOKS_JSON_BYTES:
+        return None, _OVERSIZE_ERROR
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        return None, str(exc)
+    if not isinstance(payload, dict):
+        return None, "existing JSON configuration must be an object"
+    return payload, None
 
-                frame = frames[-1]
-                state = frame["state"]
-                if frame["kind"] == "object" and state == "key":
-                    if kind == "}":
-                        frames.pop()
-                    elif kind == "string":
-                        frame["key"] = value
-                        frame["state"] = "colon"
-                    else:
-                        return False
-                    continue
-                if frame["kind"] == "object" and state == "colon":
-                    if kind != ":":
-                        return False
-                    frame["state"] = "value"
-                    continue
-                if frame["kind"] == "array" and state == "value" and kind == "]":
-                    frames.pop()
-                    continue
-                if state == "value":
-                    if frame.get("tag") == "entry" and frame.get("key") == "command":
-                        if kind == "string" and value == _PROJECT_HOOK_COMMAND:
-                            return True
-                    child_tag = "other"
-                    if kind == "{" and frame.get("tag") == "root" and frame.get("key") == "hooks":
-                        child_tag = "hooks"
-                    elif kind == "[" and frame.get("tag") == "hooks" and frame.get("key") == event:
-                        child_tag = "event-list"
-                    elif kind == "{" and frame.get("tag") == "event-list":
-                        child_tag = "entry"
-                    frame["state"] = "delimiter"
-                    frame["key"] = None
-                    if kind in {"{", "["}:
-                        if len(frames) >= _JSON_SCAN_MAX_DEPTH:
-                            skip_depth = 1
-                        else:
-                            frames.append(
-                                {
-                                    "kind": "object" if kind == "{" else "array",
-                                    "tag": child_tag,
-                                    "state": "key" if kind == "{" else "value",
-                                    "key": None,
-                                }
-                            )
-                    elif kind in {"}", "]", ":", ","}:
-                        return False
-                    continue
-                if state == "delimiter":
-                    if kind == ",":
-                        frame["state"] = "key" if frame["kind"] == "object" else "value"
-                    elif (frame["kind"] == "object" and kind == "}") or (frame["kind"] == "array" and kind == "]"):
-                        frames.pop()
-                    else:
-                        return False
-                    continue
-                return False
-    except (OSError, UnicodeError, ValueError, json.JSONDecodeError):
-        return False
-    return False
+
+def _hooks_document_error(doc: dict[str, Any]) -> str | None:
+    """Return why a loaded document is not a usable Cursor hooks config, or None."""
+    if not doc:
+        return None
+    version = doc.get("version")
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        return "existing hooks configuration needs a positive integer version"
+    hooks = doc.get("hooks")
+    if hooks is None:
+        return None
+    if not isinstance(hooks, dict):
+        return "existing hooks field must be an object"
+    for event, entries in hooks.items():
+        if not isinstance(entries, list):
+            return f"existing {event} hooks must be a list"
+    return None
+
+
+def _prepare_project_document(path: Path) -> tuple[dict[str, Any] | None, str | None]:
+    doc, error = _load_hooks_document(path)
+    if doc is None:
+        return None, error
+    error = _hooks_document_error(doc)
+    if error:
+        return None, error
+    return doc, None
 
 
 def _hook_entry(root: Path | None = None, *, scope: str = "user") -> dict[str, str]:
@@ -348,40 +259,33 @@ def _hook_entry(root: Path | None = None, *, scope: str = "user") -> dict[str, s
 
 
 def project_presence_hook_installed(workspace: Path, event: str) -> bool:
-    """Return whether a scope-distinct project hook owns this Cursor event."""
+    """Return whether a valid project hooks config owns this Cursor event.
+
+    A document that is oversized, malformed, or fails validation cannot be loaded
+    by Cursor, so it never suppresses the user-scope hook.
+    """
     if event not in _MANAGED_HOOK_EVENTS:
         return False
-    path = workspace / ".cursor" / "hooks.json"
-    if not path.is_file():
+    doc, error = _prepare_project_document(workspace / ".cursor" / "hooks.json")
+    if doc is None or error or not doc:
         return False
-    return _hooks_have_project_event(path, event)
+    entries = (doc.get("hooks") or {}).get(event)
+    return isinstance(entries, list) and _hook_entry(scope="project") in entries
 
 
 def install_project_presence_hooks(workspace: Path) -> str | None:
     """Add the three Cursor lifecycle hooks to a project without replacing entries."""
     path = workspace / ".cursor" / "hooks.json"
-    try:
-        if path.is_file() and path.stat().st_size > _MAX_HOOKS_JSON_BYTES:
-            return "existing hooks configuration exceeds 1 MiB size limit"
-    except OSError as exc:
-        return str(exc)
-    doc, error = _read_json_object(path)
+    doc, error = _prepare_project_document(path)
     if doc is None:
         return error or "could not read hooks configuration"
-    hooks = doc.get("hooks")
-    if hooks is None:
-        hooks = {}
-    if not isinstance(hooks, dict):
-        return "existing hooks field must be an object"
-    changed = False
+    created = not doc
+    hooks = doc.get("hooks") or {}
     managed = _hook_entry(scope="project")
     legacy = {"command": _LEGACY_HOOK_COMMAND}
+    changed = created
     for event in _MANAGED_HOOK_EVENTS:
-        entries = hooks.get(event)
-        if entries is None:
-            entries = []
-        if not isinstance(entries, list):
-            return f"existing {event} hooks must be a list"
+        entries = hooks.get(event, [])
         normalized: list[Any] = []
         managed_added = False
         for entry in entries:
@@ -398,9 +302,13 @@ def install_project_presence_hooks(workspace: Path) -> str | None:
             changed = True
     if not changed:
         return None
+    doc.setdefault("version", _HOOKS_DOCUMENT_VERSION)
     doc["hooks"] = hooks
+    text = _coowned_json_text(doc)
+    if len(text.encode("utf-8")) > _MAX_HOOKS_JSON_BYTES:
+        return _OVERSIZE_ERROR
     try:
-        localio.write_text_atomic(path, _coowned_json_text(doc))
+        localio.write_text_atomic(path, text)
     except OSError as exc:
         return str(exc)
     return None
@@ -576,6 +484,8 @@ def install(*, write: bool = False, json_output: bool = False) -> int:
 
         hook_changed = False
         if hooks_doc is not None and all(item["status"] != "conflict" for item in hook_items):
+            if not hooks_doc:
+                hooks_doc["version"] = _HOOKS_DOCUMENT_VERSION
             hooks = hooks_doc.setdefault("hooks", {})
             desired_hook = _hook_entry()
             for hook_item in hook_items:

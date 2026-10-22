@@ -1,0 +1,363 @@
+"""Table-driven checks for the Cursor hook config model (issue #1898, PR #1938).
+
+Every Codex finding on the PR maps to at least one row below; the `finding`
+field names it by review comment id.
+"""
+
+from __future__ import annotations
+
+import io
+import json
+import sys
+from pathlib import Path
+from typing import Any
+
+import pytest
+
+from brigade import cli, cursor_user_cmd, fleet_client, localio
+
+EVENTS = cursor_user_cmd._MANAGED_HOOK_EVENTS
+PROJECT = cursor_user_cmd._hook_entry(scope="project")
+LEGACY = cursor_user_cmd._hook_entry(scope="user")
+FOREIGN = {"command": "keep-foreign-hook"}
+FOREIGN_2 = {"command": "keep-other-foreign-hook"}
+LIMIT = cursor_user_cmd._MAX_HOOKS_JSON_BYTES
+
+
+def _all_events(entry: dict[str, str]) -> dict[str, list[dict[str, str]]]:
+    return {event: [entry] for event in EVENTS}
+
+
+def _padded(size: int, *, managed: bool = True) -> str:
+    """Valid hooks JSON that is exactly `size` bytes, with a foreign hook ahead of any managed ones."""
+    doc = {
+        "version": 1,
+        "hooks": {
+            "beforeSubmitPrompt": [{"command": "keep", "padding": ""}],
+            **(_all_events(PROJECT) if managed else {}),
+        },
+    }
+    base = len(json.dumps(doc))
+    doc["hooks"]["beforeSubmitPrompt"][0]["padding"] = "x" * (size - base)
+    text = json.dumps(doc)
+    assert len(text.encode()) == size
+    return text
+
+
+def _wire(path: Path, harnesses: list[str]) -> Path:
+    (path / ".brigade").mkdir(parents=True, exist_ok=True)
+    (path / ".brigade" / "config.json").write_text(
+        json.dumps({"version": 1, "depth": "repo", "harnesses": harnesses, "owner": harnesses[0]}),
+        encoding="utf-8",
+    )
+    return path
+
+
+def _seed(workspace: Path, content: str | dict[str, Any] | None) -> Path:
+    path = workspace / ".cursor" / "hooks.json"
+    if content is not None:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content if isinstance(content, str) else json.dumps(content), encoding="utf-8")
+    return path
+
+
+# (id, finding, initial file, expected hooks after install or None when refused)
+INSTALL_ROWS = [
+    pytest.param(
+        "empty-repo",
+        "r4344139090 P1: fresh config needs version",
+        None,
+        _all_events(PROJECT),
+        id="empty-repo-writes-version-1",
+    ),
+    pytest.param(
+        "empty-object",
+        "r4344139090 P1: fresh config needs version",
+        {},
+        _all_events(PROJECT),
+        id="empty-object-is-a-fresh-document",
+    ),
+    pytest.param(
+        "user-authored",
+        "brief: preserve user-authored entries and order",
+        {
+            "version": 1,
+            "hooks": {"beforeSubmitPrompt": [FOREIGN], "sessionStart": [FOREIGN, FOREIGN_2], "sessionEnd": [FOREIGN]},
+        },
+        {
+            "beforeSubmitPrompt": [FOREIGN],
+            "sessionStart": [FOREIGN, FOREIGN_2, PROJECT],
+            "postToolUse": [PROJECT],
+            "sessionEnd": [FOREIGN, PROJECT],
+        },
+        id="user-authored-hooks-preserved",
+    ),
+    pytest.param(
+        "legacy",
+        "r4343977825 P2: legacy project entry migrates in place",
+        {"version": 1, "hooks": {"sessionStart": [FOREIGN, LEGACY], "postToolUse": [LEGACY], "sessionEnd": [LEGACY]}},
+        {"sessionStart": [FOREIGN, PROJECT], "postToolUse": [PROJECT], "sessionEnd": [PROJECT]},
+        id="legacy-managed-hooks-migrate",
+    ),
+    pytest.param(
+        "mixed-and-duplicates",
+        "r4343977836 P2: mixed legacy and new collapse to one entry",
+        {"version": 1, "hooks": {"sessionStart": [LEGACY, FOREIGN, PROJECT, LEGACY, PROJECT]}},
+        {"sessionStart": [PROJECT, FOREIGN], "postToolUse": [PROJECT], "sessionEnd": [PROJECT]},
+        id="mixed-legacy-and-new-with-duplicates",
+    ),
+    pytest.param(
+        "already-current",
+        "idempotent re-run",
+        {"version": 3, "hooks": _all_events(PROJECT)},
+        _all_events(PROJECT),
+        id="current-config-with-newer-version-is-untouched",
+    ),
+    pytest.param(
+        "at-limit",
+        "r4344044551 P2: the size limit is inclusive",
+        _padded(LIMIT),
+        None,
+        id="config-at-the-limit-is-accepted",
+    ),
+]
+
+
+@pytest.mark.parametrize(("name", "finding", "initial", "expected"), INSTALL_ROWS)
+def test_project_install_model(tmp_path, name, finding, initial, expected):
+    path = _seed(tmp_path, initial)
+
+    assert cursor_user_cmd.install_project_presence_hooks(tmp_path) is None
+    first = path.read_text()
+    doc = json.loads(first)
+    assert isinstance(doc["version"], int) and doc["version"] >= 1
+    if isinstance(initial, dict) and initial.get("version"):
+        assert doc["version"] == initial["version"]
+    elif initial is None or initial == {}:
+        assert doc["version"] == 1
+    if expected is not None:
+        assert doc["hooks"] == expected
+    for event in EVENTS:
+        assert doc["hooks"][event].count(PROJECT) == 1
+        assert LEGACY not in doc["hooks"][event]
+
+    assert cursor_user_cmd.install_project_presence_hooks(tmp_path) is None
+    assert path.read_text() == first
+
+
+# (id, finding, initial file, error substring)
+REFUSED_ROWS = [
+    pytest.param(
+        "above-limit",
+        "r4344044551/r4344099017: oversized configs are never edited",
+        _padded(LIMIT + 1),
+        "1 MiB",
+        id="config-above-the-limit",
+    ),
+    pytest.param(
+        "output-above-limit",
+        "r4344099017: never write a document the loader would reject",
+        _padded(LIMIT - 10, managed=False),
+        "1 MiB",
+        id="rewrite-would-cross-the-limit",
+    ),
+    pytest.param(
+        "malformed", "r4344139095 P2: whole document must parse", '{"version": 1, "hooks": {', "", id="malformed"
+    ),
+    pytest.param("empty-file", "r4344139095 P2", "", "", id="empty-file"),
+    pytest.param("not-an-object", "invalid document", "[]", "object", id="array-root"),
+    pytest.param(
+        "no-version", "r4344139090 P1: existing config without version", {"hooks": {}}, "version", id="missing-version"
+    ),
+    pytest.param("zero-version", "r4344139090 P1", {"version": 0, "hooks": {}}, "version", id="version-zero"),
+    pytest.param("string-version", "r4344139090 P1", {"version": "1", "hooks": {}}, "version", id="version-string"),
+    pytest.param("bool-version", "r4344139090 P1", {"version": True, "hooks": {}}, "version", id="version-bool"),
+    pytest.param("hooks-not-object", "invalid document", {"version": 1, "hooks": []}, "object", id="hooks-not-object"),
+    pytest.param(
+        "event-not-list",
+        "invalid document",
+        {"version": 1, "hooks": {"sessionEnd": {}}},
+        "must be a list",
+        id="event-not-list",
+    ),
+]
+
+
+@pytest.mark.parametrize(("name", "finding", "initial", "error"), REFUSED_ROWS)
+def test_project_install_refuses_an_invalid_document_and_leaves_it_alone(tmp_path, name, finding, initial, error):
+    path = _seed(tmp_path, initial)
+    before = path.read_bytes()
+
+    result = cursor_user_cmd.install_project_presence_hooks(tmp_path)
+
+    assert result and error in result
+    assert path.read_bytes() == before
+    assert not any(cursor_user_cmd.project_presence_hook_installed(tmp_path, event) for event in EVENTS)
+
+
+def test_project_install_write_failures_return_text_and_keep_the_original(tmp_path, monkeypatch):
+    """r4343906080 P2 (OSError becomes a message) and r4343949439 P2 (atomic replace)."""
+    original = json.dumps({"version": 1, "hooks": {"beforeSubmitPrompt": [FOREIGN]}})
+    path = _seed(tmp_path, original)
+    real_replace = localio.os.replace
+
+    def fail_replace(source, destination):
+        if Path(destination) == path:
+            raise OSError("disk full")
+        return real_replace(source, destination)
+
+    monkeypatch.setattr(localio.os, "replace", fail_replace)
+
+    assert cursor_user_cmd.install_project_presence_hooks(tmp_path) == "disk full"
+    assert path.read_text() == original
+    assert list(path.parent.glob(".hooks.json.*.tmp")) == []
+
+
+# (id, finding, file content, expected owned events)
+OWNERSHIP_ROWS = [
+    pytest.param(
+        "valid", "project owns the event", {"version": 1, "hooks": _all_events(PROJECT)}, set(EVENTS), id="valid"
+    ),
+    pytest.param(
+        "one-event",
+        "ownership is per event",
+        {"version": 1, "hooks": {"sessionStart": [PROJECT], "postToolUse": [LEGACY]}},
+        {"sessionStart"},
+        id="owns-only-the-event-it-lists",
+    ),
+    pytest.param(
+        "legacy",
+        "r4343977825 P2: the legacy command is not distinguishable as project scope",
+        {"version": 1, "hooks": _all_events(LEGACY)},
+        set(),
+        id="legacy-entry-does-not-own",
+    ),
+    pytest.param(
+        "managed-command-before-bad-suffix",
+        "r4344139095 P2: no ownership from a prefix of a malformed document",
+        '{"version": 1, "hooks": {"sessionStart": [{"command": "' + PROJECT["command"] + '"}]}, "oops": ',
+        set(),
+        id="malformed-suffix",
+    ),
+    pytest.param(
+        "no-version",
+        "r4344139090 P1: a config Cursor cannot load owns nothing",
+        {"hooks": _all_events(PROJECT)},
+        set(),
+        id="missing-version",
+    ),
+    pytest.param(
+        "wrong-event-type",
+        "invalid document",
+        {"version": 1, "hooks": {"sessionStart": [PROJECT], "sessionEnd": "nope"}},
+        set(),
+        id="sibling-event-wrong-type",
+    ),
+    pytest.param("at-limit", "r4344099017: limit is inclusive", _padded(LIMIT), set(EVENTS), id="owns-at-the-limit"),
+    pytest.param(
+        "grew-past-limit",
+        "r4344099017 P2: oversized config fails open",
+        _padded(LIMIT + 1),
+        set(),
+        id="above-the-limit-fails-open",
+    ),
+]
+
+
+@pytest.mark.parametrize(("name", "finding", "initial", "owned"), OWNERSHIP_ROWS)
+def test_project_ownership_requires_a_whole_valid_document(tmp_path, name, finding, initial, owned):
+    _seed(tmp_path, initial)
+
+    assert {e for e in EVENTS if cursor_user_cmd.project_presence_hook_installed(tmp_path, e)} == owned
+
+
+# Scope resolution through the real hook entry point. `callbacks` lists the
+# scopes Cursor would run for a sessionStart in that configuration.
+SCOPE_ROWS = [
+    pytest.param(
+        ["codex"],
+        None,
+        ["user"],
+        0,
+        "issue #1898: user hook skips a project selected for another harness",
+        id="other-harness",
+    ),
+    pytest.param(["cursor"], None, ["user"], 1, "user-only", id="user-only"),
+    pytest.param(
+        ["cursor"], {"version": 1, "hooks": _all_events(PROJECT)}, ["project"], 1, "project-only", id="project-only"
+    ),
+    pytest.param(
+        ["cursor"],
+        {"version": 1, "hooks": _all_events(PROJECT)},
+        ["project", "user"],
+        1,
+        "r4343833587 P2: both scopes publish once",
+        id="both-scopes-publish-once",
+    ),
+    pytest.param(
+        ["cursor"],
+        {"version": 1, "hooks": _all_events(LEGACY)},
+        ["user", "user"],
+        2,
+        "r4343977825 P2: legacy project entry stays active until init migrates it",
+        id="legacy-project-entry",
+    ),
+    pytest.param(
+        ["cursor"],
+        '{"version": 1, "hooks": {"sessionStart": [{"command": "' + PROJECT["command"] + '"}]}, "oops": ',
+        ["user"],
+        1,
+        "r4344139095 P2: malformed project config does not suppress the user hook",
+        id="malformed-project-config",
+    ),
+    pytest.param(
+        ["cursor"],
+        {"hooks": _all_events(PROJECT)},
+        ["user"],
+        1,
+        "r4344139090 P1: unversioned project config does not suppress the user hook",
+        id="unversioned-project-config",
+    ),
+    pytest.param(
+        ["cursor"],
+        _padded(LIMIT + 1),
+        ["user"],
+        1,
+        "r4344099017 P2: oversized project config fails open",
+        id="oversized-project-config",
+    ),
+]
+
+
+@pytest.mark.parametrize(("harnesses", "project_file", "callbacks", "published", "finding"), SCOPE_ROWS)
+def test_scope_resolution_publishes_the_expected_number_of_times(
+    tmp_path, monkeypatch, capsys, harnesses, project_file, callbacks, published, finding
+):
+    workspace = _wire(tmp_path, harnesses)
+    _seed(workspace, project_file)
+    calls: list[Any] = []
+    monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "http://127.0.0.1:3774")
+    monkeypatch.setattr(fleet_client, "upsert_session", lambda snap: calls.append(snap) or True)
+    payload = json.dumps(
+        {"conversation_id": "conv-1", "hook_event_name": "sessionStart", "workspace_roots": [str(workspace)]}
+    )
+
+    for scope in callbacks:
+        monkeypatch.setattr(sys, "stdin", io.StringIO(payload))
+        context = "cursor-work-loop-project" if scope == "project" else "cursor-work-loop"
+        assert cli.main(["work", "presence-hook", "--harness", "cursor", "--stdin", "--context", context]) == 0
+        capsys.readouterr()
+
+    assert len(calls) == published
+
+
+def test_fresh_user_scope_hooks_carry_a_version(tmp_path, monkeypatch, capsys):
+    """r4344139090 P1 at user scope: a new ~/.cursor/hooks.json is also a versioned document."""
+    monkeypatch.setattr(cursor_user_cmd, "_home_dir", lambda: tmp_path)
+
+    assert cursor_user_cmd.install(write=True, json_output=True) == 0
+    capsys.readouterr()
+
+    doc = json.loads((tmp_path / ".cursor" / "hooks.json").read_text())
+    assert doc["version"] == 1
+    assert all(LEGACY in doc["hooks"][event] for event in EVENTS)
