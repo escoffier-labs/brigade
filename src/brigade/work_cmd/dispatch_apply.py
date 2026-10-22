@@ -75,13 +75,28 @@ def _release(target: Path, row: dict[str, Any]) -> None:
     locking._release_tasks(target, task_ids=[row["task_id"]], claim_ids=[row["claim_id"]])
 
 
+_RELEASING = frozenset({"failed", "orphaned", "canceled"})
+_TERMINAL_TEXT_LIMIT = 16 * 1024
+
+
+def _bounded_text(value: Any, limit: int = _TERMINAL_TEXT_LIMIT) -> Any:
+    """Keep terminal metadata inside the bounded event envelope."""
+    if not isinstance(value, str):
+        return value
+    raw = value.encode("utf-8")
+    if len(raw) <= limit:
+        return value
+    kept = raw[:limit].decode("utf-8", errors="ignore")
+    return f"{kept}\n[truncated {len(raw) - limit} bytes]"
+
+
 def _finish(
     target: Path, path: Path, row: dict[str, Any], state: str, meta: dict[str, Any], *, commit: bool = False
 ) -> None:
     if row["state"] in store.TERMINAL - {"unknown"}:
         # Legacy receipts and crashes before recording release still reconcile.
         # Publish the marker only after the ledger mutation succeeds.
-        if row["state"] in {"failed", "orphaned", "canceled"} and not row.get("released"):
+        if row["state"] in _RELEASING and not row.get("released"):
             _release(target, row)
             store.transition(path, row, row["state"], released=True)
         return
@@ -95,8 +110,8 @@ def _finish(
     worktree = Path(row["worktree"])
     if state == "completed":
         try:
-            changes["diff_stat"] = _git(worktree, "diff", "--stat", row["base_sha"])
-            changes["untracked"] = _git(worktree, "ls-files", "--others", "--exclude-standard")
+            changes["diff_stat"] = _bounded_text(_git(worktree, "diff", "--stat", row["base_sha"]))
+            changes["untracked"] = _bounded_text(_git(worktree, "ls-files", "--others", "--exclude-standard"))
             head = _git(worktree, "rev-parse", "HEAD")
             if head != row["base_sha"]:
                 changes["needs_review"] = True
@@ -124,7 +139,7 @@ def _finish(
                     _git(worktree, "commit", "--only", "-m", f"feat: dispatch {row['task_id']}", "--", *ordered_paths)
                     changes["commit"] = _git(worktree, "rev-parse", "HEAD")
         except (ValueError, OSError) as exc:
-            changes.update(commit_error=str(exc), commit_failed=True, needs_review=True)
+            changes.update(commit_error=_bounded_text(str(exc)), commit_failed=True, needs_review=True)
     terminal = {
         "run_status": meta.get("status"),
         "failure_kind": kind,
@@ -133,7 +148,7 @@ def _finish(
         "changes": changes,
     }
     if meta.get("error"):
-        terminal["error"] = meta["error"]
+        terminal["error"] = _bounded_text(meta["error"])
     store.transition(path, row, state, terminal=terminal)
     if state != "completed":
         _release(target, row)
@@ -227,6 +242,7 @@ class Apply:
         self.started = time.monotonic()
         self.last_launch: float | None = None
         self.adopted: set[Path] = set()
+        self.settled: set[Path] = set()
         self.continue_on_error = False
         self.can_launch: Callable[[], bool] = lambda: True
         self.reservation_allowed: Callable[[], bool] = lambda: True
@@ -676,15 +692,23 @@ class Apply:
         self.observe()
         result = 0
         for directory in store.sessions(self.target):
+            if directory in self.settled:
+                continue
             session = store.read(directory / "session.json")
             if session.get("dry_run") or session.get("watch"):
                 continue
             try:
-                # Terminal rows may still have a claim-release side effect pending.
+                # Only failed, orphaned, and canceled rows have a claim-release
+                # side effect that can still be pending.
+                pending = False
                 for path in (directory / "intents").glob("*.json"):
                     row = store.read(path)
-                    if row["state"] in store.TERMINAL and not row.get("released"):
+                    if row["state"] in _RELEASING and not row.get("released"):
+                        pending = True
                         self.refresh(path, row, session)
+                if session.get("finished_at") and not pending:
+                    # A finished session with nothing left to release stays settled.
+                    self.settled.add(directory)
                 if not session.get("finished_at"):
                     result = max(result, self.session(directory, no_wait=no_wait, launch=launch))
                     if not store.read(directory / "session.json").get("finished_at"):

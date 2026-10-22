@@ -7,8 +7,8 @@ the fleet hub. Two pivots over the same event stream:
   (run, repo, seat/harness, state, elapsed, last event) and the claims it
   holds.
 - ``repos`` — one row per observed repo: where it is running, who claims it
-  (owner node, conductor, TTL remaining), its last outcome, and a collision
-  flag when two nodes touch one repo or a run is not on the claim owner.
+  (owner node, conductor, TTL remaining), its last outcome, and neutral
+  parallel activity details when two active nodes report the same repo label.
 
 Everything here is a pure function of the hub's query results, so the tests
 can render without a socket. The page mirrors the ``brigade center serve``
@@ -693,7 +693,7 @@ def _machine_board(
 class _RepoEntry:
     repo: str
     live: list[RunRow]  # rows shown after filtering
-    all_live: list[RunRow]  # every live run, so a collision survives a filter
+    all_live: list[RunRow]  # every active run, so parallel context survives a filter
     claim: ClaimRow | None
     last_outcome: RunRow | None
 
@@ -704,8 +704,6 @@ class _RepoEntry:
 
     @property
     def rank(self) -> int:
-        if self.collision:
-            return -1
         return min((_rank(row) for row in self.live), default=_IDLE_RANK)
 
 
@@ -743,10 +741,7 @@ def _repo_entries(all_rows: list[RunRow], claims: list[ClaimRow], query: Dashboa
         if query.node and not live and not (claim and _contains(claim.owner_node, query.node)):
             continue
         if narrowed and not live:
-            if not (query.attention_only and entry.collision):
-                continue
-            # The collision itself is the attention item: show the runs that make it one.
-            entry.live = all_live
+            continue
         entries.append(entry)
     return entries
 
@@ -786,7 +781,10 @@ def _repo_board(entries: list[_RepoEntry], sort: str) -> str:
         else:
             outcome = esc("-")
         flags = (
-            f'<span class="fleet-state fleet-state-failed">{esc("! collision")}</span>' if entry.collision else esc("-")
+            "<details><summary>parallel activity</summary>"
+            "<p>Same repo label on multiple machines. File overlap unknown.</p></details>"
+            if entry.collision
+            else esc("-")
         )
         body.append(
             f'<tr data-collision="{"1" if entry.collision else "0"}">'

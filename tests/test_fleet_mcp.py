@@ -5,12 +5,13 @@ from __future__ import annotations
 import io
 import json
 import re
+import threading
 import time
 
 import pytest
 
 from brigade import cli, fleet_client, fleet_client_messages, fleet_hub, fleet_hub_messages, mcp_server
-from tests.test_fleet_messages import NODE_A, NODE_B
+from tests.test_fleet_messages import NODE_A, NODE_B, _wait_for_active_waiters
 from tests.test_mcp_http import _start
 
 pytest_plugins = ["tests._fleet_message_fixtures"]
@@ -223,7 +224,17 @@ def test_who_and_claims_use_agent_grants_without_admin(stations, hub, tmp_path, 
     assert error
 
 
-def test_inbox_wait_backoff_is_bounded_and_finds_arrivals(stations, monkeypatch):
+@pytest.fixture
+def old_hub_without_wait(monkeypatch):
+    original = fleet_hub_messages.handle
+
+    def old_hub(conn, raw, *, caller, **new_hub_kwargs):
+        return original(conn, {k: v for k, v in raw.items() if k != "wait_ms"}, caller=caller, **new_hub_kwargs)
+
+    monkeypatch.setattr(fleet_hub_messages, "handle", old_hub)
+
+
+def test_old_hub_inbox_backoff_is_bounded_and_finds_arrivals(stations, monkeypatch, old_hub_without_wait):
     from brigade import fleet_mcp
 
     a, b = stations
@@ -248,6 +259,62 @@ def test_inbox_wait_backoff_is_bounded_and_finds_arrivals(stations, monkeypatch)
     sleeps.clear()
     assert len(call(b, "fleet_inbox", wait_secs=120)["messages"]) == 1
     assert sleeps == [1]
+
+
+def test_inbox_long_poll_wakes_on_arrival_with_two_list_requests(stations, monkeypatch):
+    a, b = stations
+    original = fleet_hub_messages.handle
+    lists = []
+    results = []
+
+    def handle(conn, raw, **kwargs):
+        if raw.get("action") == "list":
+            lists.append(raw)
+        return original(conn, raw, **kwargs)
+
+    monkeypatch.setattr(fleet_hub_messages, "handle", handle)
+    thread = threading.Thread(target=lambda: results.append(call(b, "fleet_inbox", wait_secs=10)), daemon=True)
+    thread.start()
+    try:
+        _wait_for_active_waiters(NODE_B, 1, timeout=0.5)
+    finally:
+        start = time.monotonic()
+        sent = call(a, "fleet_send", to=NODE_B, body="Wake waiter")["message"]
+        thread.join(timeout=2)
+    assert not thread.is_alive()
+    assert time.monotonic() - start < 2
+    assert [row["id"] for row in results[0]["messages"]] == [sent["id"]]
+    assert len(lists) <= 2
+
+
+def test_capped_inbox_long_poll_falls_back_without_tool_error(stations, monkeypatch):
+    from brigade import fleet_mcp
+
+    a, b = stations
+    original = fleet_hub_messages.handle
+    waits = []
+    sleeps = []
+    clock = [0.0]
+    monkeypatch.setattr(fleet_mcp, "monotonic", lambda: clock[0])
+
+    def capped(conn, raw, **kwargs):
+        if raw.get("wait_ms"):
+            waits.append(raw["wait_ms"])
+            raise fleet_hub_messages.MessageQuotaError("message wait capacity reached", code="message_wait_capped")
+        return original(conn, raw, **kwargs)
+
+    def sleep(delay):
+        sleeps.append(delay)
+        clock[0] += delay
+        if clock[0] == 7:
+            call(a, "fleet_send", to=NODE_B, body="Arrived after cap")
+
+    monkeypatch.setattr(fleet_hub_messages, "handle", capped)
+    monkeypatch.setattr(fleet_mcp, "sleep", sleep)
+    page = call(b, "fleet_inbox", wait_secs=13)
+    assert len(page["messages"]) == 1
+    assert waits == [13000]
+    assert sleeps == [1, 2, 4]
 
 
 def test_inbox_network_read_has_minimum_timeout(stations, monkeypatch):
@@ -282,7 +349,7 @@ def test_http_station_uses_shared_security_guards(stations, monkeypatch):
         assert status == 200 and json.loads(body)["result"]["isError"] is False
 
 
-def test_wait_with_all_mail_preserves_acknowledged_history(stations, monkeypatch):
+def test_old_hub_wait_with_all_mail_preserves_acknowledged_history(stations, monkeypatch, old_hub_without_wait):
     from brigade import fleet_mcp
 
     a, b = stations
@@ -379,7 +446,7 @@ def test_invalid_ack_batch_leaves_seeded_message_unacked(stations):
     assert call(a, "fleet_inbox")["messages"][0]["acked_at"] is None
 
 
-def test_cursor_pages_and_wait_returns_arrival_page(stations, monkeypatch):
+def test_old_hub_cursor_pages_and_wait_returns_arrival_page(stations, monkeypatch, old_hub_without_wait):
     from brigade import fleet_mcp
 
     a, b = stations
@@ -426,7 +493,7 @@ def test_late_poll_error_returns_last_good_page(stations, monkeypatch):
     monkeypatch.setattr(fleet_client_messages, "list_messages", read)
     page = call(stations[1], "fleet_inbox", wait_secs=2, after="7")
     assert page == {"messages": [], "next_cursor": "7"}
-    assert timeouts == [2, 2]
+    assert timeouts == [2, 2, 2]
 
 
 @pytest.mark.parametrize(
@@ -465,7 +532,7 @@ def test_ack_returns_results_for_each_id(stations):
 def test_old_hub_reports_ignored_reply_and_unsupported_reads(stations, monkeypatch):
     original = fleet_hub_messages.handle
 
-    def old_hub(conn, raw, *, caller):
+    def old_hub(conn, raw, *, caller, **_new_hub_kwargs):
         if raw.get("action") in ("who", "claims"):
             raise fleet_hub_messages.MessageError("unsupported action")
         return original(conn, {k: v for k, v in raw.items() if k != "reply_to"}, caller=caller)

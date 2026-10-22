@@ -3,12 +3,20 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import re
 import secrets
 import sqlite3
+from collections.abc import Callable
+from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
+import threading
+from time import monotonic
 from typing import Any, TypeGuard
+
+from .fleet_hub_server import MAX_HANDLER_THREADS
 
 SUBJECT_LIMIT = 200
 BODY_LIMIT = 64 * 1024
@@ -22,6 +30,27 @@ RETENTION_DAYS = 90
 MAX_LIST_RESPONSE_BYTES = 7 * 1024 * 1024
 MAX_FUTURE_SKEW = timedelta(minutes=5)
 MAX_SQLITE_INTEGER = (1 << 63) - 1
+MAX_WAIT_MS = 20_000
+MAX_WAITERS_PER_CALLER = 2
+MAX_WAITERS = MAX_HANDLER_THREADS // 4
+MAX_WAITERS_PER_SOURCE = 2
+_WAKE_LOCK = threading.Lock()
+_WAKE_CONDITIONS: dict[str, threading.Condition] = {}
+_WAKE_EPOCHS: dict[str, int] = {}
+_ACTIVE_WAITERS: dict[str, int] = {}
+_SOURCE_WAITERS: dict[str, int] = {}
+_LOCAL = threading.local()
+
+
+def _source_cap_applies(source_ip: str) -> bool:
+    """Loopback peers are a local reverse proxy (such as Tailscale Serve) whose
+    clients are indistinguishable, so only the per-caller and global caps apply."""
+    try:
+        return not ipaddress.ip_address(source_ip).is_loopback
+    except ValueError:
+        return True
+
+
 _PRINCIPAL_NAME_RE = re.compile(r"^[a-z][a-z0-9._-]{0,62}$")
 _SENDER_LABEL_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _THREAD_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:/#-]{0,127}$")
@@ -318,20 +347,60 @@ def _active_principal(conn: sqlite3.Connection, principal: str) -> bool:
     )
 
 
-def _as_active_principal(conn: sqlite3.Connection, principal: str, operation: Any, *, read_only: bool = False) -> Any:
+def _wake_epoch(recipient: str) -> int:
+    with _WAKE_LOCK:
+        return _WAKE_EPOCHS.get(recipient, 0)
+
+
+def _notify_recipient(recipient: str) -> None:
+    with _WAKE_LOCK:
+        _WAKE_EPOCHS[recipient] = _WAKE_EPOCHS.get(recipient, 0) + 1
+        condition = _WAKE_CONDITIONS.get(recipient)
+        if condition is not None:
+            condition.notify_all()
+
+
+def _queue_notification(recipient: str) -> None:
+    pending = getattr(_LOCAL, "pending_notifications", None)
+    if isinstance(pending, list):
+        pending.append(recipient)
+
+
+@dataclass
+class _ConnectionState:
+    closed: bool = False
+
+
+def _as_active_principal(
+    conn: sqlite3.Connection,
+    principal: str,
+    operation: Any,
+    *,
+    read_only: bool = False,
+    connection_state: _ConnectionState | None = None,
+) -> Any:
     opened = not conn.in_transaction
     if opened:
         conn.execute("BEGIN" if read_only else "BEGIN IMMEDIATE")
+        _LOCAL.pending_notifications = []
     try:
         if not _active_principal(conn, principal):
             raise MessageAuthError("sender is not an active hub principal")
         result = operation()
         if opened:
-            conn.commit()
+            if connection_state is None or not connection_state.closed:
+                conn.commit()
+            pending = getattr(_LOCAL, "pending_notifications", None)
+            _LOCAL.pending_notifications = None
+            if pending:
+                for recipient in pending:
+                    _notify_recipient(recipient)
         return result
     except BaseException:
         if opened:
-            conn.rollback()
+            _LOCAL.pending_notifications = None
+            if connection_state is None or not connection_state.closed:
+                conn.rollback()
         raise
 
 
@@ -567,9 +636,13 @@ def send(
         if existing is not None:
             if existing[1] is not None and existing[1] != message_hash:
                 raise MessageConflict("client_id was already used for a different message")
+            existing_row = _fetch(conn, int(existing[0])) or {}
             if opened:
                 conn.commit()
-            return _fetch(conn, int(existing[0])) or {}
+                _notify_recipient(recipient)
+            else:
+                _queue_notification(recipient)
+            return existing_row
         if reply_to is not None:
             if not _sqlite_integer(reply_to):
                 raise MessageError("reply_to must be a positive integer within SQLite's range")
@@ -631,16 +704,65 @@ def send(
             "INSERT INTO fleet_message_sends(sender,client_id,received_at) VALUES(?,?,?)",
             (sender, client_id, now.isoformat()),
         )
+        result = _fetch(conn, message_id) or {}
         if opened:
             conn.commit()
-        return _fetch(conn, message_id) or {}
+            _notify_recipient(recipient)
+        else:
+            _queue_notification(recipient)
+        return result
     except BaseException:
         if opened:
             conn.rollback()
         raise
 
 
-def list_messages(conn: sqlite3.Connection, raw: dict[str, Any], *, recipient: str) -> dict[str, Any]:
+def _validate_wait_ms(value: Any) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0 or value > MAX_WAIT_MS:
+        raise MessageError(f"wait_ms must be an integer between 0 and {MAX_WAIT_MS}")
+    return value
+
+
+def _default_open_conn(conn: sqlite3.Connection) -> Callable[[], sqlite3.Connection]:
+    db_file: str | None = None
+    for _seq, name, path in conn.execute("PRAGMA database_list").fetchall():
+        if name == "main" and isinstance(path, str) and path:
+            db_file = path
+            break
+    if not db_file:
+        raise MessageError("waiting on messages requires a file-backed hub database")
+    from . import fleet_hub_http
+
+    db_path = Path(db_file)
+    return lambda: fleet_hub_http.open_db(db_path)
+
+
+def _query_inbox_rows(
+    conn: sqlite3.Connection,
+    *,
+    recipient: str,
+    after: int,
+    unacked: bool,
+) -> list[tuple[Any, ...]]:
+    _prune_expired(conn)
+    return conn.execute(
+        "SELECT id,sender,recipient,subject,body,reference,priority,client_id,reply_to,created_at,acked_at,acked_by,sender_label,thread,kind "
+        "FROM fleet_messages WHERE recipient=? AND id>? "
+        + ("AND acked_at IS NULL " if unacked else "")
+        + "ORDER BY id LIMIT 100",
+        (recipient, after),
+    ).fetchall()
+
+
+def list_messages(
+    conn: sqlite3.Connection,
+    raw: dict[str, Any],
+    *,
+    recipient: str,
+    open_conn: Callable[[], sqlite3.Connection] | None = None,
+    source_ip: str = "",
+    connection_state: _ConnectionState | None = None,
+) -> dict[str, Any]:
     opened = not conn.in_transaction
     _prune_expired(conn)
     after = raw.get("after", 0)
@@ -649,6 +771,8 @@ def list_messages(conn: sqlite3.Connection, raw: dict[str, Any], *, recipient: s
     unacked = raw.get("unacked", False)
     if not isinstance(unacked, bool):
         raise MessageError("unacked must be a boolean")
+    wait_ms = _validate_wait_ms(raw.get("wait_ms", 0))
+    wake_epoch = _wake_epoch(recipient) if wait_ms > 0 else 0
     rows = conn.execute(
         "SELECT id,sender,recipient,subject,body,reference,priority,client_id,reply_to,created_at,acked_at,acked_by,sender_label,thread,kind "
         "FROM fleet_messages WHERE recipient=? AND id>? "
@@ -658,7 +782,69 @@ def list_messages(conn: sqlite3.Connection, raw: dict[str, Any], *, recipient: s
     ).fetchall()
     if opened:
         conn.commit()
-    return _message_page(rows, after=after)
+    if rows or wait_ms == 0:
+        return _message_page(rows, after=after)
+
+    reopen = open_conn if open_conn is not None else _default_open_conn(conn)
+    if not _active_principal(conn, recipient):
+        raise MessageAuthError("sender is not an active hub principal")
+    if conn.in_transaction:
+        conn.commit()
+    conn.close()
+    if connection_state is not None:
+        connection_state.closed = True
+
+    with _WAKE_LOCK:
+        active = _ACTIVE_WAITERS.get(recipient, 0)
+        source_active = _SOURCE_WAITERS.get(source_ip, 0)
+        if (
+            active >= MAX_WAITERS_PER_CALLER
+            or sum(_ACTIVE_WAITERS.values()) >= MAX_WAITERS
+            or (_source_cap_applies(source_ip) and source_active >= MAX_WAITERS_PER_SOURCE)
+        ):
+            raise MessageQuotaError("message wait capacity reached", code="message_wait_capped")
+        condition = _WAKE_CONDITIONS.get(recipient)
+        if condition is None:
+            condition = threading.Condition(_WAKE_LOCK)
+            _WAKE_CONDITIONS[recipient] = condition
+        _ACTIVE_WAITERS[recipient] = active + 1
+        _SOURCE_WAITERS[source_ip] = source_active + 1
+
+    try:
+        deadline = monotonic() + wait_ms / 1000.0
+        while True:
+            with _WAKE_LOCK:
+                remaining_seconds = deadline - monotonic()
+                if _WAKE_EPOCHS.get(recipient, 0) == wake_epoch and remaining_seconds > 0:
+                    condition.wait(timeout=remaining_seconds)
+                wake_epoch = _WAKE_EPOCHS.get(recipient, 0)
+
+            reopened_conn = reopen()
+            try:
+                rows = _as_active_principal(
+                    reopened_conn,
+                    recipient,
+                    lambda reopened_conn=reopened_conn: _query_inbox_rows(
+                        reopened_conn, recipient=recipient, after=after, unacked=unacked
+                    ),
+                )
+            finally:
+                reopened_conn.close()
+            if rows or monotonic() >= deadline:
+                return _message_page(rows, after=after)
+    finally:
+        with _WAKE_LOCK:
+            remaining = _ACTIVE_WAITERS[recipient] - 1
+            if remaining == 0:
+                _ACTIVE_WAITERS.pop(recipient, None)
+                _WAKE_CONDITIONS.pop(recipient, None)
+            else:
+                _ACTIVE_WAITERS[recipient] = remaining
+            source_remaining = _SOURCE_WAITERS[source_ip] - 1
+            if source_remaining == 0:
+                _SOURCE_WAITERS.pop(source_ip, None)
+            else:
+                _SOURCE_WAITERS[source_ip] = source_remaining
 
 
 def _message_page(rows: list[tuple[Any, ...]], *, after: int) -> dict[str, Any]:
@@ -901,7 +1087,14 @@ def _station_read(conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str)
     }
 
 
-def handle(conn: sqlite3.Connection, raw: Any, *, caller: str | None) -> tuple[int, dict[str, Any]]:
+def handle(
+    conn: sqlite3.Connection,
+    raw: Any,
+    *,
+    caller: str | None,
+    open_conn: Callable[[], sqlite3.Connection] | None = None,
+    source_ip: str = "",
+) -> tuple[int, dict[str, Any]]:
     if caller is None:
         return 403, {"error": "a node principal is required"}
     if not isinstance(raw, dict):
@@ -914,7 +1107,20 @@ def handle(conn: sqlite3.Connection, raw: Any, *, caller: str | None) -> tuple[i
     if action == "sent":
         return 200, _as_active_principal(conn, caller, lambda: sent(conn, raw, sender=caller))
     if action == "list":
-        return 200, _as_active_principal(conn, caller, lambda: list_messages(conn, raw, recipient=caller))
+        connection_state = _ConnectionState()
+        return 200, _as_active_principal(
+            conn,
+            caller,
+            lambda: list_messages(
+                conn,
+                raw,
+                recipient=caller,
+                open_conn=open_conn,
+                source_ip=source_ip,
+                connection_state=connection_state,
+            ),
+            connection_state=connection_state,
+        )
     if action == "ack":
         message = _as_active_principal(conn, caller, lambda: ack(conn, raw.get("id"), recipient=caller))
         return (200, {"message": message}) if message else (404, {"error": "message not found"})

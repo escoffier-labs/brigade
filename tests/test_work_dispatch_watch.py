@@ -182,7 +182,7 @@ def test_watch_idle_sleeps_and_holds_lease(apply_target, fake_watch, capsys):
     checked = []
 
     def probe():
-        with pytest.raises(ValueError, match="held by pid"):
+        with pytest.raises(ValueError, match="dispatch.lock is held"):
             with store.dispatch_lock(apply_target):
                 pass
         checked.append(True)

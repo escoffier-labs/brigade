@@ -1,6 +1,7 @@
 """Command Deck overview renderers over synthetic DeckView objects."""
 
 import re
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -323,12 +324,17 @@ def test_queue_exclusions_preserve_actionable_aggregates_and_identified_blocks(i
         assert alerts[-1].detail == reason
     html = deck.render_deck(view, nonce="nonce", now=NOW)
     assert f"Active alerts ({count})" in html
-    assert "Queue exclusions" in html and 'href="/deck/work"' in html
-    assert f"3 excluded · {reason}" in html
+    summary = "3 excluded from ready queue" if actionable else "3 not ready"
+    assert f"<details><summary>{summary}</summary>" in html and 'href="/deck/work"' in html
+    readable = {"not-ready": "not ready", "blocker": "blocked", "attempt-limit": "reached the attempt limit"}[reason]
+    assert f"<li>3 {readable}</li>" in html
+    assert "observed scan" not in html
+    if actionable:
+        assert f'class="alert-detail">{readable}<' in html
     assert 'class="row-title">unknown<' not in html
     assert "none blocked" not in html
     details = deck.render_control_plane(plane)
-    assert "3 excluded" in details
+    assert f"<li>3 {readable}</li>" in details
     assert "No blocked reasons reported" not in details
     assert f"unknown &middot; {reason}" not in details
     if not identified:
@@ -488,7 +494,7 @@ def test_stale_and_unknown_working_rows_link_to_the_attention_board():
 
 def test_working_rows_show_repo_badge_seat_machine_elapsed_and_a_board_link():
     html = overview.render_work_lists(_mixed_view())
-    assert "Working now (2)" in html
+    assert "Managed jobs (2)" in html
     assert html.count('class="row"') == 2
     assert 'href="/view/machines?node=11111111-1111-4111-8111-111111111111&amp;repo=skillet"' in html
     assert "seat-a · linux-a" in html
@@ -496,7 +502,38 @@ def test_working_rows_show_repo_badge_seat_machine_elapsed_and_a_board_link():
     assert 'class="badge ' in html
 
 
-def test_working_row_flags_collisions_and_non_running_buckets():
+@pytest.mark.parametrize("signal", [None, "failed", "awaiting approval", "stale", "unknown"])
+def test_generated_parallel_activity_does_not_count_as_attention(signal):
+    runs = [
+        _run(NODE_A, "a", "shared", repo_identity="github.com/example/shared"),
+        _run(NODE_B, "b", "shared", repo_identity="github.com/other/shared"),
+    ]
+    failures = []
+    if signal:
+        event = _run(NODE_A, "needs-help", "other", bucket=signal)
+        (failures if signal == "failed" else runs).append(event)
+    view = deck.build_view(
+        deck.DeckConfig(stations=(deck.StationConfig(NODE_A, "Alpha", 2), deck.StationConfig(NODE_B, "Beta", 2))),
+        live_runs=runs,
+        claims=[],
+        enrolled_labels={},
+        last_heard={},
+        outcomes=[],
+        failed_outcomes=failures,
+        observers=[],
+        now=NOW,
+    )
+    parallel = [entry for entry in view.rail if entry.kind == "parallel"]
+    assert len(parallel) == 1 and parallel[0].repo == "shared"
+    assert len(deck.attention_items(view)) == bool(signal)
+    alerts = [alert for alert in overview.page_alerts(view, NOW) if alert.kind != "coverage"]
+    assert [alert.kind for alert in alerts] == ([signal] if signal else [])
+    expected = "NEEDS ATTENTION (1)" if signal else "COVERAGE UNKNOWN"
+    assert deck.deck_verdict(view).startswith(expected)
+    assert expected in overview.render_header(view, NOW)
+
+
+def test_working_row_labels_parallel_activity_and_non_running_buckets():
     run = _run(NODE_A, "r1", "shared", bucket="queued", seat="")
     claim = deck.Claim(target="shared", owner_node="linux-a", owner_conductor="conductor-1", ttl_remaining=60)
     station = deck.StationView(
@@ -508,13 +545,73 @@ def test_working_row_flags_collisions_and_non_running_buckets():
         tiles=(deck.Tile(run=run, claim=claim, collision=True),),
     )
     html = overview.render_work_lists(_view([station]))
-    assert "! collision" in html
+    assert "parallel activity" in html
+    assert "! collision" not in html and 'class="flag"' not in html
     assert 'class="chip chip-muted">queued<' in html
     assert "conductor-1 · linux-a" in html
 
 
+@pytest.mark.parametrize("parallel", [False, True])
+def test_activity_shows_known_shared_modified_paths_without_unknown_claim(parallel):
+    identity = "github.com/example/shared"
+    runs = [_run(NODE_A, "a", "shared", repo_identity=identity)]
+    if parallel:
+        runs.append(_run(NODE_B, "b", "shared", repo_identity=identity))
+    sessions = [
+        {
+            "node_id": node,
+            "harness": "codex",
+            "session_id": node,
+            "repo_identity": identity,
+            "repo_label": "shared",
+            "dirty_paths": ["src/shared.py"],
+        }
+        for node in (NODE_A, NODE_B)
+    ]
+    view = deck.build_view(
+        deck.DeckConfig(stations=(deck.StationConfig(NODE_A, "Alpha", 2), deck.StationConfig(NODE_B, "Beta", 2))),
+        live_runs=runs,
+        claims=[],
+        enrolled_labels={},
+        last_heard={},
+        outcomes=[],
+        failed_outcomes=[],
+        observers=[],
+        now=NOW,
+        interactive_sessions=sessions,
+    )
+    assert view.repos[0].interactive_overlap
+    html = overview.render_work_lists(view)
+    assert "Shared modified paths reported" in html
+    assert "File overlap unknown" not in html
+    assert "same modified path" in html
+    assert "! overlap" in deck.repo_coordination_table(view)
+
+
+def test_repositoryless_jobs_remain_visible_without_shared_label_claim():
+    runs = [_run(NODE_A, "a", ""), _run(NODE_B, "b", "")]
+    view = deck.build_view(
+        deck.DeckConfig(stations=(deck.StationConfig(NODE_A, "Alpha", 2), deck.StationConfig(NODE_B, "Beta", 2))),
+        live_runs=runs,
+        claims=[],
+        enrolled_labels={},
+        last_heard={},
+        outcomes=[],
+        failed_outcomes=[],
+        observers=[],
+        now=NOW,
+    )
+    assert not deck.collides("", runs, {})
+    assert not any(entry.kind == "parallel" for entry in view.rail)
+    assert sum(station.busy for station in view.stations) == 2
+    html = overview.render_work_lists(view)
+    assert "Managed jobs (2)" in html and html.count(">unknown</a>") == 2
+    assert "parallel activity" not in html
+    assert "<td>unknown</td>" in deck.repo_coordination_table(view)
+
+
 def test_working_list_empty_state_and_hostile_names_are_inert():
-    assert "Nothing is running." in overview.render_work_lists(_view([_station(NODE_A, "linux-a", 2)]))
+    assert "No managed jobs reported." in overview.render_work_lists(_view([_station(NODE_A, "linux-a", 2)]))
     hostile = _station(NODE_A, HOSTILE, 2, [_run(NODE_A, "r1", HOSTILE, seat=HOSTILE)])
     html = overview.render_work_lists(_view([hostile]))
     assert HOSTILE not in html and "&lt;script&gt;" in html
@@ -524,13 +621,15 @@ def test_queued_panel_states():
     unknown = overview.render_work_lists(_view())
     assert "Queue unknown" in unknown
     zero = deck.QueueState(eligible_count="0", queued_count="0", blocked_known=True)
-    assert "Nothing queued." in overview.render_work_lists(_view(plane=_plane(queue=zero)))
+    assert "0 ready to run" in overview.render_work_lists(_view(plane=_plane(queue=zero)))
     positive = deck.QueueState(eligible_count="2", queued_count="2", blocked_known=True)
-    assert "2 queued, none blocked." in overview.render_work_lists(_view(plane=_plane(queue=positive)))
+    assert "2 ready to run" in overview.render_work_lists(_view(plane=_plane(queue=positive)))
     unsure = deck.QueueState(eligible_count="2", queued_count="2", blocked_known=False)
-    assert "2 queued, blocked reasons unknown." in overview.render_work_lists(_view(plane=_plane(queue=unsure)))
+    assert "Blocked reasons unknown." in overview.render_work_lists(_view(plane=_plane(queue=unsure)))
     unreported = deck.QueueState(eligible_count=deck.UNKNOWN, queued_count=deck.UNKNOWN, blocked_known=True)
-    assert "Queued items unknown." in overview.render_work_lists(_view(plane=_plane(queue=unreported)))
+    assert "Ready to run: unknown · queued: unknown" in overview.render_work_lists(
+        _view(plane=_plane(queue=unreported))
+    )
     blocked = deck.QueueState(
         eligible_count="1",
         queued_count="1",
@@ -772,7 +871,7 @@ def test_cloud_workers_render_compact_cards_and_empty_state():
     assert "No cloud providers configured." in overview.render_cloud_workers(_view())
 
 
-def test_sessions_table_keeps_the_path_in_a_tooltip_only():
+def test_session_details_retain_exact_escaped_checkout_branch_and_dirty_count():
     session = deck.InteractiveSession(
         node_id=NODE_A,
         harness="claude",
@@ -786,10 +885,12 @@ def test_sessions_table_keeps_the_path_in_a_tooltip_only():
         dirty_truncated=True,
     )
     html = overview.render_sessions(_view(interactive_sessions=(session,)))
-    assert "1 session(s)" in html and "claude/sess-1" in html and ">main<" in html and ">2+<" in html
-    assert 'title="&lt;script&gt;alert(1)&lt;/script&gt;"' in html
+    assert "Reported agent sessions (1)" in html and "Claude" in html
+    details = html.split("<details>", 1)[1]
+    assert "Session: sess-1" in details and "Branch: main" in details and "Dirty paths: 2+" in details
+    assert "Checkout: &lt;script&gt;alert(1)&lt;/script&gt;" in details
     assert html.count("&lt;script&gt;") == 1
-    assert "No interactive sessions." in overview.render_sessions(_view())
+    assert "No agent sessions reported." in overview.render_sessions(_view())
 
 
 def test_outcomes_collapse_adjacent_duplicates_and_label_the_node():
@@ -832,9 +933,9 @@ def test_overview_body_orders_sections_and_folds_control_plane_details():
         'aria-label="Fleet summary"',
         'id="alerts"',
         'aria-labelledby="working-title"',
+        'id="interactive-sessions"',
         'id="machines-table"',
         'id="cloud-workers"',
-        'id="interactive-sessions"',
         'id="timeline"',
         "<summary>Control plane details</summary>",
         "<summary>Other observers (0)</summary>",
@@ -1011,3 +1112,105 @@ def test_policy_disabled_and_draining_machines_are_limited_with_the_policy_word(
         rows = _rows(overview.render_machine_table(view, NOW))
         assert "4 unavailable" in rows[0]
         assert f">{word}<" in overview.render_sidebar(view, "overview", NOW, worklore_enabled=False)
+
+
+def test_action_links_require_concrete_server_registered_subjects():
+    from brigade.fleet_action_auth import canonical
+
+    view = _mixed_view()
+    source = canonical({"kind": "telemetry", "node_id": NODE_B})
+    assert "Have an agent fix this" not in overview.render_alerts(view, NOW)
+    rendered = overview.render_alerts(view, NOW, action_sources=frozenset({source}))
+    assert rendered.count("Have an agent fix this") == 1
+    assert "/deck/actions/compose?" in rendered
+    assert all(not alert.source_ref for alert in overview.page_alerts(view, NOW) if alert.kind == "coverage")
+
+
+# Activity is a projection of presence, never proof of a running model turn.
+@pytest.mark.parametrize(
+    "harness, name", [("codex", "Codex"), ("openclaw", "OpenClaw"), ("custom-agent", "custom-agent")]
+)
+def test_activity_groups_presence_identity_and_retains_repository_memberships(harness, name):
+    session = deck.InteractiveSession(
+        NODE_A, harness, "opaque-session", "example/one", "fleet", "one", "/tmp/one", "main", (), False
+    )
+    sessions = (
+        session,
+        replace(session, repo_identity="example/two", repo_label="two", checkout_path=HOSTILE),
+        replace(session, node_id=NODE_B),
+        replace(session, harness="claude"),
+        replace(session, session_id="another-session"),
+    )
+    view = replace(_mixed_view(), interactive_sessions=sessions)
+    html = overview.render_overview(view, NOW, worklore_enabled=True)
+    activity = html.split('aria-labelledby="working-title"', 1)[1].split('aria-labelledby="queued-title"', 1)[0]
+    assert ">Activity<" in activity
+    assert "Managed jobs (2)" in activity
+    assert "Reported agent sessions (4)" in activity
+    assert "may be idle" in activity
+    assert f"{name} · " in activity and "current presence" in activity
+    assert "unexpired report" in activity
+    assert html.count('id="interactive-sessions"') == 1
+    assert activity.index("Reported agent sessions") < html.index('id="machines-table"')
+    assert "one, two" in activity
+    assert "/tmp/one" in activity and "&lt;script&gt;alert(1)&lt;/script&gt;" in activity
+    assert HOSTILE not in activity
+    assert "opaque-session" not in re.sub(r"<details.*?</details>", "", activity, flags=re.S)
+    assert overview.summarize(view).busy == 2
+    assert overview.summarize(view).total == 22
+
+
+@pytest.mark.parametrize("memberships", [12, 500])
+def test_activity_bounds_visible_sessions_and_discloses_possible_membership_cap(memberships):
+    session = deck.InteractiveSession(
+        NODE_A, "codex", "session-0", "example/one", "fleet", "one", "/tmp/one", "main", (), False
+    )
+    sessions = tuple(replace(session, session_id=f"session-{index}") for index in range(memberships - 1))
+    sessions += (replace(session, repo_identity="example/two", repo_label="two", checkout_path="/tmp/two"),)
+    html = overview.render_work_lists(replace(_mixed_view(), interactive_sessions=sessions))
+    # One session has two memberships: count identities, and retain both checkouts.
+    assert f"Reported agent sessions ({memberships - 1})" in html
+    assert "one, two" in html and "/tmp/two" in html
+    fold = f"<details><summary>{memberships - 9} more reported agent sessions</summary>"
+    assert fold in html
+    visible, folded = html.split(fold, 1)
+    assert visible.count("current presence") == 8
+    assert folded.count("current presence") == memberships - 9
+    assert "<details open" not in html
+    assert ("list may be capped" in html) == (memberships == 500)
+    assert ("Session total unknown" in html) == (memberships == 500)
+
+
+@pytest.mark.parametrize(
+    ("eligible", "queued", "label"),
+    [
+        ("7", "7", "7 ready to run"),
+        ("3", "7", "3 ready to run · 7 queued"),
+        ("unknown", "7", "Ready to run: unknown · 7 queued"),
+        ("7", "unknown", "7 ready to run · queued: unknown"),
+    ],
+)
+def test_queue_readable_counts_and_folded_routine_exclusions(eligible, queued, label):
+    queue = deck.QueueState(eligible, queued, ({"reason": "not-ready", "count": 66},), True)
+    html = overview.render_work_lists(_view(plane=_plane(queue=queue)))
+    assert label in html
+    assert "<details><summary>66 not ready</summary>" in html
+    assert '<a href="/deck/work">Work</a>' in html
+    assert "observed scan" not in html and "not-ready" not in html
+    assert "reported above" not in html
+    if eligible == queued:
+        assert html.count("7") == 1
+    disabled = overview.render_work_lists(_view(plane=_plane(queue=queue)), worklore_enabled=False)
+    assert 'href="/deck/work"' not in disabled
+
+
+def test_future_queue_exclusion_reason_falls_back_to_raw_value(monkeypatch):
+    # A future producer bucket must remain visible even if this renderer has no friendly name.
+    from brigade import fleet_deck_activity as activity
+
+    monkeypatch.delitem(activity.REASONS, "manual-mode")
+    queue = deck.QueueState("0", "0", ({"reason": "manual-mode", "count": 2},), True)
+    html = overview.render_work_lists(_view(plane=_plane(queue=queue)))
+    assert "2 excluded from ready queue" in html
+    assert "manual-mode" in html
+    assert ">Ready queue<" in html

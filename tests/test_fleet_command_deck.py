@@ -156,7 +156,7 @@ def test_deck_sessions_are_separate_escaped_and_do_not_consume_capacity(conn, no
         interactive_sessions=sessions,
     )
     html = deck.render_deck(view, nonce="nonce", now=now)
-    assert "Interactive sessions" in html
+    assert "Reported agent sessions (1)" in html
     assert "&lt;script&gt;alert(1)&lt;/script&gt;" in html
     assert "<script>alert(1)</script>" not in html
     assert view.stations[0].busy == 0
@@ -910,7 +910,8 @@ def test_station_order_labels_capacity_and_timeline_bounds(tmp_path):
         assert body.count("run.completed") <= 2
 
 
-def test_collision_markers_and_observers_and_expired_claims(tmp_path):
+@pytest.mark.parametrize("claimed", [False, True])
+def test_parallel_activity_is_neutral_and_observers_and_expired_claims(tmp_path, claimed):
     with _start_hub(tmp_path, CONFIG) as (hub, _db):
         for node_id, label in ((NODE_A, "Alpha"), (NODE_B, "Beta")):
             status, _headers, text = _request(
@@ -923,19 +924,25 @@ def test_collision_markers_and_observers_and_expired_claims(tmp_path):
             assert status == 200, text
         _seed_run(hub, NODE_A, "ca", "run.created", repo="shared")
         _seed_run(hub, NODE_B, "cb", "run.created", repo="shared")
-        _seed_claim(hub, "shared", node=NODE_A)
+        if claimed:
+            _seed_claim(hub, "shared", node=NODE_A)
         _seed_claim(hub, "gone", node=NODE_A, ttl=1)
         _seed_run(hub, NODE_C, "obs", "run.created", repo="observer-repo")
         time.sleep(1.5)
         _status, _headers, deck_body = _request(hub, "GET", "/deck", headers=_bearer())
-        assert deck_body.count("! collision") >= 1
-        assert "collision" in deck_body.split('id="alerts"')[1].split("</section>")[0]
+        assert "parallel activity" in deck_body
+        assert "! collision" not in deck_body
+        assert "Same repo label on Alpha, Beta" in deck_body
+        assert "File overlap unknown" in deck_body
         rail = deck_body.split('id="alerts"')[1].split("</section>")[0]
-        assert "shared" in rail and "held by Alpha" in rail
-        assert f"held by {NODE_A}" not in rail
+        assert "shared" not in rail and "parallel" not in rail
         _status, _headers, repos_body = _request(hub, "GET", "/deck/repos", headers=_bearer())
-        first_row = repos_body.split("<tbody>")[1].split("<tr>")[1]
-        assert "! collision" in first_row and "shared" in first_row
+        repo_rows = repos_body.split("<tbody>")[1].split("<tr>")[1:]
+        assert "observer-repo" in repo_rows[0]
+        shared_row = next(row for row in repo_rows if "<td>shared</td>" in row)
+        assert "parallel activity" in shared_row
+        assert 'class="flag"' not in shared_row
+        assert "Alpha:run.created" in shared_row and "Beta:run.created" in shared_row
         # Expired claims are absent.
         assert "gone" not in repos_body
         # Observers are excluded from station totals.

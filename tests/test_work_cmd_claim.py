@@ -173,7 +173,7 @@ def test_concurrent_claim_rejection_two_processes(tmp_path, monkeypatch):
 
     assert len(results) == 2
     codes = sorted(code for _actor, code, _out, _err in results)
-    assert codes == [0, 13]
+    assert codes == [0, 13], f"claim subprocess results: {results!r}"
 
     winners = [item for item in results if item[1] == 0]
     losers = [item for item in results if item[1] == 13]
@@ -192,6 +192,8 @@ def test_concurrent_claim_rejection_two_processes(tmp_path, monkeypatch):
     stored = next(item for item in ledger["tasks"] if item["id"] == task["id"])
     assert stored["status"] == "in_progress"
     assert stored["assignee"] == winners[0][0]
+    assert stored["claim"]["actor"] == winners[0][0]
+    assert stored["claim"]["claim_id"] == winner_payload["claim"]["claim_id"]
 
 
 def test_same_actor_different_claim_id_rejects(tmp_path, monkeypatch, capsys):
