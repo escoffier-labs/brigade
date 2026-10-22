@@ -277,11 +277,20 @@ _ADDITIVE_INDEXES = (
 
 
 def _missing_additive_columns(conn: sqlite3.Connection) -> list[str]:
-    missing = [
+    # Order matters: an events table first (a hub at the current schema version may predate one added later on
+    # the events branch), then the ALTERs that need their table, then indexes that need their columns.
+    existing = {(kind, name) for kind, name in conn.execute("SELECT type, name FROM sqlite_master")}
+    absent = [(kind, ddl) for kind, name, ddl in fleet_hub_events.SCHEMA_OBJECTS if (kind, name) not in existing]
+    missing = [ddl for kind, ddl in absent if kind == "table"]
+    created = {
+        name for kind, name, _ddl in fleet_hub_events.SCHEMA_OBJECTS if kind == "table" and (kind, name) not in existing
+    }
+    missing.extend(
         ddl
         for table, column, ddl in _ADDITIVE_COLUMNS
-        if column not in {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
-    ]
+        if table not in created and column not in {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    )
+    missing.extend(ddl for kind, ddl in absent if kind == "index")
     # Index repair shares the current-version self-heal transaction and its
     # read-only fast path. Claim fencing tables retain their strict validation.
     missing.extend(

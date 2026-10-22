@@ -877,6 +877,67 @@ def test_hourly_ceiling_defers_instead_of_flooding(stations, receiver, hub, monk
     assert tick(db, clock=lambda: now + 3700) >= 1, "deferred events go out once the window moves"
 
 
+def test_a_secret_rotation_during_a_delivery_outlives_the_stale_gone_response(stations, receiver, hub) -> None:
+    """Rotation completing while a request signed with the old secret is in flight must not let that 410 act."""
+    _base, _ta, _tb, db = hub
+    sid = subscribe(stations[1], receiver.url)["result"]["id"]
+    send(stations[0], NODE_B)
+    before = rows(db, "SELECT generation FROM fleet_event_subscriptions")[0][0]
+    assert before
+
+    def rotate_then_gone(*_args: Any) -> tuple[int, bytes]:
+        assert subscribe(stations[1], receiver.url, secret=OTHER_SECRET)["result"]["id"] == sid
+        return 410, b""
+
+    assert tick(db, post=rotate_then_gone) == 0
+    stored = rows(db, "SELECT id, generation, secret FROM fleet_event_subscriptions")
+    assert [row[0] for row in stored] == [sid], "the rotated subscription survives the pre-rotation 410"
+    assert stored[0][1] != before and stored[0][2] == OTHER_SECRET
+    # A refresh with the same secret keeps the new generation.
+    assert subscribe(stations[1], receiver.url, secret=OTHER_SECRET)["result"]["id"] == sid
+    assert rows(db, "SELECT generation FROM fleet_event_subscriptions") == [(stored[0][1],)]
+    receiver.secrets = [OTHER_SECRET]
+    send(stations[0], NODE_B)
+    assert tick(db) >= 1
+
+
+def test_a_stale_failure_streak_from_before_a_rotation_is_ignored(stations, receiver, hub, monkeypatch) -> None:
+    _base, _ta, _tb, db = hub
+    monkeypatch.setattr(fleet_hub_events_dispatch, "MAX_FAILED_STREAK", 1)
+    subscribe(stations[1], receiver.url)
+    send(stations[0], NODE_B)
+
+    def rotate_then_reject(*_args: Any) -> tuple[int, bytes]:
+        subscribe(stations[1], receiver.url, secret=OTHER_SECRET)
+        return 400, b""
+
+    tick(db, post=rotate_then_reject)
+    assert rows(db, "SELECT failures FROM fleet_event_subscriptions") == [(0,)]
+
+
+def test_a_hub_at_schema_39_without_the_verifications_table_keeps_delivering(stations, receiver, hub) -> None:
+    """The previous head (83ea0563a) is schema 39 and lacks fleet_event_verifications; startup must add it."""
+    _base, _ta, _tb, db = hub
+    subscribe(stations[1], receiver.url)
+    send(stations[0], NODE_B)
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("DROP INDEX fleet_event_verifications_recent")
+        conn.execute("DROP TABLE fleet_event_verifications")
+        conn.commit()
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION == 39
+    finally:
+        conn.close()
+    with pytest.raises(sqlite3.OperationalError):
+        tick(db)  # the unrepaired database stops the dispatcher at its prune
+    fleet_hub.init_db(db).close()
+    names = {row[0] for row in rows(db, "SELECT name FROM sqlite_master")}
+    assert {"fleet_event_verifications", "fleet_event_verifications_recent"} <= names
+    assert tick(db) == 1 and len(receiver.events) == 1, "the existing subscription delivers again"
+    assert subscribe(stations[1], receiver.url, name="claim.expired")["result"]["id"], "new subscriptions verify"
+    assert len(rows(db, "SELECT * FROM fleet_event_verifications")) == 1
+
+
 def test_a_stale_gone_response_cannot_delete_a_recreated_subscription(stations, receiver, hub) -> None:
     """Unsubscribe plus subscribe during an in-flight delivery reuses the id; the old 410 must not remove it."""
     _base, _ta, _tb, db = hub

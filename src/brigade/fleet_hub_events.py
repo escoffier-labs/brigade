@@ -105,6 +105,15 @@ PRODUCER_COLUMN_DDL = "ALTER TABLE fleet_events ADD COLUMN producer TEXT NOT NUL
 GENERATION_COLUMN_DDL = "ALTER TABLE fleet_event_subscriptions ADD COLUMN generation TEXT NOT NULL DEFAULT ''"
 PRODUCER_INDEX_DDL = "CREATE INDEX IF NOT EXISTS fleet_events_producer ON fleet_events (name, producer, created_at)"
 
+_OBJECT_RE = re.compile(r"CREATE (TABLE|INDEX) IF NOT EXISTS (\w+)")
+# Every events table and index with its idempotent DDL, so a database already at the current schema version
+# regains any object added after it was created. Derived from _SCHEMA: an object added there is covered at once.
+SCHEMA_OBJECTS = tuple(
+    (match.group(1).lower(), match.group(2), statement)
+    for statement in (*_SCHEMA, PRODUCER_INDEX_DDL)
+    if (match := _OBJECT_RE.search(statement))
+)
+
 
 def backfill_producer(conn: sqlite3.Connection) -> None:
     """Fill ``producer`` on rows written before the column existed; rows that already have one are untouched.
@@ -566,8 +575,9 @@ def _subscribe(conn: sqlite3.Connection, params: dict[str, Any], caller: str) ->
                 old[3] if old is not None else moment,
                 expires,
                 cursor_seq,
-                # A refresh keeps its generation; a creation, including one after an unsubscribe, gets a new one.
-                old[6] if old is not None else secrets.token_hex(8),
+                # A refresh keeps its generation. A creation, including one after an unsubscribe, and a secret
+                # rotation get a new one, so outcomes of requests signed before the change are ignored.
+                old[6] if old is not None and old[0] == delivery["secret"] else secrets.token_hex(8),
             ),
         )
         return expires

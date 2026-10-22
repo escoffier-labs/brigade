@@ -149,3 +149,26 @@ def test_main_schema_38_hub_upgrades_to_39_with_events_tables(tmp_path: Path) ->
             assert "producer" in {r[1] for r in conn.execute("PRAGMA table_info(fleet_events)")}
         finally:
             conn.close()
+
+
+def test_every_events_object_is_repaired_at_the_current_version(tmp_path: Path) -> None:
+    """A hub at schema 39 missing any events table or index regains it; the registry covers later additions."""
+    db = tmp_path / "hub.sqlite"
+    fleet_hub.init_db(db).close()
+    names = [(kind, name) for kind, name, _ddl in fleet_hub_events.SCHEMA_OBJECTS]
+    assert ("table", "fleet_event_verifications") in names and ("index", "fleet_events_producer") in names
+    conn = sqlite3.connect(db)
+    try:
+        for kind, name in reversed(names):
+            conn.execute(f"DROP {kind.upper()} IF EXISTS {name}")
+        conn.commit()
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
+    finally:
+        conn.close()
+    conn = fleet_hub.init_db(db)
+    try:
+        present = {(r[0], r[1]) for r in conn.execute("SELECT type, name FROM sqlite_master")}
+        assert set(names) <= present
+        assert "generation" in {r[1] for r in conn.execute("PRAGMA table_info(fleet_event_subscriptions)")}
+    finally:
+        conn.close()
