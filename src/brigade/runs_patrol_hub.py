@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import time
+from concurrent.futures import ThreadPoolExecutor, wait
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -19,10 +21,40 @@ def _safe_claim(row: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+_INSPECT_WORKERS = 8
+_TIMED_OUT = "Hub claim inspection timed out"
+
+
 def _snapshot(node: str, limit: int) -> tuple[list[tuple[dict[str, Any], str | None, str | None]], bool]:
-    rows = fleet_client.fetch_claims()
+    """Fetch claims, then inspect this node's rows concurrently under one hard deadline.
+
+    A slow inspection marks only its own row unavailable. Rows that finished keep
+    their observation, so one latent claim cannot discard the rest.
+    """
+    started = time.monotonic()
+    total = fleet_client.REPORT_TIMEOUT_SECONDS
+    rows = fleet_client._run_with_deadline(fleet_client.fetch_claims, timeout=total)
+    window = list(rows[:limit])
+    owned = [
+        row
+        for row in window
+        if isinstance(row, dict) and isinstance(row.get("target"), str) and row.get("owner_node") == node
+    ]
+    decisions: dict[str, Any] = {}
+    if owned:
+        pool = ThreadPoolExecutor(max_workers=min(_INSPECT_WORKERS, len(owned)), thread_name_prefix="brigade-patrol")
+        try:
+            futures = {
+                row["target"]: pool.submit(fleet_client.inspect_claim, row["target"], node_id=node) for row in owned
+            }
+            wait(futures.values(), timeout=max(0.0, total - (time.monotonic() - started)))
+            for target, future in futures.items():
+                if future.done() and future.exception() is None:
+                    decisions[target] = future.result()
+        finally:
+            pool.shutdown(wait=False, cancel_futures=True)
     observations: list[tuple[dict[str, Any], str | None, str | None]] = []
-    for row in rows[:limit]:
+    for row in window:
         if (
             not isinstance(row, dict)
             or not isinstance(row.get("target"), str)
@@ -33,8 +65,10 @@ def _snapshot(node: str, limit: int) -> tuple[list[tuple[dict[str, Any], str | N
         path = None
         error = None
         if row["owner_node"] == node:
-            decision = fleet_client.inspect_claim(row["target"], node_id=node)
-            if not decision.granted or not decision.claim or decision.claim.get("owner_node") != node:
+            decision = decisions.get(row["target"])
+            if decision is None:
+                error = _TIMED_OUT
+            elif not decision.granted or not decision.claim or decision.claim.get("owner_node") != node:
                 error = "Hub claim changed or inspection unavailable"
             else:
                 row = decision.claim
@@ -52,9 +86,7 @@ def cross_check(lanes: Lanes, *, target: Path, now: datetime, limit: int, scan_i
     try:
         if node in {"", "unknown"}:
             raise ValueError("node identity unavailable")
-        observations, truncated = fleet_client._run_with_deadline(
-            lambda: _snapshot(node, limit), timeout=fleet_client.REPORT_TIMEOUT_SECONDS
-        )
+        observations, truncated = _snapshot(node, limit)
     except (fleet_client.FleetClientError, OSError, ValueError, RuntimeError):
         lanes.append(
             Lane("hub", errors=["Hub claims unavailable"], evidence=[Evidence("fleet:claims", now, "unavailable")])

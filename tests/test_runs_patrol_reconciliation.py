@@ -250,3 +250,32 @@ def test_brief_summary_caps_claims_at_ten_with_few_runs(tmp_path):
     summary = runs_patrol.brief_summary(repo)
     assert sum(summary["counts"].values()) == 10
     assert summary["truncated"] is True
+
+
+def test_one_slow_hub_inspection_keeps_the_other_observations(tmp_path, monkeypatch, hub):
+    import threading
+    import time
+
+    from brigade import runs_patrol_hub
+
+    repo = _repo(tmp_path)
+    hub.extend([{**_hub_claim(repo), "target": f"repo-{i}"} for i in range(4)])
+    monkeypatch.setattr(fleet_client, "REPORT_TIMEOUT_SECONDS", 0.5)
+    release = threading.Event()
+    real = fleet_client.inspect_claim
+
+    def inspect(target, **kwargs):
+        if target == "repo-0":
+            release.wait(5)
+        return real(target, **kwargs)
+
+    monkeypatch.setattr(fleet_client, "inspect_claim", inspect)
+    started = time.monotonic()
+    try:
+        observations, _ = runs_patrol_hub._snapshot("local-node", 50)
+    finally:
+        release.set()
+    assert time.monotonic() - started < 2
+    errors = {claim["target"]: error for claim, _, error in observations}
+    assert errors["repo-0"] == "Hub claim inspection timed out"
+    assert [errors[f"repo-{i}"] for i in (1, 2, 3)] == [None, None, None]
