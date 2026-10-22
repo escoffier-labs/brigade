@@ -8,11 +8,13 @@ configured every handler answers ``events_disabled`` and the record_* hooks
 return before touching the database.
 
 Webhook payloads are thin on purpose: ids, principal names, hub-validated enums
-and timestamps. They never carry message subjects, bodies, threads or labels,
-and free text that a node chose (claim targets, run ids) is included only when
-it is a short token without whitespace. The hosted agent reads the full record
-through its own authenticated tools, so delivery widens nothing it could not
-already read.
+and timestamps. They never carry message subjects, bodies, threads or labels.
+Text that a node chose (claim targets, run ids) never leaves the hub: the
+outbox keeps it for correlation, and each delivery replaces it with a keyed
+reference (HMAC under that subscription's secret), so the same target looks
+different to every subscription and cannot be tested against a word list by
+anyone without the secret. The hosted agent reads the full record through its
+own authenticated tools, so delivery widens nothing it could not already read.
 """
 
 from __future__ import annotations
@@ -20,6 +22,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import logging
 import re
 import secrets
 import sqlite3
@@ -51,11 +54,12 @@ DEFAULT_TTL_MS = 7 * 86_400_000
 MIN_TTL_MS = 60_000
 MAX_SUBSCRIPTIONS_PER_PRINCIPAL = 20
 MAX_SUBSCRIPTIONS = 200
+# Recording bound: one principal can add at most this many events of one kind an hour.
+MAX_EVENTS_PER_SUBJECT_PER_HOUR = 120
 ROTATION_WINDOW_SECONDS = 300
 _VERIFY_SLOTS = threading.BoundedSemaphore(4)
 _ID_RE = re.compile(r"^(agent:)?[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-# A free-text field from a node is shared only when it cannot carry a sentence.
-_SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._/:#@-]{0,199}$")
+_LOG = logging.getLogger("brigade.fleet_hub_events")
 _TIMESTAMP_RE = re.compile(r"^[0-9][0-9T:.+Z-]{9,39}$")
 
 _SCHEMA = (
@@ -69,6 +73,7 @@ _SCHEMA = (
     """CREATE TABLE IF NOT EXISTS fleet_events (
         seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
         subject TEXT NOT NULL, data TEXT NOT NULL, created_at REAL NOT NULL)""",
+    "CREATE INDEX IF NOT EXISTS fleet_events_subject ON fleet_events (name, subject, created_at)",
     """CREATE TABLE IF NOT EXISTS fleet_event_deliveries (
         seq INTEGER NOT NULL, subscription_id TEXT NOT NULL, state TEXT NOT NULL,
         attempts INTEGER NOT NULL DEFAULT 0, next_attempt REAL NOT NULL, attempted_at REAL,
@@ -166,7 +171,10 @@ def definitions() -> list[dict[str, Any]]:
         },
         {
             "name": CLAIM_EXPIRED,
-            "description": "A repository claim ran past its lease without a renewal or release.",
+            "description": (
+                "A repository claim ran past its lease without a renewal or release. "
+                "target_ref is a keyed reference, not the target."
+            ),
             "delivery": ["webhook"],
             "inputSchema": {
                 "type": "object",
@@ -177,11 +185,10 @@ def definitions() -> list[dict[str, Any]]:
                 "type": "object",
                 "properties": {
                     "owner_node": {"type": "string"},
-                    "target": {"type": "string"},
-                    "target_digest": {"type": "string"},
+                    "target_ref": {"type": "string"},
                     "expired_at": {"type": "string"},
                 },
-                "required": ["owner_node", "target_digest", "expired_at"],
+                "required": ["owner_node", "target_ref", "expired_at"],
                 "additionalProperties": False,
             },
         },
@@ -198,7 +205,7 @@ def definitions() -> list[dict[str, Any]]:
                 "type": "object",
                 "properties": {
                     "node_id": {"type": "string"},
-                    "run_id": {"type": "string"},
+                    "run_ref": {"type": "string"},
                     "exit_status": {"type": "integer"},
                     "failed_at": {"type": "string"},
                 },
@@ -240,9 +247,17 @@ def has_subscribers(conn: sqlite3.Connection, name: str) -> bool:
 def _append(
     conn: sqlite3.Connection, name: str, subject: str, data: dict[str, Any], *, event_id: str | None = None
 ) -> None:
+    now = time.time()
+    recent = conn.execute(
+        "SELECT COUNT(*) FROM fleet_events WHERE name=? AND subject=? AND created_at>?", (name, subject, now - 3600)
+    ).fetchone()[0]
+    if recent >= MAX_EVENTS_PER_SUBJECT_PER_HOUR:
+        # One principal cannot grow the outbox without bound; the hourly window reopens by itself.
+        _LOG.warning("fleet event rate limit reached: name=%s", name)
+        return
     conn.execute(
         "INSERT OR IGNORE INTO fleet_events(event_id,name,subject,data,created_at) VALUES(?,?,?,?,?)",
-        (event_id or "evt_" + uuid4().hex, name, subject, json.dumps(data, separators=(",", ":")), time.time()),
+        (event_id or "evt_" + uuid4().hex, name, subject, json.dumps(data, separators=(",", ":")), now),
     )
 
 
@@ -264,9 +279,8 @@ def record_message_created(conn: sqlite3.Connection, message: dict[str, Any]) ->
 def record_run_failed(conn: sqlite3.Connection, event: dict[str, Any]) -> None:
     if not _CONFIG.enabled or not has_subscribers(conn, RUN_FAILED):
         return
-    data: dict[str, Any] = {"node_id": event["node_id"]}
-    if _SAFE_TOKEN_RE.fullmatch(str(event.get("run_id", ""))):
-        data["run_id"] = event["run_id"]
+    # run_id is node-chosen free text: kept here for correlation, never sent as is (see public_data).
+    data: dict[str, Any] = {"node_id": event["node_id"], "run_id": str(event.get("run_id", ""))}
     if isinstance(event.get("exit_status"), int):
         data["exit_status"] = event["exit_status"]
     if _TIMESTAMP_RE.fullmatch(str(event.get("ts", ""))):
@@ -285,14 +299,27 @@ def record_claim_expired(
 ) -> None:
     if not _CONFIG.enabled or not has_subscribers(conn, CLAIM_EXPIRED):
         return
-    data: dict[str, Any] = {
-        "owner_node": owner_node,
-        "target_digest": hashlib.sha256(target.encode()).hexdigest()[:16],
-        "expired_at": iso(expires_at),
-    }
-    if _SAFE_TOKEN_RE.fullmatch(target):
-        data["target"] = target
+    data: dict[str, Any] = {"owner_node": owner_node, "target": target, "expired_at": iso(expires_at)}
     _append(conn, CLAIM_EXPIRED, owner_node, data, event_id=claim_expired_event_id(target, holder_token, expires_at))
+
+
+def _reference(secret: str, label: str, value: str) -> str:
+    """Opaque, subscription-scoped handle: HMAC under the subscription's own key, never a bare hash."""
+    return hmac.new(
+        secret_key(secret), f"brigade-fleet-events/{label}/v1\0{value}".encode(), hashlib.sha256
+    ).hexdigest()[:32]
+
+
+def public_data(name: str, data: dict[str, Any], secret: str) -> dict[str, Any]:
+    """The payload a receiver sees: node-chosen text is replaced by keyed references."""
+    shared = dict(data)
+    if name == CLAIM_EXPIRED:
+        shared["target_ref"] = _reference(secret, "claim-target", str(shared.pop("target", "")))
+    elif name == RUN_FAILED:
+        run_id = str(shared.pop("run_id", ""))
+        if run_id:
+            shared["run_ref"] = _reference(secret, "run", run_id)
+    return shared
 
 
 # --------------------------------------------------------------------------------------
@@ -400,8 +427,8 @@ def _subscribe(conn: sqlite3.Connection, params: dict[str, Any], caller: str) ->
         moment = time.time()
         expires = moment + ttl
         old = conn.execute(
-            "SELECT secret, previous_secret, rotate_until, created_at, cursor_seq FROM fleet_event_subscriptions "
-            "WHERE id=?",
+            "SELECT secret, previous_secret, rotate_until, created_at, cursor_seq, expires_at "
+            "FROM fleet_event_subscriptions WHERE id=?",
             (sid,),
         ).fetchone()
         if old is None:
@@ -413,6 +440,10 @@ def _subscribe(conn: sqlite3.Connection, params: dict[str, Any], caller: str) ->
                 or conn.execute("SELECT COUNT(*) FROM fleet_event_subscriptions").fetchone()[0] >= MAX_SUBSCRIPTIONS
             ):
                 raise EventsError(429, "events_subscription_limit", "subscription_limit")
+        # A row that lapsed but was not yet swept is a new subscription: no replay of the lapse.
+        if old is not None and old[5] is not None and old[5] <= moment:
+            conn.execute("DELETE FROM fleet_event_deliveries WHERE subscription_id=?", (sid,))
+            old = None
         previous, rotate_until = None, None
         if old is not None and old[0] != delivery["secret"]:
             previous, rotate_until = old[0], moment + ROTATION_WINDOW_SECONDS

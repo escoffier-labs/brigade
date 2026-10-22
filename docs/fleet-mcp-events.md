@@ -19,9 +19,14 @@ Three methods on the fleet station, next to the existing tools:
 The station also answers `server/discover`, and the shared transport in
 `mcp_server.py` accepts protocol version `2026-07-28` next to `2024-11-05`,
 `2025-03-26` and `2025-06-18`. A client that sends an unknown version is still
-told `2025-06-18`. Over HTTP, a `2026-07-28` request must carry `Mcp-Method`
-(and `Mcp-Name` for `tools/call`) matching the body, or it gets a 400 with
-JSON-RPC code `-32020`. Older versions do not need those headers.
+told `2025-06-18`. Over HTTP, a `2026-07-28` request must carry an `Mcp-Method`
+header equal to the body's method, and a `tools/call` must also carry `Mcp-Name`
+equal to the tool name; anything else gets a 400 with JSON-RPC code `-32020`.
+JSON-RPC batches are refused under `2026-07-28` because one set of headers
+cannot describe several requests. The `events/*` methods are refused (400,
+`-32600`) unless the request names `MCP-Protocol-Version: 2026-07-28`, so a client
+cannot pick an older version to skip the routing checks. Older versions keep
+working for the other methods without those headers.
 
 Delivery is webhook only. Polling, streaming and the draft's `gap` and
 `terminated` notifications are not implemented, and every event has
@@ -32,14 +37,19 @@ Delivery is webhook only. Polling, streaming and the draft's `gap` and
 | Event | Arguments | Payload `data` |
 |---|---|---|
 | `message.created` | `recipient` (optional, must equal the caller) | `message_id`, `recipient`, `sender`, `priority`, `created_at`, and `kind` when set |
-| `claim.expired` | `owner_node` (optional) | `owner_node`, `target_digest`, `expired_at`, and `target` when it is a short token without whitespace |
-| `run.failed` | `node_id` (optional) | `node_id`, and `run_id`, `exit_status`, `failed_at` when present and well formed |
+| `claim.expired` | `owner_node` (optional) | `owner_node`, `target_ref`, `expired_at` |
+| `run.failed` | `node_id` (optional) | `node_id`, and `run_ref`, `exit_status`, `failed_at` when present and well formed |
 
 Payloads are thin. They never carry a message subject, body, thread, label or
-reference. Free text that a node chose is included only when it matches a strict
-token pattern, so a claim target such as `owner/repo` goes through and a sentence
-does not. The agent reads full records with its own authenticated tools
-(`fleet_inbox`, `fleet_claims`), where peer text is already fenced as untrusted.
+reference, and they never carry text a node chose. A claim target (often a path
+or a private repository name) and a run id are replaced by `target_ref` and
+`run_ref`: the first 128 bits of an HMAC-SHA256 keyed with that subscription's
+secret. The same target gets a different reference under every subscription, and
+the reference cannot be matched against a word list without the secret. A
+receiver that already knows a target or run id can compute the reference with its
+own secret and compare. Rotating the secret changes the references. The agent
+reads full records with its own authenticated tools (`fleet_inbox`,
+`fleet_claims`), where peer text is already fenced as untrusted.
 
 ## Turning it on
 
@@ -67,7 +77,8 @@ Webhooks follow Standard Webhooks: `webhook-id` equals the body's `eventId`,
 `webhook-timestamp` is Unix seconds, and `webhook-signature` is
 `v1,<base64 HMAC-SHA256>` over `eventId.timestamp.body` with the subscription
 secret (`whsec_` plus 24 to 64 base64 bytes). `X-MCP-Subscription-Id` names the
-subscription. A secret rotation signs with the old and new key for five minutes.
+subscription. A secret rotation signs with the old and new key for five minutes; the retired key
+is erased from the hub once that window closes.
 
 A `2xx` acknowledges. Failures retry with exponential backoff and a fresh
 timestamp and signature, keeping the same event id, up to eight attempts. `410`
@@ -108,15 +119,23 @@ network position, and the principal credentials.
 * **Secret at rest.** The signing secret has to be recoverable to sign, so the
   hub stores it in its SQLite file, as the dot pack does. Protect that file like
   the hub token store. Secrets never appear in responses, logs or errors.
-* **Data leaving the hub.** Only the thin payloads above. This is the main
-  reason the payloads omit text.
+* **Data leaving the hub.** Only the thin payloads above: ids, principal names,
+  validated enums, timestamps and keyed references. No path, repository name,
+  host token or other node-chosen text is sent.
 * **Prompt injection through events.** Event data contains no instructions and
   no free text from peers. A compromised node cannot put a sentence into a
-  payload through a claim target or run id, because those fields are dropped
-  unless they are a short token.
+  payload through a claim target or run id, because those fields never leave the
+  hub as text.
 * **Resource exhaustion.** Twenty subscriptions per principal, 200 per hub, four
   concurrent challenge verifications, a 120 per hour ceiling per subscription,
-  24 hour event retention, and a bounded batch per tick.
+  24 hour event retention, and a bounded batch per tick. Recording is limited to
+  120 events an hour per event name and principal; past that the hub logs a
+  warning and records nothing until the window reopens, so one node cannot grow
+  the outbox with a flood of `run.failed` posts. Fan-out is bounded too: a tick
+  creates at most 50 delivery rows per subscription and the table never holds
+  more than 2000 pending rows. A subscription's cursor moves only past events it
+  was given a row for, so whatever does not fit waits for a later tick (within the
+  24 hour retention) instead of being created in one transaction.
 * **Not covered.** Whether the callback host is trustworthy is the operator's
   call when they add it to the allowlist. TLS trust is the system store. Delivery
   is at least once; receivers must tolerate duplicates and reordering.

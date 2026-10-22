@@ -403,19 +403,35 @@ def _make_handler(
                 self.close_connection = True
                 return None
 
-        def _routing_headers_ok(self, decoded: object, protocol_version: str | None) -> bool:
-            """2026-07-28 routes on Mcp-Method and Mcp-Name; when sent they must match the body."""
+        def _routing_error(self, decoded: object, protocol_version: str | None) -> tuple[int, str] | None:
+            """Enforce the version-gated routing contract; returns (JSON-RPC code, message) on a violation."""
+            stateless = protocol_version == STATELESS_PROTOCOL_VERSION
+            members = decoded if isinstance(decoded, list) else [decoded]
+            if not stateless:
+                # Event methods exist only in the stateless contract; an older version must not reach them.
+                if any(
+                    isinstance(m, dict) and isinstance(m.get("method"), str) and m["method"].startswith("events/")
+                    for m in members
+                ):
+                    return -32600, f"events methods require MCP-Protocol-Version {STATELESS_PROTOCOL_VERSION}"
+                return None
+            if isinstance(decoded, list):
+                # Headers can describe one request only, so a batch would bypass routing validation.
+                return -32600, f"batch requests are not supported in {STATELESS_PROTOCOL_VERSION}"
             if not isinstance(decoded, dict) or not isinstance(decoded.get("method"), str):
-                return True
+                return None
             method = self.headers.get("Mcp-Method")
             if method is None:
-                # Required by the stateless protocol; older versions never sent it.
-                return protocol_version != STATELESS_PROTOCOL_VERSION or "id" not in decoded
-            if method.strip() != decoded["method"]:
-                return False
-            name = self.headers.get("Mcp-Name")
-            params = decoded.get("params")
-            return name is None or not isinstance(params, dict) or params.get("name") in (None, name.strip())
+                # Notifications carry no id and are not routed.
+                return None if "id" not in decoded else (HEADER_MISMATCH_CODE, "Mcp-Method header required")
+            if method != decoded["method"]:
+                return HEADER_MISMATCH_CODE, "Mcp-Method or Mcp-Name header mismatch"
+            if decoded["method"] == "tools/call":
+                params = decoded.get("params")
+                tool = params.get("name") if isinstance(params, dict) else None
+                if not isinstance(tool, str) or self.headers.get("Mcp-Name") != tool:
+                    return HEADER_MISMATCH_CODE, "Mcp-Method or Mcp-Name header mismatch"
+            return None
 
         def _handle_mcp_post(self, protocol_version: str | None = None) -> None:
             body = self._read_body()
@@ -428,12 +444,14 @@ def _make_handler(
                 # RecursionError is pathologically deep nesting.
                 self._send_json(400, response(None, error={"code": -32700, "message": "parse error"}))
                 return
-            if not self._routing_headers_ok(decoded, protocol_version):
+            violation = self._routing_error(decoded, protocol_version)
+            if violation is not None:
+                code, message = violation
                 self._send_json(
                     400,
                     response(
                         decoded.get("id") if isinstance(decoded, dict) else None,
-                        error={"code": HEADER_MISMATCH_CODE, "message": "Mcp-Method or Mcp-Name header mismatch"},
+                        error={"code": code, "message": message},
                     ),
                 )
                 return

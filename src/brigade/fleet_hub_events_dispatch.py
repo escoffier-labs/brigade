@@ -35,39 +35,93 @@ MAX_FAILED_STREAK = 10
 HOURLY_DELIVERY_CEILING = 120
 EVENT_RETENTION_SECONDS = 86_400
 CLAIM_SWEEP_LIMIT = 100
+# Fan-out bounds: a tick materializes a bounded window, and the outbox holds a bounded number of pending rows.
+FAN_OUT_PER_SUBSCRIPTION = 50
+MAX_PENDING_DELIVERIES = 2000
 _LOG = logging.getLogger("brigade.fleet_hub_events")
 
 
-def sweep_expired_claims(conn: sqlite3.Connection, now: float) -> None:
-    """Emit claim.expired for leases that ran out; the prune path in claims covers the rest."""
+Watermark = tuple[float, str]
+
+
+def sweep_expired_claims(conn: sqlite3.Connection, now: float, after: Watermark | None = None) -> Watermark:
+    """Emit claim.expired for leases that ran out; the prune path in claims covers the rest.
+
+    Claims stay in their table after expiry, so progress is a (expires_at, target) watermark the caller keeps
+    between ticks: each pass takes the next ``CLAIM_SWEEP_LIMIT`` rows past it. Anything that expired before
+    the retention window has no retained event to dedupe against and is not revisited.
+    """
     if not events.current().enabled or not events.has_subscribers(conn, events.CLAIM_EXPIRED):
-        return
+        # Nobody was subscribed for these expiries, so nobody is owed them later.
+        return (now, "")
+    floor = max(after or (0.0, ""), (now - EVENT_RETENTION_SECONDS, ""))
     rows = conn.execute(
         "SELECT target, owner_node, holder_token, expires_at FROM claims WHERE expires_at<=? "
-        "ORDER BY expires_at DESC LIMIT ?",
-        (now, CLAIM_SWEEP_LIMIT),
+        "AND (expires_at>? OR (expires_at=? AND target>?)) ORDER BY expires_at, target LIMIT ?",
+        (now, floor[0], floor[0], floor[1], CLAIM_SWEEP_LIMIT),
     ).fetchall()
     for target, owner, holder, expires_at in rows:
         events.record_claim_expired(conn, target, owner, holder, expires_at)
+    return (rows[-1][3], rows[-1][0]) if rows else floor
+
+
+def _materialize(conn: sqlite3.Connection, now: float) -> None:
+    """Create delivery rows for new events, a bounded window per subscription and a bounded pending total.
+
+    A subscription's cursor moves only past events it was given a delivery row for (or past the end of the
+    outbox when nothing more matches), so whatever does not fit this tick waits for the next one.
+    """
+    budget = (
+        MAX_PENDING_DELIVERIES
+        - conn.execute("SELECT COUNT(*) FROM fleet_event_deliveries WHERE state='pending'").fetchone()[0]
+    )
+    newest = conn.execute("SELECT COALESCE(MAX(seq),0) FROM fleet_events").fetchone()[0]
+    subscriptions = conn.execute(
+        "SELECT id, name, filter_value, cursor_seq FROM fleet_event_subscriptions WHERE cursor_seq<? "
+        "ORDER BY cursor_seq, id",
+        (newest,),
+    ).fetchall()
+    for sid, name, filter_value, cursor in subscriptions:
+        limit = min(FAN_OUT_PER_SUBSCRIPTION, budget)
+        if limit <= 0:
+            break
+        seqs = [
+            row[0]
+            for row in conn.execute(
+                "SELECT seq FROM fleet_events WHERE name=? AND seq>? AND created_at>=? "
+                "AND (? IS NULL OR subject=?) ORDER BY seq LIMIT ?",
+                (name, cursor, now - EVENT_RETENTION_SECONDS, filter_value, filter_value, limit),
+            )
+        ]
+        conn.executemany(
+            "INSERT OR IGNORE INTO fleet_event_deliveries(seq,subscription_id,state,next_attempt) "
+            "VALUES(?,?,'pending',0)",
+            [(seq, sid) for seq in seqs],
+        )
+        budget -= len(seqs)
+        # A full window may have more behind it; a short one has reached the end of the outbox.
+        conn.execute(
+            "UPDATE fleet_event_subscriptions SET cursor_seq=? WHERE id=?",
+            (seqs[-1] if len(seqs) == limit else newest, sid),
+        )
 
 
 def _fan_out(conn: sqlite3.Connection, now: float) -> list[dict[str, Any]]:
     """Create delivery rows for new events, drop dead state, and return the due deliveries."""
     conn.execute("DELETE FROM fleet_event_subscriptions WHERE expires_at IS NOT NULL AND expires_at<=?", (now,))
+    # A retired signing key is erased once its rotation window closes, not kept as dead weight.
+    conn.execute(
+        "UPDATE fleet_event_subscriptions SET previous_secret=NULL, rotate_until=NULL "
+        "WHERE rotate_until IS NOT NULL AND rotate_until<=?",
+        (now,),
+    )
     # A revoked principal keeps nothing, even before another event comes due for it.
     conn.execute(
         "DELETE FROM fleet_event_subscriptions WHERE principal_id NOT IN "
         "(SELECT node_id FROM nodes WHERE revoked_at IS NULL) AND principal_id NOT IN "
         "(SELECT principal_id FROM fleet_message_principals WHERE revoked_at IS NULL)"
     )
-    conn.execute(
-        "INSERT OR IGNORE INTO fleet_event_deliveries(seq,subscription_id,state,next_attempt) "
-        "SELECT e.seq, s.id, 'pending', 0 FROM fleet_events e JOIN fleet_event_subscriptions s "
-        "ON e.name=s.name AND e.seq>s.cursor_seq AND (s.filter_value IS NULL OR s.filter_value=e.subject) "
-        "WHERE e.created_at>=?",
-        (now - EVENT_RETENTION_SECONDS,),
-    )
-    conn.execute("UPDATE fleet_event_subscriptions SET cursor_seq=(SELECT COALESCE(MAX(seq),0) FROM fleet_events)")
+    _materialize(conn, now)
     conn.execute(
         "DELETE FROM fleet_event_deliveries WHERE subscription_id NOT IN (SELECT id FROM fleet_event_subscriptions)"
     )
@@ -119,7 +173,7 @@ def _body(row: dict[str, Any]) -> bytes:
             "eventId": row["event_id"],
             "name": row["name"],
             "timestamp": events.iso(row["created_at"]),
-            "data": json.loads(row["data"]),
+            "data": events.public_data(row["name"], json.loads(row["data"]), row["secret"]),
             "cursor": None,
         },
         separators=(",", ":"),
@@ -131,6 +185,7 @@ class Dispatcher:
         self.db_path, self.clock = Path(db_path), clock
         self._post: Post = post or post_webhook
         self._pool = ThreadPoolExecutor(max_workers=WORKERS, thread_name_prefix="fleet-events")
+        self._swept: Watermark | None = None
 
     def _attempt(self, job: tuple[dict[str, Any], bytes, dict[str, str]]) -> tuple[int | None, str]:
         row, body, headers = job
@@ -154,7 +209,7 @@ class Dispatcher:
         try:
             conn.execute("BEGIN IMMEDIATE")
             try:
-                sweep_expired_claims(conn, now)
+                swept = sweep_expired_claims(conn, now, self._swept)
                 due = _fan_out(conn, now)
                 jobs: list[tuple[dict[str, Any], bytes, dict[str, str]]] = []
                 planned: dict[str, int] = {}
@@ -187,6 +242,7 @@ class Dispatcher:
                     planned[row["subscription_id"]] = planned.get(row["subscription_id"], 0) + 1
                     jobs.append((row, body, headers))
                 conn.commit()
+                self._swept = swept  # only once the events it recorded are durable
             except BaseException:
                 conn.rollback()
                 raise
