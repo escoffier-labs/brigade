@@ -443,7 +443,7 @@ def _verify_callback(url: str, secret: str, sid: str) -> None:
         echoed = json.loads(result).get("challenge")
     except (ValueError, AttributeError):
         raise EventsError(400, "events_callback_response_not_json", "response_not_json") from None
-    if not isinstance(echoed, str) or not hmac.compare_digest(echoed, challenge):
+    if not isinstance(echoed, str) or not echoed.isascii() or not hmac.compare_digest(echoed, challenge):
         raise EventsError(400, "events_callback_challenge_mismatch", "challenge_mismatch")
 
 

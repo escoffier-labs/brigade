@@ -59,7 +59,8 @@ class Receiver:
                     receiver.requests.append({"headers": headers, "body": body, "payload": payload, "signed": signed})
                 if payload.get("type") == "verification":
                     mode = receiver.challenge_mode
-                    reply = {"challenge": payload["challenge"] if mode == "echo" else "wrong"}
+                    echoes = {"echo": payload["challenge"], "unicode": "\u00e9"}
+                    reply = {"challenge": echoes.get(mode, "wrong")}
                     status = 500 if mode == "500" else 200
                     data = b"not json" if mode == "text" else json.dumps(reply).encode()
                 else:
@@ -522,7 +523,12 @@ def test_subscribe_verifies_the_callback_then_is_idempotent(stations, receiver, 
 
 @pytest.mark.parametrize(
     ("mode", "reason"),
-    [("wrong", "challenge_mismatch"), ("500", "http_5xx"), ("text", "response_not_json")],
+    [
+        ("wrong", "challenge_mismatch"),
+        ("unicode", "challenge_mismatch"),  # a non-ASCII echo must not raise out of compare_digest
+        ("500", "http_5xx"),
+        ("text", "response_not_json"),
+    ],
 )
 def test_failed_verification_stores_nothing(stations, receiver, hub, mode: str, reason: str) -> None:
     receiver.challenge_mode = mode
