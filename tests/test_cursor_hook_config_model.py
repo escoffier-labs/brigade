@@ -23,6 +23,31 @@ LEGACY = cursor_user_cmd._hook_entry(scope="user")
 FOREIGN = {"command": "keep-foreign-hook"}
 FOREIGN_2 = {"command": "keep-other-foreign-hook"}
 LIMIT = cursor_user_cmd._MAX_HOOKS_JSON_BYTES
+# Independent contract from https://cursor.com/docs/hooks#hook-events,
+# retrieved 2026-10-22. Keep this table independent of the validator's allowlist.
+DOCUMENTED_EVENTS = (
+    "sessionStart",
+    "sessionEnd",
+    "preToolUse",
+    "postToolUse",
+    "postToolUseFailure",
+    "subagentStart",
+    "subagentStop",
+    "beforeShellExecution",
+    "afterShellExecution",
+    "beforeMCPExecution",
+    "afterMCPExecution",
+    "beforeReadFile",
+    "afterFileEdit",
+    "beforeSubmitPrompt",
+    "preCompact",
+    "stop",
+    "afterAgentResponse",
+    "afterAgentThought",
+    "beforeTabFileRead",
+    "afterTabFileEdit",
+    "workspaceOpen",
+)
 
 
 def _all_events(entry: dict[str, str]) -> dict[str, list[dict[str, str]]]:
@@ -115,12 +140,29 @@ INSTALL_ROWS = [
         id="current-config-with-newer-version-is-untouched",
     ),
     pytest.param(
+        "future-event",
+        "future schema events are preserved while installing project hooks",
+        {"version": 2, "hooks": {"sessionStart": [FOREIGN], "futureEvent": []}},
+        {**_all_events(PROJECT), "sessionStart": [FOREIGN, PROJECT], "futureEvent": []},
+        id="future-version-unknown-event-is-preserved",
+    ),
+    pytest.param(
         "at-limit",
         "r4344044551 P2: the size limit is inclusive",
         _padded(LIMIT),
         None,
         id="config-at-the-limit-is-accepted",
     ),
+    *[
+        pytest.param(
+            event,
+            "issue #1961: every documented event is preserved during installation",
+            {"version": 1, "hooks": {event: [FOREIGN]}},
+            {**_all_events(PROJECT), event: [FOREIGN, PROJECT] if event in EVENTS else [FOREIGN]},
+            id=f"documented-{event}",
+        )
+        for event in DOCUMENTED_EVENTS
+    ],
 ]
 
 
@@ -141,6 +183,7 @@ def test_project_install_model(tmp_path, name, finding, initial, expected):
     for event in EVENTS:
         assert doc["hooks"][event].count(PROJECT) == 1
         assert LEGACY not in doc["hooks"][event]
+        assert cursor_user_cmd.project_presence_hook_installed(tmp_path, event)
 
     assert cursor_user_cmd.install_project_presence_hooks(tmp_path) is None
     assert path.read_text() == first
@@ -203,6 +246,30 @@ REFUSED_ROWS = [
         "must be a list",
         id="event-not-list",
     ),
+    pytest.param(
+        "future-event-not-list",
+        "invalid document",
+        {"version": 2, "hooks": {"futureEvent": {}}},
+        "must be a list",
+        id="future-version-event-not-list",
+    ),
+    pytest.param(
+        "future-event-bad-definition",
+        "r4344258655 P2",
+        {"version": 2, "hooks": {"futureEvent": [{}]}},
+        "command or prompt",
+        id="future-version-event-bad-definition",
+    ),
+    *[
+        pytest.param(
+            event,
+            "issue #1961: unknown events invalidate the whole document",
+            {"version": 1, "hooks": {"sessionStart": [PROJECT], event: entries}},
+            "unknown event",
+            id=f"unknown-{event}",
+        )
+        for event, entries in [("sessionEnded", [FOREIGN]), ("unknownEvent", [])]
+    ],
 ]
 
 
@@ -240,6 +307,13 @@ def test_project_install_write_failures_return_text_and_keep_the_original(tmp_pa
 OWNERSHIP_ROWS = [
     pytest.param(
         "valid", "project owns the event", {"version": 1, "hooks": _all_events(PROJECT)}, set(EVENTS), id="valid"
+    ),
+    pytest.param(
+        "future-version",
+        "future schema event names do not invalidate known project ownership",
+        {"version": 2, "hooks": {"sessionStart": [PROJECT], "futureEvent": []}},
+        {"sessionStart"},
+        id="future-version-preserves-project-ownership",
     ),
     pytest.param(
         "one-event",
@@ -393,6 +467,17 @@ SCOPE_ROWS = [
         "r4344099017 P2: oversized project config fails open",
         id="oversized-project-config",
     ),
+    *[
+        pytest.param(
+            ["cursor"],
+            {"version": 1, "hooks": {"sessionStart": [PROJECT], event: entries}},
+            ["user"],
+            1,
+            "issue #1961: unknown events invalidate project ownership without suppressing the user hook",
+            id=f"unknown-{event}-in-project-config",
+        )
+        for event, entries in [("sessionEnded", [FOREIGN]), ("unknownEvent", [])]
+    ],
 ]
 
 
@@ -434,6 +519,27 @@ def test_fresh_user_scope_hooks_carry_a_version(tmp_path, monkeypatch, capsys):
 # document is repaired: sync is an explicit edit of the user's own file and
 # older releases wrote it without `version`.
 USER_ROWS = [
+    *[
+        pytest.param(
+            {"version": 1, "hooks": {"sessionStart": [LEGACY], event: entries}},
+            "conflict",
+            id=f"unknown-{event}",
+        )
+        for event, entries in [("sessionEnded", [FOREIGN]), ("unknownEvent", [])]
+    ],
+    *[
+        pytest.param(
+            {"hooks": {"sessionStart": [LEGACY], event: entries}},
+            "conflict",
+            id=f"versionless-unknown-{event}",
+        )
+        for event, entries in [("sessionEnded", [FOREIGN]), ("unknownEvent", [])]
+    ],
+    pytest.param(
+        {"version": 2, "hooks": {"sessionStart": [FOREIGN, LEGACY], "futureEvent": []}},
+        "repaired",
+        id="future-version-unknown-event-is-preserved",
+    ),
     pytest.param({"hooks": {"sessionStart": [FOREIGN, LEGACY]}}, "repaired", id="older-release-document-is-repaired"),
     pytest.param({"hooks": {"beforeSubmitPrompt": [FOREIGN]}}, "repaired", id="foreign-document-without-version"),
     pytest.param({"version": "1", "hooks": {}}, "conflict", id="string-version"),
@@ -472,7 +578,7 @@ def test_user_scope_hook_document_validation(tmp_path, monkeypatch, capsys, rout
         return
     assert rc == 0
     doc = json.loads(path.read_text())
-    assert doc["version"] == 1
+    assert doc["version"] == (initial.get("version", 1) if isinstance(initial, dict) else 1)
     for event, entries in initial["hooks"].items():
         assert doc["hooks"][event][: len(entries)] == entries
     assert all(LEGACY in doc["hooks"][event] for event in EVENTS)

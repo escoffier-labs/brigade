@@ -260,6 +260,17 @@ def _prune_expired(conn: sqlite3.Connection) -> None:
         conn.commit()
 
 
+def unread_count(conn: sqlite3.Connection, raw: dict[str, Any], *, recipient: str) -> dict[str, int]:
+    """Count one inbox without fetching bodies or writing retention cleanup."""
+    if set(raw) - {"action"}:
+        raise MessageError("count accepts no arguments")
+    count = conn.execute(
+        "SELECT COUNT(*) FROM fleet_messages WHERE recipient=? AND acked_at IS NULL AND created_at>=?",
+        (recipient, _expiry_cutoff()),
+    ).fetchone()[0]
+    return {"unread_count": int(count)}
+
+
 def unread_counts(conn: sqlite3.Connection) -> dict[str, int]:
     """Unread message totals keyed by enrolled machine identity for the fleet board."""
     _prune_expired(conn)
@@ -1132,6 +1143,10 @@ def handle(
         return 201, {"message": send(conn, raw, sender=caller, reply_to=raw.get("reply_to"))}
     if action == "sent":
         return 200, _as_active_principal(conn, caller, lambda: sent(conn, raw, sender=caller))
+    if action == "count":
+        return 200, _as_active_principal(
+            conn, caller, lambda: unread_count(conn, raw, recipient=caller), read_only=True
+        )
     if action == "list":
         connection_state = _ConnectionState()
         return 200, _as_active_principal(
@@ -1150,4 +1165,4 @@ def handle(
     if action == "ack":
         message = _as_active_principal(conn, caller, lambda: ack(conn, raw.get("id"), recipient=caller))
         return (200, {"message": message}) if message else (404, {"error": "message not found"})
-    raise MessageError("action must be send, list, sent, ack, reply, who, or claims")
+    raise MessageError("action must be send, list, sent, count, ack, reply, who, or claims")

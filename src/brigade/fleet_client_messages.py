@@ -504,6 +504,22 @@ def send(
     return result
 
 
+def unread_count(
+    *,
+    token_file: str | None = None,
+    timeout: float | None = None,
+    authority: MessageAuthority | None = None,
+    expected_scope: str | None = None,
+) -> dict[str, Any]:
+    """Read this credential's total unacknowledged inbox depth without bodies."""
+    authority = _authority(authority, token_file, expected_scope)
+    payload = _online({"action": "count"}, authority=authority, timeout=timeout)
+    count = payload.get("unread_count")
+    if not _message_limits._sqlite_integer(count, allow_zero=True):
+        raise fleet_client.FleetClientError("fleet hub returned an invalid unread count")
+    return {"unread_count": count}
+
+
 def list_messages(
     *,
     after: int = 0,
