@@ -138,11 +138,22 @@ def test_deadline_attributes_progress_only_to_started_files(tmp_path, unstarted)
     assert ("previous_test" in result.diagnostic) is not unstarted
 
 
-@pytest.mark.parametrize("patched_open", [False, True], ids=["plain", "patched-path-open"])
-def test_driver_loads_diagnostics_outside_its_own_checkout(tmp_path, monkeypatch, patched_open):
+@pytest.mark.parametrize(
+    "patched_open,target_plugin",
+    [(False, False), (True, False), (False, True)],
+    ids=["plain", "patched-path-open", "target-plugin"],
+)
+def test_driver_loads_diagnostics_outside_its_own_checkout(tmp_path, monkeypatch, patched_open, target_plugin):
     repo = tmp_path / "checkout"
     (repo / "tests").mkdir(parents=True)
-    source = "def test_example(monkeypatch):\n    assert True\n"
+    (repo / "checkout_support.py").write_text("VALUE = 42\n", encoding="utf-8")
+    if target_plugin:
+        (repo / "scripts").mkdir()
+        (repo / "scripts" / "__init__.py").touch()
+        (repo / "scripts" / "windows_pytest_diagnostics.py").write_text(
+            "raise RuntimeError('target diagnostics plugin loaded')\n", encoding="utf-8"
+        )
+    source = "from checkout_support import VALUE\ndef test_example(monkeypatch):\n    assert VALUE == 42\n"
     if patched_open:
         source += (
             "    from pathlib import Path\n    monkeypatch.setattr(Path, 'open', lambda *args, **kwargs: object())\n"

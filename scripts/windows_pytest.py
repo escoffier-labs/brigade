@@ -314,7 +314,7 @@ def _child_environment() -> dict[str, str]:
     environment["BRIGADE_EXTRAS"] = "0"
     environment["BRIGADE_NO_UPDATE_CHECK"] = "1"
     environment["PYTHONUNBUFFERED"] = "1"
-    # Resolve the plugin from the driver checkout, independently of --repo.
+    # Keep the driver checkout importable alongside inherited search paths.
     environment["PYTHONPATH"] = os.pathsep.join(filter(None, (str(REPO_ROOT), environment.get("PYTHONPATH"))))
     return environment
 
@@ -392,8 +392,16 @@ def run_file(
     basetemp.mkdir(parents=True, exist_ok=False)
     argv = [
         str(python),
-        "-m",
-        "pytest",
+        "-c",
+        # Pin only the plugin to this driver, retaining python -m pytest semantics.
+        "import importlib.util, os, runpy, sys; "
+        "sys.path[0] = os.getcwd(); "
+        "spec = importlib.util.spec_from_file_location('scripts.windows_pytest_diagnostics', sys.argv.pop(1)); "
+        "plugin = importlib.util.module_from_spec(spec); "
+        "sys.modules[spec.name] = plugin; "
+        "spec.loader.exec_module(plugin); "
+        "runpy.run_module('pytest', run_name='__main__', alter_sys=True)",
+        str(REPO_ROOT / "scripts" / "windows_pytest_diagnostics.py"),
         "-vv",
         "-ra",
         "--tb=line",
