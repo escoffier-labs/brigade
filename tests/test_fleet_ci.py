@@ -188,10 +188,10 @@ def test_migration_from_37_is_repeatable(tmp_path):
         conn.close()
 
 
-def handler(tmp_path, path, bearer=None, body=None):
+def handler(tmp_path, path, bearer=None, body=None, *, trust_tailscale_identity=False):
     db = tmp_path / "hub.db"
     fleet_hub.init_db(db).close()
-    cls = fleet_hub_http.make_handler("example-admin", db)
+    cls = fleet_hub_http.make_handler("example-admin", db, trust_tailscale_identity=trust_tailscale_identity)
     h = cls.__new__(cls)
     h.path = path
     h.headers = Message()
@@ -409,3 +409,36 @@ def test_late_old_completion_does_not_replace_api_latest_or_hide_stale_attempt(d
     assert "stale-head" in rendered
     assert "Run 11" in rendered
     assert "Run 12" in rendered
+
+
+@pytest.mark.parametrize("capability", ["cookie", "tailscale", "operator"])
+def test_deck_ci_visibility_follows_actual_roster_capability(tmp_path, capability):
+    from brigade import fleet_hub_enrollment as enrollment
+    from ipaddress import IPv4Address
+
+    h, out, path = handler(tmp_path, "/deck/ci", trust_tailscale_identity=capability == "tailscale")
+    conn = fleet_hub.open_db(path)
+    put(
+        conn,
+        repositories=[
+            observation(),
+            observation("example/private", "private"),
+            observation("example/unknown", "unknown"),
+        ],
+    )
+    if capability == "cookie":
+        credential = enrollment.redeem(conn, enrollment.mint(conn)["code"])
+        h.headers["Cookie"] = f"{fleet_hub.DASHBOARD_COOKIE}={credential}"
+    elif capability == "tailscale":
+        h.client_address = (str(IPv4Address(0x7F000001)), 0)
+        h.headers[fleet_hub._TAILSCALE_IDENTITY_HEADER] = "reader@example.invalid"
+    else:
+        h.headers["Authorization"] = "Bearer example-admin"
+    conn.close()
+    h.do_GET()
+    assert out[0][0] == 200
+    html = out[0][1]
+    assert "example/public" in html
+    for hidden in ("example/private", "example/unknown"):
+        assert (hidden in html) is (capability == "operator")
+    assert "reader@example.invalid" not in html

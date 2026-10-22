@@ -15,8 +15,9 @@ def route(handler: Any, db_path: Path, *, method: str) -> None:
     if query:
         handler._send_json(400, {"error": "invalid CI query"})
         return
+    deck_operator = False
     if path == "/deck/ci":
-        authorized, _ = handler._roster_auth()
+        authorized, deck_operator = handler._roster_auth()
         if not authorized:
             handler._send_html(
                 401, "Unauthorized: use brigade fleet enroll.\n", content_type="text/plain; charset=utf-8"
@@ -27,7 +28,7 @@ def route(handler: Any, db_path: Path, *, method: str) -> None:
         try:
             if path == "/deck/ci":
                 conn.execute("PRAGMA query_only=ON")
-                view = board.load_view(conn, operator=True)
+                view = board.load_view(conn, operator=deck_operator)
                 nonce = secrets.token_urlsafe(16)
                 handler._send_html(200, page.render(view, nonce=nonce), nonce=nonce)
                 return
