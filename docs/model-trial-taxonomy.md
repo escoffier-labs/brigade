@@ -35,8 +35,8 @@ the headline score stats.
 ## Process exit
 0 = only accepted/unscored. 1 = ≥1 deterministic non-pass (rejected or non-timeout
 execution_error), no measurement failures. 3 = any measurement failure; dominates 1 (matches
-brigade run exit-3). 4 = the trial stopped before launching every cell (≥1 `not_run` cell) and had
-no measurement failures. It dominates 1 and 0 so an incomplete trial never reads as a pass.
+brigade run exit-3). 4 = the trial stopped before finishing every cell (≥1 `not_run` cell, or ≥1 cell
+left `running` by a killed runner) and had no measurement failures. It dominates 1 and 0 so an incomplete trial never reads as a pass.
 
 ## Regrade
 brigade model trial regrade <output-dir> re-runs graders against stored run/final.txt (verified
@@ -71,14 +71,24 @@ Caps, counted as retries after the first attempt per cell (`model_trials.RETRY_C
 A cell that reaches its cap stays in its failed state and keeps counting in
 measurement_failures.
 
+Retries have no backoff: a retry starts as soon as the failed attempt is recorded. A
+provider_5xx or transport_drop that persists for more than a few seconds usually fails the retry
+the same way and uses up the cap. Wait and use `resume --retry-transient` instead.
+
+The cap also holds across a killed runner. A cell left `running` keeps its `prior_attempts`, and
+the attempt that was in flight is added to them with `state: interrupted`, so it counts toward the
+cap on resume. A `not_run` record written over a `running` cell keeps the same history.
+
 ## Drain (not_run)
 A running trial can be told to stop launching cells without losing work in flight:
 
 - `brigade model trial drain <output-dir>` writes `drain.json` into the artifact directory, or
-- the first SIGINT or SIGTERM delivered to the runner process requests the same drain. The
-  handlers are then restored, so a second signal hard-stops the process. A terminal Ctrl-C also
-  reaches the seat subprocess in the foreground process group, so use `drain` or a plain
-  `kill -TERM <runner-pid>` when in-flight cells must finish.
+- the first SIGINT or SIGTERM delivered to the runner process requests the same drain, whether
+  it arrives between cells or while a cell runs. A terminal Ctrl-C and `kill -TERM <runner-pid>`
+  both work. On POSIX each seat process starts in its own session (`start_new_session`), so the
+  terminal's SIGINT reaches only the runner, never the seat, and the in-flight seat keeps running.
+  A second signal hard-stops the process: a second SIGTERM during a cell records that run as
+  `canceled` and exits 143, and a second Ctrl-C raises KeyboardInterrupt.
 
 The runner checks before each launch and before each retry. The cell in flight finishes, is graded,
 and is recorded normally. Every cell that has not started is written as `state: not_run` with
@@ -92,9 +102,12 @@ removed when the next `run` or `resume` starts.
 ## Quota and capacity stop (capacity-exhausted)
 A structured provider quota, rate, or capacity response is the worker-failure class
 `capacity-exhausted` from the [seat health and worker failure taxonomy](proposals/2026-07-26-seat-health-probe-and-worker-failure-taxonomy.md).
-The trial runner recognizes it only from structured data in worker-results.json (a
-`brigade.worker_failure.v1` payload of that class, or the legacy adapter kind `rate-limit-error`),
-never from the seat's output text. When a seat's attempt ends that way:
+The trial runner recognizes it only from structured data in worker-results.json: a
+`brigade.worker_failure.v1` payload of that class, or the legacy adapter kind `rate-limit-error`
+when its `failure_phase` is not `output-validation`. Final-output validation assigns
+`rate-limit-error` by matching the seat's answer text (for example `Error: rate limit exceeded`),
+so that origin is graded as a normal model result: it is not `capacity-exhausted` and it does not
+stop the seat. When a seat's attempt ends with a recognized capacity response:
 
 - the cell is `adapter_error` with `failure_reason: capacity-exhausted`, even when the seat exited
   nonzero. It is a measurement failure (exit 3), not a deterministic `execution_error`, so it is

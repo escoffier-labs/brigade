@@ -1,7 +1,13 @@
 from __future__ import annotations
 
 import json
+import os
+import signal
+import time
 from contextlib import nullcontext
+from pathlib import Path
+
+import pytest
 
 from brigade import agents
 from brigade import cli
@@ -1180,8 +1186,6 @@ def test_drain_marker_lets_in_flight_cell_finish_and_marks_rest_not_run(tmp_path
 
 
 def test_sigterm_drains_then_restores_the_previous_handlers(tmp_path, monkeypatch):
-    import os
-    import signal
 
     manifest_path = _three_cell_manifest(tmp_path)
     root = tmp_path / "results"
@@ -1404,3 +1408,199 @@ def test_resume_after_capacity_stop_launches_the_not_run_cells(tmp_path, monkeyp
     assert len(calls) == 1
     assert cells["hello:cursor:2"]["state"] == "accepted"
     assert cells["hello:cursor:1"]["failure_reason"] == "capacity-exhausted"
+
+
+# --- #1977 review: drain through the real aboyeur.run decorator ---------------
+
+
+def _signal_during_first_real_cell(monkeypatch, *signals):
+    """Keep the real aboyeur.run (and its SIGTERM terminalizer); signal from inside the seat call."""
+    prompts: list[str] = []
+    sigint_before = signal.getsignal(signal.SIGINT)
+
+    def fake_run_agent(cli_ref, prompt, **kwargs):
+        prompts.append(prompt)
+        if len(prompts) == 1:
+            for index, signum in enumerate(signals):
+                if index:
+                    # Signals sent back to back coalesce; wait until the drain took the first
+                    # one (it hands SIGINT back to the prior handler) before sending the next.
+                    deadline = time.monotonic() + 5
+                    while signal.getsignal(signal.SIGINT) is not sigint_before and time.monotonic() < deadline:
+                        time.sleep(0.01)
+                os.kill(os.getpid(), signum)
+        return agents.AgentResult(text="hello\n", ok=True)
+
+    monkeypatch.setattr(model_trials.aboyeur.agents, "run_agent", fake_run_agent)
+    return prompts
+
+
+def test_sigterm_during_a_real_aboyeur_cell_drains_instead_of_aborting(tmp_path, monkeypatch):
+    manifest_path = _three_cell_manifest(tmp_path)
+    root = tmp_path / "results"
+    before = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+    prompts = _signal_during_first_real_cell(monkeypatch, signal.SIGTERM)
+    rc = model_trials.execute(manifest_path, _roster(), workspace=tmp_path, output_dir=root, resume=False)
+    assert len(prompts) == 1
+    cells = _cells_by_trial(root)
+    assert cells[1]["state"] == "accepted"
+    run_receipt = json.loads((Path(cells[1]["run_dir"]) / "run.json").read_text())
+    assert run_receipt["status"] != "canceled"
+    assert [cells[t]["state"] for t in (2, 3)] == ["not_run", "not_run"]
+    assert json.loads((root / "summary.json").read_text())["counts"] == {"accepted": 1, "not_run": 2}
+    assert rc == model_trials.EXIT_INCOMPLETE
+    assert {sig: signal.getsignal(sig) for sig in before} == before
+
+
+def test_sigint_during_a_real_aboyeur_cell_drains(tmp_path, monkeypatch):
+    manifest_path = _three_cell_manifest(tmp_path)
+    root = tmp_path / "results"
+    before = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+    prompts = _signal_during_first_real_cell(monkeypatch, signal.SIGINT)
+    rc = model_trials.execute(manifest_path, _roster(), workspace=tmp_path, output_dir=root, resume=False)
+    assert len(prompts) == 1
+    cells = _cells_by_trial(root)
+    assert cells[1]["state"] == "accepted"
+    assert [cells[t]["state"] for t in (2, 3)] == ["not_run", "not_run"]
+    assert rc == model_trials.EXIT_INCOMPLETE
+    assert {sig: signal.getsignal(sig) for sig in before} == before
+
+
+def test_second_sigterm_during_a_real_aboyeur_cell_still_terminalizes_the_run(tmp_path, monkeypatch):
+    manifest_path = _three_cell_manifest(tmp_path)
+    root = tmp_path / "results"
+    before = {sig: signal.getsignal(sig) for sig in (signal.SIGINT, signal.SIGTERM)}
+    _signal_during_first_real_cell(monkeypatch, signal.SIGTERM, signal.SIGTERM)
+    with pytest.raises(SystemExit) as excinfo:
+        model_trials.execute(manifest_path, _roster(), workspace=tmp_path, output_dir=root, resume=False)
+    assert excinfo.value.code == 128 + signal.SIGTERM
+    run_dir = next((root / "cells").glob("*/attempts/attempt-001/run"))
+    receipt = json.loads((run_dir / "run.json").read_text())
+    assert receipt["status"] == "canceled"
+    assert receipt["failure"]["kind"] == "signal"
+    assert {sig: signal.getsignal(sig) for sig in before} == before
+
+
+# --- #1977 review: retry history survives running and not_run records --------
+
+
+def _seed_running_cell_with_history(tmp_path, root):
+    manifest_path = _single_cell_manifest(tmp_path)
+    plan, cells = model_trials.build_plan(manifest_path, _roster(), root)
+    cell = cells[0]
+    cell_dir = root / "cells" / cell.cell_id
+    (cell_dir / "attempts" / "attempt-001" / "run").mkdir(parents=True)
+    (cell_dir / "attempts" / "attempt-002" / "run").mkdir(parents=True)
+    running = {
+        "schema": model_trials.CELL_SCHEMA,
+        **cell.payload(),
+        "state": "running",
+        "attempt": 2,
+        "started_at": "2026-01-01T00:00:00+00:00",
+        "manifest_digest": plan["manifest_digest"],
+        "prior_attempts": [{"attempt": 1, "state": "adapter_error", "failure_reason": "transport_drop"}],
+    }
+    (cell_dir / "cell.json").write_text(json.dumps(running))
+    return manifest_path, plan, cell, cell_dir, running
+
+
+def test_resume_keeps_prior_attempts_and_retry_cap_of_a_running_cell(tmp_path, monkeypatch):
+    root = tmp_path / "results"
+    manifest_path, _plan, _cell, _cell_dir, _running = _seed_running_cell_with_history(tmp_path, root)
+    calls = _scripted_run(monkeypatch, ["adapter"])
+    rc = model_trials.execute(
+        manifest_path, _roster(), workspace=tmp_path, output_dir=root, resume=True, retry_transient=True
+    )
+    # Attempt 1 failed and attempt 2 was orphaned, so only one more attempt fits the cap of 3.
+    assert calls == ["adapter"]
+    assert rc == 3
+    cell = _only_cell(root)
+    assert cell["attempt"] == 3
+    assert [item["attempt"] for item in cell["prior_attempts"]] == [1, 2]
+    assert cell["prior_attempts"][0]["state"] == "adapter_error"
+    assert cell["prior_attempts"][1]["state"] == "interrupted"
+
+
+def test_mark_not_run_keeps_prior_attempts_and_resume_honors_the_cap(tmp_path, monkeypatch):
+    root = tmp_path / "results"
+    manifest_path, plan, cell, cell_dir, running = _seed_running_cell_with_history(tmp_path, root)
+    assert model_trials._mark_not_run(cell, cell_dir, running, plan, reason=model_trials.NOT_RUN_DRAINED)
+    marked = json.loads((cell_dir / "cell.json").read_text())
+    assert marked["state"] == "not_run"
+    assert [item["attempt"] for item in marked["prior_attempts"]] == [1, 2]
+    assert marked["prior_attempts"][1]["state"] == "interrupted"
+    # Re-marking an already not_run cell must not duplicate the orphaned attempt.
+    assert model_trials._mark_not_run(cell, cell_dir, marked, plan, reason=model_trials.NOT_RUN_DRAINED)
+    assert json.loads((cell_dir / "cell.json").read_text())["prior_attempts"] == marked["prior_attempts"]
+
+    calls = _scripted_run(monkeypatch, ["adapter"])
+    model_trials.execute(
+        manifest_path, _roster(), workspace=tmp_path, output_dir=root, resume=True, retry_transient=True
+    )
+    assert calls == ["adapter"]
+    assert [item["attempt"] for item in _only_cell(root)["prior_attempts"]] == [1, 2]
+
+
+# --- #1977 review: output text never stops a seat -----------------------------
+
+
+def test_rate_limit_text_in_a_model_answer_does_not_stop_the_seat(tmp_path, monkeypatch):
+    manifest = _manifest()
+    manifest["trials"] = 2
+    manifest_path = tmp_path / "eval.json"
+    manifest_path.write_text(json.dumps(manifest))
+    prompts: list[str] = []
+
+    def fake_run_agent(cli_ref, prompt, **kwargs):
+        prompts.append(prompt)
+        return agents.AgentResult(text="Error: rate limit exceeded, retry later\n", ok=True)
+
+    monkeypatch.setattr(model_trials.aboyeur.agents, "run_agent", fake_run_agent)
+    root = tmp_path / "results"
+    rc = model_trials.execute(manifest_path, _roster(), workspace=tmp_path, output_dir=root, resume=False)
+    cells = _cells_by_trial(root)
+    # Both cells ran: the answer text is a model result, not a provider capacity response.
+    assert len(prompts) == 2
+    for cell in cells.values():
+        assert cell["state"] not in {"not_run", "adapter_error"}
+        assert cell.get("failure_reason") != "capacity-exhausted"
+    assert "not_run" not in json.loads((root / "summary.json").read_text())["counts"]
+    assert rc == 1
+
+
+def test_legacy_rate_limit_kind_from_output_validation_is_not_capacity(tmp_path, monkeypatch):
+    manifest_path = _quota_manifest(tmp_path)
+    root = tmp_path / "results"
+    seen: list[str] = []
+
+    def fake_run(task, roster, **kwargs):
+        seen.append(_seat_of(kwargs))
+        out = kwargs["output_dir"]
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "final.txt").write_text("Error: rate limit exceeded, retry later\n")
+        (out / "run.json").write_text(json.dumps({"status": "failed"}))
+        result = {
+            "worker": _seat_of(kwargs),
+            "ok": False,
+            "exit_code": 1,
+            "failure_phase": "output-validation",
+            "failure_kind": "rate-limit-error",
+            "detail": "provider returned an operational error instead of a final result",
+        }
+        (out / "worker-results.json").write_text(json.dumps({"results": [result]}))
+        return 1
+
+    monkeypatch.setattr(model_trials.aboyeur, "run", fake_run)
+    rc = model_trials.execute(manifest_path, _two_seat_roster(), workspace=tmp_path, output_dir=root, resume=False)
+    assert sorted(seen) == ["cursor", "cursor", "other", "other"]
+    for path in (root / "cells").glob("*/cell.json"):
+        cell = json.loads(path.read_text())
+        assert cell["state"] == "execution_error"
+        assert cell.get("failure_reason") != "capacity-exhausted"
+    assert rc == 1
+
+
+def test_process_exit_counts_running_cells_as_incomplete():
+    assert model_trials.process_exit({"measurement_failures": 0, "counts": {"accepted": 1, "running": 1}}) == 4
+    assert model_trials.process_exit({"measurement_failures": 0, "counts": {"rejected": 1, "running": 1}}) == 4
+    assert model_trials.process_exit({"measurement_failures": 1, "counts": {"running": 1}}) == 3

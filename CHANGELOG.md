@@ -13,6 +13,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `brigade model trial drain <output-dir>` and the first SIGINT or SIGTERM to a running trial stop it from launching new cells while in-flight cells finish and record results. Unlaunched cells are recorded as `not_run` (not a failure), `resume` launches them, and an incomplete trial exits 4.
 - A structured provider quota or capacity response (`capacity-exhausted`) during a model trial is recorded as the cell's `failure_reason` on an `adapter_error` cell, not scored as a model failure and never retried as transient. The runner launches no more cells for that seat and records them as `not_run`.
 
+### Changed
+
+- `brigade model trial run|resume` behavior changes for callers that set no new option. Check wrappers and CI that key on trial exit codes:
+  - A provider capacity response with a nonzero seat exit used to score as `execution_error` (exit 1). It is now `adapter_error` with `failure_reason: capacity-exhausted` (exit 3), and the per-seat stop is on by default, so the seat's remaining cells become `not_run`.
+  - `run` and `resume` now install SIGINT and SIGTERM handlers for the whole trial. The first signal drains instead of stopping the process; a second signal hard-stops it.
+  - Exit code 4 is new: the trial ended with `not_run` or `running` cells and no measurement failures.
+
 ### Fixed
 
 - Cursor project initialization and user-scope harness sync install all three presence lifecycle hooks into versioned hook documents, preserve foreign entries, validate the whole project document before it suppresses the user hook, and migrate hook ownership by event.

@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any, Iterator, Mapping
 
 from . import aboyeur, localio, run_budget, runguard, worker_failure
+from .aboyeur import run_io as aboyeur_run_io
 from .roster import Roster
 
 MANIFEST_SCHEMA = "brigade.eval_manifest.v1"
@@ -315,8 +316,17 @@ def _worker_result(run_dir: Path) -> dict[str, Any] | None:
 
 
 def _is_capacity_exhausted(worker_result: dict[str, Any] | None) -> bool:
-    """True only for a structured capacity-exhausted worker failure; never guessed from output text."""
+    """True for a capacity-exhausted worker failure that did not come from the seat's output text.
+
+    A `brigade.worker_failure.v1` payload is authoritative. The legacy `rate-limit-error` kind is
+    also produced by final-output validation, which pattern-matches the model's answer; that
+    origin is a model result, so it never stops a seat.
+    """
     if not isinstance(worker_result, dict):
+        return False
+    failure_payload = worker_result.get("failure")
+    structured = isinstance(failure_payload, dict) and failure_payload.get("schema") == worker_failure.SCHEMA
+    if not structured and worker_result.get("failure_phase") == "output-validation":
         return False
     try:
         failure = worker_failure.worker_result_failure(worker_result)
@@ -471,6 +481,20 @@ def _transient_kind(cell: dict[str, Any] | None) -> str | None:
     return None
 
 
+def _unfinished_history(cell: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Retry history for a cell left `running` or `not_run`, so a resume keeps the retry cap.
+
+    A `running` record is an attempt whose runner died before it finished. It is kept as an
+    `interrupted` entry and counts toward the cap like any other prior attempt.
+    """
+    history = _prior_attempts(cell)
+    if isinstance(cell, dict) and cell.get("state") == "running":
+        attempt = cell.get("attempt")
+        if isinstance(attempt, int) and not isinstance(attempt, bool) and attempt > 0:
+            history.append({"attempt": attempt, "state": "interrupted"})
+    return history
+
+
 def _retry_allowed(cell: dict[str, Any] | None) -> bool:
     kind = _transient_kind(cell)
     return kind is not None and len(_prior_attempts(cell)) < RETRY_CAPS[kind]
@@ -620,7 +644,7 @@ def process_exit(summary: dict[str, Any]) -> int:
     counts = summary.get("counts")
     if not isinstance(counts, dict):
         return 0
-    if counts.get(NOT_RUN_STATE, 0) > 0:
+    if counts.get(NOT_RUN_STATE, 0) > 0 or counts.get("running", 0) > 0:
         return EXIT_INCOMPLETE
     if counts.get("rejected", 0) > 0 or counts.get("execution_error", 0) > 0:
         return 1
@@ -728,32 +752,57 @@ class _Drain:
     def signals(self) -> Iterator[None]:
         """Turn the first SIGINT or SIGTERM into a drain request, then restore the previous handlers.
 
-        A second signal therefore gets the original behavior and hard-stops the trial. Handlers
-        can only be installed from the main thread, so other callers rely on the marker file.
+        A second signal therefore gets the original behavior and hard-stops the trial. While a
+        cell runs, aboyeur's terminal SIGTERM handler replaces ours, so the drain also registers
+        as that handler's deferral: the first SIGTERM lets the cell finish instead of canceling
+        it, and a second one terminalizes the run as usual. Handlers can only be installed from
+        the main thread, so other callers rely on the marker file.
         """
         if threading.current_thread() is not threading.main_thread():
             yield
             return
         previous: dict[int, Any] = {}
 
-        def restore() -> None:
-            for signum, handler in previous.items():
-                signal.signal(signum, handler if handler is not None else signal.SIG_DFL)
+        def original(signum: int) -> Any:
+            prior = previous[signum]
+            return prior if prior is not None else signal.SIG_DFL
 
-        def handler(signum: int, frame: Any) -> None:
+        def restore_owned() -> None:
+            # Leave a handler someone else installed on top of ours (aboyeur's) in place;
+            # it restores ours when it exits, and the next signal then hard-stops.
+            for signum in previous:
+                if signal.getsignal(signum) is handler:
+                    signal.signal(signum, original(signum))
+
+        def request() -> bool:
+            if self.signaled:
+                return False
             self.signaled = True
-            restore()
+            restore_owned()
             sys.stderr.write(
                 "drain requested: finishing in-flight cells and launching no more (signal again to abort)\n"
             )
+            return True
+
+        def handler(signum: int, frame: Any) -> None:
+            if request():
+                return
+            restore_owned()
+            prior = original(signum)
+            if callable(prior):
+                prior(signum, frame)
+            elif prior == signal.SIG_DFL:
+                signal.raise_signal(signum)
 
         for signum in (signal.SIGINT, signal.SIGTERM):
             previous[signum] = signal.getsignal(signum)
             signal.signal(signum, handler)
         try:
-            yield
+            with aboyeur_run_io.defer_terminal_sigterm(request):
+                yield
         finally:
-            restore()
+            for owned in previous:
+                signal.signal(owned, original(owned))
 
 
 def _mark_not_run(
@@ -780,6 +829,9 @@ def _mark_not_run(
     attempt = (current or {}).get("attempt")
     if isinstance(attempt, int) and not isinstance(attempt, bool) and attempt > 0:
         payload["attempt"] = attempt
+    history = _unfinished_history(current)
+    if history:
+        payload["prior_attempts"] = history
     cell_dir.mkdir(parents=True, exist_ok=True)
     localio.write_json(cell_dir / "cell.json", payload)
     return True
@@ -939,6 +991,8 @@ def execute(
                 if not (retry_transient and _retry_allowed(current)):
                     continue
                 history = [*_prior_attempts(current), _attempt_summary(current)]
+            elif resume and current is not None and current.get("state") in {"running", NOT_RUN_STATE}:
+                history = _unfinished_history(current)
             elif resume and current is not None and current.get("state") in REGRADEABLE_STATES:
                 try:
                     _regrade_cell_from_disk(cell_dir, cell, plan)
