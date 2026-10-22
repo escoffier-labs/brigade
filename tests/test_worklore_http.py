@@ -1347,6 +1347,20 @@ def test_campaign_create_is_operator_only(tmp_path):
     assert conn.execute("SELECT COUNT(*) FROM work_campaigns").fetchone()[0] == 0
 
 
+def test_campaign_credential_shaped_key_is_rejected_without_writes_or_echo(tmp_path):
+    conn = _http_conn(tmp_path)
+    synthetic_key = "ghp_" + "fake" * 5
+    status, body = http.handle(
+        conn, _req("POST", "/work/campaigns", admin=True, body=_campaign_body(campaign_key=synthetic_key))
+    )
+    assert status == 400 and body["code"] == "private-data"
+    assert synthetic_key not in json.dumps(body)
+    for table in ("work_items", "work_events", "work_campaigns", "work_campaign_members"):
+        assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+    status, listing = http.handle(conn, _req("GET", "/work/campaigns", node="node-a"))
+    assert status == 200 and listing == {"campaigns": []}
+
+
 def test_campaign_unknown_key_spec_change_and_bad_query(tmp_path):
     conn = _http_conn(tmp_path)
     status, body = http.handle(conn, _req("GET", "/work/campaigns/nope", node="node-a"))

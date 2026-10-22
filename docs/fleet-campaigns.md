@@ -53,13 +53,20 @@ would be refused. A failed read is reported in the output.
 adds only the members that are missing and reports `added`, `existing` and
 `override_conflicts`. Existing members are never rewritten. A request whose override
 differs from the stored one is listed under `override_conflicts` and the stored
-override is kept. A different title on a re-run is ignored.
+override is kept. A different title on a re-run is ignored. New members use the stored
+campaign title.
 
-The Hub request body cap (`WORKLORE_BODY_BYTES`, 256 KiB) limits how much override
-text one create can carry. Split a very large override set across repeated creates:
-each one adds only the members that are missing.
+Each campaign is limited to 256 canonical repository identities in total across all
+creates. An extension beyond this limit writes nothing. Retrying only existing members
+at the limit is allowed. The Hub request body cap (`WORKLORE_BODY_BYTES`, 256 KiB)
+separately limits how much override text one create can carry. Split a large override
+set across repeated creates within the campaign total: each one adds only the members
+that are missing.
 
 Creation is one transaction. A campaign is never left with some of its members.
+The CLI reports success only after a valid Hub acknowledgement. An unexpected response
+exits nonzero because the write may have been applied. Retry with the same campaign key
+and spec to add only missing members.
 
 ## Spec changes are refused
 
@@ -85,7 +92,9 @@ brigade fleet campaign show KEY [--json]
 `campaigns` prints one row per campaign, newest first, with the rollup counts. The
 list is capped at 50 campaigns (default 20). `show`
 prints the summary, then one row per repository: bucket, status, attempts, owner node,
-latest Brigade run, latest GitHub PR and whether it drifted. Text output strips
+latest Brigade task (`task`), latest Fleet execution (`run`), latest GitHub PR and
+whether it drifted. In JSON, `brigade` retains the Brigade task link and `fleet_run`
+projects the latest `fleet-run` link recorded by `link_execution`. Text output strips
 terminal control characters. The Hub routes are `POST /work/campaigns` (operator only,
 201 when created, 200 otherwise), `GET /work/campaigns` and
 `GET /work/campaigns/<key>`. The key in the path may be percent-encoded.

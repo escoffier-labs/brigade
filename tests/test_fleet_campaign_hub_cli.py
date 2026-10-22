@@ -41,7 +41,7 @@ class FakeHub:
     def create(self, body):
         self.posted.append(body)
         return {
-            "campaign": {},
+            "campaign": {"campaign_key": body["campaign_key"], "work_id": "wl-campaign"},
             "created": True,
             "added": [m["repo"] for m in body["members"]],
             "existing": [],
@@ -180,14 +180,35 @@ def test_subdirectory_and_missing_paths_do_not_borrow_the_enclosing_repo(workspa
     assert hub.posted[0]["members"] == [{"repo": "acme/one"}]
 
 
-def test_create_survives_a_malformed_hub_response(workspace, hub, monkeypatch, capsys):
-    monkeypatch.setattr(
-        worklore_client,
-        "create_campaign",
-        lambda body: {"created": True, "added": 3, "existing": "x", "override_conflicts": {"a": 1}},
-    )
-    assert _create(workspace) == 0
-    assert "created campaign camp-1: 0 added, 0 existing" in capsys.readouterr().out
+@pytest.mark.parametrize("json_output", [False, True])
+@pytest.mark.parametrize(
+    "malformed",
+    [
+        {},
+        {"created": True, "added": 3, "existing": "x", "override_conflicts": {"a": 1}},
+        {"campaign": None},
+        {"campaign": {}},
+        {"campaign": {"campaign_key": "other", "work_id": "wl-campaign"}},
+        {"created": "yes"},
+        {"added": None},
+        {"added": [1]},
+        {"existing": "acme/one"},
+        {"override_conflicts": {}},
+    ],
+)
+def test_create_survives_a_malformed_hub_response(workspace, hub, monkeypatch, capsys, malformed, json_output):
+    def respond(body):
+        valid = hub.create(body)
+        return {} if not malformed else {**valid, **malformed}
+
+    monkeypatch.setattr(worklore_client, "create_campaign", respond)
+    assert _create(workspace, *(["--json"] if json_output else [])) == 1
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    error = json.loads(captured.err)["error"] if json_output else captured.err
+    assert "unexpected hub response" in error
+    assert "may have been applied" in error
+    assert "same campaign key" in error
 
 
 def test_identity_without_an_owner_is_refused(workspace, hub, capsys):
@@ -265,7 +286,8 @@ def test_show_prints_summary_and_member_rows(monkeypatch, capsys):
                 "attempt_count": 1,
                 "drifted": True,
                 "owner_node": "node-a",
-                "brigade": {"display_ref": "run-9\x1b"},
+                "brigade": {"display_ref": "task-9\x1b"},
+                "fleet_run": {"display_ref": "node-a/run-9\x1b"},
                 "github": {"display_ref": "acme/one#4", "external_state": "open"},
             },
             {"repo": "acme/two", "bucket": "unowned", "status": "captured", "attempt_count": 0, "drifted": False},
@@ -277,9 +299,10 @@ def test_show_prints_summary_and_member_rows(monkeypatch, capsys):
     assert lines[0].startswith("camp-1: Sweep | total 2, unowned 1, in flight 1")
     assert "blocked 3," in lines[0] and "canceled 4," in lines[0] and "archived 5," in lines[0]
     assert (
-        "acme/one  in_flight  running  attempts 1  owner node-a  run run-9  pr acme/one#4 (open)  drifted" in lines[1]
+        "acme/one  in_flight  running  attempts 1  owner node-a  task task-9  run node-a/run-9"
+        "  pr acme/one#4 (open)  drifted" in lines[1]
     )
-    assert "owner -  run -  pr -  in-spec" in lines[2]
+    assert "owner -  task -  run -  pr -  in-spec" in lines[2]
     assert "\x1b" not in "".join(lines)
 
 

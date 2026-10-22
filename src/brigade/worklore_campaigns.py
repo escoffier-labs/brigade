@@ -86,9 +86,10 @@ def member_fingerprint(spec: str, override: str) -> str:
 
 def _campaign_key(value: object) -> str:
     try:
-        return opaque_key(value)
+        key = opaque_key(value)
     except PreviewError:
         raise _field_bound("campaign_key must be an opaque key") from None
+    return safe_text(key, "campaign_key", max_len=128)
 
 
 def canonical_identity(value: str) -> str | None:
@@ -171,13 +172,7 @@ def parse_request(raw: object) -> dict[str, Any]:
         override = safe_text(
             entry.get("override", ""), f"members[{index}].override", max_len=DESCRIPTION_MAX, min_len=0
         )
-        members.append(
-            {
-                "repo": repo,
-                "override": override,
-                "item": _member_item(parsed["title"], repo, override, parsed["acceptance"]),
-            }
-        )
+        members.append({"repo": repo, "override": override})
     return {"campaign_key": key, "item": parsed, "members": members}
 
 
@@ -215,6 +210,15 @@ def create_campaign(
         now = store._utc_now()
         row = conn.execute("SELECT work_id FROM work_campaigns WHERE campaign_key = ?", (key,)).fetchone()
         created = row is None
+        stored = {
+            str(repo): str(override)
+            for repo, override in conn.execute(
+                "SELECT repo, override FROM work_campaign_members WHERE campaign_key = ?", (key,)
+            )
+        }
+        if len(stored.keys() | {member["repo"] for member in request["members"]}) > MAX_MEMBERS:
+            raise _field_bound(f"campaign must contain at most {MAX_MEMBERS} members in total")
+        title = parsed["title"]
         if row is None:
             campaign_work_id = _create_item(parsed, now)
             conn.execute(
@@ -225,18 +229,13 @@ def create_campaign(
         else:
             campaign_work_id = str(row[0])
             current = store._loaded_item(conn, campaign_work_id)
+            title = current["title"]
             stored_spec = spec_fingerprint(current["description"], current["acceptance"])
             if stored_spec != requested_spec:
                 raise WorkloreConflict(
                     "campaign spec differs from the stored campaign; patch the campaign item to change the spec",
                     code="campaign-spec-changed",
                 )
-        stored = {
-            str(repo): str(override)
-            for repo, override in conn.execute(
-                "SELECT repo, override FROM work_campaign_members WHERE campaign_key = ?", (key,)
-            )
-        }
         added: list[str] = []
         existing: list[str] = []
         conflicts: list[str] = []
@@ -247,7 +246,7 @@ def create_campaign(
                 if stored[repo] != member["override"]:
                     conflicts.append(repo)
                 continue
-            member_work_id = _create_item(member["item"], now)
+            member_work_id = _create_item(_member_item(title, repo, member["override"], parsed["acceptance"]), now)
             conn.execute(
                 "INSERT INTO work_campaign_members "
                 "(campaign_key, repo, work_id, override, spec_fingerprint, created_at) VALUES (?, ?, ?, ?, ?, ?)",
@@ -350,6 +349,7 @@ def _members(conn: sqlite3.Connection, key: str, spec: str) -> list[dict[str, An
                 "owner_node": held.get("owner_node"),
                 "ownership_state": held.get("state"),
                 "brigade": _latest_link(conn, str(work_id), "brigade"),
+                "fleet_run": _latest_link(conn, str(work_id), "fleet-run"),
                 "github": _latest_link(conn, str(work_id), "github"),
             }
         )

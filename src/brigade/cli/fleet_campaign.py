@@ -311,6 +311,22 @@ def _hub_marks(body: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _create_acknowledged(result: object, key: str) -> bool:
+    """Require the Hub's create acknowledgement before reporting a successful write."""
+    if not isinstance(result, dict) or not isinstance(result.get("created"), bool):
+        return False
+    stored = result.get("campaign")
+    if not isinstance(stored, dict) or stored.get("campaign_key") != key:
+        return False
+    if not isinstance(stored.get("work_id"), str) or not stored["work_id"]:
+        return False
+    for field in ("added", "existing", "override_conflicts"):
+        repos = result.get(field)
+        if not isinstance(repos, list) or any(not isinstance(repo, str) or not repo for repo in repos):
+            return False
+    return True
+
+
 def _create(args: argparse.Namespace) -> int:
     from .. import worklore_client
 
@@ -343,6 +359,13 @@ def _create(args: argparse.Namespace) -> int:
         result = worklore_client.create_campaign(body)
     except worklore_client.FleetClientError as exc:
         return _hub_failure(args, exc)
+    if not _create_acknowledged(result, str(body["campaign_key"])):
+        return _hub_failure(
+            args,
+            worklore_client.WorkloreClientError(
+                "unexpected hub response: create may have been applied. Retry with the same campaign key and spec."
+            ),
+        )
     if args.json:
         print(json.dumps(result, sort_keys=True, indent=2))
         return 0
@@ -436,13 +459,15 @@ def _show(args: argparse.Namespace) -> int:
     for member in _list_of(payload.get("members")):
         member = _dict(member)
         brigade, github = _dict(member.get("brigade")), _dict(member.get("github"))
+        fleet_run = _dict(member.get("fleet_run"))
         pr = _text(github.get("display_ref")) if github else "-"
         if github and github.get("external_state"):
             pr = f"{pr} ({_text(github['external_state'])})"
         print(
             f"  {_text(member.get('repo'))}  {_text(member.get('bucket'))}  {_text(member.get('status'))}"
             f"  attempts {_count(member.get('attempt_count'))}  owner {_text(member.get('owner_node'))}"
-            f"  run {_text(brigade.get('display_ref')) if brigade else '-'}  pr {pr}"
+            f"  task {_text(brigade.get('display_ref')) if brigade else '-'}"
+            f"  run {_text(fleet_run.get('display_ref')) if fleet_run else '-'}  pr {pr}"
             f"  {'drifted' if member.get('drifted') else 'in-spec'}"
         )
     return 0

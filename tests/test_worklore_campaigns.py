@@ -71,6 +71,16 @@ def test_title_is_a_label_not_part_of_the_spec(tmp_path):
     assert again["campaign"]["title"] == first["campaign"]["title"] == "Rotate keys"
 
 
+def test_extension_uses_the_stored_campaign_title(tmp_path):
+    conn = _conn(tmp_path)
+    _create(conn, _body(repos=("acme/one",)))
+    result = _create(conn, _body(repos=("acme/two",), title="Ignored rename"))
+    shown = campaigns.show_campaign(conn, "camp-1")
+    new_member = next(m for m in shown["members"] if m["repo"] == "acme/two")
+    assert result["campaign"]["title"] == "Rotate keys"
+    assert store.get_item(conn, new_member["work_id"])["title"] == "Rotate keys [acme/two]"
+
+
 def test_override_mismatch_is_reported_not_rewritten(tmp_path):
     conn = _conn(tmp_path)
     _create(conn, _body(members=[{"repo": "acme/one", "override": "use vault A"}]))
@@ -199,6 +209,23 @@ def test_member_rows_carry_latest_links(tmp_path):
     assert member["owner_node"] is None
 
 
+def test_member_projects_execution_link_separately_from_brigade_task(tmp_path):
+    conn = _conn(tmp_path)
+    _create(conn, _body(repos=("acme/one",)))
+    work_id = campaigns.show_campaign(conn, "camp-1")["members"][0]["work_id"]
+    for run_id in ("run-1", "run-2"):
+        conn.execute(
+            "INSERT INTO events (node_id, run_id, sequence, digest, state, ts, received_at) "
+            "VALUES ('node-a', ?, 1, 'd', 'run.created', 't', 't')",
+            (run_id,),
+        )
+        conn.commit()
+        store.link_execution(conn, work_id, node_id="node-a", run_id=run_id, actor_id="node-a")
+    member = campaigns.show_campaign(conn, "camp-1")["members"][0]
+    assert member["fleet_run"] == {"display_ref": "node-a/run-2", "url": None, "external_state": None}
+    assert member["brigade"] is None
+
+
 def test_list_orders_newest_first_and_bounds_limit(tmp_path):
     conn = _conn(tmp_path)
     for index in range(3):
@@ -258,6 +285,27 @@ def test_max_members_accepted(tmp_path):
     conn = _conn(tmp_path)
     result = _create(conn, _body(repos=tuple(f"acme/r{i}" for i in range(256))))
     assert len(result["added"]) == 256
+
+
+def test_aggregate_member_limit_is_atomic_and_allows_retry_at_capacity(tmp_path):
+    conn = _conn(tmp_path)
+    repos = tuple(f"acme/r{i}" for i in range(256))
+    _create(conn, _body(repos=repos[:128]))
+    _create(conn, _body(repos=repos[128:]))
+    before = tuple(
+        conn.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
+        for table in ("work_items", "work_events", "work_campaigns", "work_campaign_members")
+    )
+    retry = _create(conn, _body(repos=tuple(f"github.com/{repo.upper()}" for repo in repos)))
+    assert retry["added"] == [] and retry["existing"] == list(repos)
+    with pytest.raises(WorkloreValidationError) as caught:
+        _create(conn, _body(repos=("acme/r0", "acme/overflow")))
+    assert caught.value.code == "field-bound"
+    after = tuple(
+        conn.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
+        for table in ("work_items", "work_events", "work_campaigns", "work_campaign_members")
+    )
+    assert after == before
 
 
 def test_failure_mid_create_rolls_back_everything(tmp_path, monkeypatch):
