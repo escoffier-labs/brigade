@@ -290,17 +290,6 @@ fn language_coverage(conn: &Connection) -> Result<BTreeMap<String, LanguageCover
         |entry, symbols, _| entry.symbols = symbols,
     )?;
     fill(
-        "SELECT f.language, COUNT(*), SUM(EXISTS(
-             SELECT 1 FROM edges e
-             WHERE e.source = p.source_id AND e.line = p.line AND e.kind = 'calls'))
-         FROM pending_calls p JOIN files f ON f.path = p.file_path GROUP BY f.language",
-        |entry, sites, resolved| {
-            entry.call_sites = sites;
-            entry.resolved_call_sites = resolved;
-            entry.unresolved_call_sites = sites - resolved;
-        },
-    )?;
-    fill(
         "SELECT f.language, COUNT(*), 0 FROM edges e
          JOIN symbols s ON s.id = e.source
          JOIN symbols t ON t.id = e.target
@@ -308,6 +297,24 @@ fn language_coverage(conn: &Connection) -> Result<BTreeMap<String, LanguageCover
          WHERE e.kind = 'calls' AND s.file_path <> t.file_path GROUP BY f.language",
         |entry, edges, _| entry.cross_file_edges = edges,
     )?;
+    let resolved = crate::store::resolved_call_site_ids(conn)?;
+    let mut stmt = conn.prepare(
+        "SELECT p.id, f.language FROM pending_calls p
+         JOIN files f ON f.path = p.file_path",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    })?;
+    for row in rows {
+        let (id, language) = row?;
+        let entry = coverage.entry(language).or_default();
+        entry.call_sites += 1;
+        if resolved.contains(&id) {
+            entry.resolved_call_sites += 1;
+        } else {
+            entry.unresolved_call_sites += 1;
+        }
+    }
     Ok(coverage)
 }
 
@@ -396,4 +403,33 @@ pub fn missing_db_report(repo_root: &Path, db_path: &Path) -> DoctorReport {
 
 fn resolve_path(path: &Path) -> PathBuf {
     path.canonicalize().unwrap_or_else(|_| path.to_path_buf())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::store::{init_schema, open_db, sync_repo};
+
+    #[test]
+    fn coverage_distinguishes_same_line_call_identities() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let db = root.join("graphtrail.db");
+        std::fs::write(root.join("util.py"), "def helper(): pass\n").unwrap();
+        std::fs::write(
+            root.join("app.py"),
+            "from util import helper as alias\nimport util as mod\ndef run():\n    alias(); missing_name()\n    alias(missing_name())\n    mod.helper(); unknown.helper()\n    alias(); alias()\n",
+        )
+        .unwrap();
+        let conn = open_db(&db).unwrap();
+        init_schema(&conn).unwrap();
+        sync_repo(&conn, root).unwrap();
+        let report = doctor(&conn, root, &db).unwrap();
+        let python = &report.coverage["python"];
+        assert_eq!(python.call_sites, 8);
+        assert_eq!(python.resolved_call_sites, 5);
+        assert_eq!(python.unresolved_call_sites, 3);
+        // Identical targets on a line share an edge, but remain distinct sites.
+        assert_eq!(python.cross_file_edges, 4);
+    }
 }
