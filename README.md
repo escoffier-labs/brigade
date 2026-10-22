@@ -4,7 +4,7 @@
 
 <p align="center">
   <strong>Run agents anywhere. Keep one record of the work.</strong><br>
-  Brigade tracks what's ready, who claimed it, and what ran across Claude Code, Codex, cloud agents, and your machines. Your MCP servers, skills, and memory stay in sync between them.
+  Brigade tracks what's ready, who claimed it, and what ran across Claude Code, Codex, cloud agents, and your machines. Your local harnesses stay in sync on MCP servers, skills, and memory.
 </p>
 
 <p align="center">
@@ -28,7 +28,7 @@ Coding work now runs in several places at once. You drive Claude Code or Codex i
 
 Agents did not create this split. Terminals, background jobs, and remote machines have always kept separate records. Running agents in parallel makes each gap cost more.
 
-Brigade keeps one record around the work itself, across harnesses, repos, machines, and cloud seats: which tasks are ready, who claimed them, which commands ran and how they exited, and what the next session should know. It also keeps MCP servers, skills, and memory in sync, so an agent picking up the work in another tool starts with the same setup and context. The record is plain local files, with an optional hub for claims across machines. Agents read and write it through the CLI and MCP. You set policy, budgets, scopes, and gates, and can stop the work at any point.
+Brigade keeps one record around the work itself, across harnesses, repos, machines, and cloud seats: which tasks are ready, who claimed them, which commands ran and how they exited, and what the next session should know. It also keeps MCP servers, skills, and memory in sync, so an agent picking up the work in another harness starts with the same setup and context. The record is plain local files, with an optional hub for claims across machines. Agents read and write it through the CLI and MCP. You set policy, budgets, scopes, and gates, and can stop the work at any point.
 
 For example, a Claude Code agent can hand a verify receipt to Codex in an [evidence package](docs/evidence-package.md), alongside a handoff that explains the change. Codex checks the package and the receipt's real exit code instead of taking the agent's word for it.
 
