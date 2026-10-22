@@ -289,6 +289,20 @@ OWNERSHIP_ROWS = [
         {"sessionStart"},
         id="prompt-definition-is-valid",
     ),
+    pytest.param(
+        "unsupported-type",
+        "r4344601010 P2: a definition type Cursor rejects invalidates the document",
+        {"version": 1, "hooks": {"sessionStart": [PROJECT], "stop": [{"type": "bogus", "command": "x"}]}},
+        set(),
+        id="unsupported-hook-type",
+    ),
+    pytest.param(
+        "explicit-command-type",
+        "r4344601010 P2: type command is a supported definition",
+        {"version": 1, "hooks": {"sessionStart": [PROJECT], "stop": [{"type": "command", "command": "x"}]}},
+        {"sessionStart"},
+        id="explicit-command-type-is-valid",
+    ),
     pytest.param("at-limit", "r4344099017: limit is inclusive", _padded(LIMIT), set(EVENTS), id="owns-at-the-limit"),
     pytest.param(
         "grew-past-limit",
@@ -361,6 +375,14 @@ SCOPE_ROWS = [
         1,
         "r4344258655 P2: a malformed definition anywhere in the project config does not suppress the user hook",
         id="malformed-definition-in-project-config",
+    ),
+    pytest.param(
+        ["cursor"],
+        {"version": 1, "hooks": {**_all_events(PROJECT), "stop": [{"type": "bogus", "command": "x"}]}},
+        ["user"],
+        1,
+        "r4344601010 P2: an unsupported definition type in the project config does not suppress the user hook",
+        id="unsupported-type-in-project-config",
     ),
     pytest.param(
         ["cursor"],

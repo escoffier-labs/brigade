@@ -242,12 +242,13 @@ def _hooks_document_error(doc: dict[str, Any]) -> str | None:
 
 
 def _is_hook_definition(entry: object) -> bool:
-    """A command hook needs a string `command`; a prompt hook needs a string `prompt`."""
+    """Cursor supports `command` hooks (type absent or "command") and `prompt` hooks."""
     if not isinstance(entry, dict):
         return False
-    if entry.get("type") == "prompt":
+    hook_type = entry.get("type", "command")
+    if hook_type == "prompt":
         return isinstance(entry.get("prompt"), str)
-    return isinstance(entry.get("command"), str)
+    return hook_type == "command" and isinstance(entry.get("command"), str)
 
 
 def user_hooks_document_status(doc: dict[str, Any]) -> tuple[str | None, bool]:

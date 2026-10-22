@@ -316,7 +316,13 @@ def _cursor_wiring(target: Path) -> tuple[dict[str, Any], list[str], bool, bool]
             issues.append(f"stale {surface}")
 
     hooks_doc, _ = cursor_user_cmd._read_json_object(root / "hooks.json")
-    hooks = hooks_doc.get("hooks") if hooks_doc is not None else None
+    hooks = None
+    if hooks_doc is not None:
+        # Cursor loads none of a user document that fails the shared validator,
+        # and a versionless one is not loaded until sync repairs it.
+        document_error, needs_version = cursor_user_cmd.user_hooks_document_status(hooks_doc)
+        if not document_error and not needs_version:
+            hooks = hooks_doc.get("hooks")
     hook_current = all(
         cursor_user_cmd.project_presence_hook_installed(target, event)
         or (
