@@ -63,7 +63,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade run`: 47 command path(s)
 - `brigade run-cloud` (deprecated; use `brigade run cloud`): 45 command path(s)
 - `brigade runbook` (extras): 5 command path(s)
-- `brigade runs`: 21 command path(s)
+- `brigade runs`: 22 command path(s)
 - `brigade scrub`: 1 command path(s)
 - `brigade search`: 6 command path(s)
 - `brigade security`: 16 command path(s)
@@ -674,6 +674,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade runbook resume` (extras)
 - `brigade runbook run` (extras)
 - `brigade runs audit`
+- `brigade runs cassette purge`
 - `brigade runs child`
 - `brigade runs diff`
 - `brigade runs events`
