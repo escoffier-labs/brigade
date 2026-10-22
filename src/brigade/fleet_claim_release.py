@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from contextlib import nullcontext
 from pathlib import Path
 
 
@@ -82,6 +83,7 @@ def _release_claim(
     force: bool,
     as_json: bool,
     expected_run_dir: Path | None = None,
+    hold_run_lock: bool = False,
 ) -> int:
     """``brigade fleet claims --release`` (issue #1141): free a claim whose
     holder token died with its run. Without ``force``, both modes run the
@@ -150,6 +152,7 @@ def _release_claim(
         )
         return 1
     inspected_acquired_at: str | None = None
+    run_workspace: Path | None = None
     if not force:
         probe = fleet_client.inspect_claim(target, node_id=node_id)
         if _print_claim_failure(probe, what="lookup"):
@@ -259,7 +262,21 @@ def _release_claim(
             print("error: claim generation is unavailable for patrol release", file=sys.stderr)
             return 1
         inspected_acquired_at = acquired_at if isinstance(acquired_at, str) else None
-    decision = fleet_client.release_claim(target, node_id=node_id, force=force, acquired_at=inspected_acquired_at)
+    # Patrol holds the matching run lock through the Hub write so a resume
+    # cannot start against the inspected generation while it is released.
+    fence = (
+        runguard.run_lock(run_workspace, run_dir=expected_run_dir, wait_seconds=0, stale_action="claim")
+        if hold_run_lock and expected_run_dir is not None and run_workspace is not None
+        else nullcontext()
+    )
+    try:
+        with fence:
+            decision = fleet_client.release_claim(
+                target, node_id=node_id, force=force, acquired_at=inspected_acquired_at
+            )
+    except runguard.RunLockError:
+        print("error: run lock acquisition refused for patrol release", file=sys.stderr)
+        return 1
     if _print_claim_failure(decision, what="release"):
         return 1
     if as_json:

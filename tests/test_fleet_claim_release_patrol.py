@@ -338,3 +338,36 @@ def test_valid_legacy_inspect_owner_stably_fences_as_foreign_owner(tmp_path, mon
     assert json.loads((repo / report["receipt"]).read_text())["actions"][0]["status"] == "observed"
     assert _patrol(repo, capsys, apply="release-claim", now=NOW + timedelta(minutes=10))["actions"] == []
     assert actions == ["inspect"]
+
+
+@pytest.mark.parametrize("lock", ["stale", "absent"])
+def test_patrol_hub_release_holds_the_run_lock_through_the_hub_write(tmp_path, monkeypatch, capsys, lock):
+    repo = _repo(tmp_path)
+    run = _write_run(repo, "20260820-120000-patrol01", status="ok")
+    if lock == "stale":
+        _write_stale_lock(repo, run)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+    monkeypatch.setattr(fleet_client, "find_workspace_for_path", lambda path: None)
+    monkeypatch.setattr(fleet_client, "resolve_claim_target", lambda path: "test-target")
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda *args: NODE)
+    claim = {"owner_node": NODE, "acquired_at": "generation-1"}
+    monkeypatch.setattr(
+        fleet_client,
+        "inspect_claim",
+        lambda *args, **kwargs: fleet_client.ClaimDecision(
+            granted=True, reason="ok", claim=claim, lock_run_dir=str(run)
+        ),
+    )
+    during = []
+
+    def release(target, **kwargs):
+        during.append((repo / ".brigade/run.lock").exists())
+        return fleet_client.ClaimDecision(granted=True, reason="ok", claim=claim)
+
+    monkeypatch.setattr(fleet_client, "release_claim", release)
+    code = fleet_claim_release._release_claim(
+        str(repo), as_path=True, node_override=None, force=False, as_json=True, expected_run_dir=run, hold_run_lock=True
+    )
+    assert code == 0
+    assert during == [True]
+    assert runguard.run_lock_state(repo, run) == "absent"

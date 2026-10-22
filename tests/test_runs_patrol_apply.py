@@ -1014,3 +1014,19 @@ def test_dispatch_receipt_preserves_joined_intent_refusal_reason(tmp_path, monke
     assert not any(item["source"] == "dispatch-launch.json" for item in report["lanes"][0]["evidence"])
     assert (ledger.read_bytes(), intent.read_bytes()) == before
     assert calls == []
+
+
+def test_escalation_delivery_is_summarized_so_the_receipt_stays_readable(tmp_path, monkeypatch, capsys):
+    from brigade import fleet_client_messages, runs_patrol_receipts
+
+    repo = _repo(tmp_path)
+    run = _write_run(repo, "20260820-120000-patrol01")
+    _write_stale_lock(repo, run)
+    monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
+    huge = {"sent": True, "message": {"blob": "x" * 5_000_000}, "extra": "y" * 5000}
+    monkeypatch.setattr(fleet_client_messages, "send", lambda **kwargs: huge)
+    report = _patrol(repo, capsys, apply="escalate", escalate_via="fleet-msg", escalate_to="operator")
+    delivery = report["actions"][0]["delivery"]
+    assert delivery["sent"] is True and "message" not in delivery and len(delivery["extra"]) == 200
+    receipt = repo / report["receipt"]
+    assert runs_patrol_receipts.read_receipt(receipt.parent)["actions"]

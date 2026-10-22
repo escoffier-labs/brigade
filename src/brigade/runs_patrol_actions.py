@@ -165,6 +165,17 @@ def _hub_preflight(lane: Lane, row: dict[str, Any]) -> Path | dict[str, Any]:
     return workspace
 
 
+def _summarize_delivery(response: Any) -> Any:
+    """Keep a bounded scalar summary so a large Hub reply cannot bloat a receipt."""
+    if not isinstance(response, dict):
+        return None
+    return {
+        str(key)[:80]: (value[:200] if isinstance(value, str) else value)
+        for key, value in list(response.items())[:20]
+        if value is None or isinstance(value, (str, int, float, bool))
+    }
+
+
 def _release_hub(lane: Lane, row: dict[str, Any]) -> dict[str, Any]:
     workspace = _hub_preflight(lane, row)
     if isinstance(workspace, dict):
@@ -178,6 +189,7 @@ def _release_hub(lane: Lane, row: dict[str, Any]) -> dict[str, Any]:
             force=False,
             as_json=True,
             expected_run_dir=lane.run_dir,
+            hold_run_lock=True,
         )
     refused = {"status": "refused", "reason": "Hub claim release refused"}
     try:
@@ -324,13 +336,15 @@ def apply_actions(
                             "escalation_number": escalation_number,
                         }
                         if escalate_via:
-                            result["delivery"] = fleet_client_messages.send(
-                                recipient=escalate_to or "",
-                                subject=f"Patrol: {row['state']}",
-                                body=f"Lane {row['lane_id']}: {row['reason']}",
-                                reference=str(receipt),
-                                priority=result["severity"],
-                                client_id=key,
+                            result["delivery"] = _summarize_delivery(
+                                fleet_client_messages.send(
+                                    recipient=escalate_to or "",
+                                    subject=f"Patrol: {row['state']}",
+                                    body=f"Lane {row['lane_id']}: {row['reason']}",
+                                    reference=str(receipt),
+                                    priority=result["severity"],
+                                    client_id=key,
+                                )
                             )
                     after = {**before, **result.pop("after", {})}
                     record.update(result, after=after)

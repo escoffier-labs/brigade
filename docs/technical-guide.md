@@ -703,7 +703,7 @@ The receipt records `refresh_error` and skips further actions on that lane. Alre
 requires a terminal run. Ledger release also requires an exact run-to-claim join. When both actions are
 selected, patrol reaps first regardless of argument order. A refused reap
 preserves the dead run's lock and claim. The ledger write compares `claim_id`
-under its normal lock. An absent run lock is rechecked without acquiring it.
+under its normal lock. Stale and absent run locks are both acquired and held through the ledger write and through the Hub release, then released.
 Hub recovery works without a ledger join or run `claim_id`. It uses the
 same local owner proof as `fleet claims --release`, checks the lane's run directory,
 and fences deletion to the inspected claim generation. No Hub reservation is
