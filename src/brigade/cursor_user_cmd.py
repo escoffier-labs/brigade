@@ -239,6 +239,19 @@ def _hooks_document_error(doc: dict[str, Any]) -> str | None:
     return None
 
 
+def user_hooks_document_status(doc: dict[str, Any]) -> tuple[str | None, bool]:
+    """Validate a user-scope hooks document; return (error, needs_version).
+
+    Sync is an explicit edit of the user's own file, and releases before the
+    version rule wrote it without `version`, so a versionless document is
+    repaired with version 1 rather than refused. Project init, an implicit
+    edit of a shared repo file, refuses instead.
+    """
+    if doc and "version" not in doc:
+        return _hooks_document_error({**doc, "version": _HOOKS_DOCUMENT_VERSION}), True
+    return _hooks_document_error(doc), False
+
+
 def _prepare_project_document(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     doc, error = _load_hooks_document(path)
     if doc is None:
@@ -352,11 +365,8 @@ def _plan_hook(root: Path, state: dict[str, Any]) -> tuple[list[dict[str, Any]],
             for event in _MANAGED_HOOK_EVENTS
         ]
         return items, None, error
-    hooks = doc.get("hooks")
-    if hooks is None:
-        hooks = {}
-    if not isinstance(hooks, dict):
-        detail = "existing hooks field must be an object"
+    detail, _needs_version = user_hooks_document_status(doc)
+    if detail:
         items = [
             {
                 "surface": "hook-config",
@@ -369,6 +379,7 @@ def _plan_hook(root: Path, state: dict[str, Any]) -> tuple[list[dict[str, Any]],
             for event in _MANAGED_HOOK_EVENTS
         ]
         return items, None, detail
+    hooks = doc.get("hooks") or {}
     return [_plan_hook_event(hooks, state, event, path) for event in _MANAGED_HOOK_EVENTS], doc, None
 
 
@@ -484,8 +495,9 @@ def install(*, write: bool = False, json_output: bool = False) -> int:
 
         hook_changed = False
         if hooks_doc is not None and all(item["status"] != "conflict" for item in hook_items):
-            if not hooks_doc:
+            if "version" not in hooks_doc:
                 hooks_doc["version"] = _HOOKS_DOCUMENT_VERSION
+                hook_changed = True
             hooks = hooks_doc.setdefault("hooks", {})
             desired_hook = _hook_entry()
             for hook_item in hook_items:
@@ -703,7 +715,7 @@ def doctor(*, json_output: bool = False) -> int:
     hooks_doc, _ = _read_json_object(root / "hooks.json")
     hook_ok = _file_matches(hook_script, desired[hook_script][0]) and bool(hook_script.stat().st_mode & 0o111)
     desired_hook = _hook_entry()
-    if hooks_doc is not None and isinstance(hooks_doc.get("hooks"), dict):
+    if hooks_doc is not None and not _hooks_document_error(hooks_doc) and isinstance(hooks_doc.get("hooks"), dict):
         for event in _MANAGED_HOOK_EVENTS:
             entries = hooks_doc["hooks"].get(event)
             hook_ok = hook_ok and isinstance(entries, list) and desired_hook in entries

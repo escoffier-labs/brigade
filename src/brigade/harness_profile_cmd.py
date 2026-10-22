@@ -1760,12 +1760,11 @@ def _sync_profile(
             if mutation is not None:
                 mutations.append(mutation)
         if hook_plan is not None:
-            if hook_plan["actions"]:
+            if hook_plan["actions"] or hook_plan.get("repair_version"):
                 from . import cursor_user_cmd
 
                 hook_doc = hook_plan["doc"] if hook_plan["doc"] is not None else {}
-                if not hook_doc:
-                    hook_doc["version"] = cursor_user_cmd._HOOKS_DOCUMENT_VERSION
+                hook_doc.setdefault("version", cursor_user_cmd._HOOKS_DOCUMENT_VERSION)
                 hook_map = hook_doc.setdefault("hooks", {})
                 for event, action in hook_plan["actions"].items():
                     entries = hook_map.setdefault(event, [])

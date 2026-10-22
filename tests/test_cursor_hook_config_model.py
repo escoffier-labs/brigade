@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 from brigade import cli, cursor_user_cmd, fleet_client, localio
+from tests._home import set_home
 
 EVENTS = cursor_user_cmd._MANAGED_HOOK_EVENTS
 PROJECT = cursor_user_cmd._hook_entry(scope="project")
@@ -360,4 +361,50 @@ def test_fresh_user_scope_hooks_carry_a_version(tmp_path, monkeypatch, capsys):
 
     doc = json.loads((tmp_path / ".cursor" / "hooks.json").read_text())
     assert doc["version"] == 1
+    assert all(LEGACY in doc["hooks"][event] for event in EVENTS)
+
+
+# User-scope documents follow the same validator, except that a versionless
+# document is repaired: sync is an explicit edit of the user's own file and
+# older releases wrote it without `version`.
+USER_ROWS = [
+    pytest.param({"hooks": {"sessionStart": [FOREIGN, LEGACY]}}, "repaired", id="older-release-document-is-repaired"),
+    pytest.param({"hooks": {"beforeSubmitPrompt": [FOREIGN]}}, "repaired", id="foreign-document-without-version"),
+    pytest.param({"version": "1", "hooks": {}}, "conflict", id="string-version"),
+    pytest.param({"version": 1, "hooks": {"sessionStart": "nope"}}, "conflict", id="event-not-list"),
+    pytest.param('{"version": 1, "hooks": {', "conflict", id="malformed"),
+]
+
+
+@pytest.mark.parametrize("route", ["install", "sync"])
+@pytest.mark.parametrize(("initial", "outcome"), USER_ROWS)
+def test_user_scope_hook_document_validation(tmp_path, monkeypatch, capsys, route, initial, outcome):
+    """r4344204939 P1: existing user hook documents are validated and migrated, not extended in place."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    set_home(monkeypatch, str(home))
+    monkeypatch.setenv("BRIGADE_NO_UPDATE_CHECK", "1")
+    path = _seed(home, initial)
+    path = home / ".cursor" / "hooks.json"
+    before = path.read_bytes()
+    workspace = _wire(tmp_path / "workspace", ["cursor"])
+    if route == "install":
+        command = ["harness", "install", "cursor", "--scope", "user", "--write", "--json"]
+    else:
+        command = ["harness", "sync", "--target", "cursor", "--scope", "user", "--workspace", str(workspace)]
+        command += ["--write", "--adopt", "--json"]
+
+    rc = cli.main(command)
+    capsys.readouterr()
+
+    if outcome == "conflict":
+        assert rc == 1
+        assert path.read_bytes() == before
+        return
+    assert rc == 0
+    doc = json.loads(path.read_text())
+    assert doc["version"] == 1
+    for event, entries in initial["hooks"].items():
+        assert doc["hooks"][event][: len(entries)] == entries
     assert all(LEGACY in doc["hooks"][event] for event in EVENTS)

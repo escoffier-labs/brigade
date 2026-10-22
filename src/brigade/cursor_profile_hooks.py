@@ -97,8 +97,8 @@ def plan(profile, state: dict[str, Any], *, adopt: bool) -> dict[str, Any]:
             for event in hook.entries
         ]
         return {**empty, "items": failure_items, "conflicts": failure_items}
-    hooks = doc.get("hooks")
-    if hooks is not None and not isinstance(hooks, dict):
+    document_error, repair_version = cursor_user_cmd.user_hooks_document_status(doc)
+    if document_error:
         failure_items = [
             {
                 "surface": "hook",
@@ -106,11 +106,12 @@ def plan(profile, state: dict[str, Any], *, adopt: bool) -> dict[str, Any]:
                 "name": event,
                 "status": "conflict",
                 "action": "preserve",
-                "detail": "existing hooks field must be an object",
+                "detail": document_error,
             }
             for event in hook.entries
         ]
         return {**empty, "items": failure_items, "conflicts": failure_items}
+    hooks = doc.get("hooks")
     hooks = hooks if isinstance(hooks, dict) else {}
     items: list[dict[str, Any]] = []
     conflicts: list[dict[str, Any]] = []
@@ -159,7 +160,25 @@ def plan(profile, state: dict[str, Any], *, adopt: bool) -> dict[str, Any]:
                 actions[event] = {"action": "create"}
             next_records[f"{HOOK_STATE_PREFIX}{event}"] = {"entry_fingerprint": desired_fp}
         items.append(item)
-    return {"items": items, "conflicts": conflicts, "doc": doc, "actions": actions, "next": next_records}
+    if repair_version:
+        items.append(
+            {
+                "surface": "hook",
+                "path": str(path),
+                "name": "version",
+                "status": "stale",
+                "action": "update",
+                "detail": "hooks document predates the required version field",
+            }
+        )
+    return {
+        "items": items,
+        "conflicts": conflicts,
+        "doc": doc,
+        "actions": actions,
+        "repair_version": repair_version,
+        "next": next_records,
+    }
 
 
 def uninstall_plan(profile, state: dict[str, Any]) -> dict[str, Any]:
