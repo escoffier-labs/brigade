@@ -1,23 +1,25 @@
-"""Read-only dispatch planning with receipts isolated under .brigade/dispatch."""
+"""Dispatch planning and local apply with receipts under .brigade/dispatch."""
 
 from __future__ import annotations
 
 import json
 import subprocess
 import sys
+import math
+from contextlib import nullcontext
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Sequence
 from uuid import uuid4
 
 from .. import __version__, localio, roster
-from . import claiming, constants, edges, footprint, partition
+from . import claiming, constants, edges, footprint, partition, dispatch_state
+from .dispatch_apply import Apply
 from .ledger import locking, queries_handoffs
 
 
 def live_children(target: Path) -> int:
-    """Planning has no intents yet. The apply slice will inspect live children here."""
-    return 0
+    return dispatch_state.live_children(target)
 
 
 def _seat_map(values: Sequence[str]) -> dict[str, str]:
@@ -47,8 +49,12 @@ def _plan(
     tasks = {str(task["id"]): task for task in ledger["tasks"] if isinstance(task, dict) and "id" in task}
     skipped = [{"task_id": item["id"], "reason": item["reason"]} for item in resolution.blocked]
     startable = []
+    excluded = dispatch_state.exclusions(target)
     for item in sorted(resolution.ready, key=claiming.ready_sort_key):
         task_id = item["id"]
+        if task_id in excluded:
+            skipped.append({"task_id": task_id, "reason": excluded[task_id]})
+            continue
         try:
             queries_handoffs._evaluate_task_start_gates(target, ledger, tasks[task_id], require_pending=True)
         except claiming.ClaimError as exc:
@@ -113,10 +119,14 @@ def _plan(
     return plan
 
 
-def _base_sha(target: Path) -> str | None:
+def _base_sha(target: Path, base: str = "HEAD") -> str | None:
     try:
         result = subprocess.run(
-            ["git", "rev-parse", "--verify", "HEAD"], cwd=target, capture_output=True, text=True, timeout=10
+            ["git", "rev-parse", "--verify", "--end-of-options", base + "^{commit}"],
+            cwd=target,
+            capture_output=True,
+            text=True,
+            timeout=10,
         )
     except (OSError, subprocess.TimeoutExpired):
         return None
@@ -133,25 +143,41 @@ def dispatch(
     seat_map: Sequence[str] = (),
     dry_run: bool = False,
     json_output: bool = False,
+    base: str = "HEAD",
+    run_budget: Path | None = None,
+    max_total: int | None = None,
+    deadline: float | None = None,
+    spawn_delay: float = 0,
+    no_wait: bool = False,
+    commit: bool = False,
 ) -> int:
-    if not dry_run:
-        message = "work dispatch currently plans only. Use --dry-run. Launching lands in a follow-up slice of #1849."
-        if json_output:
-            print(json.dumps({"error": message, "reason": "launch_not_implemented"}))
-        else:
-            print(f"error: {message}", file=sys.stderr)
-        return 2
     try:
+        if not dry_run and sys.platform == "win32":
+            raise ValueError("work dispatch apply is unsupported on Windows. Use --dry-run to plan.")
         target = target.expanduser().resolve()
         if not target.is_dir():
             raise ValueError(f"target is not a directory: {target}")
-        for name, number in (("--wave", wave), ("--max", max_workers), ("--batch-size", batch_size)):
-            if number is not None and number < 0:
+        for name, number in (
+            ("--wave", wave),
+            ("--max", max_workers),
+            ("--batch-size", batch_size),
+            ("--max-total", max_total),
+            ("--deadline", deadline),
+            ("--spawn-delay", spawn_delay),
+        ):
+            if number is not None and (number < 0 or not math.isfinite(number)):
                 raise ValueError(f"{name} must be nonnegative")
         if worker is not None:
             worker = worker.strip()
             if not worker or seat_map:
                 raise ValueError("use a nonempty --worker or --seat-map, exclusively")
+        if not dry_run and not (worker or seat_map):
+            raise ValueError("apply requires --worker or --seat-map")
+        if run_budget is not None:
+            from ..run_budget import load_declaration_file
+
+            run_budget = run_budget.expanduser().resolve()
+            load_declaration_file(run_budget)
         mapping = _seat_map(seat_map)
         roster_path = None
         cap = max_workers
@@ -169,37 +195,62 @@ def dispatch(
             if cap is None:
                 cap = configured.max_workers
         assert cap is not None
-        plan = _plan(
-            target,
-            locking._read_task_ledger(target),
-            cap=cap,
-            batch_size=batch_size if batch_size is not None else cap,
-            wave=wave,
-            worker=worker,
-            seat_map=mapping,
-        )
-        dispatch_id = f"dispatch-{uuid4().hex}"
-        directory = target / ".brigade" / "dispatch" / dispatch_id
-        session = {
-            "schema": "brigade.work_dispatch_session.v1",
-            "dispatch_id": dispatch_id,
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "target": str(target),
-            "base_sha": _base_sha(target),
-            "tool_version": __version__,
-            "roster_path": str(roster_path) if roster_path is not None else None,
-            "requested_wave": wave,
-            "cap": cap,
-            "batch_size": plan["batch_size"],
-            "worker": worker,
-            "seat_map": mapping,
-            "ledger_digest": plan["ledger_digest"],
-            "plan_digest": plan["plan_digest"],
-            "dry_run": True,
-        }
-        directory.mkdir(parents=True, exist_ok=False)
-        localio.write_json_exclusive(directory / "plan.json", plan)
-        localio.write_json_exclusive(directory / "session.json", session)
+        base_sha = _base_sha(target, base)
+        if not dry_run and (base_sha is None or roster_path is None):
+            raise ValueError("apply requires a committed Git base and a primary roster")
+        result = 0
+        with nullcontext() if dry_run else dispatch_state.dispatch_lock(target):
+            engine = Apply(target)
+            if not dry_run:
+                result = engine.reconcile(no_wait=True)
+                if result == 130:
+                    print(
+                        json.dumps({"status": "canceled"}) if json_output else "dispatch canceled during reconciliation"
+                    )
+                    return result
+            plan = _plan(
+                target,
+                locking._read_task_ledger(target),
+                cap=cap,
+                batch_size=batch_size if batch_size is not None else cap,
+                wave=wave,
+                worker=worker,
+                seat_map=mapping,
+            )
+            dispatch_id = f"dispatch-{uuid4().hex}"
+            directory = target / ".brigade" / "dispatch" / dispatch_id
+            session = {
+                "schema": "brigade.work_dispatch_session.v1",
+                "dispatch_id": dispatch_id,
+                "created_at": datetime.now(timezone.utc).isoformat(),
+                "target": str(target),
+                "base_sha": base_sha,
+                "tool_version": __version__,
+                "roster_path": str(roster_path) if roster_path is not None else None,
+                "requested_wave": wave,
+                "cap": cap,
+                "batch_size": plan["batch_size"],
+                "worker": worker,
+                "seat_map": mapping,
+                "ledger_digest": plan["ledger_digest"],
+                "plan_digest": plan["plan_digest"],
+                "dry_run": dry_run,
+                "base": base,
+                "run_budget": str(run_budget) if run_budget else None,
+                "max_total": max_total,
+                "deadline": deadline,
+                "spawn_delay": spawn_delay,
+                "no_wait": no_wait,
+                "commit": commit,
+            }
+            directory.mkdir(parents=True, exist_ok=False)
+            localio.write_json_exclusive(directory / "plan.json", plan)
+            localio.write_json_exclusive(directory / "session.json", session)
+            if not dry_run:
+                dispatch_state.event(
+                    directory, "work.dispatch.planned", {"dispatch_id": dispatch_id, "plan_digest": plan["plan_digest"]}
+                )
+                result = max(result, engine.session(directory, no_wait=no_wait))
     except locking.TaskLedgerError:
         raise
     except (OSError, ValueError) as exc:
@@ -214,4 +265,4 @@ def dispatch(
         print(f"dispatch: {dispatch_id}")
         print(f"wave: {plan['wave']}, planned: {plan['dispatch_count']}, capacity: {plan['capacity']}")
         print(f"plan: {directory / 'plan.json'}")
-    return 0
+    return result

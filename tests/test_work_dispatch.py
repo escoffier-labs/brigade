@@ -4,11 +4,17 @@ from __future__ import annotations
 
 import hashlib
 import json
+import sys
 
 import pytest
 
 from brigade import cli, localio, work_cmd
 from brigade.work_cmd import footprint
+
+requires_dispatch_apply = pytest.mark.skipif(
+    sys.platform == "win32",
+    reason="work dispatch apply is unsupported on Windows",
+)
 
 
 @pytest.fixture
@@ -49,7 +55,7 @@ def _dispatch(target, capsys, *options):
 
 
 def _snapshot(target):
-    return {str(path.relative_to(target)): path.read_bytes() for path in target.rglob("*") if path.is_file()}
+    return {path.relative_to(target).as_posix(): path.read_bytes() for path in target.rglob("*") if path.is_file()}
 
 
 def test_dry_run_only_writes_two_receipts_with_stable_canonical_digest(dispatch_target, capsys):
@@ -190,10 +196,15 @@ def test_unclaimed_in_progress_work_does_not_supply_occupied_footprint(dispatch_
     assert [item["task_id"] for item in plan["selected"]] == ["task-1"]
 
 
-def test_no_dry_run_refuses_launch_without_writes(dispatch_target, capsys):
+def test_apply_requires_explicit_routing_without_writes(dispatch_target, capsys):
     before = _snapshot(dispatch_target)
     assert cli.main(["work", "dispatch", "--target", str(dispatch_target)]) == 2
-    assert "follow-up slice of #1849" in capsys.readouterr().err
+    error = capsys.readouterr().err
+    if sys.platform == "win32":
+        assert "work dispatch apply is unsupported on Windows" in error
+        assert "--dry-run" in error
+    else:
+        assert "--worker or --seat-map" in error
     assert _snapshot(dispatch_target) == before
 
 

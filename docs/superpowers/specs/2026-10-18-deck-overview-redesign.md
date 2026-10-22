@@ -20,8 +20,8 @@ All from `DeckView` (`fleet_command_deck.py`) with no new queries except one:
 |---|---|
 | Machines, capacity, busy slots, active runs | `StationView` (`busy`, `station.capacity`, `tiles`) |
 | Load 0..1, state, why idle, claims, free slots, observed time, OS | `ControlPlane.machines` (`MachineState`) |
-| Queued work | `ControlPlane.queue` (`QueueState`) |
-| Things that need a person | `attention_items(view)`, `coverage_gaps(...)`, tile collisions |
+| Ready queue | `ControlPlane.queue` (`QueueState`) |
+| Things that need a person | `attention_items(view)`, `coverage_gaps(...)` |
 | Cloud providers and leases | `CloudWorker` |
 | Interactive sessions, recent outcomes | `InteractiveSession`, `outcomes` |
 | Last run event per node | `fetch_last_heard` (events table) |
@@ -41,14 +41,14 @@ Staleness comes from the hub, not a second threshold in the deck. A machine is s
 |                | Fleet overview                                          |
 | > Overview  3  | 3 machines · 22 slots · 5 cloud providers               |
 |   Repos        |                                                         |
-|   Work         | [Working 0 of 22] [Idle 22] [Offline 0] [Queued 0]      |
+|   Work         | [Jobs 0 of 22] [Idle 22] [Offline 0] [Ready to run 0]    |
 |   Roster       |                                                         |
 |   Policy       | Active alerts (3)                                       |
 |   Boards       |  ! FAILED skillet on linux-a   · external.failed  2h    |
 | [filter.....]  |  ! UNKNOWN canary-repo on linux-b                 1d    |
 |                |                                                         |
-| MACHINES     3 | Working now (0)            | Queued (0)                 |
-| v * Linux-a    |  ...                       |  Nothing queued.           |
+| MACHINES     3 | Activity                   | Ready queue                |
+| v * Linux-a    |  Managed jobs / sessions   |  0 ready to run            |
 |     0/10 idle  |                                                         |
 | v * Linux-b    | Machines (3)                                            |
 | v * Win-a      | Machine   Seats      Load  Claims  State     Telemetry  |
@@ -56,7 +56,7 @@ Staleness comes from the hub, not a second threshold in the deck. A machine is s
 | CLOUD        5 | linux-b   [        ] -     0       idle      1m         |
 |   claude 0/4   | win-a     [    ]     0%    0       idle      1h 13m     |
 |   ...          |                                                         |
-|                | Cloud workers · Interactive sessions · Recent outcomes  |
+|                | Cloud workers · Recent outcomes                         |
 | hub heard 11s  | Control plane details (collapsed)                       |
 +----------------+---------------------------------------------------------+
 ```
@@ -77,17 +77,18 @@ Staleness comes from the hub, not a second threshold in the deck. A machine is s
    - Working: busy slots, with a bar for busy/total and "of N slots".
    - Idle: free slots on machines whose telemetry is fresh.
    - Offline: machines that are not enrolled, report state `offline`, or have `unused_reason` `stale-telemetry` or `unknown-telemetry`. Subtitle: "stale or offline".
-   - Queued: `QueueState` eligible queued count. Shows `unknown` when the queue section is absent, never `0`.
+   - Ready to run: `QueueState` eligible queued count. Shows `unknown` when the queue section is absent, never `0`.
 3. **Active alerts:** one card per item, warning-tinted. Sources, in order:
    - attention items (failed, unknown, stale runs)
-   - claim collisions
+   - actionable coordination warnings, excluding matching repo labels alone
    - machines with stale telemetry
    - coverage gaps ("no telemetry for: integrations")
 
    Each card: title, one line of detail, and "first observed <age> ago". When there are no alerts the section reads "No active alerts" and the verdict pill says why (all clear, or coverage unknown).
-4. **Working now / Queued:** two columns.
-   - Working rows: a blue dot, the repo, `harness badge · seat · machine`, elapsed time, and a link to the run detail that exists today.
-   - Queued rows come from `QueueState`. Empty state: "Nothing queued."
+4. **Activity / Ready queue:** two columns.
+   - Managed job rows: a blue dot, the repo, `harness badge · seat · machine`, elapsed time, and a link to the existing board. Parallel activity describes matching nonempty repo labels across machines. Shared modified paths warn separately when reported repository identity and dirty paths match.
+   - Reported agent sessions group by node, harness, and session id. Show eight groups and fold the rest in native details, retaining every checkout membership. Presence may be idle or overlap managed jobs and never increases busy counts. At the 500-membership fetch limit, disclose that the list may be capped and the session total is unknown.
+   - Ready queue counts come from `QueueState`. Equal ready and queued counts appear once. Unknown values stay unknown. Routine eligibility exclusions fold into readable reasons, while actionable blockers remain alerts.
 5. **Machines table:** one row per station, joined to its `MachineState` by node id.
 
    | Column | Content |
@@ -102,7 +103,6 @@ Staleness comes from the hub, not a second threshold in the deck. A machine is s
    The rows do not link anywhere in slice 1.
 6. **Below the fold, compacted:**
    - Cloud workers: a grid of small cards.
-   - Interactive sessions: a table with repo, harness/session, branch and dirty count. The path appears only as a `title` tooltip.
    - Recent outcomes: consecutive identical `(state, repo, node)` rows collapse into one row with `×N`.
    - Control plane detail: the existing `render_control_plane` output inside a closed `<details>`.
    - Observed work groups: also inside a closed `<details>`, since they describe operator-configured metadata and not live activity.

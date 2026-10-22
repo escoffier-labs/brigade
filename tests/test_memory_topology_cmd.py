@@ -851,7 +851,7 @@ def test_memory_topology_redacts_unsafe_adapter_paths(tmp_path, capsys, monkeypa
                         "root": ".",
                         "inboxes": [
                             "/home/operator/.secret-adapter/memory-handoffs",
-                            "C:\\Users\\operator\\.secret-adapter\\memory-handoffs",
+                            "C:\\Users\\operator\\.secret-adapter\\memory-handoffs",  # content-guard: allow windows-home-path
                             "~/.secret-adapter/memory-handoffs",
                             ".safe-adapter/memory-handoffs",
                         ],

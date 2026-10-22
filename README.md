@@ -25,6 +25,8 @@
 
 Brigade lets coding agents work autonomously across repos, machines, and cloud seats while the operator stays in control. You set policy, budgets, scopes, and gates, and can inspect or stop the work. Agents leave a record of what they did: verification receipts with real exit codes, run journals, claims, and lineage. For example, a Claude Code agent can hand a verify receipt to Codex in an [evidence package](docs/evidence-package.md), alongside a handoff that explains the change. Codex can check the package and receipt instead of trusting a sentence that says "tests pass."
 
+The Python CLI may send a passive version request. [Python CLI telemetry](docs/telemetry.md) lists its fields, retention, and opt-outs.
+
 **Stable:** v0.30.0 (`brigade-cli==0.30.0` on PyPI, `@escoffier-labs/brigade@0.30.0` on npm). **Beta:** main is the 0.31 preview line (`0.31.0.devYYYYMMDD` wheels). See the [changelog](CHANGELOG.md) for what each release changed.
 
 The downloads badge sums `brigade-cli` on PyPI (excluding mirrors) and `@escoffier-labs/brigade` on npm over the same 30 completed UTC days. Downloads include automation and do not count unique people. The [metric JSON](https://raw.githubusercontent.com/escoffier-labs/brigade/download-metrics/downloads.json) records each source, the period, and the last successful refresh. npm platform companions are excluded. Daily refreshes retain the previous metric if a source fails validation or its latest day is more than three UTC days old.

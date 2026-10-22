@@ -146,11 +146,23 @@ def held_file_lock(path: Path, *, deadline_seconds: float) -> Iterator[None]:
     their process-wide reentrancy registry.  It is suitable for adjacent
     state-file locks that need independent cross-process exclusion.
     """
+    with held_file_lock_descriptor(path, deadline_seconds=deadline_seconds):
+        yield
+
+
+@contextlib.contextmanager
+def held_file_lock_descriptor(path: Path, *, deadline_seconds: float) -> Iterator[_HeldInboxLock]:
+    """Hold one cross-platform lock and yield its validated descriptor owner.
+
+    The yielded object can verify path identity and write metadata through the
+    same descriptor that owns the OS lock. Existing ``held_file_lock`` callers
+    keep its original ``None`` context value.
+    """
     held = _acquire_cross_process(str(path), deadline_seconds=deadline_seconds)
     with _HELD_FILE_LOCK_FDS_GUARD:
         _HELD_FILE_LOCK_FDS.add(held.fd)
     try:
-        yield
+        yield held
     finally:
         with _HELD_FILE_LOCK_FDS_GUARD:
             _HELD_FILE_LOCK_FDS.discard(held.fd)
@@ -290,6 +302,10 @@ class _HeldInboxLock:
             if fcntl is not None:
                 fcntl.flock(self.fd, fcntl.LOCK_UN)
             elif msvcrt is not None:  # pragma: no cover - Windows only.
+                # msvcrt locks the byte at the descriptor's current offset.
+                # Protected metadata writes may have moved it while the lock
+                # was held, so restore the acquisition byte before unlocking.
+                os.lseek(self.fd, 0, os.SEEK_SET)
                 msvcrt.locking(self.fd, msvcrt.LK_UNLCK, 1)  # type: ignore[attr-defined]
         finally:
             os.close(self.fd)
@@ -512,6 +528,10 @@ def _acquire_fallback(key: str, deadline: float, requested_seconds: float) -> tu
     flags = os.O_RDWR | os.O_CREAT | getattr(os, "O_NOINHERIT", 0) | getattr(os, "O_CLOEXEC", 0)
     fd = os.open(str(lock_path), flags, 0o600)
     try:
+        if msvcrt is not None:  # pragma: no cover - Windows only.
+            # Windows CRT descriptors default to text mode, which expands
+            # LF writes and breaks byte-exact lock metadata framing.
+            msvcrt.setmode(fd, os.O_BINARY)  # type: ignore[attr-defined]
         _validate_lock_descriptor(fd)
         if msvcrt is not None:  # pragma: no cover - Windows only.
             _msvcrt_lock_with_deadline(fd, key, deadline, requested_seconds)

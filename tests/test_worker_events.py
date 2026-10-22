@@ -147,7 +147,7 @@ def test_adversarial_secrets_absent_from_scrubbed_auto_declined_case():
     scrubbed = worker_events.scrub_event(case["raw"])
     blob = json.dumps(scrubbed)
     for needle in (
-        "sk-live-EXAMPLESECRETVALUE99",
+        "sk-live-EXAMPLESECRETVALUE99",  # content-guard: allow bare-token-prefix
         "Authorization",
         "Bearer",
         "/home/example-user",
@@ -266,7 +266,9 @@ def _write_fake_scrubbed_document(tmp_path: Path, *, mutate) -> Path:
 def test_self_declared_scrubbed_document_with_embedded_secrets_is_not_admissible(tmp_path: Path):
     def inject_private_prompt(document: dict) -> None:
         event = document["events"][0]
-        event["params"]["prompt"] = "leaked private prompt with sk-live-EXAMPLESECRETVALUE99"
+        event["params"]["prompt"] = (
+            "leaked private prompt with sk-live-EXAMPLESECRETVALUE99"  # content-guard: allow bare-token-prefix
+        )
 
     path = _write_fake_scrubbed_document(tmp_path, mutate=inject_private_prompt)
 
@@ -282,7 +284,7 @@ def test_self_declared_scrubbed_document_with_embedded_secrets_is_not_admissible
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("threadId", "sk-live-EXAMPLESECRETVALUE99"),
+        ("threadId", "sk-live-EXAMPLESECRETVALUE99"),  # content-guard: allow bare-token-prefix
         ("threadId", "thread\ninject"),
         ("threadId", "t" * 300),
         ("method", "turn/started\n"),

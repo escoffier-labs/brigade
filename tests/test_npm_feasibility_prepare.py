@@ -19,6 +19,54 @@ prepare = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(prepare)
 
 
+def test_npm_version_check_acceptance_offline(tmp_path):
+    import json
+    import os
+    import shutil
+    import venv
+
+    node = shutil.which("node")
+    if node is None:
+        pytest.skip("Node is required for npm acceptance")
+    prefix = tmp_path / "private-python"
+    builder = venv.EnvBuilder(with_pip=False)
+    builder.create(prefix)
+    python = builder.ensure_directories(prefix).env_exec_cmd
+    probe = subprocess.run(
+        [python, "-I", "-c", "import sysconfig; print(sysconfig.get_path('purelib'))"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    source = str(SOURCE.parents[2] / "src")
+    (Path(probe.stdout.strip()) / "_brigade_npm.pth").write_text(
+        f"import sys; sys.path.insert(0, {source!r}); import brigade.distribution as d; d._name = 'npm'\n"
+    )
+    out = tmp_path / "receipt"
+    env = {**os.environ, "HOME": str(tmp_path), "USERPROFILE": str(tmp_path)}
+    result = subprocess.run(
+        [
+            node,
+            str(SOURCE.parent / "acceptance.cjs"),
+            "--artifacts",
+            str(tmp_path),
+            "--out",
+            str(out),
+            "--version-check-python",
+            python,
+        ],
+        env=env,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    receipt = json.loads((out / "acceptance.json").read_text())
+    assert receipt["status"] == "passed"
+    assert len(receipt["checks"]) == 2  # normal and isolated respawns
+    assert all(check["exit"] == 0 for check in receipt["checks"])
+
+
 def wheel(tmp_path, *, metadata="", extra=None, version="0.30.0.dev1"):
     filename = tmp_path / f"brigade_cli-{version}-py3-none-any.whl"
     dist = f"brigade_cli-{version}.dist-info"

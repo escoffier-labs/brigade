@@ -154,6 +154,7 @@ BRANDS: dict[str, Brand] = {
     "grok": Brand("Grok", _GROK_SVG, "#52525b"),
     "antigravity": Brand("Antigravity", _GEMINI_SVG, "#1e293b"),
     "t3-fleet": Brand("T3 Fleet", _T3_SVG, "#7c3aed"),
+    "t3": Brand("T3 Code", _T3_SVG, "#7c3aed"),
     "grokbot": Brand("Grokbot", _GROKBOT_SVG, "#52525b"),
     "grok-bot": Brand("Grokbot", _GROKBOT_SVG, "#52525b"),
     "jules": Brand("Jules", _JULES_SVG, "#715cd7"),

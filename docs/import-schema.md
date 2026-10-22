@@ -300,7 +300,7 @@ The canonical compact JSON encoding (`ensure_ascii = False`, UTF-8, sorted keys,
 
 ### Absolute-path ban
 
-`locator.value` must be repo-relative or a non-file URI. `validate_envelope` rejects POSIX absolute paths (`/etc/passwd`), Windows drive paths (`C:\\Users\\foo`), UNC paths (`\\host\share\file`), and `file:` URIs.
+`locator.value` must be repo-relative or a non-file URI. `validate_envelope` rejects POSIX absolute paths (`/etc/passwd`), Windows drive paths (`C:\\Users\\<user>`), UNC paths (`\\host\share\file`), and `file:` URIs.
 
 ### Authority rule
 
