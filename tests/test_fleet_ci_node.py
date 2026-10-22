@@ -318,15 +318,15 @@ def test_relay_strips_payload_bodies_before_posting_to_hub(tmp_path, monkeypatch
 
 
 @pytest.mark.parametrize("visibility", ["public", "private"])
-def test_default_branch_with_slash_is_encoded_in_paths_but_raw_in_workflow_query(tmp_path, visibility):
+@pytest.mark.parametrize("branch,escaped", [("release/1.x", "release%2F1.x"), ("release%beta", "release%25beta")])
+def test_default_branch_is_encoded_in_paths_but_raw_in_workflow_query(tmp_path, visibility, branch, escaped):
     from brigade.fleet_ci_reconcile import reconcile_repo
 
-    branch = "release/1.x"
     prefix = "/repos/example/public"
     expected = {
-        prefix + "/branches/release%2F1.x": {"commit": {"sha": HEAD}, "protected": True},
-        prefix + "/rules/branches/release%2F1.x": [],
-        prefix + "/branches/release%2F1.x/protection/required_status_checks": {
+        prefix + "/branches/" + escaped: {"commit": {"sha": HEAD}, "protected": True},
+        prefix + "/rules/branches/" + escaped: [],
+        prefix + "/branches/" + escaped + "/protection/required_status_checks": {
             "contexts": [],
             "checks": [{"context": "ci", "app_id": 7}],
         },
@@ -365,7 +365,7 @@ def test_default_branch_with_slash_is_encoded_in_paths_but_raw_in_workflow_query
     assert set(expected) <= set(paths)
     run = requests[paths.index(prefix + "/actions/runs")]
     if visibility == "public":
-        assert "branch=release/1.x" in run
+        assert "branch=" + branch in run
         assert all(c[0] == "octopool" for c in requests)
     else:
         assert parse_qs(urlsplit(run[7]).query)["branch"] == [branch]

@@ -159,6 +159,56 @@ def test_equal_provider_timestamp_cannot_regress_running_to_queued(tmp_path):
     conn.close()
 
 
+@pytest.mark.parametrize("conclusion", [None, "unrecognized"])
+def test_reconcile_repairs_unknown_terminal_evidence_at_same_provider_time(tmp_path, conclusion):
+    conn = fleet_hub.init_db(tmp_path / "hub.db")
+    run = event()
+    run.update(run_attempt=2, conclusion=conclusion)
+    ci.store(conn, {"events": [run, check(conclusion=conclusion)]}, now=NOW)
+    payload = repair.reconcile_repo(reader(tmp_path, Provider()), now=NOW)
+    ci.store(conn, payload, now="2026-10-21T12:01:00Z")
+    row = ci.load_view(conn, now=NOW)["repositories"][0]
+    assert row["required"]["state"] == "passing"
+    assert row["latest_run"]["conclusion"] == "success"
+    assert row["latest_run"]["source"] == "github-reconcile"
+    saved = json.loads(conn.execute("SELECT payload FROM ci_check_runs WHERE object_id=22").fetchone()[0])
+    assert (saved["conclusion"], saved["source"], saved["updated_at"]) == ("success", "github-reconcile", NOW)
+    conn.close()
+
+
+@pytest.mark.parametrize("kind", ["workflow_run", "check_run", "status"])
+@pytest.mark.parametrize("change", ["unknown", "conflict", "older", "queued", "other-head"])
+def test_terminal_refinement_keeps_existing_ordering_guards(tmp_path, kind, change):
+    conn = fleet_hub.init_db(tmp_path / "hub.db")
+    value = check(event=kind)
+    value.update(run_id=11, status_id=33, status="success" if kind == "status" else "completed")
+    ci.store(conn, {"events": [value]}, now=NOW)
+    if change == "unknown":
+        value.update(conclusion=None, status="pending" if kind == "status" else "completed")
+    elif change == "conflict":
+        value.update(conclusion="failure", status="failure" if kind == "status" else "completed")
+    elif change == "older":
+        value.update(
+            conclusion="failure",
+            status="failure" if kind == "status" else "completed",
+            updated_at="2026-10-21T11:59:00Z",
+        )
+    elif change == "queued":
+        value.update(status="queued", conclusion=None)
+    else:
+        value.update(head_sha=OLD)
+    ci.store(conn, {"events": [value]}, now="2026-10-21T12:01:00Z")
+    table = "ci_runs" if kind == "workflow_run" else "ci_check_runs"
+    saved = json.loads(conn.execute(f"SELECT payload FROM {table}").fetchone()[0])
+    assert (saved["status"], saved["conclusion"], saved["head_sha"], saved["updated_at"]) == (
+        "completed",
+        "success",
+        HEAD,
+        NOW,
+    )
+    conn.close()
+
+
 def test_native_etags_survive_node_state_and_reader_recreation(tmp_path):
     state = node.NodeState(tmp_path / "ci.db")
     cache = state.etag_cache("example/project")

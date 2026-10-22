@@ -290,6 +290,8 @@ def store(conn: sqlite3.Connection, raw: Any, *, now: str | None = None) -> dict
                 for key in ("name", "app_id"):
                     if row[key] is None:
                         row[key] = prior.get(key)
+            # Equal-time terminal evidence may refine an unknown conclusion,
+            # while known conclusions and the completed head remain fixed.
             conn.execute(
                 f"INSERT INTO {table} ({columns}, updated_at, payload) VALUES ({placeholders}, ?, ?) "
                 f"ON CONFLICT({columns}) DO UPDATE SET updated_at=excluded.updated_at, payload=excluded.payload "
@@ -298,7 +300,8 @@ def store(conn: sqlite3.Connection, raw: Any, *, now: str | None = None) -> dict
                 f"(({rank_sql.format(payload='excluded.payload')}) >= ({rank_sql.format(payload=table + '.payload')})) AND "
                 f"(json_extract({table}.payload, '$.status') != 'completed' OR "
                 f"(json_extract({table}.payload, '$.status')=json_extract(excluded.payload, '$.status') AND "
-                f"json_extract({table}.payload, '$.conclusion')=json_extract(excluded.payload, '$.conclusion') AND "
+                f"(json_extract({table}.payload, '$.conclusion')=json_extract(excluded.payload, '$.conclusion') OR "
+                f"json_extract({table}.payload, '$.conclusion')='unknown') AND "
                 f"json_extract({table}.payload, '$.head_sha')=json_extract(excluded.payload, '$.head_sha'))))",
                 (*values, _order_time(row["updated_at"]), json.dumps(row)),
             )

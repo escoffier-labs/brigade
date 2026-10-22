@@ -355,6 +355,12 @@ def test_force_fresh_requires_a_named_merge_gate(tmp_path):
         PATH + "/%2E.",
         PATH + "/%252e%252e",
         PATH + "/feature%252Ftopic",
+        PATH + "/feature%250atopic",
+        PATH + "/feature%255Ctopic",
+        PATH + "/feature%25C2%2585topic",
+        PATH + "/%25252e%25252e",
+        PATH + "/feature%253Fquery",
+        PATH + "/feature%2523fragment",
         PATH + "/feature%2F..%2Fissues",
         PATH + "/feature%2F%2Ftopic",
         PATH + "/%2Ftopic",
@@ -546,7 +552,10 @@ def test_injected_etag_cache_revalidates_across_reader_instances(tmp_path):
     assert result.state == "not-modified"
 
 
-@pytest.mark.parametrize("branch", ["release%2F1.x", "feature%2Fplus%2Bhash%23", "r%C3%A9sum%C3%A9"])
+@pytest.mark.parametrize(
+    "branch",
+    ["release%2F1.x", "feature%2Fplus%2Bhash%23", "r%C3%A9sum%C3%A9", "release%25beta", "release%25name", "release%25"],
+)
 @pytest.mark.parametrize("visibility", ["public", "private"])
 def test_safe_encoded_path_segments_are_preserved_for_each_route(tmp_path, branch, visibility):
     path = "/repos/example/project/branches/" + branch

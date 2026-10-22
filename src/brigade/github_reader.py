@@ -22,7 +22,7 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from email.utils import parsedate_to_datetime
 from typing import Any, Literal, Protocol
-from urllib.parse import unquote, urlencode
+from urllib.parse import quote, unquote, urlencode
 
 from brigade.claude_review_import import GetResponse
 from brigade.github_read_ledger import BudgetLedger
@@ -302,13 +302,23 @@ class GitHubReader:
             or not (path == prefix or path.startswith(prefix + "/"))
         ):
             raise ValueError("GET path must stay inside the bound repository")
-        # Validate one decoded UTF-8 form, but send the original escaped path.
-        # Percent in that form would permit ambiguous nested decoding.
+        # Send the original path, with canonical escaping within each segment.
+        # Literal percent is legal, but a second decode must not change routing
+        # or introduce traversal, controls, backslashes or another escape layer.
         decoded = unquote(path, errors="strict")
+        canonical = "/".join(quote(unquote(part, errors="strict"), safe="") for part in path.split("/"))
+        escaped = re.sub(r"%[A-Fa-f0-9]{2}", lambda match: match[0].upper(), path)
+        # Replacement decoding lets literal percent text such as %beta survive
+        # invalid UTF-8 bytes while still exposing ASCII/UTF-8 routing hazards.
+        nested = unquote(decoded, errors="replace")
         if (
-            not decoded.isprintable()
-            or any(c in decoded for c in "%\\")
-            or any(part in {"", ".", ".."} for part in decoded[1:].split("/"))
+            canonical != escaped
+            or "%25" in decoded.lower()
+            or not decoded.isprintable()
+            or not nested.isprintable()
+            or "\\" in decoded + nested
+            or any(decoded.count(c) != nested.count(c) for c in "/?#")
+            or any(part in {"", ".", ".."} for value in (decoded, nested) for part in value[1:].split("/"))
         ):
             raise ValueError("GET path must stay inside the bound repository")
         query: dict[str, str | int] = {}
