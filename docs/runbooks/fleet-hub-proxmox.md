@@ -650,8 +650,9 @@ Upgrade the hub to schema 31 before enabling agent sends. Agents start with no
 send grants. A node may supply a display-only `--sender-label`. Agents cannot.
 Every new outbound agent message, including a reply, requires a matching send grant.
 
-Enroll using the administrator credential and stream the one-time token directly
-into a private file. Substitute an enrolled node ID for `example-node`. The token
+Enroll using the administrator credential and stream the token directly into a
+private file. The command prints it once, but it is derived from the
+administrator credential, so treat it as a secret rather than a single-use code. Substitute an enrolled node ID for `example-node`. The token
 file must be owned by the invoking effective user where the platform exposes an
 effective user ID, have no group or other access, and contain only the token,
 with no trailing newline.

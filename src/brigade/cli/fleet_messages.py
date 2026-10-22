@@ -92,7 +92,9 @@ def register(fleet_sub: argparse._SubParsersAction) -> None:
     principals = sub.add_parser("principals", help="Enroll or revoke named external agent principals (admin token).")
     principal_sub = principals.add_subparsers(dest="principal_command", metavar="<principal-command>")
     principal_sub.required = True
-    add = principal_sub.add_parser("add", help="Enroll a named external agent and print its one-time token.")
+    add = principal_sub.add_parser(
+        "add", help="Enroll a named external agent and print its token (shown once; store it privately)."
+    )
     add.add_argument("name")
     add.add_argument("--label")
     add.add_argument("--may-send-to", nargs="+", action="extend")
