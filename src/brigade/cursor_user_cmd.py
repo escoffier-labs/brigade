@@ -261,8 +261,7 @@ def install_project_presence_hooks(workspace: Path) -> str | None:
         return None
     doc["hooks"] = hooks
     try:
-        path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(_coowned_json_text(doc), encoding="utf-8")
+        localio.write_text_atomic(path, _coowned_json_text(doc))
     except OSError as exc:
         return str(exc)
     return None

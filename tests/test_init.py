@@ -82,21 +82,25 @@ def test_init_cursor_installs_project_presence_hooks_and_preserves_foreign_entri
     assert all(hooks[event].count(managed) == 1 for event in ("sessionStart", "postToolUse", "sessionEnd"))
 
 
-def test_init_cursor_warns_when_project_hook_file_cannot_be_written(tmp_path: Path, monkeypatch, capsys):
+def test_init_cursor_warns_when_atomic_project_hook_write_fails(tmp_path: Path, monkeypatch, capsys):
     import json
 
     target = tmp_path / "cursor-project"
     hooks_path = target / ".cursor" / "hooks.json"
     hooks_path.parent.mkdir(parents=True)
-    hooks_path.write_text(json.dumps({"version": 1, "hooks": {}}))
-    original_write_text = Path.write_text
+    original_content = json.dumps({"version": 1, "hooks": {}})
+    hooks_path.write_text(original_content)
 
-    def reject_hook_write(path, *args, **kwargs):
-        if path == hooks_path:
-            raise PermissionError("read-only test hooks")
-        return original_write_text(path, *args, **kwargs)
+    from brigade import localio
 
-    monkeypatch.setattr(Path, "write_text", reject_hook_write)
+    original_replace = localio.os.replace
+
+    def reject_hook_replace(source, destination):
+        if destination == hooks_path:
+            raise OSError("disk full test hooks")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(localio.os, "replace", reject_hook_replace)
 
     from brigade.cli import main
 
@@ -104,6 +108,8 @@ def test_init_cursor_warns_when_project_hook_file_cannot_be_written(tmp_path: Pa
     captured = capsys.readouterr()
     assert "warning: unable to wire project-scoped Cursor presence hooks" in captured.err
     assert "Traceback" not in captured.err
+    assert hooks_path.read_text() == original_content
+    assert list(hooks_path.parent.glob(".hooks.json.*.tmp")) == []
 
 
 def test_init_no_gitignore_skips_gitignore(tmp_target: Path):
