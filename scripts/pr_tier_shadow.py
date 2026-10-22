@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
+from http.client import HTTPException
 import json
 import os
 from pathlib import Path
@@ -81,9 +82,12 @@ def retain_report(output: Path, report: dict) -> None:
     ]
     summary = "\n".join(lines)
     (output / "summary.md").write_text(summary, encoding="utf-8")
+
+
+def publish_summary(output: Path) -> None:
     if summary_path := os.environ.get("GITHUB_STEP_SUMMARY"):
         with Path(summary_path).open("a", encoding="utf-8") as stream:
-            stream.write(summary)
+            stream.write((output / "summary.md").read_text(encoding="utf-8"))
 
 
 def guard(output: Path, *, now: datetime | None = None) -> dict:
@@ -132,6 +136,8 @@ def merge_identity(repo: Path) -> dict:
 
 def pytest_worker(repo: Path, output: Path, selected: Sequence[str]) -> int:
     """The child process records actual reports, including setup/teardown errors."""
+    os.environ["COVERAGE_CORE"] = "sysmon"
+    os.environ["COVERAGE_FILE"] = str(output.resolve() / ".coverage")
     import pytest
 
     class Results:
@@ -146,7 +152,14 @@ def pytest_worker(repo: Path, output: Path, selected: Sequence[str]) -> int:
 
         def pytest_runtest_logreport(self, report) -> None:
             outcome = self.outcomes.setdefault(report.nodeid, {"nodeid": report.nodeid, "phases": []})
-            outcome["phases"].append({"when": report.when, "outcome": report.outcome, "duration": report.duration})
+            outcome["phases"].append(
+                {
+                    "when": report.when,
+                    "outcome": report.outcome,
+                    "duration": report.duration,
+                    "subtest": isinstance(report, getattr(pytest, "SubtestReport", ())),
+                }
+            )
             if report.when == "teardown":
                 self.finished.add(report.nodeid)
 
@@ -171,12 +184,20 @@ def pytest_worker(repo: Path, output: Path, selected: Sequence[str]) -> int:
                     ],
                     "collection_errors": self.collection_errors,
                     "outcomes": outcomes,
-                    "test_duration_seconds": sum(phase["duration"] for item in outcomes for phase in item["phases"]),
+                    # A parent's call already includes time spent inside its subtests.
+                    "test_duration_seconds": sum(
+                        phase["duration"] for item in outcomes for phase in item["phases"] if not phase["subtest"]
+                    ),
                 },
             )
 
     os.chdir(repo)
-    return int(pytest.main(["-q", "-rA", "-o", "addopts=", "--", *selected], plugins=[Results()]))
+    return int(
+        pytest.main(
+            ["-q", "-rA", "-o", "addopts=", "--cov=brigade", "--cov-report=", "--cov-fail-under=0", "--", *selected],
+            plugins=[Results()],
+        )
+    )
 
 
 def run_pytest(repo: Path, selected: Sequence[str], output: Path) -> dict:
@@ -200,6 +221,7 @@ def run_pytest(repo: Path, selected: Sequence[str], output: Path) -> dict:
         return result
     started = time.monotonic()
     env = dict(os.environ)
+    env.update(COVERAGE_CORE="sysmon", COVERAGE_FILE=str(output / ".coverage"))
     # No Actions API credentials go to the selected test process.
     for key in ("GITHUB_TOKEN", "GH_TOKEN"):
         env.pop(key, None)
@@ -233,9 +255,10 @@ def run_pytest(repo: Path, selected: Sequence[str], output: Path) -> dict:
 
 
 def outcome_nodeid(line: str) -> tuple[str, str] | None:
-    match = re.match(r"^(FAILED|ERROR) (tests/.*)$", line)
+    # Pytest 9 emits each subtest failure as well as its parent failure.
+    match = re.match(r"^(FAILED|ERROR|SUBFAILED.*?) (tests/.*)$", line)
     if not match:
-        if line.startswith(("FAILED ", "ERROR ")):
+        if line.startswith(("FAILED ", "ERROR ", "SUBFAILED")):
             raise ValueError("unparseable failure outcome")
         return None
     # Pytest's separator can also occur inside parametrized IDs.
@@ -243,14 +266,14 @@ def outcome_nodeid(line: str) -> tuple[str, str] | None:
     text = match[2]
     for position, char in enumerate(text):
         if depth == 0 and text[position:].startswith(" - "):
-            return match[1], text[:position]
+            return "ERROR" if match[1] == "ERROR" else "FAILED", text[:position]
         if char == "[":
             depth += 1
         elif char == "]":
             depth -= 1
     if depth:
         raise ValueError("unparseable parametrized nodeid")
-    return match[1], text
+    return "ERROR" if match[1] == "ERROR" else "FAILED", text
 
 
 def parse_full_log(text: str, index: int, sha: str) -> dict:
@@ -273,35 +296,65 @@ def parse_full_log(text: str, index: int, sha: str) -> dict:
     start, marker = markers[0]
     assert marker is not None
     selected = int(marker[2])
-    failed: list[str] = []
-    errored: list[str] = []
     all_failures: set[str] = set()
     summaries: list[dict] = []
+    groups = [line for line in lines[:start] if line.startswith("##[group]")]
+    if not groups or "Run python scripts/ci_pytest_shard.py " not in groups[-1]:
+        raise ValueError("missing primary pytest execution step")
+    # Actions starts each step with a group. Use those boundaries to attribute
+    # terminal output to the shard or the known shard-zero auxiliary invocation.
+    frames: list[list[str]] = [[]]
+    active = True
     for line in lines[start + 1 :]:
-        if "ERROR collecting" in line or "Interrupted:" in line or "INTERNALERROR" in line:
-            raise ValueError("collection, interrupt or internal error")
-        outcome = outcome_nodeid(line)
-        if outcome:
-            (failed if outcome[0] == "FAILED" else errored).append(outcome[1])
-        summary = SUMMARY.search(line)
-        if summary:
-            counts = {name: int(count) for count, name in COUNTS.findall(line)}
-            if (
-                not counts
-                or counts.get("failed", 0) != len(failed)
-                or counts.get("errors", counts.get("error", 0)) != len(errored)
-            ):
-                raise ValueError("summary failures lack attributable nodeids")
-            outcomes = sum(
+        if re.fullmatch(r"##\[error\]Process completed with exit code \d+\.", line) or line == "Post job cleanup.":
+            active = False
+        elif line.startswith("##[group]"):
+            active = line.startswith("##[group]Run output=$(python -m pytest tests/test_grokbot_mcp.py ")
+            if active:
+                frames.append([])
+        elif active:
+            if line and not line.startswith(("##[endgroup]", "##[error]")):
+                frames[-1].append(line)
+        elif SUMMARY.fullmatch(line) or line.startswith(("FAILED ", "ERROR", "SUBFAILED", "INTERNALERROR")):
+            raise ValueError("pytest output outside an attributable execution step")
+    for frame in frames:
+        summary = SUMMARY.fullmatch(frame[-1]) if frame else None
+        if summary is None:
+            raise ValueError("missing valid terminal pytest summary")
+        headers = [i for i, line in enumerate(frame[:-1]) if re.fullmatch(r"=+ short test summary info =+", line)]
+        if not headers and any(re.match(r"-+ Captured (?:stdout|stderr|log) ", line) for line in frame):
+            raise ValueError("captured output lacks a final short test summary")
+        # Captured text and tracebacks precede the real short summary. A passing
+        # run can omit that section, but must still have one terminal summary.
+        section = frame[headers[-1] + 1 : -1] if headers else frame[:-1]
+        if any(SUMMARY.fullmatch(line) for line in section):
+            raise ValueError("ambiguous pytest summaries")
+        failed: list[str] = []
+        errored: list[str] = []
+        subfailed_count = 0
+        if headers:
+            for line in section:
+                outcome = outcome_nodeid(line)
+                if outcome:
+                    (failed if outcome[0] == "FAILED" else errored).append(outcome[1])
+                    subfailed_count += int(line.startswith("SUBFAILED"))
+        counts = {name: int(count) for count, name in COUNTS.findall(frame[-1])}
+        if (
+            not counts
+            or counts.get("failed", 0) != len(failed)
+            or counts.get("errors", counts.get("error", 0)) != len(errored)
+        ):
+            raise ValueError("summary failures lack attributable nodeids")
+        outcomes = (
+            sum(
                 counts.get(name, 0) for name in ("passed", "failed", "skipped", "errors", "error", "xfailed", "xpassed")
             )
-            if not summaries and (outcomes < selected or (selected == 0 and not counts.get("deselected"))):
-                raise ValueError("summary does not account for selected tests")
-            all_failures.update(failed + errored)
-            summaries.append({"counts": counts, "elapsed_seconds": float(summary[1])})
-            failed, errored = [], []
-    if not summaries or failed or errored:
-        raise ValueError("missing valid terminal pytest summary")
+            - subfailed_count
+        )
+        if not summaries and (outcomes < selected or (selected == 0 and not counts.get("deselected"))):
+            raise ValueError("summary does not account for selected tests")
+        all_failures.update(failed + errored)
+        summaries.append({"counts": counts, "elapsed_seconds": float(summary[1])})
     primary_counts = summaries[0]["counts"]
     primary_failed = any(primary_counts.get(name, 0) for name in ("failed", "error", "errors"))
     if index == 0 and not primary_failed and len(summaries) < 2:
@@ -448,7 +501,7 @@ def fetch_evidence(
                 raise ValueError("inconsistent jobs pagination")
         else:
             raise ValueError("jobs pagination exceeded 20 pages")
-    except (OSError, ValueError, KeyError, TypeError) as exc:
+    except (OSError, HTTPException, ValueError, KeyError, TypeError) as exc:
         errors.append(f"exact attempt metadata unavailable: {type(exc).__name__}")
     for job in jobs:
         if job.get("name") not in SHARD_NAMES:
@@ -458,7 +511,7 @@ def fetch_evidence(
             text = api_get(f"/repos/{repository}/actions/jobs/{job_id}/logs").decode("utf-8-sig")
             (output / f"job-{job_id}.log").write_text(text, encoding="utf-8")
             logs[job_id] = text
-        except (OSError, ValueError, KeyError, TypeError) as exc:
+        except (OSError, HTTPException, ValueError, KeyError, TypeError) as exc:
             errors.append(f"{job.get('name')}: log unavailable: {type(exc).__name__}")
     write_json(output / "fetch-errors.json", {"errors": errors})
     return run, jobs, logs, errors
@@ -495,6 +548,7 @@ def finalize(output: Path) -> int:
     report = json.loads((output / "report.json").read_text(encoding="utf-8"))
     if report["trial_status"] != "active":
         retain_report(output, report)
+        publish_summary(output)
         return 0
     try:
         identity = report["identity"]
@@ -503,9 +557,10 @@ def finalize(output: Path) -> int:
             os.environ["GITHUB_REPOSITORY"], identity["run_id"], identity["run_attempt"], output / "full"
         )
         report["comparison"] = compare(identity, run, jobs, logs, selected, errors=errors)
-    except (OSError, ValueError, KeyError, TypeError) as exc:
+    except (OSError, HTTPException, ValueError, KeyError, TypeError) as exc:
         report["comparison"] = incomplete(f"comparison unavailable: {type(exc).__name__}")
     retain_report(output, report)
+    publish_summary(output)
     return 0 if report["comparison"]["status"] == "complete" else 2
 
 

@@ -973,16 +973,16 @@ jobs:
         id: trial
         run: python3 scripts/pr_tier_shadow.py guard --output .pr-tier-shadow
       - uses: actions/setup-python@v7
-        if: steps.trial.outputs.active == 'true'
+        if: steps.trial.outputs.active == 'true' && (needs.test-shards.result == 'success' || needs.test-shards.result == 'failure')
         with:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: pyproject.toml
       - name: Install shadow dependencies
-        if: steps.trial.outputs.active == 'true'
+        if: steps.trial.outputs.active == 'true' && (needs.test-shards.result == 'success' || needs.test-shards.result == 'failure')
         run: python -m pip install -e ".[dev,grokbot]"
       - name: Run selected files on the PR merge
-        if: steps.trial.outputs.active == 'true'
+        if: steps.trial.outputs.active == 'true' && (needs.test-shards.result == 'success' || needs.test-shards.result == 'failure')
         env:
           PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
         run: python scripts/pr_tier_shadow.py run --output .pr-tier-shadow

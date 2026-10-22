@@ -2,6 +2,7 @@
 
 from copy import deepcopy
 from datetime import datetime
+from http.client import HTTPException, IncompleteRead
 import json
 from pathlib import Path
 import re
@@ -23,13 +24,19 @@ def log(index, *, failed=None, checkout=SHA):
     lines = [
         "2026-10-22T01:00:00Z [command]/usr/bin/git log -1 --format=%H",
         f"2026-10-22T01:00:00Z {checkout}",
+        '##[group]Run python scripts/ci_pytest_shard.py --shard-index "0" --shard-count 4 -- -q',
+        "##[endgroup]",
         f"2026-10-22T01:00:01Z CI shard {index + 1}/4: selected 2 of 8 tests",
     ]
+    if failures:
+        lines.append("================ short test summary info ================")
     lines += [f"2026-10-22T01:00:02Z FAILED {nodeid} - AssertionError" for nodeid in failures]
     counts = f"{len(failures)} failed, {2 - len(failures)} passed" if failures else "2 passed"
     lines.append(f"2026-10-22T01:00:03Z {counts}, 6 deselected in 10.00s")
     # A separate real pytest invocation in shard 0 must not replace the shard summary.
+    lines += ["##[group]Run output=$(python -m pytest tests/test_grokbot_mcp.py -q 2>&1)", "##[endgroup]"]
     lines.append("2026-10-22T01:00:04Z 4 passed in 1.00s")
+    lines.append("##[group]Run actions/upload-artifact@v7")
     return "\n".join(lines)
 
 
@@ -120,7 +127,7 @@ def test_incomplete_evidence_never_reports_zero_candidates(evidence, problem):
     elif problem == "no-summary":
         logs[500] = "setup failed"
     elif problem == "collection-error":
-        logs[500] = log(0).replace("2 passed", "ERROR collecting tests/test_broken.py\n2 passed")
+        logs[500] = log(0).replace("2 passed, 6 deselected", "ERROR collecting tests/test_broken.py\n1 error")
     elif problem == "unattributed-failure":
         logs[500] = log(0).replace("2 passed", "1 failed, 1 passed")
     elif problem == "truncated-log":
@@ -178,6 +185,8 @@ def test_trial_boundaries_are_utc_and_expiry_retains_report(tmp_path, monkeypatc
     assert report["trial_status"] == status
     assert json.loads((tmp_path / "evidence/report.json").read_text())["trial_status"] == status
     assert f"active={'true' if status == 'active' else 'false'}" in outputs.read_text()
+    assert not summary.exists()  # The always-run finalizer publishes the single job summary.
+    shadow.finalize(tmp_path / "evidence")
     assert status in summary.read_text()
     assert not (tmp_path / "evidence/pytest-results.json").exists()
 
@@ -234,6 +243,9 @@ def test_expired_cli_does_no_git_or_pytest_or_api_work(tmp_path):
 
 
 def test_merge_identity_validates_second_parent_and_uses_current_first_parent(tmp_path, monkeypatch, evidence):
+    summary = tmp_path / "step-summary"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+
     def git(*args):
         return subprocess.check_output(["git", "-C", str(tmp_path), *args], text=True).strip()
 
@@ -311,6 +323,8 @@ def test_merge_identity_validates_second_parent_and_uses_current_first_parent(tm
     assert report["comparison"]["full_only_candidate_count"] == 0
     assert report["comparison"]["confirmed_real_miss_count"] is None
     assert merge in (output / "summary.md").read_text()
+    assert summary.read_text().count("# PR test tier shadow\n") == 1
+    assert "Comparison: complete" in summary.read_text()
 
 
 def test_exact_attempt_api_reads_only_requested_jobs_and_keeps_log_failures_incomplete(tmp_path, monkeypatch):
@@ -366,6 +380,7 @@ def test_full_log_collects_auxiliary_failure_without_replacing_shard_elapsed(evi
     run, jobs, logs, selected = evidence
     jobs[0]["conclusion"] = "failure"
     logs[500] = log(0).rsplit("4 passed", 1)[0] + (
+        "================ short test summary info ================\n"
         "FAILED tests/test_grokbot_mcp.py::test_auxiliary - AssertionError\n1 failed, 3 passed in 1.00s\n"
     )
     result = shadow.compare(IDENTITY, run, jobs, logs, selected)
@@ -460,7 +475,211 @@ def test_traceback_text_ending_in_seconds_is_not_a_terminal_summary(evidence):
 
 def test_successful_shard_zero_requires_its_auxiliary_pytest_summary(evidence):
     run, jobs, logs, selected = evidence
-    logs[500] = log(0).rsplit("\n", 1)[0]
+    logs[500] = log(0).split("##[group]Run output=", 1)[0]
     result = shadow.compare(IDENTITY, run, jobs, logs, selected)
     assert result["status"] == "incomplete"
     assert result["full_only_candidate_count"] is None
+
+
+def test_worker_uses_full_shard_coverage_settings_in_actual_child(tmp_path):
+    output = tmp_path / "evidence"
+    (tmp_path / "test_settings.py").write_text(
+        "import os\n"
+        "assert os.environ['COVERAGE_CORE'] == 'sysmon'\n"
+        f"assert os.environ['COVERAGE_FILE'] == {str(output / '.coverage')!r}\n"
+        "def test_settings(pytestconfig):\n"
+        "    assert pytestconfig.getoption('cov_source') == ['brigade']\n"
+        "    assert pytestconfig.getoption('cov_report') == {'': None}\n"
+        "    assert pytestconfig.getoption('cov_fail_under') == 0\n"
+    )
+    result = shadow.run_pytest(tmp_path, ["test_settings.py"], output)
+    assert result["complete"] is True, (output / "pytest.log").read_text()
+    assert result["exit_code"] == 0, (output / "pytest.log").read_text()
+    assert (output / ".coverage").is_file()
+
+
+def test_actual_subtest_durations_are_not_added_twice_and_failures_are_retained(tmp_path):
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests/test_sub.py").write_text(
+        "import time\n"
+        "def test_sub(subtests):\n"
+        "    for i in range(2):\n"
+        "        with subtests.test(i=i):\n"
+        "            time.sleep(0.02)\n"
+        "            assert i < 0\n"
+        "def test_log():\n"
+        "    import logging\n"
+        "    logging.error('ERROR brigade.worker: expected failure')\n"
+        "    print('FAILED tests/fake.py::test_fake - fake')\n"
+        "    print('2 passed in 0.01s')\n"
+        "    assert False\n"
+    )
+    (tmp_path / "conftest.py").write_text(
+        "import json, pytest\n"
+        "from pathlib import Path\n"
+        "rows = []\n"
+        "def pytest_runtest_logreport(report):\n"
+        "    rows.append([isinstance(report, pytest.SubtestReport), report.duration])\n"
+        "def pytest_sessionfinish(session, exitstatus):\n"
+        "    Path('durations.json').write_text(json.dumps(rows))\n"
+    )
+    output = tmp_path / "evidence"
+    result = shadow.run_pytest(tmp_path, ["tests/test_sub.py"], output)
+    assert result["complete"] is True
+    assert result["failed_nodeids"] == ["tests/test_sub.py::test_log", "tests/test_sub.py::test_sub"]
+    rows = json.loads((tmp_path / "durations.json").read_text())
+    assert sum(child for child, _ in rows) == 2
+    assert result["test_duration_seconds"] == pytest.approx(sum(duration for child, duration in rows if not child))
+    text = log(1).split("CI shard", 1)[0] + "CI shard 2/4: selected 2 of 2 tests\n"
+    parsed = shadow.parse_full_log(text + (output / "pytest.log").read_text(), 1, SHA)
+    assert parsed["counts"]["failed"] == 4
+    assert parsed["failed_nodeids"] == result["failed_nodeids"]
+
+
+@pytest.mark.parametrize(
+    "captured",
+    [
+        "ERROR brigade.worker: expected failure",
+        "FAILED tests/fake.py::test_fake - fake",
+        "3 passed in 0.01s",
+        "ERROR collecting tests/fake.py",
+        "INTERNALERROR fake",
+        "================ short test summary info ================\nFAILED tests/fake.py::test_fake - fake\n1 failed, 1 passed in 0.01s",
+    ],
+)
+def test_captured_output_does_not_poison_real_short_summary(evidence, captured):
+    run, jobs, logs, selected = evidence
+    jobs[1]["conclusion"] = "failure"
+    logs[501] = log(1, failed=["tests/test_a.py::test_failure"]).replace(
+        "FAILED tests/test_a.py",
+        f"---------------- Captured stdout call ----------------\n{captured}\n"
+        "================ short test summary info ================\nFAILED tests/test_a.py",
+        1,
+    )
+    result = shadow.compare(IDENTITY, run, jobs, logs, selected)
+    assert result["status"] == "complete", result["errors"]
+    assert result["full_only_candidates"] == ["tests/test_a.py::test_failure"]
+    assert result["full_shards"][1]["pytest_elapsed_seconds"] == 10.0
+    assert result["full_shards"][1]["auxiliary_pytest_elapsed_seconds"] == [1.0]
+
+
+@pytest.mark.parametrize("selected_count,expected_status", [(2, "complete"), (4, "incomplete")])
+def test_pytest9_subfailed_summaries_count_reports_then_deduplicate_parent(evidence, selected_count, expected_status):
+    run, jobs, logs, selected = evidence
+    jobs[1]["conclusion"] = "failure"
+    logs[501] = (
+        log(1, failed=["tests/test_a.py::test_sub"])
+        .replace(
+            "FAILED tests/test_a.py::test_sub",
+            "SUBFAILED(i=0) tests/test_a.py::test_sub - AssertionError\n"
+            "SUBFAILED[message with spaces] (i=1) tests/test_a.py::test_sub - AssertionError\n"
+            "FAILED tests/test_a.py::test_sub",
+            1,
+        )
+        .replace("1 failed, 1 passed", "3 failed, 1 passed")
+        .replace("selected 2 of", f"selected {selected_count} of")
+    )
+    result = shadow.compare(IDENTITY, run, jobs, logs, selected)
+    assert result["status"] == expected_status, result["errors"]
+    if expected_status == "complete":
+        assert result["full_only_candidates"] == ["tests/test_a.py::test_sub"]
+    else:
+        assert result["full_only_candidate_count"] is None
+
+
+@pytest.mark.parametrize("where", ["metadata", "log", "finalize"])
+@pytest.mark.parametrize("error", [HTTPException("bad HTTP"), IncompleteRead(b"partial", 10)])
+def test_http_protocol_failures_retain_incomplete_report(tmp_path, monkeypatch, evidence, where, error):
+    run, jobs, _, selected = evidence
+    output = tmp_path / "evidence"
+    shadow.guard(output, now=datetime.fromisoformat("2026-10-23T00:00:00+00:00"))
+    report = json.loads((output / "report.json").read_text())
+    report["identity"] = IDENTITY
+    shadow.write_json(output / "report.json", report)
+    shadow.write_json(output / "pytest-results.json", selected)
+    monkeypatch.setenv("GITHUB_REPOSITORY", "example/project")
+
+    def get(path):
+        if where == "metadata" or path.endswith("/logs"):
+            raise error
+        return json.dumps(run if path.endswith("/attempts/2") else {"total_count": 4, "jobs": jobs}).encode()
+
+    monkeypatch.setattr(shadow, "api_get", get)
+    if where == "finalize":
+
+        def fetch(*args):
+            raise error
+
+        monkeypatch.setattr(shadow, "fetch_evidence", fetch)
+    assert shadow.finalize(output) == 2
+    result = json.loads((output / "report.json").read_text())["comparison"]
+    assert result["status"] == "incomplete"
+    assert result["full_only_candidate_count"] is None
+    assert result["errors"]
+
+
+@pytest.mark.parametrize("trial", ["active", "expired"])
+def test_step_summary_is_published_once_at_lifecycle_end(tmp_path, monkeypatch, trial):
+    summary = tmp_path / "step-summary"
+    output = tmp_path / "evidence"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    instant = datetime.fromisoformat("2026-10-23T00:00:00+00:00" if trial == "active" else "2026-11-06T00:00:00+00:00")
+    shadow.guard(output, now=instant)
+    shadow.run_shadow(tmp_path, output, instant)  # Invalid checkout retains incomplete evidence.
+    shadow.finalize(output)
+    assert summary.read_text().count("# PR test tier shadow\n") == 1
+    assert "Comparison: incomplete" in summary.read_text()
+
+
+@pytest.mark.parametrize(
+    "outcome,expected", [("success", True), ("failure", True), ("cancelled", False), ("skipped", False)]
+)
+@pytest.mark.parametrize("active", [True, False])
+def test_shadow_test_work_requires_finished_full_shards(outcome, expected, active):
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    job = text.split("  pr-tier-shadow:\n", 1)[1]
+    conditions = re.findall(r"^        if: (.+)$", job, re.M)
+    test_conditions = [condition for condition in conditions if "steps.trial.outputs.active" in condition]
+    assert len(test_conditions) == 3
+    for condition in test_conditions:
+        expression = condition.removeprefix("${{ ").removesuffix(" }}")
+        expression = expression.replace("steps.trial.outputs.active", repr("true" if active else "false"))
+        expression = (
+            expression.replace("needs.test-shards.result", repr(outcome)).replace("&&", "and").replace("||", "or")
+        )
+        assert eval(expression, {"__builtins__": {}}, {}) is (expected and active)
+
+
+@pytest.mark.parametrize(
+    "problem", ["missing-execution", "missing-short-summary", "ambiguous-summary", "truncated-captured-summary"]
+)
+def test_unattributed_terminal_output_is_incomplete(evidence, problem):
+    run, jobs, logs, selected = evidence
+    if problem == "missing-execution":
+        logs[501] = log(1).replace("Run python scripts/ci_pytest_shard.py", "Run unknown")
+    elif problem == "missing-short-summary":
+        jobs[1]["conclusion"] = "failure"
+        logs[501] = log(1, failed=["tests/test_a.py::test_failed"]).replace(
+            "================ short test summary info ================\n", ""
+        )
+    elif problem == "ambiguous-summary":
+        logs[501] = log(1).replace("2 passed, 6 deselected", "2 passed in 0.01s\n2 passed, 6 deselected")
+    else:
+        logs[501] = log(1).split("CI shard", 1)[0] + (
+            "CI shard 2/4: selected 2 of 8 tests\n"
+            "---------------- Captured stdout call ----------------\n2 passed in 0.01s\n"
+        )
+    result = shadow.compare(IDENTITY, run, jobs, logs, selected)
+    assert result["status"] == "incomplete"
+    assert result["full_only_candidate_count"] is None
+
+
+def test_runner_cleanup_after_failed_step_does_not_replace_terminal_summary(evidence):
+    run, jobs, logs, selected = evidence
+    jobs[1]["conclusion"] = "failure"
+    logs[501] = log(1, failed=["tests/test_a.py::test_failure"]).split("##[group]Run output=", 1)[0] + (
+        "##[error]Process completed with exit code 1.\nPost job cleanup.\n[command]/usr/bin/git version\n"
+    )
+    result = shadow.compare(IDENTITY, run, jobs, logs, selected)
+    assert result["status"] == "complete", result["errors"]
+    assert result["full_only_candidates"] == ["tests/test_a.py::test_failure"]

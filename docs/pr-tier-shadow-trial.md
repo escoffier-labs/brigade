@@ -16,7 +16,11 @@ and Actions permissions, does not persist checkout credentials, and uses
 The standard-library guard executes before Python setup or package installation.
 Before the start and at or after expiry, the job records its status and uploads
 evidence without installing dependencies, selecting files, running pytest, or
-reading the Actions API. Cancellation can prevent even an `always()` upload.
+reading the Actions API. During the active window, setup, installation and test
+work require the full shards' aggregate result to be success or failure.
+Cancelled or skipped shards leave an incomplete report without starting that
+work. Finalization and upload still use `always()`.
+Cancellation can prevent even an `always()` upload.
 A missing artifact is an evidence gap that requires an explanation.
 
 ## Selection
@@ -46,14 +50,18 @@ absent. Selection records sorted inputs, reasons, tiers and the manifest hash.
 Each run attempts to upload `pr-tier-shadow-<run-id>-<attempt>` for 30 days:
 
 - `report.json` and `summary.md`: trial status, identity, comparison, gaps and
-  timing. The readable report is also written to the job summary.
+  timing. Finalization publishes one readable job summary after intermediate
+  report updates have been retained.
 - `identity.json`: tested merge SHA, current first-parent base, PR head,
   changed paths, run ID and attempt.
 - `selection.json`, `selected.txt` and `pr_test_tiers.json`: reproducible
   selection, reasons and the exact curated membership used.
 - `pytest-input.json`, `pytest.log` and `pytest-results.json`: selected paths,
   local outcomes, collection errors, process exit, pytest subprocess wall time
-  and summed durations from actual setup/call/teardown reports.
+  and summed durations from actual setup/call/teardown reports. Child subtest
+  durations are retained but excluded from the sum because the parent call
+  already includes them. Failure nodeids include failed subtests' parents.
+- `.coverage`: scratch coverage data from the selected test process.
 - `full/workflow-run.json`, `full/jobs-page-*.json`, `full/job-*.log` and
   `full/fetch-errors.json`: raw metadata, four full shard logs and retrieval gaps.
 
@@ -73,12 +81,24 @@ or absent jobs, API errors, collection errors, missing summaries and
 unattributable outcomes leave the comparison incomplete. A failed job with a
 complete pytest summary and attributable failures can still be compared.
 
-`full_only_candidates` are full-log FAILED/ERROR nodeids absent from the shadow
+The parser attributes terminal summaries to the primary Actions execution step
+and the known grokbot auxiliary step. It reads failures from the final short
+test summary section, excluding captured output and traceback text. Passing
+runs can omit that section. Missing or ambiguous terminal evidence remains
+incomplete. Pytest 9 SUBFAILED reports count individually when checking the
+failure total, then map to unique parent nodeids for comparison.
+
+`full_only_candidates` are full-log FAILED/ERROR/SUBFAILED nodeids absent from the shadow
 failure set. They are **unconfirmed candidates**. On incomplete evidence,
 `full_only_candidate_count` is null even if some candidates can be retained.
 Only complete evidence can report zero candidates. `confirmed_real_miss_count`
 always remains null here. The job never classifies candidates as real, inherited
 or flaky and never asserts zero real misses.
+
+The observation is self-reported by PR-controlled tests and scripts, which can
+forge its evidence. The token has read-only access and the repository is public.
+Adversarial changes require independent reproduction in a trusted environment
+before these observations can support a decision.
 
 Full logs expose pytest elapsed seconds, not summed testcase durations.
 `full_pytest_elapsed_seconds_sum` sums the four primary shard elapsed times.
@@ -89,6 +109,13 @@ Selected subprocess wall time and summed actual testcase durations are separate
 fields. Full testcase durations and historical estimates remain null because
 neither is available to this job. CSV timings from the prior analysis are
 historical estimates and must not be presented as measured trial runtime.
+
+Both the selected process and full primary shards use `--cov=brigade
+--cov-report=` with `COVERAGE_CORE=sysmon`. The selected process sets its
+`COVERAGE_FILE` under the output directory before importing pytest and explicitly
+uses `--cov-fail-under=0`, so a partial selection has no whole-package coverage
+floor. Matching instrumentation improves cost comparability. Collection,
+process startup, reporting and selected-worker instrumentation still differ.
 
 ## Reproduce and evaluate
 
@@ -108,8 +135,9 @@ from scripts.pr_tier_selection import select_tests
 record = json.loads(Path("../shadow-evidence/identity.json").read_text())
 selection = select_tests(Path("."), record["changed"])
 print(json.dumps(selection, indent=2))
+Path("../shadow-evidence/pytest-input.json").write_text(json.dumps({"selected": selection["selected"]}))
 subprocess.run(
-    [sys.executable, "-m", "pytest", "-q", "-o", "addopts=", "--", *selection["selected"]],
+    [sys.executable, "scripts/pr_tier_shadow.py", "pytest", "--output", "../shadow-evidence"],
     check=True,
 )
 PY
@@ -137,7 +165,8 @@ all candidates and their reproduction evidence. The decision criteria are:
 3. Median comparable test-time cost below 25 percent: selected pytest subprocess
    wall seconds divided by the sum of the four primary full-shard pytest elapsed
    seconds, using only complete observations with positive denominators. This is
-   an elapsed-time cost proxy, not measured CPU usage or billing.
+   a coverage-instrumented elapsed-time cost proxy. It does not measure CPU
+   usage, billing or the whole-job cost including setup and installation.
 
 Separately report median selected wall time, summed full job wall time and full
 parallel span. The four full shards run in parallel, while selected files run
