@@ -16,7 +16,10 @@ func Generate(path string, opts sources.Options, w io.Writer) (sources.Result, e
 	if err != nil {
 		return sources.Result{}, err
 	}
-	scans, err := sources.NewFileScanSet(path, sources.DefaultInclude)
+	// Only Codex normalizes compressed session paths when deriving record IDs.
+	scans, err := sources.NewFileScanSet(path, func(path string) bool {
+		return sources.DefaultInclude(sources.LogicalJSONLPath(path))
+	})
 	if err != nil {
 		return sources.Result{}, err
 	}

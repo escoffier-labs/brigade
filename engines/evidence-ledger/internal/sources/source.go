@@ -266,7 +266,7 @@ func LogicalJSONLPath(path string) string {
 }
 
 func DefaultInclude(path string) bool {
-	name := strings.ToLower(filepath.Base(LogicalJSONLPath(path)))
+	name := strings.ToLower(filepath.Base(path))
 	if !strings.HasSuffix(name, ".jsonl") {
 		return false
 	}

@@ -11,6 +11,55 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
+func TestNonCodexCompressedSessionsExcluded(t *testing.T) {
+	for _, harness := range []string{"claude", "openclaw", "pi"} {
+		t.Run(harness, func(t *testing.T) {
+			withTempHome(t)
+			runOK(t, "init")
+			dir := t.TempDir()
+			plain := filepath.Join(dir, "session.jsonl")
+			// No explicit session ID: compression must not split the collection.
+			content := []byte(`{"type":"message","text":"alpha event","message":{"role":"user","content":"alpha event"}}` + "\n")
+			if err := os.WriteFile(plain, content, 0o600); err != nil {
+				t.Fatal(err)
+			}
+			first := runJSON(t, "import", harness, dir, "--json")
+			if first["inserted_items"].(float64) != 1 {
+				t.Fatalf("initial plain import = %v", first)
+			}
+			before := runJSON(t, "status", "--json")
+			encoder, err := zstd.NewWriter(nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			defer encoder.Close()
+			compressed := plain + ".zst"
+			if err := os.WriteFile(compressed, encoder.EncodeAll(content, nil), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if err := os.Remove(plain); err != nil {
+				t.Fatal(err)
+			}
+			// Both recursive discovery and explicit inputs must ignore unsupported
+			// compressed sessions, including repeat imports after replacement.
+			for _, path := range []string{dir, compressed, dir} {
+				result := runJSON(t, "import", harness, path, "--json")
+				if result["files_parsed"].(float64) != 0 || result["files_skipped"].(float64) != 0 || result["inserted_items"].(float64) != 0 {
+					t.Errorf("unsupported compressed import %q = %v", path, result)
+				}
+			}
+			after := runJSON(t, "status", "--json")
+			if before["items"] != after["items"] {
+				t.Errorf("compression duplicated archive rows: before=%v after=%v", before, after)
+			}
+			collections := runJSON(t, "sql", "select count(*) as n from collections", "--json")
+			if collections["rows"].([]any)[0].(map[string]any)["n"].(float64) != 1 {
+				t.Errorf("compression split the collection: %v", collections)
+			}
+		})
+	}
+}
+
 func TestCodexCompressedSessionImportIdentity(t *testing.T) {
 	withTempHome(t)
 	runOK(t, "init")
@@ -25,7 +74,8 @@ func TestCodexCompressedSessionImportIdentity(t *testing.T) {
 	if first["inserted_items"].(float64) != 1 {
 		t.Fatalf("initial import = %v", first)
 	}
-	before := runJSON(t, "status", "--json")
+	countsQuery := "select (select count(*) from items) as items, (select count(*) from collections) as collections"
+	before := runJSON(t, "sql", countsQuery, "--json")["rows"].([]any)[0].(map[string]any)
 	encoder, err := zstd.NewWriter(nil)
 	if err != nil {
 		t.Fatal(err)
@@ -46,7 +96,7 @@ func TestCodexCompressedSessionImportIdentity(t *testing.T) {
 	if second["files_parsed"].(float64) != 1 || second["inserted_items"].(float64) != 0 {
 		t.Fatalf("compressed replacement import = %v", second)
 	}
-	after := runJSON(t, "status", "--json")
+	after := runJSON(t, "sql", countsQuery, "--json")["rows"].([]any)[0].(map[string]any)
 	if before["items"] != after["items"] || before["collections"] != after["collections"] {
 		t.Fatalf("compression duplicated archive rows: before=%v after=%v", before, after)
 	}
