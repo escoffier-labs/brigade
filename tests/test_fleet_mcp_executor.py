@@ -69,6 +69,27 @@ def test_http_discovery_preserves_explicit_annotations(agent_http):
             "destructiveHint": name == "fleet_ack",
         }
         assert tool["inputSchema"]["additionalProperties"] is False
+        if name in {"fleet_send", "fleet_reply"}:
+            client_id = tool["inputSchema"]["properties"]["client_id"]
+            assert client_id["minLength"] == 1
+            assert client_id["maxLength"] == 64
+            assert client_id["pattern"] == "^[A-Za-z0-9_-]+$"
+
+
+def test_http_replay_keys_are_scoped_to_authenticated_sender(agent_http, stations):
+    node, _peer = stations
+    args = {"to": NODE_B, "body": "Shared payload", "client_id": "shared-replay-key"}
+    agent_message = rpc(agent_http, "fleet_send", **args)["message"]
+    node_message = call(node, "fleet_send", **args)["message"]
+
+    assert agent_message["sender"] == "agent:executor"
+    assert node_message["sender"] == NODE_A
+    assert agent_message["id"] != node_message["id"]
+    for sent, expected in (
+        (rpc(agent_http, "fleet_sent")["messages"], agent_message),
+        (call(node, "fleet_sent")["messages"], node_message),
+    ):
+        assert [(row["id"], row["sender"]) for row in sent] == [(expected["id"], expected["sender"])]
 
 
 @pytest.mark.parametrize("tool", ["fleet_send", "fleet_reply"])

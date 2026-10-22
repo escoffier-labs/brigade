@@ -51,6 +51,8 @@ def tool_specs() -> list[dict[str, Any]]:
                 "thread": text,
                 "client_id": {
                     **text,
+                    "maxLength": 64,
+                    "pattern": "^[A-Za-z0-9_-]+$",
                     "description": "Reuse this key with identical arguments to retry without duplicates.",
                 },
             },
@@ -81,6 +83,8 @@ def tool_specs() -> list[dict[str, Any]]:
                 "body": text,
                 "client_id": {
                     **text,
+                    "maxLength": 64,
+                    "pattern": "^[A-Za-z0-9_-]+$",
                     "description": "Reuse this key with identical arguments to retry without duplicates.",
                 },
             },

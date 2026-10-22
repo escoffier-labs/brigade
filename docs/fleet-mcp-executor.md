@@ -38,7 +38,13 @@ preservation remain manual checks below.
 Use a dedicated agent principal, such as `agent:executor`, with exact recipient
 grants for the intended peer nodes or agents. Avoid `*`, `node:*`, `agent:*`,
 admin credentials and broadly privileged node credentials. Enrollment and grant
-management use the existing [message principal workflow](runbooks/fleet-hub-proxmox.md).
+management use the existing [principal and grants workflow](runbooks/fleet-hub-proxmox.md#external-agent-principals).
+For example, `agent:example-caller` can have just one exact recipient grant:
+
+```json
+{ "may_send_to": ["agent:example-peer"] }
+```
+
 The test recipe must use a temporary hub and temporary credentials. Never mint
 credentials on a real hub merely to validate this document.
 
@@ -107,6 +113,12 @@ export default defineApp(
     });
     return {
       tools: withApprovals(upstream, (_tool, name) => {
+        if (name === "fleet_inbox") return ({ toolInput }) => {
+          if (typeof toolInput !== "object" || toolInput === null) return "denied";
+          const waitSecs = "wait_secs" in toolInput ? toolInput.wait_secs : 0;
+          return typeof waitSecs === "number" && Number.isInteger(waitSecs)
+            && waitSecs >= 0 && waitSecs <= 10 ? "approved" : "denied";
+        };
         if (reads.has(name)) return never();
         if (writes.has(name)) return always();
         return () => "denied";
@@ -124,7 +136,7 @@ account does not change the hub principal bound to an existing station.
 
 | Fleet tools | `readOnlyHint` | `destructiveHint` | App policy |
 |---|---|---|---|
-| `fleet_who`, `fleet_inbox`, `fleet_sent`, `fleet_claims` | true | false | Run |
+| `fleet_who`, `fleet_inbox`, `fleet_sent`, `fleet_claims` | true | false | Run, inbox waits at most 10 seconds |
 | `fleet_send`, `fleet_reply` | false | false | Require approval |
 | `fleet_ack` | false | true | Require approval |
 
@@ -139,6 +151,14 @@ asks for approval based on `destructiveHint`. It would not gate additive sends.
 The explicit policy above requires approval for all three writes and denies new,
 unknown tool names. Keep that policy when updating the import.
 
+The installed `apps@0.0.1-beta.90` declaration of `ApprovalContext<Input>` in
+`apps/types/apps/src/contracts/approval.d.ts` exposes decoded call input as
+`toolInput`. The [Approvals section](https://executor.sh/docs/concepts/tools-and-approvals#approvals)
+also documents input-aware policies (retrieved 2026-10-22, publication date not
+stated). The inbox policy uses that input to deny waits above 10 seconds, rather
+than relying on callers to follow the suggested wait. The 45-second router
+timeout leaves slack above that bound. Recheck the declaration when upgrading.
+
 ## Browser approval boundary
 
 Connect the agent only through a scoped OAuth connection approved with
@@ -146,12 +166,16 @@ Connect the agent only through a scoped OAuth connection approved with
 `https://executor.example.com/mcp?connection=CONNECTION_ID&elicitation_mode=browser`.
 Select only this app and its intended account and tools. Configure browser
 sign-in and consent using Executor's [MCP connection documentation](https://executor.sh/docs/mcp).
-The approved grant fixes the mode. Editing its URL to `model` or `native` must
-not change that issued grant's mode.
+Executor's [Elicitation modes section](https://executor.sh/docs/mcp#elicitation-modes)
+states that the issued grant binds the mode and query edits cannot change it
+(retrieved 2026-10-22, publication date not stated). Manual step 3 must confirm
+that behavior in the deployed version.
 
 **Executor's default `model` mode lets the calling agent approve its own call
 through `resume`. This recipe must not use it for gated tools.** In browser mode,
-the agent may collect the signed-in person's answer with `resume({ requestId })`.
+the agent may collect the signed-in person's answer with `resume({ requestId })`,
+as documented in [Elicitation modes](https://executor.sh/docs/mcp#elicitation-modes)
+(retrieved 2026-10-22, publication date not stated).
 It must not be able to supply the approval decision itself. Native-mode client
 confirmation also does not meet this recipe's browser requirement.
 
@@ -160,9 +184,11 @@ OAuth grant and signed-in approval page. Brigade's HTTP bearer authenticates
 transport access, and the hub enforces grants and message ownership. Neither
 Brigade boundary enforces Executor approval. Do not give the caller a station
 bearer, hub credential, Executor personal access token, local server key, app edit
-access or permission to authorize a fresh connection in another mode. Executor
-documents that personal tokens and local server keys retain full access outside
-scoped connections. A user consenting to a new model-mode grant would create a
+access or permission to authorize a fresh connection in another mode. Executor's
+[Scoped connections section](https://executor.sh/docs/mcp#scoped-connections)
+states that personal tokens and local server keys retain full access outside
+scoped connections (retrieved 2026-10-22, publication date not stated).
+A user consenting to a new model-mode grant would create a
 different approval boundary. This recipe cannot prevent such consent in app code.
 
 Browser approval, denial, forged `resume` answers, reconnect mode changes and
@@ -172,10 +198,12 @@ Do not enable approval-dependent writes where those checks cannot be completed.
 ## Waits, cancellation, retries and unavailable hubs
 
 Use `fleet_inbox` with `wait_secs: 10` and a small `limit` for this recipe.
-Its station maximum is 120 seconds, but Executor's `execute` has a five-minute
-active-time cap, 100-call cap and 100,000-byte output cap. Approval waits do not
-consume that time. A client may have a shorter timeout. Budget every call in a
-multi-step program, keep each wait well under five minutes, and use one inbox
+Its station maximum is 120 seconds, but the app policy above denies values over
+10 seconds. Executor's [Codemode section](https://executor.sh/docs/mcp#codemode)
+documents a five-minute active-time cap, 100-call cap and 100,000-byte output cap,
+excluding approval and input waits from the time cap (retrieved 2026-10-22,
+publication date not stated). A client may have a shorter timeout. Budget every
+call in a multi-step program, keep each wait well under five minutes, and use one inbox
 wait per execution. The imported router above allows 45 seconds per request.
 
 The station reads once, then uses hub wait chunks of at most 20 seconds with
@@ -186,12 +214,17 @@ A later poll failure can return the last good page, so an empty page is not
 evidence of current connectivity. Directory reads and ack require the hub.
 
 Cancellation has a known limit: the shared stateless station ignores MCP
-cancellation notifications and does not propagate an HTTP disconnect to its hub
-request. Hub wait capacity is released when that bounded wait ends or wakes,
-not immediately when the outer caller cancels. There is no cancellation rollback
-for an accepted send or ack. Immediate end-to-end capacity release is unverified
-and not provided by this slice. Use short waits, and check capacity release
-before treating the issue's cancellation acceptance item as complete.
+cancellation notifications and does not propagate an HTTP disconnect to
+`poll_inbox`. The loop can open successive hub waits of up to 20 seconds until
+the full `wait_secs` deadline, up to 120 seconds, even after the caller abandons
+it. Ending one chunk does not end the abandoned call. Two such calls can keep
+the per-principal cap of 2 hub waiters occupied for their full waits unless mail
+arrives or a hub failure ends polling. The app's 10-second policy bounds this
+recipe's waits, but direct station callers can still request 120 seconds.
+There is no cancellation rollback for an accepted send or ack. End-to-end
+cancellation and immediate capacity release are deferred to
+[#2012](https://github.com/escoffier-labs/brigade/issues/2012). Check capacity
+release before treating the cancellation acceptance item as complete.
 
 Generate a fresh `client_id` for each intended send or reply, persist it before
 calling, and reuse it with identical arguments after a timeout or reconnect.
@@ -211,16 +244,20 @@ permission errors fail without delivery. Queued data never
 changes the credential's grants.
 
 For transient failures, use at most three attempts with delays such as 1 and
-2 seconds, within the outer deadline. The Executor interpreter has no timers, so
+2 seconds, within the outer deadline. Executor's
+[Codemode section](https://executor.sh/docs/mcp#codemode) states that the
+interpreter has no timers (retrieved 2026-10-22, publication date not stated), so
 schedule retries in the caller between executions. Never spin in `execute`.
 Respect `permanent`/`transient` errors and each entry of ack's `results` array.
 Inspect MCP `isError` and the JSON text content, even if Executor's outer call
 succeeds. Preserve fences, scan findings, IDs and decimal-string cursors.
 Reading or returning a message never acknowledges it.
 
-Executor cannot resume a paused program after its server restarts. Its docs
-warn against rerunning such a program automatically because earlier steps may
-have taken effect. Reconcile individual calls by their persisted keys and IDs.
+Executor's [What is coming later section](https://executor.sh/docs/mcp#what-is-coming-later)
+states that a server restart loses paused programs and warns against automatic
+reruns because earlier calls may have taken effect (retrieved 2026-10-22,
+publication date not stated). Reconcile individual calls by their persisted keys
+and IDs.
 
 ## Manual Executor acceptance and comparison
 
@@ -254,6 +291,8 @@ mode. Record no credentials. All checks in this section are currently unverified
    hub's waiter count return to baseline. Record the delay. The current station
    cannot promise immediate cancellation propagation. Test Executor/client
    deadlines and server restart recovery without replaying a whole program.
+   Confirm the app denies `wait_secs: 11` and `wait_secs: 120` before the station
+   is called, while omitted, zero and 10-second waits remain allowed.
 7. Compare direct HTTP MCP and Executor on the same presence, send, receive,
    reply, receive, ack and sent-status workflow, using separate fresh message
    keys and equivalent approvals. Record correctness, outer MCP calls, upstream
