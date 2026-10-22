@@ -12,7 +12,7 @@ import tempfile
 import threading
 import unicodedata
 from time import monotonic, sleep
-from typing import Any
+from typing import Any, Callable
 
 from . import fleet_client, fleet_client_messages as messages, fleet_hub_questions as questions
 from .fleet_hub_messages import BODY_LIMIT, MAX_WAIT_MS
@@ -36,7 +36,7 @@ def _plain(text: str) -> str:
     return "".join(c for c in text if c in "\n\t" or not unicodedata.category(c).startswith("C"))
 
 
-def _process(argv: list[str], *, deadline: float) -> str | None:
+def _process(argv: list[str], *, deadline: float, stop: Callable[[], bool]) -> str | None:
     remaining = deadline - monotonic()
     if remaining <= 0:
         return None
@@ -51,7 +51,16 @@ def _process(argv: list[str], *, deadline: float) -> str | None:
                     stderr=subprocess.DEVNULL,
                     start_new_session=os.name == "posix",
                 )
-                process.wait(timeout=remaining)
+                while True:
+                    remaining = deadline - monotonic()
+                    if remaining <= 0:
+                        return None
+                    try:
+                        process.wait(timeout=min(1, remaining))
+                        break
+                    except subprocess.TimeoutExpired:
+                        if stop():
+                            return None
                 if process.returncode != 0:
                     return None
                 output.seek(0)
@@ -74,30 +83,39 @@ def _process(argv: list[str], *, deadline: float) -> str | None:
         return None
 
 
-def _desktop(question: str, record: dict[str, Any], *, deadline: float) -> str | None:
+def _desktop(question: str, record: dict[str, Any], *, deadline: float, stop: Callable[[], bool]) -> str | None:
     if not (os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")):
         return None
     text = _plain(f"{record['caller']} | Question {record['question_id']}\nAnswers are recorded.\n\n{question}")
     zenity = shutil.which("zenity")
     kdialog = shutil.which("kdialog") if not zenity else None
     if zenity:
+        # Entry labels always run through g_strcompress and GTK mnemonic parsing,
+        # even with --no-markup. Encode only this backend's native text syntax.
+        encoded = text.replace("\\", "\\\\").replace("_", "__")
         answer = _process(
-            [zenity, "--entry", "--no-markup", "--title", "Brigade operator question", "--text", text],
+            [zenity, "--entry", "--no-markup", "--title", "Brigade operator question", "--text", encoded],
             deadline=deadline,
+            stop=stop,
         )
     elif kdialog:
         answer = _process(
-            [kdialog, "--title", "Brigade operator question", "--inputbox", html.escape(text)], deadline=deadline
+            [kdialog, "--title", "Brigade operator question", "--inputbox", html.escape(text)],
+            deadline=deadline,
+            stop=stop,
         )
     else:
         answer = None
     if answer is not None:
         return answer
+    if stop():
+        return None
     notice = shutil.which("notify-send")
     if notice:
         _process(
             [notice, "--", "Brigade operator question", "A question is waiting in the configured operator inbox."],
             deadline=min(deadline, monotonic() + 1),
+            stop=stop,
         )
     return None
 
@@ -162,7 +180,17 @@ class AskUser:
             if terminal is not None:
                 return terminal
             if record["created"]:
-                answer = _desktop(question, record, deadline=deadline)
+
+                def desktop_done() -> bool:
+                    nonlocal record
+                    if record["status"] not in {"answered", "timeout"}:
+                        record = online({"action": "question_status", "question_id": question_id})
+                    return record["status"] in {"answered", "timeout"}
+
+                answer = _desktop(question, record, deadline=deadline, stop=desktop_done)
+                terminal = _terminal(record)
+                if terminal is not None:
+                    return terminal
                 if answer is not None:
                     record = online({"action": "question_desktop", "question_id": question_id, "answer": answer})
                     terminal = _terminal(record)

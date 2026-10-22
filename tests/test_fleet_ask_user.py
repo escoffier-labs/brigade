@@ -21,7 +21,7 @@ pytest_plugins = ["tests._fleet_message_fixtures"]
 
 @pytest.fixture
 def station(hub, tmp_path, monkeypatch):
-    monkeypatch.setenv("BRIGADE_EXTRAS", "all")
+    monkeypatch.setenv("BRIGADE_EXTRAS", "1")
     monkeypatch.setenv("BRIGADE_FLEET_OPERATOR_RECIPIENT", NODE_B)
     monkeypatch.delenv("BRIGADE_FLEET_MESSAGE_TOKEN_FILE", raising=False)
     monkeypatch.delenv("DISPLAY", raising=False)
@@ -121,6 +121,127 @@ def executable(tmp_path, name, body):
     return str(path)
 
 
+def zenity_label(text):
+    """Model entry.c's g_strcompress followed by GTK mnemonic parsing, without a GUI."""
+    escapes = {"b": "\b", "f": "\f", "n": "\n", "r": "\r", "t": "\t", "v": "\v"}
+
+    def unescape(match):
+        value = match.group(1)
+        return chr(int(value, 8)) if value[0] in "01234567" else escapes.get(value, value)
+
+    compressed = re.sub(r"\\([0-7]{1,3}|.)", unescape, text, flags=re.S).split("\0", 1)[0]
+    return re.sub(r"_(.)", r"\1", compressed, flags=re.S)
+
+
+def test_zenity_native_label_preserves_paths_and_caller(station, hub, tmp_path, monkeypatch):
+    from brigade import fleet_ask_user, fleet_hub
+
+    with fleet_hub.open_db(hub[3]) as conn:
+        asker = fleet_hub_messages.add_principal(conn, {"name": "test_worker", "may_send_to": [NODE_B]})
+    token_file = tmp_path / "asker.token"
+    token_file.write_text(asker["token"])
+    token_file.chmod(0o600)
+    station = fleet_mcp.FleetMcp(token_file=str(token_file))
+    record = tmp_path / "argv.json"
+    binary = executable(
+        tmp_path,
+        "zenity",
+        "import json,sys\nfrom pathlib import Path\n"
+        f"Path({str(record)!r}).write_text(json.dumps(sys.argv))\nprint('Local answer')\n",
+    )
+    monkeypatch.setenv("DISPLAY", ":99")
+    monkeypatch.setattr(fleet_ask_user.shutil, "which", lambda name: binary if name == "zenity" else None)
+    question = r"Use C:\new_dir\000\tail and _literal__name?" + "\n<b>Plain</b>\u202e\x01 $(echo data)"
+    result, error = invoke(station, question=question)
+    assert not error and result["source"] == "caller_reported_desktop"
+    argv = json.loads(record.read_text())
+    text = argv[argv.index("--text") + 1]
+    assert r"C:\\new__dir\\000\\tail" in text
+    assert "agent:test__worker" in text
+    display = zenity_label(text)
+    expected = f"agent:test_worker | Question {result['question_id']}\nAnswers are recorded.\n\n" + question.replace(
+        "\u202e", ""
+    ).replace("\x01", "")
+    assert display == expected
+    assert "<b>Plain</b>" in text and "$(echo data)" in text and "--no-markup" in argv
+    assert "\u202e" not in text and "\x01" not in text
+    with sqlite3.connect(hub[3]) as conn:
+        assert conn.execute("SELECT question FROM fleet_questions").fetchone() == (question,)
+
+
+def test_operator_reply_preempts_open_desktop_and_reaps_process(station, hub, tmp_path, monkeypatch):
+    from brigade import fleet_ask_user
+
+    opened = tmp_path / "opened"
+    notified = tmp_path / "notified"
+    binary = executable(
+        tmp_path,
+        "zenity",
+        "from pathlib import Path\nimport time\n"
+        f"Path({str(opened)!r}).touch()\ntime.sleep(30)\nprint('Late local answer')\n",
+    )
+    notice = executable(tmp_path, "notify-send", f"from pathlib import Path\nPath({str(notified)!r}).touch()\n")
+    monkeypatch.setenv("DISPLAY", ":99")
+    monkeypatch.setattr(
+        fleet_ask_user.shutil, "which", lambda name: {"zenity": binary, "notify-send": notice}.get(name)
+    )
+    processes = []
+    original_popen = fleet_ask_user.subprocess.Popen
+
+    def tracked_popen(*args, **kwargs):
+        process = original_popen(*args, **kwargs)
+        processes.append(process)
+        return process
+
+    monkeypatch.setattr(fleet_ask_user.subprocess, "Popen", tracked_popen)
+    requests = []
+    original_request = fleet_client_messages._request
+
+    def counted(*args, **kwargs):
+        requests.append(args[2]["action"])
+        return original_request(*args, **kwargs)
+
+    monkeypatch.setattr(fleet_client_messages, "_request", counted)
+    results = []
+    thread = threading.Thread(
+        target=lambda: results.append(invoke(station, timeout_secs=30, request_id="desktop-preempt")), daemon=True
+    )
+    thread.start()
+    try:
+        question = pending(hub)
+        limit = time.monotonic() + 3
+        while not opened.exists() and time.monotonic() < limit:
+            time.sleep(0.01)
+        assert opened.exists() and len(processes) == 1 and processes[0].poll() is None
+        replied = time.monotonic()
+        assert _request(hub[0], hub[2], {"action": "reply", "id": question["id"], "body": "Inbox wins"})[0] == 201
+        thread.join(timeout=4)
+        assert not thread.is_alive(), "open dialog blocked an already-recorded operator reply"
+        assert time.monotonic() - replied < 4
+        assert processes[0].returncode is not None
+        assert not notified.exists()
+        result, error = results[0]
+        assert not error and result["status"] == "answered" and result["source"] == "operator_reply"
+        assert stable_answer(result)["answer"] == "Inbox wins"
+        assert 1 <= requests.count("question_status") <= 5
+        assert "question_desktop" not in requests
+        with sqlite3.connect(hub[3]) as conn:
+            assert conn.execute("SELECT status,answer,source FROM fleet_questions").fetchone() == (
+                "answered",
+                "Inbox wins",
+                "operator_reply",
+            )
+        again, error = invoke(station, timeout_secs=30, request_id="desktop-preempt")
+        assert not error and stable_answer(again) == stable_answer(result)
+        assert len(processes) == 1
+    finally:
+        for process in processes:
+            if process.poll() is None:
+                process.kill()
+            process.wait(timeout=2)
+        thread.join(timeout=3)
+
+
 def test_desktop_literal_argv_hub_audit_and_no_duplicate_dialog(station, hub, tmp_path, monkeypatch):
     from brigade import fleet_ask_user
 
@@ -141,7 +262,8 @@ def test_desktop_literal_argv_hub_audit_and_no_duplicate_dialog(station, hub, tm
     text = argv[argv.index("--text") + 1]
     assert "<b>Plain</b>" in text and "$(echo data)" in text
     assert "\u202e" not in text and "\x01" not in text
-    assert NODE_A in text and result["question_id"] in text and "recorded" in text
+    display = zenity_label(text)
+    assert NODE_A in display and result["question_id"] in display and "recorded" in display
     with sqlite3.connect(hub[3]) as conn:
         assert conn.execute("SELECT answer,source FROM fleet_questions").fetchone() == (
             "Local answer",
@@ -183,6 +305,12 @@ def test_desktop_fallbacks_and_kdialog(station, hub, tmp_path, monkeypatch, mode
     thread = threading.Thread(target=lambda: results.append(invoke(station, question="<b>Question</b>")), daemon=True)
     thread.start()
     question = pending(hub)
+    if mode == "notify":
+        # Exercise notification while pending, before the operator wins.
+        limit = time.monotonic() + 2
+        while not record.exists() and time.monotonic() < limit:
+            time.sleep(0.01)
+        assert record.exists()
     if mode != "kdialog":
         assert _request(hub[0], hub[2], {"action": "reply", "id": question["id"], "body": "Inbox answer"})[0] == 201
     thread.join(timeout=3)

@@ -1107,6 +1107,22 @@ def handle(
         return fleet_hub_questions.handle(conn, raw, caller=caller, authenticated_generation=authenticated_generation)
     if action in ("who", "claims"):
         return 200, _as_active_principal(conn, caller, lambda: _station_read(conn, raw, caller=caller), read_only=True)
+    if action == "reply" or (action == "send" and raw.get("reply_to") is not None):
+
+        def insert_reply() -> dict[str, Any] | None:
+            if authenticated_generation is not None:
+                from .fleet_hub_questions import _generation
+
+                if not secrets.compare_digest(_generation(conn, caller), authenticated_generation):
+                    raise MessageAuthError("reply credential generation changed")
+            if action == "reply":
+                return reply(conn, raw, sender=caller)
+            return send(conn, raw, sender=caller, reply_to=raw.get("reply_to"))
+
+        # Hold the write lock from credential comparison through insertion and
+        # the question audit trigger, including the alternate send/reply_to path.
+        message = _as_active_principal(conn, caller, insert_reply)
+        return (201, {"message": message}) if message else (404, {"error": "message not found"})
     if action == "send":
         return 201, {"message": send(conn, raw, sender=caller, reply_to=raw.get("reply_to"))}
     if action == "sent":
@@ -1129,7 +1145,4 @@ def handle(
     if action == "ack":
         message = _as_active_principal(conn, caller, lambda: ack(conn, raw.get("id"), recipient=caller))
         return (200, {"message": message}) if message else (404, {"error": "message not found"})
-    if action == "reply":
-        message = _as_active_principal(conn, caller, lambda: reply(conn, raw, sender=caller))
-        return (201, {"message": message}) if message else (404, {"error": "message not found"})
     raise MessageError("action must be send, list, sent, ack, reply, who, or claims")

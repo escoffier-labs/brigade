@@ -54,7 +54,7 @@ def unfence(value):
 
 
 def test_cli_stdio_inventory_and_http_config(monkeypatch, capsys):
-    monkeypatch.setenv("BRIGADE_EXTRAS", "all")
+    monkeypatch.setenv("BRIGADE_EXTRAS", "1")
     monkeypatch.setattr(
         "sys.stdin", io.StringIO(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}) + "\n")
     )
