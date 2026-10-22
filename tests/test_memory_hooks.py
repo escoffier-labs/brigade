@@ -708,3 +708,32 @@ def test_rendered_fields_are_printable_physical_lines_without_field_truncation()
     assert "memory/ card name.md" in text
     assert text.splitlines()[0] == "memory recall: comet"
     assert "SECRET_BODY" not in text
+
+
+@pytest.mark.parametrize("shadow", ["brigade.py", "brigade/__init__.py"])
+def test_recall_child_excludes_workspace_imports(tmp_path, monkeypatch, shadow):
+    hub = tmp_path / "hub"
+    session = tmp_path / "comet-project"
+    session.mkdir()
+    _write_card(hub, "comet.md", "Comet notes", "PRIVATE_BODY", tags=["comet"])
+    sentinel = tmp_path / "executed"
+    planted = session / shadow
+    planted.parent.mkdir(parents=True, exist_ok=True)
+    planted.write_text(f"from pathlib import Path\nPath({str(sentinel)!r}).touch()\n", encoding="utf-8")
+    monkeypatch.chdir(session)
+    monkeypatch.setenv("PYTHONPATH", str(session))
+    payload = memory_hooks.recall_cards_payload(target=hub, cwd=session, query="comet")
+    assert not sentinel.exists(), "recall child executed workspace Brigade code"
+    assert payload["status"] == "ok"
+    assert payload["cwd"] == str(session)
+    assert payload["matches"][0]["title"] == "Comet notes"
+
+
+def test_recall_child_preserves_relative_target_and_session_paths(tmp_path, monkeypatch):
+    _write_card(tmp_path / "hub", "comet.md", "Comet notes", "PRIVATE_BODY", tags=["comet"])
+    (tmp_path / "comet-project").mkdir()
+    monkeypatch.chdir(tmp_path)
+    payload = memory_hooks.recall_cards_payload(target=Path("hub"), cwd=Path("comet-project"), query="comet")
+    assert payload["status"] == "ok"
+    assert payload["cwd"] == "comet-project"
+    assert payload["matches"][0]["title"] == "Comet notes"

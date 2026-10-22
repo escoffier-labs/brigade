@@ -86,7 +86,8 @@ def test_render_units(tmp_path, monkeypatch):
     for rendered in (unit, service):
         assert "After=network.target\n" in rendered
         assert "network-online" not in rendered
-    assert f"ExecStart=/venv/bin/python -m brigade.grokbot_t3 watch --target {tmp_path}" in service
+    assert "ExecStart=/venv/bin/python -I -c " in service
+    assert f"brigade.grokbot_t3 watch --target {tmp_path}\n" in service
     assert "OnUnitActiveSec=1min" in timer and f"Unit={lifecycle.WATCH_SERVICE}" in timer
 
 
@@ -251,7 +252,8 @@ def test_render_intake_units(tmp_path, monkeypatch):
     runtime = write_runtime(tmp_path, writable_paths=["/srv/t3/state"])
     monkeypatch.setattr(lifecycle, "_load_validated_instance", lambda target: {"runtime_path": str(runtime)})
     service, timer = lifecycle.render_intake_units(tmp_path, python="/venv/bin/python")
-    assert f"ExecStart=/venv/bin/python -m brigade.grokbot_t3 intake --target {tmp_path}\n" in service
+    assert "ExecStart=/venv/bin/python -I -c " in service
+    assert f"brigade.grokbot_t3 intake --target {tmp_path}\n" in service
     assert "Description=Brigade Grok Bot t3-dispatch issue intake\n" in service
     assert "Type=oneshot\n" in service and "TimeoutStartSec=900\n" in service
     assert "ProtectSystem=strict\n" in service

@@ -68,8 +68,9 @@ with runguard.run_lock(cwd, run_dir=run, wait_seconds=0):
 
         def launch(argv, *args, **kwargs):
             if "brigade.work_cmd.dispatch_child" in argv:
-                assert argv[4:8] == [sys.executable, "-m", "brigade", "run"]
-                argv = [*argv[:4], sys.executable, str(executable), *argv[7:]]
+                child_start = argv.index("brigade.work_cmd.dispatch_child") + 2
+                child_argv = argv[child_start:]
+                argv = [*argv[:child_start], sys.executable, str(executable), *child_argv[child_argv.index("run") :]]
             return popen(argv, *args, **kwargs)
 
         monkeypatch.setattr(subprocess, "Popen", launch)
@@ -514,15 +515,24 @@ def test_max_total_denial_uses_budget_payload(apply_target, capsys):
     }
 
 
+@requires_process_groups
 @requires_dispatch_apply
 def test_live_child_consumes_capacity_in_next_plan(apply_target, capsys, monkeypatch):
-    monkeypatch.setenv("FAKE_DISPATCH_SLEEP", "0.5")
+    # The child must outlive the dry-run on a slow runner; a 0.5 s child raced it (#1953).
+    monkeypatch.setenv("FAKE_DISPATCH_SLEEP", "60")
     _tasks(apply_target, [["a.py"], ["b.py"]])
     _apply(apply_target, capsys, "--max", "1", "--no-wait")
     assert cli.main(["work", "dispatch", "--target", str(apply_target), "--max", "1", "--dry-run", "--json"]) == 0
     plan = json.loads(capsys.readouterr().out)["plan"]
     assert plan["live_children"] == 1 and plan["capacity"] == 0
-    _apply(apply_target, capsys, "--max", "0")
+    (intent,) = _intents(apply_target)
+    run_dir = Path(intent["run_dir"])
+    deadline = time.monotonic() + 5
+    while not (run_dir / "run.json").exists() and time.monotonic() < deadline:
+        time.sleep(0.02)
+    os.killpg(intent["pid"], 9)
+    os.waitpid(intent["pid"], 0)
+    _apply(apply_target, capsys, "--max", "0", expected=1)
 
 
 @requires_process_groups

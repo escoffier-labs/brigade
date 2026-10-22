@@ -861,7 +861,7 @@ def test_ci_windows_native_acceptance_script_covers_required_flow():
     assert "BrigadeCare-ingest-sweep" in text
     assert "/SC MINUTE /MO 30" in text
     assert "brigade care status" in text
-    assert '/RU "%USERNAME%" /IT' in text
+    assert "/RU `$env:USERNAME /IT /F" in text
     assert "Invoke-PrintedSchtasksBatch" in text
     assert "Read-AcceptanceFileText" in text
     assert "runas.exe /trustlevel:0x20000" not in text

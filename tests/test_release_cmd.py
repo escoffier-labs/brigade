@@ -3,6 +3,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 import time
 from pathlib import Path
 
@@ -149,10 +150,12 @@ def test_release_guard_defaults_to_embedded_brigade_modules(tmp_path, monkeypatc
         tmp_path, policy="public-repo", introduced=True, base_ref="origin/main"
     )
     assert tip_error is None
-    assert tip[:3] == [release_cmd.sys.executable, "-m", "brigade.guard"]
-    assert tip[3:7] == ["audit", str(tmp_path), "--scope", "tracked"]
+    from brigade.isolated_exec import module_argv
+
+    assert tip[:6] == module_argv("brigade.guard")
+    assert tip[6:10] == ["audit", str(tmp_path), "--scope", "tracked"]
     assert "--strict" in tip
-    assert history[:3] == [release_cmd.sys.executable, "-m", "brigade.guard.git_scan"]
+    assert history[:7] == module_argv("brigade.guard.git_scan_target", str(tmp_path))
     assert tip_env == history_env == {}
     assert "CONTENT_GUARD_DIR" not in " ".join(tip + history)
 
@@ -173,7 +176,8 @@ def test_release_guard_tip_ignores_gitignored_scratch(tmp_path, monkeypatch):
 
 def test_release_guard_broken_external_scanner_is_unavailable_warning(tmp_path, monkeypatch):
     checkout = tmp_path / "content-guard"
-    (checkout / "src").mkdir(parents=True)
+    (checkout / "src/content_guard").mkdir(parents=True)
+    (checkout / "src/content_guard/__init__.py").write_text("")
     (checkout / "policies").mkdir()
     (checkout / "policies" / "public-repo.json").write_text("{}")
     monkeypatch.setenv("CONTENT_GUARD_DIR", str(checkout))
@@ -204,7 +208,8 @@ def test_release_guard_malformed_embedded_policy_is_unavailable_warning(tmp_path
 
 def test_release_guard_external_checkout_requires_explicit_override(tmp_path, monkeypatch):
     checkout = tmp_path / "content-guard"
-    (checkout / "src").mkdir(parents=True)
+    (checkout / "src/content_guard").mkdir(parents=True)
+    (checkout / "src/content_guard/__init__.py").write_text("")
     (checkout / "policies").mkdir()
     (checkout / "policies" / "public-repo.json").write_text("{}")
     monkeypatch.setenv("CONTENT_GUARD_DIR", str(checkout))
@@ -216,28 +221,24 @@ def test_release_guard_external_checkout_requires_explicit_override(tmp_path, mo
     )
     policy = str(checkout / "policies" / "public-repo.json")
     assert tip_error is None
-    assert tip == [
-        release_cmd.sys.executable,
-        "-m",
-        "content_guard",
+    assert tip[:3] == history[:3] == [sys.executable, "-I", "-c"]
+    assert tip[4] == history[4] == str(checkout / "src/content_guard/__init__.py")
+    assert tip[tip.index("content_guard") + 1 :] == [
         "scan",
         str(tmp_path),
         "--policy",
         policy,
     ]
     assert history_error is None
-    assert history == [
-        release_cmd.sys.executable,
-        "-m",
-        "content_guard.git_scan",
+    assert history[history.index("content_guard.git_scan") + 1 :] == [
+        str(tmp_path),
         "--history",
         "--range",
         "origin/main..HEAD",
         "--policy",
         policy,
     ]
-    expected_env = {"PYTHONPATH": str(checkout / "src")}
-    assert tip_env == history_env == expected_env
+    assert tip_env == history_env == {}
 
 
 def test_release_plan_run_runs_show_clean_ready(tmp_path, monkeypatch, capsys):

@@ -16,6 +16,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from .isolated_exec import module_argv, trusted_cwd
+
 DEFAULT_RECALL_LIMIT = 5
 RECALL_MAX_LINES = 10
 RECALL_TIMEOUT_SECONDS = 5
@@ -23,7 +25,6 @@ RECALL_QUERY_MAX_CHARS = 256
 _GIT_TIMEOUT_SECONDS = 0.5
 GENERIC_WORKSPACE_QUERY = "workspace"
 _TERM_SPLIT = re.compile(r"[-_]+")
-_RECALL_WORKER_COMMAND = "from brigade.memory_hooks import _recall_worker_main; _recall_worker_main()"
 
 
 def split_cwd_terms(basename: str) -> list[str]:
@@ -336,8 +337,8 @@ def recall_cards_payload(
     )
     request = json.dumps(
         {
-            "target": str(target),
-            "cwd": str(cwd),
+            "target": str(memory_root),
+            "cwd": str(cwd.expanduser().absolute()),
             "limit": capped,
             "query": explicit_query,
         },
@@ -345,7 +346,8 @@ def recall_cards_payload(
     )
     try:
         completed = subprocess.run(
-            [sys.executable, "-c", _RECALL_WORKER_COMMAND],
+            module_argv("brigade.memory_recall_worker"),
+            cwd=trusted_cwd(),
             input=request,
             capture_output=True,
             text=True,
@@ -368,6 +370,7 @@ def recall_cards_payload(
         return empty
     if not isinstance(parsed, dict):
         return empty
+    parsed["cwd"] = str(cwd)
     return parsed
 
 

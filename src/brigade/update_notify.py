@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from . import __version__, component_paths, distribution, localio, telemetry_usage
+from .isolated_exec import module_argv, trusted_cwd
 
 CHECK_URL = "https://check.brigade.tools/v1/version"
 CHECK_INTERVAL_SECONDS = 24 * 60 * 60
@@ -107,7 +108,8 @@ def _spawn_refresh(env: Mapping[str, str]) -> None:
         {"start_new_session": True} if os.name == "posix" else {"creationflags": 0x00000008}  # DETACHED_PROCESS
     )
     subprocess.Popen(
-        [sys.executable, "-m", "brigade", "update", "--notify-refresh"],
+        module_argv("brigade", "update", "--notify-refresh"),
+        cwd=trusted_cwd(),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
