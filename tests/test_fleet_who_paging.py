@@ -213,6 +213,142 @@ def test_claim_snapshot_survives_renew_release_and_reacquire(directory):
     assert seen == sorted(original, key=lambda row: row["target"])
 
 
+@pytest.mark.parametrize("action", ["who", "claims"])
+def test_cursor_keeps_snapshot_order_during_inserts_from_another_connection(directory, action):
+    roster(directory, 4)
+    for target in ("b", "d", "f", "h"):
+        claim(directory, target)
+    keys = ("nodes", "principals", "sessions") if action == "who" else ("claims",)
+    status, original = messages.handle(directory, {"action": action}, caller="reader-node")
+    assert status == 200
+    status, page = messages.handle(directory, {"action": action, "limit": 1}, caller="reader-node")
+    assert status == 200 and page["next_cursor"]
+    seen = {key: list(page[key]) for key in keys}
+    path = directory.execute("PRAGMA database_list").fetchone()[2]
+    writer = fleet_hub.open_db(path)
+    try:
+        for index in range(10):
+            # Insert before and after the current roster/target position.
+            for prefix in ("aaa", "zzz"):
+                fleet_hub.add_node(writer, f"{prefix}-{index}")
+                messages.add_principal(writer, {"name": f"{prefix}-{index}"})
+                claim(writer, f"{prefix}-{index}")
+            status, page = messages.handle(
+                directory, {"action": action, "limit": 1, "cursor": page["next_cursor"]}, caller="reader-node"
+            )
+            assert status == 200
+            for key in keys:
+                seen[key].extend(page[key])
+                assert seen[key] == original[key][: len(seen[key])]
+            if page["next_cursor"] is None:
+                break
+        else:
+            pytest.fail("snapshot traversal did not terminate during concurrent inserts")
+    finally:
+        writer.close()
+    assert seen == {key: original[key] for key in keys}
+
+
+@pytest.mark.parametrize("action", ["who", "claims"])
+def test_agent_pages_filter_before_cuts_and_recheck_remaining_grants(directory, monkeypatch, action):
+    from brigade import fleet_hub_message_grants as grants
+
+    roster(directory, 6)
+    allowed_nodes = ["node-0001", "node-0003", "node-0005"]
+    allowed_peers = ["agent:peer-0001", "agent:peer-0003", "agent:peer-0005"]
+    messages.add_principal(directory, {"name": "limited", "may_send_to": allowed_nodes + allowed_peers})
+    for index in range(6):
+        node = f"node-{index:04d}"
+        session(directory, node, f"session-{index}")
+        status, _ = fleet_hub.handle_claim(
+            directory,
+            {"action": "acquire", "target": f"target-{index}", "node_id": node, "holder": "holder"},
+            caller_node=node,
+        )
+        assert status == 200
+    # Newer forbidden sessions must not consume the one-row session budget.
+    monkeypatch.setattr(fleet_hub_sessions, "LIST_ACTIVE_LIMIT", 1)
+    directory.execute("UPDATE interactive_sessions SET heartbeat_at=? WHERE node_id=?", ("9999", "node-0004"))
+    directory.commit()
+    status, first = messages.handle(directory, {"action": action, "limit": 1}, caller="agent:limited")
+    assert status == 200 and first["next_cursor"]
+    if action == "who":
+        assert [row["node_id"] for row in first["nodes"]] == [allowed_nodes[0]]
+        assert [row["principal_id"] for row in first["principals"]] == [allowed_peers[0]]
+        assert [row["node_id"] for row in first["sessions"]] == [allowed_nodes[-1]]
+    else:
+        assert [row["target"] for row in first["claims"]] == ["target-1"]
+    # Remove the middle permitted rows after the cursor is issued. The next
+    # page must fill from the remaining snapshot, without exposing hidden rows.
+    grants.replace_grants(directory, "agent:limited", [allowed_nodes[-1], allowed_peers[-1]])
+    directory.commit()
+    status, last = messages.handle(
+        directory, {"action": action, "limit": 1, "cursor": first["next_cursor"]}, caller="agent:limited"
+    )
+    assert status == 200 and last["next_cursor"] is None
+    if action == "who":
+        assert [row["node_id"] for row in last["nodes"]] == [allowed_nodes[-1]]
+        assert [row["principal_id"] for row in last["principals"]] == [allowed_peers[-1]]
+        assert last["sessions"] == []
+        assert first["total"] == {"nodes": 3, "principals": 3, "sessions": 1}
+        assert last["total"] == {"nodes": 1, "principals": 1, "sessions": 1}
+    else:
+        assert [row["target"] for row in last["claims"]] == ["target-5"]
+        assert first["total"] == 3 and last["total"] == 1
+
+
+@pytest.mark.parametrize("caller", ["reader-node", "agent:limited"])
+def test_claim_pages_preserve_node_metadata_and_redact_agent_metadata(directory, caller):
+    from datetime import datetime, timedelta, timezone
+
+    from tests.test_fleet_claim_display import _insert_job
+
+    messages.add_principal(directory, {"name": "limited", "may_send_to": ["reader-node"]})
+    for target in ("a", "z"):
+        status, _ = fleet_hub.handle_claim(
+            directory,
+            {
+                "action": "acquire",
+                "node_id": "reader-node",
+                "target": target,
+                "holder": "holder",
+                "conductor": "example-conductor",
+                "job": "example-job",
+                "session": "example-session",
+            },
+            caller_node="reader-node",
+        )
+        assert status == 200
+    _insert_job(
+        directory,
+        "grokbot-" + "4" * 24,
+        state="running",
+        claimant_node="reader-node",
+        lease_expires_at=(datetime.now(timezone.utc) + timedelta(minutes=5)).isoformat(),
+    )
+    rows = []
+    raw = {"action": "claims", "limit": 1}
+    for _ in range(4):
+        status, page = messages.handle(directory, raw, caller=caller)
+        assert status == 200
+        rows.extend(page["claims"])
+        if page["next_cursor"] is None:
+            break
+        raw["cursor"] = page["next_cursor"]
+    else:
+        pytest.fail("claim view traversal did not terminate")
+    if caller.startswith("agent:"):
+        assert [row["target"] for row in rows] == ["a", "z"]
+        assert all(not {"job", "session", "owner_conductor"}.intersection(row) for row in rows)
+    else:
+        assert len(rows) == 3
+        ordinary = [row for row in rows if row["target"] in {"a", "z"}]
+        assert len(ordinary) == 2
+        assert all(row["job"] == "example-job" and row["session"] == "example-session" for row in ordinary)
+        assert all(row["owner_conductor"] == "example-conductor" for row in ordinary)
+        assert any(row["harness"] == "grokbot" for row in rows)
+
+
 def test_snapshot_rechecks_grants_revocation_and_query_binding(directory):
     from brigade import fleet_hub_message_grants as grants
 
@@ -311,13 +447,14 @@ def test_snapshot_global_count_and_byte_caps_fail_closed(directory, monkeypatch,
     assert directory.execute("SELECT COUNT(*) FROM fleet_read_snapshots").fetchone()[0] == 0
 
 
-def test_schema_37_migrates_once_and_preserves_snapshot_on_reopen(tmp_path):
+@pytest.mark.parametrize("previous_version", [37, 40])
+def test_previous_schema_migrates_once_and_preserves_snapshot_on_reopen(tmp_path, previous_version):
     path = tmp_path / "fleet.db"
     conn = fleet_hub.init_db(path)
     fleet_hub.add_node(conn, "reader-node")
     fleet_hub.add_node(conn, "other-node")
     conn.execute("DROP TABLE fleet_read_snapshots")
-    conn.execute("PRAGMA user_version=37")
+    conn.execute(f"PRAGMA user_version={previous_version}")
     conn.commit()
     conn.close()
     conn = fleet_hub.init_db(path)
