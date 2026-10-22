@@ -40,6 +40,8 @@ def hub(tmp_path):
     yield ("127.0.0.1", server.server_address[1], db)
     server.shutdown()
     server.server_close()
+    thread.join(timeout=5)
+    assert not thread.is_alive(), "Fleet Hub accept loop survived shutdown (#1916)"
 
 
 def _request(hub, method: str, path: str, *, headers: dict | None = None, body=None):

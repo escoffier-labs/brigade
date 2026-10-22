@@ -94,7 +94,7 @@ def test_daily_status_text_and_json(tmp_path, capsys):
 
     assert daily_cmd.status(target=tmp_path, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["pending_task_count"] == 1
+    assert payload["pending_task_count"] == 1, payload["status_section_checks"]
     assert payload["selected_action"]["source_subsystem"] == "work-task"
     assert payload["next_recommended_command"] == "brigade work run"
 

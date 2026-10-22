@@ -298,6 +298,7 @@ def _child_environment() -> dict[str, str]:
     environment = dict(os.environ)
     environment["BRIGADE_EXTRAS"] = "0"
     environment["BRIGADE_NO_UPDATE_CHECK"] = "1"
+    environment["PYTHONUNBUFFERED"] = "1"
     return environment
 
 
@@ -376,13 +377,18 @@ def run_file(
         str(python),
         "-m",
         "pytest",
-        "-q",
+        "-vv",
         "-ra",
         "--tb=line",
         "-p",
         "no:cacheprovider",
         "-p",
         "no:xdist",
+        "-p",
+        "scripts.windows_pytest_diagnostics",
+        "--durations=0",
+        "-o",
+        "faulthandler_timeout=60",
         "-o",
         "addopts=",
         f"--basetemp={basetemp}",
@@ -393,6 +399,10 @@ def run_file(
     termination_status = None
     cleanup = _CleanupDeadline()
     process = None
+    progress = log.with_suffix(".progress.log")
+    progress.unlink(missing_ok=True)
+    environment = _child_environment()
+    environment["BRIGADE_WINDOWS_TEST_PROGRESS"] = str(progress.resolve())
     if deadline is not None and clock() >= deadline:
         return _deadline_failure(name, output_dir, unstarted=True)
     try:
@@ -401,7 +411,7 @@ def run_file(
                 python=python.absolute(),
                 args=argv[1:],
                 cwd=repo.resolve(),
-                env=_child_environment(),
+                env=environment,
                 log=stream,
                 tracker=tracker,
                 deadline=deadline,
@@ -461,6 +471,12 @@ def run_file(
     diagnostic = None
     if termination_status is not None:
         diagnostic = f"job termination: {status}"
+        if progress.is_file():
+            with progress.open("rb") as stream:
+                stream.seek(max(0, progress.stat().st_size - 8192))
+                lines = stream.read().decode("utf-8", errors="replace").splitlines()
+            if lines:
+                diagnostic += f" last_test_phase={lines[-1]}"
     if process.token.leaked_descendants:
         diagnostic = f"{diagnostic + '; ' if diagnostic else ''}leaked_descendants={process.token.leaked_descendants}"
     return FileResult(name, status, returncode, clock() - started, log.relative_to(output_dir).as_posix(), diagnostic)
@@ -799,6 +815,13 @@ def main(argv: Sequence[str] | None = None) -> int:
     def record_progress(snapshot: list[FileResult]) -> None:
         partial_results[:] = snapshot
         write_record(args.record, results=snapshot, expected_files=files)
+        if snapshot:
+            latest = snapshot[-1]
+            print(
+                f"windows pytest file: {latest.name} status={latest.status} seconds={latest.seconds:.3f} "
+                f"log={latest.log} diagnostic={latest.diagnostic}",
+                flush=True,
+            )
 
     try:
         if args.job_timeout < 1:
