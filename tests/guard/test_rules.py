@@ -501,9 +501,7 @@ class MissingLeakShapeTests(unittest.TestCase):
         ):
             with self.subTest(before=before):
                 text = before + host
-                self.assertEqual(
-                    [f.rule_id for f in scan_text(text).findings], ["private-hostname"]
-                )
+                self.assertEqual([f.rule_id for f in scan_text(text).findings], ["private-hostname"])
                 redacting = scan_text(text, policy=Policy(rules={"private-hostname": "redact"}))
                 self.assertEqual(redacting.redacted_text, before + "[redacted-host]")
 
@@ -519,9 +517,7 @@ class MissingLeakShapeTests(unittest.TestCase):
         ):
             with self.subTest(before=before, after=after):
                 text = before + host + after
-                self.assertNotIn(
-                    "private-hostname", {f.rule_id for f in scan_text(text).findings}
-                )
+                self.assertNotIn("private-hostname", {f.rule_id for f in scan_text(text).findings})
 
     def test_nested_interpolation_remains_code_shaped(self) -> None:
         result = scan_text(
