@@ -88,7 +88,8 @@ def _stamp(value: Any) -> float | None:
     return None if isinstance(value, bool) or not isinstance(value, (int, float)) else float(value)
 
 
-def _write_state(path: Path, *, scope: str, cursor: int, next_poll_at: float = 0.0, retry_at: float = 0.0) -> None:
+def _write_state(path: Path, *, scope: str, cursor: int, next_poll_at: float = 0.0, retry_at: float = 0.0) -> bool:
+    """Persist the cursor file. False means it could not be stored."""
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
         os.chmod(path.parent, 0o700)
@@ -101,7 +102,8 @@ def _write_state(path: Path, *, scope: str, cursor: int, next_poll_at: float = 0
         )
         os.chmod(path, 0o600)
     except OSError:
-        return
+        return False
+    return True
 
 
 def _prune(directory: Path, *, now: float) -> None:
@@ -110,7 +112,7 @@ def _prune(directory: Path, *, now: float) -> None:
         for index, entry in enumerate(directory.iterdir()):
             if index >= PRUNE_SCAN_LIMIT:
                 return
-            if entry.suffix == ".json" and now - entry.stat().st_mtime > STATE_RETENTION_SECONDS:
+            if entry.suffix in (".json", ".lock") and now - entry.stat().st_mtime > STATE_RETENTION_SECONDS:
                 entry.unlink()
     except OSError:
         return
@@ -118,10 +120,12 @@ def _prune(directory: Path, *, now: float) -> None:
 
 def clear(harness: str, session_id: str) -> None:
     """Drop this session's cursor file. Never raises."""
-    try:
-        state_path(harness, session_id).unlink()
-    except OSError:
-        return
+    path = state_path(harness, session_id)
+    for stale in (path, path.with_name(path.name + ".lock")):
+        try:
+            stale.unlink()
+        except OSError:
+            continue
 
 
 def _clean(value: Any, limit: int) -> str:
@@ -173,7 +177,17 @@ def deliver(harness: str, session_id: str, event: str, *, now: float | None = No
 
 
 def _deliver(harness: str, session_id: str, event: str, now: float) -> str | None:
+    from .fleet_client_spool_lock import _spool_lock
+
     path = state_path(harness, session_id)
+    # One delivery per session at a time. Parallel tool calls fire overlapping
+    # hook processes: a contender skips (timeout 0) instead of waiting, because
+    # the holder is already reading and will show the mail.
+    with _spool_lock(path, timeout=0):
+        return _deliver_locked(path, event, now)
+
+
+def _deliver_locked(path: Path, event: str, now: float) -> str | None:
     state = _read_state(path)
     # Two stamps: ``retry_at`` is the failure backoff, which every event honors;
     # ``next_poll_at`` is the tool-event throttle, which a prompt skips. A stamp
@@ -189,13 +203,16 @@ def _deliver(harness: str, session_id: str, event: str, now: float) -> str | Non
     cursor = state.get("cursor", 0)
     # Stamp the backoff first: a hung hub, a dead credential, or a killed hook
     # still consumes the window, so the bound is one attempt per window.
-    _write_state(
+    stamped = _write_state(
         path,
         scope=scope,
         cursor=cursor,
         next_poll_at=state.get("next_poll_at", 0.0),
         retry_at=now + FAILURE_BACKOFF_SECONDS,
     )
+    if not stamped:
+        # Without the stamp a read-only or full disk would let every event call the hub.
+        return None
     from . import fleet_client_messages as messages, fleet_session_presence
 
     if not fleet_session_presence._hub_url_configured():
@@ -208,8 +225,9 @@ def _deliver(harness: str, session_id: str, event: str, now: float) -> str | Non
     rows = page["messages"]
     shown = rows[:MAX_DELIVERED_MESSAGES]
     new_cursor = shown[-1]["id"] if shown else cursor
-    _write_state(path, scope=scope, cursor=new_cursor, next_poll_at=now + TOOL_POLL_INTERVAL_SECONDS)
-    if not shown:
+    saved = _write_state(path, scope=scope, cursor=new_cursor, next_poll_at=now + TOOL_POLL_INTERVAL_SECONDS)
+    # Unsaved cursor: showing the mail would repeat it on every later event.
+    if not shown or not saved:
         return None
     return render(shown, more=len(rows) > len(shown))
 

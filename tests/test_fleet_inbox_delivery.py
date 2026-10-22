@@ -335,6 +335,75 @@ def test_stale_cursor_files_are_pruned_when_a_new_session_starts(fleet):
     assert delivery.state_path("claude", "fresh").exists()
 
 
+def test_overlapping_hooks_for_one_session_deliver_once_and_never_wait(fleet, monkeypatch):
+    from brigade.fleet_client_spool_lock import _spool_lock
+
+    _send(fleet)
+    calls = _list_calls(monkeypatch)
+    path = delivery.state_path("claude", "session-1")
+
+    started = time.monotonic()
+    with _spool_lock(path):
+        # Another hook process holds the session: this one skips and consumes nothing.
+        assert delivery.deliver("claude", "session-1", "UserPromptSubmit", now=T0) is None
+    assert time.monotonic() - started < 1
+    assert calls == []
+    assert delivery.deliver("claude", "session-1", "UserPromptSubmit", now=T0 + 1)
+    assert delivery.deliver("claude", "session-1", "UserPromptSubmit", now=T0 + 2) is None
+
+
+def test_parallel_tool_events_show_a_message_once(fleet):
+    _send(fleet)
+    barrier = threading.Barrier(6)
+    results: list[str | None] = []
+
+    def hook() -> None:
+        barrier.wait()
+        results.append(delivery.deliver("claude", "session-1", "PostToolUse", now=T0))
+
+    threads = [threading.Thread(target=hook) for _ in range(6)]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=10)
+
+    assert len([text for text in results if text]) == 1
+
+
+def test_unwritable_state_neither_calls_the_hub_nor_delivers(fleet, monkeypatch):
+    calls = _list_calls(monkeypatch)
+    _send(fleet)
+
+    def refuse(*_args, **_kwargs):
+        raise OSError("read-only file system")
+
+    monkeypatch.setattr(delivery.localio, "write_text_atomic", refuse)
+
+    assert delivery.deliver("claude", "session-1", "UserPromptSubmit", now=T0) is None
+    assert delivery.deliver("claude", "session-1", "UserPromptSubmit", now=T0 + 100) is None
+    assert calls == []
+
+
+def test_mail_is_not_shown_when_the_cursor_cannot_be_saved(fleet, monkeypatch):
+    _send(fleet)
+    real = delivery.localio.write_text_atomic
+    writes = []
+
+    def second_write_fails(path, data):
+        writes.append(path)
+        if len(writes) == 2:
+            raise OSError("disk full")
+        return real(path, data)
+
+    monkeypatch.setattr(delivery.localio, "write_text_atomic", second_write_fails)
+
+    assert delivery.deliver("claude", "session-1", "UserPromptSubmit", now=T0) is None
+    monkeypatch.setattr(delivery.localio, "write_text_atomic", real)
+    # The mail is still unread and the cursor never moved, so it arrives once storage works.
+    text = delivery.deliver("claude", "session-1", "UserPromptSubmit", now=T0 + delivery.FAILURE_BACKOFF_SECONDS)
+    assert text and delivery.deliver("claude", "session-1", "UserPromptSubmit", now=T0 + 200) is None
+
+
 # --- Claude adapter -----------------------------------------------------------------
 
 
