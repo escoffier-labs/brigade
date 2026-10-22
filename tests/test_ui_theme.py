@@ -85,10 +85,8 @@ def test_icons_controls_and_off_seats_clear_the_graphics_contrast_floor(scheme):
     assert _contrast(colors["--offline"], colors["--surface"]) >= 3
 
 
-def test_alert_icon_controls_and_off_seats_use_their_tokens():
+def test_controls_and_off_seats_use_their_tokens():
     css = ui_theme.BASE_CSS + ui_theme.OVERVIEW_CSS
-    icon = re.search(r"\.alert-icon \{[^}]*\}", css).group(0)
-    assert "color: var(--on-signal)" in icon
     assert re.search(r"\.tree-filter input \{[^}]*border: 1px solid var\(--control-line\)", css)
     assert re.search(r'input\[type="text"\][^{]*\{[^}]*border: 1px solid var\(--control-line\)', css)
     off = re.search(r"\.seg--off \{[^}]*\}", css).group(0)
@@ -112,9 +110,10 @@ def test_document_scheme_selects_the_token_sheet():
         ui_theme.document("t", "n", "b", as_of="x", scheme="sepia")
 
 
-def test_base_css_takes_inset_and_error_colors_from_tokens():
-    assert ".empty { margin: 0; padding: var(--space-3); color: var(--muted); background: var(--surface-inset);" in (
-        ui_theme.BASE_CSS
+def test_base_css_takes_empty_and_error_colors_from_tokens():
+    assert (
+        ".empty { margin: 0; padding: var(--space-6) var(--space-3); color: var(--muted); text-align: center; font-size: 13px; }"
+        in ui_theme.BASE_CSS
     )
     assert ".callout--error { border-color: var(--error-line); }" in ui_theme.BASE_CSS
     assert ".banner--error { border-color: var(--error-line); }" in ui_theme.BASE_CSS
@@ -198,3 +197,51 @@ def test_shape_and_type_tokens_are_declared_once():
         dark = tokens.split("@media (prefers-color-scheme: light)")[0]
         for declaration in ("--radius-card: 8px;", "--radius-control: 6px;", "--font-sans:", "--font-mono:"):
             assert tokens.count(declaration) == dark.count(declaration) == 1
+
+
+def test_radius_rule_uses_the_shape_tokens():
+    from brigade import fleet_command_deck, fleet_dashboard
+
+    assert "border-radius: var(--radius-card)" in ui_theme.BASE_CSS
+    assert "border-radius: var(--radius-control)" in ui_theme.BASE_CSS
+    css = ui_theme.BASE_CSS + ui_theme.OVERVIEW_CSS + fleet_command_deck._STYLE + fleet_dashboard._BOARD_CSS
+    assert set(re.findall(r"border-radius:\s*([^;]+);", css)) <= {
+        "var(--radius-card)",
+        "var(--radius-control)",
+        "999px",
+        "2px",
+        "0",
+    }
+
+
+def test_buttons_follow_primary_and_secondary_roles():
+    from brigade import fleet_dashboard
+
+    primary = re.search(r'[^{}]*\.shell-main button\[type="submit"\][^{]*\{([^}]+)\}', ui_theme.BASE_CSS)
+    assert primary and "background: var(--ink)" in primary.group(1) and "color: var(--canvas)" in primary.group(1)
+    preview = re.search(r'\.shell-main button\[value="preview"\] \{([^}]+)\}', ui_theme.BASE_CSS)
+    assert preview and "background: var(--surface)" in preview.group(1)
+    roster = re.search(r"\.roster-actions button \{([^}]+)\}", ui_theme.BASE_CSS).group(1)
+    board = re.search(r"\.fleet-controls button \{([^}]+)\}", fleet_dashboard._BOARD_CSS).group(1)
+    assert "background:" not in roster and "background:" not in board
+    dark, light = ui_theme.TOKENS.split("@media (prefers-color-scheme: light)")
+    for block in (dark, light):
+        colors = _palette(block)
+        assert _contrast(colors["--ink"], colors["--canvas"]) >= 4.5
+
+
+def test_form_labels_are_not_uppercase():
+    from brigade import fleet_dashboard
+
+    for css, selector in (
+        (ui_theme.BASE_CSS, ".roster-form label"),
+        (fleet_dashboard._BOARD_CSS, ".fleet-controls label"),
+    ):
+        rule = re.search(re.escape(selector) + r" \{([^}]+)\}", css).group(1)
+        assert "text-transform: uppercase" not in rule
+
+
+def test_sidebar_resources_hide_on_narrow_screens():
+    narrow = ui_theme.BASE_CSS.split("@media (max-width: 900px)")[1].split("@media")[0]
+    hide = re.search(r"([^{}]+)\{ display: none; \}", narrow).group(1)
+    assert ".resources" in hide and ".sidebar-meta" in hide
