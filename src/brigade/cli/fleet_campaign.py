@@ -311,12 +311,12 @@ def _hub_marks(body: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def _create_acknowledged(result: object, key: str) -> bool:
+def _create_acknowledged(result: object, body: dict[str, Any]) -> bool:
     """Require the Hub's create acknowledgement before reporting a successful write."""
     if not isinstance(result, dict) or not isinstance(result.get("created"), bool):
         return False
     stored = result.get("campaign")
-    if not isinstance(stored, dict) or stored.get("campaign_key") != key:
+    if not isinstance(stored, dict) or stored.get("campaign_key") != body["campaign_key"]:
         return False
     if not isinstance(stored.get("work_id"), str) or not stored["work_id"]:
         return False
@@ -324,7 +324,11 @@ def _create_acknowledged(result: object, key: str) -> bool:
         repos = result.get(field)
         if not isinstance(repos, list) or any(not isinstance(repo, str) or not repo for repo in repos):
             return False
-    return True
+        if len(set(repos)) != len(repos):
+            return False
+    added, existing, conflicts = (set(result[field]) for field in ("added", "existing", "override_conflicts"))
+    requested = {member["repo"] for member in body["members"]}
+    return not (added & existing) and (added | existing) == requested and conflicts <= existing
 
 
 def _create(args: argparse.Namespace) -> int:
@@ -359,7 +363,7 @@ def _create(args: argparse.Namespace) -> int:
         result = worklore_client.create_campaign(body)
     except worklore_client.FleetClientError as exc:
         return _hub_failure(args, exc)
-    if not _create_acknowledged(result, str(body["campaign_key"])):
+    if not _create_acknowledged(result, body):
         return _hub_failure(
             args,
             worklore_client.WorkloreClientError(

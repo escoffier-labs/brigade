@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from brigade import cli, worklore_client
+from brigade import cli, fleet_hub, worklore_campaigns, worklore_client
 
 
 def _git(path: Path, *args: str) -> None:
@@ -194,6 +194,35 @@ def test_subdirectory_and_missing_paths_do_not_borrow_the_enclosing_repo(workspa
         {"added": [1]},
         {"existing": "acme/one"},
         {"override_conflicts": {}},
+        pytest.param({"added": [], "existing": []}, id="empty-members"),
+        pytest.param(
+            {
+                "campaign": {"campaign_key": "camp-1", "work_id": "wl-campaign", "summary": {"total": 2}},
+                "added": [],
+                "existing": [],
+            },
+            id="summary-does-not-acknowledge-members",
+        ),
+        pytest.param({"added": ["acme/one"]}, id="missing-added-member"),
+        pytest.param({"added": [], "existing": ["acme/one"]}, id="missing-existing-member"),
+        pytest.param({"added": ["acme/one", "acme/foreign"]}, id="foreign-added-member"),
+        pytest.param({"added": ["acme/one"], "existing": ["acme/foreign"]}, id="foreign-existing-member"),
+        pytest.param({"added": ["acme/one", "acme/two", "acme/one"]}, id="duplicate-added-member"),
+        pytest.param({"added": [], "existing": ["acme/one", "acme/two", "acme/two"]}, id="duplicate-existing-member"),
+        pytest.param({"existing": ["acme/one"]}, id="overlapping-members"),
+        pytest.param({"override_conflicts": ["acme/one"]}, id="conflict-for-new-member"),
+        pytest.param(
+            {"added": [], "existing": ["acme/one", "acme/two"], "override_conflicts": ["acme/one", "acme/one"]},
+            id="duplicate-conflict",
+        ),
+        pytest.param({"override_conflicts": ["acme/foreign"]}, id="foreign-conflict"),
+        pytest.param({"existing": [False]}, id="nonstring-existing-member"),
+        pytest.param({"override_conflicts": [{}]}, id="nonstring-conflict"),
+        pytest.param({"added": ["", "acme/two"]}, id="empty-member"),
+        *[
+            pytest.param({"added": [repo, "acme/two"]}, id=f"noncanonical-{index}")
+            for index, repo in enumerate(("Acme/One", "acme/one.git", "https://github.com/acme/one", " acme/one "))
+        ],
     ],
 )
 def test_create_survives_a_malformed_hub_response(workspace, hub, monkeypatch, capsys, malformed, json_output):
@@ -209,6 +238,64 @@ def test_create_survives_a_malformed_hub_response(workspace, hub, monkeypatch, c
     assert "unexpected hub response" in error
     assert "may have been applied" in error
     assert "same campaign key" in error
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+@pytest.mark.parametrize(
+    "seed,added,existing,conflicts",
+    [
+        pytest.param([], ["acme/one", "acme/two"], [], [], id="all-new"),
+        pytest.param(["acme/one", "acme/two"], [], ["acme/one", "acme/two"], [], id="all-existing"),
+        pytest.param(["acme/one"], ["acme/two"], ["acme/one"], [], id="mixed"),
+        pytest.param(["acme/one"], ["acme/two"], ["acme/one"], ["acme/one"], id="override-conflict"),
+    ],
+)
+def test_create_accepts_real_hub_acknowledgements(
+    workspace, monkeypatch, capsys, json_output, seed, added, existing, conflicts
+):
+    conn = fleet_hub.init_db(workspace / "hub.db")
+    try:
+        if seed:
+            worklore_campaigns.create_campaign(
+                conn,
+                {
+                    "campaign_key": "camp-1",
+                    "title": "Sweep",
+                    "acceptance": ["Done"],
+                    "members": [{"repo": repo} for repo in [*seed, "acme/unrequested"]],
+                },
+                actor_id="admin",
+            )
+        responses = []
+
+        def create(body):
+            result = worklore_campaigns.create_campaign(conn, body, actor_id="admin")
+            responses.append(result)
+            return result
+
+        monkeypatch.setattr(worklore_client, "create_campaign", create)
+        extra = ["--json"] if json_output else []
+        if conflicts:
+            overrides = workspace / "overrides.json"
+            overrides.write_text(json.dumps({"repo-one": "different override"}))
+            extra.extend(["--overrides", str(overrides)])
+        assert _create(workspace, *extra) == 0
+        captured = capsys.readouterr()
+        assert captured.err == ""
+        result = responses[0]
+        assert result["added"] == added
+        assert result["existing"] == existing
+        assert result["override_conflicts"] == conflicts
+        assert result["campaign"]["summary"]["total"] == (3 if seed else 2)
+        if json_output:
+            assert json.loads(captured.out) == result
+        else:
+            verb = "updated" if seed else "created"
+            assert f"{verb} campaign camp-1: {len(added)} added, {len(existing)} existing" in captured.out
+            for repo in conflicts:
+                assert f"override conflict (kept stored): {repo}" in captured.out
+    finally:
+        conn.close()
 
 
 def test_identity_without_an_owner_is_refused(workspace, hub, capsys):
