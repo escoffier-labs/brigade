@@ -536,7 +536,7 @@ def take_authority(
         "SELECT override, spec_fingerprint FROM work_campaign_members WHERE work_id=?", (work_id,)
     ).fetchone()
     expected = member_fingerprint(spec_fingerprint(spec["description"], spec["acceptance"]), override)
-    if fingerprint != expected:
+    if fingerprint != expected or item["description"] != override or item["acceptance"] != spec["acceptance"]:
         raise WorkloreConflict("member specification has drifted", code="campaign-ineligible")
     if current["state"] != "unowned" and not ownership.expired(current, now):
         raise WorkloreConflict("member ownership is already reserved", code="ownership-conflict")

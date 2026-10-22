@@ -220,7 +220,9 @@ def test_member_projects_execution_link_separately_from_brigade_task(tmp_path):
             (run_id,),
         )
         conn.commit()
-        store.link_execution(conn, work_id, node_id="node-a", run_id=run_id, actor_id="node-a")
+        store.link_execution(
+            conn, work_id, node_id="node-a", run_id=run_id, actor_id="admin", actor_type="operator", is_admin=True
+        )
     member = campaigns.show_campaign(conn, "camp-1")["members"][0]
     assert member["fleet_run"] == {"display_ref": "node-a/run-2", "url": None, "external_state": None}
     assert member["brigade"] is None

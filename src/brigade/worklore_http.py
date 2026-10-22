@@ -380,6 +380,10 @@ def _record_attempt(
         actor_type=_actor_type(request),
         node_id=None if request.is_admin else request.node_id,
         run_id=run_id,
+        is_admin=request.is_admin,
+        is_operator=_is_operator(request),
+        generation=_generation(request),
+        holder_nonce=_header(request, "X-Worklore-Holder"),
     )
     return 200, {"item": item}
 
@@ -422,6 +426,9 @@ def _link_execution(
         actor_id=_actor_id(request),
         actor_type=_actor_type(request),
         is_admin=request.is_admin,
+        is_operator=_is_operator(request),
+        generation=_generation(request),
+        holder_nonce=_header(request, "X-Worklore-Holder"),
     )
     return 201, {"link": link}
 
@@ -499,6 +506,15 @@ def _if_match(request: Request) -> int:
     if not text.isdigit() or len(text) > _MAX_NUMBER_DIGITS:
         raise WorkloreValidationError("If-Match is required", code="if-match-required")
     return int(text)
+
+
+def _generation(request: Request) -> int | None:
+    raw = _header(request, "X-Worklore-Generation")
+    if raw is None:
+        return None
+    if not raw.isascii() or not raw.isdigit() or len(raw) > _MAX_NUMBER_DIGITS:
+        raise WorkloreValidationError("campaign generation header is invalid", code="field-bound")
+    return int(raw)
 
 
 def _optional_if_match(request: Request) -> int | None:

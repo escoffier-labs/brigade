@@ -52,6 +52,7 @@ EVENT_TYPES = {
     "report": "ownership-reported",
     "handoff": "ownership-handoff-offered",
     "release": "ownership-released",
+    "recover": "ownership-recovered",
 }
 _FIELDS = {
     "offer": {"action", "target_node", "exclusions", "authorization_ref", "attempt_budget"},
@@ -70,6 +71,7 @@ _FIELDS = {
     "report": {"action", "generation", "report"},
     "handoff": {"action", "generation", "target_node"},
     "release": {"action", "generation"},
+    "recover": {"action", "generation", "holder_quiesced", "evidence_ref"},
 }
 _NODE_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _REVISION_RE = re.compile(r"^[0-9a-f]{40}$")
@@ -170,6 +172,10 @@ def _parse(raw: object) -> dict[str, Any]:
             "cap": _integer(budget["cap"], minimum=1, maximum=BUDGET_CAP_MAX),
             "source_ref": _reference(budget["source_ref"]),
         }
+    if action == "recover":
+        if body["holder_quiesced"] is not True:
+            raise _invalid("recovery requires explicit holder quiescence acknowledgement")
+        body["evidence_ref"] = _reference(body["evidence_ref"])
     if action == "report":
         from .fleet_dot import DotReportError, validate_ownership_report
 
@@ -300,9 +306,11 @@ def _authorize(
     generation: int | None,
     digest: str | None,
 ) -> None:
-    if action in {"offer", "withdraw"}:
+    if action in {"offer", "withdraw", "recover"}:
         if not (is_admin or is_operator):
             raise store.WorkloreForbidden("operator token required", code="forbidden")
+        if action == "recover" and generation != authority["generation"]:
+            raise store.WorkloreConflict("ownership generation does not match", code="stale-generation")
         return
     if is_admin:
         raise store.WorkloreForbidden("node holder authority required", code="holder-mismatch")
@@ -329,6 +337,61 @@ def expired(snapshot: Mapping[str, Any], now: str) -> bool:
         return False
 
 
+def require_campaign_write(
+    conn: sqlite3.Connection,
+    work_id: str,
+    item: Mapping[str, Any],
+    *,
+    actor_id: str,
+    is_admin: bool,
+    is_operator: bool,
+    generation: object,
+    holder_nonce: object,
+) -> dict[str, Any] | None:
+    """Fence new side effects under the caller's existing write transaction.
+
+    Trusted operator observations are explicit authority, never inferred from an
+    actor label. Node writes must present the current campaign holder capability.
+    The returned binding can be persisted on an execution, without its secret.
+    """
+    from . import worklore_campaigns as campaigns
+
+    member = campaigns.member_campaign(conn, work_id)
+    if member is None or is_admin or is_operator:
+        return None
+    _enrolled(conn, actor_id)
+    grant = campaigns._eligible_campaign(conn, member)
+    current = _current(conn, work_id)
+    if generation is None or holder_nonce is None:
+        raise store.WorkloreForbidden("campaign holder capability required", code="holder-mismatch")
+    digest = nonce_hash(holder_nonce)
+    _authorize(
+        "checkpoint",
+        current,
+        actor_id=actor_id,
+        is_admin=False,
+        is_operator=False,
+        generation=_integer(generation),
+        digest=digest,
+    )
+    if current["state"] != "owned":
+        raise store.WorkloreConflict("campaign ownership is not active", code="ownership-conflict")
+    if expired(current, store._utc_now()):
+        raise store.WorkloreConflict("campaign ownership lease expired", code="stale-generation")
+    offer = grant["offer"]
+    if (
+        current.get("campaign_offer_event") != grant["event_id"]
+        or actor_id not in offer["allowed_nodes"]
+        or member["repo"] in offer["exclusions"]
+    ):
+        raise store.WorkloreForbidden("campaign grant does not authorize holder", code="campaign-not-authorized")
+    if item["status"] in TERMINAL_STATUSES or int(item["attempt_count"]) >= min(
+        store.ATTEMPT_LIMIT, offer["attempt_budget"]["cap"]
+    ):
+        raise store.WorkloreConflict("member is not eligible for campaign progress", code="campaign-ineligible")
+    return {"generation": current["generation"], "holder_hash": digest, "campaign_offer_event": grant["event_id"]}
+
+
 def _transition(
     snapshot: dict[str, Any], body: Mapping[str, Any], *, actor_id: str, actor_type: str, digest: str | None
 ) -> dict[str, Any]:
@@ -341,6 +404,7 @@ def _transition(
         "report": {"owned"},
         "handoff": {"owned"},
         "release": {"owned", "handoff-pending"},
+        "recover": {"owned", "handoff-pending"},
     }
     if snapshot["state"] not in allowed[action]:
         raise store.WorkloreConflict("ownership state does not permit action", code="ownership-conflict")
@@ -372,7 +436,7 @@ def _transition(
         result["conflict_check"] = "path-admission"
     else:
         result = _initial()
-        result["generation"] = snapshot["generation"]
+        result["generation"] = snapshot["generation"] + (1 if action == "recover" else 0)
     result["revision"] = snapshot["revision"] + 1
     return result
 
@@ -436,7 +500,7 @@ def ownership_action(
     key = _text(idempotency_key, "idempotency_key", IDEMPOTENCY_KEY_MAX)
     body = _parse(raw)
     action = body["action"]
-    digest = (supplied_digest or nonce_hash(holder_nonce)) if action not in {"offer", "withdraw"} else None
+    digest = (supplied_digest or nonce_hash(holder_nonce)) if action not in {"offer", "withdraw", "recover"} else None
     actor_id = "admin" if is_admin else _node(actor_id)
     actor_type = "admin" if is_admin else "node"
     # Include principal type, not merely a node/key pair that could collide with admin.
@@ -455,12 +519,14 @@ def ownership_action(
         item = store.get_item(conn, work_id)
         if not is_admin:
             _enrolled(conn, actor_id)
-        if action in {"offer", "withdraw"} and not (is_admin or is_operator):
+        if action in {"offer", "withdraw", "recover"} and not (is_admin or is_operator):
             raise store.WorkloreForbidden("operator token required", code="forbidden")
         if action == "take":
             if is_admin:
                 raise store.WorkloreForbidden("node holder authority required", code="holder-mismatch")
         member = campaigns.member_campaign(conn, work_id)
+        if action == "recover" and member is None:
+            raise store.WorkloreForbidden("recovery requires campaign membership", code="campaign-not-authorized")
         if member is not None and action in {"offer", "accept", "handoff"}:
             raise store.WorkloreForbidden(
                 "campaign members require policy-bounded take", code="campaign-not-authorized"
@@ -516,7 +582,7 @@ def ownership_action(
         campaign_authority = None
         if action == "take":
             campaign_authority = campaigns.take_authority(conn, work_id, item, current, node=actor_id, now=now)
-        elif member is not None and action not in {"release", "withdraw"}:
+        elif member is not None and action not in {"release", "withdraw", "recover"}:
             if expired(current, now):
                 raise store.WorkloreConflict("campaign ownership lease expired", code="stale-generation")
             campaigns._eligible_campaign(conn, member)
@@ -526,7 +592,7 @@ def ownership_action(
                 raise store.WorkloreForbidden(
                     "checkpoint repository differs from member", code="campaign-not-authorized"
                 )
-        if item["status"] in TERMINAL_STATUSES and action not in {"release", "withdraw"}:
+        if item["status"] in TERMINAL_STATUSES and action not in {"release", "withdraw", "recover"}:
             raise store.WorkloreConflict("terminal work item refuses ownership progress", code="ownership-conflict")
         if "target_node" in body:
             _enrolled(conn, body["target_node"])
@@ -535,9 +601,9 @@ def ownership_action(
         ).fetchone()[0]
         maximum = (
             OFFER_MAX_PRIOR_EVENTS
-            if action in {"offer", "handoff"}
+            if action in {"offer", "handoff", "take"}
             else ITEM_MAX_OWNERSHIP_TOTAL - 1
-            if action in {"release", "withdraw"}
+            if action in {"release", "withdraw", "recover"}
             else ITEM_MAX_OWNERSHIP_EVENTS - 1
         )
         if count > maximum:
@@ -580,6 +646,12 @@ def ownership_action(
         result["updated_at"] = now
         authority = {key: current[key] for key in ("generation", "owner_node", "offered_to", "holder_hash")}
         detail = {"action": action, "fingerprint": fingerprint, "authority": authority, "ownership": result}
+        if action == "recover":
+            detail["recovery"] = {
+                "holder_quiesced": True,
+                "evidence_ref": body["evidence_ref"],
+                "verification": "operator-reported-unverified",
+            }
         serialized = json.dumps(detail)
         if len(serialized.encode("utf-8")) > OWNERSHIP_EVENT_MAX_BYTES:
             raise _invalid("ownership event exceeds serialized byte bound; ownership unchanged")

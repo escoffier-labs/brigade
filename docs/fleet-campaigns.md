@@ -210,3 +210,25 @@ physical checkout locks. Path reservations remain conservative until a release o
 reclaim clears them. No node consumer, process launch, cloud lease, completion gate,
 or automatic selection loop is added by this slice. The request body limit remains
 256 KiB.
+
+## Campaign execution and attempt writes
+
+New node writes to `/work/items/<id>/execution` and `/attempts` require both
+`X-Worklore-Holder` and `X-Worklore-Generation` for the current unexpired grant.
+The Python client's `link_execution` and `record_attempt` accept the corresponding
+`holder_nonce` and `generation` keyword arguments. Attempt requests still use the
+item version in `If-Match`. These checks run inside each existing write transaction.
+New execution events bind the run to that grant's generation, nonce digest, and
+authorization event. An old run cannot spend a reclaimed grant's attempt budget,
+even when the same node becomes holder again. Use a new run for the new grant.
+Cancellation, expiry, reclaim, or an exhausted budget prevents new node writes.
+A historical own-run replay can return its existing record without adding events,
+links, or attempt counts. It cannot rebind the run or restore authority.
+
+Admin and configured operator observations use their existing explicit trusted
+authority, including recording failures or resetting attempts after cancellation.
+An operator's execution observation does not grant a node holder capability.
+Only the admin can observe another node's run. Noncampaign execution and attempt
+behavior is unchanged. Explicit campaign reservation recovery requires the
+acknowledged physical quiescence and audited operator action documented in
+[ownership recovery](worklore-ownership.md#capacity-and-recovery).

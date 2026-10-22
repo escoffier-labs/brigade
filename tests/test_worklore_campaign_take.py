@@ -495,3 +495,393 @@ def test_exact_take_replay_survives_legacy_item_key_reuse(ledger):
     before = store.list_events(conn, work_id)
     assert act(conn, work_id) == (200, grant)
     assert store.list_events(conn, work_id) == before
+
+
+@pytest.fixture
+def live_campaign(tmp_path, monkeypatch):
+    """Exercise the real bearer authentication boundary, not caller role fields."""
+    import urllib.error
+    import urllib.request
+
+    monkeypatch.setenv("BRIGADE_WORKLORE_ENABLED", "1")
+    monkeypatch.setenv("BRIGADE_WORKLORE_OPERATOR_NODES", "node-c")
+    clock = ["2026-01-01T00:00:00+00:00"]
+    monkeypatch.setattr(store, "_utc_now", lambda: clock[0])
+    path = tmp_path / "live.db"
+    conn = fleet_hub.init_db(path)
+    tokens = {"admin": "test-admin-token"}
+    for node in ("node-a", "node-b", "node-c", "node-d"):
+        _, tokens[node] = fleet_hub.add_node(conn, node, node)
+    server = fleet_hub.make_server(
+        "127.0.0.1",
+        0,
+        path,
+        tokens["admin"],  # content-guard: allow loopback-ipv4
+    )
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+
+    def request(work_id, tail, body, *, node="node-a", headers=None, method="POST"):
+        req = urllib.request.Request(
+            f"http://127.0.0.1:{server.server_address[1]}/work/items/{work_id}/{tail}",  # content-guard: allow loopback-ipv4
+            data=json.dumps(body).encode(),
+            method=method,
+            headers={"Authorization": f"Bearer {tokens[node]}", "Content-Type": "application/json", **(headers or {})},
+        )
+        try:
+            with urllib.request.urlopen(req, timeout=5) as response:
+                return response.status, json.load(response)
+        except urllib.error.HTTPError as exc:
+            return exc.code, json.load(exc)
+
+    yield conn, clock, request, server, tokens
+    server.shutdown()
+    server.server_close()
+    thread.join()
+    conn.close()
+
+
+def fleet_run(conn, node="node-a", run="run-1"):
+    conn.execute(
+        "INSERT INTO events (node_id, run_id, sequence, digest, state, ts, received_at) "
+        "VALUES (?, ?, 1, 'fixture-digest', 'run.created', 't', 't')",
+        (node, run),
+    )
+    conn.commit()
+
+
+@pytest.mark.parametrize("endpoint", ["execution", "attempts"])
+@pytest.mark.parametrize("condition", ["no-offer", "unowned", "disallowed", "canceled", "expired", "reclaimed"])
+def test_campaign_execution_and_attempt_http_require_current_grant(live_campaign, endpoint, condition):
+    conn, clock, request, _, _ = live_campaign
+    made = create(conn, offer=None if condition == "no-offer" else OFFER)
+    work_id = members(conn)["acme/one"]
+    node = "node-d" if condition == "disallowed" else "node-a"
+    fleet_run(conn, node)
+    if condition not in {"no-offer", "unowned", "disallowed"}:
+        assert act(conn, work_id)[0] == 200
+    if endpoint == "attempts":
+        # Trusted operator observation creates a real link, without granting node authority.
+        assert request(work_id, "execution", {"node_id": node, "run_id": "run-1"}, node="admin")[0] == 201
+    if condition == "canceled":
+        store.transition(conn, made["campaign"]["work_id"], to_status="canceled", expected_version=1, actor_id="admin")
+    if condition in {"expired", "reclaimed"}:
+        clock[0] = "2026-01-01T00:01:00+00:00"
+    if condition == "reclaimed":
+        assert act(conn, work_id, node="node-b", revision=1, generation=1, nonce=NONCE_B, key="reclaim")[0] == 200
+    body = {"node_id": node, "run_id": "run-1"} if endpoint == "execution" else {"action": "failed", "run_id": "run-1"}
+    before = store.list_events(conn, work_id)
+    item = store.get_item(conn, work_id)
+    status, refusal = request(
+        work_id,
+        endpoint,
+        body,
+        node=node,
+        headers={"If-Match": str(item["version"]), "X-Worklore-Holder": NONCE_A, "X-Worklore-Generation": "1"},
+    )
+    assert status in {403, 409}, refusal
+    assert refusal["code"] in {
+        "campaign-not-authorized",
+        "campaign-ineligible",
+        "holder-mismatch",
+        "stale-generation",
+        "ownership-conflict",
+    }
+    assert store.list_events(conn, work_id) == before
+    assert store.get_item(conn, work_id) == item
+    if endpoint == "execution":
+        assert not store.list_links(conn, work_id)
+
+
+def test_campaign_http_execution_binding_replay_and_budget(live_campaign):
+    conn, clock, request, _, _ = live_campaign
+    create(conn)
+    work_id = members(conn)["acme/one"]
+    fleet_run(conn)
+    assert act(conn, work_id)[0] == 200
+    headers = {"X-Worklore-Holder": NONCE_A, "X-Worklore-Generation": "1", "If-Match": "1"}
+    execution = {"node_id": "node-a", "run_id": "run-1"}
+    status, link = request(work_id, "execution", execution, headers=headers)
+    assert status == 201, link
+    failed = {"action": "failed", "run_id": "run-1"}
+    assert request(work_id, "attempts", failed, headers=headers)[1]["item"]["attempt_count"] == 1
+    before = store.list_events(conn, work_id)
+    clock[0] = "2026-01-01T00:01:00+00:00"
+    assert request(work_id, "execution", execution, headers=headers) == (201, link)
+    assert request(work_id, "attempts", failed, headers=headers)[1]["item"]["attempt_count"] == 1
+    assert store.list_events(conn, work_id) == before
+    # Same authenticated node with a fresh capability cannot spend the old run's budget.
+    assert act(conn, work_id, revision=1, generation=1, nonce=NONCE_B, key="reclaim")[0] == 200
+    assert (
+        request(
+            work_id,
+            "attempts",
+            {**failed, "action": "started"},
+            headers={"X-Worklore-Holder": NONCE_B, "X-Worklore-Generation": "2", "If-Match": "2"},
+        )[0]
+        == 409
+    )
+    assert store.get_item(conn, work_id)["attempt_count"] == 1
+
+
+@pytest.mark.parametrize("patch", [{"description": "Changed member"}, {"acceptance": ["Different checks"]}])
+def test_take_refuses_actual_member_drift_through_normal_patch(ledger, patch):
+    conn, _, _ = ledger
+    create(conn)
+    work_id = members(conn)["acme/one"]
+    status, result = call(conn, f"/work/items/{work_id}", patch, admin=True, method="PATCH", headers={"If-Match": "1"})
+    assert status == 200, result
+    before = store.list_events(conn, work_id)
+    status, refusal = act(conn, work_id)
+    assert status == 409 and refusal["code"] == "campaign-ineligible"
+    assert store.list_events(conn, work_id) == before
+    assert snapshot(conn, work_id)["state"] == "unowned"
+    assert act(conn, members(conn)["acme/two"], key="unchanged")[0] == 200
+
+
+def seed_ownership_history(conn, work_id, count):
+    from brigade import worklore_ownership as ownership
+
+    # Simulate a long valid departed history; latest projection is explicitly unowned.
+    state = ownership._initial()
+    for _ in range(count):
+        store._append_event(
+            conn,
+            work_id=work_id,
+            event_type="ownership-released",
+            actor_type="node",
+            actor_id="node-a",
+            from_status=None,
+            to_status=None,
+            now=store._utc_now(),
+            detail={"action": "release", "ownership": state},
+        )
+    conn.commit()
+
+
+@pytest.mark.parametrize("count", [197, 198, 199])
+def test_campaign_take_reserves_checkpoint_and_safety_exit_capacity(ledger, count):
+    conn, _, _ = ledger
+    create(conn)
+    work_id = members(conn)["acme/one"]
+    seed_ownership_history(conn, work_id, count)
+    before = store.list_events(conn, work_id)
+    status, result = act(conn, work_id)
+    if count > 197:
+        assert status == 409 and result["code"] == "ownership-capacity-exhausted"
+        assert store.list_events(conn, work_id) == before
+    else:
+        assert status == 200, result
+        assert checkpoint(conn, work_id)[0] == 200
+        assert checkpoint(conn, work_id, revision=2, key="progress")[0] == 200
+        assert act(conn, work_id, "release", revision=3, generation=1, key="release")[0] == 200
+        assert snapshot(conn, work_id)["state"] == "unowned"
+
+
+def recovery_request(request, work_id, *, node="admin", revision=2, generation=1, key="recover", **fields):
+    return request(
+        work_id,
+        "ownership",
+        {
+            "action": "recover",
+            "generation": generation,
+            "holder_quiesced": True,
+            "evidence_ref": "receipt-quiescence",
+            **fields,
+        },
+        node=node,
+        headers={"If-Match": str(revision), "Idempotency-Key": key},
+    )
+
+
+@pytest.mark.parametrize("operator", ["admin", "node-c"])
+def test_campaign_recovery_is_audited_and_frees_canceled_absent_holder_scope(live_campaign, operator):
+    conn, clock, request, _, _ = live_campaign
+    made = create(conn)
+    work_id = members(conn)["acme/one"]
+    assert act(conn, work_id)[0] == 200
+    assert checkpoint(conn, work_id)[0] == 200
+    fleet_hub.revoke_node(conn, "node-a")
+    store.transition(conn, made["campaign"]["work_id"], to_status="canceled", expected_version=1, actor_id="admin")
+    clock[0] = "2026-01-01T00:01:00+00:00"
+    create(conn, key="camp-2")
+    peer_id = next(m["work_id"] for m in campaigns.show_campaign(conn, "camp-2")["members"] if m["repo"] == "acme/one")
+    assert act(conn, peer_id, node="node-b", nonce=NONCE_B, key="peer")[0] == 200
+    assert checkpoint(conn, peer_id, node="node-b", nonce=NONCE_B, key="peer-scope")[1]["code"] == "path-scope-conflict"
+    before = store.list_events(conn, work_id)
+    assert recovery_request(request, work_id, node="node-b")[0] == 403
+    assert store.list_events(conn, work_id) == before
+    status, result = recovery_request(request, work_id, node=operator)
+    assert status == 200, result
+    assert result["ownership"]["state"] == "unowned" and result["ownership"]["generation"] == 2
+    assert result["ownership"]["write_scope"] == []
+    event = store.list_events(conn, work_id)[-1]
+    assert event["actor_id"] == operator
+    assert event["detail"]["recovery"] == {
+        "holder_quiesced": True,
+        "evidence_ref": "receipt-quiescence",
+        "verification": "operator-reported-unverified",
+    }
+    after = store.list_events(conn, work_id)
+    assert recovery_request(request, work_id, node=operator) == (200, result)
+    assert store.list_events(conn, work_id) == after
+    assert recovery_request(request, work_id, node=operator, evidence_ref="different")[0] == 409
+    assert checkpoint(conn, peer_id, node="node-b", nonce=NONCE_B, key="peer-scope")[0] == 200
+    # Keep the bearer enrolled while proving the old capability itself is fenced.
+    fleet_hub.add_node(conn, "node-a", "Returned holder")
+    assert checkpoint(conn, work_id, revision=3, key="stale")[1]["code"] == "stale-generation"
+    assert act(conn, work_id, "release", revision=3, generation=1, key="stale-release")[1]["code"] == "stale-generation"
+
+
+@pytest.mark.parametrize(
+    "fields,revision,generation",
+    [
+        ({"holder_quiesced": False}, 2, 1),
+        ({"holder_quiesced": 1}, 2, 1),
+        ({"evidence_ref": ""}, 2, 1),
+        ({"evidence_ref": "/private/evidence"}, 2, 1),
+        ({"evidence_ref": None}, 2, 1),
+        ({}, 1, 1),
+        ({}, 2, 0),
+    ],
+)
+def test_campaign_recovery_refuses_invalid_ack_evidence_and_stale_fences(live_campaign, fields, revision, generation):
+    conn, _, request, _, _ = live_campaign
+    create(conn)
+    work_id = members(conn)["acme/one"]
+    assert act(conn, work_id)[0] == 200
+    assert checkpoint(conn, work_id)[0] == 200
+    before = store.list_events(conn, work_id)
+    status, _ = recovery_request(request, work_id, revision=revision, generation=generation, **fields)
+    assert status in {400, 409}
+    assert store.list_events(conn, work_id) == before
+
+
+def test_campaign_recovery_replay_cannot_clear_a_new_holder(live_campaign):
+    conn, _, request, _, _ = live_campaign
+    create(conn)
+    work_id = members(conn)["acme/one"]
+    assert act(conn, work_id)[0] == 200
+    assert recovery_request(request, work_id, revision=1)[0] == 200
+    assert act(conn, work_id, node="node-b", revision=2, generation=2, nonce=NONCE_B, key="new-holder")[0] == 200
+    held = snapshot(conn, work_id)
+    before = store.list_events(conn, work_id)
+    assert recovery_request(request, work_id, revision=1)[0] == 200
+    assert snapshot(conn, work_id) == held
+    assert store.list_events(conn, work_id) == before
+
+
+def test_campaign_client_transports_execution_and_attempt_capability(live_campaign, monkeypatch):
+    from brigade import worklore_client as client
+
+    conn, _, _, server, tokens = live_campaign
+    create(conn)
+    work_id = members(conn)["acme/one"]
+    fleet_run(conn)
+    monkeypatch.setattr(
+        client,
+        "load_fleet_settings",
+        lambda: {
+            "hub_url": f"http://127.0.0.1:{server.server_address[1]}",  # content-guard: allow loopback-ipv4
+            "node_token": tokens["node-a"],
+        },
+    )
+    client.ownership_action(
+        work_id, {"action": "take", "generation": 0}, if_match=0, idempotency_key="client-take", holder_nonce=NONCE_A
+    )
+    link = client.link_execution(work_id, {"node_id": "node-a", "run_id": "run-1"}, generation=1, holder_nonce=NONCE_A)
+    assert link["link"]["external_key"] == "node-a/run-1"
+    with pytest.raises(client.WorkloreClientError) as denial:
+        client.record_attempt(
+            work_id, {"action": "started", "run_id": "run-1"}, if_match=1, generation=1, holder_nonce=NONCE_B
+        )
+    assert denial.value.code == "holder-mismatch"
+    assert (
+        client.record_attempt(
+            work_id, {"action": "failed", "run_id": "run-1"}, if_match=1, generation=1, holder_nonce=NONCE_A
+        )["item"]["attempt_count"]
+        == 1
+    )
+
+
+@pytest.mark.parametrize("node", ["admin", "node-c"])
+def test_campaign_operator_observations_and_reset_use_trusted_identity(live_campaign, node):
+    conn, _, request, _, _ = live_campaign
+    made = create(conn, offer=None)
+    work_id = members(conn)["acme/one"]
+    fleet_run(conn, node="node-c")
+    store.transition(conn, made["campaign"]["work_id"], to_status="canceled", expected_version=1, actor_id="admin")
+    assert request(work_id, "execution", {"node_id": "node-c", "run_id": "run-1"}, node=node)[0] == 201
+    status, result = request(
+        work_id, "attempts", {"action": "failed", "run_id": "run-1"}, node=node, headers={"If-Match": "1"}
+    )
+    assert status == 200 and result["item"]["attempt_count"] == 1
+    assert request(work_id, "attempts", {"action": "reset"}, node="node-a", headers={"If-Match": "2"})[0] == 403
+    status, result = request(work_id, "attempts", {"action": "reset"}, node=node, headers={"If-Match": "2"})
+    assert status == 200 and result["item"]["attempt_count"] == 0
+    before = store.list_events(conn, work_id)
+    assert request(work_id, "execution", {"node_id": "node-a", "run_id": "run-1", "is_operator": True})[0] == 400
+    assert store.list_events(conn, work_id) == before
+    with pytest.raises(store.WorkloreForbidden):
+        store.record_attempt(conn, work_id, action="reset", expected_version=3, actor_id="admin", actor_type="operator")
+
+
+@pytest.mark.parametrize("count,expected", [(200, 200), (201, 409)])
+def test_campaign_recovery_obeys_safety_exit_capacity(live_campaign, count, expected):
+    conn, _, request, _, _ = live_campaign
+    create(conn)
+    work_id = members(conn)["acme/one"]
+    assert act(conn, work_id)[0] == 200
+    # Fill a held history with real checkpoints, preserving the actual holder projection.
+    while (
+        conn.execute(
+            "SELECT COUNT(*) FROM work_events WHERE work_id=? AND event_type LIKE 'ownership-%'", (work_id,)
+        ).fetchone()[0]
+        < 200
+    ):
+        held = snapshot(conn, work_id)
+        assert checkpoint(conn, work_id, revision=held["revision"], key=f"checkpoint-{held['revision']}")[0] == 200
+    if count == 201:
+        held = snapshot(conn, work_id)
+        # A persisted exhausted held history remains bounded, including operator recovery.
+        store._append_event(
+            conn,
+            work_id=work_id,
+            event_type="ownership-checkpoint",
+            actor_type="node",
+            actor_id="node-a",
+            from_status=None,
+            to_status=None,
+            now=store._utc_now(),
+            detail={"action": "checkpoint", "ownership": held},
+        )
+        conn.commit()
+    held = snapshot(conn, work_id)
+    before = store.list_events(conn, work_id)
+    status, result = recovery_request(request, work_id, revision=held["revision"])
+    assert status == expected, result
+    if expected == 409:
+        assert result["code"] == "ownership-capacity-exhausted"
+        assert store.list_events(conn, work_id) == before
+    else:
+        assert len(store.list_events(conn, work_id)) == len(before) + 1
+
+
+def test_recovery_requires_complete_body_and_cannot_force_noncampaign_release(live_campaign):
+    conn, _, request, _, _ = live_campaign
+    create(conn)
+    work_id = members(conn)["acme/one"]
+    assert act(conn, work_id)[0] == 200
+    before = store.list_events(conn, work_id)
+    for missing in ("holder_quiesced", "evidence_ref"):
+        body = {"action": "recover", "generation": 1, "holder_quiesced": True, "evidence_ref": "receipt-1"}
+        del body[missing]
+        assert (
+            request(work_id, "ownership", body, node="admin", headers={"If-Match": "1", "Idempotency-Key": "missing"})[
+                0
+            ]
+            == 400
+        )
+    assert store.list_events(conn, work_id) == before
+    item = store.create_item(conn, {"title": "Legacy holder", "kind": "fleet"}, actor_id="admin")
+    assert recovery_request(request, item["work_id"], revision=0, generation=0)[0] == 403
