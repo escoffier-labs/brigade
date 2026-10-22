@@ -10,6 +10,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Invalid Cursor hook event names no longer let a project configuration suppress the user presence callback.
+- Managed Cursor command hooks with an explicit command type are recognized without duplicate callbacks.
 - Daily status preserves local work counts when an optional health snapshot times out. Windows pytest artifacts include flushed test-phase timings and stack dumps, and timeout summaries identify the last test or session phase.
 - Cursor project initialization and user-scope harness sync install all three presence lifecycle hooks into versioned hook documents, preserve foreign entries, validate the whole project document before it suppresses the user hook, and migrate hook ownership by event.
 - Brigade self-invocations isolate Python imports from workspace files and `PYTHONPATH`, using the running installation with `-I` so `pip --user` installs keep working. This covers hooks, update refreshes, detached runs, dispatch, dashboard access, embedded scanners, and generated service commands. Agent hook commands skip update notices and refreshes entirely.
