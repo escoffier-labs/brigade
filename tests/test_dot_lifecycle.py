@@ -303,7 +303,8 @@ def test_sdk_context_events_and_exactly_one_row_per_call(dot_private_dir):
 def test_render_unit(configured):
     target, _, _ = configured
     text = m.render_unit(target, python="/usr/bin/python-example")
-    assert "-m brigade run cloud grokbot serve --pack dot --target" in text
+    assert "brigade run cloud grokbot serve --pack dot --target" in text
+    assert " -I -c " in text
     assert "--allow-host dot.example.test" in text
     assert "--allow-origin https://dot.example.test" in text
     assert "--bind 127.0.0.1:8779" in text
@@ -323,7 +324,8 @@ def test_render_unit(configured):
 def test_render_watch_units(configured, tmp_path):
     target, _, _ = configured
     service, timer = m.render_watch_units(target, python="/usr/bin/python-example")
-    assert "-m brigade.dot watch --target" in service
+    assert "brigade.dot watch --target" in service
+    assert " -I -c " in service
     for line in ["OnBootSec=5min", "OnUnitActiveSec=5min", "AccuracySec=30s", "Unit=brigade-dot-watch.service"]:
         assert line in timer
     out = tmp_path / "units"

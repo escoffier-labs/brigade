@@ -15,6 +15,7 @@ from typing import Any, Callable, Iterator, Mapping
 
 from ..fleet_claim_target import ClaimTargetError
 from ..claim_loss_cancellation import ClaimLossCancellation, ClaimLossCancelled
+from ..isolated_exec import module_argv, trusted_cwd
 
 
 _DETACH_START_TIMEOUT_SECONDS = 30.0
@@ -1142,7 +1143,7 @@ def _dispatch_detached(
                 with log_path.open("a", encoding="utf-8") as log:
                     child, detach_mode = proc_mod.spawn_detached(
                         argv,
-                        cwd=run_cwd,
+                        cwd=trusted_cwd(),
                         stdin=DEVNULL,
                         stdout=log,
                         stderr=STDOUT,
@@ -1238,9 +1239,7 @@ def _dispatch_detached(
 
 
 def _detached_child_argv(args, *, run_cwd: Path, roster_resolution, output_dir: Path) -> list[str]:
-    argv = [
-        sys.executable,
-        "-m",
+    argv = module_argv(
         "brigade",
         "run",
         args.task,
@@ -1252,7 +1251,7 @@ def _detached_child_argv(args, *, run_cwd: Path, roster_resolution, output_dir: 
         str(run_cwd),
         "--output-dir",
         str(output_dir),
-    ]
+    )
     for shadowed in roster_resolution.shadowed:
         argv.extend(["--resolved-roster-shadowed", str(shadowed)])
     if args.allow_dirty:

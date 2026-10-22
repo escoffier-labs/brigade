@@ -22,6 +22,7 @@ def _env(tmp_path: Path, **extra: str) -> dict[str, str]:
         "HOME": str(tmp_path),
         "USERPROFILE": str(tmp_path),
         "XDG_CACHE_HOME": str(tmp_path / "cache"),
+        "LOCALAPPDATA": str(tmp_path / "cache"),
     }
     env.update(extra)
     return env
@@ -325,6 +326,7 @@ def _run_brief(tmp_path, cache_home: Path, monkeypatch, capsys) -> str:
 
     set_home(monkeypatch, str(cache_home))
     monkeypatch.setenv("XDG_CACHE_HOME", str(cache_home / "cache"))
+    monkeypatch.setenv("LOCALAPPDATA", str(cache_home / "cache"))
     _init_git_repo(tmp_path)
     dogfood_cmd.init(target=tmp_path)
     monkeypatch.setattr(work_cmd.helpers.shutil, "which", lambda name: f"/usr/bin/{name}")
@@ -466,6 +468,24 @@ def test_refresh_privacy_headers_keep_version_fetch(tmp_path, monkeypatch, extra
     else:
         assert headers == {"User-agent": "Python-urllib"}
     assert update_notify.available_update(env=_env(tmp_path))["latest"] == "99.0.0"
+
+
+@pytest.mark.parametrize("optout", [{"DO_NOT_TRACK": "1"}, {"BRIGADE_TELEMETRY": "0"}])
+def test_default_refresh_child_preserves_supplied_environment(tmp_path, monkeypatch, optout):
+    monkeypatch.delenv("DO_NOT_TRACK", raising=False)
+    monkeypatch.delenv("BRIGADE_TELEMETRY", raising=False)
+    monkeypatch.setenv("BRIGADE_INSTALL_CHANNEL", "pip")
+    environment = _env(tmp_path, BRIGADE_INSTALL_CHANNEL="plugin", **optout)
+    original = environment.copy()
+    children = []
+    monkeypatch.setattr(update_notify.subprocess, "Popen", lambda *a, **kw: children.append(kw["env"]))
+
+    update_notify.maybe_notify(["work"], 0, env=environment, now=100.0, stderr=io.StringIO())
+
+    assert len(children) == 1
+    child_env = children[0]
+    assert {key: child_env.get(key) for key in original} == original
+    assert environment == original
 
 
 def test_npm_refreshes_without_notice_and_preserves_channel_in_child(tmp_path, monkeypatch):

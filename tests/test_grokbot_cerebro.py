@@ -683,7 +683,7 @@ def test_doctor_and_canary_are_sanitized_and_unit_uses_brigade_cli(tmp_path: Pat
     unit = grokbot_packs.render_install_service(tmp_path, "cerebro-memory")
     exec_start = [line for line in unit.splitlines() if line.startswith("ExecStart=")]
     assert len(exec_start) == 1
-    assert exec_start[0].startswith(f"ExecStart={grokbot_ops._systemd_quote(sys.executable)} -m brigade run ")
+    assert exec_start[0].startswith(f"ExecStart={grokbot_ops._systemd_quote(sys.executable)} -I -c ")
     assert "run" in unit
     assert "cloud" in unit
     assert "grokbot" in unit

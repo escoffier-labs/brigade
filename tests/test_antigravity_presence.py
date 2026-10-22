@@ -101,8 +101,8 @@ def test_hook_detaches_silent_publisher_and_preserves_session(workspace, monkeyp
     else:
         assert options["start_new_session"] is True
     assert "PLANTED" not in repr(launches)
-    assert argv[:3] == [sys.executable, "-m", "brigade"]
-    assert argv[3:5] == ["work", "presence-hook"]
+    assert argv[:3] == [sys.executable, "-I", "-c"]
+    assert argv[5:8] == ["brigade", "work", "presence-hook"]
     assert argv[argv.index("--event") + 1] == expected
 
     # Run the detached command's real entry point and inspect what reaches the client.
@@ -110,7 +110,7 @@ def test_hook_detaches_silent_publisher_and_preserves_session(workspace, monkeyp
     monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "http://127.0.0.1:3774")
     monkeypatch.setattr(fleet_client, "upsert_session", lambda snap: snapshots.append(snap) or True)
     monkeypatch.setattr(fleet_client, "end_session", lambda snap: pytest.fail("Stop must not end a session"))
-    assert cli.main(argv[3:]) == 0
+    assert cli.main(argv[6:]) == 0
     assert capsys.readouterr().out == ""
     assert len(snapshots) == 1
     snapshot = snapshots[0]
@@ -242,34 +242,37 @@ def test_hook_skips_unwired_unselected_and_operator_home(tmp_path, monkeypatch, 
 
 def test_hook_process_returns_while_detached_publisher_is_blocked(workspace, tmp_path):
     """A live publisher cannot keep agy's hook stdout pipe or hook process open."""
-    import time
+    import threading
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 
-    started = tmp_path / "publisher-started"
-    release = tmp_path / "release-publisher"
-    finished = tmp_path / "publisher-finished"
-    customization = tmp_path / "python-startup"
-    customization.mkdir()
-    (customization / "sitecustomize.py").write_text(
-        "import os, time\n"
-        "from pathlib import Path\n"
-        "from brigade import fleet_client\n"
-        "def blocked(snapshot):\n"
-        "    Path(os.environ['TEST_PUBLISHER_STARTED']).touch()\n"
-        "    while not Path(os.environ['TEST_PUBLISHER_RELEASE']).exists():\n"
-        "        time.sleep(0.01)\n"
-        "    Path(os.environ['TEST_PUBLISHER_FINISHED']).touch()\n"
-        "    return True\n"
-        "fleet_client.upsert_session = blocked\n",
-        encoding="utf-8",
-    )
+    started = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    requests = []
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_POST(self):
+            requests.append((self.path, json.loads(self.rfile.read(int(self.headers["Content-Length"])))))
+            started.set()
+            release.wait(timeout=15)
+            try:
+                self.send_response(200)
+                self.end_headers()
+            finally:
+                finished.set()
+
+        def log_message(self, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever)
+    thread.start()
     env = dict(os.environ)
     env.update(
-        PYTHONPATH=os.pathsep.join([str(customization), str(Path(presence.__file__).resolve().parents[1])]),
+        PYTHONPATH=str(Path(presence.__file__).resolve().parents[1]),
         BRIGADE_EXTRAS="1",
-        BRIGADE_FLEET_HUB_URL="http://127.0.0.1:3774",
-        TEST_PUBLISHER_STARTED=str(started),
-        TEST_PUBLISHER_RELEASE=str(release),
-        TEST_PUBLISHER_FINISHED=str(finished),
+        BRIGADE_FLEET_HUB_URL=f"http://127.0.0.1:{server.server_port}",
+        BRIGADE_FLEET_NODE_TOKEN="example-node-token",
     )
     try:
         result = subprocess.run(
@@ -293,16 +296,17 @@ def test_hook_process_returns_while_detached_publisher_is_blocked(workspace, tmp
             check=True,
         )
         assert result.stdout == result.stderr == ""
-        deadline = time.monotonic() + 10
-        while not started.exists() and time.monotonic() < deadline:
-            time.sleep(0.01)
-        assert started.exists(), "detached publisher did not reach the client"
-        assert not finished.exists(), "publisher was released before the hook returned"
+        assert started.wait(timeout=10), "detached publisher did not reach the loopback endpoint"
+        assert not finished.is_set(), "publisher was released before the hook returned"
+        assert requests[0][0] == "/sessions"
+        assert requests[0][1]["session_id"] == "conversation-1"
     finally:
-        release.touch()
-        deadline = time.monotonic() + 10
-        while started.exists() and not finished.exists() and time.monotonic() < deadline:
-            time.sleep(0.01)
+        release.set()
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+        if started.is_set():
+            assert finished.wait(timeout=5)
 
 
 @pytest.mark.parametrize("shadow", ["brigade.py", "brigade/__init__.py"])
@@ -320,6 +324,7 @@ def test_publisher_does_not_import_workspace_copy(workspace, tmp_path, monkeypat
 
     _stub_publisher_process(monkeypatch, spawn)
     monkeypatch.chdir(workspace)
+    monkeypatch.setenv("PYTHONPATH", str(workspace))
     monkeypatch.setattr(
         sys, "stdin", io.StringIO(json.dumps({"conversationId": "conversation-1", "workspacePaths": [str(workspace)]}))
     )

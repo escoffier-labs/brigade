@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 
 from . import grokbot_jobs, grokbot_mcp
+from .isolated_exec import module_argv, trusted_cwd
 from . import dirfd as dirfd_mod
 
 
@@ -349,15 +350,14 @@ def canary(
 
 
 def render_unit(config: dict[str, Any], *, python: str, exec_root: Path) -> str:
+    exec_root = exec_root.expanduser().resolve()
     config = _validate_config(config)
     instance = config["instance"]
     client_id = config.get("client_id")
     bind = config["bind"]
     reference = config["bearer"]
     hub_token_file = config.get("hub_token_file")
-    args = [
-        python,
-        "-m",
+    args = module_argv(
         "brigade",
         "run",
         "cloud",
@@ -369,7 +369,8 @@ def render_unit(config: dict[str, Any], *, python: str, exec_root: Path) -> str:
         str(exec_root),
         "--bind",
         bind,
-    ]
+        python=python,
+    )
     if client_id is not None:
         args += ["--client-id", client_id]
     for host in config.get("allowed_hosts", []):
@@ -397,7 +398,7 @@ def render_unit(config: dict[str, Any], *, python: str, exec_root: Path) -> str:
         "[Service]\n"
         "Type=simple\n"
         f"{hub_environment}"
-        f"ExecStart={exec_start}\n"
+        f"WorkingDirectory={_systemd_quote(str(trusted_cwd()))}\nExecStart={exec_start}\n"
         f"{LISTENER_RECOVERY_SERVICE_FRAGMENT}"
         "NoNewPrivileges=yes\n"
         "PrivateTmp=yes\n"

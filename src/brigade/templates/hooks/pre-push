@@ -50,20 +50,34 @@ if [[ -n "${CONTENT_GUARD_DIR:-}" ]]; then
     echo "pre-push: policy file not found: $POLICY" >&2
     exit 1
   fi
+  if [[ ! -f "$CONTENT_GUARD_DIR/src/content_guard/__init__.py" ]]; then
+    echo "pre-push: content-guard package initializer not found: $CONTENT_GUARD_DIR/src/content_guard/__init__.py" >&2
+    exit 1
+  fi
+  SCANNER_PACKAGE="$(cd "$CONTENT_GUARD_DIR/src/content_guard" && pwd -P)"
+  SCANNER_INIT="$SCANNER_PACKAGE/__init__.py"
+  # Load only the configured package before entering the Git target. -I
+  # excludes cwd, PYTHONPATH and user-site discovery, without reading .pth.
+  SCANNER_BOOTSTRAP='import importlib.util as u,os,pathlib as p,runpy as r,sys as s;i,m,t=s.argv[1:4];del s.argv[1:4];f=u.spec_from_file_location("content_guard",i);s.path.append(str(p.Path(i).resolve().parent.parent));q=u.module_from_spec(f);s.modules[f.name]=q;f.loader.exec_module(q);os.chdir(t);r.run_module(m,run_name="__main__",alter_sys=True)'
+  RUN_EXTERNAL() {
+    local module="$1"
+    shift
+    (cd "$SCANNER_PACKAGE" && python3 -I -c "$SCANNER_BOOTSTRAP" "$SCANNER_INIT" "$module" "$REPO_ROOT" "$@")
+  }
   echo "pre-push: scanning $REPO_ROOT with explicit content-guard compatibility override"
   RUN_TIP() {
     local pol="$1"
-    PYTHONPATH="$CONTENT_GUARD_DIR/src" python3 -m content_guard scan "$REPO_ROOT" --policy "$pol" || rc=$?
+    RUN_EXTERNAL content_guard scan "$REPO_ROOT" --policy "$pol" || rc=$?
   }
   RUN_HISTORY() {
     local pol="$1"
-    PYTHONPATH="$CONTENT_GUARD_DIR/src" python3 -m content_guard.git_scan \
+    RUN_EXTERNAL content_guard.git_scan \
       --history --revs-stdin --policy "$pol" "${ALLOW_FROM[@]+"${ALLOW_FROM[@]}"}" || rc=$?
   }
   RUN_HISTORY_RANGE() {
     local range="$1"
     local pol="$2"
-    PYTHONPATH="$CONTENT_GUARD_DIR/src" python3 -m content_guard.git_scan \
+    RUN_EXTERNAL content_guard.git_scan \
       --history --range "$range" --policy "$pol" "${ALLOW_FROM[@]+"${ALLOW_FROM[@]}"}" || rc=$?
   }
 else
