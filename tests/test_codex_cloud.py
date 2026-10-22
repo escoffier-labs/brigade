@@ -136,6 +136,153 @@ def _result(code=0, stdout="", stderr=""):
     return proc.Result(code=code, stdout=stdout, stderr=stderr)
 
 
+def test_launch_task_uses_stdin_and_binds_codex_lease(monkeypatch, tmp_path):
+    codex_cloud.save_environment_config(tmp_path, environment_id="env-launch")
+    calls = _grant_hub(monkeypatch)
+    seen = {}
+
+    def fake_run(argv, timeout=30.0, env=None, cwd=None, stdin=None, process_registry=None):
+        seen.update(argv=argv, stdin=stdin, cwd=cwd)
+        return _result(stdout="Submitted https://chatgpt.com/codex/tasks/task_launch99")
+
+    monkeypatch.setattr(codex_cloud.proc, "run", fake_run)
+    launched = codex_cloud.launch_task("private prompt", target=tmp_path, repo="owner/repo", label="launch")
+
+    assert launched["ok"] is True
+    assert launched["task_id"] == "task_launch99"
+    assert seen["argv"] == ["codex", "cloud", "exec", "--env", "env-launch", "-"]
+    assert seen["stdin"] == b"private prompt"
+    assert "private prompt" not in seen["argv"]
+    assert calls["admit"][0]["args"][0] == "codex"
+    assert calls["bind"][0]["kwargs"]["provider_task_id"] == "task_launch99"
+    assert cloud_tracker.load_registry(tmp_path)["entries"][0]["task_id"] == "task_launch99"
+
+
+def test_launch_task_releases_lease_when_submission_fails(monkeypatch, tmp_path):
+    codex_cloud.save_environment_config(tmp_path, environment_id="env-launch")
+    calls = _grant_hub(monkeypatch)
+    monkeypatch.setattr(codex_cloud.proc, "run", lambda *a, **k: _result(code=1))
+
+    launched = codex_cloud.launch_task("private prompt", target=tmp_path, repo="owner/repo", label="launch")
+
+    assert launched == {"ok": False, "reason": "submit-failed"}
+    assert calls["release"][0]["kwargs"]["state"] == "submit-failed"
+
+
+def test_launch_task_keeps_lease_when_submission_times_out(monkeypatch, tmp_path):
+    codex_cloud.save_environment_config(tmp_path, environment_id="env-launch")
+    calls = _grant_hub(monkeypatch)
+    monkeypatch.setattr(codex_cloud.proc, "run", lambda *a, **k: _result(code=124))
+
+    launched = codex_cloud.launch_task("private prompt", target=tmp_path, repo="owner/repo", label="launch")
+
+    assert launched == {"ok": False, "reason": "uncertain"}
+    assert calls["release"] == []
+
+
+def test_register_codex_task_lease_is_idempotent(monkeypatch, tmp_path):
+    calls = _grant_hub(monkeypatch)
+    monkeypatch.setattr(fleet_client, "fetch_cloud", lambda: {"leases": []})
+    cloud_tracker.register(
+        tmp_path,
+        provider="codex-cloud",
+        task_id="task_register99",
+        label="registered task",
+        prompt_hash="sha256:1234",
+    )
+
+    codex_cloud.acquire_registered_task_lease(
+        tmp_path,
+        task_id="task_register99",
+        label="registered task",
+        prompt_hash="sha256:1234",
+        repo="owner/repo",
+    )
+    codex_cloud.acquire_registered_task_lease(
+        tmp_path,
+        task_id="task_register99",
+        label="registered task",
+        prompt_hash="sha256:1234",
+        repo="owner/repo",
+    )
+
+    assert len(calls["admit"]) == 1
+    assert len(calls["bind"]) == 1
+    assert cloud_tracker.load_registry(tmp_path)["entries"][0]["lease_holder"] == "h1"
+
+
+def test_cli_cloud_launch_codex_cloud_submission(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("BRIGADE_EXTRAS", "1")
+    codex_cloud.save_environment_config(tmp_path, environment_id="env-cli")
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_text("private prompt", encoding="utf-8")
+    prompt_file.chmod(0o600)
+    calls = _grant_hub(monkeypatch)
+    seen = {}
+
+    def fake_run(argv, timeout=30.0, env=None, cwd=None, stdin=None, process_registry=None):
+        seen.update(argv=argv, stdin=stdin)
+        return _result(stdout="task_cli_launch99")
+
+    monkeypatch.setattr(codex_cloud.proc, "run", fake_run)
+    rc = cli.main(
+        [
+            "run",
+            "cloud",
+            "launch",
+            "--target",
+            str(tmp_path),
+            "--provider",
+            "codex-cloud",
+            "--repo",
+            "owner/repo",
+            "--label",
+            "cli-codex",
+            "--prompt-file",
+            str(prompt_file),
+            "--json",
+        ]
+    )
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["task_id"] == "task_cli_launch99"
+    assert payload["provider"] == "codex-cloud"
+    assert "holder" not in payload
+    assert seen["argv"] == ["codex", "cloud", "exec", "--env", "env-cli", "-"]
+    assert seen["stdin"] == b"private prompt"
+    assert len(calls["admit"]) == len(calls["bind"]) == 1
+
+
+def test_cli_register_codex_cloud_acquires_one_lease(monkeypatch, tmp_path, capsys):
+    monkeypatch.setenv("BRIGADE_EXTRAS", "1")
+    calls = _grant_hub(monkeypatch)
+    monkeypatch.setattr(fleet_client, "fetch_cloud", lambda: {"leases": []})
+    argv = [
+        "run",
+        "cloud",
+        "register",
+        "--target",
+        str(tmp_path),
+        "--provider",
+        "codex-cloud",
+        "--task-id",
+        "task_cli_register99",
+        "--label",
+        "registered",
+        "--json",
+    ]
+
+    assert cli.main(argv) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert cli.main(argv) == 0
+    capsys.readouterr()
+
+    assert first["task_id"] == "task_cli_register99"
+    assert len(calls["admit"]) == 1
+    assert len(calls["bind"]) == 1
+
+
 def _grant_hub(monkeypatch, *, lease_id: str | None = "lease-1", granted: bool = True, reason: str = "ok"):
     """Wire fleet_client so admission succeeds; return the recorded calls."""
     recorded: dict[str, list] = {"admit": [], "bind": [], "renew": [], "release": []}

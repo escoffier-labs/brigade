@@ -100,6 +100,113 @@ def _repo_from_cwd(cwd: Path | None) -> str | None:
     return None
 
 
+def launch_task(prompt: str, *, target: Path, repo: str, label: str) -> dict[str, Any]:
+    """Submit one task from stdin and bind its Codex provider lease."""
+    from . import cloud_tracker
+
+    env_id = resolve_environment_id(CONFIGURED_SELECTOR, target=target)
+    prompt_hash = cloud_tracker.prompt_hash(prompt)
+    canonical_repo = repo.removeprefix("https://github.com/").removesuffix(".git").strip("/")
+    lease_id: str | None = None
+    holder: str | None = None
+    if _hub_configured():
+        admission = fleet_client.admit_cloud(
+            "codex",
+            repo=canonical_repo,
+            label=cloud_tracker.lease_label("codex", canonical_repo, prompt_hash),
+            prompt_hash=prompt_hash,
+            ttl_seconds=300,
+        )
+        lease_id = admission.lease.get("lease_id") if isinstance(admission.lease, dict) else None
+        if not admission.granted or not isinstance(lease_id, str):
+            return {"ok": False, "reason": admission.reason if not admission.granted else "no-lease"}
+        holder = admission.holder
+
+    try:
+        result = proc.run(
+            ["codex", "cloud", "exec", "--env", env_id, "-"],
+            timeout=SUBMIT_TIMEOUT,
+            cwd=target,
+            stdin=prompt.encode("utf-8"),
+        )
+    except Exception:  # noqa: BLE001 - submission errors release the unbound lease
+        if lease_id is not None:
+            fleet_client.release_cloud(lease_id, state="submit-failed", holder=holder)
+        return {"ok": False, "reason": "submit-failed"}
+    task_id = parse_task_id(result.stdout) or parse_task_id(result.stderr)
+    if result.code == 124 and task_id is None:
+        return {"ok": False, "reason": "uncertain"}
+    if result.code != 0 and result.code != 124:
+        if lease_id is not None:
+            fleet_client.release_cloud(lease_id, state="submit-failed", holder=holder)
+        return {"ok": False, "reason": "submit-failed"}
+    if task_id is None:
+        return {"ok": False, "reason": "uncertain"}
+    if lease_id is not None:
+        bound = fleet_client.bind_cloud(lease_id, provider_task_id=task_id, holder=holder)
+        if not bound.granted:
+            return {"ok": False, "reason": "bind-failed", "task_id": task_id}
+    entry = cloud_tracker.register(
+        target,
+        provider="codex-cloud",
+        task_id=task_id,
+        label=label,
+        prompt_hash=prompt_hash,
+        lease_holder=holder,
+        environment_audit=environment_audit_ref(CONFIGURED_SELECTOR, env_id),
+    )
+    return {"ok": True, "reason": "ok", "task_id": task_id, "entry": entry}
+
+
+def acquire_registered_task_lease(
+    target: Path, *, task_id: str, label: str, prompt_hash: str | None, repo: str | None
+) -> None:
+    """Acquire and bind one lease for a Codex task registered after submission."""
+    from . import cloud_tracker
+
+    if not _hub_configured():
+        return
+    entries = cloud_tracker.load_registry(target)["entries"]
+    current = next(
+        (row for row in entries if row.get("provider") == "codex-cloud" and row.get("task_id") == task_id), None
+    )
+    if isinstance(current, dict) and isinstance(current.get("lease_holder"), str):
+        return
+    snapshot = fleet_client.fetch_cloud()
+    leases = snapshot.get("leases")
+    if isinstance(leases, list) and any(
+        isinstance(row, dict) and row.get("provider_task_id") == task_id for row in leases
+    ):
+        return
+    digest = prompt_hash or cloud_tracker.prompt_hash(label)
+    admission = fleet_client.admit_cloud(
+        "codex",
+        repo=repo,
+        label=cloud_tracker.lease_label("codex", repo, digest),
+        prompt_hash=prompt_hash,
+        ttl_seconds=300,
+    )
+    lease_id = admission.lease.get("lease_id") if isinstance(admission.lease, dict) else None
+    if not admission.granted or not isinstance(lease_id, str):
+        raise RuntimeError("cloud admission denied")
+    bound = fleet_client.bind_cloud(lease_id, provider_task_id=task_id, holder=admission.holder)
+    if not bound.granted:
+        raise RuntimeError("cloud lease bind failed")
+    with cloud_tracker.registry_lock(target):
+        registry = cloud_tracker.load_registry(target)
+        entry = next(
+            (
+                row
+                for row in registry["entries"]
+                if row.get("provider") == "codex-cloud" and row.get("task_id") == task_id
+            ),
+            None,
+        )
+        if isinstance(entry, dict) and admission.holder:
+            entry["lease_holder"] = admission.holder
+            cloud_tracker.save_registry(target, registry)
+
+
 def parse_task_id(text: str) -> str | None:
     """Return only a strict Codex Cloud task id; never an arbitrary stdout token."""
     for pat in _ID_PATTERNS:
