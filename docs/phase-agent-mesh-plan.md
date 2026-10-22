@@ -6,584 +6,743 @@ mail), #2006 (teammate invites), #2007 (no-hub mode), #2008 (Hub Lite). Parent:
 
 Each slice below is one pull request that a worker lane can pick up on its own
 once the slices it depends on have merged. Slices list the files they touch,
-the tests they add and what must be true before they merge. Every slice runs
-the focused gate through Brigade with its own test selectors:
+the tests they add and what must be true before they merge. Slice numbers
+from revision 1 are kept so review comments still resolve. New slices carry a
+letter suffix. Every slice runs the focused gate through Brigade with its own
+test selectors:
 
 ```bash
 brigade work verify run --target . --argv-json '["./scripts/verify-focused","<selectors>"]' --capture brigade-work
 ```
 
-The full gate runs once per pull request, as AGENTS.md requires.
+The full gate runs once per pull request, as AGENTS.md requires. Planned
+commands are written without the `brigade` prefix because they do not exist
+yet.
 
-## Gates that need the operator
+## Integration baseline
 
-- **G1, dependency (blocks slice 1 and everything that imports it):** agreement
-  on #2005 to add the optional extra `mesh = ["cryptography>=47,<52"]`, with
-  the Intel Mac `--only-binary cryptography` instruction and no Windows arm64
-  wheel. AGENTS.md requires a conversation before a new dependency. Until G1 is
-  recorded on #2005, slice 1 must not merge. Slices 3, 4 and 8 never import
-  `cryptography` and can proceed while G1 is open.
-- **G2, native engine (blocks slices 15, 18 and 19):** agreement on #2007 to add
-  `engines/mesh/` (Rust, iroh 1.x) and its CI job.
-- **G3, design open questions 2, 3, 4, 6 and 7** in the design doc. Each slice
-  that depends on one names it. A slice may land with the proposed default
-  behind a constant if the operator has not answered yet, and the pull request
-  says so.
+Slices build on `main` plus #1939 (opaque paging cursors and snapshots), #2009
+(`count_only`), #2010 (`client_id` and tool annotations) and #1951 (operator
+questions). A slice that touches a surface one of them changes waits for that
+merge and says so in its header. Rebase onto the merged form, not the open
+branch.
+
+## Gates
+
+- **G1, dependency: approved** on #2005 (2026-10-22). The optional extra is
+  `mesh = ["cryptography>=48,<52"]`. Design D1 explains the floor of 48.
+- **G2, native engine: approved** on #2007 (2026-10-22), staged: slice 15 is a
+  bounded spike, slice 15b writes the wire protocol, and slices 18a to 18e
+  start only after slice 15 records a go and slice 15b is merged.
+- **G3, open questions: decided.** Design "Decisions on the open questions"
+  records all seven.
+- **G4, `wrangler` for CI (blocks the workerd runs in slices 12a to 12c):**
+  running the contract suite against workerd needs `wrangler` as a pinned
+  development dependency of `workers/hub-lite/`, used only in CI and locally.
+  AGENTS.md asks for a conversation before a new dependency, so slice 12a
+  records the operator's agreement on #2008 before it merges.
 
 ## Constraints for every slice
 
-- `src/brigade/fleet_hub.py` is at 1963 lines and the module size ratchet caps
-  modules at 2000 lines. New hub logic goes in new modules. Only small hook
-  calls may be added to `fleet_hub.py`. `fleet_hub_messages.py` (1135 lines)
-  and `fleet_client_messages.py` (1183 lines) also take new logic in new
-  modules where it is more than a few lines.
+- `src/brigade/fleet_hub.py` is at 1965 lines on `main` and the module size
+  ratchet caps modules at 2000 lines. New hub logic goes in new modules. Only
+  small hook calls may be added to `fleet_hub.py`. `fleet_hub_messages.py`
+  (1135 lines) and `fleet_client_messages.py` (1183 lines) also take new logic
+  in new modules.
 - The hub never imports `cryptography`. A test in slice 3 enforces this.
-- Every slice that changes the hub schema (3, 4, 8 and 9) bumps
-  `SCHEMA_VERSION` or registers its columns in the additive column lists in
-  `fleet_hub.py`, so the startup gate accepts an upgraded database.
-- Every module that needs the extra imports it lazily inside functions and
-  raises one `MeshExtraMissing` error, the same pattern
-  `src/brigade/dot/access_auth.py` uses with `OptionalDependencyError`.
+- Every slice that changes the hub schema (3, 4, 7b, 8 and 9) bumps
+  `SCHEMA_VERSION` past #1939's 41 or registers additive columns, so the
+  startup gate accepts an upgraded database.
+- Every module that needs the extra imports it lazily and raises one
+  `MeshExtraMissing` error, the pattern `src/brigade/dot/access_auth.py` uses.
 - No fixture, test or doc contains real hostnames, addresses, tokens or
   personal names. Use `example.invalid` hosts and obviously fake keys.
 - Existing plain-text messaging tests pass unchanged with and without the
   extra installed.
 - `src/brigade/message_envelope.py` already exists for run messages (#1010).
-  New modules use the `fleet_mesh_` prefix to avoid confusion.
+  New modules use the `fleet_mesh_` prefix.
+- Docs refer to planned commands without the literal `brigade` prefix until
+  the slice that adds the command merges, so the documented-command inventory
+  check stays green.
 
 ## Dependency order
 
+```text
+1 -> 2
+3 -> 4
+1 + 3 -> 2b
+1 + 2 + 2b + 3 + 4 -> 5 -> 6 -> 7
+6 + #1951 -> 7b
+8;  3 + 8 -> 9
+2 + 2b + 5 + 6 + 9 -> 10
+4 + 9 -> 11 -> 12a -> 12b -> 12c -> 13 -> 14 (14 also needs 10)
+15 -> 15b
+16
+1 + 2 + 5 + 6 + 15b + 16 -> 17
+15 + 17 -> 18a -> 18b -> 18c -> 18d, 18e
+18b -> 19
 ```
-G1 -> 1 -> 2 -------> 5 -> 6 -> 7
-3 (no G1) ----------> 5
-4 (no G1) ----------> 5
-8 (no G1) + 3 -> 9 -> 10 (also needs 2)
-4 + 9 -> 11 -> 12 -> 13 -> 14 (also needs 10)
-G2 -> 15
-16 (any time)
-1 + 2 + 16 -> 17
-15 + 17 -> 18 -> 19
-```
+
+## How the review findings map to slices
+
+| Finding | Design | Slices |
+|---|---|---|
+| ask_user bypasses the boundary | D7 | 7b, docs note in 7 |
+| Hub identity can reset pins | D4 | 3, 2b |
+| Reply check trusts hub columns | D5, D6 | 4, 5 |
+| Pin acceptance boundary | D3 | 2 |
+| Invite fragment readable by the hub's page | D9 | 9, 10 |
+| Pending invitation trust | D3, D9 | 2, 10 |
+| Retry recovery API | D5 | 1, 4, 6 |
+| Rotation and retention semantics | D3, D8 | 2, 4, 5 |
+| Idempotent redemption | D9 | 9, 10 |
+| Dependency graph and baseline | this plan | all |
+| Hub Lite storage math | D8, D12 | 4, 12c, 14 |
+| Reason Network rationale | D10 | none (docs) |
 
 ## #2005: sealed message bodies
 
-### Slice 1: crypto core and the `mesh` extra (needs G1)
+### Slice 1: crypto core and the `mesh` extra
 
-Pure functions, no I/O, no wiring into messaging.
+Pure functions, no I/O.
 
 Files:
-- `pyproject.toml`: add the `mesh` extra. Add `cryptography>=47,<52` to the
-  `dev` extra so mypy and tests see it.
-- `src/brigade/fleet_mesh_crypto.py` (new): `MeshExtraMissing`, key pair
-  generation, key record build and verify (`self_sig`, `prev_sig`), `kid` and
-  fingerprint derivation, canonical encoding, the binary payload fields,
-  padding, `seal()` and `open()`
-  for the version 1 envelope in design D2, using
-  `cryptography.hazmat.primitives.hpke` with X25519, HKDF-SHA256 and
-  AES-256-GCM.
-- `.github/workflows/ci.yml`: one job leg runs the mesh tests with the extra,
-  one confirms the plain-text suite without it, and one installs the floor
-  version (47) to catch API drift.
+- `pyproject.toml`: add the `mesh` extra. Add `cryptography>=48,<52` to the
+  `dev` extra.
+- `src/brigade/fleet_mesh_crypto.py` (new): `MeshExtraMissing`, the ML-KEM
+  backend probe (`mesh_backend_unsupported`), Ed25519 and hybrid KEM key
+  generation, key record build and verify, `kid` and fingerprint derivation,
+  canonical encoding, binary payload fields, padding, the routing header,
+  signed header and envelope of design D2, the retry commitment, the label
+  constants, and `seal()` and `open()` with `Suite(KEM.MLKEM768_X25519,
+  KDF.HKDF_SHA256, AEAD.AES_256_GCM)`.
+- `.github/workflows/ci.yml`: one leg runs the mesh tests with the extra, one
+  runs the plain-text suite without it, and one installs the floor (48).
 
 Tests (`tests/test_fleet_mesh_crypto.py`):
-- Seal and open round trip for recipient and sender wraps.
-- Changing any single header field, the ciphertext, a wrap or the signature
-  makes `open()` fail with a fixed error code.
+- Seal and open round trip for the recipient and sender wraps.
+- Changing any single routing header field, `ct_sha256`, `wraps_sha256`,
+  `rc`, the ciphertext, a wrap or the signature makes `open()` fail with a
+  fixed code.
 - An envelope re-signed by a different sender with `from` changed fails to
-  unwrap (the identity-misbinding case in D2).
+  unwrap and fails the AEAD check.
+- An envelope forwarded unchanged to a third party fails the `to` check, and
+  one with `to` or `rcpt` rewritten fails the signature.
+- The signed header verifies alone after `ct` and `recipients` are removed.
 - Unknown `v` or `suite` gives `envelope_unsupported`.
-- Padding: sizes land on 1 KiB buckets and strip back exactly.
-- Two seals of the same input draw different content keys.
-- The largest legal message (64 KiB body of quotes, backslashes and CJK text,
-  maximum subject, ref, thread and label) seals under the 96 KiB envelope cap.
-- Key records: changing any covered field (including `suites` and `prev_kid`)
-  breaks `self_sig`.
-- A checked-in known-answer fixture (fixed test keys, fixed envelope) opens, so
-  a refactor cannot change the format silently.
+- Padding lands on 1 KiB buckets and strips back exactly.
+- Two seals of the same input draw different content keys and produce the
+  same `rc`. Changing any semantic field changes `rc`, and changing
+  `created_at` alone does not.
+- Every label is distinct, and a signature made under one label fails under
+  each of the others.
+- The largest legal message seals under 96 KiB, and the client reports
+  `message_too_large` against a 32 KiB `max_envelope_bytes`.
+- Key records: changing any covered field breaks `self_sig`.
+- A checked-in known-answer fixture (fixed test keys and envelope) opens.
 - With `cryptography` blocked in `sys.modules`, every entry point raises
-  `MeshExtraMissing` and nothing else.
+  `MeshExtraMissing`. With ML-KEM reported unavailable, sealing raises
+  `mesh_backend_unsupported` and never falls back to `KEM.X25519`.
 
-Acceptance: focused gate passes on the floor and newest `cryptography`. No
-other module imports `fleet_mesh_crypto` yet.
+Acceptance: the focused gate passes on the floor and newest `cryptography`.
 
-### Slice 2: local key store, pins and `brigade fleet keys` (needs 1)
+### Slice 2: local key store, trust levels and the keys subcommands (needs 1)
 
 Files:
-- `src/brigade/fleet_mesh_keys.py` (new): key files under
-  `<brigade_home>/fleet/mesh-keys/`, pin files per hub id, TOFU, continuity
-  acceptance, `changed` status, retired keys and pruning. File handling follows
-  `read_message_token_file` and `src/brigade/authority_key.py`: owner-only
-  mode, parent directory 0700, no symlinks, atomic replace.
+- `src/brigade/fleet_mesh_keys.py` (new): key files, the retry key and retired
+  keys under `<brigade_home>/fleet/mesh-keys/`, a pin store per accepted hub
+  identity with the statuses of design D3, continuity chains of up to 8 links,
+  key history with validity intervals, `compromised_from` handling, the
+  manifest key pin, manifest and fingerprint-list verification, and pruning.
+  File handling follows `read_message_token_file` and
+  `src/brigade/authority_key.py`.
 - `src/brigade/cli/fleet_keys.py` (new), registered from `cli/fleet.py`:
-  `keys init`, `keys show`, `keys fingerprint`, `keys rotate`, `keys accept
-  <principal> --fingerprint <fp>`, `keys accept --all-changed --hub <url>`,
-  `keys prune`. `rotate` only writes locally in this slice. Publishing arrives
-  with slice 6.
+  `fleet keys show`, `rotate`, `accept <principal> --fingerprint <fp>`,
+  `accept --manifest <file>`, `accept --fingerprints <file>`,
+  `trust-manifest-key --fingerprint <fp>`, `manifest sign` (admin machine)
+  and `prune`. No `--all-changed`. `rotate` writes locally until slice 6.
 
 Tests (`tests/test_fleet_mesh_keys.py`):
-- Key files are created 0600 under a 0700 directory, and a symlinked key path
-  is refused.
-- First sight pins with source `tofu`. A record with a valid `prev_sig` from the
-  pinned, retired key advances the pin. Any other change yields `changed`.
-- A change signed by a revoked key yields `changed` and is never accepted automatically.
-- `keys accept` refuses a fingerprint that does not match.
-- No MCP tool can reach pin mutation: `fleet_mcp.tool_specs()` names are
-  unchanged and none maps to `fleet_mesh_keys` writers.
+- Key files are 0600 under a 0700 directory, and a symlinked path is refused.
+- A first key is recorded `observed`, never `verified`.
+- `accept` without `--fingerprint` is refused. With a fingerprint that does not
+  match the fetched record it changes nothing, and with a matching one the
+  entry becomes `verified`.
+- A manifest signed by an unpinned key, or with any entry altered, is refused
+  whole. A fingerprint list with one mismatch accepts nothing.
+- A chain of 8 valid links advances the pin and keeps its trust level. A chain
+  of 9 yields `changed`. A chain with a revoked link, a gap, or a
+  non-increasing `created_at` yields `changed`.
+- A key revoked with `compromised_from` rejects mail signed at or after that
+  time, and rejects earlier-dated mail that this client did not record before
+  learning of the revocation.
+- Archived mail verifies against a retired key inside its interval and fails
+  outside it.
+- No MCP tool reaches pin, key, hub identity or manifest writers:
+  `fleet_mcp.tool_specs()` names are unchanged and none maps to these modules.
 
-Acceptance: focused gate passes. `brigade fleet keys --help` lists the
+Acceptance: the focused gate passes, and the keys help output lists the
 subcommands.
 
-### Slice 3: hub key directory and hub identity (no G1)
+### Slice 2b: hub identity on the client (needs 1 and 3)
 
 Files:
-- `src/brigade/fleet_hub_message_keys.py` (new): `fleet_message_keys` table
-  with one active key per principal (partial unique index), `hub_meta` table
-  with `hub_id`, `keys_publish` and `keys_get` actions, format checks, the
-  `prev_kid` rule and `principal_key_exists`, refusal of revoked kids.
-- `src/brigade/fleet_hub_messages.py`: route `keys_publish` and `keys_get` in
-  `handle()`. `_station_read` adds each visible principal's active record under
-  `keys`.
-- `src/brigade/fleet_hub.py`: one call from `revoke_node` to revoke keys in the
-  same transaction, the schema version bump, and `GET /mesh/identity` routing
-  in `fleet_hub_http.py`.
-- `revoke_principal` in `fleet_hub_messages.py`: the same key revocation call.
-- `src/brigade/fleet_mcp.py`: `_frame_directory` treats the hub's validated key
-  fields as structural. Raw keys still do not reach agents (slice 5 replaces
-  them with a fingerprint and status).
+- `src/brigade/fleet_mesh_hub_identity.py` (new): identity statement signing
+  and verification, the hub id derivation, the endpoint-to-identity store (a
+  separate file from the pin store), migration statements, and the
+  `hub_identity_changed` refusal.
+- `src/brigade/cli/fleet_hub_identity.py` (new): `fleet hub-identity init`,
+  `show`, `publish` (admin token), `migrate` and `accept --hub-id <id>`.
+
+Tests (`tests/test_fleet_mesh_hub_identity.py`):
+- A known endpoint serving a different hub id or key stops every message
+  operation with `hub_identity_changed` and creates no new pin namespace.
+- A migration signed by the old key moves the pins to the new id. One signed by
+  any other key is refused.
+- `accept --hub-id` with the right id carries the pins, and with a wrong id
+  changes nothing.
+- A statement whose `hub_id` is not the hash of its key is refused.
+- A new endpoint served by the same key with a fresh signed statement is
+  accepted.
+
+Acceptance: the hub identity can change only through a signed migration or
+operator verification.
+
+### Slice 3: hub key directory and hub identity storage (no crypto, needs #1939)
+
+Files:
+- `src/brigade/fleet_hub_message_keys.py` (new): `fleet_message_keys` with one
+  active key per principal, `keys_publish` and `keys_get`, format checks, the
+  `prev_kid` rule, `principal_key_exists`, refusal of revoked kids, and
+  `compromised_from`.
+- `src/brigade/fleet_hub_identity.py` (new): `hub_meta` storage of the signed
+  statement and migration, the `hashlib` check that `hub_id` matches the key,
+  and the admin upload action.
+- `src/brigade/fleet_hub_messages.py` and `fleet_hub_paging.py`: route the new
+  actions. `who` reads key entries live on every page instead of from the
+  #1939 snapshot.
+- `src/brigade/fleet_hub.py`: revoke keys in the same transaction as
+  `revoke_node`, the schema bump, and `GET /mesh/identity` in
+  `fleet_hub_http.py`.
+- `revoke_principal`: the same key revocation call.
 
 Tests (`tests/test_fleet_hub_message_keys.py`):
 - A caller can publish only its own record. A second record without
   `prev_kid` gets `principal_key_exists`.
-- Revoking a node or principal revokes its keys, and a revoked kid cannot be
-  published again.
-- `who` shows only active keys, and only for principals the caller's grants
-  allow.
-- `/mesh/identity` returns a stable hub id across restarts.
-- Importing the hub modules with `cryptography` blocked in `sys.modules`
-  succeeds, proving the hub has no crypto dependency.
+- Revoking a node or principal revokes its keys with `compromised_from`, and a
+  revoked kid cannot be published again.
+- Paging: between two pages of one `who` snapshot, a key published for a
+  principal on the second page shows on that page, and a key revoked for a
+  principal on the second page is not served there.
+- `who` shows keys only for principals the caller's grants allow.
+- `/mesh/identity` serves the uploaded statement unchanged, and refuses an
+  upload whose `hub_id` does not match its key or that lacks the admin token.
+- Importing the hub modules with `cryptography` blocked succeeds.
 
-Acceptance: issue #2005 "revoking a node stops new mail from being sealed to
-its key" holds at the hub level: after revocation `who` serves no key for that
-node.
+Acceptance: after revocation `who` serves no key for that node, including on
+continuation pages.
 
-### Slice 4: sealed storage and the hub policy (no G1, design question 2)
+### Slice 4: sealed storage, retry lookup, retention and admission (needs 3)
 
 Files:
-- `src/brigade/fleet_hub_sealed.py` (new): envelope parse and header checks
-  with string comparisons only, size cap (96 KiB), `payload_hash` over the
-  envelope bytes, `recipient_key_stale`, the `in_reply_to` check for replies,
-  and the post-ack envelope purge behind a constant (default from question 2).
-- `src/brigade/fleet_hub_messages.py`: `envelope` and `envelope_bytes` columns,
-  `send()` and `reply()` branch to the sealed path, `_row()` returns
-  `envelope` and `sealed: true` for sealed rows. Sealed rows store empty
-  `subject` and `body`.
-- Hub serve flag `--require-sealed` and `BRIGADE_FLEET_MESSAGES_REQUIRE_SEALED`.
-  `/mesh/identity` reports the policy.
+- `src/brigade/fleet_hub_sealed.py` (new): envelope parse and header checks by
+  string comparison, the `max_envelope_bytes` cap (96 KiB default),
+  `payload_hash` over the envelope bytes, `recipient_key_stale` and
+  `sender_key_stale`, the symmetric `reply_to` and `in_reply_to` presence
+  rule, `sent_lookup` by `client_id`, the existing id in the 409 body, the
+  7 day post-ack purge to a `content_expired` tombstone, the unacked TTL, and
+  per-sender and fleet stored-bytes admission.
+- `src/brigade/fleet_hub_messages.py`: `envelope`, `envelope_bytes` and
+  `content_state` columns, the sealed path in `send()` and `reply()`, sealed
+  rows in `_row()`, and `count` (#2009) treating sealed rows like any row.
+- `brigade fleet serve --require-sealed` and its environment variable.
 
 Tests (`tests/test_fleet_hub_sealed.py`), using syntactically valid fake
 envelopes because the hub never verifies cryptography:
-- A sealed send stores empty `subject` and `body` columns and NULL `reference`,
-  `thread` and `sender_label`. A sealed send that also carries plain `subject`
-  or `body` fields is refused rather than stored. The database grep with real
-  sealing is in slice 6, because this slice cannot produce real ciphertext.
-- `from` not equal to the caller, a stale `from_kid` (`sender_key_stale`) or a
-  stale recipient kid (`recipient_key_stale`) is refused, and a 409 stores
-  nothing.
-- The `(sender, client_id)` duplicate check runs before the key id checks: a
-  retry of a stored envelope after the sender rotates returns the stored row.
-- A retry with identical envelope bytes and the same `client_id` returns the
-  stored row. Different bytes with the same `client_id` is a conflict.
-- With `--require-sealed`, a plain-text send gets `message_sealing_required`.
-  Without it, plain-text tests in `tests/test_fleet_messages.py` pass unchanged.
-- A sealed reply whose hub `reply_to` row disagrees with `in_reply_to` is
-  refused.
+- A sealed send stores empty `subject` and `body` and NULL `reference`,
+  `thread` and `sender_label`. A sealed send that also carries plain fields
+  is refused.
+- A wrong `from`, a stale `from_kid` or a stale recipient kid is refused, and
+  a 409 stores nothing.
+- The duplicate check runs before the key id checks.
+- Identical bytes with the same `client_id` return the stored row. Different
+  bytes get 409 `message_client_id_conflict` with the existing id.
+- `sent_lookup` returns only the caller's own row: another sender's
+  `client_id` gives `not_found`, and a purged row returns its tombstone with
+  the signed header.
+- A `reply_to` without `in_reply_to`, or the reverse, is refused.
+- An acked envelope becomes a tombstone after 7 days and keeps its header and
+  signature. Unacked mail past the TTL is removed.
+- A send over the per-sender stored-bytes limit gets `sender_storage_quota`,
+  and one over the fleet limit gets `hub_storage_full`.
+- `--require-sealed` refuses plain text with `message_sealing_required`.
+  Without it, `tests/test_fleet_messages.py` passes unchanged.
 
-Acceptance: the hub stores sealed rows without plaintext columns and enforces
-its policy.
+Acceptance: the hub stores sealed rows without plaintext columns, enforces its
+policy, and supports retry recovery after purge.
 
-### Slice 5: opening on read, the fence and live delivery (needs 1, 2, 3 and 4)
+### Slice 5: opening, pending requests and the fence (needs 1, 2, 2b, 3 and 4)
 
-Opening lands before sealing, because a sealed reply has to open the original.
-Tests build envelopes with slice 1's `seal()` and post them through the hub.
+Opening lands before sealing because a sealed reply has to open the original.
 
 Files:
-- `src/brigade/fleet_mesh_open.py` (new): `open_rows()` with the order in
-  design D5 (header and hub id check, signature, unwrap and decrypt, binary
-  payload limits, freshness and replay cache, header-sourced `kind`,
-  `priority` and `sent_at`, the `reply_to` check), the structural field
-  pattern checks for every row, the `unsealed_from_pinned` rule, and the
-  failed-row shape with Brigade's fixed body.
+- `src/brigade/fleet_mesh_open.py` (new): `open_rows()` in the order of design
+  D6, the seen-id cache with its start time and `unchecked` label, freshness
+  and `MAX_FUTURE_SKEW`, tombstones, legacy labels, structural pattern checks
+  and the failed-row shape.
+- `src/brigade/fleet_mesh_pending.py` (new): the local pending request store
+  and reply linking (design D5).
 - `src/brigade/fleet_client_messages.py`: `list_messages()` (with
-  `open_limit`), `sent()`, `ack()` and the rows returned by `send()` and
-  `reply()` pass through `open_rows()` after `_validate_page`.
-- `src/brigade/fleet_mcp.py`: add `sealed`, `signature`, `open_error`, `key`
-  and `sent_at` to the structural field sets, add the new codes to
-  `_SAFE_ERROR_CODES`, and replace raw keys in `fleet_who` output with
-  `{"fingerprint", "status"}`.
-- `src/brigade/fleet_inbox_delivery.py`: open only the shown rows, lazily, with
-  cached keys only and no extra hub call.
-- `src/brigade/cli/fleet_messages.py`: show `sealed` and `open_error` in human
-  and JSON output.
-- `src/brigade/dot/hub_inbox.py`: reply matching uses the opened row, so it
-  relies on the verified `reply_to`.
+  `open_limit`), `sent()`, `ack()`, `sent_lookup` and the rows returned by
+  `send()` and `reply()` pass through `open_rows()`.
+- `src/brigade/fleet_mcp.py`: the new structural fields and error codes, and
+  `key: {"fingerprint", "status"}` in `fleet_who`.
+- `src/brigade/fleet_inbox_delivery.py`: open only the shown rows, with cached
+  keys and the read-only pending store, and no extra hub call.
+- `src/brigade/dot/hub_inbox.py`: replace the `row.get("reply_to") == msg_id`
+  match at line 424 with a match of the verified `in_reply_to` against the
+  pack's own record of the `client_id` it sent for `msg_id`.
+- `src/brigade/doctor_*`: a clock offset warning.
 
 Tests:
 - `tests/test_fleet_mesh_open.py`:
-  - A tampered ciphertext and a wrong signer are rejected before `_frame()`
-    runs, and the agent-facing result contains no plaintext.
-  - An envelope from another hub id, an envelope older than the window, and a
-    future-dated envelope are each refused with their own code.
-  - A replayed envelope under a new hub message id opens as `replayed`.
-  - A plain-text row whose sender is pinned opens as `unsealed_from_pinned`.
-  - Hub-supplied `subject` and `body` beside an envelope are ignored.
-  - A `reply_to` that disagrees with `in_reply_to` opens as `reply_mismatch`.
-  - A failed row contains no sender-chosen string outside the fence, including
-    `client_id`.
-  - An `agent:` sender's sealed `sender_label` is dropped.
-  - A row with a malformed structural field is dropped.
-- `tests/test_fleet_inbox_delivery.py`:
-  - A sealed message is shown fenced.
-  - An unopenable one renders the fixed body without raising, and the cursor
-    advances exactly as it does for plain text.
-- `tests/test_dot_inbox_tools.py`: a failed row does not raise in the Dot pack.
+  - A tampered ciphertext or wrong signer is rejected before `_frame()`, and
+    the result contains no plaintext.
+  - Another hub id, an envelope older than the window and a future-dated one
+    each get their own code.
+  - A replay under a new hub id opens as `replayed`, and the seen entry is
+    persisted before the row is returned.
+  - On a fresh station, an envelope created before the cache start opens as
+    `unchecked`.
+  - A hub `reply_to` pointing at a different request does not link the reply.
+    A reply whose signed `in_reply_to` matches a local record links even when
+    the hub's `reply_to` is altered. Presence mismatches open as
+    `reply_mismatch`.
+  - A reply signed after the request's deadline does not link.
+  - Plain-text rows are labeled `unauthenticated-legacy`. A plain-text row
+    from a pinned sender with no local pre-pin record is labeled
+    `unauthenticated-after-pin`, whatever its hub timestamp.
+  - A tombstone opens as `content_expired` with a verified header.
+  - A failed row contains no sender-chosen string outside the fence.
+  - `sender_label` is dropped for `agent:` senders and for `observed` keys.
+- `tests/test_fleet_inbox_delivery.py`: a linked reply shows `reply:
+  "linked"`, an unknown one shows `unlinked`, delivery completes no request,
+  and an unopenable row renders the fixed body without raising.
+- `tests/test_dot_inbox_tools.py`: a forged `reply_to` does not match, and a
+  failed row does not raise.
 
 Acceptance: the "tampered ciphertext or wrong signer is rejected before the
 agent sees the text" bullet of #2005 holds. Run the focused gate with the
 extra and with it blocked.
 
-### Slice 6: sealing on send, reply and the spool (needs 5)
+### Slice 6: sealing on send, reply, retry and the spool (needs 5, and #2010 for the MCP replay test)
 
 Files:
-- `src/brigade/fleet_mesh_send.py` (new):
-  - the seal decision table in design D4
-  - key lookup through pins and `who`, and the downgrade rule for pinned
-    principals
-  - a fresh content key on every seal
-  - reply subject and thread construction for sealed originals
-  - the conflict check for deterministic client ids, which fetches the stored
-    row with `sent` by id and compares plaintext through the sender wrap
-- `src/brigade/fleet_client_messages.py`:
-  - `send()`, `reply()` and the spool call into `fleet_mesh_send`.
-  - The spool stores the sealed envelope before the first transmission.
-  - A send made offline without a key is stored as `seal: "pending"`, and so
-    is a reply whose original has not been opened. The reply record keeps the
-    original's hub message id, and drain fetches and opens the original before
-    sealing.
-  - `_drain_locked` keeps and reseals on `recipient_key_stale` and
-    `sender_key_stale` instead of dropping them as unknown 4xx responses.
-- `src/brigade/fleet_action_adapters.py`: `_inbox_main` sends through
-  `send()` rather than raw `_online`, so it gets the seal decision.
-- `src/brigade/fleet_mesh_keys.py`: publish on first use and on `keys rotate`,
-  and report `local_key_superseded` when the hub refuses this machine's kid.
-- `src/brigade/fleet_client_message_credentials.py`: the new error codes.
+- `src/brigade/fleet_mesh_send.py` (new): the seal decision table, key lookup
+  through pins and `who`, the downgrade rule, a fresh content key on every
+  seal, `rc`, local reply construction, pending request records, and retry
+  recovery (409 with id, `sent_lookup`, header verification, `rc` comparison,
+  the wrap fallback and `content_unverifiable`).
+- `src/brigade/fleet_client_messages.py`: `send()`, `reply()` and the spool
+  call into `fleet_mesh_send`. The spool stores the sealed envelope before the
+  first transmission. `seal: "pending"` records for offline sends and replies.
+  `_drain_locked` keeps and reseals on `recipient_key_stale` and
+  `sender_key_stale`.
+- `src/brigade/fleet_action_adapters.py`: `_inbox_main` sends through `send()`.
+- `src/brigade/fleet_mesh_keys.py`: publish on first use and on rotate, and
+  `local_key_superseded`.
 
-Tests (`tests/test_fleet_mesh_send.py`), against the in-process hub fixtures in
-`tests/_fleet_message_fixtures.py`:
-- Every row of the D4 decision table.
-- The spool file holds the sealed envelope before the first request leaves,
-  and a forced retry sends identical bytes.
-- Two seals of the same input use different content keys.
-- A pending send and a pending reply are sealed at drain time and persisted
-  before sending.
-- A 409 for a stale key keeps the spool record and reseals it. Nothing is
-  dropped.
-- A crash-and-resend with a deterministic `client_id` (the patrol and Dot
-  shapes) returns the stored row instead of a conflict.
-- A pinned recipient with no key served gets `recipient_key_missing` and never
-  plain text.
-- `fleet_action_adapters` inbox sends are sealed.
-- Without the extra, plain-text sends behave exactly as before, and sends that
-  need sealing fail with `mesh_extra_missing`.
-- Round trips:
-  - MCP: two principals exchange sealed mail through `fleet_send`,
-    `fleet_inbox`, `fleet_reply`, `fleet_ack` and `fleet_sent`.
-  - CLI: the same exchange through `brigade fleet msg send`, `list`, `reply`
-    and `ack`.
-  - A dump of every table in the hub SQLite file contains neither the subject
-    nor the body marker string.
+Tests (`tests/test_fleet_mesh_send.py`):
+- Every row of the decision table, including `observed` with and without
+  require-verified, `pending_binding` and `changed`.
+- The spool holds the sealed envelope before the first request, and a forced
+  retry sends identical bytes.
+- A stale-key 409 keeps the spool record and reseals it.
+- Crash and resend with a deterministic `client_id` (patrol and Dot shapes)
+  returns the stored id. The same `client_id` with a different body is a
+  permanent 409.
+- An MCP `fleet_send` retried with the same `client_id` and arguments returns
+  the original id, and with a changed body gets #2010's permanent 409.
+- Retry recovery after the stored row is purged to a tombstone still returns
+  the stored id through `rc`.
+- A hub that answers `sent_lookup` with a row not signed by the caller does
+  not count as delivered.
+- A pinned recipient with no key gets `recipient_key_missing`, never plain
+  text.
+- Round trips through MCP and through the message CLI, and a dump of every hub
+  table contains neither the subject nor the body marker.
 
 Acceptance: all four #2005 acceptance bullets hold, including the database
-grep with real sealing.
+dump with real sealing.
 
 ### Slice 7: user docs for sealed mail (needs 6)
 
 Files: `docs/fleet-messages-sealed.md` (new), links from the fleet messaging
-docs and `docs/fleet-mcp-events.md` (one sentence: payloads already exclude
-sealed fields).
+docs and `docs/fleet-mcp-events.md`.
 
-Content: install (including the Intel Mac and Windows arm64 notes), hub
-policy, local policy, key commands, fingerprint checks, what stays plain text,
-and the threat model table condensed from the design.
+Content: install (the Intel Mac `--only-binary` route to 48.0.x, Windows
+arm64, and `mesh_backend_unsupported` for builds without ML-KEM), hub and
+local policy, key commands, how to compare fingerprints out of band, the local
+boundary statement from design D3, what stays plain text, the threat model,
+and, until slice 7b merges, the statement that ask_user answers are
+hub-trusted.
 
-Acceptance: `brigade guard scan` with `src/brigade/guard/policies/public-repo.json`
-is clean, and Vale reports no errors.
+Acceptance: `brigade guard scan` with
+`src/brigade/guard/policies/public-repo.json` is clean, Vale reports no
+errors, and the documented-command inventory test passes.
+
+### Slice 7b: sealed operator questions (needs 6 and #1951 merged)
+
+Files:
+- `src/brigade/fleet_ask_user.py`: the question goes out as a sealed `kind:
+  question` envelope with a signed deadline through `fleet_mesh_send`, not
+  `messages._online()`. `_terminal()` is replaced by one verification function
+  used for hub-inbox and desktop answers (design D7).
+- `src/brigade/fleet_hub_questions.py`: `question_create` takes the envelope.
+  The hub no longer builds the message. `fleet_questions` stores envelopes
+  and verification metadata instead of `question` and `answer`. The trigger
+  copies `NEW.envelope` and answer metadata.
+- `docs/fleet-messages-sealed.md`: remove the hub-trusted note.
+
+Tests (`tests/test_fleet_ask_user_sealed.py`):
+- A hub that writes `status='answered'`, `source='operator_reply'` and
+  `answered_by=<operator>` with its own answer text produces
+  `operator_authenticated: false`.
+- An answer signed by the operator's `verified` key, linked to this ask and
+  inside the deadline, is authenticated. The same answer linked to a different
+  pending question, signed after the deadline, sent to another principal, or
+  signed by an `observed` operator key is not.
+- A replayed operator answer from an earlier question is refused.
+- A desktop answer without an operator signature is fenced and not
+  authenticated. A desktop answer signed with the operator's own key on the
+  same machine is authenticated.
+- A dump of the hub database contains neither the question nor the answer
+  marker.
+
+Acceptance: no unsigned hub field can confer operator authority.
 
 ## #2006: teammate invites
 
-### Slice 8: teammate role, grant hardening and the audit log (no G1, design question 6)
+### Slice 8: teammate role, symmetric grants and the audit log (no crypto)
 
 Files:
-- `src/brigade/fleet_hub_audit.py` (new): `fleet_audit_log` table, append
-  helper that refuses secret-shaped values, admin read with paging, and
-  aggregation for refused redemptions.
-- `src/brigade/fleet_hub_messages.py`: `role` and `person` columns on
-  `fleet_message_principals` (default `agent`). Audit rows for grant changes
-  and principal revocation.
-- `src/brigade/fleet_hub_message_grants.py`: one helper that looks the caller
-  up and treats only enrolled node ids as unrestricted. It replaces the
-  `agent:` prefix tests in `permits()`, `require_granted()` and
-  `require_recipient_cap()`, in `_station_read()` and in
-  `fleet_hub_events.permits()`. Teammate grants become symmetric (a sender
-  needs to be in the teammate's grant list to reach it).
-- `_station_read`: teammates get `principal_role_forbidden` on `claims`, and
-  `who` drops session repo, branch and harness for them.
-- `src/brigade/fleet_hub_events.py`: teammates may subscribe only to their own
+- `src/brigade/fleet_hub_audit.py` (new): `fleet_audit_log`, an append helper
+  that refuses secret-shaped values, admin paging, and aggregation for refused
+  redemptions.
+- `src/brigade/fleet_hub_messages.py`: `role` and `person` columns, audit rows
+  for grant changes and revocation.
+- `src/brigade/fleet_hub_message_grants.py`: one caller lookup helper that
+  treats only enrolled node ids as unrestricted, replacing the prefix tests in
+  `permits()`, `require_granted()`, `require_recipient_cap()`,
+  `_station_read()` and `fleet_hub_events.permits()`. Symmetric grants for any
+  pair that includes a teammate, both checked in the insert's
+  `BEGIN IMMEDIATE` transaction.
+- `_station_read`: teammates get `principal_role_forbidden` on `claims` and a
+  reduced `who`.
+- `src/brigade/fleet_hub_events.py`: teammates subscribe only to their own
   `message.created`.
 - `src/brigade/fleet_hub_http.py`: `GET /audit` (admin).
 
 Tests (`tests/test_fleet_hub_teammates.py`, extending
 `tests/test_fleet_message_grants.py`):
-- A teammate cannot read claims, cannot subscribe to `claim.expired` or
-  `run.failed`, and cannot message principals outside its grant.
-- A node principal cannot message a teammate that has not granted it.
-- A principal id with an unknown prefix gets the restrictions of an `agent:` sender.
+- A teammate cannot read claims, subscribe to `claim.expired` or `run.failed`,
+  or message principals outside its grant.
+- Reciprocity: agent A to teammate T succeeds only when A's grant names T and
+  T's grant names A, and the same holds from T to A. A node principal cannot
+  message a teammate that has not granted it.
+- Revocation: removing one side of a reciprocal grant blocks the next send in
+  both directions. A grant revoked on another connection while a send waits on
+  the write lock blocks that send.
+- A principal id with an unknown prefix gets agent restrictions.
 - Audit rows exist for grant changes and revocation and contain no token.
 
 Acceptance: hub-side half of #2006's "a teammate principal cannot read claims,
 submit work or message principals outside its grant".
 
-### Slice 9: hub invites and redemption (needs 3 and 8)
+### Slice 9: hub invites and idempotent redemption (needs 3 and 8)
 
 Files:
-- `src/brigade/fleet_hub_invites.py` (new): `fleet_invites` table, admin
-  `create`, `list` and `revoke`, redemption under `BEGIN IMMEDIATE` following
-  `fleet_hub_enrollment.redeem`, constant-time digest comparison, one generic
-  refusal, per-source and global rate limits, principal creation with role and
-  grants, key and binding storage, audit rows.
-- `src/brigade/fleet_hub_http.py`: `POST /invites` (admin),
-  `POST /invites/redeem` (no token), `GET /join` (static page that does not
-  read the fragment).
+- `src/brigade/fleet_hub_invites.py` (new): `fleet_invites` and
+  `fleet_invite_uses`, admin `create`, `list` and `revoke`, redemption under
+  `BEGIN IMMEDIATE` with the `join_attempt_id` rule of design D9 (following
+  enrollment in `fleet_hub_messages.py:445-505`), constant-time digest
+  comparison, one generic refusal, rate limits, principal creation with role,
+  grants and client-supplied token digest, key and binding storage, audit
+  rows.
+- `src/brigade/fleet_hub_http.py`: `POST /invites` (admin) and
+  `POST /invites/redeem`. No join page.
 
 Tests (`tests/test_fleet_hub_invites.py`):
-- An invite redeemed twice fails the second time. Expired and revoked invites
-  fail. A wrong secret fails with the same response as an unknown id.
-- Two concurrent redemptions of a one-use invite produce exactly one principal.
-- `max_uses` above one admits that many and no more.
-- The hub stores only `sha256(redeem_key)` and the binding, never the secret.
-- Removing a member makes its token return 401 on the next call.
+- A second redemption under a different attempt id fails. Expired and revoked
+  invites fail. A wrong secret fails like an unknown id.
+- The same attempt id with the same token, key record and name returns the
+  same success without counting a use. The same attempt id with any value
+  changed is refused.
+- Two concurrent redemptions of a one-use invite produce exactly one
+  principal.
+- `max_uses` above one admits that many attempts and no more.
+- The hub stores only `sha256(redeem_key)`, the token digest and the binding.
+- `GET /join` returns 404.
+- Removing a member makes its token return 401.
 
 Acceptance: #2006's first two acceptance bullets hold against the Python hub.
 
-### Slice 10: invite and join client (needs 2 and 9)
+### Slice 10: invite and join client (needs 2, 2b, 5, 6 and 9)
 
 Files:
-- `src/brigade/fleet_mesh_invites.py` (new): link build and parse for
-  `bfi1` (hub id, invite id, secret, inviter fingerprint), HKDF derivation of `redeem_key` and `bind_key`, the local invite
-  record holding `bind_key`, binding verification and `invite`-source pins.
-- `src/brigade/cli/fleet_invites.py` (new): `brigade fleet invite create |
-  list | revoke`, `brigade fleet join '<link>'`, `brigade fleet members list |
-  remove`, `brigade fleet audit list`.
-- `src/brigade/fleet_client_message_credentials.py`: a new
-  `write_message_token_file()` that mirrors `read_message_token_file()`
-  (owner-only, no symlinks, atomic replace). Only a reader exists today.
-- `invite create` requires the `--as` principal's private key on the local
-  machine and supports `--bootstrap` for a hub with no keyed principal yet.
+- `src/brigade/fleet_mesh_invites.py` (new): `bfi1` token build and parse,
+  HKDF derivation, the persisted join attempt, the inviter's invite record
+  holding `bind_key` until the binding is processed, `pending_binding`
+  handling, binding verification, `binding_mismatch` and `binding_missing`.
+- `src/brigade/cli/fleet_invites.py` (new): `fleet invite create | list |
+  verify | revoke`, `fleet join --hub <url> --invite-file <path>` and
+  `--invite-stdin`, `fleet members list | remove`, `fleet audit list`.
+- `src/brigade/fleet_client_message_credentials.py`: a
+  `write_message_token_file()` that mirrors the reader.
 
 Tests (`tests/test_fleet_mesh_invites.py`):
-- End to end against the in-process hub: create, join, the joiner pins the
-  inviter from the link fingerprint, the inviter verifies the binding and pins
-  the joiner, and a sealed round trip works between them.
-- A hub that swaps the joiner's key is caught by the binding check, and a hub
-  that swaps the inviter's key is caught by the link fingerprint.
-- The link never appears in logs or error text.
-- A link whose hub id differs from `/mesh/identity` is refused before
-  redemption.
-- A binding mismatch pins nothing, reports `binding_mismatch` and exits
-  nonzero.
+- End to end: create, join, the joiner pins the inviter from the token, the
+  inviter verifies the binding, and a sealed round trip works.
+- Before the inviter verifies, sends to the new principal and mail from it are
+  refused with `invite_binding_pending`.
+- A hub that swaps the joiner's key is caught by the binding, and one that
+  swaps the inviter's key is caught by the token fingerprint.
+- A hub that serves no binding leaves the principal blocked as
+  `binding_missing`, never `observed`.
+- `bind_key` survives the invite's expiry until the binding is processed.
+- A token whose hub id does not match the verified identity statement is
+  refused before redemption.
+- Response loss: the hub stores the redemption and the client sees a timeout.
+  Rerunning the command installs the credential. Crash after redemption and
+  before token install: restarting from the persisted attempt installs the
+  same credential.
+- `fleet join` refuses a token passed as a positional argument, and the token
+  never appears in logs or error text.
 - `invite create --as` a principal whose key is not local is refused.
-- A `--bootstrap` link joins a fresh hub, and the next invite is created from
-  the joined machine.
+- A `--bootstrap` token joins a fresh hub, and the next invite comes from the
+  joined machine.
+- A pre-mesh principal stays `observed` until `keys accept` with its
+  fingerprint.
 
 Acceptance: #2006's third bullet ("a teammate's sealed mail cannot be read by
-the hub") holds, using slice 4's database grep with a teammate sender.
+the hub") holds, using the slice 6 database dump with a teammate sender.
 
 ## #2008: Hub Lite
 
 ### Slice 11: hub contract suite (needs 4 and 9)
 
 Files:
-- `tests/contract/fleet_hub_contract.py` (new): a backend-neutral suite that
-  takes a base URL, an admin token and a callback that dumps stored rows. It
-  covers identity, invites, join, `who`, sealed `send`, `list` with `wait_ms`,
-  `ack`, `reply`, `sent`, key publish and revoke, role restrictions, and the
-  "no plaintext in storage" check, with two nodes.
-- `tests/test_fleet_hub_contract_python.py` (new): runs the suite against the
-  Python hub in-process.
+- `tests/contract/fleet_hub_contract.py` (new): a backend-neutral HTTP suite
+  that takes a base URL, an admin token and a storage dump callback. It covers
+  identity, invites and idempotent redemption, `who`, sealed `send`, `list`
+  with `wait_ms`, `count`, `ack`, `reply`, `sent`, `sent_lookup`, key publish
+  and revoke, role restrictions, the envelope cap, admission errors, and the
+  no-plaintext storage check, with two nodes.
+- `tests/test_fleet_hub_contract_python.py` (new): runs it against the Python
+  hub.
+- `scripts/hub-contract` (new): runs it against a URL.
 
-Acceptance: the suite passes on the Python hub and is the bar Hub Lite must
-meet.
+Acceptance: the suite passes on the Python hub.
 
-### Slice 12: Hub Lite core (needs 11)
+### Slice 12a: Hub Lite skeleton under workerd (needs 11 and G4)
 
-Files under `workers/hub-lite/` (self-contained, so the deploy button can treat
-it as a repository root):
-- `wrangler.toml` with one SQLite-backed Durable Object class, `workers_dev =
-  true`, a `HUB_ADMIN_TOKEN` secret, and a `.dev.vars.example`.
-- `src/index.js` (routing and request limits) and `src/fleet.js` (the Durable
-  Object: schema from design D10, token hashing with WebCrypto, identity,
-  invites, keys, messages with sealed-only storage, quotas, long-poll waiters
-  capped at 20 s, audit).
-- `test/*.test.js` on `node:test`, with a fake `ctx.storage.sql` backed by
-  Node's built-in `node:sqlite` so the real SQL runs in tests without npm
-  dependencies. The slice confirms the minimum Node version that ships
-  `node:sqlite` unflagged and pins it in CI.
-- `.github/workflows/ci.yml`: a `workers` job that runs `node --test` for
-  `workers/**` when those paths change. It also covers
-  `workers/github-webhook-relay`, which has no CI job today.
+Files under `workers/hub-lite/`:
+- `wrangler.toml` with one SQLite-backed Durable Object class,
+  `workers_dev = true`, a `HUB_ADMIN_TOKEN` secret and `.dev.vars.example`.
+- `package.json` pinning `wrangler` as a development dependency.
+- `src/index.js` (routing, request limits, 404 for every route outside design
+  D12) and `src/fleet.js` (the Durable Object: schema, token hashing,
+  principals, identity statement storage, `GET /mesh/identity`, audit).
+- `test/*.test.js` on `node:test` with a `node:sqlite` fake for fast checks.
+- `.github/workflows/ci.yml`: a `workers` job for `workers/**` that runs
+  `node --test`, then starts `wrangler dev` and runs the contract suite's
+  identity and auth sections against it. It also runs
+  `workers/github-webhook-relay` tests.
 
-Tests: the same cases as the contract suite, ported to `node:test`, plus a
-storage dump assertion that no plaintext marker is stored and a test that a
-send without an envelope is refused.
+Acceptance: the identity and auth contract sections pass against
+`wrangler dev` in CI.
 
-Acceptance: `node --test` passes in CI. No route outside the D10 table answers
-anything but 404.
+### Slice 12b: Hub Lite keys and invites (needs 12a)
 
-### Slice 13: Hub Lite presence and claims (needs 12, design question 7)
+Files: `workers/hub-lite/src/fleet.js` and tests. `keys_publish`, `keys_get`,
+key state in `who`, invites, `invite_uses` and idempotent redemption.
 
-Files: `workers/hub-lite/src/fleet.js` and tests.
-- Presence: `POST /sessions` and `GET /sessions`, heartbeats held in memory,
-  rows written only on state, repository or branch change or once per third of
-  the TTL.
-- Claims (if question 7 keeps them): `acquire`, `renew` and `release` with
-  holder fencing tokens and TTL, and the `claims` read for `fleet_claims`.
-  The `scope: "node"` supersede extension stays out.
+Acceptance: the key and invite contract sections, including the redemption
+retry cases, pass against `wrangler dev`.
 
-- Client throttles in `src/brigade/fleet_session_presence.py` and
-  `src/brigade/fleet_inbox_delivery.py`, applied when `/mesh/identity` reports
-  a Hub Lite: one heartbeat per session per 60 seconds unless state changes,
-  and a 60 second delivery poll interval.
+### Slice 12c: Hub Lite messages, admission and retention (needs 12b)
 
-Tests: a heartbeat storm writes a bounded number of rows, and the Python
-client throttles hold under a burst of tool events. Claim exclusivity,
-fencing token checks and expiry match the Python hub's claim tests that apply.
+Files: `workers/hub-lite/src/fleet.js` and tests. Sealed-only `send` and
+`reply`, the 32 KiB cap, `list` with waiters capped at 20 s, `count`, `ack`,
+`sent`, `sent_lookup`, tombstones, the alarm that purges ciphertext at the
+earlier of ack plus 7 days and creation plus 14 days, and the admission
+ceilings with `hub_storage_full`, `sender_storage_quota` and
+`hub_daily_quota`.
 
-Acceptance: the contract suite's presence and claims sections pass in
-`node:test`.
+Tests: the messaging contract sections, a storage dump with no plaintext
+marker, a send without an envelope refused, a 32 KiB plus one byte envelope
+refused, each ceiling refusing before the next write, and the purge alarm
+leaving a verifiable header.
 
-### Slice 14: deploy template, limits docs and live contract run (needs 10 and 13)
+Acceptance: the messaging contract sections pass against `wrangler dev`.
+
+### Slice 13: Hub Lite presence and client throttles (needs 12c)
+
+Files: `workers/hub-lite/src/fleet.js`, `src/brigade/fleet_session_presence.py`
+and `src/brigade/fleet_inbox_delivery.py`, with tests.
+- `POST /sessions` and `GET /sessions`, heartbeats in memory, rows written only
+  on state, repository or branch change or once per third of the TTL.
+- Client throttles applied when the identity statement reports a Hub Lite: one
+  heartbeat per session per 60 seconds unless state changes, and a 60 second
+  delivery poll.
+
+Tests: a heartbeat storm writes a bounded number of rows, and the client
+throttles hold under a burst of tool events.
+
+Acceptance: the presence contract section passes against `wrangler dev`.
+
+### Slice 14: deploy template, limits docs and live measurements (needs 10 and 13)
 
 Files:
-- `workers/hub-lite/README.md`: the Deploy to Cloudflare button, the
-  `npx wrangler deploy` fallback, the free plan limits table from design D10
-  with what happens at each limit, the one-hub-per-account advice, optional
-  Cloudflare Access for admin routes, and bootstrap with `brigade fleet invite
-  create --role node`.
-- `scripts/hub-lite-contract` (new): runs `tests/contract/fleet_hub_contract.py`
-  against a URL, for `wrangler dev` locally or a deployed instance.
+- `workers/hub-lite/README.md`: the deploy button, the `npx wrangler deploy`
+  fallback, identity upload and bootstrap invite, the free plan limits and
+  admission ceilings with what happens at each, one Hub Lite per account,
+  optional Cloudflare Access for admin routes, and the claims deferral.
 
-Operator step, recorded in the pull request: deploy to a fresh Cloudflare
-account on the Free plan with the button, confirm the Durable Object migration
-applied (UNVERIFIED in the design), run the contract script with two nodes,
-and record the measured rows written per message and requests per waiting
-station.
+Operator step, recorded in the pull request: deploy to a fresh Free plan
+account with the button, confirm the Durable Object migration applied, run
+`scripts/hub-contract` with two nodes, and record rows written per message,
+requests per waiting station, and the per-object storage limit. The design's
+D12 figures, including the 1 GB assumption and the 800 MB ceiling, are
+replaced by the measured numbers.
 
-Acceptance: #2008's three acceptance bullets, with the measured numbers
-replacing the derived ones in the design doc.
+Acceptance: #2008's three acceptance bullets for messaging, invites and
+presence. Claims are out of scope (decision Q7) and get their own issue after
+this slice merges.
 
 ## #2007: no-hub mode
 
-### Slice 15: spike prototype (needs G2)
+### Slice 15: spike (G2)
 
 Files: `engines/mesh/` (new Rust crate, iroh 1.x) with a minimal binary that
 opens an endpoint on ALPN `brigade-mesh/1` and exchanges one length-prefixed
 frame. No Brigade integration.
 
-Measure and record in the design doc's D8 section: release binary size per
-platform, cold start time, a connection between two machines on different
-networks through a self-hosted `iroh-relay`, whether a direct path forms, and
-behavior with `--relay none` on a LAN and on a tailnet.
+Thresholds, fixed before measuring: stripped release binary at most 20 MB per
+platform, endpoint ready within 2 seconds of a cold start, and 10 of 10
+relayed connections between two machines on different networks through a
+self-hosted `iroh-relay`. The direct-path rate and behavior with
+`--relay none` on a LAN and a tailnet are recorded without a threshold.
 
-Acceptance: a go or no-go recorded in the design doc. On no-go, D8 is
-rewritten to the fallback (LAN and tailnet only, Hub Lite for the rest) before
-any later no-hub slice starts.
+Acceptance: a go or no-go recorded in design D10. On no-go, D10 is rewritten
+to the fallback (LAN and tailnet only, Hub Lite for the rest) before any later
+no-hub slice starts.
+
+### Slice 15b: no-hub wire protocol (needs 15 with a go)
+
+Files: `docs/phase-agent-mesh-wire.md` (new). Frame format and size limits,
+transport receipts and signed application acks, outbox retry and backoff with
+idempotency on `(from, client_id)`, per-contact admission (frame size, rate,
+stored bytes), inbox caps and retention matching design D8, contact
+revocation, and the `bmi1` invite exchange.
+
+Acceptance: reviewed and merged before slice 17 or 18a starts.
 
 ### Slice 16: backend interface (any time)
 
 Files:
-- `src/brigade/fleet_backend.py` (new): a `MessageBackend` protocol with `who`,
-  `send`, `reply`, `list`, `ack`, `sent` and `claims`, and `HubBackend`
-  wrapping the existing client functions.
+- `src/brigade/fleet_backend.py` (new): a `MessageBackend` protocol and
+  `HubBackend` wrapping the existing client functions.
 - `src/brigade/fleet_mcp.py`, `src/brigade/fleet_inbox_delivery.py` and
-  `src/brigade/cli/fleet_messages.py`: call through the backend, so no-hub mode
-  gets live delivery and the CLI as well as MCP. No behavior change.
+  `src/brigade/cli/fleet_messages.py`: call through the backend.
 
-Tests: the existing `tests/test_fleet_mcp.py` and
-`tests/test_fleet_inbox_delivery.py` pass unchanged. A new test asserts
-`tool_specs()` is identical for every backend.
+Tests: the existing MCP and delivery tests pass unchanged, and `tool_specs()`
+is identical for every backend.
 
-Acceptance: pure refactor, no output change.
+Acceptance: pure refactor.
 
-### Slice 17: local mesh store and backend (needs 1, 2 and 16)
+### Slice 17: local mesh store and backend (needs 1, 2, 5, 6, 15b and 16)
 
 Files:
 - `src/brigade/fleet_mesh_store.py` (new): SQLite inbox, outbox, contacts,
-  receipts and replay cache in WAL mode, the shared database the engine will
-  use.
-- `src/brigade/fleet_mesh_backend.py` (new): `MeshBackend` implementing the
-  seven tools per design D9. `claims` returns `hub_feature_unavailable`.
-- `src/brigade/cli/fleet_mesh.py` (new): `brigade mesh init --relay
-  <url|n0-public|none>` (design question 4), `brigade mesh status`, contacts,
-  and `bmi1` invites through `brigade fleet join`.
+  receipts, the seen-id cache and pending requests in WAL mode, with the
+  admission and storage limits of slice 15b.
+- `src/brigade/fleet_mesh_backend.py` (new): `MeshBackend` per design D11,
+  reusing `open_rows()` and `fleet_mesh_send`.
+- `src/brigade/cli/fleet_mesh.py` (new): `mesh init --relay
+  <url|n0-public|none>` with no default, `mesh status`, contacts, and `bmi1`
+  tokens through `fleet join`.
 - `fleet.mode` configuration and selection in `brigade fleet mcp`.
 
-Tests (`tests/test_fleet_mesh_backend.py`), with a fake engine that moves rows
-between two temporary databases:
-- Two nodes exchange sealed messages with no hub configured, through the same
-  MCP tool calls the hub tests use.
-- An offline peer receives queued mail when the fake engine reconnects, and the
-  outbox drops entries after 7 days.
-- `fleet_claims` returns the fixed code. `fleet_who` returns contacts and an
-  empty `sessions` list.
+Tests (`tests/test_fleet_mesh_backend.py`), with a fake engine between two
+temporary databases:
+- Two nodes exchange sealed messages with no hub, through the same MCP calls
+  the hub tests use, and the D6 replay and reply-linking tests pass against
+  the mesh backend.
+- An offline peer receives queued mail on reconnect, and the outbox drops
+  entries after 7 days.
+- `mesh init` without `--relay` refuses.
+- `fleet_claims` returns the fixed code.
 
 Acceptance: #2007's "the same MCP tool schemas work in hub and no-hub mode"
 holds against the fake engine.
 
-### Slice 18: engine daemon (needs 15 and 17)
+### Slice 18a: engine protocol crate (needs 15 and 17)
 
-Files:
-- `engines/mesh/`: the daemon reads the outbox, sends frames, writes received
-  envelopes to the inbox, returns `stored` receipts, honors the relay setting,
-  and exposes a status file. It never decrypts.
-- `brigade setup` installs the engine the way it installs the code-graph
-  engine. `brigade doctor` adds `WARN` or `MANUAL` checks for a configured but
-  missing engine, a stopped daemon and an unset relay choice.
-- Service unit templates for Linux (systemd user unit), macOS (launchd) and
-  Windows (scheduled task).
-- `.github/workflows/ci.yml`: cargo check, clippy and test for
-  `engines/mesh/**`, path-filtered like `engines/code-graph`.
-- `docs/fleet-no-hub.md` (new): setup, relay choices and what each exposes,
-  and the plain statement that claims, runs, patrol, dispatch and MCP Events
-  need a hub.
+Files: `engines/mesh/src/proto/` and `.github/workflows/ci.yml` (cargo check,
+clippy and test for `engines/mesh/**`). Framing, size limits, receipt types
+and admission limits from slice 15b, with no networking loop.
 
-Tests: Rust unit tests for framing and size limits. An integration test in CI
-starts `iroh-relay --dev`, runs two daemons that can only reach each other
-through it, and exchanges a sealed message. A capture at the relay contains no
-plaintext marker.
+Tests: Rust unit tests for framing, oversize frames, malformed receipts and
+admission refusals.
+
+### Slice 18b: engine daemon (needs 18a)
+
+Files: `engines/mesh/src/daemon/`. Reads the outbox, sends frames, writes
+received envelopes to the inbox, returns receipts, honors the relay setting
+and exposes a status file. It never decrypts.
+
+Tests: an integration test in CI starts `iroh-relay --dev`, runs two daemons
+that can reach each other only through it, and exchanges a sealed message. A
+capture at the relay contains no plaintext marker. Killing a daemon mid-send
+and restarting it delivers exactly once.
+
+### Slice 18c: Linux service, setup and doctor (needs 18b)
+
+Files: a systemd user unit template, `brigade setup` installing the engine
+like the code-graph engine, `brigade doctor` `WARN` or `MANUAL` checks for a
+missing engine, a stopped daemon and an unset relay choice, and
+`docs/fleet-no-hub.md` (setup, relay choices and what each exposes, and the
+plain statement that claims, runs, patrol, dispatch and MCP Events need a
+hub).
 
 Acceptance: #2007's "two nodes on different networks exchange sealed messages
-with no hub configured, and a relay cannot read them", shown by the relay test
-in CI and by one manual run across two real networks recorded in the pull
+with no hub configured, and a relay cannot read them", shown by the slice 18b
+relay test and one manual run across two real networks recorded in the pull
 request.
 
-### Slice 19: anchor mode (optional, needs 18)
+### Slice 18d: macOS service (needs 18c)
 
-Files: `engines/mesh/` and `src/brigade/fleet_mesh_store.py`. An always-on node
-started with `--anchor` holds sealed envelopes for contacts that opted in and
-forwards them when the recipient connects. It stores ciphertext and routing ids
-only, with the same 7 day limit.
+Files: a launchd agent template, setup and doctor support. Tests: template
+rendering and doctor checks.
+
+### Slice 18e: Windows service (needs 18c)
+
+Files: a scheduled task template, setup and doctor support. Tests: template
+rendering and doctor checks.
+
+### Slice 19: anchor mode (optional, needs 18b)
+
+Files: `engines/mesh/` and `src/brigade/fleet_mesh_store.py`. An always-on
+node started with `--anchor` holds sealed envelopes for contacts that opted in
+and forwards them when the recipient connects, storing ciphertext and routing
+ids only, with the same 7 day limit and the slice 15b admission limits.
 
 Tests: delivery succeeds when sender and recipient are never online at the
 same time, and the anchor's database contains no plaintext marker.
 
-Acceptance: offline delivery between machines that never overlap works
-without a hub.
+## Deferred
+
+- Hub Lite claims (decision Q7): after slice 14, as a new issue.
+- OS separation of keys and pins from agents (design D3).
+- The `bm2` suite with ML-DSA signatures (design D2).
