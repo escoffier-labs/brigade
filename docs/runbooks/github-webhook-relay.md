@@ -18,6 +18,15 @@ relay, apply `workers/github-webhook-relay/schema.sql`, and bind the database as
 `owner/repository` names. Leave it empty until the approved source repositories
 are known. Do not use wildcard entries.
 
+Choose and configure public ingress before deployment. This repository's
+Wrangler file sets `workers_dev = false` and has no `route` or `routes`, so it
+does not create a public URL. After the operator approves a hostname and its
+Cloudflare zone, add a Wrangler `route` or `routes` entry that covers both
+`/webhooks/github` and `/v1/events`. If the operator instead approves a
+`workers.dev` endpoint, enable `workers_dev` for this Worker. The selected URL
+must be reachable by GitHub and the approved Brigade pull clients. See
+[Wrangler route configuration](https://developers.cloudflare.com/workers/wrangler/configuration/).
+
 Generate two independent high-entropy values in the approved secret manager:
 one webhook signing secret and one read-only event API bearer. Store them as
 Worker secrets. For a local Wrangler operator flow, enter values at the
