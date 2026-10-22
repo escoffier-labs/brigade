@@ -54,8 +54,8 @@ DEFAULT_TTL_MS = 7 * 86_400_000
 MIN_TTL_MS = 60_000
 MAX_SUBSCRIPTIONS_PER_PRINCIPAL = 20
 MAX_SUBSCRIPTIONS = 200
-# Recording bound: one principal can add at most this many events of one kind an hour.
-MAX_EVENTS_PER_SUBJECT_PER_HOUR = 120
+# Recording bound: one authenticated producer can add at most this many events of one kind an hour.
+MAX_EVENTS_PER_PRODUCER_PER_HOUR = 120
 ROTATION_WINDOW_SECONDS = 300
 _VERIFY_SLOTS = threading.BoundedSemaphore(4)
 _ID_RE = re.compile(r"^(agent:)?[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
@@ -72,8 +72,9 @@ _SCHEMA = (
     "CREATE INDEX IF NOT EXISTS fleet_event_subscriptions_name ON fleet_event_subscriptions (name)",
     """CREATE TABLE IF NOT EXISTS fleet_events (
         seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
-        subject TEXT NOT NULL, data TEXT NOT NULL, created_at REAL NOT NULL)""",
+        subject TEXT NOT NULL, producer TEXT NOT NULL, data TEXT NOT NULL, created_at REAL NOT NULL)""",
     "CREATE INDEX IF NOT EXISTS fleet_events_subject ON fleet_events (name, subject, created_at)",
+    "CREATE INDEX IF NOT EXISTS fleet_events_producer ON fleet_events (name, producer, created_at)",
     """CREATE TABLE IF NOT EXISTS fleet_event_deliveries (
         seq INTEGER NOT NULL, subscription_id TEXT NOT NULL, state TEXT NOT NULL,
         attempts INTEGER NOT NULL DEFAULT 0, next_attempt REAL NOT NULL, attempted_at REAL,
@@ -245,19 +246,30 @@ def has_subscribers(conn: sqlite3.Connection, name: str) -> bool:
 
 
 def _append(
-    conn: sqlite3.Connection, name: str, subject: str, data: dict[str, Any], *, event_id: str | None = None
+    conn: sqlite3.Connection,
+    name: str,
+    subject: str,
+    producer: str,
+    data: dict[str, Any],
+    *,
+    event_id: str | None = None,
 ) -> None:
+    """Record an event for ``subject`` (the routing key) on behalf of ``producer`` (the authenticated cause).
+
+    The hourly bound counts per producer: keyed by subject, anyone allowed to message a principal could use up
+    that principal's allowance and silence its legitimate events for an hour.
+    """
     now = time.time()
     recent = conn.execute(
-        "SELECT COUNT(*) FROM fleet_events WHERE name=? AND subject=? AND created_at>?", (name, subject, now - 3600)
+        "SELECT COUNT(*) FROM fleet_events WHERE name=? AND producer=? AND created_at>?", (name, producer, now - 3600)
     ).fetchone()[0]
-    if recent >= MAX_EVENTS_PER_SUBJECT_PER_HOUR:
-        # One principal cannot grow the outbox without bound; the hourly window reopens by itself.
+    if recent >= MAX_EVENTS_PER_PRODUCER_PER_HOUR:
+        # One producer cannot grow the outbox without bound; the hourly window reopens by itself.
         _LOG.warning("fleet event rate limit reached: name=%s", name)
         return
     conn.execute(
-        "INSERT OR IGNORE INTO fleet_events(event_id,name,subject,data,created_at) VALUES(?,?,?,?,?)",
-        (event_id or "evt_" + uuid4().hex, name, subject, json.dumps(data, separators=(",", ":")), now),
+        "INSERT OR IGNORE INTO fleet_events(event_id,name,subject,producer,data,created_at) VALUES(?,?,?,?,?,?)",
+        (event_id or "evt_" + uuid4().hex, name, subject, producer, json.dumps(data, separators=(",", ":")), now),
     )
 
 
@@ -273,7 +285,8 @@ def record_message_created(conn: sqlite3.Connection, message: dict[str, Any]) ->
     }
     if message.get("kind"):
         data["kind"] = message["kind"]
-    _append(conn, MESSAGE_CREATED, message["recipient"], data)
+    # The sender is the authenticated producer; the recipient only routes the event to its inbox.
+    _append(conn, MESSAGE_CREATED, message["recipient"], message["sender"], data)
 
 
 def record_run_failed(conn: sqlite3.Connection, event: dict[str, Any]) -> None:
@@ -285,7 +298,7 @@ def record_run_failed(conn: sqlite3.Connection, event: dict[str, Any]) -> None:
         data["exit_status"] = event["exit_status"]
     if _TIMESTAMP_RE.fullmatch(str(event.get("ts", ""))):
         data["failed_at"] = event["ts"]
-    _append(conn, RUN_FAILED, event["node_id"], data)
+    _append(conn, RUN_FAILED, event["node_id"], event["node_id"], data)
 
 
 def claim_expired_event_id(target: str, holder_token: str, expires_at: float) -> str:
@@ -300,7 +313,14 @@ def record_claim_expired(
     if not _CONFIG.enabled or not has_subscribers(conn, CLAIM_EXPIRED):
         return
     data: dict[str, Any] = {"owner_node": owner_node, "target": target, "expired_at": iso(expires_at)}
-    _append(conn, CLAIM_EXPIRED, owner_node, data, event_id=claim_expired_event_id(target, holder_token, expires_at))
+    _append(
+        conn,
+        CLAIM_EXPIRED,
+        owner_node,
+        owner_node,
+        data,
+        event_id=claim_expired_event_id(target, holder_token, expires_at),
+    )
 
 
 def _reference(secret: str, sid: str, label: str, value: str) -> str:

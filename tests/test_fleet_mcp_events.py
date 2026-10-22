@@ -888,7 +888,7 @@ def test_event_recording_is_rate_limited_per_principal(stations, receiver, hub) 
     _base, _ta, _tb, db = hub
     subscribe(stations[1], receiver.url, name="run.failed")
     _store_failed(db, NODE_A, 1000)  # one request at the per-POST maximum
-    cap = fleet_hub_events.MAX_EVENTS_PER_SUBJECT_PER_HOUR
+    cap = fleet_hub_events.MAX_EVENTS_PER_PRODUCER_PER_HOUR
     assert rows(db, "SELECT COUNT(*) FROM fleet_events WHERE subject=?", NODE_A) == [(cap,)]
     _store_failed(db, NODE_B, 1)
     assert rows(db, "SELECT COUNT(*) FROM fleet_events WHERE subject=?", NODE_B) == [(1,)], "per principal"
@@ -1003,6 +1003,31 @@ def test_references_differ_across_subscriptions_that_share_a_secret(stations, re
         assert first["payload"]["data"]["target_ref"] != other["payload"]["data"]["target_ref"]
     finally:
         second.close()
+
+
+def test_flooding_a_recipient_does_not_suppress_other_producers_events(
+    stations, receiver, hub, tmp_path, monkeypatch
+) -> None:
+    _base, _ta, _tb, db = hub
+    monkeypatch.setattr(fleet_hub_events, "MAX_EVENTS_PER_PRODUCER_PER_HOUR", 3)
+    conn = fleet_hub.open_db(db)
+    try:
+        principal = fleet_hub_messages.add_principal(conn, {"name": "dot", "may_send_to": [NODE_B]})
+    finally:
+        conn.close()
+    token_file = tmp_path / "dot.token"
+    token_file.write_text(principal["token"])
+    token_file.chmod(0o600)
+    agent = FleetMcp(token_file=str(token_file), events=True)
+    subscribe(stations[1], receiver.url)
+    for _ in range(5):
+        send(stations[0], NODE_B)  # node A floods node B's inbox
+    assert rows(db, "SELECT COUNT(*) FROM fleet_events WHERE producer=?", NODE_A) == [(3,)], "A is bounded"
+    send(agent, NODE_B)  # a different producer, same recipient
+    assert rows(db, "SELECT COUNT(*) FROM fleet_events WHERE producer=?", "agent:dot") == [(1,)]
+    assert rows(db, "SELECT COUNT(*) FROM fleet_events WHERE subject=?", NODE_B) == [(4,)]
+    assert tick(db) == 4
+    assert sorted(r["payload"]["data"]["sender"] for r in receiver.events) == [NODE_A] * 3 + ["agent:dot"]
 
 
 def test_retired_signing_key_is_erased_after_the_rotation_window(stations, receiver, hub) -> None:
