@@ -33,7 +33,6 @@ def test_icons_are_decorative_and_carry_no_colors():
         fleet_deck_icons.BUG_ICON,
         fleet_deck_icons.STAR_ICON,
         fleet_deck_icons.EXTERNAL_ICON,
-        fleet_deck_icons.ARROW_ICON,
     ]
     for icon in icons:
         assert icon.startswith(OUTER_TAG) and icon.endswith("</svg>")

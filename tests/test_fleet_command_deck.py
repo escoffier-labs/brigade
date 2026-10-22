@@ -1708,5 +1708,5 @@ def test_deck_http_joins_stations_to_telemetry_by_node_id(tmp_path):
         alpha = next(row for row in rows if ">Alpha<" in row)
         beta = next(row for row in rows if ">Beta<" in row)
         assert "idle-capacity" in alpha and "stale-telemetry" not in alpha
-        assert "stale-telemetry" in beta and "dot--stale" in beta
+        assert "stale-telemetry" in beta and 'data-status="stale"' in beta and 'class="tag tag--warn">stale<' in beta
         assert 'class="alert-kind">stale telemetry<' in page
