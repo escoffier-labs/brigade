@@ -67,7 +67,7 @@ _SCHEMA = (
         id TEXT NOT NULL PRIMARY KEY, principal_id TEXT NOT NULL, name TEXT NOT NULL, arguments TEXT NOT NULL,
         filter_value TEXT, url TEXT NOT NULL, secret TEXT NOT NULL, previous_secret TEXT, rotate_until REAL,
         created_at REAL NOT NULL, expires_at REAL, cursor_seq INTEGER NOT NULL DEFAULT 0,
-        failures INTEGER NOT NULL DEFAULT 0)""",
+        failures INTEGER NOT NULL DEFAULT 0, generation TEXT NOT NULL DEFAULT '')""",
     "CREATE INDEX IF NOT EXISTS fleet_event_subscriptions_principal ON fleet_event_subscriptions (principal_id)",
     "CREATE INDEX IF NOT EXISTS fleet_event_subscriptions_name ON fleet_event_subscriptions (name)",
     """CREATE TABLE IF NOT EXISTS fleet_events (
@@ -79,6 +79,11 @@ _SCHEMA = (
         attempts INTEGER NOT NULL DEFAULT 0, next_attempt REAL NOT NULL, attempted_at REAL,
         PRIMARY KEY (seq, subscription_id))""",
     "CREATE INDEX IF NOT EXISTS fleet_event_deliveries_due ON fleet_event_deliveries (state, next_attempt)",
+    # One row per webhook request, so the hourly ceiling counts requests and retries cannot slip under it. Rows
+    # are keyed by subscription id, not generation: re-creating a subscription does not reset its budget.
+    """CREATE TABLE IF NOT EXISTS fleet_event_attempts (
+        subscription_id TEXT NOT NULL, attempted_at REAL NOT NULL)""",
+    "CREATE INDEX IF NOT EXISTS fleet_event_attempts_recent ON fleet_event_attempts (subscription_id, attempted_at)",
 )
 
 
@@ -86,6 +91,9 @@ _SCHEMA = (
 # current version, which startup accepts as is. So fleet_hub registers the column with its additive repair and then re-runs ensure_schema, which
 # backfills and indexes it. The index cannot join that registry: a fresh database has no fleet_events yet.
 PRODUCER_COLUMN_DDL = "ALTER TABLE fleet_events ADD COLUMN producer TEXT NOT NULL DEFAULT ''"
+# Each creation of a subscription row gets a fresh generation, so a delivery outcome can tell the subscription it
+# was sent for from a later one that reuses the same deterministic id. Rows from before the column read ''.
+GENERATION_COLUMN_DDL = "ALTER TABLE fleet_event_subscriptions ADD COLUMN generation TEXT NOT NULL DEFAULT ''"
 PRODUCER_INDEX_DDL = "CREATE INDEX IF NOT EXISTS fleet_events_producer ON fleet_events (name, producer, created_at)"
 
 
@@ -114,6 +122,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         conn.execute(statement)
     if "producer" not in {row[1] for row in conn.execute("PRAGMA table_info(fleet_events)")}:
         conn.execute(PRODUCER_COLUMN_DDL)
+    if "generation" not in {row[1] for row in conn.execute("PRAGMA table_info(fleet_event_subscriptions)")}:
+        conn.execute(GENERATION_COLUMN_DDL)
     backfill_producer(conn)
     conn.execute(PRODUCER_INDEX_DDL)
 
@@ -481,7 +491,7 @@ def _subscribe(conn: sqlite3.Connection, params: dict[str, Any], caller: str) ->
         moment = time.time()
         expires = moment + ttl
         old = conn.execute(
-            "SELECT secret, previous_secret, rotate_until, created_at, cursor_seq, expires_at "
+            "SELECT secret, previous_secret, rotate_until, created_at, cursor_seq, expires_at, generation "
             "FROM fleet_event_subscriptions WHERE id=?",
             (sid,),
         ).fetchone()
@@ -508,7 +518,8 @@ def _subscribe(conn: sqlite3.Connection, params: dict[str, Any], caller: str) ->
         )
         conn.execute(
             "INSERT OR REPLACE INTO fleet_event_subscriptions(id,principal_id,name,arguments,filter_value,url,secret,"
-            "previous_secret,rotate_until,created_at,expires_at,cursor_seq,failures) VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0)",
+            "previous_secret,rotate_until,created_at,expires_at,cursor_seq,failures,generation) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,0,?)",
             (
                 sid,
                 caller,
@@ -522,6 +533,8 @@ def _subscribe(conn: sqlite3.Connection, params: dict[str, Any], caller: str) ->
                 old[3] if old is not None else moment,
                 expires,
                 cursor_seq,
+                # A refresh keeps its generation; a creation, including one after an unsubscribe, gets a new one.
+                old[6] if old is not None else secrets.token_hex(8),
             ),
         )
         return expires

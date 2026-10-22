@@ -838,6 +838,67 @@ def test_hourly_ceiling_defers_instead_of_flooding(stations, receiver, hub, monk
     assert tick(db, clock=lambda: now + 3700) >= 1, "deferred events go out once the window moves"
 
 
+def test_a_stale_gone_response_cannot_delete_a_recreated_subscription(stations, receiver, hub) -> None:
+    """Unsubscribe plus subscribe during an in-flight delivery reuses the id; the old 410 must not remove it."""
+    _base, _ta, _tb, db = hub
+    sid = subscribe(stations[1], receiver.url)["result"]["id"]
+    send(stations[0], NODE_B)
+    first_generation = rows(db, "SELECT generation FROM fleet_event_subscriptions")[0][0]
+    assert first_generation
+
+    def recreate_then_gone(*_args: Any) -> tuple[int, bytes]:
+        assert rpc(stations[1], "events/unsubscribe", {"id": sid})["result"] == {}
+        assert subscribe(stations[1], receiver.url)["result"]["id"] == sid
+        return 410, b""
+
+    assert tick(db, post=recreate_then_gone) == 0
+    stored = rows(db, "SELECT id, generation FROM fleet_event_subscriptions")
+    assert [row[0] for row in stored] == [sid], "the re-created subscription survives the stale 410"
+    assert stored[0][1] != first_generation
+    # The surviving subscription still delivers.
+    send(stations[0], NODE_B)
+    assert tick(db, post=_ok) == 1
+
+
+def test_retries_count_against_the_hourly_ceiling(stations, receiver, hub, monkeypatch) -> None:
+    """30 events with 5 attempts each is 150 requests; the advertised ceiling is 120 an hour."""
+    _base, _ta, _tb, db = hub
+    monkeypatch.setattr(fleet_hub_events_dispatch, "MAX_ATTEMPTS", 5)
+    monkeypatch.setattr(fleet_hub_events_dispatch, "MAX_FAILED_STREAK", 1000)
+    subscribe(stations[1], receiver.url, name="run.failed", arguments={"node_id": NODE_A})
+    _store_failed(db, NODE_A, 30)
+    posts: list[float] = []
+    now = [time.time()]
+
+    def failing(*_args: Any) -> tuple[int, bytes]:
+        posts.append(now[0])
+        return 503, b""
+
+    dispatcher = fleet_hub_events_dispatch.Dispatcher(db, clock=lambda: now[0], post=failing)
+    start = now[0]
+    while now[0] < start + 3500:
+        dispatcher.tick()
+        now[0] += 10
+    assert len(posts) == fleet_hub_events_dispatch.HOURLY_DELIVERY_CEILING, "every attempt counts, not every row"
+    now[0] = start + 3700
+    dispatcher.tick()
+    assert len(posts) > fleet_hub_events_dispatch.HOURLY_DELIVERY_CEILING, "attempts resume once the hour passes"
+
+
+def test_due_deliveries_are_interleaved_across_principals(stations, receiver, hub) -> None:
+    """An older backlog for one principal cannot fill the whole batch ahead of another principal's new event."""
+    _base, _ta, _tb, db = hub
+    subscribe(stations[1], receiver.url)
+    sid_a = subscribe(stations[0], receiver.url)["result"]["id"]
+    backlog = fleet_hub_events_dispatch.BATCH + 10
+    for _ in range(backlog):
+        send(stations[0], NODE_B)
+    send(stations[1], NODE_A)
+    assert tick(db, post=_ok) == fleet_hub_events_dispatch.BATCH
+    delivered = rows(db, "SELECT subscription_id FROM fleet_event_deliveries WHERE state='delivered'")
+    assert (sid_a,) in delivered, "the newer principal is served in the first batch"
+
+
 # --- claim.expired and run.failed ------------------------------------------------------
 
 

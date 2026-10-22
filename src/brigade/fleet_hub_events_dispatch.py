@@ -34,6 +34,7 @@ BACKOFF_BASE_SECONDS = 5
 BACKOFF_CAP_SECONDS = 3600
 MAX_FAILED_STREAK = 10
 HOURLY_DELIVERY_CEILING = 120
+HOURLY_WINDOW_SECONDS = 3600
 EVENT_RETENTION_SECONDS = 86_400
 CLAIM_SWEEP_LIMIT = 100
 # Fan-out bounds: a tick materializes a bounded window, and the outbox holds a bounded number of pending rows.
@@ -155,6 +156,7 @@ def _fan_out(conn: sqlite3.Connection, now: float) -> list[dict[str, Any]]:
         "(SELECT principal_id FROM fleet_message_principals WHERE revoked_at IS NULL)"
     )
     _materialize(conn, now)
+    conn.execute("DELETE FROM fleet_event_attempts WHERE attempted_at<=?", (now - HOURLY_WINDOW_SECONDS,))
     conn.execute(
         "DELETE FROM fleet_event_deliveries WHERE subscription_id NOT IN (SELECT id FROM fleet_event_subscriptions)"
     )
@@ -171,16 +173,24 @@ def _fan_out(conn: sqlite3.Connection, now: float) -> list[dict[str, Any]]:
     conn.execute(
         "DELETE FROM fleet_event_deliveries WHERE state!='pending' AND seq NOT IN (SELECT seq FROM fleet_events)"
     )
+    # Due deliveries are ranked within each principal and taken rank by rank, the same interleave the outbox
+    # uses on the way in, so one principal's older backlog cannot fill every batch.
     rows = conn.execute(
-        "SELECT d.seq, d.subscription_id, d.attempts, e.event_id, e.name, e.subject, e.data, e.created_at, "
-        "s.principal_id, s.url, s.secret, s.previous_secret, s.rotate_until "
+        "SELECT seq, subscription_id, attempts, event_id, name, subject, data, created_at, principal_id, url, "
+        "secret, previous_secret, rotate_until, generation FROM ("
+        "SELECT d.seq AS seq, d.subscription_id AS subscription_id, d.attempts AS attempts, e.event_id AS event_id, "
+        "e.name AS name, e.subject AS subject, e.data AS data, e.created_at AS created_at, "
+        "s.principal_id AS principal_id, s.url AS url, s.secret AS secret, s.previous_secret AS previous_secret, "
+        "s.rotate_until AS rotate_until, s.generation AS generation, "
+        "ROW_NUMBER() OVER (PARTITION BY s.principal_id ORDER BY d.seq, d.subscription_id) AS turn "
         "FROM fleet_event_deliveries d JOIN fleet_events e ON e.seq=d.seq "
         "JOIN fleet_event_subscriptions s ON s.id=d.subscription_id "
-        "WHERE d.state='pending' AND d.next_attempt<=? ORDER BY d.seq LIMIT ?",
+        "WHERE d.state='pending' AND d.next_attempt<=?) ORDER BY turn, seq, subscription_id LIMIT ?",
         (now, BATCH),
     ).fetchall()
     columns = (
-        "seq subscription_id attempts event_id name subject data created_at principal url secret previous rotate_until"
+        "seq subscription_id attempts event_id name subject data created_at principal url secret previous rotate_until "
+        "generation"
     ).split()
     return [dict(zip(columns, row, strict=True)) for row in rows]
 
@@ -245,7 +255,6 @@ class Dispatcher:
                 swept = sweep_expired_claims(conn, now, self._swept)
                 due = _fan_out(conn, now)
                 jobs: list[tuple[dict[str, Any], bytes, dict[str, str]]] = []
-                planned: dict[str, int] = {}
                 for row in due:
                     allowed = _still_allowed(conn, row)
                     if allowed is None:
@@ -257,11 +266,12 @@ class Dispatcher:
                             (row["seq"], row["subscription_id"]),
                         )
                         continue
+                    # Requests, not rows: a retry is another attempt, and attempts planned this tick are in the table.
                     recent = conn.execute(
-                        "SELECT COUNT(*) FROM fleet_event_deliveries WHERE subscription_id=? AND attempted_at>?",
-                        (row["subscription_id"], now - 3600),
+                        "SELECT COUNT(*) FROM fleet_event_attempts WHERE subscription_id=? AND attempted_at>?",
+                        (row["subscription_id"], now - HOURLY_WINDOW_SECONDS),
                     ).fetchone()[0]
-                    if recent + planned.get(row["subscription_id"], 0) >= HOURLY_DELIVERY_CEILING:
+                    if recent >= HOURLY_DELIVERY_CEILING:
                         conn.execute(
                             "UPDATE fleet_event_deliveries SET next_attempt=? WHERE seq=? AND subscription_id=?",
                             (now + 60, row["seq"], row["subscription_id"]),
@@ -272,7 +282,10 @@ class Dispatcher:
                     headers = signed_headers(
                         row["secret"], row["event_id"], body, row["subscription_id"], now=now, previous=previous
                     )
-                    planned[row["subscription_id"]] = planned.get(row["subscription_id"], 0) + 1
+                    conn.execute(
+                        "INSERT INTO fleet_event_attempts(subscription_id, attempted_at) VALUES(?,?)",
+                        (row["subscription_id"], now),
+                    )
                     jobs.append((row, body, headers))
                 conn.commit()
                 self._swept = swept  # only once the events it recorded are durable
@@ -295,6 +308,16 @@ class Dispatcher:
 
     @staticmethod
     def _record(conn: sqlite3.Connection, row: dict[str, Any], status: int | None, problem: str, now: float) -> int:
+        # The outcome belongs to the subscription it was sent for. The owner may have unsubscribed and created the
+        # same id again while the request was in flight; a result for the earlier one must not touch the new one.
+        if (
+            conn.execute(
+                "SELECT 1 FROM fleet_event_subscriptions WHERE id=? AND generation=?",
+                (row["subscription_id"], row["generation"]),
+            ).fetchone()
+            is None
+        ):
+            return 0
         attempts = row["attempts"] + 1
         key = (row["seq"], row["subscription_id"])
         if status is not None and 200 <= status < 300:

@@ -269,6 +269,7 @@ _ADDITIVE_COLUMNS = (
     ("events", "context", "ALTER TABLE events ADD COLUMN context TEXT"),
     ("model_policy", "t3_model", "ALTER TABLE model_policy ADD COLUMN t3_model TEXT NOT NULL DEFAULT ''"),
     ("fleet_events", "producer", fleet_hub_events.PRODUCER_COLUMN_DDL),
+    ("fleet_event_subscriptions", "generation", fleet_hub_events.GENERATION_COLUMN_DDL),
 )
 _ADDITIVE_INDEXES = (
     ("claims_owner_expiry", "CREATE INDEX IF NOT EXISTS claims_owner_expiry ON claims (owner_node, expires_at)"),
