@@ -54,8 +54,6 @@ CURSOR_WORK_LOOP_CONTEXT = (
     "run with --capture brigade-work. Capture failures, export new receipts to MiseLedger when installed, and "
     "finish durable work with a Memory Handoff."
 )
-# Codex hook command: brigade work presence-hook --harness codex --stdin --context fleet-inbox
-CODEX_FLEET_INBOX_CONTEXT = "fleet-inbox"
 _CURSOR_HOOK_EVENTS = {
     "sessionStart": "start",
     "postToolUse": "heartbeat",
@@ -558,17 +556,10 @@ def run_presence_hook(
         if harness == "cursor" and stdin and context == "cursor-work-loop":
             _run_cursor_presence_hook()
             return 0
-        if harness == "codex" and stdin and context == CODEX_FLEET_INBOX_CONTEXT:
-            from .fleet_inbox_delivery import run_codex_hook
-
-            run_codex_hook()
-            return 0
         _run_explicit_presence_hook(target=target, harness=harness, session=session, event=event)
     except Exception:
         if harness == "cursor" and stdin and context == "cursor-work-loop":
             _print_cursor_hook_output(None)
-        if harness == "codex" and stdin and context == CODEX_FLEET_INBOX_CONTEXT:
-            print("{}")
     return 0
 
 
