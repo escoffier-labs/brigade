@@ -254,7 +254,7 @@ def _stop_bound(run_dir: Path, workspace: Path, journal: Path) -> None:
     with (
         run_lifecycle.checkpoint_event_pair(),
         run_journal.journal_mutation(journal) if journaled else nullcontext(),
-        store.directory(run_dir, create=True) as parent,
+        store.directory(run_dir, create=True, create_root=False) as parent,
     ):
         if _finished(run_dir):
             return
@@ -476,7 +476,7 @@ def _publish_blobs(
     with (
         run_lifecycle.checkpoint_event_pair(),
         run_journal.journal_mutation(journal) if journaled else nullcontext(),
-        store.directory(run_dir, create=True) as parent,
+        store.directory(run_dir, create=True, create_root=False) as parent,
     ):
         if _finished(run_dir):
             return None

@@ -38,11 +38,11 @@ def encode(value: Any) -> bytes:
 
 
 @contextmanager
-def directory(run_dir: Path, *, create: bool = False) -> Iterator[int]:
+def directory(run_dir: Path, *, create: bool = False, create_root: bool = True) -> Iterator[int]:
     """Walk every component without following links, including on Windows."""
     descriptors: list[int] = []
     try:
-        parent = dirfd.open_directory_chain(Path(os.path.abspath(run_dir)), create=create)
+        parent = dirfd.open_directory_chain(Path(os.path.abspath(run_dir)), create=create and create_root)
         descriptors.append(parent)
         for name in ("events", DIRECTORY):
             try:
@@ -64,8 +64,12 @@ def directory(run_dir: Path, *, create: bool = False) -> Iterator[int]:
 
 @contextmanager
 def journal_scope(run_dir: Path) -> Iterator[None]:
-    """Bind journal helpers to a run opened by an all-component no-follow walk."""
-    descriptor = dirfd.open_directory_chain(Path(os.path.abspath(run_dir)), create=True)
+    """Bind journal helpers to an existing run opened by a no-follow walk.
+
+    A run deleted mid-flight is never recreated here, so late publication
+    cannot resurrect an orphan tree.
+    """
+    descriptor = dirfd.open_directory_chain(Path(os.path.abspath(run_dir)))
     info = os.fstat(descriptor)
     bound = run_dirfd.BoundRunDir(run_dir, descriptor, (info.st_dev, info.st_ino))
     token = run_dirfd._active.set(bound)

@@ -27,6 +27,8 @@ def auto_recording(tmp_path):
 def _record(run_dir: Path, **kwargs):
     from brigade import run_cassette
 
+    # A live run always has its directory; publication never recreates one.
+    run_dir.mkdir(parents=True, exist_ok=True)
     workspace = kwargs.pop(
         "cwd",
         next(

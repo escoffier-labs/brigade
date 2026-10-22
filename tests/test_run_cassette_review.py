@@ -214,3 +214,23 @@ def test_unexpected_recorder_exception_cannot_lose_completed_seat_result(tmp_pat
         result = invoker.invoke(seat="worker", phase="research.plan", prompt="task", timeout=10)
     assert result.ok and result.text == "completed answer"
     assert (run / "events" / "cassettes" / ".stopped").exists()
+
+
+def test_deleted_run_is_not_recreated_by_publication(tmp_path):
+    from brigade import run_cassette
+
+    run = tmp_path / ".brigade" / "runs" / "gone"
+    run.parent.mkdir(parents=True)
+    result = agents.AgentResult(text="private-worker-answer", ok=True, transport="cli")
+    ref = run_cassette.record_result(
+        run_dir=run,
+        workspace=tmp_path,
+        agent=Agent(name="worker", cli="codex", role="write", model="test-model"),
+        task="t",
+        prompt="p",
+        result=result,
+        read_only=True,
+        sandbox="read-only",
+    )
+    assert ref is None
+    assert not run.exists()
