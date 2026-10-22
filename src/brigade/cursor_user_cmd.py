@@ -260,7 +260,7 @@ def _hooks_document_error(doc: dict[str, Any]) -> str | None:
     if not isinstance(hooks, dict):
         return "existing hooks field must be an object"
     for event, entries in hooks.items():
-        if event not in _SUPPORTED_HOOK_EVENTS:
+        if version == _HOOKS_DOCUMENT_VERSION and event not in _SUPPORTED_HOOK_EVENTS:
             return f"existing hooks configuration has unknown event: {event}"
         if not isinstance(entries, list):
             return f"existing {event} hooks must be a list"
