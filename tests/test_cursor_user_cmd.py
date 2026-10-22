@@ -529,6 +529,34 @@ def test_user_cursor_hook_skips_project_selected_for_another_harness(tmp_path, m
     assert calls == []
 
 
+def test_user_cursor_hook_does_not_suppress_legacy_project_entry(tmp_path, monkeypatch, capsys):
+    workspace = _wire_cursor_workspace(tmp_path)
+    hooks_path = workspace / ".cursor" / "hooks.json"
+    hooks_path.parent.mkdir()
+    hooks_path.write_text(json.dumps({"version": 1, "hooks": {"sessionStart": [cursor_user_cmd._hook_entry()]}}))
+    calls = []
+    monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "http://127.0.0.1:3774")
+    monkeypatch.setattr(fleet_client, "upsert_session", lambda snap: calls.append(snap) or True)
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(
+            json.dumps(
+                {
+                    "conversation_id": "conv-1",
+                    "hook_event_name": "sessionStart",
+                    "workspace_roots": [str(workspace)],
+                }
+            )
+        ),
+    )
+
+    assert cli.main(["work", "presence-hook", "--harness", "cursor", "--stdin", "--context", "cursor-work-loop"]) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert len(calls) == 1
+    assert "additional_context" in output
+
+
 def test_cursor_project_and_user_hooks_publish_once_when_both_scopes_are_installed(tmp_path, monkeypatch, capsys):
     workspace = _wire_cursor_workspace(tmp_path)
     managed_project_hook = {

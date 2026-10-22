@@ -316,10 +316,11 @@ def _cursor_wiring(target: Path) -> tuple[dict[str, Any], list[str], bool, bool]
             issues.append(f"stale {surface}")
 
     hooks_doc, _ = cursor_user_cmd._read_json_object(root / "hooks.json")
-    hook_entries: object = None
-    if hooks_doc is not None and isinstance(hooks_doc.get("hooks"), dict):
-        hook_entries = hooks_doc["hooks"].get("sessionStart")
-    hook_current = isinstance(hook_entries, list) and cursor_user_cmd._hook_entry(root) in hook_entries
+    hooks = hooks_doc.get("hooks") if hooks_doc is not None else None
+    hook_current = isinstance(hooks, dict) and all(
+        isinstance(hooks.get(event), list) and cursor_user_cmd._hook_entry(root) in hooks[event]
+        for event in cursor_user_cmd._MANAGED_HOOK_EVENTS
+    )
     if not hook_current:
         missing = missing or not (root / "hooks.json").exists()
         stale = stale or (root / "hooks.json").exists()

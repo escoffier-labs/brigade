@@ -208,7 +208,7 @@ def _hook_entry(root: Path | None = None, *, scope: str = "user") -> dict[str, s
 
 
 def project_presence_hook_installed(workspace: Path, event: str) -> bool:
-    """Return whether a project hook already owns this Cursor presence event."""
+    """Return whether a scope-distinct project hook owns this Cursor event."""
     if event not in _MANAGED_HOOK_EVENTS:
         return False
     path = workspace / ".cursor" / "hooks.json"
@@ -222,11 +222,7 @@ def project_presence_hook_installed(workspace: Path, event: str) -> bool:
     entries = hooks.get(event) if isinstance(hooks, dict) else None
     if not isinstance(entries, list):
         return False
-    brigade_commands = {_PROJECT_HOOK_COMMAND, _LEGACY_HOOK_COMMAND}
-    return any(
-        isinstance(entry, dict) and isinstance(entry.get("command"), str) and entry["command"] in brigade_commands
-        for entry in entries
-    )
+    return any(isinstance(entry, dict) and entry.get("command") == _PROJECT_HOOK_COMMAND for entry in entries)
 
 
 def install_project_presence_hooks(workspace: Path) -> str | None:
@@ -241,21 +237,27 @@ def install_project_presence_hooks(workspace: Path) -> str | None:
     if not isinstance(hooks, dict):
         return "existing hooks field must be an object"
     changed = False
+    managed = _hook_entry(scope="project")
+    legacy = {"command": _LEGACY_HOOK_COMMAND}
     for event in _MANAGED_HOOK_EVENTS:
         entries = hooks.get(event)
         if entries is None:
             entries = []
-            hooks[event] = entries
-            changed = True
         if not isinstance(entries, list):
             return f"existing {event} hooks must be a list"
-        managed = _hook_entry(scope="project")
-        legacy = {"command": _LEGACY_HOOK_COMMAND}
-        if legacy in entries:
-            entries[entries.index(legacy)] = managed
-            changed = True
-        if managed not in entries:
-            entries.append(managed)
+        normalized: list[Any] = []
+        managed_added = False
+        for entry in entries:
+            if entry == managed or entry == legacy:
+                if not managed_added:
+                    normalized.append(managed)
+                    managed_added = True
+                continue
+            normalized.append(entry)
+        if not managed_added:
+            normalized.append(managed)
+        if normalized != entries:
+            hooks[event] = normalized
             changed = True
     if not changed:
         return None
