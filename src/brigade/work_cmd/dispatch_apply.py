@@ -75,14 +75,30 @@ def _release(target: Path, row: dict[str, Any]) -> None:
     locking._release_tasks(target, task_ids=[row["task_id"]], claim_ids=[row["claim_id"]])
 
 
+_RELEASING = frozenset({"failed", "orphaned", "canceled"})
+_TERMINAL_TEXT_LIMIT = 16 * 1024
+
+
+def _bounded_text(value: Any, limit: int = _TERMINAL_TEXT_LIMIT) -> Any:
+    """Keep terminal metadata inside the bounded event envelope."""
+    if not isinstance(value, str):
+        return value
+    raw = value.encode("utf-8")
+    if len(raw) <= limit:
+        return value
+    kept = raw[:limit].decode("utf-8", errors="ignore")
+    return f"{kept}\n[truncated {len(raw) - limit} bytes]"
+
+
 def _finish(
     target: Path, path: Path, row: dict[str, Any], state: str, meta: dict[str, Any], *, commit: bool = False
 ) -> None:
     if row["state"] in store.TERMINAL - {"unknown"}:
-        # Repeating release closes the crash window between terminal publication
-        # and ledger mutation. A newer claim generation cannot match this CAS.
-        if row["state"] in {"failed", "orphaned", "canceled"}:
+        # Legacy receipts and crashes before recording release still reconcile.
+        # Publish the marker only after the ledger mutation succeeds.
+        if row["state"] in _RELEASING and not row.get("released"):
             _release(target, row)
+            store.transition(path, row, row["state"], released=True)
         return
     kind, phase = worker_failure.resolve_run_failure_taxonomy(meta)
     infrastructure = worker_failure.run_failure_is_infrastructure_at_read_time(kind, phase) is True
@@ -94,8 +110,8 @@ def _finish(
     worktree = Path(row["worktree"])
     if state == "completed":
         try:
-            changes["diff_stat"] = _git(worktree, "diff", "--stat", row["base_sha"])
-            changes["untracked"] = _git(worktree, "ls-files", "--others", "--exclude-standard")
+            changes["diff_stat"] = _bounded_text(_git(worktree, "diff", "--stat", row["base_sha"]))
+            changes["untracked"] = _bounded_text(_git(worktree, "ls-files", "--others", "--exclude-standard"))
             head = _git(worktree, "rev-parse", "HEAD")
             if head != row["base_sha"]:
                 changes["needs_review"] = True
@@ -123,7 +139,7 @@ def _finish(
                     _git(worktree, "commit", "--only", "-m", f"feat: dispatch {row['task_id']}", "--", *ordered_paths)
                     changes["commit"] = _git(worktree, "rev-parse", "HEAD")
         except (ValueError, OSError) as exc:
-            changes.update(commit_error=str(exc), commit_failed=True, needs_review=True)
+            changes.update(commit_error=_bounded_text(str(exc)), commit_failed=True, needs_review=True)
     terminal = {
         "run_status": meta.get("status"),
         "failure_kind": kind,
@@ -132,10 +148,21 @@ def _finish(
         "changes": changes,
     }
     if meta.get("error"):
-        terminal["error"] = meta["error"]
+        terminal["error"] = _bounded_text(meta["error"])
+    if (
+        state != "completed"
+        and store.event_room(path.parent.parent, reserve_events=1)
+        and not store.event_room(path.parent.parent, reserve_events=2)
+    ):
+        # Only one envelope fits. Release first, then publish the terminal
+        # state and the release marker together so the session can settle.
+        _release(target, row)
+        store.transition(path, row, state, terminal=terminal, released=True)
+        return
     store.transition(path, row, state, terminal=terminal)
     if state != "completed":
         _release(target, row)
+        store.transition(path, row, state, released=True)
 
 
 def _session_result(rows: list[tuple[Path, dict[str, Any]]]) -> int:
@@ -225,6 +252,11 @@ class Apply:
         self.started = time.monotonic()
         self.last_launch: float | None = None
         self.adopted: set[Path] = set()
+        self.settled: set[Path] = set()
+        self.continue_on_error = False
+        self.can_launch: Callable[[], bool] = lambda: True
+        self.reservation_allowed: Callable[[], bool] = lambda: True
+        self.pause: Callable[[float], None] = time.sleep
 
     def observe(self) -> None:
         lanes = run_lane_state.collect_lanes(self.target, limit=run_lane_state.MAX_LIMIT)
@@ -338,6 +370,12 @@ class Apply:
         return False
 
     def advance(self, path: Path, row: dict[str, Any], session: dict[str, Any]) -> None:
+        if row["state"] in {"planned", "claimed", "workspace_ready", "launching"} and self.last_launch is not None:
+            remaining = session.get("spawn_delay", 0) - (time.monotonic() - self.last_launch)
+            if remaining > 0:
+                self.pause(remaining)
+        if not self.can_launch() or (not row.get("pid") and not self.reservation_allowed()):
+            return
         try:
             self._advance(path, row, session)
         except (ValueError, OSError) as exc:
@@ -353,7 +391,19 @@ class Apply:
                 if exc.exit_code == 13:
                     store.transition(path, row, "lost_race")
                     return
-                raise
+                _finish(
+                    self.target,
+                    path,
+                    row,
+                    "failed",
+                    {
+                        "status": "failed",
+                        "failure_kind": "claim-refused",
+                        "failure_phase": "dispatch",
+                        "error": str(exc),
+                    },
+                )
+                return
             if row["state"] == "planned":
                 store.transition(path, row, "claimed", claimed_item_revision=claim["claim"]["item_revision"])
         worktree = Path(row["worktree"])
@@ -382,6 +432,8 @@ class Apply:
             if (run_dir / "run.json").exists() or (run_dir / "dispatch-launch.json").exists():
                 self.refresh(path, row, session)
                 return
+            if not self.can_launch():
+                return
             run_dir.mkdir(parents=True, exist_ok=True)
             store.transition(path, row, "launching")
             task = next(
@@ -390,6 +442,10 @@ class Apply:
             argv = _child_argv(row, session, _render_task_run_prompt(task) + CONTRACT)
             try:
                 with (run_dir / "dispatch-child.log").open("ab") as log:
+                    # Worktree setup and prompt rendering take time. Re-check the
+                    # watch deadline and launch ceiling at the final gate.
+                    if not self.can_launch() or (not row.get("pid") and not self.reservation_allowed()):
+                        return
                     child = subprocess.Popen(
                         [sys.executable, "-m", "brigade.work_cmd.dispatch_child", str(run_dir), *argv],
                         stdin=subprocess.DEVNULL,
@@ -481,7 +537,7 @@ class Apply:
         if store.child_alive(row):
             raise ValueError("adopted child is still active, claim retained")
 
-    def session(self, directory: Path, *, no_wait: bool = False) -> int:
+    def session(self, directory: Path, *, no_wait: bool = False, launch: bool = True) -> int:
         store.events(directory, repair_tail=True)
         session, plan = store.read(directory / "session.json"), store.read(directory / "plan.json")
         rows = [(path, store.read(path)) for path in sorted((directory / "intents").glob("*.json"))]
@@ -524,11 +580,11 @@ class Apply:
                 denied = True
             return False
 
-        def launch(item: dict[str, Any]) -> None:
+        def launch_item(item: dict[str, Any]) -> None:
             delay = session.get("spawn_delay", 0)
             if self.last_launch is not None and delay:
-                time.sleep(max(0, delay - (time.monotonic() - self.last_launch)))
-            if not budget_allows():
+                self.pause(max(0, delay - (time.monotonic() - self.last_launch)))
+            if not self.can_launch() or not self.reservation_allowed() or not budget_allows():
                 return
             if item["rank"] >= plan["dispatch_count"] and not any(
                 existing["task_id"] == item["task_id"] for _, existing in rows
@@ -547,25 +603,29 @@ class Apply:
                 if store.supervised(row):
                     if self.refresh(path, row, session):
                         continue
-                    if session.get("deadline") is not None and elapsed_seconds() >= session["deadline"]:
+                    if launch and session.get("deadline") is not None and elapsed_seconds() >= session["deadline"]:
                         budget_allows()
                         self.cancel(rows, session, timeout=True)
                         break
-                    self.advance(path, row, session)
+                    if launch:
+                        self.advance(path, row, session)
                 else:
                     self.refresh(path, row, session)
             attempted = {row["task_id"] for _, row in rows}
             accepted = sum(row["state"] != "lost_race" for _, row in rows)
             for item in plan["candidates"]:
+                if not launch or not self.can_launch():
+                    break
                 if accepted >= plan["dispatch_count"]:
                     break
                 if item["task_id"] in attempted:
                     continue
-                launch(item)
+                launch_item(item)
                 attempted.add(item["task_id"])
                 accepted = sum(row["state"] != "lost_race" for _, row in rows)
             if no_wait:
-                self._retry(directory, session, plan, rows, launch)
+                if launch:
+                    self._retry(directory, session, plan, rows, launch_item)
                 if all(not store.supervised(row) for _, row in rows):
                     session["finished_at"] = localio.utc_now_iso()
                     localio.write_json(directory / "session.json", session)
@@ -583,7 +643,7 @@ class Apply:
                         break
                 for path, row in list(rows):
                     self.refresh(path, row, session)
-                retried = self._retry(directory, session, plan, rows, launch)
+                retried = self._retry(directory, session, plan, rows, launch_item) if launch else False
                 if not retried and not self.adopted and all(not store.supervised(row) for _, row in rows):
                     break
                 time.sleep(0.05)
@@ -592,8 +652,9 @@ class Apply:
             self._cancel_previous()
             return 130
         except Exception:
-            self.cancel(rows, session)
-            self._cancel_previous()
+            if not self.continue_on_error:
+                self.cancel(rows, session)
+                self._cancel_previous()
             raise
         if all(not store.supervised(row) for _, row in rows):
             session["finished_at"] = localio.utc_now_iso()
@@ -639,20 +700,38 @@ class Apply:
                     )
         return len(rows) > before
 
-    def reconcile(self, *, no_wait: bool) -> int:
+    def reconcile(self, *, no_wait: bool, launch: bool = True) -> int:
         self.observe()
         result = 0
         for directory in store.sessions(self.target):
-            session = store.read(directory / "session.json")
-            if session.get("dry_run"):
+            if directory in self.settled:
                 continue
-            # Terminal rows may still have a claim-release side effect pending.
-            for path in (directory / "intents").glob("*.json"):
-                row = store.read(path)
-                if row["state"] in store.TERMINAL:
-                    self.refresh(path, row, session)
-            if not session.get("finished_at"):
-                result = max(result, self.session(directory, no_wait=no_wait))
-                if not store.read(directory / "session.json").get("finished_at"):
-                    self.adopted.add(directory)
+            session = store.read(directory / "session.json")
+            if session.get("dry_run") or session.get("watch"):
+                continue
+            try:
+                # Only failed, orphaned, and canceled rows have a claim-release
+                # side effect that can still be pending.
+                pending = False
+                for path in (directory / "intents").glob("*.json"):
+                    row = store.read(path)
+                    if row["state"] in _RELEASING and not row.get("released"):
+                        pending = True
+                        self.refresh(path, row, session)
+                if session.get("finished_at") and not pending:
+                    # A finished session with nothing left to release stays settled.
+                    self.settled.add(directory)
+                if not session.get("finished_at"):
+                    result = max(result, self.session(directory, no_wait=no_wait, launch=launch))
+                    if not store.read(directory / "session.json").get("finished_at"):
+                        self.adopted.add(directory)
+            except Exception as exc:
+                if not self.continue_on_error:
+                    raise
+                store.event(
+                    directory,
+                    "work.dispatch.tick_error",
+                    {"dispatch_id": directory.name, "error_type": type(exc).__name__, "error": str(exc)},
+                )
+                result = max(result, 1)
         return result
