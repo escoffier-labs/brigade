@@ -91,7 +91,7 @@ def test_migration_retention_and_idempotent_snapshot(tmp_path):
     conn.commit()
     conn.close()
     conn = fleet_hub.init_db(path)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 37
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
     old = stats.snapshot(
         taken_at=datetime(2024, 1, 1, tzinfo=timezone.utc),
         source_set=[],
@@ -471,7 +471,7 @@ def test_v35_migration_backfills_weekly_history(tmp_path):
     conn.commit()
     conn.close()
     conn = fleet_hub.init_db(path)
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 37
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
     assert stats.load_view(conn, now=NOW)["weeks"] == value["weeks"]
     conn.close()
 
