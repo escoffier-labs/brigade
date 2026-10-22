@@ -112,7 +112,6 @@ def _expected_profile_state(
 ) -> dict[str, Any]:
     """Build the ownership state a conflict-free sync would persist."""
     from .harness_profile_cmd import (
-        _HOOK_STATE_KEY,
         _INSTRUCTION_EFFECTIVE_PROFILE_KEY,
         _INSTRUCTION_REQUIRED_PROFILE_KEY,
         _LEGACY_MIGRATED,
@@ -145,7 +144,7 @@ def _expected_profile_state(
     proposed["skills"] = skill_plan["next"]
     proposed["generated"] = generated_plan["next"]
     if hook_plan is not None:
-        proposed["generated"][_HOOK_STATE_KEY] = hook_plan["next"]
+        proposed["generated"].update(hook_plan["next"])
     proposed["mcp"] = mcp_next
     proposed["package_version"] = BRIGADE_VERSION
     instruction_dirs = (

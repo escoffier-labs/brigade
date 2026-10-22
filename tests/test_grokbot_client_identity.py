@@ -79,7 +79,10 @@ def test_client_configs_and_rendered_services_coexist_and_roundtrip(tmp_path, mo
         command = next(
             line.removeprefix("ExecStart=") for line in path.read_text().splitlines() if line.startswith("ExecStart=")
         )
-        assert cli.main(shlex.split(command)[3:]) == 0
+        argv = shlex.split(command)
+        assert argv[1:3] == ["-I", "-c"]
+        assert argv[5] == "brigade"
+        assert cli.main(argv[6:]) == 0
         assert captured[-1].client_id == client_id
         assert captured[-1].bot_id == f"grokbot-{ROLE}-{client_id}"
         assert captured[-1].bind_port == port

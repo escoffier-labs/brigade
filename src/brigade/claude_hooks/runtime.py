@@ -19,8 +19,9 @@ from typing import Any, BinaryIO, Callable, Iterator
 
 from .. import localio
 from ..component_paths import cache_root
+from ..isolated_exec import module_argv, trusted_cwd
 from ..wiring import expand_user_path, resolve_wired_target
-from . import anchored_io, compaction_marker, dependencies, envelope, heartbeat, presence
+from . import anchored_io, compaction_marker, dependencies, envelope, fleet_inbox, heartbeat, presence
 from .fingerprint import repo_worktree_fingerprint
 from .package import PACKAGE_REF
 from .paths import is_operator_home, resolved_path
@@ -37,6 +38,7 @@ from .session_state import (
 )
 
 BRIEF_TIMEOUT_SECONDS = 10
+_monotonic = time.monotonic
 HOOK_TIMEOUT_LATCH_AFTER = 2
 _TIMEOUT_FOLLOWUP_SECONDS = 0.5
 # Inner lock acquire only. Must stay strictly below the 0.5s outer follow-up
@@ -58,9 +60,6 @@ _HOOK_WORKER_EVENT_ENV = "BRIGADE_HOOK_WORKER_EVENT"
 _HOOK_PIN_ENV = "BRIGADE_HOOK_PIN_TARGET"
 _HOOK_TEST_HANG_ENV = "BRIGADE_HOOK_TEST_HANG_SECONDS"
 _HOOK_TIMEOUT_ENV = "BRIGADE_HOOK_TIMEOUT_SECONDS"
-_HOOK_WORKER_COMMAND = (
-    "import json, os, sys, time; from brigade.claude_hooks.runtime import _hook_worker_main; _hook_worker_main()"
-)
 
 
 class HookDegraded(Exception):
@@ -712,8 +711,8 @@ def _stop_targets(payload: dict[str, Any], session_id: str, *, task_epoch: str |
 def _run_brief(target: Path) -> str:
     try:
         result = subprocess.run(
-            [sys.executable, "-m", "brigade", "work", "brief", "--target", str(target)],
-            cwd=target,
+            module_argv("brigade", "work", "brief", "--target", str(target)),
+            cwd=trusted_cwd(),
             check=False,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -2197,7 +2196,22 @@ def _handle_user_prompt_submit(payload: dict[str, Any], *, pin: Path | None = No
 
 
 def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = None) -> dict[str, Any] | None:
+    started = _monotonic()
     pin = pin if pin is not None else _hook_pin_from_env()
+    result = _handle_event(event, payload, pin=pin)
+    # Live Fleet Hub inbox delivery rides on prompt and tool events of wired sessions.
+    # It only gets what the event left of the hook budget, so a slow brief still
+    # returns its claim path to the parent before the outer timeout kills the worker.
+    return fleet_inbox.attach(
+        event,
+        payload,
+        result,
+        wired=lambda: effective_hook_target(payload, pin=pin) is not None,
+        budget=_hook_timeout_seconds() - (_monotonic() - started),
+    )
+
+
+def _handle_event(event: str, payload: dict[str, Any], *, pin: Path | None) -> dict[str, Any] | None:
     if event == "PreCompact":
         return _handle_pre_compact(payload, pin=pin)
     if event == "UserPromptSubmit":
@@ -2974,12 +2988,13 @@ def _subprocess_timed_hook_run(
     env = os.environ.copy()
     env[_HOOK_WORKER_EVENT_ENV] = event
     if pin_target is not None:
-        env[_HOOK_PIN_ENV] = str(pin_target)
+        env[_HOOK_PIN_ENV] = str(pin_target.expanduser().absolute())
     else:
         env.pop(_HOOK_PIN_ENV, None)
     try:
         completed = subprocess.run(
-            [sys.executable, "-c", _HOOK_WORKER_COMMAND],
+            module_argv("brigade.claude_hooks.worker"),
+            cwd=trusted_cwd(),
             input=raw,
             capture_output=True,
             text=True,

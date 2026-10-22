@@ -11,6 +11,12 @@ Two transports share one protocol function, ``handle_message``:
 * ``serve_http`` is a stateless Streamable HTTP endpoint bound to loopback only
   (``POST /mcp`` plus ``GET /healthz``), guarded by a bearer token read from
   ``BRIGADE_MCP_HTTP_TOKEN``. It has no sessions and no SSE stream.
+
+Protocol version ``2026-07-28`` is stateless: there is no handshake, clients may
+probe with ``server/discover``, and HTTP requests carry ``Mcp-Method`` and
+``Mcp-Name`` headers that must match the body. Older versions keep working and
+need none of that. A station can add capabilities and JSON-RPC methods (for
+example MCP Events) through ``McpExtension`` without touching this module.
 """
 
 from __future__ import annotations
@@ -22,7 +28,7 @@ import signal
 import socket
 import sys
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, Callable, Mapping
 from urllib.parse import urlsplit
@@ -34,8 +40,12 @@ ResourceReader = Callable[[str], "tuple[str | None, str | None]"]
 ToolLister = Callable[[], list[dict[str, Any]]]
 ToolCaller = Callable[[str, dict[str, Any]], "tuple[object, bool]"]
 
-SUPPORTED_PROTOCOL_VERSIONS = ("2024-11-05", "2025-03-26", "2025-06-18")
+SUPPORTED_PROTOCOL_VERSIONS = ("2024-11-05", "2025-03-26", "2025-06-18", "2026-07-28")
+# Negotiation stays conservative: a client that offers an unknown version is told
+# 2025-06-18, and 2026-07-28 is used only when the client asks for it.
 DEFAULT_PROTOCOL_VERSION = "2025-06-18"
+STATELESS_PROTOCOL_VERSION = "2026-07-28"
+HEADER_MISMATCH_CODE = -32020
 
 HTTP_TOKEN_ENV = "BRIGADE_MCP_HTTP_TOKEN"
 HTTP_DEFAULT_HOST = "127.0.0.1"
@@ -51,6 +61,25 @@ HTTP_MAX_BATCH_MESSAGES = 64
 HTTP_MCP_PATH = "/mcp"
 HTTP_HEALTH_PATH = "/healthz"
 _LOOPBACK_HOSTNAMES = frozenset({"localhost", "127.0.0.1", "::1"})
+
+
+class McpRpcError(Exception):
+    """Raised by an extension method to return a JSON-RPC error with optional structured data."""
+
+    def __init__(self, code: int, message: str, data: dict[str, Any] | None = None) -> None:
+        super().__init__(message)
+        self.code, self.message, self.data = code, message, data
+
+
+ExtensionMethod = Callable[[dict[str, Any]], dict[str, Any]]
+
+
+@dataclass(frozen=True)
+class McpExtension:
+    """Capabilities and JSON-RPC methods a station adds on top of resources and tools."""
+
+    capabilities: Mapping[str, Any] = field(default_factory=dict)
+    methods: Mapping[str, ExtensionMethod] = field(default_factory=dict)
 
 
 def response(
@@ -83,6 +112,7 @@ def handle_message(
     read_resource: ResourceReader,
     list_tools: ToolLister,
     call_tool: ToolCaller,
+    extension: McpExtension | None = None,
 ) -> dict[str, Any] | None:
     """Handle one decoded JSON-RPC message and return its response.
 
@@ -100,12 +130,24 @@ def handle_message(
         return None
     if not isinstance(message.get("method"), str):
         return response(request_id, error={"code": -32600, "message": "invalid request"})
+    capabilities: dict[str, Any] = {"resources": {}, "tools": {}, **(extension.capabilities if extension else {})}
     if method == "initialize":
         return response(
             request_id,
             result={
                 "protocolVersion": negotiate_protocol_version(params.get("protocolVersion")),
-                "capabilities": {"resources": {}, "tools": {}},
+                "capabilities": capabilities,
+                "serverInfo": {"name": server_name, "version": __version__},
+            },
+        )
+    if method == "server/discover":
+        # The stateless protocol has no handshake; this is the optional capability probe.
+        return response(
+            request_id,
+            result={
+                "resultType": "complete",
+                "supportedVersions": list(SUPPORTED_PROTOCOL_VERSIONS),
+                "capabilities": capabilities,
                 "serverInfo": {"name": server_name, "version": __version__},
             },
         )
@@ -127,6 +169,17 @@ def handle_message(
         payload, failed = call_tool(name, arguments)
         text = payload if isinstance(payload, str) else json.dumps(payload, indent=2, sort_keys=True)
         return response(request_id, result={"content": [{"type": "text", "text": text}], "isError": failed})
+    if extension is not None and method in extension.methods:
+        # Stateless clients carry client identity in params._meta; the extension never needs it.
+        try:
+            return response(
+                request_id, result=extension.methods[method]({k: v for k, v in params.items() if k != "_meta"})
+            )
+        except McpRpcError as exc:
+            error: dict[str, Any] = {"code": exc.code, "message": exc.message}
+            if exc.data is not None:
+                error["data"] = exc.data
+            return response(request_id, error=error)
     return response(request_id, error={"code": -32601, "message": f"method not found: {method}"})
 
 
@@ -137,6 +190,7 @@ def serve_stdio(
     read_resource: ResourceReader,
     list_tools: ToolLister,
     call_tool: ToolCaller,
+    extension: McpExtension | None = None,
 ) -> int:
     """Run a read-only MCP server over stdin/stdout until EOF."""
     for line in sys.stdin:
@@ -154,6 +208,7 @@ def serve_stdio(
             read_resource=read_resource,
             list_tools=list_tools,
             call_tool=call_tool,
+            extension=extension,
         )
         if reply is not None:
             _emit(reply)
@@ -322,7 +377,7 @@ def _make_handler(
             if protocol_version is not None and protocol_version.strip() not in SUPPORTED_PROTOCOL_VERSIONS:
                 self._error(400, "unsupported MCP-Protocol-Version")
                 return
-            self._handle_mcp_post()
+            self._handle_mcp_post(protocol_version.strip() if protocol_version is not None else None)
 
         def _read_body(self) -> bytes | None:
             if self.headers.get("Transfer-Encoding") is not None:
@@ -348,7 +403,37 @@ def _make_handler(
                 self.close_connection = True
                 return None
 
-        def _handle_mcp_post(self) -> None:
+        def _routing_error(self, decoded: object, protocol_version: str | None) -> tuple[int, str] | None:
+            """Enforce the version-gated routing contract; returns (JSON-RPC code, message) on a violation."""
+            stateless = protocol_version == STATELESS_PROTOCOL_VERSION
+            members = decoded if isinstance(decoded, list) else [decoded]
+            if not stateless:
+                # Event methods exist only in the stateless contract; an older version must not reach them.
+                if any(
+                    isinstance(m, dict) and isinstance(m.get("method"), str) and m["method"].startswith("events/")
+                    for m in members
+                ):
+                    return -32600, f"events methods require MCP-Protocol-Version {STATELESS_PROTOCOL_VERSION}"
+                return None
+            if isinstance(decoded, list):
+                # Headers can describe one request only, so a batch would bypass routing validation.
+                return -32600, f"batch requests are not supported in {STATELESS_PROTOCOL_VERSION}"
+            if not isinstance(decoded, dict) or not isinstance(decoded.get("method"), str):
+                return None
+            method = self.headers.get("Mcp-Method")
+            if method is None:
+                # Notifications carry no id and are not routed.
+                return None if "id" not in decoded else (HEADER_MISMATCH_CODE, "Mcp-Method header required")
+            if method != decoded["method"]:
+                return HEADER_MISMATCH_CODE, "Mcp-Method or Mcp-Name header mismatch"
+            if decoded["method"] == "tools/call":
+                params = decoded.get("params")
+                tool = params.get("name") if isinstance(params, dict) else None
+                if not isinstance(tool, str) or self.headers.get("Mcp-Name") != tool:
+                    return HEADER_MISMATCH_CODE, "Mcp-Method or Mcp-Name header mismatch"
+            return None
+
+        def _handle_mcp_post(self, protocol_version: str | None = None) -> None:
             body = self._read_body()
             if body is None:
                 return
@@ -358,6 +443,17 @@ def _make_handler(
                 # ValueError covers UnicodeDecodeError and JSONDecodeError;
                 # RecursionError is pathologically deep nesting.
                 self._send_json(400, response(None, error={"code": -32700, "message": "parse error"}))
+                return
+            violation = self._routing_error(decoded, protocol_version)
+            if violation is not None:
+                code, message = violation
+                self._send_json(
+                    400,
+                    response(
+                        decoded.get("id") if isinstance(decoded, dict) else None,
+                        error={"code": code, "message": message},
+                    ),
+                )
                 return
             is_batch = isinstance(decoded, list)
             messages = decoded if is_batch else [decoded]
@@ -439,6 +535,7 @@ def make_http_server(
     read_resource: ResourceReader,
     list_tools: ToolLister,
     call_tool: ToolCaller,
+    extension: McpExtension | None = None,
 ) -> ThreadingHTTPServer:
     """Validate the config and return a bound, not yet serving, HTTP server."""
     config = validate_http_config(host=host, port=port, token=token)
@@ -451,6 +548,7 @@ def make_http_server(
             "read_resource": read_resource,
             "list_tools": list_tools,
             "call_tool": call_tool,
+            "extension": extension,
         },
     )
     return _LoopbackHTTPServer((config.host, config.port), handler, ipv6=config.host == "::1")
@@ -472,6 +570,7 @@ def serve_http(
     read_resource: ResourceReader,
     list_tools: ToolLister,
     call_tool: ToolCaller,
+    extension: McpExtension | None = None,
 ) -> int:
     """Serve the read-only MCP endpoint on loopback until interrupted."""
     server = make_http_server(
@@ -483,6 +582,7 @@ def serve_http(
         read_resource=read_resource,
         list_tools=list_tools,
         call_tool=call_tool,
+        extension=extension,
     )
     label = server_name[len("brigade-") :] if server_name.startswith("brigade-") else server_name
     print(f"brigade {label} MCP listening on {http_endpoint_url(server)}", file=sys.stderr, flush=True)
@@ -515,6 +615,7 @@ def run_http_from_env(
     read_resource: ResourceReader,
     list_tools: ToolLister,
     call_tool: ToolCaller,
+    extension: McpExtension | None = None,
 ) -> int:
     """Validate host, port, and the env token, then serve; exit 2 on bad config."""
     env = os.environ if environ is None else environ
@@ -533,6 +634,7 @@ def run_http_from_env(
             read_resource=read_resource,
             list_tools=list_tools,
             call_tool=call_tool,
+            extension=extension,
         )
     except McpHttpConfigError as exc:
         print(f"error: {exc}", file=sys.stderr)

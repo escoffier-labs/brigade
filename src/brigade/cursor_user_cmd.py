@@ -12,7 +12,12 @@ from . import __version__, component_bins, harness_profiles, localio
 STATE_VERSION = 1
 MANAGED_MCP_NAMES = ("brigade", "graphtrail", "miseledger")
 _MANAGED_HOOK_EVENTS = ("sessionStart", "postToolUse", "sessionEnd")
+_MAX_HOOKS_JSON_BYTES = 1_048_576
+_HOOKS_DOCUMENT_VERSION = 1
+_OVERSIZE_ERROR = "hooks configuration exceeds 1 MiB size limit"
 _MANAGED_HOOK_COMMAND = "exec brigade work presence-hook --harness cursor --stdin --context cursor-work-loop"
+_PROJECT_HOOK_COMMAND = "exec brigade work presence-hook --harness cursor --stdin --context cursor-work-loop-project"
+_LEGACY_HOOK_COMMAND = _MANAGED_HOOK_COMMAND
 
 
 def _home_dir() -> Path:
@@ -196,11 +201,142 @@ def _read_json_object(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     return payload, None
 
 
-def _hook_entry(root: Path | None = None) -> dict[str, str]:
+def _load_hooks_document(path: Path) -> tuple[dict[str, Any] | None, str | None]:
+    """Read a Cursor hooks.json whole, with a size ceiling; absent means a new document."""
+    try:
+        with path.open("rb") as stream:
+            raw = stream.read(_MAX_HOOKS_JSON_BYTES + 1)
+    except FileNotFoundError:
+        return {}, None
+    except OSError as exc:
+        return None, str(exc)
+    if len(raw) > _MAX_HOOKS_JSON_BYTES:
+        return None, _OVERSIZE_ERROR
+    try:
+        payload = json.loads(raw.decode("utf-8"))
+    except (UnicodeError, json.JSONDecodeError) as exc:
+        return None, str(exc)
+    if not isinstance(payload, dict):
+        return None, "existing JSON configuration must be an object"
+    return payload, None
+
+
+def _hooks_document_error(doc: dict[str, Any]) -> str | None:
+    """Return why a loaded document is not a usable Cursor hooks config, or None."""
+    if not doc:
+        return None
+    version = doc.get("version")
+    if isinstance(version, bool) or not isinstance(version, int) or version < 1:
+        return "existing hooks configuration needs a positive integer version"
+    if "hooks" not in doc:
+        return None
+    hooks = doc["hooks"]
+    if not isinstance(hooks, dict):
+        return "existing hooks field must be an object"
+    for event, entries in hooks.items():
+        if not isinstance(entries, list):
+            return f"existing {event} hooks must be a list"
+        if not all(_is_hook_definition(entry) for entry in entries):
+            return f"existing {event} hooks must be command or prompt definitions"
+    return None
+
+
+def _is_hook_definition(entry: object) -> bool:
+    """Cursor supports `command` hooks (type absent or "command") and `prompt` hooks."""
+    if not isinstance(entry, dict):
+        return False
+    hook_type = entry.get("type", "command")
+    if hook_type == "prompt":
+        return isinstance(entry.get("prompt"), str)
+    return hook_type == "command" and isinstance(entry.get("command"), str)
+
+
+def user_hooks_document_status(doc: dict[str, Any]) -> tuple[str | None, bool]:
+    """Validate a user-scope hooks document; return (error, needs_version).
+
+    Sync is an explicit edit of the user's own file, and releases before the
+    version rule wrote it without `version`, so a versionless document is
+    repaired with version 1 rather than refused. Project init, an implicit
+    edit of a shared repo file, refuses instead.
+    """
+    if doc and "version" not in doc:
+        return _hooks_document_error({**doc, "version": _HOOKS_DOCUMENT_VERSION}), True
+    return _hooks_document_error(doc), False
+
+
+def _prepare_project_document(path: Path) -> tuple[dict[str, Any] | None, str | None]:
+    doc, error = _load_hooks_document(path)
+    if doc is None:
+        return None, error
+    error = _hooks_document_error(doc)
+    if error:
+        return None, error
+    return doc, None
+
+
+def _hook_entry(root: Path | None = None, *, scope: str = "user") -> dict[str, str]:
     # hooks.json keeps this direct command. ~/.cursor/hooks/brigade-session-start
     # is a compatibility executable only; do not redirect the command at that file.
     del root
-    return {"command": _MANAGED_HOOK_COMMAND}
+    if scope not in {"user", "project"}:
+        raise ValueError(f"unsupported Cursor hook scope: {scope}")
+    return {"command": _PROJECT_HOOK_COMMAND if scope == "project" else _MANAGED_HOOK_COMMAND}
+
+
+def project_presence_hook_installed(workspace: Path, event: str) -> bool:
+    """Return whether a valid project hooks config owns this Cursor event.
+
+    A document that is oversized, malformed, or fails validation cannot be loaded
+    by Cursor, so it never suppresses the user-scope hook.
+    """
+    if event not in _MANAGED_HOOK_EVENTS:
+        return False
+    doc, error = _prepare_project_document(workspace / ".cursor" / "hooks.json")
+    if doc is None or error or not doc:
+        return False
+    entries = (doc.get("hooks") or {}).get(event)
+    return isinstance(entries, list) and _hook_entry(scope="project") in entries
+
+
+def install_project_presence_hooks(workspace: Path) -> str | None:
+    """Add the three Cursor lifecycle hooks to a project without replacing entries."""
+    path = workspace / ".cursor" / "hooks.json"
+    doc, error = _prepare_project_document(path)
+    if doc is None:
+        return error or "could not read hooks configuration"
+    created = not doc
+    hooks = doc.get("hooks") or {}
+    managed = _hook_entry(scope="project")
+    legacy = {"command": _LEGACY_HOOK_COMMAND}
+    changed = created
+    for event in _MANAGED_HOOK_EVENTS:
+        entries = hooks.get(event, [])
+        normalized: list[Any] = []
+        managed_added = False
+        for entry in entries:
+            if entry == managed or entry == legacy:
+                if not managed_added:
+                    normalized.append(managed)
+                    managed_added = True
+                continue
+            normalized.append(entry)
+        if not managed_added:
+            normalized.append(managed)
+        if normalized != entries:
+            hooks[event] = normalized
+            changed = True
+    if not changed:
+        return None
+    doc.setdefault("version", _HOOKS_DOCUMENT_VERSION)
+    doc["hooks"] = hooks
+    text = _coowned_json_text(doc)
+    if len(text.encode("utf-8")) > _MAX_HOOKS_JSON_BYTES:
+        return _OVERSIZE_ERROR
+    try:
+        localio.write_text_atomic(path, text)
+    except OSError as exc:
+        return str(exc)
+    return None
 
 
 def _plan_hook_event(hooks: dict[str, Any], state: dict[str, Any], event: str, path: Path) -> dict[str, Any]:
@@ -241,11 +377,8 @@ def _plan_hook(root: Path, state: dict[str, Any]) -> tuple[list[dict[str, Any]],
             for event in _MANAGED_HOOK_EVENTS
         ]
         return items, None, error
-    hooks = doc.get("hooks")
-    if hooks is None:
-        hooks = {}
-    if not isinstance(hooks, dict):
-        detail = "existing hooks field must be an object"
+    detail, _needs_version = user_hooks_document_status(doc)
+    if detail:
         items = [
             {
                 "surface": "hook-config",
@@ -258,6 +391,7 @@ def _plan_hook(root: Path, state: dict[str, Any]) -> tuple[list[dict[str, Any]],
             for event in _MANAGED_HOOK_EVENTS
         ]
         return items, None, detail
+    hooks = doc.get("hooks") or {}
     return [_plan_hook_event(hooks, state, event, path) for event in _MANAGED_HOOK_EVENTS], doc, None
 
 
@@ -373,6 +507,9 @@ def install(*, write: bool = False, json_output: bool = False) -> int:
 
         hook_changed = False
         if hooks_doc is not None and all(item["status"] != "conflict" for item in hook_items):
+            if "version" not in hooks_doc:
+                hooks_doc["version"] = _HOOKS_DOCUMENT_VERSION
+                hook_changed = True
             hooks = hooks_doc.setdefault("hooks", {})
             desired_hook = _hook_entry()
             for hook_item in hook_items:
@@ -590,7 +727,7 @@ def doctor(*, json_output: bool = False) -> int:
     hooks_doc, _ = _read_json_object(root / "hooks.json")
     hook_ok = _file_matches(hook_script, desired[hook_script][0]) and bool(hook_script.stat().st_mode & 0o111)
     desired_hook = _hook_entry()
-    if hooks_doc is not None and isinstance(hooks_doc.get("hooks"), dict):
+    if hooks_doc is not None and not _hooks_document_error(hooks_doc) and isinstance(hooks_doc.get("hooks"), dict):
         for event in _MANAGED_HOOK_EVENTS:
             entries = hooks_doc["hooks"].get(event)
             hook_ok = hook_ok and isinstance(entries, list) and desired_hook in entries

@@ -1456,6 +1456,11 @@ def make_handler(
             path, _, query = self.path.partition("?")
             if self._refuse_token_query(query):
                 return
+            if path in ("/deck/ci", "/ci", "/ci/work"):
+                from .fleet_ci_http import route
+
+                route(self, Path(db_path), method="GET")
+                return
             if path.startswith("/deck/actions/"):
                 from . import fleet_action_http
 
@@ -1662,6 +1667,11 @@ def make_handler(
         def do_POST(self) -> None:  # noqa: N802 - stdlib handler API
             path, _, query = self.path.partition("?")
             if self._refuse_token_query(query):
+                return
+            if path in ("/ci", "/ci/refresh"):
+                from .fleet_ci_http import route
+
+                route(self, Path(db_path), method="POST")
                 return
             if path.startswith("/deck/actions/") or path == "/actions":
                 from . import fleet_action_http

@@ -134,7 +134,7 @@ def _evidence_log(target: Path) -> EvidenceLog:
 def register(sub: argparse._SubParsersAction) -> None:
     parser = sub.add_parser("reflect", help="Derive cited memory candidates without editing cards.")
     commands = parser.add_subparsers(dest="memory_reflect_command", required=True)
-    for name in ("run", "status", "candidates", "show"):
+    for name in ("run", "status", "candidates", "show", "propose"):
         command = commands.add_parser(name, help=f"{name.capitalize()} deterministic memory reflection candidates.")
         command.add_argument("--target", "-t", type=Path, default=Path("."))
         command.add_argument("--json", action="store_true", help="Print machine-readable JSON.")
@@ -142,8 +142,10 @@ def register(sub: argparse._SubParsersAction) -> None:
             command.add_argument("--scope", help="Exact card frontmatter scope (missing scope means repo).")
             command.add_argument("--limit", type=int, default=DEFAULT_LIMIT, help="Candidate limit from 1 to 100.")
             command.add_argument("--dry-run", action="store_true", help="Print metadata diffs and duplicate summaries.")
-        elif name == "show":
+        elif name in ("show", "propose"):
             command.add_argument("candidate_id")
+            if name == "propose":
+                command.add_argument("--reason", required=True)
 
 
 def run_payload(
@@ -303,6 +305,10 @@ def dispatch(args: argparse.Namespace) -> int:
             pass
         if args.memory_reflect_command == "run":
             payload = run_payload(target=target, scope=args.scope, limit=args.limit, dry_run=args.dry_run)
+        elif args.memory_reflect_command == "propose":
+            from .memory_proposal_v2_reflect import propose_payload
+
+            payload = propose_payload(target=target, candidate_id=args.candidate_id, reason=args.reason)
         else:
             payload = inspect_payload(
                 target=target, command=args.memory_reflect_command, candidate_id=getattr(args, "candidate_id", None)
@@ -315,6 +321,9 @@ def dispatch(args: argparse.Namespace) -> int:
         print(f"memory reflect: {payload.get('status', payload.get('kind', 'ok'))}")
         if "error" in payload:
             print(_terminal_text(f"error: {payload['error']}"))
+        if args.memory_reflect_command == "propose" and "id" in payload:
+            print(_terminal_text(f"{payload['id']} digest: {payload['digest']}"))
+            print(_terminal_text(payload["diff"]))
         if "latest_run" in payload:
             print(json.dumps(payload, sort_keys=True, indent=2))
         candidates = payload.get("candidates", [payload] if "candidate_id" in payload else [])

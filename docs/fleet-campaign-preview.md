@@ -1,5 +1,7 @@
 # Offline fleet campaign preview
 
+Hub-backed campaign membership (`campaign create`, `campaigns`, `campaign show`) is in [fleet-campaigns.md](fleet-campaigns.md).
+
 `brigade fleet campaign preview` prints a read-only JSON membership plan. It
 selects repositories through the existing `.brigade/repos.toml` selector and
 binds each selected opaque repository ID to an explicit existing task or

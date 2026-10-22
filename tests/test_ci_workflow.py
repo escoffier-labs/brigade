@@ -407,6 +407,64 @@ def test_nightly_windows_observer_preserves_per_file_budgets_and_results():
 
 @pytest.mark.skipif(os.name == "nt", reason="lint shell step runs on Ubuntu")
 @pytest.mark.parametrize(
+    ("event", "head_matches", "expected"),
+    [
+        ("pull_request", True, "first-parent"),
+        ("pull_request", False, "error"),
+        ("merge_group", True, "event-base"),
+        ("push", True, "event-base"),
+    ],
+)
+def test_lint_allowlist_base_uses_the_test_merge_first_parent(tmp_path, event, head_matches, expected):
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    lint = _workflow_job_section(text, "lint")
+    assert "fetch-depth: 2" in lint.split("      - uses: actions/setup-python", 1)[0]
+    step = _workflow_step_section(text, "lint", "Resolve allowlist base")
+    assert "id: allowlist-base" in step
+    assert "EVENT_BASE_SHA: ${{ github.event.merge_group.base_sha || github.event.before }}" in step
+    script = textwrap.dedent(step.split("        run: |\n", 1)[1])
+
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(tmp_path), *args], text=True).strip()
+
+    git("init", "-q", "-b", "main")
+    git("config", "user.email", "contributor@example.com")
+    git("config", "user.name", "Contributor")
+    (tmp_path / "file.txt").write_text("base\n")
+    git("add", ".")
+    git("commit", "-qm", "base")
+    stale_base = git("rev-parse", "HEAD")
+    git("switch", "-qc", "feature")
+    (tmp_path / "feature.txt").write_text("feature\n")
+    git("add", ".")
+    git("commit", "-qm", "feature")
+    pr_head = git("rev-parse", "HEAD")
+    git("switch", "-q", "main")
+    (tmp_path / "file.txt").write_text("main moved\n")
+    git("commit", "-qam", "main moved")
+    main_tip = git("rev-parse", "HEAD")
+    git("merge", "-q", "--no-ff", "--no-edit", "feature")
+    output = tmp_path / "github_output"
+    env = {
+        **os.environ,
+        "EVENT_NAME": event,
+        "PR_HEAD_SHA": pr_head if head_matches else stale_base,
+        "EVENT_BASE_SHA": stale_base,
+        "GITHUB_OUTPUT": str(output),
+    }
+    result = subprocess.run(_workflow_bash_command(script), cwd=tmp_path, env=env, capture_output=True, text=True)
+    if expected == "error":
+        assert result.returncode != 0
+        assert "HEAD is not the pull request test merge" in result.stdout
+        assert not output.exists()
+        return
+    assert result.returncode == 0, result.stderr
+    want = main_tip if expected == "first-parent" else stale_base
+    assert output.read_text() == f"sha={want}\n"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="lint shell step runs on Ubuntu")
+@pytest.mark.parametrize(
     ("base", "fetch_status", "expected_commands"),
     [("", 0, []), ("a" * 40, 128, ["git"]), ("a" * 40, 0, ["git", "python"])],
     ids=["missing-base", "failed-fetch", "available-base"],
@@ -417,11 +475,11 @@ def test_required_lint_allowlist_step_fails_closed_before_checking(tmp_path, bas
     assert text.count("--check-allowlist-only") == 1
     step = _workflow_step_section(text, "lint", "Windows allowlist ratchet")
     assert "continue-on-error" not in step
+    assert "BASE_SHA: ${{ steps.allowlist-base.outputs.sha }}" in step
+    assert "github.event.pull_request.base.sha" not in lint
     assert (
-        "BASE_SHA: ${{ github.event.pull_request.base.sha || github.event.merge_group.base_sha || github.event.before }}"
-        in step
+        lint.index("actions/checkout") < lint.index("Resolve allowlist base") < lint.index("Windows allowlist ratchet")
     )
-    assert lint.index("actions/checkout") < lint.index("Windows allowlist ratchet")
     script = textwrap.dedent(step.split("        run: |\n", 1)[1])
     # Execute the actual workflow shell. Transport stubs log argv only, never
     # implement ratchet policy, which is tested against real Git commits.
@@ -861,7 +919,7 @@ def test_ci_windows_native_acceptance_script_covers_required_flow():
     assert "BrigadeCare-ingest-sweep" in text
     assert "/SC MINUTE /MO 30" in text
     assert "brigade care status" in text
-    assert '/RU "%USERNAME%" /IT' in text
+    assert "/RU `$env:USERNAME /IT /F" in text
     assert "Invoke-PrintedSchtasksBatch" in text
     assert "Read-AcceptanceFileText" in text
     assert "runas.exe /trustlevel:0x20000" not in text
@@ -1636,8 +1694,17 @@ def test_windows_affected_job_selects_before_install_and_preserves_driver_policy
     assert "timeout-minutes: 45" in job
     assert "fetch-depth: 0" in job
     assert "persist-credentials: false" in job
-    assert "github.event.pull_request.base.sha || github.event.merge_group.base_sha" in job
-    assert "git fetch --no-tags --depth=1 origin $env:BASE_SHA" in job
+    # Diff from the test merge's first parent. pull_request.base.sha can trail
+    # the base branch and would count other merged pull requests' changes.
+    assert "pull_request.base.sha }}" not in job
+    assert "merge_group.base_sha" not in job
+    assert "PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}" in job
+    assert "$mergeHead = git rev-parse HEAD^2" in job
+    assert '$mergeHead -ne $env:PR_HEAD_SHA) { throw "HEAD is not the pull request test merge" }' in job
+    assert "$base = git rev-parse HEAD^1" in job
+    assert '"base=$base" >> $env:GITHUB_OUTPUT' in job
+    assert "--base $base --head HEAD" in job
+    assert "BASE_SHA: ${{ steps.selection.outputs.base }}" in job
     assert job.index("scripts/windows_affected_tests.py") < job.index("actions/setup-python")
     assert job.count("if: ${{ steps.selection.outputs.count != '0' }}") == 3
     assert "Skip empty selection" in job

@@ -5,6 +5,8 @@ import os
 from datetime import timedelta
 from pathlib import Path
 
+import pytest
+
 from brigade import cli, cursor_user_cmd, localio, repos_cmd
 from brigade.claude_hooks import runtime
 from brigade.install import install_selection
@@ -192,6 +194,90 @@ def test_adoption_report_distinguishes_all_fleet_states(tmp_path, monkeypatch, c
         "unwired:cursor",
     }
     assert all(row["next_command"] for row in payload["rows"] if row["state"] != "active")
+
+
+@pytest.mark.parametrize("missing_event", cursor_user_cmd._MANAGED_HOOK_EVENTS)
+def test_cursor_adoption_flags_each_missing_profile_hook(tmp_path, monkeypatch, capsys, missing_event):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    cursor_repo = _wired_repo(workspace, "cursor", "cursor")
+    home = tmp_path / "home"
+    monkeypatch.setattr(cursor_user_cmd, "_home_dir", lambda: home)
+    assert cursor_user_cmd.install(write=True, json_output=True) == 0
+    capsys.readouterr()
+
+    hooks_path = home / ".cursor" / "hooks.json"
+    hooks_doc = json.loads(hooks_path.read_text())
+    hooks_doc["hooks"][missing_event] = []
+    hooks_path.write_text(json.dumps(hooks_doc))
+    # init wires project hooks too; drop them so only the user scope can own the event.
+    (cursor_repo / ".cursor" / "hooks.json").unlink(missing_ok=True)
+    _fleet_config(workspace, [("cursor", cursor_repo)])
+
+    assert repos_cmd.adoption_report(target=workspace, harnesses=["cursor"], days=7, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    row = next(row for row in payload["rows"] if row["repo_id"] == "cursor")
+    assert row["state"] == "stale"
+    assert row["wiring"]["hooks"] == "stale"
+    assert "missing or stale session hook registration" in row["issues"]
+
+
+def test_cursor_adoption_counts_a_valid_project_hook_as_owning_the_event(tmp_path, monkeypatch, capsys):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    cursor_repo = _wired_repo(workspace, "cursor", "cursor")
+    home = tmp_path / "home"
+    monkeypatch.setattr(cursor_user_cmd, "_home_dir", lambda: home)
+    assert cursor_user_cmd.install(write=True, json_output=True) == 0
+    capsys.readouterr()
+    hooks_path = home / ".cursor" / "hooks.json"
+    hooks_doc = json.loads(hooks_path.read_text())
+    hooks_doc["hooks"]["sessionEnd"] = []
+    hooks_path.write_text(json.dumps(hooks_doc))
+    assert cursor_user_cmd.project_presence_hook_installed(cursor_repo, "sessionEnd")
+    _fleet_config(workspace, [("cursor", cursor_repo)])
+
+    assert repos_cmd.adoption_report(target=workspace, harnesses=["cursor"], days=7, json_output=True) == 0
+    row = next(row for row in json.loads(capsys.readouterr().out)["rows"] if row["repo_id"] == "cursor")
+    assert row["wiring"]["hooks"] != "stale"
+    assert "missing or stale session hook registration" not in row["issues"]
+
+
+@pytest.mark.parametrize(
+    "mutate",
+    [
+        pytest.param(lambda doc: doc.pop("version"), id="versionless"),
+        pytest.param(lambda doc: doc.update(version="1"), id="string-version"),
+        pytest.param(lambda doc: doc["hooks"].update(stop=[{"type": "bogus", "command": "x"}]), id="unsupported-type"),
+        pytest.param(lambda doc: doc["hooks"].update(stop="nope"), id="event-not-a-list"),
+    ],
+)
+def test_cursor_adoption_validates_the_user_document_before_combining_ownership(tmp_path, monkeypatch, capsys, mutate):
+    # r4344601017 P2: a project file owning sessionStart plus an invalid user
+    # document that holds the other two events must not report the hooks current.
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    cursor_repo = _wired_repo(workspace, "cursor", "cursor")
+    home = tmp_path / "home"
+    monkeypatch.setattr(cursor_user_cmd, "_home_dir", lambda: home)
+    assert cursor_user_cmd.install(write=True, json_output=True) == 0
+    capsys.readouterr()
+    hooks_path = home / ".cursor" / "hooks.json"
+    hooks_doc = json.loads(hooks_path.read_text())
+    mutate(hooks_doc)
+    hooks_path.write_text(json.dumps(hooks_doc))
+    project_path = cursor_repo / ".cursor" / "hooks.json"
+    project_doc = json.loads(project_path.read_text())
+    project_doc["hooks"] = {"sessionStart": project_doc["hooks"]["sessionStart"]}
+    project_path.write_text(json.dumps(project_doc))
+    assert cursor_user_cmd.project_presence_hook_installed(cursor_repo, "sessionStart")
+    assert not cursor_user_cmd.project_presence_hook_installed(cursor_repo, "postToolUse")
+    _fleet_config(workspace, [("cursor", cursor_repo)])
+
+    assert repos_cmd.adoption_report(target=workspace, harnesses=["cursor"], days=7, json_output=True) == 0
+    row = next(row for row in json.loads(capsys.readouterr().out)["rows"] if row["repo_id"] == "cursor")
+    assert row["wiring"]["hooks"] == "stale"
+    assert "missing or stale session hook registration" in row["issues"]
 
 
 def test_adoption_counts_failed_or_rejected_verify_only_when_captured(tmp_path, capsys):

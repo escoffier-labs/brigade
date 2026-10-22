@@ -103,6 +103,66 @@ pub(super) fn rebuild_edges(tx: &Connection) -> Result<()> {
     Ok(())
 }
 
+/// Identify persisted call sites that actually produced a stored call edge.
+/// Replaying the resolver preserves aliases and qualifiers, which cannot be
+/// recovered by matching an edge's source and line (or a target's name).
+/// This is read-only and used only by the full doctor coverage report.
+pub(crate) fn resolved_call_site_ids(conn: &Connection) -> Result<HashSet<i64>> {
+    let name_index = load_name_index(conn)?;
+    let import_index = load_import_index(conn)?;
+    let source_index = load_symbol_id_index(conn)?;
+    let file_index = load_file_index(conn)?;
+    let mut select = conn.prepare(
+        "SELECT id, source_id, file_path, target_name, kind, qualifier, line FROM pending_calls",
+    )?;
+    let mut edge = conn.prepare(
+        "SELECT EXISTS(SELECT 1 FROM edges
+         WHERE source = ?1 AND target = ?2 AND kind = 'calls' AND line = ?3)",
+    )?;
+    let rows = select.query_map([], |row| {
+        Ok((
+            row.get::<_, i64>(0)?,
+            row.get::<_, String>(4)?,
+            PendingCall {
+                source_id: row.get(1)?,
+                source_file: row.get(2)?,
+                target_name: row.get(3)?,
+                kind: CallKind::Bare,
+                qualifier: row.get(5)?,
+                line: row.get::<_, i64>(6)?.max(0) as usize,
+            },
+        ))
+    })?;
+    let mut resolved = HashSet::new();
+    for row in rows {
+        let (id, kind, mut call) = row?;
+        let Some(kind) = CallKind::parse(&kind) else {
+            continue;
+        };
+        call.kind = kind;
+        for target in resolve_call(
+            &call,
+            &name_index,
+            &import_index,
+            &source_index,
+            &file_index,
+        ) {
+            if target.candidate.id == call.source_id {
+                continue;
+            }
+            let stored: bool = edge.query_row(
+                params![call.source_id, target.candidate.id, call.line as i64],
+                |row| row.get(0),
+            )?;
+            if stored {
+                resolved.insert(id);
+                break;
+            }
+        }
+    }
+    Ok(resolved)
+}
+
 /// Partition candidates once, avoiding per-call filtering and cloning of homonyms.
 pub(crate) type NameIndex = HashMap<&'static str, HashMap<String, Vec<SymbolCandidate>>>;
 

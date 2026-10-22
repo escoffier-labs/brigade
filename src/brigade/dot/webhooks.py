@@ -1,59 +1,22 @@
 """Standard Webhooks signing and bounded HTTPS delivery ported from the bridge."""
 
 import asyncio
-import base64
-import hashlib
-import hmac
 import ipaddress
 import socket
 import ssl
-import time
-from urllib.parse import SplitResult, urlsplit
+from urllib.parse import SplitResult
 from typing import cast
 
-
-def secret_key(secret: str) -> bytes:
-    if not isinstance(secret, str) or not secret.startswith("whsec_") or len(secret) > 100:
-        raise ValueError("invalid_secret")
-    key = base64.b64decode(secret[6:], validate=True)
-    if not 24 <= len(key) <= 64:
-        raise ValueError("invalid_secret")
-    return key
-
-
-def signed_headers(
-    secret: str, event_id: str, body: bytes, subscription_id: str, now: float | None = None, previous: str | None = None
-) -> dict[str, str]:
-    timestamp = str(int(time.time() if now is None else now))
-    signed = event_id.encode() + b"." + timestamp.encode() + b"." + body
-    signatures = [
-        "v1," + base64.b64encode(hmac.new(secret_key(value), signed, hashlib.sha256).digest()).decode()
-        for value in (secret, previous)
-        if value
-    ]
-    return {
-        "Content-Type": "application/json",
-        "webhook-id": event_id,
-        "webhook-timestamp": timestamp,
-        "webhook-signature": " ".join(signatures),
-        "X-MCP-Subscription-Id": subscription_id,
-    }
+from brigade.mcp_events import (
+    CallbackPolicy,
+    parse_callback,
+    secret_key as secret_key,
+    signed_headers as signed_headers,
+)
 
 
 def callback_url(url: str, allowed_hosts: frozenset[str]) -> SplitResult:
-    if not isinstance(url, str) or len(url) > 2048 or any(ord(c) <= 32 or ord(c) >= 127 for c in url):
-        raise ValueError("invalid_callback")
-    parts = urlsplit(url)
-    if (
-        parts.scheme != "https"
-        or parts.hostname not in allowed_hosts
-        or parts.username
-        or parts.password
-        or parts.fragment
-        or parts.port not in (None, 443)
-    ):
-        raise ValueError("invalid_callback")
-    return parts
+    return parse_callback(url, CallbackPolicy(allowed_hosts))
 
 
 async def webhook_post(

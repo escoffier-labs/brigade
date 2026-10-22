@@ -13,6 +13,7 @@ from typing import Any, Callable
 
 from . import __version__ as BRIGADE_VERSION
 from . import brief_sections, harness_profiles, localio, managed_block, mcp_adapters, mcp_cmd, skills_cmd
+from . import cursor_profile_hooks
 from .harness_profile_doctor import (
     _doctor_receipt_item,
     _expected_profile_state,
@@ -27,16 +28,8 @@ from .toml_compat import loads as _toml_loads
 
 _RECOVERY_COMMAND = "brigade harness sync --target <harness> --scope user --help"
 _SECTIONS = ("instructions", "skills", "generated", "mcp")
-_HOOK_STATE_KEY = "hooks.json#sessionStart"
+_HOOK_STATE_PREFIX = cursor_profile_hooks.HOOK_STATE_PREFIX
 _LEGACY_MIGRATED = "legacy_migrated"
-_LEGACY_CURSOR_INSTRUCTION = "plugins/local/brigade-loop/rules/brigade-loop.mdc"
-_LEGACY_CURSOR_GENERATED = (
-    "plugins/local/brigade-loop/.cursor-plugin/plugin.json",
-    "hooks/brigade-session-start",
-    "brigade/mcp.json",
-)
-_LEGACY_CURSOR_SKILL_ID = "brigade-work"
-_LEGACY_CURSOR_SKILL_PREFIX = "skills/brigade-work/"
 _INSTRUCTION_REQUIRED_PROFILE_KEY = "required_profile"
 _INSTRUCTION_EFFECTIVE_PROFILE_KEY = "effective_profile"
 
@@ -109,46 +102,8 @@ def _legacy_projected_fingerprint(fingerprint: str) -> str:
 
 
 def migrate_legacy_cursor_install_state(*, state: dict[str, Any], workspace: Path, harness: str) -> dict[str, Any]:
-    """Map legacy Cursor install attestations into schema_version 2 profile state."""
-    files = state["files"]
-    hooks = state["hooks"]
-    mcp = state["mcp"]
-    migrated = empty_profile_state(workspace=workspace, harness=harness)
-    package_version = state.get("package_version")
-    if isinstance(package_version, str) and package_version:
-        migrated["package_version"] = package_version
-
-    rule_digest = files.get(_LEGACY_CURSOR_INSTRUCTION)
-    if isinstance(rule_digest, str):
-        migrated["instructions"] = _legacy_migrated_record(digest=rule_digest, created_file=True)
-
-    generated: dict[str, dict[str, Any]] = {}
-    for relative in _LEGACY_CURSOR_GENERATED:
-        digest = files.get(relative)
-        if isinstance(digest, str):
-            generated[relative] = _legacy_migrated_record(digest=digest)
-    hook_fingerprint = hooks.get("sessionStart")
-    if isinstance(hook_fingerprint, str):
-        generated[_HOOK_STATE_KEY] = _legacy_migrated_record(entry_fingerprint=hook_fingerprint)
-    migrated["generated"] = generated
-
-    skill_files: dict[str, str] = {}
-    for relative, digest in files.items():
-        if not isinstance(relative, str) or not isinstance(digest, str):
-            continue
-        if relative.startswith(_LEGACY_CURSOR_SKILL_PREFIX):
-            skill_files[relative.removeprefix(_LEGACY_CURSOR_SKILL_PREFIX)] = digest
-    if skill_files:
-        migrated["skills"][_LEGACY_CURSOR_SKILL_ID] = _legacy_migrated_record(files=skill_files)
-
-    for name, fingerprint in mcp.items():
-        if not isinstance(name, str) or not isinstance(fingerprint, str):
-            continue
-        migrated["mcp"][name] = _legacy_migrated_record(
-            projected_fingerprint=_legacy_projected_fingerprint(fingerprint),
-            managed=True,
-        )
-    return migrated
+    """Compatibility entry point for the Cursor profile-state migration."""
+    return cursor_profile_hooks.migrate_legacy_install_state(state=state, workspace=workspace, harness=harness)
 
 
 def load_profile_state(*, state_path: Path, workspace: Path, harness: str) -> LoadedProfileState:
@@ -1017,7 +972,7 @@ def _generated_plans(profile, state: dict[str, Any], *, adopt: bool) -> dict[str
             "created_directories": list(record.get("created_directories", [])),
         }
     for relative, record in sorted(records.items()):
-        if relative == _HOOK_STATE_KEY or relative in desired:
+        if relative.startswith(_HOOK_STATE_PREFIX) or relative in desired:
             continue
         item = {"surface": "generated", "path": str(profile.user_root / relative)}
         if not isinstance(record, dict) or not isinstance(record.get("digest"), str):
@@ -1059,7 +1014,7 @@ def _generated_uninstall_plan(profile, state: dict[str, Any]) -> dict[str, Any]:
     removes: list[Path] = []
     prune: list[Path] = []
     for relative, record in sorted(state["generated"].items()):
-        if relative == _HOOK_STATE_KEY:
+        if relative.startswith(_HOOK_STATE_PREFIX):
             continue
         item = {"surface": "generated", "path": str(profile.user_root / relative)}
         if not isinstance(record, dict) or not isinstance(record.get("digest"), str):
@@ -1085,91 +1040,13 @@ def _generated_uninstall_plan(profile, state: dict[str, Any]) -> dict[str, Any]:
 
 
 def _hook_plan(profile, state: dict[str, Any], *, adopt: bool) -> dict[str, Any]:
-    """Plan one Brigade-managed entry inside a co-owned JSON hook config."""
-    from . import cursor_user_cmd
-
-    hook = profile.hook
-    path = hook.path
-    record = state["generated"].get(_HOOK_STATE_KEY)
-    record = record if isinstance(record, dict) else {}
-    desired_fp = cursor_user_cmd._digest_value(hook.entry)
-    empty: dict[str, Any] = {"items": [], "conflicts": [], "doc": None, "next": record}
-    doc, error = cursor_user_cmd._read_json_object(path)
-    item: dict[str, Any] = {"surface": "hook", "path": str(path), "name": "sessionStart"}
-    if doc is None:
-        item.update(status="conflict", action="preserve", detail=error or "could not read hook configuration")
-        return {**empty, "items": [item], "conflicts": [item]}
-    hooks = doc.get("hooks")
-    if hooks is not None and not isinstance(hooks, dict):
-        item.update(status="conflict", action="preserve", detail="existing hooks field must be an object")
-        return {**empty, "items": [item], "conflicts": [item]}
-    entries = hooks.get("sessionStart") if isinstance(hooks, dict) else None
-    if entries is not None and not isinstance(entries, list):
-        item.update(status="conflict", action="preserve", detail="existing sessionStart hooks must be a list")
-        return {**empty, "items": [item], "conflicts": [item]}
-    entries = entries if isinstance(entries, list) else []
-    conflicts: list[dict[str, Any]] = []
-    if hook.entry in entries:
-        if record.get("entry_fingerprint") == desired_fp:
-            item.update(status="current", action="none")
-        elif adopt:
-            item.update(status="adopted", action="none")
-        else:
-            item.update(
-                status="conflict",
-                action="preserve",
-                detail="matching hook entry is unowned; rerun with --adopt",
-            )
-            conflicts.append(item)
-    else:
-        prior_fp = record.get("entry_fingerprint")
-        prior_index = next(
-            (
-                index
-                for index, entry in enumerate(entries)
-                if prior_fp and cursor_user_cmd._digest_value(entry) == prior_fp
-            ),
-            None,
-        )
-        if prior_index is not None:
-            item.update(status="stale", action="update", prior_index=prior_index)
-        else:
-            item.update(status="missing", action="create")
-    return {
-        "items": [item],
-        "conflicts": conflicts,
-        "doc": doc,
-        "next": {"entry_fingerprint": desired_fp},
-    }
+    """Compatibility entry point for Cursor lifecycle-hook planning."""
+    return cursor_profile_hooks.plan(profile, state, adopt=adopt)
 
 
 def _hook_uninstall_plan(profile, state: dict[str, Any]) -> dict[str, Any]:
-    from . import cursor_user_cmd
-
-    hook = profile.hook
-    path = hook.path
-    record = state["generated"].get(_HOOK_STATE_KEY)
-    fingerprint = record.get("entry_fingerprint") if isinstance(record, dict) else None
-    if not fingerprint:
-        return {"items": [], "conflicts": [], "doc": None, "index": None}
-    doc, error = cursor_user_cmd._read_json_object(path)
-    item: dict[str, Any] = {"surface": "hook", "path": str(path), "name": "sessionStart"}
-    entries: Any = None
-    if doc is not None and isinstance(doc.get("hooks"), dict):
-        entries = doc["hooks"].get("sessionStart")
-    index = (
-        next((i for i, entry in enumerate(entries) if cursor_user_cmd._digest_value(entry) == fingerprint), None)
-        if isinstance(entries, list)
-        else None
-    )
-    if index is not None:
-        item.update(status="managed", action="remove")
-        return {"items": [item], "conflicts": [], "doc": doc, "index": index}
-    if not path.exists():
-        item.update(status="absent", action="none")
-        return {"items": [item], "conflicts": [], "doc": None, "index": None}
-    item.update(status="conflict", action="preserve", detail=error or "managed hook entry was edited or removed")
-    return {"items": [item], "conflicts": [item], "doc": None, "index": None}
+    """Compatibility entry point for Cursor lifecycle-hook uninstall planning."""
+    return cursor_profile_hooks.uninstall_plan(profile, state)
 
 
 def _malformed_native_config(adapter, text: str | None) -> str | None:
@@ -1883,16 +1760,19 @@ def _sync_profile(
             if mutation is not None:
                 mutations.append(mutation)
         if hook_plan is not None:
-            hook_item = hook_plan["items"][0]
-            if hook_item["action"] in {"create", "update"}:
+            if hook_plan["actions"] or hook_plan.get("repair_version"):
                 from . import cursor_user_cmd
 
                 hook_doc = hook_plan["doc"] if hook_plan["doc"] is not None else {}
-                entries = hook_doc.setdefault("hooks", {}).setdefault("sessionStart", [])
-                if hook_item["action"] == "create":
-                    entries.append(profile.hook.entry)
-                else:
-                    entries[hook_item["prior_index"]] = profile.hook.entry
+                hook_doc.setdefault("version", cursor_user_cmd._HOOKS_DOCUMENT_VERSION)
+                hook_map = hook_doc.setdefault("hooks", {})
+                for event, action in hook_plan["actions"].items():
+                    entries = hook_map.setdefault(event, [])
+                    entry = profile.hook.entries[event]
+                    if action["action"] == "create":
+                        entries.append(entry)
+                    else:
+                        entries[action["prior_index"]] = entry
                 mutation = _profile_mutation(
                     profile.hook.path, cursor_user_cmd._coowned_json_text(hook_doc).encode("utf-8")
                 )
@@ -2186,14 +2066,16 @@ def _uninstall_profile(
             mutation = _profile_mutation(path, None)
             if mutation is not None:
                 mutations.append(mutation)
-        if hook_plan is not None and hook_plan["doc"] is not None and hook_plan["index"] is not None:
+        if hook_plan is not None and hook_plan["doc"] is not None and hook_plan["indices"]:
             from . import cursor_user_cmd
 
             hook_doc = hook_plan["doc"]
-            entries = hook_doc["hooks"]["sessionStart"]
-            entries.pop(hook_plan["index"])
-            if not entries:
-                hook_doc["hooks"].pop("sessionStart", None)
+            hook_map = hook_doc["hooks"]
+            for event, index in hook_plan["indices"].items():
+                entries = hook_map[event]
+                entries.pop(index)
+                if not entries:
+                    hook_map.pop(event, None)
             mutation = _profile_mutation(
                 profile.hook.path, cursor_user_cmd._coowned_json_text(hook_doc).encode("utf-8")
             )

@@ -65,6 +65,7 @@ Thumbs.db
 !/scripts/ci_pytest_shard.py
 !/scripts/windows_affected_tests.py
 !/scripts/windows_pytest.py
+!/scripts/windows_pytest_diagnostics.py
 !/scripts/windows_job.py
 !/scripts/verify_lock.py
 !/scripts/verify_parallel.py
