@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import json
 import os
+from types import SimpleNamespace
 
 import pytest
 
@@ -668,10 +669,54 @@ def test_watch_rejects_invalid_pid_launch_evidence(apply_target, capsys, pid, so
         assert not watcher.snapshot()[row["intent_id"]][0]
 
 
-def test_event_appends_scan_existing_chain_once_per_lease(tmp_path, monkeypatch):
+@pytest.mark.parametrize("path_ctime", ["native", "birthtime"])
+def test_event_appends_scan_existing_chain_once_per_lease(tmp_path, monkeypatch, path_ctime):
     directory = store.root(tmp_path) / "dispatch-cache"
     directory.mkdir(parents=True)
-    store.event(directory, "work.dispatch.planned", {})
+    log = directory / "events.jsonl"
+    platform_os = SimpleNamespace(**vars(os))
+    if path_ctime == "birthtime":
+        platform_os.name = "nt"
+        original_stat = type(log).stat
+
+        def path_stat(path, **kwargs):
+            stat = original_stat(path, **kwargs)
+            if path != log:
+                return stat
+            # Emulate path creation time differing from handle change time on Windows.
+            stat = SimpleNamespace(**{field: getattr(stat, field) for field in dir(stat) if field.startswith("st_")})
+            stat.st_ctime_ns = 0
+            return stat
+
+        monkeypatch.setattr(type(log), "stat", path_stat)
+
+    def handle_identity(fd):
+        stat = os.fstat(fd)
+        return tuple(getattr(stat, field) for field in ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns"))
+
+    writer_identity = None
+
+    def synced(fd):
+        nonlocal writer_identity
+        os.fsync(fd)
+        writer_identity = handle_identity(fd)
+
+    platform_os.fsync = synced
+    monkeypatch.setattr(store, "os", platform_os)
+
+    def append(name, payload):
+        error = None
+        try:
+            store.event(directory, name, payload)
+        except ValueError as exc:
+            error = str(exc)
+        with log.open("rb") as stream:
+            read_identity = handle_identity(stream.fileno())
+        assert error is None and writer_identity == read_identity, (
+            f"append_error={error}; writer_identity={writer_identity}; read_identity={read_identity}"
+        )
+
+    append("work.dispatch.planned", {})
     validate = store.events
     scans = []
 
@@ -682,14 +727,14 @@ def test_event_appends_scan_existing_chain_once_per_lease(tmp_path, monkeypatch)
     monkeypatch.setattr(store, "events", counted)
     with store.dispatch_lock(tmp_path):
         for tick in range(30):
-            store.event(directory, "work.dispatch.tick", {"tick": tick})
+            append("work.dispatch.tick", {"tick": tick})
     assert len(scans) == 1
     assert len(validate(directory)) == 31
     with store.dispatch_lock(tmp_path):
-        store.event(directory, "work.dispatch.closed", {})
+        append("work.dispatch.closed", {})
     assert len(scans) == 2
-    store.event(directory, "work.dispatch.closed", {})
-    store.event(directory, "work.dispatch.closed", {})
+    append("work.dispatch.closed", {})
+    append("work.dispatch.closed", {})
     assert len(scans) == 4
     assert len(validate(directory)) == 34
 
