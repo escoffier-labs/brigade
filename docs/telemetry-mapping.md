@@ -27,7 +27,7 @@ OpenInference mapping version 2 adds `llm.request.model_name` and
 `llm.response.model_name`. The names were checked against the released
 `openinference-semantic-conventions` 0.1.41 package and the current
 specification. An earlier upstream changelog entry used
-`llm.input_model_name` and `llm.output_model_name`; those names are not in the
+`llm.input_model_name` and `llm.output_model_name`. Those names are not in the
 released package and Brigade does not emit them.
 
 ## Status values
