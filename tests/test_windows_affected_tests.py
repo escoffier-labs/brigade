@@ -94,3 +94,33 @@ def test_named_root_import_does_not_select_unrelated_siblings(tmp_path):
     write(tmp_path, "tests/test_parent.py", "import brigade.grokbot_t3")
     write(tmp_path, "tests/test_roster.py", "from brigade import roster")
     assert selector.select_tests(tmp_path, ["src/brigade/roster.py"]) == ["test_roster.py"]
+
+
+def test_merge_first_parent_excludes_changes_already_on_the_base_branch(tmp_path):
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(tmp_path), *args], text=True).strip()
+
+    git("init", "-q", "-b", "main")
+    git("config", "user.email", "contributor@example.com")
+    git("config", "user.name", "Contributor")
+    write(tmp_path, "src/brigade/engine.py", "VALUE = 1\n")
+    write(tmp_path, "tests/test_engine.py", "import brigade.engine\n")
+    git("add", ".")
+    git("commit", "-qm", "base")
+    stale_base = git("rev-parse", "HEAD")
+    git("switch", "-qc", "docs-only")
+    write(tmp_path, "docs/notes.md", "notes\n")
+    git("add", ".")
+    git("commit", "-qm", "docs only")
+    git("switch", "-q", "main")
+    # Another pull request lands on main after this one was opened.
+    write(tmp_path, "src/brigade/engine.py", "VALUE = 2\n")
+    git("commit", "-qam", "engine change on main")
+    # GitHub's test merge: first parent is the base tip, second is the PR head.
+    git("merge", "-q", "--no-ff", "--no-edit", "docs-only")
+    stale = tmp_path / "stale.txt"
+    current = tmp_path / "current.txt"
+    selector.main(["--repo", str(tmp_path), "--base", stale_base, "--head", "HEAD", "--output", str(stale)])
+    selector.main(["--repo", str(tmp_path), "--base", "HEAD^1", "--head", "HEAD", "--output", str(current)])
+    assert stale.read_text() == "test_engine.py\n"
+    assert current.read_text() == ""

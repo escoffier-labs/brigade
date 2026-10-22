@@ -292,7 +292,7 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
     )
     ledger_task = resolved.get("ledger_task") if isinstance(resolved.get("ledger_task"), dict) else None
     git = helpers._git_snapshot(target)
-    from ... import run_reap
+    from ... import run_reap, runs_patrol
 
     orphaned_runs = run_reap.list_orphaned_runs(target)
     suggested = _suggested_command(active, resolved["task"], resolved["source"])
@@ -562,6 +562,7 @@ def _brief_payload(target: Path, *, limit: int = 3, include_code_graph: bool = F
         "next": str(resolved["task"]),
         "suggested_command": suggested,
         "orphaned_runs": orphaned_runs,
+        "patrol": runs_patrol.brief_summary(target),
         "update": update_notify.available_update(),
         "cloud_tracker": _cloud_tracker_for_brief(target),
         "fleet_routing": _fleet_routing_for_brief(),
@@ -812,6 +813,11 @@ def brief(*, target: Path, limit: int = 3, json_output: bool = False) -> int:
     print(f"next: {helpers._short(str(payload['next']))}")
     print(f"suggested_command: {payload['suggested_command']}")
 
+    patrol = payload.get("patrol")
+    if isinstance(patrol, dict):
+        counts = patrol.get("counts", {})
+        patrol_summary = ", ".join(f"{state}={count}" for state, count in counts.items()) or "no local lanes"
+        print(f"patrol: {patrol_summary}" + (" (truncated)" if patrol.get("truncated") else ""))
     orphaned_runs = payload.get("orphaned_runs")
     if isinstance(orphaned_runs, list) and orphaned_runs:
         print(f"orphaned_runs: {len(orphaned_runs)}")

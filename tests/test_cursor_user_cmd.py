@@ -503,6 +503,107 @@ def test_cursor_presence_hook_skips_publish_when_workspace_missing(tmp_path, mon
     assert calls == []
 
 
+def test_user_cursor_hook_skips_project_selected_for_another_harness(tmp_path, monkeypatch, capsys):
+    workspace = _wire_cursor_workspace(tmp_path)
+    config = workspace / ".brigade" / "config.json"
+    config.write_text(json.dumps({"version": 1, "depth": "repo", "harnesses": ["codex"], "owner": "codex"}))
+    calls = []
+    monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "http://127.0.0.1:3774")
+    monkeypatch.setattr(fleet_client, "upsert_session", lambda snap: calls.append(snap) or True)
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(
+            json.dumps(
+                {
+                    "conversation_id": "conv-1",
+                    "hook_event_name": "sessionStart",
+                    "workspace_roots": [str(workspace)],
+                }
+            )
+        ),
+    )
+
+    assert cli.main(["work", "presence-hook", "--harness", "cursor", "--stdin", "--context", "cursor-work-loop"]) == 0
+    capsys.readouterr()
+    assert calls == []
+
+
+def test_user_cursor_hook_does_not_suppress_legacy_project_entry(tmp_path, monkeypatch, capsys):
+    workspace = _wire_cursor_workspace(tmp_path)
+    hooks_path = workspace / ".cursor" / "hooks.json"
+    hooks_path.parent.mkdir()
+    hooks_path.write_text(json.dumps({"version": 1, "hooks": {"sessionStart": [cursor_user_cmd._hook_entry()]}}))
+    calls = []
+    monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "http://127.0.0.1:3774")
+    monkeypatch.setattr(fleet_client, "upsert_session", lambda snap: calls.append(snap) or True)
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(
+            json.dumps(
+                {
+                    "conversation_id": "conv-1",
+                    "hook_event_name": "sessionStart",
+                    "workspace_roots": [str(workspace)],
+                }
+            )
+        ),
+    )
+
+    assert cli.main(["work", "presence-hook", "--harness", "cursor", "--stdin", "--context", "cursor-work-loop"]) == 0
+    output = json.loads(capsys.readouterr().out)
+    assert len(calls) == 1
+    assert "additional_context" in output
+
+
+def test_cursor_project_and_user_hooks_publish_once_when_both_scopes_are_installed(tmp_path, monkeypatch, capsys):
+    workspace = _wire_cursor_workspace(tmp_path)
+    managed_project_hook = {
+        "command": "exec brigade work presence-hook --harness cursor --stdin --context cursor-work-loop-project"
+    }
+    hooks_path = workspace / ".cursor" / "hooks.json"
+    hooks_path.parent.mkdir()
+    hooks_path.write_text(
+        json.dumps({"version": 1, "hooks": {event: [managed_project_hook] for event in _CURSOR_HOOK_EVENTS}})
+    )
+    calls = []
+    monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "http://127.0.0.1:3774")
+    monkeypatch.setattr(fleet_client, "upsert_session", lambda snap: calls.append(("upsert", snap)) or True)
+    monkeypatch.setattr(fleet_client, "end_session", lambda snap: calls.append(("end", snap)) or True)
+
+    for event in _CURSOR_HOOK_EVENTS:
+        payload = {
+            "conversation_id": "conv-1",
+            "hook_event_name": event,
+            "workspace_roots": [str(workspace)],
+            **({"tool_name": "Write"} if event == "postToolUse" else {}),
+        }
+        for scope in ("project", "user"):
+            monkeypatch.setattr(sys, "stdin", io.StringIO(json.dumps(payload)))
+            assert (
+                cli.main(
+                    [
+                        "work",
+                        "presence-hook",
+                        "--harness",
+                        "cursor",
+                        "--stdin",
+                        "--context",
+                        "cursor-work-loop-project" if scope == "project" else "cursor-work-loop",
+                    ]
+                )
+                == 0
+            )
+            output = json.loads(capsys.readouterr().out)
+            if event == "sessionStart" and scope == "project":
+                assert "additional_context" in output
+            else:
+                assert output == {}
+    assert [kind for kind, _snap in calls] == ["upsert", "upsert", "end"]
+    assert len(calls) == len(_CURSOR_HOOK_EVENTS)
+
+
 def test_cursor_presence_fails_open_on_unwired_workspace_and_operator_home(tmp_path, monkeypatch, capsys):
     calls = []
     git_calls = []

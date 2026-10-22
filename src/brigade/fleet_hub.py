@@ -105,7 +105,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from . import fleet_command_deck, fleet_hub_preference, worklore_store
+from . import fleet_command_deck, fleet_hub_events, fleet_hub_preference, worklore_store
 from .fleet_execution_context import serialize_context
 from .fleet_hub_event_bounds import oversized_event_field
 from .fleet_hub_server import BoundedThreadingHTTPServer
@@ -117,7 +117,7 @@ from .fleet_hub_status import (
     latest_status as latest_status,
 )
 
-SCHEMA_VERSION = 38
+SCHEMA_VERSION = 39
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
@@ -268,6 +268,8 @@ _EVENTS_ADDITIVE_COLUMNS = ("exit_status", "capability_fingerprint", "repo_ident
 _ADDITIVE_COLUMNS = (
     ("events", "context", "ALTER TABLE events ADD COLUMN context TEXT"),
     ("model_policy", "t3_model", "ALTER TABLE model_policy ADD COLUMN t3_model TEXT NOT NULL DEFAULT ''"),
+    ("fleet_events", "producer", fleet_hub_events.PRODUCER_COLUMN_DDL),
+    ("fleet_event_subscriptions", "generation", fleet_hub_events.GENERATION_COLUMN_DDL),
 )
 _ADDITIVE_INDEXES = (
     ("claims_owner_expiry", "CREATE INDEX IF NOT EXISTS claims_owner_expiry ON claims (owner_node, expires_at)"),
@@ -275,11 +277,20 @@ _ADDITIVE_INDEXES = (
 
 
 def _missing_additive_columns(conn: sqlite3.Connection) -> list[str]:
-    missing = [
+    # Order matters: an events table first (a hub at the current schema version may predate one added later on
+    # the events branch), then the ALTERs that need their table, then indexes that need their columns.
+    existing = {(kind, name) for kind, name in conn.execute("SELECT type, name FROM sqlite_master")}
+    absent = [(kind, ddl) for kind, name, ddl in fleet_hub_events.SCHEMA_OBJECTS if (kind, name) not in existing]
+    missing = [ddl for kind, ddl in absent if kind == "table"]
+    created = {
+        name for kind, name, _ddl in fleet_hub_events.SCHEMA_OBJECTS if kind == "table" and (kind, name) not in existing
+    }
+    missing.extend(
         ddl
         for table, column, ddl in _ADDITIVE_COLUMNS
-        if column not in {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
-    ]
+        if table not in created and column not in {row[1] for row in conn.execute(f"PRAGMA table_info({table})")}
+    )
+    missing.extend(ddl for kind, ddl in absent if kind == "index")
     # Index repair shares the current-version self-heal transaction and its
     # read-only fast path. Claim fencing tables retain their strict validation.
     missing.extend(
@@ -660,9 +671,12 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     from . import fleet_hub_actions
 
     fleet_hub_actions.ensure_schema(conn)
+    # v37 -> v38: CI board tables.
     from .fleet_ci_schema import ensure_schema as ensure_ci_schema
 
     ensure_ci_schema(conn)
+    # v38 -> v39: MCP Events subscriptions, event outbox and delivery state.
+    fleet_hub_events.ensure_schema(conn)
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 
@@ -708,6 +722,8 @@ def _init_schema(conn: sqlite3.Connection, db_path: Path) -> None:
             if conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION:
                 for ddl in _missing_additive_columns(conn):
                     conn.execute(ddl)
+                # The producer column arrives with an empty default; the events schema backfills it, then indexes it.
+                fleet_hub_events.ensure_schema(conn)
                 fleet_hub_claims.validate_schema(conn)
             else:
                 _apply_schema(conn)
@@ -958,6 +974,10 @@ def store_events(conn: sqlite3.Connection, raw_events: Any, *, caller_node: str 
             duplicate += 1
         else:
             accepted += 1
+            if event["state"] == "run.failed":
+                from .fleet_hub_events import record_run_failed
+
+                record_run_failed(conn, event)
     conn.commit()
     return {"accepted": accepted, "duplicate": duplicate}
 
@@ -1893,6 +1913,12 @@ def run(
         print(f"error: {exc}", file=sys.stderr)
         return 2
     try:
+        # MCP Events stay off unless the operator names callback hosts in the environment.
+        fleet_hub_events.configure(fleet_hub_events.config_from_environment(os.environ))
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    try:
         server = make_server(
             host,
             port,
@@ -1918,6 +1944,9 @@ def run(
 
     sweeper_stop = threading.Event()
     sweeper_thread = fleet_hub_grokbot.start_expiry_sweeper(Path(db_path).expanduser(), stop=sweeper_stop)
+    from .fleet_hub_events_dispatch import start_dispatcher
+
+    events_thread = start_dispatcher(Path(db_path).expanduser(), sweeper_stop)
     stats_thread = fleet_admin_stats.start_retention_sweeper(Path(db_path).expanduser(), stop=sweeper_stop)
     try:
         server.serve_forever()
@@ -1927,5 +1956,6 @@ def run(
         sweeper_stop.set()
         sweeper_thread.join(timeout=5)
         stats_thread.join(timeout=5)
+        events_thread.join(timeout=5)
         server.server_close()
     return 0

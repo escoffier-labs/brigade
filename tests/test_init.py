@@ -56,6 +56,62 @@ def test_init_no_wire_skips_skill_install(tmp_path: Path):
     assert not (target / ".openclaw" / "skills" / "ultra-work-scout").exists()
 
 
+def test_init_cursor_installs_project_presence_hooks_and_preserves_foreign_entries(tmp_path: Path):
+    import json
+
+    target = tmp_path / "cursor-project"
+    hooks_path = target / ".cursor" / "hooks.json"
+    hooks_path.parent.mkdir(parents=True)
+    foreign = {"command": "keep-foreign-hook"}
+    legacy = {"command": "exec brigade work presence-hook --harness cursor --stdin --context cursor-work-loop"}
+    managed = {"command": "exec brigade work presence-hook --harness cursor --stdin --context cursor-work-loop-project"}
+    hooks_path.write_text(json.dumps({"version": 1, "hooks": {"sessionStart": [foreign, legacy, managed, legacy]}}))
+
+    from brigade.cli import main
+
+    command = ["init", "--target", str(target), "--depth", "repo", "--harnesses", "cursor"]
+    assert main(command) == 0
+
+    hooks = json.loads(hooks_path.read_text())["hooks"]
+    assert hooks["sessionStart"] == [foreign, managed]
+    assert hooks["postToolUse"] == [managed]
+    assert hooks["sessionEnd"] == [managed]
+
+    assert main(command) == 0
+    hooks = json.loads(hooks_path.read_text())["hooks"]
+    assert all(hooks[event].count(managed) == 1 for event in ("sessionStart", "postToolUse", "sessionEnd"))
+
+
+def test_init_cursor_warns_when_atomic_project_hook_write_fails(tmp_path: Path, monkeypatch, capsys):
+    import json
+
+    target = tmp_path / "cursor-project"
+    hooks_path = target / ".cursor" / "hooks.json"
+    hooks_path.parent.mkdir(parents=True)
+    original_content = json.dumps({"version": 1, "hooks": {}})
+    hooks_path.write_text(original_content)
+
+    from brigade import localio
+
+    original_replace = localio.os.replace
+
+    def reject_hook_replace(source, destination):
+        if destination == hooks_path:
+            raise OSError("disk full test hooks")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(localio.os, "replace", reject_hook_replace)
+
+    from brigade.cli import main
+
+    assert main(["init", "--target", str(target), "--depth", "repo", "--harnesses", "cursor"]) == 0
+    captured = capsys.readouterr()
+    assert "warning: unable to wire project-scoped Cursor presence hooks" in captured.err
+    assert "Traceback" not in captured.err
+    assert hooks_path.read_text() == original_content
+    assert list(hooks_path.parent.glob(".hooks.json.*.tmp")) == []
+
+
 def test_init_no_gitignore_skips_gitignore(tmp_target: Path):
     tmp_target.mkdir(parents=True, exist_ok=True)
     assert install_selection(tmp_target, _workspace_sel(), update_gitignore=False) == 0
