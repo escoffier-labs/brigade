@@ -542,7 +542,75 @@ def run_shadow(repo: Path, output: Path, now: datetime | None) -> int:
         return 2
 
 
-def finalize(output: Path) -> int:
+def load_evidence(output: Path) -> tuple[dict, list[dict], dict[int, str], list[str]]:
+    """Read an exact-attempt cache only. Missing/partial fetches remain gaps."""
+    errors: list[str] = []
+
+    def read_json(name: str, expected: type):
+        try:
+            value = json.loads((output / name).read_text(encoding="utf-8"))
+            if not isinstance(value, expected):
+                raise ValueError("invalid cached JSON shape")
+            return value
+        except (OSError, ValueError) as exc:
+            errors.append(f"cached {name} unavailable: {type(exc).__name__}")
+            return expected()
+
+    run = read_json("workflow-run.json", dict)
+    fetched = read_json("fetch-errors.json", dict)
+    if not isinstance(fetched.get("errors"), list) or any(not isinstance(item, str) for item in fetched["errors"]):
+        errors.append("cached fetch-errors.json lacks a valid fetch result")
+    else:
+        errors.extend(fetched["errors"])
+    jobs: list[dict] = []
+    logs: dict[int, str] = {}
+    total = None
+    for page in range(1, 21):
+        batch = read_json(f"jobs-page-{page}.json", dict)
+        if (
+            not isinstance(batch.get("jobs"), list)
+            or any(not isinstance(job, dict) for job in batch["jobs"])
+            or type(batch.get("total_count")) is not int
+            or batch["total_count"] < 0
+            or (total is not None and total != batch["total_count"])
+        ):
+            errors.append("invalid cached jobs pagination")
+            break
+        total = batch["total_count"]
+        jobs.extend(batch["jobs"])
+        if len(jobs) == total:
+            break
+        if not batch["jobs"] or len(jobs) > total:
+            errors.append("inconsistent cached jobs pagination")
+            break
+    else:
+        errors.append("cached jobs pagination exceeded 20 pages")
+    for job in jobs:
+        if job.get("name") not in SHARD_NAMES:
+            continue
+        job_id = job.get("id")
+        if type(job_id) is not int or job_id < 1:
+            errors.append("invalid cached job ID")
+            continue
+        try:
+            logs[job_id] = (output / f"job-{job_id}.log").read_text(encoding="utf-8-sig")
+        except (OSError, ValueError) as exc:
+            errors.append(f"{job['name']}: cached log unavailable: {type(exc).__name__}")
+    return run, jobs, logs, errors
+
+
+def finalize(output: Path, full_evidence: Path | None = None) -> int:
+    # Retain the raw prefetch even if checkout, installation or pytest failed.
+    cached = output / "full"
+    copy_errors: list[str] = []
+    if full_evidence is not None and full_evidence.resolve() != cached.resolve():
+        try:
+            shutil.copytree(full_evidence, cached, dirs_exist_ok=True)
+        except OSError as exc:
+            copy_errors.append(f"full evidence cache unavailable: {type(exc).__name__}")
+    # Read the explicit source, so older retained output cannot fill its gaps.
+    run, jobs, logs, errors = load_evidence(full_evidence if full_evidence is not None else cached)
+    errors.extend(copy_errors)
     if not (output / "report.json").is_file():
         guard(output)
     report = json.loads((output / "report.json").read_text(encoding="utf-8"))
@@ -553,12 +621,9 @@ def finalize(output: Path) -> int:
     try:
         identity = report["identity"]
         selected = json.loads((output / "pytest-results.json").read_text(encoding="utf-8"))
-        run, jobs, logs, errors = fetch_evidence(
-            os.environ["GITHUB_REPOSITORY"], identity["run_id"], identity["run_attempt"], output / "full"
-        )
         report["comparison"] = compare(identity, run, jobs, logs, selected, errors=errors)
     except (OSError, HTTPException, ValueError, KeyError, TypeError) as exc:
-        report["comparison"] = incomplete(f"comparison unavailable: {type(exc).__name__}")
+        report["comparison"] = incomplete(*errors, f"comparison unavailable: {type(exc).__name__}")
     retain_report(output, report)
     publish_summary(output)
     return 0 if report["comparison"]["status"] == "complete" else 2
@@ -570,6 +635,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser.add_argument("--repo", type=Path, default=Path(__file__).resolve().parents[1])
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--now", type=parse_time, help="UTC clock override for offline reproduction")
+    parser.add_argument(
+        "--full-evidence", type=Path, help="prefetched exact-attempt directory; finalize never uses the network"
+    )
     args = parser.parse_args(argv)
     output = args.output.resolve()
     if args.command == "guard":
@@ -578,7 +646,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     if args.command == "run":
         return run_shadow(args.repo, output, args.now)
     if args.command == "finalize":
-        return finalize(output)
+        return finalize(output, args.full_evidence)
     selected = json.loads((output / "pytest-input.json").read_text(encoding="utf-8"))["selected"]
     return pytest_worker(args.repo.resolve(), output, selected)
 

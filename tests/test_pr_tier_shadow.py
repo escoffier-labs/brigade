@@ -1,13 +1,18 @@
 """Retained-result and adverse evidence contracts for the non-gating shadow."""
 
 from copy import deepcopy
+import datetime as datetime_module
 from datetime import datetime
 from http.client import HTTPException, IncompleteRead
 import json
 from pathlib import Path
 import re
+import shutil
 import subprocess
 import sys
+import textwrap
+from urllib.error import HTTPError
+import urllib.request
 
 import pytest
 
@@ -17,6 +22,173 @@ ROOT = Path(__file__).resolve().parents[1]
 SHA = "a" * 40
 PR_HEAD = "b" * 40
 IDENTITY = {"sha": SHA, "pr_head": PR_HEAD, "run_id": 123, "run_attempt": 2}
+
+
+def prefetch_source():
+    job = (ROOT / ".github/workflows/ci.yml").read_text().split("  pr-tier-shadow:\n", 1)[1]
+    first = re.split(r"^      - ", job.split("    steps:\n", 1)[1], flags=re.M)[1]
+    assert "GH_TOKEN: ${{ github.token }}" in first
+    assert "python3 -I -S - <<'PY'" in first
+    return textwrap.dedent(first.split("python3 -I -S - <<'PY'\n", 1)[1].rsplit("          PY", 1)[0])
+
+
+def test_shadow_token_is_confined_to_literal_first_step():
+    job = (ROOT / ".github/workflows/ci.yml").read_text().split("  pr-tier-shadow:\n", 1)[1]
+    steps = re.split(r"^      - ", job.split("    steps:\n", 1)[1], flags=re.M)[1:]
+    prefetch_source()
+    assert "scripts/" not in steps[0] and "pip install" not in steps[0]
+    assert "actions/checkout@" in steps[1]
+    assert "GH_TOKEN" not in "".join(steps[1:])
+    assert "GITHUB_TOKEN" not in "".join(steps[1:])
+    assert '--full-evidence "$RUNNER_TEMP/pr-tier-full"' in job
+
+
+@pytest.mark.parametrize(
+    "problem", [None, "missing", "partial", "stale-output", "wrong-attempt", "wrong-sha", "fetch-error"]
+)
+def test_finalize_uses_only_explicit_cached_evidence(tmp_path, monkeypatch, evidence, problem):
+    run, jobs, logs, selected = deepcopy(evidence)
+    output, cache = tmp_path / "output", tmp_path / "cache"
+    shadow.guard(output, now=datetime.fromisoformat("2026-10-23T00:00:00+00:00"))
+    report = json.loads((output / "report.json").read_text())
+    report["identity"] = IDENTITY
+    shadow.write_json(output / "report.json", report)
+    shadow.write_json(output / "pytest-results.json", selected)
+    if problem == "wrong-attempt":
+        run["run_attempt"] = 1
+    if problem == "wrong-sha":
+        run["head_sha"] = "c" * 40
+    if problem != "missing":
+        shadow.write_json(cache / "workflow-run.json", run)
+        shadow.write_json(cache / "jobs-page-1.json", {"total_count": 4, "jobs": jobs})
+        if problem != "partial":
+            shadow.write_json(
+                cache / "fetch-errors.json", {"errors": ["log fetch failed"] if problem == "fetch-error" else []}
+            )
+        for job_id, text in logs.items():
+            (cache / f"job-{job_id}.log").write_text(text)
+        if problem == "stale-output":
+            shutil.copytree(cache, output / "full")
+            (cache / "fetch-errors.json").unlink()
+
+    def no_network(*args, **kwargs):
+        pytest.fail("offline finalization attempted network access")
+
+    monkeypatch.setattr(shadow, "fetch_evidence", no_network)
+    monkeypatch.setattr(shadow, "api_get", no_network)
+    assert shadow.main(["finalize", "--output", str(output), "--full-evidence", str(cache)]) == (2 if problem else 0)
+    comparison = json.loads((output / "report.json").read_text())["comparison"]
+    assert comparison["full_only_candidate_count"] is (None if problem else 0)
+    if problem:
+        assert comparison["errors"]
+    if problem == "fetch-error":
+        assert "log fetch failed" in comparison["errors"]
+    if problem != "missing":
+        assert (output / "full/workflow-run.json").read_bytes() == (cache / "workflow-run.json").read_bytes()
+
+
+@pytest.fixture
+def prefetch(tmp_path, monkeypatch, evidence):
+    run, jobs, logs, _ = evidence
+    requests = []
+    clock = [shadow.TRIAL_START]
+    failure = [None]
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return clock[0]
+
+    class Response:
+        def __init__(self, data):
+            self.data = data
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            pass
+
+        def read(self, size=-1):
+            data, self.data = self.data[:size], self.data[size:]
+            return data
+
+    class Opener:
+        def open(self, request, *, timeout):
+            assert 0 < timeout <= 30
+            requests.append(request)
+            if failure[0]:
+                raise failure[0]
+            url = request.full_url
+            if url.startswith("https://logs.example/"):
+                assert not request.has_header("Authorization")
+                return Response(logs[int(url.rsplit("/", 1)[1])].encode())
+            assert request.get_header("Authorization") == "Bearer fixture-token"
+            if url.endswith("/logs"):
+                job_id = url.split("/")[-2]
+                raise HTTPError(url, 302, "Found", {"Location": f"https://logs.example/{job_id}"}, None)
+            if "/jobs?" in url:
+                return Response(json.dumps({"total_count": 4, "jobs": jobs}).encode())
+            assert url.endswith("/runs/123/attempts/2")
+            return Response(json.dumps(run).encode())
+
+    monkeypatch.setattr(datetime_module, "datetime", Clock)
+    monkeypatch.setattr(urllib.request, "build_opener", lambda *args: Opener())
+    monkeypatch.setenv("GH_TOKEN", "fixture-token")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "example/project")
+    monkeypatch.setenv("GITHUB_RUN_ID", "123")
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "2")
+    monkeypatch.setenv("RUNNER_TEMP", str(tmp_path))
+    monkeypatch.setenv("FULL_SHARDS_RESULT", "success")
+
+    def execute():
+        namespace = {"__name__": "__main__"}
+        exec(compile(prefetch_source(), "workflow-prefetch", "exec"), namespace)
+        return namespace
+
+    return execute, requests, clock, failure, tmp_path / "pr-tier-full"
+
+
+def test_literal_prefetch_retains_exact_attempt_without_forwarding_token(prefetch):
+    execute, requests, _, _, cache = prefetch
+    namespace = execute()
+    assert namespace["TRIAL_START"] == shadow.TRIAL_START
+    assert namespace["TRIAL_EXPIRY"] == shadow.TRIAL_EXPIRY
+    assert len(requests) == 10  # Metadata, jobs and four API/signed-host log pairs.
+    assert json.loads((cache / "fetch-errors.json").read_text()) == {"errors": []}
+    assert json.loads((cache / "workflow-run.json").read_text())["run_attempt"] == 2
+    assert len(list(cache.glob("job-*.log"))) == 4
+    assert "fixture-token" not in "".join(path.read_text() for path in cache.iterdir())
+
+
+@pytest.mark.parametrize("reason", ["before", "expired", "cancelled", "invalid-repo", "invalid-run", "invalid-attempt"])
+def test_literal_prefetch_does_no_api_work_when_disallowed(prefetch, monkeypatch, reason):
+    execute, requests, clock, _, cache = prefetch
+    if reason == "before":
+        clock[0] = shadow.TRIAL_START - datetime_module.timedelta(seconds=1)
+    elif reason == "expired":
+        clock[0] = shadow.TRIAL_EXPIRY
+    elif reason == "cancelled":
+        monkeypatch.setenv("FULL_SHARDS_RESULT", "cancelled")
+    else:
+        key = {
+            "invalid-repo": "GITHUB_REPOSITORY",
+            "invalid-run": "GITHUB_RUN_ID",
+            "invalid-attempt": "GITHUB_RUN_ATTEMPT",
+        }[reason]
+        monkeypatch.setenv(key, "../bad")
+    execute()
+    assert requests == []
+    assert json.loads((cache / "fetch-errors.json").read_text())["errors"]
+
+
+def test_literal_prefetch_failure_continues_without_leaking_exception_urls(prefetch):
+    execute, _, _, failure, cache = prefetch
+    failure[0] = OSError("https://signed.example/?token=secret")
+    execute()
+    errors = (cache / "fetch-errors.json").read_text()
+    assert "OSError" in errors
+    assert "secret" not in errors and "https://" not in errors
 
 
 def log(index, *, failed=None, checkout=SHA):
@@ -316,6 +488,7 @@ def test_merge_identity_validates_second_parent_and_uses_current_first_parent(tm
         return log(job_id - 500, checkout=merge).encode()
 
     monkeypatch.setattr(shadow, "api_get", get)
+    shadow.fetch_evidence("example/project", 123, 2, output / "full")
     assert shadow.finalize(output) == 0
     report = json.loads((output / "report.json").read_text())
     assert report["identity"]["sha"] == merge
@@ -587,7 +760,7 @@ def test_pytest9_subfailed_summaries_count_reports_then_deduplicate_parent(evide
         assert result["full_only_candidate_count"] is None
 
 
-@pytest.mark.parametrize("where", ["metadata", "log", "finalize"])
+@pytest.mark.parametrize("where", ["metadata", "log"])
 @pytest.mark.parametrize("error", [HTTPException("bad HTTP"), IncompleteRead(b"partial", 10)])
 def test_http_protocol_failures_retain_incomplete_report(tmp_path, monkeypatch, evidence, where, error):
     run, jobs, _, selected = evidence
@@ -605,12 +778,7 @@ def test_http_protocol_failures_retain_incomplete_report(tmp_path, monkeypatch, 
         return json.dumps(run if path.endswith("/attempts/2") else {"total_count": 4, "jobs": jobs}).encode()
 
     monkeypatch.setattr(shadow, "api_get", get)
-    if where == "finalize":
-
-        def fetch(*args):
-            raise error
-
-        monkeypatch.setattr(shadow, "fetch_evidence", fetch)
+    shadow.fetch_evidence("example/project", 123, 2, output / "full")
     assert shadow.finalize(output) == 2
     result = json.loads((output / "report.json").read_text())["comparison"]
     assert result["status"] == "incomplete"

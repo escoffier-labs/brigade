@@ -3,9 +3,9 @@
 The `pr-tier-shadow` job observes test selection on pull requests for fourteen
 days: **2026-10-23T00:00:00Z inclusive through 2026-11-06T00:00:00Z exclusive**.
 Before activation, move both dates together if publication occurs later. Keep
-the interval at fourteen days. Update the runner constants, boundary tests and
-this document together. This change does not activate a scheduler or authorize
-a later rollout.
+the interval at fourteen days. Update the inline prefetch constants, runner
+constants, boundary tests and this document together. This change does not
+activate a scheduler or authorize a later rollout.
 
 The job depends on the existing four Python 3.12 `test-shards` jobs and runs
 with `always()` on `pull_request`, including fork PRs. It has read-only contents
@@ -13,7 +13,20 @@ and Actions permissions, does not persist checkout credentials, and uses
 `continue-on-error: true`. No existing job depends on it. Required jobs and
 `ci-gate` retain their existing definitions.
 
-The standard-library guard executes before Python setup or package installation.
+The first job step fetches full evidence using inline standard-library Python,
+before checkout or any PR-controlled script, installation or tests. It runs
+`python3 -I -S` to exclude Python environment paths and site initialization.
+Only this step receives `GH_TOKEN`. No later step receives an API token. The
+literal validates the repository, run ID and attempt from the environment and
+checks the same UTC trial window before any API request. It also requires the
+full shards' aggregate result to be success or failure. Requests have a
+30-second timeout. A 240-second fetch deadline is checked before each request
+and read. Pagination stops at 20 pages, metadata responses at 4 MiB and each
+log response at 64 MiB. Log download
+redirects use a fresh request without authorization headers and refuse further
+redirects. Retrieval errors omit response bodies, URLs and exception messages.
+
+The checked-out standard-library guard executes before Python setup or package installation.
 Before the start and at or after expiry, the job records its status and uploads
 evidence without installing dependencies, selecting files, running pytest, or
 reading the Actions API. During the active window, setup, installation and test
@@ -69,7 +82,7 @@ Files are written as their inputs become available. Installation or checkout
 failure can leave only an incomplete report. Expired runs deliberately contain
 no selection or pytest results. An absent result is never interpreted as a pass.
 
-Comparison GETs only the requested workflow run **and explicit attempt**, then
+The prefetch GETs only the requested workflow run **and explicit attempt**, then
 that attempt's jobs and their logs through the
 [Actions jobs API](https://docs.github.com/en/rest/actions/workflow-jobs?apiVersion=2022-11-28#list-jobs-for-a-workflow-run-attempt).
 It never fetches a different run or attempt
@@ -80,6 +93,14 @@ with success or failure conclusions. Skipped, cancelled, timed-out, duplicate
 or absent jobs, API errors, collection errors, missing summaries and
 unattributable outcomes leave the comparison incomplete. A failed job with a
 complete pytest summary and attributable failures can still be compared.
+
+Prefetch writes raw metadata, logs and `fetch-errors.json` beneath
+`$RUNNER_TEMP/pr-tier-full`. A failed prefetch leaves the selected tests and
+reporting steps enabled. Finalization accepts that directory through
+`--full-evidence`, retains its files under `full/`, and reads only the cache.
+It never authenticates or falls back to a live request. Missing cache files,
+unfinished pagination and retained fetch errors keep the candidate count null.
+The upload also retains prefetched files if checkout or installation failed.
 
 The parser attributes terminal summaries to the primary Actions execution step
 and the known grokbot auxiliary step. It reads failures from the final short
@@ -96,7 +117,8 @@ always remains null here. The job never classifies candidates as real, inherited
 or flaky and never asserts zero real misses.
 
 The observation is self-reported by PR-controlled tests and scripts, which can
-forge its evidence. The token has read-only access and the repository is public.
+forge its evidence after prefetch. The read-only token is used before those
+processes start and is absent from their environment.
 Adversarial changes require independent reproduction in a trusted environment
 before these observations can support a decision.
 

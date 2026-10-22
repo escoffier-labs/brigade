@@ -964,6 +964,134 @@ jobs:
       contents: read
       actions: read
     steps:
+      - name: Prefetch full evidence before PR code
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          FULL_SHARDS_RESULT: ${{ needs.test-shards.result }}
+        run: |
+          python3 -I -S - <<'PY'
+          from datetime import datetime, timezone
+          from http.client import HTTPException
+          import json
+          import os
+          from pathlib import Path
+          import re
+          import time
+          from urllib.error import HTTPError
+          from urllib.parse import urlparse
+          from urllib.request import HTTPRedirectHandler, Request, build_opener
+
+          TRIAL_START = datetime(2026, 10, 23, tzinfo=timezone.utc)
+          TRIAL_EXPIRY = datetime(2026, 11, 6, tzinfo=timezone.utc)
+          SHARD_NAMES = [f"test shard (3.12, {index})" for index in range(4)]
+          output = Path(os.environ["RUNNER_TEMP"]) / "pr-tier-full"
+          output.mkdir(parents=True, exist_ok=True)
+          errors = []
+          deadline = time.monotonic() + 240
+
+          class NoRedirect(HTTPRedirectHandler):
+              def redirect_request(self, req, fp, code, msg, headers, newurl):
+                  return None
+
+          opener = build_opener(NoRedirect())
+
+          def read_response(request, limit):
+              remaining = deadline - time.monotonic()
+              if remaining <= 0:
+                  raise TimeoutError("prefetch deadline exceeded")
+              with opener.open(request, timeout=min(30, remaining)) as response:
+                  chunks = []
+                  size = 0
+                  while True:
+                      if time.monotonic() >= deadline:
+                          raise TimeoutError("prefetch deadline exceeded")
+                      chunk = response.read(min(65536, limit + 1 - size))
+                      if not chunk:
+                          return b"".join(chunks)
+                      chunks.append(chunk)
+                      size += len(chunk)
+                      if size > limit:
+                          raise ValueError("response size exceeded")
+
+          def api_get(path, *, logs=False):
+              request = Request("https://api.github.com" + path, headers={
+                  "Accept": "application/vnd.github+json",
+                  "X-GitHub-Api-Version": "2022-11-28",
+                  "Authorization": "Bearer " + os.environ["GH_TOKEN"],
+              })
+              try:
+                  return read_response(request, 64 * 1024 * 1024 if logs else 4 * 1024 * 1024)
+              except HTTPError as exc:
+                  if exc.code != 302 or not logs:
+                      raise OSError(f"GitHub API HTTP {exc.code}") from None
+                  location = exc.headers.get("Location", "")
+                  target = urlparse(location)
+                  if target.scheme != "https" or not target.hostname or target.username or target.password:
+                      raise ValueError("invalid log redirect") from None
+              # A fresh request has no API headers. Further redirects are refused.
+              return read_response(Request(location), 64 * 1024 * 1024)
+
+          def fetch():
+              instant = datetime.now(timezone.utc)
+              if not TRIAL_START <= instant < TRIAL_EXPIRY:
+                  errors.append("prefetch disabled outside trial window")
+                  return
+              if os.environ.get("FULL_SHARDS_RESULT") not in {"success", "failure"}:
+                  errors.append("prefetch disabled: full shards did not finish with success or failure")
+                  return
+              repository = os.environ.get("GITHUB_REPOSITORY", "")
+              run_id = os.environ.get("GITHUB_RUN_ID", "")
+              attempt = os.environ.get("GITHUB_RUN_ATTEMPT", "")
+              if (not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9-]*/[A-Za-z0-9_.-]+", repository)
+                      or repository.split("/")[-1] in {".", ".."}
+                      or not re.fullmatch(r"[1-9][0-9]{0,19}", run_id)
+                      or not re.fullmatch(r"[1-9][0-9]{0,19}", attempt)):
+                  raise ValueError("invalid repository, run ID or attempt")
+              prefix = f"/repos/{repository}/actions/runs/{run_id}/attempts/{attempt}"
+              raw = api_get(prefix)
+              (output / "workflow-run.json").write_bytes(raw)
+              json.loads(raw)
+              jobs = []
+              total = None
+              for page in range(1, 21):
+                  raw = api_get(f"{prefix}/jobs?per_page=100&page={page}")
+                  (output / f"jobs-page-{page}.json").write_bytes(raw)
+                  batch = json.loads(raw)
+                  if (not isinstance(batch.get("jobs"), list)
+                          or type(batch.get("total_count")) is not int
+                          or batch["total_count"] < 0
+                          or (total is not None and total != batch["total_count"])):
+                      raise ValueError("invalid jobs page")
+                  total = batch["total_count"]
+                  jobs.extend(batch["jobs"])
+                  if len(jobs) == total:
+                      break
+                  if not batch["jobs"] or len(jobs) > total:
+                      raise ValueError("inconsistent jobs pagination")
+              else:
+                  raise ValueError("jobs pagination exceeded 20 pages")
+              for name in SHARD_NAMES:
+                  matches = [job for job in jobs if job.get("name") == name]
+                  if len(matches) != 1:
+                      errors.append(f"{name}: expected exactly one job")
+                      continue
+                  job_id = matches[0]["id"]
+                  if type(job_id) is not int or job_id < 1:
+                      raise ValueError("invalid job ID")
+                  try:
+                      raw = api_get(f"/repos/{repository}/actions/jobs/{job_id}/logs", logs=True)
+                      (output / f"job-{job_id}.log").write_bytes(raw)
+                  except (OSError, HTTPException, ValueError, KeyError, TypeError) as exc:
+                      errors.append(f"{name}: log unavailable: {type(exc).__name__}")
+
+          try:
+              fetch()
+          except (OSError, HTTPException, ValueError, KeyError, TypeError, AttributeError) as exc:
+              # Exception messages and headers may contain signed URLs or tokens.
+              errors.append(f"exact attempt prefetch unavailable: {type(exc).__name__}")
+          (output / "fetch-errors.json").write_text(json.dumps({"errors": errors}) + "\n", encoding="utf-8")
+          PY
       - uses: actions/checkout@v7
         with:
           ref: ${{ github.sha }}
@@ -988,11 +1116,13 @@ jobs:
         run: python scripts/pr_tier_shadow.py run --output .pr-tier-shadow
       - name: Compare exact attempt and write summary
         if: always()
-        env:
-          GH_TOKEN: ${{ github.token }}
         run: |
+          mkdir -p .pr-tier-shadow/full
+          if [ -d "$RUNNER_TEMP/pr-tier-full" ]; then
+            cp -R "$RUNNER_TEMP/pr-tier-full/." .pr-tier-shadow/full/
+          fi
           if [ -f scripts/pr_tier_shadow.py ]; then
-            python3 scripts/pr_tier_shadow.py finalize --output .pr-tier-shadow
+            python3 scripts/pr_tier_shadow.py finalize --output .pr-tier-shadow --full-evidence "$RUNNER_TEMP/pr-tier-full"
           else
             mkdir -p .pr-tier-shadow
             echo '{"trial_status":"unknown","comparison":{"status":"incomplete","full_only_candidate_count":null,"confirmed_real_miss_count":null,"errors":["checkout unavailable"]}}' > .pr-tier-shadow/report.json
