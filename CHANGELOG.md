@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- The fleet MCP station serves MCP Events (`events/list`, `events/subscribe`, `events/unsubscribe`) behind `brigade fleet mcp --events`, with subscriptions stored on the Fleet Hub (schema 38) and signed Standard Webhooks delivery for `message.created`, `claim.expired` and `run.failed`. The hub keeps events off until `BRIGADE_FLEET_EVENTS_CALLBACK_HOSTS` names exact callback hosts. The shared MCP transport now accepts protocol version `2026-07-28` (`server/discover`, `Mcp-Method` and `Mcp-Name` header checks) and the dot pack reuses the shared signing and callback code. See `docs/fleet-mcp-events.md`. (#1887)
 - Claude work-loop hooks track explicit file reads and record unseen callers before Edit, Write, or NotebookEdit. Checks warn without denying edits, and unavailable or incomplete graphs record a null result with a reason.
 
 - Antigravity sessions publish Fleet Hub presence through silent, detached hooks installed by `brigade init --harnesses antigravity`; Stop refreshes presence until the session expires by TTL.

@@ -117,7 +117,7 @@ from .fleet_hub_status import (
     latest_status as latest_status,
 )
 
-SCHEMA_VERSION = 37
+SCHEMA_VERSION = 38
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
@@ -660,6 +660,10 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     from . import fleet_hub_actions
 
     fleet_hub_actions.ensure_schema(conn)
+    # v37 -> v38: MCP Events subscriptions, event outbox and delivery state.
+    from . import fleet_hub_events
+
+    fleet_hub_events.ensure_schema(conn)
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 
@@ -955,6 +959,10 @@ def store_events(conn: sqlite3.Connection, raw_events: Any, *, caller_node: str 
             duplicate += 1
         else:
             accepted += 1
+            if event["state"] == "run.failed":
+                from .fleet_hub_events import record_run_failed
+
+                record_run_failed(conn, event)
     conn.commit()
     return {"accepted": accepted, "duplicate": duplicate}
 
@@ -1889,6 +1897,14 @@ def run(
     except FleetHubError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
+    from . import fleet_hub_events
+
+    try:
+        # MCP Events stay off unless the operator names callback hosts in the environment.
+        fleet_hub_events.configure(fleet_hub_events.config_from_environment(os.environ))
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
     try:
         server = make_server(
             host,
@@ -1915,6 +1931,9 @@ def run(
 
     sweeper_stop = threading.Event()
     sweeper_thread = fleet_hub_grokbot.start_expiry_sweeper(Path(db_path).expanduser(), stop=sweeper_stop)
+    from .fleet_hub_events_dispatch import start_dispatcher
+
+    events_thread = start_dispatcher(Path(db_path).expanduser(), sweeper_stop)
     stats_thread = fleet_admin_stats.start_retention_sweeper(Path(db_path).expanduser(), stop=sweeper_stop)
     try:
         server.serve_forever()
@@ -1924,5 +1943,7 @@ def run(
         sweeper_stop.set()
         sweeper_thread.join(timeout=5)
         stats_thread.join(timeout=5)
+        if events_thread is not None:
+            events_thread.join(timeout=5)
         server.server_close()
     return 0

@@ -11,7 +11,7 @@ import sqlite3
 from typing import Any
 
 from . import fleet_hub as hub
-from . import fleet_hub_claim_cardinality
+from . import fleet_hub_claim_cardinality, fleet_hub_events
 
 # Fences are never evicted. At capacity, existing targets remain usable but
 # an unseen target must fail closed, including a missing legacy release.
@@ -446,14 +446,14 @@ def _prune(conn: sqlite3.Connection, now: float, budget: _RetirementBudget, requ
     # Always process the requested target first, even beyond the unrelated
     # batch. Keep retirement work under the write lock independent of backlog.
     targets = conn.execute(
-        "SELECT target, owner_node, holder_token FROM claims WHERE target = ? AND expires_at <= ?",
+        "SELECT target, owner_node, holder_token, expires_at FROM claims WHERE target = ? AND expires_at <= ?",
         (requested_target, now),
     ).fetchall()
     targets += conn.execute(
-        "SELECT target, owner_node, holder_token FROM claims WHERE expires_at <= ? AND target != ? LIMIT ?",
+        "SELECT target, owner_node, holder_token, expires_at FROM claims WHERE expires_at <= ? AND target != ? LIMIT ?",
         (now, requested_target, EXPIRED_CLAIM_PRUNE_BATCH),
     ).fetchall()
-    for target, node, holder in targets:
+    for target, node, holder, expires_at in targets:
         current = generation(conn, target, has_claim=True)
         if current == MAX_GENERATION:
             raise ClaimFenceError("claim generation fence exhausted")
@@ -467,6 +467,7 @@ def _prune(conn: sqlite3.Connection, now: float, budget: _RetirementBudget, requ
             continue
         _advance(conn, target, current)
         conn.execute("DELETE FROM claims WHERE target = ?", (target,))
+        fleet_hub_events.record_claim_expired(conn, target, node, holder, expires_at)
 
 
 def _acquire(
