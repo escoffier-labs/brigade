@@ -13,6 +13,8 @@ STATE_VERSION = 1
 MANAGED_MCP_NAMES = ("brigade", "graphtrail", "miseledger")
 _MANAGED_HOOK_EVENTS = ("sessionStart", "postToolUse", "sessionEnd")
 _MANAGED_HOOK_COMMAND = "exec brigade work presence-hook --harness cursor --stdin --context cursor-work-loop"
+_PROJECT_HOOK_COMMAND = "exec brigade work presence-hook --harness cursor --stdin --context cursor-work-loop-project"
+_LEGACY_HOOK_COMMAND = _MANAGED_HOOK_COMMAND
 
 
 def _home_dir() -> Path:
@@ -196,11 +198,35 @@ def _read_json_object(path: Path) -> tuple[dict[str, Any] | None, str | None]:
     return payload, None
 
 
-def _hook_entry(root: Path | None = None) -> dict[str, str]:
+def _hook_entry(root: Path | None = None, *, scope: str = "user") -> dict[str, str]:
     # hooks.json keeps this direct command. ~/.cursor/hooks/brigade-session-start
     # is a compatibility executable only; do not redirect the command at that file.
     del root
-    return {"command": _MANAGED_HOOK_COMMAND}
+    if scope not in {"user", "project"}:
+        raise ValueError(f"unsupported Cursor hook scope: {scope}")
+    return {"command": _PROJECT_HOOK_COMMAND if scope == "project" else _MANAGED_HOOK_COMMAND}
+
+
+def project_presence_hook_installed(workspace: Path, event: str) -> bool:
+    """Return whether a project hook already owns this Cursor presence event."""
+    if event not in _MANAGED_HOOK_EVENTS:
+        return False
+    path = workspace / ".cursor" / "hooks.json"
+    try:
+        if not path.is_file() or path.stat().st_size > 1_048_576:
+            return False
+    except OSError:
+        return False
+    doc, _error = _read_json_object(path)
+    hooks = doc.get("hooks") if doc is not None else None
+    entries = hooks.get(event) if isinstance(hooks, dict) else None
+    if not isinstance(entries, list):
+        return False
+    brigade_commands = {_PROJECT_HOOK_COMMAND, _LEGACY_HOOK_COMMAND}
+    return any(
+        isinstance(entry, dict) and isinstance(entry.get("command"), str) and entry["command"] in brigade_commands
+        for entry in entries
+    )
 
 
 def install_project_presence_hooks(workspace: Path) -> str | None:
@@ -223,7 +249,11 @@ def install_project_presence_hooks(workspace: Path) -> str | None:
             changed = True
         if not isinstance(entries, list):
             return f"existing {event} hooks must be a list"
-        managed = _hook_entry()
+        managed = _hook_entry(scope="project")
+        legacy = {"command": _LEGACY_HOOK_COMMAND}
+        if legacy in entries:
+            entries[entries.index(legacy)] = managed
+            changed = True
         if managed not in entries:
             entries.append(managed)
             changed = True

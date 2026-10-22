@@ -32,6 +32,8 @@ MAX_PRESENCE_ERROR_CHARS = 200
 MAX_REPO_IDENTITY_CHARS = 512
 _IDENTITY_CACHE_LIMIT = 32
 _GIT_DIR_FILE_LIMIT = 4096
+_CURSOR_USER_HOOK_CONTEXT = "cursor-work-loop"
+_CURSOR_PROJECT_HOOK_CONTEXT = "cursor-work-loop-project"
 _CURSOR_WRITE_TOOLS = frozenset(
     {
         "Write",
@@ -553,12 +555,28 @@ def run_presence_hook(
 
             run_hook(event)
             return 0
-        if harness == "cursor" and stdin and context == "cursor-work-loop":
-            _run_cursor_presence_hook()
+        if (
+            harness == "cursor"
+            and stdin
+            and context
+            in {
+                _CURSOR_USER_HOOK_CONTEXT,
+                _CURSOR_PROJECT_HOOK_CONTEXT,
+            }
+        ):
+            _run_cursor_presence_hook(scope="user" if context == _CURSOR_USER_HOOK_CONTEXT else "project")
             return 0
         _run_explicit_presence_hook(target=target, harness=harness, session=session, event=event)
     except Exception:
-        if harness == "cursor" and stdin and context == "cursor-work-loop":
+        if (
+            harness == "cursor"
+            and stdin
+            and context
+            in {
+                _CURSOR_USER_HOOK_CONTEXT,
+                _CURSOR_PROJECT_HOOK_CONTEXT,
+            }
+        ):
             _print_cursor_hook_output(None)
     return 0
 
@@ -575,13 +593,19 @@ def _run_explicit_presence_hook(
     _publish_presence(event, target, session, harness=harness)
 
 
-def _run_cursor_presence_hook() -> None:
+def _run_cursor_presence_hook(*, scope: str = "project") -> None:
     payload = _read_bounded_json_object()
     hook_event = payload.get("hook_event_name") if payload else None
     mapped = _CURSOR_HOOK_EVENTS.get(hook_event) if isinstance(hook_event, str) else None
     session_id = _cursor_session_id(payload)
     workspace = _cursor_workspace(payload)
     target = _cursor_presence_target(workspace)
+    if scope == "user" and target is not None and isinstance(hook_event, str):
+        from .cursor_user_cmd import project_presence_hook_installed
+
+        if project_presence_hook_installed(target, hook_event):
+            _print_cursor_hook_output(None)
+            return
     if mapped and session_id and target is not None:
         if mapped == "heartbeat":
             if _cursor_tool_is_write_capable(payload):

@@ -63,7 +63,8 @@ def test_init_cursor_installs_project_presence_hooks_and_preserves_foreign_entri
     hooks_path = target / ".cursor" / "hooks.json"
     hooks_path.parent.mkdir(parents=True)
     foreign = {"command": "keep-foreign-hook"}
-    hooks_path.write_text(json.dumps({"version": 1, "hooks": {"sessionStart": [foreign]}}))
+    legacy = {"command": "exec brigade work presence-hook --harness cursor --stdin --context cursor-work-loop"}
+    hooks_path.write_text(json.dumps({"version": 1, "hooks": {"sessionStart": [foreign, legacy]}}))
 
     from brigade.cli import main
 
@@ -71,7 +72,7 @@ def test_init_cursor_installs_project_presence_hooks_and_preserves_foreign_entri
     assert main(command) == 0
 
     hooks = json.loads(hooks_path.read_text())["hooks"]
-    managed = {"command": "exec brigade work presence-hook --harness cursor --stdin --context cursor-work-loop"}
+    managed = {"command": "exec brigade work presence-hook --harness cursor --stdin --context cursor-work-loop-project"}
     assert hooks["sessionStart"] == [foreign, managed]
     assert hooks["postToolUse"] == [managed]
     assert hooks["sessionEnd"] == [managed]
