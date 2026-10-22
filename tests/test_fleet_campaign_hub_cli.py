@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from brigade import cli, fleet_hub, worklore_campaigns, worklore_client
+from brigade import cli, fleet_hub, worklore_campaigns, worklore_client, worklore_http
 
 
 def _git(path: Path, *args: str) -> None:
@@ -137,6 +137,119 @@ def test_dry_run_without_hub_skips_the_read(workspace, hub, capsys):
     assert _create(workspace, "--dry-run", "--json") == 0
     assert hub.reads == []
     assert json.loads(capsys.readouterr().out)["hub"]["checked"] is False
+
+
+@pytest.fixture
+def campaign_offer():
+    return {
+        "allowed_nodes": ["node-a", "node-b"],
+        "per_node_concurrency": 1,
+        "attempt_budget": {"cap": 2, "source_ref": "budget-1"},
+        "authorization_ref": "grant-1",
+        "exclusions": ["acme/excluded", "acme/other"],
+        "lease_seconds": 300,
+    }
+
+
+@pytest.fixture
+def sqlite_hub(workspace, hub, monkeypatch):
+    conn = fleet_hub.init_db(workspace / "hub.db")
+    calls = []
+
+    def request(method, path, body=None):
+        status, payload = worklore_http.handle(
+            conn,
+            worklore_http.Request(
+                method=method, path=path, body=body or {}, is_admin=True, operator_authorization_resolved=True
+            ),
+        )
+        calls.append((method, status))
+        if status >= 400:
+            raise worklore_client.WorkloreClientError(f"fleet hub work failed: HTTP {status}", code=payload["code"])
+        return payload
+
+    monkeypatch.setattr(worklore_client, "create_campaign", lambda body: request("POST", "/work/campaigns", body))
+    monkeypatch.setattr(worklore_client, "get_campaign", lambda key: request("GET", f"/work/campaigns/{key}"))
+    try:
+        yield conn, calls
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+@pytest.mark.parametrize("case", ["changed", "both-changed", "identical", "omitted", "legacy-attach", "new"])
+def test_dry_run_offer_matches_sqlite_hub_decision(workspace, sqlite_hub, campaign_offer, capsys, json_output, case):
+    conn, calls = sqlite_hub
+    path = workspace / "offer.json"
+    path.write_text(json.dumps(campaign_offer))
+    if case != "new":
+        seed = [] if case == "legacy-attach" else ["--offer-file", str(path)]
+        assert _create(workspace, "--repos", "repo-one", *seed) == 0
+        capsys.readouterr()
+    requested = dict(campaign_offer)
+    if case in {"changed", "both-changed"}:
+        requested["authorization_ref"] = "grant-2"
+    if case == "identical":
+        # Array order, object order, and omitted defaults normalize to the stored offer.
+        requested["allowed_nodes"] = ["node-b", "node-a"]
+        requested["exclusions"] = ["acme/other", "acme/excluded"]
+        del requested["lease_seconds"]
+    path.write_text(json.dumps(dict(reversed(list(requested.items())))))
+    extra = [] if case == "omitted" else ["--offer-file", str(path)]
+    if case == "both-changed":
+        extra.extend(["--acceptance", "Different"])
+    output = ["--json"] if json_output else []
+    calls.clear()
+    before = tuple(conn.iterdump())
+    changes = conn.total_changes
+    assert _create(workspace, *extra, *output, "--dry-run") == 0
+    captured = capsys.readouterr()
+    assert captured.err == ""
+    assert calls == [("GET", 404 if case == "new" else 200)]
+    assert tuple(conn.iterdump()) == before and conn.total_changes == changes
+    offer_changed = case in {"changed", "both-changed"}
+    spec_changed = case == "both-changed"
+    if json_output:
+        marks = json.loads(captured.out)["hub"]
+        assert marks["checked"] is True
+        assert marks["campaign_exists"] is (case != "new")
+        assert marks["spec_changed"] is spec_changed
+        assert marks["offer_changed"] is offer_changed
+    else:
+        assert ("campaign-offer-conflict" in captured.out) is offer_changed
+        assert ("campaign-spec-changed" in captured.out) is spec_changed
+    # The same request must reach the real Hub refusal or successful acknowledgement.
+    assert _create(workspace, *extra, "--json") == (1 if offer_changed else 0)
+    captured = capsys.readouterr()
+    assert calls[-1] == ("POST", 409 if offer_changed else 201 if case == "new" else 200)
+    if offer_changed:
+        assert json.loads(captured.err)["code"] == (
+            "campaign-spec-changed" if spec_changed else "campaign-offer-conflict"
+        )
+        assert tuple(conn.iterdump()) == before
+    else:
+        assert captured.err == ""
+        assert json.loads(captured.out)["campaign"]["offer"] == campaign_offer
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+@pytest.mark.parametrize("stored", [None, {}, {"offer": []}, {"offer": {}}, {"offer": {"allowed_nodes": []}}])
+def test_dry_run_malformed_offer_is_unknown(workspace, hub, campaign_offer, capsys, json_output, stored):
+    hub.shown = {"campaign": stored, "members": []}
+    path = workspace / "offer.json"
+    path.write_text(json.dumps(campaign_offer))
+    extra = ["--json"] if json_output else []
+    assert _create(workspace, "--offer-file", str(path), "--dry-run", *extra) == 0
+    captured = capsys.readouterr()
+    assert captured.err == "" and hub.posted == []
+    if json_output:
+        marks = json.loads(captured.out)["hub"]
+        assert marks["checked"] is False
+        assert marks["error"] == "unexpected hub response"
+        assert "offer_changed" not in marks
+    else:
+        assert "hub not checked: unexpected hub response" in captured.out
+        assert "create would be refused" not in captured.out
 
 
 def test_identity_collision_is_refused(workspace, hub, capsys):
@@ -419,3 +532,22 @@ def test_show_and_list_survive_malformed_hub_values(monkeypatch, capsys):
     assert "\x1b" not in capsys.readouterr().out
     monkeypatch.setattr(worklore_client, "get_campaign", lambda key: {"campaign": "x", "members": "y"})
     assert cli.main(["fleet", "campaign", "show", "camp-1"]) == 0
+
+
+def test_offer_file_is_forwarded_and_invalid_policy_never_posts(workspace, hub, capsys):
+    offer = {
+        "allowed_nodes": ["node-a"],
+        "per_node_concurrency": 1,
+        "attempt_budget": {"cap": 2, "source_ref": "budget-1"},
+        "authorization_ref": "grant-1",
+        "exclusions": [],
+        "lease_seconds": 60,
+    }
+    path = workspace / "offer.json"
+    path.write_text(json.dumps(offer))
+    assert _create(workspace, "--offer-file", str(path), "--json") == 0
+    assert hub.posted[0]["offer"] == offer
+    capsys.readouterr()
+    path.write_text(json.dumps({**offer, "per_node_concurrency": 0}))
+    assert _create(workspace, "--offer-file", str(path), "--json") == 2
+    assert len(hub.posted) == 1

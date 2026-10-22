@@ -453,7 +453,9 @@ def test_snapshot_global_count_and_byte_caps_fail_closed(directory, monkeypatch,
     assert directory.execute("SELECT COUNT(*) FROM fleet_read_snapshots").fetchone()[0] == 0
 
 
-@pytest.mark.parametrize("previous_version", [fleet_hub.SCHEMA_VERSION - 4, fleet_hub.SCHEMA_VERSION - 1])
+@pytest.mark.parametrize(
+    "previous_version", [fleet_hub.SCHEMA_VERSION - 4, pytest.param(42, id="main-v42"), fleet_hub.SCHEMA_VERSION - 1]
+)
 def test_previous_schema_migrates_once_and_preserves_snapshot_on_reopen(tmp_path, previous_version):
     path = tmp_path / "fleet.db"
     conn = fleet_hub.init_db(path)

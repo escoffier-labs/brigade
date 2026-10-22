@@ -152,7 +152,8 @@ def test_expiry_cleanup_removes_snapshot_rows_and_counts(store, monkeypatch):
         read(store, first["next_cursor"])
 
 
-def test_old_format_current_schema_migrates_idempotently_and_rejects_cursor(store):
+@pytest.mark.parametrize("previous_version", [41, fleet_hub.SCHEMA_VERSION])
+def test_old_format_current_schema_migrates_idempotently_and_rejects_cursor(store, previous_version):
     first = seed(store, 3)
     store.execute("UPDATE fleet_read_snapshots SET payload=?", (json.dumps({"claims": []}),))
     objects = store.execute(
@@ -161,6 +162,7 @@ def test_old_format_current_schema_migrates_idempotently_and_rejects_cursor(stor
     ).fetchall()
     for kind, name in objects:
         store.execute(f'DROP {kind} "{name}"')
+    store.execute(f"PRAGMA user_version={previous_version}")
     store.commit()
     path = store.execute("PRAGMA database_list").fetchone()[2]
     for _ in range(2):

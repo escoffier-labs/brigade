@@ -11,6 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 import sqlite3
+from datetime import datetime, timedelta
 from typing import Any, Mapping, Sequence
 
 from . import worklore_ownership as ownership
@@ -29,7 +30,7 @@ from .worklore_validate import (
 LIST_DEFAULT = 20
 LIST_MAX = 50
 REPO_MAX = 255
-REQUEST_FIELDS = frozenset({"campaign_key", "title", "description", "acceptance", "priority", "members"})
+REQUEST_FIELDS = frozenset({"campaign_key", "title", "description", "acceptance", "priority", "members", "offer"})
 MEMBER_FIELDS = frozenset({"repo", "override"})
 TERMINAL_BUCKETS = ("completed", "canceled", "archived")
 BUCKETS = ("unowned", "in_flight", "awaiting_gate", "attempt_limited", "blocked", *TERMINAL_BUCKETS)
@@ -173,7 +174,12 @@ def parse_request(raw: object) -> dict[str, Any]:
             entry.get("override", ""), f"members[{index}].override", max_len=DESCRIPTION_MAX, min_len=0
         )
         members.append({"repo": repo, "override": override})
-    return {"campaign_key": key, "item": parsed, "members": members}
+    return {
+        "campaign_key": key,
+        "item": parsed,
+        "members": members,
+        "offer": parse_offer(raw["offer"]) if "offer" in raw else None,
+    }
 
 
 def create_campaign(
@@ -235,6 +241,25 @@ def create_campaign(
                 raise WorkloreConflict(
                     "campaign spec differs from the stored campaign; patch the campaign item to change the spec",
                     code="campaign-spec-changed",
+                )
+        requested_offer = request["offer"]
+        current_offer = campaign_offer(conn, campaign_work_id)
+        if requested_offer is not None:
+            if current_offer is not None and current_offer["offer"] != requested_offer:
+                raise WorkloreConflict("campaign offer is immutable", code="campaign-offer-conflict")
+            if current_offer is None:
+                status = store._loaded_item(conn, campaign_work_id)["status"]
+                store._append_event(
+                    conn,
+                    work_id=campaign_work_id,
+                    event_type="campaign-offered",
+                    from_status=status,
+                    to_status=status,
+                    actor_type=actor_type,
+                    actor_id=actor_id,
+                    node_id=node_id,
+                    now=now,
+                    detail={"offer": requested_offer},
                 )
         added: list[str] = []
         existing: list[str] = []
@@ -385,6 +410,7 @@ def _campaign(conn: sqlite3.Connection, key: str, *, members: list[dict[str, Any
         "spec_fingerprint": spec,
         "created_at": str(row[2]),
         "created_by": str(row[3]),
+        "offer": (campaign_offer(conn, str(row[1])) or {}).get("offer"),
         "summary": summarize(members if members is not None else _members(conn, key, spec)),
     }
 
@@ -417,3 +443,120 @@ def show_campaign(conn: sqlite3.Connection, campaign_key: str) -> dict[str, Any]
     item = store._loaded_item(conn, str(row[1]))
     members = _members(conn, campaign_key, spec_fingerprint(item["description"], item["acceptance"]))
     return {"campaign": _campaign(conn, campaign_key, members=members), "members": members}
+
+
+def parse_offer(raw: object) -> dict[str, Any]:
+    """Validate a closed campaign authorization; no offer means no self-assignment."""
+    if not isinstance(raw, Mapping):
+        raise _field_bound("campaign offer must be an object")
+    required = {"allowed_nodes", "per_node_concurrency", "attempt_budget", "authorization_ref", "exclusions"}
+    if set(raw) - (required | {"lease_seconds"}):
+        raise WorkloreValidationError("unknown campaign offer field", code="unknown-field")
+    if not required <= set(raw):
+        raise _field_bound("campaign offer requires all authorization bounds")
+    nodes = [ownership._node(node) for node in ownership._array(raw["allowed_nodes"], 32)]
+    if not nodes or len(set(nodes)) != len(nodes):
+        raise _field_bound("campaign offer requires distinct allowed nodes")
+    budget = ownership._object(raw["attempt_budget"], {"cap", "source_ref"})
+    exclusions = [_repo(value, index) for index, value in enumerate(ownership._array(raw["exclusions"], 32))]
+    if len(set(exclusions)) != len(exclusions):
+        raise _field_bound("campaign exclusions must be distinct repository identities")
+    return {
+        "allowed_nodes": sorted(nodes),
+        "per_node_concurrency": ownership._integer(raw["per_node_concurrency"], minimum=1, maximum=32),
+        "attempt_budget": {
+            "cap": ownership._integer(budget["cap"], minimum=1, maximum=ownership.BUDGET_CAP_MAX),
+            "source_ref": ownership._reference(budget["source_ref"]),
+        },
+        "authorization_ref": ownership._reference(raw["authorization_ref"]),
+        "exclusions": sorted(exclusions),
+        "lease_seconds": ownership._integer(raw.get("lease_seconds", 300), minimum=1, maximum=3600),
+    }
+
+
+def campaign_offer(conn: sqlite3.Connection, work_id: str) -> dict[str, Any] | None:
+    row = conn.execute(
+        "SELECT event_id, actor_id, actor_type, detail_json FROM work_events "
+        "WHERE work_id=? AND event_type='campaign-offered' ORDER BY seq DESC LIMIT 1",
+        (work_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return {"event_id": row[0], "actor_id": row[1], "actor_type": row[2], "offer": json.loads(row[3])["offer"]}
+
+
+def member_campaign(conn: sqlite3.Connection, work_id: str) -> dict[str, str] | None:
+    """Indexed backlink for old and new members, derived from canonical membership."""
+    row = conn.execute(
+        "SELECT m.campaign_key, c.work_id, m.repo FROM work_campaign_members m "
+        "JOIN work_campaigns c ON c.campaign_key=m.campaign_key WHERE m.work_id=?",
+        (work_id,),
+    ).fetchone()
+    return None if row is None else {"campaign_key": row[0], "work_id": row[1], "repo": row[2]}
+
+
+def _eligible_campaign(conn: sqlite3.Connection, member: Mapping[str, str]) -> dict[str, Any]:
+    campaign = store._loaded_item(conn, member["work_id"])
+    if campaign["status"] in {*TERMINAL_BUCKETS, "blocked", "deferred"} or campaign.get("blocker"):
+        raise WorkloreConflict("campaign is not eligible for assignment", code="campaign-ineligible")
+    grant = campaign_offer(conn, member["work_id"])
+    if grant is None:
+        raise store.WorkloreForbidden("campaign has no authorization offer", code="campaign-not-authorized")
+    return grant
+
+
+def take_authority(
+    conn: sqlite3.Connection, work_id: str, item: Mapping[str, Any], current: Mapping[str, Any], *, node: str, now: str
+) -> dict[str, Any]:
+    """Check eligibility and per-node occupancy while ownership holds BEGIN IMMEDIATE."""
+    member = member_campaign(conn, work_id)
+    if member is None:
+        raise store.WorkloreForbidden("take requires campaign membership", code="campaign-not-authorized")
+    grant = _eligible_campaign(conn, member)
+    offer = grant["offer"]
+    if node not in offer["allowed_nodes"]:
+        raise store.WorkloreForbidden("node is outside campaign authorization", code="campaign-not-authorized")
+    if member["repo"] in offer["exclusions"]:
+        raise WorkloreConflict("repository is excluded from campaign assignment", code="campaign-ineligible")
+    reclaim = (
+        current["state"] in _HELD_STATES
+        and current.get("campaign_offer_event") == grant["event_id"]
+        and ownership.expired(current, now)
+    )
+    allowed_statuses = {"captured", "ready", "claimed", "running"} if reclaim else {"captured", "ready"}
+    if (
+        item["status"] not in allowed_statuses
+        or item.get("blocker")
+        or store._review_after_future(item.get("review_after"))
+        or int(item["attempt_count"]) >= min(store.ATTEMPT_LIMIT, offer["attempt_budget"]["cap"])
+    ):
+        raise WorkloreConflict("member is not eligible for assignment", code="campaign-ineligible")
+    spec = store._loaded_item(conn, member["work_id"])
+    override, fingerprint = conn.execute(
+        "SELECT override, spec_fingerprint FROM work_campaign_members WHERE work_id=?", (work_id,)
+    ).fetchone()
+    expected = member_fingerprint(spec_fingerprint(spec["description"], spec["acceptance"]), override)
+    if fingerprint != expected or item["description"] != override or item["acceptance"] != spec["acceptance"]:
+        raise WorkloreConflict("member specification has drifted", code="campaign-ineligible")
+    if current["state"] != "unowned" and not ownership.expired(current, now):
+        raise WorkloreConflict("member ownership is already reserved", code="ownership-conflict")
+    active = 0
+    # Membership can grow through re-create, so do not truncate the occupancy set.
+    for (identifier,) in conn.execute(
+        "SELECT work_id FROM work_campaign_members WHERE campaign_key=?", (member["campaign_key"],)
+    ):
+        held = ownership._current(conn, identifier)
+        if held["state"] in _HELD_STATES and held["owner_node"] == node and not ownership.expired(held, now):
+            active += 1
+    if active >= offer["per_node_concurrency"]:
+        raise WorkloreConflict("campaign per-node concurrency limit reached", code="campaign-concurrency-limit")
+    return {
+        "granted_by": {"actor_id": grant["actor_id"], "actor_type": grant["actor_type"]},
+        "authorization_ref": offer["authorization_ref"],
+        "attempt_budget": offer["attempt_budget"],
+        "exclusions": offer["exclusions"],
+        "campaign_key": member["campaign_key"],
+        "campaign_repo": member["repo"],
+        "campaign_offer_event": grant["event_id"],
+        "expires_at": (datetime.fromisoformat(now) + timedelta(seconds=offer["lease_seconds"])).isoformat(),
+    }
