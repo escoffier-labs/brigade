@@ -10,6 +10,7 @@ import re
 import secrets
 import sqlite3
 from collections.abc import Callable
+from dataclasses import dataclass
 from typing import Any
 
 from . import fleet_hub
@@ -24,7 +25,7 @@ SNAPSHOT_MAX_PER_CALLER = 8
 SNAPSHOT_MAX_COUNT = 128
 SNAPSHOT_MAX_BYTES = 64 * 1024 * 1024
 SNAPSHOT_SINGLE_MAX_BYTES = 16 * 1024 * 1024
-_SCHEMA = (
+_SCHEMA: tuple[tuple[str, str, str], ...] = (
     (
         "table",
         "fleet_read_snapshots",
@@ -38,6 +39,100 @@ _SCHEMA = (
         "CREATE INDEX IF NOT EXISTS fleet_read_snapshots_expiry ON fleet_read_snapshots(expires_at)",
     ),
 )
+
+# Visibility changes belong to authorization writes, never to continuation reads.
+# Cache each row's current visibility and maintain totals with deltas, so even a
+# narrowed grant can seek past a large forbidden prefix without reading it.
+_VISIBLE_SQL = """(
+    (caller NOT GLOB 'agent:*' OR (recipient != caller AND EXISTS (
+        SELECT 1 FROM fleet_message_send_grants g WHERE g.principal_id=caller
+        AND g.pattern IN (recipient, '*', CASE WHEN recipient GLOB 'agent:*' THEN 'agent:*' ELSE 'node:*' END)
+    ))) AND (
+        kind='claims' OR
+        (kind='principals' AND EXISTS (SELECT 1 FROM fleet_message_principals p
+            WHERE p.principal_id=recipient AND p.revoked_at IS NULL)) OR
+        (kind IN ('nodes','sessions') AND EXISTS (SELECT 1 FROM nodes n
+            WHERE n.node_id=recipient AND n.revoked_at IS NULL))
+    )
+)"""
+_SCHEMA += (
+    (
+        "table",
+        "fleet_read_snapshot_groups",
+        "CREATE TABLE IF NOT EXISTS fleet_read_snapshot_groups ("
+        "snapshot_id TEXT NOT NULL, kind TEXT NOT NULL, row_count INTEGER NOT NULL, total INTEGER NOT NULL, "
+        "PRIMARY KEY(snapshot_id,kind)) WITHOUT ROWID",
+    ),
+    (
+        "table",
+        "fleet_read_snapshot_rows",
+        "CREATE TABLE IF NOT EXISTS fleet_read_snapshot_rows ("
+        "snapshot_id TEXT NOT NULL, kind TEXT NOT NULL, ordinal INTEGER NOT NULL, caller TEXT NOT NULL, "
+        "recipient TEXT NOT NULL, payload TEXT NOT NULL, wire_bytes INTEGER NOT NULL, visible INTEGER NOT NULL, "
+        "PRIMARY KEY(snapshot_id,kind,ordinal)) WITHOUT ROWID",
+    ),
+    (
+        "index",
+        "fleet_read_snapshot_visible",
+        "CREATE INDEX IF NOT EXISTS fleet_read_snapshot_visible "
+        "ON fleet_read_snapshot_rows(snapshot_id,kind,visible,ordinal)",
+    ),
+    (
+        "index",
+        "fleet_read_snapshot_recipient",
+        "CREATE INDEX IF NOT EXISTS fleet_read_snapshot_recipient ON fleet_read_snapshot_rows(recipient)",
+    ),
+    (
+        "index",
+        "fleet_read_snapshot_caller",
+        "CREATE INDEX IF NOT EXISTS fleet_read_snapshot_caller ON fleet_read_snapshot_rows(caller)",
+    ),
+    (
+        "trigger",
+        "fleet_read_snapshot_delete",
+        "CREATE TRIGGER IF NOT EXISTS fleet_read_snapshot_delete "
+        "AFTER DELETE ON fleet_read_snapshots BEGIN "
+        "DELETE FROM fleet_read_snapshot_rows WHERE snapshot_id=OLD.snapshot_id; "
+        "DELETE FROM fleet_read_snapshot_groups WHERE snapshot_id=OLD.snapshot_id; END",
+    ),
+    (
+        "trigger",
+        "fleet_read_snapshot_total",
+        "CREATE TRIGGER IF NOT EXISTS fleet_read_snapshot_total "
+        "AFTER UPDATE OF visible ON fleet_read_snapshot_rows WHEN OLD.visible != NEW.visible BEGIN "
+        "UPDATE fleet_read_snapshot_groups SET total=total+NEW.visible-OLD.visible "
+        "WHERE snapshot_id=NEW.snapshot_id AND kind=NEW.kind; END",
+    ),
+)
+for _table, _identity, _scope in (
+    ("nodes", "node_id", "kind IN ('nodes','sessions')"),
+    ("fleet_message_principals", "principal_id", "kind='principals'"),
+    ("fleet_message_send_grants", "principal_id", "1"),
+):
+    for _event, _refs in (("INSERT", ("NEW",)), ("DELETE", ("OLD",)), ("UPDATE", ("OLD", "NEW"))):
+        _name = f"fleet_read_visibility_{_table}_{_event.lower()}"
+        _column = "caller" if _table == "fleet_message_send_grants" else "recipient"
+        _matches = " OR ".join(f"{_column}={ref}.{_identity}" for ref in _refs)
+        _event_sql = (
+            "UPDATE OF pattern,principal_id" if _table == "fleet_message_send_grants" else "UPDATE OF revoked_at"
+        )
+        _SCHEMA += (
+            (
+                "trigger",
+                _name,
+                f"CREATE TRIGGER IF NOT EXISTS {_name} AFTER "
+                f"{_event_sql if _event == 'UPDATE' else _event} ON {_table} BEGIN "
+                f"UPDATE fleet_read_snapshot_rows SET visible={_VISIBLE_SQL} "
+                f"WHERE ({_matches}) AND {_scope}; END",
+            ),
+        )
+
+
+@dataclass(frozen=True)
+class Snapshot:
+    """Constant-size collection metadata; row payloads stay in SQLite."""
+
+    groups: list[tuple[str, int, int]]
 
 
 class SnapshotWriteRequired(Exception):
@@ -78,9 +173,7 @@ def query_hash(conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str) ->
     return hashlib.sha256(json.dumps(query).encode()).hexdigest()
 
 
-def load(
-    conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str
-) -> tuple[dict[str, list[dict[str, Any]]], list[int], str] | None:
+def load(conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str) -> tuple[Snapshot, list[int], str] | None:
     if "cursor" not in raw:
         return None
     cursor = raw["cursor"]
@@ -103,18 +196,34 @@ def load(
         raise MessageError("invalid paging cursor") from None
     snapshot_id, offsets = value
     row = conn.execute(
-        "SELECT payload FROM fleet_read_snapshots WHERE snapshot_id=? AND caller=? AND query_hash=? AND expires_at>?",
+        "SELECT 1 FROM fleet_read_snapshots WHERE snapshot_id=? AND caller=? AND query_hash=? "
+        "AND expires_at>? AND payload='rows-v1'",
         (snapshot_id, caller, query_hash(conn, raw, caller=caller), fleet_hub._now_epoch()),
     ).fetchone()
     if row is None:
-        raise MessageError("paging cursor is invalid or expired")
-    data = json.loads(row[0])
-    if any(offset > len(rows) for offset, rows in zip(offsets, data.values(), strict=True)):
-        raise MessageError("invalid paging cursor offset")
-    return data, offsets, snapshot_id
+        raise MessageError("paging cursor is invalid or expired; restart from the first page")
+    keys = ("nodes", "principals", "sessions") if raw["action"] == "who" else ("claims",)
+    groups = []
+    for key, offset in zip(keys, offsets, strict=True):
+        group = conn.execute(
+            "SELECT row_count,total FROM fleet_read_snapshot_groups WHERE snapshot_id=? AND kind=?", (snapshot_id, key)
+        ).fetchone()
+        if group is None:
+            raise MessageError("paging cursor is invalid or expired; restart from the first page")
+        if offset > group[0]:
+            raise MessageError("invalid paging cursor offset")
+        groups.append((key, group[0], group[1]))
+    return Snapshot(groups), offsets, snapshot_id
 
 
-def _save(conn: sqlite3.Connection, data: dict[str, Any], *, caller: str, binding: str) -> str:
+def _save(
+    conn: sqlite3.Connection,
+    data: dict[str, list[dict[str, Any]]],
+    *,
+    caller: str,
+    binding: str,
+    visible: Callable[[str, dict[str, Any]], bool],
+) -> str:
     payload = json.dumps(data, separators=(",", ":"))
     size = len(payload.encode())
     if size > SNAPSHOT_SINGLE_MAX_BYTES:
@@ -131,8 +240,33 @@ def _save(conn: sqlite3.Connection, data: dict[str, Any], *, caller: str, bindin
     snapshot_id = secrets.token_hex(24)
     conn.execute(
         "INSERT INTO fleet_read_snapshots VALUES(?,?,?,?,?,?)",
-        (snapshot_id, caller, binding, now + SNAPSHOT_TTL_SECONDS, payload, size),
+        (snapshot_id, caller, binding, now + SNAPSHOT_TTL_SECONDS, "rows-v1", size),
     )
+    for key, rows in data.items():
+        stored = [
+            (
+                snapshot_id,
+                key,
+                ordinal,
+                caller,
+                str(
+                    row["owner_node"]
+                    if key == "claims"
+                    else row["principal_id"]
+                    if key == "principals"
+                    else row["node_id"]
+                ),
+                json.dumps(row, separators=(",", ":")),
+                _wire_size(row),
+                int(visible(key, row)),
+            )
+            for ordinal, row in enumerate(rows)
+        ]
+        conn.execute(
+            "INSERT INTO fleet_read_snapshot_groups VALUES(?,?,?,?)",
+            (snapshot_id, key, len(rows), sum(row[-1] for row in stored)),
+        )
+        conn.executemany("INSERT INTO fleet_read_snapshot_rows VALUES(?,?,?,?,?,?,?,?)", stored)
     return snapshot_id
 
 
@@ -147,7 +281,7 @@ def _wire_size(row: dict[str, Any]) -> int:
 def page(
     conn: sqlite3.Connection,
     raw: dict[str, Any],
-    data: dict[str, list[dict[str, Any]]],
+    data: dict[str, list[dict[str, Any]]] | Snapshot,
     *,
     caller: str,
     limit: int,
@@ -156,6 +290,9 @@ def page(
     snapshot_id: str | None = None,
     snapshot_write: bool = False,
 ) -> dict[str, Any]:
+    if isinstance(data, Snapshot):
+        assert offsets is not None and snapshot_id is not None
+        return _snapshot_page(conn, data, offsets, snapshot_id, limit=limit, snapshot_write=snapshot_write)
     offsets = list(offsets) if offsets is not None else [0] * len(data)
     result: dict[str, Any] = {}
     totals: dict[str, int] = {}
@@ -186,10 +323,77 @@ def page(
         result[key] = selected
         offsets[index] = position
         more |= position < len(rows)
-    if more and snapshot_id is None:
+    opted_in = "limit" in raw or "cursor" in raw
+    if more and snapshot_id is None and opted_in:
         if not snapshot_write:
             raise SnapshotWriteRequired
-        snapshot_id = _save(conn, data, caller=caller, binding=query_hash(conn, raw, caller=caller))
+        snapshot_id = _save(conn, data, caller=caller, binding=query_hash(conn, raw, caller=caller), visible=visible)
+    cursor = (
+        base64.urlsafe_b64encode(json.dumps([snapshot_id, offsets], separators=(",", ":")).encode()).decode()
+        if more and snapshot_id is not None
+        else None
+    )
+    return {
+        **result,
+        "total": totals["claims"] if "claims" in data else totals,
+        "truncated": more or oversized > 0,
+        "oversized": oversized,
+        "next_cursor": cursor,
+    }
+
+
+def _snapshot_page(
+    conn: sqlite3.Connection,
+    snapshot: Snapshot,
+    offsets: list[int],
+    snapshot_id: str,
+    *,
+    limit: int,
+    snapshot_write: bool,
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    totals = {}
+    remaining = PAGE_MAX_BYTES - 8192
+    oversized = 0
+    more = False
+    offsets = list(offsets)
+    for index, (key, length, total) in enumerate(snapshot.groups):
+        totals[key] = total
+        selected: list[dict[str, Any]] = []
+        position = offsets[index]
+        # The covering visibility/ordinal index skips revoked or newly forbidden
+        # rows. SQLite streams only the page and one lookahead, without OFFSET.
+        rows = conn.execute(
+            "SELECT ordinal,wire_bytes,payload FROM fleet_read_snapshot_rows "
+            "WHERE snapshot_id=? AND kind=? AND visible=1 AND ordinal>=? ORDER BY ordinal",
+            (snapshot_id, key, position),
+        )
+        try:
+            for ordinal, size, payload in rows:
+                position = ordinal
+                if key != "sessions" and len(selected) >= limit:
+                    more = True
+                    break
+                if size > PAGE_MAX_BYTES - 8192:
+                    oversized += 1
+                    position += 1
+                    continue
+                if size > remaining:
+                    more = True
+                    break
+                selected.append(json.loads(payload))
+                remaining -= size
+                position += 1
+            else:
+                position = length
+        finally:
+            rows.close()
+        result[key] = selected
+        offsets[index] = position
+    if not more:
+        if not snapshot_write:
+            raise SnapshotWriteRequired
+        conn.execute("DELETE FROM fleet_read_snapshots WHERE snapshot_id=?", (snapshot_id,))
     cursor = (
         base64.urlsafe_b64encode(json.dumps([snapshot_id, offsets], separators=(",", ":")).encode()).decode()
         if more
@@ -197,7 +401,7 @@ def page(
     )
     return {
         **result,
-        "total": totals["claims"] if "claims" in data else totals,
+        "total": totals.get("claims", totals),
         "truncated": more or oversized > 0,
         "oversized": oversized,
         "next_cursor": cursor,

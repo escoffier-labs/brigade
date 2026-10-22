@@ -27,7 +27,7 @@ def roster(conn, count):
 
 
 def who(conn, **args):
-    status, page = messages.handle(conn, {"action": "who", **args}, caller="reader-node")
+    status, page = messages.handle(conn, {"action": "who", "limit": 200, **args}, caller="reader-node")
     assert status == 200
     return page
 
@@ -82,7 +82,7 @@ def test_grants_and_text_filter_precede_cuts_and_do_not_hide_sessions(directory)
     session(directory, "node-0004", "later-session", repo_label="unique-match")
     session(directory, "node-0000", "hidden-session", repo_label="unique-match")
     for args in ({"limit": 1}, {"limit": 1, "filter": "UNIQUE-MATCH"}):
-        status, page = messages.handle(directory, {"action": "who", **args}, caller="agent:limited")
+        status, page = messages.handle(directory, {"action": "who", "limit": 200, **args}, caller="agent:limited")
         assert status == 200
         assert [row["session_id"] for row in page["sessions"]] == ["later-session"]
         assert [row["node_id"] for row in page["nodes"]] == ([] if "filter" in args else ["node-0003"])
@@ -149,21 +149,24 @@ def test_full_mcp_wire_response_is_bounded_with_maximum_sessions(directory, monk
         session(directory, "reader-node", f"session-{index:04d}", repo_label="😀" * 256, branch="😀" * 256)
     station = FleetMcp()
     monkeypatch.setattr(station, "_authority", lambda: object())
-    monkeypatch.setattr(
-        fleet_client_messages,
-        "_online",
-        lambda body, **_kw: who(directory, **{k: v for k, v in body.items() if k != "action"}),
-    )
+    raw_pages = []
+
+    def fetch(body, **_kw):
+        page = who(directory, **{k: v for k, v in body.items() if k != "action"})
+        raw_pages.append(dict(page))
+        return page
+
+    monkeypatch.setattr(fleet_client_messages, "_online", fetch)
     args = {"limit": 500, "all": True}
     nodes, principals, sessions = [], [], []
     for _ in range(20):
-        page = who(directory, **args)
-        assert len(json.dumps(page).encode()) < 8 * 1024 * 1024
         response = mcp_server.handle_message(
             {"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": "fleet_who", "arguments": args}},
             **station.callbacks(),
         )
         assert not response["result"]["isError"]
+        page = raw_pages[-1]
+        assert len(json.dumps(page).encode()) < 8 * 1024 * 1024
         assert len(json.dumps(response).encode()) < 8 * 1024 * 1024
         nodes.extend(row["node_id"] for row in page["nodes"])
         principals.extend(row["principal_id"] for row in page["principals"])
@@ -447,7 +450,7 @@ def test_snapshot_global_count_and_byte_caps_fail_closed(directory, monkeypatch,
     assert directory.execute("SELECT COUNT(*) FROM fleet_read_snapshots").fetchone()[0] == 0
 
 
-@pytest.mark.parametrize("previous_version", [37, 40])
+@pytest.mark.parametrize("previous_version", [fleet_hub.SCHEMA_VERSION - 4, fleet_hub.SCHEMA_VERSION - 1])
 def test_previous_schema_migrates_once_and_preserves_snapshot_on_reopen(tmp_path, previous_version):
     path = tmp_path / "fleet.db"
     conn = fleet_hub.init_db(path)
@@ -500,7 +503,9 @@ def test_current_schema_repairs_paging_objects_and_preserves_cursors(tmp_path, m
             if missing == "table" and startup == 0:
                 first = who(conn, limit=1)
                 snapshots = conn.execute("SELECT * FROM fleet_read_snapshots").fetchall()
-            second = who(conn, cursor=first["next_cursor"])
-            assert [row["node_id"] for row in first["nodes"] + second["nodes"]] == ["other-node", "reader-node"]
+            if startup == 1:
+                second = who(conn, cursor=first["next_cursor"])
+                assert [row["node_id"] for row in first["nodes"] + second["nodes"]] == ["other-node", "reader-node"]
+                assert conn.execute("SELECT COUNT(*) FROM fleet_read_snapshots").fetchone()[0] == 0
         finally:
             conn.close()

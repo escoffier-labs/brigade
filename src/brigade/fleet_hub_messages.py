@@ -984,46 +984,6 @@ def reply(conn: sqlite3.Connection, raw: dict[str, Any], *, sender: str) -> dict
     return _fetch(conn, message["id"])
 
 
-# Legacy row-and-byte bounding helper retained for compatibility tests.
-# Production station reads use fleet_hub_paging snapshots.
-CLAIMS_PAGE_DEFAULT = 200
-CLAIMS_PAGE_MAX = 500
-CLAIMS_PAGE_MAX_BYTES = 4 * 1024 * 1024
-
-
-def _claims_page_limit(raw: dict[str, Any]) -> int:
-    limit = raw.get("limit", CLAIMS_PAGE_DEFAULT)
-    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= CLAIMS_PAGE_MAX:
-        raise MessageError(f"claims limit must be an integer from 1 to {CLAIMS_PAGE_MAX}")
-    return limit
-
-
-def _claims_page(rows: list[dict[str, Any]], *, limit: int) -> dict[str, Any]:
-    ordered = sorted(rows, key=lambda row: str(row.get("target", "")))
-    page: list[dict[str, Any]] = []
-    size = 0
-    oversized = 0
-    for row in ordered:
-        if len(page) >= limit:
-            break
-        row_size = len(json.dumps(row, separators=(",", ":"), default=str).encode("utf-8"))
-        if row_size > CLAIMS_PAGE_MAX_BYTES:
-            # A single row over the budget would push the response past the
-            # client's cap; leave it out and count it rather than fail.
-            oversized += 1
-            continue
-        if size + row_size > CLAIMS_PAGE_MAX_BYTES:
-            break
-        page.append(row)
-        size += row_size
-    return {
-        "claims": page,
-        "truncated": len(page) < len(ordered),
-        "total": len(ordered),
-        "oversized": oversized,
-    }
-
-
 def _station_read(
     conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str, snapshot_write: bool = False
 ) -> dict[str, Any]:
@@ -1040,6 +1000,20 @@ def _station_read(
 
     limit = paging.page_limit(raw)
     snapshot = paging.load(conn, raw, caller=caller)
+
+    if snapshot is not None:
+        stored_snapshot, offsets, snapshot_id = snapshot
+        return paging.page(
+            conn,
+            raw,
+            stored_snapshot,
+            caller=caller,
+            limit=limit,
+            visible=lambda *_: True,
+            offsets=offsets,
+            snapshot_id=snapshot_id,
+            snapshot_write=snapshot_write,
+        )
 
     # Load the caller's grants once; checking every row with require_granted
     # would issue one query per claim or session.
@@ -1060,12 +1034,6 @@ def _station_read(
         identity = str(row["principal_id"] if key == "principals" else row["node_id"])
         active = active_principals if key == "principals" else active_nodes
         return identity in active and permitted(identity)
-
-    if snapshot is not None:
-        data, offsets, snapshot_id = snapshot
-        return paging.page(
-            conn, raw, data, caller=caller, limit=limit, visible=visible, offsets=offsets, snapshot_id=snapshot_id
-        )
 
     if action == "claims":
         if not caller.startswith("agent:"):

@@ -1026,18 +1026,6 @@ def test_directory_legacy_continuation_is_explicit(stations, monkeypatch, action
         assert call(station, f"fleet_{action}")["next_cursor"] == "opaque-continuation"
 
 
-def test_claims_page_stays_under_the_byte_budget(monkeypatch):
-    monkeypatch.setattr(fleet_hub_messages, "CLAIMS_PAGE_MAX_BYTES", 3000)
-    rows = [{"target": f"t{index}-" + "y" * 1000, "owner_node": NODE_A} for index in range(5)]
-    page = fleet_hub_messages._claims_page(rows, limit=500)
-    size = sum(len(json.dumps(row, separators=(",", ":"))) for row in page["claims"])
-    assert page["claims"] and size <= 3000 and page["truncated"] and page["total"] == 5
-    rows.insert(0, {"target": "a-first", "owner_node": NODE_A, "conductor": "z" * 5000})
-    skipped = fleet_hub_messages._claims_page(rows, limit=500)
-    assert skipped["oversized"] == 1 and skipped["truncated"]
-    assert "a-first" not in [row["target"] for row in skipped["claims"]] and skipped["claims"]
-
-
 def test_each_tool_call_captures_one_authority(stations, monkeypatch):
     a, b = stations
     ids = [str(call(a, "fleet_send", to=NODE_B, body=f"m{index}")["message"]["id"]) for index in range(3)]

@@ -364,7 +364,7 @@ class FleetMcp:
         authority = self._authority()
         if name in {"fleet_who", "fleet_claims"}:
             action = "who" if name == "fleet_who" else "claims"
-            payload = messages._online({"action": action, **args}, authority=authority)
+            payload = messages._online({"action": action, "limit": 200, **args}, authority=authority)
             if payload.get("truncated") is True and "next_cursor" not in payload:
                 raise messages.FleetMessageHubError(
                     "Fleet hub does not support directory continuation.", code="paging_continuation_unsupported"
