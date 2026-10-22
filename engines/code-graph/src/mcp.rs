@@ -26,9 +26,9 @@ use crate::model::Direction;
 use crate::query::build_context_pack_from_entry_points;
 use crate::query::{
     DEFAULT_AFFECTED_DEPTH, DEFAULT_IMPACT_DEPTH, affected, build_context_pack, cycles, dead_code,
-    diff_graphs, doctor, file_neighbors, graph_query_with_matches, impact_query_with_matches,
-    limit_edges, normalize_depth, outline, personalize_context_pack, render_markdown,
-    render_markdown_budgeted, search_symbols_with_path, stats,
+    diff_graphs, doctor, file_neighbors, freshness, graph_query_with_matches,
+    impact_query_with_matches, limit_edges, normalize_depth, outline, personalize_context_pack,
+    render_markdown, render_markdown_budgeted, search_symbols_with_path, stats,
 };
 use crate::store::{init_schema, open_db, open_read_only, sync_repo};
 
@@ -226,7 +226,7 @@ fn call_tool(default_db: &Path, name: &str, args: &Value) -> Result<String> {
                 _ => impact_query_with_matches(&conn, &symbol, depth, all_matches)?,
             };
             result.edges = limit_edges(result.edges, optional_usize_arg(args, "limit"));
-            to_pretty(&result)
+            to_pretty_with_freshness(&result, &conn, &doctor_root(default_db, args, &db))
         }
         #[cfg(feature = "codesearch")]
         ToolId::SemanticSearch => {
@@ -287,11 +287,15 @@ fn call_tool(default_db: &Path, name: &str, args: &Value) -> Result<String> {
         ToolId::FileNeighbors => to_pretty(&file_neighbors(&conn, &str_arg(args, "path"))?),
         ToolId::DeadCode => to_pretty(&dead_code(&conn, usize_arg(args, "limit", 100))?),
         ToolId::Cycles => to_pretty(&cycles(&conn)?),
-        ToolId::Affected => to_pretty(&affected(
+        ToolId::Affected => to_pretty_with_freshness(
+            &affected(
+                &conn,
+                &files_arg(args),
+                usize_arg(args, "depth", DEFAULT_AFFECTED_DEPTH),
+            )?,
             &conn,
-            &files_arg(args),
-            usize_arg(args, "depth", DEFAULT_AFFECTED_DEPTH),
-        )?),
+            &doctor_root(default_db, args, &db),
+        ),
         ToolId::Explain => to_pretty(&crate::store::explain_calls(
             &conn,
             &str_arg(args, "source"),
@@ -648,6 +652,22 @@ fn tool_defs() -> Value {
 
 fn to_pretty<T: Serialize>(value: &T) -> Result<String> {
     Ok(serde_json::to_string_pretty(value)?)
+}
+
+/// Serialize a graph answer with a top-level `freshness` object, so an agent
+/// sees whether the index can be trusted without a separate `doctor` call. A
+/// failed check reports UNKNOWN instead of failing the query.
+fn to_pretty_with_freshness<T: Serialize>(
+    value: &T,
+    conn: &rusqlite::Connection,
+    repo_root: &Path,
+) -> Result<String> {
+    let mut body = serde_json::to_value(value)?;
+    let freshness = freshness(conn, repo_root).unwrap_or_else(crate::query::Freshness::unknown);
+    if let Some(object) = body.as_object_mut() {
+        object.insert("freshness".to_string(), serde_json::to_value(freshness)?);
+    }
+    to_pretty(&body)
 }
 
 fn returns_json_rpc_tool_error(name: &str) -> bool {

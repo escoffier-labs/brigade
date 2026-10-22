@@ -340,6 +340,28 @@ fn doctor_fresh_synced_repo_reports_fresh() {
 }
 
 #[test]
+fn doctor_text_reports_head_movement_and_language_coverage() {
+    let dir = tempfile::tempdir().unwrap();
+    let db = build_db(dir.path());
+
+    let output = Command::new(graphtrail())
+        .current_dir(dir.path())
+        .args(["--db", &db.display().to_string(), "doctor"])
+        .output()
+        .unwrap();
+
+    assert!(output.status.success(), "doctor failed: {output:?}");
+    let stdout = String::from_utf8(output.stdout).unwrap();
+    assert!(stdout.contains("head_moved=false"), "{stdout}");
+    assert!(
+        stdout.contains(
+            "coverage.python: files=1 symbols=2 call_sites=1 resolved=1 unresolved=0 cross_file_edges=0"
+        ),
+        "{stdout}"
+    );
+}
+
+#[test]
 fn doctor_new_file_reports_stale_exit_1() {
     let dir = tempfile::tempdir().unwrap();
     let db = build_db(dir.path());
