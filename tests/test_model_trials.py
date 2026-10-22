@@ -892,13 +892,20 @@ def test_resume_regrades_grader_error_cells(tmp_path, monkeypatch):
 def test_project_cell_strips_prompt_and_relativizes_run_dir(tmp_path):
     secret = "secret prompt contents must not leak"
     run_dir = tmp_path / "results" / "cells" / "abc" / "attempts" / "attempt-001" / "run"
+    outside_run_dir = tmp_path / "other-results" / "prior-run"
     cell = {
         "schema": model_trials.CELL_SCHEMA,
         "cell_id": "abc",
         "prompt": secret,
         "case": {"id": "hello", "prompt": secret},
         "run_dir": str(run_dir),
+        "prior_attempts": [
+            {"attempt": 1, "state": "adapter_error", "run_dir": str(run_dir)},
+            {"attempt": 2, "state": "execution_error", "run_dir": str(outside_run_dir)},
+            {"attempt": 3, "state": "interrupted"},
+        ],
     }
+    stored_cell = json.dumps(cell, sort_keys=True)
     projected = model_trials.project_cell(cell, base_dir=tmp_path / "results")
     serialized = json.dumps(projected)
     assert "prompt" not in projected
@@ -909,6 +916,12 @@ def test_project_cell_strips_prompt_and_relativizes_run_dir(tmp_path):
     assert projected["case"]["prompt_digest"].startswith("sha256:")
     assert "prompt" not in projected["case"]
     assert projected["run_dir"] == "cells/abc/attempts/attempt-001/run"
+    assert projected["prior_attempts"] == [
+        {"attempt": 1, "state": "adapter_error", "run_dir": "cells/abc/attempts/attempt-001/run"},
+        {"attempt": 2, "state": "execution_error", "run_dir": "prior-run"},
+        {"attempt": 3, "state": "interrupted"},
+    ]
+    assert json.dumps(cell, sort_keys=True) == stored_cell
 
 
 # --- #1977: --retry-transient -------------------------------------------------
@@ -1316,7 +1329,11 @@ def test_capacity_response_is_its_own_failure_reason_not_a_model_failure(tmp_pat
         # Nonzero exit would otherwise score as a deterministic execution_error.
         assert cell["state"] == "adapter_error"
         assert cell["failure_reason"] == "capacity-exhausted"
-        assert model_trials.summarize(root)["measurement_failures"] == 1
+        summary = model_trials.summarize(root)
+        assert summary["measurement_failures"] == 1
+        assert summary["scores"]["count"] == 0
+        assert summary["scores"]["mean"] is None
+        assert summary["partial_scores"]["count"] == 0
         assert rc == 3
 
 
@@ -1344,6 +1361,9 @@ def test_other_provider_failures_still_score_as_execution_errors(tmp_path, monke
     cell = _only_cell(root)
     assert cell["state"] == "execution_error"
     assert "failure_reason" not in cell
+    summary = model_trials.summarize(root)
+    assert summary["scores"]["count"] == 1
+    assert summary["scores"]["mean"] == 0.0
 
 
 def test_capacity_stops_remaining_cells_for_that_seat_only(tmp_path, monkeypatch):
@@ -1371,6 +1391,8 @@ def test_capacity_stops_remaining_cells_for_that_seat_only(tmp_path, monkeypatch
     summary = json.loads((root / "summary.json").read_text())
     assert summary["counts"] == {"accepted": 2, "adapter_error": 1, "not_run": 1}
     assert summary["measurement_failures"] == 1
+    assert summary["scores"]["count"] == 2
+    assert summary["scores"]["mean"] == 1.0
     assert rc == 3
 
 
@@ -1597,6 +1619,9 @@ def test_legacy_rate_limit_kind_from_output_validation_is_not_capacity(tmp_path,
         cell = json.loads(path.read_text())
         assert cell["state"] == "execution_error"
         assert cell.get("failure_reason") != "capacity-exhausted"
+    summary = model_trials.summarize(root)
+    assert summary["scores"]["count"] == 4
+    assert summary["scores"]["mean"] == 0.0
     assert rc == 1
 
 

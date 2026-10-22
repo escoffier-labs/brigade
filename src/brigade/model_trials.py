@@ -635,6 +635,12 @@ def project_cell(cell: dict[str, Any], *, base_dir: Path) -> dict[str, Any]:
             projected["run_dir"] = str(Path(run_dir).resolve().relative_to(base_dir.resolve()))
         except ValueError:
             projected["run_dir"] = Path(run_dir).name
+    prior_attempts = projected.get("prior_attempts")
+    if isinstance(prior_attempts, list):
+        projected["prior_attempts"] = [
+            project_cell(attempt, base_dir=base_dir) if isinstance(attempt, dict) else attempt
+            for attempt in prior_attempts
+        ]
     return projected
 
 
@@ -1089,6 +1095,8 @@ def summarize(output_dir: Path) -> dict[str, Any]:
         if isinstance(cell.get("duration_seconds"), (int, float)):
             durations.append(float(cell["duration_seconds"]))
         cell_state = cell.get("state")
+        if cell_state == "adapter_error" and cell.get("failure_reason") == CAPACITY_EXHAUSTED:
+            continue
         for grader in cell.get("graders", []):
             if not isinstance(grader, dict) or not isinstance(grader.get("score"), (int, float)):
                 continue
