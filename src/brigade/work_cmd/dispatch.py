@@ -44,12 +44,15 @@ def _plan(
     wave: int | None,
     worker: str | None,
     seat_map: dict[str, str],
+    allow_missing_wave: bool = False,
+    extra_exclusions: dict[str, str] | None = None,
 ) -> dict[str, Any]:
     resolution = edges.resolve_readiness(ledger)
     tasks = {str(task["id"]): task for task in ledger["tasks"] if isinstance(task, dict) and "id" in task}
     skipped = [{"task_id": item["id"], "reason": item["reason"]} for item in resolution.blocked]
     startable = []
     excluded = dispatch_state.exclusions(target)
+    excluded.update(extra_exclusions or {})
     for item in sorted(resolution.ready, key=claiming.ready_sort_key):
         task_id = item["id"]
         if task_id in excluded:
@@ -72,7 +75,7 @@ def _plan(
     waves = partition.partition_ready(startable, tasks, target, occupied=occupied)
     skipped.extend(waves.get("skipped", []))
     wave_list = waves["waves"]
-    if wave is not None and wave >= len(wave_list):
+    if wave is not None and wave >= len(wave_list) and not allow_missing_wave:
         raise ValueError(f"wave {wave} does not exist ({len(wave_list)} dispatchable waves)")
     wave_index = wave if wave is not None else (0 if wave_list else None)
     candidates = []
@@ -150,8 +153,17 @@ def dispatch(
     spawn_delay: float = 0,
     no_wait: bool = False,
     commit: bool = False,
+    watch: bool = False,
+    interval: float = 5,
+    drain_wait: bool = False,
 ) -> int:
     try:
+        if not math.isfinite(interval) or interval <= 0:
+            raise ValueError("--interval must be positive and finite")
+        if watch and (dry_run or no_wait):
+            raise ValueError("--watch cannot be combined with --dry-run or --no-wait")
+        if drain_wait and not watch:
+            raise ValueError("--drain-wait requires --watch")
         if not dry_run and sys.platform == "win32":
             raise ValueError("work dispatch apply is unsupported on Windows. Use --dry-run to plan.")
         target = target.expanduser().resolve()
@@ -201,7 +213,7 @@ def dispatch(
         result = 0
         with nullcontext() if dry_run else dispatch_state.dispatch_lock(target):
             engine = Apply(target)
-            if not dry_run:
+            if not dry_run and not watch:
                 result = engine.reconcile(no_wait=True)
                 if result == 130:
                     print(
@@ -216,6 +228,7 @@ def dispatch(
                 wave=wave,
                 worker=worker,
                 seat_map=mapping,
+                allow_missing_wave=watch,
             )
             dispatch_id = f"dispatch-{uuid4().hex}"
             directory = target / ".brigade" / "dispatch" / dispatch_id
@@ -242,7 +255,12 @@ def dispatch(
                 "spawn_delay": spawn_delay,
                 "no_wait": no_wait,
                 "commit": commit,
+                "watch": watch,
+                "interval": interval,
+                "drain_wait": drain_wait,
             }
+            if watch:
+                session["tick_sessions"] = []
             directory.mkdir(parents=True, exist_ok=False)
             localio.write_json_exclusive(directory / "plan.json", plan)
             localio.write_json_exclusive(directory / "session.json", session)
@@ -250,7 +268,61 @@ def dispatch(
                 dispatch_state.event(
                     directory, "work.dispatch.planned", {"dispatch_id": dispatch_id, "plan_digest": plan["plan_digest"]}
                 )
-                result = max(result, engine.session(directory, no_wait=no_wait))
+                if watch:
+                    from .dispatch_watch import Watch
+
+                    supervisor = Watch(engine, directory, session, interval=interval, drain_wait=drain_wait)
+
+                    def tick() -> int:
+                        reconciled = engine.reconcile(no_wait=True)
+                        if not supervisor.budget_allows():
+                            return reconciled
+                        tick_plan = _plan(
+                            target,
+                            locking._read_task_ledger(target),
+                            cap=cap,
+                            batch_size=session["batch_size"],
+                            wave=wave,
+                            worker=worker,
+                            seat_map=mapping,
+                            allow_missing_wave=True,
+                            extra_exclusions=supervisor.exclusions(),
+                        )
+                        if not tick_plan["dispatch_count"]:
+                            return reconciled
+                        tick_id = f"dispatch-{uuid4().hex}"
+                        tick_dir = dispatch_state.root(target) / tick_id
+                        tick_session = {
+                            **session,
+                            "dispatch_id": tick_id,
+                            "watch": False,
+                            "parent_watch": dispatch_id,
+                            # Watch ceilings stop launches in the supervisor.
+                            # Saved ticks must remain resumable after it exits.
+                            "deadline": None,
+                            "max_total": None,
+                            "created_at": datetime.now(timezone.utc).isoformat(),
+                            "ledger_digest": tick_plan["ledger_digest"],
+                            "plan_digest": tick_plan["plan_digest"],
+                            "no_wait": True,
+                        }
+                        tick_dir.mkdir(parents=True, exist_ok=False)
+                        localio.write_json_exclusive(tick_dir / "plan.json", tick_plan)
+                        localio.write_json_exclusive(tick_dir / "session.json", tick_session)
+                        session["tick_sessions"].append(tick_id)
+                        dispatch_state.event(
+                            directory,
+                            "work.dispatch.planned",
+                            {
+                                "dispatch_id": tick_id,
+                                "plan_digest": tick_plan["plan_digest"],
+                            },
+                        )
+                        return max(reconciled, engine.session(tick_dir, no_wait=True))
+
+                    result = supervisor.run(tick)
+                else:
+                    result = max(result, engine.session(directory, no_wait=no_wait))
     except locking.TaskLedgerError:
         raise
     except (OSError, ValueError) as exc:
@@ -259,7 +331,17 @@ def dispatch(
         else:
             print(f"error: {exc}", file=sys.stderr)
         return 2
-    if json_output:
+    if watch and json_output:
+        print(
+            json.dumps(
+                {key: session[key] for key in ("dispatch_id", "launched", "close_reason", "tick_sessions")}, indent=2
+            )
+        )
+    elif watch:
+        print(f"dispatch: {dispatch_id}")
+        print(f"launched: {session['launched']}, close_reason: {session['close_reason']}")
+        print("tick_sessions: " + ", ".join(session["tick_sessions"]))
+    elif json_output:
         print(json.dumps({"dispatch_id": dispatch_id, "plan": plan}, indent=2, sort_keys=True))
     else:
         print(f"dispatch: {dispatch_id}")

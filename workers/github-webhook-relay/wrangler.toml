@@ -1,0 +1,17 @@
+name = "brigade-github-webhook-relay"
+main = "src/index.js"
+compatibility_date = "2026-10-21"
+# Ingress is intentionally unconfigured until the operator approves a hostname.
+# With workers_dev=false and no route/routes, deployment will not expose a URL.
+workers_dev = false
+
+[vars]
+ALLOWED_REPOSITORIES = ""
+
+[[d1_databases]]
+binding = "DB"
+database_name = "brigade-github-webhook-relay"
+database_id = "set-by-operator-after-approval"
+
+[triggers]
+crons = ["17 4 * * *"]

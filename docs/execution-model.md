@@ -33,8 +33,8 @@ receipt merely because they ran. `brigade work ready` computes candidates and
 parallel-safe waves without launching workers. `brigade work dispatch` claims
 and launches one ready wave, then supervises its children until they finish.
 `--no-wait` returns after launch. A later invocation reconciles those children
-and fills available capacity before waiting. Hub summary mirroring and a
-continuous `--watch` mode remain follow-up work. Run patrol is planned in
+and fills available capacity before waiting. Hub summary mirroring remains
+follow-up work. Run patrol is planned in
 [#1850](https://github.com/escoffier-labs/brigade/issues/1850), and memory reflection in [#1856](https://github.com/escoffier-labs/brigade/issues/1856).
 
 ## Long-running modes
@@ -55,6 +55,7 @@ separate Brigade stop subcommand for the foreground servers.
 | Skills MCP over stdio | `brigade skills serve-mcp --stdio` | The MCP host closes stdin or terminates its child. Ctrl+C also stops an interactive process. | Read-only registry responses over stdout. No per-read verification receipt. |
 | Skills MCP over HTTP | `brigade skills serve-mcp --http` | Ctrl+C, or stop the owning service. | Read-only registry responses over loopback HTTP. No per-read verification receipt. |
 | Grok Bot MCP listener | `brigade run cloud grokbot serve --instance operator` or `brigade run cloud grokbot serve --pack <pack-id>` | Ctrl+C, or stop the owning service. | Role listeners journal call decisions to stderr and job transitions to the hub. Packs use their own records, such as the T3 dispatch SQLite ledger. |
+| Dispatch watch | `brigade work dispatch --watch --worker <seat> --interval 5` | SIGTERM or Ctrl+C stops launches. Children detach by default. `--drain-wait` waits for them. | Holds `dispatch.lock` for the loop. Supervisor events link immutable tick plans and record launched and finalized intents, budget denials, and session close. |
 | Run watch | `brigade runs watch <run-id>` | Ends when the run reaches a terminal state, or stop with Ctrl+C. | Prints observations from run artifacts, or newline-delimited JSON with `--json`. It can recover stale artifact collection and update the affected run's records. |
 
 The shipped hub command is `brigade fleet serve`. The listener requires its
@@ -63,6 +64,43 @@ protected bearer configuration. The HTTP memory and skills servers require
 `BRIGADE_MCP_HTTP_TOKEN`. See the [Grok Bot operating guide](grokbot-operating-guide.md)
 and [MCP transport guide](technical-guide.md#streamable-http-for-the-read-only-mcp-servers)
 for setup. These commands do not enable every service during installation.
+
+Run dispatch watch under a service manager when it should survive terminal
+closure. Give it an explicit target, an available worker seat, and a committed
+base. For example, a systemd user unit can use:
+
+```ini
+[Service]
+Type=simple
+WorkingDirectory=/path/to/repository
+ExecStart=/path/to/venv/bin/brigade work dispatch --target /path/to/repository --worker coder --watch --interval 5 --spawn-delay 1
+Restart=on-failure
+RestartSec=5
+KillMode=process
+```
+
+`KillMode=process` sends the stop signal to the dispatcher while its children
+retain their process groups. This allows the default detach behavior. Add
+`--drain-wait` to wait for children instead, and set `TimeoutStopSec` to cover
+the expected child runtime. Both SIGTERM and SIGINT stop new launches and write
+a close receipt. A second signal ends drain waiting and leaves unfinished
+children detached. Unexpected tick errors are recorded as
+`work.dispatch.tick_error`, preserve running children, and allow later ticks
+to continue. A close receipt includes `claimed_prelaunch_intents`, the count
+of intents that still hold a claim without a child. The next dispatch invocation
+resumes those intents using their saved plans and worktrees.
+Each tick checks the installed Brigade version and closes watch when it changes.
+The dispatcher sleeps between ticks even when no task is ready. `--max-total`
+and `--deadline` bound one watch process, including retries. Use `Restart=no`
+when either ceiling must stop the service. A failed child or tick keeps the exit
+status at 1 even when watch closes for a ceiling, version change, or signal.
+`Restart=on-failure` can therefore restart a ceiling close, and `Restart=always`
+restarts every close. Each restart gives watch a fresh launch ceiling and deadline.
+Restart the unit explicitly after updating Brigade when `Restart=no` is set.
+Infrastructure retry exhaustion is retained across ticks within one watch
+process. Restarting watch resets those exclusions and permits another initial
+launch plus two retries for each affected task. Non-infrastructure task breakers
+remain persisted across restarts.
 
 ## Receipts and provenance
 

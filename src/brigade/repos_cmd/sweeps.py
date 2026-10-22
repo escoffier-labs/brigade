@@ -21,6 +21,7 @@ from uuid import uuid4
 from .. import actionqueue, config as brigade_config, reportstore, toml_compat as tomllib, work_cmd
 from ..budgets import HANDOFF_BACKLOG_STALE_DAYS
 from ..install import apply_gitignore
+from ..isolated_exec import module_argv, trusted_cwd
 from ..localio import (
     read_json_dict as _read_json,
     read_jsonl_dicts as _read_jsonl,
@@ -229,12 +230,12 @@ def _resolve_sweep(target: Path, sweep_id: str) -> tuple[dict[str, Any] | None, 
 def _sweep_commands() -> list[constants.SweepCommand]:
     return [
         constants.SweepCommand(
-            "center-report-build", [sys.executable, "-m", "brigade", "center", "report", "build", "--json"]
+            "center-report-build", module_argv("brigade", "center", "report", "build", "--json"), builtin=True
         ),
         constants.SweepCommand(
-            "release-plan", [sys.executable, "-m", "brigade", "release", "plan", "--base-ref", "", "--json"]
+            "release-plan", module_argv("brigade", "release", "plan", "--base-ref", "", "--json"), builtin=True
         ),
-        constants.SweepCommand("work-brief", [sys.executable, "-m", "brigade", "work", "brief", "--json"]),
+        constants.SweepCommand("work-brief", module_argv("brigade", "work", "brief", "--json"), builtin=True),
     ]
 
 
@@ -516,12 +517,20 @@ def _run_sweep_command(entry: constants.RepoEntry, command: constants.SweepComma
     command_dir = sweep_dir / "logs" / entry.repo_id / command.label
     command_dir.mkdir(parents=True, exist_ok=True)
     env = os.environ.copy()
-    source_path = Path(__file__).resolve().parents[2]
-    env["PYTHONPATH"] = str(source_path) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
+    argv = command.argv
+    cwd = entry.path
+    if command.builtin:
+        argv = [*argv, "--target", str(entry.path.expanduser().resolve())]
+        cwd = trusted_cwd()
+        env.pop("PYTHONPATH", None)
+        env.pop("PYTHONHOME", None)
+    else:
+        source_path = Path(__file__).resolve().parents[2]
+        env["PYTHONPATH"] = str(source_path) + (os.pathsep + env["PYTHONPATH"] if env.get("PYTHONPATH") else "")
     try:
         result = subprocess.run(
-            command.argv,
-            cwd=entry.path,
+            argv,
+            cwd=cwd,
             check=False,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
