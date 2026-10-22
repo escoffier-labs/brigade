@@ -1147,8 +1147,10 @@ def sync_payload(
 
 def stale_entries_for_brief(target: Path, *, now: datetime | None = None) -> dict[str, Any]:
     """Best-effort stale summary for work brief; fail-open on observe errors."""
+    from . import codex_cloud
+
     try:
-        provider_tasks, github, cursor_wired = observe_providers(target)
+        provider_tasks, github, cursor_wired = observe_providers(target, codex_max_items=codex_cloud.MAX_LIST_LIMIT)
         payload = status_payload(
             target,
             now=now,
@@ -1412,11 +1414,31 @@ def _parse_codex_cloud_list(stdout: str) -> dict[str, Any]:
     return tasks
 
 
-def _codex_cloud_observation(target: Path) -> ProviderObservation:
-    from . import codex_cloud
+def _observe_missing_codex_tasks(
+    target: Path, tasks: dict[str, Any], *, bounded: bool = False, deadline: float | None = None
+) -> None:
+    from . import cloud_codex_probes
 
+    cloud_codex_probes.observe_missing_tasks(
+        load_registry(target)["entries"], tasks, run_text=_run_text, cwd=target, bounded=bounded, deadline=deadline
+    )
+
+
+def _codex_cloud_observation(target: Path, *, codex_max_items: int | None = None) -> ProviderObservation:
+    from . import cloud_codex_probes, codex_cloud
+
+    # A bounded read takes one page, because cursor pages are slow on the provider
+    # side, and shares one deadline between that page and the status probes.
+    deadline = None if codex_max_items is None else cloud_codex_probes.brief_deadline()
     try:
-        inventory = codex_cloud.list_tasks(cwd=target)
+        inventory = codex_cloud.list_tasks(
+            cwd=target,
+            max_items=codex_cloud.DEFAULT_MAX_ITEMS if codex_max_items is None else codex_max_items,
+            max_pages=codex_cloud.MAX_LIST_PAGES if codex_max_items is None else 1,
+            command_timeout=codex_cloud.DEFAULT_LIST_TIMEOUT
+            if deadline is None
+            else cloud_codex_probes.BRIEF_CODEX_BUDGET_SECONDS,
+        )
     except Exception:  # noqa: BLE001 - observation must stay bounded
         return ProviderObservation(True, False, "transport-failure", {})
     tasks = {
@@ -1424,21 +1446,10 @@ def _codex_cloud_observation(target: Path) -> ProviderObservation:
         for row in inventory.tasks
         if isinstance(row.get("id"), str)
     }
-    if not tasks:
-        # Preserve the established bounded positive-evidence fallback for
-        # registered tasks. Failure or absence never implies a terminal state.
-        registry = load_registry(target)
-        for entry in registry["entries"]:
-            task_id = entry.get("task_id")
-            if not isinstance(task_id, str) or entry.get("provider") != "codex-cloud":
-                continue
-            scode, sout, serr = _run_text(["codex", "cloud", "status", task_id], cwd=target)
-            blob = (sout + "\n" + serr).strip()
-            if scode != 0 and not blob:
-                continue
-            state = codex_cloud._scan_status(blob)  # noqa: SLF001 - shared status scanner
-            if state is not None:
-                tasks[task_id] = {"state": state, "ready_at": None}
+    if codex_max_items is not None:
+        _observe_missing_codex_tasks(target, tasks, bounded=True, deadline=deadline)
+    elif not tasks:
+        _observe_missing_codex_tasks(target, tasks)
     if not inventory.ok:
         reason = inventory.reason or "provider-error"
         if reason in {"provider-missing", "provider-unavailable"}:
@@ -1778,10 +1789,10 @@ def _grokbot_cloud_observation() -> ProviderObservation:
     return ProviderObservation(True, True, decision.reason, {})
 
 
-def observe_provider(provider: str, target: Path) -> ProviderObservation:
+def observe_provider(provider: str, target: Path, *, codex_max_items: int | None = None) -> ProviderObservation:
     """Observe exactly one provider without exposing credentials or bodies."""
     if provider == "codex-cloud":
-        return _codex_cloud_observation(target)
+        return _codex_cloud_observation(target, codex_max_items=codex_max_items)
     if provider == "cursor-cloud":
         return _cursor_cloud_observation(target)
     if provider == "jules":
@@ -1793,12 +1804,17 @@ def observe_provider(provider: str, target: Path) -> ProviderObservation:
     return ProviderObservation(False, False, "unsupported-provider", {})
 
 
-def observe_provider_details(target: Path, **_kwargs: Any) -> tuple[dict[str, ProviderObservation], dict[str, Any]]:
+def observe_provider_details(
+    target: Path, *, codex_max_items: int | None = None, **_kwargs: Any
+) -> tuple[dict[str, ProviderObservation], dict[str, Any]]:
     """Return per-provider health so failed empty inventories stay visible."""
     observations: dict[str, ProviderObservation] = {}
     for provider in TRACKER_PROVIDERS:
         try:
-            observations[provider] = observe_provider(provider, target)
+            if provider == "codex-cloud" and codex_max_items is not None:
+                observations[provider] = observe_provider(provider, target, codex_max_items=codex_max_items)
+            else:
+                observations[provider] = observe_provider(provider, target)
         except Exception:  # noqa: BLE001 - observation must stay bounded
             observations[provider] = ProviderObservation(True, False, "transport-failure", {})
     github = observe_github(target)
@@ -1816,9 +1832,14 @@ def _legacy_provider_tasks(observations: dict[str, ProviderObservation]) -> dict
     return tasks
 
 
-def observe_providers(target: Path, **_kwargs: Any) -> tuple[dict[str, Any], dict[str, Any], bool]:
+def observe_providers(
+    target: Path, *, codex_max_items: int | None = None, **_kwargs: Any
+) -> tuple[dict[str, Any], dict[str, Any], bool]:
     """Compatibility wrapper for callers that only accept a flattened inventory."""
-    observations, github = observe_provider_details(target)
+    if codex_max_items is None:
+        observations, github = observe_provider_details(target)
+    else:
+        observations, github = observe_provider_details(target, codex_max_items=codex_max_items)
     return _legacy_provider_tasks(observations), github, observations["cursor-cloud"].configured
 
 

@@ -610,9 +610,10 @@ def bucket_for(state: str, *, age_seconds: int | None, stale_after_seconds: int)
 
 
 def collides(target: str, live_runs: Sequence[LiveRun], claims: Mapping[str, Claim]) -> bool:
+    """Broad parallel activity by repo label, without identity or file-overlap proof."""
     del claims
     nodes = {run.node_id for run in live_runs if run.repo == target}
-    return len(nodes) >= 2
+    return bool(target.strip()) and len(nodes) >= 2
 
 
 _LATEST_ROWS = (
@@ -1160,7 +1161,7 @@ def build_view(
     )
     claims_by_target = {claim.target: claim for claim in claims}
     display_claims = {target: _display_claim(claim, enrolled_labels) for target, claim in claims_by_target.items()}
-    collision_targets = {
+    parallel_targets = {
         target for target in {run.repo for run in active_runs} if collides(target, active_runs, claims_by_target)
     }
     session_rows = tuple(_interactive_session(item) for item in interactive_sessions)
@@ -1170,7 +1171,7 @@ def build_view(
         tiles = tuple(
             sorted(
                 (
-                    Tile(run=run, claim=display_claims.get(run.repo), collision=run.repo in collision_targets)
+                    Tile(run=run, claim=display_claims.get(run.repo), collision=run.repo in parallel_targets)
                     for run in active_runs
                     if run.node_id == station.node_id
                 ),
@@ -1211,17 +1212,11 @@ def build_view(
         for run in live_runs
         if run.bucket in ("awaiting approval", "stale", "unknown")
     )
-    rail.extend(
-        RailEntry(
-            kind="collision",
-            node_id=_node_label(claim.owner_node, enrolled_labels),
-            repo=target,
-            run_id="",
-            detail=f"held by {_node_label(claim.owner_node, enrolled_labels)}, live on {target}",
-        )
-        for target, claim in sorted(claims_by_target.items())
-        if target in collision_targets
-    )
+    from .fleet_deck_activity import parallel_entries
+
+    labels = dict(enrolled_labels)
+    labels.update({station.station.node_id: station.label for station in stations})
+    rail.extend(parallel_entries(parallel_targets, active_runs, labels))
     identity_to_display = _session_identity_display_targets(active_runs, claims_by_target, session_rows)
     run_identities = {run.repo_identity for run in active_runs if run.repo_identity}
     repo_targets = {run.repo for run in active_runs} | set(claims_by_target)
@@ -1247,7 +1242,7 @@ def build_view(
                     target=target,
                     claim=display_claims.get(target),
                     live=tuple(run for run in active_runs if run.repo == target),
-                    collision=target in collision_targets,
+                    collision=target in parallel_targets,
                     interactive_overlap=_repo_row_has_exact_overlap(
                         target,
                         active_runs=active_runs,
@@ -1258,7 +1253,7 @@ def build_view(
                 )
                 for target in repo_targets
             ),
-            key=lambda row: (not row.collision, not row.interactive_overlap, row.target),
+            key=lambda row: (not row.interactive_overlap, row.target),
         )
     )
     return DeckView(
@@ -1472,7 +1467,7 @@ def coverage_gaps(control_plane: ControlPlane | None) -> tuple[str, ...]:
 
 def attention_items(view: DeckView) -> tuple[str, ...]:
     """Real signals that need someone: rail entries plus flagged integrations."""
-    items = [f"{entry.kind}:{entry.repo}" for entry in view.rail]
+    items = [f"{entry.kind}:{entry.repo}" for entry in view.rail if entry.kind != "parallel"]
     control_plane = view.control_plane
     if control_plane is not None:
         items.extend(
@@ -1561,18 +1556,20 @@ def render_control_plane(control_plane: ControlPlane | None, *, worklore_enabled
         if route_rows
         else '<p class="empty">No routing receipts (unknown, not unrouted).</p>'
     )
+    from .fleet_deck_activity import REASONS
+
     blocked_rows = "".join(
-        f"<li>{_esc(item.get('id', UNKNOWN))} &middot; {_esc(item.get('reason', UNKNOWN))}</li>"
+        f"<li>{_esc(item.get('id', UNKNOWN))} &middot; "
+        f"{_esc(REASONS.get(_cp_text(item.get('reason')), _cp_text(item.get('reason'))))}</li>"
         for item in control_plane.queue.blocked_items
     )
     queue_html = (
-        f"<p>eligible {_esc(control_plane.queue.eligible_count)} &middot; queued "
-        f"{_esc(control_plane.queue.queued_count)}</p>"
+        _queue_counts_html(control_plane.queue)
         + (
             f'<ul class="attention-list">{blocked_rows}</ul>'
             if blocked_rows
             else (
-                '<p class="empty">Queue exclusions reported below.</p>'
+                ""
                 if control_plane.queue.exclusions
                 else '<p class="empty">No blocked reasons reported.</p>'
                 if control_plane.queue.blocked_known
@@ -1620,18 +1617,16 @@ def render_control_plane(control_plane: ControlPlane | None, *, worklore_enabled
     )
 
 
+def _queue_counts_html(queue: QueueState) -> str:
+    from .fleet_deck_activity import queue_counts
+
+    return queue_counts(queue)
+
+
 def _queue_exclusions_html(queue: QueueState, *, worklore_enabled: bool) -> str:
-    """Queue eligibility status, not individual failed jobs or invented ages."""
-    rows = "".join(
-        f"<li>{_esc(_cp_text(item.get('count')))} excluded · {_esc(_cp_text(item.get('reason')))}</li>"
-        for item in queue.exclusions
-    )
-    if not rows:
-        return ""
-    work_link = ' · <a href="/deck/work">Work</a>' if worklore_enabled else ""
-    return (
-        f'<p class="station-meta">Queue exclusions (observed scan){work_link}</p><ul class="attention-list">{rows}</ul>'
-    )
+    from .fleet_deck_activity import queue_exclusions
+
+    return queue_exclusions(queue, worklore_enabled=worklore_enabled)
 
 
 def _quota_effective_html(control_plane: ControlPlane) -> str:
@@ -1708,11 +1703,20 @@ th:nth-child(1) { width: 22%; } th:nth-child(2) { width: 20%; } th:nth-child(3) 
 """
 
 
-def render_deck(view: DeckView, *, nonce: str, now: datetime, worklore_enabled: bool = True) -> str:
+def render_deck(
+    view: DeckView,
+    *,
+    nonce: str,
+    now: datetime,
+    worklore_enabled: bool = True,
+    action_sources: frozenset[str] = frozenset(),
+) -> str:
     # Imported here because fleet_deck_overview imports this module for its types.
     from . import fleet_deck_overview
 
-    body = fleet_deck_overview.render_overview(view, now, worklore_enabled=worklore_enabled)
+    body = fleet_deck_overview.render_overview(
+        view, now, worklore_enabled=worklore_enabled, action_sources=action_sources
+    )
     return _document(
         body,
         nonce=nonce,
@@ -1726,13 +1730,14 @@ def render_deck(view: DeckView, *, nonce: str, now: datetime, worklore_enabled: 
 
 def repo_coordination_table(view: DeckView) -> str:
     """The claim/run coordination table. ``fleet_repo_policy_page`` frames it."""
+    labels = {station.station.node_id: station.label for station in view.stations}
     rows = "".join(
         "<tr>"
-        f"<td>{_esc(row.target)}</td>"
+        f"<td>{_esc(row.target or UNKNOWN)}</td>"
         f"<td>{_esc(_owner_text(row.claim))}</td>"
         f"<td>{_esc(str(row.claim.ttl_remaining) + 's left') if row.claim else ''}</td>"
-        f"<td>{_esc(', '.join(f'{run.node_id[:12]}:{run.state}' for run in row.live))}</td>"
-        f'<td class="flag">{_esc(_repo_flags(row))}</td>'
+        f"<td>{_esc(', '.join(f'{labels.get(run.node_id, run.node_id[:12])}:{run.state}' for run in row.live))}</td>"
+        f'<td class="{"flag" if row.interactive_overlap else ""}">{_esc(_repo_flags(row))}</td>'
         "</tr>"
         for row in view.repos
     )
@@ -1747,7 +1752,7 @@ def repo_coordination_table(view: DeckView) -> str:
 def _repo_flags(row: RepoRow) -> str:
     flags: list[str] = []
     if row.collision:
-        flags.append("! collision")
+        flags.append("parallel activity")
     if row.interactive_overlap:
         flags.append("! overlap")
     return " ".join(flags)

@@ -69,8 +69,39 @@ def _release_receipts(target: Path) -> list[dict[str, Any]]:
 
 
 def _latest_release_receipt(target: Path) -> dict[str, Any] | None:
-    receipts = _release_receipts(target)
-    return receipts[0] if receipts else None
+    # commands.run names each run dir from the same datetime it stores as started_at,
+    # so name order is start order to the second and only the newest second needs
+    # decoding. Runs within that second are ordered by their precise started_at.
+    # Other layouts keep the full started_at sort.
+    root = _release_runs_root(target)
+    if not root.is_dir():
+        return None
+    children = sorted((path for path in root.iterdir() if path.is_dir()), key=lambda path: path.name, reverse=True)
+    if not reportstore._dir_names_are_timestamp_prefixed(children):
+        receipts = _release_receipts(target)
+        return receipts[0] if receipts else None
+
+    def sort_key(item: dict[str, Any]) -> str:
+        return str(item.get("started_at") or item.get("run_id") or "")
+
+    newest: list[dict[str, Any]] = []
+    unkeyed: list[dict[str, Any]] = []
+    boundary: str | None = None
+    for child in children:
+        if boundary is not None and reportstore.timestamp_prefix(child.name) != boundary:
+            break
+        receipt = _read_release_receipt(child)
+        if not isinstance(receipt, dict):
+            continue
+        if not sort_key(receipt):
+            # A receipt with no started_at or run_id sorts after every keyed receipt.
+            unkeyed.append(receipt)
+            continue
+        newest.append(receipt)
+        boundary = boundary or reportstore.timestamp_prefix(child.name)
+    newest.sort(key=sort_key, reverse=True)
+    newest.extend(unkeyed)
+    return newest[0] if newest else None
 
 
 def _resolve_release_receipt(target: Path, run_id: str) -> tuple[dict[str, Any] | None, str | None]:
@@ -99,7 +130,12 @@ def _release_candidates(target: Path, *, include_archived: bool = False) -> list
 
 
 def _latest_candidate(target: Path) -> dict[str, Any] | None:
-    candidates = _release_candidates(target)
+    candidates = reportstore.latest_bundles(
+        [_release_candidates_root(target)],
+        _read_candidate,
+        id_field="candidate_id",
+        skip_child=lambda name: name == "archive",
+    )
     return candidates[0] if candidates else None
 
 

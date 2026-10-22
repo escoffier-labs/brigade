@@ -8,6 +8,7 @@ import sqlite3
 import stat
 import sys
 import threading
+import time
 import urllib.error
 import urllib.request
 from io import BytesIO
@@ -395,13 +396,13 @@ def test_http_sender_revocation_race_has_retryable_error_code(message_hub, monke
     base, token_a, _token_b, db = message_hub
     handle = fleet_hub_messages.handle
 
-    def revoke_after_caller_auth(conn, raw, *, caller):
+    def revoke_after_caller_auth(conn, raw, *, caller, **kwargs):
         conn.execute(
             "UPDATE nodes SET revoked_at=? WHERE node_id=?",
             (datetime.now(timezone.utc).isoformat(), NODE_A),
         )
         conn.commit()
-        return handle(conn, raw, caller=caller)
+        return handle(conn, raw, caller=caller, **kwargs)
 
     monkeypatch.setattr(fleet_hub_messages, "handle", revoke_after_caller_auth)
 
@@ -3604,3 +3605,510 @@ def test_flush_rejects_invalid_lock_timeout_before_settings(monkeypatch, lock_ti
             fleet_client_messages.flush_credential(lock_timeout=lock_timeout)
         else:
             fleet_client_messages.flush("node-a", lock_timeout=lock_timeout)
+
+
+def _wait_for_active_waiters(recipient: str, expected: int, *, timeout: float = 2.0) -> None:
+    deadline = time.monotonic() + timeout
+    while time.monotonic() < deadline:
+        with fleet_hub_messages._WAKE_LOCK:
+            if fleet_hub_messages._ACTIVE_WAITERS.get(recipient, 0) == expected:
+                return
+        time.sleep(0.005)
+    with fleet_hub_messages._WAKE_LOCK:
+        actual = fleet_hub_messages._ACTIVE_WAITERS.get(recipient, 0)
+    raise AssertionError(f"expected {expected} active waiter(s) for {recipient}, found {actual}")
+
+
+def test_list_wait_wakes_promptly_on_send_to_same_recipient(message_hub):
+    base, token_a, token_b, _db = message_hub
+    results: list[tuple[int, dict]] = []
+
+    def waiter() -> None:
+        results.append(_request(base, token_b, {"action": "list", "after": 0, "unacked": True, "wait_ms": 5000}))
+
+    thread = threading.Thread(target=waiter, daemon=True)
+    thread.start()
+    _wait_for_active_waiters(NODE_B, 1)
+
+    send_status, sent = _request(
+        base,
+        token_a,
+        {"action": "send", "to": NODE_B, "subject": "Wake", "body": "Deliver immediately"},
+    )
+    send_finished = time.monotonic()
+    assert send_status == 201
+    thread.join(timeout=2.0)
+    wake_elapsed = time.monotonic() - send_finished
+
+    assert not thread.is_alive()
+    assert wake_elapsed < 2.0
+    assert len(results) == 1
+    list_status, inbox = results[0]
+    assert list_status == 200
+    assert inbox["messages"] == [sent["message"]]
+    assert inbox["next_cursor"] == sent["message"]["id"]
+
+
+def test_list_wait_ignores_send_to_different_recipient(message_hub):
+    base, _token_a, token_b, _db = message_hub
+    results: list[tuple[int, dict, float]] = []
+
+    def waiter() -> None:
+        started = time.monotonic()
+        status, payload = _request(base, token_b, {"action": "list", "after": 0, "unacked": True, "wait_ms": 250})
+        results.append((status, payload, time.monotonic() - started))
+
+    thread = threading.Thread(target=waiter, daemon=True)
+    thread.start()
+    _wait_for_active_waiters(NODE_B, 1)
+
+    send_status, _sent = _request(
+        base,
+        token_b,
+        {"action": "send", "to": NODE_A, "subject": "Unrelated", "body": "Do not wake NODE_B"},
+    )
+    assert send_status == 201
+    time.sleep(0.05)
+    assert thread.is_alive()
+
+    thread.join(timeout=2.0)
+    assert not thread.is_alive()
+    status, inbox, elapsed = results[0]
+    assert status == 200
+    assert inbox == {"messages": [], "next_cursor": 0}
+    assert elapsed >= 0.2
+
+
+def test_list_wait_timeout_returns_empty_after_wait_ms(message_hub):
+    base, _token_a, token_b, _db = message_hub
+    started = time.monotonic()
+    status, inbox = _request(base, token_b, {"action": "list", "after": 7, "unacked": True, "wait_ms": 150})
+    elapsed = time.monotonic() - started
+
+    assert status == 200
+    assert inbox == {"messages": [], "next_cursor": 7}
+    assert 0.12 <= elapsed < 1.5
+
+
+@pytest.mark.parametrize("bad_wait_ms", [True, False, -1, 20001, 1.5, "100", None, [], {}])
+def test_list_wait_validation_rejects_bad_values(message_hub, monkeypatch, bad_wait_ms):
+    base, _token_a, token_b, _db = message_hub
+    status, payload = _request(base, token_b, {"action": "list", "after": 0, "wait_ms": bad_wait_ms})
+    assert status == 400
+    assert "wait_ms" in payload["error"]
+
+    monkeypatch.setattr(
+        fleet_client_messages,
+        "_request",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(AssertionError("invalid wait_ms reached transport")),
+    )
+    with pytest.raises(fleet_client.FleetClientError, match="wait_ms"):
+        fleet_client_messages.list_messages(after=0, wait_ms=bad_wait_ms)
+
+
+def test_list_wait_closes_db_connection_while_waiting_and_notifies_after_commit(message_hub, monkeypatch):
+    base, token_a, token_b, db = message_hub
+    lock = threading.Lock()
+    opened_connections: list[sqlite3.Connection] = []
+    active_count = 0
+
+    class TrackingConnection(sqlite3.Connection):
+        def close(self) -> None:
+            nonlocal active_count
+            if not getattr(self, "_tracked_closed", False):
+                self._tracked_closed = True
+                with lock:
+                    active_count -= 1
+            super().close()
+
+    def tracking_open_db(path: Path) -> sqlite3.Connection:
+        nonlocal active_count
+        resolved = Path(path).expanduser().resolve()
+        conn = sqlite3.connect(
+            f"{resolved.as_uri()}?mode=rw",
+            timeout=10,
+            uri=True,
+            factory=TrackingConnection,
+        )
+        conn.execute("PRAGMA busy_timeout=5000")
+        with lock:
+            active_count += 1
+            opened_connections.append(conn)
+        return conn
+
+    monkeypatch.setattr(fleet_hub, "open_db", tracking_open_db)
+    results: list[tuple[int, dict]] = []
+
+    def waiter() -> None:
+        results.append(_request(base, token_b, {"action": "list", "after": 0, "unacked": True, "wait_ms": 3000}))
+
+    thread = threading.Thread(target=waiter, daemon=True)
+    thread.start()
+    _wait_for_active_waiters(NODE_B, 1)
+
+    with lock:
+        assert len(opened_connections) == 1
+        assert active_count == 0
+        first_conn = opened_connections[0]
+    with pytest.raises(sqlite3.ProgrammingError):
+        first_conn.execute("SELECT 1")
+
+    # A failed commit in send() must not notify the waiting recipient.
+    class FailingCommitConnection(sqlite3.Connection):
+        def commit(self) -> None:
+            if getattr(self, "_fail_commit", False):
+                raise sqlite3.OperationalError("simulated commit failure")
+            super().commit()
+
+    failing_conn = sqlite3.connect(
+        f"{Path(db).expanduser().resolve().as_uri()}?mode=rw",
+        timeout=10,
+        uri=True,
+        factory=FailingCommitConnection,
+    )
+    try:
+        failing_conn.execute("PRAGMA busy_timeout=5000")
+        notified: list[str] = []
+        original_notify = fleet_hub_messages._notify_recipient
+        monkeypatch.setattr(fleet_hub_messages, "_notify_recipient", lambda r: notified.append(r))
+        try:
+            failing_conn._fail_commit = True
+            with pytest.raises(sqlite3.OperationalError, match="simulated commit failure"):
+                fleet_hub_messages.send(
+                    failing_conn,
+                    {"to": NODE_B, "subject": "Rollback", "body": "Commit will fail"},
+                    sender=NODE_A,
+                )
+        finally:
+            failing_conn._fail_commit = False
+            monkeypatch.setattr(fleet_hub_messages, "_notify_recipient", original_notify)
+        assert notified == []
+    finally:
+        failing_conn.close()
+
+    send_status, sent = _request(
+        base,
+        token_a,
+        {"action": "send", "to": NODE_B, "subject": "After close", "body": "Reopened connection sees me"},
+    )
+    assert send_status == 201
+    thread.join(timeout=2.0)
+    assert not thread.is_alive()
+    assert results[0][0] == 200
+    assert results[0][1]["messages"] == [sent["message"]]
+    with lock:
+        assert active_count == 0
+        assert len(opened_connections) >= 3
+
+
+def test_list_wait_enforces_per_caller_waiter_cap(message_hub, monkeypatch):
+    base, token_a, token_b, _db = message_hub
+    # Keep the source budget larger so this independently tests the caller cap.
+    monkeypatch.setattr(fleet_hub_messages, "MAX_WAITERS_PER_SOURCE", 3)
+    waiter_results: list[tuple[int, dict]] = []
+
+    def waiter() -> None:
+        waiter_results.append(_request(base, token_b, {"action": "list", "after": 0, "unacked": True, "wait_ms": 3000}))
+
+    threads = [threading.Thread(target=waiter, daemon=True) for _ in range(fleet_hub_messages.MAX_WAITERS_PER_CALLER)]
+    for thread in threads:
+        thread.start()
+    _wait_for_active_waiters(NODE_B, fleet_hub_messages.MAX_WAITERS_PER_CALLER)
+
+    started = time.monotonic()
+    extra_status, extra_inbox = _request(
+        base, token_b, {"action": "list", "after": 9, "unacked": True, "wait_ms": 3000}
+    )
+    extra_elapsed = time.monotonic() - started
+
+    assert extra_status == 429
+    assert extra_inbox["code"] == "message_wait_capped"
+    assert isinstance(extra_inbox["error"], str)
+    assert extra_elapsed < 2.0
+
+    send_status, sent = _request(
+        base,
+        token_a,
+        {"action": "send", "to": NODE_B, "subject": "Wake capped waiters", "body": "Both wake"},
+    )
+    assert send_status == 201
+    for thread in threads:
+        thread.join(timeout=2.0)
+        assert not thread.is_alive()
+    assert len(waiter_results) == fleet_hub_messages.MAX_WAITERS_PER_CALLER
+    for status, inbox in waiter_results:
+        assert status == 200
+        assert inbox["messages"] == [sent["message"]]
+    _wait_for_active_waiters(NODE_B, 0)
+
+
+def test_client_and_cli_list_wait_timeout_margin_cap_and_old_hub_compat(monkeypatch, capsys):
+    seen: list[tuple[dict, float | None]] = []
+
+    def fake_request(_hub: str, _token: str, body: dict, *, timeout: float | None = None):
+        seen.append((dict(body), timeout))
+        # Simulate an older hub that ignores wait_ms and returns immediately.
+        return 200, {"messages": [], "next_cursor": body.get("after", 0)}
+
+    monkeypatch.setattr(fleet_client_messages, "_request", fake_request)
+    monkeypatch.setattr(
+        credentials,
+        "message_settings",
+        lambda token_file=None, **_kw: ("https://hub.example.test", "token", NODE_A),
+    )
+
+    page = fleet_client_messages.list_messages(after=3, unacked=True, wait_ms=5000)
+    assert page == {"messages": [], "next_cursor": 3}
+    assert seen[-1][0] == {"action": "list", "after": 3, "unacked": True, "wait_ms": 5000}
+    assert seen[-1][1] is not None and seen[-1][1] >= 5.0 + fleet_client.FLUSH_TIMEOUT_SECONDS
+
+    fleet_client_messages.list_messages(after=0, wait_ms=4000, timeout=1.0)
+    assert seen[-1][1] is not None and seen[-1][1] >= 4.0 + fleet_client.FLUSH_TIMEOUT_SECONDS
+
+    fleet_client_messages.list_messages(after=0, wait_ms=4000, timeout=15.0)
+    assert seen[-1][1] == 15.0
+
+    assert cli.main(["fleet", "msg", "list", "--unacked", "--after", "2", "--wait", "1.5", "--json"]) == 0
+    capsys.readouterr()
+    assert seen[-1][0] == {"action": "list", "after": 2, "unacked": True, "wait_ms": 1500}
+
+    assert cli.main(["fleet", "msg", "list", "--wait", "20", "--json"]) == 0
+    capsys.readouterr()
+    assert seen[-1][0] == {"action": "list", "after": 0, "unacked": False, "wait_ms": 20000}
+
+    calls_before = len(seen)
+    for excessive_wait in ("20.0001", "45"):
+        assert cli.main(["fleet", "msg", "list", "--wait", excessive_wait, "--json"]) == 1
+        err_payload = json.loads(capsys.readouterr().out)
+        assert err_payload["code"] == "invalid_argument"
+        assert "20 seconds" in err_payload["error"]
+    assert len(seen) == calls_before
+
+    assert cli.main(["fleet", "msg", "list", "--wait", "-1", "--json"]) == 1
+    err_payload = json.loads(capsys.readouterr().out)
+    assert err_payload["code"] == "invalid_argument"
+    assert "wait" in err_payload["error"]
+
+
+@pytest.mark.parametrize("cap", ["global", "source"])
+def test_list_wait_caps_across_callers(message_hub, monkeypatch, cap):
+    base, token_a, token_b, _db = message_hub
+    if cap == "global":
+        monkeypatch.setattr(fleet_hub_messages, "MAX_WAITERS", 1, raising=False)
+    else:
+        # The test hub is reached over loopback, which is exempt; treat it as a remote peer.
+        monkeypatch.setattr(fleet_hub_messages, "_source_cap_applies", lambda _source_ip: True)
+    results = []
+    tokens = [token_b] if cap == "global" else [token_b, token_a]
+    threads = [
+        threading.Thread(
+            target=lambda token=token: results.append(_request(base, token, {"action": "list", "wait_ms": 3000})),
+            daemon=True,
+        )
+        for token in tokens
+    ]
+    try:
+        for thread, recipient in zip(threads, [NODE_B, NODE_A], strict=False):
+            thread.start()
+            _wait_for_active_waiters(recipient, 1)
+        status, payload = _request(base, token_a, {"action": "list", "wait_ms": 3000})
+        assert status == 429
+        assert payload["code"] == "message_wait_capped"
+        assert isinstance(payload["error"], str)
+        # Ordinary reads still work with every waiter slot occupied.
+        assert _request(base, token_a, {"action": "list"}) == (200, {"messages": [], "next_cursor": 0})
+    finally:
+        for token, recipient in [(token_a, NODE_B), (token_b, NODE_A)]:
+            assert (
+                _request(base, token, {"action": "send", "to": recipient, "subject": "Release", "body": "Wake"})[0]
+                == 201
+            )
+        for thread in threads:
+            thread.join(timeout=4)
+            assert not thread.is_alive()
+    assert all(status == 200 for status, _payload in results)
+    _wait_for_active_waiters(NODE_B, 0)
+    _wait_for_active_waiters(NODE_A, 0)
+    # Released source/global reservations admit a later wait.
+    assert _request(base, token_b, {"action": "list", "after": 100, "wait_ms": 1}) == (
+        200,
+        {"messages": [], "next_cursor": 100},
+    )
+
+
+def test_source_cap_skips_loopback_proxy_peers():
+    assert not fleet_hub_messages._source_cap_applies("127.0.0.1")
+    assert not fleet_hub_messages._source_cap_applies("::1")
+    assert fleet_hub_messages._source_cap_applies("100.64.0.5")
+    assert fleet_hub_messages._source_cap_applies("192.0.2.10")
+    assert fleet_hub_messages._source_cap_applies("")
+
+
+def test_list_wait_loopback_callers_share_no_source_cap(message_hub, monkeypatch):
+    base, token_a, token_b, _db = message_hub
+    monkeypatch.setattr(fleet_hub_messages, "MAX_WAITERS_PER_SOURCE", 1)
+    results = []
+    threads = [
+        threading.Thread(
+            target=lambda token=token: results.append(_request(base, token, {"action": "list", "wait_ms": 3000})),
+            daemon=True,
+        )
+        for token in (token_b, token_a)
+    ]
+    try:
+        for thread, recipient in zip(threads, [NODE_B, NODE_A], strict=True):
+            thread.start()
+            _wait_for_active_waiters(recipient, 1)
+    finally:
+        for token, recipient in [(token_a, NODE_B), (token_b, NODE_A)]:
+            assert (
+                _request(base, token, {"action": "send", "to": recipient, "subject": "Release", "body": "Wake"})[0]
+                == 201
+            )
+        for thread in threads:
+            thread.join(timeout=4)
+            assert not thread.is_alive()
+    assert [status for status, _payload in results] == [200, 200]
+
+
+def test_wait_capped_client_and_cli_exit_without_retry(message_hub, monkeypatch, capsys):
+    base, _token_a, token_b, _db = message_hub
+    monkeypatch.setattr(fleet_hub_messages, "MAX_WAITERS_PER_CALLER", 0)
+    monkeypatch.setattr(credentials, "message_settings", lambda token_file=None, **_kw: (base, token_b, NODE_B))
+    with pytest.raises(fleet_client_messages.FleetMessageHubError) as caught:
+        fleet_client_messages.list_messages(wait_ms=100)
+    assert caught.value.status == 429
+    assert caught.value.code == "message_wait_capped"
+    calls = 0
+    request = fleet_client_messages._request
+
+    def counted_request(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return request(*args, **kwargs)
+
+    monkeypatch.setattr(fleet_client_messages, "_request", counted_request)
+    assert cli.main(["fleet", "msg", "list", "--wait", "1", "--json"]) == 1
+    output = capsys.readouterr()
+    payload = json.loads(output.out)
+    assert payload["status"] == 429
+    assert payload["code"] == "message_wait_capped"
+    assert payload["error"] in output.err
+    assert calls == 1
+
+
+def test_list_wait_epoch_window_returns_message_without_sleep(message_hub, monkeypatch):
+    base, token_a, token_b, _db = message_hub
+    armed = threading.Event()
+    armed.set()
+    sent = []
+
+    class SendOnCloseConnection(sqlite3.Connection):
+        def close(self):
+            super().close()
+            if armed.is_set():
+                armed.clear()
+                sent.append(
+                    _request(
+                        base, token_a, {"action": "send", "to": NODE_B, "subject": "Epoch", "body": "In the window"}
+                    )
+                )
+
+    def open_db(path):
+        return sqlite3.connect(path, timeout=5, factory=SendOnCloseConnection)
+
+    monkeypatch.setattr(fleet_hub, "open_db", open_db)
+    started = time.monotonic()
+    status, payload = _request(base, token_b, {"action": "list", "wait_ms": 4000})
+    assert time.monotonic() - started < 2
+    assert sent[0][0] == 201
+    assert status == 200
+    assert payload["messages"] == [sent[0][1]["message"]]
+    _wait_for_active_waiters(NODE_B, 0)
+
+
+def test_list_wait_empty_wake_waits_until_deadline(message_hub):
+    base, _token_a, token_b, _db = message_hub
+    results = []
+
+    def waiter():
+        started = time.monotonic()
+        result = _request(base, token_b, {"action": "list", "wait_ms": 350})
+        results.append((result, time.monotonic() - started))
+
+    thread = threading.Thread(target=waiter, daemon=True)
+    thread.start()
+    _wait_for_active_waiters(NODE_B, 1)
+    fleet_hub_messages._notify_recipient(NODE_B)
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+    result, elapsed = results[0]
+    assert result == (200, {"messages": [], "next_cursor": 0})
+    assert 0.3 <= elapsed < 2
+    _wait_for_active_waiters(NODE_B, 0)
+
+
+@pytest.mark.parametrize("failure", ["commit", "rollback"])
+def test_active_principal_does_not_swallow_unexpected_programming_error(message_hub, failure):
+    _base, _token_a, _token_b, db = message_hub
+
+    class BrokenConnection(sqlite3.Connection):
+        def commit(self):
+            if failure == "commit":
+                raise sqlite3.ProgrammingError("unexpected commit error")
+            return super().commit()
+
+        def rollback(self):
+            if failure == "rollback":
+                raise sqlite3.ProgrammingError("unexpected rollback error")
+            return super().rollback()
+
+    conn = sqlite3.connect(db, factory=BrokenConnection)
+    try:
+
+        def operation():
+            if failure == "rollback":
+                raise ValueError("trigger rollback")
+            return {}
+
+        with pytest.raises(sqlite3.ProgrammingError, match=f"unexpected {failure} error"):
+            fleet_hub_messages._as_active_principal(conn, NODE_B, operation)
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("failure", ["revoked", "database"])
+def test_list_wait_rechecks_auth_and_releases_reservations_on_error(message_hub, monkeypatch, failure):
+    base, _token_a, token_b, db = message_hub
+    results = []
+    thread = threading.Thread(
+        target=lambda: results.append(_request(base, token_b, {"action": "list", "wait_ms": 3000})),
+        daemon=True,
+    )
+    thread.start()
+    _wait_for_active_waiters(NODE_B, 1)
+    if failure == "revoked":
+        with sqlite3.connect(db) as conn:
+            conn.execute(
+                "UPDATE nodes SET revoked_at=? WHERE node_id=?", (datetime.now(timezone.utc).isoformat(), NODE_B)
+            )
+    else:
+
+        def fail_query(*args, **kwargs):
+            raise sqlite3.OperationalError("simulated requery failure")
+
+        monkeypatch.setattr(fleet_hub_messages, "_query_inbox_rows", fail_query)
+    fleet_hub_messages._notify_recipient(NODE_B)
+    thread.join(timeout=2)
+    assert not thread.is_alive()
+    status, payload = results[0]
+    if failure == "revoked":
+        assert status == 403
+        assert payload["code"] == "message_sender_inactive"
+    else:
+        assert status == 500
+        assert "simulated requery failure" in payload["error"]
+    with fleet_hub_messages._WAKE_LOCK:
+        assert fleet_hub_messages._ACTIVE_WAITERS == {}
+        assert fleet_hub_messages._SOURCE_WAITERS == {}
+        assert fleet_hub_messages._WAKE_CONDITIONS == {}

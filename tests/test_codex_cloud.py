@@ -1060,6 +1060,18 @@ class TestListTasks:
         assert calls[0][-2:] == ["--limit", "20"]
         assert calls[1][-4:] == ["--limit", "20", "--cursor", "next"]
 
+    def test_list_tasks_max_pages_stops_after_a_short_page(self, monkeypatch):
+        calls = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(argv)
+            return _result(stdout=json.dumps({"tasks": [{"id": "task_page1", "status": "RUNNING"}], "cursor": "next"}))
+
+        monkeypatch.setattr(codex_cloud.proc, "run", fake_run)
+        assert codex_cloud.list_tasks(max_items=20, max_pages=1).tasks == [{"id": "task_page1", "state": "running"}]
+        assert len(calls) == 1
+        assert "--cursor" not in calls[0]
+
     def test_list_tasks_returns_failure_reason_on_command_failure(self, monkeypatch):
         monkeypatch.setattr(codex_cloud.proc, "run", lambda *a, **k: _result(code=1, stderr="boom"))
         outcome = codex_cloud.list_tasks()

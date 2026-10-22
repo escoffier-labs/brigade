@@ -1,10 +1,11 @@
 # CI runner pilot
 
 The pilot adds merge-group classification and one optional Linux canary. All
-existing hosted jobs, display names, and 20 required statuses stay in place.
-Keep the three Python versions with four shards each, eight installer variants,
-all platform checks, and the 78% coverage floor. Required-name and matrix
-reductions are deferred.
+existing hosted jobs and display names stay in place. `ci-gate` is the only
+required status on `main`. Merge groups and pushes to `main` run the three
+Python versions with four shards each. Pull requests run the four Python 3.12
+shards, which carry the 78% coverage floor. All runs keep the eight installer
+variants and all platform checks.
 
 ## Land the compatible workflow
 
@@ -15,25 +16,42 @@ container. Pushes and pull requests retain path filtering. Public pull requests
 and merge-group jobs continue to use hosted runners.
 
 Preserve current branch protections, review requirements, and conversation
-resolution requirements throughout the pilot. Queue preparation does not require
-an aggregate check or replacement of the existing 20 required statuses.
+resolution requirements throughout the pilot. The queue was prepared while the
+20 per-job statuses were still required. `ci-gate` replaced them afterward.
 
-## Track the separate shadow aggregate
+## Required aggregate
 
-[PR #1721](https://github.com/escoffier-labs/brigade/pull/1721) owns the separate
-shadow aggregate rollout. This pilot does not add another aggregate job or
-helper. That PR merges current main and includes conditional Fleet Hub container
-acceptance: a container may skip only after successful classification explicitly
-marks it unchanged. Merge groups require container success. Check its current
-diff and acceptance evidence before integration. The shadow ci-gate remains
-nonrequired and excludes the optional trusted-runner-canary.
+[PR #1721](https://github.com/escoffier-labs/brigade/pull/1721) added `ci-gate`.
+It always runs and requires success from the 9 jobs behind the former 20
+required statuses plus their 4 dependencies. A missing or extra dependency
+fails closed. Fleet Hub container may skip only after successful classification
+marks it unchanged, and never in a merge group. The gate excludes the optional
+trusted-runner-canary.
 
-Keep any aggregate nonrequired until deliberate failure cases have been proved
-on GitHub. Record run URLs and head commits showing rejection of failures,
-cancellations, missing or malformed policy, and unexpected skips, including a
-matrix member failure and merge-group full classification. A successful local
-contract test is not live Actions proof. Retain all 20 existing required statuses
-when introducing an aggregate.
+On 2026-10-21 `ci-gate` replaced the 20 per-job required statuses. These
+GitHub runs proved each acceptance case first:
+
+| Case | Event | Run | Head | ci-gate |
+| --- | --- | --- | --- | --- |
+| Clean head | pull_request | [39062560230](https://github.com/escoffier-labs/brigade/actions/runs/39062560230) | `13ad96985` | success |
+| Unchanged-container skip | pull_request | [39062629527](https://github.com/escoffier-labs/brigade/actions/runs/39062629527) | `fd42bb080` | success |
+| Python shard failure (matrix member) | pull_request | [39065646753](https://github.com/escoffier-labs/brigade/actions/runs/39065646753) | `3e571f7c6` | failure |
+| Lint failure | pull_request | [39062595036](https://github.com/escoffier-labs/brigade/actions/runs/39062595036) | `7ed4eab3d` | failure |
+| Cancellation | pull_request | [39062567035](https://github.com/escoffier-labs/brigade/actions/runs/39062567035) | `4e3e06693` | failure |
+| Unexpected skip (`repo-metadata`) | pull_request | [39062613193](https://github.com/escoffier-labs/brigade/actions/runs/39062613193) | `25c91dcad` | failure |
+| Missing policy dependency | pull_request | [39683853181](https://github.com/escoffier-labs/brigade/actions/runs/39683853181) | `de8753038` | failure |
+| Full classification | merge_group | [39651345036](https://github.com/escoffier-labs/brigade/actions/runs/39651345036) | `65bb00fb6` | success |
+| Shard failure | merge_group | [39539973591](https://github.com/escoffier-labs/brigade/actions/runs/39539973591) | `e6b6ae3ed` | failure |
+
+Before the switch, `ci-gate` agreed with the 20 statuses on all 54 open and
+recently merged pull requests that had both results. To step back, restore the
+20 contexts: the expanded check names of the nine protected jobs in the
+`ci-gate` policy set, required from the GitHub Actions app.
+
+A skipped matrix job reports one check with the unexpanded name, such as
+`Feature configuration (${{ matrix.name }})`. Never skip a matrix job with a
+job-level `if:` when its expanded names are required. Shrink the matrix with an
+expression instead, as the `test-shards` Python axis does.
 
 ## Activate one canary
 
@@ -97,8 +115,8 @@ queue for the exact `main` branch with these settings:
 - Merge only non-failing pull requests.
 - Status-check timeout: 90 minutes.
 
-Retain all current 20 required statuses and all existing review and conversation
-requirements. Confirm a real merge-group run creates the existing required
+Retain the required `ci-gate` status (see [Required aggregate](#required-aggregate))
+and all existing review and conversation requirements. Confirm a real merge-group run creates the existing required
 checks and runs all four component classes on hosted runners. Record its run URL,
 head SHA, classifications, check conclusions, and duration before treating queue
 preparation as operational proof.

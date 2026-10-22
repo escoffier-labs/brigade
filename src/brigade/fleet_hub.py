@@ -117,7 +117,7 @@ from .fleet_hub_status import (
     latest_status as latest_status,
 )
 
-SCHEMA_VERSION = 36
+SCHEMA_VERSION = 37
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
@@ -657,6 +657,9 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     from . import fleet_admin_stats
 
     fleet_admin_stats.ensure_schema(conn)
+    from . import fleet_hub_actions
+
+    fleet_hub_actions.ensure_schema(conn)
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 
