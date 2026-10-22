@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import os
-from pathlib import Path
+from io import open as _open
 
 import pytest
 
@@ -12,7 +12,7 @@ def _record(message: str) -> None:
     destination = os.environ.get("BRIGADE_WINDOWS_TEST_PROGRESS")
     if destination:
         # A separate file stays visible even while pytest captures stdout/stderr.
-        with Path(destination).open("a", encoding="utf-8") as stream:
+        with _open(destination, "a", encoding="utf-8") as stream:
             stream.write(message + "\n")
 
 

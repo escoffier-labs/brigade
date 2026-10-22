@@ -44,6 +44,7 @@ def test_test_phase_diagnostics_survive_file_timeout(tmp_path, hang):
         "addopts=",
         "-o",
         "faulthandler_timeout=1",
+        f"--rootdir={tmp_path}",
         str(test_file),
     ]
     last_phase = {
@@ -137,10 +138,16 @@ def test_deadline_attributes_progress_only_to_started_files(tmp_path, unstarted)
     assert ("previous_test" in result.diagnostic) is not unstarted
 
 
-def test_driver_loads_diagnostics_outside_its_own_checkout(tmp_path, monkeypatch):
+@pytest.mark.parametrize("patched_open", [False, True], ids=["plain", "patched-path-open"])
+def test_driver_loads_diagnostics_outside_its_own_checkout(tmp_path, monkeypatch, patched_open):
     repo = tmp_path / "checkout"
     (repo / "tests").mkdir(parents=True)
-    (repo / "tests" / "test_example.py").write_text("def test_example():\n    assert True\n", encoding="utf-8")
+    source = "def test_example(monkeypatch):\n    assert True\n"
+    if patched_open:
+        source += (
+            "    from pathlib import Path\n    monkeypatch.setattr(Path, 'open', lambda *args, **kwargs: object())\n"
+        )
+    (repo / "tests" / "test_example.py").write_text(source, encoding="utf-8")
     monkeypatch.delenv("PYTHONPATH", raising=False)
     monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
 
