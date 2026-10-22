@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Retention diagnostics use the held run lock when a detached worker checkout and custom output directory hide the original workspace after a malformed or unreadable receipt. Stale recovery retains the saved failure detail.
 - The content guard recognizes host-related assignment keys behind shell declaration prefixes (`export`, `readonly`, and Windows batch `set`), so `export HOSTNAME=<host>` is detected like its bare assignment; arbitrary keys, code expressions, and call arguments stay skipped.
 - The content guard no longer flags a private hostname in a formatted URL when an f-string replacement field holds only that expression, such as `f"https://{cfg.db.host}/path"`; every other URL, prose, string, and configuration hostname is still detected.
+- The content guard keeps JavaScript URL template fields such as `https://${cfg.db.host}/path` code-shaped while still detecting literal hosts in quoted expressions, escaped fields, comments, and ordinary strings.
 
 - Fleet claim renewal and release follow node-token rotation on the bound hub, including orphan-release retries, while retaining the last node credential when its token file is temporarily unavailable.
 
