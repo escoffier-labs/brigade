@@ -313,10 +313,15 @@ def _hostname_context(text: str, start: int, end: int) -> bool:
         return False
     if re.match(r"\s*(?:=|\?)", after):
         return False
-    # Host-related assignment keys behind shell declaration prefixes
-    # (export/readonly, and Windows batch set) are still configuration (#1920).
+    # Shell declarations can carry flags and earlier assignments. Keep each
+    # token bounded so member assignments, calls and other commands stay code.
+    # Spaced local assignments may be Lua, so only accept shell's KEY=value.
     if re.fullmatch(
-        r"\s*(?:(?:export|readonly|set)\s+)*(?:[a-z][a-z0-9]*[_-])*(?:host|hostname|server|endpoint|domain|url|address)\s*[:=]\s*",
+        r"\s*(?:(?:(?:export|readonly|declare|(?P<local_declaration>local))(?:[ \t]+-[a-z]+)*"
+        r"|@?set(?:[ \t]+/a)?)[ \t]+"
+        r"(?:[a-z_][a-z0-9_]*=(?:[^\s\"'`;|&(){}]|'[^'\r\n]*'|\"[^\"\r\n]*\")*[ \t]+)*)*"
+        r"(?:[a-z][a-z0-9]*[_-])*(?:host|hostname|server|endpoint|domain|url|address)"
+        r"(?(local_declaration)=|\s*[:=]\s*)",
         before,
         re.IGNORECASE,
     ):

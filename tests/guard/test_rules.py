@@ -498,6 +498,16 @@ class MissingLeakShapeTests(unittest.TestCase):
             "readonly server=",
             "set HOST=",
             "set HOSTNAME=",
+            "@set HOST=",
+            "set /a HOST=",
+            "export -n HOST=",
+            "readonly -x HOST=",
+            "declare -x HOST=",
+            "local HOST=",
+            "export A=1 HOST=",
+            "export -n A=1 B=2 HOST=",
+            "export A='two words' HOST=",
+            'declare -x A="two words" HOST=',
         ):
             with self.subTest(before=before):
                 text = before + host
@@ -514,6 +524,14 @@ class MissingLeakShapeTests(unittest.TestCase):
             ("callback(", ")"),
             ("const value = ", " ? yes : no;"),
             ("offset host=", ""),
+            ("@offset host=", ""),
+            ("export -n ARBITRARY_VALUE=", ""),
+            ("export A=1 DATABASE_HOSTNAME_SUFFIX=", ""),
+            ("export A=1 obj.HOST=", ""),
+            ("export A=1 callback(", ")"),
+            ("export A=1; HOST=", ""),
+            ("A=1 HOST=", ""),
+            ("local host = cfg.", ""),
         ):
             with self.subTest(before=before, after=after):
                 text = before + host + after
