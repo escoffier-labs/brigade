@@ -91,6 +91,49 @@ with a nonblank `--reason`. After the timer fires, `brigade care status`
 should show a completed receipt when the queue is empty (or an explicit defer
 was chosen).
 
+### Run patrol
+
+`run-patrol` is an optional care entry on systemd and launchd. Its default
+schedule is every 10 minutes. Install one timer with:
+
+```bash
+brigade care install --target . --entry run-patrol --schedule 'run-patrol=*:0/10'
+brigade care status --target . --entry run-patrol --json
+```
+
+The schedule above uses systemd syntax. For launchd use
+`--schedule 'run-patrol=*/10 * * * *'`. On Windows the same entry prints a
+Task Scheduler plan with `/SC MINUTE /MO 10` and exits 3, like the other entries.
+
+Installation writes `.brigade/runbooks/run-patrol.json` only when run-patrol is
+selected. It contains one report-only
+step:
+
+```bash
+brigade runs patrol --target . --json --receipt --fail-on stalled,zombie,dead
+```
+
+To enable repairs, review the generated runbook and add an explicit
+`--apply reap,release-claim` to its step. `escalate` can also be selected.
+`finalize-intent` is not implemented. Reinstall preserves an existing runbook.
+Patrol retains the newest 144 receipts for at most 7 days, including under
+`--apply`. Compact action fences survive pruning in
+`.brigade/patrol/.action-fences/`, with one file per lane. Apply reads only the
+scanned lanes' fence files and at most the newest 144 receipts. Its first
+retention sweep also migrates the legacy `.action-fences.json` archive. Fences
+retain the lifetime escalation cap and have no shared size ceiling across lanes.
+Care status checks at most the newest 10 patrol receipt candidates and includes the latest valid patrol
+receipt and the latest runbook receipt.
+Two consecutive failed runbook receipts use care's existing repeated-failure
+reporting in work brief and Center. A selected patrol finding returns 1 and
+therefore fails that scheduled runbook step.
+
+The crontab backend keeps one atomic managed block. `care install --backend
+crontab` without `--entry` includes run-patrol in that block. `--entry
+run-patrol` still refuses crontab. Systemd and launchd default installs retain
+the existing five-recipe set until run-patrol is explicitly selected.
+Existing CARE crontab blocks show as stale after upgrading, and `brigade care install --target .` refreshes the managed block.
+
 Related docs: [memory care](memory-care.md), [scanner registry](scanner-registry.md), [operator center](operator-center.md), [agents guide](agents-guide.md), [execution model](execution-model.md).
 
 ## Scheduler wiring

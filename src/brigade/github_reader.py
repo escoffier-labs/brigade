@@ -22,13 +22,13 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from email.utils import parsedate_to_datetime
 from typing import Any, Literal, Protocol
-from urllib.parse import urlencode
+from urllib.parse import quote, unquote, urlencode
 
 from brigade.claude_review_import import GetResponse
 from brigade.github_read_ledger import BudgetLedger
 
 _REPO = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.-]{1,100}")
-_PATH = re.compile(r"/[A-Za-z0-9_./-]{1,1024}")
+_PATH = re.compile(r"/[A-Za-z0-9_./%~-]{1,1024}")
 _CLASS = re.compile(r"[a-z][a-z0-9_-]{0,39}")
 _SECRET = re.compile(r"token|secret|password|credential|authorization|api.?key", re.I)
 _HEADERS = {"etag", "x-ratelimit-remaining", "x-ratelimit-reset", "x-poll-interval", "retry-after", "link"}
@@ -222,6 +222,7 @@ class GitHubReader:
         allow_public_fallback: bool = False,
         clock: Callable[[], float] = time.time,
         timeout: float = 30,
+        cache: OrderedDict[str, tuple[str, bytes]] | None = None,
     ):
         if not _REPO.fullmatch(repository) or repository.split("/")[1] in {".", ".."}:
             raise ValueError("canonical owner/repository required")
@@ -245,7 +246,7 @@ class GitHubReader:
         self.clock = clock
         self.timeout = timeout
         self._health: tuple[float, bool] | None = None
-        self._cache: OrderedDict[str, tuple[str, bytes]] = OrderedDict()
+        self._cache: OrderedDict[str, tuple[str, bytes]] = cache if cache is not None else OrderedDict()
         self._stats: dict[str, Any] | None = None
 
     def _run(self, argv: list[str], cap: int, fresh: bool = False) -> CommandResult:
@@ -297,8 +298,27 @@ class GitHubReader:
         prefix = f"/repos/{self.repository}"
         if (
             not _PATH.fullmatch(path)
+            or re.search(r"%(?![A-Fa-f0-9]{2})", path)
             or not (path == prefix or path.startswith(prefix + "/"))
-            or any(part in {"", ".", ".."} for part in path[1:].split("/"))
+        ):
+            raise ValueError("GET path must stay inside the bound repository")
+        # Send the original path, with canonical escaping within each segment.
+        # Literal percent is legal, but a second decode must not change routing
+        # or introduce traversal, controls, backslashes or another escape layer.
+        decoded = unquote(path, errors="strict")
+        canonical = "/".join(quote(unquote(part, errors="strict"), safe="") for part in path.split("/"))
+        escaped = re.sub(r"%[A-Fa-f0-9]{2}", lambda match: match[0].upper(), path)
+        # Replacement decoding lets literal percent text such as %beta survive
+        # invalid UTF-8 bytes while still exposing ASCII/UTF-8 routing hazards.
+        nested = unquote(decoded, errors="replace")
+        if (
+            canonical != escaped
+            or "%25" in decoded.lower()
+            or not decoded.isprintable()
+            or not nested.isprintable()
+            or "\\" in decoded + nested
+            or any(decoded.count(c) != nested.count(c) for c in "/?#")
+            or any(part in {"", ".", ".."} for value in (decoded, nested) for part in value[1:].split("/"))
         ):
             raise ValueError("GET path must stay inside the bound repository")
         query: dict[str, str | int] = {}

@@ -1636,8 +1636,17 @@ def test_windows_affected_job_selects_before_install_and_preserves_driver_policy
     assert "timeout-minutes: 45" in job
     assert "fetch-depth: 0" in job
     assert "persist-credentials: false" in job
-    assert "github.event.pull_request.base.sha || github.event.merge_group.base_sha" in job
-    assert "git fetch --no-tags --depth=1 origin $env:BASE_SHA" in job
+    # Diff from the test merge's first parent. pull_request.base.sha can trail
+    # the base branch and would count other merged pull requests' changes.
+    assert "pull_request.base.sha }}" not in job
+    assert "merge_group.base_sha" not in job
+    assert "PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}" in job
+    assert "$mergeHead = git rev-parse HEAD^2" in job
+    assert '$mergeHead -ne $env:PR_HEAD_SHA) { throw "HEAD is not the pull request test merge" }' in job
+    assert "$base = git rev-parse HEAD^1" in job
+    assert '"base=$base" >> $env:GITHUB_OUTPUT' in job
+    assert "--base $base --head HEAD" in job
+    assert "BASE_SHA: ${{ steps.selection.outputs.base }}" in job
     assert job.index("scripts/windows_affected_tests.py") < job.index("actions/setup-python")
     assert job.count("if: ${{ steps.selection.outputs.count != '0' }}") == 3
     assert "Skip empty selection" in job
