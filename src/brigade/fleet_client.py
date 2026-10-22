@@ -1167,6 +1167,23 @@ def _claim_op(
     if payload.get("reason") in CLAIM_FENCE_REFUSALS:
         return ClaimDecision(granted=False, reason=payload["reason"], detail=detail, holder=holder)
     if status == 200 and payload.get(_CLAIM_OK_KEYS[action]) is True:
+        if action == "inspect":
+            held = payload.get("claim")
+            owner_node = held.get("owner_node") if isinstance(held, dict) else None
+            if "claim" not in payload or (
+                held is not None
+                and not (
+                    isinstance(owner_node, str)
+                    and _node_id_is_claimable(owner_node)
+                    and _CLAIM_ID_RE.fullmatch(owner_node)
+                )
+            ):
+                return ClaimDecision(
+                    granted=False,
+                    reason="hub-unavailable",
+                    detail="hub returned a malformed inspect response",
+                    holder=holder,
+                )
         claim = payload.get("claim") if isinstance(payload.get("claim"), dict) else None
         superseded = payload.get("superseded") if isinstance(payload.get("superseded"), dict) else None
         run_dir = payload.get("lock_run_dir") if isinstance(payload.get("lock_run_dir"), str) else None
