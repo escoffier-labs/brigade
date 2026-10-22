@@ -14,7 +14,7 @@ import pytest
 
 from brigade import cli, localio, runguard, work_cmd
 from tests._posix import requires_process_groups
-from tests.test_work_dispatch import _tasks, dispatch_target  # noqa: F401
+from tests.test_work_dispatch import _tasks, dispatch_target, requires_dispatch_apply  # noqa: F401
 from tests.work_cmd_test_helpers import _init_git_repo
 
 
@@ -54,19 +54,25 @@ with runguard.run_lock(cwd, run_dir=run, wait_seconds=0):
     if os.environ.get('FAKE_DISPATCH_INFRA'): meta['failure_kind'] = 'provider-error'
     meta['failure_kind'] = os.environ.get('FAKE_DISPATCH_KIND', meta.get('failure_kind'))
     (run / 'run.json').write_text(json.dumps(meta))
+    release_file = os.environ.get('FAKE_DISPATCH_TERMINAL_RELEASE_FILE')
+    if release_file:
+        deadline = time.monotonic() + 30
+        while not Path(release_file).exists() and time.monotonic() < deadline:
+            time.sleep(0.01)
     time.sleep(float(os.environ.get('FAKE_DISPATCH_AFTER_TERMINAL', '0')))
 """
     )
     executable.chmod(0o755)
-    popen = subprocess.Popen
+    if sys.platform != "win32":
+        popen = subprocess.Popen
 
-    def launch(argv, *args, **kwargs):
-        if "brigade.work_cmd.dispatch_child" in argv:
-            assert argv[4:8] == [sys.executable, "-m", "brigade", "run"]
-            argv = [*argv[:4], sys.executable, str(executable), *argv[7:]]
-        return popen(argv, *args, **kwargs)
+        def launch(argv, *args, **kwargs):
+            if "brigade.work_cmd.dispatch_child" in argv:
+                assert argv[4:8] == [sys.executable, "-m", "brigade", "run"]
+                argv = [*argv[:4], sys.executable, str(executable), *argv[7:]]
+            return popen(argv, *args, **kwargs)
 
-    monkeypatch.setattr(subprocess, "Popen", launch)
+        monkeypatch.setattr(subprocess, "Popen", launch)
     _tasks(target, [["base.txt"]])
     return target
 
@@ -85,6 +91,7 @@ def _intents(target):
     ]
 
 
+@requires_dispatch_apply
 def test_apply_keeps_claim_and_branch_with_uncommitted_diff(apply_target, capsys):
     result = _apply(apply_target, capsys)
     (intent,) = _intents(apply_target)
@@ -119,6 +126,7 @@ def test_apply_keeps_claim_and_branch_with_uncommitted_diff(apply_target, capsys
         previous = digest
 
 
+@requires_dispatch_apply
 def test_failure_releases_only_its_claim_and_keeps_worktree(apply_target, capsys, monkeypatch):
     monkeypatch.setenv("FAKE_DISPATCH_STATUS", "failed")
     _apply(apply_target, capsys, expected=1)
@@ -129,6 +137,7 @@ def test_failure_releases_only_its_claim_and_keeps_worktree(apply_target, capsys
     assert task["status"] == "pending" and not task.get("claim")
 
 
+@requires_dispatch_apply
 def test_no_wait_then_next_invocation_finalizes(apply_target, capsys, monkeypatch):
     monkeypatch.setenv("FAKE_DISPATCH_SLEEP", "0.2")
     _apply(apply_target, capsys, "--no-wait")
@@ -146,6 +155,7 @@ def test_no_wait_then_next_invocation_finalizes(apply_target, capsys, monkeypatc
     assert (Path(intent["run_dir"]) / "launch-count").read_text() == "launch\n"
 
 
+@requires_dispatch_apply
 def test_breaker_and_explicit_reset(apply_target, capsys, monkeypatch):
     monkeypatch.setenv("FAKE_DISPATCH_STATUS", "failed")
     for _ in range(3):
@@ -165,6 +175,7 @@ def test_breaker_and_explicit_reset(apply_target, capsys, monkeypatch):
     )
 
 
+@requires_dispatch_apply
 def test_infrastructure_retries_are_bounded_and_do_not_trip(apply_target, capsys, monkeypatch):
     monkeypatch.setenv("FAKE_DISPATCH_STATUS", "failed")
     monkeypatch.setenv("FAKE_DISPATCH_INFRA", "1")
@@ -176,13 +187,80 @@ def test_infrastructure_retries_are_bounded_and_do_not_trip(apply_target, capsys
     assert json.loads(capsys.readouterr().out)["tripped_tasks"] == []
 
 
-def test_dispatch_lock_refuses_second_holder(apply_target, capsys):
+def test_dispatch_lock_refuses_second_holder(apply_target):
     from brigade.work_cmd.dispatch_state import dispatch_lock
 
     with dispatch_lock(apply_target):
-        assert cli.main(["work", "dispatch", "--target", str(apply_target), "--worker", "coder"]) == 2
-        assert str(os.getpid()) in capsys.readouterr().err
+        with pytest.raises(ValueError, match=rf"dispatch\.lock is held; last recorded owner pid {os.getpid()}"):
+            with dispatch_lock(apply_target):
+                pytest.fail("second lock acquisition unexpectedly succeeded")
     assert _intents(apply_target) == []
+
+
+def test_dispatch_lock_metadata_uses_held_descriptor(apply_target, monkeypatch):
+    from brigade.work_cmd.dispatch_state import dispatch_lock
+
+    lock_path = apply_target / ".brigade/dispatch/dispatch.lock"
+    original_write_text = Path.write_text
+
+    def reject_reopened_lock_write(path, *args, **kwargs):
+        if path == lock_path:
+            raise PermissionError("dispatch lock path cannot be reopened while its byte range is locked")
+        return original_write_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", reject_reopened_lock_write)
+    with dispatch_lock(apply_target):
+        from brigade.work_cmd.dispatch_state import _dispatch_lock_holder
+
+        assert _dispatch_lock_holder(lock_path) == str(os.getpid())
+    with dispatch_lock(apply_target):
+        pass
+    assert lock_path.read_bytes() == b"\0BRIGADE-DISPATCH-LOCK-V1:" + f"{os.getpid()}\n".encode("ascii")
+
+
+def test_dispatch_lock_legacy_metadata_is_unknown(tmp_path):
+    from brigade.work_cmd.dispatch_state import _dispatch_lock_holder
+
+    lock_path = tmp_path / "dispatch.lock"
+    lock_path.write_bytes(b"59648\n")
+    assert _dispatch_lock_holder(lock_path) == "unknown"
+
+
+def test_dispatch_lock_partial_or_malformed_metadata_is_unknown(tmp_path):
+    from brigade.work_cmd.dispatch_state import _dispatch_lock_holder
+
+    lock_path = tmp_path / "dispatch.lock"
+    for record in (
+        b"\0BRIGADE-DISPATCH-LOCK-V1:123",
+        b"\0" + b"123",
+        b"\0BRIGADE-DISPATCH-LOCK-V1:x\n",
+    ):
+        lock_path.write_bytes(record)
+        assert _dispatch_lock_holder(lock_path) == "unknown"
+
+
+def test_dispatch_lock_contention_calls_metadata_last_recorded(tmp_path):
+    from brigade.inbox_lock import held_file_lock_descriptor
+    from brigade.work_cmd.dispatch_state import dispatch_lock
+
+    lock_path = tmp_path / ".brigade/dispatch/dispatch.lock"
+    lock_path.parent.mkdir(parents=True)
+    lock_path.write_bytes(b"\0BRIGADE-DISPATCH-LOCK-V1:123\n")
+    with held_file_lock_descriptor(lock_path, deadline_seconds=0):
+        with pytest.raises(ValueError, match=r"last recorded owner pid 123"):
+            with dispatch_lock(tmp_path):
+                pytest.fail("contended dispatch lock was acquired")
+
+
+def test_held_file_lock_descriptor_unlocks_acquired_byte_after_seek(tmp_path):
+    from brigade.inbox_lock import held_file_lock_descriptor
+
+    lock_path = tmp_path / "state.lock"
+    with held_file_lock_descriptor(lock_path, deadline_seconds=1) as held:
+        assert held is not None
+        os.lseek(held.fd, 8, os.SEEK_SET)
+    with held_file_lock_descriptor(lock_path, deadline_seconds=1):
+        pass
 
 
 class DispatchCrash(BaseException):
@@ -205,6 +283,7 @@ class DispatchCrash(BaseException):
         "terminal-before-intent",
     ],
 )
+@requires_dispatch_apply
 def test_crash_recovery_has_one_claim_worktree_and_child(apply_target, capsys, monkeypatch, point):
     from brigade.work_cmd import dispatch_apply as apply, dispatch_state as store
 
@@ -269,6 +348,7 @@ def test_crash_recovery_has_one_claim_worktree_and_child(apply_target, capsys, m
     assert listing.count("worktree ") == 2
 
 
+@requires_dispatch_apply
 def test_lost_race_fills_capacity_from_next_wave_candidate(apply_target, capsys, monkeypatch):
     from brigade.work_cmd import dispatch_apply as apply
 
@@ -286,6 +366,7 @@ def test_lost_race_fills_capacity_from_next_wave_candidate(apply_target, capsys,
     assert {i["task_id"]: i["state"] for i in rows} == {"task-0": "lost_race", "task-1": "completed"}
 
 
+@requires_dispatch_apply
 def test_late_failure_never_releases_a_newer_claim(apply_target, capsys, monkeypatch):
     from brigade.work_cmd import dispatch_apply as apply
 
@@ -304,6 +385,7 @@ def test_late_failure_never_releases_a_newer_claim(apply_target, capsys, monkeyp
     assert task["status"] == "in_progress" and task["claim"]["claim_id"] == "new-generation"
 
 
+@requires_dispatch_apply
 def test_ctrl_c_terminates_children_and_releases_claim(apply_target, capsys, monkeypatch):
     from brigade.work_cmd import dispatch_apply as apply
 
@@ -323,6 +405,7 @@ def test_ctrl_c_terminates_children_and_releases_claim(apply_target, capsys, mon
     assert work_cmd._read_task_ledger(apply_target)["tasks"][0]["status"] == "pending"
 
 
+@requires_dispatch_apply
 def test_deadline_cancels_child(apply_target, capsys, monkeypatch):
     monkeypatch.setenv("FAKE_DISPATCH_SLEEP", "60")
     _apply(apply_target, capsys, "--deadline", "0.3", expected=1)
@@ -331,6 +414,7 @@ def test_deadline_cancels_child(apply_target, capsys, monkeypatch):
     assert not runguard._pid_is_active(intent["pid"])
 
 
+@requires_dispatch_apply
 def test_max_total_denial_uses_budget_payload(apply_target, capsys):
     result = _apply(apply_target, capsys, "--max-total", "0")
     assert _intents(apply_target) == []
@@ -348,6 +432,7 @@ def test_max_total_denial_uses_budget_payload(apply_target, capsys):
     }
 
 
+@requires_dispatch_apply
 def test_live_child_consumes_capacity_in_next_plan(apply_target, capsys, monkeypatch):
     monkeypatch.setenv("FAKE_DISPATCH_SLEEP", "0.5")
     _tasks(apply_target, [["a.py"], ["b.py"]])
@@ -359,6 +444,7 @@ def test_live_child_consumes_capacity_in_next_plan(apply_target, capsys, monkeyp
 
 
 @requires_process_groups
+@requires_dispatch_apply
 def test_orphaned_child_is_finalized_and_claim_released(apply_target, capsys, monkeypatch):
     monkeypatch.setenv("FAKE_DISPATCH_SLEEP", "60")
     _apply(apply_target, capsys, "--no-wait")
@@ -375,6 +461,7 @@ def test_orphaned_child_is_finalized_and_claim_released(apply_target, capsys, mo
     assert work_cmd._read_task_ledger(apply_target)["tasks"][0]["status"] == "pending"
 
 
+@requires_dispatch_apply
 def test_status_show_reads_intents_and_receipts(apply_target, capsys):
     result = _apply(apply_target, capsys)
     assert cli.main(["work", "dispatch-show", result["dispatch_id"], "--target", str(apply_target), "--json"]) == 0
@@ -383,6 +470,7 @@ def test_status_show_reads_intents_and_receipts(apply_target, capsys):
     assert session["events"][-1]["payload"]["state"] == "completed"
 
 
+@requires_dispatch_apply
 def test_spawn_error_is_receipted_released_and_retried(apply_target, capsys, monkeypatch):
     popen = subprocess.Popen
 
@@ -399,6 +487,7 @@ def test_spawn_error_is_receipted_released_and_retried(apply_target, capsys, mon
     assert work_cmd._read_task_ledger(apply_target)["tasks"][0]["status"] == "pending"
 
 
+@requires_dispatch_apply
 def test_partial_event_tail_recovers_without_duplicate_child(apply_target, capsys, monkeypatch):
     from brigade.work_cmd import dispatch_state as store
 
@@ -423,6 +512,7 @@ def test_partial_event_tail_recovers_without_duplicate_child(apply_target, capsy
     assert (Path(intent["run_dir"]) / "launch-count").read_text() == "launch\n"
 
 
+@requires_dispatch_apply
 def test_full_event_digest_corruption_refuses_resume(apply_target, capsys, monkeypatch):
     from brigade.work_cmd import dispatch_state as store
 
@@ -443,23 +533,48 @@ def test_full_event_digest_corruption_refuses_resume(apply_target, capsys, monke
     assert not list((apply_target / ".brigade/runs").glob("*/launch-count"))
 
 
-def test_terminal_run_waits_for_child_exit_before_closeout(apply_target, capsys, monkeypatch):
-    monkeypatch.setenv("FAKE_DISPATCH_AFTER_TERMINAL", "0.5")
-    _apply(apply_target, capsys, "--no-wait")
-    (intent,) = _intents(apply_target)
-    run_dir = Path(intent["run_dir"])
-    deadline = time.monotonic() + 5
-    while time.monotonic() < deadline:
-        meta = localio.read_json_dict(run_dir / "run.json")
-        if meta and meta.get("status") == "ok":
-            break
-        time.sleep(0.01)
-    _apply(apply_target, capsys, "--no-wait", "--max", "0")
-    assert _intents(apply_target)[0]["state"] == "running"
-    _apply(apply_target, capsys, "--max", "0")
-    assert _intents(apply_target)[0]["state"] == "completed"
+@requires_dispatch_apply
+def test_terminal_run_waits_for_child_exit_before_closeout(apply_target, capsys, monkeypatch, tmp_path):
+    from brigade.work_cmd import dispatch_state as store
+
+    release_file = tmp_path / "release-terminal-child"
+    monkeypatch.setenv("FAKE_DISPATCH_TERMINAL_RELEASE_FILE", str(release_file))
+    try:
+        _apply(apply_target, capsys, "--no-wait")
+        (intent,) = _intents(apply_target)
+        run_dir = Path(intent["run_dir"])
+        deadline = time.monotonic() + 5
+        meta = None
+        while time.monotonic() < deadline:
+            meta = localio.read_json_dict(run_dir / "run.json")
+            if meta and meta.get("status") == "ok":
+                break
+            time.sleep(0.01)
+        assert meta and meta.get("status") == "ok"
+        assert store.child_alive(intent)
+
+        _apply(apply_target, capsys, "--no-wait", "--max", "0")
+        assert _intents(apply_target)[0]["state"] == "running"
+        assert store.child_alive(intent)
+
+        release_file.touch()
+        deadline = time.monotonic() + 5
+        while store.child_alive(intent) and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert not store.child_alive(intent)
+        _apply(apply_target, capsys, "--max", "0")
+        assert _intents(apply_target)[0]["state"] == "completed"
+    finally:
+        release_file.touch()
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            rows = _intents(apply_target)
+            if not rows or not store.child_alive(rows[0]):
+                break
+            time.sleep(0.01)
 
 
+@requires_dispatch_apply
 def test_branch_head_drift_is_kept_for_review(apply_target, capsys, monkeypatch):
     monkeypatch.setenv("FAKE_DISPATCH_STATUS", "failed")
     monkeypatch.setenv("FAKE_DISPATCH_KIND", "branch-head-drift")
@@ -469,6 +584,7 @@ def test_branch_head_drift_is_kept_for_review(apply_target, capsys, monkeypatch)
     assert work_cmd._read_task_ledger(apply_target)["tasks"][0]["status"] == "in_progress"
 
 
+@requires_dispatch_apply
 def test_spawn_delay_uses_remaining_interval(apply_target, capsys, monkeypatch):
     from types import SimpleNamespace
     from brigade.work_cmd import dispatch_apply as apply
@@ -495,6 +611,7 @@ def test_spawn_delay_uses_remaining_interval(apply_target, capsys, monkeypatch):
     assert 2 in sleeps
 
 
+@requires_dispatch_apply
 def test_resume_cancellation_waits_for_adopted_child(apply_target, capsys, monkeypatch):
     from brigade.work_cmd import dispatch_apply as apply
 
@@ -514,6 +631,7 @@ def test_resume_cancellation_waits_for_adopted_child(apply_target, capsys, monke
     assert _intents(apply_target)[0]["state"] == "canceled"
 
 
+@requires_dispatch_apply
 def test_terminal_journal_wins_over_nonterminal_snapshot(apply_target, capsys):
     from brigade import run_journal
 
@@ -544,18 +662,31 @@ def test_terminal_journal_wins_over_nonterminal_snapshot(apply_target, capsys):
 
 
 def test_dispatch_lock_refuses_independent_process(apply_target, capsys):
-    program = 'from pathlib import Path\nfrom brigade.work_cmd.dispatch_state import dispatch_lock\nimport sys\nwith dispatch_lock(Path(sys.argv[1])):\n print("ready", flush=True)\n sys.stdin.readline()\n'
+    holder = (
+        "from pathlib import Path\nfrom brigade.work_cmd.dispatch_state import dispatch_lock\n"
+        "import sys\nwith dispatch_lock(Path(sys.argv[1])):\n"
+        ' print("ready", flush=True)\n sys.stdin.readline()\n'
+    )
+    contender = (
+        "from pathlib import Path\nfrom brigade.work_cmd.dispatch_state import dispatch_lock\n"
+        "import sys\ntry:\n with dispatch_lock(Path(sys.argv[1])): pass\n"
+        "except ValueError as exc:\n print(exc)\n sys.exit(0)\n"
+        "sys.exit(1)\n"
+    )
     child = subprocess.Popen(
-        [sys.executable, "-c", program, str(apply_target)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True
+        [sys.executable, "-c", holder, str(apply_target)], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True
     )
     try:
         assert child.stdout.readline().strip() == "ready"
-        assert cli.main(["work", "dispatch", "--target", str(apply_target), "--worker", "coder"]) == 2
-        assert str(child.pid) in capsys.readouterr().err
+        result = subprocess.run(
+            [sys.executable, "-c", contender, str(apply_target)], capture_output=True, text=True, check=True
+        )
+        assert f"dispatch.lock is held; last recorded owner pid {child.pid}" in result.stdout
     finally:
         child.communicate("\n", timeout=5)
 
 
+@requires_dispatch_apply
 def test_duplicate_bootstrap_never_executes_same_child_twice(apply_target, capsys):
     _apply(apply_target, capsys)
     (intent,) = _intents(apply_target)
@@ -572,6 +703,7 @@ def test_duplicate_bootstrap_never_executes_same_child_twice(apply_target, capsy
     assert (run_dir / "launch-count").read_text() == "launch\n"
 
 
+@requires_dispatch_apply
 def test_local_commit_runs_only_after_child_exit(apply_target, capsys):
     subprocess.run(["git", "config", "user.name", "Test"], cwd=apply_target, check=True)
     subprocess.run(["git", "config", "user.email", "test@example.invalid"], cwd=apply_target, check=True)
@@ -584,6 +716,7 @@ def test_local_commit_runs_only_after_child_exit(apply_target, capsys):
     )
 
 
+@requires_dispatch_apply
 def test_resumed_intent_does_not_launch_after_claim_reassignment(apply_target, capsys, monkeypatch):
     from brigade.work_cmd import dispatch_state as store
 
@@ -609,6 +742,7 @@ def test_resumed_intent_does_not_launch_after_claim_reassignment(apply_target, c
     assert work_cmd._read_task_ledger(apply_target)["tasks"][0]["claim"]["claim_id"] == "new-generation"
 
 
+@requires_dispatch_apply
 def test_child_rejected_before_run_metadata_is_infrastructure(apply_target, capsys):
     executable = apply_target / "bin/fake_run.py"
     executable.write_text(f"#!{sys.executable}\nraise SystemExit(2)\n")
@@ -618,6 +752,7 @@ def test_child_rejected_before_run_metadata_is_infrastructure(apply_target, caps
     assert all(row["state"] == "failed" and row["terminal"]["infrastructure"] for row in rows)
 
 
+@requires_dispatch_apply
 def test_expired_session_does_not_spawn_a_saved_planned_intent(apply_target, capsys, monkeypatch):
     from brigade.work_cmd import dispatch_state as store
 

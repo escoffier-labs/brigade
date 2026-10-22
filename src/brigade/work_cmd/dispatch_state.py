@@ -11,10 +11,12 @@ from typing import Any, Iterator
 from uuid import uuid4
 
 from .. import localio, runguard, run_events, worker_failure
-from ..inbox_lock import InboxLockTimeout, held_file_lock
+from ..inbox_lock import InboxLockTimeout, held_file_lock_descriptor
 
 TERMINAL = frozenset({"completed", "failed", "canceled", "orphaned", "lost_race", "unknown"})
 ACTIVE = frozenset({"planned", "claimed", "workspace_ready", "launching", "running"})
+_DISPATCH_LOCK_METADATA_PREFIX = b"BRIGADE-DISPATCH-LOCK-V1:"
+_DISPATCH_LOCK_METADATA_LIMIT = 128
 
 
 def root(target: Path) -> Path:
@@ -26,12 +28,49 @@ def dispatch_lock(target: Path) -> Iterator[None]:
     path = root(target) / "dispatch.lock"
     path.parent.mkdir(parents=True, exist_ok=True)
     try:
-        with held_file_lock(path, deadline_seconds=0):
-            path.write_text(str(os.getpid()) + "\n")
+        with held_file_lock_descriptor(path, deadline_seconds=0) as held:
+            held.verify()
+            # Keep byte zero as the Windows lock byte. Invalidate any previous
+            # owner's hint before publishing a complete framed record at byte 1.
+            os.ftruncate(held.fd, 1)
+            os.lseek(held.fd, 0, os.SEEK_SET)
+            _write_dispatch_lock_bytes(held.fd, b"\0")
+            os.lseek(held.fd, 1, os.SEEK_SET)
+            record = _DISPATCH_LOCK_METADATA_PREFIX + str(os.getpid()).encode("ascii") + b"\n"
+            _write_dispatch_lock_bytes(held.fd, record)
+            os.ftruncate(held.fd, 1 + len(record))
             yield
     except InboxLockTimeout as exc:
-        holder = path.read_text().strip() if path.is_file() else "unknown"
-        raise ValueError(f"dispatch.lock is held by pid {holder}") from exc
+        holder = _dispatch_lock_holder(path)
+        raise ValueError(f"dispatch.lock is held; last recorded owner pid {holder}") from exc
+
+
+def _write_dispatch_lock_bytes(fd: int, content: bytes) -> None:
+    """Write all bytes or propagate the underlying failure."""
+    offset = 0
+    while offset < len(content):
+        written = os.write(fd, content[offset:])
+        if written <= 0:
+            raise OSError("short write while updating dispatch lock metadata")
+        offset += written
+
+
+def _dispatch_lock_holder(path: Path) -> str:
+    """Read a bounded, complete last-recorded PID hint outside locked byte zero."""
+    if not path.is_file():
+        return "unknown"
+    try:
+        with path.open("rb") as lock_file:
+            lock_file.seek(1)
+            metadata = lock_file.read(_DISPATCH_LOCK_METADATA_LIMIT)
+        if len(metadata) >= _DISPATCH_LOCK_METADATA_LIMIT:
+            return "unknown"
+        if not metadata.startswith(_DISPATCH_LOCK_METADATA_PREFIX) or not metadata.endswith(b"\n"):
+            return "unknown"
+        holder = metadata[len(_DISPATCH_LOCK_METADATA_PREFIX) : -1].decode("ascii")
+    except (OSError, UnicodeDecodeError):
+        return "unknown"
+    return holder if holder.isdecimal() and int(holder) > 0 else "unknown"
 
 
 def sessions(target: Path) -> list[Path]:

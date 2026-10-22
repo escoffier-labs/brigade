@@ -807,6 +807,50 @@ class TestPureRendering:
 
         assert fleet_dashboard._RepoEntry("repo", [fresh], [fresh, abandoned], None, None).collision is False
         assert fleet_dashboard._RepoEntry("repo", [fresh, second], [fresh, second], None, None).collision is True
+        html = fleet_dashboard.render_page(
+            view="repos",
+            query_string="",
+            runs=[
+                {"node_id": row.node_id, "run_id": row.run_id, "repo": row.repo, "state": row.state, "ts": row.last_ts}
+                for row in (fresh, second)
+            ],
+            claims=[],
+            nodes=[],
+            started_at={},
+            nonce="abc",
+            now=now,
+        )
+        assert "parallel activity" in html and "Same repo label" in html
+        assert "File overlap unknown" in html
+        assert "! collision" not in html and "fleet-state-failed" not in html.split("<tbody>")[1]
+        events = [
+            {"node_id": row.node_id, "run_id": row.run_id, "repo": row.repo, "state": row.state, "ts": row.last_ts}
+            for row in (fresh, second)
+        ]
+        events.append(
+            {
+                "node_id": "c",
+                "run_id": "bad",
+                "repo": "approval-repo",
+                "state": "approval.requested",
+                "ts": now.isoformat(),
+            }
+        )
+        attention = fleet_dashboard.render_page(
+            view="repos",
+            query_string="attention=1",
+            runs=events,
+            claims=[],
+            nodes=[],
+            started_at={},
+            nonce="abc",
+            now=now,
+        )
+        assert "<td>repo</td>" not in attention and "<td>approval-repo</td>" in attention
+        ranked = fleet_dashboard.render_page(
+            view="repos", query_string="", runs=events, claims=[], nodes=[], started_at={}, nonce="abc", now=now
+        )
+        assert ranked.index("<td>approval-repo</td>") < ranked.index("<td>repo</td>")
 
     def test_format_duration(self):
         assert fleet_dashboard.format_duration(None) == "-"
@@ -897,7 +941,7 @@ def test_interactive_sessions_stay_off_legacy_boards_and_station_capacity(tmp_pa
             conn.close()
         status, _headers, deck_body = _request(hub, "GET", "/deck", headers=_bearer())
         assert status == 200
-        assert "Interactive sessions" in deck_body
+        assert "Reported agent sessions (1)" in deck_body
         assert "&lt;script&gt;alert(1)&lt;/script&gt;" in deck_body
         assert "<script>alert(1)</script>" not in deck_body
         assert "10 unavailable" in deck_body
