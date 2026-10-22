@@ -65,12 +65,13 @@ func normalize(ev sources.RawEvent) (rec adapter.Record, warning string, skipped
 	if payload == nil {
 		payload = ev.Object
 	}
+	logicalPath := sources.LogicalJSONLPath(ev.Path)
 	sessionID := sources.String(payload, "session_id", "sessionId", "id")
 	if sessionID == "" {
 		sessionID = sources.String(ev.Object, "session_id", "sessionId", "session")
 	}
 	if sessionID == "" {
-		sessionID = filepath.Base(ev.Path)
+		sessionID = filepath.Base(logicalPath)
 	}
 	role := sources.String(payload, "role", "author")
 	if role == "" {
@@ -140,7 +141,7 @@ func normalize(ev sources.RawEvent) (rec adapter.Record, warning string, skipped
 		hashData += digest
 	}
 	itemHash := sources.HashBytes([]byte(hashData))
-	externalID := "codex:" + sources.StableID(ev.Path, sessionID, fmt.Sprint(ev.Ordinal), eventType, ts, itemHash)
+	externalID := "codex:" + sources.StableID(logicalPath, sessionID, fmt.Sprint(ev.Ordinal), eventType, ts, itemHash)
 	if callID != "" {
 		if strings.Contains(strings.ToLower(payloadType), "output") || strings.Contains(strings.ToLower(payloadType), "result") {
 			externalID = "codex:call_result:" + callID
