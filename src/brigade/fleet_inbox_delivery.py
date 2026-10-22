@@ -107,13 +107,19 @@ def _write_state(path: Path, *, scope: str, cursor: int, next_poll_at: float = 0
 
 
 def _prune(directory: Path, *, now: float) -> None:
-    """Drop cursor files of long-gone sessions. Bounded scan, never raises."""
+    """Drop cursor files of long-gone sessions. Bounded scan, never raises.
+
+    A lock file goes only together with its own cursor file, never by age: a
+    lock unlinked while a hook holds it would let the next hook lock a new
+    inode and run alongside the holder.
+    """
     try:
         for index, entry in enumerate(directory.iterdir()):
             if index >= PRUNE_SCAN_LIMIT:
                 return
-            if entry.suffix in (".json", ".lock") and now - entry.stat().st_mtime > STATE_RETENTION_SECONDS:
+            if entry.suffix == ".json" and now - entry.stat().st_mtime > STATE_RETENTION_SECONDS:
                 entry.unlink()
+                entry.with_name(entry.name + ".lock").unlink(missing_ok=True)
     except OSError:
         return
 
@@ -226,6 +232,11 @@ def _deliver_locked(path: Path, event: str, now: float) -> str | None:
     shown = rows[:MAX_DELIVERED_MESSAGES]
     new_cursor = shown[-1]["id"] if shown else cursor
     saved = _write_state(path, scope=scope, cursor=new_cursor, next_poll_at=now + TOOL_POLL_INTERVAL_SECONDS)
+    if not saved:
+        # The write can fail after the replace landed (directory fsync, chmod).
+        # Trust the file, not the exception: a published cursor must be shown.
+        stored = _read_state(path)
+        saved = stored.get("scope") == scope and stored.get("cursor") == new_cursor
     # Unsaved cursor: showing the mail would repeat it on every later event.
     if not shown or not saved:
         return None

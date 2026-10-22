@@ -331,8 +331,21 @@ def test_stale_cursor_files_are_pruned_when_a_new_session_starts(fleet):
 
     delivery.deliver("claude", "fresh", "UserPromptSubmit", now=now)
 
-    assert not old.exists()
+    assert not old.exists() and not old.with_name(old.name + ".lock").exists()
     assert delivery.state_path("claude", "fresh").exists()
+
+
+def test_a_lock_file_is_never_pruned_by_age(fleet):
+    lock = delivery.state_path("claude", "held").with_name(delivery.state_path("claude", "held").name + ".lock")
+    lock.parent.mkdir(parents=True, exist_ok=True)
+    lock.write_text("", encoding="utf-8")
+    now = time.time()
+    aged = now - delivery.STATE_RETENTION_SECONDS - 10
+    os.utime(lock, (aged, aged))
+
+    delivery.deliver("claude", "fresh", "UserPromptSubmit", now=now)
+
+    assert lock.exists()
 
 
 def test_overlapping_hooks_for_one_session_deliver_once_and_never_wait(fleet, monkeypatch):
@@ -382,6 +395,28 @@ def test_unwritable_state_neither_calls_the_hub_nor_delivers(fleet, monkeypatch)
     assert delivery.deliver("claude", "session-1", "UserPromptSubmit", now=T0) is None
     assert delivery.deliver("claude", "session-1", "UserPromptSubmit", now=T0 + 100) is None
     assert calls == []
+
+
+def test_mail_is_shown_when_the_write_failed_after_the_cursor_was_published(fleet, monkeypatch):
+    _send(fleet)
+    real = delivery.localio.write_text_atomic
+    writes = []
+
+    def fails_after_replace(path, data):
+        writes.append(path)
+        real(path, data)
+        if len(writes) == 2:
+            raise OSError("directory fsync failed")
+
+    monkeypatch.setattr(delivery.localio, "write_text_atomic", fails_after_replace)
+
+    text = delivery.deliver("claude", "session-1", "UserPromptSubmit", now=T0)
+
+    assert text is not None
+    # The cursor did advance, so the same mail never repeats.
+    assert (
+        delivery.deliver("claude", "session-1", "UserPromptSubmit", now=T0 + delivery.FAILURE_BACKOFF_SECONDS) is None
+    )
 
 
 def test_mail_is_not_shown_when_the_cursor_cannot_be_saved(fleet, monkeypatch):
