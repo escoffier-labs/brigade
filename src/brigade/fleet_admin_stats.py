@@ -15,15 +15,26 @@ from typing import Any
 
 from . import fleet_client, toml_compat
 
-SCHEMA = "brigade.admin-stats.v1"
+SCHEMA = "brigade.admin-stats.v2"
+LEGACY_SCHEMA = "brigade.admin-stats.v1"
 RETENTION_DAYS = 400
 RETENTION_INTERVAL_SECONDS = 3600
 SOURCE_FIELDS = ("active_sources", "retained_2d_sources", "retained_3d_sources")
 WEEK_FIELDS = ("week", "partial", *SOURCE_FIELDS, "versions", "upgrades")
 DAILY_FIELDS = ("day", "worker_requests", "worker_errors")
-FIELDS = ("schema", "snapshot_id", "taken_at", "source_set", "weeks", "daily", "downloads", "digest")
+V1_FIELDS = ("schema", "snapshot_id", "taken_at", "source_set", "weeks", "daily", "downloads", "digest")
+FIELDS = (*V1_FIELDS[:-1], "cloudflare", V1_FIELDS[-1])
 FIELD_PATHS = (
     *FIELDS,
+    "cloudflare.collected_at",
+    "cloudflare.credential",
+    "cloudflare.worker_version",
+    "cloudflare.worker_published_at",
+    "cloudflare.repository_head",
+    "cloudflare.d1_rows",
+    "cloudflare.last_purge",
+    "cloudflare.requests_24h",
+    "cloudflare.errors_24h",
     *("weeks." + f for f in WEEK_FIELDS),
     "weeks.versions.version",
     "weeks.versions.active_sources",
@@ -78,6 +89,37 @@ def _count(value: Any, *, sources: bool = False) -> None:
         raise ValueError("invalid or unsuppressed count")
 
 
+def _cloudflare(value: Any) -> None:
+    if value is None:
+        return
+    fields = (
+        "collected_at",
+        "credential",
+        "worker_version",
+        "worker_published_at",
+        "repository_head",
+        "d1_rows",
+        "last_purge",
+        "requests_24h",
+        "errors_24h",
+    )
+    _keys(value, fields)
+    _stamp(value["collected_at"])
+    if value["credential"] not in ("available", "unavailable", "unknown"):
+        raise ValueError("invalid Cloudflare credential state")
+    for key in ("worker_version", "repository_head"):
+        if value[key] is not None and (
+            not isinstance(value[key], str) or not re.fullmatch(r"[A-Za-z0-9._+-]{1,128}", value[key])
+        ):
+            raise ValueError("invalid Cloudflare version")
+    for key in ("worker_published_at", "last_purge"):
+        if value[key] is not None:
+            _stamp(value[key])
+    for key in ("d1_rows", "requests_24h", "errors_24h"):
+        if value[key] is not None and (type(value[key]) is not int or not 0 <= value[key] <= 10**15):
+            raise ValueError("invalid Cloudflare count")
+
+
 def _stamp(value: Any) -> datetime:
     if not isinstance(value, str) or len(value) != 20:
         raise ValueError("invalid timestamp")
@@ -109,14 +151,17 @@ def _digest(value: dict[str, Any]) -> str:
 
 def validate(value: Any) -> dict[str, Any]:
     """Reject unknown fields at every depth before checking the canonical digest."""
-    _keys(value, FIELDS)
-    if value["schema"] != SCHEMA:
+    if not isinstance(value, dict):
+        raise ValueError("invalid snapshot fields")
+    legacy = value.get("schema") == LEGACY_SCHEMA
+    _keys(value, V1_FIELDS if legacy else FIELDS)
+    if value["schema"] not in (SCHEMA, LEGACY_SCHEMA):
         raise ValueError("unsupported snapshot schema")
     taken = _stamp(value["taken_at"])
-    sources = _rows(value["source_set"], 3)
-    if any(type(s) is not str or s not in ("d1", "worker", "downloads") for s in sources) or len(set(sources)) != len(
-        sources
-    ):
+    sources = _rows(value["source_set"], 4)
+    if any(type(s) is not str or s not in ("d1", "worker", "downloads", "cloudflare") for s in sources) or len(
+        set(sources)
+    ) != len(sources):
         raise ValueError("invalid source set")
     seen = set()
     for row in _rows(value["weeks"], 60):
@@ -167,6 +212,10 @@ def validate(value: Any) -> dict[str, Any]:
     _keys(value["downloads"], ("pypi", "npm"))
     for count in value["downloads"].values():
         _count(count)
+    if not legacy:
+        _cloudflare(value["cloudflare"])
+        if value["cloudflare"] is not None and "cloudflare" not in sources:
+            raise ValueError("Cloudflare data absent from source set")
     if (
         (value["weeks"] and "d1" not in sources)
         or (value["daily"] and "worker" not in sources)
@@ -190,6 +239,7 @@ def snapshot(
     weeks: list[dict[str, Any]],
     daily: list[dict[str, Any]],
     downloads: dict[str, Any],
+    cloudflare: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     value: dict[str, Any] = copy.deepcopy(
         {
@@ -199,6 +249,7 @@ def snapshot(
             "weeks": weeks,
             "daily": daily,
             "downloads": downloads,
+            "cloudflare": cloudflare,
         }
     )
     for row in value["weeks"]:

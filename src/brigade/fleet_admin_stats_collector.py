@@ -40,6 +40,13 @@ ANALYTICS_QUERY = """query Stats($account: string!, $worker: string!, $start: Ti
  workersInvocationsAdaptive(limit: 10000, filter: {scriptName: $worker, datetime_geq: $start, datetime_lt: $end}, orderBy: [date_ASC]) {
  dimensions { date } sum { requests errors }
  } } } }"""
+VIEWER_QUERY = "query CredentialCheck { viewer { accounts { accountTag } } }"
+STATUS_ANALYTICS_QUERY = """query Status($account: string!, $worker: string!, $start: Time!, $end: Time!) {
+ viewer { accounts(filter: {accountTag: $account}) {
+ workersInvocationsAdaptive(limit: 10000, filter: {scriptName: $worker, datetime_geq: $start, datetime_lt: $end}, orderBy: [date_ASC]) {
+ dimensions { date } sum { requests errors }
+ } } } }"""
+STATUS_QUERY = "SELECT COUNT(*) AS row_count FROM version_observations WHERE internal = 0"
 _MAX_RESPONSE = 4 * 1024 * 1024
 
 
@@ -51,12 +58,61 @@ def wrangler_argv(database: str, query: str) -> list[str]:
     return ["wrangler", "d1", "execute", database, "--remote", "--json", "--command", QUERIES[query]]
 
 
+def status_wrangler_argv(worker: str, database: str, action: str) -> list[str]:
+    """Build only the named read operations used by the Deck status panel."""
+    if not isinstance(worker, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", worker):
+        raise ValueError("invalid stats Worker setting")
+    if not isinstance(database, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", database):
+        raise ValueError("invalid stats database setting")
+    commands = {
+        "deployments-status": ["wrangler", "deployments", "status", "--name", worker, "--json"],
+        "deployments-list": ["wrangler", "deployments", "list", "--name", worker, "--json"],
+        "versions-list": ["wrangler", "versions", "list", "--name", worker, "--json"],
+        "d1-info": ["wrangler", "d1", "info", database, "--json"],
+        "d1-counts": ["wrangler", "d1", "execute", database, "--remote", "--json", "--command", STATUS_QUERY],
+    }
+    try:
+        return commands[action]
+    except (KeyError, TypeError):
+        raise ValueError("unknown Cloudflare status read") from None
+
+
+def _status_read(argv: list[str]) -> bool:
+    if any(not isinstance(part, str) for part in argv):
+        return False
+    if len(argv) == 6 and argv[:3] in (["wrangler", "deployments", "status"], ["wrangler", "deployments", "list"]):
+        return (
+            argv[3] == "--name"
+            and bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", argv[4]))
+            and argv[5] == "--json"
+        )
+    if len(argv) == 6 and argv[:3] == ["wrangler", "versions", "list"]:
+        return (
+            argv[3] == "--name"
+            and bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", argv[4]))
+            and argv[5] == "--json"
+        )
+    if len(argv) == 5 and argv[:3] == ["wrangler", "d1", "info"]:
+        return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", argv[3])) and argv[4] == "--json"
+    return (
+        len(argv) == 8
+        and argv[-1] == STATUS_QUERY
+        and argv == status_wrangler_argv("example-worker", argv[3], "d1-counts")
+    )
+
+
 def run_wrangler(argv: list[str], *, account: str | None = None, token_envs: tuple[str, ...] = ()) -> Any:
     """Only the exact generated read vector is executable. Never print tool output."""
-    if not isinstance(argv, list) or len(argv) != 8 or argv[-1] not in QUERIES.values():
+    if not isinstance(argv, list):
         raise ValueError("command outside stats read allowlist")
-    query = next(key for key, sql in QUERIES.items() if sql == argv[-1])
-    if argv != wrangler_argv(argv[3], query) or not argv[-1].lstrip().startswith(("SELECT ", "WITH ")):
+    status_read = _status_read(argv)
+    query = next((key for key, sql in QUERIES.items() if len(argv) == 8 and sql == argv[-1]), None)
+    existing_read = (
+        query is not None
+        and argv == wrangler_argv(argv[3], query)
+        and argv[-1].lstrip().startswith(("SELECT ", "WITH "))
+    )
+    if not status_read and not existing_read:
         raise ValueError("command outside stats read allowlist")
     env = {
         key: value
@@ -72,7 +128,7 @@ def run_wrangler(argv: list[str], *, account: str | None = None, token_envs: tup
     try:
         return json.loads(_bounded_output(argv, env))
     except (OSError, subprocess.SubprocessError, ValueError):
-        raise ValueError("D1 read failed") from None
+        raise ValueError("Cloudflare read failed" if status_read else "D1 read failed") from None
 
 
 def _bounded_output(argv: list[str], env: dict[str, str]) -> bytes:
@@ -219,6 +275,140 @@ def _analytics(settings: dict[str, Any], now: datetime) -> list[dict[str, Any]]:
     return [daily[key] for key in sorted(daily)]
 
 
+def _status_time(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    return parsed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def cloudflare_status(settings: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any] | None:
+    """Return only validated Cloudflare status fields; never retain CLI or API payloads."""
+    if settings.get("status_panel") is not True:
+        return None
+    now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
+    worker, database = settings.get("worker"), settings.get("database")
+    if not worker and not database:
+        return None
+    result: dict[str, Any] = {
+        "collected_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "credential": "unavailable",
+        "worker_version": None,
+        "worker_published_at": None,
+        "repository_head": None,
+        "d1_rows": None,
+        "last_purge": None,
+        "requests_24h": None,
+        "errors_24h": None,
+    }
+    repository_head = settings.get("repository_head")
+    if isinstance(repository_head, str) and re.fullmatch(r"[A-Za-z0-9._+-]{1,128}", repository_head):
+        result["repository_head"] = repository_head
+    wrangler_ok = False
+    if isinstance(worker, str) and isinstance(database, str):
+        try:
+            token_envs = tuple(
+                settings[key] for key in ("analytics_token_env", "d1_token_env") if isinstance(settings.get(key), str)
+            )
+            current = run_wrangler(
+                status_wrangler_argv(worker, database, "deployments-status"),
+                account=settings.get("account"),
+                token_envs=token_envs,
+            )
+            deployments = run_wrangler(
+                status_wrangler_argv(worker, database, "deployments-list"),
+                account=settings.get("account"),
+                token_envs=token_envs,
+            )
+            versions = run_wrangler(
+                status_wrangler_argv(worker, database, "versions-list"),
+                account=settings.get("account"),
+                token_envs=token_envs,
+            )
+            run_wrangler(
+                status_wrangler_argv(worker, database, "d1-info"),
+                account=settings.get("account"),
+                token_envs=token_envs,
+            )
+            counts = run_wrangler(
+                status_wrangler_argv(worker, database, "d1-counts"),
+                account=settings.get("account"),
+                token_envs=token_envs,
+            )
+            wrangler_ok = True
+            deployment = current.get("latest") if isinstance(current, dict) else None
+            if deployment is None and isinstance(deployments, dict):
+                entries = deployments.get("deployments")
+                deployment = entries[0] if isinstance(entries, list) and entries else None
+            version_id = None
+            if isinstance(deployment, dict):
+                deployed = deployment.get("versions")
+                if isinstance(deployed, list) and deployed and isinstance(deployed[0], dict):
+                    candidate = deployed[0].get("version_id") or deployed[0].get("id")
+                    if isinstance(candidate, str) and re.fullmatch(r"[A-Za-z0-9._+-]{1,128}", candidate):
+                        version_id = candidate
+                result["worker_version"] = version_id
+            version_rows = versions.get("versions", []) if isinstance(versions, dict) else []
+            for version in version_rows:
+                if isinstance(version, dict) and version_id in (version.get("id"), version.get("version_id")):
+                    result["worker_published_at"] = _status_time(version.get("created_on") or version.get("created_at"))
+                    break
+            rows = _results(counts)
+            if len(rows) == 1 and type(rows[0].get("row_count")) is int and rows[0]["row_count"] >= 0:
+                result["d1_rows"] = rows[0]["row_count"]
+        except (ValueError, KeyError, TypeError, AttributeError):
+            pass
+    token_key = settings.get("analytics_token_env")
+    token = os.environ.get(token_key, "") if isinstance(token_key, str) else ""
+    graphql_ok = False
+    if token and isinstance(worker, str) and isinstance(settings.get("account"), str):
+        try:
+            viewer = fetch_json(
+                "https://api.cloudflare.com/client/v4/graphql", body={"query": VIEWER_QUERY}, token=token
+            )
+            accounts = viewer["data"]["viewer"]["accounts"]
+            graphql_ok = not viewer.get("errors") and isinstance(accounts, list) and bool(accounts)
+            if graphql_ok:
+                end = now
+                payload = fetch_json(
+                    "https://api.cloudflare.com/client/v4/graphql",
+                    body={
+                        "query": STATUS_ANALYTICS_QUERY,
+                        "variables": {
+                            "account": settings["account"],
+                            "worker": worker,
+                            "start": (end - timedelta(hours=24)).isoformat(),
+                            "end": end.isoformat(),
+                        },
+                    },
+                    token=token,
+                )
+                account_rows = payload["data"]["viewer"]["accounts"]
+                if not payload.get("errors") and len(account_rows) == 1:
+                    observations = account_rows[0]["workersInvocationsAdaptive"]
+                    if len(observations) < 10000:
+                        requests, errors = [], []
+                        for row in observations:
+                            requests.append(row["sum"]["requests"])
+                            errors.append(row["sum"]["errors"])
+                        if all(type(value) is int and value >= 0 for value in requests + errors):
+                            result["requests_24h"] = sum(requests)
+                            result["errors_24h"] = sum(errors)
+        except (ValueError, KeyError, TypeError, AttributeError):
+            pass
+    if wrangler_ok and graphql_ok:
+        result["credential"] = "available"
+    # Available read-only status sources do not report a D1 purge event timestamp.
+    # Keep last_purge unknown instead of presenting the newest data date as a purge.
+    stats._cloudflare(result)
+    return result
+
+
 def collect(settings: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any]:
     """Unavailable providers stay unknown. Successful empty queries never imply zero."""
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
@@ -280,7 +470,12 @@ def collect(settings: dict[str, Any], *, now: datetime | None = None) -> dict[st
             sources.append("downloads")
         except (ValueError, KeyError, TypeError, AttributeError):
             downloads = {"pypi": None, "npm": None}
-    return stats.snapshot(taken_at=now, source_set=sources, weeks=weeks, daily=daily, downloads=downloads)
+    cloudflare = cloudflare_status(settings, now=now)
+    if cloudflare is not None:
+        sources.append("cloudflare")
+    return stats.snapshot(
+        taken_at=now, source_set=sources, weeks=weeks, daily=daily, downloads=downloads, cloudflare=cloudflare
+    )
 
 
 def _histogram(rows: list[dict[str, Any]] | None, week: str, *, upgrades: bool) -> list[dict[str, Any]] | None:

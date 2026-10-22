@@ -2228,8 +2228,11 @@ download-metrics JSON supplies matching 30-day PyPI and npm download counts.
 Unavailable providers stay unknown. If no source succeeds, collection exits 1
 without publishing. `--no-publish` prints a successful snapshot instead of
 posting it. Collection is explicit and no timer is installed.
+The Cloudflare status panel is opt-in with `fleet.stats.status_panel = true`;
+configure the expected `repository_head` in the same section. See the fleet
+statistics settings below in [Fleet sync](fleet-sync.md).
 
-The closed `brigade.admin-stats.v1` snapshot and page expose these fields:
+The closed `brigade.admin-stats.v2` snapshot and page expose these fields:
 
 - `schema`, `snapshot_id`, `taken_at`, `source_set`.
 - `weeks`, `daily`, `downloads`, `digest`.
@@ -2238,6 +2241,26 @@ The closed `brigade.admin-stats.v1` snapshot and page expose these fields:
 - `weeks.versions.active_sources`, `weeks.upgrades.from_version`, `weeks.upgrades.to_version`, `weeks.upgrades.active_sources`.
 - `daily.day`, `daily.worker_requests`, `daily.worker_errors`, `downloads.pypi`.
 - `downloads.npm`.
+- `cloudflare`, `cloudflare.collected_at`, `cloudflare.credential`.
+- `cloudflare.worker_version`, `cloudflare.worker_published_at`, `cloudflare.repository_head`.
+- `cloudflare.d1_rows`, `cloudflare.last_purge`, `cloudflare.requests_24h`, `cloudflare.errors_24h`.
+
+The Hub continues to read retained v1 snapshots during the transition.
+
+The Cloudflare panel uses only fixed Wrangler reads (`deployments status`,
+`deployments list`, `versions list`, `d1 info`, and one fixed aggregate SELECT)
+and a fixed GraphQL viewer check plus the 24-hour Analytics query. The collector
+publishes normalized fields only. API tokens, raw CLI output, and error text do
+not enter the snapshot. A missing credential is labeled `credential unavailable`;
+failed cells and snapshots older than 15 minutes render as unknown. Wrangler
+does not report a D1 purge event timestamp, so `cloudflare.last_purge` remains
+unknown until the Worker records that event. The latest retained observation
+date is not a purge timestamp.
+
+An operator-triggered mutating path is a separate follow-up, out of scope here.
+It would require an admin bearer, an exact argv preview before each action, a
+Brigade receipt for every action, and no unattended execution. Deploy, rollback,
+secret changes, migration application, and deletion remain denied.
 
 `weeks`, `daily`, version cells and upgrade cells are arrays. Counts are nullable
 nonnegative integers. Source counts below 5 become `null`, including zero.

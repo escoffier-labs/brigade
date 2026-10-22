@@ -4,7 +4,7 @@ import copy
 import io
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.message import Message
 
 import pytest
@@ -239,6 +239,75 @@ def test_page_unknown_partial_privacy_and_docs():
         listed = Path(doc).read_text().split("expose these fields:\n\n", 1)[1].split("\n\n", 1)[0]
         assert set(re.findall(r"`([^`]+)`", listed)) == set(stats.FIELD_PATHS)
     assert "unknown" in page.render({"latest": None, "weeks": []}, nonce="example", now=NOW)
+
+
+def test_cloudflare_panel_shows_fixture_and_hides_stale_values():
+    from brigade import fleet_admin_stats as stats, fleet_admin_stats_page as page
+
+    cloudflare = {
+        "collected_at": "2026-10-20T12:00:00Z",
+        "credential": "available",
+        "worker_version": "example-version",
+        "worker_published_at": "2026-10-20T11:55:00Z",
+        "repository_head": "a" * 40,
+        "d1_rows": 120,
+        "last_purge": "2026-10-20T11:00:00Z",
+        "requests_24h": 840,
+        "errors_24h": 2,
+    }
+    value = stats.snapshot(
+        taken_at=NOW,
+        source_set=["cloudflare"],
+        weeks=[],
+        daily=[],
+        downloads={"pypi": None, "npm": None},
+        cloudflare=cloudflare,
+    )
+    fresh = page.render({"latest": value, "weeks": []}, nonce="example", now=NOW)
+    assert 'data-field="cloudflare.worker_version">example-version</span>' in fresh
+    assert "credential unavailable" not in fresh
+    unavailable = dict(cloudflare, credential="unavailable", worker_version=None, d1_rows=None)
+    unavailable_snapshot = stats.snapshot(
+        taken_at=NOW,
+        source_set=["cloudflare"],
+        weeks=[],
+        daily=[],
+        downloads={"pypi": None, "npm": None},
+        cloudflare=unavailable,
+    )
+    unavailable_html = page.render({"latest": unavailable_snapshot, "weeks": []}, nonce="example", now=NOW)
+    assert "credential unavailable" in unavailable_html
+    assert 'data-field="cloudflare.d1_rows">unknown</span>' in unavailable_html
+    stale = page.render({"latest": value, "weeks": []}, nonce="example", now=NOW + timedelta(minutes=16))
+    assert 'data-field="cloudflare.credential">unknown</span>' in stale
+    assert "credential unavailable" not in stale
+    assert 'data-field="cloudflare.worker_version">unknown</span>' in stale
+
+
+def test_cloudflare_snapshot_rejects_unapproved_fields():
+    from brigade import fleet_admin_stats as stats
+
+    cloudflare = {
+        "collected_at": "2026-10-20T12:00:00Z",
+        "credential": "available",
+        "worker_version": None,
+        "worker_published_at": None,
+        "repository_head": None,
+        "d1_rows": None,
+        "last_purge": None,
+        "requests_24h": None,
+        "errors_24h": None,
+        "token": "example-secret",
+    }
+    with pytest.raises(ValueError, match="fields"):
+        stats.snapshot(
+            taken_at=NOW,
+            source_set=["cloudflare"],
+            weeks=[],
+            daily=[],
+            downloads={"pypi": None, "npm": None},
+            cloudflare=cloudflare,
+        )
 
 
 @pytest.mark.parametrize("enabled", [False, True])
