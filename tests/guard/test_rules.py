@@ -395,6 +395,54 @@ class MissingLeakShapeTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertNotIn("bare-token-prefix", {f.rule_id for f in scan_text(text).findings})
 
+    def test_worklore_provider_families_preserve_context_and_redact_whole_tokens(self) -> None:
+        for prefix, body in (
+            ("ASIA", "A" * 16),
+            ("AIza", "a" * 30),
+            ("AIza", "a" * 28 + "_-"),
+            ("glpat-", "a" * 16),
+            ("glpat-", "a" * 14 + "-_"),
+        ):
+            credential = prefix + body
+            for before, after, expected in (
+                ("Credential: ", ".", "bare-token-prefix"),
+                ("(", ")", "bare-token-prefix"),
+                ('api_key="', '"', "api-key-assignment"),
+                ("token='", "'", "api-key-assignment"),
+                ("Bearer ", "", "bearer-token"),
+            ):
+                with self.subTest(prefix=prefix, body=body, expected=expected, before=before):
+                    result = scan_text(before + credential + after)
+                    self.assertEqual([finding.rule_id for finding in result.findings], [expected])
+                    self.assertNotIn(credential, result.redacted_text)
+                    if expected == "bare-token-prefix":
+                        self.assertEqual(result.findings[0].match, credential)
+                        self.assertEqual(result.redacted_text, before + "[redacted-secret]" + after)
+
+    def test_worklore_provider_short_prefixes_and_embedded_tokens_do_not_match(self) -> None:
+        for text in (
+            "AsiaPacificCustomers",
+            "ASIA" + "a" * 16,
+            "asia" + "A" * 16,
+            "aiza" + "a" * 30,
+            "GLPAT-" + "a" * 16,
+            "ASIAEXAMPLE",
+            "ASIA" + "A" * 15,
+            "ASIA" + "A" * 17,
+            "ASIA" + "A" * 16 + "_",
+            "AIza" + "a" * 29,
+            "glpat-demo",
+            "glpat-" + "a" * 15,
+            "xASIA" + "A" * 16,
+            "_ASIA" + "A" * 16,
+            "xAIza" + "a" * 30,
+            "_AIza" + "a" * 30,
+            "xglpat-" + "a" * 16,
+            "_glpat-" + "a" * 16,
+        ):
+            with self.subTest(text=text):
+                self.assertNotIn("bare-token-prefix", {f.rule_id for f in scan_text(text).findings})
+
     def test_private_hostname_without_hyphen_and_nested_labels(self) -> None:
         for host in (
             "db.internal",  # content-guard: allow private-hostname
