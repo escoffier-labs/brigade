@@ -117,7 +117,7 @@ from .fleet_hub_status import (
     latest_status as latest_status,
 )
 
-SCHEMA_VERSION = 38
+SCHEMA_VERSION = 39
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
@@ -661,7 +661,11 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     from . import fleet_hub_actions
 
     fleet_hub_actions.ensure_schema(conn)
-    # v37 -> v38: MCP Events subscriptions, event outbox and delivery state.
+    # v37 -> v38: CI board tables.
+    from .fleet_ci_schema import ensure_schema as ensure_ci_schema
+
+    ensure_ci_schema(conn)
+    # v38 -> v39: MCP Events subscriptions, event outbox and delivery state.
     fleet_hub_events.ensure_schema(conn)
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 

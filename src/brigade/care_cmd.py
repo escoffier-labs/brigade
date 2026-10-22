@@ -22,7 +22,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal
 
-from . import care_schedules, managed_block, memory_cmd, runbook_cmd
+from . import care_patrol, care_schedules, managed_block, memory_cmd, runbook_cmd
 from .care_launchers import explicit_workspace, runbook_argv
 from .care_windows import create_command as _windows_create_command, task_run as _schtasks_task_run
 from .isolated_exec import trusted_cwd
@@ -209,7 +209,7 @@ REPEATED_FAILURE_THRESHOLD = 2
 
 
 def _catalog_by_id() -> dict[str, CareEntry]:
-    return {entry.entry_id: entry for entry in (*CARE_ENTRIES, *MEMORY_JOB_ENTRIES)}
+    return {entry.entry_id: entry for entry in (*CARE_ENTRIES, *MEMORY_JOB_ENTRIES, care_patrol.entry(CareEntry))}
 
 
 def _runbook_identity_key(entry: CareEntry) -> str:
@@ -549,7 +549,7 @@ def _crontab_body(
     home: Path | None = None,
     entries: tuple[CareEntry, ...] | None = None,
 ) -> str:
-    selected = entries if entries is not None else CARE_ENTRIES
+    selected = care_patrol.select(CARE_ENTRIES, None, "crontab", CareEntry) if entries is None else entries
     lines = [f"PATH={_path_prefix(home)}"]
     for entry in selected:
         lines.append(f"{entry.schedule} {_cron_command(entry, workspace=workspace)}")
@@ -623,30 +623,9 @@ def _ensure_memory_care_runbooks(target: Path) -> int:
 
 
 def _write_daily_observability_runbook(target: Path) -> int:
-    """Materialize the daily-observability runbook with binary pins when missing."""
-    dest = memory_cmd._memory_care_runbooks_dir(target) / DAILY_OBSERVABILITY_RUNBOOK_NAME
-    if dest.is_file():
-        return 0
-    temp = dest.parent / f".{DAILY_OBSERVABILITY_RUNBOOK_NAME}.init-tmp"
-    try:
-        from .localio import write_json as _write_json
-
-        temp.parent.mkdir(parents=True, exist_ok=True)
-        _write_json(temp, dict(DAILY_OBSERVABILITY_RUNBOOK_PAYLOAD))
-        validated, error = runbook_cmd._read_runbook(temp, require_pin_hashes=False)
-        if validated is None:
-            print(f"error: {error}", file=sys.stderr)
-            return 2
-        pins, pin_error = runbook_cmd._pin_payload_from_runbook(target, validated)
-        if pins is None:
-            print(f"error: {pin_error}", file=sys.stderr)
-            return 2
-        validated["pins"] = pins
-        _write_json(dest, validated)
-        return 0
-    finally:
-        if temp.is_file():
-            temp.unlink()
+    return care_patrol.write_runbook(
+        target, MEMORY_CARE_RUNBOOK_REL["daily-observability"], DAILY_OBSERVABILITY_RUNBOOK_PAYLOAD
+    )
 
 
 def _write_memory_closeout_runbook(target: Path) -> int:
@@ -741,6 +720,7 @@ def _entry_status(target: Path, entry: CareEntry) -> dict[str, Any]:
     payload["last_receipt"] = _receipt_summary(receipts[0] if receipts else None)
     payload["consecutive_failures"] = consecutive
     payload["repeated_failure"] = consecutive >= REPEATED_FAILURE_THRESHOLD
+    payload.update(care_patrol.receipt_fields(target, entry, payload["last_receipt"]))
     return payload
 
 
@@ -1153,12 +1133,20 @@ def install(
         print(f"error: {runbook_error}", file=sys.stderr)
         return 2
     backend = _resolve_backend(backend) or ""
+    entries = care_patrol.select(entries, entry_ids, backend, CareEntry)
     if not backend:
         print(
             f"error: care scheduler is unsupported on {sys.platform}; supported platforms: Linux (systemd user timers), macOS (launchd), Windows (schtasks)",
             file=sys.stderr,
         )
         return 3
+    if backend == "crontab" and entry_ids:
+        print(
+            "error: care --entry is not supported on the crontab backend; "
+            "crontab remains one atomic managed block. Use systemd or launchd.",
+            file=sys.stderr,
+        )
+        return 2
     adopted: list[dict[str, Any]] = []
     if not entry_ids:
         if backend == "systemd":
@@ -1192,7 +1180,7 @@ def install(
     if _uses_schtasks(backend):
         return _windows_install(workspace=target, entries=entries, json_output=json_output, dry_run=dry_run)
 
-    rc = _ensure_care_runbooks(target)
+    rc = _ensure_care_runbooks(target) or care_patrol.ensure_selected(target, entries)
     if rc != 0:
         return rc
     if any(entry.entry_id == "memory-closeout" for entry in entries):
@@ -1211,13 +1199,6 @@ def install(
         )
 
     if backend == "crontab":
-        if entry_ids:
-            print(
-                "error: care --entry is not supported on the crontab backend; "
-                "crontab remains one atomic managed block. Use systemd or launchd.",
-                file=sys.stderr,
-            )
-            return 2
         return _install_crontab(
             target=target,
             dry_run=dry_run,
@@ -1828,6 +1809,7 @@ def status_payload(*, target: Path, home: Path | None = None) -> dict[str, Any]:
         selected_entries = installed_systemd
     else:
         selected_entries = CARE_ENTRIES
+    selected_entries = care_patrol.select(selected_entries, None, "crontab" if crontab_enabled else "", CareEntry)
     entry_payloads = [_entry_status(target, entry) for entry in selected_entries]
     return {
         "enabled": crontab_enabled or systemd_enabled,
@@ -1858,6 +1840,7 @@ def status(
         print(f"error: {entry_error}", file=sys.stderr)
         return 2
     backend = _resolve_backend(backend) or ""
+    entries = care_patrol.select(entries, entry_ids, backend, CareEntry)
     if not backend:
         print(
             f"error: care scheduler is unsupported on {sys.platform}; supported platforms: Linux (systemd user timers), macOS (launchd), Windows (schtasks)",
@@ -1931,6 +1914,7 @@ def uninstall(
         print(f"error: {entry_error}", file=sys.stderr)
         return 2
     backend = _resolve_backend(backend) or ""
+    entries = care_patrol.select(entries, entry_ids, backend, CareEntry)
     if not backend:
         print(
             f"error: care scheduler is unsupported on {sys.platform}; supported platforms: Linux (systemd user timers), macOS (launchd), Windows (schtasks)",

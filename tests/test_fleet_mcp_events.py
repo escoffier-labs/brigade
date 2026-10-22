@@ -487,8 +487,8 @@ def test_operator_config_comes_from_explicit_environment_only() -> None:
 
 def test_schema_version_and_tables(hub) -> None:
     _base, _ta, _tb, db = hub
-    assert fleet_hub.SCHEMA_VERSION == 38
-    assert rows(db, "PRAGMA user_version") == [(38,)]
+    assert fleet_hub.SCHEMA_VERSION == 39
+    assert rows(db, "PRAGMA user_version") == [(39,)]
     names = {r[0] for r in rows(db, "SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"fleet_event_subscriptions", "fleet_events", "fleet_event_deliveries"} <= names
     fleet_hub.init_db(db).close()  # idempotent

@@ -82,8 +82,8 @@ _SCHEMA = (
 )
 
 
-# Hub databases created at the earlier schema-38 head hold fleet_events without producer. Startup treats 38 as
-# current, so fleet_hub registers the column with its additive repair and then re-runs ensure_schema, which
+# Hub databases created at this feature's earlier head hold fleet_events without producer, and one may sit at the
+# current version, which startup accepts as is. So fleet_hub registers the column with its additive repair and then re-runs ensure_schema, which
 # backfills and indexes it. The index cannot join that registry: a fresh database has no fleet_events yet.
 PRODUCER_COLUMN_DDL = "ALTER TABLE fleet_events ADD COLUMN producer TEXT NOT NULL DEFAULT ''"
 PRODUCER_INDEX_DDL = "CREATE INDEX IF NOT EXISTS fleet_events_producer ON fleet_events (name, producer, created_at)"

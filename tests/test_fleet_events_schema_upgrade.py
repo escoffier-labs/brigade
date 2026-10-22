@@ -1,7 +1,8 @@
 """A hub database created before ``fleet_events.producer`` existed repairs itself at startup.
 
-The earlier schema-38 head shipped ``fleet_events`` without ``producer`` and never bumped
-``user_version`` again, so startup treated those databases as current.
+The earlier schema-38 head of this feature shipped ``fleet_events`` without ``producer``. Main then took
+schema 38 for the CI board, so the events schema is version 39. A database left at either 38, or at 39 without
+the column, must come up with the full events schema.
 """
 
 from __future__ import annotations
@@ -28,8 +29,8 @@ def events_on() -> Iterator[None]:
     fleet_hub_events.configure(fleet_hub_events.EventsConfig())
 
 
-def _pre_producer_hub(db: Path, now: float) -> None:
-    """A schema-38 hub as the earlier head left it: current user_version, no producer column or index."""
+def _pre_producer_hub(db: Path, now: float, version: int = 39) -> None:
+    """A hub as the earlier head left it: no producer column or index, at ``version``."""
     fleet_hub.init_db(db).close()
     conn = sqlite3.connect(db)
     try:
@@ -53,17 +54,21 @@ def _pre_producer_hub(db: Path, now: float) -> None:
             " (SELECT 'message.created' AS name UNION SELECT 'claim.expired' UNION SELECT 'run.failed')",
             (now,),
         )
+        conn.execute(f"PRAGMA user_version={version}")
         conn.commit()
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION == 38
+        assert fleet_hub.SCHEMA_VERSION == 39
         assert "producer" not in {r[1] for r in conn.execute("PRAGMA table_info(fleet_events)")}
     finally:
         conn.close()
 
 
-def test_pre_producer_hub_is_repaired_and_backfilled_on_startup(tmp_path: Path, events_on, monkeypatch) -> None:
+@pytest.mark.parametrize("version", [38, 39])
+def test_pre_producer_hub_is_repaired_and_backfilled_on_startup(
+    tmp_path: Path, events_on, monkeypatch, version: int
+) -> None:
     db = tmp_path / "hub.sqlite"
     now = time.time()
-    _pre_producer_hub(db, now)
+    _pre_producer_hub(db, now, version)
 
     conn = fleet_hub.init_db(db)
     try:
@@ -100,3 +105,36 @@ def test_pre_producer_hub_is_repaired_and_backfilled_on_startup(tmp_path: Path, 
         assert again.execute("SELECT seq, producer FROM fleet_events ORDER BY seq").fetchall() == before
     finally:
         again.close()
+
+
+_EVENT_TABLES = ("fleet_event_subscriptions", "fleet_events", "fleet_event_deliveries")
+_CI_TABLES = ("ci_runs", "ci_check_runs", "ci_repo_state")
+
+
+def _tables(conn: sqlite3.Connection) -> set[str]:
+    return {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+
+
+def test_main_schema_38_hub_upgrades_to_39_with_events_tables(tmp_path: Path) -> None:
+    """A hub at main's schema 38 has the CI board tables and no events tables."""
+    db = tmp_path / "hub.sqlite"
+    fleet_hub.init_db(db).close()
+    conn = sqlite3.connect(db)
+    try:
+        conn.execute("DROP INDEX IF EXISTS fleet_event_deliveries_due")
+        for table in _EVENT_TABLES[::-1]:
+            conn.execute(f"DROP TABLE {table}")
+        conn.execute("PRAGMA user_version=38")
+        conn.commit()
+        assert not set(_EVENT_TABLES) & _tables(conn)
+        assert set(_CI_TABLES) <= _tables(conn)
+    finally:
+        conn.close()
+    for _ in range(2):  # the second start is a no-op
+        conn = fleet_hub.init_db(db)
+        try:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION == 39
+            assert set(_EVENT_TABLES + _CI_TABLES) <= _tables(conn)
+            assert "producer" in {r[1] for r in conn.execute("PRAGMA table_info(fleet_events)")}
+        finally:
+            conn.close()
