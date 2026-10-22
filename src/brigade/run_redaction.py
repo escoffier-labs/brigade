@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
-from brigade import localio, run_checkpoint, run_events, run_journal, run_projector, run_shadow, runguard
+from brigade import localio, run_cassette, run_checkpoint, run_events, run_journal, run_projector, run_shadow, runguard
 
 REDACTION_SCHEMA = "brigade.run_redaction.v1"
 REDACTION_SCHEMA_VERSION = 1
@@ -429,7 +429,7 @@ def _rewrite_events(
     total = bytearray()
     idempotency_keys: set[str] = set()
     for event in events:
-        affected = sequence_start <= event.sequence <= sequence_end
+        affected = run_cassette.redaction_affects(event, sequence_start, sequence_end)
         preserved_anchor = event.event_type == "run.redaction.recorded"
         payload = _redacted_payload(event) if affected and not preserved_anchor else dict(event.payload)
         idempotency_key = (
@@ -2250,7 +2250,6 @@ def redact_journal(
                 raise RedactionError("invalid sequence range")
             if any(event.run_id != resolved_run_dir.name for event in events):
                 raise RedactionError("journal run identity mismatch")
-
             operation_id = _operation_id(resolved_run_dir.name, start, end, bounded_reason)
             operation_dir, quarantine_path, record_path = _operation_paths(
                 resolved_run_dir,
@@ -2403,14 +2402,8 @@ def redact_journal(
                             ),
                         )
                     _post_replace_verify(resolved_run_dir, expected_digest=None)
-                    return RedactionReport(
-                        operation_id,
-                        start,
-                        end,
-                        quarantine_path,
-                        record_path,
-                        cleaned=cleaned,
-                    )
+                    run_cassette.redact_sidecars(resolved_run_dir)
+                    return RedactionReport(operation_id, start, end, quarantine_path, record_path, cleaned=cleaned)
                 if active_digest != prior_state.get("original_sha256") or prior_state["phase"] != "quarantined":
                     raise RedactionError("redaction transaction does not match the active journal")
 
@@ -2536,6 +2529,7 @@ def redact_journal(
             )
             _replace_projection(resolved_run_dir, _projection(after_projection.snapshot, [*rewritten_events, anchor]))
             _post_replace_verify(resolved_run_dir, expected_digest=None)
+            run_cassette.redact_sidecars(resolved_run_dir)
             return RedactionReport(operation_id, start, end, quarantine_path, record_path)
 
 

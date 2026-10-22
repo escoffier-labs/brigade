@@ -860,7 +860,9 @@ def _expected_verify_archive_manifest(
     privacy-safe projection via ``_exported_checkpoint_errors``; the raw path
     is used only while writing the staging tree and never reaches the index.
     """
-    from brigade import run_checkpoint
+    from brigade import run_cassette, run_checkpoint
+
+    run_cassette.refuse_unstripped_archive(run_dir)
 
     expected = dict(source_manifest)
     omissions: list[dict[str, str]] = []
