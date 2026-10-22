@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import os
 import re
@@ -448,6 +449,7 @@ def _isolated_from_dot(target: Path, runtime: Runtime) -> bool:
     return (
         runtime.hub.principal != dot_runtime.hub.principal
         and not _same_location(runtime.hub.message_token_file, dot_runtime.hub.message_token_file)
+        and not _same_token(runtime.hub.message_token_file, dot_runtime.hub.message_token_file)
         and not _same_location(runtime.paths.state_dir, dot_runtime.paths.state_dir)
         and runtime.auth.audience != dot_runtime.auth.audience
         and runtime.auth.resource != dot_runtime.auth.resource
@@ -462,6 +464,19 @@ def _same_location(left: Path, right: Path) -> bool:
         return left.resolve() == right.resolve()
     except OSError:
         return True
+
+
+def _same_token(left: Path, right: Path) -> bool:
+    # Two files holding one Hub token are one credential; a token that exists but cannot be read counts as shared.
+    from brigade.fleet_client_message_credentials import FleetMessageHubError, read_message_token_file
+
+    if not (os.path.lexists(left) and os.path.lexists(right)):
+        return False
+    try:
+        tokens = read_message_token_file(str(left)), read_message_token_file(str(right))
+    except FleetMessageHubError:
+        return True
+    return hmac.compare_digest(tokens[0].encode("ascii"), tokens[1].encode("ascii"))
 
 
 def _registered_names(config: DotListenerConfig, tools: DotTools) -> set[str]:

@@ -5,7 +5,7 @@ from datetime import datetime
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePath
 import re
 import stat
 from typing import Any
@@ -216,7 +216,7 @@ class MemoryTools:
         # Withheld skills are dropped from results the same way they are hidden from skill_get.
         found = value.get("skills", [])
         found = found if isinstance(found, list) else []
-        kept = [item for item in found if not (isinstance(item, dict) and item.get("id") in deny)]
+        kept = [item for item in found if not (isinstance(item, dict) and _skill_names(item) & deny)]
         count = value.get("count", 0)
         if type(count) is int:
             count = max(0, count - (len(found) - len(kept)))
@@ -228,6 +228,15 @@ class MemoryTools:
             # Indistinguishable from a missing skill, so the denylist itself is not disclosed.
             return {"error": "skill_not_found"}
         return skill_get(self.workspace, name, resource, offset)
+
+
+def _skill_names(item: dict[str, Any]) -> set[str]:
+    # Registry rows carry the id in metadata and the entry name in skill_dir, which skill_get reads by.
+    metadata = item.get("metadata")
+    names = {metadata.get("id"), item.get("id")} if isinstance(metadata, dict) else {item.get("id")}
+    if isinstance(item.get("skill_dir"), str):
+        names.add(PurePath(item["skill_dir"]).name)
+    return {name for name in names if isinstance(name, str)}
 
 
 def read_file(path: Path, maximum: int = 1024 * 1024) -> tuple[bytes, os.stat_result]:

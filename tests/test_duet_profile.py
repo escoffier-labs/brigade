@@ -316,9 +316,17 @@ class DuetAdapter(DuetFixture):
     def test_denied_skill_reads_as_missing_and_is_filtered_from_search(self):
         self.assertEqual(self.call("skill_get", name="private-notes"), {"error": "skill_not_found"})
         self.assertEqual(self.runner.calls, [])
-        found = {"skills": [{"id": "private-notes"}, {"id": "brigade-work"}], "count": 2}
+        # Rows are shaped as `brigade skills search --json` prints them; either name of a denied entry hides it.
+        kept = {"skill_dir": "/registry/brigade-work", "metadata": {"id": "brigade-work"}}
+        rows = [
+            {"skill_dir": "/registry/private-notes", "metadata": {"id": "private-notes"}},
+            {"skill_dir": "/registry/private-notes", "metadata": {"id": "renamed"}},
+            {"skill_dir": "/registry/other", "metadata": {"id": "private-notes"}},
+            kept,
+        ]
+        found = {"skills": rows, "count": 4}
         self.runner.handler = lambda argv, stdin: CommandResult(0, json.dumps(found).encode())
-        self.assertEqual(self.call("skill_search", query="notes"), {"skills": [{"id": "brigade-work"}], "count": 1})
+        self.assertEqual(self.call("skill_search", query="notes"), {"skills": [kept], "count": 1})
 
 
 class DuetMessagingOff(DuetFixture):
@@ -659,6 +667,18 @@ def test_duet_isolation_fails_when_sharing_dot_identity(duet_configured, dot_pri
     link.symlink_to(token)
     dot_data["hub"]["message_token_file"] = str(link)
     dot_runtime.write_text(json.dumps(dot_data))
+    assert m._isolated_from_dot(target, runtime) is False
+    # A separate file holding Duet's token is still Duet's credential.
+    copy = dot_private_dir.parent / "dot-copy.token"
+    copy.write_text(token.read_text())
+    copy.chmod(0o600)
+    dot_data["hub"]["message_token_file"] = str(copy)
+    dot_runtime.write_text(json.dumps(dot_data))
+    assert m._isolated_from_dot(target, runtime) is False
+    copy.write_text("fixture-dot-credential-" * 2)
+    assert m._isolated_from_dot(target, runtime) is True
+    # A token that exists but cannot be read cannot be shown to differ.
+    copy.chmod(0o644)
     assert m._isolated_from_dot(target, runtime) is False
 
 
