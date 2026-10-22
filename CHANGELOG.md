@@ -17,7 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `brigade model trial run|resume` behavior changes for callers that set no new option. Check wrappers and CI that key on trial exit codes:
   - A provider capacity response with a nonzero seat exit used to score as `execution_error` (exit 1). It is now `adapter_error` with `failure_reason: capacity-exhausted` (exit 3), and the per-seat stop is on by default, so the seat's remaining cells become `not_run`.
-  - `run` and `resume` now install SIGINT and SIGTERM handlers for the whole trial. The first signal drains instead of stopping the process; a second signal hard-stops it.
+  - `run` and `resume` now install SIGINT and SIGTERM handlers for the whole trial. The first signal drains instead of stopping the process. A second signal hard-stops it.
   - Exit code 4 is new: the trial ended with `not_run` or `running` cells and no measurement failures.
 
 ### Fixed
