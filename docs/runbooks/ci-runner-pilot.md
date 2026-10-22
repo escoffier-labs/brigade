@@ -110,7 +110,9 @@ The queue went live on 2026-10-19 (ruleset 25415491) for the exact `main`
 branch, after the compatible `merge_group` workflow landed. Live settings:
 
 - Build concurrency: 3.
-- Minimum merge group size: 1, with a 5-minute wait for more entries.
+- Minimum merge group size: 1. The 5-minute wait time is a timeout for
+  reaching that minimum, so at 1 it never delays a group. Raise the minimum
+  if batching is wanted.
 - Maximum merge group size: 5.
 - Grouping: `HEADGREEN`. Only the group head must pass, so a flaky failure on
   an earlier entry does not eject it when the combined head is green. The tip
@@ -118,12 +120,12 @@ branch, after the compatible `merge_group` workflow landed. Live settings:
   group is not tested alone.
 - Merge method: squash. Status-check timeout: 90 minutes. No bypass actors.
 
-The original plan was build concurrency 1, groups of at most 3, and only
-non-failing pull requests. In the first 2.5 days the queue merged 71 pull
-requests in 83 merge-group runs (72 success, 10 failure, 1 cancelled), with a
-27-minute median successful run. At that rate a single build slot would cap
-throughput near 53 landings a day, and every failure would stall the whole
-queue. Rebuilds cost 12 extra runs: 8 pull requests needed 2 runs and 1 needed
+The original plan was build concurrency 1, groups of at most 3, and only non-
+failing pull requests. In the first 2.5 days 72 pull requests entered the queue
+and 71 merged, across 83 merge-group runs (72 success, 10 failure, 1 cancelled),
+with a 27-minute median successful run. At that rate a single build slot would
+cap throughput near 53 landings a day, and every failure would stall the whole
+queue. Rebuilds cost 11 extra runs: 8 pull requests needed 2 runs and 1 needed
 4. Revisit these numbers if hosted-runner queueing grows. Switch grouping to
 `ALLGREEN` if every squash commit on `main` must pass on its own.
 
