@@ -664,7 +664,9 @@ func discoverSources() []map[string]any {
 					count = countOpenCodeExports(c.root)
 				} else {
 					include := sources.DefaultInclude
-					if c.kind == "hermes" {
+					if c.kind == "codex" {
+						include = codex.Include
+					} else if c.kind == "hermes" {
 						include = hermes.Include
 					}
 					if files, err := sources.ListJSONLFiles(c.root, include); err == nil {

@@ -11,15 +11,17 @@ import (
 	"github.com/escoffier-labs/miseledger/internal/sources"
 )
 
+// Include accepts plain or compressed Codex sessions while excluding backups and sidecars.
+func Include(path string) bool {
+	return sources.DefaultInclude(sources.LogicalJSONLPath(path))
+}
+
 func Generate(path string, opts sources.Options, w io.Writer) (sources.Result, error) {
 	since, hasSince, err := sources.ParseSince(opts.Since)
 	if err != nil {
 		return sources.Result{}, err
 	}
-	// Only Codex normalizes compressed session paths when deriving record IDs.
-	scans, err := sources.NewFileScanSet(path, func(path string) bool {
-		return sources.DefaultInclude(sources.LogicalJSONLPath(path))
-	})
+	scans, err := sources.NewFileScanSet(path, Include)
 	if err != nil {
 		return sources.Result{}, err
 	}

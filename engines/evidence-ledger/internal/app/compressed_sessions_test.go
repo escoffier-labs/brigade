@@ -11,6 +11,51 @@ import (
 	"github.com/klauspost/compress/zstd"
 )
 
+func TestSourcesDiscoverCodexCompressedSessions(t *testing.T) {
+	withTempHome(t)
+	root := filepath.Join(os.Getenv("HOME"), ".codex", "sessions")
+	content := []byte(`{"type":"event_msg","payload":{"message":"synthetic fixture"}}` + "\n")
+	encoder, err := zstd.NewWriter(nil, zstd.WithEncoderConcurrency(1))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer encoder.Close()
+	for _, name := range []string{
+		"nested/session.jsonl.zst",
+		"session.metadata.jsonl.zst", "session.sidecar.jsonl.zst",
+		"session.backup.jsonl.zst", "session.bak.jsonl.zst", "session.deleted.jsonl.zst",
+		"backups/session.jsonl.zst", "deleted/session.jsonl.zst",
+	} {
+		path := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, encoder.EncodeAll(content, nil), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, plainTwin := range []bool{false, true} {
+		if plainTwin {
+			if err := os.WriteFile(filepath.Join(root, "nested", "session.jsonl"), content, 0o600); err != nil {
+				t.Fatal(err)
+			}
+		}
+		found := false
+		for _, item := range runJSONArray(t, "sources", "discover", "--json") {
+			row := item.(map[string]any)
+			if row["source_kind"] == "codex" {
+				found = true
+				if row["exists"] != true || row["count"] != float64(1) {
+					t.Fatalf("Codex discovery (plain twin=%t) = %v, want one session", plainTwin, row)
+				}
+			}
+		}
+		if !found {
+			t.Fatal("Codex discovery row missing")
+		}
+	}
+}
+
 func TestNonCodexCompressedSessionsExcluded(t *testing.T) {
 	for _, harness := range []string{"claude", "openclaw", "pi"} {
 		t.Run(harness, func(t *testing.T) {
