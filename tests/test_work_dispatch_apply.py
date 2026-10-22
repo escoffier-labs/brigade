@@ -435,7 +435,7 @@ def test_max_total_denial_uses_budget_payload(apply_target, capsys):
 
 @requires_dispatch_apply
 def test_live_child_consumes_capacity_in_next_plan(apply_target, capsys, monkeypatch):
-    monkeypatch.setenv("FAKE_DISPATCH_SLEEP", "0.5")
+    monkeypatch.setenv("FAKE_DISPATCH_SLEEP", "4")
     _tasks(apply_target, [["a.py"], ["b.py"]])
     _apply(apply_target, capsys, "--max", "1", "--no-wait")
     assert cli.main(["work", "dispatch", "--target", str(apply_target), "--max", "1", "--dry-run", "--json"]) == 0
