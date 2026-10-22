@@ -16,14 +16,25 @@ text block for the harness to inject as additional context. Rules:
   throttle on tool events, and a failure backoff stamped before the call so a
   slow or down hub costs at most one deadline per backoff window. Nothing in
   ``deliver`` raises.
+* A cursor outlives the hub's message retention, so a session that resumes
+  after a long gap never sees an old, still unacknowledged message twice.
+  Pruning removes only cursor files, never a per-session lock file: an
+  unlinked lock held by a running hook would let the next hook lock a new
+  inode and run alongside the holder.
+* Cursor I/O stays inside the directory descriptor that ``_spool_lock``
+  validated. Windows has no ``dir_fd`` support and keeps path-based I/O.
 * The hub scopes every read to the calling credential's own inbox, so a
   session only ever sees mail addressed to its own node or principal.
 """
 
 from __future__ import annotations
 
+import errno
 import json
 import os
+import re
+import secrets
+import stat
 import sys
 import time
 from pathlib import Path
@@ -40,8 +51,8 @@ MAX_SENDER_CHARS = 64
 MAX_STATE_BYTES = 4096
 MAX_STDIN_BYTES = 1_048_576
 STATE_DIRNAME = "fleet-inbox-delivery"
-STATE_RETENTION_SECONDS = 7 * 24 * 3600
 PRUNE_SCAN_LIMIT = 256
+SECONDS_PER_DAY = 24 * 3600
 # A prompt is the natural moment to look; tool events follow the throttle.
 PROMPT_EVENTS = frozenset({"UserPromptSubmit"})
 TOOL_EVENTS = frozenset({"PostToolUse"})
@@ -61,12 +72,24 @@ def state_path(harness: str, session_id: str) -> Path:
     return state_dir() / f"{slug}-{digest}.json"
 
 
-def _read_state(path: Path) -> dict[str, Any]:
+def retention_seconds() -> float:
+    """How long a cursor must outlive its last write: the hub's message retention."""
+    # Lazy: the hub module is heavy and only pruning (once per new session) needs it.
+    from .fleet_hub_messages import RETENTION_DAYS
+
+    return float(RETENTION_DAYS * SECONDS_PER_DAY)
+
+
+def _read_state(path: Path, dir_fd: int | None = None) -> dict[str, Any]:
+    from . import fleet_client as client
+
     try:
-        with path.open("rb") as handle:
+        # No-follow, regular files only; relative to the validated directory when there is one.
+        fd = client._open_private(path, os.O_RDONLY, dir_fd=dir_fd)
+        with os.fdopen(fd, "rb") as handle:
             raw = handle.read(MAX_STATE_BYTES + 1)
         payload = json.loads(raw.decode("utf-8")) if len(raw) <= MAX_STATE_BYTES else None
-    except (OSError, ValueError):
+    except (OSError, ValueError, client.FleetClientError):
         return {}
     if not isinstance(payload, dict):
         return {}
@@ -88,44 +111,127 @@ def _stamp(value: Any) -> float | None:
     return None if isinstance(value, bool) or not isinstance(value, (int, float)) else float(value)
 
 
-def _write_state(path: Path, *, scope: str, cursor: int, next_poll_at: float = 0.0, retry_at: float = 0.0) -> bool:
-    """Persist the cursor file. False means it could not be stored."""
-    try:
+def _write_atomic(path: Path, data: str, dir_fd: int | None) -> None:
+    """Replace ``path`` with ``data`` atomically, 0600, by names relative to ``dir_fd``."""
+    from . import fleet_client as client
+
+    if dir_fd is None:
+        # Windows (no dir_fd support): the path-based writer, then chmod.
         path.parent.mkdir(parents=True, exist_ok=True)
         os.chmod(path.parent, 0o700)
-        localio.write_text_atomic(
-            path,
-            json.dumps(
-                {"scope": scope, "cursor": cursor, "next_poll_at": next_poll_at, "retry_at": retry_at}, sort_keys=True
-            )
-            + "\n",
-        )
+        localio.write_text_atomic(path, data)
         os.chmod(path, 0o600)
+        return
+    tmp_name = f".{path.name}.{secrets.token_hex(16)}.tmp"
+    fd = os.open(
+        tmp_name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | client._O_NOFOLLOW | client._O_CLOEXEC, 0o600, dir_fd=dir_fd
+    )
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            handle.write(data)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.replace(tmp_name, path.name, src_dir_fd=dir_fd, dst_dir_fd=dir_fd)
+    except BaseException:
+        try:
+            os.unlink(tmp_name, dir_fd=dir_fd)
+        except OSError:
+            pass
+        raise
+    client._fsync_spool_parent(path, dir_fd)
+
+
+def _write_state(
+    path: Path, *, scope: str, cursor: int, next_poll_at: float = 0.0, retry_at: float = 0.0, dir_fd: int | None = None
+) -> bool:
+    """Persist the cursor file. False means it could not be stored."""
+    payload = {"scope": scope, "cursor": cursor, "next_poll_at": next_poll_at, "retry_at": retry_at}
+    try:
+        _write_atomic(path, json.dumps(payload, sort_keys=True) + "\n", dir_fd)
     except OSError:
         return False
     return True
 
 
-def _prune(directory: Path, *, now: float) -> None:
+def _prune(directory: Path, *, now: float, dir_fd: int | None = None) -> None:
     """Drop cursor files of long-gone sessions. Bounded scan, never raises.
 
-    A lock file goes only together with its own cursor file, never by age: a
-    lock unlinked while a hook holds it would let the next hook lock a new
-    inode and run alongside the holder.
+    Only a cursor older than the hub's message retention goes, and only when
+    its session lock can be taken without waiting: a held lock means a hook is
+    running that session. Lock files are never unlinked. One removed while a
+    hook holds it would let the next hook create a new inode and run alongside
+    the holder, and a safe removal would need every locker to revalidate its
+    inode. They are empty files, one per session ever seen.
     """
+    from . import fleet_client as client
+
+    cutoff = now - retention_seconds()
     try:
-        for index, entry in enumerate(directory.iterdir()):
-            if index >= PRUNE_SCAN_LIMIT:
-                return
-            if entry.suffix == ".json" and now - entry.stat().st_mtime > STATE_RETENTION_SECONDS:
-                entry.unlink()
-                entry.with_name(entry.name + ".lock").unlink(missing_ok=True)
+        entries = os.scandir(dir_fd if dir_fd is not None else directory)
+        with entries:
+            for index, entry in enumerate(entries):
+                if index >= PRUNE_SCAN_LIMIT:
+                    return
+                if not entry.name.endswith(".json"):
+                    continue
+                info = entry.stat(follow_symlinks=False)
+                if not stat.S_ISREG(info.st_mode) or info.st_mtime >= cutoff:
+                    continue
+                _unlink_unless_held(directory, entry.name, dir_fd, client)
     except OSError:
         return
 
 
+def _unlink_unless_held(directory: Path, name: str, dir_fd: int | None, client: Any) -> None:
+    lock_name = name + ".lock"
+    flags = os.O_RDWR | client._O_NOFOLLOW | client._O_CLOEXEC
+    try:
+        fd = os.open(lock_name if dir_fd is not None else str(directory / lock_name), flags, dir_fd=dir_fd)
+    except FileNotFoundError:
+        fd = -1  # no lock file, so no holder
+    except OSError:
+        return
+    try:
+        if fd >= 0 and client.fcntl is not None:
+            try:
+                client.fcntl.flock(fd, client.fcntl.LOCK_EX | client.fcntl.LOCK_NB)
+            except OSError as exc:
+                if exc.errno not in {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK}:
+                    raise
+                return  # held by a running hook: leave the session alone
+        try:
+            os.unlink(name if dir_fd is not None else str(directory / name), dir_fd=dir_fd)
+        except FileNotFoundError:
+            pass
+    except OSError:
+        return
+    finally:
+        if fd >= 0:
+            os.close(fd)  # releases the flock; the lock file stays
+
+
+# Terminal escapes first (so their payload goes with them), then every remaining
+# C0/C1 control except newline and tab, then bidirectional formatting characters
+# that can reorder or hide text without being visible themselves.
+_ANSI_ESCAPE = re.compile(
+    r"(?:\x1b|\x9b)\[[0-?]*[ -/]*[@-~]"  # CSI
+    r"|(?:\x1b\]|\x9d)[^\x07\x1b\x9c]*(?:\x07|\x1b\\|\x9c)?"  # OSC
+    r"|\x1b[@-Z\\-_]"  # two-byte escapes
+)
+_CONTROLS_AND_BIDI = re.compile("[\x00-\x08\x0b-\x1f\x7f-\x9f\u061c\u200e\u200f\u202a-\u202e\u2066-\u2069]")
+
+
+def _sanitize(value: str) -> str:
+    return _CONTROLS_AND_BIDI.sub("", _ANSI_ESCAPE.sub("", value))
+
+
+def _sanitize_row(row: dict[str, Any]) -> dict[str, Any]:
+    """Strip terminal and bidi control characters from every peer string, before truncation."""
+    return {key: _sanitize(item) if isinstance(item, str) else item for key, item in row.items()}
+
+
 def _clean(value: Any, limit: int) -> str:
-    text = "".join(ch for ch in str(value) if ch.isprintable())
+    text = "".join(ch for ch in _sanitize(str(value)) if ch.isprintable())
     return text[:limit]
 
 
@@ -135,6 +241,7 @@ def render(rows: list[dict[str, Any]], *, more: bool) -> str:
 
     framed_rows = []
     for row in rows:
+        row = _sanitize_row(row)
         body = row.get("body")
         if isinstance(body, str) and len(body) > MAX_BODY_CHARS:
             row = {**row, "body": body[:MAX_BODY_CHARS] + "\n... [truncated; read the full message with fleet_inbox]"}
@@ -179,12 +286,13 @@ def _deliver(harness: str, session_id: str, event: str, now: float) -> str | Non
     # One delivery per session at a time. Parallel tool calls fire overlapping
     # hook processes: a contender skips (timeout 0) instead of waiting, because
     # the holder is already reading and will show the mail.
-    with _spool_lock(path, timeout=0):
-        return _deliver_locked(path, event, now)
+    # The lock yields the validated state directory descriptor (None on Windows).
+    with _spool_lock(path, timeout=0) as dir_fd:
+        return _deliver_locked(path, event, now, dir_fd)
 
 
-def _deliver_locked(path: Path, event: str, now: float) -> str | None:
-    state = _read_state(path)
+def _deliver_locked(path: Path, event: str, now: float, dir_fd: int | None) -> str | None:
+    state = _read_state(path, dir_fd)
     # Two stamps: ``retry_at`` is the failure backoff, which every event honors;
     # ``next_poll_at`` is the tool-event throttle, which a prompt skips. A stamp
     # further out than its own window is a clock that moved backwards.
@@ -194,7 +302,7 @@ def _deliver_locked(path: Path, event: str, now: float) -> str | None:
         if event in TOOL_EVENTS and now < state["next_poll_at"] <= now + TOOL_POLL_INTERVAL_SECONDS:
             return None
     else:
-        _prune(path.parent, now=now)
+        _prune(path.parent, now=now, dir_fd=dir_fd)
     scope = state.get("scope", "")
     cursor = state.get("cursor", 0)
     # Stamp the backoff first: a hung hub, a dead credential, or a killed hook
@@ -205,6 +313,7 @@ def _deliver_locked(path: Path, event: str, now: float) -> str | None:
         cursor=cursor,
         next_poll_at=state.get("next_poll_at", 0.0),
         retry_at=now + FAILURE_BACKOFF_SECONDS,
+        dir_fd=dir_fd,
     )
     if not stamped:
         # Without the stamp a read-only or full disk would let every event call the hub.
@@ -221,11 +330,13 @@ def _deliver_locked(path: Path, event: str, now: float) -> str | None:
     rows = page["messages"]
     shown = rows[:MAX_DELIVERED_MESSAGES]
     new_cursor = shown[-1]["id"] if shown else cursor
-    saved = _write_state(path, scope=scope, cursor=new_cursor, next_poll_at=now + TOOL_POLL_INTERVAL_SECONDS)
+    saved = _write_state(
+        path, scope=scope, cursor=new_cursor, next_poll_at=now + TOOL_POLL_INTERVAL_SECONDS, dir_fd=dir_fd
+    )
     if not saved:
         # The write can fail after the replace landed (directory fsync, chmod).
         # Trust the file, not the exception: a published cursor must be shown.
-        stored = _read_state(path)
+        stored = _read_state(path, dir_fd)
         saved = stored.get("scope") == scope and stored.get("cursor") == new_cursor
     # Unsaved cursor: showing the mail would repeat it on every later event.
     if not shown or not saved:

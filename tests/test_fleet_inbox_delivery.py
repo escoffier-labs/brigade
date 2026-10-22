@@ -323,29 +323,89 @@ def test_corrupt_or_oversized_state_is_ignored(fleet, content):
     assert delivery.deliver("claude", "session-1", "UserPromptSubmit", now=T0)
 
 
-def test_stale_cursor_files_are_pruned_when_a_new_session_starts(fleet):
+def _age(path: Path, seconds: float) -> None:
+    aged = time.time() - seconds
+    os.utime(path, (aged, aged))
+
+
+def test_cursors_outlive_the_hub_retention_and_stale_ones_are_pruned_when_a_new_session_starts(fleet):
+    from brigade.fleet_hub_messages import RETENTION_DAYS
+
+    assert delivery.retention_seconds() == RETENTION_DAYS * 24 * 3600
     old = delivery.state_path("claude", "ancient")
     delivery._write_state(old, scope="s", cursor=1)
-    now = time.time()
-    os.utime(old, (now - delivery.STATE_RETENTION_SECONDS - 10, now - delivery.STATE_RETENTION_SECONDS - 10))
+    _age(old, delivery.retention_seconds() + 10)
 
-    delivery.deliver("claude", "fresh", "UserPromptSubmit", now=now)
+    delivery.deliver("claude", "fresh", "UserPromptSubmit", now=time.time())
 
-    assert not old.exists() and not old.with_name(old.name + ".lock").exists()
+    assert not old.exists()
     assert delivery.state_path("claude", "fresh").exists()
+
+
+def test_a_cursor_older_than_a_week_but_inside_hub_retention_is_kept_and_not_redelivered(fleet):
+    mid = _send(fleet)
+    assert f"Message {mid} from" in delivery.deliver("claude", "resumed", "UserPromptSubmit", now=T0)
+    path = delivery.state_path("claude", "resumed")
+    _age(path, 30 * 24 * 3600)
+
+    # Another session starts and prunes opportunistically.
+    delivery.deliver("claude", "other", "UserPromptSubmit", now=time.time())
+
+    assert path.exists()
+    # The resumed session still has its cursor, so the unacknowledged message is not shown again.
+    assert (
+        delivery.deliver("claude", "resumed", "UserPromptSubmit", now=T0 + 10 * delivery.FAILURE_BACKOFF_SECONDS)
+        is None
+    )
 
 
 def test_a_lock_file_is_never_pruned_by_age(fleet):
     lock = delivery.state_path("claude", "held").with_name(delivery.state_path("claude", "held").name + ".lock")
     lock.parent.mkdir(parents=True, exist_ok=True)
     lock.write_text("", encoding="utf-8")
-    now = time.time()
-    aged = now - delivery.STATE_RETENTION_SECONDS - 10
-    os.utime(lock, (aged, aged))
+    _age(lock, delivery.retention_seconds() + 10)
 
-    delivery.deliver("claude", "fresh", "UserPromptSubmit", now=now)
+    delivery.deliver("claude", "fresh", "UserPromptSubmit", now=time.time())
 
     assert lock.exists()
+
+
+@pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW") or os.name == "nt", reason="needs flock and dir_fd")
+def test_pruning_never_touches_a_session_whose_lock_another_process_holds(fleet):
+    import subprocess
+    import sys
+
+    held = delivery.state_path("claude", "held")
+    free = delivery.state_path("claude", "free")
+    for path in (held, free):
+        delivery._write_state(path, scope="s", cursor=1)
+        path.with_name(path.name + ".lock").write_text("", encoding="utf-8")
+        _age(path, delivery.retention_seconds() + 10)
+    held_lock = held.with_name(held.name + ".lock")
+    free_lock = free.with_name(free.name + ".lock")
+    inodes = {lock: lock.stat().st_ino for lock in (held_lock, free_lock)}
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import fcntl,sys,time;f=open(sys.argv[1],'r+');fcntl.flock(f,fcntl.LOCK_EX);print('held',flush=True);time.sleep(60)",
+            str(held_lock),
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout.readline().strip() == "held"
+
+        delivery.deliver("claude", "fresh", "UserPromptSubmit", now=time.time())
+
+        # A running hook owns the held session: its cursor and lock inode are untouched.
+        assert held.exists() and held_lock.stat().st_ino == inodes[held_lock]
+        # The unheld stale cursor goes, but no lock inode is ever unlinked.
+        assert not free.exists() and free_lock.stat().st_ino == inodes[free_lock]
+    finally:
+        holder.kill()
+        holder.wait()
 
 
 def test_overlapping_hooks_for_one_session_deliver_once_and_never_wait(fleet, monkeypatch):
@@ -390,7 +450,7 @@ def test_unwritable_state_neither_calls_the_hub_nor_delivers(fleet, monkeypatch)
     def refuse(*_args, **_kwargs):
         raise OSError("read-only file system")
 
-    monkeypatch.setattr(delivery.localio, "write_text_atomic", refuse)
+    monkeypatch.setattr(delivery, "_write_atomic", refuse)
 
     assert delivery.deliver("claude", "session-1", "UserPromptSubmit", now=T0) is None
     assert delivery.deliver("claude", "session-1", "UserPromptSubmit", now=T0 + 100) is None
@@ -399,16 +459,16 @@ def test_unwritable_state_neither_calls_the_hub_nor_delivers(fleet, monkeypatch)
 
 def test_mail_is_shown_when_the_write_failed_after_the_cursor_was_published(fleet, monkeypatch):
     _send(fleet)
-    real = delivery.localio.write_text_atomic
+    real = delivery._write_atomic
     writes = []
 
-    def fails_after_replace(path, data):
+    def fails_after_replace(path, data, dir_fd):
         writes.append(path)
-        real(path, data)
+        real(path, data, dir_fd)
         if len(writes) == 2:
             raise OSError("directory fsync failed")
 
-    monkeypatch.setattr(delivery.localio, "write_text_atomic", fails_after_replace)
+    monkeypatch.setattr(delivery, "_write_atomic", fails_after_replace)
 
     text = delivery.deliver("claude", "session-1", "UserPromptSubmit", now=T0)
 
@@ -421,22 +481,106 @@ def test_mail_is_shown_when_the_write_failed_after_the_cursor_was_published(flee
 
 def test_mail_is_not_shown_when_the_cursor_cannot_be_saved(fleet, monkeypatch):
     _send(fleet)
-    real = delivery.localio.write_text_atomic
+    real = delivery._write_atomic
     writes = []
 
-    def second_write_fails(path, data):
+    def second_write_fails(path, data, dir_fd):
         writes.append(path)
         if len(writes) == 2:
             raise OSError("disk full")
-        return real(path, data)
+        return real(path, data, dir_fd)
 
-    monkeypatch.setattr(delivery.localio, "write_text_atomic", second_write_fails)
+    monkeypatch.setattr(delivery, "_write_atomic", second_write_fails)
 
     assert delivery.deliver("claude", "session-1", "UserPromptSubmit", now=T0) is None
-    monkeypatch.setattr(delivery.localio, "write_text_atomic", real)
+    monkeypatch.setattr(delivery, "_write_atomic", real)
     # The mail is still unread and the cursor never moved, so it arrives once storage works.
     text = delivery.deliver("claude", "session-1", "UserPromptSubmit", now=T0 + delivery.FAILURE_BACKOFF_SECONDS)
     assert text and delivery.deliver("claude", "session-1", "UserPromptSubmit", now=T0 + 200) is None
+
+
+@pytest.mark.skipif(
+    os.name == "nt", reason="dir_fd is unsupported on Windows; path-based I/O is the documented fallback"
+)
+def test_cursor_io_stays_inside_the_validated_directory_descriptor(fleet, monkeypatch, tmp_path):
+    _send(fleet)
+    directory = delivery.state_dir()
+    moved = tmp_path / "moved-state"
+    attacker = tmp_path / "attacker"
+    attacker.mkdir()
+    real = fleet_client_messages.list_messages
+
+    def swap_directory_during_the_hub_call(**kwargs):
+        # After the lock validated the directory, replace it with a symlink elsewhere.
+        directory.rename(moved)
+        directory.symlink_to(attacker, target_is_directory=True)
+        return real(**kwargs)
+
+    monkeypatch.setattr(fleet_client_messages, "list_messages", swap_directory_during_the_hub_call)
+
+    assert delivery.deliver("claude", "session-1", "UserPromptSubmit", now=T0)
+
+    assert list(attacker.iterdir()) == []
+    stored = delivery._read_state(moved / delivery.state_path("claude", "session-1").name)
+    assert stored["cursor"] > 0
+
+
+@pytest.mark.skipif(
+    os.name == "nt", reason="dir_fd is unsupported on Windows; path-based I/O is the documented fallback"
+)
+def test_a_symlinked_cursor_file_is_neither_read_nor_written_through(fleet, tmp_path):
+    mid = _send(fleet)
+    outside = tmp_path / "outside.json"
+    decoy = {"scope": "", "cursor": mid + 100, "next_poll_at": 0, "retry_at": 0}
+    outside.write_text(json.dumps(decoy), encoding="utf-8")
+    path = delivery.state_path("claude", "session-1")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.symlink_to(outside)
+
+    text = delivery.deliver("claude", "session-1", "UserPromptSubmit", now=T0)
+
+    assert text is not None and f"Message {mid} from" in text
+    assert json.loads(outside.read_text(encoding="utf-8")) == decoy
+    assert not path.is_symlink() and delivery._read_state(path)["cursor"] == mid
+
+
+def test_terminal_escapes_and_bidi_overrides_in_a_sent_body_never_reach_the_session(fleet):
+    ansi, rlo = "\x1b[31m", "\u202e"
+    mid = _send(
+        fleet,
+        body=f"{ansi}red body{rlo}gnp.exe\x1b]0;owned\x07\x00 tab\there\nnext line\x85\u2066x\u2069\u200f",
+    )
+    assert mid
+
+    text = delivery.deliver("claude", "session-1", "UserPromptSubmit", now=T0)
+
+    assert text is not None
+    for banned in ("\x1b", "\x00", "\x07", "\x08", "\x85", "\u202e", "\u2066", "\u2069", "\u200f"):
+        assert banned not in text
+    assert "red bodygnp.exe tab\there\nnext line" in text
+
+
+def test_subject_and_body_from_the_hub_are_sanitized_before_framing():
+    row = {
+        "id": 7,
+        "sender": "node\u202eb",
+        "subject": "\x1b[1murgent\u202etxt.exe",
+        "body": "\x1b[31mhello\u202e\u2066 world\x1b[0m\x00",
+    }
+
+    rendered = delivery.render([row], more=False)
+
+    assert "urgenttxt.exe" in rendered and "hello world" in rendered
+    assert not re.search("[\x00-\x08\x0b-\x1f\x7f-\x9f\u202a-\u202e\u2066-\u2069]", rendered)
+
+
+def test_sanitizer_strips_controls_before_the_body_is_truncated():
+    body = "\x1b[0m" * delivery.MAX_BODY_CHARS + "tail"
+
+    rendered = delivery.render([{"id": 1, "sender": "n\u202eb", "body": body}], more=False)
+
+    # The escapes would have used up the whole budget if they were truncated first.
+    assert "tail" in rendered and "\x1b" not in rendered and "\u202e" not in rendered
 
 
 # --- Claude adapter -----------------------------------------------------------------
