@@ -14,6 +14,14 @@ from typing import Any, Callable
 from .. import fleet_inbox_delivery
 
 
+# Inbox mail is best-effort. A hook that already spent most of its budget (a
+# post-compaction brief can use 10 of 12 seconds) must reach its caller with the
+# brief and claim path, so the poll keeps this much of the budget in reserve and
+# is skipped outright when the remainder is too small to be useful.
+RESERVE_SECONDS = 1.0
+MIN_POLL_SECONDS = 1.0
+
+
 def _accepts_context(result: dict[str, Any] | None) -> bool:
     if result is None:
         return True
@@ -27,15 +35,23 @@ def attach(
     result: dict[str, Any] | None,
     *,
     wired: Callable[[], bool],
+    budget: float | None = None,
 ) -> dict[str, Any] | None:
-    """Return ``result`` with newly arrived inbox mail added. Never raises."""
+    """Return ``result`` with newly arrived inbox mail added. Never raises.
+
+    ``budget`` is the seconds the hook has left. The poll gets that minus
+    ``RESERVE_SECONDS``, and is skipped when under ``MIN_POLL_SECONDS``.
+    """
     try:
+        hub_timeout = None if budget is None else budget - RESERVE_SECONDS
+        if hub_timeout is not None and hub_timeout < MIN_POLL_SECONDS:
+            return result
         session_id = payload.get("session_id")
         if event not in fleet_inbox_delivery.DELIVERY_EVENTS or not isinstance(session_id, str) or not session_id:
             return result
         if not _accepts_context(result) or not wired():
             return result
-        text = fleet_inbox_delivery.deliver("claude", session_id, event)
+        text = fleet_inbox_delivery.deliver("claude", session_id, event, hub_timeout=hub_timeout)
         if text is None:
             return result
         if result is None:

@@ -803,6 +803,27 @@ def test_sanitizer_strips_controls_before_the_body_is_truncated():
     assert "tail" in rendered and "\x1b" not in rendered and "\u202e" not in rendered
 
 
+def test_hub_read_timeout_is_capped_by_the_caller_but_never_raised(fleet, monkeypatch):
+    calls = _list_calls(monkeypatch)
+
+    delivery.deliver("claude", "capped", "UserPromptSubmit", now=T0, hub_timeout=0.5)
+    delivery.deliver("claude", "raised", "UserPromptSubmit", now=T0, hub_timeout=60.0)
+
+    assert calls == [0.5, delivery.HUB_TIMEOUT_SECONDS]
+
+
+def test_adapter_hands_delivery_the_budget_minus_the_reserve_and_skips_below_the_minimum(monkeypatch):
+    timeouts = []
+    monkeypatch.setattr(delivery, "deliver", lambda *_a, hub_timeout=None, **_k: timeouts.append(hub_timeout))
+
+    claude_adapter.attach("UserPromptSubmit", _payload(), None, wired=lambda: True, budget=4.0)
+    claude_adapter.attach("UserPromptSubmit", _payload(), None, wired=lambda: True, budget=1.9)
+    claude_adapter.attach("UserPromptSubmit", _payload(), None, wired=lambda: True, budget=2.0)
+    claude_adapter.attach("UserPromptSubmit", _payload(), None, wired=lambda: True)
+
+    assert timeouts == [3.0, 1.0, None]
+
+
 # --- Claude adapter -----------------------------------------------------------------
 
 

@@ -38,6 +38,7 @@ from .session_state import (
 )
 
 BRIEF_TIMEOUT_SECONDS = 10
+_monotonic = time.monotonic
 HOOK_TIMEOUT_LATCH_AFTER = 2
 _TIMEOUT_FOLLOWUP_SECONDS = 0.5
 # Inner lock acquire only. Must stay strictly below the 0.5s outer follow-up
@@ -2195,10 +2196,19 @@ def _handle_user_prompt_submit(payload: dict[str, Any], *, pin: Path | None = No
 
 
 def handle_payload(event: str, payload: dict[str, Any], *, pin: Path | None = None) -> dict[str, Any] | None:
+    started = _monotonic()
     pin = pin if pin is not None else _hook_pin_from_env()
     result = _handle_event(event, payload, pin=pin)
     # Live Fleet Hub inbox delivery rides on prompt and tool events of wired sessions.
-    return fleet_inbox.attach(event, payload, result, wired=lambda: effective_hook_target(payload, pin=pin) is not None)
+    # It only gets what the event left of the hook budget, so a slow brief still
+    # returns its claim path to the parent before the outer timeout kills the worker.
+    return fleet_inbox.attach(
+        event,
+        payload,
+        result,
+        wired=lambda: effective_hook_target(payload, pin=pin) is not None,
+        budget=_hook_timeout_seconds() - (_monotonic() - started),
+    )
 
 
 def _handle_event(event: str, payload: dict[str, Any], *, pin: Path | None) -> dict[str, Any] | None:

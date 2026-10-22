@@ -357,17 +357,24 @@ def render(rows: list[dict[str, Any]], *, more: bool) -> str:
     return "\n".join(lines)
 
 
-def deliver(harness: str, session_id: str, event: str, *, now: float | None = None) -> str | None:
-    """Return injectable text for newly arrived inbox mail, or None. Never raises."""
+def deliver(
+    harness: str, session_id: str, event: str, *, now: float | None = None, hub_timeout: float | None = None
+) -> str | None:
+    """Return injectable text for newly arrived inbox mail, or None. Never raises.
+
+    ``hub_timeout`` caps the hub read below ``HUB_TIMEOUT_SECONDS`` for a caller
+    with little time left.
+    """
     try:
         if event not in DELIVERY_EVENTS or not session_id:
             return None
-        return _deliver(harness, session_id, event, time.time() if now is None else now)
+        timeout = HUB_TIMEOUT_SECONDS if hub_timeout is None else min(HUB_TIMEOUT_SECONDS, hub_timeout)
+        return _deliver(harness, session_id, event, time.time() if now is None else now, timeout)
     except Exception:  # noqa: BLE001 - delivery must never break a hook
         return None
 
 
-def _deliver(harness: str, session_id: str, event: str, now: float) -> str | None:
+def _deliver(harness: str, session_id: str, event: str, now: float, hub_timeout: float) -> str | None:
     from .fleet_client_spool_lock import _spool_lock
 
     path = state_path(harness, session_id)
@@ -376,10 +383,10 @@ def _deliver(harness: str, session_id: str, event: str, now: float) -> str | Non
     # the holder is already reading and will show the mail.
     # The lock yields the validated state directory descriptor (None on Windows).
     with _spool_lock(_lock_path(path), timeout=0) as dir_fd:
-        return _deliver_locked(path, event, now, dir_fd)
+        return _deliver_locked(path, event, now, dir_fd, hub_timeout)
 
 
-def _deliver_locked(path: Path, event: str, now: float, dir_fd: int | None) -> str | None:
+def _deliver_locked(path: Path, event: str, now: float, dir_fd: int | None, hub_timeout: float) -> str | None:
     state = _read_state(path, dir_fd)
     # Two stamps: ``retry_at`` is the failure backoff, which every event honors;
     # ``next_poll_at`` is the tool-event throttle, which a prompt skips. A stamp
@@ -414,7 +421,7 @@ def _deliver_locked(path: Path, event: str, now: float, dir_fd: int | None) -> s
     if authority.scope != scope:
         # A different hub or credential owns a different id space: start over.
         scope, cursor = authority.scope, 0
-    page = messages.list_messages(after=cursor, unacked=True, timeout=HUB_TIMEOUT_SECONDS, authority=authority)
+    page = messages.list_messages(after=cursor, unacked=True, timeout=hub_timeout, authority=authority)
     rows = page["messages"]
     shown = rows[:MAX_DELIVERED_MESSAGES]
     new_cursor = shown[-1]["id"] if shown else cursor
