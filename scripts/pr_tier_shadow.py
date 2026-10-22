@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 from datetime import datetime, timezone
-from http.client import HTTPException
 import json
 import os
 from pathlib import Path
@@ -15,9 +14,6 @@ import subprocess
 import sys
 import time
 from typing import Sequence
-from urllib.error import HTTPError
-from urllib.parse import urlparse
-from urllib.request import HTTPRedirectHandler, Request, build_opener, urlopen
 
 # The workflow executes this file directly, while tests import it as a module.
 if __package__ in (None, ""):
@@ -447,76 +443,6 @@ def compare(
     return result
 
 
-class NoRedirect(HTTPRedirectHandler):
-    def redirect_request(self, req, fp, code, msg, headers, newurl):
-        return None
-
-
-def api_get(path: str) -> bytes:
-    """GET only. Never forward the API token to the signed log-download host."""
-    token = os.environ.get("GH_TOKEN", "")
-    request = Request(
-        "https://api.github.com" + path,
-        headers={
-            "Accept": "application/vnd.github+json",
-            "X-GitHub-Api-Version": "2022-11-28",
-            **({"Authorization": f"Bearer {token}"} if token else {}),
-        },
-    )
-    try:
-        with build_opener(NoRedirect()).open(request, timeout=60) as response:
-            return response.read()
-    except HTTPError as exc:
-        if exc.code != 302 or not path.endswith("/logs"):
-            # The error text intentionally omits signed URLs and response bodies.
-            raise OSError(f"GitHub API HTTP {exc.code}") from None
-        location = exc.headers.get("Location", "")
-        if urlparse(location).scheme != "https":
-            raise OSError("invalid log-download redirect") from None
-        with urlopen(Request(location), timeout=60) as response:
-            return response.read()
-
-
-def fetch_evidence(
-    repository: str, run_id: int, attempt: int, output: Path
-) -> tuple[dict, list[dict], dict[int, str], list[str]]:
-    run: dict = {}
-    jobs: list[dict] = []
-    logs: dict[int, str] = {}
-    errors: list[str] = []
-    output.mkdir(parents=True, exist_ok=True)
-    if not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository) or run_id < 1 or attempt < 1:
-        return run, jobs, logs, ["invalid repository, run ID or attempt"]
-    prefix = f"/repos/{repository}/actions/runs/{run_id}/attempts/{attempt}"
-    try:
-        run = json.loads(api_get(prefix))
-        write_json(output / "workflow-run.json", run)
-        for page in range(1, 21):
-            batch = json.loads(api_get(f"{prefix}/jobs?per_page=100&page={page}"))
-            write_json(output / f"jobs-page-{page}.json", batch)
-            jobs.extend(batch["jobs"])
-            if len(jobs) == batch["total_count"]:
-                break
-            if not batch["jobs"] or len(jobs) > batch["total_count"]:
-                raise ValueError("inconsistent jobs pagination")
-        else:
-            raise ValueError("jobs pagination exceeded 20 pages")
-    except (OSError, HTTPException, ValueError, KeyError, TypeError) as exc:
-        errors.append(f"exact attempt metadata unavailable: {type(exc).__name__}")
-    for job in jobs:
-        if job.get("name") not in SHARD_NAMES:
-            continue
-        try:
-            job_id = int(job["id"])
-            text = api_get(f"/repos/{repository}/actions/jobs/{job_id}/logs").decode("utf-8-sig")
-            (output / f"job-{job_id}.log").write_text(text, encoding="utf-8")
-            logs[job_id] = text
-        except (OSError, HTTPException, ValueError, KeyError, TypeError) as exc:
-            errors.append(f"{job.get('name')}: log unavailable: {type(exc).__name__}")
-    write_json(output / "fetch-errors.json", {"errors": errors})
-    return run, jobs, logs, errors
-
-
 def run_shadow(repo: Path, output: Path, now: datetime | None) -> int:
     report = guard(output, now=now)
     if report["trial_status"] != "active":
@@ -603,9 +529,15 @@ def finalize(output: Path, full_evidence: Path | None = None) -> int:
     # Retain the raw prefetch even if checkout, installation or pytest failed.
     cached = output / "full"
     copy_errors: list[str] = []
-    if full_evidence is not None and full_evidence.resolve() != cached.resolve():
+    if full_evidence is not None and full_evidence.absolute() != cached.absolute():
         try:
-            shutil.copytree(full_evidence, cached, dirs_exist_ok=True)
+            if output.is_symlink():
+                raise OSError("shadow output directory is a symlink")
+            if cached.is_symlink() or (cached.exists() and not cached.is_dir()):
+                cached.unlink()
+            elif cached.exists():
+                shutil.rmtree(cached)
+            shutil.copytree(full_evidence, cached, symlinks=True)
         except OSError as exc:
             copy_errors.append(f"full evidence cache unavailable: {type(exc).__name__}")
     # Read the explicit source, so older retained output cannot fill its gaps.
@@ -622,7 +554,7 @@ def finalize(output: Path, full_evidence: Path | None = None) -> int:
         identity = report["identity"]
         selected = json.loads((output / "pytest-results.json").read_text(encoding="utf-8"))
         report["comparison"] = compare(identity, run, jobs, logs, selected, errors=errors)
-    except (OSError, HTTPException, ValueError, KeyError, TypeError) as exc:
+    except (OSError, ValueError, KeyError, TypeError) as exc:
         report["comparison"] = incomplete(*errors, f"comparison unavailable: {type(exc).__name__}")
     retain_report(output, report)
     publish_summary(output)

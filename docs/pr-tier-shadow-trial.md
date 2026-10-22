@@ -36,6 +36,11 @@ work. Finalization and upload still use `always()`.
 Cancellation can prevent even an `always()` upload.
 A missing artifact is an evidence gap that requires an explanation.
 
+Prefetch and the checked-out guard sample separate UTC clocks. If prefetch runs
+just before the trial starts and the guard runs at or after the start, selected
+tests can run with prefetch disabled. That observation remains incomplete.
+Record it as a trial-start clock boundary gap.
+
 ## Selection
 
 The checked-out SHA must equal the workflow's PR merge SHA. Its second parent
@@ -101,6 +106,11 @@ reporting steps enabled. Finalization accepts that directory through
 It never authenticates or falls back to a live request. Missing cache files,
 unfinished pagination and retained fetch errors keep the candidate count null.
 The upload also retains prefetched files if checkout or installation failed.
+Before copying, retention removes only the known output `full` entry and creates
+a fresh directory. Existing files cannot mix with the cache. A `full` symlink
+is unlinked without following its target, including when it points at the
+prefetch cache. The workflow refuses a symlink at `.pr-tier-shadow` itself.
+Retention does not remove the prefetch cache.
 
 The parser attributes terminal summaries to the primary Actions execution step
 and the known grokbot auxiliary step. It reads failures from the final short
@@ -108,6 +118,12 @@ test summary section, excluding captured output and traceback text. Passing
 runs can omit that section. Missing or ambiguous terminal evidence remains
 incomplete. Pytest 9 SUBFAILED reports count individually when checking the
 failure total, then map to unique parent nodeids for comparison.
+
+The shard-zero grokbot wrapper appends `ERROR: grokbot MCP tests failed` or
+`ERROR: grokbot MCP tests were skipped; install the grokbot extra` after the
+pytest summary on failure or skips. The parser requires a terminal pytest
+summary, so those wrapper outcomes leave the comparison incomplete even when
+pytest supplied failure nodeids. Record this as a grokbot wrapper evidence gap.
 
 `full_only_candidates` are full-log FAILED/ERROR/SUBFAILED nodeids absent from the shadow
 failure set. They are **unconfirmed candidates**. On incomplete evidence,
@@ -189,6 +205,16 @@ all candidates and their reproduction evidence. The decision criteria are:
    seconds, using only complete observations with positive denominators. This is
    a coverage-instrumented elapsed-time cost proxy. It does not measure CPU
    usage, billing or the whole-job cost including setup and installation.
+
+Tabulate complete and incomplete observations separately for fallback and
+non-fallback selections. Count selected-run timeouts, prefetch timeouts,
+full-shard timeouts, cancellation or missing artifacts, API or identity gaps,
+parse gaps, grokbot wrapper gaps and trial-start clock boundary gaps. An
+observation can have several gap causes. Keep incomplete observations in the
+trial denominator and report any retained selected wall time. Incomplete
+fallback timeouts must be counted separately so excluding long unfinished
+runs from the comparable-cost median cannot conceal expensive fallbacks.
+Missing cost ratios remain unknown.
 
 Separately report median selected wall time, summed full job wall time and full
 parallel span. The four full shards run in parallel, while selected files run

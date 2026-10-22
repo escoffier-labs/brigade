@@ -74,8 +74,8 @@ def test_finalize_uses_only_explicit_cached_evidence(tmp_path, monkeypatch, evid
     def no_network(*args, **kwargs):
         pytest.fail("offline finalization attempted network access")
 
-    monkeypatch.setattr(shadow, "fetch_evidence", no_network)
-    monkeypatch.setattr(shadow, "api_get", no_network)
+    monkeypatch.setattr(urllib.request, "build_opener", no_network)
+    monkeypatch.setattr(urllib.request, "urlopen", no_network)
     assert shadow.main(["finalize", "--output", str(output), "--full-evidence", str(cache)]) == (2 if problem else 0)
     comparison = json.loads((output / "report.json").read_text())["comparison"]
     assert comparison["full_only_candidate_count"] is (None if problem else 0)
@@ -92,7 +92,7 @@ def prefetch(tmp_path, monkeypatch, evidence):
     run, jobs, logs, _ = evidence
     requests = []
     clock = [shadow.TRIAL_START]
-    failure = [None]
+    failure = [None, None]
 
     class Clock(datetime):
         @classmethod
@@ -117,23 +117,33 @@ def prefetch(tmp_path, monkeypatch, evidence):
         def open(self, request, *, timeout):
             assert 0 < timeout <= 30
             requests.append(request)
-            if failure[0]:
-                raise failure[0]
             url = request.full_url
+            stage = "log" if url.endswith("/logs") else "metadata"
+            if failure[0] and failure[1] in (None, stage):
+                raise failure[0]
             if url.startswith("https://logs.example/"):
                 assert not request.has_header("Authorization")
-                return Response(logs[int(url.rsplit("/", 1)[1])].encode())
+                return Response(b"\xef\xbb\xbf" + logs[int(url.rsplit("/", 1)[1])].encode())
             assert request.get_header("Authorization") == "Bearer fixture-token"
             if url.endswith("/logs"):
                 job_id = url.split("/")[-2]
                 raise HTTPError(url, 302, "Found", {"Location": f"https://logs.example/{job_id}"}, None)
             if "/jobs?" in url:
-                return Response(json.dumps({"total_count": 4, "jobs": jobs}).encode())
+                all_jobs = [{"id": 1000 + i, "name": f"other job {i}"} for i in range(120)] + jobs
+                page = int(url.rsplit("=", 1)[1])
+                return Response(
+                    json.dumps({"total_count": len(all_jobs), "jobs": all_jobs[(page - 1) * 100 : page * 100]}).encode()
+                )
             assert url.endswith("/runs/123/attempts/2")
             return Response(json.dumps(run).encode())
 
+    def opener(handler):
+        request = urllib.request.Request("https://api.github.com/fixture")
+        assert handler.redirect_request(request, None, 302, "Found", {}, "https://logs.example/500") is None
+        return Opener()
+
     monkeypatch.setattr(datetime_module, "datetime", Clock)
-    monkeypatch.setattr(urllib.request, "build_opener", lambda *args: Opener())
+    monkeypatch.setattr(urllib.request, "build_opener", opener)
     monkeypatch.setenv("GH_TOKEN", "fixture-token")
     monkeypatch.setenv("GITHUB_REPOSITORY", "example/project")
     monkeypatch.setenv("GITHUB_RUN_ID", "123")
@@ -149,16 +159,61 @@ def prefetch(tmp_path, monkeypatch, evidence):
     return execute, requests, clock, failure, tmp_path / "pr-tier-full"
 
 
-def test_literal_prefetch_retains_exact_attempt_without_forwarding_token(prefetch):
-    execute, requests, _, _, cache = prefetch
+@pytest.mark.parametrize("problem", [None, "http-error", "missing-shard"])
+def test_literal_prefetch_to_offline_finalize_with_two_pages_and_bom(
+    tmp_path, monkeypatch, prefetch, evidence, problem
+):
+    execute, requests, _, failure, cache = prefetch
+    _, jobs, _, selected = evidence
+    if problem == "missing-shard":
+        jobs.pop()
+    elif problem == "http-error":
+        failure[:] = [
+            HTTPError(
+                "https://api.github.com/fixture", 403, "Forbidden", {"Location": "https://signed.example/secret"}, None
+            ),
+            "log",
+        ]
     namespace = execute()
     assert namespace["TRIAL_START"] == shadow.TRIAL_START
     assert namespace["TRIAL_EXPIRY"] == shadow.TRIAL_EXPIRY
-    assert len(requests) == 10  # Metadata, jobs and four API/signed-host log pairs.
-    assert json.loads((cache / "fetch-errors.json").read_text()) == {"errors": []}
+    assert [request.full_url for request in requests if "/jobs?" in request.full_url] == [
+        "https://api.github.com/repos/example/project/actions/runs/123/attempts/2/jobs?per_page=100&page=1",
+        "https://api.github.com/repos/example/project/actions/runs/123/attempts/2/jobs?per_page=100&page=2",
+    ]
+    if problem is None:
+        assert len(requests) == 11  # Metadata, two job pages, four API/signed-host log pairs.
+        assert json.loads((cache / "fetch-errors.json").read_text()) == {"errors": []}
+        assert len(list(cache.glob("job-*.log"))) == 4
+        assert (cache / "job-500.log").read_bytes().startswith(b"\xef\xbb\xbf")
     assert json.loads((cache / "workflow-run.json").read_text())["run_attempt"] == 2
-    assert len(list(cache.glob("job-*.log"))) == 4
+    assert json.loads((cache / "jobs-page-2.json").read_text())["total_count"] == (
+        123 if problem == "missing-shard" else 124
+    )
     assert "fixture-token" not in "".join(path.read_text() for path in cache.iterdir())
+    assert "signed.example" not in (cache / "fetch-errors.json").read_text()
+    if problem == "http-error":
+        assert not any(request.full_url.startswith("https://logs.example/") for request in requests)
+
+    def no_network(*args, **kwargs):
+        pytest.fail("offline finalization attempted network access")
+
+    monkeypatch.setattr(urllib.request, "build_opener", no_network)
+    monkeypatch.setattr(urllib.request, "urlopen", no_network)
+    output = tmp_path / "output"
+    report = shadow.guard(output, now=shadow.TRIAL_START)
+    report["identity"] = IDENTITY
+    shadow.write_json(output / "report.json", report)
+    shadow.write_json(output / "pytest-results.json", selected)
+    assert shadow.finalize(output, cache) == (2 if problem else 0)
+    comparison = json.loads((output / "report.json").read_text())["comparison"]
+    assert comparison["status"] == ("incomplete" if problem else "complete")
+    assert comparison["full_only_candidate_count"] == (None if problem else 0)
+    if problem:
+        assert comparison["errors"]
+    assert {path.name: path.read_bytes() for path in (output / "full").iterdir()} == {
+        path.name: path.read_bytes() for path in cache.iterdir()
+    }
 
 
 @pytest.mark.parametrize("reason", ["before", "expired", "cancelled", "invalid-repo", "invalid-run", "invalid-attempt"])
@@ -189,6 +244,45 @@ def test_literal_prefetch_failure_continues_without_leaking_exception_urls(prefe
     errors = (cache / "fetch-errors.json").read_text()
     assert "OSError" in errors
     assert "secret" not in errors and "https://" not in errors
+
+
+@pytest.mark.parametrize("surface", ["finalize", "workflow"])
+@pytest.mark.parametrize("existing", ["directory", "outside-symlink", "cache-symlink"])
+def test_retained_full_replaces_old_artifact_without_following_symlinks(
+    tmp_path, monkeypatch, prefetch, surface, existing
+):
+    execute, _, _, _, cache = prefetch
+    execute()
+    output = tmp_path / ".pr-tier-shadow"
+    shadow.guard(output, now=shadow.TRIAL_START)
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    sentinel = outside / "sentinel.txt"
+    sentinel.write_text("untouched")
+    full = output / "full"
+    if existing == "directory":
+        full.mkdir()
+        (full / "stale.log").write_text("PR-committed artifact")
+        (full / "job-500.log").symlink_to(sentinel)
+    else:
+        full.symlink_to(cache if existing == "cache-symlink" else outside, target_is_directory=True)
+    expected = {path.name: path.read_bytes() for path in cache.iterdir()}
+    if surface == "workflow":
+        bash = shutil.which("bash")
+        if bash is None:
+            pytest.skip("Ubuntu shadow workflow retention requires Bash")
+        job = (ROOT / ".github/workflows/ci.yml").read_text().split("  pr-tier-shadow:\n", 1)[1]
+        script = job.split("      - name: Compare exact attempt and write summary\n", 1)[1]
+        script = textwrap.dedent(script.split("        run: |\n", 1)[1].split("          if [ -f scripts/", 1)[0])
+        result = subprocess.run([bash, "-e", "-c", script], cwd=tmp_path, capture_output=True, text=True, timeout=30)
+        assert result.returncode == 0, result.stderr
+    else:
+        assert shadow.finalize(output, cache) == 2  # No selected run was supplied.
+    assert not full.is_symlink()
+    assert {path.name: path.read_bytes() for path in full.iterdir()} == expected
+    assert sentinel.read_text() == "untouched"
+    assert list(outside.iterdir()) == [sentinel]
+    assert {path.name: path.read_bytes() for path in cache.iterdir()} == expected
 
 
 def log(index, *, failed=None, checkout=SHA):
@@ -414,7 +508,9 @@ def test_expired_cli_does_no_git_or_pytest_or_api_work(tmp_path):
     assert not (tmp_path / "evidence/pytest.log").exists()
 
 
-def test_merge_identity_validates_second_parent_and_uses_current_first_parent(tmp_path, monkeypatch, evidence):
+def test_merge_identity_validates_second_parent_and_uses_current_first_parent(
+    tmp_path, monkeypatch, evidence, prefetch
+):
     summary = tmp_path / "step-summary"
     monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
 
@@ -474,22 +570,16 @@ def test_merge_identity_validates_second_parent_and_uses_current_first_parent(tm
     assert local["selected_pytest"]["collected"] == 1
     assert local["selected_pytest"]["wall_seconds"] > 0
     assert (output / "selected.txt").read_text() == "tests/test_cli_help.py\n"
-    run, jobs, _, _ = evidence
+    run, jobs, logs, _ = evidence
     run["head_sha"] = head
     for job in jobs:
         job["head_sha"] = head
 
-    def get(path):
-        if path.endswith("/attempts/2"):
-            return json.dumps(run).encode()
-        if "/attempts/2/jobs?" in path:
-            return json.dumps({"total_count": 4, "jobs": jobs}).encode()
-        job_id = int(path.split("/")[-2])
-        return log(job_id - 500, checkout=merge).encode()
-
-    monkeypatch.setattr(shadow, "api_get", get)
-    shadow.fetch_evidence("example/project", 123, 2, output / "full")
-    assert shadow.finalize(output) == 0
+    for job_id in logs:
+        logs[job_id] = log(job_id - 500, checkout=merge)
+    execute, _, _, _, cache = prefetch
+    execute()
+    assert shadow.finalize(output, cache) == 0
     report = json.loads((output / "report.json").read_text())
     assert report["identity"]["sha"] == merge
     assert report["comparison"]["status"] == "complete"
@@ -498,31 +588,6 @@ def test_merge_identity_validates_second_parent_and_uses_current_first_parent(tm
     assert merge in (output / "summary.md").read_text()
     assert summary.read_text().count("# PR test tier shadow\n") == 1
     assert "Comparison: complete" in summary.read_text()
-
-
-def test_exact_attempt_api_reads_only_requested_jobs_and_keeps_log_failures_incomplete(tmp_path, monkeypatch):
-    routes = []
-
-    def get(path):
-        routes.append(path)
-        if path.endswith("/attempts/2"):
-            return json.dumps({"id": 123, "run_attempt": 2}).encode()
-        if "/attempts/2/jobs?" in path:
-            return json.dumps({"total_count": 1, "jobs": [{"id": 500, "name": "test shard (3.12, 0)"}]}).encode()
-        if path == "/repos/example/project/actions/jobs/500/logs":
-            raise OSError("HTTP 403")
-        raise AssertionError(f"unexpected API path: {path}")
-
-    monkeypatch.setattr(shadow, "api_get", get)
-    _, jobs, logs, errors = shadow.fetch_evidence("example/project", 123, 2, tmp_path)
-    assert len(jobs) == 1
-    assert not logs
-    assert errors
-    assert routes == [
-        "/repos/example/project/actions/runs/123/attempts/2",
-        "/repos/example/project/actions/runs/123/attempts/2/jobs?per_page=100&page=1",
-        "/repos/example/project/actions/jobs/500/logs",
-    ]
 
 
 def test_shadow_job_is_fork_compatible_read_only_and_outside_required_dag():
@@ -762,28 +827,22 @@ def test_pytest9_subfailed_summaries_count_reports_then_deduplicate_parent(evide
 
 @pytest.mark.parametrize("where", ["metadata", "log"])
 @pytest.mark.parametrize("error", [HTTPException("bad HTTP"), IncompleteRead(b"partial", 10)])
-def test_http_protocol_failures_retain_incomplete_report(tmp_path, monkeypatch, evidence, where, error):
-    run, jobs, _, selected = evidence
+def test_http_protocol_failures_retain_incomplete_report(tmp_path, evidence, prefetch, where, error):
+    _, _, _, selected = evidence
+    execute, _, _, failure, cache = prefetch
+    failure[:] = [error, where]
+    execute()
+    assert type(error).__name__ in (cache / "fetch-errors.json").read_text()
     output = tmp_path / "evidence"
-    shadow.guard(output, now=datetime.fromisoformat("2026-10-23T00:00:00+00:00"))
-    report = json.loads((output / "report.json").read_text())
+    report = shadow.guard(output, now=shadow.TRIAL_START)
     report["identity"] = IDENTITY
     shadow.write_json(output / "report.json", report)
     shadow.write_json(output / "pytest-results.json", selected)
-    monkeypatch.setenv("GITHUB_REPOSITORY", "example/project")
-
-    def get(path):
-        if where == "metadata" or path.endswith("/logs"):
-            raise error
-        return json.dumps(run if path.endswith("/attempts/2") else {"total_count": 4, "jobs": jobs}).encode()
-
-    monkeypatch.setattr(shadow, "api_get", get)
-    shadow.fetch_evidence("example/project", 123, 2, output / "full")
-    assert shadow.finalize(output) == 2
+    assert shadow.finalize(output, cache) == 2
     result = json.loads((output / "report.json").read_text())["comparison"]
     assert result["status"] == "incomplete"
     assert result["full_only_candidate_count"] is None
-    assert result["errors"]
+    assert any(type(error).__name__ in problem for problem in result["errors"])
 
 
 @pytest.mark.parametrize("trial", ["active", "expired"])

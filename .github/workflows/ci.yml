@@ -1117,9 +1117,14 @@ jobs:
       - name: Compare exact attempt and write summary
         if: always()
         run: |
-          mkdir -p .pr-tier-shadow/full
+          if [ -L .pr-tier-shadow ]; then
+            echo 'Shadow output directory is a symlink' >&2
+            exit 2
+          fi
+          mkdir -p .pr-tier-shadow
+          rm -rf -- .pr-tier-shadow/full
           if [ -d "$RUNNER_TEMP/pr-tier-full" ]; then
-            cp -R "$RUNNER_TEMP/pr-tier-full/." .pr-tier-shadow/full/
+            cp -R -- "$RUNNER_TEMP/pr-tier-full" .pr-tier-shadow/full
           fi
           if [ -f scripts/pr_tier_shadow.py ]; then
             python3 scripts/pr_tier_shadow.py finalize --output .pr-tier-shadow --full-evidence "$RUNNER_TEMP/pr-tier-full"
