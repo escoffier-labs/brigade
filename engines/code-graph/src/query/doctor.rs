@@ -40,6 +40,7 @@ pub struct DoctorReport {
     pub warnings: Vec<String>,
     /// How well each language's call sites resolve, keyed by language. Lets a
     /// caller read "no callers" as "none" or as "this language resolves poorly".
+    /// Empty until sync repairs an outdated schema or stale resolver state.
     pub coverage: BTreeMap<String, LanguageCoverage>,
     pub verdict: &'static str,
 }
@@ -236,8 +237,9 @@ pub fn doctor(conn: &Connection, repo_root: &Path, db_path: &Path) -> Result<Doc
         sample: parse_error_sample,
     };
     let warnings = warnings(&skipped, &parse_errors);
-    // An unmigrated graph may predate the tables coverage reads.
-    let coverage = if contract.schema.needs_migration {
+    // An unmigrated graph may predate the tables coverage reads. Resolver
+    // replay must also use the same rules that produced the persisted edges.
+    let coverage = if contract.schema.needs_migration || contract.resolver.stale {
         BTreeMap::new()
     } else {
         language_coverage(conn)?
