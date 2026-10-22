@@ -1341,3 +1341,24 @@ def test_card_links_point_only_at_existing_routes():
         assert 'class="card-link" href="/deck/work"' not in html
     rule = re.search(r"\.card-link::after \{[^}]*\}", ui_theme.BASE_CSS).group(0)
     assert 'content: "\\2192"' in rule
+
+
+def test_stale_machine_row_shows_the_age_with_the_stale_tone():
+    rows = _rows(overview.render_machine_table(_mixed_view(), NOW))
+    stale = rows[1]
+    assert 'class="seen mono seen--stale">stale 2h 0m<' in stale
+    assert 'class="seen mono">1m<' in rows[0]
+
+
+def test_seats_cell_title_and_bar_label_share_the_seat_sentence():
+    (row,) = _rows(overview.render_machine_table(_seat_view("6"), NOW))
+    sentence = "2 busy, 6 idle, 2 claimed"
+    assert f'<td title="{sentence}">' in row and f'role="img" aria-label="{sentence}"' in row
+
+
+def test_machine_legend_uses_its_own_swatches_not_seat_segments():
+    html = overview.render_machine_table(_mixed_view(), NOW)
+    legend = re.search(r'<p class="seat-legend" aria-hidden="true">.*?</p>', html, re.S).group(0)
+    for kind in ("busy", "free", "off"):
+        assert f'legend-swatch legend-swatch--{kind}"' in legend
+    assert "seg" not in legend.replace("seat-legend", "")

@@ -253,3 +253,13 @@ def test_table_wrap_contains_absolutely_positioned_cells():
     rule = re.search(r"^\.table-wrap \{([^}]+)\}", ui_theme.BASE_CSS, re.M).group(1)
     assert "position: relative" in rule and "overflow-x: auto" in rule
     assert re.search(r"^\.seen \{[^}]*white-space: nowrap", ui_theme.OVERVIEW_CSS, re.M)
+
+
+def test_machine_table_gives_seen_room_and_keeps_shared_css_lean():
+    assert ".machine-table th:nth-child(5) { width: 14%; text-align: right; }" in ui_theme.OVERVIEW_CSS
+    # The arrow is decorative; empty alt text keeps it out of the link's accessible name.
+    assert '.card-link::after { content: "\\2192" / "";' in ui_theme.BASE_CSS
+    assert re.search(r"^\.pager a \{[^}]*border-radius: var\(--radius-control\)", ui_theme.BASE_CSS, re.M)
+    assert ".sidebar-foot" not in ui_theme.BASE_CSS
+    assert not re.search(r"^\.card \{", ui_theme.BASE_CSS, re.M)  # the overview strip owns .card
+    assert not re.search(r"^\.sub \{", ui_theme.OVERVIEW_CSS, re.M)

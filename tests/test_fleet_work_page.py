@@ -761,3 +761,9 @@ def test_observed_config_text_is_escaped_and_references_are_plain(tmp_path):
     assert payload not in body and html.escape(payload) in body
     assert 'href="javascript:' not in body and 'href="https://example.test/work/' not in body
     assert not any(tag == "img" or "onerror" in attrs for tag, attrs in _Markup(body).tags)
+
+
+def test_worklore_pagination_is_a_pager_not_the_deck_tab_strip():
+    body = _render({"items": [], "next_cursor": "c2"})
+    assert '<nav class="pager" aria-label="Worklore pages">' in body
+    assert 'class="deck-nav" aria-label="Worklore pages"' not in body
