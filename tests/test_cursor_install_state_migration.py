@@ -45,7 +45,11 @@ def test_migrate_legacy_cursor_install_state_preserves_ownership_entries(tmp_pat
             "skills/brigade-work/SKILL.md": "skill-md-digest",
             "skills/brigade-work/skill.json": "skill-json-digest",
         },
-        "hooks": {"sessionStart": "hook-entry-digest"},
+        "hooks": {
+            "sessionStart": "start-entry-digest",
+            "postToolUse": "post-entry-digest",
+            "sessionEnd": "end-entry-digest",
+        },
         "mcp": {
             "brigade": "79ccc5bec9aa60af2028383f22a1d1f21a2e9a2d313b580bf50e106a2ffe8992",
             "graphtrail": "239bb5bd3544ee1dc6603a7d85486728174a00f5770cb769d1982ce84fbb987e",
@@ -80,9 +84,11 @@ def test_migrate_legacy_cursor_install_state_preserves_ownership_entries(tmp_pat
         "legacy_migrated": True,
     }
     assert migrated["generated"]["hooks.json#sessionStart"] == {
-        "entry_fingerprint": "hook-entry-digest",
+        "entry_fingerprint": "start-entry-digest",
         "legacy_migrated": True,
     }
+    assert migrated["generated"]["hooks.json#postToolUse"]["entry_fingerprint"] == "post-entry-digest"
+    assert migrated["generated"]["hooks.json#sessionEnd"]["entry_fingerprint"] == "end-entry-digest"
     assert migrated["skills"]["brigade-work"]["files"] == {
         "SKILL.md": "skill-md-digest",
         "skill.json": "skill-json-digest",
@@ -127,6 +133,10 @@ def test_load_profile_state_migrates_legacy_cursor_state(tmp_path):
 def test_legacy_install_then_profile_sync_migrates_and_uninstalls(tmp_path, monkeypatch, capsys):
     home = _use_home(monkeypatch, tmp_path)
     workspace = _workspace(tmp_path)
+    hooks_path = home / ".cursor" / "hooks.json"
+    hooks_path.parent.mkdir(parents=True)
+    foreign = {event: [{"command": f"keep-{event}"}] for event in ("sessionStart", "postToolUse", "sessionEnd")}
+    hooks_path.write_text(json.dumps({"version": 1, "hooks": foreign}))
     legacy = _legacy_state(home, capsys)
 
     assert (
@@ -159,6 +169,53 @@ def test_legacy_install_then_profile_sync_migrates_and_uninstalls(tmp_path, monk
         "CHANGELOG.md",
     }
     assert set(migrated["mcp"]) == set(legacy["mcp"])
+    assert {event for event in migrated["generated"] if event.startswith("hooks.json#")} == {
+        "hooks.json#sessionStart",
+        "hooks.json#postToolUse",
+        "hooks.json#sessionEnd",
+    }
+    installed_hooks = json.loads(hooks_path.read_text())["hooks"]
+    for event, entries in foreign.items():
+        assert entries[0] in installed_hooks[event]
+        assert (
+            sum(
+                entry
+                == {"command": "exec brigade work presence-hook --harness cursor --stdin --context cursor-work-loop"}
+                for entry in installed_hooks[event]
+            )
+            == 1
+        )
+
+    sync_command = [
+        "harness",
+        "sync",
+        "--target",
+        "cursor",
+        "--scope",
+        "user",
+        "--workspace",
+        str(workspace),
+        "--write",
+        "--json",
+    ]
+    assert cli.main(sync_command) == 0
+    second_sync = json.loads(capsys.readouterr().out)
+    assert second_sync["results"][0]["status"] == "current"
+    assert second_sync["results"][0]["files_written"] == []
+
+    doctor_command = [
+        "harness",
+        "doctor",
+        "--target",
+        "cursor",
+        "--scope",
+        "user",
+        "--workspace",
+        str(workspace),
+        "--json",
+    ]
+    assert cli.main(doctor_command) == 0
+    assert json.loads(capsys.readouterr().out)["results"][0]["ready"] is True
 
     assert (
         cli.main(
@@ -181,6 +238,9 @@ def test_legacy_install_then_profile_sync_migrates_and_uninstalls(tmp_path, monk
     assert not (home / ".cursor" / "brigade" / "install-state.json").exists()
     assert not (home / ".cursor" / "skills" / "brigade-work" / "SKILL.md").exists()
     assert not (home / ".cursor" / "plugins" / "local" / "brigade-loop" / "rules" / "brigade-loop.mdc").exists()
+    uninstalled_hooks = json.loads(hooks_path.read_text())["hooks"]
+    for event, entries in foreign.items():
+        assert uninstalled_hooks[event] == entries
 
 
 def test_sync_on_already_v2_state_is_unchanged(tmp_path, monkeypatch, capsys):

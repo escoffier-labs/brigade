@@ -56,6 +56,31 @@ def test_init_no_wire_skips_skill_install(tmp_path: Path):
     assert not (target / ".openclaw" / "skills" / "ultra-work-scout").exists()
 
 
+def test_init_cursor_installs_project_presence_hooks_and_preserves_foreign_entries(tmp_path: Path):
+    import json
+
+    target = tmp_path / "cursor-project"
+    hooks_path = target / ".cursor" / "hooks.json"
+    hooks_path.parent.mkdir(parents=True)
+    foreign = {"command": "keep-foreign-hook"}
+    hooks_path.write_text(json.dumps({"version": 1, "hooks": {"sessionStart": [foreign]}}))
+
+    from brigade.cli import main
+
+    command = ["init", "--target", str(target), "--depth", "repo", "--harnesses", "cursor"]
+    assert main(command) == 0
+
+    hooks = json.loads(hooks_path.read_text())["hooks"]
+    managed = {"command": "exec brigade work presence-hook --harness cursor --stdin --context cursor-work-loop"}
+    assert hooks["sessionStart"] == [foreign, managed]
+    assert hooks["postToolUse"] == [managed]
+    assert hooks["sessionEnd"] == [managed]
+
+    assert main(command) == 0
+    hooks = json.loads(hooks_path.read_text())["hooks"]
+    assert all(hooks[event].count(managed) == 1 for event in ("sessionStart", "postToolUse", "sessionEnd"))
+
+
 def test_init_no_gitignore_skips_gitignore(tmp_target: Path):
     tmp_target.mkdir(parents=True, exist_ok=True)
     assert install_selection(tmp_target, _workspace_sel(), update_gitignore=False) == 0

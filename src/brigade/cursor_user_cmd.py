@@ -203,6 +203,38 @@ def _hook_entry(root: Path | None = None) -> dict[str, str]:
     return {"command": _MANAGED_HOOK_COMMAND}
 
 
+def install_project_presence_hooks(workspace: Path) -> str | None:
+    """Add the three Cursor lifecycle hooks to a project without replacing entries."""
+    path = workspace / ".cursor" / "hooks.json"
+    doc, error = _read_json_object(path)
+    if doc is None:
+        return error or "could not read hooks configuration"
+    hooks = doc.get("hooks")
+    if hooks is None:
+        hooks = {}
+    if not isinstance(hooks, dict):
+        return "existing hooks field must be an object"
+    changed = False
+    for event in _MANAGED_HOOK_EVENTS:
+        entries = hooks.get(event)
+        if entries is None:
+            entries = []
+            hooks[event] = entries
+            changed = True
+        if not isinstance(entries, list):
+            return f"existing {event} hooks must be a list"
+        managed = _hook_entry()
+        if managed not in entries:
+            entries.append(managed)
+            changed = True
+    if not changed:
+        return None
+    doc["hooks"] = hooks
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(_coowned_json_text(doc), encoding="utf-8")
+    return None
+
+
 def _plan_hook_event(hooks: dict[str, Any], state: dict[str, Any], event: str, path: Path) -> dict[str, Any]:
     item: dict[str, Any] = {"surface": "hook-config", "path": str(path), "name": event}
     entries = hooks.get(event)

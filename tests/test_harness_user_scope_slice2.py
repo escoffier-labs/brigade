@@ -270,7 +270,15 @@ def test_cursor_managed_plugin_rule_hook_surface(tmp_path, monkeypatch, capsys):
     hooks = json.loads(hooks_json.read_text())["hooks"]
     assert foreign_entry in hooks["sessionStart"]
     managed_entry = {"command": "exec brigade work presence-hook --harness cursor --stdin --context cursor-work-loop"}
-    assert managed_entry in hooks["sessionStart"]
+    for event in ("sessionStart", "postToolUse", "sessionEnd"):
+        assert managed_entry in hooks[event]
+
+    assert cli.main(_doctor_base(workspace, "cursor") + ["--json"]) == 0
+    doctor = json.loads(capsys.readouterr().out)
+    assert all(
+        next(item for item in doctor["results"][0]["items"] if item.get("name") == event)["status"] == "current"
+        for event in ("sessionStart", "postToolUse", "sessionEnd")
+    )
 
 
 def test_cursor_edited_managed_rule_reports_conflict_and_preserves_edit(tmp_path, monkeypatch, capsys):
@@ -330,8 +338,10 @@ def test_uninstall_removes_only_brigade_owned_artifacts(tmp_path, monkeypatch, c
         assert not instruction.exists()
         assert not (home / ".cursor" / "plugins").exists()
         assert not (home / ".cursor" / "hooks" / "brigade-session-start").exists()
-        entries = json.loads((home / ".cursor" / "hooks.json").read_text())["hooks"]["sessionStart"]
-        assert entries == [foreign_entry]
+        hooks = json.loads((home / ".cursor" / "hooks.json").read_text())["hooks"]
+        assert hooks["sessionStart"] == [foreign_entry]
+        assert "postToolUse" not in hooks
+        assert "sessionEnd" not in hooks
 
 
 @pytest.mark.parametrize("harness", SLICE2_HARNESSES)

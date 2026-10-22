@@ -503,6 +503,32 @@ def test_cursor_presence_hook_skips_publish_when_workspace_missing(tmp_path, mon
     assert calls == []
 
 
+def test_user_cursor_hook_skips_project_selected_for_another_harness(tmp_path, monkeypatch, capsys):
+    workspace = _wire_cursor_workspace(tmp_path)
+    config = workspace / ".brigade" / "config.json"
+    config.write_text(json.dumps({"version": 1, "depth": "repo", "harnesses": ["codex"], "owner": "codex"}))
+    calls = []
+    monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "http://127.0.0.1:3774")
+    monkeypatch.setattr(fleet_client, "upsert_session", lambda snap: calls.append(snap) or True)
+    monkeypatch.setattr(
+        sys,
+        "stdin",
+        io.StringIO(
+            json.dumps(
+                {
+                    "conversation_id": "conv-1",
+                    "hook_event_name": "sessionStart",
+                    "workspace_roots": [str(workspace)],
+                }
+            )
+        ),
+    )
+
+    assert cli.main(["work", "presence-hook", "--harness", "cursor", "--stdin", "--context", "cursor-work-loop"]) == 0
+    capsys.readouterr()
+    assert calls == []
+
+
 def test_cursor_presence_fails_open_on_unwired_workspace_and_operator_home(tmp_path, monkeypatch, capsys):
     calls = []
     git_calls = []

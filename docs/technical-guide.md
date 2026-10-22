@@ -1170,6 +1170,8 @@ The scanner registry records configured commands and their output paths. `brigad
 
 Roadmap and repo-fleet commands:
 
+Cursor presence hooks use two installation scopes. `brigade init --harnesses cursor` writes the three lifecycle events to the project's `.cursor/hooks.json`; `brigade harness sync --target cursor --scope user --workspace <project> --write` manages the same events in the user's `~/.cursor/hooks.json`. Both preserve other hook entries. User-scoped callbacks publish only when the nearest Brigade project selects Cursor, so a shared user hook skips projects configured for another harness.
+
 - `brigade roadmap audit` parses `ROADMAP.md`, classifies roadmap bullets, detects stale current or next phase sections, fails when a target that declares a `project.version` has a "Where things stand" version headline that lags `pyproject.toml` major.minor or is unparseable, compares documented commands with the CLI, and can import roadmap hygiene issues with `--import-issues`. `--check` exits non-zero on a stale or missing version headline.
 - `brigade roadmap patterns` shows neutral pattern-family coverage and local source-pattern decisions: `bake-in`, `integrate`, `catalog-only`, `move-candidate`, and `leave-alone`.
 - `brigade roadmap commands` reports the public command documentation contract in text or JSON for wrappers and docs drift checks. Use `--write` to regenerate `docs/command-inventory.md` from the CLI parser and `--check` to fail when the inventory is missing or stale.
