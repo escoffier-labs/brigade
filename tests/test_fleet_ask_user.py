@@ -745,3 +745,66 @@ def test_question_quota_rejections_keep_safe_code(station, monkeypatch, code):
     monkeypatch.setattr(fleet_client_messages, "_request", lambda *_args, **_kwargs: (429, {"code": code}))
     result, error = invoke(station, request_id="quota-retry")
     assert error and result["code"] == code and result["request_id"] == "quota-retry"
+
+
+@pytest.mark.parametrize("changed", [{"question": "Different question?"}, {"timeout_secs": 3}])
+def test_changed_payload_retry_preserves_conflict_and_original_audit(station, hub, monkeypatch, changed):
+    from brigade import fleet_ask_user
+
+    monkeypatch.setattr(fleet_ask_user, "_desktop", lambda *_args, **_kwargs: "Recorded answer")
+    original, error = invoke(station, request_id="payload-retry")
+    assert not error and original["status"] == "answered"
+    with sqlite3.connect(hub[3]) as conn:
+        audit = conn.execute("SELECT * FROM fleet_questions").fetchall()
+        messages = conn.execute("SELECT * FROM fleet_messages").fetchall()
+
+    def no_second_prompt(*_args, **_kwargs):
+        raise AssertionError("retry must not open another prompt")
+
+    monkeypatch.setattr(fleet_ask_user, "_desktop", no_second_prompt)
+    for _ in range(2):
+        result, error = invoke(station, request_id="payload-retry", **changed)
+        assert error and result["code"] == "question_request_conflict"
+        assert result["request_id"] == "payload-retry"
+        assert "original question and timeout_secs" in result["error"]
+        assert "new request_id for a new question" in result["error"]
+        assert "Retry with the same request_id." not in result["error"]
+        assert "Different question" not in json.dumps(result) and "Recorded answer" not in json.dumps(result)
+        with sqlite3.connect(hub[3]) as conn:
+            assert conn.execute("SELECT * FROM fleet_questions").fetchall() == audit
+            assert conn.execute("SELECT * FROM fleet_messages").fetchall() == messages
+    resumed, error = invoke(station, request_id="payload-retry")
+    assert not error and stable_answer(resumed) == stable_answer(original)
+
+
+@pytest.mark.parametrize("code", ["question_not_owned", "unrecognized_private_code"])
+def test_question_ownership_wire_error_is_safe_through_mcp(station, hub, tmp_path, monkeypatch, code):
+    calls = []
+
+    def denied(*args, **_kwargs):
+        calls.append(args[2])
+        return 403, {"code": code, "error": "private upstream credential detail"}
+
+    # MCP cannot select question_id. Exercise its protocol boundary without
+    # inventing a credential generation transition during question creation.
+    monkeypatch.setattr(fleet_client_messages, "_request", denied)
+    result, error = invoke(station, request_id="ownership-recovery")
+    assert error and result["request_id"] == "ownership-recovery"
+    assert result["code"] == (code if code == "question_not_owned" else "question_unavailable")
+    if code == "question_not_owned":
+        assert "Use the current credential and a new request_id" in result["error"]
+        assert "Retry with the same request_id." not in result["error"]
+    else:
+        assert result["error"] == "Question could not be completed. Retry with the same request_id."
+    assert "private" not in json.dumps(result)
+    assert calls == [
+        {
+            "action": "question_create",
+            "question": "Proceed?",
+            "timeout_secs": 2,
+            "request_id": "ownership-recovery",
+        }
+    ]
+    with sqlite3.connect(hub[3]) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM fleet_questions").fetchone() == (0,)
+    assert not (tmp_path / "spool").exists()

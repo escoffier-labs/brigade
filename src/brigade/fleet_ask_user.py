@@ -26,7 +26,17 @@ TRANSPORT_GRACE = fleet_client.FLUSH_TIMEOUT_SECONDS
 
 class AskUserError(fleet_client.FleetClientError):
     def __init__(self, *, request_id: str, question_id: str | None = None, code: str = "question_unavailable") -> None:
-        super().__init__("Question could not be completed. Retry with the same request_id.")
+        guidance = {
+            "question_request_conflict": (
+                "Request conflicts with an existing question. Resume with the same request_id and the original "
+                "question and timeout_secs. Use a new request_id for a new question."
+            ),
+            "question_not_owned": (
+                "Question is not owned by the current credential. Use the current credential and a new request_id "
+                "to ask a new question."
+            ),
+        }
+        super().__init__(guidance.get(code, "Question could not be completed. Retry with the same request_id."))
         self.request_id = request_id
         self.question_id = question_id
         self.code = code

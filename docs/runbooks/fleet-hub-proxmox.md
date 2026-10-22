@@ -851,3 +851,9 @@ when creation was confirmed, `question_id`. Retry the same question and timeout
 with that `request_id` to resume its audit and original deadline. Retries do not
 create another question or open another dialog. Only the credential generation
 that created a question can resume it after an outage.
+
+Changing the question or timeout requires a new `request_id`. Inbox replies
+remain unacknowledged for the caller's normal inbox consumer. Two pending asks
+can occupy the caller's two long-poll slots, causing other waits to use their
+existing polling fallback. A stdio station serves one tool call at a time,
+so other tools on that process wait for the ask to finish.
