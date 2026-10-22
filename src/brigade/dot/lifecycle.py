@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import re
 import time
 import urllib.error
@@ -446,11 +447,21 @@ def _isolated_from_dot(target: Path, runtime: Runtime) -> bool:
     _, dot_runtime = _load_config(target, profile=DOT)
     return (
         runtime.hub.principal != dot_runtime.hub.principal
-        and runtime.hub.message_token_file != dot_runtime.hub.message_token_file
-        and runtime.paths.state_dir != dot_runtime.paths.state_dir
+        and not _same_location(runtime.hub.message_token_file, dot_runtime.hub.message_token_file)
+        and not _same_location(runtime.paths.state_dir, dot_runtime.paths.state_dir)
         and runtime.auth.audience != dot_runtime.auth.audience
         and runtime.auth.resource != dot_runtime.auth.resource
     )
+
+
+def _same_location(left: Path, right: Path) -> bool:
+    # Spellings like a/../b or a symlink name the same file; an unreadable pair counts as shared.
+    try:
+        if left.exists() and right.exists():
+            return os.path.samefile(left, right)
+        return left.resolve() == right.resolve()
+    except OSError:
+        return True
 
 
 def _registered_names(config: DotListenerConfig, tools: DotTools) -> set[str]:

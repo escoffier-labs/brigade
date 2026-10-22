@@ -650,6 +650,16 @@ def test_duet_isolation_fails_when_sharing_dot_identity(duet_configured, dot_pri
     assert m._isolated_from_dot(target, runtime) is True
     _, tools, _ = m.build_listener_from_target(target, pack_id="duet")
     tools.state.close()
+    # Another spelling of Duet's own token file, or a link to it, is still the same credential.
+    token = runtime.hub.message_token_file
+    dot_data["hub"]["message_token_file"] = str(token.parent / "x" / ".." / token.name)
+    dot_runtime.write_text(json.dumps(dot_data))
+    assert m._isolated_from_dot(target, runtime) is False
+    link = dot_private_dir.parent / "dot-token-link"
+    link.symlink_to(token)
+    dot_data["hub"]["message_token_file"] = str(link)
+    dot_runtime.write_text(json.dumps(dot_data))
+    assert m._isolated_from_dot(target, runtime) is False
 
 
 @pytest.fixture
