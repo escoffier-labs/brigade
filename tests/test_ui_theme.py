@@ -245,3 +245,11 @@ def test_sidebar_resources_hide_on_narrow_screens():
     narrow = ui_theme.BASE_CSS.split("@media (max-width: 900px)")[1].split("@media")[0]
     hide = re.search(r"([^{}]+)\{ display: none; \}", narrow).group(1)
     assert ".resources" in hide and ".sidebar-meta" in hide
+
+
+def test_table_wrap_contains_absolutely_positioned_cells():
+    # The machines table's visually hidden Notes header is absolutely positioned; without a
+    # positioned scroll wrapper it escapes the overflow clip and widens the page on phones.
+    rule = re.search(r"^\.table-wrap \{([^}]+)\}", ui_theme.BASE_CSS, re.M).group(1)
+    assert "position: relative" in rule and "overflow-x: auto" in rule
+    assert re.search(r"^\.seen \{[^}]*white-space: nowrap", ui_theme.OVERVIEW_CSS, re.M)

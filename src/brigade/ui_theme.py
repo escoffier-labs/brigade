@@ -129,7 +129,7 @@ nav a[aria-current="page"], .deck-nav a[aria-current="page"] { border-bottom-col
 details { margin-top: var(--space-4); padding: var(--space-3) var(--space-4); color: var(--muted); }
 details:target { border-color: var(--signal); }
 summary { cursor: pointer; color: var(--ink); font-weight: 700; }
-.table-wrap { max-width: 100%; overflow-x: auto; }
+.table-wrap { position: relative; max-width: 100%; overflow-x: auto; }
 table { width: 100%; table-layout: fixed; border-collapse: collapse; }
 th, td { padding: 10px var(--space-3); border-bottom: 1px solid var(--line-quiet); overflow-wrap: anywhere; text-align: left; vertical-align: top; }
 th { background: var(--surface-raised); color: var(--muted); font-size: 12px; font-weight: 500; letter-spacing: 0; text-transform: none; }
@@ -269,10 +269,11 @@ progress::-moz-progress-bar { background: var(--working); }
 .machine-name { color: var(--ink); font-weight: 650; }
 .sub { display: block; color: var(--faint); font-size: 11px; }
 .sub-inline { margin-left: var(--space-2); color: var(--faint); font-size: 12px; }
-.seen { text-align: right; }
+.seen { text-align: right; white-space: nowrap; }
 .seen--stale { color: var(--signal); }
-.seat-legend { display: flex; gap: var(--space-3); margin: 0; color: var(--muted); font-size: 12px; }
-.legend-swatch { display: inline-block; width: 6px; height: 10px; margin-right: var(--space-1); border-radius: 2px; vertical-align: -1px; }
+.seat-legend { margin: 0; color: var(--muted); font-size: 12px; }
+.legend-swatch { display: inline-block; width: 6px; height: 10px; margin: 0 var(--space-1) 0 var(--space-3); border-radius: 2px; vertical-align: -1px; }
+.legend-swatch:first-child { margin-left: 0; }
 .legend-swatch--busy { background: var(--working); }
 .legend-swatch--free { background: var(--idle); }
 .legend-swatch--off { box-shadow: inset 0 0 0 1px var(--offline); }
