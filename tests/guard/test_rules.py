@@ -538,6 +538,11 @@ class MissingLeakShapeTests(unittest.TestCase):
             'f"https://{cfg.db.local!r}/p"',  # content-guard: allow private-hostname
             'f"https://{cfg.db.local:>{width}}/p"',  # content-guard: allow private-hostname
             'f"https://{{{cfg.db.local}}}/p"',  # content-guard: allow private-hostname
+            # Common expression positions for the f-string itself.
+            'requests.get(f"https://{cfg.db.local}/x")',  # content-guard: allow private-hostname
+            '{"url": f"https://{cfg.db.local}/x"}',  # content-guard: allow private-hostname
+            'return f"https://{cfg.db.local}/x"',  # content-guard: allow private-hostname
+            'base + f"https://{cfg.db.local}/x"',  # content-guard: allow private-hostname
         ):
             with self.subTest(text=text):
                 result = scan_text(text)
@@ -586,6 +591,14 @@ class MissingLeakShapeTests(unittest.TestCase):
             '// f"https://{db.home}/path"',  # content-guard: allow private-hostname
             # A nested f-string inside another literal keeps main's detection.
             "f\"https://{f'{db.home}'}/\"",  # content-guard: allow private-hostname
+            # A complete f-string example in prose or after a line-start comment.
+            'REM f"https://{db.home}/x"',  # content-guard: allow private-hostname
+            'Use f"https://{db.home}/x" for that.',  # content-guard: allow private-hostname
+            '; f"https://{db.home}/x"',  # content-guard: allow private-hostname
+            '; url = f"https://{db.home}/x"',  # content-guard: allow private-hostname
+            '* f"https://{db.home}/x"',  # content-guard: allow private-hostname
+            '-- f"https://{db.home}/x"',  # content-guard: allow private-hostname
+            '<!-- f"https://{db.home}/x" -->',  # content-guard: allow private-hostname
         ):
             with self.subTest(text=text):
                 self.assertIn("private-hostname", {f.rule_id for f in scan_text(text).findings})
