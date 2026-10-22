@@ -302,8 +302,10 @@ def test_state_file_is_private_and_holds_no_message_text(fleet):
     path = delivery.state_path("claude", "session-1")
     raw = path.read_text(encoding="utf-8")
     assert "confidential" not in raw and set(json.loads(raw)) == {"scope", "cursor", "next_poll_at", "retry_at"}
-    assert stat.S_IMODE(path.stat().st_mode) == 0o600
-    assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
+    if os.name != "nt":
+        # Windows does not enforce POSIX permission bits; it reports 0o666.
+        assert stat.S_IMODE(path.stat().st_mode) == 0o600
+        assert stat.S_IMODE(path.parent.stat().st_mode) == 0o700
 
 
 @pytest.mark.parametrize(
