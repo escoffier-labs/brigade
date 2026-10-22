@@ -161,7 +161,7 @@ def brief_summary(target: Path) -> dict[str, object]:
     """Bound the brief to ten run snapshots and bounded claim rows, with no Hub reads or receipt."""
     started = run_reap._utc_now(None)
     try:
-        lanes = collect_lanes(target, now=started, limit=20, scan_limit=10, include_hub=False)
+        lanes = collect_lanes(target, now=started, limit=20, scan_limit=10, claim_limit=10, include_hub=False)
         clock = run_reap._utc_now(None)
         counts = Counter(classify(lane, clock, Thresholds(), observation_started_at=started).state for lane in lanes)
         return {"counts": dict(sorted(counts.items())), "truncated": lanes.truncated}

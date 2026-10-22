@@ -16,7 +16,7 @@ from tests.test_runs_patrol import _ledger, _snapshot
 
 @pytest.mark.parametrize("signal", ["success", "ahead"])
 @pytest.mark.parametrize("age_hours,landed,expected", [(25, False, "stranded"), (23, False, None), (25, True, None)])
-def test_stranded_requires_old_unlanded_in_progress_task(tmp_path, signal, age_hours, landed, expected):
+def test_stranded_requires_old_unlanded_in_progress_task(tmp_path, monkeypatch, signal, age_hours, landed, expected):
     repo = _repo(tmp_path)
     ledger = _ledger(repo, worktree=repo)
     payload = json.loads(ledger.read_text())
@@ -31,6 +31,7 @@ def test_stranded_requires_old_unlanded_in_progress_task(tmp_path, signal, age_h
         _git(repo, "branch", "base")
         _git(repo, "branch", "--set-upstream-to=base")
         (repo / "tracked.txt").write_text("finished change\n")
+        monkeypatch.setenv("GIT_COMMITTER_DATE", stamp)
         _git(repo, "commit", "-am", "finished change")
     before = _snapshot(repo)
     lane = run_lane_state.collect_lanes(repo, now=NOW)[0]
@@ -214,3 +215,38 @@ def test_dispatch_observation_does_not_read_the_hub():
     from brigade.work_cmd import dispatch_apply
 
     assert "include_hub=False" in inspect.getsource(dispatch_apply)
+
+
+def test_fresh_ahead_commit_defers_stranding_of_an_old_claim(tmp_path, monkeypatch):
+    repo = _repo(tmp_path)
+    ledger = _ledger(repo, worktree=repo)
+    payload = json.loads(ledger.read_text())
+    payload["tasks"][0]["claim"]["claimed_at"] = (NOW - timedelta(hours=48)).isoformat()
+    ledger.write_text(json.dumps(payload))
+    _git(repo, "branch", "base")
+    _git(repo, "branch", "--set-upstream-to=base")
+    (repo / "tracked.txt").write_text("fresh\n")
+    monkeypatch.setenv("GIT_COMMITTER_DATE", (NOW - timedelta(minutes=5)).isoformat())
+    _git(repo, "commit", "-am", "fresh change")
+    lane = run_lane_state.collect_lanes(repo, now=NOW)[0]
+    assert run_lane_state.classify(lane, NOW, run_lane_state.Thresholds()).state != "stranded"
+
+
+def test_brief_summary_caps_claims_at_ten_with_few_runs(tmp_path):
+    from brigade import runs_patrol
+
+    repo = _repo(tmp_path)
+    tasks = [
+        {
+            "id": f"task-{i}",
+            "status": "in_progress",
+            "claim": {"claim_id": f"c{i}", "actor": "worker", "claimed_at": OLD_STARTED},
+        }
+        for i in range(15)
+    ]
+    path = repo / ".brigade/work/tasks.json"
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(json.dumps({"tasks": tasks}))
+    summary = runs_patrol.brief_summary(repo)
+    assert sum(summary["counts"].values()) == 10
+    assert summary["truncated"] is True

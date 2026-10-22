@@ -236,7 +236,19 @@ def _worktree_progress(lane: Lane, now: datetime, git_root: Path | None) -> None
         lane.progress_errors.append("branch ahead comparison unavailable")
         return
     lane.ahead = int(ahead.stdout.strip()) > 0
-    lane.evidence.append(Evidence("worktree:git-ahead", now, f"{ahead.stdout.strip()} commits ahead of upstream"))
+    committed: datetime | None = None
+    if lane.ahead:
+        # The newest unpushed commit is progress, so fresh work is not stranded.
+        newest_commit = _git(git_root, "log", "-1", "--format=%ct", "@{upstream}..HEAD")
+        raw_time = newest_commit.stdout.strip()
+        if newest_commit.code != 0 or not raw_time.isdigit():
+            lane.progress_errors.append("branch ahead commit time unavailable")
+            return
+        committed = datetime.fromtimestamp(int(raw_time), timezone.utc)
+        lane.progress.append(committed)
+    lane.evidence.append(
+        Evidence("worktree:git-ahead", now, f"{ahead.stdout.strip()} commits ahead of upstream", committed)
+    )
 
 
 def _observe_worktree(
@@ -484,6 +496,7 @@ def collect_lanes(
     now: datetime | None = None,
     limit: int = 50,
     scan_limit: int | None = None,
+    claim_limit: int | None = None,
     include_hub: bool = True,
     dispatch_intents: list[dict[str, Any]] | None = None,
 ) -> Lanes:
@@ -497,6 +510,9 @@ def collect_lanes(
     if not 1 <= limit <= MAX_LIMIT:
         raise ValueError(f"limit must be between 1 and {MAX_LIMIT}")
     run_limit = RUN_SCAN_LIMIT if scan_limit is None else scan_limit
+    claims_cap = limit if claim_limit is None else claim_limit
+    if not 1 <= claims_cap <= MAX_LIMIT:
+        raise ValueError(f"claim_limit must be between 1 and {MAX_LIMIT}")
     if not 1 <= run_limit <= MAX_LIMIT:
         raise ValueError(f"scan_limit must be between 1 and {MAX_LIMIT}")
     target = target.expanduser().resolve()
@@ -582,7 +598,7 @@ def collect_lanes(
                     claimed_tasks.append((task, claim))
             # Append order puts fresh claims at the end of the ledger. Validate
             # the whole byte-capped file, then bound only claimed task rows.
-            lanes.truncated |= len(claimed_tasks) > limit
+            lanes.truncated |= len(claimed_tasks) > claims_cap
             by_claim: dict[str, list[Lane]] = {}
             for lane in lanes:
                 key = lane.run.get("claim_id") if lane.run else None
@@ -599,7 +615,7 @@ def collect_lanes(
                     by_claim.setdefault(key, []).append(lane)
             join_unverified = scan_full or any(lane.run_dir is not None and lane.errors for lane in lanes)
             nonterminal = any(lane.run is not None and lane.terminal_status is None for lane in lanes)
-            for task, claim in claimed_tasks[-limit:]:
+            for task, claim in claimed_tasks[-claims_cap:]:
                 # A task can be reclaimed. Only the exact claim generation can
                 # join a run, never the task id shared with a completed run.
                 matches = [
