@@ -315,6 +315,38 @@ class MissingLeakShapeTests(unittest.TestCase):
                     {finding.rule_id for finding in scan_text(before + host + after).findings},
                 )
 
+    def test_yaml_sequence_hostname_keys_match_without_broadening_code_context(self) -> None:
+        host = "fixture-db" + ".internal"
+        policy = load_policy(Path(__file__).resolve().parents[2] / "src/brigade/guard/policies/public-repo.json")
+        for before in (
+            "- host: ",
+            "  - hostname: ",
+            "    - DATABASE_HOST: ",
+            "- internal-api-endpoint: ",
+            "-  server: ",
+            "  - DATABASE_HOST=",
+        ):
+            with self.subTest(before=before):
+                text = "services:\n" + before + host + "\n"
+                result = scan_text(text, policy=policy)
+                self.assertEqual([(f.rule_id, f.action) for f in result.findings], [("private-hostname", "block")])
+                redacting = scan_text(text, policy=Policy(rules={"private-hostname": "redact"}))
+                self.assertEqual(redacting.redacted_text, "services:\n" + before + "[redacted-host]\n")
+
+        for before, after in (
+            ("- arbitrary_value: ", ""),
+            ("- DATABASE_HOSTNAME_SUFFIX: ", ""),
+            ("- obj.DATABASE_HOST: ", ""),
+            ("- const DATABASE_HOST=", ";"),
+            ("- host: callback(", ")"),
+            ("- host: ", " ? yes : no;"),
+            ("- host: ", ".example.com"),
+            ("-host: ", ""),
+        ):
+            with self.subTest(before=before, after=after):
+                result = scan_text(before + host + after, policy=policy)
+                self.assertNotIn("private-hostname", {f.rule_id for f in result.findings})
+
     def test_windows_home_path_matches(self) -> None:
         result = scan_text(
             r"Config at C:\Users\example-user\.config\tool.json"  # content-guard: allow windows-home-path
