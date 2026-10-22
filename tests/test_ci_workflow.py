@@ -461,11 +461,41 @@ def test_required_lint_allowlist_step_fails_closed_before_checking(tmp_path, bas
             assert "base SHA is missing" in result.stdout + result.stderr
 
 
+# Pull requests run only the 3.12 shards. Merge groups and pushes to main run
+# every supported Python, so the queue still tests 3.10 and 3.11 before landing.
+SHARD_PYTHON_AXIS = (
+    'python: ${{ fromJSON(github.event_name == \'pull_request\' && \'["3.12"]\' || \'["3.10", "3.11", "3.12"]\') }}'
+)
+
+
+def test_ci_workflow_limits_pull_request_shards_to_python312_only():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    shards = _workflow_job_section(text, "test-shards")
+    axis = re.search(r"^        python: (.+)$", shards, re.MULTILINE)
+    assert axis is not None
+    match = re.fullmatch(
+        r"\$\{\{ fromJSON\(github\.event_name == 'pull_request' && '(.+?)' \|\| '(.+?)'\) \}\}",
+        axis.group(1),
+    )
+    assert match is not None, axis.group(1)
+    pull_request, other_events = (json.loads(group) for group in match.groups())
+    assert pull_request == ["3.12"]
+    assert other_events == ["3.10", "3.11", "3.12"]
+    # The shard name expands per leg, and the required test (X) names keep
+    # the full matrix, so no check reports an unexpanded matrix expression.
+    assert "    if:" not in shards.split("    steps:", 1)[0]
+    protected = _workflow_job_section(text, "test")
+    assert 'python: ["3.10", "3.11", "3.12"]' in protected
+    notice = _workflow_step_section(text, "test", "Note Python shards deferred to the merge queue")
+    assert "if: ${{ github.event_name == 'pull_request' && matrix.python != '3.12' }}" in notice
+    assert "::notice::" in notice
+
+
 def test_ci_workflow_runs_four_shards_on_every_supported_python():
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     shards = _workflow_job_section(text, "test-shards")
     assert "name: test shard (${{ matrix.python }}, ${{ matrix.shard }})" in shards
-    assert 'python: ["3.10", "3.11", "3.12"]' in shards
+    assert SHARD_PYTHON_AXIS in shards
     assert "shard: [0, 1, 2, 3]" in shards
     assert "fail-fast: false" in shards
     assert "python scripts/ci_pytest_shard.py" in shards
@@ -1502,7 +1532,7 @@ def test_ci_migration_preserves_existing_job_names_and_hosted_routing():
 def test_ci_migration_preserves_complete_matrices():
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     for job, axis in (
-        ("test-shards", 'python: ["3.10", "3.11", "3.12"]'),
+        ("test-shards", SHARD_PYTHON_AXIS),
         ("test-shards", "shard: [0, 1, 2, 3]"),
         ("test", 'python: ["3.10", "3.11", "3.12"]'),
         ("cosign-integration", 'cosign: ["v2.6.5", "v3.1.3"]'),

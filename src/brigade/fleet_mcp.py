@@ -7,7 +7,7 @@ from time import monotonic, sleep
 from typing import Any
 
 from . import fleet_client, fleet_client_messages as messages, mcp_server
-from .fleet_hub_messages import MAX_SQLITE_INTEGER
+from .fleet_hub_messages import MAX_SQLITE_INTEGER, MAX_WAIT_MS
 from .untrusted import scan_untrusted, wrap_untrusted
 
 DEFAULT_PORT = 8933
@@ -211,14 +211,15 @@ def poll_inbox(
     after: int = 0,
     limit: int | None = None,
 ) -> dict[str, Any]:
-    """Bounded list polling; replace here when the hub gains long-poll support."""
+    """Long-poll until the deadline, with bounded backoff for old or unavailable hubs."""
     deadline = monotonic() + wait_secs
 
-    def read(unacked: bool) -> dict[str, Any]:
+    def read(unacked: bool, *, wait_ms: int = 0) -> dict[str, Any]:
         remaining = deadline - monotonic()
         return messages.list_messages(
             after=after,
             unacked=unacked,
+            wait_ms=wait_ms,
             authority=authority,
             timeout=min(fleet_client.FLUSH_TIMEOUT_SECONDS, max(remaining, 2.0)) if wait_secs else None,
         )
@@ -237,8 +238,25 @@ def poll_inbox(
             return read(True)
         except fleet_client.FleetClientError:
             return history
-    delay = 1.0
     last_good = history
+    while (remaining := deadline - monotonic()) > 0:
+        chunk = int(min(remaining, MAX_WAIT_MS / 1000) * 1000)
+        if chunk == 0:
+            break
+        started = monotonic()
+        try:
+            page = read(True, wait_ms=chunk)
+        except fleet_client.FleetClientError:
+            break
+        if page["messages"]:
+            return page
+        if unacked_only:
+            last_good = page
+        # Older hubs ignore wait_ms; do not spin on their immediate empty replies.
+        if monotonic() - started < chunk / 2000:
+            break
+
+    delay = 1.0
     while (remaining := deadline - monotonic()) > 0:
         sleep(min(delay, remaining))
         if monotonic() >= deadline:

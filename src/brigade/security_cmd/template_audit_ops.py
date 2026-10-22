@@ -203,9 +203,11 @@ def harness_wiring_payload(target: Path) -> dict[str, Any]:
     findings: list[dict[str, Any]] = []
     scanned_files: list[str] = []
     for path in _scan_engine_mod._iter_scan_files(target):
-        if _should_skip_harness_wiring_path(path, target):
-            continue
+        # The document check is a cheap suffix/prefix test; the skip check stats every
+        # ancestor for a nested worktree marker, so run it only on candidate documents.
         if not _scan_detectors_mod._is_harness_wiring_document(path, target):
+            continue
+        if _should_skip_harness_wiring_path(path, target):
             continue
         try:
             text = path.read_text(errors="replace")
