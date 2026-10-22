@@ -82,6 +82,30 @@ def test_init_cursor_installs_project_presence_hooks_and_preserves_foreign_entri
     assert all(hooks[event].count(managed) == 1 for event in ("sessionStart", "postToolUse", "sessionEnd"))
 
 
+def test_init_cursor_warns_when_project_hook_file_cannot_be_written(tmp_path: Path, monkeypatch, capsys):
+    import json
+
+    target = tmp_path / "cursor-project"
+    hooks_path = target / ".cursor" / "hooks.json"
+    hooks_path.parent.mkdir(parents=True)
+    hooks_path.write_text(json.dumps({"version": 1, "hooks": {}}))
+    original_write_text = Path.write_text
+
+    def reject_hook_write(path, *args, **kwargs):
+        if path == hooks_path:
+            raise PermissionError("read-only test hooks")
+        return original_write_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "write_text", reject_hook_write)
+
+    from brigade.cli import main
+
+    assert main(["init", "--target", str(target), "--depth", "repo", "--harnesses", "cursor"]) == 0
+    captured = capsys.readouterr()
+    assert "warning: unable to wire project-scoped Cursor presence hooks" in captured.err
+    assert "Traceback" not in captured.err
+
+
 def test_init_no_gitignore_skips_gitignore(tmp_target: Path):
     tmp_target.mkdir(parents=True, exist_ok=True)
     assert install_selection(tmp_target, _workspace_sel(), update_gitignore=False) == 0

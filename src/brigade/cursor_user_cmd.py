@@ -260,8 +260,11 @@ def install_project_presence_hooks(workspace: Path) -> str | None:
     if not changed:
         return None
     doc["hooks"] = hooks
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(_coowned_json_text(doc), encoding="utf-8")
+    try:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_coowned_json_text(doc), encoding="utf-8")
+    except OSError as exc:
+        return str(exc)
     return None
 
 
