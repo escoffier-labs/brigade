@@ -280,161 +280,174 @@ def _status_time(value: Any) -> str | None:
     return parsed.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+_WORKER_READS = ("deployments-status", "deployments-list", "versions-list")
+_D1_READS = ("d1-info", "d1-counts")
+_GRAPHQL = "https://api.cloudflare.com/client/v4/graphql"
+_NAME = re.compile(r"[A-Za-z0-9._+-]{1,128}")
+
+
+def _active_deployment(current: Any, deployments: Any) -> dict[str, Any] | None:
+    """`deployments status --json` is the deployment object itself. Fall back to
+    the newest entry of `deployments list --json`, a raw array."""
+    if isinstance(current, dict) and isinstance(current.get("versions"), list):
+        return current
+    entries = [d for d in deployments if isinstance(d, dict)] if isinstance(deployments, list) else []
+    stamped = [(when, d) for d in entries if (when := _status_time(d.get("created_on"))) is not None]
+    if stamped:
+        return max(stamped, key=lambda item: item[0])[1]
+    return entries[0] if len(entries) == 1 else None
+
+
+def _single_version(deployment: dict[str, Any] | None) -> str | None:
+    """The two-field panel can name one version. A gradual deployment splits traffic
+    across several, so it reports no version rather than an arbitrary one."""
+    versions = deployment.get("versions") if deployment else None
+    if not isinstance(versions, list) or len(versions) != 1 or not isinstance(versions[0], dict):
+        return None
+    candidate = versions[0].get("version_id") or versions[0].get("id")
+    return candidate if isinstance(candidate, str) and _NAME.fullmatch(candidate) else None
+
+
+def _published_at(versions: Any, version_id: str | None) -> str | None:
+    """`versions list --json` is a raw array with the time under metadata.created_on."""
+    for version in versions if isinstance(versions, list) and version_id else []:
+        if isinstance(version, dict) and version_id in (version.get("id"), version.get("version_id")):
+            metadata = version.get("metadata")
+            return _status_time(metadata.get("created_on") if isinstance(metadata, dict) else None)
+    return None
+
+
+def _row_count(payload: Any) -> int | None:
+    try:
+        rows = _results(payload)
+        count = rows[0].get("row_count") if len(rows) == 1 else None
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return None
+    return count if type(count) is int and count >= 0 else None
+
+
+def _worker_analytics(account: str, worker: str, token: str, now: datetime) -> tuple[bool, int | None, int | None]:
+    """Return (token can see the configured account, requests, errors) for 24 hours."""
+    try:
+        viewer = fetch_json(_GRAPHQL, body={"query": VIEWER_QUERY}, token=token)
+        accounts = viewer["data"]["viewer"]["accounts"]
+        if viewer.get("errors") or not isinstance(accounts, list):
+            return False, None, None
+        if not any(isinstance(row, dict) and row.get("accountTag") == account for row in accounts):
+            return False, None, None
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return False, None, None
+    try:
+        payload = fetch_json(
+            _GRAPHQL,
+            body={
+                "query": STATUS_ANALYTICS_QUERY,
+                "variables": {
+                    "account": account,
+                    "worker": worker,
+                    "start": (now - timedelta(hours=24)).isoformat(),
+                    "end": now.isoformat(),
+                },
+            },
+            token=token,
+        )
+        rows = payload["data"]["viewer"]["accounts"]
+        if payload.get("errors") or len(rows) != 1 or len(rows[0]["workersInvocationsAdaptive"]) >= 10000:
+            return True, None, None
+        sums = [row["sum"] for row in rows[0]["workersInvocationsAdaptive"]]
+        requests, errors = [s["requests"] for s in sums], [s["errors"] for s in sums]
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return True, None, None
+    if not all(type(value) is int and value >= 0 for value in requests + errors):
+        return True, None, None
+    return True, sum(requests), sum(errors)
+
+
+def _credential_state(
+    *, worker: bool, database: bool, worker_read: bool, d1_read: bool, token: bool, viewer: bool
+) -> str:
+    """Decide credential health from per-resource access.
+
+    A configured Worker needs a Wrangler read and an Analytics token whose viewer
+    lists the configured account. A configured database needs one Wrangler read.
+    Every configured resource accessible: available. A missing Analytics token for
+    a Worker, or an Analytics token that works while no Wrangler read does (no
+    Wrangler login): unavailable. Anything else is a failure whose cause cannot be
+    told from an outage: unknown. Unconfigured resources never count either way.
+    """
+    if (not worker or (worker_read and viewer)) and (not database or d1_read):
+        return "available"
+    if (worker and not token) or (viewer and not (worker_read or d1_read)):
+        return "unavailable"
+    return "unknown"
+
+
 def cloudflare_status(settings: dict[str, Any], *, now: datetime | None = None) -> dict[str, Any] | None:
-    """Return only validated Cloudflare status fields; never retain CLI or API payloads."""
+    """Return only validated Cloudflare status fields; never retain CLI or API payloads.
+
+    Each configured resource is read on its own, so one failed read leaves only its
+    own cells unknown. No Worker and no database configured means no observation.
+    """
     if settings.get("status_panel") is not True:
         return None
     now = (now or datetime.now(timezone.utc)).astimezone(timezone.utc)
-    worker, database = settings.get("worker"), settings.get("database")
+    worker, database = (
+        settings[key] if isinstance(settings.get(key), str) and settings[key] else None
+        for key in ("worker", "database")
+    )
     if not worker and not database:
         return None
-    result: dict[str, Any] = {
-        "collected_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "credential": "unknown",
-        "worker_version": None,
-        "worker_published_at": None,
-        "repository_head": None,
-        "d1_rows": None,
-        "last_purge": None,
-        "requests_24h": None,
-        "errors_24h": None,
-    }
     repository_head = settings.get("repository_head")
-    if isinstance(repository_head, str) and re.fullmatch(r"[A-Za-z0-9._+-]{1,128}", repository_head):
-        result["repository_head"] = repository_head
-    worker_reads: dict[str, tuple[bool, Any]] = {}
-    d1_reads: dict[str, tuple[bool, Any]] = {}
-    if isinstance(worker, str) or isinstance(database, str):
-        token_envs = tuple(
-            settings[key] for key in ("analytics_token_env", "d1_token_env") if isinstance(settings.get(key), str)
-        )
+    token_key, account = settings.get("analytics_token_env"), settings.get("account")
+    token = os.environ.get(token_key, "") if isinstance(token_key, str) else ""
+    token_envs = tuple(
+        settings[key] for key in ("analytics_token_env", "d1_token_env") if isinstance(settings.get(key), str)
+    )
 
-        def read(action: str) -> tuple[bool, Any]:
+    def read(actions: tuple[str, ...]) -> dict[str, Any]:
+        """Successful reads by action. A failed read is simply absent."""
+        done = {}
+        for action in actions:
             try:
-                worker_name = worker if action in ("deployments-status", "deployments-list", "versions-list") else None
-                database_name = database if action in ("d1-info", "d1-counts") else None
-                value = run_wrangler(
-                    status_wrangler_argv(worker_name, database_name, action),
-                    account=settings.get("account"),
-                    token_envs=token_envs,
+                done[action] = run_wrangler(
+                    status_wrangler_argv(worker, database, action), account=account, token_envs=token_envs
                 )
             except (ValueError, KeyError, TypeError, AttributeError):
-                return False, None
-            return True, value
+                pass
+        return done
 
-        if isinstance(worker, str):
-            worker_reads = {
-                action: read(action) for action in ("deployments-status", "deployments-list", "versions-list")
-            }
-        if isinstance(database, str):
-            d1_reads = {action: read(action) for action in ("d1-info", "d1-counts")}
-    worker_ok = any(succeeded for succeeded, _ in worker_reads.values())
-    d1_ok = any(succeeded for succeeded, _ in d1_reads.values())
-    wrangler_ok = worker_ok or d1_ok
-    current = worker_reads.get("deployments-status", (False, None))[1]
-    deployments = worker_reads.get("deployments-list", (False, None))[1]
-    versions = worker_reads.get("versions-list", (False, None))[1]
-
-    if isinstance(worker, str):
-        deployment = None
-        if isinstance(current, dict):
-            deployment = current.get("latest")
-            if deployment is None and isinstance(current.get("versions"), list):
-                deployment = current
-        if deployment is None:
-            entries = deployments if isinstance(deployments, list) else []
-            if isinstance(deployments, dict) and isinstance(deployments.get("deployments"), list):
-                entries = deployments["deployments"]
-            deployment = entries[0] if entries else None
-
-        version_id = None
-        if isinstance(deployment, dict):
-            deployed = deployment.get("versions")
-            if isinstance(deployed, list) and len(deployed) == 1 and isinstance(deployed[0], dict):
-                candidate = deployed[0].get("version_id") or deployed[0].get("id")
-                if isinstance(candidate, str) and re.fullmatch(r"[A-Za-z0-9._+-]{1,128}", candidate):
-                    version_id = candidate
-            result["worker_version"] = version_id
-
-        version_rows = versions if isinstance(versions, list) else []
-        if isinstance(versions, dict) and isinstance(versions.get("versions"), list):
-            version_rows = versions["versions"]
-        for version in version_rows:
-            if (
-                isinstance(version_id, str)
-                and isinstance(version, dict)
-                and version_id in (version.get("id"), version.get("version_id"))
-            ):
-                metadata = version.get("metadata")
-                created = metadata.get("created_on") if isinstance(metadata, dict) else None
-                result["worker_published_at"] = _status_time(
-                    created or version.get("created_on") or version.get("created_at")
-                )
-                break
-
-    if d1_reads.get("d1-counts", (False, None))[0]:
-        try:
-            rows = _results(d1_reads["d1-counts"][1])
-            if len(rows) == 1 and type(rows[0].get("row_count")) is int and rows[0]["row_count"] >= 0:
-                result["d1_rows"] = rows[0]["row_count"]
-        except (ValueError, KeyError, TypeError, AttributeError):
-            pass
-    token_key = settings.get("analytics_token_env")
-    token = os.environ.get(token_key, "") if isinstance(token_key, str) else ""
-    graphql_ok = False
-    if token and isinstance(worker, str) and isinstance(settings.get("account"), str):
-        try:
-            viewer = fetch_json(
-                "https://api.cloudflare.com/client/v4/graphql", body={"query": VIEWER_QUERY}, token=token
-            )
-            accounts = viewer["data"]["viewer"]["accounts"]
-            account = settings.get("account")
-            graphql_ok = (
-                not viewer.get("errors")
-                and isinstance(accounts, list)
-                and isinstance(account, str)
-                and any(isinstance(row, dict) and row.get("accountTag") == account for row in accounts)
-            )
-            if graphql_ok:
-                end = now
-                payload = fetch_json(
-                    "https://api.cloudflare.com/client/v4/graphql",
-                    body={
-                        "query": STATUS_ANALYTICS_QUERY,
-                        "variables": {
-                            "account": settings["account"],
-                            "worker": worker,
-                            "start": (end - timedelta(hours=24)).isoformat(),
-                            "end": end.isoformat(),
-                        },
-                    },
-                    token=token,
-                )
-                account_rows = payload["data"]["viewer"]["accounts"]
-                if not payload.get("errors") and len(account_rows) == 1:
-                    observations = account_rows[0]["workersInvocationsAdaptive"]
-                    if len(observations) < 10000:
-                        requests, errors = [], []
-                        for row in observations:
-                            requests.append(row["sum"]["requests"])
-                            errors.append(row["sum"]["errors"])
-                        if all(type(value) is int and value >= 0 for value in requests + errors):
-                            result["requests_24h"] = sum(requests)
-                            result["errors_24h"] = sum(errors)
-        except (ValueError, KeyError, TypeError, AttributeError):
-            pass
-    if not token and not isinstance(worker, str) and isinstance(database, str) and d1_ok:
-        result["credential"] = "available"
-    elif not token:
-        result["credential"] = "unavailable"
-    elif isinstance(worker, str) and worker_ok and graphql_ok:
-        result["credential"] = "available"
-    elif not isinstance(worker, str) and isinstance(database, str) and d1_ok:
-        result["credential"] = "available"
-    elif graphql_ok and not wrangler_ok:
-        result["credential"] = "unavailable"
-    # Available read-only status sources do not report a D1 purge event timestamp.
-    # Keep last_purge unknown instead of presenting the newest data date as a purge.
+    worker_reads = read(_WORKER_READS) if worker else {}
+    d1_reads = read(_D1_READS) if database else {}
+    version_id = _single_version(
+        _active_deployment(worker_reads.get("deployments-status"), worker_reads.get("deployments-list"))
+    )
+    viewer, requests, errors = (
+        _worker_analytics(account, worker, token, now)
+        if worker and token and isinstance(account, str)
+        else (False, None, None)
+    )
+    result: dict[str, Any] = {
+        "collected_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "credential": _credential_state(
+            worker=bool(worker),
+            database=bool(database),
+            worker_read=bool(worker_reads),
+            d1_read=bool(d1_reads),
+            token=bool(token),
+            viewer=viewer,
+        ),
+        "worker_version": version_id,
+        "worker_published_at": _published_at(worker_reads.get("versions-list"), version_id),
+        "repository_head": repository_head
+        if isinstance(repository_head, str) and _NAME.fullmatch(repository_head)
+        else None,
+        "d1_rows": _row_count(d1_reads["d1-counts"]) if "d1-counts" in d1_reads else None,
+        # No available read-only source reports a D1 purge event time. Keep it
+        # unknown rather than present the newest data date as a purge.
+        "last_purge": None,
+        "requests_24h": requests,
+        "errors_24h": errors,
+    }
     stats._cloudflare(result)
     return result
 

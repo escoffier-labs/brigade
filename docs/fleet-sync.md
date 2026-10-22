@@ -868,7 +868,9 @@ The Cloudflare panel uses only fixed Wrangler reads (`deployments status`,
 and a fixed GraphQL viewer check plus the 24-hour Analytics query. The collector
 publishes normalized fields only. API tokens, raw CLI output, and error text do
 not enter the snapshot. A missing credential is labeled `credential unavailable`;
-failed cells and snapshots older than 15 minutes render as unknown. Wrangler
+failed cells and snapshots older than 15 minutes render as unknown. The panel
+follows the newest retained snapshot and is hidden when that snapshot carries no
+Cloudflare observation (the panel is off, or it is a v1 snapshot). Wrangler
 does not report a D1 purge event timestamp, so `cloudflare.last_purge` remains
 unknown until the Worker records that event. The latest retained observation
 date is not a purge timestamp.

@@ -45,6 +45,10 @@ FIELD_PATHS = (
     "downloads.pypi",
     "downloads.npm",
 )
+# Provider coverage of a stored snapshot. The Cloudflare status read is not a
+# stats provider, so it never lifts a snapshot's coverage rank.
+_COVERAGE = """json_array_length(source_set) -
+            CASE WHEN source_set LIKE '%"cloudflare"%' THEN 1 ELSE 0 END"""
 _VERSION = re.compile(r"[0-9]{1,6}(?:\.[0-9]{1,6}){1,3}(?:(?:a|b|rc|\.post)[0-9]{1,6}|\.dev[0-9]{1,8})?")
 
 
@@ -348,21 +352,21 @@ def _store_weeks(conn: sqlite3.Connection, value: dict[str, Any]) -> None:
 
 
 def _prune(conn: sqlite3.Connection, now: datetime) -> None:
-    # Keep the best regular snapshot and newest Cloudflare observation per
-    # UTC day. Cloudflare freshness must not be discarded by source coverage.
-    conn.execute("""DELETE FROM admin_stats_snapshots WHERE snapshot_id NOT IN (
+    # Each UTC day keeps two rows: the best regular snapshot (most successful
+    # providers, ties to the newest) and the newest snapshot of any kind. The
+    # newest one carries the operator's current Cloudflare opt-in state and
+    # observation, so source coverage must never be able to delete it.
+    conn.execute(f"""DELETE FROM admin_stats_snapshots WHERE snapshot_id NOT IN (
         SELECT snapshot_id FROM (
             SELECT snapshot_id, ROW_NUMBER() OVER (
                 PARTITION BY substr(taken_at, 1, 10)
-                ORDER BY json_array_length(source_set) -
-                    CASE WHEN source_set LIKE '%"cloudflare"%' THEN 1 ELSE 0 END DESC,
-                    taken_at DESC, snapshot_id DESC) AS position
+                ORDER BY {_COVERAGE} DESC, taken_at DESC, snapshot_id DESC) AS position
             FROM admin_stats_snapshots
             UNION ALL
             SELECT snapshot_id, ROW_NUMBER() OVER (
                 PARTITION BY substr(taken_at, 1, 10)
                 ORDER BY taken_at DESC, snapshot_id DESC) AS position
-            FROM admin_stats_snapshots WHERE source_set LIKE '%"cloudflare"%'
+            FROM admin_stats_snapshots
         ) WHERE position = 1)""")
     cutoff = (now - timedelta(days=RETENTION_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
     conn.execute("DELETE FROM admin_stats_snapshots WHERE taken_at < ?", (cutoff,))
@@ -400,44 +404,35 @@ def start_retention_sweeper(db_path: Path, *, stop: threading.Event) -> threadin
     return thread
 
 
+def _first_valid(conn: sqlite3.Connection, query: str, cutoff: str) -> dict[str, Any] | None:
+    for row in conn.execute(query, (cutoff,)):
+        try:
+            return validate(json.loads(row[0]))
+        except (ValueError, TypeError, KeyError, AttributeError):
+            continue
+    return None
+
+
 def load_view(conn: sqlite3.Connection, *, now: datetime | None = None) -> dict[str, Any]:
+    """Read the page model.
+
+    `latest` is the best regular snapshot of the newest retained day. The
+    Cloudflare panel follows the newest valid snapshot alone: if it carries an
+    observation the panel shows it, and if it has none (the operator opted out,
+    or it is a retained v1 snapshot that predates the field) the panel is hidden.
+    """
     cutoff = ((now or datetime.now(timezone.utc)) - timedelta(days=RETENTION_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    newest = None
-    for row in conn.execute(
+    newest = _first_valid(
+        conn,
         "SELECT payload_json FROM admin_stats_snapshots WHERE taken_at >= ? ORDER BY taken_at DESC, snapshot_id DESC",
-        (cutoff,),
-    ):
-        try:
-            newest = validate(json.loads(row[0]))
-        except (ValueError, TypeError, KeyError, AttributeError):
-            continue
-        break
-    latest = None
-    for row in conn.execute(
-        """SELECT payload_json FROM admin_stats_snapshots WHERE taken_at >= ?
-        ORDER BY substr(taken_at, 1, 10) DESC,
-            json_array_length(source_set) -
-            CASE WHEN source_set LIKE '%"cloudflare"%' THEN 1 ELSE 0 END DESC,
-            taken_at DESC, snapshot_id DESC""",
-        (cutoff,),
-    ):
-        try:
-            latest = validate(json.loads(row[0]))
-        except (ValueError, TypeError, KeyError, AttributeError):
-            continue
-        break
-    cloudflare = None
-    for row in conn.execute(
-        """SELECT payload_json FROM admin_stats_snapshots WHERE taken_at >= ?
-        AND source_set LIKE '%"cloudflare"%' ORDER BY taken_at DESC, snapshot_id DESC""",
-        (cutoff,),
-    ):
-        try:
-            cloudflare = validate(json.loads(row[0]))["cloudflare"]
-        except (ValueError, TypeError, KeyError, AttributeError):
-            continue
-        if cloudflare is not None:
-            break
+        cutoff,
+    )
+    latest = _first_valid(
+        conn,
+        f"""SELECT payload_json FROM admin_stats_snapshots WHERE taken_at >= ?
+        ORDER BY substr(taken_at, 1, 10) DESC, {_COVERAGE} DESC, taken_at DESC, snapshot_id DESC""",
+        cutoff,
+    )
     weeks = []
     for row in conn.execute(
         "SELECT payload_json FROM admin_stats_weeks WHERE taken_at >= ? ORDER BY week DESC LIMIT 60",
@@ -450,7 +445,6 @@ def load_view(conn: sqlite3.Connection, *, now: datetime | None = None) -> dict[
         weeks.extend(value["weeks"])
     return {
         "latest": latest,
-        "cloudflare": cloudflare,
-        "cloudflare_enabled": newest is not None and newest.get("cloudflare") is not None,
+        "cloudflare": newest.get("cloudflare") if newest else None,
         "weeks": weeks,
     }

@@ -122,7 +122,6 @@ def test_load_view_keeps_retained_v1_snapshot_available(tmp_path):
     view = stats.load_view(conn, now=NOW)
     assert view["latest"] == legacy
     assert view["cloudflare"] is None
-    assert view["cloudflare_enabled"] is False
     conn.close()
 
 
@@ -282,7 +281,7 @@ def test_cloudflare_panel_shows_fixture_and_hides_stale_values():
         downloads={"pypi": None, "npm": None},
         cloudflare=cloudflare,
     )
-    fresh = page.render({"latest": value, "weeks": []}, nonce="example", now=NOW)
+    fresh = page.render({"latest": value, "cloudflare": value["cloudflare"], "weeks": []}, nonce="example", now=NOW)
     assert 'data-field="cloudflare.worker_version">example-version</span>' in fresh
     assert "credential unavailable" not in fresh
     unavailable = dict(cloudflare, credential="unavailable", worker_version=None, d1_rows=None)
@@ -294,10 +293,18 @@ def test_cloudflare_panel_shows_fixture_and_hides_stale_values():
         downloads={"pypi": None, "npm": None},
         cloudflare=unavailable,
     )
-    unavailable_html = page.render({"latest": unavailable_snapshot, "weeks": []}, nonce="example", now=NOW)
+    unavailable_html = page.render(
+        {"latest": unavailable_snapshot, "cloudflare": unavailable_snapshot["cloudflare"], "weeks": []},
+        nonce="example",
+        now=NOW,
+    )
     assert "credential unavailable" in unavailable_html
     assert 'data-field="cloudflare.d1_rows">unknown</span>' in unavailable_html
-    stale = page.render({"latest": value, "weeks": []}, nonce="example", now=NOW + timedelta(minutes=16))
+    stale = page.render(
+        {"latest": value, "cloudflare": value["cloudflare"], "weeks": []},
+        nonce="example",
+        now=NOW + timedelta(minutes=16),
+    )
     assert 'data-field="cloudflare.credential">unknown</span>' in stale
     assert "credential unavailable" not in stale
     assert 'data-field="cloudflare.worker_version">unknown</span>' in stale
@@ -307,24 +314,6 @@ def test_cloudflare_panel_is_hidden_without_an_observation():
     from brigade import fleet_admin_stats_page as page
 
     html = page.render({"latest": snapshot(), "weeks": []}, nonce="example", now=NOW)
-    assert 'data-field="cloudflare"' not in html
-
-    opted_out = {
-        "collected_at": "2026-10-20T11:00:00Z",
-        "credential": "available",
-        "worker_version": "example-version",
-        "worker_published_at": None,
-        "repository_head": None,
-        "d1_rows": 120,
-        "last_purge": None,
-        "requests_24h": 840,
-        "errors_24h": 2,
-    }
-    html = page.render(
-        {"latest": snapshot(), "cloudflare": opted_out, "cloudflare_enabled": False, "weeks": []},
-        nonce="example",
-        now=NOW,
-    )
     assert 'data-field="cloudflare"' not in html
 
 
@@ -557,11 +546,12 @@ def test_daily_compaction_prefers_coverage_over_recency(tmp_path, sources):
     stats.store(conn, full, now=NOW)
     stats.store(conn, fewer, now=NOW + timedelta(hours=1))
     assert stats.load_view(conn, now=NOW)["latest"] == full
-    assert conn.execute("SELECT COUNT(*) FROM admin_stats_snapshots").fetchone()[0] == 1
+    # The newest snapshot is kept beside the best one: it carries the current opt-in state.
+    assert conn.execute("SELECT COUNT(*) FROM admin_stats_snapshots").fetchone()[0] == 2
     conn.close()
 
 
-def test_daily_compaction_preserves_latest_cloudflare_observation(tmp_path):
+def test_daily_compaction_keeps_best_regular_and_newest_snapshot(tmp_path):
     from datetime import timedelta
     from brigade import fleet_admin_stats as stats
 
@@ -599,20 +589,7 @@ def test_daily_compaction_preserves_latest_cloudflare_observation(tmp_path):
     view = stats.load_view(conn, now=collected)
     assert view["latest"] == full
     assert view["cloudflare"] == cloudflare
-    assert view["cloudflare_enabled"] is True
     assert conn.execute("SELECT COUNT(*) FROM admin_stats_snapshots").fetchone()[0] == 2
-
-    opted_out = stats.snapshot(
-        taken_at=collected + timedelta(hours=1),
-        source_set=["d1", "worker", "downloads"],
-        weeks=[],
-        daily=[],
-        downloads={"pypi": 15, "npm": 7},
-    )
-    stats.store(conn, opted_out, now=collected + timedelta(hours=1))
-    view = stats.load_view(conn, now=collected + timedelta(hours=1))
-    assert view["cloudflare"] == cloudflare
-    assert view["cloudflare_enabled"] is False
     conn.close()
 
 
