@@ -20,7 +20,7 @@ import json
 import time
 from pathlib import Path
 
-from .. import localio
+from .. import fleet_inbox_delivery, localio
 from . import envelope, presence
 
 # fleet_session_presence.DEFAULT_TTL_SECONDS // 3. Pinned as a literal so the
@@ -103,6 +103,7 @@ def on_event(event: str, target: Path, session_id: str, *, now: float | None = N
         if event == "SessionEnd":
             _note(target, event, presence.emit_presence(event, target, session_id))
             clear(target, session_id)
+            fleet_inbox_delivery.clear("claude", session_id)
             return
         if event not in REFRESH_EVENTS:
             return

@@ -21,6 +21,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Live Fleet Hub inbox delivery (#1887 slice 3): new unread mail reaches running Claude Code sessions through the managed `UserPromptSubmit` and `PostToolUse` hooks, and Codex sessions through `brigade work presence-hook --harness codex --stdin --context fleet-inbox`. Messages are fenced as untrusted peer content, shown once per session from a private cursor file, never acknowledged by delivery, and fetched with one 2 second hub request behind a 60 second failure backoff. See `docs/fleet-inbox-delivery.md`.
 - Claude work-loop hooks track explicit file reads and record unseen callers before Edit, Write, or NotebookEdit. Checks warn without denying edits, and unavailable or incomplete graphs record a null result with a reason.
 
 - Antigravity sessions publish Fleet Hub presence through silent, detached hooks installed by `brigade init --harnesses antigravity`; Stop refreshes presence until the session expires by TTL.
