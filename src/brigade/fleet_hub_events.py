@@ -74,7 +74,6 @@ _SCHEMA = (
         seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
         subject TEXT NOT NULL, producer TEXT NOT NULL, data TEXT NOT NULL, created_at REAL NOT NULL)""",
     "CREATE INDEX IF NOT EXISTS fleet_events_subject ON fleet_events (name, subject, created_at)",
-    "CREATE INDEX IF NOT EXISTS fleet_events_producer ON fleet_events (name, producer, created_at)",
     """CREATE TABLE IF NOT EXISTS fleet_event_deliveries (
         seq INTEGER NOT NULL, subscription_id TEXT NOT NULL, state TEXT NOT NULL,
         attempts INTEGER NOT NULL DEFAULT 0, next_attempt REAL NOT NULL, attempted_at REAL,
@@ -83,9 +82,40 @@ _SCHEMA = (
 )
 
 
+# Hub databases created at the earlier schema-38 head hold fleet_events without producer. Startup treats 38 as
+# current, so fleet_hub registers the column with its additive repair and then re-runs ensure_schema, which
+# backfills and indexes it. The index cannot join that registry: a fresh database has no fleet_events yet.
+PRODUCER_COLUMN_DDL = "ALTER TABLE fleet_events ADD COLUMN producer TEXT NOT NULL DEFAULT ''"
+PRODUCER_INDEX_DDL = "CREATE INDEX IF NOT EXISTS fleet_events_producer ON fleet_events (name, producer, created_at)"
+
+
+def backfill_producer(conn: sqlite3.Connection) -> None:
+    """Fill ``producer`` on rows written before the column existed; rows that already have one are untouched.
+
+    A message's producer is its sender (kept in the event data); node-owned events are produced by the node that
+    is also their subject. Unparseable data falls back to the subject, the same value the node-owned events use.
+    """
+    for seq, name, subject, data in conn.execute(
+        "SELECT seq, name, subject, data FROM fleet_events WHERE producer=''"
+    ).fetchall():
+        producer = subject
+        if name == MESSAGE_CREATED:
+            try:
+                sender = json.loads(data).get("sender")
+            except (ValueError, AttributeError):
+                sender = None
+            if isinstance(sender, str) and sender:
+                producer = sender
+        conn.execute("UPDATE fleet_events SET producer=? WHERE seq=?", (producer, seq))
+
+
 def ensure_schema(conn: sqlite3.Connection) -> None:
     for statement in _SCHEMA:
         conn.execute(statement)
+    if "producer" not in {row[1] for row in conn.execute("PRAGMA table_info(fleet_events)")}:
+        conn.execute(PRODUCER_COLUMN_DDL)
+    backfill_producer(conn)
+    conn.execute(PRODUCER_INDEX_DDL)
 
 
 @dataclass(frozen=True)

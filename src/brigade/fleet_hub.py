@@ -105,7 +105,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from . import fleet_command_deck, fleet_hub_preference, worklore_store
+from . import fleet_command_deck, fleet_hub_events, fleet_hub_preference, worklore_store
 from .fleet_execution_context import serialize_context
 from .fleet_hub_event_bounds import oversized_event_field
 from .fleet_hub_server import BoundedThreadingHTTPServer
@@ -268,6 +268,7 @@ _EVENTS_ADDITIVE_COLUMNS = ("exit_status", "capability_fingerprint", "repo_ident
 _ADDITIVE_COLUMNS = (
     ("events", "context", "ALTER TABLE events ADD COLUMN context TEXT"),
     ("model_policy", "t3_model", "ALTER TABLE model_policy ADD COLUMN t3_model TEXT NOT NULL DEFAULT ''"),
+    ("fleet_events", "producer", fleet_hub_events.PRODUCER_COLUMN_DDL),
 )
 _ADDITIVE_INDEXES = (
     ("claims_owner_expiry", "CREATE INDEX IF NOT EXISTS claims_owner_expiry ON claims (owner_node, expires_at)"),
@@ -661,8 +662,6 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
 
     fleet_hub_actions.ensure_schema(conn)
     # v37 -> v38: MCP Events subscriptions, event outbox and delivery state.
-    from . import fleet_hub_events
-
     fleet_hub_events.ensure_schema(conn)
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
@@ -709,6 +708,8 @@ def _init_schema(conn: sqlite3.Connection, db_path: Path) -> None:
             if conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION:
                 for ddl in _missing_additive_columns(conn):
                     conn.execute(ddl)
+                # The producer column arrives with an empty default; the events schema backfills it, then indexes it.
+                fleet_hub_events.ensure_schema(conn)
                 fleet_hub_claims.validate_schema(conn)
             else:
                 _apply_schema(conn)
@@ -1897,8 +1898,6 @@ def run(
     except FleetHubError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 2
-    from . import fleet_hub_events
-
     try:
         # MCP Events stay off unless the operator names callback hosts in the environment.
         fleet_hub_events.configure(fleet_hub_events.config_from_environment(os.environ))
