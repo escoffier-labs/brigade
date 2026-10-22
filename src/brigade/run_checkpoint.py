@@ -1257,21 +1257,23 @@ def _verify_coverage(
     ``event_type`` equals the checkpoint's ``paired_event_type`` and whose
     derived status equals the status in the validated checkpoint bytes.
     When ``paired_event_type`` is null, the checkpoint covers only itself
-    as the tail. Anything else fails uncovered-tail. ``checkpoint_obj`` is
+    as the tail. Trailing redaction anchors and status-neutral cassette
+    references do not require checkpoint coverage. Anything else fails
+    uncovered-tail. ``checkpoint_obj`` is
     the parsed validated checkpoint bytes; its ``status`` is the authoritative
     status the paired event must derive to.
     """
     paired_event_type = latest.payload.get("paired_event_type")
     pairing_key = latest.payload.get("pairing_key")
     tail = events[-1]
-    trailing_redaction_anchors = 0
-    while tail.event_type == "run.redaction.recorded":
-        trailing_redaction_anchors += 1
-        if trailing_redaction_anchors == len(events):
+    trailing_neutral_facts = 0
+    while tail.event_type in {"run.redaction.recorded", "run.cassette.recorded"}:
+        trailing_neutral_facts += 1
+        if trailing_neutral_facts == len(events):
             raise CheckpointError(
                 _bound("journal tail is not covered by the latest checkpoint"), category="uncovered-tail"
             )
-        tail = events[-1 - trailing_redaction_anchors]
+        tail = events[-1 - trailing_neutral_facts]
     if latest.sequence == tail.sequence:
         # A dispatch pairing key promises a specific identity-bearing fact.
         # A checkpoint at tail means that fact never committed, so recovery
@@ -1348,8 +1350,9 @@ def recover_from_checkpoint(
     or exactly one immediately following event at N+1 whose ``event_type``
     equals the checkpoint's ``paired_event_type`` and whose derived status
     equals the status in the validated checkpoint bytes. A null
-    ``paired_event_type`` covers only checkpoint-at-tail. Anything else
-    fails uncovered-tail.
+    ``paired_event_type`` covers only checkpoint-at-tail. Trailing redaction
+    anchors and status-neutral cassette references are allowed after either
+    covered tail. Anything else fails uncovered-tail.
 
     Restore-byte selection (issue #568 slice 6): when the latest checkpoint
     payload carries ``body_kind`` ``"base-stripped"`` and the validated
