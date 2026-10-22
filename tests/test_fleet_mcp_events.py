@@ -736,6 +736,30 @@ def test_claim_expired_via_the_prune_path_and_no_duplicate_with_the_sweep(statio
     assert refs == sorted(fleet_hub_events._reference(SECRET, "claim-target", t) for t in ("repo-one", "repo-two"))
 
 
+def test_claim_expired_when_a_lapsed_claim_is_released_before_the_sweep(stations, receiver, hub, monkeypatch) -> None:
+    _base, _ta, _tb, db = hub
+    subscribe(stations[1], receiver.url, name="claim.expired")
+    _claim(db, "repo-late")
+    now = fleet_hub._now_epoch()
+    monkeypatch.setattr(fleet_hub, "_now_epoch", lambda: now + 30)
+    conn = fleet_hub.open_db(db)
+    try:
+        status, payload = fleet_hub.handle_claim(
+            conn,
+            {"action": "release", "node_id": NODE_A, "target": "repo-late", "holder": "holder-one", "scope": "holder"},
+            caller_node=NODE_A,
+        )
+        assert status == 200 and payload["released"], payload
+    finally:
+        conn.close()
+    assert rows(db, "SELECT COUNT(*) FROM fleet_events WHERE name='claim.expired'") == [(1,)]
+    assert tick(db, clock=lambda: time.time() + 60) == 1
+    assert tick(db, clock=lambda: time.time() + 61) == 0
+    assert rows(db, "SELECT COUNT(*) FROM fleet_events WHERE name='claim.expired'") == [(1,)]
+    [delivery] = receiver.events
+    assert delivery["payload"]["name"] == "claim.expired"
+
+
 def test_claim_target_text_is_never_forwarded(stations, receiver, hub) -> None:
     _base, _ta, _tb, db = hub
     subscribe(stations[1], receiver.url, name="claim.expired")

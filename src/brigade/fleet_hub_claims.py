@@ -604,6 +604,10 @@ def _decide(conn: sqlite3.Connection, request: dict[str, Any], now: float) -> tu
         elif scope == "holder":
             budget.retire(target, node, holder, ended, enforce_node_quota=True)
         conn.execute("DELETE FROM claims WHERE target = ?", (target,))
+        if row is not None and row[10] <= now:
+            # Released after it lapsed but before a prune or sweep saw it. The event id is
+            # deterministic, so a later sweep cannot record a second one.
+            fleet_hub_events.record_claim_expired(conn, target, row[1], row[11], row[10])
         released: dict[str, Any] = {"released": row is not None}
         if scope == "holder" and row is None:
             released["reason"] = "stale-holder"
