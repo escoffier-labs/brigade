@@ -23,6 +23,7 @@ MESSAGE_CODES = frozenset(
         "message_recipient_quota",
         "message_sender_quota",
         "message_wait_capped",
+        "question_station_busy",
         "message_recipient_inactive",
         "message_recipient_unknown",
         "message_sender_inactive",

@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-import html
+import math
 import os
 import secrets
 import shutil
@@ -46,6 +46,35 @@ def _process(argv: list[str], *, deadline: float, stop: Callable[[], bool]) -> s
             try:
                 process = subprocess.Popen(
                     argv,
+                    # Helpers need the desktop session, never the station's
+                    # credentials or interpreter/plugin injection settings.
+                    env={
+                        key: value
+                        for key, value in os.environ.items()
+                        if key
+                        in {
+                            "DISPLAY",
+                            "WAYLAND_DISPLAY",
+                            "XAUTHORITY",
+                            "DBUS_SESSION_BUS_ADDRESS",
+                            "XDG_RUNTIME_DIR",
+                            "HOME",
+                            "LANG",
+                            "LANGUAGE",
+                            "LC_ALL",
+                            "LC_CTYPE",
+                            "LC_MESSAGES",
+                            "LC_COLLATE",
+                            "LC_NUMERIC",
+                            "LC_TIME",
+                            "LC_MONETARY",
+                            "SystemRoot",
+                            "SYSTEMROOT",
+                            "WINDIR",
+                            "TEMP",
+                            "TMP",
+                        }
+                    },
                     stdin=subprocess.DEVNULL,
                     stdout=output,
                     stderr=subprocess.DEVNULL,
@@ -94,13 +123,27 @@ def _desktop(question: str, record: dict[str, Any], *, deadline: float, stop: Ca
         # even with --no-markup. Encode only this backend's native text syntax.
         encoded = text.replace("\\", "\\\\").replace("_", "__")
         answer = _process(
-            [zenity, "--entry", "--no-markup", "--title", "Brigade operator question", "--text", encoded],
+            [
+                zenity,
+                "--entry",
+                "--no-markup",
+                "--timeout",
+                str(max(1, math.ceil(deadline - monotonic()))),
+                "--title",
+                "Brigade operator question",
+                "--text",
+                encoded,
+            ],
             deadline=deadline,
             stop=stop,
         )
     elif kdialog:
+        # Qt AutoText stops at the first newline, so a fixed plain first line
+        # keeps even literal tags plain. QInputDialog's QLabel buddy consumes
+        # ampersand mnemonics, for which Qt's native literal escape is &&.
+        encoded = ("Brigade operator question\n" + text).replace("&", "&&")
         answer = _process(
-            [kdialog, "--title", "Brigade operator question", "--inputbox", html.escape(text)],
+            [kdialog, "--title", "Brigade operator question", "--inputbox", encoded],
             deadline=deadline,
             stop=stop,
         )
@@ -184,7 +227,20 @@ class AskUser:
                 def desktop_done() -> bool:
                     nonlocal record
                     if record["status"] not in {"answered", "timeout"}:
-                        record = online({"action": "question_status", "question_id": question_id})
+                        try:
+                            record = online({"action": "question_status", "question_id": question_id})
+                        except messages.MessageAuthorityError:
+                            raise
+                        except messages.FleetMessageHubError as exc:
+                            # A failed poll cannot cancel a still-live prompt.
+                            # Authentication and other permanent refusals must
+                            # stop it; transport retries keep the same deadline.
+                            if not (
+                                (exc.status is None and exc.code == "hub_unavailable")
+                                or exc.status in {408, 425, 429}
+                                or (exc.status is not None and exc.status >= 500)
+                            ):
+                                raise
                     return record["status"] in {"answered", "timeout"}
 
                 answer = _desktop(question, record, deadline=deadline, stop=desktop_done)
@@ -244,6 +300,10 @@ class AskUser:
                 code
                 if code
                 in {
+                    "message_recipient_quota",
+                    "message_sender_quota",
+                    "message_sender_recipient_quota",
+                    "question_station_busy",
                     "question_request_conflict",
                     "question_not_owned",
                     "message_recipient_not_permitted",

@@ -823,17 +823,29 @@ installed `notify-send` can announce that inbox question. No desktop dependency
 is installed. The operator answers by replying to the question message with
 `fleet_reply` or the existing message CLI.
 
+Desktop helpers receive only display, session, locale, and required operating
+system settings. Fleet and other credential environment variables are excluded.
+An inbox answer closes an open dialog on the next status check. A temporary
+status-read failure keeps the dialog open within the original deadline.
+Zenity also receives its own timeout. Kdialog cleanup depends on the station
+remaining alive.
+
 The hub records the first answer received before its deadline. A desktop answer
-has source `caller_reported_desktop`; an authenticated inbox reply has source
+has source `caller_reported_desktop`. An authenticated inbox reply has source
 `operator_reply`. Desktop input is not proof of operator credential ownership.
 The audit copies the question, answer, identities, source, and timestamps, so
 acknowledging or pruning message links cannot erase an accepted answer. Audit
-retention is 90 days. Expired pending questions become timeout records on the
-next question operation, without a background timer.
+retention removes records older than 90 days on the next question operation.
+Expired pending questions also become timeout records on that operation,
+without a background timer. Question messages remain in the operator inbox
+until the operator acknowledges them, including questions answered on the
+desktop or timed out. Existing inbox quotas apply.
 
 The wait uses the existing inbox long-poll in slices of at most 20 seconds and
-never acknowledges unrelated messages. Each station permits two concurrent
-asks. The entire call shares a five-second transport and cleanup grace beyond
+never acknowledges unrelated messages. The hub permits two pending questions
+per caller across station processes. Resuming an existing request does not use
+another slot. Each station process also limits concurrent asks to two. The
+entire call shares a five-second transport and cleanup grace beyond
 `timeout_secs`. An outage returns a structured error with `request_id` and,
 when creation was confirmed, `question_id`. Retry the same question and timeout
 with that `request_id` to resume its audit and original deadline. Retries do not

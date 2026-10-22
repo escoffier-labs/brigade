@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import sqlite3
+from concurrent.futures import ProcessPoolExecutor
 from datetime import datetime, timedelta, timezone
+from multiprocessing import get_context
 
 import pytest
 
@@ -186,7 +188,7 @@ def test_schema_37_migration_and_current_version_selfheal(hub):
     fleet_hub.init_db(db).close()
     assert create(hub)[0] == 201
     with sqlite3.connect(db) as conn:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 38
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
         conn.execute("DROP TRIGGER fleet_questions_reply")
         conn.execute("DROP INDEX fleet_questions_deadline")
     fleet_hub.init_db(db).close()
@@ -287,3 +289,134 @@ def test_answer_copy_survives_message_pruning(hub):
         assert conn.execute("SELECT COUNT(*) FROM fleet_messages").fetchone()[0] == 0
     result = status(hub, question["question_id"])[1]
     assert result["answer"] == "Keep the audit" and result["answer_id"] == str(reply["message"]["id"])
+
+
+@pytest.fixture(params=["node", "agent"])
+def asking_station(hub, request):
+    from tests._fleet_message_fixtures import _RedactedHub
+
+    if request.param == "node":
+        return hub, NODE_A, None
+    with fleet_hub.open_db(hub[3]) as conn:
+        principal = fleet_hub_messages.add_principal(conn, {"name": "asker", "may_send_to": [NODE_B]})
+    station = _RedactedHub((hub[0], principal["token"], hub[2], hub[3]))
+    return station, principal["principal_id"], principal["enrollment_id"]
+
+
+def test_pending_limit_is_per_caller_and_resumes_at_capacity(asking_station):
+    station, caller, _enrollment = asking_station
+    first = create(station, "first")[1]
+    assert create(station, "second")[0] == 201
+    code, rejected = create(station, "third")
+    assert code == 429 and rejected["code"] == "question_station_busy"
+    code, resumed = create(station, "first")
+    assert code == 200 and resumed["created"] is False
+    assert resumed["question_id"] == first["question_id"] and resumed["deadline"] == first["deadline"]
+    assert create(station, "first", question="Changed?")[0] == 409
+    with sqlite3.connect(station[3]) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM fleet_questions").fetchone() == (2,)
+        assert conn.execute("SELECT COUNT(*) FROM fleet_messages").fetchone() == (2,)
+        assert conn.execute("SELECT COUNT(*) FROM fleet_message_sends").fetchone() == (2,)
+        assert conn.execute("SELECT COUNT(*) FROM fleet_messages WHERE acked_at IS NULL").fetchone() == (2,)
+    # Another station identity has its own quota, even with the same operator.
+    with fleet_hub.open_db(station[3]) as conn:
+        other = fleet_hub_messages.add_principal(conn, {"name": "other-asker", "may_send_to": [NODE_B]})
+    code, independent = _request(
+        station[0],
+        other["token"],
+        {"action": "question_create", "question": "Independent?", "timeout_secs": 60, "request_id": "first"},
+    )
+    assert code == 201 and independent["caller"] != caller
+
+
+def test_pending_limit_counts_old_credential_generations(asking_station):
+    station, caller, enrollment = asking_station
+    first = create(station, "first")[1]
+    assert create(station, "second")[0] == 201
+    with fleet_hub.open_db(station[3]) as conn:
+        if enrollment is None:
+            fleet_hub.revoke_node(conn, caller)
+            replacement = fleet_hub.add_node(conn, caller)[1]
+        else:
+            expected = {"name": "asker", "expected_enrollment_id": enrollment}
+            fleet_hub_messages.revoke_principal(conn, {"action": "revoke", **expected})
+            replacement = fleet_hub_messages.add_principal(conn, {**expected, "may_send_to": [NODE_B]})["token"]
+    # Reusing the old request ID under a new generation must also obey the cap.
+    raw = {"action": "question_create", "question": "Proceed?", "timeout_secs": 60, "request_id": "first"}
+    code, rejected = _request(station[0], replacement, raw)
+    assert code == 429 and rejected["code"] == "question_station_busy"
+    with sqlite3.connect(station[3]) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM fleet_questions").fetchone() == (2,)
+        assert conn.execute("SELECT COUNT(*) FROM fleet_message_sends").fetchone() == (2,)
+        conn.execute(
+            "UPDATE fleet_questions SET deadline=? WHERE question_id=?",
+            ((datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(), first["question_id"]),
+        )
+    assert _request(station[0], replacement, raw)[0] == 201
+    with sqlite3.connect(station[3]) as conn:
+        assert conn.execute(
+            "SELECT status FROM fleet_questions WHERE question_id=?", (first["question_id"],)
+        ).fetchone() == ("timeout",)
+
+
+@pytest.mark.parametrize("terminal", ["operator_reply", "desktop", "timeout"])
+def test_terminal_question_frees_pending_quota(asking_station, terminal):
+    station, _caller, _enrollment = asking_station
+    first = create(station, "first")[1]
+    assert create(station, "second")[0] == 201
+    assert create(station, "third")[0] == 429
+    if terminal == "operator_reply":
+        assert (
+            _request(station[0], station[2], {"action": "reply", "id": int(first["message_id"]), "body": "Yes"})[0]
+            == 201
+        )
+    elif terminal == "desktop":
+        assert (
+            _request(
+                station[0],
+                station[1],
+                {"action": "question_desktop", "question_id": first["question_id"], "answer": "Yes"},
+            )[0]
+            == 200
+        )
+    else:
+        with sqlite3.connect(station[3]) as conn:
+            conn.execute(
+                "UPDATE fleet_questions SET deadline=? WHERE question_id=?",
+                ((datetime.now(timezone.utc) - timedelta(seconds=1)).isoformat(), first["question_id"]),
+            )
+    assert create(station, "third")[0] == 201
+    assert status(station, first["question_id"])[1]["status"] == ("timeout" if terminal == "timeout" else "answered")
+    with sqlite3.connect(station[3]) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM fleet_questions WHERE status='pending'").fetchone() == (2,)
+        assert conn.execute(
+            "SELECT COUNT(*) FROM fleet_messages WHERE kind='question' AND acked_at IS NULL"
+        ).fetchone() == (3,)
+
+
+def test_concurrent_process_stations_share_pending_quota(asking_station):
+    station, caller, _enrollment = asking_station
+    with ProcessPoolExecutor(max_workers=4, mp_context=get_context("spawn")) as pool:
+        attempts = [pool.submit(create, station, f"concurrent-{index}") for index in range(4)]
+        results = [attempt.result(timeout=15) for attempt in attempts]
+    assert sorted(code for code, _result in results) == [201, 201, 429, 429]
+    assert all(result["code"] == "question_station_busy" for code, result in results if code == 429)
+    with sqlite3.connect(station[3]) as conn:
+        assert conn.execute(
+            "SELECT COUNT(*) FROM fleet_questions WHERE caller=? AND status='pending'", (caller,)
+        ).fetchone() == (2,)
+        assert conn.execute("SELECT COUNT(*) FROM fleet_messages").fetchone() == (2,)
+        assert conn.execute("SELECT COUNT(*) FROM fleet_message_sends").fetchone() == (2,)
+
+
+@pytest.mark.parametrize("schema_version", [37, fleet_hub.SCHEMA_VERSION])
+def test_retention_index_migration_and_current_version_selfheal(hub, schema_version):
+    with sqlite3.connect(hub[3]) as conn:
+        conn.execute("DROP INDEX IF EXISTS fleet_questions_created_at")
+        conn.execute(f"PRAGMA user_version={schema_version}")
+    # Both upgrade and already-current repair must be safe on repeated startup.
+    fleet_hub.init_db(hub[3]).close()
+    fleet_hub.init_db(hub[3]).close()
+    with sqlite3.connect(hub[3]) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone() == (fleet_hub.SCHEMA_VERSION,)
+        assert [row[2] for row in conn.execute("PRAGMA index_info(fleet_questions_created_at)")] == ["created_at"]

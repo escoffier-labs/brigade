@@ -36,6 +36,7 @@ _TABLE = """CREATE TABLE IF NOT EXISTS fleet_questions (
     UNIQUE(caller,generation,request_id)
 )"""
 _INDEX = "CREATE INDEX IF NOT EXISTS fleet_questions_deadline ON fleet_questions(status,deadline)"
+_RETENTION_INDEX = "CREATE INDEX IF NOT EXISTS fleet_questions_created_at ON fleet_questions(created_at)"
 # Copy the accepted answer in the same transaction as message insertion. Audit
 # records have no message FK, so ordinary pruning cannot erase accepted answers.
 # Both stamps are hub-generated UTC ISO strings. Direct comparison preserves
@@ -50,7 +51,12 @@ BEGIN
              OR EXISTS (SELECT 1 FROM fleet_message_principals
                 WHERE principal_id=caller AND token_hash=generation AND revoked_at IS NULL));
 END"""
-_OBJECTS = (("fleet_questions", _TABLE), ("fleet_questions_deadline", _INDEX), ("fleet_questions_reply", _TRIGGER))
+_OBJECTS = (
+    ("fleet_questions", _TABLE),
+    ("fleet_questions_deadline", _INDEX),
+    ("fleet_questions_created_at", _RETENTION_INDEX),
+    ("fleet_questions_reply", _TRIGGER),
+)
 
 
 def missing_schema(conn: sqlite3.Connection) -> list[str]:
@@ -144,6 +150,13 @@ def _create(conn: sqlite3.Connection, raw: dict[str, Any], caller: str, generati
                 "request_id was used for a different question", code="question_request_conflict"
             )
         return _result(_fetch(conn, existing[0]))
+    # The caller's active-principal transaction serializes this check and insert.
+    # Count old generations too; rotation must not bypass the pending limit.
+    pending = conn.execute(
+        "SELECT COUNT(*) FROM fleet_questions WHERE caller=? AND status='pending'", (caller,)
+    ).fetchone()[0]
+    if pending >= 2:
+        raise messages.MessageQuotaError("question station has two pending questions", code="question_station_busy")
     operator = os.environ.get("BRIGADE_FLEET_OPERATOR_RECIPIENT", "")
     if not operator or operator == caller or not messages._active_principal(conn, operator):
         raise messages.MessageError("hub operator recipient must be another active principal")

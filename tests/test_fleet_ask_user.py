@@ -548,3 +548,200 @@ def test_creation_delay_uses_backoff_until_hub_timeout(station, hub, monkeypatch
     result, error = invoke(station, timeout_secs=1)
     assert not error and result["status"] == "timeout"
     assert len(statuses) <= 8
+
+
+@pytest.mark.parametrize("winner", ["desktop", "reply", "timeout"])
+def test_open_desktop_survives_transient_status_failure(station, hub, tmp_path, monkeypatch, winner):
+    from brigade import fleet_ask_user
+
+    release = tmp_path / "release"
+    binary = executable(
+        tmp_path,
+        "zenity",
+        "from pathlib import Path\nimport time\n"
+        f"while not Path({str(release)!r}).exists(): time.sleep(0.01)\n"
+        "print('Recovered local answer')\n",
+    )
+    monkeypatch.setenv("DISPLAY", ":99")
+    monkeypatch.setattr(fleet_ask_user.shutil, "which", lambda name: binary if name == "zenity" else None)
+    original = fleet_client_messages._request
+    failed = threading.Event()
+    actions = []
+
+    def interrupted(*args, **kwargs):
+        action = args[2]["action"]
+        actions.append(action)
+        if action == "question_status" and not failed.is_set():
+            failed.set()
+            raise fleet_client.FleetClientError("temporary connection failure")
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(fleet_client_messages, "_request", interrupted)
+    results = []
+    thread = threading.Thread(
+        target=lambda: results.append(invoke(station, timeout_secs=3, request_id="transient-dialog")), daemon=True
+    )
+    started = time.monotonic()
+    thread.start()
+    try:
+        question = pending(hub)
+        assert failed.wait(timeout=2)
+        if winner == "desktop":
+            release.touch()
+        elif winner == "reply":
+            assert _request(hub[0], hub[2], {"action": "reply", "id": question["id"], "body": "Inbox wins"})[0] == 201
+        thread.join(timeout=5)
+        assert not thread.is_alive()
+        result, error = results[0]
+        assert not error and result["status"] == ("timeout" if winner == "timeout" else "answered")
+        assert time.monotonic() - started < 6
+        if winner == "desktop":
+            assert result["source"] == "caller_reported_desktop"
+            assert stable_answer(result)["answer"] == "Recovered local answer"
+            assert actions.count("question_desktop") == 1
+        else:
+            assert "question_desktop" not in actions
+            if winner == "reply":
+                assert result["source"] == "operator_reply" and stable_answer(result)["answer"] == "Inbox wins"
+        with sqlite3.connect(hub[3]) as conn:
+            assert conn.execute("SELECT status FROM fleet_questions").fetchone() == (result["status"],)
+    finally:
+        release.touch()
+        thread.join(timeout=5)
+
+
+@pytest.mark.parametrize("status,code", [(401, None), (403, "message_sender_inactive"), (None, "token_scope_changed")])
+def test_desktop_status_auth_failure_stops_prompt(station, hub, tmp_path, monkeypatch, status, code):
+    from brigade import fleet_ask_user
+
+    binary = executable(tmp_path, "zenity", "import time\ntime.sleep(30)\nprint('Unaudited')\n")
+    monkeypatch.setenv("DISPLAY", ":99")
+    monkeypatch.setattr(fleet_ask_user.shutil, "which", lambda name: binary if name == "zenity" else None)
+    original = fleet_client_messages._request
+    actions = []
+
+    def denied(*args, **kwargs):
+        actions.append(args[2]["action"])
+        if args[2]["action"] == "question_status":
+            raise fleet_client_messages.FleetMessageHubError("denied", status=status, code=code)
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(fleet_client_messages, "_request", denied)
+    started = time.monotonic()
+    result, error = invoke(station, timeout_secs=10)
+    assert error and result["question_id"] and time.monotonic() - started < 3
+    assert actions.count("question_status") == 1 and "question_desktop" not in actions
+
+
+@pytest.mark.parametrize("helper", ["zenity", "notify-send"])
+def test_desktop_helpers_receive_only_display_environment(station, hub, tmp_path, monkeypatch, helper):
+    from brigade import fleet_ask_user
+
+    forbidden = (
+        "BRIGADE_FLEET_NODE_TOKEN",
+        "BRIGADE_FLEET_TOKEN",
+        "BRIGADE_FLEET_MESSAGE_TOKEN_FILE",
+        "MCP_TOKEN",
+        "UNRELATED_API_KEY",
+        "LD_PRELOAD",
+        "QT_PLUGIN_PATH",
+        "PYTHONPATH",
+        "LC_FAKE_TOKEN",
+    )
+    for name in forbidden:
+        monkeypatch.setenv(name, "fake-test-value")
+    # Keep the station on its fixture node authority while poisoning child env.
+    authority = fleet_client_messages.MessageAuthority(hub[0], hub[1], NODE_A, node_credential=True)
+    monkeypatch.setattr(
+        fleet_client_messages.MessageAuthority, "capture", staticmethod(lambda *_args, **_kwargs: authority)
+    )
+    record = tmp_path / "environment.json"
+    binary = executable(
+        tmp_path,
+        "helper",
+        "import json,os\nfrom pathlib import Path\n"
+        f"Path({str(record)!r}).write_text(json.dumps({{'credentials_absent': all(k not in os.environ for k in {forbidden!r}), "
+        "'display': os.environ.get('DISPLAY'), 'bus': os.environ.get('DBUS_SESSION_BUS_ADDRESS'), "
+        "'runtime': os.environ.get('XDG_RUNTIME_DIR'), 'locale': os.environ.get('LANG')}))\n"
+        "print('Local answer')\n",
+    )
+    monkeypatch.setenv("DISPLAY", ":99")
+    monkeypatch.setenv("DBUS_SESSION_BUS_ADDRESS", "unix:path=/tmp/fake-bus")
+    monkeypatch.setenv("XDG_RUNTIME_DIR", str(tmp_path))
+    monkeypatch.setenv("LANG", "C.UTF-8")
+    monkeypatch.setattr(fleet_ask_user.shutil, "which", lambda name: binary if name == helper else None)
+    result, error = invoke(station, timeout_secs=1)
+    observed = json.loads(record.read_text())
+    assert observed["credentials_absent"] is True
+    assert observed["display"] == ":99" and observed["bus"] == "unix:path=/tmp/fake-bus"
+    assert observed["runtime"] == str(tmp_path) and observed["locale"] == "C.UTF-8"
+    assert not error and result["status"] == ("answered" if helper == "zenity" else "timeout")
+
+
+def test_kdialog_native_plain_label_preserves_literal_question(station, hub, tmp_path, monkeypatch):
+    from brigade import fleet_ask_user
+
+    record = tmp_path / "argv.json"
+    binary = executable(
+        tmp_path,
+        "kdialog",
+        "import json,sys\nfrom pathlib import Path\n"
+        f"Path({str(record)!r}).write_text(json.dumps(sys.argv))\nprint('KDE answer')\n",
+    )
+    monkeypatch.setenv("DISPLAY", ":99")
+    monkeypatch.setattr(fleet_ask_user.shutil, "which", lambda name: binary if name == "kdialog" else None)
+    question = "O'Brien & _literal_ && <b>tags</b> &lt;literal&gt;\n<image src='file:///fake'>"
+    result, error = invoke(station, question=question)
+    assert not error and result["source"] == "caller_reported_desktop"
+    argv = json.loads(record.read_text())
+    text = argv[argv.index("--inputbox") + 1]
+    # Qt AutoText examines the first line; QInputDialog sets a QLabel buddy,
+    # which consumes ampersand mnemonics even when displaying plain text.
+    assert text.split("\n", 1)[0] == "Brigade operator question"
+    display = re.sub(r"&(.)", r"\1", text, flags=re.S)
+    assert (
+        display
+        == f"Brigade operator question\n{NODE_A} | Question {result['question_id']}\nAnswers are recorded.\n\n{question}"
+    )
+
+
+def test_zenity_native_timeout_uses_ceil_remaining_budget(station, hub, tmp_path, monkeypatch):
+    from brigade import fleet_ask_user
+
+    record = tmp_path / "argv.json"
+    binary = executable(
+        tmp_path,
+        "zenity",
+        "import json,sys\nfrom pathlib import Path\n"
+        f"Path({str(record)!r}).write_text(json.dumps(sys.argv))\nprint('Local answer')\n",
+    )
+    monkeypatch.setenv("DISPLAY", ":99")
+    monkeypatch.setattr(fleet_ask_user.shutil, "which", lambda name: binary if name == "zenity" else None)
+    original = fleet_client_messages._request
+    clock = time.monotonic
+    offset = 0.0
+
+    def delayed_create(*args, **kwargs):
+        nonlocal offset
+        result = original(*args, **kwargs)
+        if args[2]["action"] == "question_create":
+            offset = 1.2
+        return result
+
+    monkeypatch.setattr(fleet_ask_user, "monotonic", lambda: clock() + offset)
+    monkeypatch.setattr(fleet_client_messages, "_request", delayed_create)
+    result, error = invoke(station, timeout_secs=2)
+    assert not error and result["status"] == "answered"
+    argv = json.loads(record.read_text())
+    assert argv[argv.index("--timeout") + 1] == "1"
+
+
+@pytest.mark.parametrize(
+    "code",
+    ["message_recipient_quota", "message_sender_quota", "message_sender_recipient_quota", "question_station_busy"],
+)
+def test_question_quota_rejections_keep_safe_code(station, monkeypatch, code):
+    # Keep _online and AskUserError real: both sanitize this transport response.
+    monkeypatch.setattr(fleet_client_messages, "_request", lambda *_args, **_kwargs: (429, {"code": code}))
+    result, error = invoke(station, request_id="quota-retry")
+    assert error and result["code"] == code and result["request_id"] == "quota-retry"
