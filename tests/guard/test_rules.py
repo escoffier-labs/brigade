@@ -526,7 +526,7 @@ class MissingLeakShapeTests(unittest.TestCase):
             'f"https://{db.local}/path"',
             'f"https://{cfg.db.local}/path"',
             "f'https://{db.local}/path'",
-            "url = f\"https://{db.local}/api\"",
+            'url = f"https://{db.local}/api"',
         ):
             with self.subTest(text=text):
                 result = scan_text(text)
