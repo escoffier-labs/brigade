@@ -111,6 +111,102 @@ def test_fresh_hub_applies_worklore_schema_after_model_roster_v15(tmp_path):
         conn.close()
 
 
+@pytest.mark.parametrize("upgrade", [False, True], ids=["fresh", "v40-upgrade"])
+def test_ownership_take_event_lookup_searches_fresh_and_upgraded_hubs(tmp_path, upgrade):
+    db = tmp_path / "hub.db"
+    conn = fleet_hub.init_db(db)
+    try:
+        _legacy_items(conn, 2)
+        # Event ids remain item-scoped outside take, so the new index must be nonunique.
+        for work_id in ("wl-legacy-000000", "wl-legacy-000001"):
+            _legacy_events(conn, work_id, 3)
+        before = {
+            table: conn.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
+            for table in ("work_items", "work_events")
+        }
+        if upgrade:
+            conn.execute("DROP INDEX IF EXISTS work_events_event_work")
+            conn.execute("PRAGMA user_version=40")
+            conn.commit()
+    finally:
+        conn.close()
+
+    for _ in range(2):
+        conn = fleet_hub.init_db(db)
+        try:
+            query = "SELECT 1 FROM work_events WHERE event_id=? AND work_id!=? LIMIT 1"
+            parameters = ("evt-legacy-000000", "wl-legacy-000000")
+            plan = [row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + query, parameters)]
+            print(f"upgrade={upgrade}: {plan}")
+            assert any("SEARCH work_events USING COVERING INDEX" in step for step in plan), plan
+            assert not any("SCAN work_events" in step for step in plan), plan
+            assert conn.execute(query, parameters).fetchone() == (1,)
+            assert conn.execute(query, ("missing-event", parameters[1])).fetchone() is None
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION == 42
+            store.ensure_schema(conn)
+            assert {
+                table: conn.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall() for table in before
+            } == before
+        finally:
+            conn.close()
+
+
+@pytest.mark.parametrize("upgrade", [False, True], ids=["fresh", "v41-upgrade"])
+def test_execution_history_identity_lookup_is_indexed_and_migration_preserves_data(tmp_path, upgrade):
+    db = tmp_path / "hub.db"
+    conn = fleet_hub.init_db(db)
+    try:
+        _legacy_items(conn, 1)
+        _legacy_events(conn, "wl-legacy-000000", 3)
+        store._append_event(
+            conn,
+            work_id="wl-legacy-000000",
+            event_type="execution-linked",
+            actor_type="node",
+            actor_id="node-a",
+            node_id="node-a",
+            run_id="old-run",
+            from_status=None,
+            to_status=None,
+            now="2026-01-01T00:00:00+00:00",
+            detail={"campaign_grant": {"generation": 1}},
+        )
+        conn.commit()
+        before = {
+            table: conn.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
+            for table in ("work_items", "work_events", "work_links")
+        }
+        if upgrade:
+            conn.execute("DROP INDEX IF EXISTS work_events_execution_identity")
+            conn.execute("PRAGMA user_version=41")
+            conn.commit()
+    finally:
+        conn.close()
+    for _ in range(2):
+        conn = fleet_hub.init_db(db)
+        try:
+            query = (
+                "SELECT 1 FROM work_events WHERE event_type='execution-linked' AND node_id=? AND run_id=? "
+                "AND (? OR json_extract(detail_json, '$.campaign_grant') IS NOT NULL) LIMIT 1"
+            )
+            for campaign_member in (False, True):
+                parameters = ("node-a", "old-run", campaign_member)
+                plan = [row[3] for row in conn.execute("EXPLAIN QUERY PLAN " + query, parameters)]
+                print(f"upgrade={upgrade}, campaign_member={campaign_member}: {plan}")
+                assert any("SEARCH work_events USING INDEX work_events_execution_identity" in step for step in plan), (
+                    plan
+                )
+                assert not any("SCAN work_events" in step for step in plan), plan
+                assert conn.execute(query, parameters).fetchone() == (1,)
+                assert conn.execute(query, ("node-a", "missing-run", campaign_member)).fetchone() is None
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION == 42
+            assert {
+                table: conn.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall() for table in before
+            } == before
+        finally:
+            conn.close()
+
+
 def test_create_and_transition_share_one_transaction(tmp_path):
     conn = _conn(tmp_path)
     item = store.create_item(conn, {"title": "Fleet maintenance", "kind": "fleet"}, actor_id="admin")

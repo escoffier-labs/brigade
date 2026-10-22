@@ -26,9 +26,9 @@ use crate::model::Direction;
 use crate::query::build_context_pack_from_entry_points;
 use crate::query::{
     DEFAULT_AFFECTED_DEPTH, DEFAULT_IMPACT_DEPTH, affected, build_context_pack, cycles, dead_code,
-    diff_graphs, doctor, file_neighbors, graph_query_with_matches, impact_query_with_matches,
-    limit_edges, normalize_depth, outline, personalize_context_pack, render_markdown,
-    render_markdown_budgeted, search_symbols_with_path, stats,
+    diff_graphs, doctor, file_neighbors, freshness, graph_query_with_matches,
+    impact_query_with_matches, limit_edges, normalize_depth, outline, personalize_context_pack,
+    render_markdown, render_markdown_budgeted, search_symbols_with_path, stats,
 };
 use crate::store::{init_schema, open_db, open_read_only, sync_repo};
 
@@ -204,30 +204,35 @@ fn call_tool(default_db: &Path, name: &str, args: &Value) -> Result<String> {
             optional_str_arg(args, "path").as_deref(),
             usize_arg(args, "limit", 20),
         )?),
-        ToolId::Callers | ToolId::Callees | ToolId::Impact => {
-            let symbol = str_arg(args, "symbol");
-            let depth = normalize_depth(usize_arg(args, "depth", DEFAULT_IMPACT_DEPTH));
-            let all_matches = bool_arg(args, "all_matches", false);
-            let mut result = match spec.id {
-                ToolId::Callers => graph_query_with_matches(
-                    &conn,
-                    &symbol,
-                    Direction::Incoming,
-                    depth,
-                    all_matches,
-                )?,
-                ToolId::Callees => graph_query_with_matches(
-                    &conn,
-                    &symbol,
-                    Direction::Outgoing,
-                    depth,
-                    all_matches,
-                )?,
-                _ => impact_query_with_matches(&conn, &symbol, depth, all_matches)?,
-            };
-            result.edges = limit_edges(result.edges, optional_usize_arg(args, "limit"));
-            to_pretty(&result)
-        }
+        ToolId::Callers | ToolId::Callees | ToolId::Impact => to_pretty_with_freshness(
+            |conn| {
+                let symbol = str_arg(args, "symbol");
+                let depth = normalize_depth(usize_arg(args, "depth", DEFAULT_IMPACT_DEPTH));
+                let all_matches = bool_arg(args, "all_matches", false);
+                let mut result = match spec.id {
+                    ToolId::Callers => graph_query_with_matches(
+                        conn,
+                        &symbol,
+                        Direction::Incoming,
+                        depth,
+                        all_matches,
+                    )?,
+                    ToolId::Callees => graph_query_with_matches(
+                        conn,
+                        &symbol,
+                        Direction::Outgoing,
+                        depth,
+                        all_matches,
+                    )?,
+                    _ => impact_query_with_matches(conn, &symbol, depth, all_matches)?,
+                };
+                result.edges = limit_edges(result.edges, optional_usize_arg(args, "limit"));
+                Ok(result)
+            },
+            &conn,
+            &doctor_root(default_db, args, &db),
+        ),
+
         #[cfg(feature = "codesearch")]
         ToolId::SemanticSearch => {
             let limit = semantic_search_limit(args);
@@ -287,11 +292,17 @@ fn call_tool(default_db: &Path, name: &str, args: &Value) -> Result<String> {
         ToolId::FileNeighbors => to_pretty(&file_neighbors(&conn, &str_arg(args, "path"))?),
         ToolId::DeadCode => to_pretty(&dead_code(&conn, usize_arg(args, "limit", 100))?),
         ToolId::Cycles => to_pretty(&cycles(&conn)?),
-        ToolId::Affected => to_pretty(&affected(
+        ToolId::Affected => to_pretty_with_freshness(
+            |conn| {
+                affected(
+                    conn,
+                    &files_arg(args),
+                    usize_arg(args, "depth", DEFAULT_AFFECTED_DEPTH),
+                )
+            },
             &conn,
-            &files_arg(args),
-            usize_arg(args, "depth", DEFAULT_AFFECTED_DEPTH),
-        )?),
+            &doctor_root(default_db, args, &db),
+        ),
         ToolId::Explain => to_pretty(&crate::store::explain_calls(
             &conn,
             &str_arg(args, "source"),
@@ -650,6 +661,25 @@ fn to_pretty<T: Serialize>(value: &T) -> Result<String> {
     Ok(serde_json::to_string_pretty(value)?)
 }
 
+/// Read a graph answer and its freshness from one deferred read snapshot.
+/// A timed-out refresh may commit concurrently in WAL mode, but cannot make
+/// an older answer look fresh. A failed check reports UNKNOWN.
+fn to_pretty_with_freshness<T: Serialize>(
+    query: impl FnOnce(&rusqlite::Connection) -> Result<T>,
+    conn: &rusqlite::Connection,
+    repo_root: &Path,
+) -> Result<String> {
+    let snapshot = conn.unchecked_transaction()?;
+    let value = query(&snapshot)?;
+    let mut body = serde_json::to_value(value)?;
+    let freshness =
+        freshness(&snapshot, repo_root).unwrap_or_else(crate::query::Freshness::unknown);
+    if let Some(object) = body.as_object_mut() {
+        object.insert("freshness".to_string(), serde_json::to_value(freshness)?);
+    }
+    to_pretty(&body)
+}
+
 fn returns_json_rpc_tool_error(name: &str) -> bool {
     tool_spec(name).is_some_and(|spec| spec.returns_json_rpc_error)
 }
@@ -993,6 +1023,67 @@ fn expand_tilde(path: &str) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn query_freshness_keeps_snapshot_when_refresh_commits_during_serialization() {
+        struct CommitRefresh {
+            value: Value,
+            root: PathBuf,
+            db: PathBuf,
+        }
+        impl Serialize for CommitRefresh {
+            fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+                let root = self.root.clone();
+                let db = self.db.clone();
+                // A timed-out refresh can finish after the answer was read.
+                // Joining proves a read snapshot does not block its WAL commit.
+                thread::spawn(move || {
+                    let writer = open_db(&db).unwrap();
+                    sync_repo(&writer, &root).unwrap();
+                })
+                .join()
+                .unwrap();
+                self.value.serialize(serializer)
+            }
+        }
+
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        let db = root.join("graphtrail.db");
+        std::fs::write(
+            root.join("app.py"),
+            "def helper(): pass\ndef run(): helper()\n",
+        )
+        .unwrap();
+        let writer = open_db(&db).unwrap();
+        init_schema(&writer).unwrap();
+        sync_repo(&writer, root).unwrap();
+        std::fs::write(
+            root.join("app.py"),
+            "def helper(): pass\ndef run(): missing_name()\n",
+        )
+        .unwrap();
+        let reader = open_read_only(&db).unwrap();
+        let query = |conn: &rusqlite::Connection| -> Result<CommitRefresh> {
+            let result = graph_query_with_matches(conn, "run", Direction::Outgoing, 1, false)?;
+            assert_eq!(result.edges.len(), 1);
+            Ok(CommitRefresh {
+                value: serde_json::to_value(result)?,
+                root: root.to_path_buf(),
+                db: db.clone(),
+            })
+        };
+        let text = to_pretty_with_freshness(query, &reader, root).unwrap();
+        let body: Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(body["edges"].as_array().unwrap().len(), 1);
+        assert_eq!(body["freshness"]["verdict"], "STALE");
+        assert_eq!(body["freshness"]["pending_files"], 1);
+        assert!(reader.is_autocommit());
+        let current =
+            graph_query_with_matches(&reader, "run", Direction::Outgoing, 1, false).unwrap();
+        assert!(current.edges.is_empty());
+        assert_eq!(freshness(&reader, root).unwrap().verdict, "FRESH");
+    }
 
     #[test]
     fn tool_specs_are_unique_complete_and_refresh_consistent() {
