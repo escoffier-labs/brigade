@@ -359,8 +359,24 @@ def test_a_cursor_older_than_a_week_but_inside_hub_retention_is_kept_and_not_red
     )
 
 
+def _stale(path: Path, *, cursor: int = 1) -> Path:
+    delivery._write_state(path, scope="s", cursor=cursor)
+    _age(path, delivery.retention_seconds() + 10)
+    return path
+
+
+def _sessions_on_distinct_stripes(count: int) -> list[str]:
+    chosen: dict[Path, str] = {}
+    index = 0
+    while len(chosen) < count:
+        name = f"session-{index}"
+        chosen.setdefault(delivery._lock_path(delivery.state_path("claude", name)), name)
+        index += 1
+    return list(chosen.values())
+
+
 def test_a_lock_file_is_never_pruned_by_age(fleet):
-    lock = delivery.state_path("claude", "held").with_name(delivery.state_path("claude", "held").name + ".lock")
+    lock = delivery._lock_path(delivery.state_path("claude", "held"))
     lock.parent.mkdir(parents=True, exist_ok=True)
     lock.write_text("", encoding="utf-8")
     _age(lock, delivery.retention_seconds() + 10)
@@ -370,20 +386,158 @@ def test_a_lock_file_is_never_pruned_by_age(fleet):
     assert lock.exists()
 
 
+def test_lock_files_are_bounded_by_the_stripe_count_however_many_sessions_run(fleet):
+    sessions = [f"session-{index}" for index in range(delivery.LOCK_STRIPES + 40)]
+    for session in sessions:
+        delivery.deliver("claude", session, "UserPromptSubmit", now=T0)
+
+    locks = list(delivery.state_dir().glob("*.lock"))
+    assert 0 < len(locks) <= delivery.LOCK_STRIPES
+    assert all(lock.name.startswith("lock-") for lock in locks)
+    assert len(list(delivery.state_dir().glob("*.json"))) == len(sessions)
+
+
+def test_more_than_the_scan_limit_of_lock_files_cannot_hide_a_stale_cursor(fleet):
+    directory = delivery.state_dir()
+    directory.mkdir(parents=True, exist_ok=True)
+    for index in range(delivery.PRUNE_SCAN_LIMIT + 50):
+        (directory / f"orphan-{index:04d}.json.lock").write_text("", encoding="utf-8")
+    old = _stale(delivery.state_path("claude", "ancient"))
+
+    delivery.deliver("claude", "fresh", "UserPromptSubmit", now=time.time())
+
+    assert not old.exists()
+
+
+def test_a_scan_bounded_by_cursors_still_reaches_every_stale_one(fleet, monkeypatch):
+    monkeypatch.setattr(delivery, "PRUNE_SCAN_LIMIT", 8)
+    fresh = [delivery.state_path("claude", f"fresh-{index}") for index in range(30)]
+    for path in fresh:
+        delivery._write_state(path, scope="s", cursor=1)
+    old = [_stale(delivery.state_path("claude", f"ancient-{index}")) for index in range(6)]
+
+    # Each new session prunes one window past the last, so the stale ones go within a few passes.
+    for index in range(40):
+        delivery.deliver("claude", f"new-{index}", "UserPromptSubmit", now=time.time())
+        if not any(path.exists() for path in old):
+            break
+
+    assert not any(path.exists() for path in old)
+    assert index < 39
+    assert all(path.exists() for path in fresh)
+
+
+def test_a_cursor_refreshed_between_the_scan_and_the_lock_is_kept(fleet, monkeypatch):
+    stale = _stale(delivery.state_path("claude", "resumed"), cursor=5)
+    real = delivery._try_lock
+    refreshed: list[str] = []
+
+    def refresh_then_lock(fd, client):
+        # A hook for that session ran after the scan judged it stale and released its lock.
+        delivery._write_state(stale, scope="s", cursor=9)
+        refreshed.append(stale.name)
+        return real(fd, client)
+
+    monkeypatch.setattr(delivery, "_try_lock", refresh_then_lock)
+
+    delivery.deliver("claude", "fresh", "UserPromptSubmit", now=time.time())
+
+    assert refreshed == [stale.name]
+    assert stale.exists()
+    assert json.loads(stale.read_text())["cursor"] == 9
+
+
+def test_a_cursor_swapped_for_a_symlink_before_the_lock_is_not_unlinked_through(fleet, monkeypatch, tmp_path):
+    stale = _stale(delivery.state_path("claude", "swapped"))
+    target = tmp_path / "elsewhere.json"
+    target.write_text("{}", encoding="utf-8")
+    real = delivery._try_lock
+
+    def swap_then_lock(fd, client):
+        stale.unlink()
+        stale.symlink_to(target)
+        return real(fd, client)
+
+    monkeypatch.setattr(delivery, "_try_lock", swap_then_lock)
+
+    delivery.deliver("claude", "fresh", "UserPromptSubmit", now=time.time())
+
+    assert stale.is_symlink() and target.exists()
+
+
+class _FakeMsvcrt:
+    LK_NBLCK = 2
+    LK_UNLCK = 0
+
+    def __init__(self, held: set[int]):
+        self.held, self.calls = held, []
+
+    def locking(self, fd, mode, nbytes):
+        self.calls.append((mode, nbytes))
+        if mode == self.LK_NBLCK and os.fstat(fd).st_ino in self.held:
+            raise OSError(13, "Permission denied")
+
+
+def test_without_fcntl_pruning_takes_a_nonblocking_msvcrt_lock_and_skips_a_held_one(fleet, monkeypatch):
+    held = _stale(delivery.state_path("claude", "held"))
+    free = _stale(delivery.state_path("claude", "free"))
+    held_lock, free_lock = delivery._lock_path(held), delivery._lock_path(free)
+    assert held_lock != free_lock
+    for lock in (held_lock, free_lock):
+        lock.write_text("", encoding="utf-8")
+    fake = _FakeMsvcrt({held_lock.stat().st_ino})
+    monkeypatch.setattr(fleet_client, "fcntl", None)
+    monkeypatch.setattr(fleet_client, "msvcrt", fake)
+
+    delivery._prune(held.parent, now=time.time())
+
+    assert held.exists() and not free.exists()
+    assert fake.calls and {mode for mode, _ in fake.calls} == {fake.LK_NBLCK}
+
+
+@pytest.mark.skipif(os.name != "nt", reason="native msvcrt byte-range locks")
+def test_windows_pruning_leaves_a_session_whose_lock_another_process_holds(fleet):
+    import subprocess
+    import sys
+
+    held, free = (delivery.state_path("claude", name) for name in _sessions_on_distinct_stripes(2))
+    for path in (held, free):
+        _stale(path)
+    held_lock = delivery._lock_path(held)
+    held_lock.write_text("", encoding="utf-8")
+    holder = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "import msvcrt,sys,time;f=open(sys.argv[1],'r+b');msvcrt.locking(f.fileno(),msvcrt.LK_NBLCK,1);"
+            "print('held',flush=True);time.sleep(60)",
+            str(held_lock),
+        ],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    try:
+        assert holder.stdout.readline().strip() == "held"
+
+        delivery._prune(held.parent, now=time.time())
+
+        assert held.exists() and not free.exists()
+    finally:
+        holder.kill()
+        holder.wait()
+
+
 @pytest.mark.skipif(not hasattr(os, "O_NOFOLLOW") or os.name == "nt", reason="needs flock and dir_fd")
 def test_pruning_never_touches_a_session_whose_lock_another_process_holds(fleet):
     import subprocess
     import sys
 
-    held = delivery.state_path("claude", "held")
-    free = delivery.state_path("claude", "free")
+    held, free = (delivery.state_path("claude", name) for name in _sessions_on_distinct_stripes(2))
     for path in (held, free):
-        delivery._write_state(path, scope="s", cursor=1)
-        path.with_name(path.name + ".lock").write_text("", encoding="utf-8")
-        _age(path, delivery.retention_seconds() + 10)
-    held_lock = held.with_name(held.name + ".lock")
-    free_lock = free.with_name(free.name + ".lock")
-    inodes = {lock: lock.stat().st_ino for lock in (held_lock, free_lock)}
+        _stale(path)
+    held_lock = delivery._lock_path(held)
+    held_lock.write_text("", encoding="utf-8")
+    inode = held_lock.stat().st_ino
     holder = subprocess.Popen(
         [
             sys.executable,
@@ -399,10 +553,10 @@ def test_pruning_never_touches_a_session_whose_lock_another_process_holds(fleet)
 
         delivery.deliver("claude", "fresh", "UserPromptSubmit", now=time.time())
 
-        # A running hook owns the held session: its cursor and lock inode are untouched.
-        assert held.exists() and held_lock.stat().st_ino == inodes[held_lock]
-        # The unheld stale cursor goes, but no lock inode is ever unlinked.
-        assert not free.exists() and free_lock.stat().st_ino == inodes[free_lock]
+        # A running hook owns the held stripe: its cursor and lock inode are untouched.
+        assert held.exists() and held_lock.stat().st_ino == inode
+        # The unheld stale cursor goes, and no lock file is unlinked.
+        assert not free.exists() and delivery._lock_path(free).exists()
     finally:
         holder.kill()
         holder.wait()
@@ -416,7 +570,7 @@ def test_overlapping_hooks_for_one_session_deliver_once_and_never_wait(fleet, mo
     path = delivery.state_path("claude", "session-1")
 
     started = time.monotonic()
-    with _spool_lock(path):
+    with _spool_lock(delivery._lock_path(path)):
         # Another hook process holds the session: this one skips and consumes nothing.
         assert delivery.deliver("claude", "session-1", "UserPromptSubmit", now=T0) is None
     assert time.monotonic() - started < 1

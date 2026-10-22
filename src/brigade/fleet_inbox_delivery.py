@@ -18,9 +18,11 @@ text block for the harness to inject as additional context. Rules:
   ``deliver`` raises.
 * A cursor outlives the hub's message retention, so a session that resumes
   after a long gap never sees an old, still unacknowledged message twice.
-  Pruning removes only cursor files, never a per-session lock file: an
+  Sessions share ``LOCK_STRIPES`` fixed lock files, chosen by a hash of the
+  cursor name, so lock files never accumulate and never need unlinking: an
   unlinked lock held by a running hook would let the next hook lock a new
-  inode and run alongside the holder.
+  inode and run alongside the holder. Two sessions on one stripe at the same
+  instant skip, as overlapping hooks of one session do.
 * Cursor I/O stays inside the directory descriptor that ``_spool_lock``
   validated. Windows has no ``dir_fd`` support and keeps path-based I/O.
 * The hub scopes every read to the calling credential's own inbox, so a
@@ -29,6 +31,7 @@ text block for the harness to inject as additional context. Rules:
 
 from __future__ import annotations
 
+import bisect
 import errno
 import json
 import os
@@ -52,6 +55,8 @@ MAX_STATE_BYTES = 4096
 MAX_STDIN_BYTES = 1_048_576
 STATE_DIRNAME = "fleet-inbox-delivery"
 PRUNE_SCAN_LIMIT = 256
+PRUNE_MARKER = "prune-position"
+LOCK_STRIPES = 64
 SECONDS_PER_DAY = 24 * 3600
 # A prompt is the natural moment to look; tool events follow the throttle.
 PROMPT_EVENTS = frozenset({"UserPromptSubmit"})
@@ -153,61 +158,104 @@ def _write_state(
     return True
 
 
-def _prune(directory: Path, *, now: float, dir_fd: int | None = None) -> None:
-    """Drop cursor files of long-gone sessions. Bounded scan, never raises.
+def _lock_path(path: Path) -> Path:
+    """The shared lock a cursor file is guarded by: one of ``LOCK_STRIPES`` fixed names."""
+    stripe = int(localio.stable_hash(path.name)[:8], 16) % LOCK_STRIPES
+    return path.with_name(f"lock-{stripe:02x}")
 
-    Only a cursor older than the hub's message retention goes, and only when
-    its session lock can be taken without waiting: a held lock means a hook is
-    running that session. Lock files are never unlinked. One removed while a
-    hook holds it would let the next hook create a new inode and run alongside
-    the holder, and a safe removal would need every locker to revalidate its
-    inode. They are empty files, one per session ever seen.
+
+def _lstat(directory: Path, name: str, dir_fd: int | None) -> os.stat_result:
+    return os.stat(name if dir_fd is not None else str(directory / name), dir_fd=dir_fd, follow_symlinks=False)
+
+
+def _scan_window(directory: Path, dir_fd: int | None) -> list[str]:
+    """Up to ``PRUNE_SCAN_LIMIT`` cursor names, resuming after the last name the previous pass reached.
+
+    Only cursor files count: the lock files and the position marker are skipped by
+    suffix. The directory listing is sorted so the marker is a stable position, and
+    the window wraps past the end, so every cursor is visited within
+    ``ceil(cursors / PRUNE_SCAN_LIMIT)`` passes however many fresh ones sit ahead of it.
     """
     from . import fleet_client as client
 
+    with os.scandir(dir_fd if dir_fd is not None else directory) as entries:
+        names = sorted(entry.name for entry in entries if entry.name.endswith(".json"))
+    if len(names) <= PRUNE_SCAN_LIMIT:
+        return names
+    try:
+        fd = client._open_private(directory / PRUNE_MARKER, os.O_RDONLY, dir_fd=dir_fd)
+        with os.fdopen(fd, "rb") as handle:
+            marker = handle.read(MAX_STATE_BYTES).decode("utf-8", "replace").strip()
+    except (OSError, client.FleetClientError):
+        marker = ""
+    start = bisect.bisect_right(names, marker) if marker else 0
+    window = (names[start:] + names[:start])[:PRUNE_SCAN_LIMIT]
+    try:
+        _write_atomic(directory / PRUNE_MARKER, window[-1] + "\n", dir_fd)
+    except OSError:
+        pass  # the next pass restarts from the top; still bounded
+    return window
+
+
+def _prune(directory: Path, *, now: float, dir_fd: int | None = None) -> None:
+    """Drop cursor files of long-gone sessions. Bounded scan, never raises.
+
+    Only a cursor older than the hub's message retention goes. Each candidate is
+    judged again under its shared lock (see ``_unlink_if_still_stale``).
+    """
     cutoff = now - retention_seconds()
     try:
-        entries = os.scandir(dir_fd if dir_fd is not None else directory)
-        with entries:
-            for index, entry in enumerate(entries):
-                if index >= PRUNE_SCAN_LIMIT:
-                    return
-                if not entry.name.endswith(".json"):
-                    continue
-                info = entry.stat(follow_symlinks=False)
-                if not stat.S_ISREG(info.st_mode) or info.st_mtime >= cutoff:
-                    continue
-                _unlink_unless_held(directory, entry.name, dir_fd, client)
-    except OSError:
-        return
-
-
-def _unlink_unless_held(directory: Path, name: str, dir_fd: int | None, client: Any) -> None:
-    lock_name = name + ".lock"
-    flags = os.O_RDWR | client._O_NOFOLLOW | client._O_CLOEXEC
-    try:
-        fd = os.open(lock_name if dir_fd is not None else str(directory / lock_name), flags, dir_fd=dir_fd)
-    except FileNotFoundError:
-        fd = -1  # no lock file, so no holder
-    except OSError:
-        return
-    try:
-        if fd >= 0 and client.fcntl is not None:
+        for name in _scan_window(directory, dir_fd):
             try:
-                client.fcntl.flock(fd, client.fcntl.LOCK_EX | client.fcntl.LOCK_NB)
-            except OSError as exc:
-                if exc.errno not in {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK}:
-                    raise
-                return  # held by a running hook: leave the session alone
-        try:
+                info = _lstat(directory, name, dir_fd)
+            except FileNotFoundError:
+                continue
+            if stat.S_ISREG(info.st_mode) and info.st_mtime < cutoff:
+                _unlink_if_still_stale(directory, name, cutoff, dir_fd)
+    except OSError:
+        return
+
+
+def _try_lock(fd: int, client: Any) -> bool:
+    """Take the lock without waiting. False means a running hook holds it."""
+    try:
+        if client.fcntl is not None:
+            client.fcntl.flock(fd, client.fcntl.LOCK_EX | client.fcntl.LOCK_NB)
+        elif client.msvcrt is not None:
+            client.msvcrt.locking(fd, client.msvcrt.LK_NBLCK, 1)
+    except OSError as exc:
+        if exc.errno not in {errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK, errno.EDEADLK}:
+            raise
+        return False
+    return True
+
+
+def _unlink_if_still_stale(directory: Path, name: str, cutoff: float, dir_fd: int | None) -> None:
+    """Unlink a stale cursor, but only when its stripe lock is free and it is still stale under it.
+
+    The scan's age check is advisory: a hook can refresh the cursor between that
+    check and this lock. The decision is repeated here, no-follow, once the lock is
+    held, so a refreshed cursor is kept. A held lock means a hook is running a
+    session on this stripe; its cursor is left for a later pass.
+    """
+    from . import fleet_client as client
+
+    lock = _lock_path(directory / name)
+    flags = os.O_RDWR | os.O_CREAT | client._O_NOFOLLOW | client._O_CLOEXEC
+    try:
+        fd = os.open(lock.name if dir_fd is not None else str(lock), flags, 0o600, dir_fd=dir_fd)
+    except OSError:
+        return
+    try:
+        if not _try_lock(fd, client):
+            return
+        info = _lstat(directory, name, dir_fd)
+        if stat.S_ISREG(info.st_mode) and info.st_mtime < cutoff:
             os.unlink(name if dir_fd is not None else str(directory / name), dir_fd=dir_fd)
-        except FileNotFoundError:
-            pass
     except OSError:
         return
     finally:
-        if fd >= 0:
-            os.close(fd)  # releases the flock; the lock file stays
+        os.close(fd)  # releases the lock; the stripe file stays
 
 
 # Terminal escapes first (so their payload goes with them), then every remaining
@@ -287,7 +335,7 @@ def _deliver(harness: str, session_id: str, event: str, now: float) -> str | Non
     # hook processes: a contender skips (timeout 0) instead of waiting, because
     # the holder is already reading and will show the mail.
     # The lock yields the validated state directory descriptor (None on Windows).
-    with _spool_lock(path, timeout=0) as dir_fd:
+    with _spool_lock(_lock_path(path), timeout=0) as dir_fd:
         return _deliver_locked(path, event, now, dir_fd)
 
 
