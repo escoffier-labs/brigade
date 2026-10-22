@@ -13,9 +13,9 @@ from typing import Any, Literal
 from . import proc
 from .agents import AgentResult
 from .result_integrity import validate_final_output
+from .roster import ACPX_TRANSPORT_VERSIONS
 from .worklore_validate import contains_credential, contains_private_path
 
-SUPPORTED_VERSION = "0.12.0"
 CURSOR_AUTH_TIMEOUT_SECONDS = 10.0
 CURSOR_AUTH_RECOVERY = "run `cursor-agent login` once, then verify with `cursor-agent status`"
 _ANSI_ESCAPE = re.compile(r"\x1b\[[0-?]*[ -/]*[@-~]")
@@ -601,11 +601,14 @@ def run_cursor(
     process_registry: proc.ProcessRegistry | None = None,
     env: dict[str, str] | None = None,
 ) -> AgentResult:
-    if version != SUPPORTED_VERSION:
+    if version not in ACPX_TRANSPORT_VERSIONS:
         return AgentResult(
             text="",
             ok=False,
-            detail=f"unsupported acpx adapter version {version}; reviewed version is {SUPPORTED_VERSION}",
+            detail=(
+                f"unsupported acpx adapter version {version}; "
+                f"reviewed versions are {', '.join(ACPX_TRANSPORT_VERSIONS)}"
+            ),
             failure_phase="preflight",
             failure_kind="version-mismatch",
             transport="acpx",

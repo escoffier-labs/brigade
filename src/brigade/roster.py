@@ -16,7 +16,7 @@ from . import toml_compat
 SANDBOX_CHOICES = ("read-only", "workspace-write", "danger-full-access")
 CODEX_TRANSPORT_CHOICES = ("exec", "app-server")
 AGENT_TRANSPORT_CHOICES = ("direct", "acpx")
-ACPX_TRANSPORT_VERSION = "0.12.0"
+ACPX_TRANSPORT_VERSIONS = ("0.12.0", "0.19.4")
 RosterSource = Literal["explicit", "workspace", "worktree-parent", "user"]
 
 RESEARCH_GENERAL_CAPABILITIES = frozenset({"research.plan", "research.extract", "research.synthesize"})
@@ -535,9 +535,9 @@ def load_roster(path: Path, *, resolution: RosterResolution | None = None, text:
                 raise ValueError(f"agents.{agent_name}.transport acpx requires model")
             if transport_version is None:
                 raise ValueError(f"agents.{agent_name}.transport acpx requires transport_version")
-            if transport_version != ACPX_TRANSPORT_VERSION:
+            if transport_version not in ACPX_TRANSPORT_VERSIONS:
                 raise ValueError(
-                    f"agents.{agent_name}.transport acpx reviewed version is {ACPX_TRANSPORT_VERSION}; "
+                    f"agents.{agent_name}.transport acpx reviewed versions are {', '.join(ACPX_TRANSPORT_VERSIONS)}; "
                     f"got {transport_version}"
                 )
             if agent_name == orchestrator:
@@ -616,10 +616,10 @@ def load_roster(path: Path, *, resolution: RosterResolution | None = None, text:
             raise ValueError(f"agents.{agent_name}.invalid_final_fallback must name a reviewed cursor-grok acpx seat")
         if invalid_final_agent.model is None or not invalid_final_agent.model.lower().startswith("grok-"):
             raise ValueError(f"agents.{agent_name}.invalid_final_fallback target must use a grok model")
-        if invalid_final_agent.transport_version != ACPX_TRANSPORT_VERSION:
+        if invalid_final_agent.transport_version not in ACPX_TRANSPORT_VERSIONS:
             raise ValueError(
-                f"agents.{agent_name}.invalid_final_fallback target requires reviewed acpx version "
-                f"{ACPX_TRANSPORT_VERSION}"
+                f"agents.{agent_name}.invalid_final_fallback target requires reviewed acpx versions "
+                f"{', '.join(ACPX_TRANSPORT_VERSIONS)}"
             )
 
     return Roster(
@@ -741,7 +741,7 @@ def _is_reviewed_invalid_final_fallback(agent: Agent) -> bool:
         and agent.transport == "acpx"
         and agent.model is not None
         and agent.model.lower().startswith("grok-")
-        and agent.transport_version == ACPX_TRANSPORT_VERSION
+        and agent.transport_version in ACPX_TRANSPORT_VERSIONS
     )
 
 

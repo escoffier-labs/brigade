@@ -466,7 +466,8 @@ def test_build_argv_refuses_writable_non_worktree(tmp_path):
         raise AssertionError("expected writable ACP refusal")
 
 
-def test_run_parses_protocol_and_final_text(monkeypatch, tmp_path):
+@pytest.mark.parametrize("version", ["0.12.0", "0.19.4"])
+def test_run_parses_protocol_and_final_text(monkeypatch, tmp_path, version):
     monkeypatch.setattr(acpx_adapter.proc, "which", lambda cmd: f"/bin/{cmd}")
     monkeypatch.setattr(acpx_adapter, "cursor_auth_status", _authenticated_status)
     calls = []
@@ -474,12 +475,12 @@ def test_run_parses_protocol_and_final_text(monkeypatch, tmp_path):
     def fake_run(argv, **kwargs):
         calls.append(argv)
         if argv == ["acpx", "--version"]:
-            return proc.Result(0, "acpx 0.12.0\n", "")
+            return proc.Result(0, f"acpx {version}\n", "")
         return proc.Result(0, _success_stream(), "")
 
     monkeypatch.setattr(acpx_adapter.proc, "run", fake_run)
     result = acpx_adapter.run_cursor(
-        "inspect", cwd=tmp_path, timeout=120, model="composer-2.5", version="0.12.0", read_only=True
+        "inspect", cwd=tmp_path, timeout=120, model="composer-2.5", version=version, read_only=True
     )
     assert result.ok is True
     assert result.text == "hello"
@@ -1516,14 +1517,15 @@ def test_run_correlates_stop_reason_to_prompt_request(monkeypatch, tmp_path):
     assert result.failure_kind == "non-final-stop"
 
 
-def test_run_rejects_version_mismatch(monkeypatch, tmp_path):
+@pytest.mark.parametrize(("version", "installed"), [("0.12.0", "0.19.4"), ("0.19.4", "0.12.0"), ("0.19.4", "0.20.0")])
+def test_run_rejects_version_mismatch(monkeypatch, tmp_path, version, installed):
     monkeypatch.setattr(acpx_adapter.proc, "which", lambda cmd: f"/bin/{cmd}")
-    monkeypatch.setattr(acpx_adapter.proc, "run", lambda argv, **kwargs: proc.Result(0, "acpx 0.13.0\n", ""))
+    monkeypatch.setattr(acpx_adapter.proc, "run", lambda argv, **kwargs: proc.Result(0, f"acpx {installed}\n", ""))
     result = acpx_adapter.run_cursor(
-        "inspect", cwd=tmp_path, timeout=120, model="composer-2.5", version="0.12.0", read_only=True
+        "inspect", cwd=tmp_path, timeout=120, model="composer-2.5", version=version, read_only=True
     )
     assert result.ok is False
-    assert "requires acpx 0.12.0" in result.detail
+    assert f"requires acpx {version}" in result.detail
     assert result.failure_phase == "preflight"
     assert result.failure_kind == "version-mismatch"
     assert result.transport == "acpx"
@@ -1581,28 +1583,29 @@ def test_run_rejects_invalid_or_empty_protocol_output(monkeypatch, tmp_path):
     assert empty.failure_kind == "empty-output"
 
 
-def test_run_distinguishes_timeout_permission_and_provider_startup(monkeypatch, tmp_path):
+@pytest.mark.parametrize("version", ["0.12.0", "0.19.4"])
+def test_run_distinguishes_timeout_permission_and_provider_startup(monkeypatch, tmp_path, version):
     monkeypatch.setattr(acpx_adapter.proc, "which", lambda cmd: f"/bin/{cmd}")
     monkeypatch.setattr(acpx_adapter, "cursor_auth_status", _authenticated_status)
     outputs = iter(
         [
-            proc.Result(0, "acpx 0.12.0\n", ""),
+            proc.Result(0, f"acpx {version}\n", ""),
             proc.Result(3, "", "acpx timed out"),
-            proc.Result(0, "acpx 0.12.0\n", ""),
+            proc.Result(0, f"acpx {version}\n", ""),
             proc.Result(5, "", "permission denied"),
-            proc.Result(0, "acpx 0.12.0\n", ""),
+            proc.Result(0, f"acpx {version}\n", ""),
             proc.Result(7, "", "provider failed before ACP startup"),
         ]
     )
     monkeypatch.setattr(acpx_adapter.proc, "run", lambda argv, **kwargs: next(outputs))
     timeout = acpx_adapter.run_cursor(
-        "inspect", cwd=tmp_path, timeout=120, model="composer-2.5", version="0.12.0", read_only=True
+        "inspect", cwd=tmp_path, timeout=120, model="composer-2.5", version=version, read_only=True
     )
     denied = acpx_adapter.run_cursor(
-        "inspect", cwd=tmp_path, timeout=120, model="composer-2.5", version="0.12.0", read_only=True
+        "inspect", cwd=tmp_path, timeout=120, model="composer-2.5", version=version, read_only=True
     )
     startup = acpx_adapter.run_cursor(
-        "inspect", cwd=tmp_path, timeout=120, model="composer-2.5", version="0.12.0", read_only=True
+        "inspect", cwd=tmp_path, timeout=120, model="composer-2.5", version=version, read_only=True
     )
     assert timeout.exit_code == 3 and timeout.timed_out is True
     assert denied.exit_code == 5 and denied.detail == "permission denied"
@@ -1697,20 +1700,21 @@ def test_run_rejects_invalid_utf8_stderr_with_valid_acp_stdout(monkeypatch, tmp_
     assert "hello" not in result.text
 
 
-def test_run_preserves_end_turn_final_after_late_permission_prompt(monkeypatch, tmp_path):
+@pytest.mark.parametrize("version", ["0.12.0", "0.19.4"])
+def test_run_preserves_end_turn_final_after_late_permission_prompt(monkeypatch, tmp_path, version):
     stream = _late_permission_stream()
     monkeypatch.setattr(acpx_adapter.proc, "which", lambda cmd: f"/bin/{cmd}")
     monkeypatch.setattr(acpx_adapter, "cursor_auth_status", _authenticated_status)
     outputs = iter(
         [
-            proc.Result(0, "acpx 0.12.0\n", ""),
+            proc.Result(0, f"acpx {version}\n", ""),
             proc.Result(5, stream, "PERMISSION_PROMPT_UNAVAILABLE"),
         ]
     )
     monkeypatch.setattr(acpx_adapter.proc, "run", lambda argv, **kwargs: next(outputs))
 
     result = acpx_adapter.run_cursor(
-        "inspect", cwd=tmp_path, timeout=120, model="composer-2.5", version="0.12.0", read_only=True
+        "inspect", cwd=tmp_path, timeout=120, model="composer-2.5", version=version, read_only=True
     )
 
     assert result.ok is True
@@ -2052,3 +2056,19 @@ def test_run_rejects_wrong_permission_code_even_with_marker_message(monkeypatch,
     assert result.text == "Complete review findings."
     assert result.transport_warning is None
     assert result.failure_kind == "transport-error"
+
+
+@pytest.mark.parametrize("version", ["0.13.0", "0.19.5", "0.20.0", "0.19.4-beta.1", ">=0.12.0"])
+def test_run_rejects_unreviewed_version_before_spawning(monkeypatch, tmp_path, version):
+    def unexpected_probe(*args, **kwargs):
+        pytest.fail("unreviewed versions must fail before probing executables")
+
+    monkeypatch.setattr(acpx_adapter.proc, "which", unexpected_probe)
+    monkeypatch.setattr(acpx_adapter.proc, "run", unexpected_probe)
+    result = acpx_adapter.run_cursor(
+        "inspect", cwd=tmp_path, timeout=120, model="composer-2.5", version=version, read_only=True
+    )
+    assert result.ok is False
+    assert result.failure_phase == "preflight"
+    assert result.failure_kind == "version-mismatch"
+    assert "reviewed versions are 0.12.0, 0.19.4" in result.detail

@@ -518,19 +518,21 @@ def test_cli_agent_accepts_reasoning_pin(tmp_path):
     assert loaded.agents["chef"].reasoning == "max"
 
 
-def test_cursor_worker_accepts_pinned_acpx_transport(tmp_path):
+@pytest.mark.parametrize("version", ["0.12.0", "0.19.4"])
+def test_cursor_worker_accepts_pinned_acpx_transport(tmp_path, version):
     text = (
         'orchestrator = "chef"\n'
         '[agents.chef]\ncli = "codex"\nrole = "plan"\n'
         '[agents.composer]\ncli = "cursor"\nmodel = "composer-2.5"\n'
-        'transport = "acpx"\ntransport_version = "0.12.0"\nrole = "build"\n'
+        f'transport = "acpx"\ntransport_version = "{version}"\nrole = "build"\n'
     )
     loaded = roster_mod.load_roster(_write(tmp_path, text))
     assert loaded.agents["composer"].transport == "acpx"
-    assert loaded.agents["composer"].transport_version == "0.12.0"
+    assert loaded.agents["composer"].transport_version == version
 
 
-def test_acpx_transport_rejects_wrong_cli_or_unreviewed_version(tmp_path):
+@pytest.mark.parametrize("version", ["0.13.0", "0.19.5", "0.20.0", "0.19.4-beta.1", ">=0.12.0"])
+def test_acpx_transport_rejects_wrong_cli_or_unreviewed_version(tmp_path, version):
     wrong_cli = (
         'orchestrator = "chef"\n'
         '[agents.chef]\ncli = "codex"\nrole = "plan"\n'
@@ -540,8 +542,8 @@ def test_acpx_transport_rejects_wrong_cli_or_unreviewed_version(tmp_path):
     with pytest.raises(ValueError, match="cursor"):
         roster_mod.load_roster(_write(tmp_path, wrong_cli))
 
-    wrong_version = wrong_cli.replace('cli = "grok"', 'cli = "cursor"').replace("0.12.0", "0.13.0")
-    with pytest.raises(ValueError, match="reviewed version"):
+    wrong_version = wrong_cli.replace('cli = "grok"', 'cli = "cursor"').replace("0.12.0", version)
+    with pytest.raises(ValueError, match=r"reviewed versions are 0\.12\.0, 0\.19\.4"):
         roster_mod.load_roster(_write(tmp_path, wrong_version))
 
 
@@ -910,7 +912,7 @@ def test_grok_invalid_final_fallback_names_reviewed_acpx_seat(tmp_path):
         ),
         (
             GROK_FALLBACK_ROSTER.replace('transport_version = "0.12.0"', 'transport_version = "0.11.0"'),
-            "reviewed version is 0.12.0",
+            r"reviewed versions are 0\.12\.0, 0\.19\.4",
         ),
     ],
 )
@@ -1431,8 +1433,9 @@ caveats = []
 """
 
 
-def test_resolve_capabilities_includes_invalid_final_fallback_dependency(tmp_path):
-    roster = _metadata_roster_from_text(INVALID_FINAL_RESOLUTION_ROSTER, tmp_path)
+@pytest.mark.parametrize("version", ["0.12.0", "0.19.4"])
+def test_resolve_capabilities_includes_invalid_final_fallback_dependency(tmp_path, version):
+    roster = _metadata_roster_from_text(INVALID_FINAL_RESOLUTION_ROSTER.replace("0.12.0", version), tmp_path)
     probe = FakeProbe(
         {
             "codex": roster_mod.Capability(installed=True),
