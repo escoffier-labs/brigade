@@ -10,7 +10,7 @@ import pytest
 
 from brigade import cli, localio, work_cmd
 from brigade.work_cmd import dispatch_apply as apply, dispatch_state as store
-from tests.test_work_dispatch import _tasks, dispatch_target  # noqa: F401
+from tests.test_work_dispatch import _tasks, dispatch_target, requires_dispatch_apply  # noqa: F401
 from tests.test_work_dispatch_apply import _apply, _intents
 from tests.test_work_dispatch_apply import apply_target as dispatch_apply_target  # noqa: F401
 from tests.test_work_dispatch_review import _unfinished
@@ -39,6 +39,7 @@ def test_child_command_uses_current_interpreter_and_real_run_parser(tmp_path):
 
 
 @pytest.mark.parametrize("operation", ["commit", "diff"])
+@requires_dispatch_apply
 def test_post_success_git_error_keeps_completed_claim(apply_target, capsys, monkeypatch, operation):
     _apply(apply_target, capsys)
     path, row = _unfinished(apply_target)
@@ -59,6 +60,7 @@ def test_post_success_git_error_keeps_completed_claim(apply_target, capsys, monk
 
 
 @pytest.mark.parametrize(("status", "state"), [("completed", "completed"), ("orphaned", "orphaned")])
+@requires_dispatch_apply
 def test_terminal_reread_has_same_status_mapping(apply_target, capsys, monkeypatch, status, state):
     _apply(apply_target, capsys)
     path, row = _unfinished(apply_target)
@@ -69,6 +71,7 @@ def test_terminal_reread_has_same_status_mapping(apply_target, capsys, monkeypat
 
 
 @pytest.mark.parametrize("timeout", [False, True])
+@requires_dispatch_apply
 def test_cancel_preserves_child_that_already_succeeded(apply_target, capsys, timeout):
     _apply(apply_target, capsys)
     path, row = _unfinished(apply_target)
@@ -77,6 +80,7 @@ def test_cancel_preserves_child_that_already_succeeded(apply_target, capsys, tim
     assert work_cmd._read_task_ledger(apply_target)["tasks"][0]["status"] == "in_progress"
 
 
+@requires_dispatch_apply
 def test_foreground_fills_capacity_before_waiting_for_detached_child(apply_target, capsys, monkeypatch):
     _tasks(apply_target, [["a.py"], ["b.py"]])
     monkeypatch.setenv("FAKE_DISPATCH_SLEEP", "2")
@@ -103,6 +107,7 @@ def _corrupt_journal(row):
     journal.write_text('{"partial":')
 
 
+@requires_dispatch_apply
 def test_unknown_refresh_does_not_repeat_transition(apply_target, capsys):
     _apply(apply_target, capsys)
     path, row = _unfinished(apply_target)
@@ -114,6 +119,7 @@ def test_unknown_refresh_does_not_repeat_transition(apply_target, capsys):
     assert len(store.events(path.parent.parent)) == before
 
 
+@requires_dispatch_apply
 def test_unknown_live_child_still_obeys_deadline(apply_target, capsys, monkeypatch):
     monkeypatch.setenv("FAKE_DISPATCH_SLEEP", "60")
     _apply(apply_target, capsys, "--no-wait", "--deadline", "30")
@@ -136,6 +142,7 @@ def test_unknown_live_child_still_obeys_deadline(apply_target, capsys, monkeypat
             apply.Apply(apply_target)._cancel_adopted(row)
 
 
+@requires_dispatch_apply
 def test_reset_can_explicitly_release_dead_unknown_intent(apply_target, capsys):
     _apply(apply_target, capsys)
     path, row = _unfinished(apply_target)
@@ -165,6 +172,7 @@ def test_reset_can_explicitly_release_dead_unknown_intent(apply_target, capsys):
 
 
 @pytest.mark.parametrize("pid", [None, "not-a-pid", True, -1])
+@requires_dispatch_apply
 def test_bad_launch_pid_is_isolated_to_its_intent(apply_target, capsys, pid):
     _apply(apply_target, capsys)
     path, row = _unfinished(apply_target)
@@ -175,6 +183,7 @@ def test_bad_launch_pid_is_isolated_to_its_intent(apply_target, capsys, pid):
     assert work_cmd._read_task_ledger(apply_target)["tasks"][0]["status"] == "in_progress"
 
 
+@requires_dispatch_apply
 def test_detached_infrastructure_retry_reports_latest_success(apply_target, capsys, monkeypatch):
     monkeypatch.setenv("FAKE_DISPATCH_STATUS", "failed")
     monkeypatch.setenv("FAKE_DISPATCH_INFRA", "1")
@@ -191,6 +200,7 @@ def test_detached_infrastructure_retry_reports_latest_success(apply_target, caps
     assert work_cmd._read_task_ledger(apply_target)["tasks"][0]["status"] == "in_progress"
 
 
+@requires_dispatch_apply
 def test_release_unknown_refuses_live_child_without_writing_reset(apply_target, capsys, monkeypatch):
     monkeypatch.setenv("FAKE_DISPATCH_SLEEP", "60")
     _apply(apply_target, capsys, "--no-wait")

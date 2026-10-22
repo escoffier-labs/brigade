@@ -11,7 +11,7 @@ import pytest
 
 from brigade import cli, localio, runguard, work_cmd
 from brigade.work_cmd import dispatch, dispatch_apply as apply, dispatch_state as store
-from tests.test_work_dispatch import _tasks, dispatch_target  # noqa: F401
+from tests.test_work_dispatch import _tasks, dispatch_target, requires_dispatch_apply  # noqa: F401
 from tests.test_work_dispatch_apply import _apply, _intents
 from tests.test_work_dispatch_apply import apply_target as dispatch_apply_target  # noqa: F401
 
@@ -34,6 +34,7 @@ def _unfinished(target):
 
 
 @pytest.mark.parametrize("error", [ValueError("worktree add failed"), OSError("worktree inaccessible")])
+@requires_dispatch_apply
 def test_workspace_error_releases_claim_and_continues_sibling(apply_target, capsys, monkeypatch, error):
     _tasks(apply_target, [["a.py"], ["b.py"]])
     git = apply._git
@@ -54,6 +55,7 @@ def test_workspace_error_releases_claim_and_continues_sibling(apply_target, caps
     _apply(apply_target, capsys, "--max", "0")
 
 
+@requires_dispatch_apply
 def test_removed_finished_worktree_does_not_wedge_reconciliation(apply_target, capsys):
     _apply(apply_target, capsys)
     _, row = _unfinished(apply_target)
@@ -67,6 +69,7 @@ def test_removed_finished_worktree_does_not_wedge_reconciliation(apply_target, c
     _apply(apply_target, capsys, "--max", "0")
 
 
+@requires_dispatch_apply
 def test_unexpected_session_exception_cancels_supervised_children(apply_target, capsys, monkeypatch):
     monkeypatch.setenv("FAKE_DISPATCH_SLEEP", "60")
 
@@ -83,6 +86,7 @@ def test_unexpected_session_exception_cancels_supervised_children(apply_target, 
 
 
 @pytest.mark.parametrize("reopen", [False, True])
+@requires_dispatch_apply
 def test_completed_task_can_be_dispatched_after_release_or_reopen(apply_target, capsys, reopen):
     _apply(apply_target, capsys)
     assert store.exclusions(apply_target)["task-0"] == "completed-unlanded"
@@ -97,6 +101,7 @@ def test_completed_task_can_be_dispatched_after_release_or_reopen(apply_target, 
     assert all(row["state"] == "completed" for row in _intents(apply_target))
 
 
+@requires_dispatch_apply
 def test_reset_clears_completed_revision_exclusion(apply_target, capsys):
     _apply(apply_target, capsys)
     store.reset(target=apply_target, task_id="task-0", reason="Reviewed for rework")
@@ -107,6 +112,7 @@ def test_reset_clears_completed_revision_exclusion(apply_target, capsys):
     ("state", "kind"),
     [("failed", "budget-exhausted"), ("orphaned", "dispatch-orphaned"), ("canceled", "operator-cancelled")],
 )
+@requires_dispatch_apply
 def test_policy_and_orphan_terminals_do_not_advance_breaker(apply_target, capsys, state, kind):
     _apply(apply_target, capsys)
     path = next((apply_target / ".brigade/dispatch").glob("dispatch-*/intents/*.json"))
@@ -117,6 +123,7 @@ def test_policy_and_orphan_terminals_do_not_advance_breaker(apply_target, capsys
 
 
 @pytest.mark.parametrize("status", ["ok", "running"])
+@requires_dispatch_apply
 def test_corrupt_child_journal_holds_unknown_lane_and_continues(apply_target, capsys, status):
     _apply(apply_target, capsys)
     path, row = _unfinished(apply_target)
@@ -148,6 +155,7 @@ def test_windows_apply_refused_before_dispatch_writes(apply_target, capsys, monk
     assert cli.main(["work", "dispatch", "--target", str(apply_target), "--dry-run"]) == 0
 
 
+@requires_dispatch_apply
 def test_lost_race_promotion_is_receipted(apply_target, capsys, monkeypatch):
     _tasks(apply_target, [["a.py"], ["b.py"]])
     claim = apply.locking._claim_task
@@ -166,6 +174,7 @@ def test_lost_race_promotion_is_receipted(apply_target, capsys, monkeypatch):
     )
 
 
+@requires_dispatch_apply
 def test_reserve_intent_crash_retains_backfill_receipt(apply_target, capsys, monkeypatch):
     from tests.test_work_dispatch_apply import DispatchCrash
 
@@ -199,6 +208,7 @@ def test_reserve_intent_crash_retains_backfill_receipt(apply_target, capsys, mon
     )
 
 
+@requires_dispatch_apply
 def test_cancellation_uses_shared_taxonomy(apply_target, capsys, monkeypatch):
     monkeypatch.setenv("FAKE_DISPATCH_SLEEP", "60")
     refresh = apply.Apply.refresh
@@ -213,6 +223,7 @@ def test_cancellation_uses_shared_taxonomy(apply_target, capsys, monkeypatch):
     assert _intents(apply_target)[0]["terminal"]["failure_kind"] == "operator-cancelled"
 
 
+@requires_dispatch_apply
 def test_dispatch_worktree_is_discovered_and_prunable_when_clean(apply_target, capsys):
     _apply(apply_target, capsys)
     (row,) = _intents(apply_target)

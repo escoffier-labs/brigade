@@ -67,6 +67,11 @@ def _dir_names_are_timestamp_prefixed(children: list[Path]) -> bool:
     return bool(children) and all(_TIMESTAMP_PREFIXED_DIR.match(child.name) for child in children)
 
 
+def timestamp_prefix(name: str) -> str:
+    """Return the second-resolution ``YYYYMMDD-HHMMSS`` prefix of a bundle dir name."""
+    return name[:15]
+
+
 def list_bundles(
     roots: Iterable[Path],
     read: Callable[[Path], dict[str, Any] | None],
@@ -95,8 +100,10 @@ def latest_bundles(
     """Read up to limit newest bundles without decoding the full history when possible.
 
     Production bundle dirs are timestamp-prefixed and sortable by name; in that case
-    only the newest ``limit`` dirs are decoded. Legacy or arbitrary dir names fall
-    back to created_at ordering, which may require decoding every bundle.
+    only the newest ``limit`` dirs are decoded, plus any dirs that share the last
+    decoded dir's second, because the random suffix does not order bundles created
+    in the same second. Legacy or arbitrary dir names fall back to created_at
+    ordering, which may require decoding every bundle.
     """
     if limit < 1:
         return []
@@ -107,12 +114,23 @@ def latest_bundles(
     children = _bundle_dirs(roots, skip_child=skip_child)
     bundles: list[dict[str, Any]] = []
     if _dir_names_are_timestamp_prefixed(children):
+        boundary: str | None = None
+        unkeyed: list[dict[str, Any]] = []
         for child in children:
-            payload = read(child)
-            if payload is not None:
-                bundles.append(payload)
-            if len(bundles) >= limit:
+            if boundary is not None and timestamp_prefix(child.name) != boundary:
                 break
+            payload = read(child)
+            if payload is None:
+                continue
+            if not sort_key(payload):
+                # A payload with no created_at or id sorts after every keyed bundle,
+                # so it cannot end the scan.
+                unkeyed.append(payload)
+                continue
+            bundles.append(payload)
+            if boundary is None and len(bundles) >= limit:
+                boundary = timestamp_prefix(child.name)
+        bundles.extend(unkeyed)
     else:
         for child in children:
             payload = read(child)
@@ -123,6 +141,7 @@ def latest_bundles(
                 bundles.sort(key=sort_key, reverse=True)
                 del bundles[limit:]
     bundles.sort(key=sort_key, reverse=True)
+    del bundles[limit:]
     return bundles
 
 
