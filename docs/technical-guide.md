@@ -2142,10 +2142,10 @@ through `gh search issues`, with the unauthenticated GitHub search API as a
 fallback when `gh` fails or is unavailable. API reads have a 10-second timeout
 and a 60 KB response cap. Search failure prints `dedup skipped`. A dry run
 makes no network calls. Fingerprints use the recorded command, exception type,
-exit code, failing probe names, Brigade minor version, and a hash of the lowercased
-summary with paths, digits, and identifiers normalized. Different bugs with the
-same failing command or probe receive different fingerprints. Repeats with the
-same normalized summary and failure facts retain the same fingerprint.
+exit code, failing probe names, and Brigade minor version when failure facts
+exist. The normalized summary hash is used only when those facts are absent.
+Reports with the same failure facts share a fingerprint even when their
+summaries differ.
 The bundle channel comes from the updater's local install state when its version
 matches the running CLI. Missing or stale state reports `unknown` instead of
 assuming a stable release.
@@ -2198,10 +2198,19 @@ sharing to five attempts per UTC day and one per fingerprint every five
 minutes. An append-only `attempts/YYYY-MM-DD.jsonl` log under `bug-reports/`
 records each attempt before transport, including retries of the same report
 ID and failed transports. The limit reads only today's and yesterday's logs,
-at most five records and 60 KB per log. A pending submission also blocks
-retries for five minutes.
-Reports with the same failure facts and normalized summary share a fingerprint
-and cooldown.
+at most five records and 60 KB per log. A pending submission blocks retries
+for five minutes. After that window, Brigade searches for its fingerprint
+before another attempt. The loaded receipt is checked even when its attempt
+log is older than yesterday. If a fingerprint match exists or the search fails,
+it blocks creation of another issue. A match from the broader command and
+exception search alone does not block the retry. Use `--comment-on` with a
+shown duplicate to add the report to that issue. With `--yes`, a fingerprint
+match always blocks creation of another issue. A pending comment blocks another
+comment on the same issue because an issue search cannot confirm comment
+delivery. Older pending comment receipts without a target block comment retries
+on any issue. Pending URL and email handoffs do not count as uncertain remote
+submissions. Usage errors, including
+handler validation errors, do not replace the last recorded CLI failure.
 `BRIGADE_BUG_REPORT=never` disables sharing while allowing `--dry-run` and
 `--via file`. No doctor, status command, or hook starts bug reporting.
 
@@ -2310,8 +2319,11 @@ download-metrics JSON supplies matching 30-day PyPI and npm download counts.
 Unavailable providers stay unknown. If no source succeeds, collection exits 1
 without publishing. `--no-publish` prints a successful snapshot instead of
 posting it. Collection is explicit and no timer is installed.
+The Cloudflare status panel is opt-in with `fleet.stats.status_panel = true`;
+configure the expected `repository_head` in the same section. See the fleet
+statistics settings below in [Fleet sync](fleet-sync.md).
 
-The closed `brigade.admin-stats.v1` snapshot and page expose these fields:
+The closed `brigade.admin-stats.v2` snapshot and page expose these fields:
 
 - `schema`, `snapshot_id`, `taken_at`, `source_set`.
 - `weeks`, `daily`, `downloads`, `digest`.
@@ -2320,6 +2332,28 @@ The closed `brigade.admin-stats.v1` snapshot and page expose these fields:
 - `weeks.versions.active_sources`, `weeks.upgrades.from_version`, `weeks.upgrades.to_version`, `weeks.upgrades.active_sources`.
 - `daily.day`, `daily.worker_requests`, `daily.worker_errors`, `downloads.pypi`.
 - `downloads.npm`.
+- `cloudflare`, `cloudflare.collected_at`, `cloudflare.credential`.
+- `cloudflare.worker_version`, `cloudflare.worker_published_at`, `cloudflare.repository_head`.
+- `cloudflare.d1_rows`, `cloudflare.last_purge`, `cloudflare.requests_24h`, `cloudflare.errors_24h`.
+
+The Hub continues to read retained v1 snapshots during the transition.
+
+The Cloudflare panel uses only fixed Wrangler reads (`deployments status`,
+`deployments list`, `versions list`, `d1 info`, and one fixed aggregate SELECT)
+and a fixed GraphQL viewer check plus the 24-hour Analytics query. The collector
+publishes normalized fields only. API tokens, raw CLI output, and error text do
+not enter the snapshot. A missing credential is labeled `credential unavailable`;
+failed cells and snapshots older than 15 minutes render as unknown. The panel
+follows the newest retained snapshot and is hidden when that snapshot carries no
+Cloudflare observation (the panel is off, or it is a v1 snapshot). Wrangler
+does not report a D1 purge event timestamp, so `cloudflare.last_purge` remains
+unknown until the Worker records that event. The latest retained observation
+date is not a purge timestamp.
+
+An operator-triggered mutating path is a separate follow-up, out of scope here.
+It would require an admin bearer, an exact argv preview before each action, a
+Brigade receipt for every action, and no unattended execution. Deploy, rollback,
+secret changes, migration application, and deletion remain denied.
 
 `weeks`, `daily`, version cells and upgrade cells are arrays. Counts are nullable
 nonnegative integers. Source counts below 5 become `null`, including zero.

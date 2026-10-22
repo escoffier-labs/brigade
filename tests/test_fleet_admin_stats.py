@@ -4,7 +4,7 @@ import copy
 import io
 import json
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from email.message import Message
 
 import pytest
@@ -106,6 +106,22 @@ def test_migration_retention_and_idempotent_snapshot(tmp_path):
     assert stats.load_view(conn, now=NOW)["latest"] == snapshot()
     conn.execute("PRAGMA query_only=ON")
     assert stats.load_view(conn, now=NOW)["weeks"][0]["week"] == "2026-W43"
+    conn.close()
+
+
+def test_load_view_keeps_retained_v1_snapshot_available(tmp_path):
+    from brigade import fleet_admin_stats as stats
+
+    value = snapshot()
+    legacy = {key: item for key, item in value.items() if key != "cloudflare"}
+    legacy["schema"] = stats.LEGACY_SCHEMA
+    legacy["digest"] = legacy["snapshot_id"] = stats._digest(legacy)
+    conn = fleet_hub.init_db(tmp_path / "hub.db")
+    stats.store(conn, legacy, now=NOW)
+
+    view = stats.load_view(conn, now=NOW)
+    assert view["latest"] == legacy
+    assert view["cloudflare"] is None
     conn.close()
 
 
@@ -234,11 +250,97 @@ def test_page_unknown_partial_privacy_and_docs():
     for text in ("unknown", "partial", "active sources, not people or installs", "Solomon Neas", "erasure", "below 5"):
         assert text in html
     assert 'href="https://github.com/escoffier-labs/brigade/blob/main/SECURITY.md"' in html
-    assert set(re.findall(r'data-field="([^"]+)"', html)) == set(stats.FIELD_PATHS)
+    assert set(re.findall(r'data-field="([^"]+)"', html)) == {
+        field for field in stats.FIELD_PATHS if not field.startswith("cloudflare")
+    }
     for doc in ("docs/technical-guide.md", "docs/fleet-sync.md"):
         listed = Path(doc).read_text().split("expose these fields:\n\n", 1)[1].split("\n\n", 1)[0]
         assert set(re.findall(r"`([^`]+)`", listed)) == set(stats.FIELD_PATHS)
     assert "unknown" in page.render({"latest": None, "weeks": []}, nonce="example", now=NOW)
+
+
+def test_cloudflare_panel_shows_fixture_and_hides_stale_values():
+    from brigade import fleet_admin_stats as stats, fleet_admin_stats_page as page
+
+    cloudflare = {
+        "collected_at": "2026-10-20T12:00:00Z",
+        "credential": "available",
+        "worker_version": "example-version",
+        "worker_published_at": "2026-10-20T11:55:00Z",
+        "repository_head": "a" * 40,
+        "d1_rows": 120,
+        "last_purge": "2026-10-20T11:00:00Z",
+        "requests_24h": 840,
+        "errors_24h": 2,
+    }
+    value = stats.snapshot(
+        taken_at=NOW,
+        source_set=["cloudflare"],
+        weeks=[],
+        daily=[],
+        downloads={"pypi": None, "npm": None},
+        cloudflare=cloudflare,
+    )
+    fresh = page.render({"latest": value, "cloudflare": value["cloudflare"], "weeks": []}, nonce="example", now=NOW)
+    assert 'data-field="cloudflare.worker_version">example-version</span>' in fresh
+    assert "credential unavailable" not in fresh
+    unavailable = dict(cloudflare, credential="unavailable", worker_version=None, d1_rows=None)
+    unavailable_snapshot = stats.snapshot(
+        taken_at=NOW,
+        source_set=["cloudflare"],
+        weeks=[],
+        daily=[],
+        downloads={"pypi": None, "npm": None},
+        cloudflare=unavailable,
+    )
+    unavailable_html = page.render(
+        {"latest": unavailable_snapshot, "cloudflare": unavailable_snapshot["cloudflare"], "weeks": []},
+        nonce="example",
+        now=NOW,
+    )
+    assert "credential unavailable" in unavailable_html
+    assert 'data-field="cloudflare.d1_rows">unknown</span>' in unavailable_html
+    stale = page.render(
+        {"latest": value, "cloudflare": value["cloudflare"], "weeks": []},
+        nonce="example",
+        now=NOW + timedelta(minutes=16),
+    )
+    assert 'data-field="cloudflare.credential">unknown</span>' in stale
+    assert "credential unavailable" not in stale
+    assert 'data-field="cloudflare.worker_version">unknown</span>' in stale
+
+
+def test_cloudflare_panel_is_hidden_without_an_observation():
+    from brigade import fleet_admin_stats_page as page
+
+    html = page.render({"latest": snapshot(), "weeks": []}, nonce="example", now=NOW)
+    assert 'data-field="cloudflare"' not in html
+
+
+def test_cloudflare_snapshot_rejects_unapproved_fields():
+    from brigade import fleet_admin_stats as stats
+
+    cloudflare = {
+        "collected_at": "2026-10-20T12:00:00Z",
+        "credential": "available",
+        "worker_version": None,
+        "worker_published_at": None,
+        "repository_head": None,
+        "d1_rows": None,
+        "last_purge": None,
+        "requests_24h": None,
+        "errors_24h": None,
+        "token": "example-secret",
+    }
+    with pytest.raises(ValueError, match="fields"):
+        stats.snapshot(
+            taken_at=NOW,
+            source_set=["cloudflare"],
+            weeks=[],
+            daily=[],
+            downloads={"pypi": None, "npm": None},
+            cloudflare=cloudflare,
+        )
 
 
 @pytest.mark.parametrize("enabled", [False, True])
@@ -444,7 +546,76 @@ def test_daily_compaction_prefers_coverage_over_recency(tmp_path, sources):
     stats.store(conn, full, now=NOW)
     stats.store(conn, fewer, now=NOW + timedelta(hours=1))
     assert stats.load_view(conn, now=NOW)["latest"] == full
-    assert conn.execute("SELECT COUNT(*) FROM admin_stats_snapshots").fetchone()[0] == 1
+    # The newest snapshot is kept beside the best one: it carries the current opt-in state.
+    assert conn.execute("SELECT COUNT(*) FROM admin_stats_snapshots").fetchone()[0] == 2
+    conn.close()
+
+
+def test_daily_compaction_keeps_best_regular_and_newest_snapshot(tmp_path):
+    from datetime import timedelta
+    from brigade import fleet_admin_stats as stats
+
+    conn = fleet_hub.init_db(tmp_path / "hub.db")
+    full = stats.snapshot(
+        taken_at=NOW,
+        source_set=["d1", "worker", "downloads"],
+        weeks=[],
+        daily=[],
+        downloads={"pypi": 12, "npm": 5},
+    )
+    collected = NOW + timedelta(hours=1)
+    cloudflare = {
+        "collected_at": collected.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "credential": "available",
+        "worker_version": "example-version",
+        "worker_published_at": None,
+        "repository_head": None,
+        "d1_rows": 120,
+        "last_purge": None,
+        "requests_24h": 840,
+        "errors_24h": 2,
+    }
+    partial = stats.snapshot(
+        taken_at=collected,
+        source_set=["d1", "cloudflare"],
+        weeks=[],
+        daily=[],
+        downloads={"pypi": None, "npm": None},
+        cloudflare=cloudflare,
+    )
+    stats.store(conn, full, now=NOW)
+    stats.store(conn, partial, now=collected)
+
+    view = stats.load_view(conn, now=collected)
+    assert view["latest"] == full
+    assert view["cloudflare"] == cloudflare
+    assert conn.execute("SELECT COUNT(*) FROM admin_stats_snapshots").fetchone()[0] == 2
+    conn.close()
+
+
+def test_load_view_prefers_newest_day_before_source_coverage(tmp_path):
+    from datetime import timedelta
+    from brigade import fleet_admin_stats as stats
+
+    conn = fleet_hub.init_db(tmp_path / "hub.db")
+    older = stats.snapshot(
+        taken_at=NOW - timedelta(days=1),
+        source_set=["d1", "worker", "downloads"],
+        weeks=[],
+        daily=[],
+        downloads={"pypi": 12, "npm": 5},
+    )
+    today = stats.snapshot(
+        taken_at=NOW,
+        source_set=["d1", "worker"],
+        weeks=[],
+        daily=[],
+        downloads={"pypi": None, "npm": None},
+    )
+    stats.store(conn, older, now=NOW)
+    stats.store(conn, today, now=NOW)
+
+    assert stats.load_view(conn, now=NOW)["latest"] == today
     conn.close()
 
 
