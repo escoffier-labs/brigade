@@ -1023,16 +1023,22 @@ def _claims_page(rows: list[dict[str, Any]], *, limit: int) -> dict[str, Any]:
     }
 
 
-def _station_read(conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str) -> dict[str, Any]:
+def _station_read(
+    conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str, snapshot_write: bool = False
+) -> dict[str, Any]:
     """Read-only directory/claims for message credentials, without admin access."""
     from . import fleet_claim_display, fleet_hub, fleet_hub_message_grants as grants, fleet_hub_sessions
+    from . import fleet_hub_paging as paging
 
     action = raw["action"]
-    allowed = {"action", "all", "filter"} if action == "who" else {"action", "all", "limit"}
+    allowed = {"action", "all", "limit", "cursor"} | ({"filter"} if action == "who" else set())
     include_all = raw.get("all", False)
     query = raw.get("filter", "")
     if set(raw) - allowed or not isinstance(include_all, bool) or not isinstance(query, str):
         raise MessageError("invalid station read arguments")
+
+    limit = paging.page_limit(raw)
+    snapshot = paging.load(conn, raw, caller=caller)
 
     # Load the caller's grants once; checking every row with require_granted
     # would issue one query per claim or session.
@@ -1041,8 +1047,26 @@ def _station_read(conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str)
     def permitted(recipient: str) -> bool:
         return grants.permits(patterns, caller, recipient)
 
+    active_nodes = {str(row[0]) for row in conn.execute("SELECT node_id FROM nodes WHERE revoked_at IS NULL")}
+    active_principals = {
+        str(row[0])
+        for row in conn.execute("SELECT principal_id FROM fleet_message_principals WHERE revoked_at IS NULL")
+    }
+
+    def visible(key: str, row: dict[str, Any]) -> bool:
+        if key == "claims":
+            return permitted(str(row["owner_node"]))
+        identity = str(row["principal_id"] if key == "principals" else row["node_id"])
+        active = active_principals if key == "principals" else active_nodes
+        return identity in active and permitted(identity)
+
+    if snapshot is not None:
+        data, offsets, snapshot_id = snapshot
+        return paging.page(
+            conn, raw, data, caller=caller, limit=limit, visible=visible, offsets=offsets, snapshot_id=snapshot_id
+        )
+
     if action == "claims":
-        limit = _claims_page_limit(raw)
         if not caller.startswith("agent:"):
             rows = fleet_claim_display.list_display_claims(conn, include_all=include_all)
         else:
@@ -1051,7 +1075,10 @@ def _station_read(conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str)
                 for row in fleet_hub.list_claims(conn, include_all=include_all)
                 if permitted(row["owner_node"])
             ]
-        return _claims_page(rows, limit=limit)
+        rows.sort(key=lambda row: str(row.get("target", "")))
+        return paging.page(
+            conn, raw, {"claims": rows}, caller=caller, limit=limit, visible=visible, snapshot_write=snapshot_write
+        )
 
     nodes = [
         {"node_id": str(row[0])}
@@ -1081,10 +1108,11 @@ def _station_read(conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str)
         )
     ]
     needle = query.casefold()
-    return {
+    data = {
         key: [row for row in rows if any(needle in str(value).casefold() for value in row.values())]
         for key, rows in (("nodes", nodes), ("principals", principals), ("sessions", sessions))
     }
+    return paging.page(conn, raw, data, caller=caller, limit=limit, visible=visible, snapshot_write=snapshot_write)
 
 
 def handle(
@@ -1101,7 +1129,18 @@ def handle(
         raise MessageError("message request must be an object")
     action = raw.get("action")
     if action in ("who", "claims"):
-        return 200, _as_active_principal(conn, caller, lambda: _station_read(conn, raw, caller=caller), read_only=True)
+        from .fleet_hub_paging import SnapshotWriteRequired
+
+        try:
+            result = _as_active_principal(conn, caller, lambda: _station_read(conn, raw, caller=caller), read_only=True)
+        except SnapshotWriteRequired:
+            # Small reads never take write admission. Rebuild a new snapshot
+            # after BEGIN IMMEDIATE so its data and authorization are current,
+            # and concurrent snapshot writers cannot race the storage caps.
+            result = _as_active_principal(
+                conn, caller, lambda: _station_read(conn, raw, caller=caller, snapshot_write=True)
+            )
+        return 200, result
     if action == "send":
         return 201, {"message": send(conn, raw, sender=caller, reply_to=raw.get("reply_to"))}
     if action == "sent":

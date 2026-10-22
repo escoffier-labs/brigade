@@ -36,8 +36,13 @@ def tool_specs() -> list[dict[str, Any]]:
     definitions = [
         (
             "fleet_who",
-            "List interactive sessions and permitted active recipients.",
-            {"filter": {"type": "string"}, "all": boolean},
+            "List sessions and permitted recipients; pass next_cursor as cursor to continue a snapshot.",
+            {
+                "filter": {"type": "string"},
+                "all": boolean,
+                "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 200},
+                "cursor": text,
+            },
             [],
         ),
         (
@@ -83,10 +88,11 @@ def tool_specs() -> list[dict[str, Any]]:
         ),
         (
             "fleet_claims",
-            "List repository claims without changing ownership; truncated is true when the list was cut.",
+            "List a stable snapshot of repository claims; pass next_cursor as cursor to continue.",
             {
                 "all": boolean,
                 "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 200},
+                "cursor": text,
             },
             [],
         ),
@@ -348,10 +354,12 @@ class FleetMcp:
     ) -> dict[str, Any]:
         # One captured credential for the whole tool call, as the message layer requires.
         authority = self._authority()
-        if name == "fleet_who":
-            return _frame_directory(messages._online({"action": "who", **args}, authority=authority))
-        if name == "fleet_claims":
-            return _frame_directory(messages._online({"action": "claims", **args}, authority=authority))
+        if name in {"fleet_who", "fleet_claims"}:
+            action = "who" if name == "fleet_who" else "claims"
+            payload = messages._online({"action": action, **args}, authority=authority)
+            # The hub-issued continuation token is protocol data, not peer text.
+            cursor = payload.pop("next_cursor", None)
+            return {**_frame_directory(payload), "next_cursor": cursor}
         if name == "fleet_send":
             result = messages.send(
                 recipient=args["to"],

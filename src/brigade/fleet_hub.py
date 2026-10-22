@@ -117,7 +117,7 @@ from .fleet_hub_status import (
     latest_status as latest_status,
 )
 
-SCHEMA_VERSION = 37
+SCHEMA_VERSION = 38
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
@@ -651,6 +651,10 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     # recoverable principal enrollment and an unacked-recipient index.
     # v30 -> v31 adds message metadata columns and external agent send grants.
     fleet_hub_messages.ensure_schema(conn)
+    # v37 -> v38: bounded, expiring directory and claims paging snapshots.
+    from . import fleet_hub_paging
+
+    fleet_hub_paging.ensure_schema(conn)
     # v31 -> v32 adds model_policy.t3_model (native T3 launch model) through
     # fleet_hub_model_roster.ensure_schema's additive column migration.
     # v34 -> v36: aggregate snapshots and compact weekly administrator history.

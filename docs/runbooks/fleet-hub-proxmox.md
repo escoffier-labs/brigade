@@ -794,7 +794,17 @@ Fences use random per-call markers and neutralize embedded fence prefixes.
 Node credentials can deliberately list all active agent principals and their
 labels through `fleet_who`. Agent credentials see only recipients allowed by
 their grants. Session filtering by permitted nodes happens before the row limit.
+`fleet_who` and `fleet_claims` accept `limit` from 1 to 500 (default 200).
+Pass the opaque `next_cursor` back as `cursor` with the same query to continue
+until `next_cursor` is null. Continuation pages retain the original snapshot
+while checking the caller's current permissions. Start a new query to see
+enrollments or claim changes made after that snapshot.
+Snapshots expire after 10 minutes. Storage is capped at eight snapshots per
+caller, 128 snapshots and 64 MiB across the hub, and 16 MiB per snapshot.
+Capacity and expired-cursor errors require a fresh query after capacity becomes
+available. Pages also enforce a serialized byte budget below the client cap.
 Node `fleet_claims` results match `GET /claims`, including active Grok Bot lease
 rows. Agent claim results include only granted owner nodes and omit `job`,
-`session`, and `owner_conductor`. Directory and claim reads use a read transaction
-that checks the caller's active status within the same snapshot.
+`session`, and `owner_conductor`. Small directory and claim reads use a read
+transaction. Creating a continuation snapshot takes write admission and
+rechecks the caller's active status and grants before saving it.
