@@ -22,7 +22,8 @@ text block for the harness to inject as additional context. Rules:
   cursor name, so lock files never accumulate and never need unlinking: an
   unlinked lock held by a running hook would let the next hook lock a new
   inode and run alongside the holder. Two sessions on one stripe at the same
-  instant skip, as overlapping hooks of one session do.
+  instant skip, as overlapping hooks of one session do. Delivery and pruning
+  take that stripe through one name (``_lock_file``), so they exclude each other.
 * Cursor I/O stays inside the directory descriptor that ``_spool_lock``
   validated. Windows has no ``dir_fd`` support and keeps path-based I/O.
 * The hub scopes every read to the calling credential's own inbox, so a
@@ -31,7 +32,6 @@ text block for the harness to inject as additional context. Rules:
 
 from __future__ import annotations
 
-import bisect
 import errno
 import json
 import os
@@ -159,37 +159,77 @@ def _write_state(
 
 
 def _lock_path(path: Path) -> Path:
-    """The shared lock a cursor file is guarded by: one of ``LOCK_STRIPES`` fixed names."""
+    """The spool a cursor file is guarded by: one of ``LOCK_STRIPES`` fixed names.
+
+    This is the argument ``_spool_lock`` takes, which appends ``.lock``; the file that
+    is actually flocked is ``_lock_file``.
+    """
     stripe = int(localio.stable_hash(path.name)[:8], 16) % LOCK_STRIPES
     return path.with_name(f"lock-{stripe:02x}")
+
+
+def _lock_file(path: Path) -> Path:
+    """The file both delivery (via ``_spool_lock``) and pruning flock for a cursor file."""
+    from .fleet_client_spool_lock import _spool_lock_name
+
+    spool = _lock_path(path)
+    return spool.with_name(_spool_lock_name(spool))
 
 
 def _lstat(directory: Path, name: str, dir_fd: int | None) -> os.stat_result:
     return os.stat(name if dir_fd is not None else str(directory / name), dir_fd=dir_fd, follow_symlinks=False)
 
 
+def _cursor_names(
+    directory: Path, dir_fd: int | None, *, skip_through: str = "", stop_at: str = "", limit: int
+) -> list[str]:
+    """Up to ``limit`` cursor names in listing order, lazily: nothing is listed in full or sorted.
+
+    ``skip_through`` drops everything up to and including that name; if it never
+    appears the result is empty. ``stop_at`` ends the walk before that name.
+    """
+    names: list[str] = []
+    skipping = bool(skip_through)
+    with os.scandir(dir_fd if dir_fd is not None else directory) as entries:
+        for entry in entries:
+            name = entry.name
+            if skipping:
+                skipping = name != skip_through
+                continue
+            if name == stop_at:
+                break
+            if name.endswith(".json"):
+                names.append(name)
+                if len(names) >= limit:
+                    break
+    return [] if skipping else names
+
+
 def _scan_window(directory: Path, dir_fd: int | None) -> list[str]:
     """Up to ``PRUNE_SCAN_LIMIT`` cursor names, resuming after the last name the previous pass reached.
 
     Only cursor files count: the lock files and the position marker are skipped by
-    suffix. The directory listing is sorted so the marker is a stable position, and
-    the window wraps past the end, so every cursor is visited within
-    ``ceil(cursors / PRUNE_SCAN_LIMIT)`` passes however many fresh ones sit ahead of it.
+    suffix. A small directory is read once and returned whole. A large one is walked
+    in listing order from the name saved in the marker and wraps to the start, so
+    the work done on cursors (one stat each) is bounded by ``PRUNE_SCAN_LIMIT`` and
+    nothing is sorted or held in full; every cursor is visited within
+    ``ceil(cursors / PRUNE_SCAN_LIMIT)`` passes while the listing order holds.
     """
     from . import fleet_client as client
 
-    with os.scandir(dir_fd if dir_fd is not None else directory) as entries:
-        names = sorted(entry.name for entry in entries if entry.name.endswith(".json"))
-    if len(names) <= PRUNE_SCAN_LIMIT:
-        return names
+    head = _cursor_names(directory, dir_fd, limit=PRUNE_SCAN_LIMIT + 1)
+    if len(head) <= PRUNE_SCAN_LIMIT:
+        return head
     try:
         fd = client._open_private(directory / PRUNE_MARKER, os.O_RDONLY, dir_fd=dir_fd)
         with os.fdopen(fd, "rb") as handle:
             marker = handle.read(MAX_STATE_BYTES).decode("utf-8", "replace").strip()
     except (OSError, client.FleetClientError):
         marker = ""
-    start = bisect.bisect_right(names, marker) if marker else 0
-    window = (names[start:] + names[:start])[:PRUNE_SCAN_LIMIT]
+    window = _cursor_names(directory, dir_fd, skip_through=marker, limit=PRUNE_SCAN_LIMIT) if marker else []
+    if len(window) < PRUNE_SCAN_LIMIT:
+        # Wrap: the rest comes from the start of the listing, up to where the pass began.
+        window += _cursor_names(directory, dir_fd, stop_at=marker, limit=PRUNE_SCAN_LIMIT - len(window))
     try:
         _write_atomic(directory / PRUNE_MARKER, window[-1] + "\n", dir_fd)
     except OSError:
@@ -231,7 +271,7 @@ def _try_lock(fd: int, client: Any) -> bool:
 
 
 def _unlink_if_still_stale(directory: Path, name: str, cutoff: float, dir_fd: int | None) -> None:
-    """Unlink a stale cursor, but only when its stripe lock is free and it is still stale under it.
+    """Unlink a stale cursor, but only when the lock delivery holds is free and it is still stale under it.
 
     The scan's age check is advisory: a hook can refresh the cursor between that
     check and this lock. The decision is repeated here, no-follow, once the lock is
@@ -240,7 +280,7 @@ def _unlink_if_still_stale(directory: Path, name: str, cutoff: float, dir_fd: in
     """
     from . import fleet_client as client
 
-    lock = _lock_path(directory / name)
+    lock = _lock_file(directory / name)
     flags = os.O_RDWR | os.O_CREAT | client._O_NOFOLLOW | client._O_CLOEXEC
     try:
         fd = os.open(lock.name if dir_fd is not None else str(lock), flags, 0o600, dir_fd=dir_fd)
