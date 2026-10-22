@@ -58,47 +58,40 @@ def wrangler_argv(database: str, query: str) -> list[str]:
     return ["wrangler", "d1", "execute", database, "--remote", "--json", "--command", QUERIES[query]]
 
 
-def status_wrangler_argv(worker: str, database: str, action: str) -> list[str]:
+def status_wrangler_argv(worker: str | None, database: str | None, action: str) -> list[str]:
     """Build only the named read operations used by the Deck status panel."""
-    if not isinstance(worker, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", worker):
-        raise ValueError("invalid stats Worker setting")
-    if not isinstance(database, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", database):
-        raise ValueError("invalid stats database setting")
-    commands = {
-        "deployments-status": ["wrangler", "deployments", "status", "--name", worker, "--json"],
-        "deployments-list": ["wrangler", "deployments", "list", "--name", worker, "--json"],
-        "versions-list": ["wrangler", "versions", "list", "--name", worker, "--json"],
-        "d1-info": ["wrangler", "d1", "info", database, "--json"],
-        "d1-counts": ["wrangler", "d1", "execute", database, "--remote", "--json", "--command", STATUS_QUERY],
-    }
-    try:
-        return commands[action]
-    except (KeyError, TypeError):
-        raise ValueError("unknown Cloudflare status read") from None
+    if action in ("deployments-status", "deployments-list", "versions-list"):
+        if not isinstance(worker, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", worker):
+            raise ValueError("invalid stats Worker setting")
+        return {
+            "deployments-status": ["wrangler", "deployments", "status", "--name", worker, "--json"],
+            "deployments-list": ["wrangler", "deployments", "list", "--name", worker, "--json"],
+            "versions-list": ["wrangler", "versions", "list", "--name", worker, "--json"],
+        }[action]
+    if action in ("d1-info", "d1-counts"):
+        if not isinstance(database, str) or not re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", database):
+            raise ValueError("invalid stats database setting")
+        if action == "d1-info":
+            return ["wrangler", "d1", "info", database, "--json"]
+        return ["wrangler", "d1", "execute", database, "--remote", "--json", "--command", STATUS_QUERY]
+    raise ValueError("unknown Cloudflare status read")
 
 
 def _status_read(argv: list[str]) -> bool:
     if any(not isinstance(part, str) for part in argv):
         return False
     if len(argv) == 6 and argv[:3] in (["wrangler", "deployments", "status"], ["wrangler", "deployments", "list"]):
-        return (
-            argv[3] == "--name"
-            and bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", argv[4]))
-            and argv[5] == "--json"
-        )
+        if argv[3] != "--name" or argv[5] != "--json":
+            return False
+        action = "deployments-status" if argv[2] == "status" else "deployments-list"
+        return argv == status_wrangler_argv(argv[4], None, action)
     if len(argv) == 6 and argv[:3] == ["wrangler", "versions", "list"]:
         return (
-            argv[3] == "--name"
-            and bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", argv[4]))
-            and argv[5] == "--json"
+            argv[3] == "--name" and argv[5] == "--json" and argv == status_wrangler_argv(argv[4], None, "versions-list")
         )
     if len(argv) == 5 and argv[:3] == ["wrangler", "d1", "info"]:
-        return bool(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9_-]{0,127}", argv[3])) and argv[4] == "--json"
-    return (
-        len(argv) == 8
-        and argv[-1] == STATUS_QUERY
-        and argv == status_wrangler_argv("example-worker", argv[3], "d1-counts")
-    )
+        return argv[4] == "--json" and argv == status_wrangler_argv(None, argv[3], "d1-info")
+    return len(argv) == 8 and argv[-1] == STATUS_QUERY and argv == status_wrangler_argv(None, argv[3], "d1-counts")
 
 
 def run_wrangler(argv: list[str], *, account: str | None = None, token_envs: tuple[str, ...] = ()) -> Any:
@@ -309,16 +302,19 @@ def cloudflare_status(settings: dict[str, Any], *, now: datetime | None = None) 
     repository_head = settings.get("repository_head")
     if isinstance(repository_head, str) and re.fullmatch(r"[A-Za-z0-9._+-]{1,128}", repository_head):
         result["repository_head"] = repository_head
-    wrangler_ok = False
-    if isinstance(worker, str) and isinstance(database, str):
+    worker_reads: dict[str, tuple[bool, Any]] = {}
+    d1_reads: dict[str, tuple[bool, Any]] = {}
+    if isinstance(worker, str) or isinstance(database, str):
         token_envs = tuple(
             settings[key] for key in ("analytics_token_env", "d1_token_env") if isinstance(settings.get(key), str)
         )
 
         def read(action: str) -> tuple[bool, Any]:
             try:
+                worker_name = worker if action in ("deployments-status", "deployments-list", "versions-list") else None
+                database_name = database if action in ("d1-info", "d1-counts") else None
                 value = run_wrangler(
-                    status_wrangler_argv(worker, database, action),
+                    status_wrangler_argv(worker_name, database_name, action),
                     account=settings.get("account"),
                     token_envs=token_envs,
                 )
@@ -326,15 +322,20 @@ def cloudflare_status(settings: dict[str, Any], *, now: datetime | None = None) 
                 return False, None
             return True, value
 
-        reads = {
-            action: read(action)
-            for action in ("deployments-status", "deployments-list", "versions-list", "d1-info", "d1-counts")
-        }
-        wrangler_ok = any(succeeded for succeeded, _ in reads.values())
-        current = reads["deployments-status"][1]
-        deployments = reads["deployments-list"][1]
-        versions = reads["versions-list"][1]
+        if isinstance(worker, str):
+            worker_reads = {
+                action: read(action) for action in ("deployments-status", "deployments-list", "versions-list")
+            }
+        if isinstance(database, str):
+            d1_reads = {action: read(action) for action in ("d1-info", "d1-counts")}
+    worker_ok = any(succeeded for succeeded, _ in worker_reads.values())
+    d1_ok = any(succeeded for succeeded, _ in d1_reads.values())
+    wrangler_ok = worker_ok or d1_ok
+    current = worker_reads.get("deployments-status", (False, None))[1]
+    deployments = worker_reads.get("deployments-list", (False, None))[1]
+    versions = worker_reads.get("versions-list", (False, None))[1]
 
+    if isinstance(worker, str):
         deployment = None
         if isinstance(current, dict):
             deployment = current.get("latest")
@@ -367,13 +368,13 @@ def cloudflare_status(settings: dict[str, Any], *, now: datetime | None = None) 
                 )
                 break
 
-        if reads["d1-counts"][0]:
-            try:
-                rows = _results(reads["d1-counts"][1])
-                if len(rows) == 1 and type(rows[0].get("row_count")) is int and rows[0]["row_count"] >= 0:
-                    result["d1_rows"] = rows[0]["row_count"]
-            except (ValueError, KeyError, TypeError, AttributeError):
-                pass
+    if d1_reads.get("d1-counts", (False, None))[0]:
+        try:
+            rows = _results(d1_reads["d1-counts"][1])
+            if len(rows) == 1 and type(rows[0].get("row_count")) is int and rows[0]["row_count"] >= 0:
+                result["d1_rows"] = rows[0]["row_count"]
+        except (ValueError, KeyError, TypeError, AttributeError):
+            pass
     token_key = settings.get("analytics_token_env")
     token = os.environ.get(token_key, "") if isinstance(token_key, str) else ""
     graphql_ok = False
@@ -414,7 +415,9 @@ def cloudflare_status(settings: dict[str, Any], *, now: datetime | None = None) 
             pass
     if not token:
         result["credential"] = "unavailable"
-    elif wrangler_ok and graphql_ok:
+    elif isinstance(worker, str) and worker_ok and graphql_ok:
+        result["credential"] = "available"
+    elif not isinstance(worker, str) and isinstance(database, str) and d1_ok:
         result["credential"] = "available"
     elif graphql_ok and not wrangler_ok:
         result["credential"] = "unavailable"

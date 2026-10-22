@@ -109,6 +109,23 @@ def test_migration_retention_and_idempotent_snapshot(tmp_path):
     conn.close()
 
 
+def test_load_view_keeps_retained_v1_snapshot_available(tmp_path):
+    from brigade import fleet_admin_stats as stats
+
+    value = snapshot()
+    legacy = {key: item for key, item in value.items() if key != "cloudflare"}
+    legacy["schema"] = stats.LEGACY_SCHEMA
+    legacy["digest"] = legacy["snapshot_id"] = stats._digest(legacy)
+    conn = fleet_hub.init_db(tmp_path / "hub.db")
+    stats.store(conn, legacy, now=NOW)
+
+    view = stats.load_view(conn, now=NOW)
+    assert view["latest"] == legacy
+    assert view["cloudflare"] is None
+    assert view["cloudflare_enabled"] is False
+    conn.close()
+
+
 @pytest.mark.parametrize("phase", ["startup", "periodic"])
 def test_hub_physically_expires_stats_without_a_later_post(tmp_path, monkeypatch, phase):
     import threading
@@ -596,6 +613,32 @@ def test_daily_compaction_preserves_latest_cloudflare_observation(tmp_path):
     view = stats.load_view(conn, now=collected + timedelta(hours=1))
     assert view["cloudflare"] == cloudflare
     assert view["cloudflare_enabled"] is False
+    conn.close()
+
+
+def test_load_view_prefers_newest_day_before_source_coverage(tmp_path):
+    from datetime import timedelta
+    from brigade import fleet_admin_stats as stats
+
+    conn = fleet_hub.init_db(tmp_path / "hub.db")
+    older = stats.snapshot(
+        taken_at=NOW - timedelta(days=1),
+        source_set=["d1", "worker", "downloads"],
+        weeks=[],
+        daily=[],
+        downloads={"pypi": 12, "npm": 5},
+    )
+    today = stats.snapshot(
+        taken_at=NOW,
+        source_set=["d1", "worker"],
+        weeks=[],
+        daily=[],
+        downloads={"pypi": None, "npm": None},
+    )
+    stats.store(conn, older, now=NOW)
+    stats.store(conn, today, now=NOW)
+
+    assert stats.load_view(conn, now=NOW)["latest"] == today
     conn.close()
 
 

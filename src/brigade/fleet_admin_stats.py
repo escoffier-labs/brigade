@@ -415,7 +415,8 @@ def load_view(conn: sqlite3.Connection, *, now: datetime | None = None) -> dict[
     latest = None
     for row in conn.execute(
         """SELECT payload_json FROM admin_stats_snapshots WHERE taken_at >= ?
-        ORDER BY json_array_length(source_set) -
+        ORDER BY substr(taken_at, 1, 10) DESC,
+            json_array_length(source_set) -
             CASE WHEN source_set LIKE '%"cloudflare"%' THEN 1 ELSE 0 END DESC,
             taken_at DESC, snapshot_id DESC""",
         (cutoff,),
@@ -450,6 +451,6 @@ def load_view(conn: sqlite3.Connection, *, now: datetime | None = None) -> dict[
     return {
         "latest": latest,
         "cloudflare": cloudflare,
-        "cloudflare_enabled": newest is not None and newest["cloudflare"] is not None,
+        "cloudflare_enabled": newest is not None and newest.get("cloudflare") is not None,
         "weeks": weeks,
     }
