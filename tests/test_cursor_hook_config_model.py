@@ -175,6 +175,27 @@ REFUSED_ROWS = [
     pytest.param("bool-version", "r4344139090 P1", {"version": True, "hooks": {}}, "version", id="version-bool"),
     pytest.param("hooks-not-object", "invalid document", {"version": 1, "hooks": []}, "object", id="hooks-not-object"),
     pytest.param(
+        "bad-definition",
+        "r4344258655 P2: every hook definition has a valid shape",
+        {"version": 1, "hooks": {"beforeSubmitPrompt": [{}], "sessionStart": [PROJECT]}},
+        "command or prompt",
+        id="empty-hook-definition",
+    ),
+    pytest.param(
+        "bad-command",
+        "r4344258655 P2",
+        {"version": 1, "hooks": {"stop": [{"command": 1}]}},
+        "command or prompt",
+        id="non-string-command",
+    ),
+    pytest.param(
+        "not-a-dict",
+        "r4344258655 P2",
+        {"version": 1, "hooks": {"stop": ["run-it"]}},
+        "command or prompt",
+        id="string-definition",
+    ),
+    pytest.param(
         "event-not-list",
         "invalid document",
         {"version": 1, "hooks": {"sessionEnd": {}}},
@@ -254,6 +275,20 @@ OWNERSHIP_ROWS = [
         set(),
         id="sibling-event-wrong-type",
     ),
+    pytest.param(
+        "bad-sibling-definition",
+        "r4344258655 P2: another event's malformed definition invalidates the document",
+        {"version": 1, "hooks": {"sessionStart": [PROJECT], "stop": [{"command": 1}]}},
+        set(),
+        id="sibling-event-malformed-definition",
+    ),
+    pytest.param(
+        "valid-prompt-definition",
+        "r4344258655 P2: prompt hooks are valid definitions",
+        {"version": 1, "hooks": {"sessionStart": [PROJECT], "stop": [{"type": "prompt", "prompt": "check"}]}},
+        {"sessionStart"},
+        id="prompt-definition-is-valid",
+    ),
     pytest.param("at-limit", "r4344099017: limit is inclusive", _padded(LIMIT), set(EVENTS), id="owns-at-the-limit"),
     pytest.param(
         "grew-past-limit",
@@ -318,6 +353,14 @@ SCOPE_ROWS = [
         1,
         "r4344139090 P1: unversioned project config does not suppress the user hook",
         id="unversioned-project-config",
+    ),
+    pytest.param(
+        ["cursor"],
+        {"version": 1, "hooks": {**_all_events(PROJECT), "stop": [{"command": 1}]}},
+        ["user"],
+        1,
+        "r4344258655 P2: a malformed definition anywhere in the project config does not suppress the user hook",
+        id="malformed-definition-in-project-config",
     ),
     pytest.param(
         ["cursor"],

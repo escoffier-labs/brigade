@@ -236,7 +236,18 @@ def _hooks_document_error(doc: dict[str, Any]) -> str | None:
     for event, entries in hooks.items():
         if not isinstance(entries, list):
             return f"existing {event} hooks must be a list"
+        if not all(_is_hook_definition(entry) for entry in entries):
+            return f"existing {event} hooks must be command or prompt definitions"
     return None
+
+
+def _is_hook_definition(entry: object) -> bool:
+    """A command hook needs a string `command`; a prompt hook needs a string `prompt`."""
+    if not isinstance(entry, dict):
+        return False
+    if entry.get("type") == "prompt":
+        return isinstance(entry.get("prompt"), str)
+    return isinstance(entry.get("command"), str)
 
 
 def user_hooks_document_status(doc: dict[str, Any]) -> tuple[str | None, bool]:
