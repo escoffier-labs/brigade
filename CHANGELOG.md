@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Fleet message credentials can read their unread total without fetching bodies through `brigade fleet msg count`, the hub `count` action, or the optional `fleet_inbox` MCP argument `count_only`. Counts exclude expired and acknowledged mail and do not run retention writes (#1715).
+
 - Memory care config accepts `read_only_paths` globs for policy or operator-owned cards. Scan, `plan-fixes`, and `backfill` skip matching cards, `memory proposal create` and `apply` refuse them with an error naming the pattern, and `memory care status` and `doctor` list the active patterns (#1976).
 - Bound campaign member self-assignment with operator offers, per-node concurrency, expiring generation-fenced ownership, and idempotent takes. Member detail responses now link back to their campaign.
 

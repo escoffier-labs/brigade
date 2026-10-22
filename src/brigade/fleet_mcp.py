@@ -54,12 +54,17 @@ def tool_specs() -> list[dict[str, Any]]:
         ),
         (
             "fleet_inbox",
-            "Read inbox messages without acknowledging them; optionally wait for unread mail.",
+            "Read inbox messages without acknowledging them; optionally wait or count unread mail without bodies.",
             {
                 "wait_secs": {"type": "integer", "minimum": 0, "maximum": 120, "default": 0},
                 "unacked_only": {"type": "boolean", "default": True},
                 "limit": limit,
                 "after": text,
+                "count_only": {
+                    "type": "boolean",
+                    "default": False,
+                    "description": "Return only unread_count for the whole inbox, ignoring wait, cursor and page options.",
+                },
             },
             [],
         ),
@@ -396,6 +401,8 @@ class FleetMcp:
             return _page_limit(
                 messages.sent(after=int(args.get("after", "0")), authority=authority), args.get("limit", 100)
             )
+        elif args.get("count_only", False):
+            return messages.unread_count(authority=authority)
         else:
             return _page_limit(
                 poll_inbox(

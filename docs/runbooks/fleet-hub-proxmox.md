@@ -650,8 +650,9 @@ Upgrade the hub to schema 31 before enabling agent sends. Agents start with no
 send grants. A node may supply a display-only `--sender-label`. Agents cannot.
 Every new outbound agent message, including a reply, requires a matching send grant.
 
-Enroll using the administrator credential and stream the one-time token directly
-into a private file. Substitute an enrolled node ID for `example-node`. The token
+Enroll using the administrator credential and stream the token directly into a
+private file. The command prints it once, but it is derived from the
+administrator credential, so treat it as a secret rather than a single-use code. Substitute an enrolled node ID for `example-node`. The token
 file must be owned by the invoking effective user where the platform exposes an
 effective user ID, have no group or other access, and contain only the token,
 with no trailing newline.
@@ -785,6 +786,22 @@ mail, it returns the page containing that arrival even for a full-history read.
 (default `"0"`) and return `next_cursor` as a decimal string. Both return up to
 one hub page, with `limit` from 1 to 100. Pass `next_cursor` as `after` to read
 subsequent pages, or acknowledge consumed inbox messages to advance unread mail.
+
+For a body-free inbox total, call `fleet_inbox` with `count_only: true` or run
+`brigade fleet msg count --json` (with `--token-file` for an agent credential).
+Both use `POST /messages` with `{"action":"count"}` and return only
+`{"unread_count":N}`. The total covers the authenticated principal's entire
+unacknowledged, unexpired inbox. Count mode ignores the MCP wait, cursor,
+unacked-only and page options. It neither acknowledges mail nor writes retention
+cleanup. Older hubs without this action return HTTP 400, without a fallback
+that fetches message bodies. Existing inbox and sent calls keep their shapes.
+
+Sender acknowledgement views remain scoped to the authenticated sender.
+`fleet_sent` and `brigade fleet msg sent --id MESSAGE_ID --json` return
+`acked_at` and `acked_by`, initially null. Send grants still govern new agent
+messages and replies. Removing a grant does not hide the sender's own history.
+A revoked token receives HTTP 401 at authentication. A principal revoked after
+authentication receives HTTP 403 from the active-principal query guard.
 
 Message results combine subject, reference, and body inside one untrusted data
 block in `body`. The original `subject` and `ref` fields are omitted. Scans cover
