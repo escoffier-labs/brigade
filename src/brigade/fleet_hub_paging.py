@@ -378,10 +378,12 @@ def _snapshot_page(
         totals[key] = total
         selected: list[dict[str, Any]] = []
         position = offsets[index]
-        # The covering visibility/ordinal index skips revoked or newly forbidden
-        # rows. SQLite streams only the page and one lookahead, without OFFSET.
+        # Require the visibility/ordinal seek even when statistics predate a
+        # grant change. The primary key could otherwise scan a forbidden prefix.
+        # SQLite streams only the page and one lookahead, without OFFSET.
         rows = conn.execute(
             "SELECT ordinal,wire_bytes,payload FROM fleet_read_snapshot_rows "
+            "INDEXED BY fleet_read_snapshot_visible "
             "WHERE snapshot_id=? AND kind=? AND visible=1 AND ordinal>=? ORDER BY ordinal",
             (snapshot_id, key, position),
         )

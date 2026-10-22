@@ -199,3 +199,37 @@ def test_cached_wire_cost_preserves_oversized_count_and_skips_payload(store, mon
     assert page["claims"][0]["target"] == "item-2"
     assert page["oversized"] == 1 and page["total"] == 4 and page["next_cursor"]
     assert max(decoded) < 2000
+
+
+def test_continuation_seeks_past_revoked_prefix_with_stale_statistics(store):
+    from brigade import fleet_hub_message_grants as grants
+
+    fleet_hub.add_node(store, "other")
+    messages.add_principal(store, {"name": "limited", "may_send_to": ["*"]})
+    measurements = []
+    for count in (32, 2048):
+        grants.replace_grants(store, "agent:limited", ["*"])
+        raw = {"action": "claims", "limit": 1}
+        data = {
+            "claims": [
+                {"owner_node": "reader" if i < count else "other", "target": f"item-{i:05d}"} for i in range(count + 3)
+            ]
+        }
+        first = paging.page(
+            store, raw, data, caller="agent:limited", limit=1, visible=lambda *_: True, snapshot_write=True
+        )
+        # Statistics collected before grant narrowing can favor the primary key
+        # over the visibility index unless the seek is required explicitly.
+        store.execute("ANALYZE")
+        grants.replace_grants(store, "agent:limited", ["other"])
+        store.commit()
+        steps = []
+        store.set_progress_handler(lambda steps=steps: steps.append(1) or 0, 1)
+        try:
+            page = read(store, first["next_cursor"], caller="agent:limited")
+        finally:
+            store.set_progress_handler(None, 0)
+        assert page["claims"][0]["target"] == f"item-{count:05d}"
+        assert page["total"] == 3 and page["next_cursor"]
+        measurements.append(len(steps))
+    assert measurements[1] <= measurements[0] * 2, measurements
