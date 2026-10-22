@@ -222,6 +222,7 @@ class GitHubReader:
         allow_public_fallback: bool = False,
         clock: Callable[[], float] = time.time,
         timeout: float = 30,
+        cache: OrderedDict[str, tuple[str, bytes]] | None = None,
     ):
         if not _REPO.fullmatch(repository) or repository.split("/")[1] in {".", ".."}:
             raise ValueError("canonical owner/repository required")
@@ -245,7 +246,7 @@ class GitHubReader:
         self.clock = clock
         self.timeout = timeout
         self._health: tuple[float, bool] | None = None
-        self._cache: OrderedDict[str, tuple[str, bytes]] = OrderedDict()
+        self._cache: OrderedDict[str, tuple[str, bytes]] = cache if cache is not None else OrderedDict()
         self._stats: dict[str, Any] | None = None
 
     def _run(self, argv: list[str], cap: int, fresh: bool = False) -> CommandResult:

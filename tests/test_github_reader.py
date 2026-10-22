@@ -502,3 +502,14 @@ def test_subprocess_reads_clear_inherited_fresh_unless_merge_gating(tmp_path, mo
     client = reader(tmp_path, EnvironmentRunner(), visibility="private")
     result = client.get(PATH, params={}, max_bytes=100, merge_gating_reason=merge_gating_reason)
     assert (result.status, result.body) == (200, b"1" if merge_gating_reason else b"unset")
+
+
+def test_injected_etag_cache_revalidates_across_reader_instances(tmp_path):
+    from collections import OrderedDict
+
+    cache = OrderedDict()
+    runner = FakeRunner(gh(body=b"[1]", etag='"shared"'), gh(304))
+    reader(tmp_path, runner, visibility="private", cache=cache).get(PATH, params={}, max_bytes=100)
+    result = reader(tmp_path, runner, visibility="private", cache=cache).get(PATH, params={}, max_bytes=100)
+    assert result.body == b"[1]"
+    assert result.state == "not-modified"
