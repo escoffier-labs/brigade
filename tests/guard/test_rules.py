@@ -527,12 +527,20 @@ class MissingLeakShapeTests(unittest.TestCase):
             'f"https://{cfg.db.local}/path"',
             "f'https://{db.local}/path'",
             'url = f"https://{db.local}/api"',
+            'rf"https://{db.local}/path"',
+            'fr"https://{db.local}/path"',
         ):
             with self.subTest(text=text):
                 result = scan_text(text)
                 self.assertNotIn("private-hostname", {f.rule_id for f in result.findings})
                 redacting = scan_text(text, policy=Policy(rules={"private-hostname": "redact"}))
                 self.assertEqual(redacting.redacted_text, text)
+
+    def test_quoted_url_inside_interpolation_still_matches(self) -> None:
+        text = "f\"{fetch('https://db.home/path')}\""  # content-guard: allow private-hostname
+        self.assertIn("private-hostname", {f.rule_id for f in scan_text(text).findings})
+        redacting = scan_text(text, policy=Policy(rules={"private-hostname": "redact"}))
+        self.assertNotIn("db.home", redacting.redacted_text)  # content-guard: allow private-hostname
 
     def test_literal_url_hostname_context_still_matches(self) -> None:
         # Controls from the existing detection surface, next to the new skips.

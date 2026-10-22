@@ -263,8 +263,9 @@ def _hostname_context(text: str, start: int, end: int) -> bool:
     # context: an f-string prefix with an open brace introduces an expression,
     # so reject it before accepting a URL or a surrounding quote (#1918). The
     # brace must sit inside that same literal, so an earlier f-string or dict
-    # elsewhere on the line cannot hide a later URL host.
-    if re.search(r"\bf([\"'])(?:(?!\1)[^\n])*\{[^}]*$", before, re.IGNORECASE):
+    # elsewhere on the line cannot hide a later URL host, and a URL literal
+    # quoted inside the expression keeps its URL context.
+    if re.search(r"\b(?:rf|fr|f)([\"'])(?:(?!\1)[^\n])*\{(?:(?!://)[^}])*$", before, re.IGNORECASE):
         return False
     if re.search(r"[a-z][a-z0-9+.-]*://[^\s]*$", before, re.IGNORECASE):
         return True
