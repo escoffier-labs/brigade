@@ -78,7 +78,10 @@ def test_run_scan_invokes_embedded_guard_by_default(tmp_path: Path, monkeypatch)
 
     assert result["exit_code"] == 0
     argv, kwargs = calls[0]
-    assert argv[:3] == [scrub_mod.sys.executable, "-m", "brigade.guard"]
+    from brigade.isolated_exec import module_argv, trusted_cwd
+
+    assert argv == module_argv("brigade.guard", "scan", str(target), "--policy", str(policy_file))
+    assert kwargs["cwd"] == trusted_cwd()
     assert "PYTHONPATH" not in kwargs["env"] or "content-guard" not in kwargs["env"]["PYTHONPATH"]
 
 

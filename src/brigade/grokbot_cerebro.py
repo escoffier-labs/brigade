@@ -12,7 +12,6 @@ import os
 import re
 import stat
 import subprocess
-import sys
 import threading
 import time
 import urllib.parse
@@ -22,6 +21,7 @@ from typing import Any, Callable, Mapping
 from weakref import WeakKeyDictionary
 
 from . import grokbot_mcp, grokbot_ops, proc
+from .isolated_exec import module_argv, trusted_cwd
 
 PACK_ID = "cerebro-memory"
 DEFAULT_BIND = "127.0.0.1:8770"
@@ -557,12 +557,11 @@ def canary(target: Path, *, timeout: int = grokbot_ops.DEFAULT_TIMEOUT_SECONDS) 
 
 
 def render_unit(target: Path, *, python: str | None = None) -> str:
+    target = target.expanduser().resolve()
     instance = _load_validated_instance(target)
     reference = instance["bearer"]
     bind = instance["bind"]
-    args = [
-        python or sys.executable,
-        "-m",
+    args = module_argv(
         "brigade",
         "run",
         "cloud",
@@ -574,7 +573,8 @@ def render_unit(target: Path, *, python: str | None = None) -> str:
         str(target),
         "--bind",
         bind,
-    ]
+        python=python,
+    )
     for host in instance.get("allowed_hosts", []):
         args += ["--allow-host", host]
     for origin in instance.get("allowed_origins", []):
@@ -595,7 +595,7 @@ def render_unit(target: Path, *, python: str | None = None) -> str:
         "\n"
         "[Service]\n"
         "Type=simple\n"
-        f"ExecStart={exec_start}\n"
+        f"WorkingDirectory={grokbot_ops._systemd_quote(str(trusted_cwd()))}\nExecStart={exec_start}\n"
         f"{grokbot_ops.LISTENER_RECOVERY_SERVICE_FRAGMENT}"
         "NoNewPrivileges=yes\n"
         "PrivateTmp=yes\n"

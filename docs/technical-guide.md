@@ -544,6 +544,86 @@ checkpoint before replacing `run.json`. If rollback leaves an older Brigade
 unable to interpret a journal event or projector version, stop that writer and
 roll forward. The append-only journal format is a one-way storage boundary.
 
+Worker dispatches also record classified cassettes under `events/cassettes/`.
+The default `run.record` policy is `metadata-only`, which omits private result
+bodies. Default-on private capture remains tracked by
+[#1894](https://github.com/escoffier-labs/brigade/issues/1894).
+Set `"run": {"record": "auto"}` in `.brigade/config.json` to record private
+bodies with an explicit `auto` opt-in, or use `off` to disable recording.
+Runs intended for [replay (#1855)](https://github.com/escoffier-labs/brigade/issues/1855)
+require explicit `auto` recording to retain private result bodies.
+Keys use seat identity and the coordinator-owned prompt fingerprint. Injected
+brief changes affect only the exact-prompt digest. Prompt text is never stored.
+Single-seat calls through `SeatInvoker` also key on the coordinator prompt digest,
+so different prompts on the same seat and phase have different keys.
+The key uses the configured seat transport and
+effective run-level Codex transport policy, including CLI overrides. A worker's
+transport fallback does not change the key. Scrubbed metadata reports the observed transport.
+Private bodies contain the terminal result after retries and fallback, already
+persisted in `worker-results.json`, with resolved `_REF` secrets scrubbed again
+at write time. Literal overrides whose variable names contain a secret-like
+component (`TOKEN`, `KEY`, `SECRET`, `PASSWORD`, `PASS`, or `CREDENTIALS`) are
+also scrubbed. Ordinary overrides such as `CI` remain intact. Scrubbed metadata and
+app-server notification projections contain no raw worker stream.
+Projections cover only bytes appended during that dispatch. Malformed, oversized,
+or overlapping seat streams produce `projection_status: "unavailable"` while
+result recording continues. Unresolved seat secrets produce a `not-observed`
+entry without a body and leave other seats recording.
+Secrets that collide with structural field names stop recording with a bounded
+diagnostic instead of rewriting those names. Invalid recording configuration
+skips recording without creating cassette files.
+Recording adds references only to an existing lifecycle journal. Runs without
+lifecycle journaling keep cassette sidecars without activating the journal.
+Remote and unsupported transports carry `not-observed` markers after prompt
+construction and request-envelope admission. Earlier preflight rejections are
+not dispatched workers and create no cassette entry. This includes unavailable
+or disallowed CLI adapters, quarantined seats, and provider or envelope rejections.
+Failures before prompt construction have no exact-prompt digest to record.
+Audit coverage states `not recorded: orchestrator calls` because planning and
+synthesis calls outside worker dispatch are not recorded.
+
+Private retention keeps the newest 50 runs for at most 30 days, ranked and aged
+by `run.json` `started_at`. Runs without that field use directory mtime. Only directories
+whose `run.json` identity matches their name count as runs. Hidden staging
+directories are excluded from retention and `runs cassette purge latest`.
+Outcome ledger references to a run's `run.json` pin its bodies. Unreadable outcome evidence
+prevents pruning. Retention streams the outcome ledger and ignores blank lines.
+It scans once per run after the first recorded dispatch. Unreadable evidence,
+ledger rows over 8 MiB, ledgers over 64 MiB, scans over 100,000 rows or 10,000
+distinct run references, or a runs inventory over 10,000 entries skip pruning
+with a bounded stderr diagnostic. Retention errors leave recording active.
+Pruning and purge remove owned private publication temporary files before
+checking final file link counts. Unsafe or unclassifiable entries are left alone
+during retention.
+Entry and run caps are 4 MiB and 32 MiB. App-server projection reads are bounded
+to 8 MiB of appended bytes. Projections over 2 MiB or the remaining entry budget
+are omitted with an unavailable marker.
+A measured local run had one 31,519-byte worker result. The two-worker journal regression measured
+1,628 bytes, or 814 bytes and one cassette reference event per dispatch. It
+enforces less than 1 KiB per dispatch,
+against the journal's 2048-event and 8 MiB limits. Optional cassette references,
+including stop facts, reserve the final 512 slots (25%) for lifecycle events.
+Recording stops when the journal reaches 1536 events, so at most 1536 dispatch
+references fit, fewer when lifecycle events or byte limits consume capacity.
+Admission failure stops recording with a bounded diagnostic.
+Scrubbed and public metadata remain until the run is deleted.
+`brigade runs cassette purge <run>` deletes all cassette sidecars without
+changing lifecycle authority and rejects linked path components. Purge refuses
+a run with a live owner, takes the workspace run lock, and serializes with
+checkpoint/event pairs and journal mutation. Offline purge uses normal stale-owner
+recovery, which can require explicit `runs recover` for journaled runs. Retention
+also skips live runs and serializes deletion with publication. `runs redact`
+conservatively tombstones every cassette reference, including those outside the
+selected range. The redaction record still reports only the requested range.
+This range-accounting limit remains tracked by
+[#1894](https://github.com/escoffier-labs/brigade/issues/1894).
+It purges all cassette sidecars after rewriting the journal and recording
+its durable redaction anchor. Cleanup completes before success and retries finish
+interrupted cleanup. Rejected preflight checks preserve sidecars.
+Export strips all cassette classes on the copy. Direct
+archive builds refuse unstripped cassettes. Evidence packages use their file
+allowlist and fleet reports carry lifecycle metadata only.
+
 Record a final human decision with `brigade run approve <run-id> --decision
 allow|deny|hold`. New decisions use `human-approval/v2`: Brigade signs the final
 tree, `changes.patch` digest, and exact Test Result payload set for that tree,
@@ -1065,17 +1145,19 @@ Task ledger commands:
 
   A missing `blocks` source or missing ancestor parent fails closed with `missing_dependency`, including blockers inherited from ancestors. Missing dependent targets stay informational. `--explain` and `--json` separate unfinished `blocking_dependencies` from unresolvable `missing_dependencies` per blocked task and retain `orphans`. Explained output names the affected ids and repair commands such as `brigade work task edge remove --id <edge-id>`. Claim and `work run --task-id` use the same resolver.
 
-- `brigade work dispatch [--target .] [--wave N] [--max N] [--batch-size N] [--worker SEAT | --seat-map CLASS=SEAT ...] [--base REF] [--run-budget FILE] [--max-total N] [--deadline SECONDS] [--spawn-delay SECONDS] [--no-wait] [--commit] [--dry-run] [--json]` dispatches one ready wave ranked by priority, age, and task id. Wave indexes count dispatchable waves after start gates, seat mapping, occupied-footprint filtering, and breaker filtering, so they can differ from `work ready --parallel-safe`. Selection is `min(max(0, cap - live_children), batch_size, ready_in_wave)`. The cap defaults to roster `limits.max_workers`, and batch size defaults to the cap. Claimed in-progress footprints hold overlapping tasks out with reason `occupied`. Empty footprints require exclusive access. Seats must exist in the primary roster. Apply requires explicit routing and a committed Git base, which defaults to `HEAD`. A lost claim race is recorded and selection continues with the next candidate in that wave.
+- `brigade work dispatch [--target .] [--wave N] [--max N] [--batch-size N] [--worker SEAT | --seat-map CLASS=SEAT ...] [--base REF] [--run-budget FILE] [--max-total N] [--deadline SECONDS] [--spawn-delay SECONDS] [--watch [--interval SECONDS] [--drain-wait]] [--no-wait] [--commit] [--dry-run] [--json]` dispatches one ready wave ranked by priority, age, and task id. Wave indexes count dispatchable waves after start gates, seat mapping, occupied-footprint filtering, and breaker filtering, so they can differ from `work ready --parallel-safe`. Selection is `min(max(0, cap - live_children), batch_size, ready_in_wave)`. The cap defaults to roster `limits.max_workers`, and batch size defaults to the cap. Claimed in-progress footprints hold overlapping tasks out with reason `occupied`. Empty footprints require exclusive access. Seats must exist in the primary roster. Apply requires explicit routing and a committed Git base, which defaults to `HEAD`. A lost claim race is recorded and selection continues with the next candidate in that wave.
 
   Each session writes `.brigade/dispatch/<dispatch_id>/session.json` and `plan.json` with a canonical `plan_digest`. Apply also writes exclusive intent files and digest-chained `events.jsonl` receipts. `dispatch.lock` refuses another dispatcher and names its holder PID. Recovery reloads each unfinished session's saved plan, retries its exact claim id, reuses its branch and worktree, and adopts its recorded child. A bootstrap receipt records the child identity before executing `python -m brigade run` with the dispatcher's interpreter, preventing duplicate execution after a dispatcher crash. Patrol joins intent `run_id` and `task_id` to the exact ledger claim generation. Dry-run writes only the plan and session receipts, without reconciling, claiming, or launching. Omitted routing leaves planned seats unset, and an explicit seat map skips tasks whose class is unmapped.
 
   Children use branches named `brigade/dispatch/<task-slug>-<intent8>` and directories named `<repo>-task-<task-slug>-<intent8>` under `brigade_worktree_root()`. The repository prefix lets `runs prune-worktrees` discover these directories. Pruning keeps dirty worktrees and requires a branch-backed HEAD and the configured minimum age. Each child gets its own process group, worktree lock, and preallocated run directory under the primary target. The prompt requires uncommitted changes, no pushes, and no edits to other tasks. Foreground dispatch waits for child exit and terminal run evidence. `--no-wait` leaves children running for reconciliation on the next apply invocation. A foreground invocation fills available capacity before supervising earlier and newly launched children together. Patrol reports their lane state but does not finalize dispatch intents. Ctrl-C cancels supervised children. `--deadline` bounds the session wall clock and cancels unfinished work. `--spawn-delay` spaces launches, and `--max-total` caps launches including infrastructure retries. Denials write `run_budget.reservation_denied` receipts using the existing budget payload fields. `--run-budget` passes the existing declaration file to each child. These limits do not measure provider spend. Apply mode is unsupported on Windows. Use `--dry-run` there to inspect a plan.
 
-  Successful children become completed intents with branch and diff summaries. Their claims stay held and tasks stay `in_progress` until the operator lands the changes and marks tasks done. The completed-intent exclusion applies only to the same claim and claimed item revision. Released or reopened work can be dispatched again. `--commit` creates a local commit after successful child exit. HEAD drift is retained for review. Failed, timed-out, or orphaned children release only their own claim generation and preserve their worktree and branch. Workspace errors fail that intent and allow siblings to continue. Git errors while summarizing or committing successful work retain the completed intent and claim with `commit_error` and `needs_review` recorded. They do not relaunch the worker. An unreadable child journal marks its intent `unknown` and keeps its claim for inspection while other lanes continue. Live unknown children remain supervised for cancellation and deadlines. Reconciliation reads the journal again on the next apply invocation. Three consecutive non-infrastructure worker failures trip a task breaker. Deadlines, cancellations, and orphans do not advance it. Infrastructure launch failures allow two additional launches per session without advancing the breaker. When a lost race promotes a candidate initially skipped for capacity or batch size, a `work.dispatch.backfill` event records the promotion. Hub attempt mirroring and dispatch summary publication are deferred.
+  `--watch` repeats reconciliation, observation, planning, and apply while holding the same dispatch lease. Each tick reloads readiness and available capacity. The supervisor links separate saved plans so recovery retains each plan digest. Ticks that launch or finalize intents produce `work.dispatch.tick` events, and shutdown produces `work.dispatch.closed`. `--interval` defaults to 5 seconds and must be positive and finite. `--spawn-delay` applies between launches across ticks. SIGTERM and SIGINT stop new launches and detach running children by default. `--drain-wait` waits for those children and finalizes their receipts without launching retries. A second signal stops waiting and leaves unfinished children detached. Unexpected tick errors produce `work.dispatch.tick_error` receipts, preserve running children, and allow later ticks to continue. The close payload counts claimed intents without a child in `claimed_prelaunch_intents`. The next invocation resumes them from their saved plans and worktrees. An installed Brigade version change also closes the loop. `--max-total` and `--deadline` apply to one watch process, including retries. Restarting starts fresh limits. Use `Restart=no` when either ceiling must stop the service. A failed child or tick keeps exit status 1 even when watch closes for a ceiling, version change, or signal. `Restart=on-failure` can restart those closes. `Restart=always` restarts every close. Each restart starts fresh limits. With `Restart=no`, restart the unit explicitly after updating Brigade. Saved tick sessions have no separate ceiling, so a later invocation can reconcile detached children without canceling them for an expired watch deadline. On exit, watch stdout and `--json` report the actual `launched` count, `close_reason`, and `tick_sessions` IDs. The supervisor's `plan.json` remains the initial plan. Watch cannot be combined with `--dry-run` or `--no-wait`. Use a service manager with a stop policy that preserves child process groups, such as systemd `KillMode=process`. See the [long-running modes guide](execution-model.md#long-running-modes) for a unit example and restart behavior.
+
+  Successful children become completed intents with branch and diff summaries. Their claims stay held and tasks stay `in_progress` until the operator lands the changes and marks tasks done. The completed-intent exclusion applies only to the same claim and claimed item revision. Released or reopened work can be dispatched again. `--commit` creates a local commit after successful child exit. HEAD drift is retained for review. Failed, timed-out, or orphaned children release only their own claim generation and preserve their worktree and branch. Workspace errors fail that intent and allow siblings to continue. Git errors while summarizing or committing successful work retain the completed intent and claim with `commit_error` and `needs_review` recorded. They do not relaunch the worker. An unreadable child journal marks its intent `unknown` and keeps its claim for inspection while other lanes continue. Live unknown children remain supervised for cancellation and deadlines. Reconciliation reads the journal again on the next apply invocation. Three consecutive non-infrastructure worker failures trip a task breaker. Deadlines, cancellations, and orphans do not advance it. Infrastructure launch failures allow two additional launches per session without advancing the breaker. Watch keeps exhausted infrastructure tasks excluded across ticks within one process. Restarting watch clears these infrastructure exclusions and permits another initial launch plus two retries per affected task. Non-infrastructure task breakers persist across restarts. Non-race claim refusals use `claim-refused` and do not count as infrastructure. When a lost race promotes a candidate initially skipped for capacity or batch size, a `work.dispatch.backfill` event records the promotion. Hub attempt mirroring and dispatch summary publication are deferred.
 
 - `brigade work dispatches [--target .] [--json]` lists dispatch sessions, intents, events, and tripped task breakers.
-- `brigade work dispatch-show <dispatch-id> [--target .] [--json]` shows one session, its saved plan, intents, and chained event receipts. An id prefix or `latest` is accepted.
-- `brigade work dispatch-reset <task-id> --reason TEXT [--release-unknown] [--target .] [--json]` writes an explicit reset receipt. The breaker and completed-intent exclusions ignore intents before the most recent reset. Active and unknown lanes remain excluded by default. After inspecting saved work, use `--release-unknown` to cancel unknown intents and release their claims by claim id. The command refuses this recovery while any affected child is alive. Each recovered intent records the reset receipt and reason.
+- `brigade work dispatch-show <dispatch-id> [--target .] [--json]` shows one session, its saved plan, intents, and chained event receipts. Event reads enforce byte, record, and line bounds. Readers ignore an incomplete final line, and lease holders repair it before append. Complete corrupt records fail closed. Intent events include task, claim, run, branch, and terminal taxonomy. An id prefix or `latest` is accepted.
+- `brigade work dispatch-reset <task-id> --reason TEXT [--release-unknown] [--target .] [--json]` writes an explicit reset receipt. An exact task id takes precedence over prefix matches. The breaker and completed-intent exclusions ignore intents before the most recent reset. Active and unknown lanes remain excluded by default. After inspecting saved work, use `--release-unknown` to cancel unknown intents and release their claims by claim id. The command refuses this recovery while any affected child is alive. Each recovered intent records the reset receipt and reason.
 - `brigade work claim <task-id> --actor <name> [--claim-id]` atomically claims a ready task (`pending` → `in_progress` with assignee) under the tasks.json lock. Same `--claim-id` retries are idempotent; a different claim id loses with exit 13 naming the holder (no release/steal suggestion). Claims against blocked or wrong-status tasks fail closed. `work claim --next` selects the highest-priority ready task in the same lock.
 - `brigade work release --task|--actor|--claim-id` releases matching claims; empty or whitespace-only filter values match nothing (fail closed). Release compares claim identity so a late reaper cannot clear a newer claim. `work reassign <task-id> --to <actor> [--claim-id]` reassigns a live claim. `work status` lists stale claims (default 24h).
 - `brigade work task edge add <type> <source> <target>` adds one typed edge (`blocks`, `parent-child`, or `discovered-from`). Repeatable `add` dedupes identical endpoints.

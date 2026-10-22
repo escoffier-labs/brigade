@@ -19,6 +19,7 @@ from typing import Any, BinaryIO, Callable, Iterator
 
 from .. import localio
 from ..component_paths import cache_root
+from ..isolated_exec import module_argv, trusted_cwd
 from ..wiring import expand_user_path, resolve_wired_target
 from . import anchored_io, compaction_marker, dependencies, envelope, heartbeat, presence
 from .fingerprint import repo_worktree_fingerprint
@@ -58,9 +59,6 @@ _HOOK_WORKER_EVENT_ENV = "BRIGADE_HOOK_WORKER_EVENT"
 _HOOK_PIN_ENV = "BRIGADE_HOOK_PIN_TARGET"
 _HOOK_TEST_HANG_ENV = "BRIGADE_HOOK_TEST_HANG_SECONDS"
 _HOOK_TIMEOUT_ENV = "BRIGADE_HOOK_TIMEOUT_SECONDS"
-_HOOK_WORKER_COMMAND = (
-    "import json, os, sys, time; from brigade.claude_hooks.runtime import _hook_worker_main; _hook_worker_main()"
-)
 
 
 class HookDegraded(Exception):
@@ -712,8 +710,8 @@ def _stop_targets(payload: dict[str, Any], session_id: str, *, task_epoch: str |
 def _run_brief(target: Path) -> str:
     try:
         result = subprocess.run(
-            [sys.executable, "-m", "brigade", "work", "brief", "--target", str(target)],
-            cwd=target,
+            module_argv("brigade", "work", "brief", "--target", str(target)),
+            cwd=trusted_cwd(),
             check=False,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
@@ -2974,12 +2972,13 @@ def _subprocess_timed_hook_run(
     env = os.environ.copy()
     env[_HOOK_WORKER_EVENT_ENV] = event
     if pin_target is not None:
-        env[_HOOK_PIN_ENV] = str(pin_target)
+        env[_HOOK_PIN_ENV] = str(pin_target.expanduser().absolute())
     else:
         env.pop(_HOOK_PIN_ENV, None)
     try:
         completed = subprocess.run(
-            [sys.executable, "-c", _HOOK_WORKER_COMMAND],
+            module_argv("brigade.claude_hooks.worker"),
+            cwd=trusted_cwd(),
             input=raw,
             capture_output=True,
             text=True,

@@ -10,13 +10,14 @@ from pathlib import Path
 from typing import Any
 
 from . import localio
+from .isolated_exec import module_argv, package_argv, trusted_cwd
 from .templates import template_root
 
 
 def scanner_dir() -> Path:
     configured = os.environ.get("CONTENT_GUARD_DIR")
     if configured:
-        return Path(configured).expanduser()
+        return Path(configured).expanduser().resolve()
     return Path(__file__).resolve().parent / "guard"
 
 
@@ -24,17 +25,38 @@ def scanner_module() -> str:
     return "content_guard" if os.environ.get("CONTENT_GUARD_DIR") else "brigade.guard"
 
 
+def _scanner_argv(target: Path, policy: Path) -> list[str]:
+    module = scanner_module()
+    if module == "brigade.guard":
+        return module_argv(module, "scan", str(target), "--policy", str(policy.resolve()))
+    return package_argv(
+        scanner_dir() / "src/content_guard/__init__.py",
+        module,
+        "scan",
+        str(target.resolve()),
+        "--policy",
+        str(policy.resolve()),
+    )
+
+
 def _scanner_env() -> dict[str, str]:
     env = os.environ.copy()
-    if scanner_module() == "content_guard":
-        existing_pp = env.get("PYTHONPATH", "")
-        external_src = scanner_dir() / "src"
-        env["PYTHONPATH"] = f"{external_src}{os.pathsep}{existing_pp}" if existing_pp else str(external_src)
+    env.pop("PYTHONPATH", None)
+    env.pop("PYTHONHOME", None)
     return env
 
 
 def available() -> bool:
-    return scanner_dir().is_dir()
+    return scanner_dir().is_dir() and external_package_error() is None
+
+
+def external_package_error() -> str | None:
+    """Diagnose an incomplete configured checkout before starting Python."""
+    if scanner_module() == "content_guard" and scanner_dir().is_dir():
+        initializer = scanner_dir() / "src/content_guard/__init__.py"
+        if not initializer.is_file():
+            return f"content-guard package initializer not found: {initializer}"
+    return None
 
 
 def policy_path(repo_target: Path, policy: str = "public-repo") -> Path:
@@ -77,7 +99,7 @@ def hook_status(target: Path, policy: str = "public-repo") -> dict[str, Any]:
     suggestions: list[str] = []
     external_configured = bool(os.environ.get("CONTENT_GUARD_DIR"))
     if not available():
-        detail = (
+        detail = external_package_error() or (
             f"CONTENT_GUARD_DIR points at missing content-guard checkout: {scanner_dir()}"
             if external_configured
             else f"embedded content guard not found at {scanner_dir()}"
@@ -227,9 +249,10 @@ def run_scan(scan_target: Path, *, repo_target: Path | None = None, policy: str 
     scan_target = scan_target.expanduser().resolve()
     repo_target = repo_target.expanduser().resolve() if repo_target is not None else scan_target
     scanner = scanner_dir()
-    if not scanner.is_dir():
+    package_error = external_package_error()
+    if not scanner.is_dir() or package_error:
         external_configured = bool(os.environ.get("CONTENT_GUARD_DIR"))
-        detail = (
+        detail = package_error or (
             f"CONTENT_GUARD_DIR points at missing content-guard checkout: {scanner}"
             if external_configured
             else f"embedded content guard not found at {scanner}"
@@ -275,18 +298,11 @@ def run_scan(scan_target: Path, *, repo_target: Path | None = None, policy: str 
             "policy_path": str(resolved_policy),
             "target": str(scan_target),
         }
-    cmd = [
-        sys.executable,
-        "-m",
-        scanner_module(),
-        "scan",
-        str(scan_target),
-        "--policy",
-        str(resolved_policy),
-    ]
+    cmd = _scanner_argv(scan_target, resolved_policy)
     try:
         result = subprocess.run(
             cmd,
+            cwd=trusted_cwd(),
             env=_scanner_env(),
             check=False,
             stdout=subprocess.PIPE,
@@ -359,7 +375,7 @@ def run(
         print(f"brigade scrub: policy not found: {policy_path}", file=sys.stderr)
         return 3
 
-    cmd = [sys.executable, "-m", scanner_module(), "scan", str(target), "--policy", str(policy_path)]
+    cmd = _scanner_argv(target, policy_path)
     if dry_run:
         if json_output:
             print(

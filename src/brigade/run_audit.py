@@ -352,7 +352,8 @@ def _transport_coverage(transport: Any) -> dict[str, Any]:
                 "composed_prompt_fingerprints": False,
                 "provider_response_fixtures": False,
                 "worker_event_streams": False,
-                "note": "transport identity missing; lifecycle projection only",
+                "note": "transport identity missing. Lifecycle projection only. not recorded: orchestrator calls",
+                "cassette_gap": "not recorded: orchestrator calls",
             },
         }
     known = TRANSPORT_COVERAGE.get(transport)
@@ -366,10 +367,19 @@ def _transport_coverage(transport: Any) -> dict[str, Any]:
                 "composed_prompt_fingerprints": False,
                 "provider_response_fixtures": False,
                 "worker_event_streams": False,
-                "note": f"unsupported transport {transport!r}; coordinator routing/approval only",
+                "note": f"unsupported transport {transport!r}. Coordinator routing/approval only. not recorded: orchestrator calls",
+                "cassette_gap": "not recorded: orchestrator calls",
             },
         }
-    return {"transport": transport, "supported": True, "coverage": dict(known)}
+    return {
+        "transport": transport,
+        "supported": True,
+        "coverage": {
+            **known,
+            "note": known["note"] + ". not recorded: orchestrator calls",
+            "cassette_gap": "not recorded: orchestrator calls",
+        },
+    }
 
 
 def _base_snapshot_for_projection(run_meta: Mapping[str, Any]) -> dict[str, Any]:

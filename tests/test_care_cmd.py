@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import base64
 import hashlib
+import shlex
 import shutil
 import subprocess
 import sys
@@ -13,6 +15,7 @@ from pathlib import Path
 import pytest
 
 from brigade import care_cmd, care_schedules, cli, managed_block, memory_cmd
+from brigade.isolated_exec import trusted_cwd
 
 
 def test_care_registration_identity_is_stable_and_target_specific(tmp_path):
@@ -394,7 +397,8 @@ def test_care_crontab_percent_in_path_is_escaped(tmp_path, monkeypatch):
     assert care_cmd.install(target=target, backend="crontab", json_output=True) == 0
     body = care_cmd._crontab_body(workspace=target)
     escaped = care_cmd._cron_escape_path(str(target))
-    assert f'cd "{escaped}"' in body
+    assert f'"--target" "{escaped}"' in body
+    assert f'cd "{care_cmd._cron_escape_path(str(trusted_cwd()))}"' in body
     assert "\\%" in escaped
     assert "\\%" in body
 
@@ -445,15 +449,17 @@ def test_care_windows_install_prints_schtasks_and_does_not_claim_success(tmp_pat
     assert rc == 3
     out = capsys.readouterr().out
     assert "schtasks" in out
-    assert "BrigadeCare-daily-care" in out
+    assert "BrigadeCare-daily-care" in _create_line_for(out, "daily-care")
     assert calls == []
 
 
 def _create_line_for(out: str, entry_id: str) -> str:
-    marker = f'/TN "BrigadeCare-{entry_id}"'
+    marker = f"/TN 'BrigadeCare-{entry_id}'"
     for line in out.splitlines():
-        if marker in line and line.startswith("schtasks /Create"):
-            return line
+        if "-EncodedCommand " in line:
+            script = base64.b64decode(line.split("-EncodedCommand ")[1]).decode("utf-16le")
+            if marker in script:
+                return script
     raise AssertionError(f"missing schtasks /Create line for {entry_id} in:\n{out}")
 
 
@@ -464,7 +470,7 @@ def test_care_auto_backend_on_win32_reaches_printed_plan(tmp_path, monkeypatch, 
     captured = capsys.readouterr()
     assert rc == 3
     assert "unsupported on win32" not in captured.err
-    assert "schtasks /Create" in captured.out
+    assert "powershell.exe -NoProfile -NonInteractive -EncodedCommand " in captured.out
     assert care_cmd._resolve_backend("auto") == care_cmd.SCHTASKS_BACKEND
 
 
@@ -504,49 +510,55 @@ def test_care_windows_printed_schtasks_match_each_schedule_hint(tmp_path, monkey
         # The old bug would put 06:15 on ingest-sweep, weekly, observability, nightly.
         if flags != "/SC DAILY /ST 06:15":
             assert "/ST 06:15" not in line
-        assert '/RU "%USERNAME%" /IT /F' in line
+        assert "/RU $env:USERNAME /IT /F" in line
         assert "/NP" not in line
         assert "/RL" not in line
         assert "/F:String" not in line
-        assert line.endswith(" /F")
-        assert line.startswith("schtasks /Create ")
-        assert r'/TR "C:\Windows\System32\cmd.exe /c cd /d ' in line
+        assert "/IT /F; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }" in line
+        assert "& 'C:\\Windows\\System32\\schtasks.exe' /Create " in line
+        assert r"/TR 'C:\Windows\System32\cmd.exe /d /c exit 1'" in line
 
 
 def test_schtasks_create_command_is_well_formed_for_every_catalog_entry(tmp_path):
-    """Emitted lines must use /IT (not /NP) and an absolute cmd.exe /TR."""
+    """Emitted lines retain schedule/account flags and pin the configured action."""
     workspace = Path(r"C:\Users\operator\project")  # content-guard: allow windows-home-path
     for entry in (*care_cmd.CARE_ENTRIES, *care_cmd.MEMORY_JOB_ENTRIES):
-        command = care_cmd._schtasks_create_command(entry, workspace=workspace)
+        printed = care_cmd._schtasks_create_command(entry, workspace=workspace)
+        assert " && " not in printed
+        assert printed.startswith(r"C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe ")
+        command = base64.b64decode(printed.split("-EncodedCommand ")[1]).decode("utf-16le")
         flags = EXPECTED_SCHTASKS_FLAGS[entry.schedule]
-        assert f'/TN "BrigadeCare-{entry.entry_id}"' in command
+        assert f"/TN 'BrigadeCare-{entry.entry_id}'" in command
         assert flags in command
-        assert r'/TR "C:\Windows\System32\cmd.exe /c ' in command
-        assert '/RU "%USERNAME%" /IT /F' in command
+        assert r"/TR 'C:\Windows\System32\cmd.exe /d /c exit 1'" in command
+        assert "/RU $env:USERNAME /IT /F" in command
         assert "/NP" not in command
         assert "/RL" not in command
         assert "/F:String" not in command
-        assert command.startswith("schtasks /Create ")
-        assert command.endswith(" /F")
+        assert "& 'C:\\Windows\\System32\\schtasks.exe' /Create " in command
+        assert "/IT /F; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }" in command
 
 
 def test_care_windows_printed_path_uses_single_backslashes(tmp_path):
     entry = care_cmd.CARE_ENTRIES[0]
     workspace = Path(r"C:\Users\operator\project")  # content-guard: allow windows-home-path
     command = care_cmd._schtasks_create_command(entry, workspace=workspace)
-    assert r"C:\Users\operator\project" in command  # content-guard: allow windows-home-path
-    assert r"C:\\Users" not in command
+    action = base64.b64decode(command.split("-EncodedCommand ")[1]).decode("utf-16le")
+    assert r"C:\Users\operator\project" in action  # content-guard: allow windows-home-path
+    assert r"C:\\Users" not in action
     spaced = care_cmd._schtasks_create_command(
         entry,
         workspace=Path(r"C:\Users\operator\my project"),  # content-guard: allow windows-home-path
     )
-    assert r"cd /d \"C:\Users\operator\my project\"" in spaced  # content-guard: allow windows-home-path
-    assert r"C:\\Users" not in spaced
+    spaced_action = base64.b64decode(spaced.split("-EncodedCommand ")[1]).decode("utf-16le")
+    assert r"C:\Users\operator\my project" in spaced_action  # content-guard: allow windows-home-path
+    assert r"C:\\Users" not in spaced_action
+    assert "$action.WorkingDirectory=" in spaced_action
     assert "/F:String" not in command
     assert "/RL" not in command
-    assert command.endswith('/RU "%USERNAME%" /IT /F')
+    assert "/RU $env:USERNAME /IT /F;" in action
     assert "/NP" not in command
-    assert r"C:\Windows\System32\cmd.exe /c " in command
+    assert r"C:\Windows\System32\cmd.exe /d /c exit 1" in action
 
 
 def test_care_windows_install_json_returns_structured_plan(tmp_path, monkeypatch, capsys):
@@ -561,9 +573,10 @@ def test_care_windows_install_json_returns_structured_plan(tmp_path, monkeypatch
     for task, entry in zip(payload["tasks"], care_cmd.CARE_ENTRIES, strict=True):
         assert task["schedule"] == entry.schedule
         assert task["schedule_flags"] == EXPECTED_SCHTASKS_FLAGS[entry.schedule]
-        assert task["schedule_flags"] in task["command"]
-        assert '/RU "%USERNAME%" /IT' in task["command"]
-        assert "/NP" not in task["command"]
+        script = base64.b64decode(task["command"].split("-EncodedCommand ")[1]).decode("utf-16le")
+        assert task["schedule_flags"] in script
+        assert "/RU $env:USERNAME /IT" in script
+        assert "/NP" not in script
 
 
 def test_care_windows_status_reports_task_presence_instead_of_refusing(tmp_path, monkeypatch, capsys):
@@ -779,14 +792,22 @@ def test_care_systemd_unit_quotes_workspace_paths_with_spaces(tmp_path, monkeypa
     text = service.read_text(encoding="utf-8")
     parsed = managed_block.parse_blocks(text, kind=care_cmd.CARE_KIND, style=care_cmd.CARE_MARKER_STYLE)
     assert parsed.status == "ok"
-    # Compare against the same quoting helper install uses so a win32
-    # workspace path (backslashes, spaces) is not asserted as a POSIX literal.
-    assert care_cmd._systemd_working_directory(target.expanduser().resolve()) in parsed.body
-    assert "my workspace" in parsed.body
-    assert (
-        "ExecStart=/usr/bin/env brigade runbook run --approved "
-        ".brigade/memory-care/runbooks/daily-care-pass.json --target ."
-    ) in parsed.body
+    # Decode the emitted double-quoted arguments independently of the
+    # production quoting helper, including systemd's literal % and $ escapes.
+    command = next(
+        line.removeprefix("ExecStart=") for line in parsed.body.splitlines() if line.startswith("ExecStart=")
+    )
+    argv = [arg.replace("%%", "%").replace("$$", "$") for arg in shlex.split(command)]
+    directory = next(
+        line.removeprefix("WorkingDirectory=")
+        for line in parsed.body.splitlines()
+        if line.startswith("WorkingDirectory=")
+    )
+    assert shlex.split(directory) == [str(trusted_cwd())]
+    assert argv[:3] == [sys.executable, "-I", "-c"]
+    assert argv[4] == str(trusted_cwd() / "__init__.py")
+    assert argv[argv.index("--approved") + 1] == str(target / ".brigade/memory-care/runbooks/daily-care-pass.json")
+    assert argv[argv.index("--target") + 1] == str(target)
 
 
 def test_care_systemd_environment_path_quotes_home_with_spaces(tmp_path, monkeypatch):
@@ -1018,7 +1039,7 @@ def test_care_crontab_dollar_and_backtick_path_remains_literal(tmp_path):
     assert "\\$" in body
     assert "\\`" in body
     command = care_cmd._cron_command(care_cmd.CARE_ENTRIES[0], workspace=workspace)
-    escaped_workspace = care_cmd._cron_escape_path(str(workspace))
+    escaped_workspace = care_cmd._cron_escape_path(str(trusted_cwd()))
     assert command.startswith(f'cd "{escaped_workspace}" && ')
 
 

@@ -68,8 +68,9 @@ with runguard.run_lock(cwd, run_dir=run, wait_seconds=0):
 
         def launch(argv, *args, **kwargs):
             if "brigade.work_cmd.dispatch_child" in argv:
-                assert argv[4:8] == [sys.executable, "-m", "brigade", "run"]
-                argv = [*argv[:4], sys.executable, str(executable), *argv[7:]]
+                child_start = argv.index("brigade.work_cmd.dispatch_child") + 2
+                child_argv = argv[child_start:]
+                argv = [*argv[:child_start], sys.executable, str(executable), *child_argv[child_argv.index("run") :]]
             return popen(argv, *args, **kwargs)
 
         monkeypatch.setattr(subprocess, "Popen", launch)
@@ -89,6 +90,88 @@ def _intents(target):
         json.loads(path.read_text())
         for path in sorted((target / ".brigade/dispatch").glob("dispatch-*/intents/*.json"))
     ]
+
+
+@requires_dispatch_apply
+def test_large_terminal_metadata_is_bounded_in_event_envelope(apply_target, capsys, monkeypatch):
+    from brigade.work_cmd import dispatch_apply as apply, dispatch_state as store
+
+    huge = "x" * (2 * store.MAX_EVENT_LINE_BYTES)
+    real_git = apply._git
+
+    def fake_git(worktree, *args):
+        if args[:1] == ("diff",) and "--stat" in args or args[:1] == ("ls-files",):
+            return huge
+        return real_git(worktree, *args)
+
+    monkeypatch.setattr(apply, "_git", fake_git)
+    _apply(apply_target, capsys)
+    (intent,) = _intents(apply_target)
+    assert intent["state"] == "completed"
+    changes = intent["terminal"]["changes"]
+    assert len(changes["diff_stat"]) < 20_000
+    assert "truncated" in changes["untracked"]
+
+
+@requires_dispatch_apply
+def test_reconcile_skips_settled_sessions_and_completed_rows(apply_target, capsys, monkeypatch):
+    from brigade.work_cmd import dispatch_apply as apply
+
+    _apply(apply_target, capsys)
+    engine = apply.Apply(apply_target)
+    refreshed = []
+    original = engine.refresh
+    monkeypatch.setattr(engine, "refresh", lambda *a, **k: refreshed.append(a[0]) or original(*a, **k))
+    engine.reconcile(no_wait=True, launch=False)
+    engine.reconcile(no_wait=True, launch=False)
+    assert refreshed == []
+    assert engine.settled
+
+
+@requires_dispatch_apply
+def test_failed_terminal_with_one_event_slot_releases_in_one_transition(apply_target, capsys, monkeypatch):
+    from brigade.work_cmd import dispatch_state as store
+
+    monkeypatch.setenv("FAKE_DISPATCH_STATUS", "failed")
+    original = store.event_room
+    monkeypatch.setattr(
+        store,
+        "event_room",
+        lambda directory, *, reserve_events: reserve_events < 2 and original(directory, reserve_events=reserve_events),
+    )
+    _apply(apply_target, capsys, expected=1)
+    ((path, row),) = store.intents(apply_target)
+    assert row["state"] == "failed"
+    assert row["released"] is True
+    assert row["terminal"]
+
+
+@requires_dispatch_apply
+def test_terminal_release_recovers_legacy_receipts_and_retries_only_after_failure(apply_target, capsys, monkeypatch):
+    from brigade.work_cmd import dispatch_apply as apply, dispatch_state as store
+
+    monkeypatch.setenv("FAKE_DISPATCH_STATUS", "failed")
+    _apply(apply_target, capsys, expected=1)
+    ((path, row),) = store.intents(apply_target)
+    row.pop("released", None)  # Legacy receipt or crash before recording release.
+    localio.write_json(path, row)
+    release = apply._release
+    attempts = []
+
+    def flaky_release(target, intent):
+        attempts.append(intent["claim_id"])
+        if len(attempts) == 1:
+            raise OSError("release unavailable")
+        release(target, intent)
+
+    monkeypatch.setattr(apply, "_release", flaky_release)
+    with pytest.raises(OSError, match="release unavailable"):
+        apply._finish(apply_target, path, row, "failed", {})
+    assert not store.read(path).get("released")
+    apply.Apply(apply_target).reconcile(no_wait=True, launch=False)
+    assert store.read(path)["released"] is True
+    apply.Apply(apply_target).reconcile(no_wait=True, launch=False)
+    assert len(attempts) == 2
 
 
 @requires_dispatch_apply
@@ -434,7 +517,7 @@ def test_max_total_denial_uses_budget_payload(apply_target, capsys):
 
 @requires_dispatch_apply
 def test_live_child_consumes_capacity_in_next_plan(apply_target, capsys, monkeypatch):
-    monkeypatch.setenv("FAKE_DISPATCH_SLEEP", "0.5")
+    monkeypatch.setenv("FAKE_DISPATCH_SLEEP", "4")
     _tasks(apply_target, [["a.py"], ["b.py"]])
     _apply(apply_target, capsys, "--max", "1", "--no-wait")
     assert cli.main(["work", "dispatch", "--target", str(apply_target), "--max", "1", "--dry-run", "--json"]) == 0
@@ -784,3 +867,52 @@ def test_expired_session_does_not_spawn_a_saved_planned_intent(apply_target, cap
     _apply(apply_target, capsys, "--max", "0", expected=1)
     assert launches == []
     assert work_cmd._read_task_ledger(apply_target)["tasks"][0]["status"] == "pending"
+
+
+@pytest.mark.parametrize("reason", ["SIGTERM", "version-changed"])
+def test_stop_during_prompt_preparation_leaves_claim_resumable(apply_target, capsys, monkeypatch, reason):
+    from brigade.work_cmd import dispatch_apply as apply, dispatch_state as store
+    from brigade.work_cmd.dispatch_watch import Watch
+
+    _apply(apply_target, capsys, "--dry-run")
+    (directory,) = store.sessions(apply_target)
+    session = store.read(directory / "session.json")
+    session.update(dry_run=False, no_wait=True)
+    localio.write_json(directory / "session.json", session)
+    plan = store.read(directory / "plan.json")
+    engine = apply.Apply(apply_target)
+    watcher = Watch(engine, directory, session, interval=0.1, drain_wait=False)
+    engine.can_launch = watcher.can_launch
+    engine.reservation_allowed = watcher.reserve
+    render = apply._render_task_run_prompt
+    launches = []
+    popen = subprocess.Popen
+
+    def stop_preparing(task):
+        watcher.reason = reason
+        return render(task)
+
+    def counted(argv, *args, **kwargs):
+        if "brigade.work_cmd.dispatch_child" in argv:
+            launches.append(argv)
+        return popen(argv, *args, **kwargs)
+
+    monkeypatch.setattr(subprocess, "Popen", counted)
+    monkeypatch.setattr(apply, "_render_task_run_prompt", stop_preparing)
+    path, row = apply._new_intent(apply_target, directory, session, plan, plan["selected"][0])
+    engine.advance(path, row, session)
+    assert not launches
+    saved = store.read(path)
+    assert saved["state"] == "launching" and not saved["pid"]
+    assert not saved.get("released")
+    claim = apply.locking._read_task_ledger(apply_target)["tasks"][0]["claim"]["claim_id"]
+    assert claim == saved["claim_id"]
+    watcher.count_launches(watcher.snapshot())
+    assert watcher.launched() == 0
+
+    monkeypatch.setattr(apply, "_render_task_run_prompt", render)
+    assert apply.Apply(apply_target).session(directory) == 0
+    saved = store.read(path)
+    assert saved["state"] == "completed" and saved["claim_id"] == claim
+    assert len(launches) == 1
+    assert (Path(saved["run_dir"]) / "launch-count").read_text() == "launch\n"
