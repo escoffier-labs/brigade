@@ -350,7 +350,7 @@ def cloudflare_status(settings: dict[str, Any], *, now: datetime | None = None) 
         version_id = None
         if isinstance(deployment, dict):
             deployed = deployment.get("versions")
-            if isinstance(deployed, list) and deployed and isinstance(deployed[0], dict):
+            if isinstance(deployed, list) and len(deployed) == 1 and isinstance(deployed[0], dict):
                 candidate = deployed[0].get("version_id") or deployed[0].get("id")
                 if isinstance(candidate, str) and re.fullmatch(r"[A-Za-z0-9._+-]{1,128}", candidate):
                     version_id = candidate
@@ -360,7 +360,11 @@ def cloudflare_status(settings: dict[str, Any], *, now: datetime | None = None) 
         if isinstance(versions, dict) and isinstance(versions.get("versions"), list):
             version_rows = versions["versions"]
         for version in version_rows:
-            if isinstance(version, dict) and version_id in (version.get("id"), version.get("version_id")):
+            if (
+                isinstance(version_id, str)
+                and isinstance(version, dict)
+                and version_id in (version.get("id"), version.get("version_id"))
+            ):
                 metadata = version.get("metadata")
                 created = metadata.get("created_on") if isinstance(metadata, dict) else None
                 result["worker_published_at"] = _status_time(
@@ -384,7 +388,13 @@ def cloudflare_status(settings: dict[str, Any], *, now: datetime | None = None) 
                 "https://api.cloudflare.com/client/v4/graphql", body={"query": VIEWER_QUERY}, token=token
             )
             accounts = viewer["data"]["viewer"]["accounts"]
-            graphql_ok = not viewer.get("errors") and isinstance(accounts, list) and bool(accounts)
+            account = settings.get("account")
+            graphql_ok = (
+                not viewer.get("errors")
+                and isinstance(accounts, list)
+                and isinstance(account, str)
+                and any(isinstance(row, dict) and row.get("accountTag") == account for row in accounts)
+            )
             if graphql_ok:
                 end = now
                 payload = fetch_json(
@@ -413,7 +423,9 @@ def cloudflare_status(settings: dict[str, Any], *, now: datetime | None = None) 
                             result["errors_24h"] = sum(errors)
         except (ValueError, KeyError, TypeError, AttributeError):
             pass
-    if not token:
+    if not token and not isinstance(worker, str) and isinstance(database, str) and d1_ok:
+        result["credential"] = "available"
+    elif not token:
         result["credential"] = "unavailable"
     elif isinstance(worker, str) and worker_ok and graphql_ok:
         result["credential"] = "available"
