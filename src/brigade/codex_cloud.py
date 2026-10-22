@@ -424,6 +424,7 @@ def _classify_list_failure(result: proc.Result) -> str:
 def list_tasks(
     *,
     max_items: int = DEFAULT_MAX_ITEMS,
+    max_pages: int = MAX_LIST_PAGES,
     cwd: Path | None = None,
     process_registry: proc.ProcessRegistry | None = None,
     command_timeout: float = DEFAULT_LIST_TIMEOUT,
@@ -432,14 +433,15 @@ def list_tasks(
 
     Only the documented ``{tasks: [...], cursor}`` schema is accepted. Reads use
     the documented 1-20 item limit and cursor pagination, with fixed page and
-    item caps. Task rows retain only id, normalized state, and environment id.
+    item caps; ``max_pages`` lowers the page cap (at least one page is read).
+    Task rows retain only id, normalized state, and environment id.
     """
     item_cap = max(0, min(max_items, DEFAULT_MAX_ITEMS))
     sanitized: list[dict[str, Any]] = []
     cursor: str | None = None
     seen_cursors: set[str] = set()
     seen_task_ids: set[str] = set()
-    for _page in range(MAX_LIST_PAGES):
+    for _page in range(max(1, min(max_pages, MAX_LIST_PAGES))):
         if len(sanitized) >= item_cap:
             break
         limit = min(MAX_LIST_LIMIT, item_cap - len(sanitized))

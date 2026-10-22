@@ -11,6 +11,7 @@ import ipaddress
 import json
 import re
 import secrets
+import socket
 import sys
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
@@ -358,6 +359,16 @@ class _RunViewHandler(BaseHTTPRequestHandler):
         return
 
 
+class _RunViewServer(ThreadingHTTPServer):
+    def server_bind(self) -> None:
+        if sys.platform == "win32":
+            # Windows reuse permits competing listeners on the same address.
+            # Claim it exclusively before HTTPServer binds the socket.
+            self.allow_reuse_address = False
+            self.socket.setsockopt(socket.SOL_SOCKET, socket.SO_EXCLUSIVEADDRUSE, 1)
+        super().server_bind()
+
+
 def make_server(
     *,
     cwd: Path,
@@ -376,7 +387,7 @@ def make_server(
         _cwd = cwd
         _runs_dir = runs_dir
 
-    server = ThreadingHTTPServer((host, port), _BoundHandler)
+    server = _RunViewServer((host, port), _BoundHandler)
     server.daemon_threads = True
     actual_host, actual_port = _bound_address(server)
     allowed = {

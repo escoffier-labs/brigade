@@ -967,6 +967,110 @@ def test_run_lock_removes_lock_after_context(tmp_path):
     assert not lock_path.exists()
 
 
+def test_release_lock_retries_transient_windows_rename_denial(tmp_path, monkeypatch):
+    lock_path = tmp_path / "lock"
+    lock_path.mkdir()
+    ownership = runguard._LockOwnership("release-token", lock_path.stat().st_dev, lock_path.stat().st_ino)
+    (lock_path / "owner.json").write_text(json.dumps({"owner_token": "release-token"}))
+    original_rename = Path.rename
+    attempts = 0
+
+    def transient_rename(path, target):
+        nonlocal attempts
+        if path == lock_path and attempts == 0:
+            attempts += 1
+            error = PermissionError(13, "sharing violation")
+            error.winerror = 32
+            raise error
+        if path == lock_path:
+            attempts += 1
+        return original_rename(path, target)
+
+    monkeypatch.setattr(Path, "rename", transient_rename)
+    runguard._release_lock(lock_path, ownership)
+
+    assert attempts == 2
+    assert not lock_path.exists()
+
+
+def test_release_lock_persistent_windows_denial_is_bounded_and_reported(tmp_path, monkeypatch):
+    lock_path = tmp_path / "lock"
+    lock_path.mkdir()
+    ownership = runguard._LockOwnership("release-token", lock_path.stat().st_dev, lock_path.stat().st_ino)
+    clock = {"now": 0.0, "attempts": 0}
+
+    def monotonic():
+        return clock["now"]
+
+    def sleep(seconds):
+        clock["now"] += seconds
+
+    def denied(path, target):
+        clock["attempts"] += 1
+        error = PermissionError(13, "sharing violation")
+        error.winerror = 5
+        raise error
+
+    monkeypatch.setattr(runguard.time, "monotonic", monotonic)
+    monkeypatch.setattr(runguard.time, "sleep", sleep)
+    monkeypatch.setattr(Path, "rename", denied)
+    with pytest.raises(PermissionError, match="sharing violation"):
+        runguard._release_lock(lock_path, ownership)
+
+    assert clock["attempts"] > 1
+    assert clock["now"] <= 1.0
+    assert lock_path.is_dir()
+
+
+def test_release_lock_does_not_touch_successor_after_transient_windows_denial(tmp_path, monkeypatch):
+    lock_path = tmp_path / "lock"
+    lock_path.mkdir()
+    ownership = runguard._LockOwnership("release-token", lock_path.stat().st_dev, lock_path.stat().st_ino)
+    successor = tmp_path / "successor"
+    original_rename = Path.rename
+    attempts = 0
+
+    def replace_before_retry(seconds):
+        nonlocal attempts
+        attempts += 1
+        original_rename(lock_path, successor)
+        lock_path.mkdir()
+        (lock_path / "owner.json").write_text('{"owner_token":"successor"}')
+
+    def denied_once(path, target):
+        error = PermissionError(13, "sharing violation")
+        error.winerror = 32
+        raise error
+
+    monkeypatch.setattr(runguard.time, "sleep", replace_before_retry)
+    monkeypatch.setattr(Path, "rename", denied_once)
+    runguard._release_lock(lock_path, ownership)
+
+    assert attempts == 1
+    assert lock_path.is_dir()
+    assert json.loads((lock_path / "owner.json").read_text())["owner_token"] == "successor"
+    assert successor.is_dir()
+
+
+def test_release_lock_does_not_retry_posix_permission_error(tmp_path, monkeypatch):
+    lock_path = tmp_path / "lock"
+    lock_path.mkdir()
+    ownership = runguard._LockOwnership("release-token", lock_path.stat().st_dev, lock_path.stat().st_ino)
+    attempts = 0
+
+    def denied(path, target):
+        nonlocal attempts
+        attempts += 1
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(Path, "rename", denied)
+    with pytest.raises(PermissionError, match="Permission denied"):
+        runguard._release_lock(lock_path, ownership)
+
+    assert attempts == 1
+    assert lock_path.is_dir()
+
+
 def test_create_detached_worktree_checks_out_head_in_separate_directory(tmp_path):
     repo = _repo(tmp_path)
     (repo / "tracked.txt").write_text("dirty source\n")
