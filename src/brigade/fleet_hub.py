@@ -117,7 +117,7 @@ from .fleet_hub_status import (
     latest_status as latest_status,
 )
 
-SCHEMA_VERSION = 41
+SCHEMA_VERSION = 42
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
@@ -638,6 +638,7 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     # running hub rather than needing one that will not start.
     # v18 -> v19: research/security/scout role columns on run_preference (roster page).
     # v40 -> v41: covering event-id index for campaign take's cross-item key probe.
+    # v41 -> v42: indexed immutable execution identity checks after link retention.
     worklore_store.ensure_schema(conn)
     # v39 -> v40: campaign membership tables (#1128). Additive; items stay in Worklore.
     worklore_campaigns.ensure_schema(conn)

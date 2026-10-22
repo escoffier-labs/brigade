@@ -624,6 +624,127 @@ def test_campaign_http_execution_binding_replay_and_budget(live_campaign):
     assert store.get_item(conn, work_id)["attempt_count"] == 1
 
 
+def execution_state(conn):
+    """Compare persisted effects, including counters and retention, across HTTP refusals."""
+    return {
+        table: conn.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall()
+        for table in ("work_items", "work_events", "work_links")
+    }
+
+
+def fill_execution_retention(conn, request, work_id, headers):
+    for index in range(51):
+        run_id = f"retained-{index}"
+        fleet_run(conn, run=run_id)
+        status, reply = request(work_id, "execution", {"node_id": "node-a", "run_id": run_id}, headers=headers)
+        assert status == 201, reply
+    links = store.list_links(conn, work_id)
+    assert len(links) == 50
+    assert "node-a/retained-0" not in {link["external_key"] for link in links}
+
+
+@pytest.mark.parametrize("destination", ["reclaimed", "other-member", "noncampaign"])
+@pytest.mark.parametrize("observer", ["node-a", "admin", "operator"])
+def test_campaign_execution_history_survives_retention_and_refuses_rebinding(
+    live_campaign, monkeypatch, destination, observer
+):
+    conn, clock, request, _, _ = live_campaign
+    create(conn)
+    work_id = members(conn)["acme/one"]
+    assert act(conn, work_id)[0] == 200
+    headers = {"X-Worklore-Holder": NONCE_A, "X-Worklore-Generation": "1", "If-Match": "1"}
+    fill_execution_retention(conn, request, work_id, headers)
+    clock[0] = "2026-01-01T00:01:00+00:00"
+    if destination == "reclaimed":
+        target = work_id
+        assert act(conn, target, revision=1, generation=1, nonce=NONCE_B, key="reclaim")[0] == 200
+        generation = "2"
+    elif destination == "other-member":
+        target = members(conn)["acme/two"]
+        assert act(conn, target, nonce=NONCE_B, key="other-member")[0] == 200
+        generation = "1"
+    else:
+        target = store.create_item(conn, {"title": "Independent work", "kind": "repo"}, actor_id="admin")["work_id"]
+        generation = "0"
+    # Legacy observations may follow a known binding; checking only the latest event loses it.
+    if destination == "noncampaign":
+        store._append_event(
+            conn,
+            work_id=work_id,
+            event_type="execution-linked",
+            actor_type="operator",
+            actor_id="admin",
+            node_id="node-a",
+            run_id="retained-0",
+            from_status=None,
+            to_status=None,
+            now=clock[0],
+            detail={"external_key": "node-a/retained-0"},
+        )
+        conn.commit()
+    headers = {"X-Worklore-Holder": NONCE_B, "X-Worklore-Generation": generation, "If-Match": "1"}
+    if observer == "operator":
+        monkeypatch.setenv("BRIGADE_WORKLORE_OPERATOR_NODES", "node-a,node-c")
+    before = execution_state(conn)
+    status, refusal = request(
+        target,
+        "execution",
+        {"node_id": "node-a", "run_id": "retained-0"},
+        headers=headers,
+        node="node-a" if observer == "operator" else observer,
+    )
+    assert status == 409 and refusal["code"] == "link-conflict", refusal
+    monkeypatch.setenv("BRIGADE_WORKLORE_OPERATOR_NODES", "node-c")
+    status, refusal = request(target, "attempts", {"action": "failed", "run_id": "retained-0"}, headers=headers)
+    assert status == 403 and refusal["code"] == "attempt-forbidden", refusal
+    assert execution_state(conn) == before
+    # Retention protection must not refuse a fresh run under the new grant.
+    fleet_run(conn, run="fresh-grant-run")
+    assert request(target, "execution", {"node_id": "node-a", "run_id": "fresh-grant-run"}, headers=headers)[0] == 201
+    status, result = request(target, "attempts", {"action": "failed", "run_id": "fresh-grant-run"}, headers=headers)
+    assert status == 200 and result["item"]["attempt_count"] == 1, result
+
+
+def test_campaign_evicted_same_grant_replay_and_legacy_observations_are_inert(live_campaign):
+    conn, _, request, _, _ = live_campaign
+    create(conn)
+    work_id = members(conn)["acme/one"]
+    assert act(conn, work_id)[0] == 200
+    headers = {"X-Worklore-Holder": NONCE_A, "X-Worklore-Generation": "1", "If-Match": "1"}
+    # This is the legacy unbound execution event shape, still emitted by trusted observations.
+    fleet_run(conn, run="legacy-observed")
+    assert request(work_id, "execution", {"node_id": "node-a", "run_id": "legacy-observed"}, node="admin")[0] == 201
+    before = execution_state(conn)
+    status, refusal = request(work_id, "attempts", {"action": "failed", "run_id": "legacy-observed"}, headers=headers)
+    assert status == 409 and refusal["code"] == "stale-generation"
+    assert execution_state(conn) == before
+    fill_execution_retention(conn, request, work_id, headers)
+    before = execution_state(conn)
+    for run_id in ("retained-0", "legacy-observed"):
+        for observer in ("node-a", "admin"):
+            status, refusal = request(
+                work_id, "execution", {"node_id": "node-a", "run_id": run_id}, node=observer, headers=headers
+            )
+            assert status == 409 and refusal["code"] == "link-conflict", refusal
+            assert execution_state(conn) == before
+    # A retained own-run reply remains inert even without the holder capability.
+    retained = {"node_id": "node-a", "run_id": "retained-50"}
+    assert request(work_id, "execution", retained)[0] == 201
+    assert execution_state(conn) == before
+    fleet_run(conn, run="unauthorized-fresh")
+    status, refusal = request(work_id, "execution", {"node_id": "node-a", "run_id": "unauthorized-fresh"})
+    assert status == 403 and refusal["code"] == "holder-mismatch"
+    assert execution_state(conn) == before
+
+
+def test_unbound_noncampaign_execution_can_still_relink_after_retention(live_campaign):
+    conn, _, request, _, _ = live_campaign
+    work_id = store.create_item(conn, {"title": "Independent work", "kind": "repo"}, actor_id="admin")["work_id"]
+    fill_execution_retention(conn, request, work_id, {})
+    assert request(work_id, "execution", {"node_id": "node-a", "run_id": "retained-0"})[0] == 201
+    assert len(store.list_links(conn, work_id)) == 50
+
+
 @pytest.mark.parametrize("patch", [{"description": "Changed member"}, {"acceptance": ["Different checks"]}])
 def test_take_refuses_actual_member_drift_through_normal_patch(ledger, patch):
     conn, _, _ = ledger

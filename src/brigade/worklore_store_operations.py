@@ -796,8 +796,19 @@ def link_execution(
             if existing["work_id"] == work_id:
                 return existing
             raise WorkloreConflict("fleet run is already linked to another work item", code="link-conflict")
+        from . import worklore_campaigns as campaigns
         from . import worklore_ownership as ownership
 
+        # Links are a retained projection. Immutable execution events still reserve a
+        # campaign run after eviction, including against trusted operator observations.
+        # Unbound legacy history cannot acquire a campaign grant retroactively either.
+        history = conn.execute(
+            "SELECT 1 FROM work_events WHERE event_type='execution-linked' AND node_id=? AND run_id=? "
+            "AND (? OR json_extract(detail_json, '$.campaign_grant') IS NOT NULL) LIMIT 1",
+            (node_id, run_id, campaigns.member_campaign(conn, work_id) is not None),
+        ).fetchone()
+        if history is not None:
+            raise WorkloreConflict("historical campaign execution cannot be relinked", code="link-conflict")
         binding = ownership.require_campaign_write(
             conn,
             work_id,

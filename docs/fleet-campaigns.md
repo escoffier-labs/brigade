@@ -224,6 +224,13 @@ even when the same node becomes holder again. Use a new run for the new grant.
 Cancellation, expiry, reclaim, or an exhausted budget prevents new node writes.
 A historical own-run replay can return its existing record without adding events,
 links, or attempt counts. It cannot rebind the run or restore authority.
+After the 50-link retention window evicts a campaign execution, relinking returns
+`link-conflict`, even for its original grant or an admin or operator observation.
+The immutable execution history reserves that node/run identity across generations
+and work items, including noncampaign destinations. A campaign member also refuses
+relinking unbound legacy execution history, which carries no authenticated grant.
+Retained unbound observations remain inert replays and cannot authorize node attempts.
+Ordinary noncampaign runs with only unbound history keep their existing relink behavior.
 
 Admin and configured operator observations use their existing explicit trusted
 authority, including recording failures or resetting attempts after cancellation.

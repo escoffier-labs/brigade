@@ -381,6 +381,10 @@ _INDEX_STATEMENTS = (
     # appending. A separate identity index makes authenticated retry probes constant-time.
     "CREATE INDEX IF NOT EXISTS work_events_attempt_work_seq ON work_events (work_id, event_type, seq)",
     "CREATE INDEX IF NOT EXISTS work_events_attempt_identity ON work_events (work_id, event_type, node_id, run_id)",
+    # A retained link may disappear; execution history must reserve campaign run
+    # identities globally without scanning other items under the write fence.
+    "CREATE INDEX IF NOT EXISTS work_events_execution_identity ON work_events (node_id, run_id) "
+    "WHERE event_type = 'execution-linked'",
     # The item page orders by (created_at, work_id) and the sprint log by (occurred_at DESC,
     # seq DESC). Both are the keyset the cursor walks, so an index in exactly that order lets
     # a page read its rows straight out of the index instead of sorting the whole table.
