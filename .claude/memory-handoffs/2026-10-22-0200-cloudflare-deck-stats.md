@@ -7,11 +7,13 @@ project-context
 Cloudflare status fields in Deck statistics
 
 ## Summary
-Issue #1877 adds a read-only Cloudflare panel to `/deck/stats` using a closed v2 statistics snapshot. The collector keeps fixed command vectors and normalized results; the rendering layer treats stale or unavailable observations as unknown. Wrangler does not provide a D1 purge event timestamp, so `last_purge` must remain unknown until an event source is added.
+Issue #1877 adds a read-only Cloudflare panel to `/deck/stats` using a closed v2 statistics snapshot. The collector keeps fixed command vectors and normalized results; the rendering layer treats stale or unavailable observations as unknown. Wrangler’s JSON shapes differ by command: deployment status returns one deployment object, deployments list and versions list return arrays, and version creation time is under `metadata.created_on`. Each read must fail independently so a D1 error does not discard deployment values. Wrangler does not provide a D1 purge event timestamp, so `last_purge` must remain unknown until an event source is added.
 
 ## Durable facts
 - The stats Hub accepts retained `brigade.admin-stats.v1` snapshots and the new `brigade.admin-stats.v2` shape.
 - Cloudflare collection is opt-in with `fleet.stats.status_panel = true`; credentials and raw API or CLI payloads are not stored in the snapshot.
+- Wrangler `deployments status --json` returns the deployment object directly; `versions list --json` returns an array with `metadata.created_on`.
+- Keep deployment, version, D1, and GraphQL reads independent. A failed D1 read leaves its cell unknown while successful Worker status values remain available.
 - The full verification gate can fail on unrelated test shards even after the focused stats gate passes; inspect its shard failure list before attributing failures to a change.
 
 ## Evidence

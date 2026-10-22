@@ -297,7 +297,7 @@ def cloudflare_status(settings: dict[str, Any], *, now: datetime | None = None) 
         return None
     result: dict[str, Any] = {
         "collected_at": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "credential": "unavailable",
+        "credential": "unknown",
         "worker_version": None,
         "worker_published_at": None,
         "repository_head": None,
@@ -311,58 +311,69 @@ def cloudflare_status(settings: dict[str, Any], *, now: datetime | None = None) 
         result["repository_head"] = repository_head
     wrangler_ok = False
     if isinstance(worker, str) and isinstance(database, str):
-        try:
-            token_envs = tuple(
-                settings[key] for key in ("analytics_token_env", "d1_token_env") if isinstance(settings.get(key), str)
-            )
-            current = run_wrangler(
-                status_wrangler_argv(worker, database, "deployments-status"),
-                account=settings.get("account"),
-                token_envs=token_envs,
-            )
-            deployments = run_wrangler(
-                status_wrangler_argv(worker, database, "deployments-list"),
-                account=settings.get("account"),
-                token_envs=token_envs,
-            )
-            versions = run_wrangler(
-                status_wrangler_argv(worker, database, "versions-list"),
-                account=settings.get("account"),
-                token_envs=token_envs,
-            )
-            run_wrangler(
-                status_wrangler_argv(worker, database, "d1-info"),
-                account=settings.get("account"),
-                token_envs=token_envs,
-            )
-            counts = run_wrangler(
-                status_wrangler_argv(worker, database, "d1-counts"),
-                account=settings.get("account"),
-                token_envs=token_envs,
-            )
-            wrangler_ok = True
-            deployment = current.get("latest") if isinstance(current, dict) else None
-            if deployment is None and isinstance(deployments, dict):
-                entries = deployments.get("deployments")
-                deployment = entries[0] if isinstance(entries, list) and entries else None
-            version_id = None
-            if isinstance(deployment, dict):
-                deployed = deployment.get("versions")
-                if isinstance(deployed, list) and deployed and isinstance(deployed[0], dict):
-                    candidate = deployed[0].get("version_id") or deployed[0].get("id")
-                    if isinstance(candidate, str) and re.fullmatch(r"[A-Za-z0-9._+-]{1,128}", candidate):
-                        version_id = candidate
-                result["worker_version"] = version_id
-            version_rows = versions.get("versions", []) if isinstance(versions, dict) else []
-            for version in version_rows:
-                if isinstance(version, dict) and version_id in (version.get("id"), version.get("version_id")):
-                    result["worker_published_at"] = _status_time(version.get("created_on") or version.get("created_at"))
-                    break
-            rows = _results(counts)
-            if len(rows) == 1 and type(rows[0].get("row_count")) is int and rows[0]["row_count"] >= 0:
-                result["d1_rows"] = rows[0]["row_count"]
-        except (ValueError, KeyError, TypeError, AttributeError):
-            pass
+        token_envs = tuple(
+            settings[key] for key in ("analytics_token_env", "d1_token_env") if isinstance(settings.get(key), str)
+        )
+
+        def read(action: str) -> tuple[bool, Any]:
+            try:
+                value = run_wrangler(
+                    status_wrangler_argv(worker, database, action),
+                    account=settings.get("account"),
+                    token_envs=token_envs,
+                )
+            except (ValueError, KeyError, TypeError, AttributeError):
+                return False, None
+            return True, value
+
+        reads = {
+            action: read(action)
+            for action in ("deployments-status", "deployments-list", "versions-list", "d1-info", "d1-counts")
+        }
+        wrangler_ok = any(succeeded for succeeded, _ in reads.values())
+        current = reads["deployments-status"][1]
+        deployments = reads["deployments-list"][1]
+        versions = reads["versions-list"][1]
+
+        deployment = None
+        if isinstance(current, dict):
+            deployment = current.get("latest")
+            if deployment is None and isinstance(current.get("versions"), list):
+                deployment = current
+        if deployment is None:
+            entries = deployments if isinstance(deployments, list) else []
+            if isinstance(deployments, dict) and isinstance(deployments.get("deployments"), list):
+                entries = deployments["deployments"]
+            deployment = entries[0] if entries else None
+
+        version_id = None
+        if isinstance(deployment, dict):
+            deployed = deployment.get("versions")
+            if isinstance(deployed, list) and deployed and isinstance(deployed[0], dict):
+                candidate = deployed[0].get("version_id") or deployed[0].get("id")
+                if isinstance(candidate, str) and re.fullmatch(r"[A-Za-z0-9._+-]{1,128}", candidate):
+                    version_id = candidate
+            result["worker_version"] = version_id
+
+        version_rows = versions if isinstance(versions, list) else []
+        if isinstance(versions, dict) and isinstance(versions.get("versions"), list):
+            version_rows = versions["versions"]
+        for version in version_rows:
+            if isinstance(version, dict) and version_id in (version.get("id"), version.get("version_id")):
+                metadata = version.get("metadata")
+                created = metadata.get("created_on") if isinstance(metadata, dict) else None
+                result["worker_published_at"] = _status_time(
+                    created or version.get("created_on") or version.get("created_at")
+                )
+                break
+
+        if reads["d1-counts"][0]:
+            try:
+                rows = _results(reads["d1-counts"][1])
+                if len(rows) == 1 and type(rows[0].get("row_count")) is int and rows[0]["row_count"] >= 0:
+                    result["d1_rows"] = rows[0]["row_count"]
+            except (ValueError, KeyError, TypeError, AttributeError):
+                pass
     token_key = settings.get("analytics_token_env")
     token = os.environ.get(token_key, "") if isinstance(token_key, str) else ""
     graphql_ok = False
@@ -401,8 +412,12 @@ def cloudflare_status(settings: dict[str, Any], *, now: datetime | None = None) 
                             result["errors_24h"] = sum(errors)
         except (ValueError, KeyError, TypeError, AttributeError):
             pass
-    if wrangler_ok and graphql_ok:
+    if not token:
+        result["credential"] = "unavailable"
+    elif wrangler_ok and graphql_ok:
         result["credential"] = "available"
+    elif graphql_ok and not wrangler_ok:
+        result["credential"] = "unavailable"
     # Available read-only status sources do not report a D1 purge event timestamp.
     # Keep last_purge unknown instead of presenting the newest data date as a purge.
     stats._cloudflare(result)
