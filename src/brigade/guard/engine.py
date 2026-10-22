@@ -242,44 +242,58 @@ def _line_starts(text: str) -> list[int]:
     return starts
 
 
-def _interpolation_state(before: str) -> tuple[bool, bool] | None:
-    """Return (inside an expression, inside a quoted literal in it) for the
-    f-string still open at the end of ``before``, or None when none is open."""
-    for prefix in re.finditer(r"\b(rf|fr|f)([\"'])", before, re.IGNORECASE):
-        state = _scan_fstring(before, prefix.end(), prefix.group(2), "r" in prefix.group(1).lower())
-        if state is not None:
-            return state
-    return None
+_STRING_PREFIXES = {"", "r", "b", "u", "br", "rb", "f", "rf", "fr"}
 
 
-def _scan_fstring(text: str, index: int, outer: str, raw: bool) -> tuple[bool, bool] | None:
-    depth = 0
-    quote: str | None = None
-    while index < len(text):
-        char = text[index]
-        if quote is not None:
-            if char == "\\":
-                index += 1
-            elif char == quote:
-                quote = None
-        elif depth == 0:
-            if char == "\\" and not raw:
-                index += 1
-            elif char == outer:
-                return None
-            elif char == "{":
-                if text.startswith("{", index + 1):
-                    index += 1
+def _interpolation_state(before: str) -> bool | None:
+    """Lex the line up to a match and report where it ends inside an f-string
+    replacement field: None when outside any field, False in bare expression
+    code, True inside a quoted literal within the expression."""
+    # Frames: ("str", delimiter) or ("fstr", delimiter) for literals, and
+    # ("expr", depth) for a replacement field with nested brace depth.
+    stack: list[list] = []
+    index = 0
+    while index < len(before):
+        char = before[index]
+        top = stack[-1] if stack else None
+        if top is None or top[0] == "expr":
+            if char in "\"'":
+                delimiter = char * 3 if before.startswith(char * 3, index) else char
+                start = index
+                while start and before[start - 1].isalpha():
+                    start -= 1
+                prefix = before[start:index].lower()
+                if start and (before[start - 1].isalnum() or before[start - 1] == "_"):
+                    prefix = "?"
+                kind = "fstr" if "f" in prefix and prefix in _STRING_PREFIXES else "str"
+                stack.append([kind, delimiter])
+                index += len(delimiter)
+                continue
+            if top is not None and char == "{":
+                top[1] += 1
+            elif top is not None and char == "}":
+                if top[1]:
+                    top[1] -= 1
                 else:
-                    depth = 1
-        elif char in "\"'":
-            quote = char
-        elif char == "{":
-            depth += 1
-        elif char == "}":
-            depth -= 1
+                    stack.pop()
+        elif char == "\\":
+            # Raw literals keep the backslash, but it still stops an escaped
+            # delimiter from closing the literal.
+            index += 2
+            continue
+        elif before.startswith(top[1], index):
+            stack.pop()
+            index += len(top[1])
+            continue
+        elif top[0] == "fstr" and char == "{":
+            if before.startswith("{{", index):
+                index += 2
+                continue
+            stack.append(["expr", 0])
         index += 1
-    return depth > 0, quote is not None
+    if not any(frame[0] == "expr" for frame in stack):
+        return None
+    return stack[-1][0] != "expr"
 
 
 def _line_at(text: str, start: int, end: int) -> str:
@@ -300,14 +314,12 @@ def _hostname_context(text: str, start: int, end: int) -> bool:
     column = start - (text.rfind("\n", 0, start) + 1)
     before, after = line[:column], line[column + end - start :]
     url_context = re.search(r"[a-z][a-z0-9+.-]*://[^\s]*$", before, re.IGNORECASE)
-    # An f-string with an open brace introduces an expression; ``{{`` is an
-    # escaped brace and a closed literal does not count. A bare member
-    # expression stays code-shaped even inside a formatted URL (#1918); a host
-    # quoted inside the expression keeps the URL context it had before, and is
-    # skipped without one.
-    interpolation = _interpolation_state(before)
-    if interpolation is not None and interpolation[0]:
-        return bool(url_context) and interpolation[1]
+    # Inside an f-string replacement field, a bare member expression stays
+    # code-shaped even within a formatted URL (#1918); a host quoted inside the
+    # expression keeps the URL context it had before, and is skipped without one.
+    nested_literal = _interpolation_state(before)
+    if nested_literal is not None:
+        return bool(url_context) and nested_literal
     if url_context:
         return True
     if before.rstrip().endswith(("[", "{")):

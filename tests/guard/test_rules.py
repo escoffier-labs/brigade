@@ -523,14 +523,18 @@ class MissingLeakShapeTests(unittest.TestCase):
         """#1918: the URL-context acceptance must not run before interpolation
         rejection, or a formatted-URL member expression becomes a finding."""
         for text in (
-            'f"https://{db.local}/path"',
-            'f"https://{cfg.db.local}/path"',
-            "f'https://{db.local}/path'",
-            'url = f"https://{db.local}/api"',
-            'rf"https://{db.local}/path"',
-            'fr"https://{db.local}/path"',
+            'f"https://{db.local}/path"',  # content-guard: allow private-hostname
+            'f"https://{cfg.db.local}/path"',  # content-guard: allow private-hostname
+            "f'https://{db.local}/path'",  # content-guard: allow private-hostname
+            'url = f"https://{db.local}/api"',  # content-guard: allow private-hostname
+            'rf"https://{db.local}/path"',  # content-guard: allow private-hostname
+            'fr"https://{db.local}/path"',  # content-guard: allow private-hostname
             # A URL literal earlier in the same expression must not re-enable the host.
             "f\"https://{resolve('https://fallback.invalid',cfg.db.local)}/path\"",  # content-guard: allow private-hostname
+            # Nested, raw-escaped, and triple-quoted formatted strings.
+            "f\"https://{f'{cfg.db.local}'}/\"",  # content-guard: allow private-hostname
+            'rf"\\"https://{cfg.db.local}/path\\""',  # content-guard: allow private-hostname
+            'f"""https://{cfg.db.local}/path"""',  # content-guard: allow private-hostname
         ):
             with self.subTest(text=text):
                 result = scan_text(text)
@@ -547,6 +551,8 @@ class MissingLeakShapeTests(unittest.TestCase):
             "f\"https://{lookup('can\\'t','db.home')}/path\"",  # content-guard: allow private-hostname
             # Doubled braces are literal text, not an expression (#1962).
             'print(f"{{")  # see https://db.home/x',  # content-guard: allow private-hostname
+            # An f-prefix inside an ordinary string does not open a field.
+            'hint = "start with f\'{name"; url = "https://db.home/x"',  # content-guard: allow private-hostname
         ):
             with self.subTest(text=text):
                 self.assertIn("private-hostname", {f.rule_id for f in scan_text(text).findings})
