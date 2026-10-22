@@ -1,3 +1,8 @@
+# content-guard: allow loopback-ipv4 file
+# content-guard: allow private-ipv4 file
+# content-guard: allow localhost-bare file
+# content-guard: allow localhost-port file
+# content-guard: allow example-email-reserved file
 """MCP Events on the fleet station: subscriptions, signed webhooks, authorization and SSRF limits.
 
 Every delivery goes to a receiver bound to loopback in this process. The hub runs
