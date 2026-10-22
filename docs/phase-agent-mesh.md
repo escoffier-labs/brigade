@@ -12,6 +12,16 @@ Revision 2 (2026-10-22) answers an independent review that found the
 cryptographic construction sound and the trust boundaries around it
 incomplete. It also records the operator's decisions on the open questions.
 
+Revision 3 (2026-10-22) answers the second review. Own-fleet `observed` keys
+now need an operator-signed membership manifest (D3), revoked keys keep old
+mail readable only with local receipt evidence and never with authority (D3),
+signed statements carry rollback high-water marks (D3, D4), the hub identity
+keeps a lineage (D4), `open_rows()` takes an explicit inbound or outbound
+context (D6), question storage holds references instead of copies (D7),
+invites admit every permitted use and keep each binding (D9), node principals
+get grants (D9), the tool contract covers all eight tools (D11), and the `bm1`
+wire profile is frozen (D2).
+
 Research was retrieved on 2026-10-22. Sources are listed at the end with their
 URLs. Claims the research could not confirm from a primary source are marked
 UNVERIFIED.
@@ -25,20 +35,22 @@ written with the prefix exist on `main` today.
 | Topic | Decision |
 |---|---|
 | Crypto library | Optional extra `brigade-cli[mesh]` on pyca `cryptography>=48,<52`. Approved by the operator (G1). |
-| Suite | `bm1`: HPKE base mode with the hybrid ML-KEM-768 and X25519 KEM (X-Wing), HKDF-SHA256 and AES-256-GCM, plus Ed25519 signatures. Version 1 ships no classical-only suite. |
+| Suite | `bm1`, frozen: HPKE base mode `0x00`, KEM `0x647A` (X-Wing), KDF `0x0001` (HKDF-SHA256), AEAD `0x0002` (AES-256-GCM), plus Ed25519 signatures. The KEM and its HPKE binding are Internet-Drafts, pinned by revision. Version 1 ships no classical-only suite. |
 | Envelope | A random single-use content key encrypts the payload with AES-256-GCM and a zero nonce. HPKE wraps that key for the recipient and for the sender. The routing header is bound through HPKE `info` and the payload AAD. An Ed25519 signature covers the whole envelope through digests of the ciphertext and the wraps. |
 | Sealed fields | Subject, body, ref, thread and sender_label. |
 | Routing fields | Sender, recipient, kind, priority, client_id, reply target, deadline, timestamps and padded size stay readable by the hub. |
-| Keys | Separate Ed25519 signing and hybrid KEM keys per principal, generated where its token lives. Keys are `verified` (out-of-band fingerprint, invite binding or signed manifest) or `observed`. Any change outside a signed continuity chain fails closed. |
+| Keys | Separate Ed25519 signing and hybrid KEM keys per principal, generated where its token lives. Keys are `verified` (out-of-band fingerprint, invite binding or signed key manifest). A first key is `observed` only for a principal listed in the operator-signed membership manifest, and that path gives opportunistic confidentiality only. Every other unconfirmed key is `unverified` and blocked. Any change outside a signed continuity chain fails closed. |
 | Rotation | Signed successor chains of up to 8 links are accepted. Longer chains, and every change after a revocation, need operator verification. Clients keep historical keys with validity intervals. |
-| Hub identity | An admin-held hub identity key. Clients bind it to the configured endpoint, separately from the pin store. A change fails closed unless the old identity signs a migration or the operator verifies the new hub id out of band. |
+| Revocation | Mail signed by a revoked key stays readable as history only when this station's append-only receipt log shows it received that exact envelope before `compromised_from`, minus the clock skew window. Such history never confers authority. |
+| Signed statements | Hub identity statements, membership manifests, key manifests and revocation statements carry sequence numbers. Clients keep a high-water mark and refuse rollback and same-sequence conflicts. |
+| Hub identity | An admin-held hub identity key. Clients bind it to the configured endpoint, separately from the pin store, and keep an authenticated lineage so old mail stays readable after a migration. A change fails closed unless the old identity signs a migration or the operator verifies the new hub id out of band. |
 | Replies | Matched against a local record of each pending request, keyed by the signed `(hub, from, client_id)`, never by the hub's numeric `reply_to`. |
-| Operator questions | Questions and answers from #1951 travel as sealed, signed messages. Operator authority comes only from a signature by the verified operator key. Until that slice lands, answers are documented as hub-trusted. |
-| Invites | A bare token, `bfi1.<hub-id>.<invite-id>.<secret>.<inviter-fingerprint>`, redeemed only by the CLI from a file or stdin. The hub URL is a separate field. Redemption is idempotent per client join attempt. Invited principals stay blocked until their binding verifies. |
+| Operator questions | Questions and answers from #1951 travel as sealed, signed messages. Operator authority comes only from a signature by the verified operator key. The hub's question table references message rows and holds no question text, answer text or hash of either. Until that slice lands, answers are documented as hub-trusted. Hub Lite and no-hub mode return `hub_feature_unavailable` for questions in version 1. |
+| Invites | A bare token, `bfi1.<hub-id>.<invite-id>.<secret>.<inviter-fingerprint>`, redeemed only by the CLI from a file or stdin. The hub URL is a separate field. Each permitted use is a separate join attempt, retries of an attempt are idempotent, and each use keeps its binding and exact key record. Invited principals stay blocked until their binding verifies. |
 | Retention | Ciphertext is cleared 7 days after ack and the signed header stays as a `content_expired` tombstone. A malicious hub cannot be forced to delete copies. |
 | No-hub path | Brigade's own store-and-forward protocol over an iroh transport in an optional native engine. A bounded spike comes first, and the production daemon only after measured results and a written receipt, retry, admission and storage protocol. Reason Network interop is not pursued. |
-| Tool contract | The fleet MCP tools keep the input schemas of the integration baseline in every mode. Outputs gain structural fields. Missing features return fixed error codes. |
-| Hub Lite | One Worker and one SQLite-backed Durable Object per fleet, sealed mail only, a 32 KiB envelope cap and storage admission limits. Claims are deferred, which narrows #2008's scope. |
+| Tool contract | The eight fleet MCP tools keep the input schemas of the integration baseline in every mode. Outputs gain structural fields, and trust labels reach every rendered surface. Missing features return fixed error codes. Mesh mode never falls back to a configured hub. |
+| Hub Lite | One Worker and one SQLite-backed Durable Object per fleet, sealed mail only, a 32 KiB envelope cap and storage admission limits. Claims and operator questions are deferred, which narrows #2008's scope. |
 | Plain text by design | Claims, presence, run events, grants, keys, the audit log and message routing metadata. |
 
 ## Integration baseline
@@ -49,10 +61,10 @@ corresponding merge.
 
 | PR | Head read for this revision | What it changes here |
 |---|---|---|
-| #1939 | 4b72698 | `fleet_who` and `fleet_claims` return pages from credential-scoped snapshots with opaque cursors (hub schema 41). Key entries served by `who` must not be frozen in those snapshots (D3). |
+| #1939 | a374638 | `fleet_who` and `fleet_claims` return pages from credential-scoped snapshots with opaque cursors (hub schema 41). Key entries served by `who` must not be frozen in those snapshots (D3). |
 | #2009 | e410444 | A body-free `count` action and the `fleet_inbox` `count_only` argument. Sealed rows count like any other row. |
 | #2010 | f52a68a | `fleet_send` and `fleet_reply` accept a sender-bound `client_id` (`^[A-Za-z0-9_-]+$`, at most 64 characters). A replay with identical arguments returns the original message id, and a different body gets a permanent 409. Tool annotations. |
-| #1951 | fa041d4 | Operator questions (`ask_user`), with the `fleet_questions` table and a trigger that records answers. D7 replaces its trust model. |
+| #1951 | fa041d4 | Operator questions: the eighth MCP tool, `fleet_ask_user`, the `fleet_questions` table and a trigger that records answers. D7 replaces its trust model and its storage. |
 
 ## Current state
 
@@ -78,15 +90,16 @@ These facts come from `main` and the baseline pull requests at the heads above.
   stores the token digest under `BEGIN IMMEDIATE`, and a retry with the same
   `request_id`, token and label succeeds again while a different one is a
   conflict. Invite redemption reuses this pattern (D9).
-- Send grants (`src/brigade/fleet_hub_message_grants.py`) restrict only
+- Send grants (`src/brigade/fleet_hub_message_grants.py`) live in
+  `fleet_message_send_grants(principal_id, pattern)` and restrict only
   `agent:` senders. `permits()` returns true for any sender id that does not
-  start with `agent:`.
+  start with `agent:`, so a node has no grant rows and no way to get one.
 - The client (`src/brigade/fleet_client_messages.py`) posts every message
   action to `POST /messages`, and spools sends and replies to a local JSONL
   file when the hub is unreachable. Retries reuse the same `client_id`.
 - The MCP station (`src/brigade/fleet_mcp.py`) exposes `fleet_who`,
   `fleet_send`, `fleet_inbox`, `fleet_ack`, `fleet_reply`, `fleet_sent` and
-  `fleet_claims`. `_frame()` fences every sender-chosen message field with the
+  `fleet_claims` on `main`, and #1951 adds `fleet_ask_user` as the eighth. `_frame()` fences every sender-chosen message field with the
   body. `_frame_directory()` fences non-structural strings in `who` and
   `claims`.
 - Live delivery (`src/brigade/fleet_inbox_delivery.py`) runs from a prompt or
@@ -103,6 +116,18 @@ These facts come from `main` and the baseline pull requests at the heads above.
   `_terminal()` grants operator authority when the hub-returned `source` is
   `operator_reply` and `answered_by` equals `operator`
   (`fleet_ask_user.py:185`). Every field in that decision comes from the hub.
+  `fleet_questions.payload_hash` is SHA-256 over the JSON list `[question,
+  timeout]` (`fleet_hub_questions.py:142`). The timeout is an integer from 1 to
+  120, so for a short question the hash is a dictionary oracle: anyone holding
+  the database can confirm a guessed question.
+- Three surfaces copy a fixed set of message fields and drop the rest. The
+  live delivery header (`fleet_inbox_delivery.render()`, line 326) prints the
+  id, sender, kind, `reply_to` and the injection flag. The Dot pack's persisted
+  projection (`DotState.hub_upsert()`, `src/brigade/dot/state.py:195`) stores
+  a fixed tuple of twelve fields. The legacy projection
+  (`src/brigade/hub_messages.py:107`, `legacy_message()`) builds a dict with
+  ten fixed keys. A trust label added only to opened rows would not reach any
+  of them.
 - MCP Events (`docs/fleet-mcp-events.md`) keep `message.created` payloads
   thin: ids, sender, recipient, priority, kind and timestamps.
 - Dashboard enrollment codes (`src/brigade/fleet_hub_enrollment.py`) are
@@ -169,6 +194,72 @@ wheel install as the fix, rather than falling back to a classical suite.
 The upper bound `<52` follows the project's two majors in 2026. CI tests the
 floor (48) and the newest release.
 
+### The `bm1` wire profile, frozen before implementation
+
+| Parameter | Value |
+|---|---|
+| HPKE mode | base, `0x00` |
+| KEM | `0x647A`, X-Wing (MLKEM768-X25519), as specified by draft-connolly-cfrg-xwing-kem revision 11 (2026-09-23) [XWING] |
+| HPKE binding of the KEM | draft-ietf-hpke-pq revision 05 (2026-07-06) [HPKE-PQ] |
+| KDF | `0x0001`, HKDF-SHA256 |
+| AEAD | `0x0002`, AES-256-GCM |
+| Public key (`enc_pub`) | 1216 bytes: the ML-KEM-768 encapsulation key (1184 bytes), then the X25519 public key (32 bytes) |
+| Private key | the 32 byte X-Wing seed |
+| `enc` | 1120 bytes: the ML-KEM-768 ciphertext (1088 bytes), then the X25519 ephemeral public key (32 bytes) |
+| Wrap of a 32 byte content key | 1168 bytes: `enc`, then 32 bytes of AES-256-GCM ciphertext and its 16 byte tag |
+
+Two hash functions appear and do different jobs. X-Wing combines the two
+shared secrets inside the KEM with SHA3-256 over `ss_M`, `ss_X`, `ct_X`,
+`pk_X` and the label `5c2e2f2f5e5c` [XWING]. HKDF-SHA256 is only the HPKE key
+schedule that turns the KEM's shared secret into the AEAD key and nonce. HPKE
+never sees the component secrets.
+
+Both documents are Internet-Drafts, and neither is an RFC. draft-ietf-hpke-pq is a working
+group draft of the IETF HPKE working group. The X-Wing draft is an
+individual submission on the Independent Submission stream, which the
+datatracker describes as "not endorsed by the IETF" [XWING]. Either can change
+before publication. The pinned revisions define `bm1`, and its meaning never
+changes: if a later revision or the published RFC computes anything
+differently (key expansion, the combiner, sizes, the key schedule or the code
+points), Brigade keeps `bm1` as specified here and defines the new behavior
+under a new suite id. Rotation (D3) moves keys to the new suite.
+
+Private keys are stored as the 32 byte X-Wing seed. pyca builds the hybrid
+private key from its two parts [CRY-HPKE], so the client expands the seed the
+way the X-Wing draft does, with `hashlib.shake_256(seed).digest(96)`: bytes 0
+to 63 are the ML-KEM-768 seed for `MLKEM768PrivateKey.from_seed_bytes()`
+[CRY-MLKEM] and bytes 64 to 95 are the X25519 private key. Storing the seed
+keeps keys portable to any other X-Wing implementation and lets slice 1 test
+key generation against the draft's vectors.
+
+Known-answer vectors, and a gap in them. Neither draft ships a vector for this
+exact suite. hpke-pq revision 05 has X-Wing vectors only with
+ChaCha20-Poly1305 (Appendix A.5: KEM `0x647A`, KDF `0x0001`, AEAD `0x0003`),
+and its JSON vector file has no `0x647A` entry with AEAD `0x0002`
+[HPKE-PQ-TV]. pyca's one-shot API takes no associated data and only sequence
+number 0 [CRY-HPKE], while the published vectors encrypt with associated data,
+so pyca cannot consume them directly. Slice 1 therefore checks three layers:
+
+1. The KEM against the X-Wing draft's vectors: seed to public key, and
+   decapsulation to the shared secret, using pyca's ML-KEM and X25519
+   primitives and `hashlib.sha3_256` for the combiner.
+2. The HPKE key schedule for `0x647A` with `0x0001` against Appendix A.5: a
+   test-only RFC 9180 key schedule (`hmac` and `hashlib`, about 40 lines)
+   must reproduce the vector's `key`, `base_nonce` and first ciphertext.
+3. pyca against that reference: the reference schedule seals a message under
+   AEAD `0x0002` with empty associated data, and pyca's
+   `Suite(KEM.MLKEM768_X25519, KDF.HKDF_SHA256, AEAD.AES_256_GCM).decrypt`
+   must open it, and the reverse.
+
+A checked-in `bm1` envelope fixture, generated once and verified by both pyca
+and the reference schedule, guards against drift. Cross-version check: CI
+seals a fixture with the floor (48) and the newest release, and each version
+must open the other's envelopes and the checked-in fixture byte for byte.
+
+Size budget. The round 2 review measured a 20 KiB padded payload at a 31,639
+byte envelope [ASTRA-MEAS], which fits Hub Lite's 32 KiB (32,768 byte) cap
+with about 1.1 KiB to spare, so the 20 KiB payload budget for Hub Lite stays.
+
 Without the extra, nothing changes for plain-text mail. Sealed mail shows up as
 a row with `sealed: true` and `open_error: "mesh_extra_missing"`. Sending to a
 hub that requires sealing fails with `message_sealing_required`.
@@ -195,7 +286,7 @@ JavaScript.
   "client_id": "c0ffee00c0ffee00c0ffee00c0ffee00",
   "created_at": "2026-10-22T12:00:00+00:00",
   "deadline": "2026-10-22T12:05:00+00:00",
-  "in_reply_to": {"from": "agent:dana.laptop", "client_id": "..."},
+  "in_reply_to": {"hub": "h_3q9GZ2pX8vN0aT1kLm4w", "from": "agent:dana.laptop", "client_id": "..."},
   "pad": 1024,
   "rcpt": ["k1_<recipient>", "k1_<sender>"],
   "ct_sha256": "<SHA-256 of ct>",
@@ -212,6 +303,9 @@ JavaScript.
 
 `hub` is the hub id (D4), or the literal `mesh` in no-hub mode. `deadline` is
 present only on `kind: question`. `in_reply_to` is absent on a new message.
+It names the original's full `(hub, from, client_id)` triple, so a reply sent
+after a hub identity migration still links to a request made under the
+previous hub id (D4).
 `client_id` follows #2010's pattern, `^[A-Za-z0-9_-]{1,64}$`. A caller that
 does not supply one gets 32 random hex characters.
 
@@ -295,12 +389,12 @@ cannot be replayed in another.
 | Retry key (per principal, 32 random bytes) | retry commitments (D5) |
 | iroh endpoint key (per machine, no-hub mode) | QUIC transport |
 | Hub identity key (admin-held, per hub) | hub identity statements and hub migrations (D4) |
-| Operator manifest key (admin-held) | key acceptance manifests and signed revocation statements (D3) |
+| Operator manifest key (admin-held) | membership manifests, key manifests and revocation statements (D3) |
 | Invite secret (per invite) | HKDF into `redeem_key` and `bind_key` (D9) |
 
 Labels: `brigade-mesh/v1/aad`, `/cek`, `/sig`, `/key`, `/kid`, `/retry`,
-`/hub-id`, `/hub-identity`, `/hub-migration`, `/manifest`, `/revocation` and
-`/ack`, and `brigade-invite/v1/redeem` and `/bind`.
+`/hub-id`, `/hub-identity`, `/hub-migration`, `/manifest`, `/membership`,
+`/revocation` and `/ack`, and `brigade-invite/v1/redeem` and `/bind`.
 
 Crypto agility. `v` and `suite` sit in the signed header and in `rh`, so they
 are bound into the KEM and the AEAD as well. Key records list the suites they
@@ -395,36 +489,105 @@ one entry per principal:
 
 | Status | Meaning | Effect |
 |---|---|---|
-| `verified` | The fingerprint matched a value the operator supplied, an invite binding, or a signed manifest. | Full use. Required for anything that confers authority. |
-| `observed` | The first key the hub served, with nothing confirming it. | Sealed mail works and later changes fail closed, but the key never confers authority: no operator answers (D7) and no `sender_label`. Shown on every row and in `fleet_who`. |
-| `pending_binding` | An invited principal whose binding has not been verified yet (D9). | Sends and opens are refused with `invite_binding_pending`. |
+| `verified` | The fingerprint matched a value the operator supplied, an invite binding, or a signed key manifest. | Full use. Required for anything that confers authority. Rows carry `confidentiality: "end_to_end"`. |
+| `observed` | The first key the hub served for a principal that the accepted membership manifest lists, with nothing confirming the key itself. | Sealed mail works and later changes fail closed, but the key never confers authority: no operator answers (D7) and no `sender_label`. Rows and `fleet_who` entries carry `confidentiality: "opportunistic"`. |
+| `unverified` | A key served for a principal that no accepted membership manifest lists, and that nothing has verified. | Sends fail with `recipient_key_unverified` and mail opens as `sender_key_unverified`. |
+| `pending_binding` | An invited principal whose binding has not been verified yet on the inviting station (D9). | Sends and opens are refused with `invite_binding_pending`. |
 | `changed` | A record that does not follow from the pinned key. | Sends fail with `recipient_key_changed` and mail opens as `sender_key_changed`. |
 | `revoked` | The hub or a signed statement revoked the key. | See revocation below. |
 
-`observed` is visible on every surface, so it is not silent trust on first
-use. Principals enrolled before the mesh existed start as `observed`, and the
-initial-key migration is explicit: the peer runs `fleet keys show`, the
-operator reads the fingerprint over a channel the hub does not control, and
-the planned `fleet keys accept <principal> --fingerprint <fp>` moves the entry
-to `verified`. A signed manifest does the same in bulk.
-`BRIGADE_FLEET_MESSAGES_REQUIRE_VERIFIED=1` refuses sends to `observed` keys
-with `recipient_key_unverified`.
+Membership decides who may be `observed`. A malicious hub controls every
+field it serves, including a principal's `role`, so a hub-provided role never
+selects the weaker path. The hub could otherwise present a teammate, or a
+principal it minted, as an ordinary own-fleet agent to a station that did not
+create the invite, and the first-key rule would let it substitute that key.
+The only input that allows `observed` is an operator-signed membership
+manifest:
+
+```json
+{
+  "v": 1,
+  "hub": "h_3q9GZ2pX8vN0aT1kLm4w",
+  "seq": 7,
+  "created_at": "2026-10-22T12:00:00+00:00",
+  "members": ["node-a", "node-b", "agent:build.node-a"],
+  "sig": "<Ed25519 signature by the operator manifest key>"
+}
+```
+
+It is signed under `brigade-mesh/v1/membership` with the operator manifest
+key, the same key whose fingerprint each machine pins once out of band with a
+planned `fleet keys trust-manifest-key --fingerprint <fp>`. It lists principal ids only, never keys or
+roles. The admin builds it with a planned `fleet keys membership sign`, which
+proposes the nodes and agent principals the admin enrolled, shows each one for
+confirmation, and leaves out every principal created by a teammate invite.
+The proposal comes from the hub, so the operator's confirmation is the check,
+and the signature is what stations trust. Stations import it from a file with
+`fleet keys membership import <file>`, or fetch the latest copy the hub stores
+as an opaque blob (D8). Either way the client verifies the signature and the
+high-water rule below before using it. A station with no accepted membership
+manifest treats every unconfirmed key as `unverified`.
+
+The decision for a principal with no pin:
+
+1. A signed key manifest entry, an operator-supplied fingerprint or, on the
+   inviting station, a verified invite binding makes it `verified`.
+2. Otherwise, a principal listed in the accepted membership manifest becomes
+   `observed`, unless `BRIGADE_FLEET_MESSAGES_REQUIRE_VERIFIED=1` is set, in
+   which case it stays `unverified`.
+3. Everything else is `unverified`: teammates on any station other than the
+   inviting one, principals the hub reports as nodes or agents but the
+   manifest does not list, and any principal the hub merely claims.
+
+A teammate becomes `verified` on other stations after the inviting station
+verifies its binding (D9) and the operator adds its fingerprint to a signed key
+manifest, which those stations accept with `fleet keys accept --manifest`.
+
+Opportunistic confidentiality. For an `observed` peer, a hub that substitutes
+the key on first contact can read what is sealed to the substituted key. Mail
+to and from `observed` peers is therefore protected only against a hub that is
+honest at first contact and passive afterwards. Every surface labels it
+`confidentiality: "opportunistic"` (D6), and the user docs recommend
+`BRIGADE_FLEET_MESSAGES_REQUIRE_VERIFIED=1` for anyone who has verified
+fingerprints. With it set, `observed` is never used and sends to an
+unconfirmed key fail with `recipient_key_unverified`.
+
+Pre-mesh principals migrate explicitly. When a peer first publishes a key, it
+becomes `observed` if the membership manifest lists it and `unverified`
+otherwise. The peer runs `fleet keys show`, the operator reads the fingerprint
+over a channel the hub does not control, and the planned `fleet keys accept
+<principal> --fingerprint <fp>` moves the entry to `verified`. A signed key
+manifest does the same in bulk.
 
 Acceptance. The planned `fleet keys accept` never accepts what it just
 fetched. It requires the expected fingerprint as input, fetches the current
 record, verifies `self_sig`, and accepts only on an exact match. Bulk
 acceptance takes one of two inputs:
 
-- `--manifest <file>`: a list of `{principal, hub, kid, fingerprint}` signed
-  under `brigade-mesh/v1/manifest` by the operator manifest key. Each machine
-  pins that key's fingerprint once, out of band, with a planned
-  `fleet keys trust-manifest-key --fingerprint <fp>`.
+- `--manifest <file>`: a key manifest, a list of `{principal, hub, kid,
+  fingerprint}` with a `seq` and `created_at`, signed under
+  `brigade-mesh/v1/manifest` by the operator manifest key.
 - `--fingerprints <file>`: principal and fingerprint pairs the operator
   verified out of band. Every entry must match.
 
 There is no `--all-changed`. This refines the operator's decision that a
 person accepts rotated keys with one bulk command: the manifest is that
 command, and its trust comes from a key the operator controls.
+
+Signed statements and rollback. Four kinds of statement carry a sequence
+number `seq` under their signature: hub identity statements (D4), membership
+manifests, key manifests and revocation statements. For each kind, and per
+signing key, the client persists the highest accepted `seq` and the SHA-256
+of that statement's canonical form. It refuses a statement with a lower `seq`
+(`signed_statement_rollback`) and a statement with the same `seq` and a
+different digest (`signed_statement_conflict`), and records the conflict as
+evidence that the signing key is misused. A replay of the accepted statement
+itself is a no-op. Revocations are also cumulative: a later revocation
+statement can add revoked kids or move a `compromised_from` earlier, and
+cannot remove a revocation or move it later. Each revocation statement lists
+every revocation so far, so the latest one is complete, and a statement that
+drops an earlier entry is refused. These marks live in the key
+directory with the pin store and follow the same file rules.
 
 The local boundary, stated exactly. Fleet MCP exposes no tool that changes
 pins, keys, hub identities or manifests, so an agent restricted to MCP cannot
@@ -460,15 +623,52 @@ a planned `--compromised-from <time|key-creation|now>` option, defaulting to
 `key-creation`, the conservative choice. A revoked kid can never be published
 again, and continuity from a revoked key is never accepted. A hub's revocation
 can only reduce trust, so clients honor it without a signature: no new mail is
-sealed to the key, and mail signed at or after `compromised_from` opens as
-`sender_key_revoked`. A thief can backdate a signed `created_at`, so mail
-claiming a time before `compromised_from` stays valid only if this client
-recorded it in its seen-id cache before it learned of the revocation. Anything
-else from a revoked key opens as `sender_key_revoked`. A revocation statement
-signed with the manifest key carries the same information to no-hub contacts.
+sealed to the key. A revocation statement signed with the manifest key carries
+the same information to no-hub contacts and to stations that do not trust the
+hub to report it. When a hub revocation and a signed statement disagree, the
+client uses the earlier `compromised_from`.
 
-Downgrade and legacy mail. Once a principal is pinned at any level, the client
-never sends it plain text, and a missing key fails with
+Which mail from a revoked key stays readable. A thief can sign any
+`created_at`, and the order in which a station learns things proves nothing.
+Take a key compromised at 10:00, a forged message signed with `created_at`
+09:59 and delivered at 10:10, and a station that learns of the revocation at
+10:20. The forgery arrived before the station knew, but it arrived after the
+compromise, so it must be rejected. The rule therefore uses only evidence the
+station recorded about the envelope itself:
+
+- Every station keeps an append-only receipt log, an owner-only SQLite table
+  in the key directory. When the station first stores or opens a sealed
+  envelope (the hub inbox, `sent`, live delivery or the no-hub inbox), it
+  appends the envelope's SHA-256 digest, `(hub, from, from_kid, client_id)`
+  and the local receive time, before the opened row is returned. Rows are
+  never updated. Triggers refuse `UPDATE` and `DELETE`, and pruning removes
+  only rows older than the 90 day freshness window whose kid is not revoked.
+- The clock policy: the receive time is the station's own UTC wall clock at
+  the moment of receipt, never a hub timestamp or the envelope's
+  `created_at`. Because the operator's `compromised_from` comes from another
+  clock, a receipt counts only when `local_received_at` is at least
+  `MAX_FUTURE_SKEW` (5 minutes) before `compromised_from`. D6's freshness
+  check already assumes synchronized clocks, and `brigade doctor` warns on a
+  visible offset.
+- A message signed by a revoked key opens as history only when the receipt
+  log holds that exact envelope digest with a qualifying receive time.
+  Everything else from that key opens as `sender_key_revoked`: mail received
+  after the cutoff, mail with no receipt (a fresh station, a pruned log, or a
+  station that never saw it), and mail whose digest differs from the receipt.
+- History is not authority. A readable message from a revoked key opens with
+  `key.status: "revoked"` and `history: "received_before_compromise"`, stays
+  fenced, carries no `sender_label`, never authenticates an operator answer
+  (D7), never completes or links a pending request (D5), and is never treated
+  as approval by the Dot pack or any other consumer.
+
+Under the default `--compromised-from key-creation`, nothing signed by the key
+stays readable. An operator who knows a later compromise time sets it to keep
+older history. The same-OS-user limit applies: an agent with the operator's
+shell can write a false receipt, which only OS separation stops.
+
+Downgrade and legacy mail. Once the client holds a key entry for a principal
+at any status, including `unverified`, it never sends that principal plain
+text, and a missing key fails with
 `recipient_key_missing`. A row that carries an `envelope` never uses
 hub-supplied `subject`, `body`, `ref`, `thread` or `sender_label`. Existing
 plain-text rows stay readable, labeled `authenticity: "unauthenticated-legacy"`,
@@ -495,14 +695,14 @@ hub identity is now a key the hub process does not hold.
 - The admin signs an identity statement under `brigade-mesh/v1/hub-identity`:
   `v`, `hub_id`, `hub_sig_pub`, `endpoint` (URL origin), `require_sealed`,
   `max_envelope_bytes`, `envelope_versions`, `suites`, `created_at` and a
-  sequence number. It uploads the statement with the admin token. The hub
+  sequence number `seq`, which follows the high-water rule of D3. It uploads the statement with the admin token. The hub
   stores it in `hub_meta` and serves it at `GET /mesh/identity`. The hub
   process checks that `hub_id` matches the key with `hashlib`, and does no
   signature work.
 - The client keeps a hub identity store, a separate file from the pin store,
-  mapping each configured endpoint origin to its accepted `hub_id`, key,
-  status (`verified` or `observed`) and acceptance time. Pins are keyed by the
-  accepted `hub_id`.
+  mapping each configured endpoint origin to its current `hub_id`, key,
+  status (`verified` or `observed`), acceptance time and the lineage below.
+  Pins are keyed by the current `hub_id`.
 - First contact. An invite token carries the hub id, so a joiner verifies the
   identity statement's signature and the hub id against the token and records
   the identity as `verified` (D9). An existing machine records it as `observed`
@@ -521,6 +721,26 @@ hub identity is now a key the hub process does not hold.
   
   After either, principals republish records bound to the new hub id with a
   `prev_sig` from their pinned keys, which the client accepts as continuity.
+- Lineage. The store keeps, per endpoint, the ordered list of every hub
+  identity it has accepted: `hub_id`, key, how it was accepted (`invite`,
+  `operator`, or `migration` with the digest of the signed migration
+  statement), `accepted_at` and `superseded_at`. Each link after the first is
+  authenticated by a migration signed with the previous key or by an operator
+  acceptance, so a hub cannot add an entry by serving one. New sends, key
+  publications and replies use only the current identity. Opening (D6 step 2)
+  accepts an envelope whose signed `hub` is any identity in the endpoint's
+  lineage, verifies it against the key history recorded under that hub id,
+  and refuses an envelope signed for a superseded identity with a signed
+  `created_at` later than that identity's `superseded_at` plus
+  `MAX_FUTURE_SKEW` (`hub_identity_superseded`). Old mail therefore stays
+  readable after a migration, and a hub cannot keep old identities alive for
+  new mail.
+- Namespaces stay distinct across a migration. The seen-id cache, the receipt
+  log (D3) and the pending request store (D5) are keyed by the full signed
+  triple `(hub, from, client_id)`, so an envelope under the old id and one
+  under the new id never collide, and a replay check under one id says
+  nothing about the other. A reply made after the migration links to an older
+  request because its signed `in_reply_to` names the original's hub (D2).
 - A new endpoint for the same identity (the hub moved) is accepted when a
   fresh statement signed by the same key lists it. The key is the identity,
   and the URL is only its location.
@@ -537,6 +757,7 @@ statement, the local policy `BRIGADE_FLEET_MESSAGES_SEAL=auto|always|never`
 | any | `never` | pinned | refused, a pinned principal never gets plain text |
 | plain allowed | `auto` | none, not pinned | plain text |
 | any | `auto` or `always` | `verified` or `observed` | sealed, unless require-verified is set and the key is `observed` (`recipient_key_unverified`) |
+| any | any | `unverified` | `recipient_key_unverified` |
 | any | any | `pending_binding` | `invite_binding_pending` |
 | any | any | `changed` | `recipient_key_changed` |
 | any | `always` | none | `recipient_key_missing` |
@@ -595,11 +816,14 @@ from, client_id)` with `to`, `kind`, `deadline` and the hub message id, and
 kept until it is answered or past its window. The client treats a message as a
 reply to a request only when:
 
-- its signed `in_reply_to` equals the local record's `from` and `client_id`,
-  under the same `hub`,
-- its `from` equals the record's `to`, and
+- its signed `in_reply_to` equals the local record's `(hub, from,
+  client_id)`, and the reply's own `hub` is the current identity or an
+  identity in the endpoint's lineage (D4),
+- its `from` equals the record's `to`,
 - for a request with a deadline, its signed `created_at` is no later than the
-  deadline plus `MAX_FUTURE_SKEW`.
+  deadline plus `MAX_FUTURE_SKEW`, and
+- its sender key is not revoked. Revoked-key history (D3) never links or
+  completes a request.
 
 The hub's numeric `reply_to` is a routing hint only. Presence must match both
 ways: a row with `reply_to` and no signed `in_reply_to`, or the reverse, opens
@@ -628,32 +852,61 @@ the label is sealed the hub cannot see it, so the opening client drops it for
 
 ## D6. Opening mail: verify, decrypt, then fence
 
-Opening happens in one place, `open_rows()`, called by `list_messages()`,
-`sent()`, `ack()`, `sent_lookup` and the rows returned by `send()` and
-`reply()`, after the page is validated. The CLI, the MCP station, the Dot pack
-and live delivery all get opened rows, and `_frame()` runs last.
-`list_messages()` takes an `open_limit` so the delivery hook opens only the
-rows it will show.
+Opening happens in one place, `open_rows(rows, context)`, after the page is
+validated. The CLI, the MCP station, the Dot pack and live delivery all get
+opened rows, and `_frame()` runs last. `list_messages()` takes an
+`open_limit` so the delivery hook opens only the rows it will show.
+
+Contexts. Every call passes an explicit context, so a station's own sent mail
+never meets the recipient check and an inbox row never meets the sender
+check:
+
+| Context | Caller must equal | Signature verified with | Wrap opened | Replay check | Reply linking |
+|---|---|---|---|---|---|
+| `inbound` | `to` | the sender's key from key history and pins | the caller's recipient wrap | seen-id cache, receipt log | yes, through the pending store |
+| `outbound` | `from` | the caller's own key history | the caller's sender wrap | own record: the triple must match the local outbox or pending store when one exists | no |
+
+| Call site | Context |
+|---|---|
+| `send()` return row | `outbound` |
+| `reply()` return row | `outbound` |
+| `reply()` opening the original before building the reply | `inbound` |
+| `sent_lookup` (retry recovery, D5) | `outbound` |
+| `sent()` (`fleet_sent`, the CLI sent list) | `outbound` |
+| `list_messages()` (`fleet_inbox`, the CLI inbox, the Dot pack inbox) | `inbound` |
+| `ack()` return row | `inbound` |
+| live delivery | `inbound`, with `open_limit` and local stores only |
+| operator answers (D7) | `inbound` |
+
+A context is a required argument with no default. Passing a row to the wrong
+context fails with `open_context_mismatch`, so the error names the real
+mistake instead of a misleading key or recipient failure.
 
 For each sealed row, in order:
 
 1. Parse with size and pattern checks. Reject an unknown `v` or `suite`.
 2. Check that the hub's `sender` and `recipient` columns equal `from` and
-   `to`, that the caller is `to` (or `from` for `fleet_sent`), and that `hub`
-   equals the accepted hub identity for this endpoint (D4).
-3. Find the sender's record by `from_kid` in key history, the pin store,
-   `who` or `keys_get`, check its trust status and validity interval (D3),
-   verify `sig` over the signed header, and check `ct_sha256` and
-   `wraps_sha256` against the stored values.
+   `to`, that the caller is the party the context requires, and that `hub`
+   is the endpoint's current identity or one in its lineage, subject to the
+   `superseded_at` rule (D4).
+3. Find the signer's record by `from_kid` in key history under that `hub`,
+   the pin store, `who` or `keys_get`, check its trust status and validity
+   interval (D3), verify `sig` over the signed header, and check `ct_sha256`
+   and `wraps_sha256` against the stored values. `unverified` opens as
+   `sender_key_unverified`, `pending_binding` as `invite_binding_pending`,
+   `changed` as `sender_key_changed`, and a revoked key as
+   `sender_key_revoked` unless the receipt rule of D3 makes it history.
 4. Find the caller's wrap by kid, open it with HPKE, decrypt `ct`, strip
    padding, and parse the payload with the existing field limits.
-5. Freshness and replay:
+5. Freshness, receipts and replay:
    - The freshness window is 90 days, the longest unacked retention of any
      backend. An envelope whose signed `created_at` is older opens as `stale`.
      One dated more than five minutes past the local clock
      (`MAX_FUTURE_SKEW`) opens as `stale_future`. Stations are expected to run
      a synchronized clock. `brigade doctor` gains a check that warns on a
      visible offset.
+   - The receipt log (D3) gets the envelope digest and local receive time on
+     first sight, in both contexts, before the row is returned.
    - The seen-id cache maps `(hub, from, client_id)` to the first hub message
      id, the envelope digest and the local first-seen time, for the whole
      window. The same triple under a different hub message id, or with a
@@ -664,11 +917,14 @@ For each sealed row, in order:
      "unchecked"`. Unchecked rows are readable and fenced and never confer
      authority. Once a full window has passed, nothing is unchecked.
 6. Take `kind`, `priority`, `created_at` (as `sent_at`) and `deadline` from the
-   verified header instead of the hub's columns, and link replies through the
-   pending store (D5).
-7. Return a row with the plain-text keys plus `sealed: true`, `signature:
-   "verified"`, `key: {"fingerprint", "status"}`, `replay` (`checked` or
-   `unchecked`) and `reply` (`linked`, `unlinked` or absent).
+   verified header instead of the hub's columns, and, in the inbound context,
+   link replies through the pending store (D5).
+7. Return a row with the plain-text keys plus `direction` (`inbound` or
+   `outbound`), `sealed: true`, `signature: "verified"`, `key:
+   {"fingerprint", "status"}`, `confidentiality` (`end_to_end` for a
+   `verified` key, `opportunistic` for an `observed` one), `replay`
+   (`checked` or `unchecked`), `reply` (`linked`, `unlinked` or absent) and,
+   for revoked-key history, `history: "received_before_compromise"`.
 
 A tombstone (D8) runs steps 1 to 3 against the signed header and returns the
 failed-row shape with `open_error: "content_expired"`.
@@ -686,15 +942,37 @@ A failed row keeps only structural fields (`id`, `sender`, `recipient`,
 every other sender-chosen string, and adds `sealed: true`, an `open_error`
 code and a fixed body Brigade writes itself: `[sealed message not opened:
 <code>]`. `fleet_inbox_delivery.render()` and the Dot pack index `body`, so
-the fixed body keeps them working. `sealed`, `signature`, `open_error`, `key`,
-`replay`, `reply` and `authenticity` join `_MESSAGE_STRUCTURAL_FIELDS`, with
-values from fixed sets.
+the fixed body keeps them working. `direction`, `sealed`, `signature`,
+`open_error`, `key`, `confidentiality`, `replay`, `reply`, `history` and
+`authenticity` join `_MESSAGE_STRUCTURAL_FIELDS`, with values from fixed sets.
+
+Trust labels reach every surface. A label that stops at the opened row does
+nothing, because three surfaces copy fixed field sets (see Current state).
+Each one keeps and shows the labels:
+
+- Live delivery: `fleet_inbox_delivery.render()` adds the labels to each
+  message header line, for example `Message 41 from node-b (question),
+  sealed, key observed, opportunistic confidentiality, replay unchecked, reply
+  linked:`. A plain-text row shows `unauthenticated-legacy` or
+  `unauthenticated-after-pin`, and a failed row shows its `open_error`. Label
+  text comes from fixed strings keyed by the fixed values, never from the row.
+- The Dot pack: `DotState.hub_upsert()` stores `sealed`, `key_status`,
+  `confidentiality`, `authenticity`, `replay`, `reply`, `history` and
+  `open_error` as new columns, and the Dot tools that list or show messages
+  render them. A stored row without the columns (written before the
+  migration) renders as `authenticity: unknown`, which confers nothing.
+- The legacy projection: `legacy_message()` copies the same fields into its
+  output dict, and its consumers render them next to the sender.
+
+The MCP tools already return the structural fields, and `fleet_who` shows
+`key: {"fingerprint", "status"}` and `confidentiality` for each principal.
 
 Live delivery opens only the rows it shows, imports `cryptography` lazily
-inside its existing `try`, and uses only pinned and cached keys and the local
-pending store, so its one hub call and 2 second deadline stay. A sender whose
-key is not cached shows the fixed body with `sender_key_unknown`. Delivery
-never acks.
+inside its existing `try`, and uses only pinned and cached keys. It appends to
+the receipt log and the seen-id cache, reads the pending store without
+changing it, and makes no extra hub call, so its one hub call and 2 second
+deadline stay. A sender whose key is not cached shows the fixed body with
+`sender_key_unknown`. Delivery never acks.
 
 Ack. `fleet_ack` acks by hub id and returns the opened row when the caller can
 open it. MCP Events payloads already carry no subject or body.
@@ -705,7 +983,8 @@ open it. MCP Events payloads already carry no subject or body.
 state). A malicious or compromised hub can mark any question answered, choose
 the answer text, and set `source` and `answered_by` so that `_terminal()`
 reports `operator_authenticated: true`. The question text also sits in
-plaintext in `fleet_questions`.
+plaintext in `fleet_questions`, and its `payload_hash` lets anyone with the
+database confirm a guessed question.
 
 Until the integration slice (plan slice 7b) lands, ask_user answers are
 hub-trusted, and the fleet messaging docs say so: whoever controls the hub can
@@ -721,10 +1000,26 @@ Target design:
   `created_at` plus the timeout, records the pending request locally (D5), and
   sends the envelope with `question_create`. The hub stops building the
   message itself (`fleet_hub_questions.py:165`).
-- `fleet_questions` stores the question envelope and verification metadata:
-  `from`, `from_kid`, `client_id`, `deadline` and the envelope digest. The
-  trigger copies `NEW.envelope` and the answer's `from_kid`, `client_id` and
-  digest, never a body. No plaintext question or answer is stored.
+- `fleet_questions` holds references and routing metadata only:
+  `question_id`, `caller`, `generation`, `request_id`, `operator`,
+  `message_id` (the question's `fleet_messages` row), `deadline`, `status`,
+  `answer_id` (the answer's `fleet_messages` row) and `answered_at`. It holds
+  no question text, no answer text, no envelope copy and no hash computed
+  over plaintext. `question` and `answer` columns are dropped and
+  `payload_hash` is removed. The trigger sets `status`, `answer_id` and
+  `answered_at` from the inserted answer row and copies nothing else.
+- Idempotency comes from the envelope and the idempotency key. A
+  `question_create` with an existing `(caller, generation, request_id)` reads
+  the referenced question row's signed header and compares its `to`, `kind`
+  and `rc` with the new envelope's. Equal values return the existing
+  question, and anything else is `question_request_conflict`. `rc` is a keyed
+  commitment (D5), so the hub learns nothing it could test guesses against.
+  After ciphertext purge the tombstone keeps the signed header, so the
+  comparison still works.
+- Because `fleet_questions` stores references, ciphertext purge and retention
+  (D8) cover questions and answers with no extra step: when the message row's
+  ciphertext is purged, no other copy remains, and a question row whose
+  message rows have expired is removed with them.
 - The operator answers with a sealed, signed reply whose `in_reply_to` names
   the question's `(from, client_id)`.
 - One verification function decides `operator_authenticated`, and it is true
@@ -735,8 +1030,10 @@ Target design:
     under the same `hub`,
   - its `from` is the operator principal and its `to` is the asking principal,
   - its signed `created_at` is no later than the question's deadline plus
-    `MAX_FUTURE_SKEW`, and
-  - its replay status is `checked`.
+    `MAX_FUTURE_SKEW`,
+  - its replay status is `checked`, and
+  - the operator key is not revoked. Revoked-key history (D3) never
+    authenticates an answer.
 
   Hub-returned `status`, `source`, `answered_by`, `operator` and `answer`
   fields are hints. No unsigned hub field can set operator authority.
@@ -746,6 +1043,9 @@ Target design:
   `operator_authenticated: false` and fenced, as #1951 treats desktop reports
   today. On a machine that holds the operator principal's own key, the desktop
   answer is signed with it and verifies like a hub-inbox answer.
+- Backends. Version 1 supports `fleet_ask_user` on the full hub only. Hub Lite
+  and no-hub mode return `{"code": "hub_feature_unavailable", "permanent":
+  true}` (D11).
 
 ## D8. Hub storage, retention and policy
 
@@ -762,8 +1062,17 @@ Schema changes on the Python hub. Each slice that changes the schema bumps
   principal enforced by a partial unique index.
 - `hub_meta` holds the signed identity statement, any migration statement, and
   the policy.
-- `fleet_questions` replaces `question` and `answer` with envelope and
-  verification-metadata columns (D7).
+- `fleet_mesh_statements(kind PRIMARY KEY, seq, statement, uploaded_at)`
+  stores the
+  latest operator-signed membership manifest, key manifest and revocation
+  statements as opaque blobs, uploaded with the admin token and served to
+  principals with a `manifests_get` action. The hub checks only size and that
+  `seq` increases. Clients verify signatures and apply the high-water rule
+  (D3). A hub that withholds an update leaves stations on the last version
+  they accepted, which it could not make more permissive than the operator
+  signed.
+- `fleet_questions` drops `question`, `answer` and `payload_hash` and
+  references the question and answer message rows instead (D7).
 
 Retention (decision Q2). The hub clears `ct` and `recipients` 7 days after a
 sealed message is acked and keeps the signed header and signature as a
@@ -831,8 +1140,10 @@ Create, list and revoke. The planned `fleet invite create --role teammate
 `--name <person>`) needs the admin token. `--as` names the inviting principal,
 whose private key must be on the machine running the command, so the
 fingerprint and `bind_key` stay where the teammate's mail will be opened.
-Expiry defaults to 24 hours, with a maximum of 7 days. Node principals cannot
-create invites.
+Expiry defaults to 24 hours, with a maximum of 7 days. Only the admin token
+can create, list or revoke invites. A node or agent token alone cannot.
+`--as` may name a node id or an `agent:` principal, and the bootstrap node
+(below) is the usual inviter.
 
 Join, with idempotent redemption:
 
@@ -849,38 +1160,60 @@ Join, with idempotent redemption:
 3. `POST /invites/redeem` with `invite_id`, `redeem_key`, `join_attempt_id`,
    the token, the name, the key record and `binding =
    HMAC-SHA256(bind_key, canonical(key record))`.
-4. The hub, under `BEGIN IMMEDIATE`: if the invite already has a use with this
-   `join_attempt_id` and the same token digest, key record and name, it
-   returns the same success without counting a new use. A use under a
-   different attempt id, or the same id with different values, gets the
-   generic refusal. Otherwise it checks that the invite exists, is unexpired,
-   unrevoked and under its use limit, compares `sha256(redeem_key)` in
-   constant time, creates the principal with the token digest, stores the key
-   and binding, records the use and writes an audit row.
+4. The hub, under `BEGIN IMMEDIATE`, first compares `sha256(redeem_key)` in
+   constant time and refuses an unknown invite or a wrong secret with the
+   generic refusal. Then:
+   - A retry: the invite already has a use with this `join_attempt_id`. If
+     the token digest, key record and name are identical and the use's
+     principal is still active, it returns the same success without counting
+     a new use. If any value differs, or the principal was removed or its
+     token revoked, it returns the generic refusal and changes nothing, so a
+     retry after member removal never revives a credential or creates a new
+     principal.
+   - A new attempt: no use has this `join_attempt_id`. It is admitted while
+     the invite is unexpired, unrevoked and `uses < max_uses`, and refused
+     otherwise. Each admitted attempt increments `uses`, creates its own
+     principal with the client-supplied token digest, stores the exact key
+     record as that principal's active key, writes the reciprocal grants
+     below, and writes an audit row.
+   - Every use row stores `join_attempt_id`, `principal_id`, the token
+     digest, the name, the full key record and the `binding`, in the full
+     hub's `fleet_invite_uses` and in Hub Lite's `invite_uses` (D12).
 5. The response carries the principal id, the inviter's principal id and key
-   record, and the hub id. The joiner checks the inviter's record against the
+   record, the hub id and the stored use row. The joiner checks the inviter's record against the
    token fingerprint, pins it `verified` with source `invite`, installs the
    token file, and only then deletes the attempt's secret material.
 
 A lost response, or a crash between redemption and token install, is
 recovered by rerunning the same command: it reloads the attempt and redeems
-again, and step 4 returns the same success. Another redeemer holding the
-same secret is refused.
+again, and step 4 returns the same success. Another holder of the same
+secret can redeem only while uses remain, which is what `--max-uses` permits,
+and each such redemption is a separate principal with its own binding.
 
-Pending invitation trust. The inviter's local invite record keeps `bind_key`
-until the binding is processed, even past the invite's expiry. When the new
-principal appears (in `who`, `invite list` or a planned `fleet invite
-verify`), the inviter's client:
+Pending invitation trust. `invite list` and the planned `fleet invite verify`
+return every use row with its stored key record and binding. For each use, the
+inviter's client:
 
-- verifies the binding and pins the key `verified` with source `invite`, or
-- on a mismatch, records `binding_mismatch`, exits nonzero and pins nothing,
-  or
-- when the hub serves no binding, records `binding_missing` the same way.
+- verifies `binding` against the stored key record with `bind_key`, checks
+  that the record's `self_sig` is valid and that its principal and hub match
+  the use, and pins exactly that record (its kid) `verified` with source
+  `invite`. If the hub currently serves a different key for that principal,
+  the entry is `changed` relative to the verified record, or
+- on a mismatch, records `binding_mismatch` for that use, exits nonzero and
+  pins nothing, or
+- when the hub serves no binding or no key record, records `binding_missing`
+  the same way.
 
-Until verification succeeds the principal is `pending_binding`, and sends to
-it and mail from it are refused with `invite_binding_pending`. A missing or
-failed binding never downgrades to `observed`. `bind_key` is deleted after
-success or after an explicit `invite revoke` or member removal.
+Until a use verifies, its principal is `pending_binding` on the inviting
+station, and sends to it and mail from it are refused with
+`invite_binding_pending`. A missing or failed binding never downgrades to
+`observed`. The inviter's local invite record keeps `bind_key`, even past the
+invite's expiry, until the invite can produce no unprocessed use: every
+permitted use has been redeemed and processed, or the invite has expired or
+been revoked and every recorded use has been processed. Deleting it after the
+first success would leave later uses of a multi-use invite unverifiable.
+Removing a member marks that use processed. On other stations a teammate is
+`unverified` until the operator adds it to a signed key manifest (D3).
 
 Bootstrap. A fresh hub has no keyed principal, so the first invite carries
 `none` as the inviter fingerprint and is created with `--bootstrap --role
@@ -907,6 +1240,23 @@ recipient's grant must name the sender. Both checks run in the same
 either blocks the send or takes effect for the next one, never half of each.
 Agent-to-agent mail with a teammate on either end needs reciprocal grants.
 
+Node grants. A node has no grant rows today, so a node inviter could never
+satisfy the recipient half of the rule. `fleet_message_send_grants` accepts an
+enrolled, unrevoked node id as `principal_id`, with the same patterns and the
+same 64-pattern limit. A node's rows are consulted only in a pair that
+includes a teammate, which keeps nodes unrestricted toward everyone else.
+Tightening node-to-agent grants is a separate follow-up. The existing admin
+action `grants` on `POST /message-principals` accepts a node id for an
+enrolled node and refuses an unknown or revoked one, and the existing
+`brigade fleet msg principals grants` command gains a planned `--node <id>`
+option. Revoking a node deletes its grant rows in the same transaction.
+
+Redemption writes the reciprocal pair. In step 4 the hub adds the new
+teammate to the inviting principal's grant, node or agent, and gives the
+teammate a grant naming the inviter plus the invite's `--grant` patterns, all
+in the redemption transaction. Mail between the inviter and the teammate then
+works in both directions, and removing either side's grant blocks both.
+
 | Capability | Teammate default |
 |---|---|
 | `fleet_send`, `fleet_reply` | only to the inviting principal plus any `--grant` patterns, and only where the recipient's grant names the teammate |
@@ -917,13 +1267,13 @@ Agent-to-agent mail with a teammate on either end needs reciprocal grants.
 | `fleet_submit`, dispatch, runs, admin reads, invites | not available |
 
 Grants are widened with the existing `brigade fleet msg principals grants`
-command.
+command, and with its planned `--node` option for a node's side.
 
 Audit. An append-only `fleet_audit_log(id, at, actor, action, subject,
 detail)` records `invite.create`, `invite.redeem`, `invite.redeem_refused`
 (aggregated), `invite.revoke`, `member.remove`, `grants.change`,
-`key.publish`, `key.rotate`, `key.revoke`, `hub.identity` and
-`hub.migration`. `detail` holds ids, roles, grant patterns and counts, never
+`key.publish`, `key.rotate`, `key.revoke`, `hub.identity`, `hub.migration`
+and `statement.upload`. `detail` holds ids, roles, grant patterns and counts, never
 secrets, tokens or message content.
 
 Revocation stops delivery at once: a revoked token gets 401 on its next call,
@@ -1038,36 +1388,50 @@ Shape, unchanged from round 1 where not stated:
 
 `brigade fleet mcp` picks a backend from `fleet.mode` (`hub`, the default when
 a hub URL is configured, or `mesh`). Hub Lite is the `hub` backend with a
-different URL and token. Both backends implement `who`, `send`, `reply`,
-`list`, `count`, `ack`, `sent` and `claims`. The live delivery hook and
+different URL and token, and it reports itself through its identity
+statement. All backends expose the same eight tools: `fleet_ask_user`,
+`fleet_who`, `fleet_send`, `fleet_inbox`, `fleet_ack`, `fleet_reply`,
+`fleet_sent` and `fleet_claims`. The live delivery hook and
 `brigade fleet msg` move onto the same interface.
 
 Input schemas stay exactly as the integration baseline defines them in
-`tool_specs()`, including #2010's `client_id` and annotations and #2009's
-`count_only`. Ids and cursors are opaque strings to callers. Each backend
-defines its own cursor encoding: #1939's opaque `who` and `claims` cursors on
-a hub, and local opaque cursors in mesh mode.
+`tool_specs()`, including #1951's `fleet_ask_user`, #2010's `client_id` and
+annotations and #2009's `count_only`. Ids and cursors are opaque strings to
+callers. Each backend defines its own cursor encoding: #1939's opaque `who`
+and `claims` cursors on a hub, and local opaque cursors in mesh mode.
 
-| Tool | Hub and Hub Lite | No-hub |
-|---|---|---|
-| `fleet_who` | nodes, principals, sessions, key fingerprints and status | contacts with key fingerprints, `online` and `last_seen_at`. `sessions` is empty. |
-| `fleet_send`, `fleet_reply` | sealed per D5, `client_id` replay per #2010 | always sealed. `delivery` is `delivered` or `spooled`. |
-| `fleet_inbox` | hub long-poll, `count_only` | local database, waited on locally |
-| `fleet_ack` | hub ack | local ack plus a signed ack receipt to the sender |
-| `fleet_sent` | hub sent list | local outbox with receipt state |
-| `fleet_claims` | claims | `{"code": "hub_feature_unavailable", "permanent": true}` |
+| Tool | Full hub | Hub Lite | No-hub |
+|---|---|---|---|
+| `fleet_ask_user` | sealed questions and signed answers (D7) | `hub_feature_unavailable` | `hub_feature_unavailable` |
+| `fleet_who` | nodes, principals, sessions, key fingerprints, status and confidentiality | the same, from Hub Lite's presence | contacts with key fingerprints, `online` and `last_seen_at`. `sessions` is empty. |
+| `fleet_send`, `fleet_reply` | sealed per D5, `client_id` replay per #2010 | sealed only, 32 KiB cap | always sealed. `delivery` is `delivered` or `spooled`. |
+| `fleet_inbox` | hub long-poll, `count_only` | the same, `wait_ms` up to 20 s | local database, waited on locally |
+| `fleet_ack` | hub ack | hub ack | local ack plus a signed ack receipt to the sender |
+| `fleet_sent` | hub sent list | hub sent list | local outbox with receipt state |
+| `fleet_claims` | claims | `hub_feature_unavailable` (deferred, D12) | `hub_feature_unavailable` |
+
+`hub_feature_unavailable` is returned as `{"code": "hub_feature_unavailable",
+"permanent": true}`. Hub Lite answers the `question_*` actions and `/claims`
+with 404, and the client maps that to the code without retrying.
+
+Mesh mode never falls back to a hub. With `fleet.mode = "mesh"`, every tool is
+served by the mesh backend even when a hub URL and token are also configured,
+and a tool the mesh backend lacks returns `hub_feature_unavailable`. Sending a
+question or a claim to a configured hub would move data the user chose to keep
+off a hub, so switching requires changing `fleet.mode`.
 
 New fixed error codes join `_SAFE_ERROR_CODES`: `mesh_extra_missing`,
 `mesh_backend_unsupported`, `recipient_key_missing`, `recipient_key_changed`,
 `recipient_key_stale`, `recipient_key_unverified`, `sender_key_stale`,
 `local_key_superseded`, `invite_binding_pending`, `hub_identity_changed`,
+`signed_statement_rollback`, `signed_statement_conflict`,
 `message_sealing_required`, `message_too_large`,
 `message_client_id_conflict`, `sender_storage_quota`, `hub_storage_full`,
 `hub_daily_quota`, `principal_role_forbidden`, `hub_feature_unavailable` and
-`mesh_engine_unavailable`.
+`mesh_engine_unavailable`. Open errors on rows (D6) are a separate fixed set.
 
-The no-hub docs say plainly that claims, runs, patrol, dispatch and MCP Events
-need a hub.
+The no-hub docs say plainly that operator questions, claims, runs, patrol,
+dispatch and MCP Events need a full hub.
 
 ## D12. Hub Lite
 
@@ -1080,21 +1444,24 @@ fleet. The object does authentication, storage and long-poll wake-ups.
 Scope change from #2008 (decision Q7). #2008 lists presence, the inbox and
 claims. Claims are deferred until messaging, invites, presence and the
 free-plan measurements in plan slice 14 pass, and then get their own issue.
-`brigade run` keeps using a full hub for claims.
+`brigade run` keeps using a full hub for claims. Operator questions are also
+out of version 1 (D7, D11).
 
 | Route | Actions | Auth |
 |---|---|---|
 | `GET /health` | liveness | none |
 | `GET /mesh/identity` | the signed identity statement (D4) | none |
-| `POST /messages` | `send`, `reply`, `list` (`wait_ms` up to 20 s), `count`, `sent`, `sent_lookup`, `ack`, `who`, `keys_publish`, `keys_get` | principal or node token |
+| `POST /messages` | `send`, `reply`, `list` (`wait_ms` up to 20 s), `count`, `sent`, `sent_lookup`, `ack`, `who`, `keys_publish`, `keys_get`, `manifests_get` | principal or node token |
 | `POST /invites` | `create`, `list`, `revoke` | admin token |
 | `POST /invites/redeem` | redeem | invite secret |
-| `POST /message-principals` | `get`, `grants`, `revoke` | admin token |
+| `POST /message-principals` | `get`, `grants` (agent or node principal), `revoke` | admin token |
 | `POST /hub-identity` | upload a statement or migration | admin token |
+| `POST /mesh/statements` | upload a signed membership manifest, key manifest or revocation statement | admin token |
 | `POST /sessions`, `GET /sessions` | presence heartbeat and list | node token |
 | `GET /audit` | audit log page | admin token |
 
-Every other route returns 404, including `/claims`, `/events`, `/status`,
+Every other route or action returns 404, including the `question_*` actions,
+`/claims`, `/events`, `/status`,
 `/cloud`, `/models`, `/policy`, `/preference`, `/owners`, `/work`, `/ci`,
 dashboard enrollment, deck pages and MCP Events webhooks.
 
@@ -1104,7 +1471,8 @@ Storage layout (SQLite in the Durable Object):
 meta(key PRIMARY KEY, value)                      -- identity statement, schema version
 principals(principal_id PRIMARY KEY, role, name, person, label,
            token_hash UNIQUE, created_at, revoked_at)
-grants(principal_id, pattern, PRIMARY KEY(principal_id, pattern))
+grants(principal_id, pattern, PRIMARY KEY(principal_id, pattern))  -- agent or node ids
+statements(kind PRIMARY KEY, seq, statement, uploaded_at)
 keys(principal_id, kid PRIMARY KEY, record, state, created_at, retired_at,
      revoked_at, compromised_from)
 messages(id INTEGER PRIMARY KEY AUTOINCREMENT, sender, recipient, kind, priority,
@@ -1116,8 +1484,8 @@ sessions(node_id, session_id, harness, state, repo_label, branch,
          heartbeat_at, expires_at, PRIMARY KEY(node_id, session_id))
 invites(invite_id PRIMARY KEY, redeem_hash, role, inviter, name, grants,
         created_at, expires_at, max_uses, uses, revoked_at)
-invite_uses(invite_id, join_attempt_id, token_hash, key_kid, name, at,
-            PRIMARY KEY(invite_id, join_attempt_id))
+invite_uses(invite_id, join_attempt_id, principal_id, token_hash, name,
+            key_record, binding, at, PRIMARY KEY(invite_id, join_attempt_id))
 audit(id INTEGER PRIMARY KEY AUTOINCREMENT, at, actor, action, subject, detail)
 ```
 
@@ -1217,7 +1585,17 @@ own tokens and sealed bodies do not depend on it.
 The user docs say this in one place: a hub operator can see who messages whom,
 when, how often and roughly how much, and everything about claims, runs and
 presence. A hub operator cannot read sealed subjects, bodies, questions or
-answers.
+answers exchanged between `verified` keys.
+
+That last sentence does not hold for `observed` peers on first contact. A hub
+that substitutes an `observed` peer's key before the station first pins it can
+read everything sealed to the substituted key, and the pin then keeps the
+substitution in place. This is opportunistic confidentiality: it protects
+against a hub that is honest at first contact and only reads stored data
+afterwards. Rows, `fleet_who` and every rendered surface label it
+`confidentiality: "opportunistic"` (D6), and the docs recommend
+`BRIGADE_FLEET_MESSAGES_REQUIRE_VERIFIED=1` for anyone who verifies
+fingerprints. Teammates and unlisted principals never get this path (D3).
 
 ## Threat model
 
@@ -1226,11 +1604,12 @@ keys, principal tokens, and the integrity of who said what.
 
 | Party | Can see | Can do | Cannot do |
 |---|---|---|---|
-| Hub operator (self-hosted hub or Hub Lite owner) | routing metadata, padded sizes, claims, presence, runs, keys, grants, audit log, tokens as presented | Drop, delay or reorder mail. Replay an envelope under a new id, which a station that saw the original catches and a fresh station labels `unchecked`. Serve a substituted key to a client that has the principal only as `observed` or not at all, or withhold a never-pinned key so `auto` sends plain text. Pass off a revoked key as retired, which matters only with a stolen key. Mint principals with the admin token. Keep copies of ciphertext forever. Until slice 7b, manufacture an operator answer. | Read sealed content. Forge a message from a pinned principal. Change its identity for a known endpoint without the old identity key or the operator. Link a reply to a request it was not sent for. Make an unsigned field confer operator authority (after slice 7b). Get plain text sent to a pinned peer. |
+| Hub operator (self-hosted hub or Hub Lite owner) | routing metadata, padded sizes, claims, presence, runs, keys, grants, audit log, tokens as presented | Drop, delay or reorder mail. Replay an envelope under a new id, which a station that saw the original catches and a fresh station labels `unchecked`. Serve a substituted key on first contact for a principal the membership manifest lists, and read what is then sealed to it (opportunistic confidentiality, labeled on every surface), or withhold a never-pinned key so `auto` sends plain text. Pass off a revoked key as retired, which matters only with a stolen key. Withhold a newer signed statement. Mint principals with the admin token. Keep copies of ciphertext forever. Until slice 7b, manufacture an operator answer. | Read sealed content exchanged between `verified` keys. Get a teammate, or any principal the membership manifest does not list, accepted as `observed` by presenting it as own-fleet. Forge a message from a pinned principal. Roll a station back to an older signed statement. Change its identity for a known endpoint without the old identity key or the operator. Link a reply to a request it was not sent for. Make an unsigned field confer operator authority (after slice 7b). Get plain text sent to a pinned peer. |
 | Relay (iroh relay, n0 public relays, anchor) | endpoint ids, IP addresses, timing and volume [IROH-PUB]. An anchor also sees routing ids and padded sizes. | drop or delay traffic | read or forge messages or key records |
 | Cloudflare, for Hub Lite | the same as a hub operator, plus bearer tokens in TLS, and it can change the running code | everything a hub operator can, including sending as a principal with a stolen token. Such mail is either plain text, which a pinned recipient labels `unauthenticated-after-pin` and never treats as authoritative, or signed by a key the recipient has not pinned, which opens as `sender_key_changed`. | the same limits as a hub operator |
 | A teammate | its own mail, and ids, labels and fingerprints of principals in its grant | send to principals that granted it. Forward a signed message it received: Ed25519 signatures are not deniable, so a message is transferable proof of authorship. | read other principals' mail or claims. Re-address a message it received to a third party. |
 | A compromised node or station | everything sealed to that principal, including stored envelopes (no forward secrecy), its outbox and spool | send as itself. Publish a rotated key with a valid continuity signature until revoked. | messages from other principals, or a key for another principal |
+| Whoever steals a principal's signing key | what that key can sign | sign mail with any `created_at` until the revocation reaches each station | have mail received after `compromised_from` read as history, or have any mail from the key confer authority once revoked (D3) |
 | An agent with shell access as the same OS user | everything that user can read, including private keys and pin stores | accept a key or hub identity by editing local state or running the CLI | nothing the OS user could not do. Only OS separation (D3) stops it. |
 | Anyone who can read a transcript holding an invite token | the token | redeem it before the invitee does, until it expires | redeem a token already used by another join attempt |
 | A future quantum adversary holding harvested envelopes | stored ciphertext | forge Ed25519 signatures on archived mail | decrypt `bm1` envelopes while ML-KEM-768 holds |
@@ -1247,7 +1626,8 @@ separation of keys from agents (D3).
 ## Decisions on the open questions
 
 Recorded from the operator's decisions on #2005, #2007 and the PR, and the
-conductor's decisions for revision 2.
+conductor's decisions for revisions 2 and 3. The operator delegated
+best-practice calls to the conductor.
 
 1. Dependency (G1): approved. `brigade-cli[mesh]` on pyca `cryptography`,
    floor 48 so the wheels carry ML-KEM (D1).
@@ -1265,6 +1645,20 @@ conductor's decisions for revision 2.
    revocation and agent-to-agent reciprocity (D9).
 7. Hub Lite claims: deferred until messaging, invites, presence and the
    free-plan measurements pass. This narrows #2008's scope (D12).
+8. Own-fleet `observed` keys: allowed only for principals in an
+   operator-signed membership manifest. Every other principal needs a verified
+   binding, and hub-provided roles never select the weaker path. The path is
+   labeled opportunistic confidentiality (D3, D13).
+9. Revoked keys: notification order is not evidence. History stays readable
+   only with a local receipt from before `compromised_from` minus the skew
+   window, and never confers authority (D3).
+10. Operator questions on Hub Lite and in no-hub mode: `hub_feature_unavailable`
+    in version 1. Mesh mode never falls back to a configured hub (D11).
+11. `bm1` wire profile: frozen to the pinned draft revisions. A behavior change
+    needs a new suite id (D1).
+12. G4: `wrangler` as a pinned development dependency of `workers/hub-lite/`
+    only, with a committed lockfile, approved. It is not a runtime dependency
+    of `brigade-cli`.
 
 ## Sources
 
@@ -1276,6 +1670,11 @@ All retrieved on 2026-10-22.
 - [CRY-HPKE] cryptography 50.0.2 HPKE API, including `KEM.MLKEM768_X25519`: https://cryptography.io/en/stable/hazmat/primitives/hpke/
 - [CRY-MEAS] Local measurement on 2026-10-22 with the cryptography 48.0.0 Linux x86_64 wheel: `Suite(KEM.MLKEM768_X25519, KDF.HKDF_SHA256, AEAD.AES_256_GCM).encrypt` of a 32 byte key returned 1168 bytes and decrypted. The same call under `KEM.X25519` returned 80 bytes.
 - [CRY-INST] cryptography installation: https://cryptography.io/en/latest/installation/
+- [CRY-MLKEM] cryptography 50.0.2 ML-KEM API (`from_seed_bytes`, `decapsulate`, added in 47.0.0): https://cryptography.io/en/stable/hazmat/primitives/asymmetric/mlkem/
+- [XWING] draft-connolly-cfrg-xwing-kem revision 11, last updated 2026-09-23, Independent Submission stream (sections 5.2 key generation, 5.3 combiner, 5.6 use in HPKE, 7 IANA: `0x647a`, Nenc 1120, Npk 1216, Nsk 32, Appendix C test vectors): https://datatracker.ietf.org/doc/draft-connolly-cfrg-xwing-kem/11/
+- [HPKE-PQ] draft-ietf-hpke-pq revision 05, last updated 2026-07-06, HPKE working group document (section 4 hybrid KEMs, section 8.2 `0x647a` MLKEM768-X25519 with Nenc 1120 and Npk 1216, Appendix A.5 vectors with ChaCha20-Poly1305): https://datatracker.ietf.org/doc/draft-ietf-hpke-pq/05/
+- [HPKE-PQ-TV] HPKE PQ JSON test vectors (13 vectors, `0x647a` only with AEAD `0x0003`, and vector encryptions use associated data such as `Count-0`): https://raw.githubusercontent.com/hpkewg/hpke-pq/main/test-vectors.json
+- [ASTRA-MEAS] Round 2 review of this PR at e13e0a6 (GPT Astra): a 20 KiB padded payload sealed into a 31,639 byte envelope. Taken from the review. Revision 3 did not repeat the measurement.
 - [NACL-PYPI] PyNaCl on PyPI: https://pypi.org/pypi/PyNaCl/json
 - [NACL-CHG] PyNaCl changelog: https://pynacl.readthedocs.io/en/latest/changelog/
 - [RN-README] Reason Network README at v0.12.9: https://github.com/reason-machines/reason-network/blob/039b9571dab11f980813918b60a827b8bb27fbfd/README.md
