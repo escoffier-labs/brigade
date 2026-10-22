@@ -419,3 +419,22 @@ def test_show_and_list_survive_malformed_hub_values(monkeypatch, capsys):
     assert "\x1b" not in capsys.readouterr().out
     monkeypatch.setattr(worklore_client, "get_campaign", lambda key: {"campaign": "x", "members": "y"})
     assert cli.main(["fleet", "campaign", "show", "camp-1"]) == 0
+
+
+def test_offer_file_is_forwarded_and_invalid_policy_never_posts(workspace, hub, capsys):
+    offer = {
+        "allowed_nodes": ["node-a"],
+        "per_node_concurrency": 1,
+        "attempt_budget": {"cap": 2, "source_ref": "budget-1"},
+        "authorization_ref": "grant-1",
+        "exclusions": [],
+        "lease_seconds": 60,
+    }
+    path = workspace / "offer.json"
+    path.write_text(json.dumps(offer))
+    assert _create(workspace, "--offer-file", str(path), "--json") == 0
+    assert hub.posted[0]["offer"] == offer
+    capsys.readouterr()
+    path.write_text(json.dumps({**offer, "per_node_concurrency": 0}))
+    assert _create(workspace, "--offer-file", str(path), "--json") == 2
+    assert len(hub.posted) == 1

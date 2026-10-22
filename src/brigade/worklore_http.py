@@ -48,6 +48,10 @@ _STATUS_BY_CODE = {
     "acceptance-required": 400,
     "import-conflict": 409,
     "campaign-spec-changed": 409,
+    "campaign-offer-conflict": 409,
+    "campaign-not-authorized": 403,
+    "campaign-ineligible": 409,
+    "campaign-concurrency-limit": 409,
     "adapter-owner-mismatch": 403,
     "execution-mismatch": 403,
     "attempt-forbidden": 403,
@@ -277,6 +281,9 @@ def _item_route(
     if not tail and method == "GET":
         _validate_query(query, {"links_limit", "links_cursor"})
         item = store.get_item(conn, work_id)
+        campaign = campaigns.member_campaign(conn, work_id)
+        if campaign is not None:
+            item["campaign"] = campaign
         links = store.list_links_page(
             conn,
             work_id,

@@ -13,6 +13,7 @@ import hmac
 import json
 import re
 import sqlite3
+from datetime import datetime
 from typing import Any, Mapping
 
 from . import worklore_scope as scope
@@ -46,6 +47,7 @@ EVENT_TYPES = {
     "offer": "ownership-offered",
     "withdraw": "ownership-offer-withdrawn",
     "accept": "ownership-accepted",
+    "take": "ownership-taken",
     "checkpoint": "ownership-checkpoint",
     "report": "ownership-reported",
     "handoff": "ownership-handoff-offered",
@@ -55,6 +57,7 @@ _FIELDS = {
     "offer": {"action", "target_node", "exclusions", "authorization_ref", "attempt_budget"},
     "withdraw": {"action"},
     "accept": {"action", "generation"},
+    "take": {"action", "generation"},
     "checkpoint": {
         "action",
         "generation",
@@ -305,11 +308,25 @@ def _authorize(
         raise store.WorkloreForbidden("node holder authority required", code="holder-mismatch")
     if generation != authority["generation"]:
         raise store.WorkloreConflict("ownership generation does not match", code="stale-generation")
+    if action == "take":
+        return  # Enrollment and campaign authorization run under the same write fence.
     expected_node = authority["offered_to"] if action == "accept" else authority["owner_node"]
     if actor_id != expected_node:
         raise store.WorkloreForbidden("ownership holder does not match", code="holder-mismatch")
     if action != "accept" and not hmac.compare_digest(str(authority["holder_hash"] or ""), str(digest or "")):
         raise store.WorkloreForbidden("ownership holder does not match", code="holder-mismatch")
+
+
+def expired(snapshot: Mapping[str, Any], now: str) -> bool:
+    """Only a valid explicit campaign deadline expires. Legacy holders stay reserved."""
+    deadline = snapshot.get("expires_at")
+    if not isinstance(deadline, str):
+        return False
+    try:
+        stamp, current = datetime.fromisoformat(deadline), datetime.fromisoformat(now)
+        return stamp.tzinfo is not None and current.tzinfo is not None and stamp <= current
+    except ValueError:
+        return False
 
 
 def _transition(
@@ -433,11 +450,21 @@ def ownership_action(
     ).hexdigest()
 
     def write() -> dict[str, Any]:
+        from . import worklore_campaigns as campaigns
+
         item = store.get_item(conn, work_id)
         if not is_admin:
             _enrolled(conn, actor_id)
         if action in {"offer", "withdraw"} and not (is_admin or is_operator):
             raise store.WorkloreForbidden("operator token required", code="forbidden")
+        if action == "take":
+            if is_admin:
+                raise store.WorkloreForbidden("node holder authority required", code="holder-mismatch")
+        member = campaigns.member_campaign(conn, work_id)
+        if member is not None and action in {"offer", "accept", "handoff"}:
+            raise store.WorkloreForbidden(
+                "campaign members require policy-bounded take", code="campaign-not-authorized"
+            )
         replay = conn.execute(
             "SELECT actor_type, actor_id, detail_json FROM work_events WHERE work_id=? AND event_id=?",
             (work_id, event_id),
@@ -465,6 +492,14 @@ def ownership_action(
                     "idempotency key conflicts with recorded request", code="idempotency-conflict"
                 )
             return _public(detail["ownership"])
+        if action == "take":
+            # Legacy keys remain item-scoped. Later reuse there cannot invalidate
+            # an already recorded take, but a new take cannot bind a used key.
+            reused = conn.execute(
+                "SELECT 1 FROM work_events WHERE event_id=? AND work_id!=? LIMIT 1", (event_id, work_id)
+            ).fetchone()
+            if reused is not None:
+                raise store.WorkloreConflict("take key is bound to another work item", code="idempotency-conflict")
         current = _current(conn, work_id)
         if current["revision"] != expected_revision:
             raise store.WorkloreConflict("ownership revision does not match", code="version-conflict")
@@ -477,6 +512,20 @@ def ownership_action(
             generation=body.get("generation"),
             digest=digest,
         )
+        now = store._utc_now()
+        campaign_authority = None
+        if action == "take":
+            campaign_authority = campaigns.take_authority(conn, work_id, item, current, node=actor_id, now=now)
+        elif member is not None and action not in {"release", "withdraw"}:
+            if expired(current, now):
+                raise store.WorkloreConflict("campaign ownership lease expired", code="stale-generation")
+            campaigns._eligible_campaign(conn, member)
+            if current.get("campaign_offer_event") is None:
+                raise store.WorkloreForbidden("campaign ownership has no authorization", code="campaign-not-authorized")
+            if action == "checkpoint" and body["repo_identity"] != member["repo"]:
+                raise store.WorkloreForbidden(
+                    "checkpoint repository differs from member", code="campaign-not-authorized"
+                )
         if item["status"] in TERMINAL_STATUSES and action not in {"release", "withdraw"}:
             raise store.WorkloreConflict("terminal work item refuses ownership progress", code="ownership-conflict")
         if "target_node" in body:
@@ -495,9 +544,9 @@ def ownership_action(
             raise store.WorkloreConflict(
                 "ownership event capacity exhausted; successor item required", code="ownership-capacity-exhausted"
             )
-        if action == "accept":
+        if action in {"accept", "take"}:
             accepted = conn.execute(
-                "SELECT detail_json FROM work_events WHERE work_id=? AND event_type='ownership-accepted' ORDER BY seq LIMIT ?",
+                "SELECT detail_json FROM work_events WHERE work_id=? AND event_type IN ('ownership-accepted','ownership-taken') ORDER BY seq LIMIT ?",
                 (work_id, ITEM_MAX_OWNERSHIP_TOTAL),
             ).fetchall()
             if any(
@@ -508,11 +557,27 @@ def ownership_action(
                 )
         if action == "report":
             _validate_report_history(conn, work_id, body["report"], reporter_node=actor_id)
-        result = _transition(
-            current, body, actor_id=actor_id, actor_type="operator" if action == "offer" else actor_type, digest=digest
-        )
+        if campaign_authority is not None:
+            # A reclaim drops old path/report declarations and fences the old capability.
+            result = _initial()
+            result.update(campaign_authority)
+            result.update(
+                state="owned",
+                owner_node=actor_id,
+                holder_hash=digest,
+                generation=current["generation"] + 1,
+                revision=current["revision"] + 1,
+            )
+        else:
+            result = _transition(
+                current,
+                body,
+                actor_id=actor_id,
+                actor_type="operator" if action == "offer" else actor_type,
+                digest=digest,
+            )
         result["last_seq"] = conn.execute(f"SELECT {store._EVENT_SEQ_SQL}").fetchone()[0]
-        result["updated_at"] = store._utc_now()
+        result["updated_at"] = now
         authority = {key: current[key] for key in ("generation", "owner_node", "offered_to", "holder_hash")}
         detail = {"action": action, "fingerprint": fingerprint, "authority": authority, "ownership": result}
         serialized = json.dumps(detail)

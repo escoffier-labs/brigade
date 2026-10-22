@@ -146,6 +146,7 @@ def _register_hub_commands(commands: argparse._SubParsersAction, fleet_sub: argp
     create.add_argument(
         "--overrides", type=Path, help="Bounded JSON object mapping repos.toml repo ID to override text."
     )
+    create.add_argument("--offer-file", type=Path, help="Bounded JSON campaign authorization offer.")
     create.add_argument("--repos", help="Comma-separated exact repos.toml IDs; default all enabled IDs.")
     create.add_argument("--priority", help="Campaign priority (low, normal, high, urgent).")
     create.add_argument("--dry-run", action="store_true", help="Print the request without writing to the Hub.")
@@ -280,6 +281,14 @@ def _request_body(args: argparse.Namespace) -> dict[str, Any]:
         body["description"] = _read_text(args.description_file, DESCRIPTION_MAX * 4)
     if args.priority:
         body["priority"] = args.priority
+    if args.offer_file:
+        from ..worklore_campaigns import parse_offer
+        from ..worklore_validate import WorkloreValidationError
+
+        try:
+            body["offer"] = parse_offer(_read_input(args.offer_file))
+        except WorkloreValidationError:
+            raise campaign.PreviewError("offer_refused") from None
     return body
 
 
