@@ -195,7 +195,18 @@ def test_cached_wire_cost_preserves_oversized_count_and_skips_payload(store, mon
         return loads(value, *args, **kwargs)
 
     monkeypatch.setattr(json, "loads", measured_loads)
-    page = read(store, first["next_cursor"])
+    fetched_bytes = []
+
+    def count_text_bytes(_cursor, row):
+        fetched_bytes.extend(len(value.encode()) for value in row if isinstance(value, str))
+        return row
+
+    store.row_factory = count_text_bytes
+    try:
+        page = read(store, first["next_cursor"])
+    finally:
+        store.row_factory = None
+    assert sum(fetched_bytes) < 2000, fetched_bytes
     assert page["claims"][0]["target"] == "item-2"
     assert page["oversized"] == 1 and page["total"] == 4 and page["next_cursor"]
     assert max(decoded) < 2000

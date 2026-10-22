@@ -382,13 +382,13 @@ def _snapshot_page(
         # grant change. The primary key could otherwise scan a forbidden prefix.
         # SQLite streams only the page and one lookahead, without OFFSET.
         rows = conn.execute(
-            "SELECT ordinal,wire_bytes,payload FROM fleet_read_snapshot_rows "
+            "SELECT ordinal,wire_bytes FROM fleet_read_snapshot_rows "
             "INDEXED BY fleet_read_snapshot_visible "
             "WHERE snapshot_id=? AND kind=? AND visible=1 AND ordinal>=? ORDER BY ordinal",
             (snapshot_id, key, position),
         )
         try:
-            for ordinal, size, payload in rows:
+            for ordinal, size in rows:
                 position = ordinal
                 if key != "sessions" and len(selected) >= limit:
                     more = True
@@ -400,6 +400,11 @@ def _snapshot_page(
                 if size > remaining:
                     more = True
                     break
+                # Lookahead and oversized rows need only cached metadata.
+                payload = conn.execute(
+                    "SELECT payload FROM fleet_read_snapshot_rows WHERE snapshot_id=? AND kind=? AND ordinal=?",
+                    (snapshot_id, key, ordinal),
+                ).fetchone()[0]
                 selected.append(json.loads(payload))
                 remaining -= size
                 position += 1
