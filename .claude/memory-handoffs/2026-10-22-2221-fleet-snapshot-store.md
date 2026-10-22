@@ -45,9 +45,9 @@ Ordinal storage also needs current-grant visibility and totals.
 - Stale-statistics red receipt: `20261022-225305-work-verify-947dcb`, 297 versus 8,361 steps.
 - Payload-read red receipt: `20261022-231207-work-verify-f0c686`, 17,217 bytes for oversized/lookahead rows.
 - Prefilter mutation receipt: `20261022-221313-work-verify-46e77b`.
-- Merged main: `c0b76ffc6`, preserving campaign migrations.
+- Merged main: `409d7653e`, preserving campaign migrations and unread counts.
 - Full focused receipt: `20261022-231336-work-verify-468bec`, 1,041 passed.
-- Merged paging/CI receipt: `20261022-231840-work-verify-1686f2`, 923 passed.
+- Merged paging/visibility receipt: `20261022-233951-work-verify-798a69`, 658 passed.
 
 ## Recommended memory action
 

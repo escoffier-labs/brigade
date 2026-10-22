@@ -55,6 +55,11 @@ def register(fleet_sub: argparse._SubParsersAction) -> None:
     _message_options(listing)
     listing.set_defaults(func=_list)
 
+    count = sub.add_parser("count", help="Count this principal's unread inbox messages without fetching bodies.")
+    count.add_argument("--json", action="store_true")
+    _message_options(count)
+    count.set_defaults(func=_count)
+
     ack = sub.add_parser("ack", help="Acknowledge one inbox message.")
     ack.add_argument("id", type=int)
     ack.add_argument("--json", action="store_true")
@@ -87,7 +92,9 @@ def register(fleet_sub: argparse._SubParsersAction) -> None:
     principals = sub.add_parser("principals", help="Enroll or revoke named external agent principals (admin token).")
     principal_sub = principals.add_subparsers(dest="principal_command", metavar="<principal-command>")
     principal_sub.required = True
-    add = principal_sub.add_parser("add", help="Enroll a named external agent and print its one-time token.")
+    add = principal_sub.add_parser(
+        "add", help="Enroll a named external agent and print its token (shown once; store it privately)."
+    )
     add.add_argument("name")
     add.add_argument("--label")
     add.add_argument("--may-send-to", nargs="+", action="extend")
@@ -236,6 +243,12 @@ def _list(args: argparse.Namespace) -> int:
         return fleet_client_messages.list_messages(after=args.after, unacked=args.unacked, **kwargs)
 
     return _result(args, operation)
+
+
+def _count(args: argparse.Namespace) -> int:
+    from .. import fleet_client_messages
+
+    return _result(args, lambda: fleet_client_messages.unread_count(**_token_kwargs(args)))
 
 
 def _ack(args: argparse.Namespace) -> int:
