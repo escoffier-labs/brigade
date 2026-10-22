@@ -46,6 +46,41 @@ def receipt_lock(target: Path, *, report_only: bool = False) -> Iterator[bool]:
             yield True
 
 
+_LANE_SUMMARY = ("lane_id", "run_id", "task_id", "claim_id", "state", "reason", "classification_digest")
+
+
+def bounded_receipt_text(payload: dict[str, Any]) -> str:
+    """Serialize a receipt that the strict reader is guaranteed to accept.
+
+    A scan can hold up to 1000 lanes with long evidence lists. Evidence, then
+    lane detail, then trailing lanes are dropped until the receipt fits. The
+    action history is never trimmed because retention and fences read it.
+    """
+
+    def render(value: dict[str, Any]) -> str:
+        return json.dumps(value, indent=2, sort_keys=True) + "\n"
+
+    text = render(payload)
+    if len(text.encode()) <= RECEIPT_BYTE_LIMIT:
+        return text
+    lanes = [dict(lane, evidence=list(lane.get("evidence", ())[:3])) for lane in payload.get("lanes", ())]
+    bounded = {**payload, "lanes": lanes, "receipt_truncated": True}
+    text = render(bounded)
+    if len(text.encode()) <= RECEIPT_BYTE_LIMIT:
+        return text
+    lanes = [{key: lane[key] for key in _LANE_SUMMARY if key in lane} for lane in lanes]
+    bounded["lanes"] = lanes
+    text = render(bounded)
+    while len(text.encode()) > RECEIPT_BYTE_LIMIT and lanes:
+        del lanes[len(lanes) // 2 :]
+        text = render(bounded)
+    return text
+
+
+def write_receipt(path: Path, payload: dict[str, Any]) -> None:
+    localio.write_text_atomic(path, bounded_receipt_text(payload))
+
+
 def read_receipt(directory: Path) -> dict[str, Any] | None:
     """Ignore unpublished directories, but fail closed on corrupt receipts."""
     if directory.is_symlink() or not directory.is_dir():

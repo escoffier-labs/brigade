@@ -182,3 +182,29 @@ def test_fences_for_many_lanes_do_not_hit_one_global_archive_cap(tmp_path, monke
     monkeypatch.setattr(runs_patrol_receipts, "_read_payload", tracked)
     assert runs_patrol_receipts.read_fences(root, lane_ids={"old-run-0"}) == [actions[0]]
     assert len(reads) == 2  # Legacy archive plus this scan's single lane shard.
+
+
+def test_oversized_receipt_is_bounded_and_stays_readable(tmp_path, monkeypatch):
+    monkeypatch.setattr(runs_patrol_receipts, "RECEIPT_BYTE_LIMIT", 20000)
+    lanes = [
+        {
+            "lane_id": f"lane-{i}",
+            "run_id": f"run-{i}",
+            "state": "complete",
+            "reason": "r",
+            "classification_digest": "d" * 64,
+            "evidence": [{"source": "s", "detail": "x" * 100} for _ in range(20)],
+        }
+        for i in range(60)
+    ]
+    action = {"status": "applied", "idempotency_key": "fence", "scope": "local", "action": "reap"}
+    payload = {"schema": "brigade.runs_patrol.v1", "lanes": lanes, "actions": [action]}
+    path = tmp_path / "20260820T120000-big/patrol.json"
+    runs_patrol_receipts.write_receipt(path, payload)
+    assert path.stat().st_size <= 20000
+    read = runs_patrol_receipts.read_receipt(path.parent)
+    assert read["actions"] == [action]
+    assert read["receipt_truncated"] is True
+    small = {"schema": "brigade.runs_patrol.v1", "lanes": lanes[:1], "actions": []}
+    runs_patrol_receipts.write_receipt(path, small)
+    assert "receipt_truncated" not in runs_patrol_receipts.read_receipt(path.parent)

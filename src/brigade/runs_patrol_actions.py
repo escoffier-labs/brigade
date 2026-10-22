@@ -16,7 +16,6 @@ from . import (
     fleet_claim_release,
     fleet_client,
     fleet_client_messages,
-    localio,
     run_reap,
     runguard,
     runs_patrol_receipts,
@@ -95,8 +94,9 @@ def _release_local(
     if bound is None:
         return {"status": "refused", "reason": "run directory could not be bound"}
     try:
-        # Ledger CAS and run binding stay held through the write. Claim only a
-        # stale lock, leaving an absent workspace lock available to new runs.
+        # Ledger CAS, run binding, and the workspace run lock stay held through
+        # the write. An absent lock is published for the write and released
+        # afterwards, so a resume cannot start while the claim is cleared.
         with ledger._task_ledger_lock(target), run_reap._bound_transaction(bound):
             raw, meta = run_reap._read_bound_run_bytes(bound)
             expected = next((item.digest for item in lane.evidence if item.source == "run.json"), None)
@@ -108,10 +108,9 @@ def _release_local(
                 return {"status": "refused", "reason": "live or foreign run lock"}
             with ExitStack() as locks:
                 try:
-                    if lock_state == "stale":
-                        locks.enter_context(
-                            runguard.run_lock(workspace, run_dir=lane.run_dir, wait_seconds=0, stale_action="claim")
-                        )
+                    locks.enter_context(
+                        runguard.run_lock(workspace, run_dir=lane.run_dir, wait_seconds=0, stale_action="claim")
+                    )
                 except runguard.RunLockError:
                     return {"status": "refused", "reason": "run lock acquisition refused"}
                 if not bound.still_bound():
@@ -124,8 +123,6 @@ def _release_local(
                 )
                 if _journal_digest(lane, now) != expected_journal:
                     return {"status": "refused", "reason": "journal changed since observation"}
-                if lock_state == "absent" and runguard.run_lock_state(workspace, lane.run_dir) != "absent":
-                    return {"status": "refused", "reason": "run lock changed since observation"}
                 current = ledger._read_task_ledger(target)
                 task = next((task for task in current["tasks"] if task.get("id") == lane.task["id"]), None)
                 if task is None:
@@ -310,7 +307,7 @@ def apply_actions(
                         escalation_number=escalation_number,
                     )
                 payload["actions"].append(record)
-                localio.write_json(receipt, payload)
+                runs_patrol_receipts.write_receipt(receipt, payload)
                 try:
                     if action == "reap":
                         result = _reap(lane, row, thresholds, now)
@@ -372,6 +369,6 @@ def apply_actions(
                 except (OSError, ValueError, RuntimeError) as exc:
                     record.update(status="failed", reason=type(exc).__name__)
                 previous.append(record)
-                localio.write_json(receipt, payload)
+                runs_patrol_receipts.write_receipt(receipt, payload)
             if refresh_failed:
                 break

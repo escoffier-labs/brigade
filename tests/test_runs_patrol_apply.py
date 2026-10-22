@@ -154,6 +154,9 @@ def test_release_requires_complete_intent_scan(tmp_path, monkeypatch, capsys, sc
     if scan == "unreadable":
         intent.write_text("{broken JSON")
     elif scan == "truncated":
+        # The run's own intent lies beyond the scan cap. Its launch receipt
+        # still fences the lane, without poisoning claim recovery elsewhere.
+        (run / "dispatch-launch.json").write_text("{}")
         localio.write_json(intent.with_name("a-unrelated.json"), {"task_id": "other", "run_id": "other"})
         monkeypatch.setattr(run_lane_state, "RUN_SCAN_LIMIT", 1)
         scandir = os.scandir
@@ -209,7 +212,9 @@ def test_release_requires_complete_intent_scan(tmp_path, monkeypatch, capsys, sc
         assert calls == []
         assert ledger.read_bytes() == before
         assert not any(action["status"] == "applied" for action in report["actions"])
-        assert any(item["detail"] == "intent scan incomplete" for item in report["lanes"][0]["evidence"])
+        details = {item["detail"] for item in report["lanes"][0]["evidence"]}
+        expected = "dispatch launch receipt without scanned intent" if scan == "truncated" else "intent scan incomplete"
+        assert expected in details
 
 
 @pytest.mark.parametrize("scope", ["ledger", "hub"])
@@ -691,18 +696,45 @@ def test_ineligible_actions_do_not_write_attempts_or_query_hub(tmp_path, monkeyp
     assert report["actions"] == []
 
 
-def test_terminal_release_does_not_acquire_an_absent_run_lock(tmp_path, monkeypatch, capsys):
+def test_terminal_release_fences_an_absent_run_lock_through_the_ledger_write(tmp_path, monkeypatch, capsys):
+    from brigade.work_cmd import ledger
+
+    repo = _repo(tmp_path)
+    run = _write_run(repo, "20260820-120000-patrol01", status="ok", extra={"claim_id": "claim-1"})
+    ledger_path = _ledger(repo)
+    assert runguard.run_lock_state(repo, run) == "absent"
+    observed = []
+    write = ledger._write_task_ledger
+
+    def checked(target, data):
+        observed.append(runguard.run_lock_state(repo, run))
+        with pytest.raises(runguard.RunLockError):
+            with runguard.run_lock(repo, run_dir=run, wait_seconds=0):
+                pass
+        write(target, data)
+
+    monkeypatch.setattr(ledger, "_write_task_ledger", checked)
+    _patrol(repo, capsys, apply="release-claim")
+    assert observed and observed[0] != "absent"
+    assert json.loads(ledger_path.read_text())["tasks"][0].get("claim") is None
+    assert runguard.run_lock_state(repo, run) == "absent"
+    assert not (repo / ".brigade/run.lock").exists()
+
+
+def test_truncated_intent_scan_still_releases_a_run_without_a_dispatch_receipt(tmp_path, monkeypatch, capsys):
+    from brigade import run_lane_state
+
     repo = _repo(tmp_path)
     _write_run(repo, "20260820-120000-patrol01", status="ok", extra={"claim_id": "claim-1"})
-    ledger = _ledger(repo)
-
-    def unexpected(*args, **kwargs):
-        pytest.fail("terminal claim release must leave an absent workspace lock available")
-
-    monkeypatch.setattr(runguard, "run_lock", unexpected)
-    _patrol(repo, capsys, apply="release-claim")
-    assert json.loads(ledger.read_text())["tasks"][0].get("claim") is None
-    assert not (repo / ".brigade/run.lock").exists()
+    ledger_path = _ledger(repo)
+    intents = repo / ".brigade/dispatch/dispatch-example/intents"
+    for index in range(3):
+        localio.write_json(intents / f"intent-{index}.json", {"task_id": f"other-{index}", "run_id": f"other-{index}"})
+    monkeypatch.setattr(run_lane_state, "RUN_SCAN_LIMIT", 2)
+    report = _patrol(repo, capsys, apply="release-claim")
+    assert report["truncated"] is True
+    assert json.loads(ledger_path.read_text())["tasks"][0].get("claim") is None
+    assert any(item["status"] == "applied" for item in report["actions"])
 
 
 def test_record_only_escalation_deduplicates_after_one_delivery(tmp_path, monkeypatch, capsys):

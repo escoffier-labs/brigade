@@ -66,7 +66,7 @@ def _write_receipt(target: Path, patrol_id: str, raw: str) -> None:
     path = parent / "patrol.json"
     if path.exists() or path.is_symlink():
         raise ValueError("patrol receipt already exists")
-    localio.write_text_atomic(path, raw + "\n")
+    localio.write_text_atomic(path, raw)
 
 
 def patrol(
@@ -163,7 +163,7 @@ def patrol(
         raw = json.dumps(payload, indent=2, sort_keys=True)
         if receipt:
             with runs_patrol_receipts.receipt_lock(target, report_only=not actions) as locked:
-                _write_receipt(target, patrol_id, raw)
+                _write_receipt(target, patrol_id, runs_patrol_receipts.bounded_receipt_text(payload))
                 written_receipt = target / payload["receipt"]
                 if locked:
                     runs_patrol_receipts.prune_reports(
@@ -186,7 +186,7 @@ def patrol(
         if written_receipt is not None and payload is not None:
             payload.update(exit_code=2, error=type(exc).__name__)
             try:
-                localio.write_json(written_receipt, payload)
+                runs_patrol_receipts.write_receipt(written_receipt, payload)
             except OSError:
                 pass  # The original failure still determines the exit disposition.
         print(f"error: patrol: {exc}", file=sys.stderr)

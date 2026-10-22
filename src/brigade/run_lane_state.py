@@ -536,8 +536,10 @@ def collect_lanes(
                 with os.scandir(dispatch_root) as dispatches:
                     for index, entry in enumerate(dispatches):
                         if index >= RUN_SCAN_LIMIT:
+                            # Truncation is reported but is not an ownership
+                            # unknown: a run with a dispatch launch receipt and
+                            # no scanned intent is refused per lane below.
                             lanes.truncated = True
-                            intent_scan_complete = False
                             break
                         if not entry.name.startswith("dispatch-"):
                             continue
@@ -556,7 +558,6 @@ def collect_lanes(
                                 if inspected >= RUN_SCAN_LIMIT:
                                     lanes.truncated = True
                                     intent_scan_truncated = True
-                                    intent_scan_complete = False
                                     break
                                 inspected += 1
                                 if not candidate.name.endswith(".json"):
