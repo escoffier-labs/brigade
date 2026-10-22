@@ -15,6 +15,7 @@ import logging
 import sqlite3
 import threading
 import time
+from collections import deque
 from collections.abc import Callable, Mapping
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -36,8 +37,13 @@ HOURLY_DELIVERY_CEILING = 120
 EVENT_RETENTION_SECONDS = 86_400
 CLAIM_SWEEP_LIMIT = 100
 # Fan-out bounds: a tick materializes a bounded window, and the outbox holds a bounded number of pending rows.
+# One principal can hold at most MAX_PENDING_PER_PRINCIPAL of the shared total, and every principal may always
+# reach RESERVED_PENDING_PER_PRINCIPAL rows even when the total is spent. The outbox therefore stays within
+# MAX_PENDING_DELIVERIES plus the reserve times the number of principals, and no subscriber can starve another.
 FAN_OUT_PER_SUBSCRIPTION = 50
 MAX_PENDING_DELIVERIES = 2000
+MAX_PENDING_PER_PRINCIPAL = 400
+RESERVED_PENDING_PER_PRINCIPAL = 10
 _LOG = logging.getLogger("brigade.fleet_hub_events")
 
 
@@ -65,26 +71,52 @@ def sweep_expired_claims(conn: sqlite3.Connection, now: float, after: Watermark 
     return (rows[-1][3], rows[-1][0]) if rows else floor
 
 
+def _round_robin(subscriptions: list[tuple[Any, ...]]) -> list[tuple[Any, ...]]:
+    """Interleave subscriptions across principals (principal id is the last column), keeping each one's order."""
+    queues: dict[str, deque[tuple[Any, ...]]] = {}
+    for subscription in subscriptions:
+        queues.setdefault(subscription[-1], deque()).append(subscription)
+    ordered: list[tuple[Any, ...]] = []
+    while queues:
+        for principal in list(queues):
+            ordered.append(queues[principal].popleft())
+            if not queues[principal]:
+                del queues[principal]
+    return ordered
+
+
 def _materialize(conn: sqlite3.Connection, now: float) -> None:
     """Create delivery rows for new events, a bounded window per subscription and a bounded pending total.
 
     A subscription's cursor moves only past events it was given a delivery row for (or past the end of the
-    outbox when nothing more matches), so whatever does not fit this tick waits for the next one.
+    outbox when nothing more matches), so whatever does not fit this tick waits for the next one. Capacity is
+    shared by principal, not by subscription: subscriptions are served round-robin across principals, each
+    principal is capped, and each keeps a small reserve, so one subscriber's failing callbacks cannot fill the
+    outbox and hold other principals' events back.
     """
-    budget = (
-        MAX_PENDING_DELIVERIES
-        - conn.execute("SELECT COUNT(*) FROM fleet_event_deliveries WHERE state='pending'").fetchone()[0]
+    pending: dict[str, int] = dict(
+        conn.execute(
+            "SELECT s.principal_id, COUNT(*) FROM fleet_event_deliveries d "
+            "JOIN fleet_event_subscriptions s ON s.id=d.subscription_id WHERE d.state='pending' "
+            "GROUP BY s.principal_id"
+        ).fetchall()
     )
+    shared = MAX_PENDING_DELIVERIES - sum(pending.values())
     newest = conn.execute("SELECT COALESCE(MAX(seq),0) FROM fleet_events").fetchone()[0]
     subscriptions = conn.execute(
-        "SELECT id, name, filter_value, cursor_seq FROM fleet_event_subscriptions WHERE cursor_seq<? "
+        "SELECT id, name, filter_value, cursor_seq, principal_id FROM fleet_event_subscriptions WHERE cursor_seq<? "
         "ORDER BY cursor_seq, id",
         (newest,),
     ).fetchall()
-    for sid, name, filter_value, cursor in subscriptions:
-        limit = min(FAN_OUT_PER_SUBSCRIPTION, budget)
+    for sid, name, filter_value, cursor, principal in _round_robin(subscriptions):
+        held = pending.get(principal, 0)
+        room = max(
+            RESERVED_PENDING_PER_PRINCIPAL - held,
+            min(MAX_PENDING_PER_PRINCIPAL - held, shared),
+        )
+        limit = min(FAN_OUT_PER_SUBSCRIPTION, room)
         if limit <= 0:
-            break
+            continue
         seqs = [
             row[0]
             for row in conn.execute(
@@ -98,7 +130,8 @@ def _materialize(conn: sqlite3.Connection, now: float) -> None:
             "VALUES(?,?,'pending',0)",
             [(seq, sid) for seq in seqs],
         )
-        budget -= len(seqs)
+        pending[principal] = held + len(seqs)
+        shared -= len(seqs)
         # A full window may have more behind it; a short one has reached the end of the outbox.
         conn.execute(
             "UPDATE fleet_event_subscriptions SET cursor_seq=? WHERE id=?",

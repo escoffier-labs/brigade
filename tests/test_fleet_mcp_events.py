@@ -916,6 +916,7 @@ def test_fan_out_window_defers_the_rest_and_the_cursor_follows(stations, receive
 def test_pending_rows_are_capped_and_resume_when_they_clear(stations, receiver, hub, monkeypatch) -> None:
     _base, _ta, _tb, db = hub
     monkeypatch.setattr(fleet_hub_events_dispatch, "MAX_PENDING_DELIVERIES", 2)
+    monkeypatch.setattr(fleet_hub_events_dispatch, "RESERVED_PENDING_PER_PRINCIPAL", 0)
     subscribe(stations[1], receiver.url, name="run.failed", arguments={"node_id": NODE_A})
     _store_failed(db, NODE_A, 5)
     start = time.time()
@@ -1028,6 +1029,37 @@ def test_flooding_a_recipient_does_not_suppress_other_producers_events(
     assert rows(db, "SELECT COUNT(*) FROM fleet_events WHERE subject=?", NODE_B) == [(4,)]
     assert tick(db) == 4
     assert sorted(r["payload"]["data"]["sender"] for r in receiver.events) == [NODE_A] * 3 + ["agent:dot"]
+
+
+def test_one_principal_saturating_its_share_cannot_block_another(stations, receiver, hub, monkeypatch) -> None:
+    _base, _ta, _tb, db = hub
+    monkeypatch.setattr(fleet_hub_events_dispatch, "MAX_PENDING_DELIVERIES", 6)
+    monkeypatch.setattr(fleet_hub_events_dispatch, "MAX_PENDING_PER_PRINCIPAL", 4)
+    monkeypatch.setattr(fleet_hub_events_dispatch, "RESERVED_PENDING_PER_PRINCIPAL", 0)
+    victim = Receiver()
+    try:
+        # Principal B's three subscriptions sort first (older cursor) and every callback answers 503.
+        for n in range(3):
+            subscribe(stations[1], f"{receiver.url}?n={n}", name="run.failed")
+        _store_failed(db, NODE_A, 1)
+        subscribe(stations[0], victim.url, name="run.failed")
+        _store_failed(db, NODE_A, 10, start=1)
+
+        def post(url: str, *_rest: Any) -> tuple[int, bytes]:
+            return (200, b"{}") if url == victim.url else (503, b"")
+
+        start = time.time()
+        delivered = sum(tick(db, clock=lambda n=n: start + n * 10, post=post) for n in range(8))
+        assert delivered == 10, "the victim receives every event despite the saturated outbox"
+        pending = rows(
+            db,
+            "SELECT s.principal_id, COUNT(*) FROM fleet_event_deliveries d "
+            "JOIN fleet_event_subscriptions s ON s.id=d.subscription_id WHERE d.state='pending' "
+            "GROUP BY s.principal_id",
+        )
+        assert pending == [(NODE_B, 4)], "the failing principal is held to its own share"
+    finally:
+        victim.close()
 
 
 def test_retired_signing_key_is_erased_after_the_rotation_window(stations, receiver, hub) -> None:
