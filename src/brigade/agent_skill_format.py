@@ -9,6 +9,7 @@ from pathlib import Path
 
 KNOWN_FIELDS = frozenset({"name", "description", "license", "compatibility", "metadata", "allowed-tools"})
 NAME_RE = re.compile(r"^[a-z0-9]+(?:-[a-z0-9]+)*$")
+BLOCK_HEADER_RE = re.compile(r"([>|])([+-]?[1-9]?|[1-9][+-]?)(?:[ \t]+#.*)?$")
 
 
 @dataclass(frozen=True)
@@ -29,6 +30,61 @@ def _scalar(value: str) -> str:
     if len(value) >= 2 and value[0] == value[-1] == "'":
         return value[1:-1].replace("''", "'")
     return value
+
+
+def _block_scalar(lines: list[str], start: int, style: str, modifiers: str) -> tuple[str, int, list[str]]:
+    """Consume one top-level block, retaining content indentation and line breaks."""
+    explicit_indent = next((int(char) for char in modifiers if char.isdigit()), None)
+    indent = explicit_indent or 1
+    if explicit_indent is None:
+        for index in range(start, len(lines)):
+            line = lines[index]
+            spaces = len(line) - len(line.lstrip(" "))
+            indent = max(indent, spaces)
+            if line.strip(" "):
+                indent = spaces or indent
+                break
+    content: list[str] = []
+    errors: list[str] = []
+    end = start
+    leading = True
+    while end < len(lines):
+        line = lines[end]
+        spaces = len(line) - len(line.lstrip(" "))
+        if line.strip(" "):
+            if spaces < indent:
+                break
+            leading = False
+        elif leading and explicit_indent is None and spaces > indent:
+            errors.append(f"frontmatter line {end + 2} has invalid block scalar indentation")
+        content.append(line[indent:])
+        end += 1
+
+    value = "".join(line + "\n" for line in content)
+    if style == ">":
+        parts: list[str] = []
+        previous: int | None = None
+        for index, line in enumerate(content):
+            if not line:
+                continue
+            if previous is None:
+                parts.append("\n" * index)
+            else:
+                breaks = index - previous
+                if content[previous][0] not in " \t" and line[0] not in " \t":
+                    # Fold ordinary lines, but retain one LF per empty paragraph line.
+                    parts.append(" " if breaks == 1 else "\n" * (breaks - 1))
+                else:
+                    parts.append("\n" * breaks)
+            parts.append(line)
+            previous = index
+        parts.append("\n" * (len(content) if previous is None else len(content) - previous))
+        value = "".join(parts)
+    if "-" in modifiers:
+        value = value.rstrip("\n")
+    elif "+" not in modifiers:
+        value = value.rstrip("\n") + ("\n" if any(content) else "")
+    return value, end, errors
 
 
 def _split_allowed_tools(allowed: str) -> tuple[str, ...]:
@@ -91,7 +147,10 @@ def validate(skill_dir: Path, *, mode: str) -> Validation:
     metadata: dict[str, str] = {}
     current_map: str | None = None
     errors: list[str] = []
-    for number, line in enumerate(lines, start=2):
+    index = 0
+    while index < len(lines):
+        number, line = index + 2, lines[index]
+        index += 1
         if not line.strip() or line.lstrip().startswith("#"):
             continue
         if line[:1].isspace():
@@ -111,16 +170,24 @@ def validate(skill_dir: Path, *, mode: str) -> Validation:
             continue
         key, raw = line.split(":", 1)
         key = key.strip()
-        if key not in KNOWN_FIELDS:
-            unknown[key] = _scalar(raw)
-            continue
         if key == "metadata":
             current_map = key
             if raw.strip() not in {"", "{}"}:
                 errors.append("metadata must be a string-to-string mapping")
             continue
-        value = _scalar(raw)
-        fields[key] = value
+        if raw.strip().startswith((">", "|")):
+            header = BLOCK_HEADER_RE.fullmatch(raw.strip())
+            if header is None:
+                errors.append(f"frontmatter line {number} has invalid block scalar header")
+                continue
+            value, index, block_errors = _block_scalar(lines, index, *header.groups())
+            errors.extend(block_errors)
+        else:
+            value = _scalar(raw)
+        if key in KNOWN_FIELDS:
+            fields[key] = value
+        else:
+            unknown[key] = value
     if metadata:
         fields["metadata"] = metadata
     diagnostics = [f"unknown frontmatter field retained: {key}" for key in unknown]
