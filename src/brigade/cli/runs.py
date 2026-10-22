@@ -13,6 +13,14 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_runs = sub.add_parser("runs", help="Inspect Brigade run artifacts.")
     runs_sub = p_runs.add_subparsers(dest="runs_command", metavar="<runs-command>")
     runs_sub.required = True
+    cassette = runs_sub.add_parser(
+        "cassette", help="Manage worker recordings. Default: metadata-only. Private bodies: auto opt-in."
+    )
+    cassette_sub = cassette.add_subparsers(dest="cassette_command", required=True)
+    purge = cassette_sub.add_parser("purge", help="Delete cassette sidecars without changing lifecycle history.")
+    purge.add_argument("run", help="Run directory path, run id, or 'latest'.")
+    purge.add_argument("--cwd", type=Path, default=Path("."))
+    purge.add_argument("--runs-dir", type=Path, default=None)
     p_runs_list = runs_sub.add_parser("list", help="List recent Brigade run directories.")
     p_runs_list.add_argument(
         "--cwd",
@@ -475,6 +483,11 @@ def register(sub: argparse._SubParsersAction) -> None:
 
 def dispatch(args) -> int:
     from .. import runs_cmd
+
+    if args.runs_command == "cassette":
+        from .. import run_cassette
+
+        return run_cassette.purge_cli(args.run, cwd=args.cwd, runs_dir=args.runs_dir)
 
     if args.runs_command == "list":
         return runs_cmd.list_runs(cwd=args.cwd, runs_dir=args.runs_dir, limit=args.limit, json_output=args.json)
