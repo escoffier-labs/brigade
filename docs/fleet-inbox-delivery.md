@@ -27,7 +27,7 @@ Rules the code enforces:
 - **Delivery is not acknowledgement.** The hook never acks. The message stays unacknowledged in the hub until the agent calls `fleet_ack` (or `brigade fleet msg ack`). If a delivery was lost, `fleet_inbox` still lists it.
 - **Own inbox only.** The hook reads with the credential the Fleet MCP station uses: `BRIGADE_FLEET_MESSAGE_TOKEN_FILE`, then the node token. The hub scopes the read to that credential, so a session never sees mail for another node or principal. Changing the credential or hub restarts the cursor.
 - **Fails open and bounded.** One hub request with a 2 second deadline. A failed, slow, or unconfigured hub stamps a 60 second backoff before the request, so a hung hub costs one deadline per minute at most, and nothing in the path raises.
-- **Nothing sensitive on disk.** Cursor files live under `~/.brigade/fleet-inbox-delivery/` (mode 0600 in a 0700 directory), hold only the credential scope hash, a message id, and two timestamps, and are pruned after seven days. Claude removes a session's file on `SessionEnd`.
+- **Nothing sensitive on disk.** Cursor files live under `~/.brigade/fleet-inbox-delivery/` (mode 0600 in a 0700 directory), hold only the credential scope hash, a message id, and two timestamps, and are pruned after seven days. A session that ends and resumes keeps its cursor, so it is not shown the same mail twice. A per-session lock file sits beside each cursor file and is removed only together with it.
 
 ## Claude Code
 

@@ -552,7 +552,7 @@ def test_claude_hub_outage_leaves_the_hook_result_unchanged(fleet, wired_repo):
     assert time.monotonic() - started < delivery.HUB_TIMEOUT_SECONDS + 2
 
 
-def test_session_end_drops_the_cursor_file(fleet, wired_repo):
+def test_session_end_keeps_the_cursor_so_a_resumed_session_sees_nothing_twice(fleet, wired_repo):
     _send(fleet)
     runtime.handle_payload("UserPromptSubmit", _claude_payload(wired_repo, "UserPromptSubmit"))
     path = delivery.state_path("claude", "live-1")
@@ -560,7 +560,8 @@ def test_session_end_drops_the_cursor_file(fleet, wired_repo):
 
     heartbeat.on_event("SessionEnd", wired_repo, "live-1")
 
-    assert not path.exists()
+    assert path.exists()
+    assert delivery.deliver("claude", "live-1", "UserPromptSubmit", now=time.time() + 1000) is None
 
 
 # --- Codex adapter -------------------------------------------------------------------

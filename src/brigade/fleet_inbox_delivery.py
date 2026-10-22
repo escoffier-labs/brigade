@@ -124,16 +124,6 @@ def _prune(directory: Path, *, now: float) -> None:
         return
 
 
-def clear(harness: str, session_id: str) -> None:
-    """Drop this session's cursor file. Never raises."""
-    path = state_path(harness, session_id)
-    for stale in (path, path.with_name(path.name + ".lock")):
-        try:
-            stale.unlink()
-        except OSError:
-            continue
-
-
 def _clean(value: Any, limit: int) -> str:
     text = "".join(ch for ch in str(value) if ch.isprintable())
     return text[:limit]
