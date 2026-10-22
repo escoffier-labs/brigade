@@ -833,3 +833,20 @@ def test_op_evidence_binds_citations_for_claim_changing_ops(tmp_path, kind):
     values = {"text": "Keep the cache cold."} if kind != "remove_block" else {}
     proposal = create(tmp_path, [op(kind, **values)])
     assert cited in proposal["op_evidence"]
+
+
+def test_saved_reflect_candidate_is_refused_after_new_contrary_evidence(tmp_path):
+    from brigade.memory_proposal_v2_reflect import propose_payload
+
+    path = setup(tmp_path, anchored=False)
+    other = card(tmp_path, "other")
+    for source, ref in ((path, ".brigade/receipts/support.json"), (other, ".brigade/receipts/other.json")):
+        evidence(tmp_path, ref)
+        source.write_text(source.read_text().replace("evidence: []", f"evidence: {json.dumps([ref])}"))
+    candidate = next(c for c in memory_reflect.run_payload(target=tmp_path)["candidates"] if c["kind"] == "duplicate")
+    log(tmp_path, path, (".brigade/receipts/contrary.json", "opposite-polarity", "2026-10-20T13:00:00Z"))
+    before = {p: p.read_bytes() for p in (path, other)}
+    with pytest.raises(api.ProposalError, match="contradicts or needs review"):
+        propose_payload(target=tmp_path, candidate_id=candidate["candidate_id"], reason="Merge exact copies.")
+    assert {p: p.read_bytes() for p in before} == before
+    assert not list((tmp_path / ".brigade/memory/proposals").glob("*/revision-1.json"))

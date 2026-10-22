@@ -98,6 +98,33 @@ def _evidence(target: Path, ops: list[dict[str, Any]], sources: list[dict[str, A
     return digests
 
 
+def _refuse_live_blockers(target: Path, sources: list[dict[str, Any]]) -> None:
+    """Refuse a reflect proposal when current evidence now contradicts or is unresolved."""
+    from dataclasses import replace
+
+    from .memory_reflect import _evidence_log
+    from .memory_reflect_candidates import Card, _evidence_id, _pending_rows
+
+    ledger = _evidence_log(target)
+    if ledger.summary["unsupported"] or ledger.summary["invalid_warning_count"]:
+        raise legacy.ProposalError("evidence log is incomplete or unreadable")
+    for source in sources:
+        rows = [
+            {**row, "evidence_id": _evidence_id(row["evidence_id"])}
+            for key in (source.get("id"), *source.get("aliases", []))
+            for row in ledger.by_identity.get(key, [])
+        ]
+        card = Card(
+            source["path"], source["text"], source["metadata"], card_identity(source["metadata"], source["path"]), rows
+        )
+        cited = {_evidence_id(ref) for ref in memory_cmd._evidence_refs(card.meta)}
+        if any(
+            row["kind"] in ("opposite-polarity", "near-match") and row["evidence_id"] not in cited
+            for row in _pending_rows(replace(card, rows=rows))
+        ):
+            raise legacy.ProposalError("current evidence contradicts or needs review; refresh the candidate")
+
+
 def _consolidated_at(target: Path, source: dict[str, Any], refs: list[str]) -> str | None:
     from .memory_reflect import _evidence_log
     from .memory_reflect_candidates import Card, _evidence_id, _pending_rows, _sort_timestamp, _timestamp
@@ -249,6 +276,8 @@ def compose(
     source_sha256 = {s["path"]: s["sha256"] for s in sources}
     if expected_source_sha256 is not None and source_sha256 != expected_source_sha256:
         raise legacy.ProposalError("candidate base hash drift")
+    if reflect is not None:
+        _refuse_live_blockers(target, sources)
     scope = legacy._scope([sources[0], sources[0]], {}, binding)
     for source in sources[1:]:
         legacy._scope([sources[0], source], {}, binding)
