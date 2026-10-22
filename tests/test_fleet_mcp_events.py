@@ -24,7 +24,7 @@ from typing import Any, Iterator
 
 import pytest
 
-from brigade import fleet_client, fleet_hub, fleet_hub_events, fleet_hub_events_dispatch, fleet_hub_messages
+from brigade import fleet_client, fleet_client_messages, fleet_hub, fleet_hub_events, fleet_hub_events_dispatch, fleet_hub_messages
 from brigade import mcp_events, mcp_server
 from brigade.fleet_mcp import FleetMcp
 from tests.test_fleet_messages import NODE_A, NODE_B
@@ -585,6 +585,29 @@ def test_invalid_subscribe_params_are_rejected(stations, receiver, params: dict[
     error = rpc(stations[1], "events/subscribe", {"delivery": delivery, **params})["error"]
     assert error["code"] == -32602
     assert receiver.requests == []
+
+
+@pytest.mark.parametrize("method", ["events/subscribe", "events/unsubscribe"])
+def test_an_action_override_in_event_params_never_reaches_the_hub(
+    stations, receiver, hub, monkeypatch, method: str
+) -> None:
+    """A caller-supplied ``action`` must not replace the forwarded one and read the station's inbox."""
+    send(stations[0], NODE_B, "private inbox text")
+    reached: list[dict[str, Any]] = []
+    real_online = fleet_client_messages._online
+
+    def spy(body: dict[str, Any], **kwargs: Any) -> dict[str, Any]:
+        reached.append(body)
+        return real_online(body, **kwargs)
+
+    monkeypatch.setattr(fleet_client_messages, "_online", spy)
+    delivery = {"mode": "webhook", "url": receiver.url, "secret": SECRET}
+    params = {"name": "message.created", "delivery": delivery, "action": "list"}
+    reply = rpc(stations[1], method, params)
+    assert reply["error"]["code"] == -32602
+    assert "private inbox text" not in json.dumps(reply)
+    assert reached == [], "the override must be refused before any hub request"
+    assert rows(hub[3], "SELECT COUNT(*) FROM fleet_event_subscriptions") == [(0,)]
 
 
 @pytest.mark.parametrize(

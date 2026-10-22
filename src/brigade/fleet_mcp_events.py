@@ -31,6 +31,9 @@ _HUB_CODES: dict[str, tuple[int, str]] = {
     "events_busy": (_SERVER_ERROR, "busy"),
 }
 _CALLBACK_PREFIX = "events_callback_"
+# Parameter keys the hub accepts for each action; anything else, "action" included, is refused at the station.
+_SUBSCRIBE_KEYS = frozenset({"name", "arguments", "delivery", "cursor", "ttlMs"})
+_UNSUBSCRIBE_KEYS = frozenset({"id", "name", "arguments", "delivery"})
 
 
 def _rpc_error(error: messages.FleetMessageHubError) -> McpRpcError:
@@ -48,10 +51,14 @@ class FleetEvents:
     def __init__(self, authority: Callable[[], messages.MessageAuthority]) -> None:
         self._authority = authority
 
-    def _forward(self, action: str, params: dict[str, Any]) -> dict[str, Any]:
+    def _forward(self, action: str, params: dict[str, Any], allowed: frozenset[str]) -> dict[str, Any]:
+        # The caller's keys never choose the hub action: an unlisted key such as "action" is refused before any
+        # request, and the fixed action is applied last as well.
+        if set(params) - allowed:
+            raise McpRpcError(_INVALID_PARAMS, "invalid_arguments", {"reason": "invalid_arguments"})
         try:
             return messages._online(
-                {"action": action, **params}, authority=self._authority(), timeout=HUB_TIMEOUT_SECONDS
+                {**params, "action": action}, authority=self._authority(), timeout=HUB_TIMEOUT_SECONDS
             )
         except messages.FleetMessageHubError as error:
             raise _rpc_error(error) from None
@@ -61,13 +68,13 @@ class FleetEvents:
     def list(self, params: dict[str, Any]) -> dict[str, Any]:
         if set(params) - {"cursor"} or params.get("cursor") not in (None, ""):
             raise McpRpcError(_INVALID_PARAMS, "invalid_arguments", {"reason": "invalid_arguments"})
-        return self._forward("events_list", {})
+        return self._forward("events_list", {}, frozenset())
 
     def subscribe(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self._forward("events_subscribe", params)
+        return self._forward("events_subscribe", params, _SUBSCRIBE_KEYS)
 
     def unsubscribe(self, params: dict[str, Any]) -> dict[str, Any]:
-        return self._forward("events_unsubscribe", params)
+        return self._forward("events_unsubscribe", params, _UNSUBSCRIBE_KEYS)
 
     def extension(self) -> McpExtension:
         return McpExtension(
