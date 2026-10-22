@@ -128,6 +128,24 @@ def test_reconcile_skips_settled_sessions_and_completed_rows(apply_target, capsy
 
 
 @requires_dispatch_apply
+def test_failed_terminal_with_one_event_slot_releases_in_one_transition(apply_target, capsys, monkeypatch):
+    from brigade.work_cmd import dispatch_state as store
+
+    monkeypatch.setenv("FAKE_DISPATCH_STATUS", "failed")
+    original = store.event_room
+    monkeypatch.setattr(
+        store,
+        "event_room",
+        lambda directory, *, reserve_events: reserve_events < 2 and original(directory, reserve_events=reserve_events),
+    )
+    _apply(apply_target, capsys, expected=1)
+    ((path, row),) = store.intents(apply_target)
+    assert row["state"] == "failed"
+    assert row["released"] is True
+    assert row["terminal"]
+
+
+@requires_dispatch_apply
 def test_terminal_release_recovers_legacy_receipts_and_retries_only_after_failure(apply_target, capsys, monkeypatch):
     from brigade.work_cmd import dispatch_apply as apply, dispatch_state as store
 

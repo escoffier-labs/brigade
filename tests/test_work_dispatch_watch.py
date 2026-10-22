@@ -1020,3 +1020,32 @@ def test_drain_hard_interrupt_skips_the_quiescence_reconcile(apply_target, fake_
     assert exit_after_observation == [(True, False, False)]
     assert store.intents(apply_target)[0][1]["state"] == "running"
     assert store.read(directory / "session.json")["finished_at"]
+
+
+def test_exclusions_read_only_own_unsettled_ticks(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from brigade.work_cmd import dispatch_watch
+
+    reads = []
+    root = tmp_path / ".brigade/dispatch"
+    for name, finished in (("dispatch-a", True), ("dispatch-b", False)):
+        (root / name / "intents").mkdir(parents=True)
+        localio.write_json(root / name / "session.json", {"finished_at": "now" if finished else None})
+        localio.write_json(
+            root / name / "intents" / "x.json", {"task_id": f"task-{name}", "retry_exhausted": name == "dispatch-a"}
+        )
+    (root / "dispatch-old").mkdir()  # Unrelated history must never be read.
+    original = dispatch_watch.store.read
+    monkeypatch.setattr(dispatch_watch.store, "read", lambda p: reads.append(p) or original(p))
+    watch = SimpleNamespace(
+        engine=SimpleNamespace(target=tmp_path),
+        session={"tick_sessions": ["dispatch-a", "dispatch-b"]},
+        exhausted={},
+        settled_ticks=set(),
+    )
+    assert dispatch_watch.Watch.exclusions(watch) == {"task-dispatch-a": "infra-retries-exhausted"}
+    first = len(reads)
+    assert dispatch_watch.Watch.exclusions(watch) == {"task-dispatch-a": "infra-retries-exhausted"}
+    assert len(reads) - first < first  # The finished tick is not reread.
+    assert watch.settled_ticks == {"dispatch-a"}

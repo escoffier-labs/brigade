@@ -149,6 +149,16 @@ def _finish(
     }
     if meta.get("error"):
         terminal["error"] = _bounded_text(meta["error"])
+    if (
+        state != "completed"
+        and store.event_room(path.parent.parent, reserve_events=1)
+        and not store.event_room(path.parent.parent, reserve_events=2)
+    ):
+        # Only one envelope fits. Release first, then publish the terminal
+        # state and the release marker together so the session can settle.
+        _release(target, row)
+        store.transition(path, row, state, terminal=terminal, released=True)
+        return
     store.transition(path, row, state, terminal=terminal)
     if state != "completed":
         _release(target, row)

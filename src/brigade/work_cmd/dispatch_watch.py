@@ -39,6 +39,8 @@ class Watch:
         self.launch_count = 0
         self.tick_no = 0
         self.denied = False
+        self.exhausted: dict[str, str] = {}
+        self.settled_ticks: set[str] = set()
 
     def snapshot(self) -> dict[str, tuple[bool, str]]:
         result = {}
@@ -65,17 +67,22 @@ class Watch:
         self.launch_count = sum(has_run and key not in self.initial_runs for key, (has_run, _) in current.items())
 
     def exclusions(self) -> dict[str, str]:
-        """Keep exhausted infrastructure retries bounded across watch ticks."""
-        own_sessions = {
-            directory
-            for directory in store.sessions(self.engine.target)
-            if store.read(directory / "session.json").get("parent_watch") == self.session["dispatch_id"]
-        }
-        return {
-            row["task_id"]: "infra-retries-exhausted"
-            for path, row in store.intents(self.engine.target)
-            if path.parent.parent in own_sessions and row.get("retry_exhausted")
-        }
+        """Keep exhausted infrastructure retries bounded across watch ticks.
+
+        Only this watch's own tick sessions are read, and a finished tick is
+        folded in once, so per-tick work does not grow with history.
+        """
+        for tick_id in self.session.get("tick_sessions", []):
+            if tick_id in self.settled_ticks:
+                continue
+            directory = store.root(self.engine.target) / tick_id
+            for path in (directory / "intents").glob("*.json"):
+                row = store.read(path)
+                if row.get("retry_exhausted"):
+                    self.exhausted[row["task_id"]] = "infra-retries-exhausted"
+            if store.read(directory / "session.json").get("finished_at"):
+                self.settled_ticks.add(tick_id)
+        return dict(self.exhausted)
 
     def can_launch(self, *, check_version: bool = False) -> bool:
         now = time.monotonic()
