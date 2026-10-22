@@ -68,10 +68,10 @@ def _evidence(target: Path, ops: list[dict[str, Any]], sources: list[dict[str, A
     refs: set[str] = set()
     addressed: set[str] = set()
     for op in ops:
-        if not isinstance(op, dict) or op.get("type") not in ("append_evidence", "merge_exact_duplicates"):
+        if not isinstance(op, dict):
             continue
-        keys = ("card_path", "other_card") if op["type"] == "merge_exact_duplicates" else ("card_path",)
-        addressed.update(op[key] for key in keys if isinstance(op.get(key), str))
+        # Every claim-changing op binds the cited evidence of each card it addresses.
+        addressed.update(op[key] for key in ("card_path", "other_card") if isinstance(op.get(key), str))
     packets = [
         *ops,
         *[{"evidence_ids": memory_cmd._evidence_refs(s["metadata"])} for s in sources if s["path"] in addressed],

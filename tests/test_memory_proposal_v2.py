@@ -823,3 +823,13 @@ def test_op_evidence_binds_citations_stored_in_alternate_fields(tmp_path):
     path.write_text(path.read_text().replace("evidence: []", f"sources: {json.dumps([old])}"))
     proposal = create(tmp_path, [op("append_evidence", evidence_ids=[".brigade/receipts/support.json"])])
     assert old in proposal["op_evidence"]
+
+
+@pytest.mark.parametrize("kind", ["replace_block", "remove_block", "add_previously"])
+def test_op_evidence_binds_citations_for_claim_changing_ops(tmp_path, kind):
+    path = setup(tmp_path)
+    cited = evidence(tmp_path, ".brigade/receipts/old.json")
+    path.write_text(path.read_text().replace("evidence: []", f"evidence: {json.dumps([cited])}"))
+    values = {"text": "Keep the cache cold."} if kind != "remove_block" else {}
+    proposal = create(tmp_path, [op(kind, **values)])
+    assert cited in proposal["op_evidence"]
