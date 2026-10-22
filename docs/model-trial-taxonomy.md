@@ -36,7 +36,7 @@ the headline score stats.
 0 = only accepted/unscored. 1 = ≥1 deterministic non-pass (rejected or non-timeout
 execution_error), no measurement failures. 3 = any measurement failure; dominates 1 (matches
 brigade run exit-3). 4 = the trial stopped before launching every cell (≥1 `not_run` cell) and had
-no measurement failures; it dominates 1 and 0 so an incomplete trial never reads as a pass.
+no measurement failures. It dominates 1 and 0 so an incomplete trial never reads as a pass.
 
 ## Regrade
 brigade model trial regrade <output-dir> re-runs graders against stored run/final.txt (verified
@@ -59,7 +59,7 @@ On `run` a failing attempt is retried immediately. On `resume` a stored adapter_
 cell is re-run, which is the only way a terminal measurement failure is re-attempted. Each retry
 is a new `attempts/attempt-NNN/` directory. The failed attempt stays on disk and is summarized in
 the cell's additive `prior_attempts` list (attempt, state, failure_reason, exit_code,
-duration_seconds, run_dir); the cell's own fields describe the latest attempt.
+duration_seconds, run_dir). The cell's own fields describe the latest attempt.
 
 Caps, counted as retries after the first attempt per cell (`model_trials.RETRY_CAPS`):
 
@@ -98,8 +98,8 @@ never from the seat's output text. When a seat's attempt ends that way:
 
 - the cell is `adapter_error` with `failure_reason: capacity-exhausted`, even when the seat exited
   nonzero. It is a measurement failure (exit 3), not a deterministic `execution_error`, so it is
-  not scored against the model;
-- it is never retried: `--retry-transient` skips it, in the same run and on resume;
+  not scored against the model.
+- it is never retried: `--retry-transient` skips it, in the same run and on resume.
 - the runner launches no further cells for that seat in this invocation. Each remaining cell of the
   seat is written as `not_run` with `not_run_reason: capacity-exhausted` and `stopped_by` set to the
   coordinate of the cell that hit the limit. Other seats keep running.
