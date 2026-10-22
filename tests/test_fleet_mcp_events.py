@@ -717,7 +717,9 @@ def test_claim_expired_fires_once_with_a_thin_payload(stations, receiver, hub) -
     [delivery] = receiver.events
     data = delivery["payload"]["data"]
     assert delivery["payload"]["name"] == "claim.expired" and delivery["signed"]
-    ref = fleet_hub_events._reference(SECRET, "claim-target", "repo-example")
+    ref = fleet_hub_events._reference(
+        SECRET, delivery["headers"]["X-MCP-Subscription-Id"], "claim-target", "repo-example"
+    )
     assert data == {"owner_node": NODE_A, "target_ref": ref, "expired_at": data["expired_at"]}
     assert "repo-example" not in delivery["body"].decode(), "the target never leaves the hub"
     assert "holder-one" not in delivery["body"].decode(), "the fencing holder is never sent"
@@ -733,7 +735,8 @@ def test_claim_expired_via_the_prune_path_and_no_duplicate_with_the_sweep(statio
     assert rows(db, "SELECT COUNT(*) FROM fleet_events WHERE name='claim.expired'") == [(1,)]
     tick(db, clock=lambda: time.time() + 60)  # sweeps repo-two; repo-one must not repeat
     refs = sorted(r["payload"]["data"]["target_ref"] for r in receiver.events)
-    assert refs == sorted(fleet_hub_events._reference(SECRET, "claim-target", t) for t in ("repo-one", "repo-two"))
+    sid = receiver.events[0]["headers"]["X-MCP-Subscription-Id"]
+    assert refs == sorted(fleet_hub_events._reference(SECRET, sid, "claim-target", t) for t in ("repo-one", "repo-two"))
 
 
 def test_claim_expired_when_a_lapsed_claim_is_released_before_the_sweep(stations, receiver, hub, monkeypatch) -> None:
@@ -797,7 +800,7 @@ def test_run_failed_delivers_opaque_references_only(stations, receiver, hub) -> 
     [delivery] = receiver.events
     assert delivery["payload"]["data"] == {
         "node_id": NODE_A,
-        "run_ref": fleet_hub_events._reference(SECRET, "run", "run-1"),
+        "run_ref": fleet_hub_events._reference(SECRET, delivery["headers"]["X-MCP-Subscription-Id"], "run", "run-1"),
         "exit_status": 2,
         "failed_at": "2026-10-21T00:00:00+00:00",
     }
@@ -976,10 +979,28 @@ def test_claim_references_are_keyed_per_subscription_and_not_a_bare_hash(station
         [other] = second.events
         one, two = first["payload"]["data"]["target_ref"], other["payload"]["data"]["target_ref"]
         assert one != two, "the same target looks different to each subscription"
-        assert one == fleet_hub_events._reference(SECRET, "claim-target", "private/repo/path")
+        sid = first["headers"]["X-MCP-Subscription-Id"]
+        assert one == fleet_hub_events._reference(SECRET, sid, "claim-target", "private/repo/path")
         assert hashlib.sha256(b"private/repo/path").hexdigest()[:32] not in (one, two)
         for body in (first["body"], other["body"]):
             assert b"private" not in body and b"repo/path" not in body
+    finally:
+        second.close()
+
+
+def test_references_differ_across_subscriptions_that_share_a_secret(stations, receiver, hub) -> None:
+    _base, _ta, _tb, db = hub
+    second = Receiver()
+    try:
+        subscribe(stations[1], receiver.url, name="claim.expired")
+        subscribe(stations[1], second.url, name="claim.expired")  # same secret, different subscription
+        _claim(db, "private/repo/path")
+        tick(db, clock=lambda: time.time() + 30)
+        [first] = receiver.events
+        [other] = second.events
+        sids = {first["headers"]["X-MCP-Subscription-Id"], other["headers"]["X-MCP-Subscription-Id"]}
+        assert len(sids) == 2
+        assert first["payload"]["data"]["target_ref"] != other["payload"]["data"]["target_ref"]
     finally:
         second.close()
 

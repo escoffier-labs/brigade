@@ -11,7 +11,7 @@ Webhook payloads are thin on purpose: ids, principal names, hub-validated enums
 and timestamps. They never carry message subjects, bodies, threads or labels.
 Text that a node chose (claim targets, run ids) never leaves the hub: the
 outbox keeps it for correlation, and each delivery replaces it with a keyed
-reference (HMAC under that subscription's secret), so the same target looks
+reference (HMAC under that subscription's secret and id), so the same target looks
 different to every subscription and cannot be tested against a word list by
 anyone without the secret. The hosted agent reads the full record through its
 own authenticated tools, so delivery widens nothing it could not already read.
@@ -303,22 +303,26 @@ def record_claim_expired(
     _append(conn, CLAIM_EXPIRED, owner_node, data, event_id=claim_expired_event_id(target, holder_token, expires_at))
 
 
-def _reference(secret: str, label: str, value: str) -> str:
-    """Opaque, subscription-scoped handle: HMAC under the subscription's own key, never a bare hash."""
+def _reference(secret: str, sid: str, label: str, value: str) -> str:
+    """Opaque, subscription-scoped handle: HMAC under the subscriber key and bound to the subscription id.
+
+    The key alone is not enough: a subscriber can reuse one secret across subscriptions, and those would then
+    hand out identical references for the same target.
+    """
     return hmac.new(
-        secret_key(secret), f"brigade-fleet-events/{label}/v1\0{value}".encode(), hashlib.sha256
+        secret_key(secret), f"brigade-fleet-events/{label}/v1\0{sid}\0{value}".encode(), hashlib.sha256
     ).hexdigest()[:32]
 
 
-def public_data(name: str, data: dict[str, Any], secret: str) -> dict[str, Any]:
+def public_data(name: str, data: dict[str, Any], secret: str, sid: str) -> dict[str, Any]:
     """The payload a receiver sees: node-chosen text is replaced by keyed references."""
     shared = dict(data)
     if name == CLAIM_EXPIRED:
-        shared["target_ref"] = _reference(secret, "claim-target", str(shared.pop("target", "")))
+        shared["target_ref"] = _reference(secret, sid, "claim-target", str(shared.pop("target", "")))
     elif name == RUN_FAILED:
         run_id = str(shared.pop("run_id", ""))
         if run_id:
-            shared["run_ref"] = _reference(secret, "run", run_id)
+            shared["run_ref"] = _reference(secret, sid, "run", run_id)
     return shared
 
 

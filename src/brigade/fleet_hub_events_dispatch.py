@@ -173,7 +173,7 @@ def _body(row: dict[str, Any]) -> bytes:
             "eventId": row["event_id"],
             "name": row["name"],
             "timestamp": events.iso(row["created_at"]),
-            "data": events.public_data(row["name"], json.loads(row["data"]), row["secret"]),
+            "data": events.public_data(row["name"], json.loads(row["data"]), row["secret"], row["subscription_id"]),
             "cursor": None,
         },
         separators=(",", ":"),
