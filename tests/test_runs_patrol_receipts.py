@@ -242,3 +242,15 @@ def test_care_status_reads_a_receipt_between_one_and_four_mib(tmp_path):
     entry = type("Entry", (), {"entry_id": "run-patrol"})()
     fields = care_patrol.receipt_fields(tmp_path, entry, None)
     assert fields["patrol_receipt"]["patrol_id"] == "20260820T120000-big"
+
+
+def test_unpublished_directories_do_not_crowd_out_older_fences(tmp_path):
+    root = tmp_path / ".brigade/patrol"
+    action = {"status": "pending", "idempotency_key": "fence", "scope": "local", "action": "escalate"}
+    localio.write_json(
+        root / "20260101T000000-old/patrol.json",
+        {"schema": "brigade.runs_patrol.v1", "observed_at": NOW.isoformat(), "actions": [action]},
+    )
+    for index in range(runs_patrol_receipts.REPORT_RECEIPT_LIMIT + 5):
+        (root / f"20260801T{index:06d}-unpublished").mkdir(parents=True)
+    assert action in runs_patrol_actions._history(root)

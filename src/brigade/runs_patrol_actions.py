@@ -28,10 +28,20 @@ TERMINAL = frozenset({"complete", "failed", "orphaned"})
 ESCALATE_STATES = frozenset({"dead", "stalled", "zombie", "stranded", "lost-worktree", "unknown"})
 
 
+def _published(directory: Path) -> bool:
+    if directory.is_symlink() or not directory.is_dir():
+        return True  # read_receipt rejects it, keeping unreadable history fail-closed
+    return (directory / "patrol.json").exists()
+
+
 def _history(root: Path, *, lane_ids: set[str] | None = None) -> list[dict[str, Any]]:
     """Fail closed on unreadable history rather than forgetting action fences."""
     actions = runs_patrol_receipts.read_fences(root, lane_ids=lane_ids)
-    directories = (directory for directory in root.iterdir() if not directory.name.startswith("."))
+    # Unpublished directories (no patrol.json) must not crowd published
+    # receipts out of the history window, or their fences would be forgotten.
+    directories = (
+        directory for directory in root.iterdir() if not directory.name.startswith(".") and _published(directory)
+    )
     for directory in nlargest(runs_patrol_receipts.REPORT_RECEIPT_LIMIT, directories):
         payload = runs_patrol_receipts.read_receipt(directory)
         if payload is not None:
