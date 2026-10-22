@@ -314,6 +314,8 @@ def _child_environment() -> dict[str, str]:
     environment["BRIGADE_EXTRAS"] = "0"
     environment["BRIGADE_NO_UPDATE_CHECK"] = "1"
     environment["PYTHONUNBUFFERED"] = "1"
+    # Resolve the plugin from the driver checkout, independently of --repo.
+    environment["PYTHONPATH"] = os.pathsep.join(filter(None, (str(REPO_ROOT), environment.get("PYTHONPATH"))))
     return environment
 
 

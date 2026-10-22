@@ -135,3 +135,42 @@ def test_deadline_attributes_progress_only_to_started_files(tmp_path, unstarted)
     progress.write_text("test_example.py::previous_test phase=call started\n", encoding="utf-8")
     result = windows_pytest._deadline_failure("test_example.py", tmp_path, unstarted=unstarted)
     assert ("previous_test" in result.diagnostic) is not unstarted
+
+
+def test_driver_loads_diagnostics_outside_its_own_checkout(tmp_path, monkeypatch):
+    repo = tmp_path / "checkout"
+    (repo / "tests").mkdir(parents=True)
+    (repo / "tests" / "test_example.py").write_text("def test_example():\n    assert True\n", encoding="utf-8")
+    monkeypatch.delenv("PYTHONPATH", raising=False)
+    monkeypatch.setenv("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")
+
+    def launch(**kwargs):
+        process = subprocess.Popen(
+            [str(kwargs["python"]), *kwargs["args"]],
+            cwd=kwargs["cwd"],
+            env=kwargs["env"],
+            stdout=kwargs["log"],
+            stderr=subprocess.STDOUT,
+        )
+        return SimpleNamespace(
+            wait=process.wait,
+            cause=None,
+            token=SimpleNamespace(leaked_descendants=0),
+            terminate=lambda cause: process.kill(),
+            finish=lambda **ignored: None,
+            close=lambda: None,
+        )
+
+    monkeypatch.setattr(windows_pytest, "launch_process", launch)
+    output = tmp_path / "output"
+    result = windows_pytest.run_file(
+        "test_example.py",
+        repo=repo,
+        python=Path(sys.executable),
+        output_dir=output,
+        temp_root=tmp_path / "temps",
+        timeout_seconds=30,
+    )
+    assert result.status == "passed", (output / result.log).read_text(encoding="utf-8", errors="replace")
+    progress = output / "logs" / "test_example.py.progress.log"
+    assert "phase=call outcome=passed seconds=" in progress.read_text(encoding="utf-8")
