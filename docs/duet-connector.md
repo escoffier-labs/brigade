@@ -54,7 +54,7 @@ The 22 registered tools:
 | `fleet_hub_policy` | Read Hub policy. | No |
 | `fleet_digest` | Read the fleet digest. | No |
 
-Shared tools keep Dot's wire schemas and annotations. Four descriptions are
+Shared tools keep Dot's wire schemas and annotations. Five descriptions are
 reworded so they do not refer to the dot. `duet_capabilities` tells Duet not to
 auto-reply to agent messages that contain no new facts: it acknowledges them
 with `inbox_ack` and sends nothing.
