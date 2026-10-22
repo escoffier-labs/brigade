@@ -4,13 +4,13 @@ import json
 import os
 import re
 import subprocess
-import sys
 from pathlib import Path
 from typing import Any
 
 from .. import scrub, security_cmd, work_cmd
 from ..guard.audit import run_audit
 from ..guard.policy import load_policy
+from ..isolated_exec import module_argv, package_argv, trusted_cwd
 from . import evidence as _evidence_mod
 from .paths import (
     CI_ACTION_REF_RE,
@@ -259,6 +259,9 @@ def _content_guard_command(
     env: dict[str, str] = {}
     if not scanner_dir.is_dir():
         return None, env, f"content guard not available at {scanner_dir}"
+    package_error = scrub.external_package_error()
+    if package_error:
+        return None, env, package_error
     policy_ref = Path(policy)
     if os.environ.get("CONTENT_GUARD_DIR") and policy_ref.parent == Path("."):
         policy_name = policy_ref.name if policy_ref.suffix == ".json" else f"{policy_ref.name}.json"
@@ -271,28 +274,23 @@ def _content_guard_command(
     if not policy_path.is_file():
         return None, env, f"content guard policy not found: {policy_path}"
     module = scrub.scanner_module()
-    if module == "content_guard":
-        env["PYTHONPATH"] = str(scanner_dir / "src")
     if introduced and base_ref:
+        history_args = ["--history", "--range", f"{base_ref}..HEAD", "--policy", str(policy_path.resolve())]
+        if module == "brigade.guard":
+            return module_argv("brigade.guard.git_scan_target", str(target.resolve()), *history_args), env, None
         return (
-            [
-                sys.executable,
-                "-m",
+            package_argv(
+                scanner_dir / "src/content_guard/__init__.py",
                 f"{module}.git_scan",
-                "--history",
-                "--range",
-                f"{base_ref}..HEAD",
-                "--policy",
-                str(policy_path),
-            ],
+                *history_args,
+                cwd_after_load=target,
+            ),
             env,
             None,
         )
     if module == "brigade.guard":
         return (
-            [
-                sys.executable,
-                "-m",
+            module_argv(
                 module,
                 "audit",
                 str(target),
@@ -301,11 +299,22 @@ def _content_guard_command(
                 "--strict",
                 "--policy",
                 str(policy_path),
-            ],
+            ),
             env,
             None,
         )
-    return [sys.executable, "-m", module, "scan", str(target), "--policy", str(policy_path)], env, None
+    return (
+        package_argv(
+            scanner_dir / "src/content_guard/__init__.py",
+            module,
+            "scan",
+            str(target.resolve()),
+            "--policy",
+            str(policy_path.resolve()),
+        ),
+        env,
+        None,
+    )
 
 
 def _run_content_guard_check(
@@ -316,6 +325,15 @@ def _run_content_guard_check(
     base_ref: str | None = None,
 ) -> dict[str, Any]:
     introduced = name == "introduced"
+    package_error = scrub.external_package_error()
+    if package_error:
+        return {
+            "name": f"content_guard_{name}",
+            "status": FAIL,
+            "detail": package_error,
+            "available": False,
+            "exit_code": 2,
+        }
     argv, env_updates, error = _content_guard_command(target, policy=policy, introduced=introduced, base_ref=base_ref)
     if error or argv is None:
         return {"name": f"content_guard_{name}", "status": WARN, "detail": error or "not available", "available": False}
@@ -342,12 +360,12 @@ def _run_content_guard_check(
             "stderr_summary": "",
             "detail": "content-guard reported findings" if report.blocked else "clean",
         }
-    env = os.environ.copy()
+    env = scrub._scanner_env()
     env.update(env_updates)
     try:
         result = subprocess.run(
             argv,
-            cwd=target,
+            cwd=trusted_cwd(),
             env=env,
             check=False,
             stdout=subprocess.PIPE,

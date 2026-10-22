@@ -12,6 +12,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from . import grokbot_findings, grokbot_findings_relay, grokbot_ops, grokbot_packs
+from .isolated_exec import module_argv, trusted_cwd
 from .grokbot_backup.contracts import BackupError
 from .grokbot_backup.ledger import BackupLedger
 from .grokbot_findings import DEFAULT_LIMIT, FINDINGS_SCHEMA, FindingsError, MAX_ENTRIES
@@ -327,9 +328,7 @@ def _render_relay_units(target: Path, *, python: str | None = None) -> tuple[dic
     owner = Path(config["owner_workspace"]).resolve()
     root = Path(target).resolve()
     executable = python or sys.executable
-    args = [
-        executable,
-        "-m",
+    args = module_argv(
         "brigade",
         "run",
         "cloud",
@@ -341,13 +340,14 @@ def _render_relay_units(target: Path, *, python: str | None = None) -> tuple[dic
         "--apply",
         "--limit",
         "50",
-    ]
+        python=python,
+    )
     exec_start = " ".join(grokbot_ops._systemd_quote(argument) for argument in args)
     writable = [
         str((root / grokbot_ops.QUEUE_STATE_DIR).resolve()),
         str(owner),
     ]
-    secrets = [str(root), str(owner), executable, str(Path(executable).parent)]
+    secrets = [str(root), str(owner), executable, str(Path(executable).parent), str(trusted_cwd())]
     wazuh = _optional_instance(root, "wazuh-triage")
     if wazuh is not None:
         ledger = Path(wazuh["ledger_path"]).resolve()
@@ -362,7 +362,7 @@ def _render_relay_units(target: Path, *, python: str | None = None) -> tuple[dic
         "After=network.target\n\n"
         "[Service]\n"
         "Type=oneshot\n"
-        f"ExecStart={exec_start}\n"
+        f"WorkingDirectory={grokbot_ops._systemd_quote(str(trusted_cwd()))}\nExecStart={exec_start}\n"
         "UMask=0077\n"
         "NoNewPrivileges=yes\n"
         "PrivateTmp=yes\n"

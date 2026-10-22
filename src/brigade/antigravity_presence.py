@@ -5,9 +5,9 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import sys
 from pathlib import Path
 
+from .isolated_exec import module_argv, trusted_cwd
 from .localio import write_json
 from .wiring import resolve_wired_target
 
@@ -115,9 +115,7 @@ def run_hook(event: str | None) -> None:
 
 def _spawn_publisher(target: Path, session: str, event: str) -> None:
     """Launch one publisher without waiting or sharing agy's standard streams."""
-    argv = [
-        sys.executable,
-        "-m",
+    argv = module_argv(
         "brigade",
         "work",
         "presence-hook",
@@ -129,13 +127,13 @@ def _spawn_publisher(target: Path, session: str, event: str) -> None:
         session,
         "--event",
         event,
-    ]
+    )
     creationflags = 0
     if os.name == "nt":
         creationflags = getattr(subprocess, "DETACHED_PROCESS", 0) | getattr(subprocess, "CREATE_NEW_PROCESS_GROUP", 0)
     subprocess.Popen(  # Do not wait: the Hub must never block agy or inherit its pipes.
         argv,
-        cwd=Path(__file__).resolve().parent,  # Keep the workspace off Python's implicit import path.
+        cwd=trusted_cwd(),
         stdin=subprocess.DEVNULL,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,

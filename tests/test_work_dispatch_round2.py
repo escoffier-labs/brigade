@@ -27,8 +27,8 @@ def test_child_command_uses_current_interpreter_and_real_run_parser(tmp_path):
     row = {"seat": "coder", "worktree": str(tmp_path / "tree"), "run_dir": str(tmp_path / "run")}
     session = {"roster_path": str(tmp_path / "roster.toml"), "run_budget": str(tmp_path / "budget.json")}
     argv = apply._child_argv(row, session, "task prompt")
-    assert argv[:4] == [sys.executable, "-m", "brigade", "run"]
-    parsed = cli._build_parser().parse_args(argv[3:])
+    assert argv[0] == sys.executable
+    parsed = cli._build_parser().parse_args(argv[argv.index("run") :])
     assert parsed.worker == "coder"
     assert Path(parsed.cwd) == tmp_path / "tree"
     assert Path(parsed.output_dir) == tmp_path / "run"

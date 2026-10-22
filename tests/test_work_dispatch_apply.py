@@ -68,8 +68,9 @@ with runguard.run_lock(cwd, run_dir=run, wait_seconds=0):
 
         def launch(argv, *args, **kwargs):
             if "brigade.work_cmd.dispatch_child" in argv:
-                assert argv[4:8] == [sys.executable, "-m", "brigade", "run"]
-                argv = [*argv[:4], sys.executable, str(executable), *argv[7:]]
+                child_start = argv.index("brigade.work_cmd.dispatch_child") + 2
+                child_argv = argv[child_start:]
+                argv = [*argv[:child_start], sys.executable, str(executable), *child_argv[child_argv.index("run") :]]
             return popen(argv, *args, **kwargs)
 
         monkeypatch.setattr(subprocess, "Popen", launch)
