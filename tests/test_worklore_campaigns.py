@@ -304,6 +304,13 @@ def test_repo_identity_is_lowercased_before_storing_and_deduping(tmp_path):
     assert conn.execute("SELECT COUNT(*) FROM work_campaign_members").fetchone()[0] == 2
 
 
+def test_github_host_prefix_is_the_same_member(tmp_path):
+    conn = _conn(tmp_path)
+    assert _create(conn, _body(repos=("GitHub.com/Acme/One",)))["added"] == ["acme/one"]
+    again = _create(conn, _body(repos=("acme/one",)))
+    assert again["existing"] == ["acme/one"] and again["added"] == []
+
+
 def test_repo_longest_identity_is_accepted(tmp_path):
     conn = _conn(tmp_path)
     repo = "a/" + "b" * 253

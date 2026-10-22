@@ -92,8 +92,8 @@ def _campaign_key(value: object) -> str:
 
 
 def canonical_identity(value: str) -> str | None:
-    """Lowercased ``owner/repo`` (or ``host/path``) identity, or None when it is not canonical."""
-    text = value.lower()
+    """Lowercased ``owner/repo`` (or ``host/path``) identity, github.com host dropped, or None when it is not canonical."""
+    text = value.lower().removeprefix("github.com/")
     if len(text) > REPO_MAX or "/" not in text or not ownership._REPO_RE.fullmatch(text):
         return None
     if any(segment in {".", ".."} for segment in text.split("/")):

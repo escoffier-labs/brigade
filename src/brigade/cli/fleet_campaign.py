@@ -176,10 +176,10 @@ def _list_of(value: object) -> list[Any]:
 
 
 def _count(value: object) -> str:
-    """Hub counts print only as real ints; anything else goes through the terminal sanitizer."""
+    """Hub counts print only as real ints; a missing or non-int count prints ``-``."""
     if isinstance(value, int) and not isinstance(value, bool):
         return str(value)
-    return _text(value) if value is not None else "0"
+    return "-"
 
 
 def _refuse(args: argparse.Namespace, code: str) -> int:
@@ -219,6 +219,11 @@ def _identity(entry: RepoEntry) -> str:
     from ..worklore_campaigns import canonical_identity
 
     try:
+        # The entry must be a checkout root (main or linked worktree): a subdirectory or a
+        # missing path would otherwise resolve to whatever repository encloses it.
+        layout = fleet_claim_target._git_layout(entry.path) if entry.path.is_dir() else None
+        if layout is None or layout[0].resolve() != entry.path.resolve():
+            raise campaign.PreviewError("repository_identity_unresolved")
         key = fleet_claim_target.git_claim_key(entry.path)
     except (fleet_claim_target.ClaimTargetError, OSError):
         key = None
@@ -341,11 +346,11 @@ def _create(args: argparse.Namespace) -> int:
     if args.json:
         print(json.dumps(result, sort_keys=True, indent=2))
         return 0
-    added, existing = result.get("added", []), result.get("existing", [])
-    conflicts = result.get("override_conflicts", [])
+    added, kept = _list_of(result.get("added")), _list_of(result.get("existing"))
+    conflicts = _list_of(result.get("override_conflicts"))
     verb = "created" if result.get("created") else "updated"
-    print(f"{verb} campaign {_text(body['campaign_key'])}: {len(added)} added, {len(existing)} existing")
-    for label, repos in (("added", added), ("existing", existing), ("override conflict (kept stored)", conflicts)):
+    print(f"{verb} campaign {_text(body['campaign_key'])}: {len(added)} added, {len(kept)} existing")
+    for label, repos in (("added", added), ("existing", kept), ("override conflict (kept stored)", conflicts)):
         for repo in repos:
             print(f"  {label}: {_text(repo)}")
     return 0
@@ -368,9 +373,11 @@ def _list(args: argparse.Namespace) -> int:
             "UNOWNED",
             "IN FLIGHT",
             "AWAITING GATE",
+            "ATTEMPT LIMITED",
             "BLOCKED",
             "COMPLETED",
-            "ATTEMPT LIMITED",
+            "CANCELED",
+            "ARCHIVED",
             "DRIFTED",
             "TITLE",
         )
@@ -388,9 +395,11 @@ def _list(args: argparse.Namespace) -> int:
                         "unowned",
                         "in_flight",
                         "awaiting_gate",
+                        "attempt_limited",
                         "blocked",
                         "completed",
-                        "attempt_limited",
+                        "canceled",
+                        "archived",
                         "drifted",
                     )
                 ),
@@ -419,9 +428,9 @@ def _show(args: argparse.Namespace) -> int:
         f"{_text(stored.get('campaign_key'))}: {_text(stored.get('title'))}"
         f" | total {_count(summary.get('total'))}, unowned {_count(summary.get('unowned'))},"
         f" in flight {_count(summary.get('in_flight'))}, awaiting gate {_count(summary.get('awaiting_gate'))},"
-        f" blocked {_count(summary.get('blocked'))}, completed {_count(summary.get('completed'))},"
-        f" canceled {_count(summary.get('canceled'))}, archived {_count(summary.get('archived'))},"
-        f" attempt limited {_count(summary.get('attempt_limited'))},"
+        f" attempt limited {_count(summary.get('attempt_limited'))}, blocked {_count(summary.get('blocked'))},"
+        f" completed {_count(summary.get('completed'))}, canceled {_count(summary.get('canceled'))},"
+        f" archived {_count(summary.get('archived'))},"
         f" drifted {_count(summary.get('drifted'))}" + (" | done" if summary.get("done") is True else "")
     )
     for member in _list_of(payload.get("members")):

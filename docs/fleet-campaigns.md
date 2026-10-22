@@ -17,8 +17,11 @@ campaign item.
 
 A member is keyed by canonical repository identity, not by the `repos.toml` id or by
 checkout path. Identities are lowercased `owner/repo` (or `host/path`), so `Acme/One`
-and `acme/one` are one member. The identity comes from the repository's origin remote,
-the same way run claims derive it, with any `@<worktree>` suffix removed. A repository
+and `acme/one` are one member, and a leading `github.com/` is dropped, so
+`github.com/acme/one` is the same member too. The identity comes from the repository's origin remote,
+the same way run claims derive it, with any `@<worktree>` suffix removed. The `repos.toml` path must be the checkout
+root itself (main checkout or linked worktree). A subdirectory or a missing path is
+refused with `repository_identity_unresolved`, so it never borrows the enclosing repo. A repository
 with no origin remote has no owner segment and is refused with
 `repository_identity_unresolved`.
 

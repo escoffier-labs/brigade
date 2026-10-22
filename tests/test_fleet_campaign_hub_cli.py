@@ -164,6 +164,32 @@ def test_worktree_suffix_is_stripped_and_missing_identity_refused(workspace, hub
     assert "repository_identity_unresolved" in capsys.readouterr().err
 
 
+def test_subdirectory_and_missing_paths_do_not_borrow_the_enclosing_repo(workspace, hub, capsys):
+    _git(workspace, "init", "-q")
+    _git(workspace, "remote", "add", "origin", "https://github.com/acme/mono.git")
+    (workspace / "pkg").mkdir()
+    (workspace / ".brigade/repos.toml").write_text('[[repo]]\nid="pkg"\npath="pkg"\n')
+    assert _create(workspace) == 2
+    assert "repository_identity_unresolved" in capsys.readouterr().err
+    (workspace / ".brigade/repos.toml").write_text('[[repo]]\nid="gone"\npath="gone"\n')
+    assert _create(workspace) == 2
+    assert "repository_identity_unresolved" in capsys.readouterr().err
+    assert hub.posted == []
+    (workspace / ".brigade/repos.toml").write_text('[[repo]]\nid="repo-one"\npath="one"\n')
+    assert _create(workspace) == 0
+    assert hub.posted[0]["members"] == [{"repo": "acme/one"}]
+
+
+def test_create_survives_a_malformed_hub_response(workspace, hub, monkeypatch, capsys):
+    monkeypatch.setattr(
+        worklore_client,
+        "create_campaign",
+        lambda body: {"created": True, "added": 3, "existing": "x", "override_conflicts": {"a": 1}},
+    )
+    assert _create(workspace) == 0
+    assert "created campaign camp-1: 0 added, 0 existing" in capsys.readouterr().out
+
+
 def test_identity_without_an_owner_is_refused(workspace, hub, capsys):
     _repo(workspace, "solo", None)
     (workspace / ".brigade/repos.toml").write_text('[[repo]]\nid="solo"\npath="solo"\n')
@@ -220,7 +246,10 @@ def test_campaigns_table_strips_controls(monkeypatch, capsys):
     out = capsys.readouterr().out
     assert "\x1b" not in out and "camp-1" in out and "Sweep" in out
     header = out.splitlines()[0]
-    assert header.split()[:3] == ["KEY", "TOTAL", "UNOWNED"] and "BLOCKED" in header
+    assert header.split()[:3] == ["KEY", "TOTAL", "UNOWNED"]
+    assert header.index("ATTEMPT LIMITED") < header.index("BLOCKED") < header.index("COMPLETED")
+    assert header.index("COMPLETED") < header.index("CANCELED") < header.index("ARCHIVED") < header.index("DRIFTED")
+    assert out.splitlines()[1].split()[:11] == ["camp-1", "2", "1", "1", "0", "0", "3", "0", "4", "5", "1"]
     assert cli.main(["fleet", "campaigns", "--json"]) == 0
     assert json.loads(capsys.readouterr().out) == payload
 
@@ -273,7 +302,7 @@ def test_show_and_list_survive_malformed_hub_values(monkeypatch, capsys):
     monkeypatch.setattr(worklore_client, "get_campaign", lambda key: payload)
     assert cli.main(["fleet", "campaign", "show", "camp-1"]) == 0
     out = capsys.readouterr().out
-    assert "\x1b" not in out and "total 0," in out and "attempts 9 [31m" in out
+    assert "\x1b" not in out and "total -," in out and "attempts -  owner" in out
     bad_list = {"campaigns": [{"campaign_key": "k", "title": "t", "summary": {"total": "5\x1b[1m", "unowned": True}}]}
     monkeypatch.setattr(worklore_client, "list_campaigns", lambda limit=None: bad_list)
     assert cli.main(["fleet", "campaigns"]) == 0
