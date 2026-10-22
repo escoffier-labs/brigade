@@ -509,17 +509,15 @@ def _deadline_failure(
     name: str, output_dir: Path, *, unstarted: bool = False, cause: int = AGGREGATE_DEADLINE
 ) -> FileResult:
     log = output_dir / "logs" / f"{name}.log"
-    return with_progress(
-        FileResult(
-            name,
-            "unstarted" if unstarted else REASONS[cause],
-            None,
-            0.0,
-            log.relative_to(output_dir).as_posix(),
-            "driver aggregate deadline exceeded" if cause == AGGREGATE_DEADLINE else "driver abort",
-        ),
-        output_dir,
+    result = FileResult(
+        name,
+        "unstarted" if unstarted else REASONS[cause],
+        None,
+        0.0,
+        log.relative_to(output_dir).as_posix(),
+        "driver aggregate deadline exceeded" if cause == AGGREGATE_DEADLINE else "driver abort",
     )
+    return result if unstarted else with_progress(result, output_dir)
 
 
 def result_from_future(

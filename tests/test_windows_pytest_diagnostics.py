@@ -126,3 +126,12 @@ def test_driver_names_last_phase_even_when_cleanup_is_unconfirmed(tmp_path, monk
     )
     assert result.status == ("cleanup-unconfirmed" if cleanup_error else "timeout")
     assert "test_example.py::test_hang phase=teardown started" in result.diagnostic
+
+
+@pytest.mark.parametrize("unstarted", [False, True])
+def test_deadline_attributes_progress_only_to_started_files(tmp_path, unstarted):
+    progress = tmp_path / "logs" / "test_example.py.progress.log"
+    progress.parent.mkdir()
+    progress.write_text("test_example.py::previous_test phase=call started\n", encoding="utf-8")
+    result = windows_pytest._deadline_failure("test_example.py", tmp_path, unstarted=unstarted)
+    assert ("previous_test" in result.diagnostic) is not unstarted

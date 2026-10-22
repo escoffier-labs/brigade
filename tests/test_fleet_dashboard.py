@@ -1499,7 +1499,7 @@ class TestBoardBounds:
     @pytest.mark.xfail(
         sys.platform == "win32",
         raises=TimeoutError,
-        reason="Windows loopback HTTP socket intermittently exceeds 5 seconds (#1916)",
+        reason="Windows loopback HTTP socket intermittently exceeds 5 seconds (#1947)",
         strict=False,
     )
     def test_machine_pages_resolve_history_seats_without_per_run_queries(self, hub, monkeypatch):
