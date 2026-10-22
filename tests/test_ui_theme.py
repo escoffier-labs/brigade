@@ -46,14 +46,14 @@ def test_tokens_define_every_color_for_dark_and_light():
 def test_light_palette_follows_the_design():
     light = ui_theme.TOKENS.split("@media (prefers-color-scheme: light)")[1]
     for declaration in (
-        "--canvas: #f6f7f8;",
-        "--surface: #ffffff;",
-        "--line: #e3e6e8;",
-        "--ink: #1d2327;",
-        "--muted: #5f6b72;",
-        "--faint: #636e74;",
-        "--working: #3b6fd8;",
-        "--idle: #3f9a5d;",
+        "--canvas: #f7f7f7;",
+        "--surface: #fcfcfc;",
+        "--line: #e5e5e5;",
+        "--ink: #171717;",
+        "--muted: #5c5c5c;",
+        "--faint: #6e6e6e;",
+        "--working: #2563eb;",
+        "--idle: #16a34a;",
         "--warn-surface: #fbf3e6;",
         "--warn-line: #e8cfa4;",
     ):
@@ -100,7 +100,7 @@ def test_dark_tokens_pin_a_page_to_dark():
     assert "prefers-color-scheme" not in ui_theme.DARK_TOKENS
     for name in COLOR_TOKENS:
         assert ui_theme.DARK_TOKENS.count(f"{name}:") == 1, name
-    assert "--canvas: #111617;" in ui_theme.DARK_TOKENS
+    assert "--canvas: #0a0a0a;" in ui_theme.DARK_TOKENS
 
 
 def test_document_scheme_selects_the_token_sheet():
@@ -143,7 +143,7 @@ def test_document_emits_shell_with_nonce_and_optional_refresh():
     assert '<style nonce="n0nce">' in html
     assert 'http-equiv="refresh"' not in html
     assert '<body class="deck" data-as-of="2026-09-06 12:00:00 UTC"><main>body</main></body>' in html
-    assert '<meta name="theme-color" content="#111617" media="(prefers-color-scheme: dark)">' in html
+    assert '<meta name="theme-color" content="#0a0a0a" media="(prefers-color-scheme: dark)">' in html
     refreshed = ui_theme.document("t", "n", "b", as_of="x", refresh_seconds=10, extra_css=".x{}", script="tick();")
     assert '<meta http-equiv="refresh" content="10">' in refreshed
     assert ".x{}" in refreshed
@@ -152,11 +152,11 @@ def test_document_emits_shell_with_nonce_and_optional_refresh():
 
 def test_theme_color_follows_the_scheme():
     auto = ui_theme.document("t", "n", "b", as_of="x")
-    assert '<meta name="theme-color" content="#111617" media="(prefers-color-scheme: dark)">' in auto
-    assert '<meta name="theme-color" content="#f6f7f8" media="(prefers-color-scheme: light)">' in auto
+    assert '<meta name="theme-color" content="#0a0a0a" media="(prefers-color-scheme: dark)">' in auto
+    assert '<meta name="theme-color" content="#f7f7f7" media="(prefers-color-scheme: light)">' in auto
     dark = ui_theme.document("t", "n", "b", as_of="x", scheme="dark")
     assert dark.count('name="theme-color"') == 1
-    assert '<meta name="theme-color" content="#111617">' in dark
+    assert '<meta name="theme-color" content="#0a0a0a">' in dark
 
 
 def test_spacing_export_and_shared_component_alias_contract():
@@ -173,3 +173,28 @@ def test_shell_css_lives_in_base_css_and_overview_css_stays_separate():
     declared = set(re.findall(r"(--[\w-]+)\s*:", ui_theme.TOKENS))
     referenced = set(re.findall(r"var\(\s*(--[\w-]+)", ui_theme.BASE_CSS + ui_theme.OVERVIEW_CSS))
     assert referenced <= declared, referenced - declared
+
+
+@pytest.mark.parametrize("scheme", ["dark", "light"])
+def test_text_tokens_clear_the_body_text_floor(scheme):
+    dark, light = ui_theme.TOKENS.split("@media (prefers-color-scheme: light)")
+    colors = {**_palette(dark), **_palette(light)} if scheme == "light" else _palette(dark)
+    for token in ("--ink", "--muted", "--faint", "--bad"):
+        for surface in ("--surface", "--canvas"):
+            assert _contrast(colors[token], colors[surface]) >= 4.5, (scheme, token, surface)
+    if scheme == "light":
+        assert _contrast(colors["--ok"], colors["--surface"]) >= 4.5
+
+
+def test_no_pure_white_or_black_surfaces():
+    for block in ui_theme.TOKENS.split("@media (prefers-color-scheme: light)"):
+        colors = _palette(block)
+        for name in ("--canvas", "--surface", "--surface-raised", "--surface-inset"):
+            assert colors[name] not in {"ffffff", "000000"}, name
+
+
+def test_shape_and_type_tokens_are_declared_once():
+    for tokens in (ui_theme.TOKENS, ui_theme.DARK_TOKENS):
+        dark = tokens.split("@media (prefers-color-scheme: light)")[0]
+        for declaration in ("--radius-card: 8px;", "--radius-control: 6px;", "--font-sans:", "--font-mono:"):
+            assert tokens.count(declaration) == dark.count(declaration) == 1

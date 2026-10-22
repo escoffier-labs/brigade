@@ -15,57 +15,63 @@ import html
 # helpers/captions use 8, and buttons use 40. Controls have a 36px minimum.
 SPACING = (4, 8, 12, 16, 20, 24, 32, 40)
 
-_DARK_COLORS = """  --canvas: #111617;
-  --surface: #182022;
-  --surface-raised: #202a2c;
-  --line: #3a4849;
-  --line-quiet: #293536;
-  --ink: #e5ece8;
-  --muted: #a4b1ad;
-  --faint: #75837f;
-  --signal: #d5ab69;
-  --signal-quiet: #382f22;
-  --ok: #6fbf8e;
-  --bad: #d67c6a;
-  --working: #6a9bf0;
-  --idle: var(--ok);
-  --offline: #75837f;
-  --warn-surface: #2a2419;
-  --warn-line: #6d5635;
-  --bar-track: #293536;
-  --surface-inset: #141b1c;
+_DARK_COLORS = """  --canvas: #0a0a0a;
+  --surface: #111111;
+  --surface-raised: #171717;
+  --line: #262626;
+  --line-quiet: #1c1c1c;
+  --ink: #ededed;
+  --muted: #a1a1a1;
+  --faint: #8a8a8a;
+  --signal: #f5a524;
+  --signal-quiet: #2a2010;
+  --ok: #22c55e;
+  --bad: #f0706a;
+  --working: #3b82f6;
+  --idle: #22c55e;
+  --offline: #6b6b6b;
+  --warn-surface: #1f1a10;
+  --warn-line: #5c4520;
+  --bar-track: #262626;
+  --surface-inset: #0d0d0d;
   --error-line: #b0553a;
   --on-accent: #ffffff;
-  --on-signal: #111617;
-  --control-line: #687879;
+  --on-signal: #0a0a0a;
+  --control-line: #6b6b6b;
 """
 
-_LIGHT_COLORS = """    --canvas: #f6f7f8;
-    --surface: #ffffff;
-    --surface-raised: #f0f2f3;
-    --line: #e3e6e8;
-    --line-quiet: #eceef0;
-    --ink: #1d2327;
-    --muted: #5f6b72;
-    --faint: #636e74;
-    --signal: #8a5d14;
+_LIGHT_COLORS = """    --canvas: #f7f7f7;
+    --surface: #fcfcfc;
+    --surface-raised: #f2f2f2;
+    --line: #e5e5e5;
+    --line-quiet: #ececec;
+    --ink: #171717;
+    --muted: #5c5c5c;
+    --faint: #6e6e6e;
+    --signal: #a15c07;
     --signal-quiet: #fbf3e6;
-    --ok: #2f7d4a;
-    --bad: #b3402c;
-    --working: #3b6fd8;
-    --idle: #3f9a5d;
-    --offline: #8a959b;
+    --ok: #15803d;
+    --bad: #c8322a;
+    --working: #2563eb;
+    --idle: #16a34a;
+    --offline: #8a8a8a;
     --warn-surface: #fbf3e6;
     --warn-line: #e8cfa4;
-    --bar-track: #e3e6e8;
-    --surface-inset: #eef1f2;
+    --bar-track: #e5e5e5;
+    --surface-inset: #f4f4f4;
     --error-line: #c0472a;
     --on-accent: #ffffff;
     --on-signal: #ffffff;
-    --control-line: #7d878d;
+    --control-line: #808080;
 """
 
 _SPACE_TOKENS = "".join(f"  --space-{index}: {pixels}px;\n" for index, pixels in enumerate(SPACING, 1))
+
+_SHAPE_TOKENS = """  --radius-card: 8px;
+  --radius-control: 6px;
+  --font-sans: "Geist", ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "Geist Mono", ui-monospace, "SF Mono", Menlo, monospace;
+"""
 
 # The default sheet follows the system: dark values on :root, light values
 # under prefers-color-scheme. DARK_TOKENS pins a page to dark.
@@ -73,11 +79,12 @@ TOKENS = (
     ":root {\n  color-scheme: light dark;\n"
     + _DARK_COLORS
     + _SPACE_TOKENS
+    + _SHAPE_TOKENS
     + "}\n@media (prefers-color-scheme: light) {\n  :root {\n"
     + _LIGHT_COLORS
     + "  }\n}\n"
 )
-DARK_TOKENS = ":root {\n  color-scheme: dark;\n" + _DARK_COLORS + _SPACE_TOKENS + "}\n"
+DARK_TOKENS = ":root {\n  color-scheme: dark;\n" + _DARK_COLORS + _SPACE_TOKENS + _SHAPE_TOKENS + "}\n"
 
 BASE_CSS = """* { box-sizing: border-box; }
 body.deck {
@@ -292,10 +299,10 @@ _HEAD_LINKS = (
 )
 
 
-_THEME_COLOR_DARK = '<meta name="theme-color" content="#111617">'
+_THEME_COLOR_DARK = '<meta name="theme-color" content="#0a0a0a">'
 _THEME_COLOR_AUTO = (
-    '<meta name="theme-color" content="#111617" media="(prefers-color-scheme: dark)">'
-    '<meta name="theme-color" content="#f6f7f8" media="(prefers-color-scheme: light)">'
+    '<meta name="theme-color" content="#0a0a0a" media="(prefers-color-scheme: dark)">'
+    '<meta name="theme-color" content="#f7f7f7" media="(prefers-color-scheme: light)">'
 )
 
 

@@ -1141,7 +1141,7 @@ def test_command_deck_asset_routes_and_metadata(tmp_path):
             assert '<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"' in body
             assert '<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"' in body
             assert '<link rel="manifest" href="/site.webmanifest"' in body
-            assert '<meta name="theme-color" content="#111617"' in body
+            assert '<meta name="theme-color" content="#0a0a0a"' in body
             assert '<meta name="application-name" content="Fleet Hub"' in body
             assert '<meta name="apple-mobile-web-app-title" content="Fleet Hub"' in body
 
