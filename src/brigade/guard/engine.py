@@ -279,8 +279,10 @@ def _hostname_context(text: str, start: int, end: int) -> bool:
         return False
     if re.match(r"\s*(?:=|\?)", after):
         return False
+    # Host-related assignment keys behind shell declaration prefixes
+    # (export/readonly, and Windows batch set) are still configuration (#1920).
     if re.fullmatch(
-        r"\s*(?:[a-z][a-z0-9]*[_-])*(?:host|hostname|server|endpoint|domain|url|address)\s*[:=]\s*",
+        r"\s*(?:(?:export|readonly|set)\s+)*(?:[a-z][a-z0-9]*[_-])*(?:host|hostname|server|endpoint|domain|url|address)\s*[:=]\s*",
         before,
         re.IGNORECASE,
     ):

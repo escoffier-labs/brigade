@@ -664,6 +664,9 @@ rather than migrated. It does not rewrite Hub history: `brigade fleet
 status --all` ages silent nonterminal rows to display-only `run.stale` after
 24h, separate from the 30-minute live-status window. `brigade work brief`
 lists orphaned runs and the recorded dirty count.
+It also prints a one-line `patrol` summary of up to ten local run snapshots
+and ten active ledger claims. That summary performs no Hub requests or writes
+and marks a truncated scan.
 
 Use `brigade runs patrol --target /path/to/repo` to report local run and
 ledger-claim lanes with timestamped evidence. It joins bounded run snapshots,
@@ -674,6 +677,12 @@ required evidence reports `unknown`. Legacy runs can use event-file or worktree
 progress when no journal was requested. A terminal run that retains its
 own live lock beyond 60 seconds reports `zombie`. A stale lock remains
 cleanup evidence on the terminal outcome.
+An `in_progress` task without a landing record reports `stranded` after
+24 hours when its exact claim joins a successful run, its recorded worktree
+is dirty, or its branch is ahead of its configured upstream. The age starts
+at the latest claim time, terminal time, or observed progress. Branches without
+an upstream provide no ahead signal. A missing recorded worktree reports
+`lost-worktree` when no higher-priority run outcome or liveness signal applies.
 
 The defaults are `--older-than 2h`, `--idle-after 15m`, `--stall-after 30m`,
 `--stranded-after 24h`, and `--limit 50`. `--json` emits
@@ -757,7 +766,16 @@ with reason `no task-to-run join key`, regardless of age or other active runs.
 `claim-without-run` is reserved until a verified join exists. It is accepted by
 `--fail-on` but cannot currently match a lane. Claim age alone cannot establish it.
 Invalid options or an unreadable target return 2.
-Dispatch-intent collection and Hub lane joins are reserved for later slices.
+When a Hub URL and node credential are configured, patrol reads active claims
+through the fleet client and inspects this node's claims for their recorded
+run paths. Exact local run paths join existing lanes. A missing run under
+this target's runs directory reports `claim-without-run`. Missing join keys,
+unrelated paths, incomplete scans, and failed inspections report `unknown`.
+Other nodes' claims appear as `display_only` rows with `unknown` liveness.
+The JSON includes `hub_claim` metadata without fencing credentials. Hub
+observations have a two-second deadline and inspect at most `--limit` rows.
+An unavailable Hub adds an unknown observation while retaining local results.
+Hub observation itself never repairs runs or claims; only the explicit `--apply` actions do.
 
 Use `brigade runs prune-worktrees --target /path/to/repo` to list Brigade-created
 detached worktrees that are safe to remove: clean, branch-backed, and older
@@ -1309,6 +1327,8 @@ Scanner registry commands:
 - `brigade work scanners doctor --import-issues` reports missing config, disabled required producers, bad commands, missing or stale output paths, schedule conflicts, failed or timed-out runs, malformed receipts, missing logs, and due scanners, then can import those health issues as local task imports.
 
 The scanner registry records configured commands and their output paths. `brigade work sweep` runs those commands in the foreground and leaves scanner receipts and a sweep report. `brief` and `doctor` inspect scanner state without launching scanners. `sweep-review` is read-only, and sweep closeout records review state. Schedule recurring sweeps through the operator's host scheduler. See [scheduled care](scheduled-care.md).
+
+Cursor presence hooks (`sessionStart`, `postToolUse`, `sessionEnd`) have two installation scopes that act as alternatives per event. `brigade init --harnesses cursor` writes them to the project's `.cursor/hooks.json` with a project-specific context; `brigade harness sync --target cursor --scope user --workspace <project> --write` manages them in `~/.cursor/hooks.json`. Both preserve foreign entries and write atomically. A project config owns an event only when the whole file is a valid Cursor hooks document (an object under 1 MiB with a positive integer `version`, a `hooks` object, and list-valued events whose entries are command or prompt definitions) that lists the project command for that event; otherwise the user hook keeps publishing. A legacy project entry that uses the user command is not distinguishable from the user hook, so it stays active until `brigade init` rewrites it. Fresh documents are created with `"version": 1`; an existing project document that is invalid, versionless, or oversized is left untouched and init warns. User-scope sync applies the same validation, but repairs a versionless `~/.cursor/hooks.json` (older releases wrote it without `version`) by adding version 1, and reports any other invalid document as a conflict. User-scope callbacks publish only when the nearest Brigade project selects Cursor.
 
 Roadmap and repo-fleet commands:
 

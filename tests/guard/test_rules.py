@@ -490,6 +490,35 @@ class MissingLeakShapeTests(unittest.TestCase):
         result = scan_text("f'{ self.home }'")
         self.assertNotIn("private-hostname", {f.rule_id for f in result.findings})
 
+    def test_shell_prefixed_hostname_assignments_match(self) -> None:
+        """#1920: export/readonly and batch set still declare host config."""
+        host = "deploy" + ".internal"
+        for before in (
+            "export HOSTNAME=",
+            "readonly server=",
+            "set HOST=",
+            "set HOSTNAME=",
+        ):
+            with self.subTest(before=before):
+                text = before + host
+                self.assertEqual([f.rule_id for f in scan_text(text).findings], ["private-hostname"])
+                redacting = scan_text(text, policy=Policy(rules={"private-hostname": "redact"}))
+                self.assertEqual(redacting.redacted_text, before + "[redacted-host]")
+
+    def test_shell_prefixed_arbitrary_and_code_assignments_stay_skipped(self) -> None:
+        host = "deploy" + ".internal"
+        for before, after in (
+            ("export ARBITRARY_VALUE=", ""),
+            ("export DATABASE_HOSTNAME_SUFFIX=", ""),
+            ("obj.DATABASE_HOST=", ";"),
+            ("callback(", ")"),
+            ("const value = ", " ? yes : no;"),
+            ("offset host=", ""),
+        ):
+            with self.subTest(before=before, after=after):
+                text = before + host + after
+                self.assertNotIn("private-hostname", {f.rule_id for f in scan_text(text).findings})
+
     def test_nested_interpolation_remains_code_shaped(self) -> None:
         result = scan_text(
             'lines.append(f\'token_file = "{(self.home / "node.token").as_posix()}"\')'  # content-guard: allow private-hostname

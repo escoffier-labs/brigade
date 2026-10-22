@@ -36,10 +36,10 @@ class GeneratedFile:
 
 @dataclass(frozen=True)
 class HookSurface:
-    """A co-owned JSON hook config that must carry one Brigade-managed entry."""
+    """A co-owned JSON hook config with one Brigade entry per managed event."""
 
     path: Path
-    entry: dict[str, str]
+    entries: dict[str, dict[str, str]]
 
 
 @dataclass(frozen=True)
@@ -153,7 +153,9 @@ def resolve_user_profiles(*, harness: str, home: Path, workspace: Path) -> tuple
                     generated=_cursor_generated(),
                     hook=HookSurface(
                         path=root / "hooks.json",
-                        entry=cursor_user_cmd._hook_entry(root),
+                        entries={
+                            event: cursor_user_cmd._hook_entry(root) for event in cursor_user_cmd._MANAGED_HOOK_EVENTS
+                        },
                     ),
                 )
             )
