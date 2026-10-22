@@ -227,7 +227,7 @@ class Apply:
         self.adopted: set[Path] = set()
 
     def observe(self) -> None:
-        lanes = run_lane_state.collect_lanes(self.target, limit=run_lane_state.MAX_LIMIT)
+        lanes = run_lane_state.collect_lanes(self.target, limit=run_lane_state.MAX_LIMIT, include_hub=False)
         self.lanes = {lane.run_dir.name: lane for lane in lanes if lane.run_dir is not None}
 
     def refresh(self, path: Path, row: dict[str, Any], session: dict[str, Any]) -> bool:

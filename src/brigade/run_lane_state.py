@@ -755,7 +755,8 @@ def _stranded(lane: Lane, now: datetime, thresholds: Thresholds) -> bool:
     if claimed is None or claimed > now:
         return False
     success = lane.terminal_status in runs_cmd._SUCCESS_STATUSES | {"completed", "complete"}
-    if not (success or lane.dirty or lane.ahead):
+    # A successful outcome proves stranding only with a usable finish time.
+    if not ((success and lane.terminal_at) or lane.dirty or lane.ahead):
         return False
     times = [claimed, *lane.progress]
     if lane.terminal_at:

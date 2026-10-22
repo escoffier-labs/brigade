@@ -180,3 +180,37 @@ def test_brief_has_bounded_local_patrol_summary(tmp_path, monkeypatch, capsys):
     assert work_cmd.brief(target=repo) == 0
     assert "patrol: complete=10 (truncated)" in capsys.readouterr().out
     assert len(calls) == 10
+
+
+def test_successful_run_without_finish_time_does_not_prove_stranding(tmp_path):
+    repo = _repo(tmp_path)
+    ledger = _ledger(repo, worktree=repo)
+    payload = json.loads(ledger.read_text())
+    payload["tasks"][0]["claim"]["claimed_at"] = (NOW - timedelta(hours=48)).isoformat()
+    ledger.write_text(json.dumps(payload))
+    _write_run(repo, "20260820-120000-patrol01", status="ok", extra={"claim_id": "claim-1"})
+    lane = run_lane_state.collect_lanes(repo, now=NOW)[0]
+    assert run_lane_state.classify(lane, NOW, run_lane_state.Thresholds()).state != "stranded"
+
+
+def test_brief_summary_keeps_claim_rows_beside_ten_run_rows(tmp_path):
+    from brigade import runs_patrol
+
+    repo = _repo(tmp_path)
+    for index in range(12):
+        _write_run(repo, f"20260820-1200{index:02d}-patrol{index:02d}", status="ok")
+    ledger = _ledger(repo, worktree=tmp_path / "gone")
+    payload = json.loads(ledger.read_text())
+    payload["tasks"][0]["claim"]["claim_id"] = "unmatched-claim"
+    ledger.write_text(json.dumps(payload))
+    summary = runs_patrol.brief_summary(repo)
+    assert sum(summary["counts"].values()) > 10
+    assert summary["truncated"] is True
+
+
+def test_dispatch_observation_does_not_read_the_hub():
+    import inspect
+
+    from brigade.work_cmd import dispatch_apply
+
+    assert "include_hub=False" in inspect.getsource(dispatch_apply)
