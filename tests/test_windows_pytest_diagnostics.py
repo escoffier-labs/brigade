@@ -139,11 +139,13 @@ def test_deadline_attributes_progress_only_to_started_files(tmp_path, unstarted)
 
 
 @pytest.mark.parametrize(
-    "patched_open,target_plugin",
-    [(False, False), (True, False), (False, True)],
-    ids=["plain", "patched-path-open", "target-plugin"],
+    "patched_open,target_plugin,patched_environment_get",
+    [(False, False, False), (True, False, False), (False, True, False), (False, False, True)],
+    ids=["plain", "patched-path-open", "target-plugin", "patched-environment-get"],
 )
-def test_driver_loads_diagnostics_outside_its_own_checkout(tmp_path, monkeypatch, patched_open, target_plugin):
+def test_driver_loads_diagnostics_outside_its_own_checkout(
+    tmp_path, monkeypatch, patched_open, target_plugin, patched_environment_get
+):
     repo = tmp_path / "checkout"
     (repo / "tests").mkdir(parents=True)
     (repo / "checkout_support.py").write_text("VALUE = 42\n", encoding="utf-8")
@@ -157,6 +159,12 @@ def test_driver_loads_diagnostics_outside_its_own_checkout(tmp_path, monkeypatch
     if patched_open:
         source += (
             "    from pathlib import Path\n    monkeypatch.setattr(Path, 'open', lambda *args, **kwargs: object())\n"
+        )
+    if patched_environment_get:
+        source += (
+            "    import os\n    def forbid_environment_get(*args, **kwargs):\n"
+            "        raise AssertionError('environment lookup after pytest starts')\n"
+            "    monkeypatch.setattr(os.environ, 'get', forbid_environment_get, raising=False)\n"
         )
     (repo / "tests" / "test_example.py").write_text(source, encoding="utf-8")
     monkeypatch.delenv("PYTHONPATH", raising=False)

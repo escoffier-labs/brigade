@@ -7,12 +7,13 @@ from io import open as _open
 
 import pytest
 
+_DESTINATION = os.environ.get("BRIGADE_WINDOWS_TEST_PROGRESS")
+
 
 def _record(message: str) -> None:
-    destination = os.environ.get("BRIGADE_WINDOWS_TEST_PROGRESS")
-    if destination:
+    if _DESTINATION:
         # A separate file stays visible even while pytest captures stdout/stderr.
-        with _open(destination, "a", encoding="utf-8") as stream:
+        with _open(_DESTINATION, "a", encoding="utf-8") as stream:
             stream.write(message + "\n")
 
 

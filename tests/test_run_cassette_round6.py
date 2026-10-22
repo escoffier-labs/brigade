@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import replace
 
 import pytest
@@ -17,6 +18,10 @@ from tests.test_run_redaction import _authority_run
 from tests.test_run_transport_recovery import _invalid_final, _recovery_roster
 
 
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason="Safe redaction transactions require POSIX dir_fd and flock. Tracking #1894 (cassette hardening)",
+)
 def test_partial_redaction_tombstones_every_purged_cassette_reference(tmp_path):
     run, snapshot, _ = _authority_run(tmp_path)
     refs = [

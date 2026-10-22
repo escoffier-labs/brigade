@@ -49,6 +49,10 @@ def _finish_recording(run_dir, snapshot):
     )
 
 
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason="Safe redaction transactions require POSIX dir_fd and flock. Tracking #1894 (cassette hardening)",
+)
 def test_redaction_removes_cassettes_and_anchors_a_coherent_audit(tmp_path):
     run_dir, snapshot, _ = _authority_run(tmp_path)
     ref = _record(run_dir)
