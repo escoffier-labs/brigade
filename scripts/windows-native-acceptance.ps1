@@ -259,6 +259,225 @@ function Invoke-PrintedSchtasksBatch {
     }
 }
 
+function Read-EncodedCarePlan {
+    param([string]$Line)
+    $prefix = 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe -NoProfile -NonInteractive -EncodedCommand '
+    if (-not $Line.StartsWith($prefix, [StringComparison]::Ordinal)) { return $null }
+    $encoded = $Line.Substring($prefix.Length)
+    if ($encoded -cnotmatch '^[A-Za-z0-9+/]+={0,2}$') { throw 'invalid care plan base64/options' }
+    $bytes = [Convert]::FromBase64String($encoded)
+    if ($bytes.Length % 2 -ne 0 -or [Convert]::ToBase64String($bytes) -cne $encoded) {
+        throw 'care plan must contain canonical UTF-16LE base64'
+    }
+    $unicode = New-Object System.Text.UnicodeEncoding($false, $false, $true)
+    return $unicode.GetString($bytes)
+}
+
+function Assert-EncodedCarePlan {
+    param([string]$Script, [string]$TaskName, [string]$Schedule,
+        [string]$Python, [string]$Initializer, [string]$Approved, [string]$Workspace)
+    # Decode Windows argv with the OS parser, independently of Python's renderer.
+    if (-not ('BrigadeAcceptance.NativeArgv' -as [type])) {
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+namespace BrigadeAcceptance {
+    public static class NativeArgv {
+        [DllImport("shell32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+        private static extern IntPtr CommandLineToArgvW(string value, out int count);
+        [DllImport("kernel32.dll")] private static extern IntPtr LocalFree(IntPtr value);
+        public static string[] Parse(string value) {
+            int count;
+            IntPtr pointer = CommandLineToArgvW("probe.exe " + value, out count);
+            if (pointer == IntPtr.Zero) throw new System.ComponentModel.Win32Exception();
+            try {
+                string[] result = new string[count - 1];
+                for (int i = 1; i < count; i++)
+                    result[i - 1] = Marshal.PtrToStringUni(Marshal.ReadIntPtr(pointer, i * IntPtr.Size));
+                return result;
+            } finally { LocalFree(pointer); }
+        }
+    }
+}
+'@
+    }
+    $literal = "'(?:[^']|'')*'"
+    $argumentMatch = [regex]::Match($Script, ('\$action\.Arguments=(?<value>' + $literal + ');'))
+    if (-not $argumentMatch.Success) { throw "care action arguments missing for $TaskName" }
+    $rawArguments = $argumentMatch.Groups['value'].Value
+    $arguments = $rawArguments.Substring(1, $rawArguments.Length - 2).Replace("''", "'")
+    $pythonLiteral = "'" + $Python.Replace("'", "''") + "'"
+    $cwdLiteral = "'" + (Split-Path -Parent $Initializer).Replace("'", "''") + "'"
+    # Exact script grammar rejects extra commands/options, elevated/noninteractive
+    # principals, executable lookup, or a live action during schtasks creation.
+    $expected = "`$ErrorActionPreference='Stop'; & 'C:\Windows\System32\schtasks.exe' /Create /TN '$TaskName' " +
+        "/TR 'C:\Windows\System32\cmd.exe /d /c exit 1' $Schedule /RU `$env:USERNAME /IT /F; " +
+        'if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }; ' +
+        '$service=New-Object -ComObject Schedule.Service; $service.Connect(); ' +
+        '$folder=$service.GetFolder(''\''); ' +
+        "`$definition=`$folder.GetTask('$TaskName').Definition; " +
+        '$action=$definition.Actions.Item(1); ' +
+        "`$action.Path=$pythonLiteral; `$action.Arguments=$rawArguments; `$action.WorkingDirectory=$cwdLiteral; " +
+        "`$folder.RegisterTaskDefinition('$TaskName',`$definition,6,`$null,`$null,3,`$null) | Out-Null"
+    if ($Script -cne $expected) { throw "unexpected encoded care creation/action for $TaskName" }
+    $bootstrap = 'import importlib.util as u,os,pathlib as p,runpy as r,sys as s;' +
+        'i,m=s.argv.pop(1),s.argv.pop(1);' +
+        'f=p.Path(i).is_file() and u.spec_from_file_location(m.partition(''.'')[0],i);' +
+        'f and f.loader or (s.stderr.write(''brigade:cannot-load:''+i+''\n''),s.exit(78));' +
+        'd=p.Path(f.origin).resolve().parent;os.chdir(d);s.path.append(str(d.parent));' +
+        'q=u.module_from_spec(f);s.modules[f.name]=q;f.loader.exec_module(q);' +
+        'r.run_module(m,run_name=''__main__'',alter_sys=True)'
+    $expectedArgv = @('-I', '-c', $bootstrap, $Initializer, 'brigade', 'runbook', 'run', '--approved', $Approved, '--target', $Workspace)
+    $actualArgv = [BrigadeAcceptance.NativeArgv]::Parse($arguments)
+    if ($actualArgv.Count -ne $expectedArgv.Count) { throw "wrong care argv length for $TaskName" }
+    for ($index = 0; $index -lt $expectedArgv.Count; $index++) {
+        if ($actualArgv[$index] -cne $expectedArgv[$index]) { throw "wrong care argv[$index] for $TaskName" }
+    }
+}
+
+function Assert-CarePlanSet {
+    param($CarePlan, [string[]]$CareInstallLines, [string]$CarePython, [string]$CareInitializer, [string]$WorkRepo)
+    $expectedSchedules = @{
+        "BrigadeCare-daily-care"             = "/SC DAILY /ST 06:15"
+        "BrigadeCare-ingest-sweep"           = "/SC MINUTE /MO 30"
+        "BrigadeCare-weekly-outcome-ratchet" = "/SC WEEKLY /D MON /ST 07:00"
+        "BrigadeCare-daily-observability"    = "/SC DAILY /ST 08:00"
+        "BrigadeCare-nightly-ops"            = "/SC DAILY /ST 04:00"
+    }
+    $expectedRunbooks = @{
+        "BrigadeCare-daily-care" = ".brigade/memory-care/runbooks/daily-care-pass.json"
+        "BrigadeCare-ingest-sweep" = ".brigade/memory-care/runbooks/ingest-sweep.json"
+        "BrigadeCare-weekly-outcome-ratchet" = ".brigade/memory-care/runbooks/weekly-outcome-ratchet.json"
+        "BrigadeCare-daily-observability" = ".brigade/memory-care/runbooks/daily-observability.json"
+        "BrigadeCare-nightly-ops" = ".brigade/runbooks/nightly-maintenance.json"
+    }
+    if ($CarePlan.backend -cne 'schtasks' -or $CarePlan.dry_run -ne $true -or
+        $CarePlan.mutates_scheduler -ne $false -or $CarePlan.target -cne $WorkRepo) {
+        throw 'care JSON must describe a non-mutating dry-run for this workspace'
+    }
+    $tasks = @($CarePlan.tasks)
+    if ($tasks.Count -ne $expectedSchedules.Count) { throw 'care JSON must contain exactly five tasks' }
+    $createByTask = @{}
+    foreach ($task in $tasks) {
+        $name = [string]$task.task_name
+        if ($expectedSchedules.Keys -cnotcontains $name -or $name -cne ('BrigadeCare-' + $task.id)) {
+            throw "unexpected care task identity: $name"
+        }
+        if ($createByTask.ContainsKey($name)) { throw "duplicate care task identity: $name" }
+        $command = [string]$task.command
+        $decoded = Read-EncodedCarePlan -Line $command
+        if ($null -eq $decoded) { throw "care task must use the exact encoded PowerShell command: $name" }
+        $approved = [IO.Path]::GetFullPath((Join-Path $WorkRepo $expectedRunbooks[$name]))
+        Assert-EncodedCarePlan -Script $decoded -TaskName $name -Schedule $expectedSchedules[$name] `
+            -Python $CarePython -Initializer $CareInitializer -Approved $approved -Workspace $WorkRepo
+        $createByTask[$name] = $command
+    }
+    # Only display annotations may be omitted. Every other printed line is a
+    # command and must appear exactly once in the fully validated JSON set.
+    $headers = @(
+        'care install: Windows Task Scheduler is not written automatically.',
+        'Print the equivalent schtasks commands below, then create the tasks yourself.',
+        "workspace: $WorkRepo",
+        'next: create the tasks above in Task Scheduler, then re-run care status after the first fire.'
+    )
+    $printedCommands = @($CareInstallLines | Where-Object {
+        -not [string]::IsNullOrWhiteSpace($_) -and $headers -cnotcontains $_ -and
+        -not $_.StartsWith(':: ', [StringComparison]::Ordinal) -and
+        -not $_.StartsWith('schedule_hint: ', [StringComparison]::Ordinal)
+    })
+    if ($printedCommands.Count -ne $expectedSchedules.Count) { throw 'care text must contain exactly five commands' }
+    foreach ($name in $expectedSchedules.Keys) {
+        if (-not $createByTask.ContainsKey($name)) { throw "missing care task: $name" }
+        $matchesForTask = @($printedCommands | Where-Object { $_ -ceq $createByTask[$name] })
+        if ($matchesForTask.Count -ne 1) { throw "care text/JSON command mismatch: $name" }
+    }
+    return $createByTask
+}
+
+function Test-CarePlanRejections {
+    param($CarePlan, [string[]]$CareInstallLines, [string]$CarePython, [string]$CareInitializer, [string]$WorkRepo)
+    $parameters = @{CarePython=$CarePython; CareInitializer=$CareInitializer; WorkRepo=$WorkRepo}
+    $validated = Assert-CarePlanSet -CarePlan $CarePlan -CareInstallLines $CareInstallLines @parameters
+    if ($validated.Count -ne 5) { throw 'positive care fixture must validate exactly five commands' }
+    $cases = New-Object 'System.Collections.Generic.List[object]'
+    $clone = { $CarePlan | ConvertTo-Json -Depth 20 | ConvertFrom-Json }
+    $first = [string]$CarePlan.tasks[0].command
+    $script = Read-EncodedCarePlan -Line $first
+    $taskName = [string]$CarePlan.tasks[0].task_name
+    $plain = 'schtasks /Create /TN "' + $taskName + '" /TR "C:\Windows\System32\cmd.exe /c exit 1" ' +
+        [string]$CarePlan.tasks[0].schedule_flags + ' /RU "%USERNAME%" /IT /F'
+    # Change JSON and printed text together: disagreement is not the reason
+    # legacy, prefix, encoding, and action regressions must be rejected.
+    $changes = @(
+        @{name='plain-command'; command=$plain},
+        @{name='wrong-prefix'; command=$first.Replace('C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe', 'powershell.exe')},
+        @{name='bad-base64'; command=($first + '!')},
+        @{name='extra-option'; command=($first + ' -NoExit')},
+        @{name='wrong-encoding'; command=($first.Substring(0, $first.LastIndexOf(' ') + 1) + [Convert]::ToBase64String([Text.Encoding]::UTF8.GetBytes($script)))}
+    )
+    $mutations = @(
+        @{name='schedule'; script=$script.Replace([string]$CarePlan.tasks[0].schedule_flags, '/SC DAILY /ST 23:59')},
+        @{name='account'; script=$script.Replace('/RU $env:USERNAME', '/RU SYSTEM')},
+        @{name='noninteractive'; script=$script.Replace('/IT /F', '/NP /F')},
+        @{name='elevation'; script=$script.Replace('/IT /F', '/IT /RL HIGHEST /F')},
+        @{name='scheduler-lookup'; script=$script.Replace('C:\Windows\System32\schtasks.exe', 'schtasks.exe')},
+        @{name='live-creation'; script=$script.Replace('cmd.exe /d /c exit 1', 'cmd.exe /d /c brigade')},
+        @{name='interpreter-lookup'; script=$script.Replace($CarePython, 'python.exe')},
+        @{name='isolation'; script=$script.Replace('-I -c', '-E -c')},
+        @{name='approved-path'; script=$script.Replace('--approved ', '--approved wrong-')},
+        @{name='extra-statement'; script=($script + '; exit 0')},
+        @{name='working-directory'; script=$script.Replace("`$action.WorkingDirectory='", "`$action.WorkingDirectory='wrong-")}
+    )
+    foreach ($mutation in $mutations) {
+        if ($mutation.script -ceq $script) { throw "ineffective care mutation: $($mutation.name)" }
+        $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($mutation.script))
+        $changes += @{name=$mutation.name; command=($first.Substring(0, $first.LastIndexOf(' ') + 1) + $encoded)}
+    }
+    foreach ($change in $changes) {
+        $plan = & $clone
+        $plan.tasks[0].command = $change.command
+        $lines = @($CareInstallLines | ForEach-Object { if ($_ -ceq $first) { $change.command } else { $_ } })
+        $cases.Add(@{name=$change.name; plan=$plan; lines=$lines})
+    }
+    for ($index = 1; $index -lt $CarePlan.tasks.Count; $index++) {
+        $plan = & $clone
+        $old = [string]$plan.tasks[$index].command
+        $replacement = 'schtasks /Create /TN "' + $plan.tasks[$index].task_name +
+            '" /TR "C:\Windows\System32\cmd.exe /c exit 1" ' + $plan.tasks[$index].schedule_flags + ' /RU "%USERNAME%" /IT /F'
+        $plan.tasks[$index].command = $replacement
+        $lines = @($CareInstallLines | ForEach-Object { if ($_ -ceq $old) { $replacement } else { $_ } })
+        $cases.Add(@{name=('plain-command-' + $plan.tasks[$index].id); plan=$plan; lines=$lines})
+    }
+    $extra = & $clone
+    $sixth = $extra.tasks[0] | ConvertTo-Json -Depth 20 | ConvertFrom-Json
+    $sixth.id='unexpected'; $sixth.task_name='BrigadeCare-unexpected'
+    $sixth.command='cmd.exe /c exit 0'
+    $extra.tasks = @($extra.tasks) + @($sixth)
+    $cases.Add(@{name='sixth-task'; plan=$extra; lines=($CareInstallLines + @($sixth.command))})
+    $duplicate = & $clone
+    $duplicate.tasks[1] = $duplicate.tasks[0]
+    $cases.Add(@{name='duplicate-identity'; plan=$duplicate; lines=$CareInstallLines})
+    $missing = & $clone
+    $missing.tasks = @($missing.tasks | Select-Object -Skip 1)
+    $cases.Add(@{name='missing-task'; plan=$missing; lines=$CareInstallLines})
+    $unknown = & $clone
+    $unknown.tasks[0].id='unexpected'; $unknown.tasks[0].task_name='BrigadeCare-unexpected'
+    $cases.Add(@{name='unknown-identity'; plan=$unknown; lines=$CareInstallLines})
+    $cases.Add(@{name='printed-extra'; plan=$CarePlan; lines=($CareInstallLines + @('cmd.exe /c exit 0'))})
+    $cases.Add(@{name='printed-duplicate'; plan=$CarePlan; lines=($CareInstallLines + @($first))})
+    $cases.Add(@{name='printed-missing'; plan=$CarePlan; lines=@($CareInstallLines | Where-Object { $_ -cne $first })})
+    $cases.Add(@{name='printed-mismatch'; plan=$CarePlan; lines=@($CareInstallLines | ForEach-Object { if ($_ -ceq $first) { $plain } else { $_ } })})
+    $accepted = @()
+    foreach ($case in $cases) {
+        $rejected = $false
+        try { Assert-CarePlanSet -CarePlan $case.plan -CareInstallLines $case.lines @parameters | Out-Null }
+        catch { $rejected = $true }
+        if (-not $rejected) { $accepted += $case.name }
+    }
+    if ($accepted.Count) { throw "care validator accepted invalid plans: $($accepted -join ', ')" }
+    Write-Host "care plan regressions passed: positive=1 negative=$($cases.Count)"
+}
+
 function Invoke-ExternalCommand {
     param(
         [scriptblock]$Command,
@@ -1053,37 +1272,9 @@ finally:
         if ($careInstallText -match "unsupported on win32") {
             throw "care install --dry-run refused on the default auto backend: $careInstallText"
         }
-        $expectedSchedules = @{
-            "BrigadeCare-daily-care"             = "/SC DAILY /ST 06:15"
-            "BrigadeCare-ingest-sweep"           = "/SC MINUTE /MO 30"
-            "BrigadeCare-weekly-outcome-ratchet" = "/SC WEEKLY /D MON /ST 07:00"
-            "BrigadeCare-daily-observability"    = "/SC DAILY /ST 08:00"
-            "BrigadeCare-nightly-ops"            = "/SC DAILY /ST 04:00"
-        }
-        foreach ($taskName in $expectedSchedules.Keys) {
-            $createLine = $careInstallLines | Where-Object { $_ -match [regex]::Escape("/TN `"$taskName`"") } | Select-Object -First 1
-            if (-not $createLine) {
-                throw "care install missing schtasks /Create for $taskName"
-            }
-            if ($createLine -notmatch [regex]::Escape($expectedSchedules[$taskName])) {
-                throw "care install schedule mismatch for ${taskName}: $createLine"
-            }
-            if ($createLine -notmatch '/RU "%USERNAME%" /IT') {
-                throw "care install missing /RU /IT pair for ${taskName}: $createLine"
-            }
-            if ($createLine -match "/NP") {
-                throw "care install must emit /IT not /NP (S4U /NP requires elevation) for ${taskName}: $createLine"
-            }
-            if ($createLine -match "/RL") {
-                throw "care install must not emit /RL for ${taskName}: $createLine"
-            }
-            if ($createLine -notmatch [regex]::Escape("C:\Windows\System32\cmd.exe")) {
-                throw "care install /TR must use absolute cmd.exe for ${taskName}: $createLine"
-            }
-            if ($createLine -match "C:\\\\") {
-                throw "care install emitted doubled backslashes for ${taskName}: $createLine"
-            }
-        }
+        $carePython = Get-InstalledBrigadePython -PipxHome $env:PIPX_HOME
+        $careInitializer = & $carePython -I -c "import brigade,pathlib; print(pathlib.Path(brigade.__file__).resolve())"
+        if ($LASTEXITCODE -ne 0) { throw "cannot identify installed care package" }
 
         $careJsonOut = Join-Path $acceptRoot "care-install.json"
         $careJsonErr = Join-Path $acceptRoot "care-install-json.err"
@@ -1096,12 +1287,10 @@ finally:
             throw "care install --json produced no stdout"
         }
         $carePlan = $careJsonText | ConvertFrom-Json
-        if ($carePlan.backend -ne "schtasks") {
-            throw "care install --json backend=$($carePlan.backend), expected schtasks"
-        }
-        if ($carePlan.tasks.Count -lt 5) {
-            throw "care install --json expected 5 tasks, got $($carePlan.tasks.Count)"
-        }
+        $createByTask = Assert-CarePlanSet -CarePlan $carePlan -CareInstallLines $careInstallLines `
+            -CarePython $carePython -CareInitializer $careInitializer -WorkRepo $workRepo
+        Test-CarePlanRejections -CarePlan $carePlan -CareInstallLines $careInstallLines `
+            -CarePython $carePython -CareInitializer $careInitializer -WorkRepo $workRepo
 
         Write-Step "brigade care status (Windows Task Scheduler)"
         $careStatusOut = Join-Path $acceptRoot "care-status.json"
@@ -1119,7 +1308,7 @@ finally:
             throw "care status --json backend=$($careStatus.backend), expected schtasks"
         }
 
-        $createDaily = $careInstallLines | Where-Object { $_ -match '^schtasks /Create /TN "BrigadeCare-daily-care"' } | Select-Object -First 1
+        $createDaily = $createByTask["BrigadeCare-daily-care"]
         if (-not $createDaily) {
             throw "care install missing BrigadeCare-daily-care /Create line"
         }

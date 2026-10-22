@@ -530,6 +530,11 @@ def register(sub: argparse._SubParsersAction) -> None:
     )
     p_work_dispatch.add_argument("--deadline", type=float, default=None, help="Session wall-clock limit in seconds.")
     p_work_dispatch.add_argument("--spawn-delay", type=float, default=0, help="Seconds between child launches.")
+    p_work_dispatch.add_argument("--watch", action="store_true", help="Reconcile and refill capacity until stopped.")
+    p_work_dispatch.add_argument("--interval", type=float, default=5, help="Seconds between watch ticks, default 5.")
+    p_work_dispatch.add_argument(
+        "--drain-wait", action="store_true", help="Wait for running children when watch stops. Default detaches them."
+    )
     p_work_dispatch.add_argument(
         "--no-wait", action="store_true", help="Leave children running and return after launch."
     )

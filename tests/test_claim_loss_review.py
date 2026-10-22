@@ -616,12 +616,12 @@ def _assert_retention_diagnostic_recovery(workspace, run_dir, original_receipt, 
     assert not {"failure", "failure_phase", "error", "finished_at"} & pending.keys()
     assert "retention_diagnostics" not in pending
     sidecar = run_dir / "retention-diagnostics.json"
-    assert "BudgetPolicyError: token ceiling reached" in sidecar.read_text()
+    assert "budget-policy: worker dispatch denied" in sidecar.read_text()
     saved = json.loads(sidecar.read_text())
     owner = runguard.read_lock_owner(runguard.lock_path(workspace))
     assert saved.get("owner_token") == owner["owner_token"]
     diagnostics = saved["diagnostics"]
-    assert any("BudgetPolicyError: token ceiling reached" in diagnostic for diagnostic in diagnostics)
+    assert any("budget-policy: worker dispatch denied" in diagnostic for diagnostic in diagnostics)
     monkeypatch.setattr(runguard, "_pid_is_active", lambda pid: False)
     assert runguard.recover_stale_run(workspace, run_dir) is True
     recovered = json.loads(run_json.read_text())
@@ -713,7 +713,7 @@ def test_sibling_retention_records_replaced_budget_denial(tmp_path, monkeypatch,
         error = exc
     assert error is retained, f"sibling retention failure lost: {error!r}"
     notes = "\n".join(getattr(error, "__notes__", ()))
-    assert "BudgetPolicyError" in notes and "token ceiling reached" in notes
+    assert "budget-policy: worker dispatch denied" in notes
     assert runguard.lock_path(tmp_path).exists()
     assert run_json.read_bytes() == original_bytes
     if diagnostic_write_fails:
@@ -892,7 +892,7 @@ def test_unprintable_scheduler_failure_preserves_sibling_retention(tmp_path, mon
     assert error is retained, type(error).__name__
     assert runguard.lock_path(tmp_path).exists()
     assert run_json.read_bytes() == original_receipt
-    diagnostic = "replaced scheduler failure: UnprintableBudgetError"
+    diagnostic = "replaced scheduler failure: budget-policy: worker dispatch denied"
     assert diagnostic in getattr(error, "__notes__", ())
     sidecar = json.loads((run_dir / "retention-diagnostics.json").read_text())
     assert sidecar["diagnostics"] == [diagnostic]
@@ -953,7 +953,7 @@ def test_retention_first_records_sibling_budget_denial(tmp_path, monkeypatch, sc
         error = exc
     assert isinstance(error, runguard.RetainRunLockError), f"retention failure lost: {error!r}"
     notes = "\n".join(getattr(error, "__notes__", ()))
-    assert "sibling worker failure: BudgetPolicyError: token ceiling reached" in notes
+    assert "sibling worker failure: budget-policy: worker dispatch denied" in notes
     assert runguard.lock_path(tmp_path).exists()
     _assert_retention_diagnostic_recovery(tmp_path, run_dir, original_receipt, monkeypatch)
 
@@ -1031,7 +1031,7 @@ def test_retention_diagnostics_do_not_leak_across_reused_output_directory(
     with monkeypatch.context() as recovery:
         recovery.setattr(runguard, "_pid_is_active", lambda pid: False)
         assert runguard.recover_stale_run(tmp_path, run_dir) is True
-    assert "old run budget denial" in json.loads(run_json.read_text())["failure"]["detail"]
+    assert "budget-policy: worker dispatch denied" in json.loads(run_json.read_text())["failure"]["detail"]
 
     retained = runguard.RetainRunLockError("new receipt unavailable")
     budget_reason = "new run budget denial"
@@ -1064,7 +1064,7 @@ def test_retention_diagnostics_do_not_leak_across_reused_output_directory(
     recovered = json.loads(run_json.read_text())
     assert recovered["status"] == "failed"
     assert recovered["failure"]["detail"].endswith("is no longer active")
-    assert "old run budget denial" not in recovered["error"]
+    assert "budget-policy: worker dispatch denied" not in recovered["error"]
     assert not runguard.lock_path(tmp_path).exists()
 
 
