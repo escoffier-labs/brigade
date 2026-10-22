@@ -25,6 +25,7 @@ from .localio import (
     utc_now_iso_z as _utc_iso,
 )
 from .memory_doctor.safety import atomic_write_text
+from .memory_paths import read_only_pattern as read_only_pattern, relative_path as _relative_path
 from .memory_search_diagnostics import _normalize_search_query, redundancy_from_entries
 from .card_identity import (
     CardIdentity,
@@ -189,13 +190,6 @@ def _positive_int(raw: object, *, field: str, default: int, minimum: int = 0) ->
     if not isinstance(raw, int) or isinstance(raw, bool) or raw < minimum:
         raise ValueError(f"{field} must be an integer >= {minimum}")
     return raw
-
-
-def _relative_path(value: str, *, field: str) -> str:
-    path = Path(value)
-    if path.is_absolute() or ".." in path.parts or not value.strip():
-        raise ValueError(f"{field} must be a non-empty relative path without '..'")
-    return value.strip()
 
 
 def load_config(target: Path) -> MemoryCareConfig | None:
@@ -400,54 +394,6 @@ def _path_matches(path: str, patterns: tuple[str, ...]) -> bool:
     return False
 
 
-def _clean_relative(value: str) -> str:
-    """Normalize separators and drop leading ``./`` or ``/`` and trailing ``/``."""
-    clean = value.replace("\\", "/").strip()
-    while clean.startswith(("./", "/")):
-        clean = clean[2:] if clean.startswith("./") else clean[1:]
-    return clean.rstrip("/")
-
-
-def _glob_regex(pattern: str) -> re.Pattern[str]:
-    """Translate a path glob: ``*`` and ``?`` stay inside one segment, ``**`` spans segments."""
-    clean = _clean_relative(pattern)
-    out: list[str] = []
-    i = 0
-    while i < len(clean):
-        char = clean[i]
-        if clean.startswith("**/", i):
-            out.append("(?:.*/)?")
-            i += 3
-        elif clean.startswith("**", i):
-            out.append(".*")
-            i += 2
-        elif char == "*":
-            out.append("[^/]*")
-            i += 1
-        elif char == "?":
-            out.append("[^/]")
-            i += 1
-        else:
-            out.append(re.escape(char))
-            i += 1
-    return re.compile("".join(out))
-
-
-def read_only_pattern(path: str, patterns: tuple[str, ...]) -> str | None:
-    """Return the first ``read_only_paths`` pattern that covers ``path``, else None.
-
-    A pattern covers a path when the glob matches the whole relative path or any
-    parent directory of it, so ``memory/cards/policy`` protects its descendants.
-    """
-    parts = _clean_relative(path).split("/")
-    candidates = ["/".join(parts[: n + 1]) for n in range(len(parts))]
-    for pattern in patterns:
-        regex = _glob_regex(pattern)
-        if any(regex.fullmatch(candidate) for candidate in candidates):
-            return pattern
-    return None
-
-
 def _is_read_only(config: MemoryCareConfig, rel: str) -> bool:
     return bool(config.read_only_paths) and read_only_pattern(rel, config.read_only_paths) is not None
 
@@ -463,7 +409,7 @@ def _iter_cards(target: Path, config: MemoryCareConfig) -> list[Path]:
                 continue
             if not path.is_file():
                 continue
-            rel = str(path.relative_to(target))
+            rel = path.relative_to(target).as_posix()
             if config.include_paths and not _path_matches(rel, config.include_paths):
                 continue
             if config.exclude_paths and _path_matches(rel, config.exclude_paths):
@@ -664,7 +610,7 @@ def _scan_payload(target: Path, config: MemoryCareConfig) -> dict[str, Any]:
     enabled = set(config.enabled_checks)
     evidence_log = EvidenceLog(target)
     for path in cards:
-        rel = str(path.relative_to(target))
+        rel = path.relative_to(target).as_posix()
         text = path.read_text(encoding="utf-8", errors="replace")
         meta, has_frontmatter = _parse_frontmatter(text)
         identity = card_identity(meta, rel)
@@ -1401,7 +1347,7 @@ def _backfill_candidates(target: Path, config: MemoryCareConfig) -> tuple[list[d
     pending: list[tuple[Path, str, str, dict[str, Any]]] = []
     # Every card claims its explicit ID so minting never reuses a read-only card's ID.
     for path in _iter_cards(target, config):
-        rel = str(path.relative_to(target))
+        rel = path.relative_to(target).as_posix()
         try:
             text = read_text_nofollow(path)
         except OSError:
@@ -1891,11 +1837,11 @@ def _card_search_fields(path: Path, target: Path) -> dict[str, Any]:
     except OSError:
         return {}
     frontmatter, _ = _parse_frontmatter(text)
-    identity = card_identity(frontmatter, str(path.relative_to(target)))
+    identity = card_identity(frontmatter, path.relative_to(target).as_posix())
     tags = frontmatter.get("tags")
     tags_list = [str(t) for t in tags] if isinstance(tags, list) else ([str(tags)] if tags else [])
     return {
-        "rel": str(path.relative_to(target)),
+        "rel": path.relative_to(target).as_posix(),
         "card_id": identity.card_id,
         "card_aliases": list(identity.aliases),
         "title": str(frontmatter.get("title") or path.stem),

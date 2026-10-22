@@ -38,7 +38,19 @@ def test_config_defaults_to_empty_and_parses_patterns(tmp_path):
     assert config.read_only_paths == ("memory/cards/policy/**", "memory/cards/*.lock.md")
 
 
-@pytest.mark.parametrize("bad", ["/etc/*.md", "../outside/*.md", "memory/../x"])
+@pytest.mark.parametrize(
+    "bad",
+    [
+        "/etc/*.md",
+        "../outside/*.md",
+        "memory/../x",
+        r"\memory\cards\*.md",
+        r"C:\memory\cards\*.md",
+        "C:memory/cards/*.md",
+        r"\\server\share\*.md",
+        r"memory\..\outside\*.md",
+    ],
+)
 def test_config_rejects_unsafe_patterns(tmp_path, bad):
     _write_config(tmp_path, bad)
     with pytest.raises(ValueError, match="read_only_paths"):
