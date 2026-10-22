@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import bisect
+import functools
 import re
 from typing import NamedTuple
 
@@ -245,28 +246,28 @@ def _line_starts(text: str) -> list[int]:
 _STRING_PREFIXES = {"", "r", "b", "u", "br", "rb", "f", "rf", "fr"}
 
 
-def _interpolation_state(before: str) -> bool | None:
-    """Lex the line up to a match and report where it ends inside an f-string
-    replacement field: None when outside any field, False in bare expression
-    code, True in literal text within it (a quoted literal or a format spec)."""
-    # Frames: ["str" | "fstr", delimiter] for literals, ["expr", depth] for a
-    # replacement field's expression with bracket depth, and ["spec", 0] for
-    # its format specification after a top-level ':'.
-    stack: list[list] = []
+def _lex_fstring_fields(segment: str, stack: list[list]) -> bool:
+    """Advance a stack of literal and replacement-field frames over segment.
+
+    Frames are ["str" | "fstr", delimiter] for literals, ["expr", depth] for a
+    replacement field's expression with its bracket depth, and ["spec", 0] for
+    the format specification after a top-level ':'. Returns False when a line
+    comment starts in code, leaving the stack as it was at the '#'.
+    """
     index = 0
-    while index < len(before):
-        char = before[index]
+    while index < len(segment):
+        char = segment[index]
         top = stack[-1] if stack else None
-        if top is None and char == "#":
-            break
         if top is None or top[0] == "expr":
+            if char == "#":
+                return False
             if char in "\"'":
-                delimiter = char * 3 if before.startswith(char * 3, index) else char
+                delimiter = char * 3 if segment.startswith(char * 3, index) else char
                 start = index
-                while start and before[start - 1].isalpha():
+                while start and segment[start - 1].isalpha():
                     start -= 1
-                prefix = before[start:index].lower()
-                if start and (before[start - 1].isalnum() or before[start - 1] == "_"):
+                prefix = segment[start:index].lower()
+                if start and (segment[start - 1].isalnum() or segment[start - 1] == "_"):
                     prefix = "?"
                 kind = "fstr" if "f" in prefix and prefix in _STRING_PREFIXES else "str"
                 stack.append([kind, delimiter])
@@ -282,7 +283,7 @@ def _interpolation_state(before: str) -> bool | None:
                         top[1] -= 1
                     else:
                         stack.pop()
-                elif char == ":" and not top[1] and not before.startswith(":=", index):
+                elif char == ":" and not top[1] and not segment.startswith(":=", index):
                     top[0] = "spec"
         elif top[0] == "spec":
             if char == "{":
@@ -290,23 +291,57 @@ def _interpolation_state(before: str) -> bool | None:
             elif char == "}":
                 stack.pop()
         elif char == "\\":
-            # Raw literals keep the backslash, but it still stops an escaped
-            # delimiter from closing the literal.
-            index += 2
+            # A backslash stops an escaped delimiter from closing the literal,
+            # raw or not, but never hides an f-string brace.
+            brace_next = top[0] == "fstr" and segment.startswith(("{", "}"), index + 1)
+            index += 1 if brace_next else 2
             continue
-        elif before.startswith(top[1], index):
+        elif segment.startswith(top[1], index):
             stack.pop()
             index += len(top[1])
             continue
         elif top[0] == "fstr" and char == "{":
-            if before.startswith("{{", index):
+            if segment.startswith("{{", index):
                 index += 2
                 continue
             stack.append(["expr", 0])
         index += 1
+    return True
+
+
+def _interpolation_state(before: str, frames: tuple[tuple, ...] = ()) -> bool | None:
+    """Report where the line up to a match ends inside an f-string replacement
+    field: None when outside any field, False in bare expression code, True in
+    literal text within it (a quoted literal or a format spec). ``frames`` is
+    the lexer state carried into the line from an earlier one."""
+    stack = [list(frame) for frame in frames]
+    if not _lex_fstring_fields(before, stack):
+        return None
     if not any(frame[0] in ("expr", "spec") for frame in stack):
         return None
     return stack[-1][0] != "expr"
+
+
+@functools.lru_cache(maxsize=8)
+def _line_start_frames(text: str) -> dict[int, tuple[tuple, ...]]:
+    """Lexer state at the start of each line that begins inside a multi-line
+    literal or replacement field. Only triple-quoted literals span lines."""
+    if not any(quote in text for quote in _TRIPLE_QUOTES):
+        return {}
+    states: dict[int, tuple[tuple, ...]] = {}
+    stack: list[list] = []
+    offset = 0
+    for line in text.split("\n"):
+        _lex_fstring_fields(line.rstrip("\r"), stack)
+        # Single-delimiter literals, and any fields inside them, end at the line.
+        for position, frame in enumerate(stack):
+            if frame[0] in ("str", "fstr") and len(frame[1]) == 1:
+                del stack[position:]
+                break
+        offset += len(line) + 1
+        if stack:
+            states[offset] = tuple(tuple(frame) for frame in stack)
+    return states
 
 
 def _line_at(text: str, start: int, end: int) -> str:
@@ -330,7 +365,8 @@ def _hostname_context(text: str, start: int, end: int) -> bool:
     # Inside an f-string replacement field, a bare member expression stays
     # code-shaped even within a formatted URL (#1918); a host quoted inside the
     # expression keeps the URL context it had before, and is skipped without one.
-    nested_literal = _interpolation_state(before)
+    line_start = text.rfind("\n", 0, start) + 1
+    nested_literal = _interpolation_state(before, _line_start_frames(text).get(line_start, ()))
     if nested_literal is not None:
         return bool(url_context) and nested_literal
     if url_context:

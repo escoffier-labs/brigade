@@ -538,6 +538,8 @@ class MissingLeakShapeTests(unittest.TestCase):
             # Brackets keep ':' inside the expression; a nested spec field is code.
             'f"https://{d[1:2]}/{cfg.db.local}"',  # content-guard: allow private-hostname
             'f"https://{cfg.db.local:>{width}}/p"',  # content-guard: allow private-hostname
+            # A line inside an earlier line's triple-quoted f-string.
+            's = f"""\nhttps://{cfg.db.local}/p\n"""',  # content-guard: allow private-hostname
         ):
             with self.subTest(text=text):
                 result = scan_text(text)
@@ -559,6 +561,11 @@ class MissingLeakShapeTests(unittest.TestCase):
             # Comment text is not lexed, and a format spec is literal text.
             "# start with f'{name; see https://db.home/x",  # content-guard: allow private-hostname
             'f"result={value:https://db.home/path}"',  # content-guard: allow private-hostname
+            # A comment inside a multi-line field, and a backslash before a doubled brace.
+            'x = f"""{(\n  a # see https://db.home/x\n)}"""',  # content-guard: allow private-hostname
+            'rf"https://\\{{db.home}}/path"',  # content-guard: allow private-hostname
+            # A line inside an earlier line's triple-quoted ordinary string.
+            'hint = """\nf"{(use https://db.home/x\n"""',  # content-guard: allow private-hostname
         ):
             with self.subTest(text=text):
                 self.assertIn("private-hostname", {f.rule_id for f in scan_text(text).findings})
