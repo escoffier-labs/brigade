@@ -345,11 +345,42 @@ def test_force_fresh_requires_a_named_merge_gate(tmp_path):
 
 
 @pytest.mark.parametrize(
-    "path", ["/user", PATH + "/../issues", PATH + "?page=1", "/repos/example/private/pulls", PATH + "/%2e%2e"]
+    "path",
+    [
+        "/user",
+        PATH + "/../issues",
+        PATH + "?page=1",
+        "/repos/example/private/pulls",
+        PATH + "/%2e%2e",
+        PATH + "/%2E.",
+        PATH + "/%252e%252e",
+        PATH + "/feature%252Ftopic",
+        PATH + "/feature%2F..%2Fissues",
+        PATH + "/feature%2F%2Ftopic",
+        PATH + "/%2Ftopic",
+        PATH + "/topic%2F",
+        PATH + "/%",
+        PATH + "/%0",
+        PATH + "/%GG",
+        PATH + "/%00",
+        PATH + "/%0a",
+        PATH + "/%7f",
+        PATH + "/%C2%85",
+        PATH + "/%FF",
+        PATH + "/%C0%AF",
+        PATH + "/%5Ctopic",
+        PATH + "/raw\\topic",
+        PATH + "/raw\ncontrol",
+        "/repos/example/project%2F..%2Fprivate/pulls",
+        "/repos/example%2Fproject/pulls",
+        "/repos/example/project-other/pulls",
+        "/repos/example/project//branches/main",
+    ],
 )
-def test_endpoint_validation_stops_cross_repo_or_option_injection(tmp_path, path):
+@pytest.mark.parametrize("visibility", ["public", "private"])
+def test_endpoint_validation_stops_cross_repo_or_option_injection(tmp_path, path, visibility):
     runner = FakeRunner()
-    client = reader(tmp_path, runner, visibility="public")
+    client = reader(tmp_path, runner, visibility=visibility, allow_public_fallback=True)
     with pytest.raises(ValueError):
         client.get(path, params={}, max_bytes=100)
     assert runner.calls == []
@@ -513,3 +544,20 @@ def test_injected_etag_cache_revalidates_across_reader_instances(tmp_path):
     result = reader(tmp_path, runner, visibility="private", cache=cache).get(PATH, params={}, max_bytes=100)
     assert result.body == b"[1]"
     assert result.state == "not-modified"
+
+
+@pytest.mark.parametrize("branch", ["release%2F1.x", "feature%2Fplus%2Bhash%23", "r%C3%A9sum%C3%A9"])
+@pytest.mark.parametrize("visibility", ["public", "private"])
+def test_safe_encoded_path_segments_are_preserved_for_each_route(tmp_path, branch, visibility):
+    path = "/repos/example/project/branches/" + branch
+    runner = FakeRunner(relay() if visibility == "public" else gh())
+    result = reader(tmp_path, runner, visibility=visibility).get(path, params={}, max_bytes=100)
+    assert result.status == 200
+    argv = runner.calls[-1][0]
+    if visibility == "public":
+        assert argv[0] == "octopool"
+        assert argv[argv.index("--path") + 1] == path
+    else:
+        assert argv[0] == "gh"
+        assert argv[7] == path
+        assert len(runner.calls) == 1

@@ -315,3 +315,58 @@ def test_relay_strips_payload_bodies_before_posting_to_hub(tmp_path, monkeypatch
     )
     assert "output" not in posts[0]["events"][0]
     assert "actor" not in posts[0]["events"][0]
+
+
+@pytest.mark.parametrize("visibility", ["public", "private"])
+def test_default_branch_with_slash_is_encoded_in_paths_but_raw_in_workflow_query(tmp_path, visibility):
+    from brigade.fleet_ci_reconcile import reconcile_repo
+
+    branch = "release/1.x"
+    prefix = "/repos/example/public"
+    expected = {
+        prefix + "/branches/release%2F1.x": {"commit": {"sha": HEAD}, "protected": True},
+        prefix + "/rules/branches/release%2F1.x": [],
+        prefix + "/branches/release%2F1.x/protection/required_status_checks": {
+            "contexts": [],
+            "checks": [{"context": "ci", "app_id": 7}],
+        },
+    }
+
+    class BranchProvider(Provider):
+        def __call__(self, argv, **kw):
+            if argv[:2] == ["octopool", "whoami"]:
+                return super().__call__(argv, **kw)
+            pooled = argv[0] == "octopool"
+            endpoint = argv[argv.index("--path") + 1] if pooled else argv[7]
+            path = urlsplit(endpoint).path
+            if path == prefix:
+                status, value = 200, {"private": visibility == "private", "default_branch": branch}
+            elif path.startswith((prefix + "/branches/", prefix + "/rules/branches/")):
+                status, value = (200, expected[path]) if path in expected else (404, {})
+            else:
+                return super().__call__(argv, **kw)
+            self.calls.append(list(argv))
+            if pooled:
+                return CommandResult(
+                    0, json.dumps({"status": status, "headers": {}, "body_encoding": "json", "body": value}).encode()
+                )
+            return CommandResult(
+                0 if status == 200 else 1, f"HTTP/2 {status}\n\n".encode() + json.dumps(value).encode()
+            )
+
+    provider = BranchProvider()
+    snapshot = reconcile_repo(reader(tmp_path, provider, visibility=visibility), now=NOW)["repositories"][0]
+    assert snapshot["complete"]
+    assert snapshot["head_sha"] == HEAD
+    assert snapshot["default_branch"] == branch
+    assert snapshot["required_checks"] == [{"context": "ci", "app_id": 7}]
+    requests = [c for c in provider.calls if c[:2] != ["octopool", "whoami"]]
+    paths = [urlsplit(c[c.index("--path") + 1] if c[0] == "octopool" else c[7]).path for c in requests]
+    assert set(expected) <= set(paths)
+    run = requests[paths.index(prefix + "/actions/runs")]
+    if visibility == "public":
+        assert "branch=release/1.x" in run
+        assert all(c[0] == "octopool" for c in requests)
+    else:
+        assert parse_qs(urlsplit(run[7]).query)["branch"] == [branch]
+        assert all(c[0] == "gh" for c in provider.calls)

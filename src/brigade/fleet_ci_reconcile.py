@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 from typing import Any
+from urllib.parse import quote
 
 from . import fleet_ci_board as board
 from .claude_actions_evidence import _text
@@ -55,12 +56,13 @@ def _pages(reader: GitHubReader, suffix: str, *, key: str | None = None, **param
 
 
 def _required(reader: GitHubReader, branch: str, *, protected: bool | None) -> list[dict[str, Any]]:
-    rules, headers = _get(reader, f"/rules/branches/{branch}", per_page=100)
+    branch_path = quote(branch, safe="")
+    rules, headers = _get(reader, f"/rules/branches/{branch_path}", per_page=100)
     if not isinstance(rules, list) or len(rules) >= 100 or 'rel="next"' in headers.get("link", ""):
         raise Unavailable("required-scope-unknown")
     if protected is False and not rules:
         return []
-    classic, _ = _get(reader, f"/branches/{branch}/protection/required_status_checks")
+    classic, _ = _get(reader, f"/branches/{branch_path}/protection/required_status_checks")
     if not isinstance(classic, dict):
         raise Unavailable("required-scope-unknown")
     checks = classic.get("checks")
@@ -156,7 +158,7 @@ def reconcile_repo(
         if meta["private"]:
             reader.visibility = "private"
         branch = snapshot["default_branch"] = meta["default_branch"]
-        ref, _ = _get(reader, f"/branches/{branch}")
+        ref, _ = _get(reader, f"/branches/{quote(branch, safe='')}")
         sha = (
             _head(ref.get("commit", {}).get("sha"))
             if isinstance(ref, dict) and isinstance(ref.get("commit"), dict)

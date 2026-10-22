@@ -22,13 +22,13 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from email.utils import parsedate_to_datetime
 from typing import Any, Literal, Protocol
-from urllib.parse import urlencode
+from urllib.parse import unquote, urlencode
 
 from brigade.claude_review_import import GetResponse
 from brigade.github_read_ledger import BudgetLedger
 
 _REPO = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}/[A-Za-z0-9_.-]{1,100}")
-_PATH = re.compile(r"/[A-Za-z0-9_./-]{1,1024}")
+_PATH = re.compile(r"/[A-Za-z0-9_./%~-]{1,1024}")
 _CLASS = re.compile(r"[a-z][a-z0-9_-]{0,39}")
 _SECRET = re.compile(r"token|secret|password|credential|authorization|api.?key", re.I)
 _HEADERS = {"etag", "x-ratelimit-remaining", "x-ratelimit-reset", "x-poll-interval", "retry-after", "link"}
@@ -298,8 +298,17 @@ class GitHubReader:
         prefix = f"/repos/{self.repository}"
         if (
             not _PATH.fullmatch(path)
+            or re.search(r"%(?![A-Fa-f0-9]{2})", path)
             or not (path == prefix or path.startswith(prefix + "/"))
-            or any(part in {"", ".", ".."} for part in path[1:].split("/"))
+        ):
+            raise ValueError("GET path must stay inside the bound repository")
+        # Validate one decoded UTF-8 form, but send the original escaped path.
+        # Percent in that form would permit ambiguous nested decoding.
+        decoded = unquote(path, errors="strict")
+        if (
+            not decoded.isprintable()
+            or any(c in decoded for c in "%\\")
+            or any(part in {"", ".", ".."} for part in decoded[1:].split("/"))
         ):
             raise ValueError("GET path must stay inside the bound repository")
         query: dict[str, str | int] = {}
