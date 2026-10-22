@@ -250,9 +250,9 @@ def _line_at(text: str, start: int, end: int) -> str:
 
 # An f-string opening quote with no other quote between it and the field.
 _FSTRING_OPEN = re.compile(r"""(?<!\w)(?:[rR]?[fF]|[fF][rR])(?:\"\"\"|'''|"|')[^"'\n]*$""")
-# Code that can come right before an f-string: line start, an operator or
-# opening bracket, or `return`.
-_FSTRING_POSITION = re.compile(r"(?:^|[=(\[{,:+]|\breturn)\s*$")
+# Positions where prose does not put an f-string: line start, '=', `return`,
+# a call paren right after a name, or a bracket opened after '=' or '('.
+_FSTRING_POSITION = re.compile(r"(?:^|=|\breturn|\w\(|[=(]\s*[\[{])\s*$")
 # The rest of a field after its expression: '=', a conversion, a format spec
 # with at most simple nested fields, then the closing brace.
 _FIELD_CLOSE = re.compile(r"""\s*=?\s*(?:![rsa])?(?::(?:[^{}"'\n]|\{[A-Za-z_][\w.]*\})*)?\}""")
