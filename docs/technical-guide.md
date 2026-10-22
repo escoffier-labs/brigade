@@ -664,6 +664,9 @@ rather than migrated. It does not rewrite Hub history: `brigade fleet
 status --all` ages silent nonterminal rows to display-only `run.stale` after
 24h, separate from the 30-minute live-status window. `brigade work brief`
 lists orphaned runs and the recorded dirty count.
+It also prints a one-line `patrol` summary of up to ten local run snapshots
+and ten active ledger claims. That summary performs no Hub requests or writes
+and marks a truncated scan.
 
 Use `brigade runs patrol --target /path/to/repo` to report local run and
 ledger-claim lanes with timestamped evidence. It joins bounded run snapshots,
@@ -674,6 +677,12 @@ required evidence reports `unknown`. Legacy runs can use event-file or worktree
 progress when no journal was requested. A terminal run that retains its
 own live lock beyond 60 seconds reports `zombie`. A stale lock remains
 cleanup evidence on the terminal outcome.
+An `in_progress` task without a landing record reports `stranded` after
+24 hours when its exact claim joins a successful run, its recorded worktree
+is dirty, or its branch is ahead of its configured upstream. The age starts
+at the latest claim time, terminal time, or observed progress. Branches without
+an upstream provide no ahead signal. A missing recorded worktree reports
+`lost-worktree` when no higher-priority run outcome or liveness signal applies.
 
 The defaults are `--older-than 2h`, `--idle-after 15m`, `--stall-after 30m`,
 `--stranded-after 24h`, and `--limit 50`. `--json` emits
@@ -688,16 +697,85 @@ reused within each workspace. Evidence observation times identify collection
 start, which is also the freshness reference for that scan. Classification uses
 the clock after collection for run age and progress. JSON records elapsed
 collection time as `scan_duration_seconds`.
+
+Patrol is report-only unless `--apply` names actions:
+
+```bash
+brigade runs patrol --target . --json --apply reap,release-claim
+brigade runs patrol --target . --apply escalate --escalate-via fleet-msg --escalate-to operator
+```
+
+`reap` uses the same bound run directory, snapshot comparison, claimed lock,
+checkpoint, and `run.orphaned` writer as `runs reap`. Live or foreign locks are
+refused. A successful reap remains `applied` if its evidence refresh fails.
+The receipt records `refresh_error` and skips further actions on that lane. Already orphaned runs need no second transition. `release-claim`
+requires a terminal run. Ledger release also requires an exact run-to-claim join. When both actions are
+selected, patrol reaps first regardless of argument order. A refused reap
+preserves the dead run's lock and claim. The ledger write compares `claim_id`
+under its normal lock. Stale and absent run locks are both acquired and held through the ledger write and through the Hub release, then released.
+Hub recovery works without a ledger join or run `claim_id`. It uses the
+same local owner proof as `fleet claims --release`, checks the lane's run directory,
+and fences deletion to the inspected claim generation. No Hub reservation is
+written without configured Hub access and unchanged terminal run evidence. Patrol never forces a
+release. Hub rows on other nodes cannot pass this proof.
+
+`escalate` records severity and an escalation number for dead, stalled, zombie,
+stranded, and lost-worktree lanes. Unknown lanes escalate only when evidence is
+corrupt or unreadable. Unjoined claims, young dead owners, and already orphaned
+runs do not escalate. It sends a fleet message
+only when both `--escalate-via fleet-msg` and `--escalate-to PRINCIPAL` are set.
+Without a transport, the receipt marks the escalation `recorded` and leaves
+the delivery budget available. Each lane permits at most 2 delivery attempts,
+at least 4 hours apart, even if its classification changes. Failed or uncertain
+sends consume that attempt.
+
+Applying actions always writes a patrol receipt. Each attempt records its
+scope, before and after state, timestamp, result, and an idempotency key derived
+from the lane, classification digest, and action. The second escalation also
+includes its escalation number in the key. A shared local lock serializes
+patrol actions. A durable pending record precedes every side effect, so a crash
+or an unchanged observation cannot repeat an applied, pending, or failed
+attempt. Refused and skipped actions can retry after proving their fences again.
+Corrupt receipt files refuse further actions. Unpublished receipt directories
+are ignored, and receipt files are published atomically.
+
+Patrol retains the newest 144 receipts for at most 7 days, including under
+`--apply`. Before pruning, it saves compact action fences in
+`.brigade/patrol/.action-fences/`, with one hashed file per lane. Refused and
+skipped records are discarded. Apply reads only the scanned lanes' fence files
+and at most the newest 144 receipts. Lifetime fences preserve the two-delivery
+escalation cap even after four hours. Each file has a 4 MiB cap, without a shared
+size ceiling across lanes. The first retention sweep migrates older action
+receipts and the legacy `.action-fences.json` archive before deleting originals.
+If an older patrol refused an update because the combined archive reached its
+cap, rerun patrol with this version to migrate it. Keep the archive intact to
+preserve uncertain attempts. Corrupt files still require inspection and refuse
+further actions. Publication, actions and retention share a local lock. Report-only receipts can publish while that lock
+is busy and defer retention to a later patrol. Care status reads at most the newest
+10 receipt candidates and stops at the first valid receipt.
+Findings and `--fail-on` refer to the initial scan, even when an action repairs
+a lane. No action terminates a process, removes a worktree, merges, or pushes.
+`finalize-intent` and `interrupt` are not available in this slice.
+
 JSON reports `truncated: true` when a source or result window
 is cut short. Text output warns, and `--fail-on unknown` returns 1 on truncation.
 Claims join runs only by exact `claim_id`. Current run writers omit that field,
 so normal claims remain separate lanes until dispatch-intent integration (#1849).
 An unmatched claim without independent worktree findings reports `unknown`
 with reason `no task-to-run join key`, regardless of age or other active runs.
-Claim age alone cannot establish `claim-without-run` until a verified join exists.
+`claim-without-run` is reserved until a verified join exists. It is accepted by
+`--fail-on` but cannot currently match a lane. Claim age alone cannot establish it.
 Invalid options or an unreadable target return 2.
-Patrol does not repair runs or claims. Dispatch intents and Hub joins are
-reserved for later slices.
+When a Hub URL and node credential are configured, patrol reads active claims
+through the fleet client and inspects this node's claims for their recorded
+run paths. Exact local run paths join existing lanes. A missing run under
+this target's runs directory reports `claim-without-run`. Missing join keys,
+unrelated paths, incomplete scans, and failed inspections report `unknown`.
+Other nodes' claims appear as `display_only` rows with `unknown` liveness.
+The JSON includes `hub_claim` metadata without fencing credentials. Hub
+observations have a two-second deadline and inspect at most `--limit` rows.
+An unavailable Hub adds an unknown observation while retaining local results.
+Hub observation itself never repairs runs or claims; only the explicit `--apply` actions do.
 
 Use `brigade runs prune-worktrees --target /path/to/repo` to list Brigade-created
 detached worktrees that are safe to remove: clean, branch-backed, and older
@@ -1145,17 +1223,19 @@ Task ledger commands:
 
   A missing `blocks` source or missing ancestor parent fails closed with `missing_dependency`, including blockers inherited from ancestors. Missing dependent targets stay informational. `--explain` and `--json` separate unfinished `blocking_dependencies` from unresolvable `missing_dependencies` per blocked task and retain `orphans`. Explained output names the affected ids and repair commands such as `brigade work task edge remove --id <edge-id>`. Claim and `work run --task-id` use the same resolver.
 
-- `brigade work dispatch [--target .] [--wave N] [--max N] [--batch-size N] [--worker SEAT | --seat-map CLASS=SEAT ...] [--base REF] [--run-budget FILE] [--max-total N] [--deadline SECONDS] [--spawn-delay SECONDS] [--no-wait] [--commit] [--dry-run] [--json]` dispatches one ready wave ranked by priority, age, and task id. Wave indexes count dispatchable waves after start gates, seat mapping, occupied-footprint filtering, and breaker filtering, so they can differ from `work ready --parallel-safe`. Selection is `min(max(0, cap - live_children), batch_size, ready_in_wave)`. The cap defaults to roster `limits.max_workers`, and batch size defaults to the cap. Claimed in-progress footprints hold overlapping tasks out with reason `occupied`. Empty footprints require exclusive access. Seats must exist in the primary roster. Apply requires explicit routing and a committed Git base, which defaults to `HEAD`. A lost claim race is recorded and selection continues with the next candidate in that wave.
+- `brigade work dispatch [--target .] [--wave N] [--max N] [--batch-size N] [--worker SEAT | --seat-map CLASS=SEAT ...] [--base REF] [--run-budget FILE] [--max-total N] [--deadline SECONDS] [--spawn-delay SECONDS] [--watch [--interval SECONDS] [--drain-wait]] [--no-wait] [--commit] [--dry-run] [--json]` dispatches one ready wave ranked by priority, age, and task id. Wave indexes count dispatchable waves after start gates, seat mapping, occupied-footprint filtering, and breaker filtering, so they can differ from `work ready --parallel-safe`. Selection is `min(max(0, cap - live_children), batch_size, ready_in_wave)`. The cap defaults to roster `limits.max_workers`, and batch size defaults to the cap. Claimed in-progress footprints hold overlapping tasks out with reason `occupied`. Empty footprints require exclusive access. Seats must exist in the primary roster. Apply requires explicit routing and a committed Git base, which defaults to `HEAD`. A lost claim race is recorded and selection continues with the next candidate in that wave.
 
   Each session writes `.brigade/dispatch/<dispatch_id>/session.json` and `plan.json` with a canonical `plan_digest`. Apply also writes exclusive intent files and digest-chained `events.jsonl` receipts. `dispatch.lock` refuses another dispatcher and names its holder PID. Recovery reloads each unfinished session's saved plan, retries its exact claim id, reuses its branch and worktree, and adopts its recorded child. A bootstrap receipt records the child identity before executing `python -m brigade run` with the dispatcher's interpreter, preventing duplicate execution after a dispatcher crash. Patrol joins intent `run_id` and `task_id` to the exact ledger claim generation. Dry-run writes only the plan and session receipts, without reconciling, claiming, or launching. Omitted routing leaves planned seats unset, and an explicit seat map skips tasks whose class is unmapped.
 
   Children use branches named `brigade/dispatch/<task-slug>-<intent8>` and directories named `<repo>-task-<task-slug>-<intent8>` under `brigade_worktree_root()`. The repository prefix lets `runs prune-worktrees` discover these directories. Pruning keeps dirty worktrees and requires a branch-backed HEAD and the configured minimum age. Each child gets its own process group, worktree lock, and preallocated run directory under the primary target. The prompt requires uncommitted changes, no pushes, and no edits to other tasks. Foreground dispatch waits for child exit and terminal run evidence. `--no-wait` leaves children running for reconciliation on the next apply invocation. A foreground invocation fills available capacity before supervising earlier and newly launched children together. Patrol reports their lane state but does not finalize dispatch intents. Ctrl-C cancels supervised children. `--deadline` bounds the session wall clock and cancels unfinished work. `--spawn-delay` spaces launches, and `--max-total` caps launches including infrastructure retries. Denials write `run_budget.reservation_denied` receipts using the existing budget payload fields. `--run-budget` passes the existing declaration file to each child. These limits do not measure provider spend. Apply mode is unsupported on Windows. Use `--dry-run` there to inspect a plan.
 
-  Successful children become completed intents with branch and diff summaries. Their claims stay held and tasks stay `in_progress` until the operator lands the changes and marks tasks done. The completed-intent exclusion applies only to the same claim and claimed item revision. Released or reopened work can be dispatched again. `--commit` creates a local commit after successful child exit. HEAD drift is retained for review. Failed, timed-out, or orphaned children release only their own claim generation and preserve their worktree and branch. Workspace errors fail that intent and allow siblings to continue. Git errors while summarizing or committing successful work retain the completed intent and claim with `commit_error` and `needs_review` recorded. They do not relaunch the worker. An unreadable child journal marks its intent `unknown` and keeps its claim for inspection while other lanes continue. Live unknown children remain supervised for cancellation and deadlines. Reconciliation reads the journal again on the next apply invocation. Three consecutive non-infrastructure worker failures trip a task breaker. Deadlines, cancellations, and orphans do not advance it. Infrastructure launch failures allow two additional launches per session without advancing the breaker. When a lost race promotes a candidate initially skipped for capacity or batch size, a `work.dispatch.backfill` event records the promotion. Hub attempt mirroring and dispatch summary publication are deferred.
+  `--watch` repeats reconciliation, observation, planning, and apply while holding the same dispatch lease. Each tick reloads readiness and available capacity. The supervisor links separate saved plans so recovery retains each plan digest. Ticks that launch or finalize intents produce `work.dispatch.tick` events, and shutdown produces `work.dispatch.closed`. `--interval` defaults to 5 seconds and must be positive and finite. `--spawn-delay` applies between launches across ticks. SIGTERM and SIGINT stop new launches and detach running children by default. `--drain-wait` waits for those children and finalizes their receipts without launching retries. A second signal stops waiting and leaves unfinished children detached. Unexpected tick errors produce `work.dispatch.tick_error` receipts, preserve running children, and allow later ticks to continue. The close payload counts claimed intents without a child in `claimed_prelaunch_intents`. The next invocation resumes them from their saved plans and worktrees. An installed Brigade version change also closes the loop. `--max-total` and `--deadline` apply to one watch process, including retries. Restarting starts fresh limits. Use `Restart=no` when either ceiling must stop the service. A failed child or tick keeps exit status 1 even when watch closes for a ceiling, version change, or signal. `Restart=on-failure` can restart those closes. `Restart=always` restarts every close. Each restart starts fresh limits. With `Restart=no`, restart the unit explicitly after updating Brigade. Saved tick sessions have no separate ceiling, so a later invocation can reconcile detached children without canceling them for an expired watch deadline. On exit, watch stdout and `--json` report the actual `launched` count, `close_reason`, and `tick_sessions` IDs. The supervisor's `plan.json` remains the initial plan. Watch cannot be combined with `--dry-run` or `--no-wait`. Use a service manager with a stop policy that preserves child process groups, such as systemd `KillMode=process`. See the [long-running modes guide](execution-model.md#long-running-modes) for a unit example and restart behavior.
+
+  Successful children become completed intents with branch and diff summaries. Their claims stay held and tasks stay `in_progress` until the operator lands the changes and marks tasks done. The completed-intent exclusion applies only to the same claim and claimed item revision. Released or reopened work can be dispatched again. `--commit` creates a local commit after successful child exit. HEAD drift is retained for review. Failed, timed-out, or orphaned children release only their own claim generation and preserve their worktree and branch. Workspace errors fail that intent and allow siblings to continue. Git errors while summarizing or committing successful work retain the completed intent and claim with `commit_error` and `needs_review` recorded. They do not relaunch the worker. An unreadable child journal marks its intent `unknown` and keeps its claim for inspection while other lanes continue. Live unknown children remain supervised for cancellation and deadlines. Reconciliation reads the journal again on the next apply invocation. Three consecutive non-infrastructure worker failures trip a task breaker. Deadlines, cancellations, and orphans do not advance it. Infrastructure launch failures allow two additional launches per session without advancing the breaker. Watch keeps exhausted infrastructure tasks excluded across ticks within one process. Restarting watch clears these infrastructure exclusions and permits another initial launch plus two retries per affected task. Non-infrastructure task breakers persist across restarts. Non-race claim refusals use `claim-refused` and do not count as infrastructure. When a lost race promotes a candidate initially skipped for capacity or batch size, a `work.dispatch.backfill` event records the promotion. Hub attempt mirroring and dispatch summary publication are deferred.
 
 - `brigade work dispatches [--target .] [--json]` lists dispatch sessions, intents, events, and tripped task breakers.
-- `brigade work dispatch-show <dispatch-id> [--target .] [--json]` shows one session, its saved plan, intents, and chained event receipts. An id prefix or `latest` is accepted.
-- `brigade work dispatch-reset <task-id> --reason TEXT [--release-unknown] [--target .] [--json]` writes an explicit reset receipt. The breaker and completed-intent exclusions ignore intents before the most recent reset. Active and unknown lanes remain excluded by default. After inspecting saved work, use `--release-unknown` to cancel unknown intents and release their claims by claim id. The command refuses this recovery while any affected child is alive. Each recovered intent records the reset receipt and reason.
+- `brigade work dispatch-show <dispatch-id> [--target .] [--json]` shows one session, its saved plan, intents, and chained event receipts. Event reads enforce byte, record, and line bounds. Readers ignore an incomplete final line, and lease holders repair it before append. Complete corrupt records fail closed. Intent events include task, claim, run, branch, and terminal taxonomy. An id prefix or `latest` is accepted.
+- `brigade work dispatch-reset <task-id> --reason TEXT [--release-unknown] [--target .] [--json]` writes an explicit reset receipt. An exact task id takes precedence over prefix matches. The breaker and completed-intent exclusions ignore intents before the most recent reset. Active and unknown lanes remain excluded by default. After inspecting saved work, use `--release-unknown` to cancel unknown intents and release their claims by claim id. The command refuses this recovery while any affected child is alive. Each recovered intent records the reset receipt and reason.
 - `brigade work claim <task-id> --actor <name> [--claim-id]` atomically claims a ready task (`pending` → `in_progress` with assignee) under the tasks.json lock. Same `--claim-id` retries are idempotent; a different claim id loses with exit 13 naming the holder (no release/steal suggestion). Claims against blocked or wrong-status tasks fail closed. `work claim --next` selects the highest-priority ready task in the same lock.
 - `brigade work release --task|--actor|--claim-id` releases matching claims; empty or whitespace-only filter values match nothing (fail closed). Release compares claim identity so a late reaper cannot clear a newer claim. `work reassign <task-id> --to <actor> [--claim-id]` reassigns a live claim. `work status` lists stale claims (default 24h).
 - `brigade work task edge add <type> <source> <target>` adds one typed edge (`blocks`, `parent-child`, or `discovered-from`). Repeatable `add` dedupes identical endpoints.
@@ -1247,6 +1327,8 @@ Scanner registry commands:
 - `brigade work scanners doctor --import-issues` reports missing config, disabled required producers, bad commands, missing or stale output paths, schedule conflicts, failed or timed-out runs, malformed receipts, missing logs, and due scanners, then can import those health issues as local task imports.
 
 The scanner registry records configured commands and their output paths. `brigade work sweep` runs those commands in the foreground and leaves scanner receipts and a sweep report. `brief` and `doctor` inspect scanner state without launching scanners. `sweep-review` is read-only, and sweep closeout records review state. Schedule recurring sweeps through the operator's host scheduler. See [scheduled care](scheduled-care.md).
+
+Cursor presence hooks (`sessionStart`, `postToolUse`, `sessionEnd`) have two installation scopes that act as alternatives per event. `brigade init --harnesses cursor` writes them to the project's `.cursor/hooks.json` with a project-specific context; `brigade harness sync --target cursor --scope user --workspace <project> --write` manages them in `~/.cursor/hooks.json`. Both preserve foreign entries and write atomically. A project config owns an event only when the whole file is a valid Cursor hooks document (an object under 1 MiB with a positive integer `version`, a `hooks` object, and list-valued events whose entries are command or prompt definitions) that lists the project command for that event; otherwise the user hook keeps publishing. A legacy project entry that uses the user command is not distinguishable from the user hook, so it stays active until `brigade init` rewrites it. Fresh documents are created with `"version": 1`; an existing project document that is invalid, versionless, or oversized is left untouched and init warns. User-scope sync applies the same validation, but repairs a versionless `~/.cursor/hooks.json` (older releases wrote it without `version`) by adding version 1, and reports any other invalid document as a conflict. User-scope callbacks publish only when the nearest Brigade project selects Cursor.
 
 Roadmap and repo-fleet commands:
 
@@ -2140,10 +2222,10 @@ through `gh search issues`, with the unauthenticated GitHub search API as a
 fallback when `gh` fails or is unavailable. API reads have a 10-second timeout
 and a 60 KB response cap. Search failure prints `dedup skipped`. A dry run
 makes no network calls. Fingerprints use the recorded command, exception type,
-exit code, failing probe names, Brigade minor version, and a hash of the lowercased
-summary with paths, digits, and identifiers normalized. Different bugs with the
-same failing command or probe receive different fingerprints. Repeats with the
-same normalized summary and failure facts retain the same fingerprint.
+exit code, failing probe names, and Brigade minor version when failure facts
+exist. The normalized summary hash is used only when those facts are absent.
+Reports with the same failure facts share a fingerprint even when their
+summaries differ.
 The bundle channel comes from the updater's local install state when its version
 matches the running CLI. Missing or stale state reports `unknown` instead of
 assuming a stable release.
@@ -2196,10 +2278,19 @@ sharing to five attempts per UTC day and one per fingerprint every five
 minutes. An append-only `attempts/YYYY-MM-DD.jsonl` log under `bug-reports/`
 records each attempt before transport, including retries of the same report
 ID and failed transports. The limit reads only today's and yesterday's logs,
-at most five records and 60 KB per log. A pending submission also blocks
-retries for five minutes.
-Reports with the same failure facts and normalized summary share a fingerprint
-and cooldown.
+at most five records and 60 KB per log. A pending submission blocks retries
+for five minutes. After that window, Brigade searches for its fingerprint
+before another attempt. The loaded receipt is checked even when its attempt
+log is older than yesterday. If a fingerprint match exists or the search fails,
+it blocks creation of another issue. A match from the broader command and
+exception search alone does not block the retry. Use `--comment-on` with a
+shown duplicate to add the report to that issue. With `--yes`, a fingerprint
+match always blocks creation of another issue. A pending comment blocks another
+comment on the same issue because an issue search cannot confirm comment
+delivery. Older pending comment receipts without a target block comment retries
+on any issue. Pending URL and email handoffs do not count as uncertain remote
+submissions. Usage errors, including
+handler validation errors, do not replace the last recorded CLI failure.
 `BRIGADE_BUG_REPORT=never` disables sharing while allowing `--dry-run` and
 `--via file`. No doctor, status command, or hook starts bug reporting.
 
@@ -2308,8 +2399,11 @@ download-metrics JSON supplies matching 30-day PyPI and npm download counts.
 Unavailable providers stay unknown. If no source succeeds, collection exits 1
 without publishing. `--no-publish` prints a successful snapshot instead of
 posting it. Collection is explicit and no timer is installed.
+The Cloudflare status panel is opt-in with `fleet.stats.status_panel = true`;
+configure the expected `repository_head` in the same section. See the fleet
+statistics settings below in [Fleet sync](fleet-sync.md).
 
-The closed `brigade.admin-stats.v1` snapshot and page expose these fields:
+The closed `brigade.admin-stats.v2` snapshot and page expose these fields:
 
 - `schema`, `snapshot_id`, `taken_at`, `source_set`.
 - `weeks`, `daily`, `downloads`, `digest`.
@@ -2318,6 +2412,28 @@ The closed `brigade.admin-stats.v1` snapshot and page expose these fields:
 - `weeks.versions.active_sources`, `weeks.upgrades.from_version`, `weeks.upgrades.to_version`, `weeks.upgrades.active_sources`.
 - `daily.day`, `daily.worker_requests`, `daily.worker_errors`, `downloads.pypi`.
 - `downloads.npm`.
+- `cloudflare`, `cloudflare.collected_at`, `cloudflare.credential`.
+- `cloudflare.worker_version`, `cloudflare.worker_published_at`, `cloudflare.repository_head`.
+- `cloudflare.d1_rows`, `cloudflare.last_purge`, `cloudflare.requests_24h`, `cloudflare.errors_24h`.
+
+The Hub continues to read retained v1 snapshots during the transition.
+
+The Cloudflare panel uses only fixed Wrangler reads (`deployments status`,
+`deployments list`, `versions list`, `d1 info`, and one fixed aggregate SELECT)
+and a fixed GraphQL viewer check plus the 24-hour Analytics query. The collector
+publishes normalized fields only. API tokens, raw CLI output, and error text do
+not enter the snapshot. A missing credential is labeled `credential unavailable`;
+failed cells and snapshots older than 15 minutes render as unknown. The panel
+follows the newest retained snapshot and is hidden when that snapshot carries no
+Cloudflare observation (the panel is off, or it is a v1 snapshot). Wrangler
+does not report a D1 purge event timestamp, so `cloudflare.last_purge` remains
+unknown until the Worker records that event. The latest retained observation
+date is not a purge timestamp.
+
+An operator-triggered mutating path is a separate follow-up, out of scope here.
+It would require an admin bearer, an exact argv preview before each action, a
+Brigade receipt for every action, and no unattended execution. Deploy, rollback,
+secret changes, migration application, and deletion remain denied.
 
 `weeks`, `daily`, version cells and upgrade cells are arrays. Counts are nullable
 nonnegative integers. Source counts below 5 become `null`, including zero.

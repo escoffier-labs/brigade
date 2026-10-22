@@ -13,7 +13,7 @@ from brigade.work_cmd import footprint
 
 requires_dispatch_apply = pytest.mark.skipif(
     sys.platform == "win32",
-    reason="work dispatch apply is unsupported on Windows",
+    reason="work dispatch apply is unsupported on Windows (#1849)",
 )
 
 

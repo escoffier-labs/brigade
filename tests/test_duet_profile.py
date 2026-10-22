@@ -558,7 +558,8 @@ def test_duet_units_name_the_pack(duet_configured, tmp_path):
     assert "Description=Brigade Duet MCP listener" in unit
     assert "--pack duet" in unit and "--bind 127.0.0.1:8780" in unit
     service, timer = m.render_watch_units(target, python="/usr/bin/python3", pack_id="duet")
-    assert "-m brigade.dot watch --target" in service and service.rstrip().count("--pack duet") == 1
+    assert "brigade.dot watch --target" in service and " -I -c " in service
+    assert service.rstrip().count("--pack duet") == 1
     assert "Unit=brigade-duet-watch.service" in timer
     written = m.write_watch_units(target, tmp_path, python="/usr/bin/python3", pack_id="duet")
     assert [path.name for path in written] == ["brigade-duet-watch.service", "brigade-duet-watch.timer"]

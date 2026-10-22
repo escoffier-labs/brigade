@@ -194,7 +194,11 @@ def test_work_brief_includes_pantry_health(monkeypatch, tmp_path):
 
 
 def test_work_brief_surfaces_pantry_policy_rejection_without_leak(monkeypatch, tmp_path, capsys):
+    from brigade import runs_patrol
+
     _pantry_installed(monkeypatch)
+    # The patrol summary shells out to git through the same runner this test fakes.
+    monkeypatch.setattr(runs_patrol, "brief_summary", lambda target: {"counts": {}, "truncated": False})
 
     def fake_run(args, **kw):
         assert args == ["agentpantry", "version", "--json"]

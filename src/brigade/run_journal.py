@@ -412,24 +412,31 @@ def _open_bound(
         raise
 
 
-def bound_lstat(path: Path) -> os.stat_result | None:
+def bound_lstat(path: Path, *, strict: bool = False) -> os.stat_result | None:
     """No-follow stat of a final component; None when it does not exist.
 
     Under a binding the walk runs through held directory descriptors, so a
     directory entry swapped after bind cannot redirect the stat outside the
-    bound run inode. Any other resolution failure under a binding is reported
-    as absent so callers fail closed instead of trusting a re-resolved path.
+    bound run inode. By default, other resolution failures under a binding
+    are reported as absent. With ``strict=True``, only ``FileNotFoundError``
+    means absent. Unsafe or unreadable entries propagate their ``OSError``.
     """
     target = _bound_target(path)
     if target is None:
         try:
             return os.lstat(path)
-        except (FileNotFoundError, NotADirectoryError):
+        except FileNotFoundError:
+            return None
+        except NotADirectoryError:
+            if strict:
+                raise
             return None
     bound, components, name = target
     try:
         return bound.stat(components, name)
-    except OSError:
+    except OSError as exc:
+        if strict and not isinstance(exc, FileNotFoundError):
+            raise
         return None
 
 

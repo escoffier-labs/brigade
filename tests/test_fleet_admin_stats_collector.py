@@ -24,11 +24,402 @@ def test_runner_refuses_arbitrary_sql_and_subcommands(monkeypatch):
             collector.run_wrangler(["wrangler", "d1", "execute", "example-db", "--remote", "--json", "--command", sql])
     for argv in (
         ["wrangler", "deploy"],
+        ["wrangler", "rollback"],
+        ["wrangler", "secret", "put", "EXAMPLE"],
         ["wrangler", "d1", "execute", "--file", "example.sql"],
+        ["wrangler", "d1", "migrations", "apply", "example-db", "--remote"],
+        ["wrangler", "d1", "delete", "example-db"],
         ["sh", "-c", "wrangler whoami"],
     ):
         with pytest.raises(ValueError):
             collector.run_wrangler(argv)
+
+
+def test_status_wrangle_vectors_are_fixed_read_only_commands(monkeypatch):
+    from brigade import fleet_admin_stats_collector as collector
+
+    expected = {
+        "deployments-status": ["wrangler", "deployments", "status", "--name", "example-worker", "--json"],
+        "deployments-list": ["wrangler", "deployments", "list", "--name", "example-worker", "--json"],
+        "versions-list": ["wrangler", "versions", "list", "--name", "example-worker", "--json"],
+        "d1-info": ["wrangler", "d1", "info", "example-db", "--json"],
+        "d1-counts": [
+            "wrangler",
+            "d1",
+            "execute",
+            "example-db",
+            "--remote",
+            "--json",
+            "--command",
+            collector.STATUS_QUERY,
+        ],
+    }
+    for action, argv in expected.items():
+        assert collector.status_wrangler_argv("example-worker", "example-db", action) == argv
+
+    for argv in (
+        ["wrangler", "deploy"],
+        ["wrangler", "rollback", "example-worker"],
+        ["wrangler", "secret", "put", "TOKEN"],
+        ["wrangler", "d1", "execute", "example-db", "--file", "migration.sql"],
+        ["wrangler", "d1", "migrations", "apply", "example-db", "--remote"],
+        ["wrangler", "d1", "delete", "example-db"],
+    ):
+        with pytest.raises(ValueError):
+            collector.run_wrangler(argv)
+
+
+def test_cloudflare_status_without_credentials_is_unavailable(monkeypatch):
+    from brigade import fleet_admin_stats_collector as collector
+
+    monkeypatch.delenv("EXAMPLE_ANALYTICS_TOKEN", raising=False)
+
+    def unavailable(*args, **kwargs):
+        raise ValueError("Cloudflare read failed")
+
+    monkeypatch.setattr(collector, "run_wrangler", unavailable)
+    monkeypatch.setattr(collector, "fetch_json", unavailable)
+    value = collector.cloudflare_status(
+        {
+            "worker": "example-worker",
+            "database": "example-db",
+            "account": "example-account",
+            "analytics_token_env": "EXAMPLE_ANALYTICS_TOKEN",
+            "status_panel": True,
+        },
+        now=datetime(2026, 10, 20, 12, tzinfo=timezone.utc),
+    )
+    assert value["credential"] == "unavailable"
+    assert value["worker_version"] is None
+    assert value["d1_rows"] is None
+    assert value["requests_24h"] is None
+    assert "token" not in json.dumps(value).lower()
+
+
+def test_cloudflare_status_failed_reads_are_unknown_with_configured_credentials(monkeypatch):
+    from brigade import fleet_admin_stats_collector as collector
+
+    monkeypatch.setenv("EXAMPLE_ANALYTICS_TOKEN", "example-cloudflare-secret")
+
+    def unavailable(*args, **kwargs):
+        raise ValueError("Cloudflare read failed")
+
+    monkeypatch.setattr(collector, "run_wrangler", unavailable)
+    monkeypatch.setattr(collector, "fetch_json", unavailable)
+    value = collector.cloudflare_status(
+        {
+            "worker": "example-worker",
+            "database": "example-db",
+            "account": "example-account",
+            "analytics_token_env": "EXAMPLE_ANALYTICS_TOKEN",
+            "status_panel": True,
+        },
+        now=datetime(2026, 10, 20, 12, tzinfo=timezone.utc),
+    )
+
+    assert value["credential"] == "unknown"
+    assert value["worker_version"] is None
+    assert value["d1_rows"] is None
+    assert value["requests_24h"] is None
+    assert "example-cloudflare-secret" not in json.dumps(value)
+
+
+def test_cloudflare_status_without_wrangler_login_is_unavailable(monkeypatch):
+    from brigade import fleet_admin_stats_collector as collector
+
+    monkeypatch.setenv("EXAMPLE_ANALYTICS_TOKEN", "example-cloudflare-secret")
+
+    def no_login(*args, **kwargs):
+        raise ValueError("Cloudflare read failed")
+
+    def graphql(url, *, body=None, token=None):
+        if body["query"] == collector.VIEWER_QUERY:
+            return {"data": {"viewer": {"accounts": [{"accountTag": "example-account"}]}}}
+        return {"data": {"viewer": {"accounts": [{"workersInvocationsAdaptive": []}]}}}
+
+    monkeypatch.setattr(collector, "run_wrangler", no_login)
+    monkeypatch.setattr(collector, "fetch_json", graphql)
+    value = collector.cloudflare_status(
+        {
+            "worker": "example-worker",
+            "database": "example-db",
+            "account": "example-account",
+            "analytics_token_env": "EXAMPLE_ANALYTICS_TOKEN",
+            "status_panel": True,
+        },
+        now=datetime(2026, 10, 20, 12, tzinfo=timezone.utc),
+    )
+
+    assert value["credential"] == "unavailable"
+    assert value["worker_version"] is None
+    assert value["d1_rows"] is None
+    assert "example-cloudflare-secret" not in json.dumps(value)
+
+
+def test_cloudflare_status_normalizes_read_only_fixture_data(monkeypatch):
+    from brigade import fleet_admin_stats_collector as collector
+
+    monkeypatch.setenv("EXAMPLE_ANALYTICS_TOKEN", "example-cloudflare-secret")
+    calls = []
+
+    def wrangler(argv, **kwargs):
+        calls.append(argv)
+        assert "example-cloudflare-secret" not in json.dumps(kwargs)
+        if argv[1:3] == ["deployments", "status"]:
+            return {
+                "id": "example-deployment",
+                "created_on": "2026-10-20T11:54:00Z",
+                "versions": [{"version_id": "example-version", "percentage": 100}],
+            }
+        if argv[1:3] == ["deployments", "list"]:
+            return []
+        if argv[1:3] == ["versions", "list"]:
+            return [{"id": "example-version", "metadata": {"created_on": "2026-10-20T11:55:00Z"}}]
+        if argv[1:3] == ["d1", "info"]:
+            return {"name": "example-db"}
+        return [{"success": True, "results": [{"row_count": 128}]}]
+
+    def graphql(url, *, body=None, token=None):
+        assert url.endswith("/graphql")
+        assert token == "example-cloudflare-secret"
+        if body["query"] == collector.VIEWER_QUERY:
+            return {"data": {"viewer": {"accounts": [{"accountTag": "example-account"}]}}}
+        assert dict(re.findall(r"\$(\w+):\s*(\w+!)", body["query"])) == {
+            "account": "string!",
+            "worker": "string!",
+            "start": "Time!",
+            "end": "Time!",
+        }
+        assert body["variables"]["start"] == "2026-10-19T12:00:00+00:00"
+        assert body["variables"]["end"] == "2026-10-20T12:00:00+00:00"
+        return {
+            "data": {"viewer": {"accounts": [{"workersInvocationsAdaptive": [{"sum": {"requests": 20, "errors": 1}}]}]}}
+        }
+
+    monkeypatch.setattr(collector, "run_wrangler", wrangler)
+    monkeypatch.setattr(collector, "fetch_json", graphql)
+    value = collector.cloudflare_status(
+        {
+            "status_panel": True,
+            "worker": "example-worker",
+            "database": "example-db",
+            "account": "example-account",
+            "repository_head": "a" * 40,
+            "analytics_token_env": "EXAMPLE_ANALYTICS_TOKEN",
+        },
+        now=datetime(2026, 10, 20, 12, tzinfo=timezone.utc),
+    )
+    assert value["credential"] == "available"
+    assert value["worker_version"] == "example-version"
+    assert value["worker_published_at"] == "2026-10-20T11:55:00Z"
+    assert value["repository_head"] == "a" * 40
+    assert value["d1_rows"] == 128
+    assert value["last_purge"] is None
+    assert value["requests_24h"] == 20
+    assert value["errors_24h"] == 1
+    assert len(calls) == 5
+    assert "example-cloudflare-secret" not in json.dumps(value)
+
+
+@pytest.mark.parametrize("failed_action", ["d1-info", "d1-counts"])
+def test_cloudflare_status_preserves_successful_reads_when_a_later_read_fails(monkeypatch, failed_action):
+    from brigade import fleet_admin_stats_collector as collector
+
+    monkeypatch.setenv("EXAMPLE_ANALYTICS_TOKEN", "example-cloudflare-secret")
+
+    def wrangler(argv, **kwargs):
+        action = argv[1:3]
+        if failed_action == "d1-info" and action == ["d1", "info"]:
+            raise ValueError("Cloudflare read failed")
+        if failed_action == "d1-counts" and action == ["d1", "execute"]:
+            raise ValueError("Cloudflare read failed")
+        if action == ["deployments", "status"]:
+            return {
+                "id": "example-deployment",
+                "created_on": "2026-10-20T11:54:00Z",
+                "versions": [{"version_id": "example-version", "percentage": 100}],
+            }
+        if action == ["deployments", "list"]:
+            return []
+        if action == ["versions", "list"]:
+            return [{"id": "example-version", "metadata": {"created_on": "2026-10-20T11:55:00Z"}}]
+        if action == ["d1", "info"]:
+            return {"name": "example-db"}
+        return [{"success": True, "results": [{"row_count": 128}]}]
+
+    def graphql(url, *, body=None, token=None):
+        if body["query"] == collector.VIEWER_QUERY:
+            return {"data": {"viewer": {"accounts": [{"accountTag": "example-account"}]}}}
+        return {
+            "data": {"viewer": {"accounts": [{"workersInvocationsAdaptive": [{"sum": {"requests": 20, "errors": 1}}]}]}}
+        }
+
+    monkeypatch.setattr(collector, "run_wrangler", wrangler)
+    monkeypatch.setattr(collector, "fetch_json", graphql)
+    value = collector.cloudflare_status(
+        {
+            "status_panel": True,
+            "worker": "example-worker",
+            "database": "example-db",
+            "account": "example-account",
+            "analytics_token_env": "EXAMPLE_ANALYTICS_TOKEN",
+        },
+        now=datetime(2026, 10, 20, 12, tzinfo=timezone.utc),
+    )
+
+    assert value["credential"] == "available"
+    assert value["worker_version"] == "example-version"
+    assert value["worker_published_at"] == "2026-10-20T11:55:00Z"
+    assert value["d1_rows"] == (None if failed_action == "d1-counts" else 128)
+    assert value["requests_24h"] == 20
+    assert value["errors_24h"] == 1
+
+
+def test_cloudflare_status_reads_worker_without_database(monkeypatch):
+    from brigade import fleet_admin_stats_collector as collector
+
+    monkeypatch.setenv("EXAMPLE_ANALYTICS_TOKEN", "example-cloudflare-secret")
+    calls = []
+
+    def wrangler(argv, **kwargs):
+        calls.append(argv)
+        if argv[1:3] == ["deployments", "status"]:
+            return {"id": "example-deployment", "versions": [{"version_id": "example-version"}]}
+        if argv[1:3] == ["versions", "list"]:
+            return [{"id": "example-version", "metadata": {"created_on": "2026-10-20T11:55:00Z"}}]
+        if argv[1:3] == ["deployments", "list"]:
+            return []
+        pytest.fail(f"unexpected Wrangler action: {argv[1:3]}")
+
+    def graphql(url, *, body=None, token=None):
+        if body["query"] == collector.VIEWER_QUERY:
+            return {"data": {"viewer": {"accounts": [{"accountTag": "example-account"}]}}}
+        return {"data": {"viewer": {"accounts": [{"workersInvocationsAdaptive": []}]}}}
+
+    monkeypatch.setattr(collector, "run_wrangler", wrangler)
+    monkeypatch.setattr(collector, "fetch_json", graphql)
+    value = collector.cloudflare_status(
+        {
+            "status_panel": True,
+            "worker": "example-worker",
+            "account": "example-account",
+            "analytics_token_env": "EXAMPLE_ANALYTICS_TOKEN",
+        },
+        now=datetime(2026, 10, 20, 12, tzinfo=timezone.utc),
+    )
+
+    assert value["worker_version"] == "example-version"
+    assert value["worker_published_at"] == "2026-10-20T11:55:00Z"
+    assert value["d1_rows"] is None
+    assert len(calls) == 3
+
+
+def test_cloudflare_status_reads_database_without_worker(monkeypatch):
+    from brigade import fleet_admin_stats_collector as collector
+
+    monkeypatch.delenv("EXAMPLE_ANALYTICS_TOKEN", raising=False)
+    calls = []
+
+    def wrangler(argv, **kwargs):
+        calls.append(argv)
+        if argv[1:3] == ["d1", "info"]:
+            return {"name": "example-db"}
+        if argv[1:3] == ["d1", "execute"]:
+            return [{"success": True, "results": [{"row_count": 128}]}]
+        pytest.fail(f"unexpected Wrangler action: {argv[1:3]}")
+
+    def graphql(*args, **kwargs):
+        pytest.fail("Worker analytics read ran without a configured Worker")
+
+    monkeypatch.setattr(collector, "run_wrangler", wrangler)
+    monkeypatch.setattr(collector, "fetch_json", graphql)
+    value = collector.cloudflare_status(
+        {"status_panel": True, "database": "example-db", "d1_token_env": "EXAMPLE_D1_TOKEN"},
+        now=datetime(2026, 10, 20, 12, tzinfo=timezone.utc),
+    )
+
+    assert value["d1_rows"] == 128
+    assert value["credential"] == "available"
+    assert value["worker_version"] is None
+    assert len(calls) == 2
+
+
+def test_cloudflare_status_requires_viewer_access_to_configured_account(monkeypatch):
+    from brigade import fleet_admin_stats_collector as collector
+
+    monkeypatch.setenv("EXAMPLE_ANALYTICS_TOKEN", "example-cloudflare-secret")
+    analytics_queries = []
+
+    def wrangler(argv, **kwargs):
+        if argv[1:3] == ["deployments", "status"]:
+            return {"id": "example-deployment", "versions": [{"version_id": "example-version"}]}
+        if argv[1:3] == ["versions", "list"]:
+            return [{"id": "example-version"}]
+        return []
+
+    def graphql(url, *, body=None, token=None):
+        analytics_queries.append(body["query"])
+        return {"data": {"viewer": {"accounts": [{"accountTag": "different-account"}]}}}
+
+    monkeypatch.setattr(collector, "run_wrangler", wrangler)
+    monkeypatch.setattr(collector, "fetch_json", graphql)
+    value = collector.cloudflare_status(
+        {
+            "status_panel": True,
+            "worker": "example-worker",
+            "account": "example-account",
+            "analytics_token_env": "EXAMPLE_ANALYTICS_TOKEN",
+        },
+        now=datetime(2026, 10, 20, 12, tzinfo=timezone.utc),
+    )
+
+    assert analytics_queries == [collector.VIEWER_QUERY]
+    assert value["credential"] == "unknown"
+    assert value["requests_24h"] is None
+    assert value["errors_24h"] is None
+
+
+def test_cloudflare_status_does_not_choose_one_gradual_deployment_version(monkeypatch):
+    from brigade import fleet_admin_stats_collector as collector
+
+    monkeypatch.setenv("EXAMPLE_ANALYTICS_TOKEN", "example-cloudflare-secret")
+
+    def wrangler(argv, **kwargs):
+        if argv[1:3] == ["deployments", "status"]:
+            return {
+                "id": "example-deployment",
+                "versions": [
+                    {"version_id": "example-version-a", "percentage": 50},
+                    {"version_id": "example-version-b", "percentage": 50},
+                ],
+            }
+        if argv[1:3] == ["versions", "list"]:
+            return [
+                {"id": "example-version-a", "metadata": {"created_on": "2026-10-20T11:55:00Z"}},
+                {"id": "example-version-b", "metadata": {"created_on": "2026-10-20T11:56:00Z"}},
+            ]
+        return []
+
+    def graphql(url, *, body=None, token=None):
+        if body["query"] == collector.VIEWER_QUERY:
+            return {"data": {"viewer": {"accounts": [{"accountTag": "example-account"}]}}}
+        return {"data": {"viewer": {"accounts": [{"workersInvocationsAdaptive": []}]}}}
+
+    monkeypatch.setattr(collector, "run_wrangler", wrangler)
+    monkeypatch.setattr(collector, "fetch_json", graphql)
+    value = collector.cloudflare_status(
+        {
+            "status_panel": True,
+            "worker": "example-worker",
+            "account": "example-account",
+            "analytics_token_env": "EXAMPLE_ANALYTICS_TOKEN",
+        },
+        now=datetime(2026, 10, 20, 12, tzinfo=timezone.utc),
+    )
+
+    assert value["credential"] == "available"
+    assert value["worker_version"] is None
+    assert value["worker_published_at"] is None
 
 
 def test_collector_uses_fixed_read_queries_and_suppresses(monkeypatch):
@@ -64,18 +455,25 @@ def test_wrangler_runner_oauth_env_and_sanitized_failure(monkeypatch):
     import sys
 
     monkeypatch.setenv("CLOUDFLARE_API_TOKEN", "example-secret")
+    monkeypatch.setenv("EXAMPLE_D1_TOKEN", "example-d1-secret")
+    monkeypatch.setenv("EXAMPLE_ANALYTICS_TOKEN", "example-analytics-secret")
     original = collector.subprocess.Popen
 
     def run(argv, **kwargs):
         assert kwargs["shell"] is False
         assert kwargs["stdin"] == collector.subprocess.DEVNULL
         assert "CLOUDFLARE_API_TOKEN" not in kwargs["env"]
+        assert "EXAMPLE_D1_TOKEN" not in kwargs["env"]
+        assert "EXAMPLE_ANALYTICS_TOKEN" not in kwargs["env"]
         assert "example-secret" not in str(argv)
         return original([sys.executable, "-c", "import sys; sys.stderr.write('example-secret'); sys.exit(1)"], **kwargs)
 
     monkeypatch.setattr(collector.subprocess, "Popen", run)
     with pytest.raises(ValueError, match="D1 read failed") as error:
-        collector.run_wrangler(collector.wrangler_argv("example-db", "weekly"))
+        collector.run_wrangler(
+            collector.wrangler_argv("example-db", "weekly"),
+            token_envs=("EXAMPLE_D1_TOKEN", "EXAMPLE_ANALYTICS_TOKEN"),
+        )
     assert "example-secret" not in str(error.value)
 
 

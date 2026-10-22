@@ -70,6 +70,21 @@ class FileResult:
     cleanup_error: str | None = None
 
 
+def with_progress(result: FileResult, output_dir: Path) -> FileResult:
+    """Retain the last flushed test or session phase on all termination paths."""
+    progress = (output_dir / result.log).with_suffix(".progress.log")
+    try:
+        with progress.open("rb") as stream:
+            stream.seek(max(0, os.fstat(stream.fileno()).st_size - 8192))
+            lines = stream.read().decode("utf-8", errors="replace").splitlines()
+    except OSError:
+        return result
+    if not lines:
+        return result
+    prefix = f"{result.diagnostic}; " if result.diagnostic else ""
+    return replace(result, diagnostic=f"{prefix}last_progress={lines[-1]}")
+
+
 def is_windows() -> bool:
     return os.name == "nt"
 
@@ -298,6 +313,9 @@ def _child_environment() -> dict[str, str]:
     environment = dict(os.environ)
     environment["BRIGADE_EXTRAS"] = "0"
     environment["BRIGADE_NO_UPDATE_CHECK"] = "1"
+    environment["PYTHONUNBUFFERED"] = "1"
+    # Keep the driver checkout importable alongside inherited search paths.
+    environment["PYTHONPATH"] = os.pathsep.join(filter(None, (str(REPO_ROOT), environment.get("PYTHONPATH"))))
     return environment
 
 
@@ -374,15 +392,28 @@ def run_file(
     basetemp.mkdir(parents=True, exist_ok=False)
     argv = [
         str(python),
-        "-m",
-        "pytest",
-        "-q",
+        "-c",
+        # Pin only the plugin to this driver, retaining python -m pytest semantics.
+        "import importlib.util, os, runpy, sys; "
+        "sys.path[0] = os.getcwd(); "
+        "spec = importlib.util.spec_from_file_location('scripts.windows_pytest_diagnostics', sys.argv.pop(1)); "
+        "plugin = importlib.util.module_from_spec(spec); "
+        "sys.modules[spec.name] = plugin; "
+        "spec.loader.exec_module(plugin); "
+        "runpy.run_module('pytest', run_name='__main__', alter_sys=True)",
+        str(REPO_ROOT / "scripts" / "windows_pytest_diagnostics.py"),
+        "-vv",
         "-ra",
         "--tb=line",
         "-p",
         "no:cacheprovider",
         "-p",
         "no:xdist",
+        "-p",
+        "scripts.windows_pytest_diagnostics",
+        "--durations=0",
+        "-o",
+        "faulthandler_timeout=60",
         "-o",
         "addopts=",
         f"--basetemp={basetemp}",
@@ -393,6 +424,10 @@ def run_file(
     termination_status = None
     cleanup = _CleanupDeadline()
     process = None
+    progress = log.with_suffix(".progress.log")
+    progress.unlink(missing_ok=True)
+    environment = _child_environment()
+    environment["BRIGADE_WINDOWS_TEST_PROGRESS"] = str(progress.resolve())
     if deadline is not None and clock() >= deadline:
         return _deadline_failure(name, output_dir, unstarted=True)
     try:
@@ -401,7 +436,7 @@ def run_file(
                 python=python.absolute(),
                 args=argv[1:],
                 cwd=repo.resolve(),
-                env=_child_environment(),
+                env=environment,
                 log=stream,
                 tracker=tracker,
                 deadline=deadline,
@@ -436,17 +471,23 @@ def run_file(
         )
     except CleanupError as exc:
         if returncode is not None and termination_status is None and _status(returncode) == "failed":
-            return FileResult(
-                name,
-                "failed",
-                returncode,
-                clock() - started,
-                log.relative_to(output_dir).as_posix(),
-                str(exc),
-                cleanup_error=str(exc),
+            return with_progress(
+                FileResult(
+                    name,
+                    "failed",
+                    returncode,
+                    clock() - started,
+                    log.relative_to(output_dir).as_posix(),
+                    str(exc),
+                    cleanup_error=str(exc),
+                ),
+                output_dir,
             )
-        return FileResult(
-            name, "cleanup-unconfirmed", None, clock() - started, log.relative_to(output_dir).as_posix(), str(exc)
+        return with_progress(
+            FileResult(
+                name, "cleanup-unconfirmed", None, clock() - started, log.relative_to(output_dir).as_posix(), str(exc)
+            ),
+            output_dir,
         )
     except OSError as exc:
         return FileResult(
@@ -463,7 +504,8 @@ def run_file(
         diagnostic = f"job termination: {status}"
     if process.token.leaked_descendants:
         diagnostic = f"{diagnostic + '; ' if diagnostic else ''}leaked_descendants={process.token.leaked_descendants}"
-    return FileResult(name, status, returncode, clock() - started, log.relative_to(output_dir).as_posix(), diagnostic)
+    result = FileResult(name, status, returncode, clock() - started, log.relative_to(output_dir).as_posix(), diagnostic)
+    return with_progress(result, output_dir) if termination_status is not None else result
 
 
 def _launch_failure(name: str, output_dir: Path, error: Exception) -> FileResult:
@@ -477,7 +519,7 @@ def _deadline_failure(
     name: str, output_dir: Path, *, unstarted: bool = False, cause: int = AGGREGATE_DEADLINE
 ) -> FileResult:
     log = output_dir / "logs" / f"{name}.log"
-    return FileResult(
+    result = FileResult(
         name,
         "unstarted" if unstarted else REASONS[cause],
         None,
@@ -485,6 +527,7 @@ def _deadline_failure(
         log.relative_to(output_dir).as_posix(),
         "driver aggregate deadline exceeded" if cause == AGGREGATE_DEADLINE else "driver abort",
     )
+    return result if unstarted else with_progress(result, output_dir)
 
 
 def result_from_future(
@@ -552,6 +595,11 @@ def run_files(
 
     def record(result: FileResult) -> None:
         results.append(result)
+        print(
+            f"windows pytest file: {result.name} status={result.status} seconds={result.seconds:.3f} "
+            f"log={result.log} diagnostic={result.diagnostic}",
+            flush=True,
+        )
         if on_result is not None:
             on_result(sorted(results, key=lambda item: item.name))
 

@@ -5,21 +5,22 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
-import os
 import sys
+from collections import Counter
 from dataclasses import asdict
 from datetime import datetime
 from pathlib import Path
 from uuid import uuid4
 
-from . import run_reap, runs_cmd
+from . import localio, run_reap, runs_cmd
 from .run_lane_state import STATES, Thresholds, classify, collect_lanes
+from . import runs_patrol_actions, runs_patrol_receipts
 
 SCHEMA = "brigade.runs_patrol.v1"
 
 
 def register(sub: argparse._SubParsersAction) -> None:
-    parser = sub.add_parser("patrol", help="Report local run and claim states without changing them.")
+    parser = sub.add_parser("patrol", help="Report local run and claim states, with explicit optional actions.")
     parser.add_argument("--target", type=Path, default=Path("."), help="Workspace to inspect.")
     for name, default in (
         ("older-than", "2h"),
@@ -31,6 +32,9 @@ def register(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--limit", type=int, default=50, help="Maximum returned lanes and ledger claims (default 50).")
     parser.add_argument("--json", action="store_true", help=f"Emit the versioned {SCHEMA} contract.")
     parser.add_argument("--receipt", action="store_true", help="Write .brigade/patrol/<id>/patrol.json.")
+    parser.add_argument("--apply", default="", help="Explicit actions: reap,release-claim,escalate. Writes a receipt.")
+    parser.add_argument("--escalate-via", choices=("fleet-msg",), help="Send escalation through fleet messages.")
+    parser.add_argument("--escalate-to", help="Fleet message recipient principal. Requires --escalate-via.")
     parser.add_argument("--fail-on", default="", help="Comma-separated states that return exit status 1.")
 
 
@@ -45,6 +49,9 @@ def dispatch(args: argparse.Namespace) -> int:
         json_output=args.json,
         receipt=args.receipt,
         fail_on=args.fail_on,
+        apply=args.apply,
+        escalate_via=args.escalate_via,
+        escalate_to=args.escalate_to,
     )
 
 
@@ -57,9 +64,10 @@ def _write_receipt(target: Path, patrol_id: str, raw: str) -> None:
         if parent.is_symlink():
             raise ValueError("receipt path must not be symlinked")
         parent.mkdir(mode=0o700, exist_ok=True)
-    fd = os.open(parent / "patrol.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
-    with os.fdopen(fd, "w", encoding="utf-8") as stream:
-        stream.write(raw + "\n")
+    path = parent / "patrol.json"
+    if path.exists() or path.is_symlink():
+        raise ValueError("patrol receipt already exists")
+    localio.write_text_atomic(path, raw)
 
 
 def patrol(
@@ -73,9 +81,26 @@ def patrol(
     json_output: bool = False,
     receipt: bool = False,
     fail_on: str = "",
+    apply: str = "",
+    escalate_via: str | None = None,
+    escalate_to: str | None = None,
     now: datetime | None = None,
 ) -> int:
+    written_receipt: Path | None = None
+    payload: dict | None = None
     try:
+        actions = list(dict.fromkeys(value.strip() for value in apply.split(",") if value.strip()))
+        if set(actions) - runs_patrol_actions.ACTIONS:
+            raise ValueError("apply contains an unknown action")
+        if apply and not actions:
+            raise ValueError("apply requires explicit action names")
+        if escalate_via not in {None, "fleet-msg"}:
+            raise ValueError("unknown escalation transport")
+        if (escalate_via or escalate_to) and (
+            "escalate" not in actions or not escalate_via or not escalate_to or not escalate_to.strip()
+        ):
+            raise ValueError("fleet-msg requires --apply escalate, --escalate-via and --escalate-to")
+        receipt = receipt or bool(actions)
         thresholds = Thresholds(
             older_than=run_reap.parse_older_than(older_than),
             idle_after=run_reap.parse_older_than(idle_after),
@@ -107,6 +132,8 @@ def patrol(
                 "task_id": runs_cmd._clean_str(lane.task.get("id"), 240) if lane.task else None,
                 "claim_id": runs_cmd._clean_str(lane.claim.get("claim_id"), 240) if lane.claim else None,
                 "intent": lane.intent,
+                "hub_claim": lane.hub_claim,
+                "display_only": lane.display_only,
                 "state": classification.state,
                 "reason": runs_cmd._clean_str(classification.reason, 240),
                 "infrastructure_failure": classification.infrastructure_failure,
@@ -138,8 +165,33 @@ def patrol(
         }
         raw = json.dumps(payload, indent=2, sort_keys=True)
         if receipt:
-            _write_receipt(target, patrol_id, raw)
+            with runs_patrol_receipts.receipt_lock(target, report_only=not actions) as locked:
+                _write_receipt(target, patrol_id, runs_patrol_receipts.bounded_receipt_text(payload))
+                written_receipt = target / payload["receipt"]
+                if locked:
+                    runs_patrol_receipts.prune_reports(
+                        written_receipt.parent.parent, clock, keep=written_receipt.parent, strict=bool(actions)
+                    )
+                if actions:
+                    runs_patrol_actions.apply_actions(
+                        target=target,
+                        lanes=lanes,
+                        rows=rows,
+                        payload=payload,
+                        actions=actions,
+                        thresholds=thresholds,
+                        now=clock,
+                        escalate_via=escalate_via,
+                        escalate_to=escalate_to,
+                    )
+                    raw = json.dumps(payload, indent=2, sort_keys=True)
     except (OSError, ValueError, RuntimeError, OverflowError) as exc:
+        if written_receipt is not None and payload is not None:
+            payload.update(exit_code=2, error=type(exc).__name__)
+            try:
+                runs_patrol_receipts.write_receipt(written_receipt, payload)
+            except OSError:
+                pass  # The original failure still determines the exit disposition.
         print(f"error: patrol: {exc}", file=sys.stderr)
         return 2
     if json_output:
@@ -152,3 +204,15 @@ def patrol(
     if lanes.truncated and not json_output:
         print("Patrol scan or lane report truncated. Increase --limit or inspect sources directly.")
     return exit_code
+
+
+def brief_summary(target: Path) -> dict[str, object]:
+    """Bound the brief to ten run snapshots and bounded claim rows, with no Hub reads or receipt."""
+    started = run_reap._utc_now(None)
+    try:
+        lanes = collect_lanes(target, now=started, limit=20, scan_limit=10, claim_limit=10, include_hub=False)
+        clock = run_reap._utc_now(None)
+        counts = Counter(classify(lane, clock, Thresholds(), observation_started_at=started).state for lane in lanes)
+        return {"counts": dict(sorted(counts.items())), "truncated": lanes.truncated}
+    except (OSError, ValueError, RuntimeError, OverflowError):
+        return {"counts": {"unknown": 1}, "truncated": False}

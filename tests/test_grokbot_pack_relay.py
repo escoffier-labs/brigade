@@ -340,6 +340,27 @@ def test_render_relay_units_preview_omits_private_python_executable(tmp_path: Pa
     assert str(python.parent) not in preview
 
 
+def test_relay_preview_hides_package_path_but_written_unit_keeps_it(tmp_path, monkeypatch):
+    from brigade import grokbot_pack_relay, isolated_exec
+
+    target = tmp_path / "queue"
+    target.mkdir()
+    owner = _owner(tmp_path / "owner")
+    grokbot_pack_relay.apply_relay_setup(target, owner)
+    installation = tmp_path / "private-install/lib/python3.12/site-packages/brigade"
+    monkeypatch.setattr(isolated_exec, "trusted_cwd", lambda: installation)
+    monkeypatch.setattr(grokbot_pack_relay, "trusted_cwd", lambda: installation)
+    python = str(tmp_path / "private-install/bin/python")
+    preview = "".join(grokbot_pack_relay.render_relay_units(target, python=python).values())
+    assert str(installation) not in preview, "unit preview exposed the trusted installation directory"
+    output = tmp_path / "units"
+    output.mkdir()
+    paths = grokbot_pack_relay.write_relay_units(target, output, python=python)
+    service = next(path.read_text() for path in paths if path.suffix == ".service")
+    assert str(installation / "__init__.py") in service
+    assert f"WorkingDirectory={installation}" in service
+
+
 def test_cli_pack_relay_commands_are_preview_first_and_omit_id(tmp_path: Path, capsys, monkeypatch):
     from brigade import cli
 

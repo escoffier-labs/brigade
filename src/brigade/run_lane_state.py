@@ -41,6 +41,7 @@ PATH_CAP = 200
 MAX_LIMIT = 1000
 RUN_SCAN_LIMIT = MAX_LIMIT
 WORKTREE_SCAN_LIMIT = MAX_LIMIT
+PREALLOCATION_INTENT_STATES = frozenset({"planned", "claimed", "workspace_ready", "lost_race", "failed", "canceled"})
 
 
 @dataclass(frozen=True)
@@ -76,6 +77,10 @@ class Lane:
     worktree: Path | None = None
     worktree_missing: bool = False
     dirty: bool = False
+    ahead: bool = False
+    hub_claim: dict[str, Any] | None = None
+    display_only: bool = False
+    hub_missing_run: bool = False
     lock_state: str = "absent"
     owner_live: bool | None = None
     terminal_status: str | None = None
@@ -86,6 +91,7 @@ class Lane:
     progress_errors: list[str] = field(default_factory=list)
     evidence: list[Evidence] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    intent_scan_complete: bool = False
 
 
 class Lanes(list[Lane]):
@@ -223,6 +229,28 @@ def _worktree_progress(lane: Lane, now: datetime, git_root: Path | None) -> None
     if newest is not None:
         lane.progress.append(newest)
     lane.evidence.append(Evidence("worktree:git-status", now, f"{len(paths)} changed paths", newest))
+    upstream = _git(git_root, "rev-parse", "--verify", "--quiet", "@{upstream}")
+    if upstream.code != 0:
+        lane.evidence.append(Evidence("worktree:git-ahead", now, "no upstream comparison available"))
+        return
+    ahead = _git(git_root, "rev-list", "--count", "@{upstream}..HEAD")
+    if ahead.code != 0 or ahead.output_limit_exceeded or not ahead.stdout.strip().isdigit():
+        lane.progress_errors.append("branch ahead comparison unavailable")
+        return
+    lane.ahead = int(ahead.stdout.strip()) > 0
+    committed: datetime | None = None
+    if lane.ahead:
+        # The newest unpushed commit is progress, so fresh work is not stranded.
+        newest_commit = _git(git_root, "log", "-1", "--format=%ct", "@{upstream}..HEAD")
+        raw_time = newest_commit.stdout.strip()
+        if newest_commit.code != 0 or not raw_time.isdigit():
+            lane.progress_errors.append("branch ahead commit time unavailable")
+            return
+        committed = datetime.fromtimestamp(int(raw_time), timezone.utc)
+        lane.progress.append(committed)
+    lane.evidence.append(
+        Evidence("worktree:git-ahead", now, f"{ahead.stdout.strip()} commits ahead of upstream", committed)
+    )
 
 
 def _observe_worktree(
@@ -258,6 +286,7 @@ def _observe_worktree(
     observation = cache[path]
     lane.worktree_missing = observation.worktree_missing
     lane.dirty = observation.dirty
+    lane.ahead = observation.ahead
     lane.progress.extend(observation.progress)
     lane.progress_errors.extend(observation.progress_errors)
     lane.evidence.extend(observation.evidence)
@@ -468,16 +497,26 @@ def collect_lanes(
     *,
     now: datetime | None = None,
     limit: int = 50,
+    scan_limit: int | None = None,
+    claim_limit: int | None = None,
+    include_hub: bool = True,
     dispatch_intents: list[dict[str, Any]] | None = None,
 ) -> Lanes:
     """Join a bounded local run window, ledger claims and recorded worktrees.
 
     Malformed directory names and symlinked run directories are skipped. An
-    unreadable snapshot in a valid directory is an unknown lane. Hub access
-    and all mutations belong to the caller. Dispatch intents join exact runs.
+    unreadable snapshot in a valid directory is an unknown lane. The brief
+    uses a smaller snapshot budget and omits network observations. Mutations
+    belong to the caller. Dispatch intents join exact runs.
     """
     if not 1 <= limit <= MAX_LIMIT:
         raise ValueError(f"limit must be between 1 and {MAX_LIMIT}")
+    run_limit = RUN_SCAN_LIMIT if scan_limit is None else scan_limit
+    claims_cap = limit if claim_limit is None else claim_limit
+    if not 1 <= claims_cap <= MAX_LIMIT:
+        raise ValueError(f"claim_limit must be between 1 and {MAX_LIMIT}")
+    if not 1 <= run_limit <= MAX_LIMIT:
+        raise ValueError(f"scan_limit must be between 1 and {MAX_LIMIT}")
     target = target.expanduser().resolve()
     if not target.is_dir() or not os.access(target, os.R_OK | os.X_OK):
         raise ValueError("target is not a readable directory")
@@ -504,38 +543,93 @@ def collect_lanes(
                 if entry.is_dir(follow_symlinks=False)
                 and run_reap._classify_child(root / entry.name, resolved_root) is None
             )
-            newest = heapq.nlargest(RUN_SCAN_LIMIT + 1, candidates)
-        scan_full = len(newest) > RUN_SCAN_LIMIT
+            newest = heapq.nlargest(run_limit + 1, candidates)
+        scan_full = len(newest) > run_limit
         lanes.truncated |= scan_full
-        for _, name in newest[:RUN_SCAN_LIMIT]:
+        for _, name in newest[:run_limit]:
             lanes.append(
                 _collect_run(root / name, target, clock, worktrees, worktree_error, cache, lock_cache, git_workspace)
             )
     # Optional caller input supports reconciliation. Patrol discovers the same
     # local receipts by default, without changing them or activating journals.
     intent_rows: list[tuple[dict[str, Any], str | None]] = []
+    intent_scan_complete = True
+    intent_scan_truncated = False
     if dispatch_intents is not None:
         intent_rows = [(item, None) for item in dispatch_intents[:RUN_SCAN_LIMIT]]
-        lanes.truncated |= len(dispatch_intents) > RUN_SCAN_LIMIT
+        intent_scan_complete = len(dispatch_intents) <= RUN_SCAN_LIMIT
+        lanes.truncated |= not intent_scan_complete
     else:
         dispatch_root = target / ".brigade/dispatch"
-        if dispatch_root.exists() and not dispatch_root.is_symlink():
-            for path in dispatch_root.glob("dispatch-*/intents/*.json"):
-                if len(intent_rows) >= RUN_SCAN_LIMIT:
-                    lanes.truncated = True
-                    break
-                if path.parent.is_symlink() or path.parent.parent.is_symlink():
-                    continue
-                try:
-                    item, digest = _read_json(path)
-                    intent_rows.append((item, digest))
-                except (OSError, ValueError):
-                    continue
+        try:
+            try:
+                root_info = dispatch_root.lstat()
+            except FileNotFoundError:
+                root_info = None
+            if root_info is not None:
+                if not stat.S_ISDIR(root_info.st_mode):
+                    raise ValueError("unsafe dispatch root")
+                inspected = 0
+                with os.scandir(dispatch_root) as dispatches:
+                    for index, entry in enumerate(dispatches):
+                        if index >= RUN_SCAN_LIMIT:
+                            # Truncation is reported but is not an ownership
+                            # unknown: a run with a dispatch launch receipt and
+                            # no scanned intent is refused per lane below.
+                            lanes.truncated = True
+                            break
+                        if not entry.name.startswith("dispatch-"):
+                            continue
+                        if not entry.is_dir(follow_symlinks=False):
+                            raise ValueError("unsafe dispatch directory")
+                        intent_root = dispatch_root / entry.name / "intents"
+                        try:
+                            info = intent_root.lstat()
+                        except FileNotFoundError:
+                            continue
+                        if not stat.S_ISDIR(info.st_mode):
+                            raise ValueError("unsafe intent directory")
+                        with os.scandir(intent_root) as paths:
+                            for candidate in paths:
+                                # Failed reads and junk consume the same budget.
+                                if inspected >= RUN_SCAN_LIMIT:
+                                    lanes.truncated = True
+                                    intent_scan_truncated = True
+                                    break
+                                inspected += 1
+                                if not candidate.name.endswith(".json"):
+                                    continue
+                                try:
+                                    item, digest = _read_json(intent_root / candidate.name)
+                                    intent_rows.append((item, digest))
+                                except (OSError, ValueError, RuntimeError, RecursionError):
+                                    intent_scan_complete = False
+                        if intent_scan_truncated:
+                            break
+        except (OSError, ValueError, RuntimeError, RecursionError):
+            intent_scan_complete = False
     by_run = {lane.run_dir.name: lane for lane in lanes if lane.run_dir is not None}
     for item, intent_digest in intent_rows:
+        if not isinstance(item.get("task_id"), str) or not item["task_id"]:
+            intent_scan_complete = False
+            continue
         intent_run_id = item.get("run_id")
+        if intent_run_id is None:
+            intent_state = item.get("state")
+            if (
+                "run_id" not in item
+                or item.get("run_dir") is not None
+                or item.get("pid") is not None
+                or not isinstance(intent_state, str)
+                or intent_state not in PREALLOCATION_INTENT_STATES
+            ):
+                intent_scan_complete = False
+            continue
+        if not isinstance(intent_run_id, str) or not intent_run_id:
+            intent_scan_complete = False
+            continue
         lane = by_run.get(intent_run_id) if isinstance(intent_run_id, str) else None
-        if lane is not None and isinstance(item.get("task_id"), str):
+        if lane is not None:
             if lane.intent is not None:
                 lane.errors.append("multiple dispatch intents for run")
                 continue
@@ -561,7 +655,7 @@ def collect_lanes(
                     claimed_tasks.append((task, claim))
             # Append order puts fresh claims at the end of the ledger. Validate
             # the whole byte-capped file, then bound only claimed task rows.
-            lanes.truncated |= len(claimed_tasks) > limit
+            lanes.truncated |= len(claimed_tasks) > claims_cap
             by_claim: dict[str, list[Lane]] = {}
             for lane in lanes:
                 key = lane.run.get("claim_id") if lane.run else None
@@ -578,7 +672,7 @@ def collect_lanes(
                     by_claim.setdefault(key, []).append(lane)
             join_unverified = scan_full or any(lane.run_dir is not None and lane.errors for lane in lanes)
             nonterminal = any(lane.run is not None and lane.terminal_status is None for lane in lanes)
-            for task, claim in claimed_tasks[-limit:]:
+            for task, claim in claimed_tasks[-claims_cap:]:
                 # A task can be reclaimed. Only the exact claim generation can
                 # join a run, never the task id shared with a completed run.
                 matches = [
@@ -605,6 +699,18 @@ def collect_lanes(
                     lane.evidence.append(
                         Evidence(".brigade/work/tasks.json", clock, "ledger task and claim", digest=digest)
                     )
+                    # Terminal runs normally skip secondary worktree evidence.
+                    # Only unfinished ledger work needs a landing check.
+                    if lane.terminal_status in runs_cmd._SUCCESS_STATUSES | {"completed", "complete"} and not task.get(
+                        "landing"
+                    ):
+                        meta = lane.run or {}
+                        collection = meta.get("artifact_collection")
+                        recorded = collection.get("worktree") if isinstance(collection, dict) else None
+                        raw_path = task.get("worktree") or meta.get("worktree") or recorded or meta.get("cwd")
+                        if isinstance(raw_path, str) and Path(raw_path).is_absolute():
+                            lane.worktree = Path(raw_path)
+                            _observe_worktree(lane, clock, worktrees, worktree_error, cache, git_workspace)
         except (OSError, ValueError, RuntimeError, RecursionError):
             for lane in lanes:
                 lane.errors.append("ledger unreadable")
@@ -612,6 +718,25 @@ def collect_lanes(
                 lanes.append(Lane("ledger", errors=["ledger unreadable"]))
             for lane in lanes:
                 lane.evidence.append(Evidence(".brigade/work/tasks.json", clock, "unreadable"))
+    for lane in lanes:
+        lane.intent_scan_complete = intent_scan_complete
+        if not intent_scan_complete:
+            lane.evidence.append(Evidence("dispatch:intents", clock, "intent scan incomplete"))
+        if lane.run_dir is not None and lane.intent is None:
+            try:
+                (lane.run_dir / "dispatch-launch.json").lstat()
+            except FileNotFoundError:
+                continue
+            except OSError:
+                pass
+            lane.intent_scan_complete = False
+            lane.evidence.append(
+                Evidence("dispatch-launch.json", clock, "dispatch launch receipt without scanned intent")
+            )
+    if include_hub:
+        from .runs_patrol_hub import cross_check
+
+        cross_check(lanes, target=target, now=clock, limit=limit, scan_incomplete=scan_full)
     lanes.truncated |= len(lanes) > limit
     # Run rows retain newest-first order. Truncation is explicit even when
     # the output window leaves no room for unmatched claim rows.
@@ -645,6 +770,10 @@ def classify(
         return result("unknown", "missing or stale observation")
     if any(stamp > clock for stamp in lane.progress):
         return result("unknown", "progress timestamp is in the future")
+    if lane.display_only:
+        return result("unknown", "other node claim, display only, liveness unverified")
+    if lane.hub_missing_run:
+        return result("claim-without-run", "this node's Hub claim records a missing local run")
     if lane.terminal_status == "orphaned":
         return result("orphaned", "run already marked orphaned")
     if lane.terminal_status is not None:
@@ -654,6 +783,10 @@ def classify(
             return result("unknown", "terminal lock has no finish time for grace")
         if lane.lock_state == "live" and lane.terminal_at and clock - lane.terminal_at > thresholds.zombie_after:
             return result("zombie", "terminal run still owns a live lock beyond grace")
+        if lane.terminal_status in runs_cmd._SUCCESS_STATUSES | {"completed", "complete"} and _stranded(
+            lane, clock, thresholds
+        ):
+            return result("stranded", "old in-progress task has unlanded work")
         return result(
             "complete" if lane.terminal_status in runs_cmd._SUCCESS_STATUSES | {"completed", "complete"} else "failed",
             "terminal run outcome",
@@ -697,13 +830,23 @@ def classify(
         claimed = _timestamp(lane.claim.get("claimed_at"))
         if claimed is None or claimed > clock:
             return result("unknown", "claim time unavailable")
-        if (
-            lane.dirty
-            and lane.task
-            and lane.task.get("status") == "in_progress"
-            and not lane.task.get("landing")
-            and clock - max([claimed, *lane.progress]) >= thresholds.stranded_after
-        ):
-            return result("stranded", "old claimed worktree has unlanded changes")
+        if _stranded(lane, clock, thresholds):
+            return result("stranded", "old in-progress task has unlanded work")
         return result("unknown", "no task-to-run join key for unmatched claim")
     return result("unknown", "insufficient lane evidence")
+
+
+def _stranded(lane: Lane, now: datetime, thresholds: Thresholds) -> bool:
+    if not lane.task or lane.task.get("status") != "in_progress" or lane.task.get("landing") or not lane.claim:
+        return False
+    claimed = _timestamp(lane.claim.get("claimed_at"))
+    if claimed is None or claimed > now:
+        return False
+    success = lane.terminal_status in runs_cmd._SUCCESS_STATUSES | {"completed", "complete"}
+    # A successful outcome proves stranding only with a usable finish time.
+    if not ((success and lane.terminal_at) or lane.dirty or lane.ahead):
+        return False
+    times = [claimed, *lane.progress]
+    if lane.terminal_at:
+        times.append(lane.terminal_at)
+    return now - max(times) >= thresholds.stranded_after

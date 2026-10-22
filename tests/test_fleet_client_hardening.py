@@ -647,3 +647,71 @@ def test_spool_lock_windows_bounded_success_unlocks(tmp_path, monkeypatch):
     with fleet_client._spool_lock(tmp_path / "node.jsonl", timeout=0):
         pass
     assert calls == [(windows.LK_NBLCK, 1), (windows.LK_UNLCK, 1)]
+
+
+_INSPECT_SETTINGS = {"node_id": "fake-node", "hub_url": "https://hub.example.invalid", "token": "fake-token"}
+
+
+def _inspect_with(monkeypatch, payload):
+    monkeypatch.setattr(fleet_client, "_post_claim_blocking", lambda url, token, body, *, timeout: (200, payload))
+    monkeypatch.setattr(fleet_client, "_run_with_deadline", lambda fn, **kw: fn())
+    return fleet_client.inspect_claim("fake-target", **_INSPECT_SETTINGS)
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        {"inspected": True},
+        *({"inspected": True, "claim": value} for value in ([], "", "x", True, False, 0, 1, [{"owner_node": "n"}])),
+        *(
+            {"inspected": True, "claim": claim}
+            for claim in ({}, {"target": "t"}, {"owner_node": None}, {"owner_node": 5}, {"owner_node": ""})
+        ),
+    ],
+)
+def test_malformed_inspect_response_is_retryable_hub_unavailable(monkeypatch, payload):
+    decision = _inspect_with(monkeypatch, payload)
+    assert decision.granted is False
+    assert decision.reason == "hub-unavailable"
+    assert decision.claim is None
+
+
+@pytest.mark.parametrize(
+    "owner_node",
+    ["unknown", " ", "bad id", "a\x00b", "a\x1fb", "a\x7fb", "node\n", "-lead", ".lead", "_lead", "x" * 129, "né"],
+)
+def test_invalid_inspect_owner_is_retryable_hub_unavailable(monkeypatch, owner_node):
+    decision = _inspect_with(monkeypatch, {"inspected": True, "claim": {"owner_node": owner_node}})
+    assert decision.granted is False
+    assert decision.reason == "hub-unavailable"
+    assert decision.claim is None
+
+
+@pytest.mark.parametrize("owner_node", ["a", "fake-node", "Node_1.x-2", "x" * 128])
+def test_valid_inspect_owner_is_granted(monkeypatch, owner_node):
+    claim = {"owner_node": owner_node}
+    decision = _inspect_with(monkeypatch, {"inspected": True, "claim": claim})
+    assert decision.granted is True and decision.reason == "ok"
+    assert decision.claim == claim
+
+
+@pytest.mark.parametrize(
+    "claim",
+    [None, {"owner_node": "other-node"}, {"owner_node": "fake-node"}, {"target": "t", "owner_node": "n"}],
+)
+def test_wellformed_inspect_response_is_granted(monkeypatch, claim):
+    decision = _inspect_with(monkeypatch, {"inspected": True, "claim": claim})
+    assert decision.granted is True and decision.reason == "ok"
+    assert decision.claim == claim
+
+
+def test_owned_inspect_response_passes_through_lock_run_dir_and_generation(monkeypatch):
+    claim = {"owner_node": "fake-node", "generation": 3}
+    decision = _inspect_with(
+        monkeypatch,
+        {"inspected": True, "claim": claim, "owned": True, "generation": 3, "lock_run_dir": "/fake/run"},
+    )
+    assert decision.granted is True and decision.reason == "ok"
+    assert decision.claim == claim
+    assert decision.lock_run_dir == "/fake/run"
+    assert decision.generation == 3

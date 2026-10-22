@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import argparse
 import sys
+import traceback
 
 from .. import __version__
 
@@ -241,16 +242,7 @@ def main(argv=None) -> int:
     parser = _build_parser()
     if not parse_argv:
         print(_START_HERE, file=sys.stderr)
-    try:
-        args = parser.parse_args(parse_argv)
-    except SystemExit as exc:
-        if exc.code:
-            from .. import bug_last_error
-
-            command = bug_last_error.command_path(parser, parse_argv)
-            if command != "bug report":
-                bug_last_error.record(command, 2)
-        raise
+    args = parser.parse_args(parse_argv)
     if engine_args is not None:
         args.engine_args = engine_args
 
@@ -268,7 +260,10 @@ def main(argv=None) -> int:
     try:
         exit_code = func(args)
     except SystemExit as exc:
-        if exc.code not in (None, 0) and command != "bug report":
+        usage_error = exc.code == 2 and any(
+            frame.f_code is argparse.ArgumentParser.error.__code__ for frame, _ in traceback.walk_tb(exc.__traceback__)
+        )
+        if exc.code not in (None, 0) and command != "bug report" and not usage_error:
             bug_last_error.record(command, exc.code if isinstance(exc.code, int) else 1, exc, args=args)
         raise
     except Exception as exc:
@@ -279,6 +274,9 @@ def main(argv=None) -> int:
         return exit_code
     if exit_code:
         bug_last_error.record(command, exit_code, args=args)
+    if args.command == "work" and args.work_command in {"presence-hook", "hook-run"}:
+        # Agent hooks must never print update notices or launch cache refreshes.
+        return exit_code
     try:
         from .. import update_notify
 

@@ -11,34 +11,38 @@ import stat
 import sys
 
 from . import fleet_client
+from .mcp_events import EVENT_ERROR_CODES
 
 ENV_TOKEN_FILE = "BRIGADE_FLEET_MESSAGE_TOKEN_FILE"
 _TOKEN_RE = re.compile(r"[A-Za-z0-9_-]{32,512}")
 
 
-MESSAGE_CODES = frozenset(
-    {
-        "message_recipient_not_permitted",
-        "message_sender_recipient_quota",
-        "message_recipient_quota",
-        "message_sender_quota",
-        "message_wait_capped",
-        "message_recipient_inactive",
-        "message_recipient_unknown",
-        "message_sender_inactive",
-        "message_not_found",
-        "message_timestamp_future",
-        "token_file_invalid",
-        "admin_token_refused",
-        "token_scope_changed",
-        "spool_conflict",
-        "client_id_invalid",
-        "invalid_argument",
-        "hub_unavailable",
-        "principal_enrollment_changed",
-        "principal_enrollment_revoked",
-        "principal_enrollment_grants_changed",
-    }
+MESSAGE_CODES = (
+    frozenset(
+        {
+            "message_recipient_not_permitted",
+            "message_sender_recipient_quota",
+            "message_recipient_quota",
+            "message_sender_quota",
+            "message_wait_capped",
+            "message_recipient_inactive",
+            "message_recipient_unknown",
+            "message_sender_inactive",
+            "message_not_found",
+            "message_timestamp_future",
+            "token_file_invalid",
+            "admin_token_refused",
+            "token_scope_changed",
+            "spool_conflict",
+            "client_id_invalid",
+            "invalid_argument",
+            "hub_unavailable",
+            "principal_enrollment_changed",
+            "principal_enrollment_revoked",
+            "principal_enrollment_grants_changed",
+        }
+    )
+    | EVENT_ERROR_CODES
 )
 
 

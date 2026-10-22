@@ -108,8 +108,91 @@ and back up `.brigade/memory/reflect/evidence-log.jsonl`. Manually quarantine th
 invalid line outside the log, or truncate an incomplete final line. Preserve
 valid rows, then rerun reflection before resuming writers. Rows with an unknown
 `kind` also require recovery or a Brigade version that supports that kind.
-Policy promotion, proposal creation, and model-authored changes are not available
-through these commands.
+Policy promotion and model-authored claim changes are not available through
+reflection. Reviewed proposal creation is available as described below.
+
+## Reviewed consolidation proposals
+
+`brigade memory reflect propose <candidate-id> --reason "Inspect cited support"`
+turns a retained reflection candidate into a `brigade.memory-proposal.v2`
+proposal. It checks every candidate base hash against its current card. The
+proposal records the reflect run id and candidate id. Creation writes a private
+proposal and review notification, leaving canonical cards untouched.
+
+The translator proposes evidence additions for supported stale or reinforcement
+candidates and exact duplicate merges. It refuses contrary evidence, unresolved
+near matches, and candidates that would require invented claim wording. Sources
+must share a configured card root and matching declared scope. Existing trust
+admission checks still apply. No proposal is automatically reviewed or applied.
+Candidate base hashes are rechecked under the proposal lock. Stale-evidence
+consolidations update `last_consolidated` from the newest cited pending evidence
+timestamp and derive `proof_count` from distinct resolved evidence ids.
+Machine reinforcement timestamps do not advance this consolidation timestamp.
+
+Use the existing decision path for both v1 and v2:
+
+```bash
+brigade memory proposal show <proposal-id> --json
+brigade memory proposal review <proposal-id> --digest <digest> --reason "Inspected every delta"
+brigade memory proposal reject <proposal-id> --digest <digest> --reason "Keep the current claims"
+brigade memory proposal apply <proposal-id> --digest <digest>
+```
+
+Review and rejection are alternative decisions. Rejection is terminal for that
+digest. Apply requires an exact accepted digest and rechecks source bytes,
+file modes, configuration, indexes, and cited evidence. A failed kernel write
+restores every changed card and index. A committed retry checks the retained
+receipt and after-state before returning `already-applied`.
+
+To introduce claim anchors, create a reviewed proposal for the selected card:
+
+```bash
+brigade memory proposal create --relation consolidate \
+  --source memory/cards/cache.md --anchor-blocks \
+  --reason "Add stable claim anchors for reviewed deltas"
+```
+
+Anchors use Obsidian syntax, for example `Keep the cache warm. ^c-123abc`.
+Paragraphs and individual bullets receive anchors. Headings, code fences,
+quoted blocks, tables, and `previously` history lines do not. An anchor belongs
+to its card and survives claim replacement. Removed ids remain reserved in
+`claim_anchor_ids` and are never minted again for that card. Each card permits
+at most 4096 reserved ids. Exhaustion refuses the proposal. Vault projection
+preserves anchors in the generated note body. Projection remains one-way and
+cannot authorize canonical edits.
+Evidence-only changes preserve existing trust and provenance. Anchor-only
+changes also preserve them and update envelope content hashes for the new bytes.
+Claim changes and duplicate merges derive reviewed provenance.
+
+V2 accepts one to eight distinct source cards through repeated `--source`
+options. Use `--ops-file <path>` for a bounded JSON list of typed operations.
+Every operation includes `type`, `card_path`, `block_id`, and
+`expected_block_hash`. The hash is SHA-256 of the exact UTF-8 block, including
+its ` ^c-<6hex>` suffix and internal line endings, without a final line ending.
+Operations are evaluated in order against the proposed state.
+
+| Type | Additional fields | Result |
+| --- | --- | --- |
+| `append_evidence` | `evidence_ids` list, optional `last_consolidated` | Add resolved, scan-clean evidence pointers and derive `proof_count`. A supplied timestamp must match the newest cited non-reinforcement evidence-log timestamp for the card. |
+| `replace_block` | `text` | Replace one claim, retain its anchor, and append a `previously X, now Y` history line. |
+| `remove_block` | None | Remove one claim, reserve its id, and append its previous wording to history. |
+| `add_previously` | `text` | Append a supplied previous wording to history. |
+| `supersede_card` | `other_card` | Mark the addressed card superseded by another retained source card. |
+| `merge_exact_duplicates` | `other_card` | Merge exact claims into the addressed card and remove the other source. |
+
+Replacement and history text must be a single unanchored paragraph or bullet.
+Exact duplicate comparison ignores block anchors and normalizes whitespace.
+Case and punctuation must match. Duplicate merges retain
+aliases, evidence, and anchor reservations. Supported Markdown index references
+are rewritten to the survivor. Unsupported or ambiguous removed-card references
+are refused.
+
+Unknown fields, unknown types, missing anchors, hash mismatches, unsafe text,
+and unresolved op evidence cause that op to be dropped. The proposal reports
+only the dropped index and a refusal reason. If all submitted ops are dropped,
+no proposal is saved, even if anchoring was requested. Other valid ops can still
+be proposed. The `diff` field is a deterministic unified diff of the exact
+before and after bytes. The proposal digest binds that preview and its inputs.
 
 ## Config
 

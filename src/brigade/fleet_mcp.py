@@ -303,17 +303,23 @@ def _tool_error(exc: Exception) -> dict[str, Any]:
 
 
 class FleetMcp:
-    def __init__(self, *, token_file: str | None = None) -> None:
+    def __init__(self, *, token_file: str | None = None, events: bool = False) -> None:
         self.token_file = token_file
+        self.events = events
 
     def callbacks(self) -> dict[str, Any]:
-        return {
+        callbacks: dict[str, Any] = {
             "server_name": "brigade-fleet",
             "list_resources": lambda: [],
             "read_resource": lambda _uri: (None, None),
             "list_tools": tool_specs,
             "call_tool": self.call,
         }
+        if self.events:
+            from .fleet_mcp_events import FleetEvents
+
+            callbacks["extension"] = FleetEvents(self._authority).extension()
+        return callbacks
 
     def call(self, name: str, arguments: dict[str, Any]) -> tuple[object, bool]:
         try:
@@ -407,9 +413,14 @@ class FleetMcp:
 
 
 def serve_mcp(
-    *, http: bool = False, host: str | None = None, port: int | None = None, token_file: str | None = None
+    *,
+    http: bool = False,
+    host: str | None = None,
+    port: int | None = None,
+    token_file: str | None = None,
+    events: bool = False,
 ) -> int:
-    callbacks = FleetMcp(token_file=token_file).callbacks()
+    callbacks = FleetMcp(token_file=token_file, events=events).callbacks()
     if http:
         return mcp_server.run_http_from_env(host=host, port=port, default_port=DEFAULT_PORT, **callbacks)
     if host is not None or port is not None:
@@ -430,8 +441,17 @@ def register(sub: argparse._SubParsersAction) -> None:
     parser.add_argument(
         "--principal-token-file", help="Protected message principal token file (same as msg --token-file)."
     )
+    parser.add_argument(
+        "--events",
+        action="store_true",
+        help="Serve MCP Events (events/list, events/subscribe, events/unsubscribe); the hub must enable them too.",
+    )
     parser.set_defaults(
         func=lambda args: serve_mcp(
-            http=args.http, host=args.host, port=args.port, token_file=args.principal_token_file
+            http=args.http,
+            host=args.host,
+            port=args.port,
+            token_file=args.principal_token_file,
+            events=args.events,
         )
     )
