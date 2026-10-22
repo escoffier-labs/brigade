@@ -754,6 +754,8 @@ def create_payload(*, target: Path, issue_id: str, survivor: str, relation: str,
     _refuse_read_only(care, [survivor, *issue["evidence_references"]])
     proposal_id = "proposal-" + uuid.uuid4().hex
     proposal = _compose(target, care, issue, binding, survivor, relation, reason, proposal_id)
+    # apply refuses every mutation path, index files included, so refuse them here too.
+    _refuse_read_only(care, [m["path"] for m in proposal["mutations"]])
     config_names = (
         brigade_config.CONFIG_REL_PATH,
         *[f"{d}/config.json" for d in brigade_config.LEGACY_WORKSPACE_DIRNAMES],
@@ -1108,8 +1110,6 @@ def apply_payload(*, target: Path, proposal_id: str, digest: str) -> dict[str, A
     target = _target(target)
     with _locked(target):
         proposal = _load(target, proposal_id, digest)
-        # Checked first so the operator sees the pattern, not a generic config drift error.
-        _refuse_read_only(memory_cmd._config_or_default(target), [m["path"] for m in proposal["mutations"]])
         _validate_owner(target, proposal)
         _require_accepted(target, proposal)
         receipt_path = _receipt_path(target, proposal)
@@ -1118,6 +1118,9 @@ def apply_payload(*, target: Path, proposal_id: str, digest: str) -> dict[str, A
         already = _already_applied(target, proposal)
         if already:
             return already
+        # After the replay check so a committed proposal stays idempotent, and before
+        # _validate_live so the operator sees the pattern, not a generic config drift error.
+        _refuse_read_only(memory_cmd._config_or_default(target), [m["path"] for m in proposal["mutations"]])
         _validate_live(target, proposal)
         operation_id = "memory-proposal-" + uuid.uuid4().hex
         domain = {

@@ -400,9 +400,17 @@ def _path_matches(path: str, patterns: tuple[str, ...]) -> bool:
     return False
 
 
+def _clean_relative(value: str) -> str:
+    """Normalize separators and drop leading ``./`` or ``/`` and trailing ``/``."""
+    clean = value.replace("\\", "/").strip()
+    while clean.startswith(("./", "/")):
+        clean = clean[2:] if clean.startswith("./") else clean[1:]
+    return clean.rstrip("/")
+
+
 def _glob_regex(pattern: str) -> re.Pattern[str]:
     """Translate a path glob: ``*`` and ``?`` stay inside one segment, ``**`` spans segments."""
-    clean = pattern.replace("\\", "/").strip().lstrip("/")
+    clean = _clean_relative(pattern)
     out: list[str] = []
     i = 0
     while i < len(clean):
@@ -431,8 +439,7 @@ def read_only_pattern(path: str, patterns: tuple[str, ...]) -> str | None:
     A pattern covers a path when the glob matches the whole relative path or any
     parent directory of it, so ``memory/cards/policy`` protects its descendants.
     """
-    normalized = path.replace("\\", "/").lstrip("/")
-    parts = normalized.split("/")
+    parts = _clean_relative(path).split("/")
     candidates = ["/".join(parts[: n + 1]) for n in range(len(parts))]
     for pattern in patterns:
         regex = _glob_regex(pattern)
@@ -441,10 +448,8 @@ def read_only_pattern(path: str, patterns: tuple[str, ...]) -> str | None:
     return None
 
 
-def _drop_read_only(target: Path, config: MemoryCareConfig, paths: list[Path]) -> list[Path]:
-    if not config.read_only_paths:
-        return paths
-    return [path for path in paths if read_only_pattern(str(path.relative_to(target)), config.read_only_paths) is None]
+def _is_read_only(config: MemoryCareConfig, rel: str) -> bool:
+    return bool(config.read_only_paths) and read_only_pattern(rel, config.read_only_paths) is not None
 
 
 def _iter_cards(target: Path, config: MemoryCareConfig) -> list[Path]:
@@ -645,7 +650,10 @@ def _issue(
 def _scan_payload(target: Path, config: MemoryCareConfig) -> dict[str, Any]:
     target = target.expanduser().resolve()
     today = _today()
-    cards = _drop_read_only(target, config, _iter_cards(target, config))
+    # Read-only cards still count toward identity and collision data so a normal
+    # card that copies a protected ID is flagged; only their own issues are dropped.
+    cards = _iter_cards(target, config)
+    read_only_card_count = 0
     linked = _index_links(target, config)
     linked_existing = {link for link in linked if (target / link).is_file()}
     issues: list[dict[str, Any]] = []
@@ -664,6 +672,9 @@ def _scan_payload(target: Path, config: MemoryCareConfig) -> dict[str, Any]:
         by_id.setdefault(card_id, []).append(rel)
         identities.append((rel, identity))
         identities_by_path[rel] = identity
+        if _is_read_only(config, rel):
+            read_only_card_count += 1
+            continue
         row = {
             "file": rel,
             "card_id": card_id,
@@ -862,6 +873,7 @@ def _scan_payload(target: Path, config: MemoryCareConfig) -> dict[str, Any]:
                     )
                 )
 
+    issues = [issue for issue in issues if not _is_read_only(config, str(issue.get("file") or ""))]
     for issue in issues:
         issue_identity = identities_by_path.get(str(issue.get("card_file") or ""))
         if issue_identity is not None:
@@ -902,6 +914,7 @@ def _scan_payload(target: Path, config: MemoryCareConfig) -> dict[str, Any]:
         "generated_at": _utc_iso(),
         "scan_date": today.isoformat(),
         "card_count": len(cards),
+        "read_only_card_count": read_only_card_count,
         "issue_count": len(issues),
         "refresh_queue_size": len(issues),
         "counts": dict(sorted(counts.items())),
@@ -1386,7 +1399,8 @@ def _backfill_candidates(target: Path, config: MemoryCareConfig) -> tuple[list[d
 
     claimed_ids: IdentityIndex[str] = IdentityIndex()
     pending: list[tuple[Path, str, str, dict[str, Any]]] = []
-    for path in _drop_read_only(target, config, _iter_cards(target, config)):
+    # Every card claims its explicit ID so minting never reuses a read-only card's ID.
+    for path in _iter_cards(target, config):
         rel = str(path.relative_to(target))
         try:
             text = read_text_nofollow(path)
@@ -1399,7 +1413,8 @@ def _backfill_candidates(target: Path, config: MemoryCareConfig) -> tuple[list[d
         identity = card_identity(meta, rel)
         if identity.explicit:
             claimed_ids.claim(identity.card_id, rel)
-        pending.append((path, rel, text, meta))
+        if not _is_read_only(config, rel):
+            pending.append((path, rel, text, meta))
 
     for path, rel, text, meta in pending:
         reviewed = _parse_date(_frontmatter_value(meta, "last_reviewed", "last_reviewed_at", "reviewed_at"))

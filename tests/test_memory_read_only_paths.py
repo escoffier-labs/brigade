@@ -72,6 +72,10 @@ def test_init_template_round_trips_read_only_paths(tmp_path):
         ("memory/cards/other.md", ("memory/cards/policy/**", "nothing"), None),
         ("memory/cards/other.md", (), None),
         ("memory\\cards\\policy\\x.md", ("memory/cards/policy/**",), "memory/cards/policy/**"),
+        ("memory/cards/policy/rules.md", ("memory/cards/policy/",), "memory/cards/policy/"),
+        ("memory/cards/policy/rules.md", ("./memory/cards/policy",), "./memory/cards/policy"),
+        ("./memory/cards/policy/rules.md", ("memory/cards/policy/**",), "memory/cards/policy/**"),
+        ("memory/cards/policy/rules.md", ("./memory/cards/policy/",), "./memory/cards/policy/"),
     ],
 )
 def test_read_only_pattern_matching(path, patterns, expected):
@@ -90,10 +94,31 @@ def test_scan_skips_read_only_cards(tmp_path):
     assert all(row["file"] != POLICY for row in payload["cards"])
 
 
-def test_search_and_listing_still_see_read_only_cards(tmp_path):
+def test_search_still_finds_read_only_cards(tmp_path):
     _card(tmp_path / POLICY, "policy")
+    _write_config(tmp_path, "memory/cards/policy/**")
+    payload = memory_cmd.search_cards_payload(tmp_path, "policy")
+    assert [match["path"] for match in payload["matches"]] == [POLICY]
+
+
+def test_scan_reports_duplicate_id_on_the_normal_card(tmp_path):
+    _card(tmp_path / POLICY, "shared")
+    _card(tmp_path / "memory/cards/normal.md", "shared")
     config = memory_cmd.MemoryCareConfig(read_only_paths=("memory/cards/policy/**",))
-    assert tmp_path / POLICY in memory_cmd._iter_cards(tmp_path, config)
+    payload = memory_cmd._scan_payload(tmp_path, config)
+    contradictory = [issue for issue in payload["issues"] if issue["issue_type"] == "contradictory"]
+    assert {issue["file"] for issue in contradictory} == {"memory/cards/normal.md"}
+    assert all(issue["file"] != POLICY for issue in payload["issues"])
+    assert "shared" in payload["identity_collisions"]
+    assert payload["card_count"] == 2
+    assert payload["read_only_card_count"] == 1
+
+
+def test_scan_reports_zero_read_only_cards_by_default(tmp_path):
+    _card(tmp_path / POLICY, "policy")
+    payload = memory_cmd._scan_payload(tmp_path, memory_cmd.MemoryCareConfig())
+    assert payload["card_count"] == 1
+    assert payload["read_only_card_count"] == 0
 
 
 def test_plan_skips_read_only_cards_from_a_stale_scan(tmp_path, monkeypatch, capsys):
@@ -119,6 +144,34 @@ def test_backfill_skips_read_only_cards(tmp_path, capsys):
     capsys.readouterr()
     assert (tmp_path / POLICY).read_text() == before
     assert "last_reviewed" in (tmp_path / "memory/cards/normal.md").read_text()
+
+
+def test_backfill_refuses_alias_collision_with_a_read_only_card(tmp_path, capsys):
+    _card(tmp_path / POLICY, "shared")
+    _card(tmp_path / "memory/cards/normal.md", "shared")
+    before = (tmp_path / "memory/cards/normal.md").read_text()
+    _write_config(tmp_path, "memory/cards/policy/**")
+    assert memory_cmd.backfill(target=tmp_path, apply=True, json_output=True) == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert "identity alias collisions" in payload["error"]
+    assert (tmp_path / "memory/cards/normal.md").read_text() == before
+
+
+def test_backfill_never_mints_an_id_a_read_only_card_already_claims(tmp_path, capsys):
+    from brigade.card_identity import mint_stable_card_id
+
+    normal = "memory/cards/normal.md"
+    taken = mint_stable_card_id(f"path:{normal}")
+    _card(tmp_path / POLICY, "policy")
+    policy = tmp_path / POLICY
+    policy.write_text(policy.read_text().replace("topic: policy", f"id: {taken}\ntopic: policy"))
+    _card(tmp_path / normal, "normal")
+    _write_config(tmp_path, "memory/cards/policy/**")
+    assert memory_cmd.backfill(target=tmp_path, apply=False, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    minted = {row["path"]: row["new_id"] for row in payload["identity_receipt"]["mappings"]}
+    assert POLICY not in minted
+    assert minted[normal] and minted[normal] != taken
 
 
 def test_status_and_doctor_list_active_patterns(tmp_path, capsys):
@@ -180,3 +233,34 @@ def test_proposals_unaffected_without_matching_patterns(api, tmp_path):
     _write_config(tmp_path, "memory/cards/policy/**")
     proposal = accepted(api, owner)
     assert apply(api, owner, proposal)["status"] == "committed"
+
+
+@pytestmark_proposals
+def test_create_refuses_when_an_index_mutation_is_read_only(api, tmp_path):
+    owner = (tmp_path, pair_target(tmp_path))
+    _write_config(tmp_path, "MEMORY.md")
+    with pytest.raises(api.ProposalError, match=r"MEMORY\.md is read-only.*read_only_paths pattern MEMORY\.md"):
+        create(api, owner)
+
+
+@pytestmark_proposals
+def test_reapply_returns_the_receipt_after_a_pattern_is_added(api, tmp_path):
+    owner = (tmp_path, pair_target(tmp_path))
+    proposal = accepted(api, owner)
+    first = apply(api, owner, proposal)
+    assert first["status"] == "committed"
+    _write_config(tmp_path, "memory/cards/*.md")
+    replay = apply(api, owner, proposal)
+    assert replay["status"] == "already-applied"
+    assert replay["operation_id"] == first["operation_id"]
+
+
+@pytestmark_proposals
+def test_adding_an_unrelated_pattern_while_pending_is_config_drift(api, tmp_path):
+    owner = (tmp_path, pair_target(tmp_path))
+    proposal = accepted(api, owner)
+    snapshot = {name: (tmp_path / name).read_bytes() for name in (SURVIVOR, LOSER, "MEMORY.md")}
+    _write_config(tmp_path, "memory/cards/policy/**")
+    with pytest.raises(api.ProposalError, match="config drift"):
+        apply(api, owner, proposal)
+    assert {name: (tmp_path / name).read_bytes() for name in snapshot} == snapshot
