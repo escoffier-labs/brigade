@@ -539,6 +539,10 @@ class MissingLeakShapeTests(unittest.TestCase):
         for text in (
             "https://db.home/path",  # content-guard: allow private-hostname
             '"https://db.home/path"',  # content-guard: allow private-hostname
+            # An f-string or brace elsewhere on the line must not hide the URL host.
+            'print(f"x"); cfg = {"url": "https://db.home/x"}',  # content-guard: allow private-hostname
+            'requests.get(f"{base}/x", json={"cb": "https://db.home/cb"})',  # content-guard: allow private-hostname
+            '{"f": 1, "cfg": {"url": "https://db.home/x"}}',  # content-guard: allow private-hostname
         ):
             with self.subTest(text=text):
                 self.assertIn("private-hostname", {f.rule_id for f in scan_text(text).findings})

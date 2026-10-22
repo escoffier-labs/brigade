@@ -261,8 +261,10 @@ def _hostname_context(text: str, start: int, end: int) -> bool:
     before, after = line[:column], line[column + end - start :]
     # Interpolated member expressions stay code-shaped even inside a URL
     # context: an f-string prefix with an open brace introduces an expression,
-    # so reject it before accepting a URL or a surrounding quote (#1918).
-    if re.search(r"\bf[\"'][^\n]*\{[^}]*$", before, re.IGNORECASE):
+    # so reject it before accepting a URL or a surrounding quote (#1918). The
+    # brace must sit inside that same literal, so an earlier f-string or dict
+    # elsewhere on the line cannot hide a later URL host.
+    if re.search(r"\bf([\"'])(?:(?!\1)[^\n])*\{[^}]*$", before, re.IGNORECASE):
         return False
     if re.search(r"[a-z][a-z0-9+.-]*://[^\s]*$", before, re.IGNORECASE):
         return True
