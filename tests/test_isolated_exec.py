@@ -67,3 +67,17 @@ def test_module_argv_runs_exact_package_without_ambient_imports(tmp_path, monkey
     assert not Path(payload["platform"]).is_relative_to(installed)
     assert isolated_exec.module_argv("brigade", python="renderer-python")[0] == "renderer-python"
     assert isolated_exec.trusted_cwd() == Path(isolated_exec.__file__).resolve().parent
+
+
+@pytest.mark.parametrize("missing", ["file", "directory"])
+def test_bootstrap_reports_unloadable_initializer_with_exit_78(tmp_path, missing):
+    from brigade import isolated_exec
+
+    initializer = tmp_path / "brigade" / "__init__.py"
+    if missing == "directory":
+        initializer.mkdir(parents=True)
+    argv = isolated_exec.package_argv(initializer, "brigade.nothing")
+    result = subprocess.run(argv, capture_output=True, text=True, cwd=tmp_path, check=False)
+    assert result.returncode == 78
+    assert "brigade:cannot-load:" in result.stderr
+    assert "Traceback" not in result.stderr

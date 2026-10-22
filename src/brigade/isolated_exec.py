@@ -10,7 +10,8 @@ from pathlib import Path
 _BOOTSTRAP = (
     "import importlib.util as u,os,pathlib as p,runpy as r,sys as s;"
     "i,m=s.argv.pop(1),s.argv.pop(1);"
-    "f=u.spec_from_file_location(m.partition('.')[0],i);"
+    "f=p.Path(i).is_file() and u.spec_from_file_location(m.partition('.')[0],i);"
+    "f and f.loader or (s.stderr.write('brigade:cannot-load:'+i+'\\n'),s.exit(78));"
     "d=p.Path(f.origin).resolve().parent;os.chdir(d);s.path.append(str(d.parent));"
     "q=u.module_from_spec(f);s.modules[f.name]=q;f.loader.exec_module(q);"
 )
