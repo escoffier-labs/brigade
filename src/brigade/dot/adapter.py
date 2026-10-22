@@ -156,7 +156,15 @@ class DotTools:
             dispatch_enabled=self.runtime.dispatch_enabled,
             events_enabled=self.runtime.events_enabled,
             tools=sorted(self.profile.tools),
-            dispatch_gated_tools=sorted(GATED_TOOLS),
+            # With an explicit messaging_enabled, message_send has its own gate and is not dispatch-gated.
+            dispatch_gated_tools=sorted(
+                GATED_TOOLS if self.runtime.messaging_enabled is None else DISPATCH_GATED_TOOLS
+            ),
+            messaging_enabled=(
+                self.runtime.dispatch_enabled
+                if self.runtime.messaging_enabled is None
+                else self.runtime.messaging_enabled
+            ),
             fleet=dict(
                 submit=(
                     "fleet_submit needs repository (t3-fleet alias), title, prompt. Call fleet_capacity "

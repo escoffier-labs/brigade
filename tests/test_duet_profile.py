@@ -340,6 +340,9 @@ class DotMessagingWithoutDispatch(Fixture):
         self.assertIn("id", self.call("message_send", to="review", subject="subject", body="body"))
         with self.assertRaisesRegex(DotError, "^dispatch_disabled$"):
             self.call("fleet_submit", repository="brigade", title="t", prompt="p", host="alpha", seat="sol61")
+        capabilities = self.call("dot_t3_capabilities")
+        self.assertTrue(capabilities["messaging_enabled"])
+        self.assertNotIn("message_send", capabilities["dispatch_gated_tools"])
 
     @requires_local_state
     def test_dot_messaging_off_with_dispatch_on(self):
@@ -347,6 +350,18 @@ class DotMessagingWithoutDispatch(Fixture):
         self.adapter = self.make_adapter(True)
         with self.assertRaisesRegex(DotError, "^messaging_disabled$"):
             self.call("message_send", to="review", subject="subject", body="body")
+        capabilities = self.call("dot_t3_capabilities")
+        self.assertFalse(capabilities["messaging_enabled"])
+        self.assertNotIn("message_send", capabilities["dispatch_gated_tools"])
+
+    @requires_local_state
+    def test_dot_messaging_without_override_follows_dispatch(self):
+        for dispatch in (False, True):
+            with self.subTest(dispatch=dispatch):
+                self.adapter = self.make_adapter(dispatch)
+                capabilities = self.call("dot_t3_capabilities")
+                self.assertEqual(capabilities["messaging_enabled"], dispatch)
+                self.assertIn("message_send", capabilities["dispatch_gated_tools"])
 
 
 @requires_local_state
