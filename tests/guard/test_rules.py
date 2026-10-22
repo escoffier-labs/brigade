@@ -421,6 +421,11 @@ class MissingLeakShapeTests(unittest.TestCase):
 
     def test_worklore_provider_short_prefixes_and_embedded_tokens_do_not_match(self) -> None:
         for text in (
+            "AsiaPacificCustomers",
+            "ASIA" + "a" * 16,
+            "asia" + "A" * 16,
+            "aiza" + "a" * 30,
+            "GLPAT-" + "a" * 16,
             "ASIAEXAMPLE",
             "ASIA" + "A" * 15,
             "ASIA" + "A" * 17,
