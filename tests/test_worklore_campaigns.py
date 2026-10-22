@@ -220,7 +220,9 @@ def test_member_projects_execution_link_separately_from_brigade_task(tmp_path):
             (run_id,),
         )
         conn.commit()
-        store.link_execution(conn, work_id, node_id="node-a", run_id=run_id, actor_id="node-a")
+        store.link_execution(
+            conn, work_id, node_id="node-a", run_id=run_id, actor_id="admin", actor_type="operator", is_admin=True
+        )
     member = campaigns.show_campaign(conn, "camp-1")["members"][0]
     assert member["fleet_run"] == {"display_ref": "node-a/run-2", "url": None, "external_state": None}
     assert member["brigade"] is None
@@ -335,11 +337,11 @@ def test_v39_database_upgrades_to_v40_with_campaign_tables(tmp_path):
     conn.execute("PRAGMA user_version=39")
     conn.commit()
     conn.close()
-    assert fleet_hub.SCHEMA_VERSION == 40
+    assert fleet_hub.SCHEMA_VERSION == 42
     migrated = fleet_hub.init_db(db)
     tables = {row[0] for row in migrated.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"work_campaigns", "work_campaign_members"} <= tables
-    assert migrated.execute("PRAGMA user_version").fetchone()[0] == 40
+    assert migrated.execute("PRAGMA user_version").fetchone()[0] == 42
     migrated.close()
 
 

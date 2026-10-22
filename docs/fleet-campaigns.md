@@ -1,8 +1,9 @@
 # Fleet campaigns on the Hub
 
 A campaign runs one task across a set of repositories as a single tracked unit.
-Slice 1 of #1128 adds membership and a rollup. It launches nothing: no run, claim,
-lease or dispatch is created, and no member changes state because a campaign exists.
+Slices 1 and 2 of #1128 add membership, a rollup, and bounded member ownership.
+Campaign creation launches nothing. An explicit node take grants ownership without
+changing item status or recording an attempt.
 
 Campaigns need the Worklore feature gate on the Hub, as `brigade fleet work` does.
 
@@ -34,7 +35,7 @@ combined spec it was created from.
 ```
 brigade fleet campaign create --campaign-id KEY --title TEXT \
   --acceptance TEXT [--acceptance TEXT ...] \
-  [--description-file PATH] [--overrides PATH] [--repos ID,ID] \
+  [--description-file PATH] [--overrides PATH] [--offer-file PATH] [--repos ID,ID] \
   [--priority P] [--target DIR] [--dry-run] [--json]
 ```
 
@@ -45,7 +46,9 @@ JSON object that maps a `repos.toml` id to override text. An unknown id is refus
 
 `--dry-run` writes nothing. It prints the request it would send and, when a Hub is
 configured, makes one read to mark which members already exist and whether the spec
-would be refused. A failed read is reported in the output.
+or immutable offer would be refused. JSON reports `spec_changed` and `offer_changed`.
+Text names `campaign-spec-changed` and `campaign-offer-conflict` independently when
+both differ. A failed read or unreadable stored offer is reported as unchecked.
 
 ## Idempotency
 
@@ -113,3 +116,128 @@ Each member falls in exactly one bucket, checked in this order:
 | `unowned` | Everything else. |
 
 A campaign is `done` when every member is completed, canceled or archived.
+
+
+## Authorization offer
+
+`--offer-file` supplies a bounded JSON object. The Hub records it as an immutable
+`campaign-offered` event on the campaign item, in the same transaction as creation:
+
+```json
+{
+  "allowed_nodes": ["node-a", "node-b"],
+  "per_node_concurrency": 1,
+  "attempt_budget": {"cap": 2, "source_ref": "budget-1"},
+  "authorization_ref": "grant-1",
+  "exclusions": ["acme/excluded"],
+  "lease_seconds": 300
+}
+```
+
+The HTTP create body uses the same object under `offer`. All fields except
+`lease_seconds` are required. Allowed nodes must be distinct enrolled-node identifiers
+(1 to 32 entries). Enrollment is checked at take time, so an offer can name a node
+before it enrolls. Per-node concurrency is 1 to 32 and applies within this campaign.
+The attempt cap is 1 to 100000, and assignment uses the lower of that cap and the
+Worklore attempt limit (2), per member. Exclusions are exact canonical repository
+identities (up to 32), normalized like member identities. They are never globs or
+free-form instructions. Authorization and budget references use the existing bounded
+ownership reference format. Lease duration is 1 to 3600 seconds, default 300.
+
+A campaign without an offer refuses self-assignment, including campaigns created
+before slice 2. An operator can attach an offer by repeating create with the same
+spec and an explicit offer. Repeating an identical offer writes no new authorization
+event. A different offer is refused with `campaign-offer-conflict` (409), including
+any new members in that request. Omitting the offer preserves existing authorization.
+This slice provides no offer editing or lease renewal. Cancel or block the campaign
+to stop new takes and new holder progress. A holder can still release it.
+
+The offer is included in campaign list/show JSON. `GET /work/items/<member-work-id>`
+includes `item.campaign` with `campaign_key`, the campaign `work_id`, and the member's
+canonical `repo`. This backlink is derived from membership for old and new items.
+
+## Take a member
+
+An enrolled node explicitly takes a known member through the existing ownership API:
+
+```python
+from brigade import worklore_client
+
+nonce = worklore_client.new_ownership_nonce()  # Retain privately for this grant.
+grant = worklore_client.ownership_action(
+    member_work_id,
+    {"action": "take", "generation": observed_generation},
+    if_match=observed_ownership_revision,
+    idempotency_key="take-request-1",
+    holder_nonce=nonce,
+)
+```
+
+This sends `POST /work/items/<member-work-id>/ownership`, with `If-Match`,
+`Idempotency-Key`, and `X-Worklore-Holder`. Identity comes from the authenticated node
+bearer. The Hub admin bearer cannot take ownership, and the body accepts no node id.
+Read the current generation and ownership revision with `get_ownership` first.
+The ownership revision is independent of the work-item version.
+
+The Hub checks campaign authorization, member eligibility, the node's occupied slots,
+and the ownership grant under one `BEGIN IMMEDIATE`. It rejects excluded repositories,
+terminal/blocked/deferred campaigns, terminal/blocked/deferred/in-flight members,
+specification drift, future review dates, blockers, exhausted attempts, and nodes
+outside the offer. A fresh member can be captured or ready. A claimed or running
+member can be reclaimed only after its previous campaign grant expires and while
+its attempts remain under the limit. Verifying members wait on their gate.
+
+A successful take appends `ownership-taken` with a new generation, the authorization
+event reference, copied offer bounds, authenticated owner, and `expires_at`. The holder
+capability stays header-only and is stored only as a digest. A node cannot bypass the
+campaign offer through the older per-item offer, accept, or handoff actions. Existing
+noncampaign ownership keeps that protocol. Checkpoints must name the member's
+canonical repository and still pass path admission.
+
+The idempotency key belongs to the authenticated node. An exact replay returns the
+original grant, even at the concurrency cap, without a new event, slot, generation,
+attempt, or deadline. Reusing the key for a different member, revision, body, or nonce
+is refused. A revoked node cannot replay. A historical reply carries its original
+generation and deadline, so it cannot restore authority after expiry or reclaim.
+
+Expired campaign grants cease to occupy a slot. A new take needs the current revision,
+generation, and a fresh nonce. It fences the old holder and clears the previous
+checkpoint scope and report. Before reclaim, expired checkpoint/report writes are
+already refused. Release remains generation- and capability-checked. Legacy grants
+without a campaign deadline never expire implicitly. Their holders must release them
+(or an operator must withdraw an outstanding legacy offer) before take can succeed.
+
+The deadline fences the Hub ownership protocol. It does not kill a process or replace
+physical checkout locks. Path reservations remain conservative until a release or
+reclaim clears them. No node consumer, process launch, cloud lease, completion gate,
+or automatic selection loop is added by this slice. The request body limit remains
+256 KiB.
+
+## Campaign execution and attempt writes
+
+New node writes to `/work/items/<id>/execution` and `/attempts` require both
+`X-Worklore-Holder` and `X-Worklore-Generation` for the current unexpired grant.
+The Python client's `link_execution` and `record_attempt` accept the corresponding
+`holder_nonce` and `generation` keyword arguments. Attempt requests still use the
+item version in `If-Match`. These checks run inside each existing write transaction.
+New execution events bind the run to that grant's generation, nonce digest, and
+authorization event. An old run cannot spend a reclaimed grant's attempt budget,
+even when the same node becomes holder again. Use a new run for the new grant.
+Cancellation, expiry, reclaim, or an exhausted budget prevents new node writes.
+A historical own-run replay can return its existing record without adding events,
+links, or attempt counts. It cannot rebind the run or restore authority.
+After the 50-link retention window evicts a campaign execution, relinking returns
+`link-conflict`, even for its original grant or an admin or operator observation.
+The immutable execution history reserves that node/run identity across generations
+and work items, including noncampaign destinations. A campaign member also refuses
+relinking unbound legacy execution history, which carries no authenticated grant.
+Retained unbound observations remain inert replays and cannot authorize node attempts.
+Ordinary noncampaign runs with only unbound history keep their existing relink behavior.
+
+Admin and configured operator observations use their existing explicit trusted
+authority, including recording failures or resetting attempts after cancellation.
+An operator's execution observation does not grant a node holder capability.
+Only the admin can observe another node's run. Noncampaign execution and attempt
+behavior is unchanged. Explicit campaign reservation recovery requires the
+acknowledged physical quiescence and audited operator action documented in
+[ownership recovery](worklore-ownership.md#capacity-and-recovery).

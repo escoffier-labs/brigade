@@ -175,6 +175,7 @@ def _request(
     timeout: float = REQUEST_TIMEOUT_SECONDS,
     idempotency_key: str | None = None,
     holder_nonce: str | None = None,
+    generation: object = None,
 ) -> dict[str, Any]:
     url = _hub_url() + path
     if query:
@@ -188,6 +189,8 @@ def _request(
         headers["If-Match"] = str(if_match)
     if idempotency_key is not None and str(idempotency_key) != "":
         headers["Idempotency-Key"] = str(idempotency_key)
+    if generation is not None:
+        headers["X-Worklore-Generation"] = str(generation)
     if holder_nonce is not None:
         # Only this fixed capability header is accepted, never arbitrary headers.
         from .worklore_ownership import nonce_hash
@@ -456,13 +459,22 @@ def transition(work_id: str, body: Mapping[str, Any], *, if_match: object = None
     )
 
 
-def record_attempt(work_id: str, body: Mapping[str, Any], *, if_match: object = None) -> dict[str, Any]:
+def record_attempt(
+    work_id: str,
+    body: Mapping[str, Any],
+    *,
+    if_match: object = None,
+    generation: object = None,
+    holder_nonce: str | None = None,
+) -> dict[str, Any]:
     return _request(
         "POST",
         _item_path(work_id, "attempts"),
         token=_token(admin=False),
         body=body,
         if_match=if_match,
+        generation=generation,
+        holder_nonce=holder_nonce,
     )
 
 
@@ -489,10 +501,18 @@ def import_batch(payload: Mapping[str, Any]) -> dict[str, Any]:
     )
 
 
-def link_execution(work_id: str, body: Mapping[str, Any]) -> dict[str, Any]:
+def link_execution(
+    work_id: str,
+    body: Mapping[str, Any],
+    *,
+    generation: object = None,
+    holder_nonce: str | None = None,
+) -> dict[str, Any]:
     return _request(
         "POST",
         _item_path(work_id, "execution"),
         token=_token(admin=False),
         body=body,
+        generation=generation,
+        holder_nonce=holder_nonce,
     )

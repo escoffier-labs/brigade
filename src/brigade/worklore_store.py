@@ -350,6 +350,8 @@ _INDEX_STATEMENTS = (
     "CREATE INDEX IF NOT EXISTS work_items_burn ON work_items (burn_eligible)",
     "CREATE INDEX IF NOT EXISTS work_items_ready_at ON work_items (ready_at)",
     "CREATE INDEX IF NOT EXISTS work_events_work_id ON work_events (work_id)",
+    # Cover take's cross-item event-key probe without scanning the event history.
+    "CREATE INDEX IF NOT EXISTS work_events_event_work ON work_events (event_id, work_id)",
     "CREATE INDEX IF NOT EXISTS work_events_seq ON work_events (seq)",
     "CREATE INDEX IF NOT EXISTS work_events_work_seq ON work_events (work_id, seq)",
     "CREATE INDEX IF NOT EXISTS work_links_external ON work_links (link_type, external_key)",
@@ -379,6 +381,10 @@ _INDEX_STATEMENTS = (
     # appending. A separate identity index makes authenticated retry probes constant-time.
     "CREATE INDEX IF NOT EXISTS work_events_attempt_work_seq ON work_events (work_id, event_type, seq)",
     "CREATE INDEX IF NOT EXISTS work_events_attempt_identity ON work_events (work_id, event_type, node_id, run_id)",
+    # A retained link may disappear; execution history must reserve campaign run
+    # identities globally without scanning other items under the write fence.
+    "CREATE INDEX IF NOT EXISTS work_events_execution_identity ON work_events (node_id, run_id) "
+    "WHERE event_type = 'execution-linked'",
     # The item page orders by (created_at, work_id) and the sprint log by (occurred_at DESC,
     # seq DESC). Both are the keyset the cursor walks, so an index in exactly that order lets
     # a page read its rows straight out of the index instead of sorting the whole table.

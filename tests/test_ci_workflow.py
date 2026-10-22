@@ -1571,6 +1571,7 @@ def test_ci_migration_preserves_existing_job_names_and_hosted_routing():
         "trusted-runner-canary",
         "ci-gate",
         "windows-affected-tests",
+        "pr-tier-shadow",
     }
     for job, name in EXISTING_CI_JOBS.items():
         section = _workflow_job_section(text, job)

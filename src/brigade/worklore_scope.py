@@ -80,6 +80,7 @@ def admit_checkpoint(
         ownership.EVENT_TYPES[action]: (action, state)
         for action, state in (
             ("accept", "owned"),
+            ("take", "owned"),
             ("checkpoint", "owned"),
             ("report", "owned"),
             ("handoff", "handoff-pending"),
