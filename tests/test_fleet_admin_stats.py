@@ -234,7 +234,9 @@ def test_page_unknown_partial_privacy_and_docs():
     for text in ("unknown", "partial", "active sources, not people or installs", "Solomon Neas", "erasure", "below 5"):
         assert text in html
     assert 'href="https://github.com/escoffier-labs/brigade/blob/main/SECURITY.md"' in html
-    assert set(re.findall(r'data-field="([^"]+)"', html)) == set(stats.FIELD_PATHS)
+    assert set(re.findall(r'data-field="([^"]+)"', html)) == {
+        field for field in stats.FIELD_PATHS if not field.startswith("cloudflare")
+    }
     for doc in ("docs/technical-guide.md", "docs/fleet-sync.md"):
         listed = Path(doc).read_text().split("expose these fields:\n\n", 1)[1].split("\n\n", 1)[0]
         assert set(re.findall(r"`([^`]+)`", listed)) == set(stats.FIELD_PATHS)
@@ -282,6 +284,31 @@ def test_cloudflare_panel_shows_fixture_and_hides_stale_values():
     assert 'data-field="cloudflare.credential">unknown</span>' in stale
     assert "credential unavailable" not in stale
     assert 'data-field="cloudflare.worker_version">unknown</span>' in stale
+
+
+def test_cloudflare_panel_is_hidden_without_an_observation():
+    from brigade import fleet_admin_stats_page as page
+
+    html = page.render({"latest": snapshot(), "weeks": []}, nonce="example", now=NOW)
+    assert 'data-field="cloudflare"' not in html
+
+    opted_out = {
+        "collected_at": "2026-10-20T11:00:00Z",
+        "credential": "available",
+        "worker_version": "example-version",
+        "worker_published_at": None,
+        "repository_head": None,
+        "d1_rows": 120,
+        "last_purge": None,
+        "requests_24h": 840,
+        "errors_24h": 2,
+    }
+    html = page.render(
+        {"latest": snapshot(), "cloudflare": opted_out, "cloudflare_enabled": False, "weeks": []},
+        nonce="example",
+        now=NOW,
+    )
+    assert 'data-field="cloudflare"' not in html
 
 
 def test_cloudflare_snapshot_rejects_unapproved_fields():
@@ -514,6 +541,61 @@ def test_daily_compaction_prefers_coverage_over_recency(tmp_path, sources):
     stats.store(conn, fewer, now=NOW + timedelta(hours=1))
     assert stats.load_view(conn, now=NOW)["latest"] == full
     assert conn.execute("SELECT COUNT(*) FROM admin_stats_snapshots").fetchone()[0] == 1
+    conn.close()
+
+
+def test_daily_compaction_preserves_latest_cloudflare_observation(tmp_path):
+    from datetime import timedelta
+    from brigade import fleet_admin_stats as stats
+
+    conn = fleet_hub.init_db(tmp_path / "hub.db")
+    full = stats.snapshot(
+        taken_at=NOW,
+        source_set=["d1", "worker", "downloads"],
+        weeks=[],
+        daily=[],
+        downloads={"pypi": 12, "npm": 5},
+    )
+    collected = NOW + timedelta(hours=1)
+    cloudflare = {
+        "collected_at": collected.strftime("%Y-%m-%dT%H:%M:%SZ"),
+        "credential": "available",
+        "worker_version": "example-version",
+        "worker_published_at": None,
+        "repository_head": None,
+        "d1_rows": 120,
+        "last_purge": None,
+        "requests_24h": 840,
+        "errors_24h": 2,
+    }
+    partial = stats.snapshot(
+        taken_at=collected,
+        source_set=["d1", "cloudflare"],
+        weeks=[],
+        daily=[],
+        downloads={"pypi": None, "npm": None},
+        cloudflare=cloudflare,
+    )
+    stats.store(conn, full, now=NOW)
+    stats.store(conn, partial, now=collected)
+
+    view = stats.load_view(conn, now=collected)
+    assert view["latest"] == full
+    assert view["cloudflare"] == cloudflare
+    assert view["cloudflare_enabled"] is True
+    assert conn.execute("SELECT COUNT(*) FROM admin_stats_snapshots").fetchone()[0] == 2
+
+    opted_out = stats.snapshot(
+        taken_at=collected + timedelta(hours=1),
+        source_set=["d1", "worker", "downloads"],
+        weeks=[],
+        daily=[],
+        downloads={"pypi": 15, "npm": 7},
+    )
+    stats.store(conn, opted_out, now=collected + timedelta(hours=1))
+    view = stats.load_view(conn, now=collected + timedelta(hours=1))
+    assert view["cloudflare"] == cloudflare
+    assert view["cloudflare_enabled"] is False
     conn.close()
 
 

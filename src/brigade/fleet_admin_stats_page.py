@@ -15,7 +15,8 @@ def _number(value: Any, field: str) -> str:
 
 def render(view: dict[str, Any], *, nonce: str, now: datetime) -> str:
     latest = view["latest"]
-    cloudflare = latest.get("cloudflare") if latest else None
+    cloudflare = view.get("cloudflare") if "cloudflare" in view else latest.get("cloudflare") if latest else None
+    show_cloudflare = view.get("cloudflare_enabled", cloudflare is not None)
     stale = False
     if cloudflare:
         collected_at = datetime.strptime(cloudflare["collected_at"], "%Y-%m-%dT%H:%M:%SZ").replace(tzinfo=timezone.utc)
@@ -75,26 +76,29 @@ def render(view: dict[str, Any], *, nonce: str, now: datetime) -> str:
                 body += "</p>"
             body += "<p>other (suppressed): unknown</p></div>"
         body += "</article>"
-    body += '</section><section class="panel" data-field="cloudflare"><h2>Cloudflare status</h2>'
-    credential = cloudflare["credential"] if cloudflare else ("unknown" if stale else "credential unavailable")
-    if credential == "unavailable":
-        credential = "credential unavailable"
-    body += f'<p>Credential: <span data-field="cloudflare.credential">{escape(credential)}</span></p>'
-    body += (
-        "<p>Collected: "
-        + _number(cloudflare["collected_at"] if cloudflare else None, "cloudflare.collected_at")
-        + "</p>"
-    )
-    for field, label in (
-        ("worker_version", "Deployed Worker version"),
-        ("worker_published_at", "Deployment time"),
-        ("repository_head", "Repository head"),
-        ("d1_rows", "D1 rows"),
-        ("last_purge", "Last purge"),
-        ("requests_24h", "Worker requests, 24 hours"),
-        ("errors_24h", "Worker errors, 24 hours"),
-    ):
-        value = cloudflare[field] if cloudflare else None
-        body += f"<p>{label}: " + _number(value, "cloudflare." + field) + "</p>"
-    body += "<p>Read-only Cloudflare values older than 15 minutes are unknown.</p></section></main>"
+    body += "</section>"
+    if show_cloudflare:
+        body += '<section class="panel" data-field="cloudflare"><h2>Cloudflare status</h2>'
+        credential = cloudflare["credential"] if cloudflare else ("unknown" if stale else "credential unavailable")
+        if credential == "unavailable":
+            credential = "credential unavailable"
+        body += f'<p>Credential: <span data-field="cloudflare.credential">{escape(credential)}</span></p>'
+        body += (
+            "<p>Collected: "
+            + _number(cloudflare["collected_at"] if cloudflare else None, "cloudflare.collected_at")
+            + "</p>"
+        )
+        for field, label in (
+            ("worker_version", "Deployed Worker version"),
+            ("worker_published_at", "Deployment time"),
+            ("repository_head", "Repository head"),
+            ("d1_rows", "D1 rows"),
+            ("last_purge", "Last purge"),
+            ("requests_24h", "Worker requests, 24 hours"),
+            ("errors_24h", "Worker errors, 24 hours"),
+        ):
+            value = cloudflare[field] if cloudflare else None
+            body += f"<p>{label}: " + _number(value, "cloudflare." + field) + "</p>"
+        body += "<p>Read-only Cloudflare values older than 15 minutes are unknown.</p></section>"
+    body += "</main>"
     return deck._document(body, nonce=nonce, now=now, title="Statistics", refresh=False, active="stats")

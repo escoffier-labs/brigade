@@ -348,13 +348,22 @@ def _store_weeks(conn: sqlite3.Connection, value: dict[str, Any]) -> None:
 
 
 def _prune(conn: sqlite3.Connection, now: datetime) -> None:
-    # Compact globally, including any snapshots stored before daily bucketing.
-    conn.execute("""DELETE FROM admin_stats_snapshots WHERE snapshot_id IN (
+    # Keep the best regular snapshot and newest Cloudflare observation per
+    # UTC day. Cloudflare freshness must not be discarded by source coverage.
+    conn.execute("""DELETE FROM admin_stats_snapshots WHERE snapshot_id NOT IN (
         SELECT snapshot_id FROM (
             SELECT snapshot_id, ROW_NUMBER() OVER (
                 PARTITION BY substr(taken_at, 1, 10)
-                ORDER BY json_array_length(source_set) DESC, taken_at DESC, snapshot_id DESC) AS position
-            FROM admin_stats_snapshots) WHERE position > 1)""")
+                ORDER BY json_array_length(source_set) -
+                    CASE WHEN source_set LIKE '%"cloudflare"%' THEN 1 ELSE 0 END DESC,
+                    taken_at DESC, snapshot_id DESC) AS position
+            FROM admin_stats_snapshots
+            UNION ALL
+            SELECT snapshot_id, ROW_NUMBER() OVER (
+                PARTITION BY substr(taken_at, 1, 10)
+                ORDER BY taken_at DESC, snapshot_id DESC) AS position
+            FROM admin_stats_snapshots WHERE source_set LIKE '%"cloudflare"%'
+        ) WHERE position = 1)""")
     cutoff = (now - timedelta(days=RETENTION_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
     conn.execute("DELETE FROM admin_stats_snapshots WHERE taken_at < ?", (cutoff,))
     conn.execute("DELETE FROM admin_stats_weeks WHERE taken_at < ?", (cutoff,))
@@ -393,9 +402,22 @@ def start_retention_sweeper(db_path: Path, *, stop: threading.Event) -> threadin
 
 def load_view(conn: sqlite3.Connection, *, now: datetime | None = None) -> dict[str, Any]:
     cutoff = ((now or datetime.now(timezone.utc)) - timedelta(days=RETENTION_DAYS)).strftime("%Y-%m-%dT%H:%M:%SZ")
-    latest = None
+    newest = None
     for row in conn.execute(
         "SELECT payload_json FROM admin_stats_snapshots WHERE taken_at >= ? ORDER BY taken_at DESC, snapshot_id DESC",
+        (cutoff,),
+    ):
+        try:
+            newest = validate(json.loads(row[0]))
+        except (ValueError, TypeError, KeyError, AttributeError):
+            continue
+        break
+    latest = None
+    for row in conn.execute(
+        """SELECT payload_json FROM admin_stats_snapshots WHERE taken_at >= ?
+        ORDER BY json_array_length(source_set) -
+            CASE WHEN source_set LIKE '%"cloudflare"%' THEN 1 ELSE 0 END DESC,
+            taken_at DESC, snapshot_id DESC""",
         (cutoff,),
     ):
         try:
@@ -403,6 +425,18 @@ def load_view(conn: sqlite3.Connection, *, now: datetime | None = None) -> dict[
         except (ValueError, TypeError, KeyError, AttributeError):
             continue
         break
+    cloudflare = None
+    for row in conn.execute(
+        """SELECT payload_json FROM admin_stats_snapshots WHERE taken_at >= ?
+        AND source_set LIKE '%"cloudflare"%' ORDER BY taken_at DESC, snapshot_id DESC""",
+        (cutoff,),
+    ):
+        try:
+            cloudflare = validate(json.loads(row[0]))["cloudflare"]
+        except (ValueError, TypeError, KeyError, AttributeError):
+            continue
+        if cloudflare is not None:
+            break
     weeks = []
     for row in conn.execute(
         "SELECT payload_json FROM admin_stats_weeks WHERE taken_at >= ? ORDER BY week DESC LIMIT 60",
@@ -413,4 +447,9 @@ def load_view(conn: sqlite3.Connection, *, now: datetime | None = None) -> dict[
         except (ValueError, TypeError, KeyError, AttributeError):
             continue
         weeks.extend(value["weeks"])
-    return {"latest": latest, "weeks": weeks}
+    return {
+        "latest": latest,
+        "cloudflare": cloudflare,
+        "cloudflare_enabled": newest is not None and newest["cloudflare"] is not None,
+        "weeks": weeks,
+    }
