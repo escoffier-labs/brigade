@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Fleet MCP tools advertise read-only and destructive annotations, and send/reply accept optional `client_id` keys for duplicate-free replay. The opt-in Executor app recipe documents browser approval, credential boundaries and manual compatibility checks (#1887).
 - Memory care config accepts `read_only_paths` globs for policy or operator-owned cards. Scan, `plan-fixes`, and `backfill` skip matching cards, `memory proposal create` and `apply` refuse them with an error naming the pattern, and `memory care status` and `doctor` list the active patterns (#1976).
 
 ### Fixed
