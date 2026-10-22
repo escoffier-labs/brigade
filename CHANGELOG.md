@@ -15,6 +15,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Fixed
 
 - Fleet Hub rejection responses close gracefully while clients finish uploading. Shared cleanup half-closes the response and discards at most 1 MiB of late data within 250 ms, covering form, enrollment, authentication, and JSON refusals.
+- Invalid Cursor hook event names no longer let a project configuration suppress the user presence callback.
 - Preserve campaign execution bindings after the 50-link retention window, including against trusted observations and cross-item relinks. Hub schema 42 adds an indexed history lookup without rewriting stored events.
 - Index campaign take event-key lookups without scanning Worklore history. Hub startup upgrades existing databases to schema 41 and preserves stored events.
 - Fence campaign execution and attempt writes to the current holder grant, refuse member specification drift, and reserve take capacity for progress and release. Campaign operators can recover a stranded reservation with explicit quiescence acknowledgement and an audited evidence reference.
