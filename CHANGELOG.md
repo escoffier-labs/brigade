@@ -21,6 +21,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A `duet` connector pack serves Claude Duet from the Dot connector code with its own runtime schema, Hub principal `agent:duet`, state, Access audience and handoff inbox. It exposes 22 memory, skills, inbox and read-only fleet tools; dispatch and T3 fleet tools are absent from discovery. `message_send` has its own `messaging_enabled` gate (optional for Dot) and a 20 per hour limit for Duet, and the call log records each client's name. See `docs/duet-connector.md`.
+
 - Claude work-loop hooks track explicit file reads and record unseen callers before Edit, Write, or NotebookEdit. Checks warn without denying edits, and unavailable or incomplete graphs record a null result with a reason.
 
 - Antigravity sessions publish Fleet Hub presence through silent, detached hooks installed by `brigade init --harnesses antigravity`; Stop refreshes presence until the session expires by TTL.
