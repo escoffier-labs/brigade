@@ -17,6 +17,11 @@ import pytest
 
 from brigade import fleet_hub, fleet_hub_events
 
+_PRE_GENERATION_SUBSCRIPTIONS = """CREATE TABLE fleet_event_subscriptions (
+    id TEXT NOT NULL PRIMARY KEY, principal_id TEXT NOT NULL, name TEXT NOT NULL, arguments TEXT NOT NULL,
+    filter_value TEXT, url TEXT NOT NULL, secret TEXT NOT NULL, previous_secret TEXT, rotate_until REAL,
+    created_at REAL NOT NULL, expires_at REAL, cursor_seq INTEGER NOT NULL DEFAULT 0,
+    failures INTEGER NOT NULL DEFAULT 0)"""
 _PRE_PRODUCER_TABLE = """CREATE TABLE fleet_events (
     seq INTEGER PRIMARY KEY AUTOINCREMENT, event_id TEXT NOT NULL UNIQUE, name TEXT NOT NULL,
     subject TEXT NOT NULL, data TEXT NOT NULL, created_at REAL NOT NULL)"""
@@ -37,6 +42,10 @@ def _pre_producer_hub(db: Path, now: float, version: int = 39) -> None:
         conn.execute("DROP INDEX fleet_events_producer")
         conn.execute("DROP TABLE fleet_events")
         conn.execute(_PRE_PRODUCER_TABLE)
+        # The earlier head also lacked the subscription generation and the attempts table.
+        conn.execute("DROP TABLE fleet_event_subscriptions")
+        conn.execute(_PRE_GENERATION_SUBSCRIPTIONS)
+        conn.execute("DROP TABLE fleet_event_attempts")
         sent = {"message_id": "m1", "recipient": "node-b", "sender": "agent:dot", "priority": "normal"}
         rows = [
             ("evt_1", "message.created", "node-b", json.dumps(sent)),
@@ -74,6 +83,8 @@ def test_pre_producer_hub_is_repaired_and_backfilled_on_startup(
     try:
         assert "producer" in {r[1] for r in conn.execute("PRAGMA table_info(fleet_events)")}
         assert conn.execute("SELECT 1 FROM sqlite_master WHERE name='fleet_events_producer'").fetchone()
+        assert "generation" in {r[1] for r in conn.execute("PRAGMA table_info(fleet_event_subscriptions)")}
+        assert "fleet_event_attempts" in _tables(conn)
         stored = dict(conn.execute("SELECT event_id, producer FROM fleet_events").fetchall())
         # A message is produced by its sender; unreadable data and node-owned events fall back to the subject.
         assert stored == {"evt_1": "agent:dot", "evt_2": "node-b", "evt_3": "node-a", "evt_4": "node-a"}
@@ -107,7 +118,7 @@ def test_pre_producer_hub_is_repaired_and_backfilled_on_startup(
         again.close()
 
 
-_EVENT_TABLES = ("fleet_event_subscriptions", "fleet_events", "fleet_event_deliveries")
+_EVENT_TABLES = ("fleet_event_subscriptions", "fleet_events", "fleet_event_deliveries", "fleet_event_attempts")
 _CI_TABLES = ("ci_runs", "ci_check_runs", "ci_repo_state")
 
 
