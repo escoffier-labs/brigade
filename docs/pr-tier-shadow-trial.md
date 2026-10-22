@@ -8,7 +8,12 @@ constants, boundary tests and this document together. This change does not
 activate a scheduler or authorize a later rollout.
 
 The job depends on the existing four Python 3.12 `test-shards` jobs and runs
-with `always()` on `pull_request`, including fork PRs. It has read-only contents
+with `always()` only on same-repository `pull_request` events. Before any step,
+job admission requires nonempty repository identities and an exact match between
+`github.event.pull_request.head.repo.full_name` and `github.repository`.
+Fork PRs and events with missing repository identity skip the entire shadow job,
+including prefetch, checkout, selected tests and upload. Ordinary required CI
+still runs under its existing conditions. The shadow has read-only contents
 and Actions permissions, does not persist checkout credentials, and uses
 `continue-on-error: true`. No existing job depends on it. Required jobs and
 `ci-gate` retain their existing definitions.
@@ -132,6 +137,10 @@ Only complete evidence can report zero candidates. `confirmed_real_miss_count`
 always remains null here. The job never classifies candidates as real, inherited
 or flaky and never asserts zero real misses.
 
+The trial assumes the author trust boundary of same-repository PRs. Those
+authors can already edit repository workflows. This job provides no sandbox
+for adversarial in-repository code, including executable replacement through
+`GITHUB_PATH` or detached writers that race validation and upload.
 The observation is self-reported by PR-controlled tests and scripts, which can
 forge its evidence after prefetch. The read-only token is used before those
 processes start and is absent from their environment.
@@ -196,8 +205,14 @@ A matching base failure supports inherited classification. A flaky label needs
 repeat-run evidence. An unreproducible result stays unconfirmed. Do not silently
 replace the recorded run, attempt or SHA with a more convenient example.
 
-After the window, review all trial PR runs and attempts, including missing or
-cancelled observations. Report complete and incomplete counts, each gap's cause,
+After the window, inventory all PR runs and attempts. Report fork PRs and
+missing-identity events separately as admission exclusions. A skipped shadow
+job supplies no comparison evidence and must never count as a pass or a
+zero-candidate observation. Show exclusion counts beside the eligible
+same-repository population and do not generalize its results to fork PRs.
+
+Review all eligible trial runs and attempts, including missing or cancelled
+observations. Report complete and incomplete counts, each gap's cause,
 all candidates and their reproduction evidence. The decision criteria are:
 
 1. Zero **confirmed real** full-only failures, with every candidate resolved.

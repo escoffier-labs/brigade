@@ -956,7 +956,7 @@ jobs:
   pr-tier-shadow:
     name: PR test tiers (shadow observation)
     needs: test-shards
-    if: ${{ always() && github.event_name == 'pull_request' }}
+    if: ${{ always() && github.event_name == 'pull_request' && github.repository != '' && github.event.pull_request.head.repo.full_name != '' && github.event.pull_request.head.repo.full_name == github.repository }}
     continue-on-error: true
     runs-on: ubuntu-latest
     timeout-minutes: 75

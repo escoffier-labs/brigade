@@ -708,7 +708,51 @@ def test_merge_identity_validates_second_parent_and_uses_current_first_parent(
     assert "Comparison: complete" in summary.read_text()
 
 
-def test_shadow_job_is_fork_compatible_read_only_and_outside_required_dag():
+@pytest.mark.parametrize("full_result", ["success", "failure"])
+@pytest.mark.parametrize(
+    "event_name,repository,head_repository,expected",
+    [
+        ("pull_request", "example/project", "example/project", True),
+        ("pull_request", "example/project", "contributor/project", False),
+        ("pull_request", "example/project", None, False),
+        ("pull_request", "example/project", "", False),
+        ("pull_request", None, None, False),
+        ("pull_request", None, "example/project", False),
+        ("push", "example/project", "example/project", False),
+        ("merge_group", "example/project", "example/project", False),
+    ],
+)
+def test_shadow_job_admission_requires_same_repository_pr(
+    event_name, repository, head_repository, expected, full_result
+):
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    header = text.split("  pr-tier-shadow:\n", 1)[1].split("    steps:\n", 1)[0]
+    expression = re.search(r"^    if: \$\{\{ (.+) \}\}$", header, re.M)[1]
+    github = {"event_name": event_name, "event": {}}
+    if repository is not None:
+        github["repository"] = repository
+    if head_repository is not None:
+        github["event"] = {"pull_request": {"head": {"repo": {"full_name": head_repository}}}}
+
+    def lookup(match):
+        value = github
+        for component in match[0].split(".")[1:]:
+            value = value.get(component, "") if isinstance(value, dict) else ""
+        return repr(value)
+
+    # Evaluate the literal job expression, with absent Actions properties empty.
+    expression = re.sub(r"\bgithub\.[A-Za-z_][A-Za-z0-9_.]*", lookup, expression)
+    expression = expression.replace("&&", "and").replace("||", "or")
+    functions = {
+        "always": lambda: True,
+        "success": lambda: full_result == "success",
+        "failure": lambda: full_result == "failure",
+        "cancelled": lambda: False,
+    }
+    assert bool(eval(expression, {"__builtins__": {}}, functions)) is expected
+
+
+def test_shadow_job_is_read_only_and_outside_required_dag():
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     match = re.search(r"^  pr-tier-shadow:\n(.*?)(?=^  [a-z][a-z0-9-]*:|\Z)", text, re.M | re.S)
     assert match, "missing non-gating shadow job"
@@ -719,7 +763,6 @@ def test_shadow_job_is_fork_compatible_read_only_and_outside_required_dag():
     assert "contents: read" in job and "actions: read" in job
     assert "persist-credentials: false" in job
     assert "fetch-depth: 2" in job and "ref: ${{ github.sha }}" in job
-    assert "fork" not in job
     assert "actions/checkout@v7" in job and "actions/setup-python@v7" in job
     assert "actions/upload-artifact@v7" in job
     assert "retention-days: 30" in job
