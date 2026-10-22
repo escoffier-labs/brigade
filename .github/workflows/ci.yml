@@ -952,3 +952,60 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "journal lock dev install failed" }
           & $python -m pytest -q tests/test_run_journal.py::test_windows_journal_lock_excludes_unbound_mutation_during_bound_tail_window
           if ($LASTEXITCODE -ne 0) { throw "native journal lock regressions failed" }
+
+  pr-tier-shadow:
+    name: PR test tiers (shadow observation)
+    needs: test-shards
+    if: ${{ always() && github.event_name == 'pull_request' }}
+    continue-on-error: true
+    runs-on: ubuntu-latest
+    timeout-minutes: 75
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Check bounded trial window
+        id: trial
+        run: python3 scripts/pr_tier_shadow.py guard --output .pr-tier-shadow
+      - uses: actions/setup-python@v7
+        if: steps.trial.outputs.active == 'true'
+        with:
+          python-version: "3.12"
+          cache: pip
+          cache-dependency-path: pyproject.toml
+      - name: Install shadow dependencies
+        if: steps.trial.outputs.active == 'true'
+        run: python -m pip install -e ".[dev,grokbot]"
+      - name: Run selected files on the PR merge
+        if: steps.trial.outputs.active == 'true'
+        env:
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: python scripts/pr_tier_shadow.py run --output .pr-tier-shadow
+      - name: Compare exact attempt and write summary
+        if: always()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if [ -f scripts/pr_tier_shadow.py ]; then
+            python3 scripts/pr_tier_shadow.py finalize --output .pr-tier-shadow
+          else
+            mkdir -p .pr-tier-shadow
+            echo '{"trial_status":"unknown","comparison":{"status":"incomplete","full_only_candidate_count":null,"confirmed_real_miss_count":null,"errors":["checkout unavailable"]}}' > .pr-tier-shadow/report.json
+            echo 'PR test tier shadow: incomplete, checkout unavailable.' > .pr-tier-shadow/summary.md
+            cat .pr-tier-shadow/summary.md >> "$GITHUB_STEP_SUMMARY"
+            exit 2
+          fi
+      - name: Retain shadow evidence
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: pr-tier-shadow-${{ github.run_id }}-${{ github.run_attempt }}
+          path: .pr-tier-shadow/
+          include-hidden-files: true
+          if-no-files-found: error
+          retention-days: 30

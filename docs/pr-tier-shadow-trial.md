@@ -1,0 +1,157 @@
+# PR test tier shadow trial
+
+The `pr-tier-shadow` job observes test selection on pull requests for fourteen
+days: **2026-10-23T00:00:00Z inclusive through 2026-11-06T00:00:00Z exclusive**.
+Before activation, move both dates together if publication occurs later. Keep
+the interval at fourteen days. Update the runner constants, boundary tests and
+this document together. This change does not activate a scheduler or authorize
+a later rollout.
+
+The job depends on the existing four Python 3.12 `test-shards` jobs and runs
+with `always()` on `pull_request`, including fork PRs. It has read-only contents
+and Actions permissions, does not persist checkout credentials, and uses
+`continue-on-error: true`. No existing job depends on it. Required jobs and
+`ci-gate` retain their existing definitions.
+
+The standard-library guard executes before Python setup or package installation.
+Before the start and at or after expiry, the job records its status and uploads
+evidence without installing dependencies, selecting files, running pytest, or
+reading the Actions API. Cancellation can prevent even an `always()` upload.
+A missing artifact is an evidence gap that requires an explanation.
+
+## Selection
+
+The checked-out SHA must equal the workflow's PR merge SHA. Its second parent
+must equal the event's PR head. Selection diffs its first parent against that
+merge, so changes already on the current base do not enter the PR diff.
+
+`scripts/pr_test_tiers.json` contains the curated tiers from the supplied
+659-row CSV: eighteen A files plus five invariant files, and 39 C files. Every
+other test file, including new and unknown files, defaults to B. The five
+invariants cover module size, mypy overrides, POSIX facades, phase 257 facades
+and the verify skill. They address the two module-size misses in the supplied
+200-PR offline replay, which caught 15 of 17 confirmed real failures before
+this adjustment. The replay is prior analysis, not a measurement of this trial.
+
+Selection starts with A, directly changed tests, and statically importing tests
+outside C. It uses `scripts/windows_affected_tests.py` import matching and shared
+path rules, without adding directory siblings. Changes to the tier manifest or
+shadow scripts also count as shared infrastructure. A shared change or **more
+than 250 initially selected files** falls back to every A+B file plus directly
+changed C tests. Static imports never admit C on their own. Deleted tests are
+absent. Selection records sorted inputs, reasons, tiers and the manifest hash.
+
+## Retained evidence
+
+Each run attempts to upload `pr-tier-shadow-<run-id>-<attempt>` for 30 days:
+
+- `report.json` and `summary.md`: trial status, identity, comparison, gaps and
+  timing. The readable report is also written to the job summary.
+- `identity.json`: tested merge SHA, current first-parent base, PR head,
+  changed paths, run ID and attempt.
+- `selection.json`, `selected.txt` and `pr_test_tiers.json`: reproducible
+  selection, reasons and the exact curated membership used.
+- `pytest-input.json`, `pytest.log` and `pytest-results.json`: selected paths,
+  local outcomes, collection errors, process exit, pytest subprocess wall time
+  and summed durations from actual setup/call/teardown reports.
+- `full/workflow-run.json`, `full/jobs-page-*.json`, `full/job-*.log` and
+  `full/fetch-errors.json`: raw metadata, four full shard logs and retrieval gaps.
+
+Files are written as their inputs become available. Installation or checkout
+failure can leave only an incomplete report. Expired runs deliberately contain
+no selection or pytest results. An absent result is never interpreted as a pass.
+
+Comparison GETs only the requested workflow run **and explicit attempt**, then
+that attempt's jobs and their logs through the
+[Actions jobs API](https://docs.github.com/en/rest/actions/workflow-jobs?apiVersion=2022-11-28#list-jobs-for-a-workflow-run-attempt).
+It never fetches a different run or attempt
+as a fallback. API metadata can identify the PR head instead of the merge, so
+each log must independently contain checkout's exact full merge SHA and the
+expected shard index. The four distinct expected job names must all be completed
+with success or failure conclusions. Skipped, cancelled, timed-out, duplicate
+or absent jobs, API errors, collection errors, missing summaries and
+unattributable outcomes leave the comparison incomplete. A failed job with a
+complete pytest summary and attributable failures can still be compared.
+
+`full_only_candidates` are full-log FAILED/ERROR nodeids absent from the shadow
+failure set. They are **unconfirmed candidates**. On incomplete evidence,
+`full_only_candidate_count` is null even if some candidates can be retained.
+Only complete evidence can report zero candidates. `confirmed_real_miss_count`
+always remains null here. The job never classifies candidates as real, inherited
+or flaky and never asserts zero real misses.
+
+Full logs expose pytest elapsed seconds, not summed testcase durations.
+`full_pytest_elapsed_seconds_sum` sums the four primary shard elapsed times.
+Auxiliary pytest runs are retained separately. `full_job_wall_seconds_sum`
+includes installation and other job steps. `full_parallel_wall_seconds` spans
+the earliest shard start to the latest completion, including scheduling skew.
+Selected subprocess wall time and summed actual testcase durations are separate
+fields. Full testcase durations and historical estimates remain null because
+neither is available to this job. CSV timings from the prior analysis are
+historical estimates and must not be presented as measured trial runtime.
+
+## Reproduce and evaluate
+
+Download the artifact and check identity before interpreting a comparison. Use
+the recorded merge SHA and first-parent base, manifest and changed list to replay
+selection. In an isolated checkout with the existing development dependencies:
+
+```bash
+python - <<'PY'
+import json
+from pathlib import Path
+import subprocess
+import sys
+
+from scripts.pr_tier_selection import select_tests
+
+record = json.loads(Path("../shadow-evidence/identity.json").read_text())
+selection = select_tests(Path("."), record["changed"])
+print(json.dumps(selection, indent=2))
+subprocess.run(
+    [sys.executable, "-m", "pytest", "-q", "-o", "addopts=", "--", *selection["selected"]],
+    check=True,
+)
+PY
+```
+
+Keep downloaded evidence in `../shadow-evidence/` outside the checkout.
+The runner's `--now` option exists for offline boundary reproduction. It must
+not extend the live workflow window. Retained metadata and logs can also be
+passed to `compare` offline without network access.
+
+For every candidate, reproduce the exact nodeid at the recorded merge SHA and
+at the recorded first-parent base in separate temporary checkouts, with matching
+Python and dependencies. Record commands, outcomes and reruns. A failure newly
+introduced by the merge that shadow did not expose is a confirmed real miss.
+A matching base failure supports inherited classification. A flaky label needs
+repeat-run evidence. An unreproducible result stays unconfirmed. Do not silently
+replace the recorded run, attempt or SHA with a more convenient example.
+
+After the window, review all trial PR runs and attempts, including missing or
+cancelled observations. Report complete and incomplete counts, each gap's cause,
+all candidates and their reproduction evidence. The decision criteria are:
+
+1. Zero **confirmed real** full-only failures, with every candidate resolved.
+2. No unexplained evidence gaps. Explain exclusions and retain their denominator.
+3. Median comparable test-time cost below 25 percent: selected pytest subprocess
+   wall seconds divided by the sum of the four primary full-shard pytest elapsed
+   seconds, using only complete observations with positive denominators. This is
+   an elapsed-time cost proxy, not measured CPU usage or billing.
+
+Separately report median selected wall time, summed full job wall time and full
+parallel span. The four full shards run in parallel, while selected files run
+in one process. A cost ratio cannot be read as the same latency improvement.
+Report fallback frequency and the distribution of selected file counts so a
+small median does not conceal expensive shared changes. Unknown results remain
+unknown. Meeting these criteria supplies evidence for a separately approved
+decision and does not turn this job into a gate.
+
+## Removal
+
+At expiry the guard disables installation and test work. After the evaluation
+and evidence export, remove only the `pr-tier-shadow` job, its three scripts,
+two test files and this document. Remove its entry from the expected job
+inventory in `tests/test_ci_workflow.py`. Keep required jobs and `ci-gate` untouched.
+Do not add a schedule or modify branch protection as part of removal. Export
+artifacts before the 30-day retention period ends.

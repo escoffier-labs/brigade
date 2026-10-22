@@ -1,0 +1,466 @@
+"""Retained-result and adverse evidence contracts for the non-gating shadow."""
+
+from copy import deepcopy
+from datetime import datetime
+import json
+from pathlib import Path
+import re
+import subprocess
+import sys
+
+import pytest
+
+from scripts import pr_tier_shadow as shadow
+
+ROOT = Path(__file__).resolve().parents[1]
+SHA = "a" * 40
+PR_HEAD = "b" * 40
+IDENTITY = {"sha": SHA, "pr_head": PR_HEAD, "run_id": 123, "run_attempt": 2}
+
+
+def log(index, *, failed=None, checkout=SHA):
+    failures = failed or []
+    lines = [
+        "2026-10-22T01:00:00Z [command]/usr/bin/git log -1 --format=%H",
+        f"2026-10-22T01:00:00Z {checkout}",
+        f"2026-10-22T01:00:01Z CI shard {index + 1}/4: selected 2 of 8 tests",
+    ]
+    lines += [f"2026-10-22T01:00:02Z FAILED {nodeid} - AssertionError" for nodeid in failures]
+    counts = f"{len(failures)} failed, {2 - len(failures)} passed" if failures else "2 passed"
+    lines.append(f"2026-10-22T01:00:03Z {counts}, 6 deselected in 10.00s")
+    # A separate real pytest invocation in shard 0 must not replace the shard summary.
+    lines.append("2026-10-22T01:00:04Z 4 passed in 1.00s")
+    return "\n".join(lines)
+
+
+@pytest.fixture
+def evidence():
+    run = {"id": 123, "run_attempt": 2, "head_sha": PR_HEAD, "event": "pull_request"}
+    jobs = [
+        {
+            "id": 500 + i,
+            "name": f"test shard (3.12, {i})",
+            "run_id": 123,
+            "run_attempt": 2,
+            "head_sha": PR_HEAD,
+            "status": "completed",
+            "conclusion": "success",
+            "started_at": "2026-10-22T01:00:00Z",
+            "completed_at": "2026-10-22T01:01:00Z",
+        }
+        for i in range(4)
+    ]
+    logs = {job["id"]: log(i) for i, job in enumerate(jobs)}
+    selected = {
+        "complete": True,
+        "exit_code": 0,
+        "failed_nodeids": [],
+        "wall_seconds": 2.5,
+        "test_duration_seconds": 1.0,
+    }
+    return run, jobs, logs, selected
+
+
+@pytest.mark.parametrize("summary_suffix", ["", ", 13 subtests passed"])
+def test_full_only_failures_stay_unconfirmed_and_timing_units_are_separate(evidence, summary_suffix):
+    run, jobs, logs, selected = evidence
+    jobs[1]["conclusion"] = "failure"
+    logs[501] = log(1, failed=["tests/test_c.py::test_missed[param value]"])
+    logs = {job_id: text.replace(" in ", summary_suffix + " in ") for job_id, text in logs.items()}
+    result = shadow.compare(IDENTITY, run, jobs, logs, selected)
+    assert result["status"] == "complete"
+    assert result["full_only_candidates"] == ["tests/test_c.py::test_missed[param value]"]
+    assert result["full_only_candidate_count"] == 1
+    assert result["confirmed_real_miss_count"] is None
+    assert result["timing"]["full_pytest_elapsed_seconds_sum"] == 40.0
+    assert result["timing"]["full_job_wall_seconds_sum"] == 240.0
+    assert result["timing"]["full_parallel_wall_seconds"] == 60.0
+    assert result["timing"]["full_test_duration_seconds"] is None
+    assert result["timing"]["selected_pytest_wall_seconds"] == 2.5
+    assert result["timing"]["selected_test_duration_seconds"] == 1.0
+
+
+@pytest.mark.parametrize(
+    "problem",
+    [
+        "missing-job",
+        "duplicate-job",
+        "cancelled",
+        "timed_out",
+        "skipped",
+        "missing-log",
+        "api-error",
+        "no-summary",
+        "collection-error",
+        "unattributed-failure",
+        "truncated-log",
+        "wrong-shard",
+        "wrong-checkout",
+        "wrong-attempt",
+        "wrong-sha",
+        "wrong-job-attempt",
+        "wrong-job-sha",
+        "wrong-run",
+        "shadow-incomplete",
+    ],
+)
+def test_incomplete_evidence_never_reports_zero_candidates(evidence, problem):
+    run, jobs, logs, selected = deepcopy(evidence)
+    errors = []
+    if problem == "missing-job":
+        jobs.pop()
+    elif problem == "duplicate-job":
+        jobs.append(dict(jobs[0], id=999))
+    elif problem in {"cancelled", "timed_out", "skipped"}:
+        jobs[0]["conclusion"] = problem
+    elif problem == "missing-log":
+        logs.pop(500)
+    elif problem == "api-error":
+        errors.append("HTTP 403 reading exact attempt jobs")
+    elif problem == "no-summary":
+        logs[500] = "setup failed"
+    elif problem == "collection-error":
+        logs[500] = log(0).replace("2 passed", "ERROR collecting tests/test_broken.py\n2 passed")
+    elif problem == "unattributed-failure":
+        logs[500] = log(0).replace("2 passed", "1 failed, 1 passed")
+    elif problem == "truncated-log":
+        logs[500] = log(0).split("2 passed")[0]
+    elif problem == "wrong-shard":
+        logs[500] = log(1)
+    elif problem == "wrong-checkout":
+        logs[500] = log(0, checkout="c" * 40)
+    elif problem == "wrong-attempt":
+        run["run_attempt"] = 1
+    elif problem == "wrong-sha":
+        run["head_sha"] = "c" * 40
+    elif problem == "wrong-job-attempt":
+        jobs[0]["run_attempt"] = 1
+    elif problem == "wrong-job-sha":
+        jobs[0]["head_sha"] = "c" * 40
+    elif problem == "wrong-run":
+        jobs[0]["run_id"] = 124
+    elif problem == "shadow-incomplete":
+        selected["complete"] = False
+    result = shadow.compare(IDENTITY, run, jobs, logs, selected, errors=errors)
+    assert result["status"] == "incomplete"
+    assert result["full_only_candidate_count"] is None
+    assert result["confirmed_real_miss_count"] is None
+    assert result["errors"]
+
+
+def test_complete_comparison_subtracts_observed_shadow_failures(evidence):
+    run, jobs, logs, selected = evidence
+    nodeid = "tests/test_a.py::test_same"
+    logs[500] = log(0, failed=[nodeid])
+    jobs[0]["conclusion"] = "failure"
+    selected.update(failed_nodeids=[nodeid], exit_code=1)
+    result = shadow.compare(IDENTITY, run, jobs, logs, selected)
+    assert result["status"] == "complete"
+    assert result["full_only_candidate_count"] == 0
+    assert result["confirmed_real_miss_count"] is None
+
+
+@pytest.mark.parametrize(
+    "instant,status",
+    [
+        ("2026-10-22T23:59:59+00:00", "not-started"),
+        ("2026-10-23T00:00:00+00:00", "active"),
+        ("2026-11-05T23:59:59+00:00", "active"),
+        ("2026-11-06T00:00:00+00:00", "expired"),
+    ],
+)
+def test_trial_boundaries_are_utc_and_expiry_retains_report(tmp_path, monkeypatch, instant, status):
+    summary = tmp_path / "summary.md"
+    outputs = tmp_path / "outputs"
+    monkeypatch.setenv("GITHUB_STEP_SUMMARY", str(summary))
+    monkeypatch.setenv("GITHUB_OUTPUT", str(outputs))
+    report = shadow.guard(tmp_path / "evidence", now=datetime.fromisoformat(instant))
+    assert report["trial_status"] == status
+    assert json.loads((tmp_path / "evidence/report.json").read_text())["trial_status"] == status
+    assert f"active={'true' if status == 'active' else 'false'}" in outputs.read_text()
+    assert status in summary.read_text()
+    assert not (tmp_path / "evidence/pytest-results.json").exists()
+
+
+@pytest.mark.parametrize("broken", [False, True])
+def test_real_pytest_run_retains_outcomes_and_durations(tmp_path, broken):
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests/test_tiny.py").write_text(
+        "def test_ok():\n    assert True\n\ndef test_failure():\n    assert False\n"
+        if not broken
+        else "this is not valid Python !!!\n"
+    )
+    output = tmp_path / "evidence"
+    result = shadow.run_pytest(tmp_path, ["tests/test_tiny.py"], output)
+    assert json.loads((output / "pytest-results.json").read_text()) == result
+    assert (output / "pytest.log").is_file()
+    assert result["wall_seconds"] > 0
+    if broken:
+        assert result["complete"] is False
+        assert result["collection_errors"]
+    else:
+        assert result["complete"] is True
+        assert result["exit_code"] == 1
+        assert result["failed_nodeids"] == ["tests/test_tiny.py::test_failure"]
+        assert result["test_duration_seconds"] >= 0
+        assert {item["nodeid"] for item in result["outcomes"]} == {
+            "tests/test_tiny.py::test_ok",
+            "tests/test_tiny.py::test_failure",
+        }
+
+
+def test_expired_cli_does_no_git_or_pytest_or_api_work(tmp_path):
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts/pr_tier_shadow.py"),
+            "run",
+            "--repo",
+            str(tmp_path),
+            "--output",
+            str(tmp_path / "evidence"),
+            "--now",
+            "2026-11-06T00:00:00Z",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+    report = json.loads((tmp_path / "evidence/report.json").read_text())
+    assert report["trial_status"] == "expired"
+    assert report["comparison"]["full_only_candidate_count"] is None
+    assert not (tmp_path / "evidence/pytest.log").exists()
+
+
+def test_merge_identity_validates_second_parent_and_uses_current_first_parent(tmp_path, monkeypatch, evidence):
+    def git(*args):
+        return subprocess.check_output(["git", "-C", str(tmp_path), *args], text=True).strip()
+
+    git("init", "-q", "-b", "main")
+    git("config", "user.email", "contributor@example.com")
+    git("config", "user.name", "Contributor")
+    (tmp_path / "base").write_text("base")
+    (tmp_path / "tests").mkdir()
+    (tmp_path / "tests/test_cli_help.py").write_text("def test_ok():\n    assert True\n")
+    git("add", ".")
+    git("commit", "-qm", "base")
+    git("switch", "-qc", "feature")
+    (tmp_path / "feature").write_text("feature")
+    git("add", ".")
+    git("commit", "-qm", "feature")
+    head = git("rev-parse", "HEAD")
+    git("switch", "-q", "main")
+    (tmp_path / "other").write_text("other")
+    git("add", ".")
+    git("commit", "-qm", "base advanced")
+    base = git("rev-parse", "HEAD")
+    git("merge", "-q", "--no-ff", "--no-edit", "feature")
+    merge = git("rev-parse", "HEAD")
+    monkeypatch.setenv("GITHUB_SHA", merge)
+    monkeypatch.setenv("PR_HEAD_SHA", head)
+    assert shadow.merge_identity(tmp_path) == {"sha": merge, "base": base, "pr_head": head, "changed": ["feature"]}
+    monkeypatch.setenv("PR_HEAD_SHA", base)
+    with pytest.raises(ValueError, match="second parent"):
+        shadow.merge_identity(tmp_path)
+    monkeypatch.setenv("PR_HEAD_SHA", head)
+    monkeypatch.setenv("GITHUB_RUN_ID", "123")
+    monkeypatch.setenv("GITHUB_RUN_ATTEMPT", "2")
+    monkeypatch.setenv("GITHUB_REPOSITORY", "example/project")
+    output = tmp_path / "evidence"
+    cli = subprocess.run(
+        [
+            sys.executable,
+            str(ROOT / "scripts/pr_tier_shadow.py"),
+            "run",
+            "--repo",
+            str(tmp_path),
+            "--output",
+            str(output),
+            "--now",
+            "2026-10-23T00:00:00Z",
+        ],
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert cli.returncode == 0, cli.stderr
+    local = json.loads((output / "report.json").read_text())
+    assert local["identity"]["base"] == base
+    assert local["selected_pytest"]["collected"] == 1
+    assert local["selected_pytest"]["wall_seconds"] > 0
+    assert (output / "selected.txt").read_text() == "tests/test_cli_help.py\n"
+    run, jobs, _, _ = evidence
+    run["head_sha"] = head
+    for job in jobs:
+        job["head_sha"] = head
+
+    def get(path):
+        if path.endswith("/attempts/2"):
+            return json.dumps(run).encode()
+        if "/attempts/2/jobs?" in path:
+            return json.dumps({"total_count": 4, "jobs": jobs}).encode()
+        job_id = int(path.split("/")[-2])
+        return log(job_id - 500, checkout=merge).encode()
+
+    monkeypatch.setattr(shadow, "api_get", get)
+    assert shadow.finalize(output) == 0
+    report = json.loads((output / "report.json").read_text())
+    assert report["identity"]["sha"] == merge
+    assert report["comparison"]["status"] == "complete"
+    assert report["comparison"]["full_only_candidate_count"] == 0
+    assert report["comparison"]["confirmed_real_miss_count"] is None
+    assert merge in (output / "summary.md").read_text()
+
+
+def test_exact_attempt_api_reads_only_requested_jobs_and_keeps_log_failures_incomplete(tmp_path, monkeypatch):
+    routes = []
+
+    def get(path):
+        routes.append(path)
+        if path.endswith("/attempts/2"):
+            return json.dumps({"id": 123, "run_attempt": 2}).encode()
+        if "/attempts/2/jobs?" in path:
+            return json.dumps({"total_count": 1, "jobs": [{"id": 500, "name": "test shard (3.12, 0)"}]}).encode()
+        if path == "/repos/example/project/actions/jobs/500/logs":
+            raise OSError("HTTP 403")
+        raise AssertionError(f"unexpected API path: {path}")
+
+    monkeypatch.setattr(shadow, "api_get", get)
+    _, jobs, logs, errors = shadow.fetch_evidence("example/project", 123, 2, tmp_path)
+    assert len(jobs) == 1
+    assert not logs
+    assert errors
+    assert routes == [
+        "/repos/example/project/actions/runs/123/attempts/2",
+        "/repos/example/project/actions/runs/123/attempts/2/jobs?per_page=100&page=1",
+        "/repos/example/project/actions/jobs/500/logs",
+    ]
+
+
+def test_shadow_job_is_fork_compatible_read_only_and_outside_required_dag():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    match = re.search(r"^  pr-tier-shadow:\n(.*?)(?=^  [a-z][a-z0-9-]*:|\Z)", text, re.M | re.S)
+    assert match, "missing non-gating shadow job"
+    job = match.group()
+    assert "needs: test-shards" in job
+    assert "always() && github.event_name == 'pull_request'" in job
+    assert "continue-on-error: true" in job
+    assert "contents: read" in job and "actions: read" in job
+    assert "persist-credentials: false" in job
+    assert "fetch-depth: 2" in job and "ref: ${{ github.sha }}" in job
+    assert "fork" not in job
+    assert "actions/checkout@v7" in job and "actions/setup-python@v7" in job
+    assert "actions/upload-artifact@v7" in job
+    assert "retention-days: 30" in job
+    assert job.count("if: always()") >= 2
+    assert "steps.trial.outputs.active == 'true'" in job
+    assert "python scripts/pr_tier_shadow.py run" in job
+    assert "python3 scripts/pr_tier_shadow.py finalize" in job
+    remainder = text.replace(job, "")
+    assert "pr-tier-shadow" not in remainder
+    assert "pull_request_target" not in text
+
+
+def test_full_log_collects_auxiliary_failure_without_replacing_shard_elapsed(evidence):
+    run, jobs, logs, selected = evidence
+    jobs[0]["conclusion"] = "failure"
+    logs[500] = log(0).rsplit("4 passed", 1)[0] + (
+        "FAILED tests/test_grokbot_mcp.py::test_auxiliary - AssertionError\n1 failed, 3 passed in 1.00s\n"
+    )
+    result = shadow.compare(IDENTITY, run, jobs, logs, selected)
+    assert result["status"] == "complete"
+    assert result["full_only_candidates"] == ["tests/test_grokbot_mcp.py::test_auxiliary"]
+    assert result["timing"]["full_pytest_elapsed_seconds_sum"] == 40.0
+    assert result["full_shards"][0]["auxiliary_pytest_elapsed_seconds"] == [1.0]
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        "ERROR collecting tests/test_auxiliary.py\n1 error in 1.00s\n",
+        "FAILED tests/test_auxiliary.py::test_truncated - AssertionError\n",
+    ],
+)
+def test_auxiliary_unparseable_or_incomplete_pytest_is_an_evidence_gap(evidence, suffix):
+    run, jobs, logs, selected = evidence
+    jobs[0]["conclusion"] = "failure"
+    logs[500] += "\n" + suffix
+    result = shadow.compare(IDENTITY, run, jobs, logs, selected)
+    assert result["status"] == "incomplete"
+    assert result["full_only_candidate_count"] is None
+
+
+def test_failed_job_without_attributable_test_outcome_is_incomplete(evidence):
+    run, jobs, logs, selected = evidence
+    jobs[0]["conclusion"] = "failure"
+    result = shadow.compare(IDENTITY, run, jobs, logs, selected)
+    assert result["status"] == "incomplete"
+    assert result["full_only_candidate_count"] is None
+
+
+def test_nodeid_parameter_separator_is_not_truncated(evidence):
+    run, jobs, logs, selected = evidence
+    jobs[0]["conclusion"] = "failure"
+    nodeid = "tests/test_a.py::test_value[left - right]"
+    logs[500] = log(0, failed=[nodeid])
+    assert shadow.compare(IDENTITY, run, jobs, logs, selected)["full_only_candidates"] == [nodeid]
+
+
+def test_empty_selection_does_not_fall_through_to_full_pytest_discovery(tmp_path):
+    (tmp_path / "test_unselected.py").write_text("raise RuntimeError('must not collect')\n")
+    output = tmp_path / "evidence"
+    result = shadow.run_pytest(tmp_path, [], output)
+    assert result["complete"] is False
+    assert result["exit_code"] is None
+    assert "empty selection" in result["error"]
+    assert "RuntimeError" not in (output / "pytest.log").read_text()
+
+
+def test_failed_pytest_child_cannot_reuse_stale_success(tmp_path, monkeypatch):
+    output = tmp_path / "evidence"
+    output.mkdir()
+    (output / "pytest-results.json").write_text(json.dumps({"complete": True, "exit_code": 1}))
+    monkeypatch.setattr(shadow.subprocess, "run", lambda *args, **kwargs: subprocess.CompletedProcess([], 1))
+    result = shadow.run_pytest(tmp_path, ["tests/test_a.py"], output)
+    assert result["complete"] is False
+    assert result["failed_nodeids"] == []
+
+
+def test_finalize_retains_readable_exact_identity_and_missing_install_evidence(tmp_path, monkeypatch):
+    monkeypatch.setenv("GITHUB_REPOSITORY", "example/project")
+    output = tmp_path / "evidence"
+    shadow.guard(output, now=datetime.fromisoformat("2026-10-23T00:00:00+00:00"))
+    assert shadow.finalize(output) == 2
+    report = json.loads((output / "report.json").read_text())
+    assert report["comparison"]["status"] == "incomplete"
+    assert report["comparison"]["full_only_candidate_count"] is None
+    assert "unknown" in (output / "summary.md").read_text()
+
+
+@pytest.mark.parametrize("exit_code,nodeids", [(1, []), (0, ["tests/test_a.py::test_failed"])])
+def test_inconsistent_selected_outcomes_are_incomplete(evidence, exit_code, nodeids):
+    run, jobs, logs, selected = evidence
+    selected.update(exit_code=exit_code, failed_nodeids=nodeids)
+    result = shadow.compare(IDENTITY, run, jobs, logs, selected)
+    assert result["status"] == "incomplete"
+    assert result["full_only_candidate_count"] is None
+
+
+def test_traceback_text_ending_in_seconds_is_not_a_terminal_summary(evidence):
+    run, jobs, logs, selected = evidence
+    jobs[0]["conclusion"] = "failure"
+    logs[500] = log(0, failed=["tests/test_a.py::test_failure"]).replace(
+        "FAILED tests/", "E   Failed: operation did not finish in 1.00s\nFAILED tests/", 1
+    )
+    result = shadow.compare(IDENTITY, run, jobs, logs, selected)
+    assert result["status"] == "complete"
+    assert result["full_only_candidate_count"] == 1
+
+
+def test_successful_shard_zero_requires_its_auxiliary_pytest_summary(evidence):
+    run, jobs, logs, selected = evidence
+    logs[500] = log(0).rsplit("\n", 1)[0]
+    result = shadow.compare(IDENTITY, run, jobs, logs, selected)
+    assert result["status"] == "incomplete"
+    assert result["full_only_candidate_count"] is None
