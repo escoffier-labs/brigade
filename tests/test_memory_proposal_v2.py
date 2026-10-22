@@ -815,3 +815,11 @@ def test_append_evidence_keeps_citations_stored_in_alternate_fields(tmp_path):
     proposal = create(tmp_path, [op("append_evidence", evidence_ids=[new])])
     assert apply(tmp_path, proposal)["status"] == "committed"
     assert api._meta(path.read_text())["evidence"] == sorted([old, new])
+
+
+def test_op_evidence_binds_citations_stored_in_alternate_fields(tmp_path):
+    path = setup(tmp_path)
+    old = evidence(tmp_path, ".brigade/receipts/old.json")
+    path.write_text(path.read_text().replace("evidence: []", f"sources: {json.dumps([old])}"))
+    proposal = create(tmp_path, [op("append_evidence", evidence_ids=[".brigade/receipts/support.json"])])
+    assert old in proposal["op_evidence"]

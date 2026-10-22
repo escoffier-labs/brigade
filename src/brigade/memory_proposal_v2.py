@@ -72,7 +72,10 @@ def _evidence(target: Path, ops: list[dict[str, Any]], sources: list[dict[str, A
             continue
         keys = ("card_path", "other_card") if op["type"] == "merge_exact_duplicates" else ("card_path",)
         addressed.update(op[key] for key in keys if isinstance(op.get(key), str))
-    packets = [*ops, *[{"evidence_ids": s["metadata"].get("evidence", [])} for s in sources if s["path"] in addressed]]
+    packets = [
+        *ops,
+        *[{"evidence_ids": memory_cmd._evidence_refs(s["metadata"])} for s in sources if s["path"] in addressed],
+    ]
     for op in packets:
         values = op.get("evidence_ids", []) if isinstance(op, dict) else []
         if isinstance(values, list) and len(values) <= io.MAX_LIST:
