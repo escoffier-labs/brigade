@@ -12,6 +12,7 @@ from . import __version__, component_bins, harness_profiles, localio
 STATE_VERSION = 1
 MANAGED_MCP_NAMES = ("brigade", "graphtrail", "miseledger")
 _MANAGED_HOOK_EVENTS = ("sessionStart", "postToolUse", "sessionEnd")
+_MAX_HOOKS_JSON_BYTES = 1_048_576
 _MANAGED_HOOK_COMMAND = "exec brigade work presence-hook --harness cursor --stdin --context cursor-work-loop"
 _PROJECT_HOOK_COMMAND = "exec brigade work presence-hook --harness cursor --stdin --context cursor-work-loop-project"
 _LEGACY_HOOK_COMMAND = _MANAGED_HOOK_COMMAND
@@ -213,7 +214,7 @@ def project_presence_hook_installed(workspace: Path, event: str) -> bool:
         return False
     path = workspace / ".cursor" / "hooks.json"
     try:
-        if not path.is_file() or path.stat().st_size > 1_048_576:
+        if not path.is_file() or path.stat().st_size > _MAX_HOOKS_JSON_BYTES:
             return False
     except OSError:
         return False
@@ -228,6 +229,11 @@ def project_presence_hook_installed(workspace: Path, event: str) -> bool:
 def install_project_presence_hooks(workspace: Path) -> str | None:
     """Add the three Cursor lifecycle hooks to a project without replacing entries."""
     path = workspace / ".cursor" / "hooks.json"
+    try:
+        if path.is_file() and path.stat().st_size > _MAX_HOOKS_JSON_BYTES:
+            return "existing hooks configuration exceeds 1 MiB size limit"
+    except OSError as exc:
+        return str(exc)
     doc, error = _read_json_object(path)
     if doc is None:
         return error or "could not read hooks configuration"
