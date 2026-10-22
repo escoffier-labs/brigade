@@ -928,7 +928,7 @@ def test_claims_page_is_bounded_and_reports_truncation(stations, hub):
 
 @pytest.mark.parametrize("action", ["who", "claims"])
 @pytest.mark.parametrize("cap", ["SNAPSHOT_MAX_PER_CALLER", "SNAPSHOT_MAX_COUNT", "SNAPSHOT_MAX_BYTES"])
-def test_snapshot_capacity_is_retryable_without_evicting_cursors(stations, hub, monkeypatch, action, cap):
+def test_snapshot_capacity_evicts_own_walk_or_reports_global_capacity(stations, hub, monkeypatch, action, cap):
     from brigade import fleet_hub_paging
 
     base, token, _other_token, db = hub
@@ -952,16 +952,25 @@ def test_snapshot_capacity_is_retryable_without_evicting_cursors(stations, hub, 
         conn.close()
     monkeypatch.setattr(fleet_hub_paging, cap, size if cap == "SNAPSHOT_MAX_BYTES" else 1)
     status, rejected = fleet_client_messages._request(base, token, {"action": action, "limit": 1})
-    assert status == 429
-    assert rejected["code"] == "paging_snapshot_capacity"
-    payload, error = stations[0].call(f"fleet_{action}", {"limit": 1})
-    assert error and payload == {
-        "error": "Fleet hub operation failed.",
-        "code": "paging_snapshot_capacity",
-        "status": 429,
-        "transient": True,
-        "permanent": False,
-    }
+    if cap == "SNAPSHOT_MAX_PER_CALLER":
+        assert status == 200 and rejected["next_cursor"]
+        old_status, old_page = fleet_client_messages._request(
+            base, token, {"action": action, "cursor": first["next_cursor"]}
+        )
+        assert old_status == 400 and "restart from the first page" in old_page["error"]
+        first = call(stations[0], f"fleet_{action}", limit=1)
+        assert isinstance(first["next_cursor"], str)
+    else:
+        assert status == 429
+        assert rejected["code"] == "paging_snapshot_capacity"
+        payload, error = stations[0].call(f"fleet_{action}", {"limit": 1})
+        assert error and payload == {
+            "error": "Fleet hub operation failed.",
+            "code": "paging_snapshot_capacity",
+            "status": 429,
+            "transient": True,
+            "permanent": False,
+        }
     rest = call(stations[0], f"fleet_{action}", cursor=first["next_cursor"])
     assert rest["next_cursor"] is None
     key = "nodes" if action == "who" else "claims"

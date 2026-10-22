@@ -107,3 +107,93 @@ def test_legacy_request_does_not_store_snapshot(store):
         page = messages.handle(store, {"action": "claims"}, caller="reader")[1]
     assert page["truncated"] and page["next_cursor"] is None
     assert store.execute("SELECT COUNT(*) FROM fleet_read_snapshots").fetchone()[0] == 0
+
+
+@pytest.mark.parametrize("budget", ["count", "bytes"])
+def test_caller_budget_evicts_only_its_oldest_walk(store, monkeypatch, budget):
+    fleet_hub.add_node(store, "other")
+    other = seed(store, 3, caller="other")
+    oldest = seed(store, 3)
+    size = store.execute("SELECT payload_bytes FROM fleet_read_snapshots WHERE caller='reader'").fetchone()[0]
+    if budget == "count":
+        monkeypatch.setattr(paging, "SNAPSHOT_MAX_PER_CALLER", 2)
+    else:
+        monkeypatch.setattr(paging, "SNAPSHOT_MAX_PER_CALLER_BYTES", 2 * size)
+    newer = seed(store, 3)
+    newest = seed(store, 3)
+    assert store.execute("SELECT COUNT(*) FROM fleet_read_snapshots WHERE caller='reader'").fetchone()[0] == 2
+    assert (
+        store.execute("SELECT SUM(payload_bytes) FROM fleet_read_snapshots WHERE caller='reader'").fetchone()[0]
+        <= 2 * size
+    )
+    with pytest.raises(messages.MessageError, match="restart from the first page"):
+        read(store, oldest["next_cursor"])
+    for page, caller in ((other, "other"), (newer, "reader"), (newest, "reader")):
+        assert read(store, page["next_cursor"], caller=caller)["claims"][0]["target"] == "item-00001"
+
+
+def test_snapshot_larger_than_caller_byte_budget_fails_without_eviction(store, monkeypatch):
+    first = seed(store, 3)
+    monkeypatch.setattr(paging, "SNAPSHOT_MAX_PER_CALLER_BYTES", 1)
+    with pytest.raises(messages.MessageQuotaError, match="capacity"):
+        seed(store, 3)
+    assert read(store, first["next_cursor"])["next_cursor"]
+
+
+def test_expiry_cleanup_removes_snapshot_rows_and_counts(store, monkeypatch):
+    first = seed(store, 3)
+    now = fleet_hub._now_epoch()
+    monkeypatch.setattr(fleet_hub, "_now_epoch", lambda: now + paging.SNAPSHOT_TTL_SECONDS + 1)
+    seed(store, 3)
+    assert store.execute("SELECT COUNT(*) FROM fleet_read_snapshots").fetchone()[0] == 1
+    assert store.execute("SELECT COUNT(*) FROM fleet_read_snapshot_groups").fetchone()[0] == 1
+    assert store.execute("SELECT COUNT(*) FROM fleet_read_snapshot_rows").fetchone()[0] == 3
+    with pytest.raises(messages.MessageError, match="expired"):
+        read(store, first["next_cursor"])
+
+
+def test_old_format_current_schema_migrates_idempotently_and_rejects_cursor(store):
+    first = seed(store, 3)
+    store.execute("UPDATE fleet_read_snapshots SET payload=?", (json.dumps({"claims": []}),))
+    objects = store.execute(
+        "SELECT type,name FROM sqlite_master WHERE name GLOB 'fleet_read_snapshot_*' OR name GLOB 'fleet_read_visibility_*' "
+        "ORDER BY CASE type WHEN 'trigger' THEN 0 WHEN 'index' THEN 1 ELSE 2 END"
+    ).fetchall()
+    for kind, name in objects:
+        store.execute(f'DROP {kind} "{name}"')
+    store.commit()
+    path = store.execute("PRAGMA database_list").fetchone()[2]
+    for _ in range(2):
+        conn = fleet_hub.init_db(path)
+        try:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
+            with pytest.raises(messages.MessageError, match="restart from the first page"):
+                read(conn, first["next_cursor"])
+            fresh = seed(conn, 3)
+            assert read(conn, fresh["next_cursor"], limit=200)["next_cursor"] is None
+        finally:
+            conn.close()
+
+
+def test_cached_wire_cost_preserves_oversized_count_and_skips_payload(store, monkeypatch):
+    monkeypatch.setattr(paging, "PAGE_MAX_BYTES", 20000)
+    raw = {"action": "claims", "limit": 1}
+    data = {
+        "claims": [
+            {"owner_node": "reader", "target": f"item-{i}", "note": "x" * (16000 if i == 1 else 500)} for i in range(4)
+        ]
+    }
+    first = paging.page(store, raw, data, caller="reader", limit=1, visible=lambda *_: True, snapshot_write=True)
+    store.commit()
+    loads = json.loads
+    decoded = []
+
+    def measured_loads(value, *args, **kwargs):
+        decoded.append(len(value))
+        return loads(value, *args, **kwargs)
+
+    monkeypatch.setattr(json, "loads", measured_loads)
+    page = read(store, first["next_cursor"])
+    assert page["claims"][0]["target"] == "item-2"
+    assert page["oversized"] == 1 and page["total"] == 4 and page["next_cursor"]
+    assert max(decoded) < 2000

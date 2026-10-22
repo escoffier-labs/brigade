@@ -22,6 +22,7 @@ PAGE_MAX = 500
 PAGE_MAX_BYTES = 7 * 1024 * 1024
 SNAPSHOT_TTL_SECONDS = 600
 SNAPSHOT_MAX_PER_CALLER = 8
+SNAPSHOT_MAX_PER_CALLER_BYTES = 16 * 1024 * 1024
 SNAPSHOT_MAX_COUNT = 128
 SNAPSHOT_MAX_BYTES = 64 * 1024 * 1024
 SNAPSHOT_SINGLE_MAX_BYTES = 16 * 1024 * 1024
@@ -230,10 +231,26 @@ def _save(
         raise MessageError("paging snapshot exceeds capacity")
     now = fleet_hub._now_epoch()
     conn.execute("DELETE FROM fleet_read_snapshots WHERE expires_at<=?", (now,))
-    count, total, owned = conn.execute(
-        "SELECT COUNT(*),COALESCE(SUM(payload_bytes),0),COALESCE(SUM(caller=?),0) FROM fleet_read_snapshots", (caller,)
+    count, total, owned, owned_bytes = conn.execute(
+        "SELECT COUNT(*),COALESCE(SUM(payload_bytes),0),COALESCE(SUM(caller=?),0),"
+        "COALESCE(SUM(CASE WHEN caller=? THEN payload_bytes ELSE 0 END),0) FROM fleet_read_snapshots",
+        (caller, caller),
     ).fetchone()
-    if count >= SNAPSHOT_MAX_COUNT or total + size > SNAPSHOT_MAX_BYTES or owned >= SNAPSHOT_MAX_PER_CALLER:
+    if SNAPSHOT_MAX_PER_CALLER < 1 or size > SNAPSHOT_MAX_PER_CALLER_BYTES:
+        raise MessageQuotaError("paging snapshot exceeds caller capacity", code="paging_snapshot_capacity")
+    # A full caller budget must not turn its next first-page read into a 429.
+    # Reclaim only that caller's oldest walk, including its indexed child rows.
+    while owned >= SNAPSHOT_MAX_PER_CALLER or owned_bytes + size > SNAPSHOT_MAX_PER_CALLER_BYTES:
+        oldest, oldest_bytes = conn.execute(
+            "SELECT snapshot_id,payload_bytes FROM fleet_read_snapshots WHERE caller=? ORDER BY expires_at,rowid LIMIT 1",
+            (caller,),
+        ).fetchone()
+        conn.execute("DELETE FROM fleet_read_snapshots WHERE snapshot_id=?", (oldest,))
+        count -= 1
+        total -= oldest_bytes
+        owned -= 1
+        owned_bytes -= oldest_bytes
+    if count >= SNAPSHOT_MAX_COUNT or total + size > SNAPSHOT_MAX_BYTES:
         raise MessageQuotaError(
             "paging snapshot capacity reached; retry after snapshots expire", code="paging_snapshot_capacity"
         )

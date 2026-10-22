@@ -427,8 +427,11 @@ def test_snapshot_capacity_expiry_and_schema_migration(directory, monkeypatch):
     roster(directory, 2)
     monkeypatch.setattr(fleet_hub_paging, "SNAPSHOT_MAX_PER_CALLER", 1)
     first = who(directory, limit=1)
-    with pytest.raises(messages.MessageError, match="capacity"):
-        who(directory, limit=1)
+    replacement = who(directory, limit=1)
+    with pytest.raises(messages.MessageError, match="restart from the first page"):
+        who(directory, cursor=first["next_cursor"])
+    first = replacement
+    assert directory.execute("SELECT COUNT(*) FROM fleet_read_snapshots").fetchone()[0] == 1
     now = fleet_hub._now_epoch()
     monkeypatch.setattr(fleet_hub, "_now_epoch", lambda: now + fleet_hub_paging.SNAPSHOT_TTL_SECONDS + 1)
     with pytest.raises(messages.MessageError, match="cursor"):

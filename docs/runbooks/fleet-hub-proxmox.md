@@ -806,10 +806,12 @@ returns `paging_continuation_unsupported` on a truncated claims page.
 Requests opt in to snapshots by sending `limit` or `cursor`. Legacy requests
 receive the first page without storing a snapshot. Completed walks delete their
 snapshots. Snapshots expire after 10 minutes. Storage is capped at eight snapshots
-per caller, 128 snapshots and 64 MiB across the hub, and 16 MiB per
-snapshot. Capacity and expired-cursor errors require a fresh query after capacity
-becomes available. Cursors are opaque but do not authenticate offsets: callers
-can skip or rewind within their own snapshot. Pages also enforce a serialized byte budget below the client cap.
+and 16 MiB per caller, 128 snapshots and 64 MiB across the hub, and 16 MiB per
+snapshot. A full caller budget evicts only that caller's oldest walk. Evicted
+cursors require restarting from the first page. Global capacity and expired-cursor
+errors require a fresh query after capacity becomes available. Cursors are opaque but do not authenticate offsets: callers
+can skip or rewind within their own snapshot. Pages also enforce a serialized
+byte budget below the client cap.
 Node `fleet_claims` results match `GET /claims`, including active Grok Bot lease
 rows. Agent claim results include only granted owner nodes and omit `job`,
 `session`, and `owner_conductor`. Small directory and claim reads use a read
