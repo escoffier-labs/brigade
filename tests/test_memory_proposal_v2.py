@@ -805,3 +805,13 @@ def test_exact_duplicate_merge_keeps_citations_from_alternate_evidence_fields(tm
     assert apply(tmp_path, proposal)["status"] == "committed"
     assert ref in api._meta(path.read_text())["evidence"]
     assert not other.exists()
+
+
+def test_append_evidence_keeps_citations_stored_in_alternate_fields(tmp_path):
+    path = setup(tmp_path)
+    old = evidence(tmp_path, ".brigade/receipts/old.json")
+    path.write_text(path.read_text().replace("evidence: []", f"sources: {json.dumps([old])}"))
+    new = ".brigade/receipts/support.json"
+    proposal = create(tmp_path, [op("append_evidence", evidence_ids=[new])])
+    assert apply(tmp_path, proposal)["status"] == "committed"
+    assert api._meta(path.read_text())["evidence"] == sorted([old, new])

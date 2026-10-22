@@ -199,7 +199,12 @@ def apply_op(
             or not all(isinstance(ref, str) and ref in resolved for ref in refs)
         ):
             raise legacy.ProposalError("op evidence does not resolve")
-        merged = sorted(set(_list(legacy._meta(text), "evidence")) | set(refs))
+        from . import memory_cmd
+
+        meta = legacy._meta(text)
+        _list(meta, "evidence")
+        # Existing citations may live in any field the canonical reader supports.
+        merged = sorted(set(memory_cmd._evidence_refs(meta)) | set(refs))
         if len(merged) > io.MAX_LIST:
             raise legacy.ProposalError("evidence list limit exceeded")
         updates: dict[str, Any] = {"evidence": merged, "proof_count": len(set(merged) & resolved)}
