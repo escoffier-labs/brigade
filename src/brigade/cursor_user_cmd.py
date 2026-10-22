@@ -228,9 +228,9 @@ def _hooks_document_error(doc: dict[str, Any]) -> str | None:
     version = doc.get("version")
     if isinstance(version, bool) or not isinstance(version, int) or version < 1:
         return "existing hooks configuration needs a positive integer version"
-    hooks = doc.get("hooks")
-    if hooks is None:
+    if "hooks" not in doc:
         return None
+    hooks = doc["hooks"]
     if not isinstance(hooks, dict):
         return "existing hooks field must be an object"
     for event, entries in hooks.items():

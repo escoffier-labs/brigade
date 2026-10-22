@@ -174,6 +174,7 @@ REFUSED_ROWS = [
     pytest.param("string-version", "r4344139090 P1", {"version": "1", "hooks": {}}, "version", id="version-string"),
     pytest.param("bool-version", "r4344139090 P1", {"version": True, "hooks": {}}, "version", id="version-bool"),
     pytest.param("hooks-not-object", "invalid document", {"version": 1, "hooks": []}, "object", id="hooks-not-object"),
+    pytest.param("hooks-null", "r4344688457 P2", {"version": 1, "hooks": None}, "object", id="hooks-null"),
     pytest.param(
         "bad-definition",
         "r4344258655 P2: every hook definition has a valid shape",
@@ -437,6 +438,8 @@ USER_ROWS = [
     pytest.param({"hooks": {"beforeSubmitPrompt": [FOREIGN]}}, "repaired", id="foreign-document-without-version"),
     pytest.param({"version": "1", "hooks": {}}, "conflict", id="string-version"),
     pytest.param({"version": 1, "hooks": {"sessionStart": "nope"}}, "conflict", id="event-not-list"),
+    pytest.param({"version": 1, "hooks": None}, "conflict", id="hooks-null"),
+    pytest.param({"hooks": None}, "conflict", id="versionless-hooks-null"),
     pytest.param('{"version": 1, "hooks": {', "conflict", id="malformed"),
 ]
 
