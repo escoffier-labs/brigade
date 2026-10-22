@@ -981,10 +981,8 @@ def reply(conn: sqlite3.Connection, raw: dict[str, Any], *, sender: str) -> dict
     return _fetch(conn, message["id"])
 
 
-# Station claims return one page bounded by row count and by serialized size,
-# so the response always fits the client's cap. Rows sort by target. Cursor
-# paging over a live claims table is not stable without hub-side snapshots, so
-# a cut list says so with truncated and total instead (full paging: #1901).
+# Legacy row-and-byte bounding helper retained for compatibility tests.
+# Production station reads use fleet_hub_paging snapshots.
 CLAIMS_PAGE_DEFAULT = 200
 CLAIMS_PAGE_MAX = 500
 CLAIMS_PAGE_MAX_BYTES = 4 * 1024 * 1024

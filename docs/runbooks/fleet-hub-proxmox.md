@@ -795,6 +795,8 @@ Node credentials can deliberately list all active agent principals and their
 labels through `fleet_who`. Agent credentials see only recipients allowed by
 their grants. Session filtering by permitted nodes happens before the row limit.
 `fleet_who` and `fleet_claims` accept `limit` from 1 to 500 (default 200).
+For `fleet_who`, this limits nodes and principals. Sessions keep their separate
+upstream row bounds and are split across pages only by the byte budget.
 Pass the opaque `next_cursor` back as `cursor` with the same query to continue
 until `next_cursor` is null. Continuation pages retain the original snapshot
 while checking the caller's current permissions. Start a new query to see
