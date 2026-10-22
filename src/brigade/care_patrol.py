@@ -76,7 +76,7 @@ def receipt_fields(target: Path, entry: CareEntry, last_runbook: dict[str, Any] 
     """Expose direct patrol receipts alongside the scheduler's runbook receipt."""
     if entry.entry_id != "run-patrol":
         return {}
-    from .run_lane_state import _read_json
+    from .runs_patrol_receipts import read_receipt
 
     root = target / ".brigade/patrol"
     latest: tuple[str, dict[str, Any]] | None = None
@@ -87,8 +87,9 @@ def receipt_fields(target: Path, entry: CareEntry, last_runbook: dict[str, Any] 
                 continue
             path = directory / "patrol.json"
             try:
-                payload, _ = _read_json(path)
-                if payload.get("schema") != "brigade.runs_patrol.v1":
+                # The writer's 4 MiB contract applies, not the generic 1 MiB cap.
+                payload = read_receipt(directory)
+                if payload is None:
                     continue
                 observed = str(payload.get("observed_at") or "")
                 if latest is None or observed > latest[0]:

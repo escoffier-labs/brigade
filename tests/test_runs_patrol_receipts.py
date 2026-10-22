@@ -208,3 +208,37 @@ def test_oversized_receipt_is_bounded_and_stays_readable(tmp_path, monkeypatch):
     small = {"schema": "brigade.runs_patrol.v1", "lanes": lanes[:1], "actions": []}
     runs_patrol_receipts.write_receipt(path, small)
     assert "receipt_truncated" not in runs_patrol_receipts.read_receipt(path.parent)
+
+
+def test_action_history_over_the_limit_is_refused_not_published(tmp_path, monkeypatch):
+    import pytest
+
+    monkeypatch.setattr(runs_patrol_receipts, "RECEIPT_BYTE_LIMIT", 2000)
+    actions = [{"lane_id": "x" * 100, "status": "applied"} for _ in range(50)]
+    payload = {"schema": "brigade.runs_patrol.v1", "lanes": [], "actions": actions}
+    path = tmp_path / "20260820T120000-big/patrol.json"
+    with pytest.raises(ValueError, match="action history"):
+        runs_patrol_receipts.write_receipt(path, payload)
+    assert not path.exists()
+
+
+def test_care_status_reads_a_receipt_between_one_and_four_mib(tmp_path):
+    from brigade import care_patrol
+
+    path = tmp_path / ".brigade/patrol/20260820T120000-big/patrol.json"
+    lanes = [{"lane_id": f"l{i}", "evidence": [{"detail": "x" * 200}] * 20} for i in range(300)]
+    localio.write_json(
+        path,
+        {
+            "schema": "brigade.runs_patrol.v1",
+            "patrol_id": "20260820T120000-big",
+            "observed_at": NOW.isoformat(),
+            "exit_code": 0,
+            "lanes": lanes,
+            "actions": [],
+        },
+    )
+    assert 1024 * 1024 < path.stat().st_size < runs_patrol_receipts.RECEIPT_BYTE_LIMIT
+    entry = type("Entry", (), {"entry_id": "run-patrol"})()
+    fields = care_patrol.receipt_fields(tmp_path, entry, None)
+    assert fields["patrol_receipt"]["patrol_id"] == "20260820T120000-big"

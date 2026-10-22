@@ -74,6 +74,10 @@ def bounded_receipt_text(payload: dict[str, Any]) -> str:
     while len(text.encode()) > RECEIPT_BYTE_LIMIT and lanes:
         del lanes[len(lanes) // 2 :]
         text = render(bounded)
+    if len(text.encode()) > RECEIPT_BYTE_LIMIT:
+        # The action history alone is too large. Refuse to publish a receipt
+        # the strict reader would reject and abort every later apply patrol.
+        raise ValueError("patrol action history exceeds receipt byte limit")
     return text
 
 
