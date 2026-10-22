@@ -133,7 +133,13 @@ DEFAULT_RULES: tuple[Rule, ...] = (
     Rule(
         id="root-path",
         category="infrastructure",
-        pattern=r"(?<![\w.-])/root(?:/[A-Za-z0-9._@+-]+)+",
+        # Matching quotes bound spaced components without consuming the
+        # quotes themselves. Unquoted paths keep their whitespace boundary.
+        pattern=(
+            r"(?<![\w.-])(?:"
+            r"(?<=(?P<root_quote>[\"'`]))/root(?:/[A-Za-z0-9._@+ -]+)+(?=(?P=root_quote))"
+            r"|/root(?:/[A-Za-z0-9._@+-]+)+)"
+        ),
         replacement="[redacted-root-path]",
         description="Filesystem path under the root user's home directory.",
     ),

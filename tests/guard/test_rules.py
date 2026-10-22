@@ -325,6 +325,35 @@ class MissingLeakShapeTests(unittest.TestCase):
         result = scan_text("Config at /root/.config/tool.json")  # content-guard: allow root-path
         self.assertIn("root-path", {finding.rule_id for finding in result.findings})
 
+    def test_quoted_root_spaced_paths_are_completely_matched_and_redacted(self) -> None:
+        public_policy = load_policy(Path(__file__).parents[2] / "src/brigade/guard/policies/public-repo.json")
+        for components in (
+            ("Private Folder",),
+            ("Private Folder", "secret.txt"),
+            (".config", "Private Folder", "secret file.txt"),
+            (".config", "secret file.txt"),
+        ):
+            path = "/".join(("", "root", *components))
+            for quote in ('"', "'", "`"):
+                text = f"Config at {quote}{path}{quote}, then continue."
+                with self.subTest(components=components, quote=quote, check="match"):
+                    result = scan_text(text, policy=public_policy)
+                    self.assertEqual([finding.match for finding in result.findings], [path])
+                    self.assertTrue(result.blocked)
+                with self.subTest(components=components, quote=quote, check="redaction"):
+                    result = scan_text(text, policy=Policy(rules={"root-path": "redact"}))
+                    self.assertEqual(
+                        result.redacted_text,
+                        f"Config at {quote}[redacted-root-path]{quote}, then continue.",
+                    )
+
+    def test_unquoted_root_paths_preserve_surrounding_prose(self) -> None:
+        path = "/".join(("", "root", ".config", "tool.json"))
+        text = f"Config at {path} then consult docs.md."
+        result = scan_text(text, policy=Policy(rules={"root-path": "redact"}))
+        self.assertEqual([finding.match for finding in result.findings], [path])
+        self.assertEqual(result.redacted_text, "Config at [redacted-root-path] then consult docs.md.")
+
     def test_bare_provider_token_matches(self) -> None:
         token = "ghp_" + "A" * 36
         result = scan_text(f"Leaked credential: {token}")
@@ -375,6 +404,14 @@ class MissingLeakShapeTests(unittest.TestCase):
         for text in ("/rooted/project", "/srv/root/project", "relative/root/project"):
             with self.subTest(text=text):
                 self.assertNotIn("root-path", {f.rule_id for f in scan_text(text).findings})
+
+        for path in ("/rooted/Private Folder", "/srv/root/Private Folder", "relative/root/Private Folder", "/root"):
+            for quote in ('"', "'", "`"):
+                text = f"Config at {quote}{path}{quote}, then continue."
+                with self.subTest(path=path, quote=quote):
+                    result = scan_text(text, policy=Policy(rules={"root-path": "redact"}))
+                    self.assertEqual(result.findings, [])
+                    self.assertEqual(result.redacted_text, text)
 
     def test_provider_prefix_families_match_without_assignment(self) -> None:
         for prefix, body in (
