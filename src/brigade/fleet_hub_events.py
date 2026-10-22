@@ -57,6 +57,11 @@ MAX_SUBSCRIPTIONS = 200
 # Recording bound: one authenticated producer can add at most this many events of one kind an hour.
 MAX_EVENTS_PER_PRODUCER_PER_HOUR = 120
 ROTATION_WINDOW_SECONDS = 300
+# Egress bound: every callback verification sends a request to a host the caller named, so attempts, including
+# failed ones, are counted per principal and across the hub before the challenge goes out.
+VERIFICATION_WINDOW_SECONDS = 3600
+MAX_VERIFICATIONS_PER_PRINCIPAL = 30
+MAX_VERIFICATIONS = 240
 _VERIFY_SLOTS = threading.BoundedSemaphore(4)
 _ID_RE = re.compile(r"^(agent:)?[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
 _LOG = logging.getLogger("brigade.fleet_hub_events")
@@ -84,6 +89,10 @@ _SCHEMA = (
     """CREATE TABLE IF NOT EXISTS fleet_event_attempts (
         subscription_id TEXT NOT NULL, attempted_at REAL NOT NULL)""",
     "CREATE INDEX IF NOT EXISTS fleet_event_attempts_recent ON fleet_event_attempts (subscription_id, attempted_at)",
+    # One row per callback verification, written before the challenge is sent whether or not it later succeeds.
+    """CREATE TABLE IF NOT EXISTS fleet_event_verifications (
+        principal_id TEXT NOT NULL, attempted_at REAL NOT NULL)""",
+    "CREATE INDEX IF NOT EXISTS fleet_event_verifications_recent ON fleet_event_verifications (attempted_at, principal_id)",
 )
 
 
@@ -427,6 +436,28 @@ def _ttl_seconds(params: dict[str, Any]) -> float:
     return max(MIN_TTL_MS, min(ttl, DEFAULT_TTL_MS)) / 1000
 
 
+def _reserve_verification(conn: sqlite3.Connection, caller: str, adds_row: bool) -> None:
+    """Refuse a verification that could not be stored or is over budget; otherwise record the attempt.
+
+    Runs in its own committed transaction, so the attempt stays counted when the challenge later fails.
+    ``store`` keeps its own cap check inside the insert transaction, which is what actually holds the line.
+    """
+    if adds_row and (
+        conn.execute("SELECT COUNT(*) FROM fleet_event_subscriptions WHERE principal_id=?", (caller,)).fetchone()[0]
+        >= MAX_SUBSCRIPTIONS_PER_PRINCIPAL
+        or conn.execute("SELECT COUNT(*) FROM fleet_event_subscriptions").fetchone()[0] >= MAX_SUBSCRIPTIONS
+    ):
+        raise EventsError(429, "events_subscription_limit", "subscription_limit")
+    since = time.time() - VERIFICATION_WINDOW_SECONDS
+    mine, everyone = conn.execute(
+        "SELECT COALESCE(SUM(principal_id=?),0), COUNT(*) FROM fleet_event_verifications WHERE attempted_at>?",
+        (caller, since),
+    ).fetchone()
+    if mine >= MAX_VERIFICATIONS_PER_PRINCIPAL or everyone >= MAX_VERIFICATIONS:
+        raise EventsError(429, "events_verification_limit", "verification_limit")
+    conn.execute("INSERT INTO fleet_event_verifications(principal_id, attempted_at) VALUES(?,?)", (caller, time.time()))
+
+
 def _verify_callback(url: str, secret: str, sid: str) -> None:
     """Send a signed single-use challenge and require the same value back; no data is sent before this passes."""
     challenge = secrets.token_urlsafe(32)
@@ -485,6 +516,8 @@ def _subscribe(conn: sqlite3.Connection, params: dict[str, Any], caller: str) ->
     now = time.time()
     # A refresh with the same identity and secret was verified when it was created.
     if not (existing and existing[0] == delivery["secret"] and (existing[1] is None or existing[1] > now)):
+        # Capacity and the verification budget are settled, and the attempt is on the ledger, before any egress.
+        messages._as_active_principal(conn, caller, lambda: _reserve_verification(conn, caller, existing is None))
         _verify_callback(delivery["url"], delivery["secret"], sid)
 
     def store() -> float:

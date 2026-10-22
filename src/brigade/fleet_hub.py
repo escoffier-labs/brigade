@@ -1947,7 +1947,6 @@ def run(
         sweeper_stop.set()
         sweeper_thread.join(timeout=5)
         stats_thread.join(timeout=5)
-        if events_thread is not None:
-            events_thread.join(timeout=5)
+        events_thread.join(timeout=5)
         server.server_close()
     return 0

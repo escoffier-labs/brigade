@@ -56,6 +56,7 @@ EVENT_ERROR_CODES = frozenset(
         "events_invalid_delivery",
         "events_forbidden",
         "events_subscription_limit",
+        "events_verification_limit",
         "events_busy",
         *(f"events_callback_{reason}" for reason in CALLBACK_REASONS),
     }
@@ -170,16 +171,9 @@ def _loopback(address: str) -> bool:
     return parsed.is_loopback
 
 
-def resolve_callback(parts: SplitResult, policy: CallbackPolicy) -> list[str]:
-    """Resolve once and require every answer to be acceptable for the scheme."""
-    assert parts.hostname is not None
-    port = parts.port or (443 if parts.scheme == "https" else 80)
-    answers = socket.getaddrinfo(parts.hostname, port, type=socket.SOCK_STREAM)
-    ips = list(dict.fromkeys(str(item[4][0]) for item in answers))
-    check = _public if parts.scheme == "https" else _loopback
-    if not ips or not all(check(ip) for ip in ips):
-        raise ValueError("invalid_callback_address")
-    return ips
+# A stalled resolver cannot be cancelled, only abandoned, so abandoned lookups are capped: a callback that cannot
+# get a slot fails at once instead of piling up blocked threads.
+_RESOLVER_SLOTS = threading.BoundedSemaphore(8)
 
 
 def _remaining(deadline: float) -> float:
@@ -187,6 +181,51 @@ def _remaining(deadline: float) -> float:
     if left <= 0:
         raise TimeoutError("callback_deadline_exceeded")
     return left
+
+
+def _lookup(host: str, port: int, deadline: float | None) -> list[Any]:
+    """``getaddrinfo`` inside the overall deadline: a worker runs it, the caller waits only for the time left."""
+    if deadline is None:
+        return socket.getaddrinfo(host, port, type=socket.SOCK_STREAM)
+    if not _RESOLVER_SLOTS.acquire(blocking=False):
+        raise TimeoutError("callback_resolver_busy")
+    outcome: list[Any] = []
+    done = threading.Event()
+
+    def work() -> None:
+        try:
+            outcome.append(socket.getaddrinfo(host, port, type=socket.SOCK_STREAM))
+        except BaseException as error:  # noqa: BLE001 - handed to the waiting caller
+            outcome.append(error)
+        finally:
+            _RESOLVER_SLOTS.release()
+            done.set()
+
+    try:
+        threading.Thread(target=work, name="fleet-callback-resolver", daemon=True).start()
+    except BaseException:
+        _RESOLVER_SLOTS.release()
+        raise
+    if not done.wait(_remaining(deadline)):
+        raise TimeoutError("callback_deadline_exceeded")
+    if isinstance(outcome[0], BaseException):
+        raise outcome[0]
+    return outcome[0]
+
+
+def resolve_callback(parts: SplitResult, policy: CallbackPolicy, deadline: float | None = None) -> list[str]:
+    """Resolve once and require every answer to be acceptable for the scheme.
+
+    With a ``deadline`` (a ``time.monotonic()`` value) the lookup shares the delivery's overall budget.
+    """
+    assert parts.hostname is not None
+    port = parts.port or (443 if parts.scheme == "https" else 80)
+    answers = _lookup(parts.hostname, port, deadline)
+    ips = list(dict.fromkeys(str(item[4][0]) for item in answers))
+    check = _public if parts.scheme == "https" else _loopback
+    if not ips or not all(check(ip) for ip in ips):
+        raise ValueError("invalid_callback_address")
+    return ips
 
 
 class _OwnedSocket:
@@ -270,7 +309,7 @@ def post_webhook(
 ) -> tuple[int, bytes]:
     """POST once to a validated callback. Never follows redirects, uses no proxy, bounds the response.
 
-    ``timeout`` is one overall deadline for connect, TLS, send, headers and body: per-read idle
+    ``timeout`` is one overall deadline for DNS, connect, TLS, send, headers and body: per-read idle
     timeouts alone would let a slow-drip receiver pin the caller indefinitely.
 
     Raises ``ValueError`` for a rejected URL, address, or oversized body, and
@@ -278,10 +317,10 @@ def post_webhook(
     """
     if len(body) > MAX_BODY_BYTES:
         raise ValueError("body_too_large")
+    deadline = time.monotonic() + timeout
     parts = parse_callback(url, policy)
     assert parts.hostname is not None
-    address = resolve_callback(parts, policy)[0]
-    deadline = time.monotonic() + timeout
+    address = resolve_callback(parts, policy, deadline)[0]
     target = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
     connection: _PinnedHTTPConnection | _PinnedHTTPSConnection
     if parts.scheme == "https":

@@ -28,6 +28,7 @@ _HUB_CODES: dict[str, tuple[int, str]] = {
     "events_invalid_delivery": (_INVALID_PARAMS, "invalid_delivery"),
     "events_forbidden": (_SERVER_ERROR, "forbidden"),
     "events_subscription_limit": (_SERVER_ERROR, "subscription_limit"),
+    "events_verification_limit": (_SERVER_ERROR, "verification_limit"),
     "events_busy": (_SERVER_ERROR, "busy"),
 }
 _CALLBACK_PREFIX = "events_callback_"

@@ -27,6 +27,8 @@ from .mcp_events import CallbackPolicy, post_webhook, signed_headers
 Post = Callable[[str, bytes, Mapping[str, str], CallbackPolicy], "tuple[int, bytes]"]
 
 TICK_SECONDS = 0.5
+# With events off nothing is delivered; the tick only prunes what an earlier run left behind.
+IDLE_TICK_SECONDS = 60.0
 BATCH = 20
 WORKERS = 4
 MAX_ATTEMPTS = 8
@@ -140,8 +142,8 @@ def _materialize(conn: sqlite3.Connection, now: float) -> None:
         )
 
 
-def _fan_out(conn: sqlite3.Connection, now: float) -> list[dict[str, Any]]:
-    """Create delivery rows for new events, drop dead state, and return the due deliveries."""
+def _prune_subscriptions(conn: sqlite3.Connection, now: float) -> None:
+    """Drop lapsed and revoked subscriptions and erase retired signing keys."""
     conn.execute("DELETE FROM fleet_event_subscriptions WHERE expires_at IS NOT NULL AND expires_at<=?", (now,))
     # A retired signing key is erased once its rotation window closes, not kept as dead weight.
     conn.execute(
@@ -155,8 +157,14 @@ def _fan_out(conn: sqlite3.Connection, now: float) -> list[dict[str, Any]]:
         "(SELECT node_id FROM nodes WHERE revoked_at IS NULL) AND principal_id NOT IN "
         "(SELECT principal_id FROM fleet_message_principals WHERE revoked_at IS NULL)"
     )
-    _materialize(conn, now)
+
+
+def _prune_outbox(conn: sqlite3.Connection, now: float) -> None:
+    """Apply the retention window to events, deliveries and the request ledgers."""
     conn.execute("DELETE FROM fleet_event_attempts WHERE attempted_at<=?", (now - HOURLY_WINDOW_SECONDS,))
+    conn.execute(
+        "DELETE FROM fleet_event_verifications WHERE attempted_at<=?", (now - events.VERIFICATION_WINDOW_SECONDS,)
+    )
     conn.execute(
         "DELETE FROM fleet_event_deliveries WHERE subscription_id NOT IN (SELECT id FROM fleet_event_subscriptions)"
     )
@@ -173,6 +181,13 @@ def _fan_out(conn: sqlite3.Connection, now: float) -> list[dict[str, Any]]:
     conn.execute(
         "DELETE FROM fleet_event_deliveries WHERE state!='pending' AND seq NOT IN (SELECT seq FROM fleet_events)"
     )
+
+
+def _fan_out(conn: sqlite3.Connection, now: float) -> list[dict[str, Any]]:
+    """Create delivery rows for new events, drop dead state, and return the due deliveries."""
+    _prune_subscriptions(conn, now)
+    _materialize(conn, now)
+    _prune_outbox(conn, now)
     # Due deliveries are ranked within each principal and taken rank by rank, the same interleave the outbox
     # uses on the way in, so one principal's older backlog cannot fill every batch.
     rows = conn.execute(
@@ -244,13 +259,21 @@ class Dispatcher:
         """Run one pass; returns the number of deliveries acknowledged with 2xx."""
         from . import fleet_hub
 
-        config = events.current()
-        if not config.enabled:
-            return 0
+        enabled = events.current().enabled
         now = self.clock()
         conn = fleet_hub.open_db(self.db_path)
         try:
             conn.execute("BEGIN IMMEDIATE")
+            if not enabled:
+                # Rows and keys from an earlier enabled run still age out; nothing is swept, fanned out or sent.
+                try:
+                    _prune_subscriptions(conn, now)
+                    _prune_outbox(conn, now)
+                    conn.commit()
+                except BaseException:
+                    conn.rollback()
+                    raise
+                return 0
             try:
                 swept = sweep_expired_claims(conn, now, self._swept)
                 due = _fan_out(conn, now)
@@ -362,14 +385,12 @@ class Dispatcher:
                 self.tick()
             except Exception as error:  # noqa: BLE001 - a bad tick must not end delivery
                 _LOG.warning("fleet event tick failed: %s", type(error).__name__)
-            stop.wait(TICK_SECONDS)
+            stop.wait(TICK_SECONDS if events.current().enabled else IDLE_TICK_SECONDS)
         self._pool.shutdown(wait=False, cancel_futures=True)
 
 
-def start_dispatcher(db_path: Path, stop: threading.Event) -> threading.Thread | None:
-    """Start delivery when events are enabled; returns None (and starts nothing) when they are not."""
-    if not events.current().enabled:
-        return None
+def start_dispatcher(db_path: Path, stop: threading.Event) -> threading.Thread:
+    """Start the dispatcher thread. It delivers only while events are enabled, but always prunes retained state."""
     thread = threading.Thread(target=Dispatcher(db_path).run, args=(stop,), name="fleet-events", daemon=True)
     thread.start()
     return thread

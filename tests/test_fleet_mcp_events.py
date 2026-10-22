@@ -476,7 +476,11 @@ def test_events_are_off_by_default_and_record_nothing(hub, tmp_path, monkeypatch
     assert rows(db, "SELECT COUNT(*) FROM fleet_events") == [(0,)]
     reply = rpc(FleetMcp(token_file=str(token_file), events=True), "events/list")
     assert reply["error"]["data"]["reason"] == "events_disabled"
-    assert fleet_hub_events_dispatch.start_dispatcher(db, threading.Event()) is None
+    stop = threading.Event()
+    thread = fleet_hub_events_dispatch.start_dispatcher(db, stop)
+    stop.set()
+    thread.join(5)
+    assert not thread.is_alive(), "the dispatcher still runs while disabled (it prunes) and stops on request"
 
 
 def test_operator_config_comes_from_explicit_environment_only() -> None:
@@ -653,6 +657,34 @@ def test_subscription_count_is_capped_per_principal(stations, receiver, monkeypa
     error = subscribe(stations[1], receiver.url + "c")["error"]
     assert error["data"] == {"reason": "subscription_limit"}
     assert "result" in subscribe(stations[1], receiver.url + "a"), "refreshing an existing one still works"
+
+
+def test_verification_attempts_are_counted_before_any_egress(stations, receiver, hub, monkeypatch) -> None:
+    db = hub[3]
+    monkeypatch.setattr(fleet_hub_events, "MAX_SUBSCRIPTIONS_PER_PRINCIPAL", 1)
+    assert "result" in subscribe(stations[1], receiver.url + "a")
+    assert len(receiver.challenges) == 1
+    error = subscribe(stations[1], receiver.url + "b")["error"]
+    assert error["data"] == {"reason": "subscription_limit"}
+    assert len(receiver.challenges) == 1, "a principal at its cap sends no challenge"
+
+    monkeypatch.setattr(fleet_hub_events, "MAX_SUBSCRIPTIONS_PER_PRINCIPAL", 20)
+    monkeypatch.setattr(fleet_hub_events, "MAX_VERIFICATIONS_PER_PRINCIPAL", 3)
+    receiver.challenge_mode = "wrong"
+    for suffix in ("c", "d"):
+        failed = subscribe(stations[1], receiver.url + suffix)["error"]
+        assert failed["data"] == {"reason": "challenge_mismatch"}
+    assert len(receiver.challenges) == 3, "failed verifications reach the receiver"
+    over = subscribe(stations[1], receiver.url + "e")["error"]
+    assert over["data"] == {"reason": "verification_limit"}
+    assert len(receiver.challenges) == 3, "failed attempts count, so the window sends nothing more"
+    assert rows(db, "SELECT COUNT(*) FROM fleet_event_verifications WHERE principal_id=?", NODE_B) == [(3,)]
+
+    monkeypatch.setattr(fleet_hub_events, "MAX_VERIFICATIONS", 3)
+    receiver.challenge_mode = "echo"
+    shared = subscribe(stations[0], receiver.url + "f")["error"]
+    assert shared["data"] == {"reason": "verification_limit"}
+    assert len(receiver.challenges) == 3, "the hub-wide ceiling also stops the challenge"
 
 
 def test_message_created_is_private_to_the_recipient(stations, receiver, hub) -> None:
@@ -1324,3 +1356,46 @@ def test_reviving_an_expired_subscription_does_not_replay_the_lapse(stations, re
     send(stations[0], NODE_B, body="after")
     assert tick(db) == 1
     assert len(receiver.events) == 1
+
+
+def test_dns_resolution_shares_the_callback_deadline(monkeypatch) -> None:
+    release = threading.Event()
+
+    def stalled(*_args: Any, **_kwargs: Any) -> list[Any]:
+        release.wait(10)
+        return [(2, 1, 6, "", ("93.184.216.34", 443))]
+
+    monkeypatch.setattr(mcp_events.socket, "getaddrinfo", stalled)
+    policy = mcp_events.CallbackPolicy(frozenset({"hooks.example.test"}))
+    started = time.monotonic()
+    with pytest.raises(TimeoutError):
+        mcp_events.post_webhook("https://hooks.example.test/x", b"{}", {}, policy, timeout=0.3)
+    assert time.monotonic() - started < 2, "a stalled resolver cannot outlast the overall deadline"
+
+    release.set()
+    deadline = time.monotonic() + 5
+    while time.monotonic() < deadline and any(
+        t.name == "fleet-callback-resolver" and t.is_alive() for t in threading.enumerate()
+    ):
+        time.sleep(0.02)
+    assert not any(t.name == "fleet-callback-resolver" and t.is_alive() for t in threading.enumerate()), "worker freed"
+
+
+def test_retention_cleanup_continues_while_events_are_disabled(stations, receiver, hub) -> None:
+    _base, _ta, _tb, db = hub
+    subscribe(stations[1], receiver.url)
+    subscribe(stations[1], receiver.url, secret=OTHER_SECRET)  # rotation keeps the old key for a window
+    send(stations[0], NODE_B)
+    assert rows(db, "SELECT COUNT(*) FROM fleet_events") == [(1,)]
+    assert rows(db, "SELECT previous_secret IS NOT NULL FROM fleet_event_subscriptions") == [(1,)]
+    fleet_hub_events.configure(fleet_hub_events.EventsConfig())
+
+    def unreachable(*_args: Any) -> tuple[int, bytes]:
+        raise AssertionError("nothing is delivered while events are disabled")
+
+    assert tick(db, clock=lambda: time.time() + 400, post=unreachable) == 0
+    assert rows(db, "SELECT previous_secret FROM fleet_event_subscriptions") == [(None,)], "retired key erased"
+    assert rows(db, "SELECT COUNT(*) FROM fleet_event_deliveries") == [(0,)], "no fan-out while disabled"
+    assert tick(db, clock=lambda: time.time() + 8 * 86400, post=unreachable) == 0
+    assert rows(db, "SELECT COUNT(*) FROM fleet_event_subscriptions") == [(0,)], "lapsed subscription dropped"
+    assert rows(db, "SELECT COUNT(*) FROM fleet_events") == [(0,)], "events past retention dropped"
