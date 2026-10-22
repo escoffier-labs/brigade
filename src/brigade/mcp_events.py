@@ -189,7 +189,23 @@ def _remaining(deadline: float) -> float:
     return left
 
 
-class _PinnedHTTPSConnection(http.client.HTTPSConnection):
+class _OwnedSocket:
+    """Delivery-owned socket reference, kept apart from ``connection.sock``.
+
+    ``getresponse()`` clears ``connection.sock`` when the response is ``Connection: close``, so a
+    watchdog reading it would find nothing while the body is still being read.
+    """
+
+    owned_sock: socket.socket | None = None
+
+    def abort_socket(self) -> None:
+        sock = self.owned_sock
+        if sock is not None:
+            with contextlib.suppress(OSError):
+                sock.shutdown(socket.SHUT_RDWR)
+
+
+class _PinnedHTTPSConnection(_OwnedSocket, http.client.HTTPSConnection):
     """Connect to a validated IP while verifying the certificate against the original hostname."""
 
     def __init__(self, host: str, port: int, *, address: str, deadline: float) -> None:
@@ -200,38 +216,46 @@ class _PinnedHTTPSConnection(http.client.HTTPSConnection):
 
     def connect(self) -> None:
         sock = socket.create_connection((self._address, self.port), _remaining(self._deadline))
+        self.owned_sock = sock
         sock.settimeout(_remaining(self._deadline))
-        self.sock = self._tls.wrap_socket(sock, server_hostname=self.host)
+        # Handshake manually so the wrapped socket is published before it can block.
+        wrapped = self._tls.wrap_socket(sock, server_hostname=self.host, do_handshake_on_connect=False)
+        self.owned_sock = wrapped
+        self.sock = wrapped
+        wrapped.settimeout(_remaining(self._deadline))
+        wrapped.do_handshake()
 
 
-class _PinnedHTTPConnection(http.client.HTTPConnection):
+class _PinnedHTTPConnection(_OwnedSocket, http.client.HTTPConnection):
     def __init__(self, host: str, port: int, *, address: str, deadline: float) -> None:
         super().__init__(host, port, timeout=_remaining(deadline))
         self._address = address
         self._deadline = deadline
 
     def connect(self) -> None:
-        self.sock = socket.create_connection((self._address, self.port), _remaining(self._deadline))
+        self.sock = self.owned_sock = socket.create_connection((self._address, self.port), _remaining(self._deadline))
 
 
-def _read_response(connection: http.client.HTTPConnection, deadline: float) -> tuple[int, bytes]:
+def _read_response(connection: _PinnedHTTPConnection | _PinnedHTTPSConnection, deadline: float) -> tuple[int, bytes]:
     """Read status and a bounded body, re-arming the socket timeout to the time left before every read.
 
     ``read1`` returns whatever is available instead of waiting for a full chunk, so a receiver that
     drips one byte per idle interval cannot stretch the exchange past the overall deadline.
     """
-    assert connection.sock is not None
-    connection.sock.settimeout(_remaining(deadline))
+    sock = connection.owned_sock
+    assert sock is not None
+    sock.settimeout(_remaining(deadline))
     response = connection.getresponse()
     if response.getheader("Content-Encoding", "identity").lower() != "identity":
         raise ValueError("callback_response_encoded")
     chunks: list[bytes] = []
     size = 0
     while True:
-        if connection.sock is not None:
-            connection.sock.settimeout(_remaining(deadline))
-        else:
+        if response.isclosed():
+            # A finished body closes the socket under us; there is nothing left to bound.
             _remaining(deadline)
+        else:
+            sock.settimeout(_remaining(deadline))
         chunk = response.read1(_READ_CHUNK)
         if not chunk:
             return response.status, b"".join(chunks)
@@ -259,7 +283,7 @@ def post_webhook(
     address = resolve_callback(parts, policy)[0]
     deadline = time.monotonic() + timeout
     target = (parts.path or "/") + (f"?{parts.query}" if parts.query else "")
-    connection: http.client.HTTPConnection
+    connection: _PinnedHTTPConnection | _PinnedHTTPSConnection
     if parts.scheme == "https":
         connection = _PinnedHTTPSConnection(parts.hostname, parts.port or 443, address=address, deadline=deadline)
     else:
@@ -267,21 +291,23 @@ def post_webhook(
     expired = threading.Event()
 
     def abort() -> None:
-        # Unblocks a recv stuck mid-header or mid-handshake, which no per-call timeout can bound.
+        # Unblocks a recv stuck mid-header, mid-chunk-framing or mid-handshake, which no per-call
+        # timeout can bound. Uses the delivery-owned socket, not connection.sock (cleared by getresponse).
         expired.set()
-        sock = connection.sock
-        if sock is not None:
-            with contextlib.suppress(OSError):
-                sock.shutdown(socket.SHUT_RDWR)
+        connection.abort_socket()
 
-    watchdog = threading.Timer(timeout, abort)
+    watchdog = threading.Timer(max(deadline - time.monotonic(), 0.0), abort)
     watchdog.daemon = True
     watchdog.start()
     try:
         connection.request(
             "POST", target, body=body, headers={**headers, "Accept-Encoding": "identity", "Connection": "close"}
         )
-        return _read_response(connection, deadline)
+        result = _read_response(connection, deadline)
+        if expired.is_set():
+            # A shutdown can surface as a clean EOF on a close-delimited body.
+            raise TimeoutError("callback_deadline_exceeded")
+        return result
     except (OSError, http.client.HTTPException) as error:
         if expired.is_set() or time.monotonic() >= deadline:
             raise TimeoutError("callback_deadline_exceeded") from error
@@ -290,4 +316,7 @@ def post_webhook(
         raise
     finally:
         watchdog.cancel()
+        watchdog.join()
         connection.close()
+        if connection.owned_sock is not None:
+            connection.owned_sock.close()

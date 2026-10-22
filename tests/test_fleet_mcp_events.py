@@ -319,6 +319,66 @@ def test_post_enforces_one_overall_deadline_against_a_slow_drip_receiver(
         server.server_close()
 
 
+def _chunked_close_drip_server(*, phase: str) -> ThreadingHTTPServer:
+    """Answers ``Connection: close`` plus chunked encoding, then drips one byte per idle interval.
+
+    ``getresponse()`` clears ``connection.sock`` for this shape, so only a delivery-owned socket
+    reference lets the watchdog interrupt a ``readline()`` stuck inside the chunk framing.
+    """
+
+    class ChunkedDrip(BaseHTTPRequestHandler):
+        def log_message(self, *_args: Any) -> None:
+            return
+
+        def do_POST(self) -> None:  # noqa: N802
+            self.rfile.read(int(self.headers["Content-Length"]))
+            try:
+                self.wfile.write(b"HTTP/1.1 200 OK\r\nConnection: close\r\nTransfer-Encoding: chunked\r\n\r\n")
+                self.wfile.flush()
+                if phase == "size":
+                    framing = b"3" * 200 + b"\r\n"
+                else:
+                    framing = b"1\r\nx\r\n0\r\n" + b"X-Pad: " + b"a" * 200 + b"\r\n\r\n"
+                for byte in framing:
+                    self.wfile.write(bytes([byte]))
+                    self.wfile.flush()
+                    time.sleep(0.3)
+            except OSError:
+                return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), ChunkedDrip)
+    server.daemon_threads = True
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+@pytest.mark.parametrize("phase", ["size", "trailer"])
+def test_post_deadline_holds_when_a_close_delimited_chunked_response_drips_its_framing(
+    phase: str, receiver: Receiver
+) -> None:
+    server = _chunked_close_drip_server(phase=phase)
+    try:
+        policy = mcp_events.CallbackPolicy(frozenset({"127.0.0.1"}), allow_loopback_http=True)
+        url = f"http://127.0.0.1:{server.server_address[1]}/chunked"
+        started = time.monotonic()
+        with pytest.raises(TimeoutError):
+            mcp_events.post_webhook(url, b"{}", {}, policy, timeout=1.0)
+        assert time.monotonic() - started < 1.5
+        status, _ = mcp_events.post_webhook(receiver.url, b"{}", {}, policy, timeout=1.0)
+        assert 200 <= status < 300
+    finally:
+        server.shutdown()
+        server.server_close()
+
+
+def test_post_watchdog_is_cancelled_and_joined_after_a_fast_delivery(receiver: Receiver) -> None:
+    policy = mcp_events.CallbackPolicy(frozenset({"127.0.0.1"}), allow_loopback_http=True)
+    before = {t for t in threading.enumerate() if isinstance(t, threading.Timer)}
+    mcp_events.post_webhook(receiver.url, b"{}", {}, policy, timeout=30.0)
+    leaked = {t for t in threading.enumerate() if isinstance(t, threading.Timer)} - before
+    assert not any(t.is_alive() for t in leaked)
+
+
 def test_post_still_succeeds_against_a_fast_receiver(receiver: Receiver) -> None:
     policy = mcp_events.CallbackPolicy(frozenset({"127.0.0.1"}), allow_loopback_http=True)
     started = time.monotonic()
