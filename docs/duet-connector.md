@@ -126,7 +126,8 @@ Doctor checks dependencies, runtime, state, Access settings and the Hub
 credential like Dot's. In place of Dot's T3 fleet check it runs `isolation`:
 when the same target also has a Dot instance, Duet must differ from it in Hub
 principal, message token file, state directory, Access audience and resource.
-Doctor ends by checking that unauthenticated MCP is rejected.
+The listener runs the same check at startup and refuses to serve with
+`not_isolated_from_dot` when it fails. Doctor ends by checking that unauthenticated MCP is rejected.
 
 Canary checks that anonymous `POST /mcp` returns 401, that discovery metadata
 names Duet's resource, and that the registered tools are exactly the 22 above.

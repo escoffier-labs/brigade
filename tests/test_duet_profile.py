@@ -642,9 +642,14 @@ def test_duet_isolation_fails_when_sharing_dot_identity(duet_configured, dot_pri
     payload.update(pack_id="dot", bind="127.0.0.1:8779", runtime_path=str(dot_runtime))
     instance.with_name("dot.json").write_text(json.dumps(payload))
     assert m._isolated_from_dot(target, runtime) is False
+    with pytest.raises(DotError) as refused:
+        m.build_listener_from_target(target, pack_id="duet")
+    assert refused.value.code == "not_isolated_from_dot"
     dot_data["hub"]["message_token_file"] = str(dot_private_dir.parent / "dot.token")
     dot_runtime.write_text(json.dumps(dot_data))
     assert m._isolated_from_dot(target, runtime) is True
+    _, tools, _ = m.build_listener_from_target(target, pack_id="duet")
+    tools.state.close()
 
 
 @pytest.fixture

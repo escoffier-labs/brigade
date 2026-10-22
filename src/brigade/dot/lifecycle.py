@@ -305,6 +305,9 @@ def build_listener_from_target(
     config, runtime = _load_config(
         target, bind=bind, allowed_hosts=allowed_hosts, allowed_origins=allowed_origins, profile=profile
     )
+    # A hosted profile sharing Dot's Access app, token or state would let its credential reach Dot's tools.
+    if not profile.fleet_dispatch:
+        c.require(_isolated_from_dot(target, runtime), "not_isolated_from_dot")
     tools, _, _ = build_tools(runtime, profile)
     return config, tools, runtime
 
