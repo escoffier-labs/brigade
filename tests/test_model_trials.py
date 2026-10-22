@@ -1251,3 +1251,156 @@ def test_process_exit_incomplete_sits_between_measurement_and_deterministic_fail
     assert model_trials.process_exit({"measurement_failures": 0, "counts": {"accepted": 1, "not_run": 1}}) == 4
     assert model_trials.process_exit({"measurement_failures": 0, "counts": {"rejected": 1, "not_run": 1}}) == 4
     assert model_trials.process_exit({"measurement_failures": 1, "counts": {"adapter_error": 1, "not_run": 1}}) == 3
+
+
+# --- #1977: quota and capacity stop -------------------------------------------
+
+
+def _two_seat_roster() -> Roster:
+    roster = _roster()
+    return Roster(
+        orchestrator=roster.orchestrator,
+        agents={**roster.agents, "other": Agent("other", "cursor", "answer", model="composer-2.5")},
+    )
+
+
+def _quota_manifest(tmp_path):
+    manifest = _manifest()
+    manifest["trials"] = 2
+    manifest["seats"] = ["cursor", "other"]
+    manifest_path = tmp_path / "eval.json"
+    manifest_path.write_text(json.dumps(manifest))
+    return manifest_path
+
+
+def _write_capacity(out, *, structured: bool):
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "run.json").write_text(json.dumps({"status": "failed"}))
+    result: dict = {"worker": "cursor", "ok": False, "exit_code": 1, "transport": "cli"}
+    if structured:
+        result["failure"] = {
+            "schema": "brigade.worker_failure.v1",
+            "class": "capacity-exhausted",
+            "domain": "infrastructure",
+            "phase": "dispatch",
+            "retry": "fallback",
+            "detected_by": "adapter",
+            "detail": "provider quota exhausted",
+        }
+    else:
+        result["failure_kind"] = "rate-limit-error"
+        result["detail"] = "usage limit reached"
+    (out / "worker-results.json").write_text(json.dumps({"results": [result]}))
+    return 1
+
+
+def _seat_of(kwargs) -> str:
+    return kwargs["worker"]
+
+
+def test_capacity_response_is_its_own_failure_reason_not_a_model_failure(tmp_path, monkeypatch):
+    for structured in (False, True):
+        root = tmp_path / f"results-{structured}"
+        manifest_path = _single_cell_manifest(tmp_path)
+
+        def fake_run(task, roster, _structured=structured, **kwargs):
+            return _write_capacity(kwargs["output_dir"], structured=_structured)
+
+        monkeypatch.setattr(model_trials.aboyeur, "run", fake_run)
+        rc = model_trials.execute(manifest_path, _roster(), workspace=tmp_path, output_dir=root, resume=False)
+        cell = _only_cell(root)
+        # Nonzero exit would otherwise score as a deterministic execution_error.
+        assert cell["state"] == "adapter_error"
+        assert cell["failure_reason"] == "capacity-exhausted"
+        assert model_trials.summarize(root)["measurement_failures"] == 1
+        assert rc == 3
+
+
+def test_other_provider_failures_still_score_as_execution_errors(tmp_path, monkeypatch):
+    manifest_path = _single_cell_manifest(tmp_path)
+    root = tmp_path / "results"
+
+    def fake_run(task, roster, **kwargs):
+        out = kwargs["output_dir"]
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "run.json").write_text(json.dumps({"status": "failed"}))
+        (out / "worker-results.json").write_text(
+            json.dumps(
+                {
+                    "results": [
+                        {"worker": "cursor", "ok": False, "exit_code": 1, "failure_kind": "provider-error"},
+                    ]
+                }
+            )
+        )
+        return 1
+
+    monkeypatch.setattr(model_trials.aboyeur, "run", fake_run)
+    assert model_trials.execute(manifest_path, _roster(), workspace=tmp_path, output_dir=root, resume=False) == 1
+    cell = _only_cell(root)
+    assert cell["state"] == "execution_error"
+    assert "failure_reason" not in cell
+
+
+def test_capacity_stops_remaining_cells_for_that_seat_only(tmp_path, monkeypatch):
+    manifest_path = _quota_manifest(tmp_path)
+    root = tmp_path / "results"
+    seen: list[str] = []
+
+    def fake_run(task, roster, **kwargs):
+        seen.append(_seat_of(kwargs))
+        if _seat_of(kwargs) == "cursor":
+            return _write_capacity(kwargs["output_dir"], structured=False)
+        return _write_outcome(kwargs["output_dir"], "ok")
+
+    monkeypatch.setattr(model_trials.aboyeur, "run", fake_run)
+    rc = model_trials.execute(manifest_path, _two_seat_roster(), workspace=tmp_path, output_dir=root, resume=False)
+    assert seen == ["cursor", "other", "other"]
+    cells = {c["coordinate"]: c for c in (json.loads(p.read_text()) for p in (root / "cells").glob("*/cell.json"))}
+    assert cells["hello:cursor:1"]["failure_reason"] == "capacity-exhausted"
+    skipped = cells["hello:cursor:2"]
+    assert skipped["state"] == "not_run"
+    assert skipped["not_run_reason"] == "capacity-exhausted"
+    assert skipped["stopped_by"] == "hello:cursor:1"
+    assert "failure_reason" not in skipped
+    assert cells["hello:other:1"]["state"] == cells["hello:other:2"]["state"] == "accepted"
+    summary = json.loads((root / "summary.json").read_text())
+    assert summary["counts"] == {"accepted": 2, "adapter_error": 1, "not_run": 1}
+    assert summary["measurement_failures"] == 1
+    assert rc == 3
+
+
+def test_capacity_exhausted_cells_are_never_retried_as_transient(tmp_path, monkeypatch):
+    manifest_path = _single_cell_manifest(tmp_path)
+    root = tmp_path / "results"
+    calls: list[int] = []
+
+    def fake_run(task, roster, **kwargs):
+        calls.append(1)
+        return _write_capacity(kwargs["output_dir"], structured=True)
+
+    monkeypatch.setattr(model_trials.aboyeur, "run", fake_run)
+    kwargs = {"workspace": tmp_path, "output_dir": root, "retry_transient": True}
+    assert model_trials.execute(manifest_path, _roster(), resume=False, **kwargs) == 3
+    assert model_trials.execute(manifest_path, _roster(), resume=True, **kwargs) == 3
+    assert len(calls) == 1
+    assert "prior_attempts" not in _only_cell(root)
+
+
+def test_resume_after_capacity_stop_launches_the_not_run_cells(tmp_path, monkeypatch):
+    manifest_path = _quota_manifest(tmp_path)
+    root = tmp_path / "results"
+
+    def exhausted(task, roster, **kwargs):
+        if _seat_of(kwargs) == "cursor":
+            return _write_capacity(kwargs["output_dir"], structured=False)
+        return _write_outcome(kwargs["output_dir"], "ok")
+
+    monkeypatch.setattr(model_trials.aboyeur, "run", exhausted)
+    model_trials.execute(manifest_path, _two_seat_roster(), workspace=tmp_path, output_dir=root, resume=False)
+    calls = _scripted_run(monkeypatch, ["ok"])
+    model_trials.execute(manifest_path, _two_seat_roster(), workspace=tmp_path, output_dir=root, resume=True)
+    cells = {c["coordinate"]: c for c in (json.loads(p.read_text()) for p in (root / "cells").glob("*/cell.json"))}
+    assert len(calls) == 1
+    assert cells["hello:cursor:2"]["state"] == "accepted"
+    assert cells["hello:cursor:1"]["failure_reason"] == "capacity-exhausted"

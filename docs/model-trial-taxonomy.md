@@ -11,7 +11,7 @@ contract every downstream consumer (scorecard, outcome capture, evidence export)
 | rejected | exit 0, ≥1 grader below score_max | deterministic — real result | terminal | no | 1 |
 | unscored | exit 0, no graders defined | deterministic — coverage gap | terminal | no | 0 |
 | execution_error | seat exited nonzero | deterministic — real result, unless failure_reason=timeout (then environmental) | terminal | only --retry-transient when failure_reason=timeout | 1 deterministic / 3 timeout |
-| adapter_error | worker-results.json ok:false, missing/zero adapter exit | environmental — apparatus fault | terminal → retry-eligible | --retry-transient | 3 |
+| adapter_error | worker-results.json ok:false, missing/zero adapter exit, or a structured capacity-exhausted response | environmental — apparatus fault | terminal → retry-eligible (never when failure_reason=capacity-exhausted) | --retry-transient | 3 |
 | grader_error | ≥1 grader failed to run (bad pattern, unreadable expected-file) | environmental — apparatus fault | terminal → regradeable | regrade only, no seat re-run | 3 |
 
 Deterministic = a real statement about the seat. Environmental = a measurement-apparatus fault.
@@ -23,7 +23,8 @@ failure_reason=timeout) separately from rejected.
 
 ## failure_reason (additive)
 Optional machine-readable string on the cell payload; eval_cell.v1 stays valid. Canonical
-values: timeout (canonical transient), transport_drop / provider_5xx (adapter faults). Absent
+values: timeout (canonical transient), transport_drop / provider_5xx (adapter faults),
+capacity-exhausted (provider quota or capacity stop, see below). Absent
 when not applicable.
 
 ## Partial grader outcomes
@@ -87,3 +88,21 @@ and it is not part of measurement_failures. `resume` launches `not_run` cells (a
 `running` by a killed runner). A cell that already has a finished record is never overwritten with
 `not_run`, and a retry that is due when the drain arrives is not started. A stale `drain.json` is
 removed when the next `run` or `resume` starts.
+
+## Quota and capacity stop (capacity-exhausted)
+A structured provider quota, rate, or capacity response is the worker-failure class
+`capacity-exhausted` from the [seat health and worker failure taxonomy](proposals/2026-07-26-seat-health-probe-and-worker-failure-taxonomy.md).
+The trial runner recognizes it only from structured data in worker-results.json (a
+`brigade.worker_failure.v1` payload of that class, or the legacy adapter kind `rate-limit-error`),
+never from the seat's output text. When a seat's attempt ends that way:
+
+- the cell is `adapter_error` with `failure_reason: capacity-exhausted`, even when the seat exited
+  nonzero. It is a measurement failure (exit 3), not a deterministic `execution_error`, so it is
+  not scored against the model;
+- it is never retried: `--retry-transient` skips it, in the same run and on resume;
+- the runner launches no further cells for that seat in this invocation. Each remaining cell of the
+  seat is written as `not_run` with `not_run_reason: capacity-exhausted` and `stopped_by` set to the
+  coordinate of the cell that hit the limit. Other seats keep running.
+
+`resume` starts a fresh probe: it launches the seat's `not_run` cells (stopping again at the next
+capacity response), while the original capacity-exhausted cell stays terminal.

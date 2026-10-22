@@ -11,6 +11,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `brigade model trial run|resume --retry-transient` re-runs `adapter_error` and timeout-reason `execution_error` cells as new attempts (caps: 2 and 1), keeping each failed attempt in the cell's `prior_attempts` record. Deterministic results are never retried.
 - `brigade model trial drain <output-dir>` and the first SIGINT or SIGTERM to a running trial stop it from launching new cells while in-flight cells finish and record results. Unlaunched cells are recorded as `not_run` (not a failure), `resume` launches them, and an incomplete trial exits 4.
+- A structured provider quota or capacity response (`capacity-exhausted`) during a model trial is recorded as the cell's `failure_reason` on an `adapter_error` cell, not scored as a model failure and never retried as transient. The runner launches no more cells for that seat and records them as `not_run`.
 
 ### Fixed
 

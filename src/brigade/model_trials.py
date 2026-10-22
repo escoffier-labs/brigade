@@ -16,7 +16,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterator, Mapping
 
-from . import aboyeur, localio, run_budget, runguard
+from . import aboyeur, localio, run_budget, runguard, worker_failure
 from .roster import Roster
 
 MANIFEST_SCHEMA = "brigade.eval_manifest.v1"
@@ -29,6 +29,10 @@ MEASUREMENT_STATES = frozenset({"adapter_error", "grader_error"})
 # Retry caps for --retry-transient: the most retries (attempts after the first)
 # allowed for a cell whose latest attempt failed for the named transient kind.
 RETRY_CAPS: dict[str, int] = {"adapter_error": 2, "timeout": 1}
+# Structured provider quota or capacity response (worker-failure class capacity-exhausted).
+# Recorded as the cell's failure_reason; it is an apparatus condition, never a model result,
+# and never retried as transient.
+CAPACITY_EXHAUSTED = worker_failure.FailureClass.CAPACITY_EXHAUSTED.value
 # A cell that was never launched. Not a terminal state: resume launches it.
 NOT_RUN_STATE = "not_run"
 NOT_RUN_DRAINED = "drained"
@@ -310,6 +314,17 @@ def _worker_result(run_dir: Path) -> dict[str, Any] | None:
     return results[0]
 
 
+def _is_capacity_exhausted(worker_result: dict[str, Any] | None) -> bool:
+    """True only for a structured capacity-exhausted worker failure; never guessed from output text."""
+    if not isinstance(worker_result, dict):
+        return False
+    try:
+        failure = worker_failure.worker_result_failure(worker_result)
+    except ValueError:
+        return False
+    return failure is not None and failure.failure_class is worker_failure.FailureClass.CAPACITY_EXHAUSTED
+
+
 def _state(
     exit_code: int,
     graders: list[dict[str, Any]],
@@ -318,6 +333,8 @@ def _state(
     run_meta: dict[str, Any] | None = None,
 ) -> str:
     if exit_code != 0:
+        if _is_capacity_exhausted(worker_result):
+            return "adapter_error"
         if isinstance(run_meta, dict) and run_meta.get("failure_kind") == "timeout":
             return "execution_error"
         if worker_result is not None and worker_result.get("timed_out") is True:
@@ -348,6 +365,8 @@ def _failure_reason(
     worker_result: dict[str, Any] | None,
     state: str,
 ) -> str | None:
+    if state == "adapter_error" and _is_capacity_exhausted(worker_result):
+        return CAPACITY_EXHAUSTED
     if isinstance(run_meta, dict) and run_meta.get("failure_kind") == "timeout":
         return "timeout"
     if isinstance(worker_result, dict) and worker_result.get("timed_out") is True:
@@ -441,6 +460,8 @@ def _attempt_summary(cell: dict[str, Any]) -> dict[str, Any]:
 def _transient_kind(cell: dict[str, Any] | None) -> str | None:
     """Return the RETRY_CAPS key when a recorded cell is eligible for --retry-transient."""
     if not isinstance(cell, dict):
+        return None
+    if cell.get("failure_reason") == CAPACITY_EXHAUSTED:
         return None
     state = cell.get("state")
     if state == "adapter_error":
@@ -908,6 +929,7 @@ def execute(
     drain = _Drain(output_dir)
     drain.clear_stale_marker()
     not_run = 0
+    exhausted: dict[str, str] = {}
     with drain.signals():
         for cell in cells:
             cell_dir = output_dir / "cells" / cell.cell_id
@@ -923,6 +945,12 @@ def execute(
                 except ValueError as exc:
                     print(f"error: {exc}", file=sys.stderr)
                     return 2
+                continue
+            if cell.seat in exhausted:
+                if _mark_not_run(
+                    cell, cell_dir, current, plan, reason=CAPACITY_EXHAUSTED, stopped_by=exhausted[cell.seat]
+                ):
+                    not_run += 1
                 continue
             if drain.requested():
                 if _mark_not_run(cell, cell_dir, current, plan, reason=NOT_RUN_DRAINED):
@@ -945,6 +973,9 @@ def execute(
                         history=history,
                         run_budget_payload=run_budget_payload,
                     )
+                    if payload.get("failure_reason") == CAPACITY_EXHAUSTED:
+                        exhausted[cell.seat] = cell.coordinate
+                        break
                     if drain.requested() or not (retry_transient and _retry_allowed(payload)):
                         break
                     history = [*_prior_attempts(payload), _attempt_summary(payload)]
@@ -952,7 +983,7 @@ def execute(
                 return abort.code
     if not_run:
         print(
-            f"drained: {not_run} cell(s) not run; `brigade model trial resume` launches them",
+            f"stopped early: {not_run} cell(s) not run; `brigade model trial resume` launches them",
             file=sys.stderr,
         )
     summary = summarize(output_dir)
