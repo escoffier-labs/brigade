@@ -125,6 +125,7 @@ The local config supports:
 - `output_path`: where `scan-latest.json` and `refresh-queue.json` are written.
 - `enabled_checks`: enabled issue types.
 - `max_card_bytes`: oversized-card threshold.
+- `read_only_paths`: glob patterns (relative, no `..`) for cards that automation must never edit, such as policy or operator-owned cards. `*` and `?` stay inside one path segment, `**` spans segments, and a pattern naming a directory covers its descendants. Matching cards are skipped by `scan`, `plan-fixes`, and `backfill`, and stay visible to search and recall. `brigade memory proposal create` and `apply` refuse any proposal that touches a matching card, with an error naming the pattern. `brigade memory care status` and `doctor` list the active patterns. The default is empty.
 
 ## Issue Types
 

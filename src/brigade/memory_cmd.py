@@ -85,6 +85,7 @@ class MemoryCareConfig:
     output_path: str = DEFAULT_OUTPUT_PATH
     enabled_checks: tuple[str, ...] = CHECKS
     max_card_bytes: int = MEMORY_CARD_BUDGET_BYTES
+    read_only_paths: tuple[str, ...] = ()
 
 
 def config_path(target: Path) -> Path:
@@ -161,6 +162,7 @@ def _format_config(config: MemoryCareConfig | None = None) -> str:
             f"output_path = {_toml_value(config.output_path)}",
             f"enabled_checks = {_toml_value(list(config.enabled_checks))}",
             f"max_card_bytes = {config.max_card_bytes}",
+            f"read_only_paths = {_toml_value(list(config.read_only_paths))}",
             "",
         ]
     )
@@ -212,6 +214,7 @@ def load_config(target: Path) -> MemoryCareConfig | None:
     index_paths = _string_list(data.get("index_paths"), field="index_paths", default=("MEMORY.md",))
     include_paths = _string_list(data.get("include_paths"), field="include_paths", default=())
     exclude_paths = _string_list(data.get("exclude_paths"), field="exclude_paths", default=("memory/cards/decay",))
+    read_only_paths = _string_list(data.get("read_only_paths"), field="read_only_paths", default=())
     enabled_checks = _string_list(data.get("enabled_checks"), field="enabled_checks", default=CHECKS, allowed=CHECKS)
     minimum_confidence = data.get("minimum_confidence", "medium")
     if not isinstance(minimum_confidence, str) or minimum_confidence not in CONFIDENCE_RANK:
@@ -227,6 +230,7 @@ def load_config(target: Path) -> MemoryCareConfig | None:
         ("index_paths", index_paths),
         ("include_paths", include_paths),
         ("exclude_paths", exclude_paths),
+        ("read_only_paths", read_only_paths),
     ):
         for item in paths:
             _relative_path(item, field=field)
@@ -244,6 +248,7 @@ def load_config(target: Path) -> MemoryCareConfig | None:
         max_card_bytes=_positive_int(
             data.get("max_card_bytes"), field="max_card_bytes", default=MEMORY_CARD_BUDGET_BYTES, minimum=1
         ),
+        read_only_paths=read_only_paths,
     )
 
 
@@ -393,6 +398,53 @@ def _path_matches(path: str, patterns: tuple[str, ...]) -> bool:
         if normalized == clean or normalized.startswith(clean.rstrip("/") + "/"):
             return True
     return False
+
+
+def _glob_regex(pattern: str) -> re.Pattern[str]:
+    """Translate a path glob: ``*`` and ``?`` stay inside one segment, ``**`` spans segments."""
+    clean = pattern.replace("\\", "/").strip().lstrip("/")
+    out: list[str] = []
+    i = 0
+    while i < len(clean):
+        char = clean[i]
+        if clean.startswith("**/", i):
+            out.append("(?:.*/)?")
+            i += 3
+        elif clean.startswith("**", i):
+            out.append(".*")
+            i += 2
+        elif char == "*":
+            out.append("[^/]*")
+            i += 1
+        elif char == "?":
+            out.append("[^/]")
+            i += 1
+        else:
+            out.append(re.escape(char))
+            i += 1
+    return re.compile("".join(out))
+
+
+def read_only_pattern(path: str, patterns: tuple[str, ...]) -> str | None:
+    """Return the first ``read_only_paths`` pattern that covers ``path``, else None.
+
+    A pattern covers a path when the glob matches the whole relative path or any
+    parent directory of it, so ``memory/cards/policy`` protects its descendants.
+    """
+    normalized = path.replace("\\", "/").lstrip("/")
+    parts = normalized.split("/")
+    candidates = ["/".join(parts[: n + 1]) for n in range(len(parts))]
+    for pattern in patterns:
+        regex = _glob_regex(pattern)
+        if any(regex.fullmatch(candidate) for candidate in candidates):
+            return pattern
+    return None
+
+
+def _drop_read_only(target: Path, config: MemoryCareConfig, paths: list[Path]) -> list[Path]:
+    if not config.read_only_paths:
+        return paths
+    return [path for path in paths if read_only_pattern(str(path.relative_to(target)), config.read_only_paths) is None]
 
 
 def _iter_cards(target: Path, config: MemoryCareConfig) -> list[Path]:
@@ -593,7 +645,7 @@ def _issue(
 def _scan_payload(target: Path, config: MemoryCareConfig) -> dict[str, Any]:
     target = target.expanduser().resolve()
     today = _today()
-    cards = _iter_cards(target, config)
+    cards = _drop_read_only(target, config, _iter_cards(target, config))
     linked = _index_links(target, config)
     linked_existing = {link for link in linked if (target / link).is_file()}
     issues: list[dict[str, Any]] = []
@@ -1032,6 +1084,14 @@ def health(target: Path) -> dict[str, Any]:
                     "detail": f"missing, run `brigade memory care init --target {target}`",
                 }
             )
+    if config.read_only_paths:
+        checks.append(
+            {
+                "status": "ok",
+                "name": "memory_read_only_paths",
+                "detail": f"{len(config.read_only_paths)} active: {', '.join(config.read_only_paths)}",
+            }
+        )
     scan_path = _scan_path(target, config)
     queue_path = _queue_path(target, config)
     scan_payload = None
@@ -1158,6 +1218,7 @@ def health(target: Path) -> dict[str, Any]:
         "issue_count": len(issues),
         "scan_issue_count": scan_issue_count,
         "enabled_checks": list(config.enabled_checks),
+        "read_only_paths": list(config.read_only_paths),
         "counts": (
             scan_payload["counts"]
             if isinstance(scan_payload, dict) and isinstance(scan_payload.get("counts"), dict)
@@ -1195,6 +1256,8 @@ def status(*, target: Path, json_output: bool = False) -> int:
     print(f"config_path: {payload['config_path']}")
     print(f"scan_path: {payload['scan_path']}")
     print(f"queue_path: {payload['queue_path']}")
+    if payload.get("read_only_paths"):
+        print(f"read_only_paths: {', '.join(payload['read_only_paths'])}")
     issue_count = payload["issue_count"]
     print(f"health: {'ok' if issue_count == 0 else str(issue_count) + ' issue(s)'}")
     evidence_count = payload["counts"].get("unconsolidated-evidence", 0)
@@ -1323,7 +1386,7 @@ def _backfill_candidates(target: Path, config: MemoryCareConfig) -> tuple[list[d
 
     claimed_ids: IdentityIndex[str] = IdentityIndex()
     pending: list[tuple[Path, str, str, dict[str, Any]]] = []
-    for path in _iter_cards(target, config):
+    for path in _drop_read_only(target, config, _iter_cards(target, config)):
         rel = str(path.relative_to(target))
         try:
             text = read_text_nofollow(path)

@@ -142,7 +142,11 @@ def plan_payload(target: Path, config: MemoryCareConfig, scan_payload: dict[str,
     items = [
         plan_item(issue, target=target, scan_date=scan_date, config=config)
         for issue in issues
-        if isinstance(issue, dict) and str(issue.get("issue_type") or "") in PLANABLE_METADATA_FIXES
+        if isinstance(issue, dict)
+        and str(issue.get("issue_type") or "") in PLANABLE_METADATA_FIXES
+        # A saved scan can predate a read_only_paths entry; never plan edits for those cards.
+        and care.read_only_pattern(str(issue.get("file") or issue.get("card_file") or ""), config.read_only_paths)
+        is None
     ]
     blocked = [item for item in items if item.get("blockers")]
     unblocked = [item for item in items if not item.get("blockers")]

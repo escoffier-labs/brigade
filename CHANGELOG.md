@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Memory care config accepts `read_only_paths` globs for policy or operator-owned cards. Scan, `plan-fixes`, and `backfill` skip matching cards, `memory proposal create` and `apply` refuse them with an error naming the pattern, and `memory care status` and `doctor` list the active patterns (#1976).
+
 ### Fixed
 
 - Cursor project initialization and user-scope harness sync install all three presence lifecycle hooks into versioned hook documents, preserve foreign entries, validate the whole project document before it suppresses the user hook, and migrate hook ownership by event.
