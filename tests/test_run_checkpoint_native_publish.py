@@ -230,3 +230,35 @@ def test_bound_temp_mode_never_uses_swapped_path_without_fchmod(tmp_path, monkey
             assert set(cp_dir.iterdir()) == {held_final, *([canary] if swapped_directory == "checkpoint" else [])}
         else:
             assert list(held_cp.iterdir()) == [held_final]
+
+
+@pytest.mark.skipif(not dirfd.posix_available(), reason="requires POSIX descriptor-relative links")
+def test_bound_posix_publish_fsyncs_final_link_before_unlinking_temp(tmp_path, monkeypatch):
+    run_dir = tmp_path / "run"
+    run_dir.mkdir()
+    events = []
+    real_link = dirfd.link_child
+    real_unlink = dirfd.unlink_child
+    real_fsync = run_checkpoint._fsync_directory
+
+    def link(*args):
+        events.append("link")
+        return real_link(*args)
+
+    def unlink(*args):
+        events.append("unlink")
+        return real_unlink(*args)
+
+    def fsync(path):
+        events.append("fsync")
+        return real_fsync(path)
+
+    monkeypatch.setattr(dirfd, "link_child", link)
+    monkeypatch.setattr(dirfd, "unlink_child", unlink)
+    monkeypatch.setattr(run_checkpoint, "_fsync_directory", fsync)
+    with run_dirfd.bound_run_dir(run_dir) as bound:
+        bound.dir_fd("events", run_checkpoint.CHECKPOINT_DIR_NAME, create=True)
+        final = run_checkpoint.publish_checkpoint_file(run_dir, b'{"status":"orphaned"}\n')
+    assert events == ["link", "fsync", "unlink", "fsync"]
+    assert final.stat().st_nlink == 1
+    assert list(final.parent.iterdir()) == [final]

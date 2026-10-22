@@ -870,6 +870,10 @@ def publish_checkpoint_file(run_dir: Path, run_json_bytes: bytes) -> Path:
     try:
         if parent_fd is None:
             os.link(tmp_path, final_path)
+        elif dirfd.posix_available():
+            # Non-consuming link: the temp name stays until the new entry is
+            # made durable by the directory fsync below.
+            dirfd.link_child(parent_fd, tmp_path.name, final_path.name)
         else:
             dirfd.replace_children(
                 parent_fd,
