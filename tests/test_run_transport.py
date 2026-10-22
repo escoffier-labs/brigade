@@ -260,7 +260,7 @@ def test_dispatch_releases_lease_when_worker_invocation_raises(monkeypatch, tmp_
         raise RuntimeError("worker transport failed")
 
     monkeypatch.setattr(agents, "run_agent", raises)
-    results = run_transport.dispatch(
+    result = run_transport.dispatch(
         [Assignment(worker="coder", task="implement it")],
         _roster(),
         build_prompt=lambda agent, assignment, **kw: assignment.task,
@@ -270,10 +270,9 @@ def test_dispatch_releases_lease_when_worker_invocation_raises(monkeypatch, tmp_
         read_only=True,
         output_dir=tmp_path,
         model_lease=lease,
-    )
-
-    assert results[0].ok is False
-    assert "worker transport failed" in results[0].detail
+    )[0]
+    assert not result.ok and result.failure_kind is None
+    assert result.detail == "worker transport failed"
     assert released == ["coder"]
 
 

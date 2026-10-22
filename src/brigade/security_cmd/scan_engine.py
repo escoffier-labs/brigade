@@ -116,40 +116,44 @@ def _iter_scan_files(
                 continue
             paths.append(root)
             continue
+        # os.walk yields plain joined strings under a resolved root, so relative
+        # paths come from string slicing instead of a Path.relative_to per entry.
+        target_str = str(target)
+        target_prefix = target_str if target_str.endswith(os.sep) else target_str + os.sep
         for dirpath, dirnames, filenames in os.walk(root):
             current = Path(dirpath)
-            try:
-                rel_current = current.relative_to(target)
-            except ValueError:
+            if dirpath == target_str:
+                rel_current_str = ""
+            elif dirpath.startswith(target_prefix):
+                rel_current_str = dirpath[len(target_prefix) :]
+            else:
                 dirnames[:] = []
                 continue
-            rel_parts = rel_current.parts
+            rel_parts = tuple(rel_current_str.split(os.sep)) if rel_current_str else ()
             if rel_parts and (
                 any(part in SKIP_DIRS for part in rel_parts)
                 or any(rel_parts[: len(prefix)] == prefix for prefix in SKIP_PREFIXES)
-                or not _scan_path_selected(str(rel_current), include_paths=include_paths, exclude_paths=exclude_paths)
+                or not _scan_path_selected(rel_current_str, include_paths=include_paths, exclude_paths=exclude_paths)
             ):
                 dirnames[:] = []
                 continue
+            rel_dir_prefix = rel_current_str + os.sep if rel_current_str else ""
             kept_dirs: list[str] = []
             for dirname in sorted(dirnames):
-                child = current / dirname
-                try:
-                    child_rel = child.relative_to(target)
-                except ValueError:
-                    continue
-                child_parts = child_rel.parts
+                child_parts = (*rel_parts, dirname)
                 if (
                     dirname in SKIP_DIRS
                     or any(child_parts[: len(prefix)] == prefix for prefix in SKIP_PREFIXES)
-                    or not _scan_path_selected(str(child_rel), include_paths=include_paths, exclude_paths=exclude_paths)
+                    or not _scan_path_selected(
+                        rel_dir_prefix + dirname, include_paths=include_paths, exclude_paths=exclude_paths
+                    )
                 ):
                     continue
                 kept_dirs.append(dirname)
             dirnames[:] = kept_dirs
             for filename in sorted(filenames):
                 path = current / filename
-                rel = str(path.relative_to(target))
+                rel = rel_dir_prefix + filename
                 if _scan_path_selected(
                     rel,
                     include_paths=include_paths,

@@ -15,7 +15,9 @@ from datetime import datetime, timezone
 from typing import Sequence
 from urllib.parse import urlencode
 
-from . import fleet_command_deck as deck
+from . import fleet_action_page, fleet_action_sources, fleet_command_deck as deck
+from .fleet_action_auth import canonical
+from . import fleet_deck_activity as activity
 from .fleet_command_deck import UNKNOWN, DeckView, LiveRun, MachineState, StationView, Tile
 
 _esc = deck._esc
@@ -171,10 +173,10 @@ def render_summary(view: DeckView) -> str:
     )
     return (
         '<section class="cards" aria-label="Fleet summary">'
-        + _card("working", "Working", str(summary.busy), f"of {summary.total} slots", working_bar)
+        + _card("working", "Managed jobs", str(summary.busy), f"of {summary.total} slots", working_bar)
         + _card("idle", "Idle", summary.idle, "free slots, fresh telemetry")
         + _card("offline", "Offline", summary.offline, "stale or offline")
-        + _card("queued", "Queued", summary.queued, "eligible to run")
+        + _card("queued", "Ready to run", summary.queued, "queue eligibility")
         + "</section>"
     )
 
@@ -188,6 +190,7 @@ class Alert:
     title: str
     detail: str
     since: str
+    source_ref: str = ""
 
 
 def _first_observed(age_seconds: int | None) -> str:
@@ -200,12 +203,24 @@ def page_alerts(view: DeckView, now: datetime) -> tuple[Alert, ...]:
     attention: list[Alert] = []
     collisions: list[Alert] = []
     for entry in view.rail:
+        if entry.kind == "parallel":
+            continue
         since = _first_observed(entry.age_seconds)
         if entry.kind == "collision":
             collisions.append(Alert("collision", entry.repo or UNKNOWN, entry.detail, since))
             continue
         where = labels.get(entry.node_id) or entry.node_id[:12]
-        attention.append(Alert(entry.kind, f"{entry.repo or UNKNOWN} on {where}", entry.detail, since))
+        attention.append(
+            Alert(
+                entry.kind,
+                f"{entry.repo or UNKNOWN} on {where}",
+                entry.detail,
+                since,
+                canonical({"kind": "run", "node_id": entry.node_id, "run_id": entry.run_id})
+                if entry.node_id and entry.run_id
+                else "",
+            )
+        )
     plane = view.control_plane
     if plane is not None:
         for item in plane.integrations:
@@ -214,11 +229,19 @@ def page_alerts(view: DeckView, now: datetime) -> tuple[Alert, ...]:
                 attention.append(Alert("integration", item.id, detail, _first_observed(None)))
         for blocked in plane.queue.blocked_items:
             reason = deck._cp_text(blocked.get("reason"))
-            attention.append(Alert("blocked", deck._cp_text(blocked.get("id")), reason, _first_observed(None)))
+            attention.append(
+                Alert(
+                    "blocked",
+                    deck._cp_text(blocked.get("id")),
+                    reason,
+                    _first_observed(None),
+                    fleet_action_sources.work_reference(blocked),
+                )
+            )
         for excluded in plane.queue.actionable_exclusions:
             count = excluded["count"]
             title = f"{count} work item{'' if count == 1 else 's'} blocked"
-            attention.append(Alert("blocked", title, deck._cp_text(excluded["reason"]), "observed scan"))
+            attention.append(Alert("blocked", title, deck._cp_text(excluded["reason"]), "reported by queue"))
     stale: list[Alert] = []
     coverage: list[Alert] = []
     for station in view.stations:
@@ -226,7 +249,15 @@ def page_alerts(view: DeckView, now: datetime) -> tuple[Alert, ...]:
         if machine is not None and is_stale(station, machine):
             seen = seconds_since(machine.last_observed_at, now)
             since = "no telemetry received" if seen is None else f"last telemetry {format_age(seen)} ago"
-            stale.append(Alert("stale telemetry", station.label, machine.unused_reason, since))
+            stale.append(
+                Alert(
+                    "stale telemetry",
+                    station.label,
+                    machine.unused_reason,
+                    since,
+                    canonical({"kind": "telemetry", "node_id": station.station.node_id}) if station.enrolled else "",
+                )
+            )
         elif machine is None and station.enrolled and plane is not None and "machines" in plane.present:
             # A failed node_id join leaves the station's telemetry unknown, so it can never be all clear.
             coverage.append(Alert("no telemetry row", station.label, "node not in the routing snapshot", "ongoing"))
@@ -237,19 +268,21 @@ def page_alerts(view: DeckView, now: datetime) -> tuple[Alert, ...]:
     return tuple(attention + collisions + stale + coverage)
 
 
-def _alert_html(alert: Alert) -> str:
+def _alert_html(alert: Alert, action_sources: frozenset[str] = frozenset()) -> str:
     kind_class = alert.kind.replace(" ", "-")
+    detail = activity.REASONS.get(alert.detail, alert.detail) if alert.kind == "blocked" else alert.detail
+    action = fleet_action_page.alert_link(alert.source_ref, action_sources)
     return (
         f'<li class="alert alert--{_esc(kind_class)}"><span class="alert-icon" aria-hidden="true">!</span>'
         f'<div class="alert-body"><p class="alert-title"><span class="alert-kind">{_esc(alert.kind)}</span> '
-        f'{_esc(alert.title)}</p><p class="alert-detail">{_esc(alert.detail)}</p>'
-        f'<p class="alert-since">{_esc(alert.since)}</p></div></li>'
+        f'{_esc(alert.title)}</p><p class="alert-detail">{_esc(detail)}</p>'
+        f'<p class="alert-since">{_esc(alert.since)}</p>{action}</div></li>'
     )
 
 
-def render_alerts(view: DeckView, now: datetime) -> str:
+def render_alerts(view: DeckView, now: datetime, *, action_sources: frozenset[str] = frozenset()) -> str:
     alerts = page_alerts(view, now)
-    items = "".join(_alert_html(alert) for alert in alerts)
+    items = "".join(_alert_html(alert, action_sources) for alert in alerts)
     body = f'<ul class="alerts">{items}</ul>' if items else '<p class="empty">No active alerts</p>'
     return (
         '<section class="panel" id="alerts" aria-labelledby="alerts-title"><header>'
@@ -300,22 +333,22 @@ def render_header(view: DeckView, now: datetime) -> str:
 # --- working now and queued -------------------------------------------------------
 
 
-def _working_row(station: StationView, tile: Tile) -> str:
+def _working_row(station: StationView, tile: Tile, parallel_detail: str = "", *, overlap: bool = False) -> str:
     run = tile.run
     seat = run.seat or (tile.claim.owner_conductor if tile.claim is not None else "") or UNKNOWN
     params = {"node": run.node_id, "repo": run.repo[:128]}
     if run.bucket in ("stale", "unknown"):
         params["attention"] = "1"  # the board hides these buckets unless attention is on
     href = "/view/machines?" + urlencode(params)
-    flag = ' <span class="flag">! collision</span>' if tile.collision else ""
+    parallel = activity.parallel_note(parallel_detail, overlap=overlap) if tile.collision or overlap else ""
     state = "" if run.bucket == "running" else f' <span class="chip chip-muted">{_esc(run.bucket)}</span>'
     model = run.launch_model or run.model
     model_attr = f' title="{_esc(model)}"' if model else ""
     return (
         f'<li class="row" title="{_esc(run.run_id)}"><span class="dot dot--working" aria-hidden="true"></span>'
         f'<div class="row-body"><p class="row-title"><a href="{_esc(href)}">{_esc(run.repo or UNKNOWN)}</a>'
-        f'{flag}{state}</p><p class="row-meta"{model_attr}>{deck.harness_badge_html(run.harness)} '
-        f"{_esc(seat)} · {_esc(station.label)}</p></div>"
+        f'{state}</p><p class="row-meta"{model_attr}>{deck.harness_badge_html(run.harness)} '
+        f"{_esc(seat)} · {_esc(station.label)}</p>{parallel}</div>"
         f'<span class="row-time">{_esc(format_age(run.elapsed_seconds))}</span></li>'
     )
 
@@ -324,38 +357,38 @@ def _queue_body(plane: deck.ControlPlane | None, *, worklore_enabled: bool) -> s
     if plane is None or "queue" not in plane.present:
         return '<p class="empty">Queue unknown: the control-plane snapshot has no queue section.</p>'
     queue = plane.queue
-    counts = f'<p class="station-meta">eligible {_esc(queue.eligible_count)} · queued {_esc(queue.queued_count)}</p>'
+    counts = activity.queue_counts(queue)
     counts += deck._queue_exclusions_html(queue, worklore_enabled=worklore_enabled)
     rows = "".join(
         '<li class="row"><span class="dot dot--offline" aria-hidden="true"></span><div class="row-body">'
         f'<p class="row-title">{_esc(deck._cp_text(item.get("id")))}</p>'
-        f'<p class="row-meta">blocked · {_esc(deck._cp_text(item.get("reason")))}</p></div></li>'
+        f'<p class="row-meta">blocked · {_esc(activity.REASONS.get(deck._cp_text(item.get("reason")), deck._cp_text(item.get("reason"))))}</p></div></li>'
         for item in queue.blocked_items
     )
     if rows:
         return counts + f'<ul class="rows">{rows}</ul>'
-    if queue.queued_count == "0":
-        return counts + '<p class="empty">Nothing queued.</p>'
-    if queue.queued_count == UNKNOWN:
-        return counts + '<p class="empty">Queued items unknown.</p>'
-    note = (
-        "queue exclusions reported above"
-        if queue.exclusions
-        else "none blocked"
-        if queue.blocked_known
-        else "blocked reasons unknown"
-    )
-    return counts + f'<p class="empty">{_esc(queue.queued_count)} queued, {note}.</p>'
+    if not queue.blocked_known:
+        counts += '<p class="empty">Blocked reasons unknown.</p>'
+    return counts
 
 
 def render_work_lists(view: DeckView, *, worklore_enabled: bool = True) -> str:
-    rows = "".join(_working_row(station, tile) for station in view.stations for tile in station.tiles)
+    parallel = {entry.repo: entry.detail for entry in view.rail if entry.kind == "parallel"}
+    overlaps = {row.target for row in view.repos if row.interactive_overlap}
+    rows = "".join(
+        _working_row(station, tile, parallel.get(tile.run.repo, ""), overlap=tile.run.repo in overlaps)
+        for station in view.stations
+        for tile in station.tiles
+    )
     count = sum(station.busy for station in view.stations)
-    working = f'<ul class="rows">{rows}</ul>' if rows else '<p class="empty">Nothing is running.</p>'
+    working = f'<ul class="rows">{rows}</ul>' if rows else '<p class="empty">No managed jobs reported.</p>'
     return (
         '<div class="split"><section class="panel" aria-labelledby="working-title"><header>'
-        f'<h2 id="working-title">Working now ({count})</h2></header>{working}</section>'
-        '<section class="panel" aria-labelledby="queued-title"><header><h2 id="queued-title">Queued</h2></header>'
+        '<div><h2 id="working-title">Activity</h2><p class="station-meta">Managed jobs occupy station slots. '
+        "Agent sessions report presence; they may be idle or overlap managed jobs. "
+        "Current presence means the Hub has an unexpired report.</p></div></header>"
+        f"<h3>Managed jobs ({count})</h3>{working}{render_sessions(view)}</section>"
+        '<section class="panel" aria-labelledby="queued-title"><header><h2 id="queued-title">Ready queue</h2></header>'
         f"{_queue_body(view.control_plane, worklore_enabled=worklore_enabled)}</section></div>"
     )
 
@@ -507,29 +540,8 @@ def render_cloud_workers(view: DeckView) -> str:
     )
 
 
-def _session_row(session: deck.InteractiveSession) -> str:
-    dirty = f"{len(session.dirty_paths)}+" if session.dirty_truncated else str(len(session.dirty_paths))
-    return (
-        f'<tr><td title="{_esc(session.checkout_path)}">{_esc(session.repo_label or session.repo_identity)}</td>'
-        f"<td>{deck.harness_badge_html(session.harness)} "
-        f"{_esc(session.harness or UNKNOWN)}/{_esc(session.session_id)}</td>"
-        f"<td>{_esc(session.branch or '-')}</td><td>{_esc(dirty)}</td></tr>"
-    )
-
-
 def render_sessions(view: DeckView) -> str:
-    rows = "".join(_session_row(session) for session in view.interactive_sessions)
-    body = (
-        '<div class="table-wrap"><table class="session-table"><thead><tr><th>Repo</th><th>Session</th>'
-        f"<th>Branch</th><th>Dirty</th></tr></thead><tbody>{rows}</tbody></table></div>"
-        if rows
-        else '<p class="empty">No interactive sessions.</p>'
-    )
-    return (
-        '<section class="panel" aria-labelledby="interactive-sessions"><header>'
-        '<h2 id="interactive-sessions">Interactive sessions</h2>'
-        f'<p class="panel-count">{len(view.interactive_sessions)} session(s)</p></header>{body}</section>'
-    )
+    return activity.render_sessions(view)
 
 
 def render_outcomes(view: DeckView) -> str:
@@ -598,17 +610,18 @@ def render_observers(view: DeckView, now: datetime) -> str:
     )
 
 
-def render_overview(view: DeckView, now: datetime, *, worklore_enabled: bool) -> str:
+def render_overview(
+    view: DeckView, now: datetime, *, worklore_enabled: bool, action_sources: frozenset[str] = frozenset()
+) -> str:
     """The whole main column for ``/deck``."""
     parts = [
         '<main class="deck-shell overview">',
         render_header(view, now),
         render_summary(view),
-        render_alerts(view, now),
+        render_alerts(view, now, action_sources=action_sources),
         render_work_lists(view, worklore_enabled=worklore_enabled),
         render_machine_table(view, now),
         render_cloud_workers(view),
-        render_sessions(view),
         render_outcomes(view),
         "<details><summary>Control plane details</summary>"
         + deck.render_control_plane(view.control_plane, worklore_enabled=worklore_enabled)

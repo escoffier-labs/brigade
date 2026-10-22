@@ -226,10 +226,10 @@ def _scan_mcp_document(
 
 
 def _is_harness_wiring_document(path: Path, target: Path) -> bool:
-    rel = path.relative_to(target)
-    parts = rel.parts
     if path.suffix.lower() != ".json":
         return False
+    rel = path.relative_to(target)
+    parts = rel.parts
     if parts and parts[0] == ".brigade":
         return path.name == "handoff-sources.json" or (len(parts) >= 2 and parts[1] in {"hermes", "openclaw"})
     return bool(

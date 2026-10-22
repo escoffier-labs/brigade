@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import sys
 from collections.abc import Callable
 from pathlib import Path
@@ -43,6 +44,13 @@ def register(fleet_sub: argparse._SubParsersAction) -> None:
     listing = sub.add_parser("list", help="Read this principal's message inbox.")
     listing.add_argument("--unacked", action="store_true")
     listing.add_argument("--after", type=int, default=0, help="Return messages after this cursor.")
+    listing.add_argument(
+        "--wait",
+        type=float,
+        default=0.0,
+        metavar="SECONDS",
+        help="Wait up to SECONDS for matching messages (0 to 20 seconds; larger values are rejected).",
+    )
     listing.add_argument("--json", action="store_true")
     _message_options(listing)
     listing.set_defaults(func=_list)
@@ -205,12 +213,29 @@ def _send(args: argparse.Namespace) -> int:
     )
 
 
+def _wait_ms(value: Any) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+        raise ValueError("wait must be a non-negative number of seconds")
+    if value == 0:
+        return 0
+    if value > fleet_hub_messages.MAX_WAIT_MS / 1000:
+        raise ValueError("wait must not exceed 20 seconds")
+    return max(1, int(round(float(value) * 1000)))
+
+
 def _list(args: argparse.Namespace) -> int:
     from .. import fleet_client_messages
 
-    return _result(
-        args, lambda: fleet_client_messages.list_messages(after=args.after, unacked=args.unacked, **_token_kwargs(args))
-    )
+    def operation() -> dict[str, Any]:
+        wait_ms = _wait_ms(getattr(args, "wait", 0.0))
+        kwargs: dict[str, Any] = _token_kwargs(args)
+        if wait_ms > 0:
+            kwargs["wait_ms"] = wait_ms
+        return fleet_client_messages.list_messages(after=args.after, unacked=args.unacked, **kwargs)
+
+    return _result(args, operation)
 
 
 def _ack(args: argparse.Namespace) -> int:
