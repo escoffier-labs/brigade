@@ -70,6 +70,21 @@ class FileResult:
     cleanup_error: str | None = None
 
 
+def with_progress(result: FileResult, output_dir: Path) -> FileResult:
+    """Retain the last flushed test or session phase on all termination paths."""
+    progress = (output_dir / result.log).with_suffix(".progress.log")
+    try:
+        with progress.open("rb") as stream:
+            stream.seek(max(0, os.fstat(stream.fileno()).st_size - 8192))
+            lines = stream.read().decode("utf-8", errors="replace").splitlines()
+    except OSError:
+        return result
+    if not lines:
+        return result
+    prefix = f"{result.diagnostic}; " if result.diagnostic else ""
+    return replace(result, diagnostic=f"{prefix}last_progress={lines[-1]}")
+
+
 def is_windows() -> bool:
     return os.name == "nt"
 
@@ -446,17 +461,23 @@ def run_file(
         )
     except CleanupError as exc:
         if returncode is not None and termination_status is None and _status(returncode) == "failed":
-            return FileResult(
-                name,
-                "failed",
-                returncode,
-                clock() - started,
-                log.relative_to(output_dir).as_posix(),
-                str(exc),
-                cleanup_error=str(exc),
+            return with_progress(
+                FileResult(
+                    name,
+                    "failed",
+                    returncode,
+                    clock() - started,
+                    log.relative_to(output_dir).as_posix(),
+                    str(exc),
+                    cleanup_error=str(exc),
+                ),
+                output_dir,
             )
-        return FileResult(
-            name, "cleanup-unconfirmed", None, clock() - started, log.relative_to(output_dir).as_posix(), str(exc)
+        return with_progress(
+            FileResult(
+                name, "cleanup-unconfirmed", None, clock() - started, log.relative_to(output_dir).as_posix(), str(exc)
+            ),
+            output_dir,
         )
     except OSError as exc:
         return FileResult(
@@ -471,15 +492,10 @@ def run_file(
     diagnostic = None
     if termination_status is not None:
         diagnostic = f"job termination: {status}"
-        if progress.is_file():
-            with progress.open("rb") as stream:
-                stream.seek(max(0, progress.stat().st_size - 8192))
-                lines = stream.read().decode("utf-8", errors="replace").splitlines()
-            if lines:
-                diagnostic += f" last_test_phase={lines[-1]}"
     if process.token.leaked_descendants:
         diagnostic = f"{diagnostic + '; ' if diagnostic else ''}leaked_descendants={process.token.leaked_descendants}"
-    return FileResult(name, status, returncode, clock() - started, log.relative_to(output_dir).as_posix(), diagnostic)
+    result = FileResult(name, status, returncode, clock() - started, log.relative_to(output_dir).as_posix(), diagnostic)
+    return with_progress(result, output_dir) if termination_status is not None else result
 
 
 def _launch_failure(name: str, output_dir: Path, error: Exception) -> FileResult:
@@ -493,13 +509,16 @@ def _deadline_failure(
     name: str, output_dir: Path, *, unstarted: bool = False, cause: int = AGGREGATE_DEADLINE
 ) -> FileResult:
     log = output_dir / "logs" / f"{name}.log"
-    return FileResult(
-        name,
-        "unstarted" if unstarted else REASONS[cause],
-        None,
-        0.0,
-        log.relative_to(output_dir).as_posix(),
-        "driver aggregate deadline exceeded" if cause == AGGREGATE_DEADLINE else "driver abort",
+    return with_progress(
+        FileResult(
+            name,
+            "unstarted" if unstarted else REASONS[cause],
+            None,
+            0.0,
+            log.relative_to(output_dir).as_posix(),
+            "driver aggregate deadline exceeded" if cause == AGGREGATE_DEADLINE else "driver abort",
+        ),
+        output_dir,
     )
 
 
@@ -568,6 +587,11 @@ def run_files(
 
     def record(result: FileResult) -> None:
         results.append(result)
+        print(
+            f"windows pytest file: {result.name} status={result.status} seconds={result.seconds:.3f} "
+            f"log={result.log} diagnostic={result.diagnostic}",
+            flush=True,
+        )
         if on_result is not None:
             on_result(sorted(results, key=lambda item: item.name))
 
@@ -815,13 +839,6 @@ def main(argv: Sequence[str] | None = None) -> int:
     def record_progress(snapshot: list[FileResult]) -> None:
         partial_results[:] = snapshot
         write_record(args.record, results=snapshot, expected_files=files)
-        if snapshot:
-            latest = snapshot[-1]
-            print(
-                f"windows pytest file: {latest.name} status={latest.status} seconds={latest.seconds:.3f} "
-                f"log={latest.log} diagnostic={latest.diagnostic}",
-                flush=True,
-            )
 
     try:
         if args.job_timeout < 1:

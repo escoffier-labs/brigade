@@ -16,22 +16,38 @@ def _record(message: str) -> None:
             stream.write(message + "\n")
 
 
-@pytest.hookimpl(wrapper=True, tryfirst=True)
+@pytest.hookimpl(hookwrapper=True, tryfirst=True)
+def pytest_collection():
+    _record("session phase=collection started")
+    yield
+    _record("session phase=collection completed")
+
+
+@pytest.hookimpl(hookwrapper=True, tryfirst=True)
+def pytest_sessionfinish():
+    _record("session phase=sessionfinish started")
+    yield
+    _record("session phase=sessionfinish completed")
+
+
+@pytest.hookimpl(trylast=True)
+def pytest_unconfigure():
+    _record("session phase=unconfigure completed")
+
+
+@pytest.hookimpl(tryfirst=True)
 def pytest_runtest_setup(item):
     _record(f"{item.nodeid} phase=setup started")
-    return (yield)
 
 
-@pytest.hookimpl(wrapper=True, tryfirst=True)
+@pytest.hookimpl(tryfirst=True)
 def pytest_runtest_call(item):
     _record(f"{item.nodeid} phase=call started")
-    return (yield)
 
 
-@pytest.hookimpl(wrapper=True, tryfirst=True)
+@pytest.hookimpl(tryfirst=True)
 def pytest_runtest_teardown(item):
     _record(f"{item.nodeid} phase=teardown started")
-    return (yield)
 
 
 def pytest_runtest_logreport(report):

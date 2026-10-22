@@ -9,6 +9,7 @@ import html
 import re
 import http.client
 import json
+import sys
 import threading
 from datetime import datetime, timedelta, timezone
 
@@ -1495,6 +1496,12 @@ class TestBoardBounds:
         assert page.count("<tr data-bucket=") == 2000
         assert "older runs omitted" in page
 
+    @pytest.mark.xfail(
+        sys.platform == "win32",
+        raises=TimeoutError,
+        reason="Windows loopback HTTP socket intermittently exceeds 5 seconds (#1916)",
+        strict=False,
+    )
     def test_machine_pages_resolve_history_seats_without_per_run_queries(self, hub, monkeypatch):
         stamp = datetime.now(timezone.utc).isoformat()
         events = [
