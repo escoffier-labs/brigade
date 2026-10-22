@@ -315,6 +315,41 @@ class MissingLeakShapeTests(unittest.TestCase):
                     {finding.rule_id for finding in scan_text(before + host + after).findings},
                 )
 
+    def test_equals_form_hostname_options_match_and_redact(self) -> None:
+        host = "fixture-db" + ".internal"
+        for key in ("host", "hostname", "server", "endpoint", "domain", "url", "address", "database-host"):
+            for prefix in ("--", "tool --", "tool -", "tool --verbose --output=json --"):
+                with self.subTest(key=key, prefix=prefix):
+                    before = f"{prefix}{key}="
+                    text = before + host + " --verbose"
+                    result = scan_text(text)
+                    self.assertEqual([finding.rule_id for finding in result.findings], ["private-hostname"])
+                    self.assertEqual([finding.match for finding in result.findings], [host])
+                    redacting = scan_text(text, policy=Policy(rules={"private-hostname": "redact"}))
+                    self.assertEqual(redacting.redacted_text, before + "[redacted-host] --verbose")
+
+    def test_equals_form_hostname_option_skips_remain(self) -> None:
+        host = "fixture-db" + ".internal"
+        for before, after in (
+            ("tool --arbitrary-value=", ""),
+            ("tool --hostname-suffix=", ""),
+            ("tool --ghost=", ""),
+            ("tool --databasehost=", ""),
+            ("arbitrary_value=", ""),
+            ("obj.host=", ""),
+            ("const value = tool --host=", ";"),
+            ("callback(--host=", ")"),
+            ("callback(host=", ")"),
+            ("tool --host=", "()"),
+            ("tool --host=", " ? yes : no"),
+            ("tool --host=", ".example.com"),
+        ):
+            with self.subTest(before=before, after=after):
+                text = before + host + after
+                result = scan_text(text, policy=Policy(rules={"private-hostname": "redact"}))
+                self.assertNotIn("private-hostname", {finding.rule_id for finding in result.findings})
+                self.assertEqual(result.redacted_text, text)
+
     def test_windows_home_path_matches(self) -> None:
         result = scan_text(
             r"Config at C:\Users\example-user\.config\tool.json"  # content-guard: allow windows-home-path

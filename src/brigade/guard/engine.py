@@ -257,6 +257,7 @@ _FSTRING_POSITION = re.compile(r"(?:^|=|(?:^|;)\s*return|\w\(|[=(]\s*[\[{])\s*$"
 # The rest of a field after its expression: '=', a conversion, a format spec
 # with at most simple nested fields, then the closing brace.
 _FIELD_CLOSE = re.compile(r"""\s*=?\s*(?:![rsa])?(?::(?:[^{}"'\n]|\{[A-Za-z_][\w.]*\})*)?\}""")
+_HOSTNAME_KEY = r"(?:[a-z][a-z0-9]*[_-])*(?:host|hostname|server|endpoint|domain|url|address)"
 
 
 def _whole_fstring_field(before: str, after: str) -> bool:
@@ -316,9 +317,17 @@ def _hostname_context(text: str, start: int, end: int) -> bool:
     # Host-related assignment keys behind shell declaration prefixes
     # (export/readonly, and Windows batch set) are still configuration (#1920).
     if re.fullmatch(
-        r"\s*(?:(?:export|readonly|set)\s+)*(?:[a-z][a-z0-9]*[_-])*(?:host|hostname|server|endpoint|domain|url|address)\s*[:=]\s*",
+        r"\s*(?:(?:export|readonly|set)\s+)*" + _HOSTNAME_KEY + r"\s*[:=]\s*",
         before,
         re.IGNORECASE,
+    ):
+        return True
+    # Equals-form command options have the same host keys, with one or two
+    # leading hyphens. Keep call/expression delimiters out of command context.
+    if (
+        re.search(r"(?:^|\s)--?" + _HOSTNAME_KEY + r"=\s*$", before, re.IGNORECASE)
+        and not re.search(r"[(){}\[\];]", before)
+        and not re.match(r"\s*[,)}\];]", after)
     ):
         return True
     if re.search(r"[(){}\[\];=]|\b(?:return|const|let|var|assert|import)\b", before):
