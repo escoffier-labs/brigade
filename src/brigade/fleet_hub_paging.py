@@ -24,19 +24,37 @@ SNAPSHOT_MAX_PER_CALLER = 8
 SNAPSHOT_MAX_COUNT = 128
 SNAPSHOT_MAX_BYTES = 64 * 1024 * 1024
 SNAPSHOT_SINGLE_MAX_BYTES = 16 * 1024 * 1024
+_SCHEMA = (
+    (
+        "table",
+        "fleet_read_snapshots",
+        "CREATE TABLE IF NOT EXISTS fleet_read_snapshots ("
+        "snapshot_id TEXT PRIMARY KEY, caller TEXT NOT NULL, query_hash TEXT NOT NULL, "
+        "expires_at REAL NOT NULL, payload TEXT NOT NULL, payload_bytes INTEGER NOT NULL)",
+    ),
+    (
+        "index",
+        "fleet_read_snapshots_expiry",
+        "CREATE INDEX IF NOT EXISTS fleet_read_snapshots_expiry ON fleet_read_snapshots(expires_at)",
+    ),
+)
 
 
 class SnapshotWriteRequired(Exception):
     """Restart a paged read under write admission before storing its snapshot."""
 
 
+def missing_schema(conn: sqlite3.Connection) -> list[str]:
+    return [
+        ddl
+        for kind, name, ddl in _SCHEMA
+        if conn.execute("SELECT 1 FROM sqlite_master WHERE type=? AND name=?", (kind, name)).fetchone() is None
+    ]
+
+
 def ensure_schema(conn: sqlite3.Connection) -> None:
-    conn.execute(
-        "CREATE TABLE IF NOT EXISTS fleet_read_snapshots ("
-        "snapshot_id TEXT PRIMARY KEY, caller TEXT NOT NULL, query_hash TEXT NOT NULL, "
-        "expires_at REAL NOT NULL, payload TEXT NOT NULL, payload_bytes INTEGER NOT NULL)"
-    )
-    conn.execute("CREATE INDEX IF NOT EXISTS fleet_read_snapshots_expiry ON fleet_read_snapshots(expires_at)")
+    for ddl in missing_schema(conn):
+        conn.execute(ddl)
 
 
 def page_limit(raw: dict[str, Any]) -> int:

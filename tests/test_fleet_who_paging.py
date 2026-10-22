@@ -332,3 +332,38 @@ def test_schema_37_migrates_once_and_preserves_snapshot_on_reopen(tmp_path):
         assert [row["node_id"] for row in first["nodes"] + second["nodes"]] == ["other-node", "reader-node"]
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize("missing", ["table", "index"])
+def test_current_schema_repairs_paging_objects_and_preserves_cursors(tmp_path, missing):
+    path = tmp_path / "fleet.db"
+    conn = fleet_hub.init_db(path)
+    fleet_hub.add_node(conn, "reader-node")
+    fleet_hub.add_node(conn, "other-node")
+    nodes = conn.execute("SELECT * FROM nodes ORDER BY node_id").fetchall()
+    first = who(conn, limit=1)
+    snapshots = conn.execute("SELECT * FROM fleet_read_snapshots").fetchall()
+    if missing == "table":
+        conn.execute("DROP TABLE fleet_read_snapshots")
+        snapshots = []
+    else:
+        conn.execute("DROP INDEX fleet_read_snapshots_expiry")
+    conn.commit()
+    conn.close()
+
+    for startup in range(2):
+        conn = fleet_hub.init_db(path)
+        try:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
+            assert conn.execute("SELECT * FROM nodes ORDER BY node_id").fetchall() == nodes
+            assert conn.execute("SELECT * FROM fleet_read_snapshots").fetchall() == snapshots
+            assert "fleet_read_snapshots_expiry" in {
+                row[1] for row in conn.execute("PRAGMA index_list(fleet_read_snapshots)")
+            }
+            if missing == "table" and startup == 0:
+                first = who(conn, limit=1)
+                snapshots = conn.execute("SELECT * FROM fleet_read_snapshots").fetchall()
+            second = who(conn, cursor=first["next_cursor"])
+            assert [row["node_id"] for row in first["nodes"] + second["nodes"]] == ["other-node", "reader-node"]
+        finally:
+            conn.close()

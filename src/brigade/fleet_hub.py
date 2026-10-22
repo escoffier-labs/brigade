@@ -275,6 +275,8 @@ _ADDITIVE_INDEXES = (
 
 
 def _missing_additive_columns(conn: sqlite3.Connection) -> list[str]:
+    from . import fleet_hub_paging
+
     missing = [
         ddl
         for table, column, ddl in _ADDITIVE_COLUMNS
@@ -287,7 +289,7 @@ def _missing_additive_columns(conn: sqlite3.Connection) -> list[str]:
         for name, ddl in _ADDITIVE_INDEXES
         if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?", (name,)).fetchone() is None
     )
-    return missing
+    return missing + fleet_hub_paging.missing_schema(conn)
 
 
 # Per-node credentials (schema v4, issue #1150): node_id -> SHA-256 of the
