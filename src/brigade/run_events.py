@@ -141,6 +141,7 @@ EVENT_TYPES: dict[str, frozenset[str]] = {
             "pairing_key",
         }
     ),
+    "run.cassette.recorded": frozenset({"path", "sha256", "media_type", "byte_size", "privacy_class"}),
     "run.artifact_collection.started": frozenset({"detail"}),
     "run.redaction.recorded": frozenset(
         {
@@ -497,6 +498,10 @@ def _validate_payload(event_type: str, payload: Any) -> None:
         from brigade import run_budget
 
         run_budget.validate_run_budget_payload(event_type, payload)
+    if event_type == "run.cassette.recorded":
+        from . import run_cassette
+
+        run_cassette.validate_reference(payload)
 
 
 def validate_event(env: Any) -> list[str]:
