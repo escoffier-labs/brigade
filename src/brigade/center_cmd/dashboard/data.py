@@ -10,11 +10,11 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-import sys
 from pathlib import Path
 from typing import Sequence
 
 from brigade.center_cmd.dashboard import timing as center_timing
+from brigade.isolated_exec import module_argv, trusted_cwd
 
 
 def _command_error_detail(detail: str) -> str:
@@ -48,7 +48,7 @@ def run_json(
     nonzero exit while printing their versioned JSON; pass ``(0, 1)`` there.
     """
     return _invoke(
-        [*args, "--target", str(target), "--json"],
+        [*args, "--target", str(target.expanduser().resolve()), "--json"],
         phase_args=args,
         timeout=timeout,
         ok_codes=ok_codes,
@@ -64,7 +64,7 @@ def run_json_cwd(
 ) -> dict:
     """Like :func:`run_json` for subcommands scoped by ``--cwd`` instead of ``--target``."""
     return _invoke(
-        [*args, "--cwd", str(target), "--json"],
+        [*args, "--cwd", str(target.expanduser().resolve()), "--json"],
         phase_args=args,
         timeout=timeout,
         ok_codes=ok_codes,
@@ -78,7 +78,7 @@ def _invoke(
     timeout: float,
     ok_codes: Sequence[int] = (0,),
 ) -> dict:
-    cmd = [sys.executable, "-m", "brigade", *full_args]
+    cmd = module_argv("brigade", *full_args)
     env = os.environ.copy()
     env["BRIGADE_EXTRAS"] = "1"
     phase_name = "cli:" + " ".join(phase_args)
@@ -90,6 +90,7 @@ def _invoke(
                 text=True,
                 timeout=timeout,
                 env=env,
+                cwd=trusted_cwd(),
             )
     except subprocess.TimeoutExpired:
         return {"error": "command timed out"}

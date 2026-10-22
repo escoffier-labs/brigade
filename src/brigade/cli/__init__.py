@@ -279,6 +279,9 @@ def main(argv=None) -> int:
         return exit_code
     if exit_code:
         bug_last_error.record(command, exit_code, args=args)
+    if args.command == "work" and args.work_command in {"presence-hook", "hook-run"}:
+        # Agent hooks must never print update notices or launch cache refreshes.
+        return exit_code
     try:
         from .. import update_notify
 

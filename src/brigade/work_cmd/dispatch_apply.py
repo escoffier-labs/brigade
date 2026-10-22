@@ -6,7 +6,6 @@ import hashlib
 import os
 import signal
 import subprocess
-import sys
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -14,6 +13,7 @@ from typing import Any, Callable
 
 from .. import localio, proc, run_lane_state, run_reap, runs_cmd, runguard, worker_failure
 from ..aboyeur.run_io import make_run_dir
+from ..isolated_exec import module_argv, trusted_cwd
 from . import claiming, dispatch_state as store
 from .ledger import locking
 from .session.lifecycle import _render_task_run_prompt
@@ -178,9 +178,7 @@ def _terminal_state(meta: dict[str, Any]) -> str:
 
 
 def _child_argv(row: dict[str, Any], session: dict[str, Any], prompt: str) -> list[str]:
-    argv = [
-        sys.executable,
-        "-m",
+    argv = module_argv(
         "brigade",
         "run",
         "--worker",
@@ -193,7 +191,7 @@ def _child_argv(row: dict[str, Any], session: dict[str, Any], prompt: str) -> li
         session["roster_path"],
         "--wait",
         "0",
-    ]
+    )
     if session.get("run_budget"):
         argv += ["--run-budget", session["run_budget"]]
     return [*argv, prompt]
@@ -447,7 +445,8 @@ class Apply:
                     if not self.can_launch() or (not row.get("pid") and not self.reservation_allowed()):
                         return
                     child = subprocess.Popen(
-                        [sys.executable, "-m", "brigade.work_cmd.dispatch_child", str(run_dir), *argv],
+                        module_argv("brigade.work_cmd.dispatch_child", str(run_dir), *argv),
+                        cwd=trusted_cwd(),
                         stdin=subprocess.DEVNULL,
                         stdout=log,
                         stderr=log,

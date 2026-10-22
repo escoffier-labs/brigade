@@ -104,16 +104,33 @@ runner, then record the observed runner and replacement state privately. If the
 workflow needs a hosted replacement, make that routing change explicitly and
 review it. Leave required hosted checks and branch protections intact.
 
-## Configure merge queue later
+## Merge queue settings
 
-Only after the compatible `merge_group` workflow exists on `main`, configure the
-queue for the exact `main` branch with these settings:
+The queue went live on 2026-10-19 (ruleset 25415491) for the exact `main`
+branch, after the compatible `merge_group` workflow landed. Live settings:
 
-- Build concurrency: 1.
-- Minimum merge group size: 1.
-- Maximum merge group size: 3.
-- Merge only non-failing pull requests.
-- Status-check timeout: 90 minutes.
+- Build concurrency: 3.
+- Minimum merge group size: 1. The 5-minute wait time is a timeout for
+  reaching that minimum, so at 1 it never delays a group. Raise the minimum
+  if batching is wanted.
+- Maximum merge group size: 5.
+- Grouping: `HEADGREEN`. Only the group head must pass, so a flaky failure on
+  an earlier entry does not eject it when the combined head is green. The tip
+  of `main` is always a tested commit. An individual squash commit inside a
+  group is not tested alone.
+- Merge method: squash. Status-check timeout: 90 minutes. No bypass actors.
+
+The original plan was build concurrency 1, groups of at most 3, and only
+non-failing pull requests. In the first 2.5 days 72 pull requests entered the
+queue and 71 merged, across 83 merge-group runs (72 success, 10 failure, 1
+cancelled), with a 27-minute median successful run. All 83 runs, failures
+included, took 2,404 minutes of wall clock, or 33.8 minutes per landing. A
+single build slot would therefore manage roughly 42 landings a day, and every
+failure would stall the whole queue. Wall clock includes waiting for hosted
+runners, which concurrent builds add to, so 42 is an estimate. Rebuilds cost 11
+extra runs: 8 pull requests needed 2 runs and 1 needed 4. Revisit these numbers
+if hosted-runner queueing grows. Switch grouping to `ALLGREEN` if every squash
+commit on `main` must pass on its own.
 
 Retain the required `ci-gate` status (see [Required aggregate](#required-aggregate))
 and all existing review and conversation requirements. Confirm a real merge-group run creates the existing required

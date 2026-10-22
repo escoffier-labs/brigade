@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Brigade self-invocations isolate Python imports from workspace files and `PYTHONPATH`, using the running installation with `-I` so `pip --user` installs keep working. This covers hooks, update refreshes, detached runs, dispatch, dashboard access, embedded scanners, and generated service commands. Agent hook commands skip update notices and refreshes entirely.
 - Work briefs read only the newest release candidate and release run instead of decoding every bundle, and the harness-wiring scan skips its per-ancestor worktree check for files that are not wiring documents. On a checkout with a large release history the brief ran about 3x faster with 60% lower peak memory.
 - Work briefs limit Codex Cloud inventory to the newest page and check registered tasks missing from that page individually, preserving stale-task warnings without full inventory pagination.
 - Handoff drafts use consistent LF line endings on Windows for both creation and forced replacement.
