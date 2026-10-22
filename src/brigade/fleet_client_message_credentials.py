@@ -23,6 +23,8 @@ MESSAGE_CODES = frozenset(
         "message_recipient_quota",
         "message_sender_quota",
         "message_wait_capped",
+        "paging_snapshot_capacity",
+        "paging_continuation_unsupported",
         "message_recipient_inactive",
         "message_recipient_unknown",
         "message_sender_inactive",

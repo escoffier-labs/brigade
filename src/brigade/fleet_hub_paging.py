@@ -13,7 +13,7 @@ from collections.abc import Callable
 from typing import Any
 
 from . import fleet_hub
-from .fleet_hub_messages import MessageError
+from .fleet_hub_messages import MessageError, MessageQuotaError
 
 PAGE_DEFAULT = 200
 PAGE_MAX = 500
@@ -107,7 +107,9 @@ def _save(conn: sqlite3.Connection, data: dict[str, Any], *, caller: str, bindin
         "SELECT COUNT(*),COALESCE(SUM(payload_bytes),0),COALESCE(SUM(caller=?),0) FROM fleet_read_snapshots", (caller,)
     ).fetchone()
     if count >= SNAPSHOT_MAX_COUNT or total + size > SNAPSHOT_MAX_BYTES or owned >= SNAPSHOT_MAX_PER_CALLER:
-        raise MessageError("paging snapshot capacity reached; retry after snapshots expire")
+        raise MessageQuotaError(
+            "paging snapshot capacity reached; retry after snapshots expire", code="paging_snapshot_capacity"
+        )
     snapshot_id = secrets.token_hex(24)
     conn.execute(
         "INSERT INTO fleet_read_snapshots VALUES(?,?,?,?,?,?)",

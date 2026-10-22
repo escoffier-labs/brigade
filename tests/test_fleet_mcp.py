@@ -926,6 +926,106 @@ def test_claims_page_is_bounded_and_reports_truncation(stations, hub):
         assert error
 
 
+@pytest.mark.parametrize("action", ["who", "claims"])
+@pytest.mark.parametrize("cap", ["SNAPSHOT_MAX_PER_CALLER", "SNAPSHOT_MAX_COUNT", "SNAPSHOT_MAX_BYTES"])
+def test_snapshot_capacity_is_retryable_without_evicting_cursors(stations, hub, monkeypatch, action, cap):
+    from brigade import fleet_hub_paging
+
+    base, token, _other_token, db = hub
+    conn = fleet_hub.open_db(db)
+    try:
+        for index in range(2):
+            status, claim = fleet_hub.handle_claim(
+                conn,
+                {"action": "acquire", "node_id": NODE_A, "target": f"quota-{index}", "holder": "reader"},
+                caller_node=NODE_A,
+            )
+            assert status == 200 and claim["granted"]
+    finally:
+        conn.close()
+    first = call(stations[0], f"fleet_{action}", limit=1)
+    assert isinstance(first["next_cursor"], str)
+    conn = fleet_hub.open_db(db)
+    try:
+        size = conn.execute("SELECT SUM(payload_bytes) FROM fleet_read_snapshots").fetchone()[0]
+    finally:
+        conn.close()
+    monkeypatch.setattr(fleet_hub_paging, cap, size if cap == "SNAPSHOT_MAX_BYTES" else 1)
+    status, rejected = fleet_client_messages._request(base, token, {"action": action, "limit": 1})
+    assert status == 429
+    assert rejected["code"] == "paging_snapshot_capacity"
+    payload, error = stations[0].call(f"fleet_{action}", {"limit": 1})
+    assert error and payload == {
+        "error": "Fleet hub operation failed.",
+        "code": "paging_snapshot_capacity",
+        "status": 429,
+        "transient": True,
+        "permanent": False,
+    }
+    rest = call(stations[0], f"fleet_{action}", cursor=first["next_cursor"])
+    assert rest["next_cursor"] is None
+    key = "nodes" if action == "who" else "claims"
+    assert len(first[key]) == len(rest[key]) == 1
+    now = fleet_hub._now_epoch()
+    monkeypatch.setattr(fleet_hub, "_now_epoch", lambda: now + fleet_hub_paging.SNAPSHOT_TTL_SECONDS + 1)
+    assert isinstance(call(stations[0], f"fleet_{action}", limit=1)["next_cursor"], str)
+
+
+@pytest.mark.parametrize("action", ["who", "claims"])
+def test_single_oversized_snapshot_remains_permanent(stations, hub, monkeypatch, action):
+    from brigade import fleet_hub_paging
+
+    base, token, _other_token, db = hub
+    conn = fleet_hub.open_db(db)
+    try:
+        for index in range(2):
+            status, claim = fleet_hub.handle_claim(
+                conn,
+                {"action": "acquire", "node_id": NODE_A, "target": f"oversize-{index}", "holder": "reader"},
+                caller_node=NODE_A,
+            )
+            assert status == 200 and claim["granted"]
+    finally:
+        conn.close()
+    monkeypatch.setattr(fleet_hub_paging, "SNAPSHOT_SINGLE_MAX_BYTES", 1)
+    status, rejected = fleet_client_messages._request(base, token, {"action": action, "limit": 1})
+    assert status == 400 and rejected == {"error": "paging snapshot exceeds capacity"}
+    payload, error = stations[0].call(f"fleet_{action}", {"limit": 1})
+    assert error and payload == {
+        "error": "Fleet hub operation failed.",
+        "code": "hub_rejected",
+        "status": 400,
+        "transient": False,
+        "permanent": True,
+    }
+
+
+@pytest.mark.parametrize("action", ["who", "claims"])
+def test_directory_legacy_continuation_is_explicit(stations, monkeypatch, action):
+    response = (
+        {"truncated": True, "total": 2, "claims": []}
+        if action == "claims"
+        else {"truncated": True, "nodes": [], "principals": [], "sessions": []}
+    )
+    monkeypatch.setattr(fleet_client_messages, "_request", lambda *_args, **_kwargs: (200, dict(response)))
+    for station in stations:
+        payload, error = station.call(f"fleet_{action}", {})
+        assert error and payload == {
+            "error": "Fleet hub operation failed.",
+            "code": "paging_continuation_unsupported",
+            "status": None,
+            "transient": False,
+            "permanent": True,
+        }
+        assert "next_cursor" not in payload
+    response["truncated"] = False
+    for station in stations:
+        assert call(station, f"fleet_{action}")["next_cursor"] is None
+    response.update(truncated=True, next_cursor="opaque-continuation")
+    for station in stations:
+        assert call(station, f"fleet_{action}")["next_cursor"] == "opaque-continuation"
+
+
 def test_claims_page_stays_under_the_byte_budget(monkeypatch):
     monkeypatch.setattr(fleet_hub_messages, "CLAIMS_PAGE_MAX_BYTES", 3000)
     rows = [{"target": f"t{index}-" + "y" * 1000, "owner_node": NODE_A} for index in range(5)]

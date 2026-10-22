@@ -14,6 +14,8 @@ DEFAULT_PORT = 8933
 _SAFE_ERROR_CODES = frozenset(
     {
         "hub_unavailable",
+        "paging_snapshot_capacity",
+        "paging_continuation_unsupported",
         "message_recipient_not_permitted",
         "message_sender_recipient_quota",
         "message_recipient_quota",
@@ -357,6 +359,10 @@ class FleetMcp:
         if name in {"fleet_who", "fleet_claims"}:
             action = "who" if name == "fleet_who" else "claims"
             payload = messages._online({"action": action, **args}, authority=authority)
+            if payload.get("truncated") is True and "next_cursor" not in payload:
+                raise messages.FleetMessageHubError(
+                    "Fleet hub does not support directory continuation.", code="paging_continuation_unsupported"
+                )
             # The hub-issued continuation token is protocol data, not peer text.
             cursor = payload.pop("next_cursor", None)
             return {**_frame_directory(payload), "next_cursor": cursor}
