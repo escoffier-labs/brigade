@@ -65,6 +65,15 @@ def register(sub: argparse._SubParsersAction) -> None:
             default=None,
             help="Path to a brigade.run_budget.v1 JSON declaration for each trial cell.",
         )
+        if command in {"run", "resume"}:
+            parser.add_argument(
+                "--retry-transient",
+                action="store_true",
+                help=(
+                    "Re-run adapter_error and timeout cells as new attempts (original attempt kept; "
+                    "capped per cell). Deterministic results are never retried."
+                ),
+            )
         parser.set_defaults(func=_dispatch_trial)
     for command in ("show", "summary"):
         parser = trial_sub.add_parser(command, help=f"{command.title()} trial artifacts.")
@@ -131,6 +140,8 @@ def _dispatch_trial(args) -> int:
     }
     if run_budget_payload is not None:
         execute_kwargs["run_budget_payload"] = run_budget_payload
+    if getattr(args, "retry_transient", False):
+        execute_kwargs["retry_transient"] = True
     return model_trials.execute(
         args.manifest,
         roster,

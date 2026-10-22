@@ -15,7 +15,7 @@ separate.
 - An optional `execution.mode` set to `read-only` (the default) or
   `writable-worktree`. Writable cells each run in a fresh Brigade-created
   detached worktree that is removed after grading.
-- `brigade model trial plan|run|resume|show|summary`.
+- `brigade model trial plan|run|resume|show|summary`, with opt-in `--retry-transient` on `run` and `resume`.
 - Existing direct-worker execution path for every cell.
 - Exit-status, exact-output, regex-output, JSON-field, file-existence,
   diff-constraint, and verification-receipt graders.

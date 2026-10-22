@@ -48,9 +48,23 @@ honestly-populated field under a new schema revision.
 cell.json inlines the full prompt and absolute run_dir. Any export/projection path MUST
 strip/digest prompts and relativize paths by default. Enforced by test.
 
-## Deferred (post-freeze, additive)
-The retry column above describes the deferred design. `--retry-transient` is
-not accepted by the current [trial CLI](../src/brigade/cli/model.py).
+## Retry (--retry-transient)
+`brigade model trial run|resume --retry-transient` is opt-in and off by default. It re-runs only
+transient cells as new attempts: adapter_error, and execution_error with failure_reason=timeout.
+Rejected, unscored, grader_error, and non-timeout execution_error cells are never retried.
 
---retry-transient: opt-in re-run of adapter_error and timeout-reason cells as new attempts,
-failed attempt kept on disk. Default off. Not required for the freeze.
+On `run` a failing attempt is retried immediately. On `resume` a stored adapter_error or timeout
+cell is re-run, which is the only way a terminal measurement failure is re-attempted. Each retry
+is a new `attempts/attempt-NNN/` directory. The failed attempt stays on disk and is summarized in
+the cell's additive `prior_attempts` list (attempt, state, failure_reason, exit_code,
+duration_seconds, run_dir); the cell's own fields describe the latest attempt.
+
+Caps, counted as retries after the first attempt per cell (`model_trials.RETRY_CAPS`):
+
+| Latest failure | Max retries |
+|---|---|
+| adapter_error | 2 |
+| execution_error with failure_reason=timeout | 1 |
+
+A cell that reaches its cap stays in its failed state and keeps counting in
+measurement_failures.

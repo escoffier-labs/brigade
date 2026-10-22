@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `brigade model trial run|resume --retry-transient` re-runs `adapter_error` and timeout-reason `execution_error` cells as new attempts (caps: 2 and 1), keeping each failed attempt in the cell's `prior_attempts` record. Deterministic results are never retried.
+
 ### Fixed
 
 - Cursor project initialization and user-scope harness sync install all three presence lifecycle hooks into versioned hook documents, preserve foreign entries, validate the whole project document before it suppresses the user hook, and migrate hook ownership by event.

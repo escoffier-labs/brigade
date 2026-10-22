@@ -23,6 +23,9 @@ GRADER_SCHEMA = "brigade.grader_result.v1"
 TERMINAL_STATES = frozenset({"accepted", "rejected", "unscored", "execution_error", "adapter_error", "grader_error"})
 REGRADEABLE_STATES = frozenset({"grader_error"})
 MEASUREMENT_STATES = frozenset({"adapter_error", "grader_error"})
+# Retry caps for --retry-transient: the most retries (attempts after the first)
+# allowed for a cell whose latest attempt failed for the named transient kind.
+RETRY_CAPS: dict[str, int] = {"adapter_error": 2, "timeout": 1}
 
 
 @dataclass(frozen=True)
@@ -375,6 +378,7 @@ def _finalize_cell_payload(
     graders: list[dict[str, Any]],
     text: str,
     failure_reason: str | None,
+    prior_attempts: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     output_digest = _output_digest(text)
     _attach_grader_output_refs(graders, cell_id=cell.cell_id, output_digest=output_digest)
@@ -398,7 +402,47 @@ def _finalize_cell_payload(
     }
     if failure_reason is not None:
         payload["failure_reason"] = failure_reason
+    if prior_attempts:
+        payload["prior_attempts"] = prior_attempts
     return payload
+
+
+def _prior_attempts(cell: dict[str, Any] | None) -> list[dict[str, Any]]:
+    value = (cell or {}).get("prior_attempts")
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]
+
+
+def _attempt_summary(cell: dict[str, Any]) -> dict[str, Any]:
+    """Compact record of a finished attempt kept on the cell after it is retried."""
+    summary: dict[str, Any] = {
+        "attempt": cell.get("attempt"),
+        "state": cell.get("state"),
+        "exit_code": cell.get("exit_code"),
+        "duration_seconds": cell.get("duration_seconds"),
+        "run_dir": cell.get("run_dir"),
+    }
+    if cell.get("failure_reason") is not None:
+        summary["failure_reason"] = cell["failure_reason"]
+    return summary
+
+
+def _transient_kind(cell: dict[str, Any] | None) -> str | None:
+    """Return the RETRY_CAPS key when a recorded cell is eligible for --retry-transient."""
+    if not isinstance(cell, dict):
+        return None
+    state = cell.get("state")
+    if state == "adapter_error":
+        return "adapter_error"
+    if state == "execution_error" and cell.get("failure_reason") == "timeout":
+        return "timeout"
+    return None
+
+
+def _retry_allowed(cell: dict[str, Any] | None) -> bool:
+    kind = _transient_kind(cell)
+    return kind is not None and len(_prior_attempts(cell)) < RETRY_CAPS[kind]
 
 
 def _write_cell_payload(cell_dir: Path, run_parent: Path, payload: dict[str, Any]) -> None:
@@ -462,6 +506,7 @@ def _regrade_cell_from_disk(cell_dir: Path, cell: CellSpec, plan: dict[str, Any]
         graders=graders,
         text=text,
         failure_reason=None,
+        prior_attempts=_prior_attempts(current),
     )
     _write_cell_payload(cell_dir, run_dir.parent, payload)
     return True
@@ -622,6 +667,113 @@ def build_plan(manifest_path: Path, roster: Roster, output_dir: Path) -> tuple[d
     return payload, cells
 
 
+class _TrialAbort(Exception):
+    """Raised inside a cell attempt to stop the whole trial with a process exit code."""
+
+    def __init__(self, code: int) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+def _run_attempt(
+    cell: CellSpec,
+    *,
+    roster: Roster,
+    plan: dict[str, Any],
+    workspace: Path,
+    output_dir: Path,
+    cell_dir: Path,
+    started_at: str,
+    history: list[dict[str, Any]],
+    run_budget_payload: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Run one attempt of a cell, write its payload, and return the payload."""
+    attempt = _attempt_number(cell_dir)
+    cell_dir.mkdir(parents=True, exist_ok=True)
+    running: dict[str, Any] = {
+        "schema": CELL_SCHEMA,
+        **cell.payload(),
+        "state": "running",
+        "attempt": attempt,
+        "started_at": started_at,
+        "manifest_digest": plan["manifest_digest"],
+    }
+    if history:
+        running["prior_attempts"] = history
+    localio.write_json(cell_dir / "cell.json", running)
+    run_dir = cell_dir / "attempts" / f"attempt-{attempt:03d}" / "run"
+    cell_workspace = workspace
+    worktree_path: Path | None = None
+    if cell.execution_mode == "writable-worktree":
+        worktree_path = _trial_worktree_path(workspace, output_dir, cell, attempt)
+        try:
+            cell_workspace = runguard.create_detached_worktree(workspace, worktree_path)
+        except runguard.RunGuardError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            raise _TrialAbort(2) from exc
+    try:
+        read_only = cell.execution_mode == "read-only"
+        start_kwargs: dict[str, Any] = {
+            "task": cell.prompt,
+            "cwd": cell_workspace,
+            "roster": roster,
+            "read_only": read_only,
+            "worker": cell.seat,
+            "lock_workspace": workspace,
+        }
+        if run_budget_payload is not None:
+            start_kwargs["run_budget_payload"] = run_budget_payload
+        aboyeur.record_run_start(
+            run_dir,
+            **start_kwargs,
+        )
+        with runguard.run_lock(workspace, run_dir=run_dir):
+            run_kwargs: dict[str, Any] = {
+                "worker": cell.seat,
+                "cwd": cell_workspace,
+                "output_dir": run_dir,
+                "route_enabled": False,
+                "read_only": read_only,
+                "authorized_writable_worktree": cell.execution_mode == "writable-worktree",
+                "lock_workspace": workspace,
+            }
+            if run_budget_payload is not None:
+                run_kwargs["run_budget_payload"] = run_budget_payload
+            rc = aboyeur.run(
+                cell.prompt,
+                roster,
+                **run_kwargs,
+            )
+        try:
+            text = (run_dir / "final.txt").read_text()
+        except OSError:
+            text = ""
+        graders = grade_output(
+            graders=cell.graders,
+            text=text,
+            exit_code=rc,
+            workspace=cell_workspace,
+            run_dir=run_dir,
+        )
+    finally:
+        if worktree_path is not None:
+            runguard.remove_worktree(workspace, worktree_path)
+    payload = _finalize_cell_payload(
+        cell,
+        plan=plan,
+        attempt=attempt,
+        started_at=started_at,
+        exit_code=rc,
+        run_dir=run_dir,
+        graders=graders,
+        text=text,
+        failure_reason=None,
+        prior_attempts=history,
+    )
+    _write_cell_payload(cell_dir, run_dir.parent, payload)
+    return payload
+
+
 def execute(
     manifest_path: Path,
     roster: Roster,
@@ -630,6 +782,7 @@ def execute(
     output_dir: Path,
     resume: bool,
     run_budget_payload: Mapping[str, Any] | None = None,
+    retry_transient: bool = False,
 ) -> int:
     if run_budget_payload is not None:
         try:
@@ -658,101 +811,40 @@ def execute(
     for cell in cells:
         cell_dir = output_dir / "cells" / cell.cell_id
         current = _load_json(cell_dir / "cell.json")
+        history: list[dict[str, Any]] = []
         if resume and current is not None and _resume_skip_state(str(current.get("state", ""))):
-            continue
-        if resume and current is not None and current.get("state") in REGRADEABLE_STATES:
+            if not (retry_transient and _retry_allowed(current)):
+                continue
+            history = [*_prior_attempts(current), _attempt_summary(current)]
+        elif resume and current is not None and current.get("state") in REGRADEABLE_STATES:
             try:
                 _regrade_cell_from_disk(cell_dir, cell, plan)
             except ValueError as exc:
                 print(f"error: {exc}", file=sys.stderr)
                 return 2
             continue
-        attempt = _attempt_number(cell_dir)
         if isinstance(current, dict) and isinstance(current.get("started_at"), str):
             started_at = current["started_at"]
         else:
             started_at = datetime.now(timezone.utc).isoformat()
-        cell_dir.mkdir(parents=True, exist_ok=True)
-        localio.write_json(
-            cell_dir / "cell.json",
-            {
-                "schema": CELL_SCHEMA,
-                **cell.payload(),
-                "state": "running",
-                "attempt": attempt,
-                "started_at": started_at,
-                "manifest_digest": plan["manifest_digest"],
-            },
-        )
-        run_dir = cell_dir / "attempts" / f"attempt-{attempt:03d}" / "run"
-        cell_workspace = workspace
-        worktree_path: Path | None = None
-        if cell.execution_mode == "writable-worktree":
-            worktree_path = _trial_worktree_path(workspace, output_dir, cell, attempt)
-            try:
-                cell_workspace = runguard.create_detached_worktree(workspace, worktree_path)
-            except runguard.RunGuardError as exc:
-                print(f"error: {exc}", file=sys.stderr)
-                return 2
         try:
-            read_only = cell.execution_mode == "read-only"
-            start_kwargs: dict[str, Any] = {
-                "task": cell.prompt,
-                "cwd": cell_workspace,
-                "roster": roster,
-                "read_only": read_only,
-                "worker": cell.seat,
-                "lock_workspace": workspace,
-            }
-            if run_budget_payload is not None:
-                start_kwargs["run_budget_payload"] = run_budget_payload
-            aboyeur.record_run_start(
-                run_dir,
-                **start_kwargs,
-            )
-            with runguard.run_lock(workspace, run_dir=run_dir):
-                run_kwargs: dict[str, Any] = {
-                    "worker": cell.seat,
-                    "cwd": cell_workspace,
-                    "output_dir": run_dir,
-                    "route_enabled": False,
-                    "read_only": read_only,
-                    "authorized_writable_worktree": cell.execution_mode == "writable-worktree",
-                    "lock_workspace": workspace,
-                }
-                if run_budget_payload is not None:
-                    run_kwargs["run_budget_payload"] = run_budget_payload
-                rc = aboyeur.run(
-                    cell.prompt,
-                    roster,
-                    **run_kwargs,
+            while True:
+                payload = _run_attempt(
+                    cell,
+                    roster=roster,
+                    plan=plan,
+                    workspace=workspace,
+                    output_dir=output_dir,
+                    cell_dir=cell_dir,
+                    started_at=started_at,
+                    history=history,
+                    run_budget_payload=run_budget_payload,
                 )
-            try:
-                text = (run_dir / "final.txt").read_text()
-            except OSError:
-                text = ""
-            graders = grade_output(
-                graders=cell.graders,
-                text=text,
-                exit_code=rc,
-                workspace=cell_workspace,
-                run_dir=run_dir,
-            )
-        finally:
-            if worktree_path is not None:
-                runguard.remove_worktree(workspace, worktree_path)
-        payload = _finalize_cell_payload(
-            cell,
-            plan=plan,
-            attempt=attempt,
-            started_at=started_at,
-            exit_code=rc,
-            run_dir=run_dir,
-            graders=graders,
-            text=text,
-            failure_reason=None,
-        )
-        _write_cell_payload(cell_dir, run_dir.parent, payload)
+                if not (retry_transient and _retry_allowed(payload)):
+                    break
+                history = [*_prior_attempts(payload), _attempt_summary(payload)]
+        except _TrialAbort as abort:
+            return abort.code
     summary = summarize(output_dir)
     localio.write_json(output_dir / "summary.json", summary)
     return process_exit(summary)

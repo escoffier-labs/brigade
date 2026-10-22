@@ -903,3 +903,228 @@ def test_project_cell_strips_prompt_and_relativizes_run_dir(tmp_path):
     assert projected["case"]["prompt_digest"].startswith("sha256:")
     assert "prompt" not in projected["case"]
     assert projected["run_dir"] == "cells/abc/attempts/attempt-001/run"
+
+
+# --- #1977: --retry-transient -------------------------------------------------
+
+
+def _single_cell_manifest(tmp_path):
+    manifest = _manifest()
+    manifest["trials"] = 1
+    manifest_path = tmp_path / "eval.json"
+    manifest_path.write_text(json.dumps(manifest))
+    return manifest_path
+
+
+def _write_outcome(out, kind):
+    out.mkdir(parents=True, exist_ok=True)
+    if kind == "ok":
+        (out / "final.txt").write_text("hello\n")
+        (out / "run.json").write_text(json.dumps({"status": "ok", "duration_seconds": 0.5}))
+        (out / "worker-results.json").write_text(
+            json.dumps({"results": [{"worker": "cursor", "ok": True, "exit_code": 0, "transport": "cli"}]})
+        )
+        return 0
+    if kind == "adapter":
+        (out / "run.json").write_text(json.dumps({"status": "failed"}))
+        (out / "worker-results.json").write_text(
+            json.dumps(
+                {"results": [{"worker": "cursor", "ok": False, "detail": "transport dropped", "transport": "cli"}]}
+            )
+        )
+        return 2
+    if kind == "timeout":
+        (out / "final.txt").write_text("partial\n")
+        (out / "run.json").write_text(json.dumps({"status": "timeout", "failure_kind": "timeout"}))
+        (out / "worker-results.json").write_text(
+            json.dumps({"results": [{"worker": "cursor", "ok": False, "timed_out": True, "transport": "cli"}]})
+        )
+        return 124
+    if kind == "crash":
+        (out / "final.txt").write_text("boom\n")
+        (out / "run.json").write_text(json.dumps({"status": "failed"}))
+        (out / "worker-results.json").write_text(
+            json.dumps({"results": [{"worker": "cursor", "ok": False, "exit_code": 1, "transport": "cli"}]})
+        )
+        return 1
+    if kind == "wrong":
+        (out / "final.txt").write_text("nope\n")
+        (out / "run.json").write_text(json.dumps({"status": "ok"}))
+        return 0
+    raise AssertionError(kind)
+
+
+def _scripted_run(monkeypatch, script):
+    """Replace aboyeur.run; each call consumes the next scripted outcome (last one repeats)."""
+    calls: list[str] = []
+
+    def fake_run(task, roster, **kwargs):
+        kind = script[min(len(calls), len(script) - 1)]
+        calls.append(kind)
+        return _write_outcome(kwargs["output_dir"], kind)
+
+    monkeypatch.setattr(model_trials.aboyeur, "run", fake_run)
+    return calls
+
+
+def _only_cell(root):
+    return json.loads(next((root / "cells").glob("*/cell.json")).read_text())
+
+
+def test_resume_retry_transient_reruns_adapter_error_as_new_attempt(tmp_path, monkeypatch):
+    manifest_path = _single_cell_manifest(tmp_path)
+    root = tmp_path / "results"
+    calls = _scripted_run(monkeypatch, ["adapter", "ok"])
+    assert model_trials.execute(manifest_path, _roster(), workspace=tmp_path, output_dir=root, resume=False) == 3
+    assert _only_cell(root)["state"] == "adapter_error"
+
+    rc = model_trials.execute(
+        manifest_path, _roster(), workspace=tmp_path, output_dir=root, resume=True, retry_transient=True
+    )
+    assert rc == 0
+    assert calls == ["adapter", "ok"]
+    cell = _only_cell(root)
+    assert cell["state"] == "accepted"
+    assert cell["attempt"] == 2
+    assert [item["attempt"] for item in cell["prior_attempts"]] == [1]
+    assert cell["prior_attempts"][0]["state"] == "adapter_error"
+    assert cell["prior_attempts"][0]["failure_reason"] == "transport_drop"
+    cell_dir = next((root / "cells").iterdir())
+    assert sorted(p.name for p in (cell_dir / "attempts").iterdir()) == ["attempt-001", "attempt-002"]
+    assert (cell_dir / "attempts" / "attempt-001" / "run" / "worker-results.json").is_file()
+
+
+def test_resume_without_retry_transient_keeps_transient_cells_terminal(tmp_path, monkeypatch):
+    manifest_path = _single_cell_manifest(tmp_path)
+    root = tmp_path / "results"
+    calls = _scripted_run(monkeypatch, ["adapter", "ok"])
+    assert model_trials.execute(manifest_path, _roster(), workspace=tmp_path, output_dir=root, resume=False) == 3
+    assert model_trials.execute(manifest_path, _roster(), workspace=tmp_path, output_dir=root, resume=True) == 3
+    assert calls == ["adapter"]
+    assert "prior_attempts" not in _only_cell(root)
+
+
+def test_retry_transient_reruns_timeout_reason_cells_only(tmp_path, monkeypatch):
+    manifest_path = _single_cell_manifest(tmp_path)
+    root = tmp_path / "results"
+    calls = _scripted_run(monkeypatch, ["timeout", "ok"])
+    assert model_trials.execute(manifest_path, _roster(), workspace=tmp_path, output_dir=root, resume=False) == 3
+    rc = model_trials.execute(
+        manifest_path, _roster(), workspace=tmp_path, output_dir=root, resume=True, retry_transient=True
+    )
+    assert rc == 0
+    assert calls == ["timeout", "ok"]
+    cell = _only_cell(root)
+    assert cell["state"] == "accepted"
+    assert cell["prior_attempts"][0]["failure_reason"] == "timeout"
+    assert cell["prior_attempts"][0]["state"] == "execution_error"
+
+
+def test_retry_transient_never_reruns_deterministic_results(tmp_path, monkeypatch):
+    for kind, expected_rc in (("crash", 1), ("wrong", 1)):
+        root = tmp_path / f"results-{kind}"
+        manifest_path = _single_cell_manifest(tmp_path)
+        calls = _scripted_run(monkeypatch, [kind, "ok"])
+        rc = model_trials.execute(
+            manifest_path,
+            _roster(),
+            workspace=tmp_path,
+            output_dir=root,
+            resume=False,
+            retry_transient=True,
+        )
+        assert rc == expected_rc
+        assert calls == [kind]
+        rc = model_trials.execute(
+            manifest_path, _roster(), workspace=tmp_path, output_dir=root, resume=True, retry_transient=True
+        )
+        assert rc == expected_rc
+        assert calls == [kind]
+        assert "prior_attempts" not in _only_cell(root)
+
+
+def test_run_with_retry_transient_retries_inline_up_to_the_cap(tmp_path, monkeypatch):
+    manifest_path = _single_cell_manifest(tmp_path)
+    root = tmp_path / "adapter"
+    calls = _scripted_run(monkeypatch, ["adapter"])
+    rc = model_trials.execute(
+        manifest_path, _roster(), workspace=tmp_path, output_dir=root, resume=False, retry_transient=True
+    )
+    assert rc == 3
+    # adapter_error cap: two retries after the original attempt.
+    assert calls == ["adapter"] * (1 + model_trials.RETRY_CAPS["adapter_error"])
+    cell = _only_cell(root)
+    assert cell["state"] == "adapter_error"
+    assert cell["attempt"] == 3
+    assert [item["attempt"] for item in cell["prior_attempts"]] == [1, 2]
+
+    # A later resume with the flag does not exceed the cap.
+    model_trials.execute(
+        manifest_path, _roster(), workspace=tmp_path, output_dir=root, resume=True, retry_transient=True
+    )
+    assert len(calls) == 3
+
+    root = tmp_path / "timeout"
+    calls = _scripted_run(monkeypatch, ["timeout"])
+    rc = model_trials.execute(
+        manifest_path, _roster(), workspace=tmp_path, output_dir=root, resume=False, retry_transient=True
+    )
+    assert rc == 3
+    assert calls == ["timeout"] * (1 + model_trials.RETRY_CAPS["timeout"])
+    assert len(_only_cell(root)["prior_attempts"]) == model_trials.RETRY_CAPS["timeout"]
+
+
+def test_run_with_retry_transient_stops_retrying_after_success(tmp_path, monkeypatch):
+    manifest_path = _single_cell_manifest(tmp_path)
+    root = tmp_path / "results"
+    calls = _scripted_run(monkeypatch, ["adapter", "adapter", "ok", "adapter"])
+    rc = model_trials.execute(
+        manifest_path, _roster(), workspace=tmp_path, output_dir=root, resume=False, retry_transient=True
+    )
+    assert rc == 0
+    assert calls == ["adapter", "adapter", "ok"]
+    cell = _only_cell(root)
+    assert cell["state"] == "accepted"
+    assert cell["attempt"] == 3
+    assert len(cell["prior_attempts"]) == 2
+
+
+def test_regrade_preserves_prior_attempts(tmp_path, monkeypatch):
+    manifest_path = _single_cell_manifest(tmp_path)
+    root = tmp_path / "results"
+    _scripted_run(monkeypatch, ["adapter", "ok"])
+    model_trials.execute(manifest_path, _roster(), workspace=tmp_path, output_dir=root, resume=False)
+    model_trials.execute(
+        manifest_path, _roster(), workspace=tmp_path, output_dir=root, resume=True, retry_transient=True
+    )
+    assert model_trials.regrade(root) == 0
+    assert len(_only_cell(root)["prior_attempts"]) == 1
+
+
+def test_cli_retry_transient_flag_reaches_execute_for_run_and_resume_only(tmp_path, monkeypatch, capsys):
+    manifest_path = _single_cell_manifest(tmp_path)
+    roster_path = tmp_path / "roster.toml"
+    roster_path.write_text(
+        'orchestrator = "chef"\n'
+        '[agents.chef]\ncli = "codex"\nrole = "plan"\n'
+        '[agents.cursor]\ncli = "cursor"\nmodel = "composer-2.5"\nrole = "answer"\n'
+    )
+    seen: list[dict] = []
+
+    def fake_execute(manifest, roster, **kwargs):
+        seen.append(kwargs)
+        return 0
+
+    monkeypatch.setattr(model_trials, "execute", fake_execute)
+    base = ["--target", str(tmp_path), "--roster", str(roster_path)]
+    assert cli.main(["model", "trial", "run", str(manifest_path), *base]) == 0
+    assert cli.main(["model", "trial", "resume", str(manifest_path), *base, "--retry-transient"]) == 0
+    assert cli.main(["model", "trial", "run", str(manifest_path), *base, "--retry-transient"]) == 0
+    assert [bool(item.get("retry_transient")) for item in seen] == [False, True, True]
+    try:
+        cli.main(["model", "trial", "plan", str(manifest_path), *base, "--retry-transient"])
+    except SystemExit as exc:
+        assert exc.code == 2
+    else:
+        raise AssertionError("plan must not accept --retry-transient")
+    capsys.readouterr()
