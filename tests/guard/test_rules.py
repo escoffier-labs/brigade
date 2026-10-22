@@ -566,6 +566,13 @@ class MissingLeakShapeTests(unittest.TestCase):
             'rf"https://\\{{db.home}}/path"',  # content-guard: allow private-hostname
             # A line inside an earlier line's triple-quoted ordinary string.
             'hint = """\nf"{(use https://db.home/x\n"""',  # content-guard: allow private-hostname
+            # Incomplete f-string examples in other comment forms, backtick spans,
+            # and backslash-continued strings never close a field.
+            '// start with f"{(use https://db.home/x',  # content-guard: allow private-hostname
+            'Use `f"{(use` then https://db.home/x',  # content-guard: allow private-hostname
+            's = "abc \\\nf"{(use https://db.home/x"',  # content-guard: allow private-hostname
+            # A complete-looking example in a comment is still comment text.
+            '// f"{(use https://db.home/x)}"',  # content-guard: allow private-hostname
         ):
             with self.subTest(text=text):
                 self.assertIn("private-hostname", {f.rule_id for f in scan_text(text).findings})

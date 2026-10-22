@@ -246,22 +246,23 @@ def _line_starts(text: str) -> list[int]:
 _STRING_PREFIXES = {"", "r", "b", "u", "br", "rb", "f", "rf", "fr"}
 
 
-def _lex_fstring_fields(segment: str, stack: list[list]) -> bool:
+def _lex_fstring_fields(segment: str, stack: list[list], stop_depth: int = -1) -> str:
     """Advance a stack of literal and replacement-field frames over segment.
 
     Frames are ["str" | "fstr", delimiter] for literals, ["expr", depth] for a
     replacement field's expression with its bracket depth, and ["spec", 0] for
-    the format specification after a top-level ':'. Returns False when a line
-    comment starts in code, leaving the stack as it was at the '#'.
+    the format specification after a top-level ':'. Returns "comment" when a
+    line comment starts in code, "closed" as soon as the stack shrinks to
+    ``stop_depth`` frames, and "end" otherwise.
     """
     index = 0
     while index < len(segment):
         char = segment[index]
         top = stack[-1] if stack else None
         if top is None or top[0] == "expr":
-            if char == "#":
-                return False
-            if char in "\"'":
+            if segment.startswith(_TRAILING_COMMENT_PREFIXES, index):
+                return "comment"
+            if char in _SINGLE_QUOTES:
                 delimiter = char * 3 if segment.startswith(char * 3, index) else char
                 start = index
                 while start and segment[start - 1].isalpha():
@@ -269,8 +270,8 @@ def _lex_fstring_fields(segment: str, stack: list[list]) -> bool:
                 prefix = segment[start:index].lower()
                 if start and (segment[start - 1].isalnum() or segment[start - 1] == "_"):
                     prefix = "?"
-                kind = "fstr" if "f" in prefix and prefix in _STRING_PREFIXES else "str"
-                stack.append([kind, delimiter])
+                fstring = char != "`" and "f" in prefix and prefix in _STRING_PREFIXES
+                stack.append(["fstr" if fstring else "str", delimiter])
                 index += len(delimiter)
                 continue
             if top is not None:
@@ -283,6 +284,8 @@ def _lex_fstring_fields(segment: str, stack: list[list]) -> bool:
                         top[1] -= 1
                     else:
                         stack.pop()
+                        if len(stack) <= stop_depth:
+                            return "closed"
                 elif char == ":" and not top[1] and not segment.startswith(":=", index):
                     top[0] = "spec"
         elif top[0] == "spec":
@@ -290,6 +293,8 @@ def _lex_fstring_fields(segment: str, stack: list[list]) -> bool:
                 stack.append(["expr", 0])
             elif char == "}":
                 stack.pop()
+                if len(stack) <= stop_depth:
+                    return "closed"
         elif char == "\\":
             # A backslash stops an escaped delimiter from closing the literal,
             # raw or not, but never hides an f-string brace.
@@ -298,6 +303,8 @@ def _lex_fstring_fields(segment: str, stack: list[list]) -> bool:
             continue
         elif segment.startswith(top[1], index):
             stack.pop()
+            if len(stack) <= stop_depth:
+                return "closed"
             index += len(top[1])
             continue
         elif top[0] == "fstr" and char == "{":
@@ -306,36 +313,46 @@ def _lex_fstring_fields(segment: str, stack: list[list]) -> bool:
                 continue
             stack.append(["expr", 0])
         index += 1
-    return True
+    return "end"
 
 
-def _interpolation_state(before: str, frames: tuple[tuple, ...] = ()) -> bool | None:
-    """Report where the line up to a match ends inside an f-string replacement
-    field: None when outside any field, False in bare expression code, True in
-    literal text within it (a quoted literal or a format spec). ``frames`` is
-    the lexer state carried into the line from an earlier one."""
+def _interpolation_state(before: str, after: str, frames: tuple[tuple, ...] = ()) -> bool | None:
+    """Report where a match sits inside an f-string replacement field: None
+    when outside any field, False in bare expression code, True in literal text
+    within it (a quoted literal or a format spec). ``frames`` is the lexer state
+    carried into the line from an earlier one."""
     stack = [list(frame) for frame in frames]
-    if not _lex_fstring_fields(before, stack):
+    if _lex_fstring_fields(before, stack) == "comment":
         return None
-    if not any(frame[0] in ("expr", "spec") for frame in stack):
+    fields = [position for position, frame in enumerate(stack) if frame[0] in ("expr", "spec")]
+    if not fields:
         return None
-    return stack[-1][0] != "expr"
+    literal = stack[-1][0] != "expr"
+    # Only a field the line actually closes counts: an incomplete f-string
+    # example in prose, a comment, or another language keeps normal detection.
+    if _lex_fstring_fields(after, stack, stop_depth=fields[-1]) != "closed":
+        return None
+    return literal
 
 
 @functools.lru_cache(maxsize=8)
 def _line_start_frames(text: str) -> dict[int, tuple[tuple, ...]]:
     """Lexer state at the start of each line that begins inside a multi-line
-    literal or replacement field. Only triple-quoted literals span lines."""
-    if not any(quote in text for quote in _TRIPLE_QUOTES):
+    literal or replacement field: a triple-quoted literal, or a single-quoted
+    one continued by a trailing backslash."""
+    if not any(quote in text for quote in _TRIPLE_QUOTES) and not re.search(r"\\\r?\n", text):
         return {}
     states: dict[int, tuple[tuple, ...]] = {}
     stack: list[list] = []
     offset = 0
     for line in text.split("\n"):
-        _lex_fstring_fields(line.rstrip("\r"), stack)
-        # Single-delimiter literals, and any fields inside them, end at the line.
+        content = line.rstrip("\r")
+        _lex_fstring_fields(content, stack)
+        # Single-delimiter literals, and any fields inside them, end at the line
+        # unless a trailing backslash continues them.
+        continued = len(content) - len(content.rstrip("\\")) & 1
         for position, frame in enumerate(stack):
-            if frame[0] in ("str", "fstr") and len(frame[1]) == 1:
+            if frame[0] in ("str", "fstr") and len(frame[1]) == 1 and not continued:
                 del stack[position:]
                 break
         offset += len(line) + 1
@@ -366,7 +383,7 @@ def _hostname_context(text: str, start: int, end: int) -> bool:
     # code-shaped even within a formatted URL (#1918); a host quoted inside the
     # expression keeps the URL context it had before, and is skipped without one.
     line_start = text.rfind("\n", 0, start) + 1
-    nested_literal = _interpolation_state(before, _line_start_frames(text).get(line_start, ()))
+    nested_literal = _interpolation_state(before, after, _line_start_frames(text).get(line_start, ()))
     if nested_literal is not None:
         return bool(url_context) and nested_literal
     if url_context:
