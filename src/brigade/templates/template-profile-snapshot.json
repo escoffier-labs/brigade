@@ -579,10 +579,10 @@
         "sha256": "f9cd9806d987f85f43ad7a7450593cfb1ee0649c9a1c50d28df8cf013608f23c"
       },
       {
-        "byte_size": 4847,
+        "byte_size": 5018,
         "dst": "AGENTS.md",
         "rendered": true,
-        "sha256": "0f23a2bd6467ed7b29711d438ad3fc0042d62a9aa34c9c42a3b6fd4eac58631c"
+        "sha256": "3963ec75fa18bd403dfff3b1eae91bad630a348edd93a799dd494ecfd229e48c"
       },
       {
         "byte_size": 2216,
@@ -623,10 +623,10 @@
         "sha256": "f9cd9806d987f85f43ad7a7450593cfb1ee0649c9a1c50d28df8cf013608f23c"
       },
       {
-        "byte_size": 4847,
+        "byte_size": 5018,
         "dst": "AGENTS.md",
         "rendered": true,
-        "sha256": "0f23a2bd6467ed7b29711d438ad3fc0042d62a9aa34c9c42a3b6fd4eac58631c"
+        "sha256": "3963ec75fa18bd403dfff3b1eae91bad630a348edd93a799dd494ecfd229e48c"
       },
       {
         "byte_size": 2216,
@@ -709,10 +709,10 @@
         "sha256": "f9cd9806d987f85f43ad7a7450593cfb1ee0649c9a1c50d28df8cf013608f23c"
       },
       {
-        "byte_size": 10922,
+        "byte_size": 11093,
         "dst": "AGENTS.md",
         "rendered": true,
-        "sha256": "2fb3c607a95a24be46aece389e0ba561997b29c7a0828052095aa0dd2cf514cf"
+        "sha256": "8a37a9762e2cc43610e3d9a4a8d9bf21dcf993c7f21d678b4d91123ea944bd52"
       },
       {
         "byte_size": 3226,
