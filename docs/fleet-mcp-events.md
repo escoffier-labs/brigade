@@ -67,7 +67,7 @@ Both sides are off by default.
    with the station's own principal credential. It never takes an identity from a
    request.
 
-The hub schema moved to version 38 for the subscription, event and delivery
+The hub schema moved to version 39 for the subscription, event and delivery
 tables. They are created whether or not events are enabled, and stay empty
 unless a subscription exists.
 

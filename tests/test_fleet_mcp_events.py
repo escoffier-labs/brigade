@@ -641,6 +641,15 @@ def test_invalid_delivery_objects_are_rejected(stations, delivery: Any) -> None:
     assert reply["error"]["code"] == -32602
 
 
+@pytest.mark.parametrize("url", [7, ["https://x"], None, {"u": "x"}])
+def test_identity_unsubscribe_rejects_a_non_string_callback_url(stations, receiver, hub, url: Any) -> None:
+    subscribe(stations[1], receiver.url)
+    identity = {"name": "message.created", "arguments": {}, "delivery": {"mode": "webhook", "url": url}}
+    reply = rpc(stations[1], "events/unsubscribe", identity)
+    assert reply["error"]["code"] == -32602
+    assert rows(hub[3], "SELECT COUNT(*) FROM fleet_event_subscriptions") == [(1,)]
+
+
 def test_ttl_is_clamped_and_null_never_means_unlimited(stations, receiver) -> None:
     now = time.time()
     short = subscribe(stations[1], receiver.url, ttlMs=1)["result"]

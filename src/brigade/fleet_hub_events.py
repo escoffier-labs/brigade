@@ -430,7 +430,12 @@ def _normalized_arguments(name: str, arguments: Any, caller: str) -> tuple[dict[
 
 def _parse_delivery(delivery: Any, *, with_secret: bool) -> dict[str, str]:
     fields = {"mode", "url", "secret"} if with_secret else {"mode", "url"}
-    if not isinstance(delivery, dict) or set(delivery) != fields or delivery["mode"] != "webhook":
+    if (
+        not isinstance(delivery, dict)
+        or set(delivery) != fields
+        or delivery["mode"] != "webhook"
+        or not all(isinstance(delivery[key], str) for key in fields)
+    ):
         raise EventsError(400, "events_invalid_arguments", "invalid_arguments")
     return {key: delivery[key] for key in fields}
 
