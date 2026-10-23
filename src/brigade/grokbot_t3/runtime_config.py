@@ -78,8 +78,18 @@ class Runtime:
     writable_paths: tuple[str, ...]
     intake: IntakePolicy | None = None
     hub_token_file: Path | None = None
+    hub_messaging_enabled: bool = False
+    hub_message_principal: str | None = None
     hub_wake_target: str = "default"
     hub_recipients: Mapping[str, str] = field(default_factory=lambda: MappingProxyType({}))
+
+    @property
+    def messaging_configured(self) -> bool:
+        return (
+            self.hub_messaging_enabled
+            and self.hub_message_principal == "agent:grokbot"
+            and self.hub_token_file is not None
+        )
 
 
 def _bad() -> T3DispatchError:
@@ -215,10 +225,25 @@ def _hub_recipients(value: object) -> Mapping[str, str]:
 def parse_runtime(payload: object) -> Runtime:
     if (
         not isinstance(payload, dict)
-        or set(payload) - {"intake", "hub_token_file", "hub_wake_target", "hub_recipients"} != RUNTIME_KEYS
+        or set(payload)
+        - {
+            "intake",
+            "hub_token_file",
+            "hub_wake_target",
+            "hub_recipients",
+            "hub_messaging_enabled",
+            "hub_message_principal",
+        }
+        != RUNTIME_KEYS
     ):
         raise _bad()
     if payload["schema"] != RUNTIME_SCHEMA:
+        raise _bad()
+    messaging_enabled = _bool(payload.get("hub_messaging_enabled", False))
+    principal = payload.get("hub_message_principal")
+    if "hub_message_principal" in payload and principal != "agent:grokbot":
+        raise _bad()
+    if messaging_enabled and (principal != "agent:grokbot" or "hub_token_file" not in payload):
         raise _bad()
     wake_target = payload.get("hub_wake_target", "default")
     if not isinstance(wake_target, str) or not CALLER_RE.fullmatch(wake_target):
@@ -236,6 +261,8 @@ def parse_runtime(payload: object) -> Runtime:
     repositories = _repositories(payload["repositories"])
     max_open = _int(payload["max_open"], 1, 20)
     return Runtime(
+        hub_messaging_enabled=messaging_enabled,
+        hub_message_principal=principal,
         hub_token_file=Path(_abs(payload["hub_token_file"])) if "hub_token_file" in payload else None,
         hub_wake_target=wake_target,
         hub_recipients=_hub_recipients(payload.get("hub_recipients", {})),

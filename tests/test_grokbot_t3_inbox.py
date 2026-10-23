@@ -16,12 +16,14 @@ dispatch_make = test_grokbot_t3_tools.make
 HUB_NODE_ID = "00000000-0000-4000-8000-000000000001"
 
 HUB_TOOLS = {
-    "inbox_list": {},
-    "inbox_ack": {"ids": [1]},
-    "inbox_reply": {"msg_id": 1, "body": "response"},
-    "message_send": {"to": "host-a", "subject": "subject", "body": "body"},
-    "message_status": {"ids": [1]},
+    "hub_inbox_list": {},
+    "hub_inbox_ack": {"ids": [1]},
+    "hub_message_send": {"alias": "host-a", "subject": "subject", "body": "body"},
+    "hub_message_status": {"ids": [1]},
 }
+
+
+OPERATION_ARGS = dict(HUB_TOOLS, test_only_reply={"msg_id": 1, "body": "response"})
 
 
 @pytest.fixture
@@ -30,7 +32,32 @@ def hub(dispatch_make, tmp_path, monkeypatch):
     token = "x" * 64
     token_file.write_text(token)
     token_file.chmod(0o600)
-    tools, runner, ledger = dispatch_make(hub_token_file=str(token_file), hub_recipients={"host-a": HUB_NODE_ID})
+    tools, runner, ledger = dispatch_make(
+        hub_messaging_enabled=True,
+        hub_message_principal="agent:grokbot",
+        hub_token_file=str(token_file),
+        hub_recipients={"host-a": HUB_NODE_ID},
+    )
+    # UNIT-ONLY routing: bypass the deliberately closed integration gate with fake
+    # transport. This does not establish Hub-verified identity or deployment readiness.
+    from brigade.grokbot_t3 import tools as tools_module
+    from brigade.grokbot_t3.inbox import HubInbox
+    from brigade.hub_messages import HubMessageError
+
+    monkeypatch.setattr(tools_module, "_require_hub_identity", lambda: None)
+    public_call = tools.call_tool
+
+    def call_with_internal_reply(name, args):
+        if name != "test_only_reply":
+            return public_call(name, args)
+        # Preserve existing reply credential-rotation coverage at its actual owner.
+        # No reply operation is registered or accepted by the production connector.
+        try:
+            return HubInbox(token_file=str(token_file), clock=tools.now).reply(**args)
+        except HubMessageError as error:
+            return c.T3DispatchError("hub-error", hub_code=error.hub_code).public_error()
+
+    monkeypatch.setattr(tools, "call_tool", call_with_internal_reply)
     monkeypatch.setattr(
         fleet_client,
         "load_fleet_settings",
@@ -113,37 +140,40 @@ def test_missing_hub_config_is_closed_without_breaking_dispatch(dispatch_make, n
 
 def test_hub_tools_list_ack_reply_and_status(hub):
     tools, calls, _, token, _, ledger = hub
-    listing = tools.call_tool("inbox_list", {})
+    listing = tools.call_tool("hub_inbox_list", {})
     assert listing["content_trust"] == "untrusted"
     assert listing["order"] == "oldest first"
     assert listing["messages"][0]["body"] == "incoming body"
     assert listing["unacked_total"] == 1
-    reply = tools.call_tool("inbox_reply", {"msg_id": 1, "body": "response"})
+    reply = tools.call_tool("test_only_reply", OPERATION_ARGS["test_only_reply"])
     assert reply["id"] == 2 and reply["msg_id"] == 1
     assert not any(call["action"] == "ack" for call in calls)
-    status = tools.call_tool("message_status", {"ids": [2]})
+    status = tools.call_tool("hub_message_status", {"ids": [2]})
     assert status["messages"][0]["to"] == "host-a"
     assert "body" not in status["messages"][0]
-    assert tools.call_tool("inbox_ack", {"ids": [1]})["acked"] == [1]
+    sent_calls = [call for call in calls if call["action"] == "sent"]
+    assert len(sent_calls) == 1 and sent_calls[0]["ids"] == [2]
+    assert "to" not in sent_calls[0] and "sender" not in sent_calls[0]
+    assert tools.call_tool("hub_inbox_ack", {"ids": [1]})["acked"] == [1]
     assert token not in json.dumps([listing, reply, status, ledger.recent(None, 20)])
 
 
-@pytest.mark.parametrize("recipient", ["host-a", "00000000-0000-4000-8000-000000000001", "agent:example"])
-def test_send_accepts_hub_recipients_and_preserves_client_id(hub, recipient):
+@pytest.mark.parametrize("recipient", ["host-a"])
+def test_send_accepts_configured_alias_and_preserves_client_id(hub, recipient):
     tools, calls, _, _, _, _ = hub
-    args = {"to": recipient, "subject": "subject", "body": "body", "client_id": "stable-id"}
-    first = tools.call_tool("message_send", args)
-    second = tools.call_tool("message_send", args)
+    args = {"alias": recipient, "subject": "subject", "body": "body", "client_id": "stable-id"}
+    first = tools.call_tool("hub_message_send", args)
+    second = tools.call_tool("hub_message_send", args)
     assert first["client_id"] == second["client_id"] == "stable-id"
     sends = [call for call in calls if call["action"] == "send"]
     assert len(sends) == 2
-    expected = HUB_NODE_ID if recipient == "host-a" else recipient
+    expected = HUB_NODE_ID
     assert first["recipient"] == expected
     assert all(call["to"] == expected and call["client_id"] == "stable-id" for call in sends)
 
 
 @pytest.mark.parametrize("change", ["token", "endpoint", "invalid-token"])
-@pytest.mark.parametrize("tool_name", ["message_send", "inbox_reply", "message_status"])
+@pytest.mark.parametrize("tool_name", ["hub_message_send", "test_only_reply", "hub_message_status"])
 @pytest.mark.parametrize("outcome", ["success", "offline", "refused"])
 def test_security_message_scope_change_during_request_closes_result(
     hub, hub_settings, monkeypatch, caplog, change, tool_name, outcome
@@ -169,13 +199,13 @@ def test_security_message_scope_change_during_request_closes_result(
         return 200, {"message": dict(row, client_id=body["client_id"])}
 
     monkeypatch.setattr(messages, "_request", request)
-    result = tools.call_tool(tool_name, HUB_TOOLS[tool_name])
+    result = tools.call_tool(tool_name, OPERATION_ARGS[tool_name])
     assert result.get("error", {}).get("code") == "hub-error"
     assert result["error"].get("hub_code") == ("token_file_invalid" if change == "invalid-token" else None)
     assert set(result) == {"error"}
     assert [(hub_url, credential) for hub_url, credential, _ in requests] == [(original_hub, token)]
     pending = fleet_client._read_spool(path)
-    if tool_name != "message_status" and outcome == "offline":
+    if tool_name != "hub_message_status" and outcome == "offline":
         assert len(pending) == 1 and pending[0]["client_id"] == requests[0][2]["client_id"]
         assert pending[0]["action"] == requests[0][2]["action"]
         # The new pair must not replay or move the original pair's durable mutation.
@@ -203,7 +233,7 @@ def test_security_message_scope_change_during_request_closes_result(
 
 
 @pytest.mark.parametrize("change", ["token", "endpoint"])
-@pytest.mark.parametrize("tool_name", ["message_send", "inbox_reply", "message_status"])
+@pytest.mark.parametrize("tool_name", ["hub_message_send", "test_only_reply", "hub_message_status"])
 @pytest.mark.parametrize("restore_after_load", [False, True])
 def test_security_message_scope_checks_loaded_transport_pair(
     hub, hub_settings, monkeypatch, caplog, change, tool_name, restore_after_load, transport_settings
@@ -233,7 +263,7 @@ def test_security_message_scope_checks_loaded_transport_pair(
 
     monkeypatch.setattr(transport_settings, "load", settings)
     monkeypatch.setattr(messages, "_request", request)
-    result = tools.call_tool(tool_name, HUB_TOOLS[tool_name])
+    result = tools.call_tool(tool_name, OPERATION_ARGS[tool_name])
     assert result.get("error", {}).get("code") == "hub-error"
     assert set(result) == {"error"}
     assert requests == []
@@ -269,13 +299,13 @@ def test_security_status_transport_failure_still_checks_current_scope(hub, hub_s
 @pytest.mark.parametrize(
     "tool_name,queued,rotate_at",
     [
-        ("message_send", False, "sent-message"),
-        ("inbox_reply", False, "sent-message"),
-        ("message_send", True, "sent-message"),
-        ("inbox_reply", True, "sent-message"),
-        ("message_send", True, "clock"),
-        ("inbox_reply", True, "clock"),
-        ("message_status", False, "recipients"),
+        ("hub_message_send", False, "sent-message"),
+        ("test_only_reply", False, "sent-message"),
+        ("hub_message_send", True, "sent-message"),
+        ("test_only_reply", True, "sent-message"),
+        ("hub_message_send", True, "clock"),
+        ("test_only_reply", True, "clock"),
+        ("hub_message_status", False, "recipients"),
     ],
 )
 def test_security_message_projection_scope_change_closes_complete_operation(
@@ -333,8 +363,8 @@ def test_security_message_projection_scope_change_closes_complete_operation(
         monkeypatch.setattr(tools, "now", clock)
     else:
         monkeypatch.setattr(HubInbox, "recipients", property(recipients))
-    args = dict(HUB_TOOLS[tool_name])
-    if tool_name == "message_send":
+    args = dict(OPERATION_ARGS[tool_name])
+    if tool_name == "hub_message_send":
         args["client_id"] = "stable-id"
     result = tools.call_tool(tool_name, args)
     assert rotations == [rotate_at]
@@ -395,7 +425,7 @@ def test_security_send_scope_is_captured_before_clock_and_recipient_resolution(
         monkeypatch.setattr(tools, "now", clock)
     else:
         monkeypatch.setattr(HubInbox, "recipients", property(recipients))
-    result = tools.call_tool("message_send", HUB_TOOLS["message_send"])
+    result = tools.call_tool("hub_message_send", HUB_TOOLS["hub_message_send"])
     assert rotations == [rotate_at]
     assert result.get("error", {}).get("code") == "hub-error"
     assert result["error"].get("hub_code") == ("token_file_invalid" if change == "invalid-token" else None)
@@ -405,13 +435,13 @@ def test_security_send_scope_is_captured_before_clock_and_recipient_resolution(
         assert secret not in public
 
 
-@pytest.mark.parametrize("name", ["inbox_ack", "inbox_reply", "message_send"])
-def test_hub_mutations_honor_enabled(hub, name):
+@pytest.mark.parametrize("name", HUB_TOOLS)
+def test_hub_tools_independent_of_dispatch_enabled(hub, name):
     tools, calls, _, _, _, _ = hub
     tools.runtime = replace(tools.runtime, enabled=False)
-    assert tools.call_tool(name, HUB_TOOLS[name])["error"]["code"] == "dispatch-disabled"
-    assert calls == []
-    assert "error" not in tools.call_tool("inbox_list", {})
+    args = {"ids": [2]} if name == "hub_message_status" else HUB_TOOLS[name]
+    assert "error" not in tools.call_tool(name, args)
+    assert calls
 
 
 def test_grant_code_and_raw_secret_errors_are_safe(hub, monkeypatch, caplog):
@@ -421,7 +451,7 @@ def test_grant_code_and_raw_secret_errors_are_safe(hub, monkeypatch, caplog):
         raise FleetMessageHubError(token, status=403, code="message_recipient_not_permitted")
 
     monkeypatch.setattr(messages, "send", refused)
-    result = tools.call_tool("message_send", HUB_TOOLS["message_send"])
+    result = tools.call_tool("hub_message_send", HUB_TOOLS["hub_message_send"])
     assert result["error"]["hub_code"] == "message_recipient_not_permitted"
     assert result["error"]["code"] == "hub-error"
     assert token not in json.dumps(result) + caplog.text
@@ -431,8 +461,8 @@ def test_grant_code_and_raw_secret_errors_are_safe(hub, monkeypatch, caplog):
 def test_body_byte_cap_and_unknown_fields_rejected_before_transport(hub):
     tools, calls, _, _, _, _ = hub
     for args in ({"body": "é" * 4097}, {"body": "ok", "extra": True}):
-        value = dict(HUB_TOOLS["message_send"], **args)
-        assert tools.call_tool("message_send", value)["error"]["code"] == "invalid_request"
+        value = dict(HUB_TOOLS["hub_message_send"], **args)
+        assert tools.call_tool("hub_message_send", value)["error"]["code"] == "invalid_request"
     assert calls == []
 
 
@@ -448,7 +478,7 @@ def test_principal_credential_is_owner_only_and_errors_are_closed(hub, mode):
         real = path.with_suffix(".real")
         path.rename(real)
         path.symlink_to(real)
-    result = tools.call_tool("inbox_list", {})
+    result = tools.call_tool("hub_inbox_list", {})
     assert result["error"]["code"] == "hub-error"
     assert result["error"]["hub_code"] == "token_file_invalid"
     assert token not in json.dumps(result)
@@ -618,7 +648,7 @@ def test_overlapping_hub_wakes_cannot_regress_success_cursor(hub, tmp_path):
 def test_malformed_hub_status_is_a_closed_error(hub, monkeypatch):
     tools, _, _, _, _, _ = hub
     monkeypatch.setattr(messages, "sent", lambda **kwargs: {"messages": [None]})
-    assert tools.call_tool("message_status", {"ids": [1]})["error"]["code"] == "hub-error"
+    assert tools.call_tool("hub_message_status", {"ids": [1]})["error"]["code"] == "hub-error"
 
 
 def test_non_protocol_hub_code_is_omitted(hub, monkeypatch):
@@ -628,7 +658,7 @@ def test_non_protocol_hub_code_is_omitted(hub, monkeypatch):
         raise FleetMessageHubError(token, status=403, code=[token])
 
     monkeypatch.setattr(messages, "send", refused)
-    result = tools.call_tool("message_send", HUB_TOOLS["message_send"])
+    result = tools.call_tool("hub_message_send", HUB_TOOLS["hub_message_send"])
     assert result["error"]["code"] == "hub-error"
     assert "hub_code" not in result["error"]
     assert token not in json.dumps(result)
@@ -711,15 +741,15 @@ def test_review_inbox_projection_fits_public_bytes_and_can_progress(hub, monkeyp
         return 200, {"messages": page, "next_cursor": page[-1]["id"] if page else value["after"]}
 
     monkeypatch.setattr(messages, "_request", request)
-    listing = tools.call_tool("inbox_list", {})
+    listing = tools.call_tool("hub_inbox_list", {})
     assert "error" not in listing
     assert len(json.dumps(listing, separators=(",", ":")).encode()) <= c.PUBLIC_RESULT_LIMIT
     ids = [row["id"] for row in listing["messages"]]
     assert 0 < len(ids) < 20 and ids == list(range(1, len(ids) + 1))
     assert listing["has_more"] is True and listing["unacked_total"] == 20
     assert all(row["body"] == body for row in listing["messages"])
-    assert tools.call_tool("inbox_ack", {"ids": ids})["acked"] == ids
-    assert tools.call_tool("inbox_list", {})["messages"][0]["id"] == len(ids) + 1
+    assert tools.call_tool("hub_inbox_ack", {"ids": ids})["acked"] == ids
+    assert tools.call_tool("hub_inbox_list", {})["messages"][0]["id"] == len(ids) + 1
 
 
 @pytest.mark.parametrize("pending", [20, 500])
@@ -735,8 +765,8 @@ def test_review_list_and_ack_totals_require_complete_scan(hub, monkeypatch, pend
         return 200, {"messages": page, "next_cursor": page[-1]["id"] if page else body["after"]}
 
     monkeypatch.setattr(messages, "_request", request)
-    listing = tools.call_tool("inbox_list", {"limit": 1})
-    acked = tools.call_tool("inbox_ack", {"ids": [1]})
+    listing = tools.call_tool("hub_inbox_list", {"limit": 1})
+    acked = tools.call_tool("hub_inbox_ack", {"ids": [1]})
     assert listing["unacked_total"] == (20 if pending == 20 else None)
     assert acked["unacked_total"] == (19 if pending == 20 else None)
     assert listing["has_more"] is True and acked["has_more"] is True
@@ -753,7 +783,7 @@ def test_review_incomplete_history_labels_retained_window(hub, monkeypatch):
         return 200, {"messages": rows, "next_cursor": rows[-1]["id"]}
 
     monkeypatch.setattr(messages, "_request", request)
-    listing = tools.call_tool("inbox_list", {"unacked_only": False})
+    listing = tools.call_tool("hub_inbox_list", {"unacked_only": False})
     assert listing["has_more"] is True
     assert listing["messages"][0]["id"] == 300
     assert listing["order"] == "newest first within oldest fetched window"
@@ -770,18 +800,18 @@ def test_review_partial_inbox_and_ack_survive_recount_failure(hub, monkeypatch):
         raise FleetMessageHubError("offline", code="hub_unavailable")
 
     monkeypatch.setattr(messages, "_request", request)
-    listing = tools.call_tool("inbox_list", {})
+    listing = tools.call_tool("hub_inbox_list", {})
     assert listing["messages"][0]["id"] == 1 and listing["has_more"] is True
     row["acked_at"] = "2026-10-20T12:01:00+00:00"
-    acked = tools.call_tool("inbox_ack", {"ids": [1]})
+    acked = tools.call_tool("hub_inbox_ack", {"ids": [1]})
     assert acked["acked"] == [1] and acked["not_pending"] == []
     assert acked["unacked_total"] is None and acked["has_more"] is True
-    assert tools.call_tool("inbox_list", {})["error"]["code"] == "hub-error"
+    assert tools.call_tool("hub_inbox_list", {})["error"]["code"] == "hub-error"
 
 
 @pytest.mark.usefixtures("t3_owner_reads", "t3_watch_log")
 @pytest.mark.parametrize("enabled", [True, False])
-@pytest.mark.parametrize("tool_name", ["message_send", "inbox_reply"])
+@pytest.mark.parametrize("tool_name", ["hub_message_send", "test_only_reply"])
 def test_review_watcher_drains_queued_mutations_only_when_enabled(hub, tmp_path, monkeypatch, enabled, tool_name):
     from brigade.grokbot_t3 import watch
     from tests.test_grokbot_t3_watch import Post
@@ -800,7 +830,7 @@ def test_review_watcher_drains_queued_mutations_only_when_enabled(hub, tmp_path,
 
     monkeypatch.setattr(messages, "_request", request)
     monkeypatch.setattr(fleet_client, "load_fleet_config", lambda: {"hub_url": "https://hub.example.test"})
-    sent = tools.call_tool(tool_name, HUB_TOOLS[tool_name])
+    sent = tools.call_tool(tool_name, OPERATION_ARGS[tool_name])
     assert sent["queued"] is True
     online = True
     tools.runtime = replace(tools.runtime, enabled=enabled)
@@ -931,7 +961,7 @@ def test_security_rotation_discards_foreground_scan(hub, monkeypatch, caplog, ro
         return 200, {"messages": [dict(row, id=ident)], "next_cursor": ident}
 
     monkeypatch.setattr(messages, "_request", request)
-    result = tools.call_tool("inbox_list", {})
+    result = tools.call_tool("hub_inbox_list", {})
     assert result.get("error", {}).get("code") == "hub-error"
     assert fetched == rotate_at
     public = json.dumps(result) + caplog.text + "\n".join(ledger._conn.iterdump())
@@ -1044,7 +1074,7 @@ def test_security_ack_deadline_preserves_confirmed_results(hub, monkeypatch, cap
 
     monkeypatch.setattr(inbox, "time", SimpleNamespace(monotonic=lambda: elapsed))
     monkeypatch.setattr(messages, "_request", request)
-    result = tools.call_tool("inbox_ack", {"ids": [1, 2, 3, 4]})
+    result = tools.call_tool("hub_inbox_ack", {"ids": [1, 2, 3, 4]})
     assert result.get("acked") == ([1, 3] if failure == "deadline" else [1])
     assert result["not_pending"] == [2]
     assert result["incomplete"] is True
@@ -1087,7 +1117,7 @@ def test_security_ack_recount_shares_batch_deadline(hub, monkeypatch, setup_dela
     monkeypatch.setattr(inbox.HubInbox, "capture", scope)
     monkeypatch.setattr(inbox, "time", SimpleNamespace(monotonic=lambda: elapsed))
     monkeypatch.setattr(messages, "_request", request)
-    result = tools.call_tool("inbox_ack", {"ids": [1, 2]})
+    result = tools.call_tool("hub_inbox_ack", {"ids": [1, 2]})
     assert result["acked"] == [1, 2]
     assert result["has_more"] is True
     assert calls == [("ack", 5.0), ("ack", 5.0), ("list", 0.5 - setup_delay)]
@@ -1102,7 +1132,7 @@ def test_security_first_ack_refusal_stays_closed(hub, monkeypatch, status):
         raise FleetMessageHubError(token, status=status, code="message_recipient_not_permitted")
 
     monkeypatch.setattr(messages, "ack", refused)
-    result = tools.call_tool("inbox_ack", {"ids": [1, 2]})
+    result = tools.call_tool("hub_inbox_ack", {"ids": [1, 2]})
     assert result["error"]["code"] == "hub-error"
     assert "acked" not in result and token not in json.dumps(result)
 
@@ -1129,7 +1159,7 @@ def test_security_ack_rotation_closes_batch_after_request(hub, monkeypatch, capl
         return 200, {"messages": [], "next_cursor": body["after"]}
 
     monkeypatch.setattr(messages, "_request", request)
-    result = tools.call_tool("inbox_ack", {"ids": [1, 2, 3]})
+    result = tools.call_tool("hub_inbox_ack", {"ids": [1, 2, 3]})
     assert result.get("error", {}).get("code") == "hub-error"
     assert "acked" not in result and "not_pending" not in result
     assert [(credential, body["id"]) for credential, body in requests] == [
@@ -1174,7 +1204,7 @@ def test_security_ack_checks_loaded_transport_credential(
 
     monkeypatch.setattr(transport_settings, "load", settings)
     monkeypatch.setattr(messages, "_request", request)
-    result = tools.call_tool("inbox_ack", {"ids": [1, 2]})
+    result = tools.call_tool("hub_inbox_ack", {"ids": [1, 2]})
     assert result.get("error", {}).get("code") == "hub-error"
     assert "acked" not in result
     assert [(credential, body["id"]) for credential, body in requests] == [
@@ -1201,7 +1231,7 @@ def test_security_ack_rotation_during_recount_closes_result(hub, monkeypatch, ca
         return 200, {"messages": [dict(row, body=replacement)], "next_cursor": 1}
 
     monkeypatch.setattr(messages, "_request", request)
-    result = tools.call_tool("inbox_ack", {"ids": [1]})
+    result = tools.call_tool("hub_inbox_ack", {"ids": [1]})
     assert result.get("error", {}).get("code") == "hub-error"
     assert "acked" not in result and "unacked_total" not in result
     assert [(credential, body["action"]) for credential, body in requests] == [(token, "ack"), (token, "list")]
@@ -1267,7 +1297,7 @@ def test_security_ack_endpoint_switch_closes_batch(hub, hub_settings, monkeypatc
         return 200, {"messages": [], "next_cursor": body["after"]}
 
     monkeypatch.setattr(messages, "_request", request)
-    result = tools.call_tool("inbox_ack", {"ids": [1, 2, 3]})
+    result = tools.call_tool("hub_inbox_ack", {"ids": [1, 2, 3]})
     assert result.get("error", {}).get("code") == "hub-error"
     assert "acked" not in result and "not_pending" not in result
     assert [(hub_url, body["id"]) for hub_url, body in requests] == [
@@ -1278,7 +1308,8 @@ def test_security_ack_endpoint_switch_closes_batch(hub, hub_settings, monkeypatc
 
 @pytest.mark.parametrize("restore_after_load", [False, True])
 @pytest.mark.parametrize(
-    "tool,load_at", [("inbox_ack", 1), ("inbox_ack", 2), ("inbox_ack", 3), ("inbox_list", 1), ("inbox_list", 2)]
+    "tool,load_at",
+    [("hub_inbox_ack", 1), ("hub_inbox_ack", 2), ("hub_inbox_ack", 3), ("hub_inbox_list", 1), ("hub_inbox_list", 2)],
 )
 def test_security_inbox_checks_loaded_endpoint(
     hub, hub_settings, monkeypatch, caplog, restore_after_load, tool, load_at, transport_settings
@@ -1308,7 +1339,7 @@ def test_security_inbox_checks_loaded_endpoint(
 
     monkeypatch.setattr(transport_settings, "load", settings)
     monkeypatch.setattr(messages, "_request", request)
-    result = tools.call_tool(tool, {"ids": [1, 2]} if tool == "inbox_ack" else {})
+    result = tools.call_tool(tool, {"ids": [1, 2]} if tool == "hub_inbox_ack" else {})
     assert result.get("error", {}).get("code") == "hub-error"
     assert "acked" not in result and "messages" not in result
     assert [hub_url for hub_url, _ in requests] == [original_hub] * (load_at - 1)
@@ -1331,7 +1362,7 @@ def test_security_ack_endpoint_switch_during_recount(hub, hub_settings, monkeypa
         return 200, {"messages": [row], "next_cursor": 1}
 
     monkeypatch.setattr(messages, "_request", request)
-    result = tools.call_tool("inbox_ack", {"ids": [1]})
+    result = tools.call_tool("hub_inbox_ack", {"ids": [1]})
     assert result.get("error", {}).get("code") == "hub-error"
     assert "acked" not in result and "unacked_total" not in result
     assert requests == [(original_hub, "ack"), (original_hub, "list")]
@@ -1354,7 +1385,7 @@ def test_security_endpoint_switch_discards_list_pages(hub, hub_settings, monkeyp
         return 200, {"messages": [dict(row, id=ident)], "next_cursor": ident}
 
     monkeypatch.setattr(messages, "_request", request)
-    result = tools.call_tool("inbox_list", {})
+    result = tools.call_tool("hub_inbox_list", {})
     assert result.get("error", {}).get("code") == "hub-error"
     assert "messages" not in result and fetched == switch_at
 

@@ -7,12 +7,13 @@ from functools import partial
 import re
 from typing import Any, Callable
 
-from ..hub_messages import HUB_CODES, INBOX_TOOLS
+from ..hub_messages import HUB_CODES
 
 PACK_ID = "t3-dispatch"
 DEFAULT_BIND = "127.0.0.1:8778"
 SERVICE_NAME = "grokbot-t3-dispatch"
-TOOLS = INBOX_TOOLS | frozenset(
+HUB_TOOLS = frozenset({"hub_inbox_list", "hub_inbox_ack", "hub_message_send", "hub_message_status"})
+T3_TOOLS = frozenset(
     {
         "t3_approve",
         "t3_answer",
@@ -25,6 +26,7 @@ TOOLS = INBOX_TOOLS | frozenset(
         "t3_wait",
     }
 )
+TOOLS = T3_TOOLS | HUB_TOOLS
 TERMINAL_STATES = frozenset({"succeeded", "failed", "interrupted"})
 # Provisional marker while a follow-up to a finished request is in flight; only that follow-up may replace it.
 REOPENING_STATE = "reopening"
@@ -287,17 +289,21 @@ def parse_inbox(name: str, raw: object) -> dict[str, Any]:
     # Reuse Dot's authoritative field validators and defaults, including its byte cap.
     from ..dot.contracts import DotError, TOOL_SCHEMAS
 
-    schema = TOOL_SCHEMAS[name]
-    data = _object(
-        raw, frozenset(key for key, field in schema.fields.items() if field.required), frozenset(schema.fields)
-    )
+    shared_name = name.removeprefix("hub_")
+    schema = TOOL_SCHEMAS[shared_name]
+    fields = {
+        ("alias" if shared_name == "message_send" and key == "to" else key): field
+        for key, field in schema.fields.items()
+    }
+    data = _object(raw, frozenset(key for key, field in fields.items() if field.required), frozenset(fields))
     try:
         return {
-            key: field.validator(data[key]) if key in data else field.default for key, field in schema.fields.items()
+            key: (_name(data[key]) if key == "alias" else field.validator(data[key])) if key in data else field.default
+            for key, field in fields.items()
         }
     except DotError:
         raise _invalid() from None
 
 
-for _inbox_name in INBOX_TOOLS:
+for _inbox_name in HUB_TOOLS:
     PARSERS[_inbox_name] = partial(parse_inbox, _inbox_name)

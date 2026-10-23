@@ -141,17 +141,7 @@ def test_authenticated_mcp_submit_and_recent_cross_threads(tmp_path):
         assert "error" not in response.json()
         response = client.post("/mcp", json={"jsonrpc": "2.0", "id": 5, "method": "tools/list"})
         listed = {tool["name"]: tool for tool in response.json()["result"]["tools"]}
-        assert set(listed) == set(lifecycle.c.TOOLS)
-        assert set(listed["message_send"]["inputSchema"]["properties"]) == {
-            "to",
-            "subject",
-            "body",
-            "ref",
-            "priority",
-            "thread",
-            "kind",
-            "client_id",
-        }
+        assert set(listed) == set(lifecycle.c.T3_TOOLS)
         authorization = client.headers.pop("authorization")
         try:
             response = client.post(
@@ -345,22 +335,87 @@ def test_install_intake_cli(tmp_path, monkeypatch, capsys):
     }
 
 
-@pytest.mark.parametrize("missing_tool", [None, "message_send"])
+@pytest.mark.parametrize("messaging", [False, True])
+@pytest.mark.parametrize("inventory_change", [None, "missing", "extra"])
 @pytest.mark.usefixtures("t3_platform_admission")
-def test_canary_requires_complete_hub_tool_inventory(tmp_path, monkeypatch, missing_tool):
+def test_canary_requires_exact_runtime_tool_inventory(tmp_path, monkeypatch, messaging, inventory_change):
     from brigade import grokbot_ops
 
-    monkeypatch.setattr(lifecycle, "_load_runtime_config", lambda target: (_config(), SECRET, None))
+    from brigade.grokbot_t3.runtime_config import parse_runtime
+    from tests.test_grokbot_t3_runtime import runtime_payload
+
+    runtime = parse_runtime(
+        runtime_payload(
+            tmp_path,
+            hub_messaging_enabled=messaging,
+            hub_message_principal="agent:grokbot",
+            hub_token_file=str(tmp_path / "principal.token"),
+        )
+    )
+    expected = lifecycle.c.TOOLS if messaging else lifecycle.c.T3_TOOLS
+    listed = set(expected)
+    if inventory_change == "missing":
+        listed.remove("hub_message_send" if messaging else "t3_submit")
+    elif inventory_change == "extra":
+        listed.add("inbox_reply")
+    monkeypatch.setattr(lifecycle, "_load_runtime_config", lambda target: (_config(), SECRET, runtime))
     monkeypatch.setattr(
         grokbot_ops, "_request_json", lambda *args, **kwargs: {"ok": True, "service": lifecycle.c.SERVICE_NAME}
     )
     monkeypatch.setattr(grokbot_ops, "_anonymous_health_status", lambda *args: 401)
-    monkeypatch.setattr(
-        grokbot_ops, "_tools_list", lambda *args: [{"name": name} for name in lifecycle.c.TOOLS if name != missing_tool]
-    )
+    monkeypatch.setattr(grokbot_ops, "_tools_list", lambda *args: [{"name": name} for name in listed])
     result = lifecycle.canary(tmp_path)
-    assert result["ok"] is (missing_tool is None)
-    if missing_tool:
+    assert result["ok"] is (inventory_change is None)
+    if inventory_change:
         assert result["reason"] == "inventory-mismatch"
     else:
-        assert {"inbox_list", "inbox_ack", "inbox_reply", "message_send", "message_status"} <= set(result["tools"])
+        assert set(result["tools"]) == expected
+
+
+@pytest.mark.parametrize("messaging,dispatch", [(False, False), (False, True), (True, False), (True, True)])
+def test_registration_uses_runtime_inventory_and_alias_contract(tmp_path, messaging, dispatch):
+    from brigade.grokbot_t3.runtime_config import parse_runtime
+    from tests.test_grokbot_t3_runtime import runtime_payload
+
+    runtime = parse_runtime(
+        runtime_payload(
+            tmp_path,
+            enabled=dispatch,
+            hub_messaging_enabled=messaging,
+            hub_message_principal="agent:grokbot",
+            hub_token_file=str(tmp_path / "principal.token"),
+        )
+    )
+    tools = lifecycle.T3DispatchTools(runtime=runtime, runner=None, ledger=None)
+
+    class Server:
+        handlers = None
+
+        def __init__(self):
+            self.handlers = {}
+
+        def tool(self, *, name, description):
+            def register(handler):
+                self.handlers[name] = handler
+                return handler
+
+            return register
+
+    server = Server()
+    lifecycle._register_tools(server, tools)
+    expected = lifecycle.c.TOOLS if messaging else lifecycle.c.T3_TOOLS
+    assert set(server.handlers) == expected
+    assert "inbox_reply" not in server.handlers
+    if messaging:
+        import inspect
+
+        assert set(inspect.signature(server.handlers["hub_message_send"]).parameters) == {
+            "alias",
+            "subject",
+            "body",
+            "ref",
+            "priority",
+            "thread",
+            "kind",
+            "client_id",
+        }

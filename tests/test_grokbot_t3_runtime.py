@@ -210,3 +210,47 @@ def test_hub_aliases_default_empty_and_preserve_node_id(tmp_path):
     assert configured.hub_recipients == aliases
     aliases.clear()
     assert configured.hub_recipients == {"host-a": "00000000-0000-4000-8000-000000000001"}
+
+
+def test_messaging_defaults_disabled(tmp_path):
+    runtime = rc.parse_runtime(runtime_payload(tmp_path))
+    assert runtime.hub_messaging_enabled is False
+    assert runtime.hub_message_principal is None
+
+
+def test_messaging_enable_requires_explicit_principal_and_token(tmp_path):
+    for overrides in (
+        {"hub_messaging_enabled": True},
+        {"hub_messaging_enabled": True, "hub_message_principal": "agent:grokbot"},
+        {"hub_messaging_enabled": "true"},
+        {"hub_message_principal": "agent:other"},
+    ):
+        with pytest.raises(c.T3DispatchError):
+            rc.parse_runtime(runtime_payload(tmp_path, **overrides))
+    runtime = rc.parse_runtime(
+        runtime_payload(
+            tmp_path,
+            enabled=False,
+            hub_messaging_enabled=True,
+            hub_message_principal="agent:grokbot",
+            hub_token_file=str(tmp_path / "principal.token"),
+        )
+    )
+    assert runtime.hub_messaging_enabled and not runtime.enabled
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"hub_recipients": {"../host-a": "00000000-0000-4000-8000-000000000001"}},
+        {"hub_recipients": {"host-a": "00000000000040008000000000000001"}},
+        {"hub_recipients": {"host-a": "00000000-0000-4000-8000-00000000000A"}},
+        {"hub_recipients": {"host-a": "agent:example"}},
+        {"hub_token": "inline-secret"},
+        {"hub_message_principal": None},
+    ],
+)
+def test_messaging_runtime_rejects_unsafe_optional_configuration(tmp_path, overrides):
+    with pytest.raises(c.T3DispatchError) as error:
+        rc.parse_runtime(runtime_payload(tmp_path, **overrides))
+    assert error.value.code == "invalid_request"
