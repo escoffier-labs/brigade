@@ -37,6 +37,7 @@ from brigade import (
     run_journal,
     run_projector,
     run_redaction_rewrite,
+    run_redaction_tasks,
     run_shadow,
     runguard,
 )
@@ -367,6 +368,7 @@ def _validate_checkpoint_artifacts(
     snapshot: Mapping[str, Any],
     events: Sequence[run_journal.RunEvent],
 ) -> None:
+    run_redaction_tasks.validate_history(events, error_type=RedactionError)
     checkpoint_events = [event for event in events if event.event_type == run_checkpoint.CHECKPOINT_EVENT_TYPE]
     latest = run_checkpoint.latest_checkpoint_event(list(events))
     if latest is None or not checkpoint_events:
@@ -444,16 +446,23 @@ def _rewrite_events(
     operation_id: str,
 ) -> tuple[list[run_journal.RunEvent], bytes]:
     requests: list[tuple[dict[str, Any], str]] = []
+    selected_tasks: set[int] = set()
     for event in events:
         affected = run_cassette.redaction_affects(event, sequence_start, sequence_end)
         preserved_anchor = event.event_type == "run.redaction.recorded"
-        payload = _redacted_payload(event) if affected and not preserved_anchor else dict(event.payload)
+        task_fact = event.event_type in run_events._TASK_EVENT_TYPES
+        if affected and task_fact:
+            selected_tasks.add(event.sequence)
+        payload = (
+            _redacted_payload(event) if affected and not preserved_anchor and not task_fact else dict(event.payload)
+        )
         idempotency_key = (
             _redaction_idempotency_key(operation_id, event.sequence)
             if affected and not preserved_anchor
             else event.idempotency_key
         )
         requests.append((payload, idempotency_key))
+    run_redaction_tasks.prepare_requests(events, requests, selected=selected_tasks, operation_id=operation_id)
     return run_redaction_rewrite.rewrite_events(events, requests, error_type=RedactionError)
 
 
@@ -1985,7 +1994,11 @@ def _assert_affected_values_removed(
         }:
             continue
         for key, value in prior.payload.items():
-            if key == "status" or value is None:
+            if (
+                key == "status"
+                or value is None
+                or (prior.event_type in run_events._TASK_EVENT_TYPES and key in run_redaction_tasks.STRUCTURAL_FIELDS)
+            ):
                 continue
             if value == REDACTED_VALUE or value == 0:
                 continue

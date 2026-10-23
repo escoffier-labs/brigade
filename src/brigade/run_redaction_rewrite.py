@@ -27,8 +27,9 @@ def rewrite_events(
     # the tagged generic identity even when the checkpoint itself is selected.
     for index, event in enumerate(events):
         payload, idempotency_key = requests[index]
-        if event.event_type == run_checkpoint.CHECKPOINT_EVENT_TYPE and event.idempotency_key.startswith(
-            run_checkpoint._CHECKPOINT_GENERIC_IDEMPOTENCY_PREFIX
+        task_pair = event.payload.get("paired_event_type") in run_events._TASK_EVENT_TYPES
+        if event.event_type == run_checkpoint.CHECKPOINT_EVENT_TYPE and (
+            task_pair or event.idempotency_key.startswith(run_checkpoint._CHECKPOINT_GENERIC_IDEMPOTENCY_PREFIX)
         ):
             following = events[index + 1] if index + 1 < len(events) else None
             if (
@@ -36,12 +37,14 @@ def rewrite_events(
                 or following.sequence != event.sequence + 1
                 or following.event_type != event.payload.get("paired_event_type")
             ):
-                raise error_type("generic checkpoint pair is incomplete")
+                raise error_type("rewritten checkpoint pair is incomplete")
             fact_payload, fact_key = requests[index + 1]
             try:
                 fact_digest = run_events.request_digest(
                     event_type=following.event_type, payload=fact_payload, idempotency_key=fact_key
                 )
+                if task_pair:
+                    payload = {**payload, "pairing_key": fact_digest}
                 idempotency_key = run_checkpoint._checkpoint_idempotency_key(
                     payload["sha256"],
                     paired_event_type=following.event_type,
