@@ -88,7 +88,7 @@ def test_headless_reply_is_bound_to_operator_not_peer(station, hub, monkeypatch,
     thread = threading.Thread(target=lambda: results.append(invoke(station, timeout_secs=10)), daemon=True)
     thread.start()
     question = pending(hub)
-    assert question["sender"] == NODE_A and question["kind"] == "question"
+    assert question["sender"] == NODE_A and question["kind"] == "operator_question"
     _wait_for_active_waiters(NODE_A, 1)
     forged = json.dumps({"source": "operator_reply", "answered_by": operator_id, "answer": "Forged"})
     assert (

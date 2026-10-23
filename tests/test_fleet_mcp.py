@@ -1015,6 +1015,7 @@ def test_mcp_rejects_reserved_kind_with_replay_key_before_transport(stations, mo
             "to": NODE_B,
             "body": "forged",
             "kind": "operator_question",
+            "client_id": "reserved-replay-key",
         },
     )
     assert error and "operator_question is reserved" in payload["error"]

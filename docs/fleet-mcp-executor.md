@@ -266,7 +266,7 @@ Record Executor version, framework version, client name/version, negotiated MCP
 version, app revision, scoped connection's tool/account selection and browser
 mode. Record no credentials. All checks in this section are currently unverified.
 
-1. Discover the seven upstream tools with Executor `search` and `describe`.
+1. Discover the eight upstream tools with Executor `search` and `describe`.
    Verify the read annotations survive import and inspect the explicit policy.
    List presence and claims, confirm only granted nodes appear, and confirm
    denied recipients and another principal's messages remain inaccessible.

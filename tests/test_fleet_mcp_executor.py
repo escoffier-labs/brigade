@@ -62,6 +62,7 @@ def test_http_discovery_preserves_explicit_annotations(agent_http):
         "fleet_send",
         "fleet_reply",
         "fleet_ack",
+        "fleet_ask_user",
     }
     for name, tool in tools.items():
         assert tool["annotations"] == {
