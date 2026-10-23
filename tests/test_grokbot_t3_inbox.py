@@ -1920,13 +1920,19 @@ def test_foreground_send_waits_boundedly_and_never_sends_after_timeout(hub, monk
     assert fleet_client._read_spool(path) == []
 
 
-def test_foreground_send_does_not_scan_other_spool_scopes(hub, monkeypatch):
-    tools, _, _, token, token_file, _ = hub
+@pytest.mark.parametrize("recipient", [HUB_NODE_ID, "agent:receiver"])
+def test_foreground_send_does_not_scan_other_spool_scopes(hub, monkeypatch, recipient):
+    from types import MappingProxyType
+
+    tools, calls, _, token, token_file, _ = hub
+    tools.runtime = replace(tools.runtime, hub_recipients=MappingProxyType({"host-a": recipient}))
     forbid_spool_scope_scans(monkeypatch)
     result = tools.call_tool("hub_message_send", HUB_TOOLS["hub_message_send"])
     assert "error" not in result and "recipient" not in result
+    assert calls[0]["to"] == recipient
     assert all(
-        value not in json.dumps(result) for value in (HUB_NODE_ID, token, str(token_file), "https://hub.example.test")
+        value not in json.dumps(result)
+        for value in (recipient, HUB_NODE_ID, token, str(token_file), "https://hub.example.test")
     )
 
 
