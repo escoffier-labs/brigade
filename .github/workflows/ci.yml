@@ -516,7 +516,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
       - name: Download coverage data
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@v8.0.2
         with:
           pattern: coverage-*
           path: .coverage-data
@@ -1351,7 +1351,7 @@ jobs:
             .venv/bin/python -m pip install --upgrade --only-binary cryptography 'cryptography>=48,<52'
           fi
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
-      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
           name: mesh-envelope-${{ matrix.crypto == 'floor' && 'newest' || 'floor' }}
       - name: Open other version's envelope
