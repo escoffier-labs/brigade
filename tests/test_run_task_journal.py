@@ -6,7 +6,7 @@ import json
 
 import pytest
 
-from brigade import run_checkpoint, run_events, run_journal, run_lifecycle
+from brigade import aboyeur, run_checkpoint, run_events, run_journal, run_lifecycle, run_shadow, runguard
 from brigade import run_tasks as tasks
 from tests import test_run_tasks as support
 
@@ -246,3 +246,112 @@ else:
     run_lifecycle.record_dispatch_fact(run_dir, workspace=workspace, event_type="run.dispatch.requested", seat="worker")
     assert observed == ["task checkpoint refused: incomplete-pair"]
     assert tasks.read_tasks(run_dir)[0].status == "queued"
+
+
+@pytest.fixture
+def authoritative_task_run(tmp_path):
+    """Enroll through real status writes, retaining the lifecycle owner lock."""
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / "authoritative-task-run"
+    run_dir.mkdir(parents=True)
+    snapshot = {
+        "schema": "brigade.run.v1",
+        "status": "started",
+        "lock_workspace": str(workspace),
+        "lifecycle_journal_requested": True,
+        "run_journal_authority_requested": True,
+    }
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        aboyeur._write_json(run_dir / "run.json", snapshot)
+        snapshot["status"] = "planning"
+        aboyeur._write_json(run_dir / "run.json", snapshot)
+        assert aboyeur._resolve_authority_state(run_dir) == "authoritative"
+        assert run_shadow.check_projection_readiness(run_dir).ready
+        assert json.loads(run_shadow.shadow_artifact_path(run_dir).read_text())["errors"] == 0
+        yield run_dir, workspace
+
+
+def test_task_pairs_keep_already_authoritative_run_writable(authoritative_task_run):
+    run_dir, workspace = authoritative_task_run
+    # A durable request alone does not prove that the prior authority gate runs.
+    assert aboyeur._resolve_authority_state(run_dir) == "authoritative"
+    accepted(authoritative_task_run)
+    handle = tasks.prepare_attempt(run_dir, workspace=workspace, task_id="one")
+    result = tasks.observe_task(
+        run_dir,
+        workspace=workspace,
+        handle=handle,
+        observation=tasks.TaskObservation("completed", artifact_kind="unavailable"),
+    )
+    assert result.result_id is not None
+    tasks.acknowledge_result(run_dir, workspace=workspace, task_id="one", result_id=result.result_id)
+    snapshot = json.loads((run_dir / "run.json").read_text())
+    snapshot["status"] = "dispatching"
+    aboyeur._write_json(run_dir / "run.json", snapshot)
+    assert json.loads((run_dir / "run.json").read_text())["status"] == "dispatching"
+    assert tasks.read_tasks(run_dir)[0].acknowledged
+    assert aboyeur._resolve_authority_state(run_dir) == "authoritative"
+    assert run_shadow.check_projection_readiness(run_dir).ready
+    artifact = json.loads(run_shadow.shadow_artifact_path(run_dir).read_text())
+    assert artifact["errors"] == 0
+    assert artifact["mismatches"] == 0
+
+
+@pytest.mark.parametrize("damage", ["missing", "mismatched", "nonstring", "wrong-event-type", "keyed-neutral"])
+def test_forged_task_pair_cannot_authorize_next_write(authoritative_task_run, damage):
+    run_dir, workspace = authoritative_task_run
+    journal_path = run_dir / "events/lifecycle.jsonl"
+    events = run_journal.read_journal_bounded(journal_path).events
+    payload = {
+        "task_id": "one",
+        "seat": "worker",
+        "payload_digest": "a" * 64,
+        "spec_digest": tasks.TaskSpec("one", "worker", "a" * 64).spec_digest,
+        "request_id": "request-one",
+    }
+    event_type = "run.redaction.recorded" if damage == "keyed-neutral" else "task.accepted"
+    if damage == "keyed-neutral":
+        payload = {}
+    key = run_events.request_digest(event_type=event_type, payload=payload, idempotency_key="forged-task")
+    checkpoint_payload = dict(
+        next(e for e in reversed(events) if e.event_type == run_checkpoint.CHECKPOINT_EVENT_TYPE).payload
+    )
+    checkpoint_payload["paired_event_type"] = "task.attempt-prepared" if damage == "wrong-event-type" else event_type
+    checkpoint_payload["pairing_key"] = key
+    if damage == "missing":
+        checkpoint_payload.pop("pairing_key")
+    elif damage == "mismatched":
+        checkpoint_payload["pairing_key"] = "b" * 64
+    elif damage == "nonstring":
+        checkpoint_payload["pairing_key"] = 123
+    checkpoint = run_journal.append_event(
+        journal_path,
+        run_id=run_dir.name,
+        event_type=run_checkpoint.CHECKPOINT_EVENT_TYPE,
+        payload=checkpoint_payload,
+        idempotency_key="forged-checkpoint",
+        expected_previous_sequence=events[-1].sequence,
+        workspace=workspace,
+    )
+    run_journal.append_event(
+        journal_path,
+        run_id=run_dir.name,
+        event_type=event_type,
+        payload=payload,
+        idempotency_key="forged-task",
+        expected_previous_sequence=checkpoint.sequence,
+        workspace=workspace,
+    )
+    # The chain is valid and exactly one pair ahead, so refusal must come from
+    # pair validation, rather than a broken envelope or an unrelated gate.
+    assert not run_journal.read_journal_bounded(journal_path).chain_errors
+    assert run_shadow.check_projection_readiness(run_dir).reasons == (run_shadow.REASON_JOURNAL_AHEAD,)
+    before = journal_path.read_bytes()
+    snapshot_bytes = (run_dir / "run.json").read_bytes()
+    snapshot = json.loads(snapshot_bytes)
+    snapshot["status"] = "dispatching"
+    with pytest.raises(run_lifecycle.LifecycleJournalError, match="prior gate not ready: journal-ahead"):
+        aboyeur._write_json(run_dir / "run.json", snapshot)
+    assert journal_path.read_bytes() == before
+    assert (run_dir / "run.json").read_bytes() == snapshot_bytes

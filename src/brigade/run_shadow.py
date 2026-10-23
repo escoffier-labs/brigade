@@ -296,7 +296,8 @@ def _checkpoint_status_write_gap(
 
     A normal activated-journal mapped transition appends ``run.snapshot.checkpointed``
     immediately before the mapped status event, so the journal tail can jump by two
-    sequences between comparisons without a skipped shadow step.
+    sequences between comparisons without a skipped shadow step. Task facts use
+    the same adjacent pair, bound to the exact fact's request digest.
     """
     if prior_seq is None:
         if tail_seq != 2:
@@ -331,6 +332,8 @@ def _checkpoint_status_write_gap(
     if status_event.event_type != paired_event_type:
         return False
     pairing_key = checkpoint.payload.get("pairing_key")
+    if status_event.event_type in run_events._TASK_EVENT_TYPES:
+        return isinstance(pairing_key, str) and pairing_key == status_event.request_digest
     if status_event.event_type in run_checkpoint._DISPATCH_FACT_EVENT_TYPES and pairing_key is None:
         return False
     if pairing_key is not None:
