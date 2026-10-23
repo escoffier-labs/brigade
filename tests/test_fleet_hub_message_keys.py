@@ -10,6 +10,7 @@ import sqlite3
 import subprocess
 import sys
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import contextmanager
 from unittest.mock import patch
 
@@ -244,6 +245,93 @@ def request(address, method, path, token=None, value=None):
     result = response.status, json.loads(response.read())
     conn.close()
     return result
+
+
+@pytest.mark.parametrize("principal", ["node-reader", "agent:reader"])
+@pytest.mark.parametrize("read_action", ["keys_get", "manifests_get"])
+def test_http_mesh_read_rejects_replaced_generation_after_auth(hub, monkeypatch, principal, read_action):
+    from brigade import fleet_hub_event_bounds as bounds, fleet_hub_identity as mesh
+
+    old_key = record()
+    publish(hub, old_key)
+    current_key = record(seed=2, prev_kid=old_key["kid"], prev_sig=binary(bytes(64)))
+    publish(hub, current_key)
+    fleet_hub.revoke_node(hub, "node-b")
+    statement = {"seq": 1, "sig": "opaque-fixture"}
+    mesh.upload_statement(hub, {"kind": "manifest", "statement": statement})
+    if principal.startswith("agent:"):
+        enrolled = messages.add_principal(hub, {"name": "reader"})
+        old_token = enrolled["token"]
+    else:
+        _, old_token = fleet_hub.add_node(hub, principal)
+    raw = {"action": read_action}
+    if read_action == "keys_get":
+        raw["kid"] = old_key["kid"]
+    authenticated, release_body = threading.Event(), threading.Event()
+    read_body = bounds.read_json_body
+
+    def paused_body(handler, **kwargs):
+        if handler.path == "/messages" and handler.headers.get("Authorization") == "Bearer " + old_token:
+            authenticated.set()
+            assert release_body.wait(2), "body-read barrier was not released"
+        return read_body(handler, **kwargs)
+
+    path = hub.execute("PRAGMA database_list").fetchone()[2]
+    with serving(path) as address:
+        if principal.startswith("agent:") and read_action == "keys_get":
+            assert request(address, "POST", "/messages", old_token, raw)[0] == 404
+        monkeypatch.setattr(bounds, "read_json_body", paused_body)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            inflight = executor.submit(request, address, "POST", "/messages", old_token, raw)
+            try:
+                assert authenticated.wait(2), "request did not reach the post-authentication body barrier"
+                if principal.startswith("agent:"):
+                    messages.revoke_principal(
+                        hub, {"action": "revoke", "name": "reader", "expected_enrollment_id": enrolled["enrollment_id"]}
+                    )
+                    fresh = messages.add_principal(
+                        hub,
+                        {
+                            "name": "reader",
+                            "expected_enrollment_id": enrolled["enrollment_id"],
+                            "may_send_to": ["node-b"],
+                        },
+                    )
+                    fresh_token = fresh["token"]
+                    assert messages.lookup_principal_token(hub, old_token) is None
+                    assert messages.lookup_principal_token(hub, fresh_token) == principal
+                    assert messages.get_principal(hub, {"action": "get", "name": "reader"})["may_send_to"] == ["node-b"]
+                else:
+                    fleet_hub.revoke_node(hub, principal)
+                    _, fresh_token = fleet_hub.add_node(hub, principal)
+                    assert fleet_hub.lookup_node_token(hub, old_token)[0] is None
+                    assert fleet_hub.lookup_node_token(hub, fresh_token)[0] == principal
+                before_keys = hub.execute("SELECT * FROM fleet_message_keys ORDER BY kid").fetchall()
+                before_statements = hub.execute("SELECT * FROM fleet_mesh_statements ORDER BY kind").fetchall()
+                before_grants = hub.execute(
+                    "SELECT * FROM fleet_message_send_grants ORDER BY principal_id,pattern"
+                ).fetchall()
+            finally:
+                release_body.set()
+            status, payload = inflight.result(timeout=3)
+        fresh_status, fresh_payload = request(address, "POST", "/messages", fresh_token, raw)
+        assert fresh_status == 200
+        if read_action == "keys_get":
+            key = fresh_payload["key"]
+            assert key["record"] == old_key and key["state"] == "revoked"
+            assert key["principal_id"] == "node-b"
+            assert key["compromised_from"] == old_key["created_at"] and key["revoked_at"]
+        else:
+            assert fresh_payload == {"statements": {"manifest": statement}}
+        assert hub.execute("SELECT * FROM fleet_message_keys ORDER BY kid").fetchall() == before_keys
+        assert hub.execute("SELECT * FROM fleet_mesh_statements ORDER BY kind").fetchall() == before_statements
+        assert (
+            hub.execute("SELECT * FROM fleet_message_send_grants ORDER BY principal_id,pattern").fetchall()
+            == before_grants
+        )
+        assert status == 403, payload
+        assert payload["code"] == "message_sender_inactive"
+        assert "credential generation changed" in payload["error"]
 
 
 def test_identity_upload_requires_admin_and_matching_hub_id(hub):

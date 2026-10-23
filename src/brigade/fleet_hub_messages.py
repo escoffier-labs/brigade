@@ -1147,14 +1147,21 @@ def handle(
                 return fleet_hub_message_keys.publish(conn, raw, caller=caller)
 
             return 201, _as_active_principal(conn, caller, publish_key)
+
+        def read_mesh() -> dict[str, Any] | None:
+            if authenticated_generation is not None:
+                from .fleet_hub_questions import _generation
+
+                if not secrets.compare_digest(_generation(conn, caller), authenticated_generation):
+                    raise MessageAuthError("mesh read credential generation changed")
+            if action == "manifests_get":
+                return fleet_hub_identity.manifests(conn, raw)
+            return fleet_hub_message_keys.get(conn, raw, caller=caller)
+
+        result = _as_active_principal(conn, caller, read_mesh, read_only=True)
         if action == "manifests_get":
-            return 200, _as_active_principal(
-                conn, caller, lambda: fleet_hub_identity.manifests(conn, raw), read_only=True
-            )
-        key = _as_active_principal(
-            conn, caller, lambda: fleet_hub_message_keys.get(conn, raw, caller=caller), read_only=True
-        )
-        return (200, key) if key else (404, {"error": "key not found"})
+            return 200, result
+        return (200, result) if result else (404, {"error": "key not found"})
     if action in ("who", "claims"):
         from .fleet_hub_paging import SnapshotWriteRequired
 
