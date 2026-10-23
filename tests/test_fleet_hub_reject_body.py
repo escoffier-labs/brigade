@@ -14,7 +14,14 @@ from unittest.mock import Mock
 
 import pytest
 
-from brigade import fleet_hub, fleet_hub_enrollment, fleet_hub_http, fleet_hub_roster_page, fleet_policy_page
+from brigade import (
+    fleet_hub,
+    fleet_hub_enrollment,
+    fleet_hub_http,
+    fleet_hub_http_reject,
+    fleet_hub_roster_page,
+    fleet_policy_page,
+)
 
 
 @pytest.fixture()
@@ -161,7 +168,7 @@ def test_rejected_trickling_upload_has_an_absolute_deadline(hub):
 def test_rejected_upload_has_a_byte_cap(hub, monkeypatch):
     # Separate the byte bound from the time bound. Keep the client open after
     # sending more than the byte budget, and require handler completion early.
-    monkeypatch.setattr(fleet_hub_http, "_REJECT_DRAIN_SECONDS", 5)
+    monkeypatch.setattr(fleet_hub_http_reject, "_REJECT_DRAIN_SECONDS", 5)
     with _upload(hub, "/deck/policy", 10**12) as (peer, head, _body):
         assert b" 413 " in head
         try:
@@ -219,7 +226,7 @@ def test_readonly_roster_rejection_allows_late_body(hub, identity):
 def test_consumed_rejected_body_does_not_wait_for_drain(hub, monkeypatch, body):
     # A large deadline makes an unnecessary drain fail without a tight timing
     # assertion on a busy runner. The socket stays open until completion.
-    monkeypatch.setattr(fleet_hub_http, "_REJECT_DRAIN_SECONDS", 5)
+    monkeypatch.setattr(fleet_hub_http_reject, "_REJECT_DRAIN_SECONDS", 5)
     with socket.create_connection(hub.server_address, timeout=5) as peer:
         headers = (
             "POST /messages HTTP/1.1\r\n"
@@ -249,7 +256,7 @@ def test_tls_rejection_drains_within_bounds_without_raw_half_close(tmp_path, mon
     handler.wfile = Mock()
     # Fix the clock for the byte bound, advance it for the absolute deadline.
     ticks = iter([0.0, 0.1, 0.26])
-    monkeypatch.setattr(fleet_hub_http.time, "monotonic", lambda: 0.0 if bound == "bytes" else next(ticks))
+    monkeypatch.setattr(fleet_hub_http_reject.time, "monotonic", lambda: 0.0 if bound == "bytes" else next(ticks))
     handler._drain_rejected_body()
     handler.wfile.flush.assert_called_once_with()
     connection.shutdown.assert_not_called()
