@@ -923,7 +923,11 @@ def _record_lifecycle_event_paired(
         report = run_journal.read_journal_bounded(journal_path)
         if report.partial_tail is not None or report.chain_errors:
             raise run_journal.ChainIntegrityError(run_events._bound(_CHAIN_CATEGORY))
-        if not report.events or checkpoint.sequence != report.events[-1].sequence:
+        # Task checkpoints bind one exact fact. Generic checkpoints can replay
+        # for distinct facts sharing the same snapshot and event type.
+        if event_type in run_events._TASK_EVENT_TYPES and (
+            not report.events or checkpoint.sequence != report.events[-1].sequence
+        ):
             raise LifecycleJournalError("lifecycle checkpoint is not at journal tail")
         event = _append_owner_event(
             journal_path,

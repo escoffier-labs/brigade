@@ -162,9 +162,20 @@ def test_replayed_old_checkpoint_cannot_cover_new_fact(task_run, monkeypatch):
     checkpoint = next(e for e in events if e.payload.get("paired_event_type") == "task.accepted")
     monkeypatch.setattr(run_checkpoint, "write_checkpoint", lambda *a, **kw: checkpoint)
     before = (run_dir / "events/lifecycle.jsonl").read_bytes()
+    spec = tasks.TaskSpec("two", "worker", "b" * 64)
     with pytest.raises(run_lifecycle.LifecycleJournalError, match="checkpoint is not at journal tail"):
         run_lifecycle.record_lifecycle_event(
-            run_dir, workspace=workspace, event_type="run.redaction.recorded", payload={}, idempotency_key="new-fact"
+            run_dir,
+            workspace=workspace,
+            event_type="task.accepted",
+            payload={
+                "task_id": spec.task_id,
+                "seat": spec.seat,
+                "payload_digest": spec.payload_digest,
+                "spec_digest": spec.spec_digest,
+                "request_id": "request-two",
+            },
+            idempotency_key="new-fact",
         )
     assert (run_dir / "events/lifecycle.jsonl").read_bytes() == before
 

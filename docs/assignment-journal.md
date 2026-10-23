@@ -96,10 +96,15 @@ bytes. This API records caller classifications and does not validate or retrieve
 artifacts. Contradictory terminal replacement refuses.
 
 An observation supplying any artifact classification or digest with active
-containment refuses before journal mutation. The caller must retain that evidence
-and resubmit it when containment permits a terminal result. No pending artifact
-store is supplied. A completion with active children and no artifact still records
-`waiting-for-children`.
+containment refuses before journal mutation for every status, including terminal
+statuses and an identical artifact resubmission. The caller must retain that
+evidence and wait for suitable containment before publishing a terminal result
+with the artifact. Publishing a terminal result with `unavailable` fixes its
+identity: a later artifact cannot be attached. With active children and no
+artifact, `failed`, `interrupted`, and `cancelled` publish terminal results
+immediately, while `completed` records `waiting-for-children`. Callers that need
+the artifact in the result must retain it and defer terminal publication as
+appropriate. No pending artifact store is supplied.
 
 Repeated identical current observations and acknowledgements add no records.
 A state that recurs after a real transition records a new fact. The existing
@@ -136,6 +141,9 @@ retain the 512-character bound and the same character grammar. Provider correlat
 references have a separate 512-character bound and admit ASCII letters, digits,
 `._:%~+/@=-`, starting with a letter or digit. Percentencoded opaque handles such
 as `node:delegated-task:command%3Afake-example` are retained without decoding.
+Provider references are opaque identifiers only. Consumers must never interpret
+them as paths or URLs, resolve them, or use them to carry secrets or provider
+bodies, even when the character grammar admits path-shaped or URL-shaped values.
 Whitespace, control characters and JSON bodies refuse. Digests are 64 lowercase hex
 characters. Raw task text, prompts, provider bodies, summaries, credentials,
 and paths have no task payload field. The input digest does not retain input
@@ -145,8 +153,9 @@ artifact and refuse when it is missing.
 A partial tail, broken hash chain, unsupported reader, mismatched owner, or
 failed durability barrier refuses. A checkpoint-only task tail raises an
 `incomplete-pair` refusal for both reads and writes. Later unrelated lifecycle
-facts cannot hide an earlier orphaned task pair. A reused old checkpoint cannot
-authorize an uncovered append. This slice deliberately
+facts cannot hide an earlier orphaned task pair. A reused old task checkpoint
+cannot authorize an uncovered task append. Generic lifecycle checkpoint reuse
+retains its existing behavior and recovery limitations. This slice deliberately
 provides no automatic repair for that crash window. It preserves the evidence
 and cannot infer acceptance or create another attempt. Exact manual
 reconciliation or a separately reviewed recovery API is needed before progress.
