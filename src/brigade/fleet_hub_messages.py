@@ -595,6 +595,9 @@ def revoke_principal(conn: sqlite3.Connection, raw: object) -> dict[str, str | N
             "WHERE principal_id=? AND enrollment_id IS ? AND revoked_at IS NULL",
             (datetime.now(timezone.utc).isoformat(), principal_id, expected_enrollment_id),
         )
+        from . import fleet_hub_message_keys
+
+        fleet_hub_message_keys.revoke(conn, principal_id)
         conn.commit()
     except BaseException:
         conn.rollback()
@@ -1130,6 +1133,28 @@ def handle(
         return fleet_hub_questions.handle(conn, raw, caller=caller, authenticated_generation=authenticated_generation)
     if isinstance(action, str) and action.startswith("events_"):
         return fleet_hub_events.handle(conn, raw, caller=caller)
+    if action in ("keys_publish", "keys_get", "manifests_get"):
+        from . import fleet_hub_identity, fleet_hub_message_keys
+
+        if action == "keys_publish":
+
+            def publish_key() -> dict[str, Any]:
+                if authenticated_generation is not None:
+                    from .fleet_hub_questions import _generation
+
+                    if not secrets.compare_digest(_generation(conn, caller), authenticated_generation):
+                        raise MessageAuthError("key publication credential generation changed")
+                return fleet_hub_message_keys.publish(conn, raw, caller=caller)
+
+            return 201, _as_active_principal(conn, caller, publish_key)
+        if action == "manifests_get":
+            return 200, _as_active_principal(
+                conn, caller, lambda: fleet_hub_identity.manifests(conn, raw), read_only=True
+            )
+        key = _as_active_principal(
+            conn, caller, lambda: fleet_hub_message_keys.get(conn, raw, caller=caller), read_only=True
+        )
+        return (200, key) if key else (404, {"error": "key not found"})
     if action in ("who", "claims"):
         from .fleet_hub_paging import SnapshotWriteRequired
 

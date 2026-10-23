@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Serve public mesh key history, live directory keys, and admin-supplied signed Hub identities and manifests without a crypto backend.
+
 ### Added
 
 - Add the optional `mesh` crypto core with frozen `bm1` hybrid encryption and signed envelopes. Fleet messaging integration follows in later slices.

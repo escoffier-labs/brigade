@@ -486,9 +486,7 @@ def test_snapshot_global_count_and_byte_caps_fail_closed(directory, monkeypatch,
     assert directory.execute("SELECT COUNT(*) FROM fleet_read_snapshots").fetchone()[0] == 0
 
 
-@pytest.mark.parametrize(
-    "previous_version", [fleet_hub.SCHEMA_VERSION - 4, pytest.param(42, id="main-v42"), fleet_hub.SCHEMA_VERSION - 1]
-)
+@pytest.mark.parametrize("previous_version", [40, pytest.param(42, id="main-v42"), 43, 44])
 def test_previous_schema_migrates_once_and_preserves_snapshot_on_reopen(tmp_path, previous_version):
     path = tmp_path / "fleet.db"
     conn = fleet_hub.init_db(path)
@@ -580,11 +578,11 @@ def _add_question(conn):
     )
 
 
-def test_fresh_database_reaches_schema_44_with_questions_and_paging(tmp_path):
-    assert fleet_hub.SCHEMA_VERSION == 44
+def test_fresh_database_reaches_schema_45_with_questions_and_paging(tmp_path):
+    assert fleet_hub.SCHEMA_VERSION == 45
     conn = fleet_hub.init_db(tmp_path / "fleet.db")
     try:
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 44
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 45
         questions, paging = _both_schemas(conn)
         assert ("table", "fleet_questions") in questions and ("trigger", "fleet_questions_reply") in questions
         assert ("table", "fleet_read_snapshots") in paging and ("index", "fleet_read_snapshots_expiry") in paging
@@ -593,7 +591,7 @@ def test_fresh_database_reaches_schema_44_with_questions_and_paging(tmp_path):
 
 
 @pytest.mark.parametrize("stamped", [42, 43], ids=["main-before-questions-v42", "main-v43"])
-def test_pre_paging_schemas_upgrade_to_44_and_keep_question_rows(tmp_path, stamped):
+def test_pre_paging_schemas_upgrade_to_45_and_keep_question_rows(tmp_path, stamped):
     path = tmp_path / "fleet.db"
     conn = fleet_hub.init_db(path)
     fleet_hub.add_node(conn, "reader-node")
@@ -611,7 +609,7 @@ def test_pre_paging_schemas_upgrade_to_44_and_keep_question_rows(tmp_path, stamp
     for _startup in range(2):
         conn = fleet_hub.init_db(path)
         try:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == 44
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 45
             assert _both_schemas(conn) == (questions, paging)
             kept = conn.execute("SELECT question_id FROM fleet_questions").fetchall()
             assert kept == ([("q-kept",)] if stamped == 43 else [])
@@ -633,6 +631,7 @@ def test_schema_44_missing_question_objects_are_repaired_at_startup(tmp_path, da
         _drop_schema(conn, questions)
     else:
         conn.execute("DROP TRIGGER fleet_questions_reply")
+    conn.execute("PRAGMA user_version=44")
     conn.commit()
     assert conn.execute("PRAGMA user_version").fetchone()[0] == 44
     conn.close()
@@ -640,7 +639,7 @@ def test_schema_44_missing_question_objects_are_repaired_at_startup(tmp_path, da
     for _startup in range(2):
         conn = fleet_hub.init_db(path)
         try:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == 44
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 45
             assert _both_schemas(conn) == (questions, paging)
             # The repair leaves the paging snapshot, and its cursor, untouched.
             assert conn.execute("SELECT * FROM fleet_read_snapshots").fetchall() == snapshots

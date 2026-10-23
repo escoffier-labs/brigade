@@ -1,0 +1,437 @@
+"""Public Hub key directory, opaque statements, and live paging contracts."""
+
+from __future__ import annotations
+
+import base64
+import hashlib
+import http.client
+import json
+import sqlite3
+import subprocess
+import sys
+import threading
+from contextlib import contextmanager
+from unittest.mock import patch
+
+import pytest
+
+from brigade import fleet_hub, fleet_hub_messages as messages, fleet_hub_paging as paging
+
+
+def binary(raw):
+    return base64.urlsafe_b64encode(raw).rstrip(b"=").decode()
+
+
+def record(principal="node-b", seed=1, **extra):
+    sig, enc = bytes([seed]) * 32, bytes([seed]) * 1216
+    return {
+        "v": 1,
+        "principal": principal,
+        "hub": "h_" + binary(bytes(16)),
+        "kid": "k1_" + binary(hashlib.sha256(b"brigade-mesh/v1/kid\0" + sig + enc).digest()[:16]),
+        "sig_pub": binary(sig),
+        "enc_pub": binary(enc),
+        "suites": ["bm1"],
+        "created_at": f"2026-10-22T12:00:{seed:02d}+00:00",
+        "self_sig": binary(bytes(64)),
+        **extra,
+    }
+
+
+def identity():
+    public = bytes(32)
+    return {
+        "v": 1,
+        "hub_id": "h_" + binary(hashlib.sha256(b"brigade-mesh/v1/hub-id\0" + public).digest()[:16]),
+        "hub_sig_pub": binary(public),
+        "seq": 3,
+        "backend": "full",
+        "capabilities": ["messages"],
+        "endpoint": "https://hub.invalid",
+        "require_sealed": False,
+        "max_envelope_bytes": 98304,
+        "envelope_versions": [1],
+        "suites": ["bm1"],
+        "created_at": "2026-10-22T12:00:00Z",
+        "sig": binary(bytes(64)),
+    }
+
+
+@pytest.fixture
+def hub(tmp_path):
+    conn = fleet_hub.init_db(tmp_path / "hub.db")
+    for name in ("node-a", "node-b", "node-c"):
+        fleet_hub.add_node(conn, name)
+    yield conn
+    conn.close()
+
+
+def action(conn, name, caller="node-a", **args):
+    return messages.handle(conn, {"action": name, **args}, caller=caller)
+
+
+def publish(conn, value):
+    return action(conn, "keys_publish", caller=value["principal"], record=value)
+
+
+def test_publish_only_authenticated_principal(hub):
+    value = record()
+    with pytest.raises(messages.MessageForbidden):
+        action(hub, "keys_publish", record=value)
+    assert publish(hub, value)[0] == 201
+    found = action(hub, "keys_get", kid=value["kid"])[1]["key"]
+    assert found["record"] == value and found["state"] == "active"
+    with pytest.raises(messages.MessageAuthError):
+        action(hub, "keys_publish", caller="missing-node", record=record("missing-node"))
+
+
+def test_replacement_requires_current_prev_kid(hub):
+    old = record()
+    publish(hub, old)
+    for extra in ({}, {"prev_kid": record(seed=9)["kid"], "prev_sig": binary(bytes(64))}, {"prev_kid": old["kid"]}):
+        with pytest.raises(messages.MessageConflict) as caught:
+            publish(hub, record(seed=2, **extra))
+        assert caught.value.code == "principal_key_exists"
+    new = record(seed=2, prev_kid=old["kid"], prev_sig=binary(bytes(64)))
+    assert publish(hub, new)[0] == 201
+    assert action(hub, "keys_get", kid=old["kid"])[1]["key"]["state"] == "retired"
+    assert action(hub, "keys_get", kid=old["kid"])[1]["key"]["record"] == old
+
+
+def test_revoked_kid_cannot_be_republished(hub):
+    value = record()
+    publish(hub, value)
+    fleet_hub.revoke_node(hub, "node-b")
+    fleet_hub.add_node(hub, "node-b")
+    with pytest.raises(messages.MessageConflict) as caught:
+        publish(hub, value)
+    assert caught.value.code == "principal_key_revoked"
+
+
+@pytest.mark.parametrize("mutation", ["publish", "revoke", "rotate", "grants"])
+def test_who_continuation_reads_live_keys(hub, mutation):
+    messages.add_principal(hub, {"name": "reader", "may_send_to": ["node:*"]})
+    value = record()
+    if mutation != "publish":
+        publish(hub, value)
+    first = action(hub, "who", caller="agent:reader", limit=1)[1]
+    assert first["nodes"][0]["node_id"] == "node-a"
+    assert "sig_pub" not in str(hub.execute("SELECT payload FROM fleet_read_snapshot_rows").fetchall())
+    if mutation == "publish":
+        publish(hub, value)
+    elif mutation == "rotate":
+        value = record(seed=2, prev_kid=value["kid"], prev_sig=binary(bytes(64)))
+        publish(hub, value)
+    elif mutation == "revoke":
+        fleet_hub.revoke_node(hub, "node-b")
+    else:
+        messages.handle_principal_admin(hub, {"action": "grants", "name": "reader", "may_send_to": ["node-c"]})
+    page = action(hub, "who", caller="agent:reader", limit=1, cursor=first["next_cursor"])[1]
+    if mutation in ("revoke", "grants"):
+        assert all(row["node_id"] != "node-b" for row in page["nodes"])
+    else:
+        assert page["nodes"][0]["keys"][0]["record"] == value
+
+
+def test_key_directory_respects_grants(hub):
+    value = record()
+    publish(hub, value)
+    messages.add_principal(hub, {"name": "limited", "may_send_to": ["node-c"]})
+    assert action(hub, "keys_get", caller="agent:limited", kid=value["kid"])[0] == 404
+    assert all(row["node_id"] != "node-b" for row in action(hub, "who", caller="agent:limited")[1]["nodes"])
+    fleet_hub.revoke_node(hub, "node-b")
+    assert action(hub, "keys_get", kid=value["kid"])[0] == 404
+
+
+@pytest.mark.parametrize("principal", ["node-b", "agent:peer"])
+def test_revoke_node_and_principal_keys_atomically(hub, principal):
+    enrolled = messages.add_principal(hub, {"name": "peer"}) if principal.startswith("agent:") else None
+    old = record(principal)
+    publish(hub, old)
+    publish(hub, record(principal, seed=2, prev_kid=old["kid"], prev_sig=binary(bytes(64))))
+
+    def revoke():
+        if enrolled:
+            return messages.revoke_principal(
+                hub, {"action": "revoke", "name": "peer", "expected_enrollment_id": enrolled["enrollment_id"]}
+            )
+        return fleet_hub.revoke_node(hub, principal)
+
+    hub.execute(
+        "CREATE TRIGGER reject_key_revoke BEFORE UPDATE ON fleet_message_keys BEGIN SELECT RAISE(ABORT,'key storage failure'); END"
+    )
+    hub.commit()
+    with pytest.raises(sqlite3.IntegrityError, match="key storage failure"):
+        revoke()
+    table, column = ("fleet_message_principals", "principal_id") if enrolled else ("nodes", "node_id")
+    assert hub.execute(f"SELECT revoked_at FROM {table} WHERE {column}=?", (principal,)).fetchone() == (None,)
+    assert hub.execute("SELECT state FROM fleet_message_keys ORDER BY created_at").fetchall() == [
+        ("retired",),
+        ("active",),
+    ]
+    hub.execute("DROP TRIGGER reject_key_revoke")
+    hub.commit()
+    revoke()
+    rows = hub.execute("SELECT state,created_at,compromised_from,revoked_at FROM fleet_message_keys").fetchall()
+    assert all(
+        state == "revoked" and created == compromised and revoked for state, created, compromised, revoked in rows
+    )
+    revoke()
+    assert hub.execute("SELECT state,created_at,compromised_from,revoked_at FROM fleet_message_keys").fetchall() == rows
+
+
+@contextmanager
+def serving(path):
+    server = fleet_hub.make_server("127.0.0.1", 0, path, "fixture-admin")
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+    thread.start()
+    try:
+        yield server.server_address
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join()
+
+
+def request(address, method, path, token=None, value=None):
+    conn = http.client.HTTPConnection(*address, timeout=3)
+    headers = {"Authorization": "Bearer " + token} if token else {}
+    conn.request(method, path, body=json.dumps(value) if value is not None else None, headers=headers)
+    response = conn.getresponse()
+    result = response.status, json.loads(response.read())
+    conn.close()
+    return result
+
+
+def test_identity_upload_requires_admin_and_matching_hub_id(hub):
+    path = hub.execute("PRAGMA database_list").fetchone()[2]
+    _, token = fleet_hub.add_node(hub, "http-node")
+    value = identity()
+    with serving(path) as address:
+        assert request(address, "POST", "/mesh/identity", token, value)[0] == 403
+        assert (
+            request(address, "POST", "/mesh/identity", "fixture-admin", {**value, "hub_id": "h_" + binary(bytes(16))})[
+                0
+            ]
+            == 400
+        )
+        assert request(address, "POST", "/mesh/identity", "fixture-admin", value)[0] == 200
+        assert request(address, "GET", "/mesh/identity") == (200, value)
+        migration = {"old_hub_id": value["hub_id"], "new_hub_id": value["hub_id"], "sig": "opaque"}
+        assert (
+            request(address, "POST", "/mesh/identity", "fixture-admin", {"identity": value, "migration": migration})[0]
+            == 200
+        )
+        assert request(address, "GET", "/mesh/identity") == (200, {"identity": value, "migration": migration})
+
+
+def test_statement_sequence_and_opaque_roundtrip(hub):
+    path = hub.execute("PRAGMA database_list").fetchone()[2]
+    _, token = fleet_hub.add_node(hub, "http-node")
+    value = {"seq": 7, "sig": "opaque", "future": {"preserve": ["all", "fields"]}}
+    with serving(path) as address:
+        for kind in ("membership", "manifest", "revocation"):
+            upload = {"kind": kind, "statement": value}
+            assert request(address, "POST", "/mesh/statements", token, upload)[0] == 403
+            assert request(address, "POST", "/mesh/statements", "fixture-admin", upload)[0] == 200
+            assert request(address, "POST", "/mesh/statements", "fixture-admin", upload)[0] == 409
+            assert (
+                request(
+                    address, "POST", "/mesh/statements", "fixture-admin", {"kind": kind, "statement": {"seq": True}}
+                )[0]
+                == 400
+            )
+        status, payload = request(address, "POST", "/messages", token, {"action": "manifests_get"})
+        assert status == 200 and payload["statements"] == {
+            kind: value for kind in ("membership", "manifest", "revocation")
+        }
+        for path in ("/mesh/identity", "/mesh/statements"):
+            conn = http.client.HTTPConnection(*address, timeout=3)
+            conn.putrequest("POST", path)
+            conn.putheader("Content-Length", "999999999")
+            conn.putheader("Authorization", "Bearer " + token)
+            conn.endheaders()
+            assert conn.getresponse().status == 403
+            conn.close()
+
+
+def test_schema_44_upgrade_preserves_cursor(hub):
+    first = action(hub, "who", limit=1)[1]
+    path = hub.execute("PRAGMA database_list").fetchone()[2]
+    hub.execute("PRAGMA user_version=44")
+    hub.execute("DROP TABLE fleet_message_keys")
+    hub.execute("DROP TABLE fleet_mesh_statements")
+    hub.execute("DROP TABLE hub_meta")
+    hub.commit()
+    for _ in range(2):
+        conn = fleet_hub.init_db(path)
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 45
+        conn.close()
+    conn = fleet_hub.open_db(path)
+    try:
+        assert action(conn, "who", limit=1, cursor=first["next_cursor"])[1]["nodes"][0]["node_id"] == "node-b"
+    finally:
+        conn.close()
+
+
+def test_hub_routes_without_cryptography(tmp_path):
+    code = """
+import sys
+sys.modules['cryptography'] = None
+sys.modules['brigade.fleet_mesh_crypto'] = None
+import runpy
+from pathlib import Path
+from tempfile import TemporaryDirectory
+ns = runpy.run_path('tests/test_fleet_hub_message_keys.py')
+from brigade import fleet_hub
+with TemporaryDirectory() as directory:
+    for index, name in enumerate(('test_publish_only_authenticated_principal', 'test_identity_upload_requires_admin_and_matching_hub_id', 'test_statement_sequence_and_opaque_roundtrip')):
+        conn = fleet_hub.init_db(Path(directory) / f'hub-{index}.db')
+        for node in ('node-a', 'node-b', 'node-c'):
+            fleet_hub.add_node(conn, node)
+        ns[name](conn)
+        conn.close()
+"""
+    result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_live_key_entries_stay_within_page_byte_cap(hub, monkeypatch):
+    for index, name in enumerate(("node-a", "node-b", "node-c"), start=1):
+        publish(hub, record(name, seed=index))
+    # Ground the small fixture in one live decorated row, plus pager reserve.
+    row_cost = paging._wire_size(action(hub, "who")[1]["nodes"][0])
+    monkeypatch.setattr(paging, "PAGE_MAX_BYTES", 8192 + row_cost)
+    assert row_cost <= paging.PAGE_MAX_BYTES - 8192 < 2 * row_cost
+    first = action(hub, "who", limit=1)[1]
+    args = {"cursor": first["next_cursor"]}
+    pages = [first]
+    while args["cursor"]:
+        page = action(hub, "who", limit=500, **args)[1]
+        pages.append(page)
+        args["cursor"] = page["next_cursor"]
+        assert len(pages) < 10
+    assert len(pages) == 3
+    assert [row["node_id"] for page in pages for row in page["nodes"]] == ["node-a", "node-b", "node-c"]
+    for page in pages:
+        assert (
+            sum(paging._wire_size(row) for key in ("nodes", "principals", "sessions") for row in page[key])
+            <= paging.PAGE_MAX_BYTES - 8192
+        )
+        assert len(json.dumps(page).encode()) < paging.PAGE_MAX_BYTES
+
+
+@pytest.mark.parametrize("principal", ["node-race", "agent:peer"])
+def test_key_publish_rechecks_authenticated_generation(hub, principal):
+    if principal.startswith("agent:"):
+        enrolled = messages.add_principal(hub, {"name": "peer"})
+        old_token = enrolled["token"]
+        assert messages.lookup_principal_token(hub, old_token) == principal
+    else:
+        _, old_token = fleet_hub.add_node(hub, principal)
+        assert fleet_hub.lookup_node_token(hub, old_token)[0] == principal
+    # Capture exactly what HTTP passes after authenticating, before body handling.
+    old_generation = fleet_hub.hash_node_token(old_token)
+    publish(hub, record(principal))
+    if principal.startswith("agent:"):
+        messages.revoke_principal(
+            hub, {"action": "revoke", "name": "peer", "expected_enrollment_id": enrolled["enrollment_id"]}
+        )
+        fresh = messages.add_principal(hub, {"name": "peer", "expected_enrollment_id": enrolled["enrollment_id"]})
+        fresh_token = fresh["token"]
+        assert messages.lookup_principal_token(hub, old_token) is None
+        assert messages.lookup_principal_token(hub, fresh_token) == principal
+    else:
+        fleet_hub.revoke_node(hub, principal)
+        _, fresh_token = fleet_hub.add_node(hub, principal)
+        assert fleet_hub.lookup_node_token(hub, old_token)[0] is None
+        assert fleet_hub.lookup_node_token(hub, fresh_token)[0] == principal
+
+    def authenticated_publish(value, generation):
+        return messages.handle(
+            hub, {"action": "keys_publish", "record": value}, caller=principal, authenticated_generation=generation
+        )
+
+    value = record(principal, seed=2)
+    before = hub.execute("SELECT * FROM fleet_message_keys ORDER BY kid").fetchall()
+    with pytest.raises(messages.MessageAuthError, match="credential generation changed"):
+        authenticated_publish(value, old_generation)
+    assert hub.execute("SELECT * FROM fleet_message_keys ORDER BY kid").fetchall() == before
+    generation = fleet_hub.hash_node_token(fresh_token)
+    assert generation != old_generation
+    assert authenticated_publish(value, generation)[0] == 201
+    replacement = record(principal, seed=3, prev_kid=value["kid"], prev_sig=binary(bytes(64)))
+    before = hub.execute("SELECT * FROM fleet_message_keys ORDER BY kid").fetchall()
+    with pytest.raises(messages.MessageAuthError, match="credential generation changed"):
+        authenticated_publish(replacement, old_generation)
+    assert hub.execute("SELECT * FROM fleet_message_keys ORDER BY kid").fetchall() == before
+    assert authenticated_publish(replacement, generation)[0] == 201
+    assert action(hub, "keys_get", kid=value["kid"])[1]["key"]["state"] == "retired"
+
+
+def test_nested_key_pages_fit_actual_mcp_transport(tmp_path):
+    from brigade import fleet_client_messages as client, fleet_hub_message_keys as keys, mcp_server
+    from brigade.fleet_mcp import FleetMcp
+
+    conn = fleet_hub.init_db(tmp_path / "nested-keys.db")
+    try:
+        nodes = [f"node-{index:04d}" for index in range(500)]
+        principals = [f"agent:peer-{index:04d}" for index in range(500)]
+        for node in nodes:
+            fleet_hub.add_node(conn, node)
+        for principal in principals:
+            messages.add_principal(conn, {"name": principal.removeprefix("agent:")})
+        for index, principal in enumerate(nodes + principals):
+            seed = str(index).encode()
+            sig, enc = hashlib.sha256(seed).digest(), hashlib.shake_256(seed).digest(1216)
+            value = record(
+                principal,
+                sig_pub=binary(sig),
+                enc_pub=binary(enc),
+                kid="k1_" + binary(hashlib.sha256(b"brigade-mesh/v1/kid\0" + sig + enc).digest()[:16]),
+                created_at="2026-10-22T12:00:00.123456+00:00",
+                prev_kid="k1_" + binary(bytes(16)),
+                prev_sig=binary(bytes(64)),
+                transport={"iroh": "0" * 64},
+            )
+            keys.publish(conn, {"action": "keys_publish", "record": value}, caller=principal)
+        conn.commit()
+        station = FleetMcp()
+        pages = []
+
+        def fetch(body, **kwargs):
+            page = action(
+                conn, "who", **{key: value for key, value in body.items() if key != "action"}, caller=nodes[0]
+            )[1]
+            pages.append(dict(page))
+            return page
+
+        with (
+            patch.object(station, "_authority", return_value=object()),
+            patch.object(client, "_online", side_effect=fetch),
+        ):
+            arguments = {"limit": 500}
+            while True:
+                response = mcp_server.handle_message(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": len(pages) + 1,
+                        "method": "tools/call",
+                        "params": {"name": "fleet_who", "arguments": arguments},
+                    },
+                    **station.callbacks(),
+                )
+                assert "error" not in response
+                assert len(json.dumps(response).encode()) < 8 * 1024 * 1024
+                assert pages[-1]["oversized"] == 0
+                cursor = pages[-1]["next_cursor"]
+                if cursor is None:
+                    break
+                arguments["cursor"] = cursor
+                assert len(pages) < 10
+        assert len(pages) > 1
+        assert [row["node_id"] for page in pages for row in page["nodes"]] == nodes
+        assert [row["principal_id"] for page in pages for row in page["principals"]] == principals
+        assert all(len(row["keys"]) == 1 for page in pages for group in ("nodes", "principals") for row in page[group])
+    finally:
+        conn.close()

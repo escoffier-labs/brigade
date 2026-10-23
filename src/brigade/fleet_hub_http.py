@@ -26,6 +26,7 @@ from . import (
     fleet_dashboard,
     fleet_hub_grokbot,
     fleet_hub_messages,
+    fleet_hub_identity,
     fleet_hub_sessions,
     worklore_http,
 )
@@ -1476,6 +1477,20 @@ def make_handler(
             if path in _ASSET_ROUTES:
                 self._serve_asset(path)
                 return
+            if path == "/mesh/identity":
+                try:
+                    conn = open_db(Path(db_path))
+                    try:
+                        value = fleet_hub_identity.identity(conn)
+                    finally:
+                        conn.close()
+                    self._send_json(
+                        200 if value is not None else 404,
+                        value if value is not None else {"error": "identity not found"},
+                    )
+                except (FleetHubError, sqlite3.Error) as exc:
+                    self._send_json(500, {"error": f"hub database error: {exc}"})
+                return
             if path == "/health":
                 self._send_json(200, {"ok": True, "service": "brigade-fleet-hub"})
                 return
@@ -1708,6 +1723,8 @@ def make_handler(
                 "/policy",
                 "/messages",
                 "/message-principals",
+                "/mesh/identity",
+                "/mesh/statements",
             ):
                 self._send_json(404, {"error": "not found"})
                 return
@@ -1736,7 +1753,11 @@ def make_handler(
                 if caller is None:
                     return
                 is_admin, caller_node = caller
-                if path == "/nodes":
+                if path in ("/mesh/identity", "/mesh/statements"):
+                    if not is_admin:
+                        self._send_json(403, {"error": "the admin token is required for mesh uploads"})
+                        return
+                elif path == "/nodes":
                     if not is_admin:
                         self._send_json(403, {"error": "the admin token is required to manage nodes"})
                         return
@@ -1760,7 +1781,11 @@ def make_handler(
                 parsed = self._read_json_body(MAX_BODY_BYTES)
                 if parsed is None:
                     return
-                if path == "/events":
+                if path == "/mesh/identity":
+                    status, body_payload = 200, fleet_hub_identity.upload_identity(conn, parsed)
+                elif path == "/mesh/statements":
+                    status, body_payload = 200, fleet_hub_identity.upload_statement(conn, parsed)
+                elif path == "/events":
                     status, body_payload = 200, dict(store_events(conn, parsed, caller_node=caller_node))
                 elif path == "/claims":
                     status, body_payload = handle_claim(conn, parsed, caller_node=caller_node)
