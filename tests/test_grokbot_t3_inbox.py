@@ -1806,3 +1806,28 @@ def test_watch_lifecycle_identity_failure_preserves_request_wakes(hub, monkeypat
     assert summary["woken"] == 1
     assert post.calls[0][2]["request_id"] == "request-wake"
     assert calls == ["identity", "identity"]
+
+
+@pytest.mark.parametrize("status", [401, 403])
+@pytest.mark.parametrize("operation", ["list", "ack"])
+def test_revoked_hub_authority_discards_partial_results(hub, monkeypatch, status, operation):
+    tools, _, row, token, _, _ = hub
+    seen = []
+
+    def request(hub_url, credential, body, *, timeout=None):
+        assert credential == token
+        seen.append(body["action"])
+        if body["action"] == "identity":
+            return 200, {"principal": "agent:grokbot"}
+        if len(seen) == 2:
+            if operation == "list":
+                return 200, {"messages": [row], "next_cursor": 1}
+            return 200, {"message": row}
+        return status, {}
+
+    monkeypatch.setattr(messages, "_request", request)
+    name = "hub_inbox_list" if operation == "list" else "hub_inbox_ack"
+    result = tools.call_tool(name, {} if operation == "list" else {"ids": [1, 2]})
+    assert result["error"]["code"] == "hub-error"
+    assert "messages" not in result and "acked" not in result and "not_pending" not in result
+    assert seen == ["identity", operation, operation]

@@ -45,6 +45,11 @@ class HubInbox(MessageOperations):
         self.require_authority(authority)
         try:
             return super()._call(action, *args, authority=authority, **kwargs)
+        except HubMessageError as error:
+            if error.code == "hub_unauthorized" or (error.code == "hub_forbidden" and error.hub_code is None):
+                # Remote revocation invalidates prior results even if the token file is unchanged.
+                raise HubMessageError("hub_credential_invalid") from None
+            raise
         finally:
             self.require_authority(authority)
 
