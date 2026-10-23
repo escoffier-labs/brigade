@@ -264,8 +264,26 @@ def test_soc2_artifact_slices_cannot_claim_full_support():
 def test_eu_approval_and_archive_limits_and_explicit_nonmatches():
     rows = [m for m in load_crosswalk()["mappings"] if m["framework_id"] == "eu-ai-act-2024-1689"]
     by_pair = {(m["control_id"], m["claim_id"]): m for m in rows}
-    for pair in (("Art.14", "EC-05"), ("Art.26", "EC-11")):
+    for pair in (("Art.14", "EC-04"), ("Art.14", "EC-05"), ("Art.26", "EC-11")):
         assert by_pair[pair]["relationship"] == "partially-supports", pair
+    request = by_pair[("Art.14", "EC-04")]
+    condition = request["applicability_condition"].lower()
+    assert "high-risk ai system" in condition
+    assert "independently established" in condition and "human-oversight process" in condition
+    assert request["responsible_actor"]
+    rationale = request["rationale"].lower()
+    assert "signed request" in rationale and "run" in rationale and "requester" in rationale
+    assert "does not independently establish" in rationale
+    for limit in (
+        "dispatch ordering",
+        "organizational authority",
+        "monitor",
+        "interpret",
+        "override",
+        "intervene",
+        "stop",
+    ):
+        assert limit in rationale, limit
     for control in ("Art.19", "Art.50", "Art.111(4)"):
         nonmatches = [m for m in rows if m["control_id"] == control]
         assert nonmatches, control
@@ -281,11 +299,23 @@ def test_csa_evidence_does_not_become_monitoring_bom_or_model_signing():
     partial = {"CCC-02", "LOG-02", "STA-08"}
     nonmatches = {"LOG-03", "LOG-05", "STA-09", "MDS-08", "MDS-09"}
     assert {m["control_id"] for m in rows} == partial | nonmatches
+    # Independent Orchestrated Services allocations in the raw CSA ownership bundle.
+    owned = {"CCC-02", "STA-09"}
+    shared = {"LOG-02", "LOG-03", "LOG-05", "STA-08", "MDS-08", "MDS-09"}
+    owner_phrases = {
+        "owned": "owned by the Orchestrated Service Provider",
+        "shared": "shared Model Provider-OSP (MP-OSP)",
+    }
+    expected_owners = {**dict.fromkeys(owned, "owned"), **dict.fromkeys(shared, "shared")}
     for row in rows:
         expected = "partially-supports" if row["control_id"] in partial else "no-relationship"
         assert row["relationship"] == expected, (row["control_id"], row["claim_id"])
         assert row["obligation_bearer"] == "service-organisation"
         assert row["responsible_actor"] and row["applicability_condition"] != "any"
+        for allocation, phrase in owner_phrases.items():
+            assert (phrase in row["responsible_actor"]) == (allocation == expected_owners[row["control_id"]]), row[
+                "control_id"
+            ]
         assert row["source_locator"].startswith("https://cloudsecurityalliance.org/artifacts/")
 
 

@@ -655,9 +655,10 @@
       "control_id": "Art.14",
       "relationship": "partially-supports",
       "obligation_bearer": "provider",
-      "applicability_condition": "provider of a high-risk AI system",
-      "rationale": "Human oversight can request and authorize changes before dispatch.",
-      "source_locator": "https://ai-act-service-desk.ec.europa.eu/en/ai-act/article-14"
+      "applicability_condition": "Provider of a high-risk AI system where the signed request's membership in the relevant human-oversight process for that system is independently established.",
+      "rationale": "EC-04 records a signed request bound to a run and requester. It does not independently establish dispatch ordering, organizational authority, or capability to monitor, interpret, override, intervene or stop the AI system.",
+      "source_locator": "https://ai-act-service-desk.ec.europa.eu/en/ai-act/article-14",
+      "responsible_actor": "Provider responsible for Article 14 oversight measures, with deployer implementation where applicable."
     },
     {
       "claim_id": "EC-04",

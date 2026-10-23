@@ -172,7 +172,7 @@ Note: Reviewed the eight listed controls in primary-dataset.json and their Orche
 
 ### Unmapped evidence properties
 
-These claims have no direct control in this framework. No control identifier is assigned.
+No control identifier is assigned to these evidence properties. Each entry records the rationale and limits of this disposition.
 
 | Claim | Property | Disposition | Supersedes | Artifact contract | Responsible actor | Applicability | Rationale | Verification limit | Rejected control source |
 |-------|----------|-------------|------------|-------------------|-------------------|---------------|-----------|--------------------|--------|
@@ -195,7 +195,7 @@ Note: The Commission Service Desk identifies its displayed consolidation as at 2
 | `Art.12` | EC-03 | partially-supports | provider | provider of a high-risk AI system | External verification supports log integrity for high-risk systems. | https://ai-act-service-desk.ec.europa.eu/en/ai-act/article-12 |
 | `Art.12` | EC-06 | supports | provider | provider of a high-risk AI system | Automatic logging of events supports traceability. | https://ai-act-service-desk.ec.europa.eu/en/ai-act/article-12 |
 | `Art.12` | EC-08 | supports | provider | provider of a high-risk AI system | Traceability through commit linkage to receipts. | https://ai-act-service-desk.ec.europa.eu/en/ai-act/article-12 |
-| `Art.14` | EC-04 | partially-supports | provider | provider of a high-risk AI system | Human oversight can request and authorize changes before dispatch. | https://ai-act-service-desk.ec.europa.eu/en/ai-act/article-14 |
+| `Art.14` | EC-04 | partially-supports | provider | Provider of a high-risk AI system where the signed request's membership in the relevant human-oversight process for that system is independently established. | EC-04 records a signed request bound to a run and requester. It does not independently establish dispatch ordering, organizational authority, or capability to monitor, interpret, override, intervene or stop the AI system. | https://ai-act-service-desk.ec.europa.eu/en/ai-act/article-14 |
 | `Art.14` | EC-05 | partially-supports | provider | Provider of a high-risk AI system where the bound approval is part of the relevant human-oversight process. | EC-05 records a signed approval bound to the final tree and a segregation-of-duties verdict. It does not show competence, training, understanding of system limits, correct output interpretation, or capability to disregard, override, reverse, intervene or stop the AI system. | https://ai-act-service-desk.ec.europa.eu/en/ai-act/article-14 |
 | `Art.17` | EC-10 | supports | provider | provider of a high-risk AI system | Quality management system records. | https://ai-act-service-desk.ec.europa.eu/en/ai-act/article-17 |
 | `Art.19` | EC-06 | no-relationship | provider | Provider subject to Article 19, for automatically generated high-risk AI-system logs under its control, subject to applicable-law exceptions. | EC-06 records Brigade orchestration lifecycle events. It does not establish the automatically generated logs of the high-risk AI system, provider control of those logs or their retention. | https://ai-act-service-desk.ec.europa.eu/en/ai-act/article-19 |
@@ -403,7 +403,7 @@ Note: Rows cite the final NIST AI 100-1 Core tables (Section 5, Tables 1 to 4). 
 
 ### Unmapped evidence properties
 
-These claims have no direct control in this framework. No control identifier is assigned.
+No control identifier is assigned to these evidence properties. Each entry records the rationale and limits of this disposition.
 
 | Claim | Property | Disposition | Supersedes | Artifact contract | Responsible actor | Applicability | Rationale | Verification limit | Rejected control source |
 |-------|----------|-------------|------------|-------------------|-------------------|---------------|-----------|--------------------|--------|
