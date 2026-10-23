@@ -35,17 +35,7 @@ def test_measure_snapshot_walks():
         def continuation(cursor, limit):
             request = {**raw, "cursor": cursor}
             snapshot, offsets, sid = paging.load(conn, request, caller="reader")
-            return paging.page(
-                conn,
-                request,
-                snapshot,
-                caller="reader",
-                limit=limit,
-                visible=lambda *_: True,
-                offsets=offsets,
-                snapshot_id=sid,
-                snapshot_write=True,
-            )
+            return paging.snapshot_page(conn, snapshot, offsets, sid, limit=limit, snapshot_write=True)
 
         for limit in (1, 200):
             samples = []
