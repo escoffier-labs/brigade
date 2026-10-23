@@ -28,7 +28,7 @@ dependencies = []
 mesh = ["cryptography>=48,<52"]
 dev = ["cryptography>=48,<52", "pytest>=7", "pytest-cov>=5", "pytest-xdist>=3.6", "ruff>=0.15", "mypy>=1.11"]
 grokbot = ["mcp>=2,<3", "pyjwt[crypto]>=2"]
-research = ["playwright>=1.40"]
+research = ["playwright>=1.64.0"]
 
 [project.urls]
 Homepage = "https://brigade.tools"
