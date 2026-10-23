@@ -1923,3 +1923,12 @@ def test_mesh_actions_are_pinned_to_full_commits():
         actions = re.findall(r"uses: ([^\n]+)", section)
         assert actions
         assert all(re.fullmatch(r"actions/[a-z-]+@[0-9a-f]{40} # v[0-9.]+", action) for action in actions)
+
+
+def test_mesh_checkouts_do_not_persist_credentials():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    for job in ("mesh-compatibility", "mesh-cross-version", "mesh-without-extra"):
+        section = _workflow_job_section(text, job)
+        checkout = re.search(r"uses: actions/checkout@[^\n]+\n((?:        [^\n]*\n)*)", section)
+        assert checkout, job
+        assert "persist-credentials: false" in checkout.group(1), job
