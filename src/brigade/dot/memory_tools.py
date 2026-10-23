@@ -227,6 +227,12 @@ class MemoryTools:
         if name in self.runtime.skills_deny:
             # Indistinguishable from a missing skill, so the denylist itself is not disclosed.
             return {"error": "skill_not_found"}
+        if self.runtime.skills_deny:
+            from brigade.skills_cmd.registry import _anchored_load_registry_metadata
+
+            directory, metadata = _anchored_load_registry_metadata(self.workspace, name)
+            if _skill_names({"skill_dir": str(directory), "metadata": metadata}) & self.runtime.skills_deny:
+                return {"error": "skill_not_found"}
         return skill_get(self.workspace, name, resource, offset)
 
 

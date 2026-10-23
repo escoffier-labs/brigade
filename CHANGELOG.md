@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Duet binds its authenticated Hub credential and endpoint until restart, keeps maintenance out of the shared node queue, and holds queued sends and replies while messaging is disabled. Doctor and watch verify the active principal. Watch reports polling outages without webhooks. Skill reads enforce both registry IDs and directory names.
+
 - Duet keeps its Hub inbox mirror, reconciliation and pending-send flush current while event webhooks remain disabled. Startup verifies the message credential's authenticated principal before registering MCP tools. Replies obey the messaging switch and share the 20-message hourly budget. New messages require an exact configured recipient alias. `brigade fleet msg identity` provides the read-only credential identity probe.
 
 - Daily status preserves local work counts when an optional health snapshot times out. Windows pytest artifacts include flushed test-phase timings and stack dumps, and timeout summaries identify the last test or session phase.

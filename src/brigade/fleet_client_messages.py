@@ -453,10 +453,11 @@ def flush_credential(
     lock_timeout: float | None = None,
     authority: MessageAuthority | None = None,
     expected_scope: str | None = None,
+    warn_inactive: bool = True,
 ) -> int:
     fleet_client._validate_spool_lock_timeout(lock_timeout)
     authority = _authority(authority, token_file, expected_scope)
-    return flush(authority.node_id, authority=authority, lock_timeout=lock_timeout)
+    return flush(authority.node_id, authority=authority, lock_timeout=lock_timeout, warn_inactive=warn_inactive)
 
 
 def send(
@@ -992,6 +993,7 @@ def flush(
     token: str | None = None,
     lock_timeout: float | None = None,
     authority: MessageAuthority | None = None,
+    warn_inactive: bool = True,
 ) -> int:
     fleet_client._validate_spool_lock_timeout(lock_timeout)
     if authority is None:
@@ -1005,7 +1007,8 @@ def flush(
             raise MessageAuthorityError("message credential changed", code="token_scope_changed")
     authority.validate()
     path = _spool_path(node_id, authority.token, hub_url=authority.hub)
-    _warn_inactive_spools(node_id, path)
+    if warn_inactive:
+        _warn_inactive_spools(node_id, path)
     if not path.is_file():
         return 0
     with fleet_client._spool_lock(path, timeout=lock_timeout) as dir_fd:
