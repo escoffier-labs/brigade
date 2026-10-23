@@ -50,6 +50,10 @@ class Observation:
 
 
 def operation_scope(roster: roster_mod.Roster, request: ReadinessRequest, workspace: Path) -> str:
+    error = _request_error(request)
+    if error:
+        raise ValueError(error)
+    request = replace(request, workers=tuple(dict.fromkeys(request.workers)))
     inputs = {
         "request": asdict(request),
         "workspace": str(workspace.expanduser().resolve()),
@@ -70,17 +74,22 @@ def operation_scope(roster: roster_mod.Roster, request: ReadinessRequest, worksp
 
 
 def _request_error(request: ReadinessRequest) -> str | None:
-    if not request.workers or any(not name.strip() for name in request.workers):
+    if (
+        not isinstance(request.workers, (tuple, list))
+        or not request.workers
+        or any(not isinstance(name, str) or not name.strip() for name in request.workers)
+    ):
         return "Select at least one named worker with --worker."
-    if len(set(request.workers)) != len(request.workers):
-        return "Each --worker must name a distinct seat."
-    if type(request.concurrency) is not int or not 1 <= request.concurrency <= len(request.workers):
-        return "Concurrency must be positive and cannot exceed the number of selected workers."
-    if request.route not in {"brigade", "t3"}:
+    if type(request.concurrency) is not int or request.concurrency < 1:
+        return "Concurrency must be a positive integer."
+    if not isinstance(request.route, str) or request.route not in {"brigade", "t3"}:
         return "Route must be brigade or t3."
-    if request.isolation not in {"shared", "worktree"}:
+    if not isinstance(request.isolation, str) or request.isolation not in {"shared", "worktree"}:
         return "Isolation must be shared or worktree."
-    if request.capability is not None and not re.fullmatch(r"[a-z][a-z0-9]*(\.[a-z][a-z0-9-]*)+", request.capability):
+    if request.capability is not None and (
+        not isinstance(request.capability, str)
+        or not re.fullmatch(r"[a-z][a-z0-9]*(\.[a-z][a-z0-9-]*)+", request.capability)
+    ):
         return "Capability must be a dotted capability name, such as research.plan."
     return None
 
@@ -93,6 +102,7 @@ def evaluate_readiness(
     health: Mapping[str, seat_health.SeatHealthResult] | None = None,
     observations: Mapping[str, Observation] | None = None,
     now: float | None = None,
+    hub_discovery_possible: bool = False,
 ) -> dict[str, Any]:
     """Evaluate facts supplied by selected-seat health and route integrations.
 
@@ -110,6 +120,31 @@ def evaluate_readiness(
     error = _request_error(request)
     if error:
         add("request", "failed", "malformed-request", error, freshness="current")
+        # Malformed programmatic values must never reach hashing, selection,
+        # capability checks, or providers, and may not be JSON serializable.
+        return {
+            "schema": SCHEMA,
+            "status": "blocked",
+            "exit_code": 2,
+            "observed_at": now,
+            "scope": None,
+            "request": None,
+            "roster": {
+                "source": roster.resolution.source if roster.resolution else "provided",
+                "path": str(roster.resolution.path) if roster.resolution else None,
+                "discovery": "local-cache-only",
+                "local_authoritative": not hub_discovery_possible,
+            },
+            "selected_seats": [],
+            "structural_worker_count": len(roster_mod.workers(roster)),
+            "usable_worker_count": 0,
+            "configured_limit": roster.max_workers,
+            "admitted_capacity": None,
+            "limiting_reason": "malformed-request",
+            "fallback": {"automatic": False, "admitted": False, "action": None},
+            "evidence": evidence,
+        }
+    request = replace(request, workers=tuple(dict.fromkeys(request.workers)))
     if request.concurrency > roster.max_workers:
         add(
             "configured-limit",
@@ -126,7 +161,13 @@ def evaluate_readiness(
             {
                 "name": name,
                 "role": agent.role if agent else None,
-                "selection_role": "orchestrator" if name == roster.orchestrator else "worker" if agent else "missing",
+                "selection_role": "orchestrator"
+                if name == roster.orchestrator
+                else "worker"
+                if agent
+                else "unresolved"
+                if hub_discovery_possible
+                else "missing",
                 "cli": agent.cli if agent else None,
                 "model": agent.model if agent else None,
                 "transport": agent.transport if agent else None,
@@ -135,9 +176,11 @@ def evaluate_readiness(
         if agent is None:
             add(
                 "selection",
-                "failed",
-                "worker-missing",
-                "Select a worker present in the effective roster.",
+                "unknown" if hub_discovery_possible else "failed",
+                "worker-discovery-unverified" if hub_discovery_possible else "worker-missing",
+                "The seat is absent from the local roster; configured Hub discovery was not queried."
+                if hub_discovery_possible
+                else "Select a worker present in the local roster.",
                 seat=name,
                 freshness="current",
             )
@@ -181,7 +224,19 @@ def evaluate_readiness(
             )
 
         result = health.get(name)
-        age = None if result is None else now - result.finished_wall_at + (result.cache_age_seconds or 0.0)
+        observed_at = None
+        if result is not None:
+            cache_age = result.cache_age_seconds if result.cache_age_seconds is not None else 0.0
+            if (
+                math.isfinite(result.finished_wall_at)
+                and result.finished_wall_at <= now
+                and math.isfinite(cache_age)
+                and cache_age >= 0
+            ):
+                retained_at = result.finished_wall_at - cache_age
+                if math.isfinite(retained_at):
+                    observed_at = retained_at
+        age = None if observed_at is None else now - observed_at
         ttl = (
             seat_health.HEALTHY_CACHE_TTL_SECONDS
             if result and result.status == "healthy"
@@ -218,7 +273,7 @@ def evaluate_readiness(
                 freshness="fresh" if fresh else "missing" if result is None else "stale",
                 age_seconds=age if age is not None and math.isfinite(age) else None,
                 ttl_seconds=ttl,
-                observed_at=result.finished_wall_at if result and math.isfinite(result.finished_wall_at) else None,
+                observed_at=observed_at,
                 detail=safe_detail(check.detail)[:240] if check else "",
             )
 
@@ -295,6 +350,8 @@ def evaluate_readiness(
         "roster": {
             "source": roster.resolution.source if roster.resolution else "provided",
             "path": str(roster.resolution.path) if roster.resolution else None,
+            "discovery": "local-cache-only",
+            "local_authoritative": not hub_discovery_possible,
         },
         "selected_seats": selected,
         "structural_worker_count": len(roster_mod.workers(roster)),
@@ -324,11 +381,17 @@ def inspect_readiness(
     *,
     workspace: Path,
     health_probe: seat_health.SeatHealthProbe | None = None,
+    hub_discovery_possible: bool = False,
 ) -> dict[str, Any]:
     """Inspect only structurally eligible selected seats, without model smoke."""
-    initial = evaluate_readiness(roster, request, workspace=workspace)
-    if initial["status"] == "blocked" or request.route != "brigade":
+    initial = evaluate_readiness(roster, request, workspace=workspace, hub_discovery_possible=hub_discovery_possible)
+    if (
+        initial["status"] == "blocked"
+        or request.route != "brigade"
+        or any(seat["selection_role"] == "unresolved" for seat in initial["selected_seats"])
+    ):
         return initial
+    request = replace(request, workers=tuple(dict.fromkeys(request.workers)))
     selected_roster = replace(
         roster, agents={name: replace(roster.agents[name], fallback=()) for name in request.workers}
     )
@@ -340,10 +403,17 @@ def inspect_readiness(
             roster,
             request,
             workspace=workspace,
+            hub_discovery_possible=hub_discovery_possible,
             observations={
                 "isolation": Observation("failed", time.time(), scope, "Worktree isolation requires a Git checkout.")
             },
         )
     probe = health_probe or seat_health.SeatHealthProbe(collect_executable_version=False)
     results = probe.probe_roster(selected_roster, workspace=workspace, allow_model_smoke=False)
-    return evaluate_readiness(roster, request, workspace=workspace, health={result.seat: result for result in results})
+    return evaluate_readiness(
+        roster,
+        request,
+        workspace=workspace,
+        health={result.seat: result for result in results},
+        hub_discovery_possible=hub_discovery_possible,
+    )

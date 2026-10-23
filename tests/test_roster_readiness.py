@@ -131,7 +131,7 @@ def test_missing_t3_contract_stays_unverified(declared, tmp_path):
 
 
 def test_observed_capacity_constrains_batch(declared, tmp_path):
-    request = readiness.ReadinessRequest(("worker", "unused"), concurrency=2)
+    request = readiness.ReadinessRequest(("worker",), concurrency=2)
     evidence = observed(declared, request, tmp_path)
     evidence["capacity"] = replace(evidence["capacity"], capacity=1)
     result = evaluate(declared, request, tmp_path, observations=evidence)
@@ -151,8 +151,6 @@ def test_stale_health_failure_is_unknown(declared, tmp_path):
     "scenario",
     [
         readiness.ReadinessRequest(("worker",), concurrency=0),
-        readiness.ReadinessRequest(("worker", "worker")),
-        readiness.ReadinessRequest(("worker",), concurrency=2),
         readiness.ReadinessRequest(("worker",), capability="bad capability"),
         readiness.ReadinessRequest(("worker",), route="invalid"),
     ],
@@ -200,4 +198,101 @@ def test_nonfinite_observation_is_unknown_and_json_serializable(declared, tmp_pa
     evidence["admission"] = replace(evidence["admission"], observed_at=float("nan"))
     result = evaluate(declared, request, tmp_path, observations=evidence)
     assert result["status"] == "unverified"
+    json.dumps(result, allow_nan=False)
+
+
+@pytest.mark.parametrize("workers", [("worker",), ("worker", "worker")])
+def test_one_seat_pool_can_supply_multiple_parallel_assignments(declared, tmp_path, workers):
+    declared = replace(declared, max_workers=3)
+    request = readiness.ReadinessRequest(workers, concurrency=3)
+    evidence = observed(declared, request, tmp_path)
+    evidence["capacity"] = replace(evidence["capacity"], capacity=3)
+    result = evaluate(declared, request, tmp_path, observations=evidence)
+    assert result["status"] == "ready"
+    assert result["request"]["workers"] == ("worker",)
+    assert len(result["selected_seats"]) == result["usable_worker_count"] == 1
+    assert result["scope"] == readiness.operation_scope(declared, replace(request, workers=("worker",)), tmp_path)
+
+
+def test_configured_limit_still_constrains_one_seat_pool(declared, tmp_path):
+    request = readiness.ReadinessRequest(("worker",), concurrency=3)
+    evidence = observed(declared, request, tmp_path)
+    evidence["capacity"] = replace(evidence["capacity"], capacity=3)
+    result = evaluate(declared, request, tmp_path, observations=evidence)
+    assert result["status"] == "blocked"
+    assert result["limiting_reason"] == "configured-capacity"
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"concurrency": None},
+        {"concurrency": True},
+        {"concurrency": "2"},
+        {"concurrency": 0},
+        {"capability": 1},
+        {"capability": []},
+        {"workers": None},
+        {"workers": "worker"},
+        {"workers": (None,)},
+        {"workers": (1,)},
+        {"workers": ([],)},
+        {"workers": (" ",)},
+        {"route": []},
+        {"isolation": {}},
+    ],
+)
+def test_malformed_request_stops_before_scope_fingerprints_or_probes(declared, tmp_path, monkeypatch, changes):
+    import json
+
+    request = replace(readiness.ReadinessRequest(("worker",)), **changes)
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("malformed request reached scope, fingerprint, or provider probe")
+
+    monkeypatch.setattr(readiness, "operation_scope", forbidden)
+    monkeypatch.setattr(seat_health, "seat_fingerprint", forbidden)
+    monkeypatch.setattr(seat_health, "SeatHealthProbe", forbidden)
+    result = readiness.inspect_readiness(declared, request, workspace=tmp_path)
+    assert result["status"] == "blocked"
+    assert result["limiting_reason"] == "malformed-request"
+    assert [item["reason"] for item in result["evidence"]] == ["malformed-request"]
+    assert result["scope"] is None
+    json.dumps(result, allow_nan=False)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_cached_health_timestamp_matches_retained_age(declared, tmp_path):
+    request = readiness.ReadinessRequest(("worker",))
+    row = replace(health_for(declared), cached=True, cache_age_seconds=40)
+    result = evaluate(
+        declared, request, tmp_path, health={"worker": row}, observations=observed(declared, request, tmp_path)
+    )
+    assert result["status"] == "ready"
+    health_rows = [item for item in result["evidence"] if item.get("seat") == "worker"]
+    assert all(item["observed_at"] == 960 for item in health_rows)
+    assert all(item["age_seconds"] == NOW - item["observed_at"] for item in health_rows)
+
+
+@pytest.mark.parametrize(
+    "finished,cache_age",
+    [
+        (1001, 40),
+        (1000, -1),
+        (1000, float("nan")),
+        (1000, float("inf")),
+        (float("inf"), 0),
+        (float("nan"), 0),
+    ],
+)
+def test_invalid_cached_health_times_never_establish_ready(declared, tmp_path, finished, cache_age):
+    import json
+
+    request = readiness.ReadinessRequest(("worker",))
+    row = replace(health_for(declared), finished_wall_at=finished, cached=True, cache_age_seconds=cache_age)
+    result = evaluate(
+        declared, request, tmp_path, health={"worker": row}, observations=observed(declared, request, tmp_path)
+    )
+    assert result["status"] == "unverified"
+    assert all(item["status"] == "unknown" for item in result["evidence"] if item.get("seat") == "worker")
     json.dumps(result, allow_nan=False)

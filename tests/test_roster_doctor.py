@@ -14,6 +14,8 @@ import os
 import subprocess
 import sys
 import time
+
+import pytest
 from pathlib import Path
 
 from brigade import model_inventory, roster_cmd
@@ -159,3 +161,82 @@ def test_ready_inspects_only_selected_seat_without_inference_or_persistent_write
     assert result["admitted_capacity"] is None
     assert any(item["category"] == "model-reachability" and item["status"] == "unknown" for item in result["evidence"])
     assert {file.relative_to(tmp_path): file.read_bytes() for file in tmp_path.rglob("*") if file.is_file()} == before
+
+
+@pytest.mark.parametrize(
+    "worker,expected,role",
+    [
+        ("worker", 2, "orchestrator"),
+        ("chef", 3, "worker"),
+    ],
+)
+def test_ready_uses_cached_preference_without_refresh(tmp_path, monkeypatch, capsys, worker, expected, role):
+    from brigade import fleet_client, roster, run_preference, seat_health
+
+    path = tmp_path / "roster.toml"
+    path.write_text(
+        'orchestrator = "chef"\n[agents.chef]\ncli = "codex"\nrole = "plan"\n'
+        '[agents.worker]\ncli = "codex"\nrole = "implement"\n'
+    )
+    run_preference.write_cached(run_preference.RunPreference(chef="worker"))
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("readiness attempted a network refresh")
+
+    class HealthyProbe:
+        def probe_roster(self, selected, **kwargs):
+            return [
+                seat_health.SeatHealthResult(
+                    "test",
+                    name,
+                    seat_health.seat_fingerprint(agent, selected),
+                    "healthy",
+                    {},
+                    tuple(seat_health.SeatHealthCheck(check, "passed") for check in seat_health.CHECK_NAMES),
+                    0,
+                    0,
+                    time.time(),
+                    time.time(),
+                )
+                for name, agent in selected.agents.items()
+            ]
+
+    monkeypatch.setattr(run_preference, "refresh_cache", forbidden)
+    monkeypatch.setattr(fleet_client, "load_model_policy_snapshot", forbidden)
+    before = path.read_bytes()
+    assert (
+        roster_cmd.ready(tmp_path, workers=(worker,), roster_path=path, health_probe=HealthyProbe(), json_output=True)
+        == expected
+    )
+    report = json.loads(capsys.readouterr().out)
+    assert report["selected_seats"][0]["selection_role"] == role
+    assert path.read_bytes() == before
+    assert roster.load_roster(path).orchestrator == "chef"
+
+
+@pytest.mark.parametrize("hub_source,expected", [("none", 2), ("env", 3), ("file", 3)])
+def test_ready_missing_local_worker_respects_hub_discovery_uncertainty(
+    tmp_path, monkeypatch, capsys, hub_source, expected
+):
+    from brigade import fleet_client, seat_health
+
+    path = tmp_path / "roster.toml"
+    path.write_text('orchestrator = "chef"\n[agents.chef]\ncli = "codex"\nrole = "plan"\n')
+    if hub_source == "env":
+        monkeypatch.setenv("BRIGADE_FLEET_HUB_URL", "https://hub.example.invalid")
+    elif hub_source == "file":
+        fleet_path = fleet_client.brigade_home() / "fleet.toml"
+        fleet_path.parent.mkdir(parents=True, exist_ok=True)
+        fleet_path.write_text('[fleet]\nhub_url = "https://hub.example.invalid"\n')
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("unresolved local selection attempted provider or Hub discovery")
+
+    monkeypatch.setattr(fleet_client, "load_model_policy_snapshot", forbidden)
+    monkeypatch.setattr(seat_health, "SeatHealthProbe", forbidden)
+    assert roster_cmd.ready(tmp_path, workers=("remote",), roster_path=path, json_output=True) == expected
+    report = json.loads(capsys.readouterr().out)
+    selection = next(item for item in report["evidence"] if item["category"] == "selection")
+    assert selection["reason"] == ("worker-missing" if hub_source == "none" else "worker-discovery-unverified")
+    assert report["roster"]["discovery"] == "local-cache-only"
+    assert report["roster"]["local_authoritative"] == (hub_source == "none")

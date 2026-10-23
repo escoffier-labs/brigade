@@ -361,14 +361,21 @@ def ready(
     health_probe: seat_health.SeatHealthProbe | None = None,
 ) -> int:
     """Operation inspection does not dispatch, reserve capacity, or apply fallbacks."""
-    from . import roster_readiness
+    from . import fleet_client, roster_readiness, run_preference
 
     target = target.expanduser()
     try:
         resolution = roster_mod.resolve_roster(target, roster_path)
         loaded = replace(roster_mod.load_roster(resolution.path), resolution=resolution)
+        loaded = run_preference.apply_to_roster(loaded, run_preference.load_cached())
         request = roster_readiness.ReadinessRequest(workers, concurrency, route, isolation, capability)
-        report = roster_readiness.inspect_readiness(loaded, request, workspace=target, health_probe=health_probe)
+        report = roster_readiness.inspect_readiness(
+            loaded,
+            request,
+            workspace=target,
+            health_probe=health_probe,
+            hub_discovery_possible=bool(fleet_client.load_fleet_settings()["hub_url"]),
+        )
     except (OSError, ValueError) as exc:
         report = {
             "schema": roster_readiness.SCHEMA,

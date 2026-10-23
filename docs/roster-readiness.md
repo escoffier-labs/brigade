@@ -10,16 +10,23 @@ brigade roster ready --worker builder --worker reviewer --concurrency 2 --route 
 brigade roster ready --worker researcher --capability research.plan --route t3 --json
 ```
 
-`--worker` is required and repeatable. Names must be distinct, present in the
-effective roster, and different from its orchestrator. Concurrency defaults to
-1 and cannot exceed the selected worker count or `limits.max_workers`. Route
-defaults to `brigade`, isolation to `shared`. Capabilities use the roster's
-existing dotted capability contract and `Agent.supports` semantics.
+`--worker` is required and repeatable. It names a selected seat pool, not a
+task count. Duplicate names are removed in encounter order for selection,
+health inspection, and operation scope. Each selected seat must be a worker
+rather than the effective orchestrator. Concurrency defaults to 1 and must be
+a positive integer. A single seat can supply concurrency 3 when
+`limits.max_workers` and fresh admitted capacity both permit 3 assignments.
+Repeating `--worker builder` does not request another task. Route defaults to
+`brigade`, isolation to `shared`. Capabilities use the roster's existing dotted
+capability contract and `Agent.supports` semantics.
 
 Use `--target` to select the workspace and `--roster` for an explicit file.
 The report names the effective source (`explicit`, `workspace`,
 `worktree-parent`, or `user`) and path. Resolution follows the same precedence
 as other roster commands. It never scaffolds a roster over a fallback.
+Before classifying seats it applies `run_preference.load_cached()` through
+`apply_to_roster`, matching the cached role overlay used by `run`. It never
+refreshes that cache, so a newer Hub preference remains outside this report.
 
 ## Results
 
@@ -43,7 +50,7 @@ Unix timestamp, age in seconds, and TTL. Nonfinite timestamps are unknown and
 render as JSON null.
 
 `selected_seats` includes the declared role and a separate selection role
-(`worker`, `orchestrator`, or `missing`). `structural_worker_count` counts all
+(`worker`, `orchestrator`, `missing`, or `unresolved`). `structural_worker_count` counts local
 non-orchestrator roster seats. `usable_worker_count` counts selected workers
 whose seat-specific checks passed. That count does not imply operation
 admission. `configured_limit` is the roster maximum. `admitted_capacity` is
@@ -51,6 +58,17 @@ null until fresh capacity evidence is supplied. `limiting_reason` identifies
 the first blocker, or the first unknown when there is no blocker.
 
 ## Inspection scope and current limits
+
+Discovery is limited to the resolved local roster and cached preference.
+`roster.discovery` is `local-cache-only`. `roster.local_authoritative` is true
+when no Hub path is configured. In that case a missing selected seat is blocked
+as `worker-missing`. When a Hub URL is configured through the existing fleet
+settings, the local roster cannot prove a seat is absent globally. A missing
+local seat has selection role `unresolved`, reason
+`worker-discovery-unverified`, and status `unverified` unless another known
+blocker applies. The diagnostic does not query the Hub or synthesize seats.
+`run` can perform that discovery later through its own admission path. Local
+counts do not count Hub-only seats.
 
 Default inspection never sends a model inference request, reserves a lease,
 creates a worker task, creates a worktree, changes persistent configuration,
@@ -67,6 +85,13 @@ to create a worktree. Worktree isolation remains unverified without scoped
 isolation evidence. Writable ACPX workers with shared isolation are blocked.
 The CLI has no read-only operation flag, so it does not claim readiness for a
 read-only ACPX exception.
+
+The health `isolation-compatibility` check currently tests read-only
+enforcement. Readiness conservatively requires it even for a writable
+operation, separately from requested worktree isolation. This can leave a
+writable adapter unverified or blocked despite adequate write isolation.
+Adapter-aware operation health requirements need an explicit source contract
+before this gate can be relaxed. Unknown evidence remains unverified.
 
 **The CLI currently has no authoritative live admission, capacity, or T3
 capability/governance observation producer.** It therefore cannot return ready
@@ -87,16 +112,32 @@ ReadinessRequest(workers: tuple[str, ...], concurrency=1,
 Observation(status, observed_at, scope, detail="", capacity=None)
 operation_scope(roster, request, workspace) -> str
 evaluate_readiness(roster, request, *, workspace, health=None,
-                   observations=None, now=None) -> dict
-inspect_readiness(roster, request, *, workspace, health_probe=None) -> dict
+                   observations=None, now=None,
+                   hub_discovery_possible=False) -> dict
+inspect_readiness(roster, request, *, workspace, health_probe=None,
+                  hub_discovery_possible=False) -> dict
 ```
 
 `health` maps selected seat names to existing `SeatHealthResult` instances.
 Their fingerprints must match the current seat declaration. Health uses the
 shared cache TTLs: 300 seconds for healthy results and 30 seconds otherwise.
-Cached results retain their original age. Missing checks remain unknown.
+Cached results retain their original age. Their effective `observed_at` is
+`finished_wall_at - cache_age_seconds`, so `age_seconds` equals evaluation time
+minus that observation time. A future replay timestamp, negative cache age,
+or nonfinite time cannot establish fresh health. Isolation health is
+recomputed by the shared cache but conservatively uses the retained age here.
+Missing checks remain unknown.
 The evaluator expects versionless fingerprints, matching the inspector's
 `collect_executable_version=False` setting.
+
+Programmatic callers must supply valid request fields. Malformed requests
+return blocked `malformed-request` before seat selection, scope hashing, or
+provider probes, with null `request` and `scope`. `operation_scope` raises
+`ValueError` for a malformed request and normalizes duplicate worker names for
+valid requests. Set `hub_discovery_possible=True` only when configured Hub
+discovery could supply missing local seats. This flag records uncertainty and
+does not authorize network discovery or admit a seat. The Python evaluator
+uses the roster supplied by its caller, including any preference overlay.
 
 `observations` maps `route-support`, `isolation`, `admission`, and `capacity`
 to `Observation` instances. Their status is `passed`, `failed`, `denied`,

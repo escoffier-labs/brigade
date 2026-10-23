@@ -43,7 +43,9 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_ready = roster_sub.add_parser("ready", help="Inspect readiness for an explicit worker operation.")
     p_ready.add_argument("--target", "-t", type=Path, default=Path("."))
     p_ready.add_argument("--roster", type=Path, default=None)
-    p_ready.add_argument("--worker", action="append", required=True, help="Selected worker; repeat for a batch.")
+    p_ready.add_argument(
+        "--worker", action="append", required=True, help="Selected seat pool; repeat to add seats (duplicates ignored)."
+    )
     p_ready.add_argument("--concurrency", type=int, default=1)
     p_ready.add_argument("--route", choices=("brigade", "t3"), default="brigade")
     p_ready.add_argument("--isolation", choices=("shared", "worktree"), default="shared")
