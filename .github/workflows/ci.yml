@@ -1237,6 +1237,24 @@ jobs:
         env:
           MESH_EXPORT: mesh-envelope.json
         run: brigade work verify run --target . --command './scripts/verify-focused tests/test_fleet_mesh_crypto.py' --capture brigade-work
+      - name: Show verification logs
+        if: always()
+        run: |
+          shopt -s nullglob
+          logs=(.brigade/work/verify-runs/*/command-*.log)
+          if (( ${#logs[@]} )); then
+            cat "${logs[@]}"
+          fi
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: mesh-receipts-${{ matrix.os }}-${{ matrix.crypto }}
+          path: |
+            .brigade/work/verify-runs/**/receipt.json
+            .brigade/work/verify-runs/**/command-*.log
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 7
       - uses: actions/upload-artifact@v7
         if: matrix.os == 'ubuntu-latest'
         with:
@@ -1277,6 +1295,24 @@ jobs:
         env:
           MESH_IMPORT: mesh-envelope.json
         run: brigade work verify run --target . --command './scripts/verify-focused tests/test_fleet_mesh_crypto.py::test_checked_in_envelope_and_cross_version_exchange' --capture brigade-work
+      - name: Show verification logs
+        if: always()
+        run: |
+          shopt -s nullglob
+          logs=(.brigade/work/verify-runs/*/command-*.log)
+          if (( ${#logs[@]} )); then
+            cat "${logs[@]}"
+          fi
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: mesh-cross-version-receipts-${{ matrix.crypto }}
+          path: |
+            .brigade/work/verify-runs/**/receipt.json
+            .brigade/work/verify-runs/**/command-*.log
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 7
 
   mesh-without-extra:
     needs: changes
@@ -1296,3 +1332,21 @@ jobs:
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
       - name: Plain messaging and blocked crypto CLI import
         run: brigade work verify run --target . --command './scripts/verify-focused tests/test_fleet_messages.py tests/test_fleet_messages_metadata.py tests/test_fleet_mcp.py tests/test_fleet_inbox_delivery.py tests/test_fleet_mesh_crypto.py::test_missing_extra_and_core_cli_independence' --capture brigade-work
+      - name: Show verification logs
+        if: always()
+        run: |
+          shopt -s nullglob
+          logs=(.brigade/work/verify-runs/*/command-*.log)
+          if (( ${#logs[@]} )); then
+            cat "${logs[@]}"
+          fi
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: mesh-without-extra-receipts
+          path: |
+            .brigade/work/verify-runs/**/receipt.json
+            .brigade/work/verify-runs/**/command-*.log
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 7
