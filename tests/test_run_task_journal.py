@@ -753,3 +753,80 @@ def test_inexact_checkpoint_retry_names_the_fact_without_mutation(authoritative_
     )
     assert len(journal.read_bytes().splitlines()) == len(before_journal.splitlines()) + 1
     assert run_shadow.check_projection_readiness(run_dir).ready
+
+
+@pytest.mark.parametrize("event_type", ["run.redaction.recorded", "task.accepted"])
+def test_rehashed_stored_request_digest_cannot_authorize_next_write(authoritative_task_run, event_type):
+    """Matching checkpoint identity cannot legitimize an inconsistent fact envelope."""
+    import hashlib
+
+    run_dir, workspace = authoritative_task_run
+    journal = run_dir / "events/lifecycle.jsonl"
+    events = run_journal.read_journal_bounded(journal).events
+    payload = {}
+    if event_type == "task.accepted":
+        payload = {
+            "task_id": "one",
+            "seat": "worker",
+            "payload_digest": "a" * 64,
+            "spec_digest": tasks.TaskSpec("one", "worker", "a" * 64).spec_digest,
+            "request_id": "request-one",
+        }
+    forged_digest = "b" * 64
+    checkpoint_payload = dict(
+        next(event for event in reversed(events) if event.event_type == run_checkpoint.CHECKPOINT_EVENT_TYPE).payload
+    )
+    checkpoint_payload["paired_event_type"] = event_type
+    checkpoint_payload.pop("pairing_key", None)
+    if event_type == "task.accepted":
+        checkpoint_payload["pairing_key"] = forged_digest
+        key = "forged-task-checkpoint"
+    else:
+        key = run_checkpoint._checkpoint_idempotency_key(
+            checkpoint_payload["sha256"],
+            paired_event_type=event_type,
+            body_kind=checkpoint_payload.get("body_kind"),
+            pairing_key=forged_digest,
+        )
+    checkpoint = run_journal.append_event(
+        journal,
+        run_id=run_dir.name,
+        event_type=run_checkpoint.CHECKPOINT_EVENT_TYPE,
+        payload=checkpoint_payload,
+        idempotency_key=key,
+        expected_previous_sequence=events[-1].sequence,
+        workspace=workspace,
+    )
+    fact = run_journal.append_event(
+        journal,
+        run_id=run_dir.name,
+        event_type=event_type,
+        payload=payload,
+        idempotency_key="actual-fact-key",
+        expected_previous_sequence=checkpoint.sequence,
+        workspace=workspace,
+    )
+    assert fact.request_digest != forged_digest
+    envelope = fact.to_dict()
+    envelope["request_digest"] = forged_digest
+    outer = {key: value for key, value in envelope.items() if key not in {"event_digest", "event_id"}}
+    envelope["event_digest"] = hashlib.sha256(run_events.canonical_bytes(outer)).hexdigest()
+    envelope["event_id"] = f"{fact.run_id}-{fact.sequence:06d}-{envelope['event_digest'][:12]}"
+    lines = journal.read_bytes().splitlines()
+    lines[-1] = run_events.canonical_bytes(envelope)
+    journal.write_bytes(b"\n".join(lines) + b"\n")
+
+    # Start mutation accounting after the forged bytes have reached storage.
+    before_journal = journal.read_bytes()
+    before_snapshot = (run_dir / "run.json").read_bytes()
+    before_shadow = run_shadow.shadow_artifact_path(run_dir).read_bytes()
+    candidate = json.loads(before_snapshot)
+    candidate["status"] = "dispatching"
+    with pytest.raises(run_lifecycle.LifecycleJournalError, match="^authority run journal is not chain-valid$"):
+        aboyeur._write_json(run_dir / "run.json", candidate)
+    report = run_journal.read_journal_bounded(journal)
+    assert any("request_digest does not match recomputed digest" in error for error in report.chain_errors)
+    assert report.events[-1] == checkpoint
+    assert journal.read_bytes() == before_journal
+    assert (run_dir / "run.json").read_bytes() == before_snapshot
+    assert run_shadow.shadow_artifact_path(run_dir).read_bytes() == before_shadow

@@ -604,11 +604,18 @@ def validate_event(env: Any) -> list[str]:
         return errors
 
     # Recompute digests and event_id for content binding (only when structurally valid).
+    assert isinstance(event_type, str)
+    assert isinstance(idempotency_key, str)
     try:
+        recomputed_request_digest = request_digest(
+            event_type=event_type, payload=env["payload"], idempotency_key=idempotency_key
+        )
         recomputed_digest = compute_event_digest(env)
     except CanonicalizationError as exc:
         errors.append(_bound(f"envelope is not canonicalizable: {exc}"))
         return errors
+    if request_digest_value != recomputed_request_digest:
+        errors.append("request_digest does not match recomputed digest")
     if event_digest != recomputed_digest:
         errors.append(_bound("event_digest does not match recomputed digest"))
     assert isinstance(run_id, str)
