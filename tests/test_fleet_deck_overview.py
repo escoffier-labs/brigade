@@ -326,7 +326,8 @@ def test_queue_exclusions_preserve_actionable_aggregates_and_identified_blocks(i
     if actionable:
         assert alerts[-1].detail == reason
     html = deck.render_deck(view, nonce="nonce", now=NOW)
-    assert (f"<strong>{count} alerts</strong>" in html) == bool(count)
+    noun = "alert" if count == 1 else "alerts"
+    assert (f"<strong>{count} {noun}</strong>" in html) == bool(count)
     summary = "3 excluded from ready queue" if actionable else "3 not ready"
     assert f"<details><summary>{summary}</summary>" in html and 'href="/deck/work"' in html
     readable = {"not-ready": "not ready", "blocker": "blocked", "attempt-limit": "reached the attempt limit"}[reason]
@@ -1067,7 +1068,8 @@ def test_render_deck_escapes_hostile_repo_in_sidebar_table_and_alerts():
     assert HOSTILE not in page
     alerts = _render_alerts(_view([station], rail=rail), NOW)
     assert HOSTILE not in alerts
-    assert (page + alerts).count("&lt;script&gt;alert(1)&lt;/script&gt;") >= 3
+    assert page.count("&lt;script&gt;alert(1)&lt;/script&gt;") >= 2
+    assert alerts.count("&lt;script&gt;alert(1)&lt;/script&gt;") >= 2
     assert page.count("<script") == 1
 
 
@@ -1392,6 +1394,9 @@ def test_overview_alert_line_groups_kinds_in_first_seen_order_and_hides_at_zero(
         authority=deck.AuthorityState("true", "active"),
     )
     assert overview.render_alert_line(_view(plane=clear), NOW) == ""
+    single = replace(_view(plane=clear), rail=view.rail[:1])
+    assert len(overview.page_alerts(single, NOW)) == 1
+    assert "<strong>1 alert</strong>" in overview.render_alert_line(single, NOW)
     page = overview.render_overview(view, NOW, worklore_enabled=True)
     assert 'class="alert-detail"' not in page and 'class="alerts"' not in page
     markers = [

@@ -62,9 +62,11 @@ def test_operator_copy_adds_escaped_evidence_prefix_and_keeps_editable_prompt_un
         "2000",
         "addEventListener",
         "textarea.value",
+        "execCommand('copy')",
     ):
         assert marker in script.group(1)
     assert not re.search(r"\son\w+=", rendered)
+    assert ".action-page .copy-prompt{" in rendered and "min-height:0" in rendered
     assert "fetch(" not in script.group(1)
 
 

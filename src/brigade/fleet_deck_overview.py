@@ -277,7 +277,7 @@ def render_alert_line(view: DeckView, now: datetime) -> str:
         counts[alert.kind] = counts.get(alert.kind, 0) + 1
     kinds = ", ".join(f"{count} {kind}" for kind, count in counts.items())
     return (
-        f'<p class="alert-line"><strong>{len(alerts)} alerts</strong> · {_esc(kinds)} '
+        f'<p class="alert-line"><strong>{_plural(len(alerts), "alert")}</strong> · {_esc(kinds)} '
         '<a href="/deck/alerts">Review</a></p>'
     )
 

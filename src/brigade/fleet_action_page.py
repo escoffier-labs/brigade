@@ -33,7 +33,16 @@ COPY_SCRIPT = (
     "await navigator.clipboard.writeText(text);"
     "button.textContent = 'Copied';"
     "setTimeout(function () { button.textContent = 'Copy prompt'; }, 2000);"
-    "} catch (error) { textarea.focus(); textarea.select(); }"
+    "} catch (error) {"
+    "var scratch = document.createElement('textarea');"
+    "scratch.value = text; scratch.setAttribute('readonly', '');"
+    "scratch.style.position = 'fixed'; scratch.style.opacity = '0';"
+    "document.body.appendChild(scratch); scratch.select();"
+    "var copied = false; try { copied = document.execCommand('copy'); } catch (ignored) { copied = false; }"
+    "scratch.remove();"
+    "if (copied) { button.textContent = 'Copied'; setTimeout(function () { button.textContent = 'Copy prompt'; }, 2000); }"
+    "else { textarea.focus(); textarea.select(); }"
+    "}"
     "});});}"
     "if (document.readyState === 'loading') { document.addEventListener('DOMContentLoaded', start); } else { start(); }"
     "})();"
@@ -56,7 +65,7 @@ def page(body: str, nonce: str, *, script: str = "") -> str:
         title="Agent repair",
         refresh=False,
         script=script,
-        extra_css=".action-page{max-width:60rem}.action-page textarea,.action-page select{max-width:100%;box-sizing:border-box}.action-page textarea{width:100%;min-height:14rem}.action-page pre,.action-page dd{white-space:pre-wrap;overflow-wrap:anywhere}.action-page dd{margin:0 0 1rem}.action-page dt{font-weight:700}.action-form{display:grid;gap:1rem;margin:1.5rem 0}.action-form button{min-height:40px;padding:0 18px;border:1px solid var(--signal);background:var(--signal-quiet);color:var(--ink);font:inherit;cursor:pointer;justify-self:start}.action-page details{margin:1rem 0}.prompt-label{display:flex;align-items:center;gap:var(--space-3)}.copy-prompt{padding:6px 12px;border:1px solid var(--line);border-radius:var(--radius-control);background:var(--surface-raised);color:var(--ink);font:inherit;cursor:pointer}",
+        extra_css=".action-page{max-width:60rem}.action-page textarea,.action-page select{max-width:100%;box-sizing:border-box}.action-page textarea{width:100%;min-height:14rem}.action-page pre,.action-page dd{white-space:pre-wrap;overflow-wrap:anywhere}.action-page dd{margin:0 0 1rem}.action-page dt{font-weight:700}.action-form{display:grid;gap:1rem;margin:1.5rem 0}.action-form button{min-height:40px;padding:0 18px;border:1px solid var(--signal);background:var(--signal-quiet);color:var(--ink);font:inherit;cursor:pointer;justify-self:start}.action-page details{margin:1rem 0}.prompt-label{display:flex;align-items:center;gap:var(--space-3)}.action-page .copy-prompt{min-height:0;justify-self:auto;padding:6px 12px;border:1px solid var(--line);border-radius:var(--radius-control);background:var(--surface-raised);color:var(--ink);font:inherit;cursor:pointer}",
     )
 
 

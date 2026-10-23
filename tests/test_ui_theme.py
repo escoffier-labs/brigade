@@ -302,3 +302,12 @@ def test_sidebar_machine_tree_has_no_bullets_and_only_state_words_take_state_col
     assert "list-style: none" in rules[".tree-list"]
     assert "color" not in rules[".tree-list"]
     assert "var(--signal)" in rules['.tree-row[data-status="stale"] .tree-meta']
+
+
+def test_machine_table_seen_header_stays_right_aligned_without_notes():
+    rules = {
+        selector.strip(): body
+        for selectors, body in re.findall(r"([^{}]+)\{([^{}]*)\}", ui_theme.OVERVIEW_CSS)
+        for selector in selectors.split(",")
+    }
+    assert "text-align: right" in rules[".machine-table--no-notes th:nth-child(4)"]

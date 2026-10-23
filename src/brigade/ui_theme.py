@@ -171,6 +171,9 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: 1; }
 .tree-row[data-status="unknown"] .tree-meta { color: var(--muted); }
 .tree-list, .tree-children { margin: 0; padding: 0; list-style: none; }
 .tree-row[hidden] { display: none; }
+.page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); }
+.page-head h1 { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); margin: 0; }
+.page-sub { margin: var(--space-1) 0 0; color: var(--muted); }
 .visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 .tree-line { display: flex; align-items: center; gap: var(--space-2); min-height: 28px; }
 .tree-label { flex: 1; min-width: 0; font-weight: 650; }
@@ -216,7 +219,7 @@ tbody tr:hover td { background: var(--surface-raised); }
 }
 """
 
-# Main-column rules for the Fleet overview page (/deck) only.
+# Main-column rules for the Alerts page (/deck/alerts) only.
 ALERTS_CSS = """
 .alerts-page .panel { margin-top: var(--space-4); }
 .alerts-table { min-width: 600px; }
@@ -230,9 +233,6 @@ ALERTS_CSS = """
 
 OVERVIEW_CSS = """
 .overview > * + * { margin-top: var(--space-4); }
-.page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); }
-.page-head h1 { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-3); margin: 0; }
-.page-sub { margin: var(--space-1) 0 0; color: var(--muted); }
 .verdict-status { font-size: 11px; font-weight: 800; }
 .verdict-status--attention { color: var(--signal); }
 .verdict-status--unknown { color: var(--muted); }
@@ -271,7 +271,7 @@ progress::-moz-progress-bar { background: var(--working); }
 .machine-table--no-notes th:nth-child(1) { width: 30%; }
 .machine-table--no-notes th:nth-child(2) { width: 34%; }
 .machine-table--no-notes th:nth-child(3) { width: 20%; }
-.machine-table--no-notes th:nth-child(4) { width: 16%; }
+.machine-table--no-notes th:nth-child(4) { width: 16%; text-align: right; }
 .session-table th:nth-child(n) { width: auto; }
 .machine-name { color: var(--ink); font-weight: 650; }
 .sub-inline { margin-left: var(--space-2); color: var(--faint); font-size: 12px; }

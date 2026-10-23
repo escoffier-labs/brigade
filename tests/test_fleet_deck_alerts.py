@@ -88,3 +88,4 @@ def test_alerts_page_ships_its_own_table_styles():
     assert ".alert-detail { display: block;" in style
     assert ".alerts-table th:nth-child(1)" in style
     assert ".visually-hidden {" in style
+    assert ".page-sub {" in style
