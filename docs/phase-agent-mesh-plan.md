@@ -8,9 +8,11 @@ Each slice below is one pull request that a worker lane can pick up on its own
 once the slices it depends on have merged. Slices list the files they touch,
 the tests they add and what must be true before they merge. Slice numbers
 from revision 1 are kept so review comments still resolve. New slices carry a
-letter suffix. Revision 3 adds no slices. It changes the contents of slices
-1 to 3, 5 to 12c, 16 and 17, and the dependency headers. Every slice runs the focused gate through Brigade with its own
-test selectors:
+letter suffix. Revisions 3 and 4 add no slices. Revision 3 changed the
+contents of slices 1 to 3, 5 to 12c, 16 and 17, and the dependency headers.
+Revision 4 changes slices 2, 2b, 5, 6, 7, 7b, 10, 11, 13 and 16, and adds
+`7b -> 11` to the dependency order. Every slice runs the focused gate through
+Brigade with its own test selectors:
 
 ```bash
 brigade work verify run --target . --argv-json '["./scripts/verify-focused","<selectors>"]' --capture brigade-work
@@ -43,7 +45,7 @@ branch.
   bounded spike, slice 15b writes the wire protocol, and slices 18a to 18e
   start only after slice 15 records a go and slice 15b is merged.
 - **G3, open questions: decided.** Design "Decisions on the open questions"
-  records all twelve.
+  records all fourteen.
 - **G4, `wrangler` for CI: approved** by the conductor on PR #2013
   (2026-10-22, decision 6, under the operator's delegation of best-practice
   calls). `wrangler` is a pinned development dependency of
@@ -84,7 +86,7 @@ branch.
 6 + #1951 -> 7b
 8;  3 + 8 -> 9
 2 + 2b + 5 + 6 + 9 -> 10
-4 + 9 + #1939 + #1951 + #2009 + #2010 -> 11 -> 12a -> 12b -> 12c -> 13 -> 14 (14 also needs 10)
+4 + 7b + 9 + #1939 + #1951 + #2009 + #2010 -> 11 -> 12a -> 12b -> 12c -> 13 -> 14 (14 also needs 10)
 15 -> 15b
 #1939 + #1951 + #2009 + #2010 -> 16
 1 + 2 + 5 + 6 + 15b + 16 -> 17
@@ -124,6 +126,21 @@ Round 3:
 | 7. Hub identity lineage | D2, D4, D5 | 2b, 5 |
 | 8. Backend contract and `fleet_ask_user` | D7, D11, D12 | 12c, 16, 17 |
 | 9. Frozen PQ wire profile | D1 | 1 |
+
+Round 4:
+
+| Finding | Design | Slices |
+|---|---|---|
+| S1. Membership removal for existing pins | D3, D5, D6 | 2, 5, 6 |
+| S2. Outbound confidentiality from the wrong key | D5, D6 | 5, 6 |
+| S3. Receipt clock bound | D3 | 5 |
+| S4. Slice 11 needs the question flow | this plan | 11 |
+| S5. Question retry after response loss | D5, D7 | 7b |
+| Reply identity across a hub migration | D7 | 7b |
+| Signed backend identification | D4, D11 | 2b, 13, 16 |
+| Multi-use invites in the threat table | threat model | none (docs) |
+| Fresh-station membership limitation | D3, D9 | 2, 7, 10 |
+| Earlier `compromised_from` suppresses history | threat model | 7 |
 
 ## #2005: sealed message bodies
 
@@ -214,14 +231,17 @@ Files:
   `compromised_from` handling with the earlier-wins rule, the manifest key
   pin, membership manifests, key manifests, revocation statements,
   fingerprint-list verification, the per-kind high-water marks
-  (`signed_statement_rollback`, `signed_statement_conflict`), and pruning.
+  (`signed_statement_rollback`, `signed_statement_conflict`), the optional
+  trusted membership floor, membership checked at every use of an `observed`
+  key with the computed `observed_not_member` status, and pruning.
   File handling follows `read_message_token_file` and
   `src/brigade/authority_key.py`.
 - `src/brigade/cli/fleet_keys.py` (new), registered from `cli/fleet.py`:
   `fleet keys show`, `rotate`, `accept <principal> --fingerprint <fp>`,
   `accept --manifest <file>`, `accept --fingerprints <file>`,
   `trust-manifest-key --fingerprint <fp>`, `manifest sign` and `membership
-  sign` (admin machine), `membership import <file>`, `revoke-statement sign`
+  sign` (admin machine), `membership import <file>`, `membership require
+  --seq <n> --sha256 <digest>`, `revoke-statement sign`
   and `import`, and `prune`. No `--all-changed`. `rotate` writes locally until slice 6.
 
 Tests (`tests/test_fleet_mesh_keys.py`):
@@ -236,6 +256,21 @@ Tests (`tests/test_fleet_mesh_keys.py`):
   key manifest signed by the operator that lists T's fingerprint makes T
   `verified` on C.
 - No membership manifest: every first key is `unverified`.
+- Removal: manifest 7 lists P and P is pinned `observed`. Accepting manifest
+  8 without P makes P `observed_not_member`, and the pin and key history are
+  unchanged. Manifest 9 listing P again makes it `observed`, and a
+  fingerprint acceptance makes it `verified`, which manifest 10 without P does
+  not change.
+- Removal and restart: after manifest 8 is accepted, a restart still reports
+  P as `observed_not_member`, and replaying manifest 7 is refused with
+  `signed_statement_rollback`.
+- Continuity after removal: while P is removed, the hub serving an unrelated
+  key for P makes the pin `changed`, and a later manifest listing P leaves it
+  `changed`. A valid successor chain instead advances the pin, and relisting
+  makes the new kid `observed`.
+- Trusted floor: with a floor of `seq` 8 and its digest, manifest 7 is
+  refused, a different manifest at `seq` 8 is refused, and until a manifest at
+  or above 8 is accepted every unconfirmed key is `unverified`.
 - A membership manifest signed by any key other than the pinned manifest key
   is refused whole, and changing the hub-reported role of a listed or an
   unlisted principal never changes its status.
@@ -267,7 +302,8 @@ subcommands.
 
 Files:
 - `src/brigade/fleet_mesh_hub_identity.py` (new): identity statement signing
-  and verification, the hub id derivation, the endpoint-to-identity store (a
+  and verification including the signed `backend` and `capabilities` fields,
+  the hub id derivation, the endpoint-to-identity store (a
   separate file from the pin store) with its authenticated lineage, migration
   statements, the identity statement high-water mark, and the
   `hub_identity_changed` and `hub_identity_superseded` refusals.
@@ -287,7 +323,13 @@ Tests (`tests/test_fleet_mesh_hub_identity.py`):
 - Rollback: after identity statement `seq` 3 is accepted, a statement with
   `seq` 2 (for example one with `require_sealed` off or a larger
   `max_envelope_bytes`) is refused with `signed_statement_rollback`, and a
-  different statement at `seq` 3 with `signed_statement_conflict`.
+  different statement at `seq` 3 with `signed_statement_conflict`. The same
+  holds for a lower-`seq` statement that changes only `backend` or
+  `capabilities`.
+- Backend fields: a statement with `backend` outside `full` and `hub-lite`, or
+  with unsorted or duplicate capabilities, is refused as malformed. An
+  unknown capability name is ignored, and changing either field after signing
+  breaks the signature.
 - Lineage: after a signed migration from `h_old` to `h_new`, an envelope
   signed under `h_old` before the migration verifies against the key history
   recorded under `h_old`. One signed under `h_old` with a `created_at` after
@@ -388,14 +430,18 @@ Files:
   order of design D6, with the required `inbound` or `outbound` context and
   `open_context_mismatch`, the seen-id cache with its start time and
   `unchecked` label, freshness and `MAX_FUTURE_SKEW`, hub identity lineage,
-  revoked-key history, tombstones, legacy labels, structural pattern checks
-  and the failed-row shape.
+  revoked-key history, `sender_key_not_member`, per-envelope confidentiality
+  by context, tombstones, legacy labels, structural pattern checks and the
+  failed-row shape.
 - `src/brigade/fleet_mesh_receipts.py` (new): the append-only receipt log of
-  design D3, insert-only triggers, local UTC receive times, the skew rule, and
-  pruning limited to rows past the freshness window whose kid is not revoked.
+  design D3, insert-only triggers, local UTC receive times, the measured
+  clock offset stored with each receipt, the strict
+  `MAX_RELATIVE_SKEW` plus `TIMESTAMP_PRECISION` rule, and pruning limited to
+  rows past the freshness window whose kid is not revoked.
 - `src/brigade/fleet_mesh_pending.py` (new): the local pending request store
-  keyed by the full `(hub, from, client_id)` triple, and reply linking
-  (design D5).
+  keyed by the full `(hub, from, client_id)` triple, the outbox records with
+  the recipient kid and its trust status at seal time, the ask idempotency
+  records, and reply linking (design D5).
 - `src/brigade/fleet_client_messages.py`: every call site passes its context
   from the D6 table. `send()` and `reply()` return rows, `sent_lookup` and
   `sent()` use `outbound`. `list_messages()` (with `open_limit`), `ack()`
@@ -443,6 +489,19 @@ Tests:
   - Third station: mail from a teammate, or from a principal the membership
     manifest does not list, opens as `sender_key_unverified` on a station that
     did not create the invite, whatever role the hub reports.
+  - Removal: after the station accepts a manifest that drops P, mail from
+    P's `observed` key opens as `sender_key_not_member`, including mail
+    received while P was listed, and a reply from P links nothing. After a
+    restart it still opens that way. When a later manifest lists P again,
+    the same mail opens normally.
+  - Confidentiality per envelope: a station whose own key is `verified`
+    sealing to an `observed` recipient key gets `confidentiality:
+    "opportunistic"` on the `outbound` row, and `end_to_end` for a `verified`
+    recipient key. The label comes from the outbox record, so verifying or
+    changing the recipient pin later does not change it. An outbound row
+    with no outbox record takes the kid's status from the pin store, and
+    `unknown` when the kid is not there. An inbound row's label follows the
+    sender key.
   - Contexts: each call site in the D6 table passes the context the table
     names (asserted per function). A station's own sent row opens in
     `outbound` with `direction: "outbound"`, and the same row passed to
@@ -454,8 +513,16 @@ Tests:
     opens as `sender_key_revoked`.
   - A message received at 09:30 with its digest in the receipt log, from a key
     later revoked from 10:00, opens as history with `key.status: "revoked"`
-    and `history: "received_before_compromise"`. One received at 09:57,
-    inside the 5 minute skew window, opens as `sender_key_revoked`.
+    and `history: "received_before_compromise"`. One received at 09:57 opens
+    as `sender_key_revoked`.
+  - Boundary, with `compromised_from` 10:00:00, a 10 minute
+    `MAX_RELATIVE_SKEW` and 1 second precision: a receipt at 09:49:58
+    (immediately before the bound) is history, and receipts at 09:49:59
+    (exactly at it) and 09:50:00 (immediately after) open as
+    `sender_key_revoked`.
+  - A receipt recorded while the measured clock offset exceeded 5 minutes,
+    or with no offset measured in the previous 24 hours, never qualifies,
+    whatever its receive time.
   - A message with a receipt for a different digest under the same triple,
     or with no receipt (a fresh station), opens as `sender_key_revoked`.
   - Revoked-key history never links or completes a pending request, carries
@@ -474,10 +541,12 @@ Tests:
 - `tests/test_dot_inbox_tools.py`: a forged `reply_to` does not match, a
   failed row does not raise, and the Dot tool output for a stored row shows
   its key status, confidentiality, authenticity, replay and reply labels. A
-  row stored before the migration shows `authenticity: unknown`.
+  row stored before the migration shows `authenticity: unknown`. A stored
+  outbound row sealed to an `observed` recipient renders `opportunistic`.
 - `tests/test_fleet_messages.py`: `legacy_message()` output keeps the label
-  fields, and the views its consumers render (the Dot inbox tools and the
-  Grok Bot T3 inbox) show them.
+  fields, including the per-envelope confidentiality of an outbound row, and
+  the views its consumers render (the Dot inbox tools and the Grok Bot T3
+  inbox) show them.
 
 Acceptance: the "tampered ciphertext or wrong signer is rejected before the
 agent sees the text" bullet of #2005 holds, and every trust label reaches the
@@ -489,7 +558,9 @@ blocked.
 Files:
 - `src/brigade/fleet_mesh_send.py` (new): the seal decision table, key lookup
   through pins and `who`, the downgrade rule, a fresh content key on every
-  seal, `rc`, local reply construction, pending request records, and retry
+  seal, `rc`, local reply construction, pending request records, the outbox
+  record of the recipient kid and its trust status written before the first
+  transmission, and retry
   recovery (409 with id, `sent_lookup`, header verification, `rc` comparison,
   the wrap fallback and `content_unverifiable`).
 - `src/brigade/fleet_client_messages.py`: `send()`, `reply()` and the spool
@@ -504,7 +575,16 @@ Files:
 
 Tests (`tests/test_fleet_mesh_send.py`):
 - Every row of the decision table, including `observed` with and without
-  require-verified, `unverified`, `pending_binding` and `changed`.
+  require-verified, `observed_not_member`, `unverified`, `pending_binding`
+  and `changed`.
+- Removal: after a manifest drops P, a send to P fails with
+  `recipient_key_not_member` and nothing is spooled as plain text. A spooled
+  sealed send to P drains with the same refusal after the manifest arrives.
+- Confidentiality on every send surface: sealing to an `observed` recipient
+  key labels the `send()` and `reply()` responses, the `fleet_sent` and CLI
+  sent lists, and a `sent_lookup` retry recovery `opportunistic`, and sealing
+  to a `verified` key labels them `end_to_end`. The label survives a restart
+  and a retry that reseals.
 - Retry recovery verifies the `sent_lookup` row in the `outbound` context,
   and a reply opens its original in the `inbound` context.
 - The spool holds the sealed envelope before the first request, and a forced
@@ -542,8 +622,12 @@ that ask_user answers are hub-trusted. A visible section titled
 peers is readable by a hub that substituted the key on first contact, shows
 the `confidentiality: opportunistic` label as each surface renders it, and
 recommends `BRIGADE_FLEET_MESSAGES_REQUIRE_VERIFIED=1` for anyone who
-verifies fingerprints. The revocation section explains `compromised_from`,
-the receipt rule and that history never confers authority.
+verifies fingerprints. The membership section explains removal and
+`observed_not_member`, the fresh-station limitation of the rollback rule and
+the optional trusted floor. The revocation section explains
+`compromised_from`, the receipt rule and its clock assumption, that history
+never confers authority, and that a hub reporting an earlier
+`compromised_from` can suppress history but never grant authority.
 
 Acceptance: `brigade guard scan` with
 `src/brigade/guard/policies/public-repo.json` is clean, Vale reports no
@@ -554,7 +638,9 @@ errors, and the documented-command inventory test passes.
 Files:
 - `src/brigade/fleet_ask_user.py`: the question goes out as a sealed `kind:
   question` envelope with a signed deadline through `fleet_mesh_send`, not
-  `messages._online()`. `_terminal()` is replaced by one verification function
+  `messages._online()`. The ask idempotency record (design D5) is persisted
+  before the first transmission and reused for every retry with the same
+  `request_id`. `_terminal()` is replaced by one verification function
   used for hub-inbox and desktop answers (design D7).
 - `src/brigade/fleet_hub_questions.py`: `question_create` takes the envelope.
   The hub no longer builds the message. `fleet_questions` drops `question`,
@@ -575,6 +661,17 @@ Tests (`tests/test_fleet_ask_user_sealed.py`):
   pending question, signed after the deadline, sent to another principal, or
   signed by an `observed` operator key is not.
 - A replayed operator answer from an earlier question is refused.
+- Retry after response loss: the first public `ask()` call stores the
+  question and the client sees a timeout. The clock advances by a minute and a
+  second `ask()` with the same `request_id` and arguments returns the existing
+  question, with the original `client_id` and deadline, and no conflict. The
+  same holds after a process restart between the two calls. A second `ask()`
+  with the same `request_id` and a different question or timeout gets
+  `question_request_conflict` without a hub request.
+- Across a hub migration: a question asked under `h_old` and answered by the
+  operator after a signed migration to `h_new`, with `in_reply_to` naming the
+  `h_old` triple, is authenticated. An answer whose `in_reply_to` names the
+  same `(from, client_id)` under any hub id outside the lineage is not.
 - A desktop answer without an operator signature is fenced and not
   authenticated. A desktop answer signed with the operator's own key on the
   same machine is authenticated.
@@ -735,6 +832,9 @@ Tests (`tests/test_fleet_mesh_invites.py`):
 - `fleet join` refuses a token passed as a positional argument, and the token
   never appears in logs or error text.
 - `invite create --as` a principal whose key is not local is refused.
+- Membership floor: a token with `m<seq>-<digest>` makes the joiner refuse a
+  hub-served manifest below that `seq` or with a different digest at it, and
+  a token without the field joins as before.
 - A `--bootstrap` token joins a fresh hub, and the next invite comes from the
   joined machine.
 - A pre-mesh principal listed in the membership manifest is `observed`, and
@@ -746,7 +846,7 @@ the hub") holds, using the slice 6 database dump with a teammate sender.
 
 ## #2008: Hub Lite
 
-### Slice 11: hub contract suite (needs 4 and 9, waits for #1939, #1951, #2009 and #2010)
+### Slice 11: hub contract suite (needs 4, 7b and 9, waits for #1939, #1951, #2009 and #2010)
 
 Files:
 - `tests/contract/fleet_hub_contract.py` (new): a backend-neutral HTTP suite
@@ -756,9 +856,10 @@ Files:
   `who`, sealed `send`, `list` with `wait_ms`, `count`, `ack`, `reply`,
   `sent`, `sent_lookup`, key publish and revoke, role restrictions, the
   envelope cap, admission errors, and the no-plaintext storage check, with
-  two nodes. A capability flag per backend selects the question section:
-  the full hub must run the D7 question flow, and Hub Lite must answer every
-  `question_*` action and `/claims` with 404.
+  two nodes. The signed `capabilities` of each backend's identity statement
+  select the question section: the full hub must run the D7 question flow
+  from slice 7b, and Hub Lite must answer every `question_*` action and
+  `/claims` with 404.
 - `tests/test_fleet_hub_contract_python.py` (new): runs it against the Python
   hub.
 - `scripts/hub-contract` (new): runs it against a URL.
@@ -820,7 +921,8 @@ Files: `workers/hub-lite/src/fleet.js`, `src/brigade/fleet_session_presence.py`
 and `src/brigade/fleet_inbox_delivery.py`, with tests.
 - `POST /sessions` and `GET /sessions`, heartbeats in memory, rows written only
   on state, repository or branch change or once per third of the TTL.
-- Client throttles applied when the identity statement reports a Hub Lite: one
+- Client throttles applied when the signed identity statement reports
+  `backend: "hub-lite"`: one
   heartbeat per session per 60 seconds unless state changes, and a 60 second
   delivery poll.
 
@@ -882,8 +984,9 @@ Files:
 - `src/brigade/fleet_backend.py` (new): a `MessageBackend` protocol covering
   all eight tools, including `ask_user` and `count`, and `HubBackend` wrapping
   the existing client functions. The protocol has a `capabilities()` method
-  so Hub Lite (reported by its identity statement) answers `ask_user` and
-  `claims` with `hub_feature_unavailable` without a network call.
+  that reads the signed `capabilities` of the accepted identity statement
+  (design D4), so Hub Lite answers `ask_user` and `claims` with
+  `hub_feature_unavailable` without a network call.
 - `src/brigade/fleet_mcp.py`, `src/brigade/fleet_inbox_delivery.py`,
   `src/brigade/fleet_ask_user.py` and `src/brigade/cli/fleet_messages.py`:
   call through the backend.
@@ -892,7 +995,8 @@ Tests: the existing MCP and delivery tests pass unchanged, `tool_specs()` is
 identical for every backend and lists eight tools including
 `fleet_ask_user`, and against a Hub Lite identity `fleet_ask_user` and
 `fleet_claims` return `{"code": "hub_feature_unavailable", "permanent":
-true}`.
+true}` with zero requests. A full hub statement without `claims` in
+`capabilities` makes `fleet_claims` return the same code.
 
 Acceptance: pure refactor.
 
