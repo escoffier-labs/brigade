@@ -1827,7 +1827,7 @@ _STATE_CONTRACT_DOC: tuple[str, ...] = (
     "`evidence_outcome`, and text output shows `[state | level/outcome]`.",
     "",
     "Migration from `brigade.evidence_controls.v1`: existing key names remain, but NIST `control_id` values "
-    "use spaces instead of hyphens and reviewed rows are remapped or removed. `crosswalk_version` is 2; "
+    "use spaces instead of hyphens and reviewed rows were remapped or removed in crosswalk version 2; "
     "the template schema remains `brigade.control_crosswalk.v1`. New root keys are `relationship_semantics`, "
     "`integrity_boundary`, `unmapped_evidence_properties`, `readiness_contract`, `assessment_period` and "
     "`evidence_readiness`. Mapping rows add `validation_level`, `evidence_outcome` and provenance fields. "
