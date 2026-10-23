@@ -385,9 +385,12 @@ Readers MUST reject every other spelling. Continuity compares instants after
 applying the offset, not the timestamp strings.
 
 All envelope authentication entry points MUST accept raw bytes through
-`parse_envelope(raw: bytes)` before any normalization. Before allocating a JSON
-tree, it MUST reject more than 99,328 bytes (the 96 KiB envelope cap plus a
-fixed 1024-byte parsing margin) and container nesting deeper than four levels,
+`parse_envelope(raw: bytes)` before any normalization. The raw envelope MUST
+be ASCII; non-ASCII bytes are rejected before parsing. Readers MUST also reject
+NUL bytes before the structural scan, decode as ASCII and pass text to the JSON
+parser so encoding auto-detection cannot run. Before allocating a JSON tree, it
+MUST reject more than 99,328 bytes (the 96 KiB envelope cap plus a fixed
+1024-byte parsing margin) and container nesting deeper than four levels,
 counting the root object as level one. JSON objects MUST reject duplicate keys
 recursively, including the root, `in_reply_to` and every recipient object.
 The parser MUST validate the envelope schema, including binary lengths,

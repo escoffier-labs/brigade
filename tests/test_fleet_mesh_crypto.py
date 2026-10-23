@@ -742,6 +742,7 @@ def test_empty_ref_survives_codec_and_has_distinct_retry_commitment(parties):
 def test_parse_envelope_accepts_only_canonical_bytes(parties):
     envelope = sealed(parties)
     raw = mesh.canonical(envelope)
+    assert raw.isascii() and b"\x00" not in raw
     assert mesh.parse_envelope(raw) == envelope
     assert opened(raw, parties) == PAYLOAD
     with pytest.raises(mesh.MeshError, match="envelope_malformed"):
@@ -779,6 +780,45 @@ def test_parse_envelope_bounds_size_and_depth_before_json_allocation(monkeypatch
         mesh.parse_envelope(b" " * (mesh.MAX_ENVELOPE_BYTES + 1025))
     with pytest.raises(mesh.MeshError, match="envelope_malformed"):
         mesh.parse_envelope(b"[" * 10000 + b"]" * 10000)
+
+
+def test_parse_envelope_rejects_utf16_sentinel_depth_bypass_before_json(monkeypatch):
+    # U+0122 contributes an extra 0x22 to each sentinel in UTF-16LE. The
+    # byte scanner then treats the nested array as part of a quoted string.
+    text = '{"a":"\u0122","b":' + "[" * 200 + "0" + "]" * 200 + ',"c":"\u0122"}'
+    raw = text.encode("utf-16-le")
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("UTF-16 sentinel depth bypass reached JSON allocation")
+
+    monkeypatch.setattr(mesh.json, "loads", forbidden)
+    with pytest.raises(mesh.MeshError, match="envelope_malformed"):
+        mesh.parse_envelope(raw)
+
+
+@pytest.mark.parametrize(
+    "raw",
+    ['{"a":"x"}'.encode(encoding) for encoding in ("utf-16-le", "utf-16-be", "utf-32-le", "utf-32-be")]
+    + [
+        bom + '{"a":"x"}'.encode(encoding)
+        for bom, encoding in (
+            (b"\xff\xfe", "utf-16-le"),
+            (b"\xfe\xff", "utf-16-be"),
+            (b"\xff\xfe\x00\x00", "utf-32-le"),
+            (b"\x00\x00\xfe\xff", "utf-32-be"),
+            (b"\xef\xbb\xbf", "utf-8"),
+        )
+    ]
+    + [b'{"a":"' + bytes([byte]) + b'"}' for byte in range(0x80, 0x100)]
+    + [b'{"a":"\x00"}'],
+)
+def test_parse_envelope_rejects_non_ascii_or_nul_before_json(raw, monkeypatch):
+    def forbidden(*args, **kwargs):
+        pytest.fail("non-ASCII or NUL input reached JSON allocation")
+
+    monkeypatch.setattr(mesh.json, "loads", forbidden)
+    with pytest.raises(mesh.MeshError, match="envelope_malformed"):
+        mesh.parse_envelope(raw)
 
 
 @pytest.mark.parametrize("mutation", ["unknown", "missing", "bad_wrap", "partial_content"])

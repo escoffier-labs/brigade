@@ -486,6 +486,8 @@ def parse_envelope(raw: bytes) -> dict[str, Any]:
     """
     _require(isinstance(raw, bytes))
     _require(len(raw) <= MAX_RAW_ENVELOPE_BYTES, "message_too_large")
+    _require(raw.isascii() and b"\x00" not in raw)
+    text = raw.decode("ascii")
     depth, quoted, escaped = 0, False, False
     for byte in raw:
         if quoted:
@@ -505,7 +507,7 @@ def parse_envelope(raw: bytes) -> dict[str, Any]:
             _require(depth >= 0)
     _require(depth == 0 and not quoted)
     try:
-        envelope = json.loads(raw, object_pairs_hook=_unique_object)
+        envelope = json.loads(text, object_pairs_hook=_unique_object)
     except (ValueError, UnicodeError, RecursionError):
         raise MeshError("envelope_malformed") from None
     _require(isinstance(envelope, dict))

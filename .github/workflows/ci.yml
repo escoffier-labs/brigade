@@ -38,6 +38,7 @@ jobs:
               - 'tests/test_fleet_mesh_*.py'
               - 'tests/mesh_hpke_reference.py'
               - 'tests/fixtures/mesh/**'
+              - 'docs/phase-agent-mesh.md'
               - 'pyproject.toml'
               - '.github/workflows/ci.yml'
             code_graph:

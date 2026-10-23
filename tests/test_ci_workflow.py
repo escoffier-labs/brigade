@@ -1857,14 +1857,16 @@ def test_mesh_jobs_are_protected_and_path_filtered():
         "mesh: ${{ github.event_name == 'merge_group' && 'true' || github.event_name == 'push' && 'true' || steps.filter.outputs.mesh }}"
         in changes
     )
+    mesh_filter = changes.split("            mesh:\n", 1)[1].split("            code_graph:", 1)[0]
     for path in (
         "src/brigade/fleet_mesh_*.py",
         "tests/test_fleet_mesh_*.py",
         "tests/mesh_hpke_reference.py",
         "tests/fixtures/mesh/**",
+        "docs/phase-agent-mesh.md",
         "pyproject.toml",
     ):
-        assert "'" + path + "'" in changes
+        assert "'" + path + "'" in mesh_filter
     gate = _workflow_job_section(text, "ci-gate")
     for job in ("mesh-compatibility", "mesh-cross-version", "mesh-without-extra"):
         section = _workflow_job_section(text, job)
