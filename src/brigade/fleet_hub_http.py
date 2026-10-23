@@ -37,6 +37,7 @@ from . import fleet_hub_routing
 from . import fleet_hub_status
 from . import fleet_hub_event_bounds as request_bounds
 from .fleet_hub_claim_cardinality import ClaimCardinalityError
+from .fleet_hub_http_reject import RejectedUploadMixin
 from . import fleet_model_inventory
 from . import fleet_owners
 from . import fleet_owners_page
@@ -222,7 +223,7 @@ def make_handler(
     """
     frozen_deck = deck_config if deck_config is not None else fleet_command_deck.DeckConfig()
 
-    class _Handler(BaseHTTPRequestHandler):
+    class _Handler(RejectedUploadMixin):
         server_version = "brigade-fleet-hub/1"
         sys_version = ""
         # Idle-socket guard: a peer that connects and never sends a request
@@ -1772,6 +1773,7 @@ def make_handler(
                         caller=caller_node,
                         open_conn=lambda: open_db(Path(db_path)),
                         source_ip=self.client_address[0],
+                        authenticated_generation=_hub.hash_node_token(self._bearer() or ""),
                     )
                 elif path == "/message-principals":
                     status, body_payload = fleet_hub_messages.handle_principal_admin(conn, parsed)
@@ -1891,7 +1893,10 @@ def make_handler(
                 self._send_json(403, {"error": str(exc), "code": exc.code})
                 return
             except fleet_hub_messages.MessageError as exc:
-                self._send_json(400, {"error": str(exc)})
+                payload = {"error": str(exc)}
+                if exc.code is not None:
+                    payload["code"] = exc.code
+                self._send_json(400, payload)
                 return
             except FleetHubForbidden as exc:
                 self._send_json(403, {"error": str(exc)})

@@ -1670,14 +1670,14 @@ _STYLE = """
 .cloud-worker-card h3 .badge, .attention-list li .badge { margin-right: 6px; }
 .tile-facts { display: grid; grid-template-columns: auto minmax(0, 1fr); gap: var(--space-1) 10px; margin: 10px 0 0; color: var(--muted); font-size: 12px; }
 .tile-facts dt { color: var(--muted); }
-.tile-facts dd { min-width: 0; margin: 0; }
+.tile-facts dd { min-width: 0; margin: 0; color: var(--ink); }
 .work-text { white-space: pre-wrap; overflow-wrap: anywhere; }
 .work-item h2, .work-item li { overflow-wrap: anywhere; }
 .work-item h3, .owner-card h3 { margin-top: var(--space-4); }
 .claim, .collision { margin: 10px 0 0; font-size: 12px; }
 .collision { color: var(--signal); font-weight: 800; }
 .cloud-workers { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: var(--space-4); margin-top: var(--space-4); }
-.cloud-worker-card { min-width: 0; padding: var(--space-4); border: 1px solid var(--line-quiet); background: var(--surface); }
+.cloud-worker-card { min-width: 0; padding: var(--space-4); border: 1px solid var(--line); border-radius: var(--radius-card); background: var(--surface); }
 .cloud-worker-card > header { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-2); margin-bottom: 10px; }
 .cloud-capacity { margin: 0; color: var(--signal); font-size: 12px; font-weight: 700; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .cloud-state { margin: 0 0 10px; color: var(--muted); font-size: 12px; }
@@ -1792,14 +1792,14 @@ def _document(
     *view* feeds the sidebar machine tree; pages that never build a
     ``DeckView`` pass ``None`` and get the navigation only.
     """
-    # Imported here because fleet_deck_overview imports this module for its types.
-    from . import fleet_deck_overview
+    # Imported here because the sidebar imports this module for its types.
+    from . import fleet_deck_sidebar
 
     if worklore_enabled is None:
         from . import worklore_http
 
         worklore_enabled = worklore_http.enabled()
-    sidebar = fleet_deck_overview.render_sidebar(view, active, now, worklore_enabled=worklore_enabled)
+    sidebar = fleet_deck_sidebar.render_sidebar(view, active, now, worklore_enabled=worklore_enabled)
     return fleet_deck_shell.deck_page(
         title,
         active,

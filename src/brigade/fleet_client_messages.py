@@ -198,6 +198,7 @@ def _rejection(status: int, payload: dict[str, Any]) -> str:
         "message_not_found": "message not found",
         "principal_enrollment_changed": "principal generation changed",
         "principal_enrollment_revoked": "principal generation changed",
+        "paging_cursor_expired": "paging cursor expired; restart from the first page",
     }
     code = payload.get("code")
     if isinstance(code, str) and code in descriptions:
@@ -223,6 +224,31 @@ def _online(body: dict[str, Any], *, authority: MessageAuthority, timeout: float
         status, payload = _transport(authority, body, timeout=_request_timeout(timeout))
     finally:
         authority.validate()
+    if (
+        status == 400
+        and body.get("action") in {"who", "claims"}
+        and ("limit" in body or "cursor" in body)
+        and payload.get("code") is None
+        and payload.get("error") == "invalid station read arguments"
+    ):
+        # Older hubs reject paging keys before reading either directory.
+        # The retry carries no paging keys, which also bounds it to one.
+        if "cursor" in body:
+            # An unpaged retry would return page one as if it were this continuation,
+            # duplicating rows when the hub was rolled back mid-walk. Restart instead.
+            raise FleetMessageHubError(
+                _rejection(400, {"code": "paging_cursor_expired"}), status=400, code="paging_cursor_expired"
+            )
+        legacy = _online(
+            {key: value for key, value in body.items() if key != "limit"},
+            authority=authority,
+            timeout=timeout,
+        )
+        if legacy.get("truncated") is True:
+            raise FleetMessageHubError(
+                "Fleet hub does not support directory continuation.", code="paging_continuation_unsupported"
+            )
+        return legacy
     if not 200 <= status < 300:
         raise FleetMessageHubError(
             _rejection(status, payload),
@@ -525,6 +551,22 @@ def identity(
     ):
         raise fleet_client.FleetClientError("fleet hub returned an invalid message identity")
     return payload
+
+
+def unread_count(
+    *,
+    token_file: str | None = None,
+    timeout: float | None = None,
+    authority: MessageAuthority | None = None,
+    expected_scope: str | None = None,
+) -> dict[str, Any]:
+    """Read this credential's total unacknowledged inbox depth without bodies."""
+    authority = _authority(authority, token_file, expected_scope)
+    payload = _online({"action": "count"}, authority=authority, timeout=timeout)
+    count = payload.get("unread_count")
+    if not _message_limits._sqlite_integer(count, allow_zero=True):
+        raise fleet_client.FleetClientError("fleet hub returned an invalid unread count")
+    return {"unread_count": count}
 
 
 def list_messages(

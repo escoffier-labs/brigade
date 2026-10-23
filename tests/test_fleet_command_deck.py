@@ -12,6 +12,8 @@ from contextlib import contextmanager
 
 import pytest
 
+from brigade.fleet_deck_icons import NAV_ICONS
+
 from brigade import fleet_command_deck as deck
 from brigade import fleet_repo_policy_page as repos_page
 from brigade import fleet_hub
@@ -837,7 +839,7 @@ def test_command_deck_is_root_and_legacy_boards_stay_under_view(tmp_path):
         assert 'href="/view/machines"' in root and 'href="/view/repos"' in root
         # Root is the deck itself, so the sidebar marks Overview current; what
         # must not exist is a legacy board served from root.
-        assert '<a href="/deck" aria-current="page">overview <span class="nav-count">' in root
+        assert f'<a href="/deck" aria-current="page">{NAV_ICONS["overview"]}overview <span class="nav-count">' in root
         assert 'href="/machines"' not in root and 'href="/repos"' not in root
         for path, title in (
             ("/view/machines", "Fleet: Machines"),
@@ -1141,7 +1143,7 @@ def test_command_deck_asset_routes_and_metadata(tmp_path):
             assert '<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"' in body
             assert '<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"' in body
             assert '<link rel="manifest" href="/site.webmanifest"' in body
-            assert '<meta name="theme-color" content="#111617"' in body
+            assert '<meta name="theme-color" content="#0a0a0a"' in body
             assert '<meta name="application-name" content="Fleet Hub"' in body
             assert '<meta name="apple-mobile-web-app-title" content="Fleet Hub"' in body
 
@@ -1706,5 +1708,5 @@ def test_deck_http_joins_stations_to_telemetry_by_node_id(tmp_path):
         alpha = next(row for row in rows if ">Alpha<" in row)
         beta = next(row for row in rows if ">Beta<" in row)
         assert "idle-capacity" in alpha and "stale-telemetry" not in alpha
-        assert "stale-telemetry" in beta and "dot--stale" in beta
+        assert "stale-telemetry" in beta and 'data-status="stale"' in beta and 'class="tag tag--warn">stale<' in beta
         assert 'class="alert-kind">stale telemetry<' in page

@@ -3658,6 +3658,9 @@ def test_list_wait_ignores_send_to_different_recipient(message_hub):
         status, payload = _request(base, token_b, {"action": "list", "after": 0, "unacked": True, "wait_ms": 250})
         results.append((status, payload, time.monotonic() - started))
 
+    # Establish an epoch even if the short waiter expires during the send.
+    fleet_hub_messages._notify_recipient(NODE_B)
+    before_epoch = fleet_hub_messages._wake_epoch(NODE_B)
     thread = threading.Thread(target=waiter, daemon=True)
     thread.start()
     _wait_for_active_waiters(NODE_B, 1)
@@ -3668,8 +3671,9 @@ def test_list_wait_ignores_send_to_different_recipient(message_hub):
         {"action": "send", "to": NODE_A, "subject": "Unrelated", "body": "Do not wake NODE_B"},
     )
     assert send_status == 201
-    time.sleep(0.05)
-    assert thread.is_alive()
+    # HTTP latency can exceed the 250 ms deadline, especially on Windows.
+    # A completed timeout is valid, but a notification for NODE_B is not.
+    assert fleet_hub_messages._wake_epoch(NODE_B) == before_epoch
 
     thread.join(timeout=2.0)
     assert not thread.is_alive()

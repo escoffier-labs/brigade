@@ -684,8 +684,8 @@ class TestAssets:
         assert manifest["short_name"] == "Fleet Hub"
         assert manifest["start_url"] == "/"
         assert manifest["display"] == "standalone"
-        assert manifest["theme_color"] == "#111617"
-        assert manifest["background_color"] == "#182022"
+        assert manifest["theme_color"] == "#0a0a0a"
+        assert manifest["background_color"] == "#0a0a0a"
         icons = {icon["sizes"]: icon for icon in manifest["icons"]}
         assert "192x192" in icons and "512x512" in icons
         for icon in manifest["icons"]:
@@ -705,7 +705,7 @@ class TestAssets:
             assert '<link rel="icon" type="image/png" sizes="32x32" href="/favicon-32x32.png"' in body
             assert '<link rel="apple-touch-icon" sizes="180x180" href="/apple-touch-icon.png"' in body
             assert '<link rel="manifest" href="/site.webmanifest"' in body
-            assert '<meta name="theme-color" content="#111617"' in body
+            assert '<meta name="theme-color" content="#0a0a0a"' in body
             assert '<meta name="application-name" content="Fleet Hub"' in body
             assert '<meta name="apple-mobile-web-app-title" content="Fleet Hub"' in body
 
@@ -874,7 +874,7 @@ def test_boards_render_through_the_shared_deck_shell():
     page = fleet_dashboard.render_page(
         view="machines", query_string="", runs=[], claims=[], nodes=[], started_at={}, nonce="abc"
     )
-    assert "--canvas: #111617;" in page
+    assert "--canvas: #0a0a0a;" in page
     assert '<body class="deck"' in page
     assert '<nav class="deck-nav" aria-label="Command Deck">' in page
     assert 'href="/deck"' in page and 'href="/view/repos"' in page

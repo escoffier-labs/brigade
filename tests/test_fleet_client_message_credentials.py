@@ -4,6 +4,8 @@ import io
 import json
 import os
 import sys
+import urllib.error
+import urllib.request
 
 import pytest
 
@@ -127,6 +129,22 @@ def test_token_file_without_node_identity(configured, tmp_path, monkeypatch, mod
     assert credentials.message_settings(str(path))[2] == "message-principal"
     monkeypatch.setattr(client, "_request", lambda *_args, **_kwargs: (200, {"messages": [], "next_cursor": 0}))
     assert client.list_messages(token_file=str(path)) == {"messages": [], "next_cursor": 0}
+
+
+def test_external_principal_denial_closes_response(hub):
+    base, _, _, _ = hub
+    principal = enroll(base)
+    request = urllib.request.Request(
+        base + "/messages",
+        data=json.dumps({"action": "send", "to": NODE_B, "subject": "Task", "body": "Work"}).encode(),
+        headers={"Authorization": f"Bearer {principal['token']}", "Content-Type": "application/json"},
+    )
+    with pytest.raises(urllib.error.HTTPError) as failure:
+        urllib.request.urlopen(request, timeout=5)
+    with failure.value as response:
+        assert response.code == 403
+        assert response.headers.get_all("Connection") == ["close"]
+        assert json.loads(response.read())["code"] == "message_recipient_not_permitted"
 
 
 def test_cli_json_denial_and_stdin_retry(hub, tmp_path, monkeypatch, capsys):

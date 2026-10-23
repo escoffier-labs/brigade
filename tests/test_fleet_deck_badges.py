@@ -290,7 +290,7 @@ def test_row_snapshot() -> None:
     oc = deck.harness_brand("opencode")
     assert oc.svg != ""
     assert html == (
-        '<li class="row" title="run-muse13-1"><span class="dot dot--working" aria-hidden="true"></span>'
+        '<li class="row" title="run-muse13-1">'
         '<div class="row-body"><p class="row-title">'
         f'<a href="/view/machines?node={NODE_A}&amp;repo=repo">repo</a></p>'
         '<p class="row-meta" title="opencode/muse-spark-1.3-contributor-free">'

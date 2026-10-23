@@ -225,3 +225,39 @@ fn doctor_json_reports_skipped_files_parse_errors_and_warnings() {
     );
     assert_eq!(json["warnings"], serde_json::json!([]));
 }
+
+#[test]
+fn doctor_reports_per_language_coverage() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    let db = root.join("g.db");
+    fs::write(root.join("util.py"), "def helper():\n    return 1\n").unwrap();
+    fs::write(
+        root.join("main.py"),
+        "from util import helper\n\ndef run():\n    helper()\n    missing_name()\n",
+    )
+    .unwrap();
+    fs::write(root.join("lib.rs"), "fn alone() {}\n").unwrap();
+    let conn = open_db(&db).unwrap();
+    init_schema(&conn).unwrap();
+    sync_repo(&conn, root).unwrap();
+
+    let json = serde_json::to_value(graphtrail::query::doctor(&conn, root, &db).unwrap()).unwrap();
+    let coverage = json["coverage"].as_object().expect("coverage object");
+    assert_eq!(
+        coverage.keys().map(String::as_str).collect::<Vec<_>>(),
+        vec!["python", "rust"]
+    );
+    let python = &coverage["python"];
+    assert_eq!(python["files"], 2);
+    assert_eq!(python["symbols"], 2);
+    assert_eq!(python["call_sites"], 2);
+    assert_eq!(python["resolved_call_sites"], 1);
+    assert_eq!(python["unresolved_call_sites"], 1);
+    assert_eq!(python["cross_file_edges"], 1);
+    let rust = &coverage["rust"];
+    assert_eq!(rust["files"], 1);
+    assert_eq!(rust["symbols"], 1);
+    assert_eq!(rust["call_sites"], 0);
+    assert_eq!(rust["cross_file_edges"], 0);
+}

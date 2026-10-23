@@ -105,7 +105,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from . import fleet_command_deck, fleet_hub_events, fleet_hub_preference, worklore_store
+from . import fleet_command_deck, fleet_hub_events, fleet_hub_preference, worklore_campaigns, worklore_store
 from .fleet_execution_context import serialize_context
 from .fleet_hub_event_bounds import oversized_event_field
 from .fleet_hub_server import BoundedThreadingHTTPServer
@@ -117,7 +117,7 @@ from .fleet_hub_status import (
     latest_status as latest_status,
 )
 
-SCHEMA_VERSION = 39
+SCHEMA_VERSION = 44
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
@@ -277,6 +277,8 @@ _ADDITIVE_INDEXES = (
 
 
 def _missing_additive_columns(conn: sqlite3.Connection) -> list[str]:
+    from . import fleet_hub_paging
+
     # Order matters: an events table first (a hub at the current schema version may predate one added later on
     # the events branch), then the ALTERs that need their table, then indexes that need their columns.
     existing = {(kind, name) for kind, name in conn.execute("SELECT type, name FROM sqlite_master")}
@@ -298,7 +300,10 @@ def _missing_additive_columns(conn: sqlite3.Connection) -> list[str]:
         for name, ddl in _ADDITIVE_INDEXES
         if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?", (name,)).fetchone() is None
     )
-    return missing
+    from . import fleet_hub_questions
+
+    missing.extend(fleet_hub_questions.missing_schema(conn))
+    return missing + fleet_hub_paging.missing_schema(conn)
 
 
 # Per-node credentials (schema v4, issue #1150): node_id -> SHA-256 of the
@@ -637,7 +642,11 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     # new writes still enforce the ceiling, and an operator unlinks the excess on a
     # running hub rather than needing one that will not start.
     # v18 -> v19: research/security/scout role columns on run_preference (roster page).
+    # v40 -> v41: covering event-id index for campaign take's cross-item key probe.
+    # v41 -> v42: indexed immutable execution identity checks after link retention.
     worklore_store.ensure_schema(conn)
+    # v39 -> v40: campaign membership tables (#1128). Additive; items stay in Worklore.
+    worklore_campaigns.ensure_schema(conn)
     # v19 -> v20: control-plane policy revisions, the CAS pointer, and session
     # policy receipts. Additive tables only; the legacy model_policy roster and
     # its admission path are untouched and still authoritative for launches.
@@ -662,6 +671,14 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     # recoverable principal enrollment and an unacked-recipient index.
     # v30 -> v31 adds message metadata columns and external agent send grants.
     fleet_hub_messages.ensure_schema(conn)
+    from . import fleet_hub_questions
+
+    # v42 -> v43: audited operator questions and terminal-answer trigger.
+    fleet_hub_questions.ensure_schema(conn)
+    # v43 -> v44: bounded, expiring directory and claims paging snapshots.
+    from . import fleet_hub_paging
+
+    fleet_hub_paging.ensure_schema(conn)
     # v31 -> v32 adds model_policy.t3_model (native T3 launch model) through
     # fleet_hub_model_roster.ensure_schema's additive column migration.
     # v34 -> v36: aggregate snapshots and compact weekly administrator history.
@@ -1890,6 +1907,7 @@ def make_server(
             trust_tailscale_identity=trust_tailscale_identity,
             trust_forwarded_proto=trust_forwarded_proto,
         ),
+        db_path=Path(db_path),
     )
 
 

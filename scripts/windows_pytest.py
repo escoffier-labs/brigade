@@ -233,6 +233,30 @@ def make_temp_root(repo: Path) -> Path:
         raise
 
 
+def configure_ci_temp_root(repo: Path) -> None:
+    """Keep pytest and direct tempfile users on the workspace drive in CI."""
+    workspace = repo.resolve()
+    runner_temp = os.environ.get("RUNNER_TEMP")
+    parent = Path(runner_temp).resolve() if runner_temp else workspace.parent
+    if parent.anchor.casefold() != workspace.anchor.casefold() or enclosing_checkout(parent) is not None:
+        parent = workspace.parent
+    root = (parent / "brigade-windows-temp").resolve()
+    if root.anchor.casefold() != workspace.anchor.casefold() or enclosing_checkout(root.parent) is not None:
+        raise RuntimeError("CI temporary root must be outside a checkout on the workspace drive")
+    if any(character in str(root) for character in "\r\n"):
+        raise ValueError("CI temporary root must fit on one environment-file line")
+    root.mkdir(parents=True, exist_ok=True)
+    # Persist for subsequent steps without moving RUNNER_TEMP artifact paths.
+    with Path(os.environ["GITHUB_ENV"]).open("a", encoding="utf-8") as stream:
+        for key in ("TMP", "TEMP", "TMPDIR"):
+            stream.write(f"{key}={root}\n")
+    print(
+        f"windows pytest temp: previous={tempfile.gettempdir()} RUNNER_TEMP={runner_temp} "
+        f"workspace_drive={workspace.anchor} temp_drive={root.anchor} root={root}",
+        flush=True,
+    )
+
+
 def _cleanup_path(root: Path, path: Path, *, allow_leaf_link: bool = False) -> os.stat_result:
     """Reject escapes and linked ancestors; optionally allow a removable leaf link."""
     if not path.is_relative_to(root) or ".." in path.parts:
@@ -789,6 +813,7 @@ def write_record(
 def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--repo", type=Path, default=REPO_ROOT)
+    parser.add_argument("--configure-temp-root", action="store_true", help="write CI TMP/TEMP on the workspace drive")
     parser.add_argument("--allowlist", type=Path, default=DEFAULT_ALLOWLIST)
     parser.add_argument(
         "--record", type=Path, help="write measured results only; required for the full Windows harness"
@@ -813,7 +838,10 @@ def parse_args(argv: Sequence[str]) -> argparse.Namespace:
     parser.add_argument("--base-ref", help="compare the allowlist with this base commit")
     parser.add_argument("--serial", action="append", default=[], metavar="TEST_FILE")
     args = parser.parse_args(argv)
-    if args.check_allowlist_only:
+    if args.configure_temp_root:
+        if args.check_allowlist_only:
+            parser.error("--configure-temp-root cannot be combined with --check-allowlist-only")
+    elif args.check_allowlist_only:
         if not args.base_ref:
             parser.error("--base-ref is required for --check-allowlist-only")
     elif args.record is None:
@@ -825,6 +853,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     entered_monotonic = time.monotonic()
     entered_wall = time.time()
     args = parse_args(sys.argv[1:] if argv is None else argv)
+    if args.configure_temp_root:
+        configure_ci_temp_root(args.repo)
+        return 0
     if args.check_allowlist_only:
         try:
             current = load_allowlist(args.allowlist)

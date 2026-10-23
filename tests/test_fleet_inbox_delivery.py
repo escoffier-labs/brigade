@@ -21,7 +21,7 @@ from brigade.claude_hooks import heartbeat, runtime
 from brigade.fleet_mcp import FleetMcp
 from brigade.install import install_selection
 from brigade.selection import Selection
-from tests.test_fleet_messages import NODE_A, NODE_B
+from tests.test_fleet_messages import NODE_A, NODE_B, _request
 
 from brigade.fleet_client_spool_lock import _spool_lock
 
@@ -1022,3 +1022,45 @@ def test_codex_hook_fails_open_when_the_hub_is_down(fleet, monkeypatch, capsys):
 
     assert json.loads(out) == {}
     assert time.monotonic() - started < delivery.HUB_TIMEOUT_SECONDS + 2
+
+
+@pytest.mark.parametrize("questions_only", [False, True])
+def test_live_delivery_skips_operator_questions_without_acknowledging(
+    fleet, hub, monkeypatch, tmp_path, questions_only
+):
+    from brigade import fleet_hub, fleet_hub_messages
+
+    with fleet_hub.open_db(hub[3]) as conn:
+        principal = fleet_hub_messages.add_principal(conn, {"name": "operator"})
+    monkeypatch.setenv("BRIGADE_FLEET_OPERATOR_RECIPIENT", "agent:operator")
+    code, question = _request(
+        fleet.base,
+        hub[2],
+        {"action": "question_create", "question": "Operator-only question", "request_id": "live-skip"},
+    )
+    assert code == 201, question
+    qid = int(question["message_id"])
+    token_file = tmp_path / "operator.token"
+    token_file.write_text(principal["token"])
+    token_file.chmod(0o600)
+    monkeypatch.setenv("BRIGADE_FLEET_MESSAGE_TOKEN_FILE", str(token_file))
+    fleet.receiver = FleetMcp(token_file=str(token_file))
+    assert _tool(fleet.receiver, "fleet_inbox")["messages"][0]["kind"] == "operator_question"
+    note = (
+        None
+        if questions_only
+        else _tool(fleet.sender, "fleet_send", to="agent:operator", body="Session note", kind="completion")["message"][
+            "id"
+        ]
+    )
+    text = delivery.deliver("claude", "question-session", "UserPromptSubmit", now=T0)
+    if questions_only:
+        assert text is None
+    else:
+        assert text is not None and f"Message {note} from" in text
+        assert "Operator-only question" not in text and f"Message {qid} from" not in text
+    assert delivery.deliver("claude", "question-session", "UserPromptSubmit", now=T0 + 1) is None
+    inbox = _tool(fleet.receiver, "fleet_inbox")["messages"]
+    assert next(row for row in inbox if row["id"] == qid)["acked_at"] is None
+    state = json.loads(delivery.state_path("claude", "question-session").read_text())
+    assert state["cursor"] == (qid if questions_only else note)

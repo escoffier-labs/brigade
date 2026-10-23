@@ -423,8 +423,19 @@ def _deliver_locked(path: Path, event: str, now: float, dir_fd: int | None, hub_
         scope, cursor = authority.scope, 0
     page = messages.list_messages(after=cursor, unacked=True, timeout=hub_timeout, authority=authority)
     rows = page["messages"]
-    shown = rows[:MAX_DELIVERED_MESSAGES]
-    new_cursor = shown[-1]["id"] if shown else cursor
+    # Operator questions stay in the inbox for its dedicated human client.
+    # Advance past skipped questions without acknowledging them or hiding
+    # ordinary mail behind a page of questions on every hook invocation.
+    shown = []
+    new_cursor = cursor
+    consumed = 0
+    for row in rows:
+        if row.get("kind") != "operator_question":
+            shown.append(row)
+        new_cursor = row["id"]
+        consumed += 1
+        if len(shown) == MAX_DELIVERED_MESSAGES:
+            break
     saved = _write_state(
         path, scope=scope, cursor=new_cursor, next_poll_at=now + TOOL_POLL_INTERVAL_SECONDS, dir_fd=dir_fd
     )
@@ -436,7 +447,7 @@ def _deliver_locked(path: Path, event: str, now: float, dir_fd: int | None, hub_
     # Unsaved cursor: showing the mail would repeat it on every later event.
     if not shown or not saved:
         return None
-    return render(shown, more=len(rows) > len(shown))
+    return render(shown, more=len(rows) > consumed)
 
 
 def _read_stdin_object() -> Mapping[str, Any] | None:

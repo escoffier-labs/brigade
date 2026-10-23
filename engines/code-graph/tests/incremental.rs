@@ -8,7 +8,7 @@ use std::time::Duration;
 
 use graphtrail::extractors::common::symbol_id;
 use graphtrail::extractors::{python, rust};
-use graphtrail::query::doctor;
+use graphtrail::query::{doctor, freshness};
 use graphtrail::store::{SCHEMA_VERSION, init_schema, meta, open_db, sync_repo};
 use rusqlite::Connection;
 
@@ -758,6 +758,96 @@ fn doctor_reports_branch_drift_as_stale() {
     let resynced = doctor(&conn, root, &root.join("g.db")).unwrap();
     assert_eq!(resynced.verdict, "FRESH");
     assert!(!resynced.branch.drifted);
+}
+
+#[test]
+fn freshness_reports_head_move_without_marking_unchanged_files_stale() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    make_git_repo(root);
+    let first = "1111111111111111111111111111111111111111";
+    let second = "2222222222222222222222222222222222222222";
+    fs::create_dir_all(root.join(".git/refs/heads")).unwrap();
+    fs::write(root.join(".git/refs/heads/main"), format!("{first}\n")).unwrap();
+    write_file(root.join("a.py"), "def helper():\n    return 1\n");
+
+    let conn = open_graph(root);
+    sync_repo(&conn, root).unwrap();
+    assert_eq!(
+        meta::read(&conn, "synced_head").unwrap().as_deref(),
+        Some(first)
+    );
+    let fresh = freshness(&conn, root).unwrap();
+    assert_eq!(fresh.verdict, "FRESH");
+    assert!(!fresh.head_moved);
+    assert!(!fresh.branch_moved);
+    assert_eq!(fresh.pending_files, 0);
+    assert!(fresh.synced_at.is_some());
+    assert!(fresh.age_seconds.is_some());
+
+    // A new commit with identical tracked content: HEAD moved, files did not.
+    fs::write(root.join(".git/refs/heads/main"), format!("{second}\n")).unwrap();
+    let moved = freshness(&conn, root).unwrap();
+    assert!(moved.head_moved);
+    assert!(!moved.branch_moved);
+    assert_eq!(moved.verdict, "FRESH");
+    assert!(
+        doctor(&conn, root, &root.join("g.db"))
+            .unwrap()
+            .branch
+            .head_moved
+    );
+
+    // A pending file flips the verdict and is counted.
+    write_file(root.join("b.py"), "def other():\n    return 2\n");
+    let stale = freshness(&conn, root).unwrap();
+    assert_eq!(stale.verdict, "STALE");
+    assert_eq!(stale.pending_files, 1);
+
+    // Re-sync records the new head and clears both signals.
+    sync_repo(&conn, root).unwrap();
+    let resynced = freshness(&conn, root).unwrap();
+    assert!(!resynced.head_moved);
+    assert_eq!(resynced.verdict, "FRESH");
+
+    // A branch switch reports branch_moved and STALE, matching doctor.
+    fs::write(root.join(".git/HEAD"), "ref: refs/heads/feature-x\n").unwrap();
+    let switched = freshness(&conn, root).unwrap();
+    assert!(switched.branch_moved);
+    assert_eq!(switched.verdict, "STALE");
+}
+
+#[test]
+fn synced_head_resolves_packed_refs_and_linked_worktrees() {
+    let dir = tempfile::tempdir().unwrap();
+    let common = dir.path().join("main-checkout");
+    make_git_repo(&common);
+    let packed = "3333333333333333333333333333333333333333";
+    fs::write(
+        common.join(".git/packed-refs"),
+        format!("# pack-refs with: peeled fully-peeled sorted\n{packed} refs/heads/topic\n"),
+    )
+    .unwrap();
+    let worktree_git = common.join(".git/worktrees/wt");
+    fs::create_dir_all(&worktree_git).unwrap();
+    fs::write(worktree_git.join("HEAD"), "ref: refs/heads/topic\n").unwrap();
+    fs::write(worktree_git.join("commondir"), "../..\n").unwrap();
+
+    let root = dir.path().join("wt");
+    fs::create_dir_all(&root).unwrap();
+    fs::write(
+        root.join(".git"),
+        format!("gitdir: {}\n", worktree_git.display()),
+    )
+    .unwrap();
+    write_file(root.join("a.py"), "def helper():\n    return 1\n");
+
+    let conn = open_graph(&root);
+    sync_repo(&conn, &root).unwrap();
+    assert_eq!(
+        meta::read(&conn, "synced_head").unwrap().as_deref(),
+        Some(packed)
+    );
 }
 
 #[test]
