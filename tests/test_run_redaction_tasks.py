@@ -7,7 +7,7 @@ from dataclasses import asdict
 
 import pytest
 
-from brigade import aboyeur, run_checkpoint, run_journal, run_redaction, run_tasks as tasks, runguard
+from brigade import aboyeur, run_checkpoint, run_events, run_journal, run_redaction, run_tasks as tasks, runguard
 
 
 @pytest.fixture
@@ -253,3 +253,60 @@ def test_task_redaction_recovers_after_replacement_crash(closed_tasks, monkeypat
     assert report.quarantine_path.is_file()
     assert all(r.acknowledged for r in tasks.read_tasks(run_dir))
     assert run_checkpoint.recover_from_checkpoint(run_dir, None)["status"] == "ok"
+
+
+@pytest.mark.parametrize("stage", ["original", "staged"])
+def test_task_redaction_refuses_earlier_unkeyed_checkpoint_without_publication(closed_tasks, monkeypatch, stage):
+    run_dir = closed_tasks
+    journal = run_dir / "events/lifecycle.jsonl"
+    events = run_journal.read_journal_bounded(journal).events
+    checkpoint = next(e for e in events if e.payload.get("paired_event_type") == "task.accepted")
+    assert checkpoint.sequence < run_checkpoint.latest_checkpoint_event(events).sequence
+
+    def without_pairing_key(events):
+        rebuilt, lines, previous = [], [], None
+        for event in events:
+            payload = dict(event.payload)
+            if event.sequence == checkpoint.sequence:
+                payload.pop("pairing_key")
+            # Rechain without the redaction rewriter, which would repair the
+            # missing identity. All envelope digests must remain valid.
+            envelope = run_events.build_event(
+                run_id=event.run_id,
+                sequence=event.sequence,
+                event_type=event.event_type,
+                payload=payload,
+                idempotency_key=event.idempotency_key,
+                recorded_at=event.recorded_at,
+                previous_digest=previous,
+            )
+            rebuilt.append(run_journal.RunEvent(**envelope))
+            lines.append(run_events.canonical_bytes(envelope) + b"\n")
+            previous = envelope["event_digest"]
+        return rebuilt, b"".join(lines)
+
+    if stage == "original":
+        malformed, raw = without_pairing_key(events)
+        journal.write_bytes(raw)
+        snapshot = json.loads((run_dir / "run.json").read_bytes())
+        (run_dir / "run.json").write_bytes(run_redaction._projection(snapshot, malformed).to_bytes())
+        assert not run_journal.read_journal_bounded(journal).chain_errors
+        with pytest.raises(tasks.TaskJournalError, match="task checkpoint refused: pairing"):
+            tasks.read_tasks(run_dir)
+    else:
+        original_rewrite = run_redaction._rewrite_events
+
+        def invalid_pair(events, **kwargs):
+            rewritten, _ = original_rewrite(events, **kwargs)
+            return without_pairing_key(rewritten)
+
+        monkeypatch.setattr(run_redaction, "_rewrite_events", invalid_pair)
+    before = {p.relative_to(run_dir): p.read_bytes() for p in run_dir.rglob("*") if p.is_file()}
+    directories = {p.relative_to(run_dir) for p in run_dir.rglob("*") if p.is_dir()}
+    with pytest.raises(run_redaction.RedactionError, match="^checkpoint verification failed$"):
+        run_redaction.redact_journal(
+            run_dir, sequence_start=1, sequence_end=len(events), reason="credential-exposure", operator_confirmed=True
+        )
+    assert {p.relative_to(run_dir): p.read_bytes() for p in run_dir.rglob("*") if p.is_file()} == before
+    assert {p.relative_to(run_dir) for p in run_dir.rglob("*") if p.is_dir()} == directories
+    assert not (run_dir / "events/redactions").exists()

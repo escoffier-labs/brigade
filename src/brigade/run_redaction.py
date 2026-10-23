@@ -377,8 +377,10 @@ def _validate_checkpoint_artifacts(
     try:
         for event in checkpoint_events:
             checkpoint_bytes = run_checkpoint.validate_checkpoint(run_dir, event)
-            if "pairing_key" in event.payload or event.idempotency_key.startswith(
-                run_checkpoint._CHECKPOINT_GENERIC_IDEMPOTENCY_PREFIX
+            if (
+                event.payload.get("paired_event_type") in run_events._TASK_EVENT_TYPES
+                or "pairing_key" in event.payload
+                or event.idempotency_key.startswith(run_checkpoint._CHECKPOINT_GENERIC_IDEMPOTENCY_PREFIX)
             ):
                 following = events[event.sequence] if event.sequence < len(events) else None
                 run_checkpoint._verify_coverage(
