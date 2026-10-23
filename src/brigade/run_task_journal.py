@@ -15,25 +15,7 @@ from typing import Any, Iterator, Mapping
 
 from brigade import run_checkpoint, run_events, run_journal, run_lifecycle, runguard
 
-TASK_FIELDS = {
-    "task.accepted": frozenset({"task_id", "request_id", "seat", "payload_digest", "spec_digest"}),
-    "task.attempt-prepared": frozenset({"task_id", "attempt_id"}),
-    "task.observed": frozenset(
-        {
-            "task_id",
-            "attempt_id",
-            "status",
-            "provider_task_id",
-            "original_run_id",
-            "provider_result_id",
-            "result_id",
-            "artifact_kind",
-            "artifact_digest",
-            "containment",
-        }
-    ),
-    "task.acknowledged": frozenset({"task_id", "result_id"}),
-}
+TASK_FIELDS = {event_type: run_events.EVENT_TYPES[event_type] for event_type in run_events._TASK_EVENT_TYPES}
 STATES = frozenset(
     {
         "queued",
