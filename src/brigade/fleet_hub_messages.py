@@ -149,6 +149,8 @@ def _metadata(raw: dict[str, Any], *, sender: str | None = None) -> dict[str, st
         extras[field] = value
     kind = raw.get("kind")
     if kind is not None:
+        if kind == "operator_question":
+            raise MessageError("operator_question is reserved for hub-created operator questions")
         if not isinstance(kind, str) or kind not in KINDS:
             raise MessageError("kind must be message, question, or completion")
         if kind != "message":
@@ -626,6 +628,18 @@ def send(
     sender: str,
     reply_to: int | None = None,
 ) -> dict[str, Any]:
+    return _send(conn, raw, sender=sender, reply_to=reply_to, extras=_metadata(raw, sender=sender))
+
+
+def _send(
+    conn: sqlite3.Connection,
+    raw: dict[str, Any],
+    *,
+    sender: str,
+    extras: dict[str, str],
+    reply_to: int | None = None,
+) -> dict[str, Any]:
+    """Insert validated metadata. Only question creation supplies the reserved kind."""
     recipient = _text(raw.get("to"), "to", 256)
     subject = _text(raw.get("subject"), "subject", SUBJECT_LIMIT)
     body = _text(raw.get("body"), "body", BODY_LIMIT)
@@ -636,7 +650,6 @@ def send(
     if not isinstance(priority, str) or priority not in PRIORITIES:
         raise MessageError("priority must be low, normal, high, or urgent")
     assert recipient is not None and subject is not None and body is not None
-    extras = _metadata(raw, sender=sender)
     message_hash = _payload_digest(recipient, subject, body, reference, priority, reply_to, extras=extras)
     opened = not conn.in_transaction
     if opened:
@@ -929,6 +942,7 @@ def ack(conn: sqlite3.Connection, message_id: Any, *, recipient: str) -> dict[st
 
 
 def reply(conn: sqlite3.Connection, raw: dict[str, Any], *, sender: str) -> dict[str, Any] | None:
+    _metadata(raw, sender=sender)
     _prune_expired(conn)
     message_id = raw.get("id")
     if not _sqlite_integer(message_id):
@@ -1103,12 +1117,17 @@ def handle(
     caller: str | None,
     open_conn: Callable[[], sqlite3.Connection] | None = None,
     source_ip: str = "",
+    authenticated_generation: str | None = None,
 ) -> tuple[int, dict[str, Any]]:
     if caller is None:
         return 403, {"error": "a node principal is required"}
     if not isinstance(raw, dict):
         raise MessageError("message request must be an object")
     action = raw.get("action")
+    if action in ("question_create", "question_status", "question_desktop"):
+        from . import fleet_hub_questions
+
+        return fleet_hub_questions.handle(conn, raw, caller=caller, authenticated_generation=authenticated_generation)
     if isinstance(action, str) and action.startswith("events_"):
         return fleet_hub_events.handle(conn, raw, caller=caller)
     if action in ("who", "claims"):
@@ -1124,6 +1143,22 @@ def handle(
                 conn, caller, lambda: _station_read(conn, raw, caller=caller, snapshot_write=True)
             )
         return 200, result
+    if action == "reply" or (action == "send" and raw.get("reply_to") is not None):
+
+        def insert_reply() -> dict[str, Any] | None:
+            if authenticated_generation is not None:
+                from .fleet_hub_questions import _generation
+
+                if not secrets.compare_digest(_generation(conn, caller), authenticated_generation):
+                    raise MessageAuthError("reply credential generation changed")
+            if action == "reply":
+                return reply(conn, raw, sender=caller)
+            return send(conn, raw, sender=caller, reply_to=raw.get("reply_to"))
+
+        # Hold the write lock from credential comparison through insertion and
+        # the question audit trigger, including the alternate send/reply_to path.
+        message = _as_active_principal(conn, caller, insert_reply)
+        return (201, {"message": message}) if message else (404, {"error": "message not found"})
     if action == "send":
         return 201, {"message": send(conn, raw, sender=caller, reply_to=raw.get("reply_to"))}
     if action == "sent":
@@ -1150,7 +1185,4 @@ def handle(
     if action == "ack":
         message = _as_active_principal(conn, caller, lambda: ack(conn, raw.get("id"), recipient=caller))
         return (200, {"message": message}) if message else (404, {"error": "message not found"})
-    if action == "reply":
-        message = _as_active_principal(conn, caller, lambda: reply(conn, raw, sender=caller))
-        return (201, {"message": message}) if message else (404, {"error": "message not found"})
     raise MessageError("action must be send, list, sent, count, ack, reply, who, or claims")

@@ -147,3 +147,23 @@ def test_expired_parent_reply_retry_keeps_inherited_thread(message_hub):
     assert replayed[0] == 201
     assert replayed[1]["message"]["id"] == reply["id"]
     assert replayed[1]["message"]["thread"] == "issue:7"
+
+
+@pytest.mark.parametrize("action", ["send", "reply"])
+@pytest.mark.parametrize("replay", [False, True])
+def test_senders_cannot_choose_reserved_operator_question_kind(hub, action, replay):
+    base, token_a, token_b, db = hub
+    original = send(base, token_a, NODE_B)[1]["message"]
+    request = {"action": action, "body": "Cannot impersonate question", "client_id": "reserved-kind"}
+    if action == "send":
+        request.update(to=NODE_A, subject="Question")
+    else:
+        request["id"] = original["id"]
+    if replay:
+        assert _request(base, token_b, request)[0] == 201
+    code, result = _request(base, token_b, {**request, "kind": "operator_question"})
+    assert code == 400 and "operator_question is reserved" in result["error"]
+    with sqlite3.connect(db) as conn:
+        assert conn.execute("SELECT COUNT(*) FROM fleet_messages WHERE kind='operator_question'").fetchone() == (0,)
+    if replay:
+        assert _request(base, token_b, request)[0] == 201

@@ -765,7 +765,11 @@ curl --fail http://127.0.0.1:8933/mcp \
 The HTTP listener rejects non-loopback binds, untrusted Host/Origin headers,
 and missing or incorrect bearer tokens. It is stateless and serves no SSE stream.
 
-`fleet_send` accepts `to`, `body`, and optional `reply_to`, `kind`, and `thread`.
+`fleet_send` accepts `to`, `body`, and optional `reply_to`, `kind`, `thread`, and
+`client_id`. `fleet_reply` also accepts an optional `client_id`. Reuse that key
+with identical arguments for duplicate-free retries under the same credential.
+See the [Executor recipe](../fleet-mcp-executor.md) for annotations, explicit
+approval policy, retry limits and manual compatibility checks.
 It supplies the subject `Fleet message` and normal priority. `reply_to` must be
 an inbox message from `to`. Sends and replies use the existing durable offline
 spool and report `delivery` as `delivered` or `spooled`. `fleet_ack` accepts an
@@ -843,3 +847,93 @@ rows. Agent claim results include only granted owner nodes and omit `job`,
 `session`, and `owner_conductor`. Small directory and claim reads use a read
 transaction. Creating or continuing a snapshot takes write admission and
 rechecks the caller's active status and grants before saving it.
+
+### Operator questions
+
+`fleet_ask_user` accepts `question`, optional `timeout_secs` from 1 to 120
+(default 60), and an optional `request_id`. It returns `status: answered` with
+the exact operator `answer`, or `status: timeout`, together with hub audit identifiers.
+The caller comes from the station's existing node or agent credential. Tool
+arguments cannot choose a caller, operator, credential, answer, or answer source.
+
+Set `BRIGADE_FLEET_OPERATOR_RECIPIENT` in the **hub service environment** to an
+existing dedicated `agent:` message principal, for example `agent:operator`.
+Node IDs and the admin are rejected. Enroll this principal separately and keep
+its token in the operator-only inbox client. No fleet station, hook, or MCP
+server should load it by default. The operator must be active and different
+from the caller. Agent send grants must permit the question and the operator's reply. The station sends each
+question to that recipient's inbox and records its audit atomically before
+opening a desktop prompt. Questions are never spooled for later prompting.
+The hub assigns these messages the reserved `kind=operator_question`. Ordinary
+send and reply requests, including the MCP tool and CLI, reject this kind.
+Automatic live inbox delivery skips only `operator_question`. Peer-to-peer
+`kind=question` messages still reach live sessions. Both kinds remain visible
+through the inbox and message CLI. Schema 43 upgrades only legacy messages
+referenced by `fleet_questions`, preserving peer questions.
+
+On a Linux desktop with `DISPLAY` or `WAYLAND_DISPLAY`, the station tries an
+installed `zenity` entry dialog or `kdialog` input box. Text is displayed as data
+under a fixed title with the authenticated caller and question ID on the first
+line. The preview is limited to 512 characters and eight lines. The dialog
+points to the full question in the operator's hub inbox. Missing,
+failed, cancelled, or timed-out dialogs fall back to the operator inbox. An
+installed `notify-send` can announce that inbox question. No desktop dependency
+is installed. The operator answers by replying to the question message with
+`fleet_reply` or the existing message CLI.
+
+Desktop helpers receive only display, session, locale, and required operating
+system settings. Fleet and other credential environment variables are excluded.
+An inbox answer closes an open dialog on the next status check. A temporary
+status-read failure keeps the dialog open within the original deadline.
+Zenity also receives its own timeout. Kdialog cleanup depends on the station
+remaining alive.
+
+The hub records the first answer received before its deadline. A desktop answer
+is local input from a human at the asking machine. Its result has
+`source: "desktop"`, `operator_authenticated: false`, and
+`answered_at_local_desktop: true`, inside a `desktop-local` content fence.
+The hub audit records it as `caller_reported_desktop`. An authenticated inbox
+reply has source
+`operator_reply`. Only an accepted reply from the configured operator has
+`operator_authenticated: true` and returns the exact answer as operator input.
+The result includes the hub-selected `operator` and authenticated `answered_by`.
+A peer message cannot set these audit fields or answer another recipient's question.
+Desktop input does not verify operator identity. Hub-inbox answers from the
+dedicated operator principal are operator-authenticated against the hub.
+The audit copies the question, answer, identities, source, and timestamps, so
+acknowledging or pruning message links cannot erase an accepted answer. Audit
+retention removes records older than 90 days on the next question operation.
+Expired pending questions also become timeout records on that operation,
+without a background timer. A late operator reply records the first
+`late_answer_message_id` and `late_answered_at`, including when the reply
+arrives before the next status read. It remains a timeout and is never
+returned as an authoritative answer. After a desktop answer, the first operator
+inbox reply is recorded separately in `operator_reply_after_desktop_message_id`
+and `operator_reply_after_desktop_at`. Later replies cannot overwrite these
+fields, replace the desktop answer, or make it operator-authenticated.
+Question messages remain in the operator inbox until the operator acknowledges
+them, including questions answered on the desktop or timed out. Existing inbox quotas apply.
+
+Operator authority currently depends on hub-returned fields. Questions and
+answers are stored in plaintext in `fleet_questions`, and the reply trigger
+copies the message body into `answer`. A compromised hub or anyone with write
+access to its database could fabricate an operator-authenticated answer.
+Signed, sealed answers are planned in the [agent mesh design, slice 7b
+(PR #2013)](https://github.com/escoffier-labs/brigade/pull/2013).
+
+The wait uses the existing inbox long-poll in slices of at most 20 seconds and
+never acknowledges unrelated messages. The hub permits two pending questions
+per caller across station processes. Resuming an existing request does not use
+another slot. Each station process also limits concurrent asks to two. The
+entire call shares a five-second transport and cleanup grace beyond
+`timeout_secs`. An outage returns a structured error with `request_id` and,
+when creation was confirmed, `question_id`. Retry the same question and timeout
+with that `request_id` to resume its audit and original deadline. Retries do not
+create another question or open another dialog. Only the credential generation
+that created a question can resume it after an outage.
+
+Changing the question or timeout requires a new `request_id`. Inbox replies
+remain unacknowledged for the caller's normal inbox consumer. Two pending asks
+can occupy the caller's two long-poll slots, causing other waits to use their
+existing polling fallback. A stdio station serves one tool call at a time,
+so other tools on that process wait for the ask to finish.

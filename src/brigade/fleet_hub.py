@@ -300,6 +300,9 @@ def _missing_additive_columns(conn: sqlite3.Connection) -> list[str]:
         for name, ddl in _ADDITIVE_INDEXES
         if conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?", (name,)).fetchone() is None
     )
+    from . import fleet_hub_questions
+
+    missing.extend(fleet_hub_questions.missing_schema(conn))
     return missing + fleet_hub_paging.missing_schema(conn)
 
 
@@ -668,6 +671,10 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     # recoverable principal enrollment and an unacked-recipient index.
     # v30 -> v31 adds message metadata columns and external agent send grants.
     fleet_hub_messages.ensure_schema(conn)
+    from . import fleet_hub_questions
+
+    # v42 -> v43: audited operator questions and terminal-answer trigger.
+    fleet_hub_questions.ensure_schema(conn)
     # v43 -> v44: bounded, expiring directory and claims paging snapshots.
     from . import fleet_hub_paging
 
@@ -1900,6 +1907,7 @@ def make_server(
             trust_tailscale_identity=trust_tailscale_identity,
             trust_forwarded_proto=trust_forwarded_proto,
         ),
+        db_path=Path(db_path),
     )
 
 

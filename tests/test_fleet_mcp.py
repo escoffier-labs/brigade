@@ -54,6 +54,7 @@ def unfence(value):
 
 
 def test_cli_stdio_inventory_and_http_config(monkeypatch, capsys):
+    monkeypatch.setenv("BRIGADE_EXTRAS", "1")
     monkeypatch.setattr(
         "sys.stdin", io.StringIO(json.dumps({"jsonrpc": "2.0", "id": 1, "method": "tools/list"}) + "\n")
     )
@@ -67,6 +68,7 @@ def test_cli_stdio_inventory_and_http_config(monkeypatch, capsys):
         "fleet_reply",
         "fleet_sent",
         "fleet_claims",
+        "fleet_ask_user",
     }
     assert all(tool["inputSchema"]["additionalProperties"] is False for tool in tools)
     monkeypatch.delenv("BRIGADE_MCP_HTTP_TOKEN", raising=False)
@@ -1193,3 +1195,44 @@ def test_who_binds_node_lists_only_for_named_grants(hub, monkeypatch):
         assert seen == [None, None, {NODE_B}]
     finally:
         conn.close()
+
+
+def test_mcp_rejects_reserved_kind_with_replay_key_before_transport(stations, monkeypatch):
+    station, _other = stations
+
+    def unexpected_transport(**_kwargs):
+        pytest.fail("reserved kind reached transport")
+
+    monkeypatch.setattr(fleet_client_messages, "send", unexpected_transport)
+    payload, error = station.call(
+        "fleet_send",
+        {
+            "to": NODE_B,
+            "body": "forged",
+            "kind": "operator_question",
+            "client_id": "reserved-replay-key",
+        },
+    )
+    assert error and "operator_question is reserved" in payload["error"]
+
+
+def test_cli_rejects_reserved_operator_question_kind(capsys):
+    with pytest.raises(SystemExit) as error:
+        cli.main(
+            [
+                "fleet",
+                "msg",
+                "send",
+                "--to",
+                NODE_B,
+                "--subject",
+                "Question",
+                "--body-file",
+                "question.txt",
+                "--kind",
+                "operator_question",
+            ]
+        )
+    assert error.value.code == 2
+    output = capsys.readouterr().err
+    assert "invalid choice: 'operator_question'" in output

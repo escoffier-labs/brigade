@@ -519,3 +519,102 @@ def test_current_schema_repairs_paging_objects_and_preserves_cursors(tmp_path, m
                 assert conn.execute("SELECT COUNT(*) FROM fleet_read_snapshots").fetchone()[0] == 0
         finally:
             conn.close()
+
+
+def _schema_objects(conn, prefix):
+    return {
+        (kind, name)
+        for kind, name in conn.execute("SELECT type, name FROM sqlite_master WHERE name LIKE ?", (f"{prefix}%",))
+    }
+
+
+def _both_schemas(conn):
+    return _schema_objects(conn, "fleet_questions"), _schema_objects(conn, "fleet_read_")
+
+
+def _drop_schema(conn, objects):
+    # Triggers and indexes go with their tables; drop the rest by type to model a database that never had them.
+    for kind, name in sorted(objects, key=lambda item: item[0] != "trigger"):
+        conn.execute(f"DROP {kind.upper()} IF EXISTS {name}")
+
+
+def _add_question(conn):
+    conn.execute(
+        "INSERT INTO fleet_questions(question_id, caller, generation, request_id, payload_hash, operator, question, "
+        "message_id, created_at, deadline) VALUES ('q-kept', 'reader-node', 'g', 'r', 'h', 'agent:operator', "
+        "'Keep me?', 1, '2026-10-22T00:00:00+00:00', '2026-10-22T00:01:00+00:00')"
+    )
+
+
+def test_fresh_database_reaches_schema_44_with_questions_and_paging(tmp_path):
+    assert fleet_hub.SCHEMA_VERSION == 44
+    conn = fleet_hub.init_db(tmp_path / "fleet.db")
+    try:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == 44
+        questions, paging = _both_schemas(conn)
+        assert ("table", "fleet_questions") in questions and ("trigger", "fleet_questions_reply") in questions
+        assert ("table", "fleet_read_snapshots") in paging and ("index", "fleet_read_snapshots_expiry") in paging
+    finally:
+        conn.close()
+
+
+@pytest.mark.parametrize("stamped", [42, 43], ids=["main-before-questions-v42", "main-v43"])
+def test_pre_paging_schemas_upgrade_to_44_and_keep_question_rows(tmp_path, stamped):
+    path = tmp_path / "fleet.db"
+    conn = fleet_hub.init_db(path)
+    fleet_hub.add_node(conn, "reader-node")
+    questions, paging = _both_schemas(conn)
+    _drop_schema(conn, paging)
+    if stamped == 42:
+        # Schema 42 predates the questions tables and trigger as well.
+        _drop_schema(conn, questions)
+    else:
+        _add_question(conn)
+    conn.execute(f"PRAGMA user_version={stamped}")
+    conn.commit()
+    conn.close()
+
+    for _startup in range(2):
+        conn = fleet_hub.init_db(path)
+        try:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 44
+            assert _both_schemas(conn) == (questions, paging)
+            kept = conn.execute("SELECT question_id FROM fleet_questions").fetchall()
+            assert kept == ([("q-kept",)] if stamped == 43 else [])
+            assert who(conn, limit=1)["nodes"][0]["node_id"] == "reader-node"
+        finally:
+            conn.close()
+
+
+@pytest.mark.parametrize("damage", ["table", "trigger"])
+def test_schema_44_missing_question_objects_are_repaired_at_startup(tmp_path, damage):
+    path = tmp_path / "fleet.db"
+    conn = fleet_hub.init_db(path)
+    fleet_hub.add_node(conn, "reader-node")
+    fleet_hub.add_node(conn, "other-node")
+    first = who(conn, limit=1)
+    questions, paging = _both_schemas(conn)
+    snapshots = conn.execute("SELECT * FROM fleet_read_snapshots").fetchall()
+    if damage == "table":
+        _drop_schema(conn, questions)
+    else:
+        conn.execute("DROP TRIGGER fleet_questions_reply")
+    conn.commit()
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 44
+    conn.close()
+
+    for _startup in range(2):
+        conn = fleet_hub.init_db(path)
+        try:
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == 44
+            assert _both_schemas(conn) == (questions, paging)
+            # The repair leaves the paging snapshot, and its cursor, untouched.
+            assert conn.execute("SELECT * FROM fleet_read_snapshots").fetchall() == snapshots
+        finally:
+            conn.close()
+    conn = fleet_hub.init_db(path)
+    try:
+        second = who(conn, cursor=first["next_cursor"])
+        assert [row["node_id"] for row in first["nodes"] + second["nodes"]] == ["other-node", "reader-node"]
+    finally:
+        conn.close()

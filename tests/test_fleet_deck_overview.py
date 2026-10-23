@@ -7,9 +7,11 @@ from pathlib import Path
 
 import pytest
 
+from brigade.fleet_deck_icons import NAV_ICONS
+
 from brigade import fleet_command_deck as deck
 from brigade import fleet_deck_overview as overview
-from brigade import fleet_deck_shell
+from brigade import fleet_deck_shell, ui_theme
 
 NOW = datetime(2026, 10, 18, 12, 0, 0, tzinfo=timezone.utc)
 NODE_A = "11111111-1111-4111-8111-111111111111"
@@ -651,12 +653,23 @@ def test_machine_table_joins_on_node_id_and_shows_each_column():
     rows = _rows(overview.render_machine_table(_mixed_view(), NOW))
     assert len(rows) == 3
     first, second, third = rows
-    assert "dot--working" in first and 'title="11111111-1111-4111-8111-111111111111">linux-a<' in first
-    assert "2 busy, 8 idle" in first and "44%" in first and ">0<" in first
+    assert (
+        'data-status="working"' in first
+        and "dot--" not in first
+        and 'title="11111111-1111-4111-8111-111111111111">linux-a<' in first
+    )
+    assert "2 busy, 8 idle" in first and "44%" in first and 'class="tag' not in first
     assert "available" in first and "idle-capacity" in first
     assert ">1m<" in first and "last run 1m" in first
-    assert "dot--stale" in second and "stale-telemetry" in second and "2h 0m" in second
-    assert "dot--offline" in third and "not enrolled" in third and "last run never" in third
+    assert (
+        'data-status="stale"' in second and "dot--" not in second and "stale-telemetry" in second and "2h 0m" in second
+    )
+    assert (
+        'data-status="offline"' in third
+        and "dot--" not in third
+        and "not enrolled" in third
+        and "last run never" in third
+    )
 
 
 def test_missing_node_id_gives_unknown_cells_not_a_label_match():
@@ -684,9 +697,9 @@ def test_stale_and_offline_machines_show_unavailable_seats_not_idle():
     rows = _rows(overview.render_machine_table(_mixed_view(), NOW))
     stale, offline = rows[1], rows[2]
     for row in (stale, offline):
-        assert " idle<" not in row and "seg--free" not in row
-        assert "seg--off" in row and " unavailable<" in row
-    capacity = int(re.search(r"(\d+) unavailable<", stale).group(1))
+        assert ' idle"' not in row and "seg--free" not in row
+        assert "seg--off" in row and ' unavailable"' in row
+    capacity = int(re.search(r'(\d+) unavailable"', stale).group(1))
     assert stale.count("seg--off") == capacity
 
 
@@ -734,7 +747,7 @@ def test_card_and_row_agree_when_claims_hold_seats_the_station_cannot_see():
 def test_idle_card_equals_the_sum_of_idle_seats_in_the_machine_rows():
     view = _mixed_view()
     rows = _rows(overview.render_machine_table(view, NOW))
-    idle = sum(int(m.group(1)) for row in rows for m in re.finditer(r'seat-text">[^<]*?(\d+) idle', row))
+    idle = sum(int(m.group(1)) for row in rows for m in re.finditer(r'role="img" aria-label="[^"]*?(\d+) idle', row))
     assert idle > 0
     assert _card_value(overview.render_summary(view), "idle") == str(idle)
 
@@ -756,8 +769,8 @@ def test_a_draining_machine_is_unavailable_and_counts_toward_neither_card():
     summary = overview.render_summary(view)
     assert _card_value(summary, "idle") == "0" and _card_value(summary, "offline") == "0"
     (row,) = _rows(overview.render_machine_table(view, NOW))
-    assert 'data-status="limited"' in row and "dot--limited" in row
-    assert "4 unavailable" in row and " idle<" not in row and "seg--free" not in row
+    assert 'data-status="limited"' in row and "dot--limited" not in row and 'class="tag">draining<' in row
+    assert "4 unavailable" in row and ' idle"' not in row and "seg--free" not in row
     assert row.count("seg--off") == 4
     sidebar = overview.render_sidebar(view, "overview", NOW, worklore_enabled=True)
     assert 'class="tree-meta">draining<' in sidebar and "dot--limited" in sidebar
@@ -817,10 +830,14 @@ def test_unmatched_station_row_is_unknown_and_adds_no_idle_or_offline():
     view = _view(stations, plane=_plane([_machine("linux-b", NODE_B, available_slots="8")]))
     rows = _rows(overview.render_machine_table(view, NOW))
     unmatched = rows[0]
-    assert 'data-status="unknown"' in unmatched and "dot--unknown" in unmatched
+    assert (
+        'data-status="unknown"' in unmatched
+        and "dot--unknown" not in unmatched
+        and 'class="tag">no telemetry<' in unmatched
+    )
     assert "4 unknown" in unmatched and "seg--free" not in unmatched and "seg--busy" not in unmatched
-    assert unmatched.count("seg--off") == 4 and " idle<" not in unmatched
-    idle = sum(int(m.group(1)) for row in rows for m in re.finditer(r'seat-text">[^<]*?(\d+) idle', row))
+    assert unmatched.count("seg--off") == 4 and ' idle"' not in unmatched
+    idle = sum(int(m.group(1)) for row in rows for m in re.finditer(r'role="img" aria-label="[^"]*?(\d+) idle', row))
     summary = overview.render_summary(view)
     assert idle == 8 and _card_value(summary, "idle") == str(idle)
     assert _card_value(summary, "offline") == "0"
@@ -961,8 +978,8 @@ def test_sidebar_nav_marks_the_active_page_and_hides_work_when_off():
     view = _mixed_view()
     html = overview.render_sidebar(view, "repos", NOW, worklore_enabled=False)
     assert '<nav class="deck-nav" aria-label="Command Deck">' in html
-    assert '<a href="/deck/repos" aria-current="page">repos</a>' in html
-    assert '<a href="/deck">overview <span class="nav-count">3</span></a>' in html
+    assert f'<a href="/deck/repos" aria-current="page">{NAV_ICONS["repos"]}repos</a>' in html
+    assert f'<a href="/deck">{NAV_ICONS["overview"]}overview <span class="nav-count">3</span></a>' in html
     assert html.count("aria-current") == 1
     assert "/deck/work" not in html
     for href in ("/deck/roster", "/deck/policy", "/view/machines"):
@@ -985,19 +1002,19 @@ def test_sidebar_machine_tree_shows_dots_summaries_children_and_cloud():
     assert 'Cloud <span class="nav-count">2</span>' in html
     assert 'class="tree-meta">0/4<' in html and 'class="tree-meta">1/3 · open<' in html
     assert html.count("data-filter-row") == 5
-    assert "Hub telemetry 1m ago" in html
+    assert 'class="mono sidebar-telemetry">telemetry 1m<' in html
 
 
 def test_sidebar_without_a_view_is_navigation_only():
     html = overview.render_sidebar(None, "roster", NOW, worklore_enabled=False)
-    assert "tree-list" not in html and "data-tree-filter" not in html and "Hub telemetry" not in html
-    assert '<a href="/deck/roster" aria-current="page">roster</a>' in html
-    assert '<a href="/deck">overview</a>' in html
+    assert "tree-list" not in html and "data-tree-filter" not in html and "sidebar-telemetry" not in html
+    assert f'<a href="/deck/roster" aria-current="page">{NAV_ICONS["roster"]}roster</a>' in html
+    assert f'<a href="/deck">{NAV_ICONS["overview"]}overview</a>' in html
 
 
 def test_sidebar_footer_says_unknown_without_telemetry_and_escapes_labels():
     html = overview.render_sidebar(_view([_station(NODE_A, HOSTILE, 2)]), "overview", NOW, worklore_enabled=True)
-    assert "Hub telemetry unknown" in html
+    assert "telemetry unknown" in html
     assert HOSTILE not in html and "&lt;script&gt;" in html
 
 
@@ -1214,3 +1231,136 @@ def test_future_queue_exclusion_reason_falls_back_to_raw_value(monkeypatch):
     assert "2 excluded from ready queue" in html
     assert "manual-mode" in html
     assert ">Ready queue<" in html
+
+
+@pytest.mark.parametrize("view", [_mixed_view(), None])
+def test_sidebar_resources_link_out_safely(view):
+    html = overview.render_sidebar(view, "overview", NOW, worklore_enabled=True)
+    for href in (
+        "https://brigade.tools/docs",
+        "https://github.com/escoffier-labs/brigade/issues/new?template=bug.yml",
+        "https://github.com/escoffier-labs/brigade",
+    ):
+        assert html.count(f'href="{href}"') == 1
+        assert f'href="{href}" target="_blank" rel="noopener noreferrer"' in html
+    assert html.count("<nav") == 1
+
+
+def test_sidebar_meta_shows_version_and_flags_stale_telemetry():
+    import brigade
+
+    machine = _machine("linux-a", NODE_A, last_observed_at=_stamp(120))
+    view = _view(plane=_plane([machine]), stale_after_seconds=60)
+    html = overview.render_sidebar(view, "overview", NOW, worklore_enabled=True)
+    assert "sidebar-meta--stale" in html and "telemetry stale 2m" in html
+    assert f"v{brigade.__version__}" in html
+    fresh = overview.render_sidebar(replace(view, stale_after_seconds=1800), "overview", NOW, worklore_enabled=True)
+    assert "sidebar-meta--stale" not in fresh and "telemetry 2m" in fresh
+
+
+@pytest.mark.parametrize("plane", [None, _plane([_machine("linux-a", NODE_A, last_observed_at="unreadable")])])
+def test_sidebar_meta_is_unknown_without_a_control_plane(plane):
+    html = overview.render_sidebar(_view(plane=plane), "overview", NOW, worklore_enabled=True)
+    assert "telemetry unknown" in html and "sidebar-meta--stale" not in html
+
+
+def test_every_nav_item_has_an_icon_and_a_text_label():
+    from brigade.fleet_deck_sidebar import NAV_ITEMS
+
+    html = overview.render_sidebar(_mixed_view(), "overview", NOW, worklore_enabled=True)
+    for key, _href, label in NAV_ITEMS:
+        assert NAV_ICONS[key] + label in html
+
+
+@pytest.mark.parametrize(
+    "status, fields, expected",
+    [
+        (
+            "limited",
+            {"unused_reason": "machine-draining", "active_claims": "2"},
+            (("draining", False), ("2 claims", False)),
+        ),
+        ("stale", {}, (("stale", True),)),
+        ("working", {"active_claims": "1"}, (("1 claim", False),)),
+        ("working", {"active_claims": "0"}, ()),
+        ("working", {"active_claims": "unknown"}, ()),
+        ("working", {"active_claims": "x"}, ()),
+        ("offline", {}, (("offline", False),)),
+        ("unknown", {}, (("no telemetry", False),)),
+    ],
+)
+def test_machine_notes_order_and_claims(status, fields, expected):
+    station = _station(NODE_A, "linux-a", 4)
+    machine = _machine("linux-a", NODE_A, **fields)
+    assert overview.machine_notes(station, machine, status) == expected
+
+
+def test_machine_row_escapes_hostile_notes_and_title():
+    station = _station(NODE_A, HOSTILE, 4)
+    machine = _machine("linux-a", NODE_A, state=HOSTILE, unused_reason=HOSTILE)
+    (row,) = _rows(overview.render_machine_table(_view([station], plane=_plane([machine])), NOW))
+    assert HOSTILE not in row and "&lt;script&gt;" in row
+    assert 'class="tag">&lt;script&gt;alert(1)&lt;/script&gt;<' in row
+    assert 'title="state &lt;script&gt;alert(1)&lt;/script&gt; · reason &lt;script&gt;' in row
+
+
+def test_zero_capacity_station_renders_empty_bar():
+    station = _station(NODE_A, "linux-a", 0)
+    machine = _machine("linux-a", NODE_A, available_slots="0")
+    (row,) = _rows(overview.render_machine_table(_view([station], plane=_plane([machine])), NOW))
+    assert ">0 / 0<" in row
+    assert "seg--" not in re.findall(r"<td[^>]*>(.*?)</td>", row, re.S)[1]
+
+
+@pytest.mark.parametrize("capacity, busy", [(10, 2), (4, 4), (16, 0), (3, 5)])
+def test_seat_text_is_busy_over_capacity(capacity, busy):
+    view = _seat_view(str(capacity), runs=busy, capacity=capacity)
+    (row,) = _rows(overview.render_machine_table(view, NOW))
+    # Over-capacity stays visible: the text shows the real busy count while the bar stays capped.
+    assert f">{busy} / {capacity}<" in row
+    assert row.count("seg--busy") == min(busy, capacity)
+
+
+def test_header_has_no_breadcrumb_and_alerts_have_no_icon():
+    html = overview.render_overview(_mixed_view(), NOW, worklore_enabled=True)
+    assert "crumbs" not in html and "alert-icon" not in html
+
+
+def test_main_column_has_no_status_dots():
+    view = _mixed_view()
+    queue = deck.QueueState("0", "1", blocked=({"id": "job-1", "reason": "manual-mode"},), blocked_known=True)
+    view = replace(view, control_plane=replace(view.control_plane, queue=queue))
+    html = overview.render_overview(view, NOW, worklore_enabled=True)
+    main = html.split("<main", 1)[1].split("</main>", 1)[0]
+    assert 'class="dot' not in main
+
+
+def test_card_links_point_only_at_existing_routes():
+    for enabled in (True, False):
+        html = overview.render_overview(_mixed_view(), NOW, worklore_enabled=enabled)
+        assert html.count('class="card-link"') == 2
+        assert html.count('class="card-link" href="/view/machines"') == 2
+        assert 'class="card-link" href="/deck/work"' not in html
+    rule = re.search(r"\.card-link::after \{[^}]*\}", ui_theme.BASE_CSS).group(0)
+    assert 'content: "\\2192"' in rule
+
+
+def test_stale_machine_row_shows_the_age_with_the_stale_tone():
+    rows = _rows(overview.render_machine_table(_mixed_view(), NOW))
+    stale = rows[1]
+    assert 'class="seen mono seen--stale">stale 2h 0m<' in stale
+    assert 'class="seen mono">1m<' in rows[0]
+
+
+def test_seats_cell_title_and_bar_label_share_the_seat_sentence():
+    (row,) = _rows(overview.render_machine_table(_seat_view("6"), NOW))
+    sentence = "2 busy, 6 idle, 2 claimed"
+    assert f'<td title="{sentence}">' in row and f'role="img" aria-label="{sentence}"' in row
+
+
+def test_machine_legend_uses_its_own_swatches_not_seat_segments():
+    html = overview.render_machine_table(_mixed_view(), NOW)
+    legend = re.search(r'<p class="seat-legend" aria-hidden="true">.*?</p>', html, re.S).group(0)
+    for kind in ("busy", "free", "off"):
+        assert f'legend-swatch legend-swatch--{kind}"' in legend
+    assert "seg" not in legend.replace("seat-legend", "")

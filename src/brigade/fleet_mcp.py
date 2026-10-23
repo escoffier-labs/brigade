@@ -7,7 +7,8 @@ from time import monotonic, sleep
 from typing import Any
 
 from . import fleet_client, fleet_client_messages as messages, mcp_server
-from .fleet_hub_messages import MAX_SQLITE_INTEGER, MAX_WAIT_MS
+from .fleet_hub_messages import MAX_SQLITE_INTEGER, MAX_WAIT_MS, MessageError
+from .fleet_ask_user import AskUser, AskUserError
 from .untrusted import scan_untrusted, wrap_untrusted
 
 DEFAULT_PORT = 8933
@@ -38,6 +39,16 @@ def tool_specs() -> list[dict[str, Any]]:
     limit = {"type": "integer", "minimum": 1, "maximum": 100, "default": 100}
     definitions = [
         (
+            "fleet_ask_user",
+            "Ask the configured operator, recording an answer or timeout on the hub.",
+            {
+                "question": text,
+                "timeout_secs": {"type": "integer", "minimum": 1, "maximum": 120, "default": 60},
+                "request_id": text,
+            },
+            ["question"],
+        ),
+        (
             "fleet_who",
             "List sessions and permitted recipients; pass next_cursor as cursor to continue a snapshot.",
             {
@@ -57,6 +68,12 @@ def tool_specs() -> list[dict[str, Any]]:
                 "reply_to": text,
                 "kind": {"type": "string", "enum": ["message", "question", "completion"]},
                 "thread": text,
+                "client_id": {
+                    **text,
+                    "maxLength": 64,
+                    "pattern": "^[A-Za-z0-9_-]+$",
+                    "description": "Reuse this key with identical arguments to retry without duplicates.",
+                },
             },
             ["to", "body"],
         ),
@@ -85,7 +102,16 @@ def tool_specs() -> list[dict[str, Any]]:
         (
             "fleet_reply",
             "Reply to an inbox message, durably spooling when offline.",
-            {"id": text, "body": text},
+            {
+                "id": text,
+                "body": text,
+                "client_id": {
+                    **text,
+                    "maxLength": 64,
+                    "pattern": "^[A-Za-z0-9_-]+$",
+                    "description": "Reuse this key with identical arguments to retry without duplicates.",
+                },
+            },
             ["id", "body"],
         ),
         (
@@ -109,6 +135,11 @@ def tool_specs() -> list[dict[str, Any]]:
         {
             "name": name,
             "description": description,
+            "annotations": {
+                "readOnlyHint": name in {"fleet_who", "fleet_inbox", "fleet_sent", "fleet_claims"},
+                # Sending adds a record. Ack changes existing unread state.
+                "destructiveHint": name == "fleet_ack",
+            },
             "inputSchema": {
                 "type": "object",
                 "properties": properties,
@@ -139,6 +170,10 @@ def _validate(value: Any, schema: dict[str, Any]) -> None:
     if kind == "string" and len(value) < schema.get("minLength", 0):
         raise _InvalidArguments("Invalid tool arguments: a required string is empty.")
     if "enum" in schema and value not in schema["enum"]:
+        if value == "operator_question":
+            raise _InvalidArguments(
+                "Invalid tool arguments: operator_question is reserved for hub-created operator questions."
+            )
         raise _InvalidArguments("Invalid tool arguments: unsupported value.")
     if kind == "array":
         if not schema["minItems"] <= len(value) <= schema["maxItems"]:
@@ -293,6 +328,13 @@ def _page_limit(payload: dict[str, Any], limit: int) -> dict[str, Any]:
 
 
 def _tool_error(exc: Exception) -> dict[str, Any]:
+    if isinstance(exc, AskUserError):
+        return {
+            "error": str(exc),
+            "code": exc.code,
+            "request_id": exc.request_id,
+            **({"question_id": exc.question_id} if exc.question_id else {}),
+        }
     if isinstance(exc, messages.FleetMessageHubError):
         status = exc.status if isinstance(exc.status, int) and 400 <= exc.status <= 599 else None
         code = exc.code if isinstance(exc.code, str) and exc.code in _SAFE_ERROR_CODES else "hub_rejected"
@@ -320,6 +362,7 @@ def _tool_error(exc: Exception) -> dict[str, Any]:
 class FleetMcp:
     def __init__(self, *, token_file: str | None = None, events: bool = False) -> None:
         self.token_file = token_file
+        self._ask_user = AskUser()
         self.events = events
 
     def callbacks(self) -> dict[str, Any]:
@@ -354,7 +397,7 @@ class FleetMcp:
                 _message_id(arguments["after"], allow_zero=True)
             payload = self._call(name, arguments, ids, message_id, reply_to)
             return _frame(payload), False
-        except _InvalidArguments as exc:
+        except (_InvalidArguments, MessageError) as exc:
             return {"error": str(exc)}, True
         except Exception as exc:
             # Upstream failures may contain URLs, credentials, or attacker-controlled text.
@@ -369,6 +412,8 @@ class FleetMcp:
     ) -> dict[str, Any]:
         # One captured credential for the whole tool call, as the message layer requires.
         authority = self._authority()
+        if name == "fleet_ask_user":
+            return self._ask_user.ask(authority=authority, **args)
         if name in {"fleet_who", "fleet_claims"}:
             action = "who" if name == "fleet_who" else "claims"
             payload = messages._online({"action": action, "limit": 200, **args}, authority=authority)
@@ -389,6 +434,7 @@ class FleetMcp:
                 kind=args.get("kind"),
                 thread=args.get("thread"),
                 reply_to=reply_to,
+                client_id=args.get("client_id"),
                 authority=authority,
             )
         elif name == "fleet_reply":
@@ -399,6 +445,7 @@ class FleetMcp:
                 subject=None,
                 reference=None,
                 priority="normal",
+                client_id=args.get("client_id"),
                 authority=authority,
             )
         elif name == "fleet_ack":

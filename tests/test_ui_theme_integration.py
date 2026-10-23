@@ -395,7 +395,7 @@ def test_boards_and_deck_pages_follow_the_system_scheme_and_center_stays_dark(fl
         assert "@media (prefers-color-scheme: light)" in css, route
     center = _document_css(_center_status_page())
     assert "color-scheme: dark;" in center and "prefers-color-scheme" not in center
-    assert "--canvas: #111617;" in center
+    assert "--canvas: #0a0a0a;" in center
 
 
 _LITERAL_COLOR = re.compile(r"#[0-9a-fA-F]{3,8}\b|\b(?:rgb|rgba|hsl|hsla)\(", re.IGNORECASE)

@@ -899,19 +899,19 @@ _BOARD_CSS = """
 .state-legend { display: flex; flex-wrap: wrap; gap: var(--space-2) var(--space-3); margin-bottom: var(--space-3); font-size: 12px; color: var(--muted); }
 .legend-entry { white-space: nowrap; }
 .fleet-controls { display: flex; flex-wrap: wrap; gap: var(--space-3) var(--space-4); align-items: end; margin-bottom: var(--space-3); font-size: 12px; color: var(--muted); }
-.fleet-controls label { display: grid; gap: 6px; min-width: 0; text-transform: uppercase; }
-.fleet-controls input, .fleet-controls select { max-width: 100%; min-width: 0; text-transform: none; }
-.fleet-controls input[type="search"], .fleet-controls select { min-height: 36px; padding: var(--space-2) 10px; border: 1px solid var(--line); background: var(--surface-raised); color: var(--ink); font: inherit; width: 10rem; }
-.fleet-controls button { min-height: var(--space-8); padding: 0 14px; border: 1px solid var(--signal); background: var(--signal-quiet); color: var(--ink); font: inherit; font-weight: 700; cursor: pointer; }
+.fleet-controls label { display: grid; gap: 6px; min-width: 0; }
+.fleet-controls input, .fleet-controls select { max-width: 100%; min-width: 0; border-radius: var(--radius-control); text-transform: none; }
+.fleet-controls input[type="search"], .fleet-controls select { min-height: 36px; padding: var(--space-2) 10px; border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--surface-raised); color: var(--ink); font: inherit; width: 10rem; }
+.fleet-controls button { min-height: var(--space-8); padding: 0 14px; font: inherit; font-weight: 500; cursor: pointer; }
 .fleet-quick { color: var(--muted); }
 .fleet-quick-filter { display: grid; gap: 6px; margin-bottom: var(--space-4); font-size: 12px; color: var(--muted); }
-.fleet-quick-filter input { min-height: 36px; padding: var(--space-2) 10px; border: 1px solid var(--line); background: var(--surface-raised); color: var(--ink); font: inherit; width: 100%; max-width: 24rem; min-width: 0; }
+.fleet-quick-filter input { min-height: 36px; padding: var(--space-2) 10px; border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--surface-raised); color: var(--ink); font: inherit; width: 100%; max-width: 24rem; min-width: 0; }
 .machine-board { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); gap: var(--space-4); margin-bottom: var(--space-4); }
-.machine-card { min-width: 0; padding: var(--space-4); border: 1px solid var(--line-quiet); background: var(--surface); }
+.machine-card { min-width: 0; padding: var(--space-4); border: 1px solid var(--line); border-radius: var(--radius-card); background: var(--surface); }
 .machine-card-header { display: flex; gap: var(--space-3); align-items: center; margin-bottom: var(--space-3); }
 .machine-glyph { flex: 0 0 auto; stroke: var(--muted); fill: none; stroke-width: 1.6; }
 .machine-card-meta { min-width: 0; flex: 1; }
-.machine-card-title { margin: 0; font-size: 14px; font-weight: 700; color: var(--ink); font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
+.machine-card-title { margin: 0; font-size: 14px; font-weight: 700; color: var(--ink); font-family: var(--font-mono); }
 .machine-card-line { color: var(--muted); font-size: 12px; }
 .state-strip { display: flex; flex-wrap: wrap; gap: 6px; margin-top: var(--space-2); }
 .state-chip { border: 1px solid var(--line); border-radius: 999px; padding: 2px var(--space-2); font-size: 11px; color: var(--muted); }
@@ -919,7 +919,7 @@ _BOARD_CSS = """
 .fleet-holds ul { margin: 0; padding-left: 1.2rem; }
 table.data-table { table-layout: auto; }
 table.data-table th:nth-child(n) { width: auto; }
-.fleet-run-id, .fleet-node { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; font-size: 12px; word-break: break-all; }
+.fleet-run-id, .fleet-node { font-family: var(--font-mono); font-size: 12px; word-break: break-all; }
 .fleet-where { margin: 0; padding-left: 1.1rem; }
 .fleet-state { display: inline-block; border: 1px solid var(--line); border-radius: 999px; padding: 2px var(--space-2); font-size: 11px; font-weight: 700; white-space: nowrap; color: var(--ink); }
 .fleet-execution-context { display: block; color: var(--muted); }
