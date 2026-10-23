@@ -172,7 +172,7 @@ Note: Reviewed the eight listed controls in primary-dataset.json and their Orche
 
 ### Unmapped evidence properties
 
-No control identifier is assigned to these evidence properties. Each entry records the rationale and limits of this disposition.
+Unmapped within each entry's stated scope. No control identifier is assigned.
 
 | Claim | Property | Disposition | Supersedes | Artifact contract | Responsible actor | Applicability | Rationale | Verification limit | Rejected control source |
 |-------|----------|-------------|------------|-------------------|-------------------|---------------|-----------|--------------------|--------|
@@ -403,7 +403,7 @@ Note: Rows cite the final NIST AI 100-1 Core tables (Section 5, Tables 1 to 4). 
 
 ### Unmapped evidence properties
 
-No control identifier is assigned to these evidence properties. Each entry records the rationale and limits of this disposition.
+Unmapped within each entry's stated scope. No control identifier is assigned.
 
 | Claim | Property | Disposition | Supersedes | Artifact contract | Responsible actor | Applicability | Rationale | Verification limit | Rejected control source |
 |-------|----------|-------------|------------|-------------------|-------------------|---------------|-----------|--------------------|--------|

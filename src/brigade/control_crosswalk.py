@@ -1923,10 +1923,7 @@ def render_doc() -> str:
             lines.append("")
             lines.append("### Unmapped evidence properties")
             lines.append("")
-            lines.append(
-                "No control identifier is assigned to these evidence properties. "
-                "Each entry records the rationale and limits of this disposition."
-            )
+            lines.append("Unmapped within each entry's stated scope. No control identifier is assigned.")
             lines.append("")
             lines.append(
                 "| Claim | Property | Disposition | Supersedes | Artifact contract | Responsible actor "
