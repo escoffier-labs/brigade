@@ -22,6 +22,8 @@ Omitting the handle preserves the legacy slot/worker/turn matching behavior.
 That form cannot distinguish replacements with reused IDs and should only be
 used when the caller prevents overlapping registration and cleanup. Wrappers
 around `register` must return its handle to preserve ownership protection.
+Callers must retain the returned handle. If registration raises or no handle
+is returned, there is no cleanup ownership and cleanup must be skipped.
 
 IDs are nonempty ASCII tokens of at most 128 characters, beginning
 with a letter or digit and otherwise using letters, digits, `.`, `_`, `:`, `-`.
@@ -55,7 +57,11 @@ missing registration proves containment.
 The appserver runner accepts optional task/attempt keywords and forwards them
 to turn registration and cleanup. Its `finally` cleanup retains and supplies
 the registration handle for both assignment and legacy worker slots, on success
-and provider failure. Main dispatch and the transport runner
+and provider failure. It derives cleanup identity from that handle and never
+uses tokenless cleanup. A swallowed registration-observer error leaves any
+replacement intact. If a later callback fails after an earlier registration
+succeeded, cleanup uses the earlier handle and its original identity.
+Main dispatch and the transport runner
 protocol currently supply no assignment IDs. Until the owning integration
 adds those IDs, ordinary dispatch uses legacy worker slots. Journals, durable
 results, acceptance deduplication, parent delivery, wait semantics, T3 children,

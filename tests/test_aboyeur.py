@@ -5385,6 +5385,154 @@ def test_appserver_cleanup_preserves_replacement_registration(assignment, fail):
     assert registry.snapshot()[0].thread_id == "thread-b"
 
 
+@pytest.mark.parametrize("assignment", [{}, {"task_id": "task-a", "attempt_id": "attempt-1"}])
+@pytest.mark.parametrize("registration_fails", [False, True], ids=["registered", "observer-failure"])
+@pytest.mark.parametrize("provider_fails", [False, True], ids=["completed", "provider-failure"])
+def test_appserver_cleanup_requires_returned_registration(assignment, registration_fails, provider_fails):
+    import queue
+
+    registrations = []
+    cleanups = []
+    interrupts = []
+
+    class Registry(aboyeur.run_control.LiveTurnRegistry):
+        def register(self, worker, thread, turn_id, **kwargs):
+            if registration_fails and thread.thread_id == "thread-a":
+                registrations.append(None)
+                raise RuntimeError("registration unavailable")
+            handle = super().register(worker, thread, turn_id, **kwargs)
+            registrations.append(handle)
+            return handle
+
+        def unregister(self, worker, turn_id, **kwargs):
+            cleanups.append((worker, turn_id, kwargs))
+            return super().unregister(worker, turn_id, **kwargs)
+
+    class ReplacementThread:
+        thread_id = "thread-b"
+
+        def interrupt(self, turn_id):
+            interrupts.append(turn_id)
+
+    registry = Registry()
+    replacement = registry.register("cook", ReplacementThread(), "same-turn", **assignment)
+
+    class Server:
+        def start_thread(self, **kwargs):
+            events = queue.Queue()
+            events.put(
+                {
+                    "method": "turn/completed",
+                    "params": {
+                        "turn": {
+                            "id": "same-turn",
+                            "status": "failed" if provider_fails else "completed",
+                            "items": [{"type": "agentMessage", "text": "finished"}],
+                            "error": {"message": "provider unavailable"},
+                        }
+                    },
+                }
+            )
+            self.budget = proc.ByteBudget()
+            return aboyeur.codex_appserver.CodexThread(self, "thread-a", events)
+
+        def request(self, method, params):
+            assert method == "turn/start"
+            return {"turn": {"id": "same-turn"}}
+
+        def capture_budget(self, thread_id):
+            return self.budget
+
+    result = aboyeur._run_codex_appserver_worker(
+        Server(),
+        Agent("cook", "codex", "write code"),
+        "cook",
+        "do work",
+        timeout=5.0,
+        cwd=None,
+        read_only=False,
+        sandbox=None,
+        registry=registry,
+        **assignment,
+    )
+
+    assert result.ok is not provider_fails
+    assert len(registrations) == 2
+    if registration_fails:
+        assert registrations[-1] is None
+        assert registry.snapshot() == (replacement,)
+        assert cleanups == []
+        assert registry.interrupt("cook")["interrupted"] == 1
+        assert interrupts == ["same-turn"]
+    else:
+        assert registry.snapshot() == ()
+        assert len(cleanups) == 1
+        worker, turn_id, cleanup = cleanups[0]
+        assert (worker, turn_id) == ("cook", "same-turn")
+        assert cleanup["registration"] is registrations[-1]
+
+
+@pytest.mark.parametrize("assignment", [{}, {"task_id": "task-a", "attempt_id": "attempt-1"}])
+@pytest.mark.parametrize("replace", [False, True], ids=["owned", "replaced"])
+def test_appserver_later_failed_registration_keeps_earlier_handle_identity(assignment, replace):
+    registry = aboyeur.run_control.LiveTurnRegistry()
+    handles = []
+    cleanups = []
+
+    class Thread:
+        @property
+        def thread_id(self):
+            if handles:
+                raise RuntimeError("thread identity unavailable")
+            return "thread-a"
+
+        def run_turn(self, prompt, **kwargs):
+            kwargs["on_turn_start"]("old-turn")
+            handles.extend(registry.snapshot())
+            if replace:
+                replacement = _StubAppServerThread("thread-b")
+                handles.append(registry.register("cook", replacement, "old-turn", **assignment))
+            # CodexThread suppresses observer exceptions so the provider can finish.
+            try:
+                kwargs["on_turn_start"]("new-turn")
+            except Exception:  # noqa: BLE001 - match the production observer contract
+                pass
+            return aboyeur.codex_appserver.TurnResult(
+                text="finished", ok=True, status="completed", thread_id="thread-a"
+            )
+
+    class Server:
+        def start_thread(self, **kwargs):
+            return Thread()
+
+    original_unregister = registry.unregister
+
+    def unregister(worker, turn_id, **kwargs):
+        cleanups.append((worker, turn_id, kwargs))
+        return original_unregister(worker, turn_id, **kwargs)
+
+    registry.unregister = unregister
+    result = aboyeur._run_codex_appserver_worker(
+        Server(),
+        Agent("cook", "codex", "write code"),
+        "cook",
+        "do work",
+        timeout=5.0,
+        cwd=None,
+        read_only=False,
+        sandbox=None,
+        registry=registry,
+        **assignment,
+    )
+
+    assert result.ok is True
+    assert registry.snapshot() == ((handles[-1],) if replace else ())
+    assert len(cleanups) == 1
+    worker, turn_id, cleanup = cleanups[0]
+    assert (worker, turn_id) == (handles[0].worker, handles[0].turn_id)
+    assert cleanup["registration"] is handles[0]
+
+
 def test_run_appserver_worker_rejects_non_final_output_in_receipts(monkeypatch, tmp_path):
     monkeypatch.setattr(aboyeur.codex_appserver, "AppServer", _IntentOnlyAppServer)
     output_dir = tmp_path / "run"

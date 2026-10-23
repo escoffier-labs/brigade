@@ -931,7 +931,6 @@ def _run_codex_appserver_worker(
     attempt_id: str | None = None,
 ) -> agents.AgentResult:
     effective_sandbox = sandbox if sandbox is not None else ("read-only" if read_only else None)
-    active_turn_id: str | None = None
     active_registration: run_control.ActiveTurn | None = None
     try:
         try:
@@ -954,8 +953,7 @@ def _run_codex_appserver_worker(
         thread = appserver.start_thread(cwd=cwd, model=agent.model, sandbox=effective_sandbox)
 
         def on_turn_start(turn_id: str) -> None:
-            nonlocal active_turn_id, active_registration
-            active_turn_id = turn_id
+            nonlocal active_registration
             if registry is not None:
                 if task_id is None and attempt_id is None:
                     active_registration = registry.register(worker, thread, turn_id)
@@ -987,12 +985,18 @@ def _run_codex_appserver_worker(
             reasoning=agent.reasoning,
         )
     finally:
-        if registry is not None and active_turn_id is not None:
-            if task_id is None and attempt_id is None:
-                registry.unregister(worker, active_turn_id, registration=active_registration)
+        if registry is not None and active_registration is not None:
+            if active_registration.task_id is None and active_registration.attempt_id is None:
+                registry.unregister(
+                    active_registration.worker, active_registration.turn_id, registration=active_registration
+                )
             else:
                 registry.unregister(
-                    worker, active_turn_id, task_id=task_id, attempt_id=attempt_id, registration=active_registration
+                    active_registration.worker,
+                    active_registration.turn_id,
+                    task_id=active_registration.task_id,
+                    attempt_id=active_registration.attempt_id,
+                    registration=active_registration,
                 )
     text = turn.text.strip()
     if getattr(turn, "output_limit_exceeded", False) or len(text.encode("utf-8")) > proc.MAX_CAPTURE_BYTES:
