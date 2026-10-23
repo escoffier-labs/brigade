@@ -123,3 +123,39 @@ def test_hung_grok_inventory_surfaces_distinct_timeout_state(monkeypatch):
     assert result is not None
     assert result.state == "timeout"
     assert "timed out" in result.detail
+
+
+def test_ready_inspects_only_selected_seat_without_inference_or_persistent_writes(tmp_path, monkeypatch, capsys):
+    import json
+
+    from brigade import agents, seat_health
+
+    path = tmp_path / ".brigade" / "roster.toml"
+    path.parent.mkdir()
+    path.write_text(
+        'orchestrator = "chef"\n'
+        '[agents.chef]\ncli = "codex"\nrole = "plan"\n'
+        '[agents.worker]\ncli = "codex"\nrole = "implement"\nmodel = "example-model"\n'
+        '[agents.unused]\ncli = "codex"\nrole = "research"\n'
+    )
+    before = {file.relative_to(tmp_path): file.read_bytes() for file in tmp_path.rglob("*") if file.is_file()}
+    probed = []
+    original = seat_health.SeatHealthProbe.probe
+
+    def recording_probe(self, seat, roster, **kwargs):
+        probed.append(seat.name)
+        return original(self, seat, roster, **kwargs)
+
+    def forbidden_inference(*args, **kwargs):
+        raise AssertionError("readiness inspection attempted inference")
+
+    monkeypatch.setattr(seat_health.SeatHealthProbe, "probe", recording_probe)
+    monkeypatch.setattr(agents, "run_agent", forbidden_inference)
+    rc = roster_cmd.ready(tmp_path, workers=("worker",), json_output=True)
+    result = json.loads(capsys.readouterr().out)
+    assert rc == 2  # bare-host fixture has no installed worker executable
+    assert probed == ["worker"]
+    assert result["roster"]["source"] == "workspace"
+    assert result["admitted_capacity"] is None
+    assert any(item["category"] == "model-reachability" and item["status"] == "unknown" for item in result["evidence"])
+    assert {file.relative_to(tmp_path): file.read_bytes() for file in tmp_path.rglob("*") if file.is_file()} == before
