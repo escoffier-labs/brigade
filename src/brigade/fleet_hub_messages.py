@@ -1165,15 +1165,21 @@ def handle(
     if action in ("who", "claims"):
         from .fleet_hub_paging import SnapshotWriteRequired
 
+        def read_station(*, snapshot_write: bool = False) -> dict[str, Any]:
+            if authenticated_generation is not None:
+                from .fleet_hub_questions import _generation
+
+                if not secrets.compare_digest(_generation(conn, caller), authenticated_generation):
+                    raise MessageAuthError("station read credential generation changed")
+            return _station_read(conn, raw, caller=caller, snapshot_write=snapshot_write)
+
         try:
-            result = _as_active_principal(conn, caller, lambda: _station_read(conn, raw, caller=caller), read_only=True)
+            result = _as_active_principal(conn, caller, read_station, read_only=True)
         except SnapshotWriteRequired:
             # Small reads never take write admission. Rebuild a new snapshot
             # after BEGIN IMMEDIATE so its data and authorization are current,
             # and concurrent snapshot writers cannot race the storage caps.
-            result = _as_active_principal(
-                conn, caller, lambda: _station_read(conn, raw, caller=caller, snapshot_write=True)
-            )
+            result = _as_active_principal(conn, caller, lambda: read_station(snapshot_write=True))
         return 200, result
     if action == "reply" or (action == "send" and raw.get("reply_to") is not None):
 

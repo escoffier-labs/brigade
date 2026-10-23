@@ -334,6 +334,153 @@ def test_http_mesh_read_rejects_replaced_generation_after_auth(hub, monkeypatch,
         assert "credential generation changed" in payload["error"]
 
 
+def enroll_reader(conn, principal):
+    if principal.startswith("agent:"):
+        enrolled = messages.add_principal(conn, {"name": "reader"})
+        return enrolled["token"], enrolled
+    return fleet_hub.add_node(conn, principal)[1], None
+
+
+def replace_reader(conn, principal, enrolled):
+    if enrolled is None:
+        fleet_hub.revoke_node(conn, principal)
+        return fleet_hub.add_node(conn, principal)[1]
+    messages.revoke_principal(
+        conn, {"action": "revoke", "name": "reader", "expected_enrollment_id": enrolled["enrollment_id"]}
+    )
+    return messages.add_principal(
+        conn,
+        {"name": "reader", "expected_enrollment_id": enrolled["enrollment_id"], "may_send_to": ["node-b"]},
+    )["token"]
+
+
+@pytest.mark.parametrize("principal", ["node-reader", "agent:reader"])
+@pytest.mark.parametrize("read_action", ["who", "claims"])
+def test_http_station_read_rejects_replaced_generation_after_auth(hub, monkeypatch, principal, read_action):
+    from brigade import fleet_hub_event_bounds as bounds
+
+    value = record()
+    publish(hub, value)
+    assert (
+        fleet_hub.handle_claim(
+            hub,
+            {"action": "acquire", "target": "example", "node_id": "node-b", "holder": "fixture"},
+            caller_node="node-b",
+        )[0]
+        == 200
+    )
+    old_token, enrolled = enroll_reader(hub, principal)
+    raw = {"action": read_action}
+    authenticated, release_body = threading.Event(), threading.Event()
+    read_body = bounds.read_json_body
+
+    def paused_body(handler, **kwargs):
+        if handler.path == "/messages" and handler.headers.get("Authorization") == "Bearer " + old_token:
+            authenticated.set()
+            assert release_body.wait(2), "body-read barrier was not released"
+        return read_body(handler, **kwargs)
+
+    path = hub.execute("PRAGMA database_list").fetchone()[2]
+    with serving(path) as address:
+        if enrolled:
+            before = request(address, "POST", "/messages", old_token, raw)[1]
+            assert before["nodes" if read_action == "who" else "claims"] == []
+        monkeypatch.setattr(bounds, "read_json_body", paused_body)
+        with ThreadPoolExecutor(max_workers=1) as executor:
+            inflight = executor.submit(request, address, "POST", "/messages", old_token, raw)
+            try:
+                assert authenticated.wait(2), "request did not reach the post-authentication body barrier"
+                fresh_token = replace_reader(hub, principal, enrolled)
+                if enrolled:
+                    assert messages.lookup_principal_token(hub, old_token) is None
+                    assert messages.lookup_principal_token(hub, fresh_token) == principal
+                else:
+                    assert fleet_hub.lookup_node_token(hub, old_token)[0] is None
+                    assert fleet_hub.lookup_node_token(hub, fresh_token)[0] == principal
+            finally:
+                release_body.set()
+            stale_status, stale_payload = inflight.result(timeout=3)
+        fresh_status, fresh = request(address, "POST", "/messages", fresh_token, raw)
+        assert fresh_status == 200
+        if read_action == "who":
+            node = next(row for row in fresh["nodes"] if row["node_id"] == "node-b")
+            assert node["keys"][0]["record"] == value
+        else:
+            assert [row["owner_node"] for row in fresh["claims"]] == ["node-b"]
+        assert stale_status == 403, stale_payload
+        assert stale_payload["code"] == "message_sender_inactive"
+        assert "credential generation changed" in stale_payload["error"]
+
+
+@pytest.mark.parametrize("principal", ["node-reader", "agent:reader"])
+@pytest.mark.parametrize("read_action", ["who", "claims"])
+def test_station_snapshot_retry_rechecks_generation_after_rollback(hub, monkeypatch, principal, read_action):
+    value = record()
+    publish(hub, value)
+    for target in ("example-a", "example-b"):
+        assert (
+            fleet_hub.handle_claim(
+                hub,
+                {"action": "acquire", "target": target, "node_id": "node-b", "holder": "fixture"},
+                caller_node="node-b",
+            )[0]
+            == 200
+        )
+    old_token, enrolled = enroll_reader(hub, principal)
+    if enrolled:
+        messages.handle_principal_admin(hub, {"action": "grants", "name": "reader", "may_send_to": ["node:*"]})
+    original = messages._as_active_principal
+    fresh_tokens = []
+
+    def replace_after_rollback(conn, caller, operation, **kwargs):
+        try:
+            return original(conn, caller, operation, **kwargs)
+        except paging.SnapshotWriteRequired:
+            assert not conn.in_transaction
+            assert not fresh_tokens, "expected one read-only attempt"
+            fresh_tokens.append(replace_reader(conn, principal, enrolled))
+            raise
+
+    error = None
+    with monkeypatch.context() as patch:
+        patch.setattr(messages, "_as_active_principal", replace_after_rollback)
+        try:
+            messages.handle(
+                hub,
+                {"action": read_action, "limit": 1},
+                caller=principal,
+                authenticated_generation=fleet_hub.hash_node_token(old_token),
+            )
+        except messages.MessageAuthError as caught:
+            error = caught
+    assert len(fresh_tokens) == 1
+    assert hub.execute("SELECT COUNT(*) FROM fleet_read_snapshots").fetchone()[0] == 0, (
+        "stale bearer created a snapshot"
+    )
+    assert not hub.in_transaction
+    assert error is not None and "credential generation changed" in str(error)
+    rows = []
+    raw = {"action": read_action, "limit": 1}
+    for _ in range(10):
+        status, page = messages.handle(
+            hub, raw, caller=principal, authenticated_generation=fleet_hub.hash_node_token(fresh_tokens[0])
+        )
+        assert status == 200
+        rows.extend(page["nodes" if read_action == "who" else "claims"])
+        if page["next_cursor"] is None:
+            break
+        raw["cursor"] = page["next_cursor"]
+    else:
+        pytest.fail("fresh generation pagination did not terminate")
+    if read_action == "who":
+        expected = ["node-b"] if enrolled else ["node-a", "node-b", "node-c", "node-reader"]
+        assert [row["node_id"] for row in rows] == expected
+        assert next(row for row in rows if row["node_id"] == "node-b")["keys"][0]["record"] == value
+    else:
+        assert [row["target"] for row in rows] == ["example-a", "example-b"]
+    assert hub.execute("SELECT COUNT(*) FROM fleet_read_snapshots").fetchone()[0] == 0
+
+
 def test_identity_upload_requires_admin_and_matching_hub_id(hub):
     path = hub.execute("PRAGMA database_list").fetchone()[2]
     _, token = fleet_hub.add_node(hub, "http-node")
