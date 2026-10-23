@@ -312,6 +312,19 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m pip install -e ".[dev]"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Exclude CI SQLite paths from Defender
+        shell: pwsh
+        run: |
+          try {
+            $tempRoot = (python -c "import tempfile; print(tempfile.gettempdir())").Trim()
+            if ($LASTEXITCODE -ne 0) { throw "Could not resolve Python temp root" }
+            $paths = @($tempRoot, $env:GITHUB_WORKSPACE)
+            Add-MpPreference -ExclusionPath $paths -ErrorAction Stop
+            Write-Output "Requested Defender exclusions: $($paths -join ', ')"
+            Get-MpPreference -ErrorAction Stop | Select-Object ExclusionPath | Format-List
+          } catch {
+            Write-Warning "Defender exclusion unavailable: $($_.Exception.Message)"
+          }
       - name: Probe SQLite flush latency
         timeout-minutes: 5
         run: python scripts/windows_sqlite_flush_probe.py --output "$env:RUNNER_TEMP/windows-affected-results/sqlite-flush.json"
@@ -885,6 +898,19 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+      - name: Exclude CI SQLite paths from Defender
+        shell: pwsh
+        run: |
+          try {
+            $tempRoot = (python -c "import tempfile; print(tempfile.gettempdir())").Trim()
+            if ($LASTEXITCODE -ne 0) { throw "Could not resolve Python temp root" }
+            $paths = @($tempRoot, $env:GITHUB_WORKSPACE)
+            Add-MpPreference -ExclusionPath $paths -ErrorAction Stop
+            Write-Output "Requested Defender exclusions: $($paths -join ', ')"
+            Get-MpPreference -ErrorAction Stop | Select-Object ExclusionPath | Format-List
+          } catch {
+            Write-Warning "Defender exclusion unavailable: $($_.Exception.Message)"
+          }
       - name: Probe SQLite flush latency
         shell: pwsh
         timeout-minutes: 5
