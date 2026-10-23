@@ -3,11 +3,29 @@
 from __future__ import annotations
 
 import json
+import os
 from dataclasses import asdict
 
 import pytest
 
 from brigade import aboyeur, run_checkpoint, run_events, run_journal, run_redaction, run_tasks as tasks, runguard
+
+
+# Inspect OS capabilities independently: a broken production guard must fail
+# transaction tests on a capable host, rather than silently skipping them.
+requires_secure_transactions = pytest.mark.skipif(
+    not (
+        os.name == "posix"
+        and all(op in os.supports_dir_fd for op in (os.open, os.mkdir, os.rename, os.unlink, os.link))
+        and os.listdir in os.supports_fd
+        and os.link in os.supports_follow_symlinks
+        and getattr(os, "O_NOFOLLOW", 0)
+        and getattr(os, "O_DIRECTORY", 0)
+        and callable(getattr(os, "fchmod", None))
+        and callable(getattr(os, "fsync", None))
+    ),
+    reason="safe redaction transactions require POSIX descriptor-relative traversal and durability",
+)
 
 
 @pytest.fixture
@@ -70,6 +88,7 @@ def closed_tasks(tmp_path, monkeypatch):
     return run_dir
 
 
+@requires_secure_transactions
 @pytest.mark.parametrize(
     "selection",
     ["accepted", "attempt-prepared", "running", "completed", "acknowledged", "lifecycle", "multiple", "whole"],
@@ -158,6 +177,7 @@ def test_task_redaction_preserves_relationships_without_selected_references(clos
     assert len(tasks.read_tasks(run_dir)) == 2
 
 
+@requires_secure_transactions
 @pytest.mark.parametrize(
     ("event_type", "field"),
     [
@@ -191,6 +211,7 @@ def test_task_redaction_refuses_semantic_corruption_without_publication(closed_t
     assert {p.relative_to(run_dir): p.read_bytes() for p in run_dir.rglob("*") if p.is_file()} == before
 
 
+@requires_secure_transactions
 @pytest.mark.parametrize("bound", ["line", "journal"])
 def test_task_redaction_size_preflight_is_atomic(closed_tasks, monkeypatch, bound):
     from brigade import run_events
@@ -220,6 +241,7 @@ def test_task_redaction_size_preflight_is_atomic(closed_tasks, monkeypatch, boun
     assert {p.relative_to(run_dir): p.read_bytes() for p in run_dir.rglob("*") if p.is_file()} == before
 
 
+@requires_secure_transactions
 def test_task_redaction_recovers_after_replacement_crash(closed_tasks, monkeypatch):
     run_dir = closed_tasks
     journal = run_dir / "events/lifecycle.jsonl"
@@ -255,6 +277,7 @@ def test_task_redaction_recovers_after_replacement_crash(closed_tasks, monkeypat
     assert run_checkpoint.recover_from_checkpoint(run_dir, None)["status"] == "ok"
 
 
+@requires_secure_transactions
 @pytest.mark.parametrize("stage", ["original", "staged"])
 def test_task_redaction_refuses_earlier_unkeyed_checkpoint_without_publication(closed_tasks, monkeypatch, stage):
     run_dir = closed_tasks
@@ -309,4 +332,30 @@ def test_task_redaction_refuses_earlier_unkeyed_checkpoint_without_publication(c
         )
     assert {p.relative_to(run_dir): p.read_bytes() for p in run_dir.rglob("*") if p.is_file()} == before
     assert {p.relative_to(run_dir) for p in run_dir.rglob("*") if p.is_dir()} == directories
+    assert not (run_dir / "events/redactions").exists()
+
+
+@pytest.mark.parametrize("platform_name", ["nt", "java"])
+def test_task_redaction_refuses_unsupported_platform_before_lock_or_mutation(closed_tasks, monkeypatch, platform_name):
+    run_dir = closed_tasks
+    workspace = run_dir.parents[2]
+    before = {p.relative_to(workspace): p.read_bytes() for p in workspace.rglob("*") if p.is_file()}
+    directories = {p.relative_to(workspace) for p in workspace.rglob("*") if p.is_dir()}
+    task_results = tasks.read_tasks(run_dir)
+    assert not (workspace / ".brigade/run.lock").exists()
+    monkeypatch.setattr(run_redaction, "_PLATFORM_NAME", platform_name)
+
+    def refuse_lock(*args, **kwargs):
+        pytest.fail("unsupported task redaction reached lock acquisition")
+
+    monkeypatch.setattr(run_redaction, "_exclusive_redaction_lock", refuse_lock)
+    with pytest.raises(run_redaction.RedactionError, match="^unsupported platform for safe redaction transactions$"):
+        run_redaction.redact_journal(
+            run_dir, sequence_start=1, sequence_end=1, reason="credential-exposure", operator_confirmed=True
+        )
+
+    assert {p.relative_to(workspace): p.read_bytes() for p in workspace.rglob("*") if p.is_file()} == before
+    assert {p.relative_to(workspace) for p in workspace.rglob("*") if p.is_dir()} == directories
+    assert tasks.read_tasks(run_dir) == task_results
+    assert not (workspace / ".brigade/run.lock").exists()
     assert not (run_dir / "events/redactions").exists()
