@@ -1421,7 +1421,11 @@ def test_machine_notes_column_is_only_present_when_a_row_has_a_note(claims, colu
 
 def test_activity_explanation_is_a_tooltip_and_verdict_display_is_sentence_case():
     html = overview.render_work_lists(_mixed_view())
-    assert re.search(r'<h2 id="working-title" title="Managed jobs occupy station slots\..*?">Activity</h2>', html)
+    assert '<h2 id="working-title">Activity</h2>' in html
+    assert re.search(
+        r'<details class="panel-help"><summary>About activity</summary><p>Managed jobs occupy station slots\.', html
+    )
+    assert 'title="Managed jobs occupy' not in html
     assert '<p class="station-meta">Managed jobs occupy' not in html
     assert 'verdict-status--unknown">Coverage unknown (1)' in overview.render_header(_view(), NOW)
     clear = replace(

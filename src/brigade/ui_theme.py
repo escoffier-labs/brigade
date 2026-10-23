@@ -251,6 +251,9 @@ progress::-moz-progress-bar { background: var(--working); }
 .bar { margin-top: var(--space-2); }
 .bar--thin { height: 4px; margin-top: var(--space-1); }
 .alert-line { color: var(--muted); }
+.panel-help { margin-top: var(--space-1); color: var(--muted); font-size: 12px; }
+.panel-help summary { cursor: pointer; }
+.panel-help p { margin: var(--space-1) 0 0; max-width: 60ch; }
 .alert-line strong { color: var(--signal); }
 .split { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4); }
 .split > .panel + .panel { margin-top: 0; }

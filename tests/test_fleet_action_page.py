@@ -63,6 +63,7 @@ def test_operator_copy_adds_escaped_evidence_prefix_and_keeps_editable_prompt_un
         "addEventListener",
         "textarea.value",
         "execCommand('copy')",
+        "copy-fallback",
     ):
         assert marker in script.group(1)
     assert not re.search(r"\son\w+=", rendered)
@@ -80,3 +81,17 @@ def test_copy_script_carries_the_http_response_nonce(tmp_path):
         assert "'nonce-" + nonce + "'" in headers["Content-Security-Policy"]
         assert "navigator.clipboard.writeText" in rendered
         assert "script-src-attr 'none'" in headers["Content-Security-Policy"]
+
+
+def test_status_page_returns_to_the_alerts_page():
+    action = {
+        "action_id": "action-1",
+        "status": "finished",
+        "verification": "pending",
+        "delivery": "delivered",
+        "destination_ref": None,
+        "request": {"target": {"capability": "inbox"}, "prompt": "fixture", "evidence": {}},
+        "events": [],
+    }
+    rendered = page.status(action, "status-nonce")
+    assert '<a href="/deck/alerts">Back to alerts</a>' in rendered

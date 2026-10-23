@@ -89,3 +89,8 @@ def test_alerts_page_ships_its_own_table_styles():
     assert ".alerts-table th:nth-child(1)" in style
     assert ".visually-hidden {" in style
     assert ".page-sub {" in style
+
+
+def test_alerts_time_column_heading_fits_every_time_form():
+    page = render(_alert_view())
+    assert "<th>When</th>" in page and "First seen" not in page

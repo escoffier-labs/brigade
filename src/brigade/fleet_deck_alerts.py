@@ -28,7 +28,7 @@ def render_alerts_page(
         )
     content = (
         '<div class="table-wrap"><table class="alerts-table"><thead><tr>'
-        '<th>Kind</th><th>Subject</th><th>First seen</th><th><span class="visually-hidden">Action</span></th>'
+        '<th>Kind</th><th>Subject</th><th>When</th><th><span class="visually-hidden">Action</span></th>'
         "</tr></thead><tbody>" + "".join(rows) + "</tbody></table></div>"
         if rows
         else '<p class="empty">No active alerts</p>'

@@ -383,9 +383,9 @@ def render_work_lists(view: DeckView, *, worklore_enabled: bool = True) -> str:
     working = f'<ul class="rows">{rows}</ul>' if rows else '<p class="empty">No managed jobs reported.</p>'
     return (
         '<div class="split"><section class="panel" aria-labelledby="working-title"><header>'
-        '<div><h2 id="working-title" title="Managed jobs occupy station slots. '
-        "Agent sessions report presence; they may be idle or overlap managed jobs. "
-        'Current presence means the Hub has an unexpired report.">Activity</h2></div>'
+        '<div><h2 id="working-title">Activity</h2><details class="panel-help"><summary>About activity</summary>'
+        "<p>Managed jobs occupy station slots. Agent sessions report presence; they may be idle or overlap "
+        "managed jobs. Current presence means the Hub has an unexpired report.</p></details></div>"
         '<a class="card-link" href="/view/machines">View runs</a></header>'
         f"<h3>Managed jobs ({count})</h3>{working}{render_sessions(view)}</section>"
         '<section class="panel" aria-labelledby="queued-title"><header><h2 id="queued-title">Ready queue</h2></header>'

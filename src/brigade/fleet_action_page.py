@@ -41,7 +41,13 @@ COPY_SCRIPT = (
     "var copied = false; try { copied = document.execCommand('copy'); } catch (ignored) { copied = false; }"
     "scratch.remove();"
     "if (copied) { button.textContent = 'Copied'; setTimeout(function () { button.textContent = 'Copy prompt'; }, 2000); }"
-    "else { textarea.focus(); textarea.select(); }"
+    "else if (prefix) {"
+    "var fallback = textarea.parentNode.querySelector('textarea.copy-fallback');"
+    "if (!fallback) { fallback = document.createElement('textarea'); fallback.className = 'copy-fallback';"
+    "fallback.setAttribute('readonly', ''); fallback.setAttribute('aria-label', 'Prompt with evidence');"
+    "textarea.insertAdjacentElement('afterend', fallback); }"
+    "fallback.value = text; fallback.focus(); fallback.select();"
+    "} else { textarea.focus(); textarea.select(); }"
     "}"
     "});});}"
     "if (document.readyState === 'loading') { document.addEventListener('DOMContentLoaded', start); } else { start(); }"
@@ -195,7 +201,7 @@ def status(action: dict[str, Any], nonce: str) -> str:
         + esc(canonical(action["request"]["evidence"]))
         + "</pre><h2>History</h2><pre>"
         + esc(canonical(action["events"]))
-        + '</pre><p><a href="/deck">Back to alerts</a></p>',
+        + '</pre><p><a href="/deck/alerts">Back to alerts</a></p>',
         nonce,
     )
 
