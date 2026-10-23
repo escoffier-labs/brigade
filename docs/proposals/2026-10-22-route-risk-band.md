@@ -45,8 +45,10 @@ art. Nothing here is ported from either project.
 A new pure function in `route_catalog.py`, `risk_band(task, signals,
 changed_paths, overrides) -> RouteRisk`, called from `route_brief` after
 `derive_signals`. It never reads the composed route or its size, and
-`compute_route` never reads the band. Gates are then a function of the pair
-(size, band), decided outside the router.
+`compute_route` never reads the band. Capture the original size before injecting
+risk gate signals. The brief keeps that size label for classification and
+calibration, even when a gate changes the runnable stages. Gates are a function
+of the pair (original size, band), decided outside the router.
 
 ```python
 @dataclass(frozen=True)
@@ -128,7 +130,7 @@ full opt-out: no signals, no band, no risk gates, recorded as an unrouted run.
 | --- | --- | --- |
 | routine | short path | today's behavior |
 | raised | today's behavior, no short path, independent reviewer seat | same |
-| critical | forced `plan` stage, plan approval, cross-vendor reviewer | same |
+| critical | code routes: forced `plan` and plan approval, cross-vendor reviewer | same |
 
 **routine, minimal size: the short path.** When the band is `routine`, the
 size is XS or S, and no stage is held, Brigade skips the orchestrator's
@@ -143,11 +145,17 @@ stages in the route must be assigned to a different seat than the
 implementer. Same vendor is allowed. The brief names the classes and the
 matches that fired, so the reviewer knows where to look.
 
-**critical: plan approval and a reviewer from another vendor.**
+**critical: code plan approval and a reviewer from another vendor.**
 
-1. The catalog's `plan` stage subscribes to `risk:critical` in addition to
-   `significant-build`, so a critical route always plans, at any size.
-2. `implement` carries a lock `{"while": "risk:critical", "until":
+The new plan approval hold applies only to code routes. Critical `docs` and
+`system` routes retain their existing holds. This proposal adds no plan or
+approval gate to `docs-edit` or `system-execute`. Their risk band is still
+reported, and the reviewer requirement applies to review stages they include.
+A broader approval gate needs a separate design covering those mutation stages.
+
+1. For code routes, the catalog's `plan` stage subscribes to `risk:critical`
+   in addition to `significant-build`, so critical code always plans, at any size.
+2. For code routes, `implement` carries a lock `{"while": "risk:critical", "until":
    "plan-approved"}`, reusing the existing while/until machinery. The router
    already re-drops stages whose producer is held, so the first pass yields
    the plan and holds everything downstream.
@@ -234,11 +242,13 @@ the short path goes last.
    `route-decision.json` field, the manifest field, and the recorded
    path-class hits. Tests: table-driven class and band cases, a property test
    that the band never changes the composed route or size, and a fixture
-   proving the route fingerprint is unchanged.
+   proving the route fingerprint is unchanged. These invariants apply to shadow
+   mode. Once gates are enabled, tests distinguish the original brief size from
+   the gated route's runnable-stage count.
 3. Calibration report over the corpus and pattern fixes from it.
 4. Critical cross-vendor reviewer requirement (adds review diversity, no stop).
 5. Raised independent-seat requirement.
-6. Critical plan approval hold and `--approve-plan`.
+6. Critical code route plan approval hold and `--approve-plan`.
 7. Routine short path, after the routine recall from step 3 is re-checked on
    the shadow data gathered since.
 
@@ -249,8 +259,11 @@ release, then on.
 
 - No model call. The band is keyword and path heuristics, deterministic like
   the rest of the route brief.
-- No change to size. `size_label` and `compute_route` are untouched. The band
-  does not add or remove review stages except forcing `plan` on critical.
+- No change to the baseline size calculation: `size_label` and `compute_route`
+  are untouched. The brief retains the original label captured before risk
+  gates. Forcing `plan` and holding `implement` on critical code routes can
+  change the gated runnable-stage count. That count does not replace the
+  original size in the brief or calibration records.
 - No replacement for the ship and destructive holds. Those stay as they are,
   and the band sits beside them.
 - No re-banding after implementation. The band is computed once at plan time
