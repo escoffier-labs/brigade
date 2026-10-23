@@ -65,7 +65,7 @@ def _pre_producer_hub(db: Path, now: float, version: int = 39) -> None:
         )
         conn.execute(f"PRAGMA user_version={version}")
         conn.commit()
-        assert fleet_hub.SCHEMA_VERSION == 43
+        assert fleet_hub.SCHEMA_VERSION == 44
         assert "producer" not in {r[1] for r in conn.execute("PRAGMA table_info(fleet_events)")}
     finally:
         conn.close()
@@ -144,7 +144,7 @@ def test_main_schema_38_hub_upgrades_to_39_with_events_tables(tmp_path: Path) ->
     for _ in range(2):  # the second start is a no-op
         conn = fleet_hub.init_db(db)
         try:
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION == 43
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
             assert set(_EVENT_TABLES + _CI_TABLES) <= _tables(conn)
             assert "producer" in {r[1] for r in conn.execute("PRAGMA table_info(fleet_events)")}
         finally:

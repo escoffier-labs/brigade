@@ -1893,7 +1893,10 @@ def make_handler(
                 self._send_json(403, {"error": str(exc), "code": exc.code})
                 return
             except fleet_hub_messages.MessageError as exc:
-                self._send_json(400, {"error": str(exc)})
+                payload = {"error": str(exc)}
+                if exc.code is not None:
+                    payload["code"] = exc.code
+                self._send_json(400, payload)
                 return
             except FleetHubForbidden as exc:
                 self._send_json(403, {"error": str(exc)})

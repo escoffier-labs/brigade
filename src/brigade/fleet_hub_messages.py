@@ -73,6 +73,10 @@ _PRINCIPAL_SCHEMA = """CREATE TABLE IF NOT EXISTS fleet_message_principals (
 class MessageError(ValueError):
     """A bounded queue request was invalid."""
 
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+
 
 class MessageForbidden(MessageError):
     """A principal lacks permission for the requested recipient."""
@@ -99,7 +103,7 @@ class MessageQuotaError(MessageError):
 
     def __init__(self, message: str, *, code: str, recipient: str | None = None) -> None:
         super().__init__(message)
-        self.code = code
+        self.code: str = code
         self.recipient = recipient
 
 
@@ -1009,58 +1013,33 @@ def reply(conn: sqlite3.Connection, raw: dict[str, Any], *, sender: str) -> dict
     return _fetch(conn, message["id"])
 
 
-# Station claims return one page bounded by row count and by serialized size,
-# so the response always fits the client's cap. Rows sort by target. Cursor
-# paging over a live claims table is not stable without hub-side snapshots, so
-# a cut list says so with truncated and total instead (full paging: #1901).
-CLAIMS_PAGE_DEFAULT = 200
-CLAIMS_PAGE_MAX = 500
-CLAIMS_PAGE_MAX_BYTES = 4 * 1024 * 1024
-
-
-def _claims_page_limit(raw: dict[str, Any]) -> int:
-    limit = raw.get("limit", CLAIMS_PAGE_DEFAULT)
-    if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= CLAIMS_PAGE_MAX:
-        raise MessageError(f"claims limit must be an integer from 1 to {CLAIMS_PAGE_MAX}")
-    return limit
-
-
-def _claims_page(rows: list[dict[str, Any]], *, limit: int) -> dict[str, Any]:
-    ordered = sorted(rows, key=lambda row: str(row.get("target", "")))
-    page: list[dict[str, Any]] = []
-    size = 0
-    oversized = 0
-    for row in ordered:
-        if len(page) >= limit:
-            break
-        row_size = len(json.dumps(row, separators=(",", ":"), default=str).encode("utf-8"))
-        if row_size > CLAIMS_PAGE_MAX_BYTES:
-            # A single row over the budget would push the response past the
-            # client's cap; leave it out and count it rather than fail.
-            oversized += 1
-            continue
-        if size + row_size > CLAIMS_PAGE_MAX_BYTES:
-            break
-        page.append(row)
-        size += row_size
-    return {
-        "claims": page,
-        "truncated": len(page) < len(ordered),
-        "total": len(ordered),
-        "oversized": oversized,
-    }
-
-
-def _station_read(conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str) -> dict[str, Any]:
+def _station_read(
+    conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str, snapshot_write: bool = False
+) -> dict[str, Any]:
     """Read-only directory/claims for message credentials, without admin access."""
     from . import fleet_claim_display, fleet_hub, fleet_hub_message_grants as grants, fleet_hub_sessions
+    from . import fleet_hub_paging as paging
 
     action = raw["action"]
-    allowed = {"action", "all", "filter"} if action == "who" else {"action", "all", "limit"}
+    allowed = {"action", "all", "limit", "cursor"} | ({"filter"} if action == "who" else set())
     include_all = raw.get("all", False)
     query = raw.get("filter", "")
     if set(raw) - allowed or not isinstance(include_all, bool) or not isinstance(query, str):
         raise MessageError("invalid station read arguments")
+
+    limit = paging.page_limit(raw)
+    snapshot = paging.load(conn, raw, caller=caller)
+
+    if snapshot is not None:
+        stored_snapshot, offsets, snapshot_id = snapshot
+        return paging.snapshot_page(
+            conn,
+            stored_snapshot,
+            offsets,
+            snapshot_id,
+            limit=limit,
+            snapshot_write=snapshot_write,
+        )
 
     # Load the caller's grants once; checking every row with require_granted
     # would issue one query per claim or session.
@@ -1069,8 +1048,20 @@ def _station_read(conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str)
     def permitted(recipient: str) -> bool:
         return grants.permits(patterns, caller, recipient)
 
+    active_nodes = {str(row[0]) for row in conn.execute("SELECT node_id FROM nodes WHERE revoked_at IS NULL")}
+    active_principals = {
+        str(row[0])
+        for row in conn.execute("SELECT principal_id FROM fleet_message_principals WHERE revoked_at IS NULL")
+    }
+
+    def visible(key: str, row: dict[str, Any]) -> bool:
+        if key == "claims":
+            return permitted(str(row["owner_node"]))
+        identity = str(row["principal_id"] if key == "principals" else row["node_id"])
+        active = active_principals if key == "principals" else active_nodes
+        return identity in active and permitted(identity)
+
     if action == "claims":
-        limit = _claims_page_limit(raw)
         if not caller.startswith("agent:"):
             rows = fleet_claim_display.list_display_claims(conn, include_all=include_all)
         else:
@@ -1079,7 +1070,10 @@ def _station_read(conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str)
                 for row in fleet_hub.list_claims(conn, include_all=include_all)
                 if permitted(row["owner_node"])
             ]
-        return _claims_page(rows, limit=limit)
+        rows.sort(key=lambda row: str(row.get("target", "")))
+        return paging.page(
+            conn, raw, {"claims": rows}, caller=caller, limit=limit, visible=visible, snapshot_write=snapshot_write
+        )
 
     nodes = [
         {"node_id": str(row[0])}
@@ -1109,10 +1103,11 @@ def _station_read(conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str)
         )
     ]
     needle = query.casefold()
-    return {
+    data = {
         key: [row for row in rows if any(needle in str(value).casefold() for value in row.values())]
         for key, rows in (("nodes", nodes), ("principals", principals), ("sessions", sessions))
     }
+    return paging.page(conn, raw, data, caller=caller, limit=limit, visible=visible, snapshot_write=snapshot_write)
 
 
 def handle(
@@ -1136,7 +1131,18 @@ def handle(
     if isinstance(action, str) and action.startswith("events_"):
         return fleet_hub_events.handle(conn, raw, caller=caller)
     if action in ("who", "claims"):
-        return 200, _as_active_principal(conn, caller, lambda: _station_read(conn, raw, caller=caller), read_only=True)
+        from .fleet_hub_paging import SnapshotWriteRequired
+
+        try:
+            result = _as_active_principal(conn, caller, lambda: _station_read(conn, raw, caller=caller), read_only=True)
+        except SnapshotWriteRequired:
+            # Small reads never take write admission. Rebuild a new snapshot
+            # after BEGIN IMMEDIATE so its data and authorization are current,
+            # and concurrent snapshot writers cannot race the storage caps.
+            result = _as_active_principal(
+                conn, caller, lambda: _station_read(conn, raw, caller=caller, snapshot_write=True)
+            )
+        return 200, result
     if action == "reply" or (action == "send" and raw.get("reply_to") is not None):
 
         def insert_reply() -> dict[str, Any] | None:

@@ -12,9 +12,16 @@ from .fleet_ask_user import AskUser, AskUserError
 from .untrusted import scan_untrusted, wrap_untrusted
 
 DEFAULT_PORT = 8933
+_CURSOR_RESTART_HINT = (
+    "the paging cursor expired or is not valid for this caller; restart the walk without a cursor, "
+    "then send the same filter and all with every continuation"
+)
 _SAFE_ERROR_CODES = frozenset(
     {
         "hub_unavailable",
+        "paging_snapshot_capacity",
+        "paging_continuation_unsupported",
+        "paging_cursor_expired",
         "message_recipient_not_permitted",
         "message_sender_recipient_quota",
         "message_recipient_quota",
@@ -47,8 +54,15 @@ def tool_specs() -> list[dict[str, Any]]:
         ),
         (
             "fleet_who",
-            "List interactive sessions and permitted active recipients.",
-            {"filter": {"type": "string"}, "all": boolean},
+            "List sessions and permitted recipients; pass next_cursor as cursor, with the same filter and all, "
+            "to continue a snapshot. "
+            "On paging_cursor_expired, restart the walk without a cursor.",
+            {
+                "filter": {"type": "string"},
+                "all": boolean,
+                "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 200},
+                "cursor": text,
+            },
             [],
         ),
         (
@@ -114,10 +128,12 @@ def tool_specs() -> list[dict[str, Any]]:
         ),
         (
             "fleet_claims",
-            "List repository claims without changing ownership; truncated is true when the list was cut.",
+            "List a stable snapshot of repository claims; pass next_cursor as cursor, with the same all, to continue. "
+            "On paging_cursor_expired, restart the walk without a cursor.",
             {
                 "all": boolean,
                 "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 200},
+                "cursor": text,
             },
             [],
         ),
@@ -339,13 +355,17 @@ def _tool_error(exc: Exception) -> dict[str, Any]:
                 "message_timestamp_future",
             }
         )
-        return {
+        body = {
             "error": "Fleet hub operation failed.",
             "code": code,
             "status": status,
             "transient": transient,
             "permanent": not transient,
         }
+        if code == "paging_cursor_expired":
+            # Retrying the same cursor can never succeed; the caller has to start over.
+            body["hint"] = _CURSOR_RESTART_HINT
+        return body
     return {"error": "Fleet operation failed. Check hub connectivity and credential permissions."}
 
 
@@ -404,10 +424,16 @@ class FleetMcp:
         authority = self._authority()
         if name == "fleet_ask_user":
             return self._ask_user.ask(authority=authority, **args)
-        if name == "fleet_who":
-            return _frame_directory(messages._online({"action": "who", **args}, authority=authority))
-        if name == "fleet_claims":
-            return _frame_directory(messages._online({"action": "claims", **args}, authority=authority))
+        if name in {"fleet_who", "fleet_claims"}:
+            action = "who" if name == "fleet_who" else "claims"
+            payload = messages._online({"action": action, "limit": 200, **args}, authority=authority)
+            if payload.get("truncated") is True and "next_cursor" not in payload:
+                raise messages.FleetMessageHubError(
+                    "Fleet hub does not support directory continuation.", code="paging_continuation_unsupported"
+                )
+            # The hub-issued continuation token is protocol data, not peer text.
+            cursor = payload.pop("next_cursor", None)
+            return {**_frame_directory(payload), "next_cursor": cursor}
         if name == "fleet_send":
             result = messages.send(
                 recipient=args["to"],

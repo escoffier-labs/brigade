@@ -452,7 +452,39 @@ def test_old_hub_cursor_pages_and_wait_returns_arrival_page(stations, monkeypatc
     from brigade import fleet_mcp
 
     a, b = stations
-    mids = [call(a, "fleet_send", to=NODE_B, body=str(i))["message"]["id"] for i in range(101)]
+    transport = fleet_client_messages._transport
+    last_exchange = {}
+
+    def observed_transport(authority, body, **kwargs):
+        last_exchange.clear()
+        last_exchange["action"] = body.get("action")
+        try:
+            status, payload = transport(authority, body, **kwargs)
+        except fleet_client.FleetClientError as exc:
+            causes = []
+            cause = exc
+            for _ in range(4):
+                causes.append(type(cause).__name__)
+                cause = cause.__cause__ or cause.__context__
+                if cause is None:
+                    break
+            last_exchange.update(
+                error=type(exc).__name__,
+                detail=str(exc),
+                status=getattr(exc, "status", None),
+                code=getattr(exc, "code", None),
+                causes=causes,
+            )
+            raise
+        last_exchange.update(status=status, code=payload.get("code"), error=payload.get("error"))
+        return status, payload
+
+    monkeypatch.setattr(fleet_client_messages, "_transport", observed_transport)
+    mids = []
+    for index in range(101):
+        result = call(a, "fleet_send", to=NODE_B, body=str(index))
+        assert "message" in result, f"send[{index}] result={result!r} transport={last_exchange!r}"
+        mids.append(result["message"]["id"])
     for station, tool in ((a, "fleet_sent"), (b, "fleet_inbox")):
         first = call(station, tool)
         assert [row["id"] for row in first["messages"]] == mids[:100]
@@ -928,16 +960,203 @@ def test_claims_page_is_bounded_and_reports_truncation(stations, hub):
         assert error
 
 
-def test_claims_page_stays_under_the_byte_budget(monkeypatch):
-    monkeypatch.setattr(fleet_hub_messages, "CLAIMS_PAGE_MAX_BYTES", 3000)
-    rows = [{"target": f"t{index}-" + "y" * 1000, "owner_node": NODE_A} for index in range(5)]
-    page = fleet_hub_messages._claims_page(rows, limit=500)
-    size = sum(len(json.dumps(row, separators=(",", ":"))) for row in page["claims"])
-    assert page["claims"] and size <= 3000 and page["truncated"] and page["total"] == 5
-    rows.insert(0, {"target": "a-first", "owner_node": NODE_A, "conductor": "z" * 5000})
-    skipped = fleet_hub_messages._claims_page(rows, limit=500)
-    assert skipped["oversized"] == 1 and skipped["truncated"]
-    assert "a-first" not in [row["target"] for row in skipped["claims"]] and skipped["claims"]
+@pytest.mark.parametrize("action", ["who", "claims"])
+@pytest.mark.parametrize("cap", ["SNAPSHOT_MAX_PER_CALLER", "SNAPSHOT_MAX_COUNT", "SNAPSHOT_MAX_BYTES"])
+def test_snapshot_capacity_evicts_own_walk_or_reports_global_capacity(stations, hub, monkeypatch, action, cap):
+    from brigade import fleet_hub_paging
+
+    base, token, _other_token, db = hub
+    conn = fleet_hub.open_db(db)
+    try:
+        for index in range(2):
+            status, claim = fleet_hub.handle_claim(
+                conn,
+                {"action": "acquire", "node_id": NODE_A, "target": f"quota-{index}", "holder": "reader"},
+                caller_node=NODE_A,
+            )
+            assert status == 200 and claim["granted"]
+    finally:
+        conn.close()
+    first = call(stations[0], f"fleet_{action}", limit=1)
+    assert isinstance(first["next_cursor"], str)
+    conn = fleet_hub.open_db(db)
+    try:
+        size = conn.execute("SELECT SUM(payload_bytes) FROM fleet_read_snapshots").fetchone()[0]
+    finally:
+        conn.close()
+    monkeypatch.setattr(fleet_hub_paging, cap, size if cap == "SNAPSHOT_MAX_BYTES" else 1)
+    status, rejected = fleet_client_messages._request(base, token, {"action": action, "limit": 1})
+    if cap == "SNAPSHOT_MAX_PER_CALLER":
+        assert status == 200 and rejected["next_cursor"]
+        old_status, old_page = fleet_client_messages._request(
+            base, token, {"action": action, "cursor": first["next_cursor"]}
+        )
+        assert old_status == 400 and "restart from the first page" in old_page["error"]
+        first = call(stations[0], f"fleet_{action}", limit=1)
+        assert isinstance(first["next_cursor"], str)
+    else:
+        assert status == 429
+        assert rejected["code"] == "paging_snapshot_capacity"
+        payload, error = stations[0].call(f"fleet_{action}", {"limit": 1})
+        assert error and payload == {
+            "error": "Fleet hub operation failed.",
+            "code": "paging_snapshot_capacity",
+            "status": 429,
+            "transient": True,
+            "permanent": False,
+        }
+    rest = call(stations[0], f"fleet_{action}", cursor=first["next_cursor"])
+    assert rest["next_cursor"] is None
+    key = "nodes" if action == "who" else "claims"
+    assert len(first[key]) == len(rest[key]) == 1
+    now = fleet_hub._now_epoch()
+    monkeypatch.setattr(fleet_hub, "_now_epoch", lambda: now + fleet_hub_paging.SNAPSHOT_TTL_SECONDS + 1)
+    assert isinstance(call(stations[0], f"fleet_{action}", limit=1)["next_cursor"], str)
+
+
+@pytest.mark.parametrize("action", ["who", "claims"])
+def test_single_oversized_snapshot_remains_permanent(stations, hub, monkeypatch, action):
+    from brigade import fleet_hub_paging
+
+    base, token, _other_token, db = hub
+    conn = fleet_hub.open_db(db)
+    try:
+        for index in range(2):
+            status, claim = fleet_hub.handle_claim(
+                conn,
+                {"action": "acquire", "node_id": NODE_A, "target": f"oversize-{index}", "holder": "reader"},
+                caller_node=NODE_A,
+            )
+            assert status == 200 and claim["granted"]
+    finally:
+        conn.close()
+    monkeypatch.setattr(fleet_hub_paging, "SNAPSHOT_SINGLE_MAX_BYTES", 1)
+    status, rejected = fleet_client_messages._request(base, token, {"action": action, "limit": 1})
+    assert status == 400 and rejected == {"error": "paging snapshot exceeds capacity"}
+    payload, error = stations[0].call(f"fleet_{action}", {"limit": 1})
+    assert error and payload == {
+        "error": "Fleet hub operation failed.",
+        "code": "hub_rejected",
+        "status": 400,
+        "transient": False,
+        "permanent": True,
+    }
+
+
+def _old_hub(monkeypatch, requests, truncated):
+    original = fleet_hub_messages.handle
+
+    def old_hub(conn, raw, *, caller, **kwargs):
+        if raw.get("action") in {"who", "claims"}:
+            requests.append(dict(raw))
+            if set(raw) - {"action", "all", "filter"}:
+                raise fleet_hub_messages.MessageError("invalid station read arguments")
+            status, page = original(conn, raw, caller=caller, **kwargs)
+            page.pop("next_cursor")
+            page["truncated"] = truncated
+            return status, page
+        return original(conn, raw, caller=caller, **kwargs)
+
+    monkeypatch.setattr(fleet_hub_messages, "handle", old_hub)
+
+
+@pytest.mark.parametrize("action", ["who", "claims"])
+@pytest.mark.parametrize("truncated", [False, True])
+def test_directory_retries_old_hub_without_paging_arguments(stations, monkeypatch, action, truncated):
+    from brigade import fleet_hub_paging
+
+    requests = []
+    _old_hub(monkeypatch, requests, truncated)
+    monkeypatch.setattr(fleet_hub_paging, "PAGE_DEFAULT", 1)
+    args = {"all": True, "limit": 1}
+    if action == "who":
+        args["filter"] = "fixture"
+    payload, error = stations[0].call(f"fleet_{action}", args)
+    assert requests == [
+        {"action": action, **args},
+        {"action": action, **{k: v for k, v in args.items() if k != "limit"}},
+    ]
+    assert error is truncated
+    if truncated:
+        assert payload["code"] == "paging_continuation_unsupported" and payload["permanent"]
+    else:
+        assert payload["next_cursor"] is None
+
+
+@pytest.mark.parametrize("action", ["who", "claims"])
+def test_directory_continuation_against_old_hub_restarts_instead_of_replaying_page_one(stations, monkeypatch, action):
+    requests = []
+    _old_hub(monkeypatch, requests, False)
+    args = {"all": True, "limit": 1, "cursor": "old-cursor"}
+    if action == "who":
+        args["filter"] = "fixture"
+    payload, error = stations[0].call(f"fleet_{action}", args)
+    # The hub is never asked for an unpaged page that would masquerade as the continuation.
+    assert requests == [{"action": action, **args}]
+    assert error
+    assert payload["code"] == "paging_cursor_expired"
+    assert payload["permanent"] and not payload["transient"]
+    assert "restart the walk without a cursor" in payload["hint"]
+
+
+@pytest.mark.parametrize("action", ["who", "claims"])
+def test_consumed_directory_cursor_is_typed_and_restartable(stations, hub, action):
+    conn = fleet_hub.open_db(hub[3])
+    try:
+        for index in range(2):
+            status, _ = fleet_hub.handle_claim(
+                conn,
+                {"action": "acquire", "node_id": NODE_A, "target": f"restart-{index}", "holder": "reader"},
+                caller_node=NODE_A,
+            )
+            assert status == 200
+    finally:
+        conn.close()
+    first = call(stations[0], f"fleet_{action}", limit=1)
+    assert call(stations[0], f"fleet_{action}", cursor=first["next_cursor"])["next_cursor"] is None
+    authority = stations[0]._authority()
+    with pytest.raises(fleet_client_messages.FleetMessageHubError, match="restart from the first page") as caught:
+        fleet_client_messages._online({"action": action, "cursor": first["next_cursor"]}, authority=authority)
+    assert caught.value.status == 400 and caught.value.code == "paging_cursor_expired"
+    payload, error = stations[0].call(f"fleet_{action}", {"cursor": first["next_cursor"]})
+    assert error and payload == {
+        "error": "Fleet hub operation failed.",
+        "code": "paging_cursor_expired",
+        "status": 400,
+        "transient": False,
+        "permanent": True,
+        "hint": (
+            "the paging cursor expired or is not valid for this caller; restart the walk without a cursor, "
+            "then send the same filter and all with every continuation"
+        ),
+    }
+    assert call(stations[0], f"fleet_{action}", limit=1)["next_cursor"]
+
+
+@pytest.mark.parametrize("action", ["who", "claims"])
+def test_directory_legacy_continuation_is_explicit(stations, monkeypatch, action):
+    response = (
+        {"truncated": True, "total": 2, "claims": []}
+        if action == "claims"
+        else {"truncated": True, "nodes": [], "principals": [], "sessions": []}
+    )
+    monkeypatch.setattr(fleet_client_messages, "_request", lambda *_args, **_kwargs: (200, dict(response)))
+    for station in stations:
+        payload, error = station.call(f"fleet_{action}", {})
+        assert error and payload == {
+            "error": "Fleet hub operation failed.",
+            "code": "paging_continuation_unsupported",
+            "status": None,
+            "transient": False,
+            "permanent": True,
+        }
+        assert "next_cursor" not in payload
+    response["truncated"] = False
+    for station in stations:
+        assert call(station, f"fleet_{action}")["next_cursor"] is None
+    response.update(truncated=True, next_cursor="opaque-continuation")
+    for station in stations:
+        assert call(station, f"fleet_{action}")["next_cursor"] == "opaque-continuation"
 
 
 def test_each_tool_call_captures_one_authority(stations, monkeypatch):
@@ -1041,3 +1260,14 @@ def test_cli_rejects_reserved_operator_question_kind(capsys):
     assert error.value.code == 2
     output = capsys.readouterr().err
     assert "invalid choice: 'operator_question'" in output
+
+
+def test_paging_tools_state_the_cursor_query_binding():
+    # Cursors are bound to action, all and the case-folded filter (fleet_hub_paging.query_hash).
+    # A caller that drops either on a continuation gets paging_cursor_expired and must be told why.
+    from brigade import fleet_mcp
+
+    specs = {spec["name"]: spec["description"] for spec in fleet_mcp.tool_specs()}
+    assert "same filter and all" in specs["fleet_who"]
+    assert "same all" in specs["fleet_claims"]
+    assert "same filter and all" in fleet_mcp._CURSOR_RESTART_HINT

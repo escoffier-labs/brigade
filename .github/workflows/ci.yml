@@ -21,6 +21,7 @@ jobs:
       contents: read
       pull-requests: read
     outputs:
+      mesh: ${{ github.event_name == 'merge_group' && 'true' || github.event_name == 'push' && 'true' || steps.filter.outputs.mesh }}
       code_graph: ${{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.code_graph }}
       evidence_ledger: ${{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.evidence_ledger }}
       notify: ${{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.notify }}
@@ -32,6 +33,14 @@ jobs:
         id: filter
         with:
           filters: |
+            mesh:
+              - 'src/brigade/fleet_mesh_*.py'
+              - 'tests/test_fleet_mesh_*.py'
+              - 'tests/mesh_hpke_reference.py'
+              - 'tests/fixtures/mesh/**'
+              - 'docs/phase-agent-mesh.md'
+              - 'pyproject.toml'
+              - '.github/workflows/ci.yml'
             code_graph:
               - 'engines/code-graph/**'
               - 'src/brigade/templates/components/manifest-v1.json'
@@ -290,6 +299,19 @@ jobs:
           # Hosted Windows includes Python. Selection uses only its standard library.
           python scripts/windows_affected_tests.py --base $base --head HEAD --output "$env:RUNNER_TEMP/windows-affected-results/files.txt"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Driver changes exercise the hub files affected by slow FULL flushes.
+          $driverChanged = git diff --name-only $base HEAD -- scripts/windows_pytest.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($driverChanged) {
+            $flushTests = @(
+              "test_fleet_policy_page.py", "test_fleet_roster_page.py",
+              "test_fleet_message_grants.py", "test_fleet_model_roster.py",
+              "test_fleet_enrollment.py", "test_fleet_dashboard.py",
+              "test_fleet_claim_generations.py", "test_fleet_client_message_credentials.py"
+            )
+            @(Get-Content "$env:RUNNER_TEMP/windows-affected-results/files.txt") + $flushTests |
+              Sort-Object -Unique | Set-Content "$env:RUNNER_TEMP/windows-affected-results/files.txt"
+          }
           $count = @(Get-Content "$env:RUNNER_TEMP/windows-affected-results/files.txt").Count
           "count=$count" >> $env:GITHUB_OUTPUT
       - name: Skip empty selection
@@ -308,6 +330,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m pip install -e ".[dev]"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Configure Windows test temp drive
+        run: python scripts/windows_pytest.py --configure-temp-root
+      - name: Probe SQLite flush latency
+        timeout-minutes: 5
+        run: python scripts/windows_sqlite_flush_probe.py --samples 20 --output "$env:RUNNER_TEMP/windows-affected-results/sqlite-flush.json"
       - name: Run affected Windows tests
         if: ${{ steps.selection.outputs.count != '0' }}
         timeout-minutes: 45
@@ -489,7 +516,7 @@ jobs:
           python -m pip install --upgrade pip
           python -m pip install -e ".[dev]"
       - name: Download coverage data
-        uses: actions/download-artifact@v8
+        uses: actions/download-artifact@v8.0.2
         with:
           pattern: coverage-*
           path: .coverage-data
@@ -555,6 +582,9 @@ jobs:
       - install-from-source
       - quickstart-smoke
       - windows-native-acceptance
+      - mesh-compatibility
+      - mesh-cross-version
+      - mesh-without-extra
     runs-on: ubuntu-latest
     steps:
       - name: Require all protected jobs and their dependencies
@@ -574,6 +604,7 @@ jobs:
               "cosign-integration", "fleet-hub-container", "component-manifest-provenance",
               "content-guard", "repo-metadata", "install-from-source",
               "quickstart-smoke", "windows-native-acceptance",
+              "mesh-compatibility", "mesh-cross-version", "mesh-without-extra",
           }
           needs = json.loads(os.environ["NEEDS_JSON"])
           errors = []
@@ -588,9 +619,17 @@ jobs:
               and changes.get("outputs", {}).get("fleet_hub_container") == "false"
               and os.environ["EVENT_NAME"] != "merge_group"
           )
+          mesh_jobs = {"mesh-compatibility", "mesh-cross-version", "mesh-without-extra"}
+          mesh_skip_allowed = (
+              changes.get("result") == "success"
+              and changes.get("outputs", {}).get("mesh") == "false"
+              and os.environ["EVENT_NAME"] == "pull_request"
+          )
           for name in sorted(mandatory):
               result = needs.get(name, {}).get("result")
               if name == "fleet-hub-container" and result == "skipped" and container_skip_allowed:
+                  continue
+              if name in mesh_jobs and result == "skipped" and mesh_skip_allowed:
                   continue
               if result != "success":
                   errors.append(f"{name}: required success, got {result!r}")
@@ -878,6 +917,21 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+      - name: Configure Windows test temp drive
+        shell: pwsh
+        run: python scripts/windows_pytest.py --configure-temp-root
+      - name: Probe SQLite flush latency
+        shell: pwsh
+        timeout-minutes: 5
+        run: python scripts/windows_sqlite_flush_probe.py --samples 20 --output "$env:RUNNER_TEMP/windows-native-sqlite-flush.json"
+      - name: Upload SQLite flush diagnostics
+        if: ${{ always() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: windows-native-sqlite-flush
+          path: ${{ runner.temp }}/windows-native-sqlite-flush.json
+          if-no-files-found: warn
+          retention-days: 7
       - name: Install containment test dependencies
         shell: pwsh
         run: |
@@ -1181,3 +1235,186 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 30
+
+  # Security-critical mesh compatibility is protected by ci-gate. Only PRs
+  # with no mesh changes may skip these jobs. Pushes and merge groups run all.
+  mesh-compatibility:
+    needs: changes
+    if: ${{ needs.changes.outputs.mesh == 'true' }}
+    name: mesh (${{ matrix.os }}, ${{ matrix.crypto }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-latest]
+        crypto: [floor, newest]
+    env:
+      MESH_ENV: present
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        id: python
+        with:
+          python-version: "3.12"
+      - name: Install mesh wheel and dev tools
+        env:
+          CRYPTO: ${{ matrix.crypto }}
+          RUNNER_OS_NAME: ${{ runner.os }}
+        run: |
+          "${{ steps.python.outputs.python-path }}" -m venv .venv
+          if [ "$RUNNER_OS_NAME" = Windows ]; then
+            py=.venv/Scripts
+            mesh_python=.venv/Scripts/python.exe
+          else
+            py=.venv/bin
+            mesh_python=.venv/bin/python
+          fi
+          "$mesh_python" -m pip install -e '.[dev,mesh]'
+          if [ "$CRYPTO" = floor ]; then
+            "$mesh_python" -m pip install --only-binary cryptography 'cryptography==48.0.0'
+          else
+            "$mesh_python" -m pip install --upgrade --only-binary cryptography 'cryptography>=48,<52'
+          fi
+          if [ "$RUNNER_OS_NAME" = Windows ]; then
+            cygpath -w "$PWD/$py" >> "$GITHUB_PATH"
+          else
+            echo "$PWD/$py" >> "$GITHUB_PATH"
+          fi
+          echo "PY=$py" >> "$GITHUB_ENV"
+          echo "MESH_PYTHON=$mesh_python" >> "$GITHUB_ENV"
+      - name: Frozen profile, KATs and envelope tests
+        if: runner.os == 'Linux'
+        env:
+          MESH_EXPORT: mesh-envelope.json
+        run: brigade work verify run --target . --command './scripts/verify-focused tests/test_fleet_mesh_crypto.py' --capture brigade-work
+      - name: Native frozen profile, KATs and envelope tests
+        if: runner.os != 'Linux'
+        run: brigade work verify run --target . --command "$MESH_PYTHON -m mypy src/brigade/fleet_mesh_crypto.py" --command "$MESH_PYTHON -m pytest -q tests/test_fleet_mesh_crypto.py" --capture brigade-work
+      - name: Show verification logs
+        if: always()
+        run: |
+          shopt -s nullglob
+          logs=(.brigade/work/verify-runs/*/command-*.log)
+          if (( ${#logs[@]} )); then
+            cat "${logs[@]}"
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: mesh-receipts-${{ matrix.os }}-${{ matrix.crypto }}
+          path: |
+            .brigade/work/verify-runs/**/receipt.json
+            .brigade/work/verify-runs/**/command-*.log
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: matrix.os == 'ubuntu-latest'
+        with:
+          name: mesh-envelope-${{ matrix.crypto }}
+          path: mesh-envelope.json
+          retention-days: 7
+
+  mesh-cross-version:
+    env:
+      MESH_ENV: present
+    name: mesh cross-version (${{ matrix.crypto }})
+    needs: [changes, mesh-compatibility]
+    if: ${{ needs.changes.outputs.mesh == 'true' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        crypto: [floor, newest]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        id: python
+        with:
+          python-version: "3.12"
+      - name: Install
+        env:
+          CRYPTO: ${{ matrix.crypto }}
+        run: |
+          "${{ steps.python.outputs.python-path }}" -m venv .venv
+          .venv/bin/python -m pip install -e '.[dev,mesh]'
+          if [ "$CRYPTO" = floor ]; then
+            .venv/bin/python -m pip install --only-binary cryptography 'cryptography==48.0.0'
+          else
+            .venv/bin/python -m pip install --upgrade --only-binary cryptography 'cryptography>=48,<52'
+          fi
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: mesh-envelope-${{ matrix.crypto == 'floor' && 'newest' || 'floor' }}
+      - name: Open other version's envelope
+        env:
+          MESH_IMPORT: mesh-envelope.json
+        run: brigade work verify run --target . --command './scripts/verify-focused tests/test_fleet_mesh_crypto.py::test_checked_in_envelope_and_cross_version_exchange tests/test_fleet_mesh_crypto.py::test_ci_mesh_environment' --capture brigade-work
+      - name: Show verification logs
+        if: always()
+        run: |
+          shopt -s nullglob
+          logs=(.brigade/work/verify-runs/*/command-*.log)
+          if (( ${#logs[@]} )); then
+            cat "${logs[@]}"
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: mesh-cross-version-receipts-${{ matrix.crypto }}
+          path: |
+            .brigade/work/verify-runs/**/receipt.json
+            .brigade/work/verify-runs/**/command-*.log
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 7
+
+  mesh-without-extra:
+    env:
+      MESH_ENV: absent
+    needs: changes
+    if: ${{ needs.changes.outputs.mesh == 'true' }}
+    name: mesh core without extra
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
+        id: python
+        with:
+          python-version: "3.12"
+      - name: Install core and dev tools, remove crypto
+        run: |
+          "${{ steps.python.outputs.python-path }}" -m venv .venv
+          .venv/bin/python -m pip install -e '.[dev]'
+          .venv/bin/python -m pip uninstall -y cryptography
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+      - name: Plain messaging and blocked crypto CLI import
+        run: brigade work verify run --target . --command './scripts/verify-focused tests/test_fleet_messages.py tests/test_fleet_messages_metadata.py tests/test_fleet_mcp.py tests/test_fleet_inbox_delivery.py tests/test_fleet_mesh_crypto.py::test_missing_extra_and_core_cli_independence tests/test_fleet_mesh_crypto.py::test_ci_mesh_environment' --capture brigade-work
+      - name: Show verification logs
+        if: always()
+        run: |
+          shopt -s nullglob
+          logs=(.brigade/work/verify-runs/*/command-*.log)
+          if (( ${#logs[@]} )); then
+            cat "${logs[@]}"
+          fi
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
+        if: always()
+        with:
+          name: mesh-without-extra-receipts
+          path: |
+            .brigade/work/verify-runs/**/receipt.json
+            .brigade/work/verify-runs/**/command-*.log
+          include-hidden-files: true
+          if-no-files-found: warn
+          retention-days: 7

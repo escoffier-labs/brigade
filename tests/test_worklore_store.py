@@ -142,7 +142,7 @@ def test_ownership_take_event_lookup_searches_fresh_and_upgraded_hubs(tmp_path, 
             assert not any("SCAN work_events" in step for step in plan), plan
             assert conn.execute(query, parameters).fetchone() == (1,)
             assert conn.execute(query, ("missing-event", parameters[1])).fetchone() is None
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION == 43
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
             store.ensure_schema(conn)
             assert {
                 table: conn.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall() for table in before
@@ -199,7 +199,7 @@ def test_execution_history_identity_lookup_is_indexed_and_migration_preserves_da
                 assert not any("SCAN work_events" in step for step in plan), plan
                 assert conn.execute(query, parameters).fetchone() == (1,)
                 assert conn.execute(query, ("node-a", "missing-run", campaign_member)).fetchone() is None
-            assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION == 43
+            assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
             assert {
                 table: conn.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall() for table in before
             } == before

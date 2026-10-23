@@ -337,11 +337,11 @@ def test_v39_database_upgrades_to_v40_with_campaign_tables(tmp_path):
     conn.execute("PRAGMA user_version=39")
     conn.commit()
     conn.close()
-    assert fleet_hub.SCHEMA_VERSION == 43
+    assert fleet_hub.SCHEMA_VERSION == 44
     migrated = fleet_hub.init_db(db)
     tables = {row[0] for row in migrated.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"work_campaigns", "work_campaign_members"} <= tables
-    assert migrated.execute("PRAGMA user_version").fetchone()[0] == 43
+    assert migrated.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
     migrated.close()
 
 

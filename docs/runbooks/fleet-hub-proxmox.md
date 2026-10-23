@@ -815,11 +815,51 @@ Fences use random per-call markers and neutralize embedded fence prefixes.
 Node credentials can deliberately list all active agent principals and their
 labels through `fleet_who`. Agent credentials see only recipients allowed by
 their grants. Session filtering by permitted nodes happens before the row limit.
+`fleet_who` and `fleet_claims` accept `limit` from 1 to 500 (default 200).
+For `fleet_who`, this limits nodes and principals. Sessions keep their separate
+upstream row bounds and are split across pages only by the byte budget.
+Pass the opaque `next_cursor` back as `cursor` with the same query to continue
+until `next_cursor` is null. Continuation pages retain the original snapshot
+while checking the caller's current permissions. Start a new query to see
+enrollments or claim changes made after that snapshot.
+Upgrade the hub before the clients. A new MCP client against an older hub
+retries `fleet_who` and `fleet_claims` once without `limit` and `cursor` if the
+hub rejects those arguments. A truncated legacy response from either tool
+returns `paging_continuation_unsupported`.
+Requests opt in to snapshots by sending `limit` or `cursor`. Legacy requests
+receive the first page without storing a snapshot. Legacy `who` requests without
+`limit` return at most 200 nodes and 200 principals, with `truncated: true` when
+more rows remain. Completed walks delete their
+snapshots. Snapshots expire after 10 minutes. Storage is capped at eight snapshots
+and 16 MiB per caller, 128 snapshots and 64 MiB across the hub, and 16 MiB per
+snapshot. A full caller budget evicts that caller's least recently accessed walk. Global saturation
+evicts the least recently accessed snapshot across callers if its last access
+was more than 60 seconds ago, repeating until the new snapshot fits. Continuations
+refresh last access time. If every snapshot was accessed within 60 seconds,
+the hub returns HTTP 429 with `paging_snapshot_capacity`.
+Expired, evicted, and completed cursors return HTTP 400 with
+`paging_cursor_expired`. Retrying the same cursor cannot succeed, so MCP marks
+this error permanent and adds a `hint` to restart the walk without a cursor. A
+new MCP client that sends a cursor to a hub that predates paging gets the same
+error instead of an unpaged first page, so a mid-walk rollback never repeats
+rows. Cursors are opaque but do not authenticate offsets: callers
+can skip or rewind within their own snapshot. Pages also enforce a serialized
+byte budget below the client cap.
+
+Accepted limits of the paging design:
+
+- Replaying a cursor refreshes the snapshot's last access time, so a client that
+  keeps re-sending one cursor keeps its snapshot out of idle reclamation.
+- Idle time is wall-clock time on the hub, so a clock step changes when a
+  snapshot becomes reclaimable.
+- A cursor that belongs to another caller returns `paging_cursor_expired`, the
+  same as an unknown cursor. A distinct code would reveal whether someone else's
+  snapshot exists.
 Node `fleet_claims` results match `GET /claims`, including active Grok Bot lease
 rows. Agent claim results include only granted owner nodes and omit `job`,
-`session`, and `owner_conductor`. Directory and claim reads use a read transaction
-that checks the caller's active status within the same snapshot.
-
+`session`, and `owner_conductor`. Small directory and claim reads use a read
+transaction. Creating or continuing a snapshot takes write admission and
+rechecks the caller's active status and grants before saving it.
 
 ### Operator questions
 

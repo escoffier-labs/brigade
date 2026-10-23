@@ -117,7 +117,7 @@ from .fleet_hub_status import (
     latest_status as latest_status,
 )
 
-SCHEMA_VERSION = 43
+SCHEMA_VERSION = 44
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
@@ -277,6 +277,8 @@ _ADDITIVE_INDEXES = (
 
 
 def _missing_additive_columns(conn: sqlite3.Connection) -> list[str]:
+    from . import fleet_hub_paging
+
     # Order matters: an events table first (a hub at the current schema version may predate one added later on
     # the events branch), then the ALTERs that need their table, then indexes that need their columns.
     existing = {(kind, name) for kind, name in conn.execute("SELECT type, name FROM sqlite_master")}
@@ -301,7 +303,7 @@ def _missing_additive_columns(conn: sqlite3.Connection) -> list[str]:
     from . import fleet_hub_questions
 
     missing.extend(fleet_hub_questions.missing_schema(conn))
-    return missing
+    return missing + fleet_hub_paging.missing_schema(conn)
 
 
 # Per-node credentials (schema v4, issue #1150): node_id -> SHA-256 of the
@@ -673,6 +675,10 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
 
     # v42 -> v43: audited operator questions and terminal-answer trigger.
     fleet_hub_questions.ensure_schema(conn)
+    # v43 -> v44: bounded, expiring directory and claims paging snapshots.
+    from . import fleet_hub_paging
+
+    fleet_hub_paging.ensure_schema(conn)
     # v31 -> v32 adds model_policy.t3_model (native T3 launch model) through
     # fleet_hub_model_roster.ensure_schema's additive column migration.
     # v34 -> v36: aggregate snapshots and compact weekly administrator history.

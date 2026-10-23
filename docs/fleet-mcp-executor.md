@@ -249,6 +249,13 @@ For transient failures, use at most three attempts with delays such as 1 and
 interpreter has no timers (retrieved 2026-10-22, publication date not stated), so
 schedule retries in the caller between executions. Never spin in `execute`.
 Respect `permanent`/`transient` errors and each entry of ack's `results` array.
+`paging_cursor_expired` from `fleet_who` or `fleet_claims` is permanent: the
+cursor expired, was evicted, or is not valid for this caller, so retrying it
+cannot succeed. Restart the walk without a cursor and do not merge rows across
+the two walks. The error body carries a `hint` saying so. A cursor is bound to
+the query that created it, so every continuation must repeat the same `filter`
+and `all` (only `all` for `fleet_claims`). Dropping or changing either one also
+returns `paging_cursor_expired`.
 Inspect MCP `isError` and the JSON text content, even if Executor's outer call
 succeeds. Preserve fences, scan findings, IDs and decimal-string cursors.
 Reading or returning a message never acknowledges it.
