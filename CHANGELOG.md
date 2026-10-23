@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- A programmatic assignment journal records stable task and attempt identities, classified result references, and result-consumption acknowledgements under the existing run owner. It does not dispatch work or retry uncertain attempts (#2049).
+
 - Add the optional `mesh` crypto core with frozen `bm1` hybrid encryption and signed envelopes. Fleet messaging integration follows in later slices.
 
 - Fleet MCP tools advertise read-only and destructive annotations, and send/reply accept optional `client_id` keys for duplicate-free replay. The opt-in Executor app recipe documents browser approval, credential boundaries and manual compatibility checks (#1887).
