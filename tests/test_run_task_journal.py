@@ -313,7 +313,18 @@ def test_task_pairs_keep_already_authoritative_run_writable(authoritative_task_r
     assert artifact["mismatches"] == 0
 
 
-@pytest.mark.parametrize("damage", ["missing", "mismatched", "nonstring", "wrong-event-type", "keyed-neutral"])
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "missing",
+        "mismatched",
+        "nonstring",
+        "wrong-event-type",
+        "keyed-neutral",
+        "generic-task-tag",
+        "generic-dispatch-tag",
+    ],
+)
 def test_forged_task_pair_cannot_authorize_next_write(authoritative_task_run, damage):
     run_dir, workspace = authoritative_task_run
     journal_path = run_dir / "events/lifecycle.jsonl"
@@ -328,7 +339,12 @@ def test_forged_task_pair_cannot_authorize_next_write(authoritative_task_run, da
     event_type = "run.redaction.recorded" if damage == "keyed-neutral" else "task.accepted"
     if damage == "keyed-neutral":
         payload = {}
-    key = run_events.request_digest(event_type=event_type, payload=payload, idempotency_key="forged-task")
+    if damage == "generic-dispatch-tag":
+        event_type = "run.dispatch.requested"
+        payload = {"seat": "worker", "attempt": 1}
+        key = run_checkpoint.dispatch_pairing_key(event_type, "worker", 1)
+    else:
+        key = run_events.request_digest(event_type=event_type, payload=payload, idempotency_key="forged-task")
     checkpoint_payload = dict(
         next(e for e in reversed(events) if e.event_type == run_checkpoint.CHECKPOINT_EVENT_TYPE).payload
     )
@@ -345,7 +361,7 @@ def test_forged_task_pair_cannot_authorize_next_write(authoritative_task_run, da
         run_id=run_dir.name,
         event_type=run_checkpoint.CHECKPOINT_EVENT_TYPE,
         payload=checkpoint_payload,
-        idempotency_key="forged-checkpoint",
+        idempotency_key=("checkpoint:fact:" + "0" * 64 if damage.startswith("generic-") else "forged-checkpoint"),
         expected_previous_sequence=events[-1].sequence,
         workspace=workspace,
     )
@@ -370,6 +386,107 @@ def test_forged_task_pair_cannot_authorize_next_write(authoritative_task_run, da
         aboyeur._write_json(run_dir / "run.json", snapshot)
     assert journal_path.read_bytes() == before
     assert (run_dir / "run.json").read_bytes() == snapshot_bytes
+
+
+@pytest.mark.parametrize("event_type", ["run.redaction.recorded", "run.planning.started"])
+@pytest.mark.parametrize("damage", ["forged", "request", "snapshot", "body-kind", "malformed-sha", "malformed-kind"])
+def test_forged_generic_pair_cannot_open_authoritative_gate(authoritative_task_run, event_type, damage):
+    """A valid chain and adjacent pair cannot substitute for exact fact identity."""
+    run_dir, workspace = authoritative_task_run
+    journal = run_dir / "events/lifecycle.jsonl"
+    events = run_journal.read_journal_bounded(journal).events
+    checkpoint_payload = dict(
+        next(event for event in reversed(events) if event.event_type == run_checkpoint.CHECKPOINT_EVENT_TYPE).payload
+    )
+    checkpoint_payload["paired_event_type"] = event_type
+    checkpoint_payload.pop("pairing_key", None)
+    request_digest = run_events.request_digest(event_type=event_type, payload={}, idempotency_key="generic-fact")
+    key = run_checkpoint._checkpoint_idempotency_key(
+        "a" * 64 if damage == "snapshot" else checkpoint_payload["sha256"],
+        paired_event_type=event_type,
+        body_kind=None if damage == "body-kind" else checkpoint_payload.get("body_kind"),
+        pairing_key="b" * 64 if damage == "request" else request_digest,
+    )
+    if damage == "forged":
+        key = "checkpoint:fact:" + "0" * 64
+    elif damage == "malformed-sha":
+        checkpoint_payload["sha256"] = 123
+    elif damage == "malformed-kind":
+        checkpoint_payload["body_kind"] = 123
+    checkpoint = run_journal.append_event(
+        journal,
+        run_id=run_dir.name,
+        event_type=run_checkpoint.CHECKPOINT_EVENT_TYPE,
+        payload=checkpoint_payload,
+        idempotency_key=key,
+        expected_previous_sequence=events[-1].sequence,
+        workspace=workspace,
+    )
+    run_journal.append_event(
+        journal,
+        run_id=run_dir.name,
+        event_type=event_type,
+        payload={},
+        idempotency_key="generic-fact",
+        expected_previous_sequence=checkpoint.sequence,
+        workspace=workspace,
+    )
+    assert not run_journal.read_journal_bounded(journal).chain_errors
+    assert run_shadow.check_projection_readiness(run_dir).reasons == (run_shadow.REASON_JOURNAL_AHEAD,)
+    before_journal = journal.read_bytes()
+    before_snapshot = (run_dir / "run.json").read_bytes()
+    before_shadow = run_shadow.shadow_artifact_path(run_dir).read_bytes()
+    candidate = json.loads(before_snapshot)
+    candidate["status"] = "dispatching"
+    with pytest.raises(run_lifecycle.LifecycleJournalError, match="prior gate not ready: journal-ahead"):
+        aboyeur._write_json(run_dir / "run.json", candidate)
+    assert journal.read_bytes() == before_journal
+    assert (run_dir / "run.json").read_bytes() == before_snapshot
+    assert run_shadow.shadow_artifact_path(run_dir).read_bytes() == before_shadow
+
+
+@pytest.mark.parametrize("event_type", ["run.redaction.recorded", "run.planning.started"])
+@pytest.mark.parametrize("legacy", [False, True])
+def test_valid_generic_pair_catches_up_authoritative_writer(authoritative_task_run, monkeypatch, event_type, legacy):
+    run_dir, workspace = authoritative_task_run
+    snapshot = (run_dir / "run.json").read_bytes()
+    if legacy:
+        run_checkpoint.write_checkpoint(
+            run_dir,
+            snapshot,
+            workspace=workspace,
+            paired_event_type=event_type,
+            body_kind="base-stripped",
+        )
+        run_lifecycle._append_owner_event(
+            run_dir / "events/lifecycle.jsonl",
+            workspace=workspace,
+            run_id=run_dir.name,
+            event_type=event_type,
+            payload={},
+            idempotency_key="legacy-generic-fact",
+        )
+    else:
+        # Simulate a crash after the real generic writer commits its pair.
+        with monkeypatch.context() as patch:
+            patch.setattr(run_shadow, "record_shadow_comparison", lambda *args, **kwargs: None)
+            run_lifecycle.record_lifecycle_event(
+                run_dir,
+                workspace=workspace,
+                event_type=event_type,
+                payload={},
+                idempotency_key="valid-generic-fact",
+            )
+    assert (run_dir / "run.json").read_bytes() == snapshot
+    assert run_shadow.check_projection_readiness(run_dir).reasons == (run_shadow.REASON_JOURNAL_AHEAD,)
+    candidate = json.loads(snapshot)
+    candidate["status"] = "dispatching"
+    aboyeur._write_json(run_dir / "run.json", candidate)
+    assert json.loads((run_dir / "run.json").read_bytes())["status"] == "dispatching"
+    assert aboyeur._resolve_authority_state(run_dir) == "authoritative"
+    assert run_shadow.check_projection_readiness(run_dir).ready
+    artifact = json.loads(run_shadow.shadow_artifact_path(run_dir).read_bytes())
+    assert artifact["errors"] == artifact["mismatches"] == 0
 
 
 @pytest.mark.parametrize("interleave_redaction", [False, True])
@@ -596,3 +713,43 @@ def test_generic_fact_cannot_mask_task_orphan_with_actual_authority(generic_run,
     with pytest.raises(tasks.TaskJournalError, match="incomplete-pair"):
         accepted(generic_run)
     assert (run_dir / "events/lifecycle.jsonl").read_bytes() == before
+
+
+@pytest.mark.parametrize("event_type", ["run.redaction.recorded", "run.planning.started", "run.dispatch.requested"])
+def test_inexact_checkpoint_retry_names_the_fact_without_mutation(authoritative_task_run, monkeypatch, event_type):
+    run_dir, workspace = authoritative_task_run
+    payload = {"seat": "worker", "attempt": 1} if event_type == "run.dispatch.requested" else {}
+    real_append = run_lifecycle._append_owner_event
+
+    def crash(path, **kwargs):
+        if kwargs["event_type"] == event_type:
+            raise OSError("simulated explicit fact checkpoint-only crash")
+        return real_append(path, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(run_lifecycle, "_append_owner_event", crash)
+        with pytest.raises(run_lifecycle.LifecycleJournalError, match=r"^lifecycle journal I/O failure \(OSError\)$"):
+            run_lifecycle.record_lifecycle_event(
+                run_dir, workspace=workspace, event_type=event_type, payload=payload, idempotency_key="original-fact"
+            )
+    journal = run_dir / "events/lifecycle.jsonl"
+    before_journal = journal.read_bytes()
+    before_snapshot = (run_dir / "run.json").read_bytes()
+    before_shadow = run_shadow.shadow_artifact_path(run_dir).read_bytes()
+    kind = "dispatch" if event_type == "run.dispatch.requested" else "explicit fact"
+    # A different dispatch identity must retain the existing dispatch wording.
+    changed_payload = {"seat": "other-worker", "attempt": 1} if kind == "dispatch" else payload
+    with pytest.raises(
+        run_lifecycle.LifecycleJournalError, match=f"^authoritative {kind} checkpoint recovery is not exact$"
+    ):
+        run_lifecycle.record_lifecycle_event(
+            run_dir, workspace=workspace, event_type=event_type, payload=changed_payload, idempotency_key="changed-fact"
+        )
+    assert journal.read_bytes() == before_journal
+    assert (run_dir / "run.json").read_bytes() == before_snapshot
+    assert run_shadow.shadow_artifact_path(run_dir).read_bytes() == before_shadow
+    run_lifecycle.record_lifecycle_event(
+        run_dir, workspace=workspace, event_type=event_type, payload=payload, idempotency_key="original-fact"
+    )
+    assert len(journal.read_bytes().splitlines()) == len(before_journal.splitlines()) + 1
+    assert run_shadow.check_projection_readiness(run_dir).ready

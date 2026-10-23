@@ -567,15 +567,15 @@ def _recover_authoritative_dispatch_checkpoint(
         return None
 
     checkpoint = journal_report.events[-1]
+    fact_kind = "dispatch" if event_type in run_checkpoint._DISPATCH_FACT_EVENT_TYPES else "explicit fact"
+    recovery_context = f"authoritative {fact_kind} checkpoint recovery"
     artifact_path = run_shadow.shadow_artifact_path(run_dir)
     try:
         artifact = json.loads(run_journal.bound_read_text(artifact_path))
     except (OSError, ValueError) as exc:
-        raise LifecycleJournalError(
-            run_events._bound("authoritative dispatch checkpoint recovery evidence is unreadable")
-        ) from exc
+        raise LifecycleJournalError(run_events._bound(f"{recovery_context} evidence is unreadable")) from exc
     if not isinstance(artifact, dict):
-        raise LifecycleJournalError(run_events._bound("authoritative dispatch checkpoint recovery evidence is invalid"))
+        raise LifecycleJournalError(run_events._bound(f"{recovery_context} evidence is invalid"))
     baseline = run_shadow._verify_stale_baseline(
         run_dir,
         run_dir.name,
@@ -583,16 +583,14 @@ def _recover_authoritative_dispatch_checkpoint(
         artifact.get("last_compared_event_digest"),
     )
     if baseline is None or checkpoint.sequence != baseline[0] + 1:
-        raise LifecycleJournalError(run_events._bound("authoritative dispatch checkpoint recovery is not exact"))
+        raise LifecycleJournalError(run_events._bound(f"{recovery_context} is not exact"))
     if run_checkpoint._writer_canonical_bytes(snapshot_obj) != snapshot:
-        raise LifecycleJournalError(run_events._bound("authoritative dispatch checkpoint recovery is not exact"))
+        raise LifecycleJournalError(run_events._bound(f"{recovery_context} is not exact"))
     try:
         expected_bytes = run_checkpoint._strip_journal_metadata_from_base(snapshot)
         checkpoint_bytes = run_checkpoint.validate_checkpoint(run_dir, checkpoint)
     except (run_checkpoint.CheckpointError, RecursionError) as exc:
-        raise LifecycleJournalError(
-            run_events._bound("authoritative dispatch checkpoint recovery is not exact")
-        ) from exc
+        raise LifecycleJournalError(run_events._bound(f"{recovery_context} is not exact")) from exc
 
     expected_payload = run_checkpoint._checkpoint_payload(
         expected_bytes,
@@ -613,7 +611,7 @@ def _recover_authoritative_dispatch_checkpoint(
         or checkpoint.idempotency_key != expected_checkpoint_key
         or checkpoint_bytes != expected_bytes
     ):
-        raise LifecycleJournalError(run_events._bound("authoritative dispatch checkpoint recovery is not exact"))
+        raise LifecycleJournalError(run_events._bound(f"{recovery_context} is not exact"))
     event = run_journal.append_event(
         journal_path,
         run_id=run_dir.name,
