@@ -25,6 +25,8 @@ SUITE = "bm1"
 KEM_ID, KDF_ID, AEAD_ID = 0x647A, 0x0001, 0x0002
 PUBLIC_KEY_BYTES, SEED_BYTES, ENC_BYTES, WRAP_BYTES = 1216, 32, 1120, 1168
 MAX_ENVELOPE_BYTES = 96 * 1024
+MAX_RAW_ENVELOPE_BYTES = MAX_ENVELOPE_BYTES + 1024
+MAX_ENVELOPE_DEPTH = 4
 PAYLOAD_LIMITS = {"subject": 200, "body": 65536, "ref": 256, "thread": 128, "sender_label": 64}
 MAX_PAD_BYTES = ((sum(PAYLOAD_LIMITS.values()) + 5 * len(PAYLOAD_LIMITS) + 1 + 1023) // 1024) * 1024
 LABELS = {
@@ -339,6 +341,9 @@ def verify_key_record(
     Only the caller's authenticated D4 lineage may authorize a changed hub. Both
     hub IDs must belong to that one accepted lineage. This helper neither learns
     nor authenticates lineage from the key records themselves.
+
+    This checks one link, not a chain. Slice 2 enforces the eight-link limit,
+    revocation and the pinned head that prevents replay of an already used link.
     """
     probe_backend()
     _validate_record(record)
@@ -358,7 +363,13 @@ def verify_key_record(
             or (accepted_hub_lineage is not None and {previous_record["hub"], record["hub"]} <= accepted_hub_lineage),
             "mesh_key_invalid",
         )
-        _require(record.get("prev_kid") == previous_record["kid"], "mesh_key_invalid")
+        _require(
+            record.get("prev_kid") == previous_record["kid"]
+            and record["kid"] != previous_record["kid"]
+            and datetime.fromisoformat(record["created_at"].replace("Z", "+00:00"))
+            > datetime.fromisoformat(previous_record["created_at"].replace("Z", "+00:00")),
+            "mesh_key_invalid",
+        )
         verify(unsigned, record["prev_sig"], decode_binary(previous_record["sig_pub"], 32), label="key")
 
 
@@ -368,7 +379,9 @@ def _payload(payload: dict[str, Any]) -> None:
         value = payload[name]
         if name not in {"subject", "body"} and value is None:
             continue
-        _require(isinstance(value, str) and bool(value))
+        _require(isinstance(value, str))
+        if name in {"subject", "body"}:
+            _require(bool(value.strip()))
         try:
             size = len(value.encode("utf-8"))
         except UnicodeError:
@@ -401,7 +414,7 @@ def decode_payload(raw: bytes) -> dict[str, Any]:
     while pos < len(raw) and raw[pos] != 0x80:
         _require(pos + 5 <= len(raw))
         tag, length = struct.unpack_from(">BI", raw, pos)
-        _require(last < tag <= 5 and length > 0 and pos + 5 + length < len(raw))
+        _require(last < tag <= 5 and pos + 5 + length < len(raw))
         pos += 5
         try:
             result[_PAYLOAD_FIELDS[tag - 1]] = raw[pos : pos + length].decode("utf-8", errors="strict")
@@ -456,15 +469,74 @@ def retry_commitment(retry_key: bytes, header: dict[str, Any], payload: dict[str
     return encode_binary(hmac.digest(retry_key, LABELS["retry"] + canonical(semantic), "sha256"))
 
 
-def verify_signed_header(envelope: dict[str, Any], sender_record: dict[str, Any]) -> dict[str, Any]:
-    """Verify full envelopes or tombstones; no trust/freshness claim is made."""
-    probe_backend()
-    _require(isinstance(envelope, dict) and len(canonical(envelope)) <= MAX_ENVELOPE_BYTES, "message_too_large")
+def _unique_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        _require(key not in result)
+        result[key] = value
+    return result
+
+
+def parse_envelope(raw: bytes) -> dict[str, Any]:
+    """Bound raw input before JSON allocation, validate schema and require canonical bytes.
+
+    The returned object has exactly one accepted wire representation. Receipt
+    hashes use SHA-256 of these canonical raw bytes, never a normalized input.
+    Both complete envelopes and signed content-expired tombstones are accepted.
+    """
+    _require(isinstance(raw, bytes))
+    _require(len(raw) <= MAX_RAW_ENVELOPE_BYTES, "message_too_large")
+    depth, quoted, escaped = 0, False, False
+    for byte in raw:
+        if quoted:
+            if escaped:
+                escaped = False
+            elif byte == 92:
+                escaped = True
+            elif byte == 34:
+                quoted = False
+        elif byte == 34:
+            quoted = True
+        elif byte in (91, 123):
+            depth += 1
+            _require(depth <= MAX_ENVELOPE_DEPTH)
+        elif byte in (93, 125):
+            depth -= 1
+            _require(depth >= 0)
+    _require(depth == 0 and not quoted)
+    try:
+        envelope = json.loads(raw, object_pairs_hook=_unique_object)
+    except (ValueError, UnicodeError, RecursionError):
+        raise MeshError("envelope_malformed") from None
+    _require(isinstance(envelope, dict))
     rh = _routing(envelope)
     required = set(rh) | _DIGEST_FIELDS | {"sig"}
     _require(required <= envelope.keys() <= required | {"ct", "recipients"})
     for name in _DIGEST_FIELDS:
         decode_binary(envelope[name], 32)
+    decode_binary(envelope["sig"], 64)
+    _require(("ct" in envelope) == ("recipients" in envelope))
+    if "ct" in envelope:
+        decode_binary(envelope["ct"], rh["pad"] + 16)
+        recipients = envelope["recipients"]
+        _require(isinstance(recipients, list) and len(recipients) == len(rh["rcpt"]))
+        for kid, entry in zip(rh["rcpt"], recipients, strict=True):
+            _require(isinstance(entry, dict) and set(entry) == {"kid", "wrap"} and entry["kid"] == kid)
+            decode_binary(entry["wrap"], WRAP_BYTES)
+    encoded = canonical(envelope)
+    _require(len(encoded) <= MAX_ENVELOPE_BYTES, "message_too_large")
+    _require(raw == encoded)
+    return envelope
+
+
+def verify_signed_header(raw: bytes, sender_record: dict[str, Any]) -> dict[str, Any]:
+    """Parse and verify full envelopes or tombstones; no trust/freshness claim is made."""
+    probe_backend()
+    return _verify_signed_header(parse_envelope(raw), sender_record)
+
+
+def _verify_signed_header(envelope: dict[str, Any], sender_record: dict[str, Any]) -> dict[str, Any]:
+    rh = _routing(envelope)
     verify_key_record(sender_record, principal=rh["from"], hub=rh["hub"])
     _require(sender_record["kid"] == rh["from_kid"], "mesh_key_invalid")
     header = {k: v for k, v in envelope.items() if k not in {"ct", "recipients", "sig"}}
@@ -559,9 +631,7 @@ def seal(
     return envelope
 
 
-def open(
-    envelope: dict[str, Any], *, keys: PrivateKeys, sender_record: dict[str, Any], caller: str, context: str
-) -> dict[str, Any]:
+def open(raw: bytes, *, keys: PrivateKeys, sender_record: dict[str, Any], caller: str, context: str) -> dict[str, Any]:
     """Parse, check context, verify, check digests, unwrap, decrypt, decode.
 
     This primitive does not accept hub columns, pins or clocks. Slice 5 must
@@ -572,13 +642,13 @@ def open(
     from cryptography.hazmat.primitives.ciphers.aead import AESGCM
     from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PrivateKey
 
-    _require(isinstance(envelope, dict) and len(canonical(envelope)) <= MAX_ENVELOPE_BYTES, "message_too_large")
+    envelope = parse_envelope(raw)
     rh = _routing(envelope)
     _require(
         context in {"inbound", "outbound"} and caller == rh["to" if context == "inbound" else "from"],
         "open_context_mismatch",
     )
-    verify_signed_header(envelope, sender_record)
+    _verify_signed_header(envelope, sender_record)
     _require("ct" in envelope and "recipients" in envelope, "content_expired")
     ct = decode_binary(envelope["ct"], rh["pad"] + 16)
     recipients = envelope["recipients"]

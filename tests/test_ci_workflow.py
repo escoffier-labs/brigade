@@ -612,7 +612,15 @@ def test_ci_workflow_shadow_gate_covers_required_jobs_and_their_dependencies():
         "quickstart-smoke",
         "windows-native-acceptance",
     }
-    assert needs == required_jobs | {"test-shards", "coverage", "cosign-integration", "fleet-hub-container"}
+    assert needs == required_jobs | {
+        "test-shards",
+        "coverage",
+        "cosign-integration",
+        "fleet-hub-container",
+        "mesh-compatibility",
+        "mesh-cross-version",
+        "mesh-without-extra",
+    }
     for name in needs:
         _workflow_job_section(text, name)
     assert "actions/checkout" not in gate
@@ -1842,10 +1850,13 @@ def test_windows_nightly_report_uses_driver_policy(outcome, status, failed, expe
     assert report["summary"].startswith("windows pytest: files=2 regressions=")
 
 
-def test_mesh_jobs_are_advisory_and_path_filtered():
+def test_mesh_jobs_are_protected_and_path_filtered():
     text = (ROOT / ".github/workflows/ci.yml").read_text()
     changes = _workflow_job_section(text, "changes")
-    assert "mesh: ${{ steps.filter.outputs.mesh }}" in changes
+    assert (
+        "mesh: ${{ github.event_name == 'merge_group' && 'true' || github.event_name == 'push' && 'true' || steps.filter.outputs.mesh }}"
+        in changes
+    )
     for path in (
         "src/brigade/fleet_mesh_*.py",
         "tests/test_fleet_mesh_*.py",
@@ -1858,7 +1869,7 @@ def test_mesh_jobs_are_advisory_and_path_filtered():
     for job in ("mesh-compatibility", "mesh-cross-version", "mesh-without-extra"):
         section = _workflow_job_section(text, job)
         assert "needs.changes.outputs.mesh == 'true'" in section
-        assert job not in gate
+        assert job in gate
     compatibility = _workflow_job_section(text, "mesh-compatibility")
     assert "crypto: [floor, newest]" in compatibility
     assert "os: [ubuntu-latest, macos-15, windows-latest]" in compatibility
@@ -1880,3 +1891,33 @@ def test_mesh_jobs_are_advisory_and_path_filtered():
     assert ".venv/bin/python -m pip uninstall -y cryptography" in absent
     assert "MESH_ENV: absent" in absent
     assert "tests/test_fleet_mesh_crypto.py::test_ci_mesh_environment" in absent
+
+
+@pytest.mark.parametrize("event", ["pull_request", "push", "merge_group"])
+@pytest.mark.parametrize("flag", ["true", "false", "", None])
+@pytest.mark.parametrize("job", ["mesh-compatibility", "mesh-cross-version", "mesh-without-extra"])
+def test_ci_gate_allows_mesh_skip_only_for_unchanged_pr(event, flag, job):
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    gate = _workflow_job_section(text, "ci-gate")
+    needs_block = gate.split("    needs:\n", 1)[1].split("    runs-on:", 1)[0]
+    names = re.findall(r"^      - ([a-z0-9-]+)$", needs_block, re.MULTILINE)
+    needs = {name: {"result": "success"} for name in names}
+    needs["changes"]["outputs"] = {"mesh": flag}
+    needs[job] = {"result": "skipped"}
+    script = textwrap.dedent(gate.split("        run: |\n", 1)[1])
+    result = subprocess.run(
+        _workflow_bash_command(script),
+        env=dict(os.environ, NEEDS_JSON=json.dumps(needs), EVENT_NAME=event),
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == (0 if event == "pull_request" and flag == "false" else 1), result.stdout + result.stderr
+
+
+def test_mesh_actions_are_pinned_to_full_commits():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    for job in ("mesh-compatibility", "mesh-cross-version", "mesh-without-extra"):
+        section = _workflow_job_section(text, job)
+        actions = re.findall(r"uses: ([^\n]+)", section)
+        assert actions
+        assert all(re.fullmatch(r"actions/[a-z-]+@[0-9a-f]{40} # v[0-9.]+", action) for action in actions)

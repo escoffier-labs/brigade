@@ -21,7 +21,7 @@ jobs:
       contents: read
       pull-requests: read
     outputs:
-      mesh: ${{ steps.filter.outputs.mesh }}
+      mesh: ${{ github.event_name == 'merge_group' && 'true' || github.event_name == 'push' && 'true' || steps.filter.outputs.mesh }}
       code_graph: ${{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.code_graph }}
       evidence_ledger: ${{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.evidence_ledger }}
       notify: ${{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.notify }}
@@ -563,6 +563,9 @@ jobs:
       - install-from-source
       - quickstart-smoke
       - windows-native-acceptance
+      - mesh-compatibility
+      - mesh-cross-version
+      - mesh-without-extra
     runs-on: ubuntu-latest
     steps:
       - name: Require all protected jobs and their dependencies
@@ -582,6 +585,7 @@ jobs:
               "cosign-integration", "fleet-hub-container", "component-manifest-provenance",
               "content-guard", "repo-metadata", "install-from-source",
               "quickstart-smoke", "windows-native-acceptance",
+              "mesh-compatibility", "mesh-cross-version", "mesh-without-extra",
           }
           needs = json.loads(os.environ["NEEDS_JSON"])
           errors = []
@@ -596,9 +600,17 @@ jobs:
               and changes.get("outputs", {}).get("fleet_hub_container") == "false"
               and os.environ["EVENT_NAME"] != "merge_group"
           )
+          mesh_jobs = {"mesh-compatibility", "mesh-cross-version", "mesh-without-extra"}
+          mesh_skip_allowed = (
+              changes.get("result") == "success"
+              and changes.get("outputs", {}).get("mesh") == "false"
+              and os.environ["EVENT_NAME"] == "pull_request"
+          )
           for name in sorted(mandatory):
               result = needs.get(name, {}).get("result")
               if name == "fleet-hub-container" and result == "skipped" and container_skip_allowed:
+                  continue
+              if name in mesh_jobs and result == "skipped" and mesh_skip_allowed:
                   continue
               if result != "success":
                   errors.append(f"{name}: required success, got {result!r}")
@@ -1190,8 +1202,8 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
-  # Advisory mesh compatibility checks. Deliberately outside ci-gate until
-  # the floor/newest and native-wheel results have been observed.
+  # Security-critical mesh compatibility is protected by ci-gate. Only PRs
+  # with no mesh changes may skip these jobs. Pushes and merge groups run all.
   mesh-compatibility:
     needs: changes
     if: ${{ needs.changes.outputs.mesh == 'true' }}
@@ -1208,8 +1220,8 @@ jobs:
       run:
         shell: bash
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         id: python
         with:
           python-version: "3.12"
@@ -1255,7 +1267,7 @@ jobs:
           if (( ${#logs[@]} )); then
             cat "${logs[@]}"
           fi
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: mesh-receipts-${{ matrix.os }}-${{ matrix.crypto }}
@@ -1265,7 +1277,7 @@ jobs:
           include-hidden-files: true
           if-no-files-found: warn
           retention-days: 7
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: matrix.os == 'ubuntu-latest'
         with:
           name: mesh-envelope-${{ matrix.crypto }}
@@ -1284,8 +1296,8 @@ jobs:
       matrix:
         crypto: [floor, newest]
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         id: python
         with:
           python-version: "3.12"
@@ -1301,7 +1313,7 @@ jobs:
             .venv/bin/python -m pip install --upgrade --only-binary cryptography 'cryptography>=48,<52'
           fi
           echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
-      - uses: actions/download-artifact@v7
+      - uses: actions/download-artifact@37930b1c2abaa49bbe596cd826c3c89aef350131 # v7
         with:
           name: mesh-envelope-${{ matrix.crypto == 'floor' && 'newest' || 'floor' }}
       - name: Open other version's envelope
@@ -1316,7 +1328,7 @@ jobs:
           if (( ${#logs[@]} )); then
             cat "${logs[@]}"
           fi
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: mesh-cross-version-receipts-${{ matrix.crypto }}
@@ -1335,8 +1347,8 @@ jobs:
     name: mesh core without extra
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v7
-      - uses: actions/setup-python@v7
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7
         id: python
         with:
           python-version: "3.12"
@@ -1356,7 +1368,7 @@ jobs:
           if (( ${#logs[@]} )); then
             cat "${logs[@]}"
           fi
-      - uses: actions/upload-artifact@v7
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7
         if: always()
         with:
           name: mesh-without-extra-receipts

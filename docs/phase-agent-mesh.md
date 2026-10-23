@@ -208,6 +208,9 @@ floor (48) and the newest release.
 
 ### The `bm1` wire profile, frozen before implementation
 
+The normative encoding subsection in D2 is part of this frozen profile.
+Together with the pinned primitives below, it fully pins the meaning of `bm1`.
+
 | Parameter | Value |
 |---|---|
 | HPKE mode | base, `0x00` |
@@ -334,6 +337,73 @@ What is sealed. The payload holds `subject`, `body`, `ref`, `thread` and
 length, the UTF-8 bytes). It is padded with one `0x80` byte and zeros up to a
 multiple of 1 KiB (minimum 1 KiB), so the stored size reveals the length only
 to the nearest kilobyte. `pad` records the bucket.
+
+### Normative bm1 encoding
+
+The following rules are normative for `bm1`. A change to these rules needs a
+new suite id. With this text, bm1's meaning is fully pinned.
+
+Payload fields use these one-byte tags, followed by an unsigned four-byte
+big-endian UTF-8 byte length and exactly that many UTF-8 bytes:
+
+| Tag | Field | Presence |
+|---|---|---|
+| 1 | `subject` | required |
+| 2 | `body` | required |
+| 3 | `ref` | optional |
+| 4 | `thread` | optional |
+| 5 | `sender_label` | optional |
+
+Tags MUST be unique and strictly ascending. Readers MUST reject unknown tags,
+duplicates, reordered tags, missing required fields and invalid UTF-8. Optional
+fields whose value is `None` MUST be omitted, and omission decodes to `None`.
+An explicitly empty `ref` MUST be encoded as tag 3 with length zero and MUST
+decode to `""`, distinct from `None`. Required text MUST contain at least one
+non-whitespace character, using the existing messaging validator's
+`value.strip()` test. The existing byte limits and thread and label patterns
+apply. A thread or label cannot be empty. After the last field, exactly one
+`0x80` byte and the minimum number of zero bytes bring the length to a multiple
+of 1024 bytes, with a minimum of 1024. Readers MUST reject nonzero padding or
+an extra padding bucket.
+
+`rcpt` MUST contain unique kids sorted in ASCII lexicographic order.
+`recipients` MUST contain exactly one `{kid, wrap}` object for each kid, in
+that same order. Self-send deduplicates the sender and recipient kid into one
+entry and one wrap. Later slices MUST address wraps by kid, never by position.
+
+Timestamps MUST match this exact ASCII grammar and name a valid calendar time:
+
+```text
+YYYY-MM-DDTHH:MM:SS[.fff[fff]](Z|+HH:MM|-HH:MM)
+```
+
+The separators and uppercase `T` and `Z` are literal. All digit positions use
+ASCII digits. Fractions have zero, three or six digits only. `Z` denotes UTC.
+An explicit offset has hours 00 through 23 and minutes 00 through 59, including
+`+00:00` for UTC. Seconds range from 00 through 59, with no leap-second form.
+Readers MUST reject every other spelling. Continuity compares instants after
+applying the offset, not the timestamp strings.
+
+All envelope authentication entry points MUST accept raw bytes through
+`parse_envelope(raw: bytes)` before any normalization. Before allocating a JSON
+tree, it MUST reject more than 99,328 bytes (the 96 KiB envelope cap plus a
+fixed 1024-byte parsing margin) and container nesting deeper than four levels,
+counting the root object as level one. JSON objects MUST reject duplicate keys
+recursively, including the root, `in_reply_to` and every recipient object.
+The parser MUST validate the envelope schema, including binary lengths,
+recipient order and the complete-content or tombstone shape, then re-encode
+with `json.dumps(..., sort_keys=True, separators=(",", ":"), ensure_ascii=True,
+allow_nan=False).encode("ascii")`. It MUST reject a re-encoded envelope larger
+than 98,304 bytes and any input whose bytes differ from this encoding.
+Whitespace, alternate key order, byte-order marks, alternate escapes and
+trailing newlines are therefore rejected. Each accepted message has exactly
+one raw byte representation.
+
+Every whole-envelope digest, including the receipt log, seen-id cache, outbox
+and spool `payload_hash`, MUST be SHA-256 of those canonical raw bytes.
+Structured hash inputs such as `recipients` and signed statements use the same
+canonical encoder. `ct_sha256` continues to hash the decoded ciphertext bytes,
+and primitive binary derivations keep their specified binary inputs.
 
 How it is built:
 
@@ -664,7 +734,13 @@ operator when every link from the pinned key to the new record has a valid
 `prev_sig` by its predecessor, `created_at` strictly increases along the
 chain, no link is revoked, and the chain has at most 8 links. `keys_get`
 fetches the intermediate records. A longer chain, a gap, or any revoked link
-yields `changed`. The successor keeps the pinned trust level.
+yields `changed`. Every successor MUST have a different kid from its
+predecessor. Slice 1's `verify_key_record` checks one adjacent link, including
+strict timestamp increase and predecessor identity. Slice 2's pin-store chain
+walker MUST enforce the eight-link limit, reject gaps and revoked links, and
+start at the current pinned head so an old link cannot roll back the pin. A
+ninth link requires operator verification. The successor keeps the pinned
+trust level.
 
 Key history. The client keeps every accepted public record with a validity
 interval: from its signed `created_at` to its successor's signed `created_at`,
@@ -881,7 +957,9 @@ is not sent.
 Retry commitment. `rc` is `HMAC-SHA256(retry_key, b"brigade-mesh/v1/retry\0"
 + canonical(semantic fields))`, where the semantic fields are `hub`, `from`,
 `to`, `kind`, `priority`, `client_id`, `deadline`, `in_reply_to` and the five
-payload fields. It leaves out everything that changes between seals of the
+payload fields. All five payload fields are present in the commitment object,
+including JSON `null` for `None`. An empty `ref` contributes `""`, so it MUST
+produce a different commitment from `None`. It leaves out everything that changes between seals of the
 same request: the content key, the wraps, `created_at`, padding and the
 signature. The hub has no retry key, so `rc` lets it test no guesses, and
 because it includes `client_id` and `to`, equal values reveal nothing the
@@ -1011,7 +1089,9 @@ mistake instead of a misleading key or recipient failure.
 
 For each sealed row, in order:
 
-1. Parse with size and pattern checks. Reject an unknown `v` or `suite`.
+1. Pass the original raw envelope bytes through D2's `parse_envelope`,
+   including size, depth, duplicate-key, schema and canonical-byte checks.
+   Reject an unknown `v` or `suite` before opening or hashing.
 2. Check that the hub's `sender` and `recipient` columns equal `from` and
    `to`, that the caller is the party the context requires, and that `hub`
    is the endpoint's current identity or one in its lineage, subject to the
