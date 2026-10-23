@@ -75,7 +75,7 @@ _CLIENT = re.compile(r"[A-Za-z0-9_-]{1,64}", re.ASCII)
 _THREAD = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:/#-]{0,127}", re.ASCII)
 _LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}", re.ASCII)
 _TIME = re.compile(
-    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{1,6})?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])",
+    r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{3}(?:[0-9]{3})?)?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])",
     re.ASCII,
 )
 
@@ -332,7 +332,14 @@ def verify_key_record(
     principal: str | None = None,
     hub: str | None = None,
     previous_record: dict[str, Any] | None = None,
+    accepted_hub_lineage: set[str] | frozenset[str] | None = None,
 ) -> None:
+    """Verify signatures and identity continuity, denying cross-hub links by default.
+
+    Only the caller's authenticated D4 lineage may authorize a changed hub. Both
+    hub IDs must belong to that one accepted lineage. This helper neither learns
+    nor authenticates lineage from the key records themselves.
+    """
     probe_backend()
     _validate_record(record)
     _require("self_sig" in record and ("prev_kid" in record) == ("prev_sig" in record))
@@ -340,8 +347,17 @@ def verify_key_record(
     _require(hub is None or record["hub"] == hub, "mesh_key_invalid")
     unsigned = {k: v for k, v in record.items() if k not in {"self_sig", "prev_sig"}}
     verify(unsigned, record["self_sig"], decode_binary(record["sig_pub"], 32), label="key")
+    if accepted_hub_lineage is not None:
+        _require(isinstance(accepted_hub_lineage, (set, frozenset)), "mesh_key_invalid")
+        for accepted_hub in accepted_hub_lineage:
+            _hub(accepted_hub)
     if previous_record is not None:
-        verify_key_record(previous_record)
+        verify_key_record(previous_record, principal=record["principal"])
+        _require(
+            previous_record["hub"] == record["hub"]
+            or (accepted_hub_lineage is not None and {previous_record["hub"], record["hub"]} <= accepted_hub_lineage),
+            "mesh_key_invalid",
+        )
         _require(record.get("prev_kid") == previous_record["kid"], "mesh_key_invalid")
         verify(unsigned, record["prev_sig"], decode_binary(previous_record["sig_pub"], 32), label="key")
 

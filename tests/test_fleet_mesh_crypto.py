@@ -3,6 +3,8 @@
 import base64
 from copy import deepcopy
 import hashlib
+import importlib.metadata
+import importlib.util
 import json
 import os
 from pathlib import Path
@@ -527,3 +529,62 @@ def test_record_rejects_malformed_previous_signature(parties):
 def test_record_rejects_invalid_timezone_offset(parties):
     with pytest.raises(mesh.MeshError, match="envelope_malformed"):
         mesh.build_key_record(parties[0][0], principal="node-a", hub="mesh", created_at="2026-10-22T12:00:00+00:99")
+
+
+@pytest.mark.skipif("MESH_ENV" not in os.environ, reason="explicit mesh CI environment probe")
+def test_ci_mesh_environment():
+    root = Path(__file__).resolve().parents[1]
+    assert Path(sys.prefix).resolve() == (root / ".venv").resolve()
+    assert Path(mesh.__file__).resolve() == root / "src/brigade/fleet_mesh_crypto.py"
+    expected = os.environ["MESH_ENV"]
+    assert expected in {"present", "absent"}
+    if expected == "absent":
+        assert importlib.util.find_spec("cryptography") is None
+        with pytest.raises(importlib.metadata.PackageNotFoundError):
+            importlib.metadata.version("cryptography")
+        with pytest.raises(ModuleNotFoundError):
+            __import__("cryptography")
+    else:
+        import cryptography
+
+        assert Path(cryptography.__file__).resolve().is_relative_to(Path(sys.prefix).resolve())
+        mesh.probe_backend()
+
+
+@pytest.mark.parametrize("fraction", ["", ".123", ".123456"])
+def test_record_accepts_portable_fractional_seconds(parties, fraction):
+    record = mesh.build_key_record(
+        parties[0][0], principal="node-a", hub="mesh", created_at=f"2026-10-22T12:00:00{fraction}+00:00"
+    )
+    mesh.verify_key_record(record)
+
+
+@pytest.mark.parametrize("fraction", [".1", ".12", ".1234", ".12345"])
+def test_record_rejects_nonportable_fractional_seconds(parties, fraction):
+    with pytest.raises(mesh.MeshError, match="envelope_malformed"):
+        mesh.build_key_record(
+            parties[0][0], principal="node-a", hub="mesh", created_at=f"2026-10-22T12:00:00{fraction}+00:00"
+        )
+
+
+@pytest.mark.parametrize(
+    "previous_hub,lineage,accepted",
+    [
+        ("mesh", None, True),
+        ("h_AAAAAAAAAAAAAAAAAAAAAA", None, False),
+        ("h_AAAAAAAAAAAAAAAAAAAAAA", frozenset({"mesh"}), False),
+        ("h_AAAAAAAAAAAAAAAAAAAAAA", frozenset({"h_AAAAAAAAAAAAAAAAAAAAAA"}), False),
+        ("h_AAAAAAAAAAAAAAAAAAAAAA", frozenset({"mesh", "h_AAAAAAAAAAAAAAAAAAAAAA"}), True),
+    ],
+)
+@pytest.mark.parametrize("principal", ["node-a", "node-b"])
+def test_predecessor_identity_and_accepted_hub_lineage(parties, previous_hub, lineage, accepted, principal):
+    keys, _ = parties
+    previous = mesh.build_key_record(keys[0], principal=principal, hub=previous_hub, created_at=STAMP)
+    current = mesh.build_key_record(keys[2], principal="node-a", hub="mesh", created_at=STAMP, previous=keys[0])
+    kwargs = {} if lineage is None else {"accepted_hub_lineage": lineage}
+    if accepted and principal == "node-a":
+        mesh.verify_key_record(current, previous_record=previous, **kwargs)
+    else:
+        with pytest.raises(mesh.MeshError, match="mesh_key_invalid"):
+            mesh.verify_key_record(current, previous_record=previous, **kwargs)

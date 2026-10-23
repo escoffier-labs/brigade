@@ -1863,5 +1863,20 @@ def test_mesh_jobs_are_advisory_and_path_filtered():
     assert "crypto: [floor, newest]" in compatibility
     assert "os: [ubuntu-latest, macos-15, windows-latest]" in compatibility
     assert "runner.os != 'Linux'" in compatibility
-    assert "python -m mypy src/brigade/fleet_mesh_crypto.py" in compatibility
-    assert "python -m pytest -q tests/test_fleet_mesh_crypto.py" in compatibility
+    assert '"$MESH_PYTHON -m mypy src/brigade/fleet_mesh_crypto.py"' in compatibility
+    assert '"$MESH_PYTHON -m pytest -q tests/test_fleet_mesh_crypto.py"' in compatibility
+    assert "mesh_python=.venv/Scripts/python.exe" in compatibility
+    assert "mesh_python=.venv/bin/python" in compatibility
+    assert "MESH_PYTHON=$mesh_python" in compatibility
+    assert "MESH_ENV: present" in compatibility
+    for job in ("mesh-compatibility", "mesh-cross-version", "mesh-without-extra"):
+        section = _workflow_job_section(text, job)
+        assert "id: python" in section
+        assert '"${{ steps.python.outputs.python-path }}" -m venv .venv' in section
+        assert not re.search(r'(?m)(?:^\s*(?:run:\s*)?|--command\s+)["\']?(?:python3?|pip3?)["\']?\s', section)
+    cross = _workflow_job_section(text, "mesh-cross-version")
+    assert "MESH_ENV: present" in cross
+    absent = _workflow_job_section(text, "mesh-without-extra")
+    assert ".venv/bin/python -m pip uninstall -y cryptography" in absent
+    assert "MESH_ENV: absent" in absent
+    assert "tests/test_fleet_mesh_crypto.py::test_ci_mesh_environment" in absent
