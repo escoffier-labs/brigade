@@ -135,7 +135,7 @@ key binds the exact event request, and the aggregate run status is preserved
 while the projector cursor advances. No second task database is created.
 
 Task payloads have exact closed flat fields. Local task IDs use ASCII letters,
-digits, periods, underscores, colons, and hyphens, starting with a letter or
+digits, and `._:-`, starting with a letter or
 digit, with a 128-character limit matching live control. Request IDs and seats
 retain the 512-character bound and the same character grammar. Provider correlation
 references have a separate 512-character bound and admit ASCII letters, digits,
