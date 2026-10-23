@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from brigade import fleet_client, grokbot_packs
+from brigade import fleet_client, fleet_client_messages, fleet_hub, fleet_hub_messages, grokbot_packs
 from brigade.dot import lifecycle as m
 from brigade.dot import watch as w
 from brigade.dot.access_auth import AccessVerifier, AuthError
@@ -31,6 +31,7 @@ from brigade.fleet_client_message_credentials import message_scope, message_sett
 from tests.test_dot_adapter import BRIGADE, GH, HANDOFF, NOW, Fixture, lint_report
 from tests.test_dot_lifecycle import config, request
 from tests.test_dot_runtime import _document, _write_private
+from tests.test_fleet_messages import NODE_A, message_hub as message_hub
 
 SNAPSHOT = json.loads((Path(__file__).parent / "fixtures" / "dot_tools_snapshot.json").read_text())["tools"]
 ISSUE_TOOLS = {
@@ -292,6 +293,29 @@ class DuetAdapter(DuetFixture):
         self.assertEqual((row["tool"], row["ok"], row["error_code"]), ("message_send", 0, "send_limit_reached"))
 
     @requires_local_state
+    def test_replies_share_the_send_budget(self):
+        original = self.messages.add()
+        for index in range(10):
+            self.call("message_send", to="operator", subject=f"subject {index}", body="body")
+            self.call("inbox_reply", msg_id=original["id"], body=f"answer {index}")
+        before = len(self.messages.calls)
+        with self.assertRaisesRegex(DotError, "^send_limit_reached$"):
+            self.call("inbox_reply", msg_id=original["id"], body="one too many")
+        self.assertEqual(len(self.messages.calls), before)
+        with self.assertRaisesRegex(DotError, "^send_limit_reached$"):
+            self.call("message_send", to="operator", subject="one too many", body="body")
+
+    @requires_local_state
+    def test_only_configured_aliases_reach_transport_or_consume_budget(self):
+        for recipient in ("unknown", "agent:operator", "00000000-0000-4000-8000-000000000003"):
+            with self.subTest(recipient=recipient), self.assertRaisesRegex(DotError, "^invalid_request$"):
+                self.call("message_send", to=recipient, subject="subject", body="body")
+        self.assertEqual(self.messages.calls, [])
+        for index in range(20):
+            self.call("message_send", to="operator", subject=f"subject {index}", body="body")
+        self.assertEqual(len([c for c in self.messages.calls if c["action"] == "send"]), 20)
+
+    @requires_local_state
     def test_send_budget_rolls_over_after_an_hour(self):
         start = 1_000_000.0
         self.assertTrue(all(self.state.reserve_send(2, 3600, now=start + i) for i in range(2)))
@@ -338,6 +362,13 @@ class DuetMessagingOff(DuetFixture):
             self.call("message_send", to="operator", subject="subject", body="body")
         self.assertEqual(self.messages.calls, [])
         self.assertFalse(self.call("duet_capabilities")["messaging_enabled"])
+
+    @requires_local_state
+    def test_reply_obeys_messaging_gate(self):
+        original = self.messages.add()
+        with self.assertRaisesRegex(DotError, "^messaging_disabled$"):
+            self.call("inbox_reply", msg_id=original["id"], body="answer")
+        self.assertEqual(self.messages.calls, [])
 
 
 class DotMessagingWithoutDispatch(Fixture):
@@ -690,6 +721,114 @@ def duet_hub(duet_configured, monkeypatch):
     )
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: "node-a")
     return message_scope(*message_settings(str(runtime.hub.message_token_file))[:2])
+
+
+@pytest.fixture
+def authenticated_duet(duet_configured, message_hub, monkeypatch):
+    target, runtime, _ = duet_configured
+    base, node_token, _, db = message_hub
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: dict(hub_url=base, node_token=node_token))
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
+    with fleet_hub.init_db(db) as connection:
+        principal = fleet_hub_messages.add_principal(connection, {"name": "duet", "label": "Fixture"})
+    runtime.hub.message_token_file.write_text(principal["token"])
+    return target, runtime, db
+
+
+@requires_local_state
+@pytest.mark.parametrize("evidence", ["matching", "dot", "other", "revoked", "unavailable", "malformed"])
+def test_duet_startup_authenticates_identity_before_registration(authenticated_duet, monkeypatch, evidence):
+    target, runtime, db = authenticated_duet
+    if evidence in {"dot", "other"}:
+        with fleet_hub.init_db(db) as connection:
+            principal = fleet_hub_messages.add_principal(connection, {"name": evidence, "label": "Fixture"})
+        runtime.hub.message_token_file.write_text(principal["token"])
+    elif evidence == "revoked":
+        with fleet_hub.init_db(db) as connection:
+            connection.execute("UPDATE fleet_message_principals SET revoked_at='2026-01-01'")
+    elif evidence == "unavailable":
+
+        def unavailable(*args, **kwargs):
+            raise fleet_client.FleetClientError("fixture unavailable")
+
+        monkeypatch.setattr(fleet_client_messages, "_request", unavailable)
+    elif evidence == "malformed":
+        monkeypatch.setattr(fleet_client_messages, "_request", lambda *a, **kw: (200, {"principal": ["agent:duet"]}))
+    cfg, tools, runtime = m.build_listener_from_target(target, pack_id="duet")
+    with patch.object(m, "build_app", return_value="app") as build, patch("uvicorn.run") as run:
+        if evidence == "matching":
+            m.run_listener(cfg, tools, runtime)
+            build.assert_called_once()
+            run.assert_called_once()
+        else:
+            with pytest.raises(DotError, match="^hub_identity_invalid$"):
+                m.run_listener(cfg, tools, runtime)
+            build.assert_not_called()
+            run.assert_not_called()
+
+
+@requires_local_state
+def test_duet_lifespan_polls_real_hub_without_event_delivery(authenticated_duet):
+    from brigade.dot.event_app import EventsApp
+
+    target, runtime, _ = authenticated_duet
+    fleet_client_messages.send(
+        recipient="agent:duet", subject="question", body="fixture body", reference=None, priority="normal"
+    )
+    cfg, tools, runtime = m.build_listener_from_target(target, pack_id="duet")
+    now = datetime.now(timezone.utc)
+    tools.state.log_call("fleet_digest", True, 5, clock=lambda: now)
+    captured = []
+
+    def build(config, adapter, service, verifier, **kwargs):
+        captured.append(service)
+        return "app"
+
+    async def scenario(service):
+        polled = asyncio.Event()
+        original = service.poll_hub
+        assert service.hub is tools.inbox.hub
+        service._hub_polls = 19  # Exercise the scheduled reconciliation on this poll.
+
+        async def poll():
+            await original()
+            polled.set()
+
+        service.poll_hub = poll
+        service.post = AsyncMock(side_effect=AssertionError("callback must stay disabled"))
+        service.deliver = AsyncMock(side_effect=AssertionError("delivery must stay disabled"))
+        service.poll_requests = AsyncMock(side_effect=AssertionError("request polling must stay disabled"))
+
+        async def inner(scope, receive, send):
+            await send({"type": "lifespan.startup.complete"})
+            try:
+                await asyncio.wait_for(polled.wait(), 2)
+                with tools.state.transaction() as connection:
+                    rows = connection.execute("SELECT * FROM hub_inbox").fetchall()
+                assert len(rows) == 1 and rows[0]["subject"] == "question"
+            finally:
+                await send({"type": "lifespan.shutdown.complete"})
+
+        with (
+            patch.object(service.hub, "reconcile", wraps=service.hub.reconcile) as reconcile,
+            patch.object(service.hub, "flush_pending", wraps=service.hub.flush_pending) as flush,
+        ):
+            await EventsApp(inner, service, enabled=False)({"type": "lifespan"}, AsyncMock(), AsyncMock())
+        reconcile.assert_called_once()
+        flush.assert_called_once()
+        service.post.assert_not_called()
+        service.deliver.assert_not_called()
+        service.poll_requests.assert_not_called()
+
+    def serve(*args, **kwargs):
+        asyncio.run(scenario(captured[0]))
+
+    with patch.object(m, "build_app", side_effect=build), patch("uvicorn.run", side_effect=serve):
+        m.run_listener(cfg, tools, runtime)
+    with patch.object(w, "probe_route", return_value=[]), patch.object(w, "send") as send:
+        result = w.run_watch_once(target, now=now + timedelta(hours=4), pack_id="duet")
+    assert {alert["kind"] for alert in result["alerts"]} >= {"stale_inbox", "duet_idle"}
+    send.assert_not_called()
 
 
 @requires_local_state

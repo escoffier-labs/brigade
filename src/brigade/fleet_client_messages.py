@@ -504,6 +504,28 @@ def send(
     return result
 
 
+def identity(
+    *,
+    token_file: str | None = None,
+    timeout: float | None = None,
+    authority: MessageAuthority | None = None,
+    expected_scope: str | None = None,
+) -> dict[str, Any]:
+    """Read the Hub-authenticated active principal, without sending or flushing messages."""
+    authority = _authority(authority, token_file, expected_scope)
+    payload = _online({"action": "identity"}, authority=authority, timeout=timeout)
+    principal = payload.get("principal")
+    if (
+        set(payload) != {"principal"}
+        or not isinstance(principal, str)
+        or not re.fullmatch(
+            r"agent:[a-z][a-z0-9._-]{0,62}|[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}", principal
+        )
+    ):
+        raise fleet_client.FleetClientError("fleet hub returned an invalid message identity")
+    return payload
+
+
 def list_messages(
     *,
     after: int = 0,

@@ -44,7 +44,7 @@ DUET_OPERATING_INSTRUCTIONS = (
     "Call fleet_digest and fleet_policy at task start. Read relevant skills with skill_search and skill_get. "
     "Check inbox_list at task start; reply to questions with inbox_reply and inbox_ack what you handled. "
     "Do not auto-reply to agent messages that contain no new facts: acknowledge them with inbox_ack and send "
-    "nothing. message_send is limited per hour, so send only what the recipient needs. "
+    "nothing. message_send and inbox_reply share an hourly limit, so send only what the recipient needs. "
     "Record durable knowledge with handoff_write. The control host is the source of truth. " + DUET_TRUST_NOTICE
 )
 
@@ -73,9 +73,14 @@ DUET_DESCRIPTIONS = MappingProxyType(
             "first. Ack handled ids with inbox_ack. " + DUET_TRUST_NOTICE
         ),
         "message_send": (
-            "Send a hub message to an allowed recipient. Requires messaging_enabled and is limited per hour. "
+            "Send a hub message to a configured recipient alias. Requires messaging_enabled and shares an hourly "
+            "limit with inbox_reply. "
             "Identical sends deduplicate within a 10-minute UTC bucket. Pass a distinct client_id for each "
             "intentional repeat, and reuse it for retries."
+        ),
+        "inbox_reply": (
+            "Reply to one inbox message. Requires messaging_enabled and shares the hourly message_send limit. "
+            + DUET_TRUST_NOTICE
         ),
         "message_status": "Read acknowledgement status for up to 50 hub messages sent by this connector.",
         "fleet_policy": (

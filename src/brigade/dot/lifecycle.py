@@ -324,6 +324,8 @@ def run_listener(config: DotListenerConfig, tools: DotTools, runtime: Runtime) -
     # Fail startup when RS256 cannot be verified; otherwise every login would 401 behind a passing canary.
     access_auth._jwt()
     try:
+        if not tools.profile.fleet_dispatch:
+            tools.inbox.hub.require_identity()
         try:
             tools.state.prune_call_log()
         except c.DotError:
@@ -333,7 +335,7 @@ def run_listener(config: DotListenerConfig, tools: DotTools, runtime: Runtime) -
         service = EventService(
             tools.state,
             fleet_status=fleet.fleet_status if fleet is not None else _no_fleet_status,
-            hub=tools.inbox.hub if runtime.events_enabled else None,
+            hub=tools.inbox.hub if runtime.events_enabled or not tools.profile.fleet_dispatch else None,
             hub_poll_seconds=runtime.hub.poll_seconds,
             callback_hosts=frozenset(runtime.callback_hosts),
         )

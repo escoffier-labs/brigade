@@ -40,8 +40,8 @@ The 22 registered tools:
 | `skill_get` | Read a skill. Denied skills return `skill_not_found`. | No |
 | `inbox_list` | List messages sent to `agent:duet`. | No |
 | `inbox_ack` | Acknowledge messages in Duet's own inbox. | No |
-| `inbox_reply` | Reply to a message in Duet's own inbox. | No |
-| `message_send` | Send a Hub message to a configured recipient. | `messaging_enabled`, 20 per hour |
+| `inbox_reply` | Reply to a message in Duet's own inbox. | `messaging_enabled`, shared 20 per hour |
+| `message_send` | Send a Hub message to a configured recipient alias. | `messaging_enabled`, shared 20 per hour |
 | `message_status` | Read acknowledgement status of Duet's sends. | No |
 | `fleet_overview` | Read fleet request overview. | No |
 | `fleet_sessions` | List fleet sessions. | No |
@@ -54,16 +54,17 @@ The 22 registered tools:
 | `fleet_hub_policy` | Read Hub policy. | No |
 | `fleet_digest` | Read the fleet digest. | No |
 
-Shared tools keep Dot's wire schemas and annotations. Five descriptions are
-reworded so they do not refer to the dot. `duet_capabilities` tells Duet not to
+Shared tools keep Dot's wire schemas and annotations. Tool descriptions are
+reworded for Duet's operating rules. `duet_capabilities` tells Duet not to
 auto-reply to agent messages that contain no new facts: it acknowledges them
 with `inbox_ack` and sends nothing.
 
-`message_send` has its own gate. When `messaging_enabled` is false the call
-returns `messaging_disabled`. When it is true, each call reserves one slot from
+`message_send` and `inbox_reply` share a gate. When `messaging_enabled` is false,
+either call returns `messaging_disabled`. When it is true, each call reserves one slot from
 a rolling one-hour budget of 20 kept in the state database. A call over the
-budget returns `send_limit_reached` and is logged with that error. Replies with
-`inbox_reply` are not counted.
+budget returns `send_limit_reached` and is logged with that error. New messages
+must name an exact configured alias. Unknown aliases and raw principals are
+rejected before reserving a budget slot or contacting the Hub.
 
 ## Runtime JSON
 
@@ -88,7 +89,7 @@ is rejected by the duet pack, and the reverse.
 | `hub.principal` | string | Exactly `agent:duet`. Any other principal is rejected. |
 | `hub.message_token_file` | absolute path | Duet's own message credential file, never Dot's. |
 | `hub.recipients` | object | Aliases Duet may send to, such as the operator and Miller. |
-| `messaging_enabled` | boolean | Gate for `message_send`. |
+| `messaging_enabled` | boolean | Gate for `message_send` and `inbox_reply`. |
 | `digest_pr_repo` | string | Repository for digest PR queries, formatted `owner/repo`. |
 | `notify_command` | string array | Optional notification argv for watch alerts. |
 | `skills_deny` | string array | Optional. Up to 256 skill ids hidden from `skill_search` and `skill_get`. |
@@ -173,9 +174,8 @@ and skill names.
 
 - Dispatch tools are not registered, so an injected instruction cannot start
   work on operator machines however it is worded.
-- `message_send` reaches only the aliases in `hub.recipients`, needs
-  `messaging_enabled`, and is capped at 20 per hour, which bounds spam to the
-  operator and other agents.
+- `message_send` reaches only the aliases in `hub.recipients`. It shares the
+  `messaging_enabled` switch and 20-message hourly budget with `inbox_reply`.
 - Duet has its own Hub principal and inbox. `inbox_ack` and `inbox_reply` act
   only on messages addressed to `agent:duet`, so Duet cannot ack or answer a
   message addressed to Miller.

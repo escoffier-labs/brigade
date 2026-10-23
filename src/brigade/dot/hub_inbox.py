@@ -50,6 +50,16 @@ class HubInbox(MessageOperations):
         """Compatibility snapshot accessor, never used to validate or select nested authority."""
         return self.capture(agent=agent).scope
 
+    def require_identity(self) -> None:
+        """Fail startup closed unless the credential authenticates as the configured principal."""
+        try:
+            authority = self.capture()
+            evidence = fleet_client_messages.identity(authority=authority)
+            self.require_authority(authority)
+            require(evidence.get("principal") == self.config.principal, "hub_identity_invalid")
+        except (FleetClientError, DotError):
+            raise DotError("hub_identity_invalid") from None
+
     def require_authority(self, authority: MessageAuthority) -> None:
         try:
             authority.validate()

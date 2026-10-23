@@ -69,9 +69,11 @@ class DotTools:
         try:
             identity(owner)
             values = validate_arguments(name, arguments, tools=self.profile.tools)
+            if not self.profile.fleet_dispatch and name == "message_send":
+                require(values["to"] in self.runtime.hub.recipients)
             if name in DISPATCH_GATED_TOOLS:
                 require(self.runtime.dispatch_enabled, "dispatch_disabled")
-            elif name in MESSAGING_GATED_TOOLS:
+            elif name in MESSAGING_GATED_TOOLS or (name == "inbox_reply" and not self.profile.fleet_dispatch):
                 if self.runtime.messaging_enabled is None:
                     require(self.runtime.dispatch_enabled, "dispatch_disabled")
                 else:

@@ -1107,6 +1107,10 @@ def handle(
         return fleet_hub_events.handle(conn, raw, caller=caller)
     if action in ("who", "claims"):
         return 200, _as_active_principal(conn, caller, lambda: _station_read(conn, raw, caller=caller), read_only=True)
+    if action == "identity":
+        if set(raw) != {"action"}:
+            raise MessageError("identity accepts only action")
+        return 200, _as_active_principal(conn, caller, lambda: {"principal": caller}, read_only=True)
     if action == "send":
         return 201, {"message": send(conn, raw, sender=caller, reply_to=raw.get("reply_to"))}
     if action == "sent":
@@ -1132,4 +1136,4 @@ def handle(
     if action == "reply":
         message = _as_active_principal(conn, caller, lambda: reply(conn, raw, sender=caller))
         return (201, {"message": message}) if message else (404, {"error": "message not found"})
-    raise MessageError("action must be send, list, sent, ack, reply, who, or claims")
+    raise MessageError("action must be send, list, sent, ack, reply, who, claims, or identity")
