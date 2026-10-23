@@ -99,6 +99,120 @@ def test_control_terminal_can_follow_a_task_checkpoint_while_request_is_pending(
     assert run_checkpoint.recover_from_checkpoint(run_dir, snapshot)["status"] == "running"
 
 
+def test_control_terminal_accepts_interleaved_redaction_and_cassette_facts(task_run):
+    from brigade import run_cassette
+    from brigade import run_control_journal as control
+
+    run_dir, workspace = task_run
+    accepted(task_run)
+    handles = []
+    sends = []
+    journal = run_dir / "events/lifecycle.jsonl"
+
+    def send(payload):
+        sends.append(payload)
+        handles.append(tasks.prepare_attempt(run_dir, workspace=workspace, task_id="one"))
+        tail = run_journal.read_journal_bounded(journal).events[-1]
+        run_journal.append_event(
+            journal,
+            run_id=run_dir.name,
+            event_type="run.redaction.recorded",
+            payload={
+                "operation_id": "redact-0123456789abcdef",
+                "affected_first_sequence": 1,
+                "affected_last_sequence": 1,
+                "reason_class": "credential-exposure",
+                "record_sha256": "a" * 64,
+            },
+            idempotency_key="redaction-interleaved",
+            expected_previous_sequence=tail.sequence,
+            workspace=workspace,
+        )
+        run_cassette._append_reference(
+            run_dir,
+            workspace,
+            {
+                "path": f"events/cassettes/{'b' * 64}.json",
+                "sha256": "b" * 64,
+                "byte_size": 1,
+                "media_type": run_cassette.MEDIA_TYPE,
+                "privacy_class": "public-metadata",
+            },
+        )
+        return {"ok": True}
+
+    control.execute_control_request(run_dir, op="interrupt", request_id="mixed-neutral", send=send)
+    report = run_journal.read_journal_bounded(journal)
+    assert not report.chain_errors
+    assert [event.event_type for event in report.events[-6:]] == [
+        "control.requested",
+        "run.snapshot.checkpointed",
+        "task.attempt-prepared",
+        "run.redaction.recorded",
+        "run.cassette.recorded",
+        "control.observed",
+    ]
+    before = journal.read_bytes()
+    record = tasks.read_tasks(run_dir)[0]
+    assert record.handle == handles[0]
+    assert record.status == "queued" and record.result_id is None and record.containment == "unknown"
+    assert tasks.prepare_attempt(run_dir, workspace=workspace, task_id="one") == handles[0]
+    snapshot = json.loads((run_dir / "run.json").read_bytes())
+    assert run_checkpoint.recover_from_checkpoint(run_dir, snapshot)["status"] == "running"
+    assert control.execute_control_request(run_dir, op="interrupt", request_id="mixed-neutral", send=send).replayed
+    assert len(sends) == 1
+    assert journal.read_bytes() == before
+
+
+@pytest.mark.parametrize("detail", ["missing", None, 7, ""], ids=["missing", "null", "integer", "empty"])
+def test_chain_valid_observed_control_with_invalid_detail_refuses_task_access(task_run, detail):
+    from brigade import run_control_journal as control
+
+    run_dir, workspace = task_run
+    handle = prepared(task_run)
+    journal = run_dir / "events/lifecycle.jsonl"
+    sends = []
+
+    class LostProcess(BaseException):
+        pass
+
+    def send(payload):
+        sends.append(payload)
+        raise LostProcess
+
+    with pytest.raises(LostProcess):
+        control.execute_control_request(run_dir, op="interrupt", request_id="bad-detail", send=send)
+    assert tasks.read_tasks(run_dir)[0].handle == handle
+    with pytest.raises(control.ControlJournalError, match="indeterminate"):
+        control.execute_control_request(run_dir, op="interrupt", request_id="bad-detail", send=send)
+    tail = run_journal.read_journal_bounded(journal).events[-1]
+    payload = {"op": "interrupt", "request_id": "bad-detail"}
+    if detail != "missing":
+        payload["detail"] = detail
+    run_journal.append_event(
+        journal,
+        run_id=run_dir.name,
+        event_type="control.observed",
+        payload=payload,
+        idempotency_key=control.observed_idempotency_key("bad-detail"),
+        expected_previous_sequence=tail.sequence,
+        workspace=workspace,
+    )
+    # The generic envelope is valid; coverage must reject the terminal semantics.
+    assert not run_journal.read_journal_bounded(journal).chain_errors
+    before = journal.read_bytes()
+    with pytest.raises(tasks.TaskJournalError, match="control-suffix"):
+        tasks.read_tasks(run_dir)
+    with pytest.raises(tasks.TaskJournalError, match="control-suffix"):
+        tasks.prepare_attempt(run_dir, workspace=workspace, task_id="one")
+    snapshot = json.loads((run_dir / "run.json").read_bytes())
+    with pytest.raises(run_checkpoint.CheckpointError) as error:
+        run_checkpoint.recover_from_checkpoint(run_dir, snapshot)
+    assert error.value.category == "control-suffix"
+    assert len(sends) == 1
+    assert journal.read_bytes() == before
+
+
 def test_structurally_invalid_control_suffix_is_refused_by_journal_reader(task_run):
     from brigade import run_control_journal as control
 

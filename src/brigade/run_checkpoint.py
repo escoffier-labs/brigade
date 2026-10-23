@@ -1316,6 +1316,10 @@ def _verify_control_suffix(events: list["run_journal.RunEvent"], suffix: list["r
                 raise CheckpointError("invalid control suffix request", category="control-suffix")
             requested[request_id] = event
         else:
+            if event.event_type == "control.observed":
+                detail = payload.get("detail")
+                if not isinstance(detail, str) or not detail or len(detail) > run_events.MAX_PAYLOAD_STR_LEN:
+                    raise CheckpointError("invalid control suffix observation", category="control-suffix")
             prior = requested.get(request_id)
             if (
                 prior is None
