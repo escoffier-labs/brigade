@@ -290,6 +290,19 @@ jobs:
           # Hosted Windows includes Python. Selection uses only its standard library.
           python scripts/windows_affected_tests.py --base $base --head HEAD --output "$env:RUNNER_TEMP/windows-affected-results/files.txt"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          # Driver changes exercise the hub files affected by slow FULL flushes.
+          $driverChanged = git diff --name-only $base HEAD -- scripts/windows_pytest.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          if ($driverChanged) {
+            $flushTests = @(
+              "test_fleet_policy_page.py", "test_fleet_roster_page.py",
+              "test_fleet_message_grants.py", "test_fleet_model_roster.py",
+              "test_fleet_enrollment.py", "test_fleet_dashboard.py",
+              "test_fleet_claim_generations.py", "test_fleet_client_message_credentials.py"
+            )
+            @(Get-Content "$env:RUNNER_TEMP/windows-affected-results/files.txt") + $flushTests |
+              Sort-Object -Unique | Set-Content "$env:RUNNER_TEMP/windows-affected-results/files.txt"
+          }
           $count = @(Get-Content "$env:RUNNER_TEMP/windows-affected-results/files.txt").Count
           "count=$count" >> $env:GITHUB_OUTPUT
       - name: Skip empty selection
@@ -308,6 +321,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m pip install -e ".[dev]"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Configure Windows test temp drive
+        run: python scripts/windows_pytest.py --configure-temp-root
       - name: Probe SQLite flush latency
         timeout-minutes: 5
         run: python scripts/windows_sqlite_flush_probe.py --samples 20 --output "$env:RUNNER_TEMP/windows-affected-results/sqlite-flush.json"
@@ -881,6 +896,9 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
+      - name: Configure Windows test temp drive
+        shell: pwsh
+        run: python scripts/windows_pytest.py --configure-temp-root
       - name: Probe SQLite flush latency
         shell: pwsh
         timeout-minutes: 5
