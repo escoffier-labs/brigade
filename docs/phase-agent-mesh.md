@@ -714,12 +714,19 @@ station recorded about the envelope itself:
   receipt. Each receipt row stores the station's last measured clock offset
   and when it was measured. A receipt recorded while that offset exceeded
   `MAX_FUTURE_SKEW`, or with no measurement in the previous 24 hours, never
-  qualifies. On a hub the offset comes from the `Date` header of hub
-  responses, which a hub can falsify, but a false offset can only withhold
-  history and never grant it. In no-hub mode it comes from the operating
-  system's time synchronization status where the platform reports one, and
-  otherwise there is no measurement, so revoked-key history is unavailable.
-  `brigade doctor` warns on a visible offset.
+  qualifies. The offset comes only from a source independent of the hub:
+  the operating system's time synchronization status (a synchronized flag
+  plus its reported offset or error bound, for example from systemd-timesyncd
+  or chrony on Linux, the Windows Time service, or macOS timed). The hub's
+  `Date` header never qualifies a receipt. A hub could otherwise answer a
+  station whose clock is slow with a `Date` that matches the wrong clock, so
+  the offset check would pass and a message received at true 10:10 could be
+  recorded as 09:40 and accepted against a 10:00 `compromised_from`. Where
+  the platform reports no synchronization status, or reports it as
+  unsynchronized, there is no measurement and revoked-key history is
+  unavailable, in hub and no-hub mode alike. `brigade doctor` still compares
+  the hub `Date` header with the local clock and warns on a visible
+  difference, as a diagnostic only.
 - Other checks keep `MAX_FUTURE_SKEW` as their tolerance even though they
   also compare two clocks (an answer's signed `created_at` against the
   asker's deadline, and an envelope against a superseded hub identity). In

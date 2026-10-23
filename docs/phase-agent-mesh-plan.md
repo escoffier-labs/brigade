@@ -523,6 +523,12 @@ Tests:
   - A receipt recorded while the measured clock offset exceeded 5 minutes,
     or with no offset measured in the previous 24 hours, never qualifies,
     whatever its receive time.
+  - The offset comes only from the operating system's time synchronization
+    status. A hub `Date` header that matches a slow local clock does not
+    qualify a receipt: with the local clock 30 minutes slow and a hub `Date`
+    agreeing with it, a message received at true 10:10 against a 10:00
+    `compromised_from` opens as `sender_key_revoked`. With no or
+    unsynchronized OS status, no receipt qualifies.
   - A message with a receipt for a different digest under the same triple,
     or with no receipt (a fresh station), opens as `sender_key_revoked`.
   - Revoked-key history never links or completes a pending request, carries
