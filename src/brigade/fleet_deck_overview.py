@@ -271,7 +271,7 @@ def page_alerts(view: DeckView, now: datetime) -> tuple[Alert, ...]:
 def _alert_html(alert: Alert, action_sources: frozenset[str] = frozenset()) -> str:
     kind_class = alert.kind.replace(" ", "-")
     detail = activity.REASONS.get(alert.detail, alert.detail) if alert.kind == "blocked" else alert.detail
-    action = fleet_action_page.alert_link(alert.source_ref, action_sources)
+    action = fleet_action_page.alert_link(alert.source_ref, action_sources, alert.title)
     return (
         f'<li class="alert alert--{_esc(kind_class)}">'
         f'<div class="alert-body"><p class="alert-title"><span class="alert-kind">{_esc(alert.kind)}</span> '

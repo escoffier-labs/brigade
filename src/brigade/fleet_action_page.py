@@ -163,10 +163,16 @@ def status(action: dict[str, Any], nonce: str) -> str:
     )
 
 
-def alert_link(source_ref: str, action_sources: frozenset[str]) -> str:
+def alert_link(source_ref: str, action_sources: frozenset[str], title: str = "this alert") -> str:
     if not source_ref or source_ref not in action_sources:
         return ""
-    return '<a href="/deck/actions/compose?' + esc(urlencode({"source": source_ref})) + '">Have an agent fix this</a>'
+    return (
+        '<a href="/deck/actions/compose?'
+        + esc(urlencode({"source": source_ref}))
+        + '" aria-label="Have an agent fix '
+        + esc(title)
+        + '">Fix</a>'
+    )
 
 
 def evidence(snapshot: dict[str, Any]) -> str:

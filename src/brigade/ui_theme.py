@@ -163,6 +163,7 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: 1; }
 .shell-sidebar .deck-nav a { display: flex; align-items: center; gap: var(--space-2); margin: 0; padding: 6px 10px; border: 0; border-radius: var(--radius-control); color: var(--muted); text-transform: capitalize; }
 .shell-sidebar .deck-nav a[aria-current="page"] { background: var(--surface-raised); color: var(--ink); font-weight: 500; }
 .nav-count { margin-left: auto; color: var(--muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.deck-nav a[href="/deck/alerts"] .nav-count { color: var(--signal); }
 .tree-filter input { width: 100%; min-height: 36px; padding: var(--space-2) 10px; border: 1px solid var(--control-line); border-radius: var(--radius-control); background: var(--surface-raised); color: var(--ink); font: inherit; }
 .tree-heading { display: flex; justify-content: space-between; margin: var(--space-4) 0 var(--space-2); color: var(--muted); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; }
 .tree-list, .tree-children { margin: 0; padding: 0; list-style: none; }
@@ -248,7 +249,9 @@ progress::-moz-progress-bar { background: var(--working); }
 .alert-body { min-width: 0; }
 .alert-title, .alert-detail, .alert-since { margin: 0; }
 .alert-kind { color: var(--signal); font-size: 11px; font-weight: 800; letter-spacing: .06em; text-transform: uppercase; }
-.alert-detail { color: var(--muted); font-size: 12px; }
+.alerts-page .panel { margin-top: var(--space-4); }
+.alerts-table { min-width: 600px; }
+.alert-detail { display: block; color: var(--muted); font-size: 12px; }
 .alert-since { color: var(--faint); font-size: 12px; }
 .split { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4); }
 .split > .panel + .panel { margin-top: 0; }

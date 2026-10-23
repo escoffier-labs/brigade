@@ -1136,9 +1136,9 @@ def test_action_links_require_concrete_server_registered_subjects():
 
     view = _mixed_view()
     source = canonical({"kind": "telemetry", "node_id": NODE_B})
-    assert "Have an agent fix this" not in overview.render_alerts(view, NOW)
+    assert ">Fix</a>" not in overview.render_alerts(view, NOW)
     rendered = overview.render_alerts(view, NOW, action_sources=frozenset({source}))
-    assert rendered.count("Have an agent fix this") == 1
+    assert rendered.count(">Fix</a>") == 1
     assert "/deck/actions/compose?" in rendered
     assert all(not alert.source_ref for alert in overview.page_alerts(view, NOW) if alert.kind == "coverage")
 

@@ -6,10 +6,19 @@ from datetime import datetime
 
 from . import __version__, fleet_deck_icons as icons
 from .fleet_command_deck import UNKNOWN, DeckView, StationView, Tile
-from .fleet_deck_overview import POLICY_LIMITS, _esc, format_age, machine_for, seconds_since, station_status
+from .fleet_deck_overview import (
+    POLICY_LIMITS,
+    _esc,
+    format_age,
+    machine_for,
+    seconds_since,
+    station_status,
+    page_alerts,
+)
 
 NAV_ITEMS = (
     ("overview", "/deck", "overview"),
+    ("alerts", "/deck/alerts", "alerts"),
     ("repos", "/deck/repos", "repos"),
     ("work", "/deck/work", "work"),
     ("roster", "/deck/roster", "roster"),
@@ -123,6 +132,9 @@ def render_sidebar(view: DeckView | None, active: str, now: datetime, *, worklor
         count = (
             f' <span class="nav-count">{len(view.stations)}</span>' if key == "overview" and view is not None else ""
         )
+        if key == "alerts" and view is not None:
+            alerts = len(page_alerts(view, now))
+            count = f' <span class="nav-count">{alerts}</span>' if alerts else ""
         links.append(f'<a href="{href}"{current}>{icons.NAV_ICONS[key]}{label}{count}</a>')
     parts = [
         '<aside class="shell-sidebar" aria-label="Fleet navigation"><div class="brand">'

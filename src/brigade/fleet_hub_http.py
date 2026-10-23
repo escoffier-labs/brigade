@@ -24,6 +24,7 @@ from . import fleet_claim_display, fleet_admin_stats_http
 from . import (
     fleet_command_deck,
     fleet_dashboard,
+    fleet_deck_alerts,
     fleet_hub_grokbot,
     fleet_hub_messages,
     fleet_hub_sessions,
@@ -905,7 +906,8 @@ def make_handler(
             ignored, never reflected. Renders from the startup-frozen config."""
             plain = "text/plain; charset=utf-8"
             repos_page = path == "/deck/repos"
-            if path not in ("/", "/deck") and not repos_page:
+            alerts_page = path == "/deck/alerts"
+            if path not in ("/", "/deck") and not (repos_page or alerts_page):
                 self._send_html(404, "Not found.\n", content_type=plain)
                 return
             if not (self._authorized() or self._cookie_authorized() or self._tailscale_identity_authorized()):
@@ -1022,6 +1024,10 @@ def make_handler(
                     unavailable_reason=policy_error,
                     nonce=nonce,
                     now=now,
+                )
+            elif alerts_page:
+                page = fleet_deck_alerts.render_alerts_page(
+                    view, now, nonce=nonce, worklore_enabled=worklore_http.enabled(), action_sources=action_sources
                 )
             else:
                 page = fleet_command_deck.render_deck(
