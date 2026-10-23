@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from . import fleet_action_page, fleet_command_deck as deck, fleet_deck_activity as activity
+from . import fleet_action_page, fleet_command_deck as deck, fleet_deck_activity as activity, ui_theme
 from .fleet_deck_overview import _esc, page_alerts
 
 
@@ -39,5 +39,12 @@ def render_alerts_page(
         f'<section class="panel">{content}</section></main>'
     )
     return deck._document(
-        body, nonce=nonce, now=now, active="alerts", title="Alerts", view=view, worklore_enabled=worklore_enabled
+        body,
+        nonce=nonce,
+        now=now,
+        active="alerts",
+        title="Alerts",
+        view=view,
+        worklore_enabled=worklore_enabled,
+        extra_css=ui_theme.ALERTS_CSS,
     )

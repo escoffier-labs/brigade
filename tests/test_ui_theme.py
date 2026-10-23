@@ -290,3 +290,15 @@ def test_sidebar_labels_stay_sentence_case_and_footer_cannot_wrap():
         assert re.search(
             r'\.tree-row\[data-status="' + status + r'"\] \.tree-meta \{[^}]*color: var\(--' + color + r"\)", css
         )
+
+
+def test_sidebar_machine_tree_has_no_bullets_and_only_state_words_take_state_color():
+    css = ui_theme.BASE_CSS
+    rules = {
+        selector.strip(): body
+        for selectors, body in re.findall(r"([^{}]+)\{([^{}]*)\}", css)
+        for selector in selectors.split(",")
+    }
+    assert "list-style: none" in rules[".tree-list"]
+    assert "color" not in rules[".tree-list"]
+    assert "var(--signal)" in rules['.tree-row[data-status="stale"] .tree-meta']

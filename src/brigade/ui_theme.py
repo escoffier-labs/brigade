@@ -166,11 +166,12 @@ input::placeholder, textarea::placeholder { color: var(--muted); opacity: 1; }
 .deck-nav a[href="/deck/alerts"] .nav-count { color: var(--signal); }
 .tree-filter input { width: 100%; min-height: 36px; padding: var(--space-2) 10px; border: 1px solid var(--control-line); border-radius: var(--radius-control); background: var(--surface-raised); color: var(--ink); font: inherit; }
 .tree-heading { display: flex; justify-content: space-between; margin: var(--space-4) 0 var(--space-2); color: var(--muted); font-size: 11px; }
-.tree-list, .tree-row[data-status="stale"] .tree-meta { color: var(--signal); }
+.tree-row[data-status="stale"] .tree-meta { color: var(--signal); }
 .tree-row[data-status="offline"] .tree-meta { color: var(--muted); }
 .tree-row[data-status="unknown"] .tree-meta { color: var(--muted); }
-.tree-children { margin: 0; padding: 0; list-style: none; }
+.tree-list, .tree-children { margin: 0; padding: 0; list-style: none; }
 .tree-row[hidden] { display: none; }
+.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 .tree-line { display: flex; align-items: center; gap: var(--space-2); min-height: 28px; }
 .tree-label { flex: 1; min-width: 0; font-weight: 650; }
 .tree-meta { color: var(--muted); font-size: 12px; white-space: nowrap; }
@@ -216,6 +217,17 @@ tbody tr:hover td { background: var(--surface-raised); }
 """
 
 # Main-column rules for the Fleet overview page (/deck) only.
+ALERTS_CSS = """
+.alerts-page .panel { margin-top: var(--space-4); }
+.alerts-table { min-width: 600px; }
+.alerts-table th:nth-child(1) { width: 18%; }
+.alerts-table th:nth-child(2) { width: 52%; }
+.alerts-table th:nth-child(3) { width: 22%; }
+.alerts-table th:nth-child(4) { width: 8%; }
+.alerts-table td:nth-child(1), .alerts-table td:nth-child(3) { color: var(--muted); white-space: nowrap; }
+.alert-detail { display: block; color: var(--muted); font-size: 12px; }
+"""
+
 OVERVIEW_CSS = """
 .overview > * + * { margin-top: var(--space-4); }
 .page-head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); }
@@ -240,9 +252,6 @@ progress::-moz-progress-bar { background: var(--working); }
 .bar--thin { height: 4px; margin-top: var(--space-1); }
 .alert-line { color: var(--muted); }
 .alert-line strong { color: var(--signal); }
-.alerts-page .panel { margin-top: var(--space-4); }
-.alerts-table { min-width: 600px; }
-.alert-detail { display: block; color: var(--muted); font-size: 12px; }
 .split { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4); }
 .split > .panel + .panel { margin-top: 0; }
 .rows { display: grid; margin: 0; padding: 0; list-style: none; }
@@ -274,7 +283,6 @@ progress::-moz-progress-bar { background: var(--working); }
 .legend-swatch--busy { background: var(--working); }
 .legend-swatch--free { background: var(--idle); }
 .legend-swatch--off { box-shadow: inset 0 0 0 1px var(--offline); }
-.visually-hidden { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
 .seats { display: inline-flex; gap: 2px; margin-right: var(--space-2); vertical-align: middle; }
 .seg { width: 8px; height: 12px; border-radius: 2px; }
 .seg--busy { background: var(--working); }

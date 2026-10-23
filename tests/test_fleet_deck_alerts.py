@@ -80,3 +80,11 @@ def test_alerts_route_uses_deck_auth_and_nonce_headers(tmp_path):
         assert "<h1>Alerts</h1>" in page and "<tbody><tr>" in page
         nonce = re.search(r'<style nonce="([^"]+)"', page).group(1)
         assert "'nonce-" + nonce + "'" in headers["content-security-policy"]
+
+
+def test_alerts_page_ships_its_own_table_styles():
+    page = render(_alert_view())
+    style = page.split("<style", 1)[1].split("</style>", 1)[0]
+    assert ".alert-detail { display: block;" in style
+    assert ".alerts-table th:nth-child(1)" in style
+    assert ".visually-hidden {" in style
