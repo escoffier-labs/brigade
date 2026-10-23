@@ -927,6 +927,8 @@ def _run_codex_appserver_worker(
     sandbox: str | None,
     registry: run_control.LiveTurnRegistry | None,
     on_event=None,
+    task_id: str | None = None,
+    attempt_id: str | None = None,
 ) -> agents.AgentResult:
     effective_sandbox = sandbox if sandbox is not None else ("read-only" if read_only else None)
     active_turn_id: str | None = None
@@ -953,7 +955,10 @@ def _run_codex_appserver_worker(
             nonlocal active_turn_id
             active_turn_id = turn_id
             if registry is not None:
-                registry.register(worker, thread, turn_id)
+                if task_id is None and attempt_id is None:
+                    registry.register(worker, thread, turn_id)
+                else:
+                    registry.register(worker, thread, turn_id, task_id=task_id, attempt_id=attempt_id)
 
         try:
             turn_kwargs = {"timeout": timeout, "on_event": on_event, "on_turn_start": on_turn_start}
@@ -979,7 +984,10 @@ def _run_codex_appserver_worker(
         )
     finally:
         if registry is not None and active_turn_id is not None:
-            registry.unregister(worker, active_turn_id)
+            if task_id is None and attempt_id is None:
+                registry.unregister(worker, active_turn_id)
+            else:
+                registry.unregister(worker, active_turn_id, task_id=task_id, attempt_id=attempt_id)
     text = turn.text.strip()
     if getattr(turn, "output_limit_exceeded", False) or len(text.encode("utf-8")) > proc.MAX_CAPTURE_BYTES:
         return agents.AgentResult(

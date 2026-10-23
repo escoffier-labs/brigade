@@ -5230,6 +5230,46 @@ def test_direct_appserver_failure_receipt_preserves_terminal_semantics(
         assert synthesis["timed_out"] is True
 
 
+def test_appserver_control_forwards_assignment_ids_and_unregisters_on_failure():
+    registry = aboyeur.run_control.LiveTurnRegistry()
+    interrupts = []
+
+    class ControlledThread:
+        thread_id = "thread-example"
+
+        def run_turn(self, prompt, **kwargs):
+            kwargs["on_turn_start"]("turn-example")
+            registry.interrupt(task_id="task-example", attempt_id="attempt-example")
+            raise aboyeur.codex_appserver.AppServerError("provider unavailable")
+
+        def interrupt(self, turn_id):
+            interrupts.append(turn_id)
+
+    class ControlledServer:
+        def start_thread(self, **kwargs):
+            return ControlledThread()
+
+    result = aboyeur._run_codex_appserver_worker(
+        ControlledServer(),
+        Agent("cook", "codex", "write code"),
+        "cook",
+        "do work",
+        timeout=5.0,
+        cwd=None,
+        read_only=False,
+        sandbox=None,
+        registry=registry,
+        task_id="task-example",
+        attempt_id="attempt-example",
+    )
+    assert result.ok is False
+    assert result.detail == "provider unavailable"
+    assert interrupts == ["turn-example"]
+    with pytest.raises(aboyeur.run_control.ControlError) as exc:
+        registry.interrupt(task_id="task-example")
+    assert exc.value.code == aboyeur.run_control.NO_ACTIVE_TURN
+
+
 def test_run_appserver_worker_rejects_non_final_output_in_receipts(monkeypatch, tmp_path):
     monkeypatch.setattr(aboyeur.codex_appserver, "AppServer", _IntentOnlyAppServer)
     output_dir = tmp_path / "run"
