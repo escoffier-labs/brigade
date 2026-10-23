@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Add `brigade roster ready` to inspect an explicit worker pool, concurrency, route, and isolation. It reports blocked or unverified operations without dispatching work or reserving capacity. Live admission and T3 readiness evidence remain unverified in this initial command (#2051).
+
 - Add the optional `mesh` crypto core with frozen `bm1` hybrid encryption and signed envelopes. Fleet messaging integration follows in later slices.
 
 - Fleet MCP tools advertise read-only and destructive annotations, and send/reply accept optional `client_id` keys for duplicate-free replay. The opt-in Executor app recipe documents browser approval, credential boundaries and manual compatibility checks (#1887).
