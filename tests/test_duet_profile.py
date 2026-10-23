@@ -6,9 +6,10 @@ import asyncio
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 import json
+import sys
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -735,9 +736,18 @@ def authenticated_duet(duet_configured, message_hub, monkeypatch):
     return target, runtime, db
 
 
+@pytest.fixture
+def listener_dependencies(monkeypatch):
+    # These tests replace the app and server, so they need no optional server packages.
+    monkeypatch.setitem(sys.modules, "uvicorn", SimpleNamespace(run=Mock()))
+    monkeypatch.setattr(m.access_auth, "_jwt", Mock())
+
+
 @requires_local_state
 @pytest.mark.parametrize("evidence", ["matching", "dot", "other", "revoked", "unavailable", "malformed", "old-hub"])
-def test_duet_startup_authenticates_identity_before_registration(authenticated_duet, monkeypatch, evidence):
+def test_duet_startup_authenticates_identity_before_registration(
+    authenticated_duet, monkeypatch, evidence, listener_dependencies
+):
     target, runtime, db = authenticated_duet
     if evidence in {"dot", "other"}:
         with fleet_hub.init_db(db) as connection:
@@ -785,7 +795,7 @@ def test_duet_startup_authenticates_identity_before_registration(authenticated_d
 
 
 @requires_local_state
-def test_duet_lifespan_polls_real_hub_without_event_delivery(authenticated_duet):
+def test_duet_lifespan_polls_real_hub_without_event_delivery(authenticated_duet, listener_dependencies):
     from brigade.dot.event_app import EventsApp
 
     target, runtime, _ = authenticated_duet
