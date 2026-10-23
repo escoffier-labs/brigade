@@ -1862,3 +1862,6 @@ def test_mesh_jobs_are_advisory_and_path_filtered():
     compatibility = _workflow_job_section(text, "mesh-compatibility")
     assert "crypto: [floor, newest]" in compatibility
     assert "os: [ubuntu-latest, macos-15, windows-latest]" in compatibility
+    assert "runner.os != 'Linux'" in compatibility
+    assert "python -m mypy src/brigade/fleet_mesh_crypto.py" in compatibility
+    assert "python -m pytest -q tests/test_fleet_mesh_crypto.py" in compatibility
