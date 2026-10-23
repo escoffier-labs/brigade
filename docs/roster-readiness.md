@@ -92,10 +92,11 @@ For worktree requests, a non-Git workspace is blocked before health probing.
 Git eligibility alone does not establish writable disk capacity or permission
 to create a worktree. Worktree isolation remains unverified without scoped
 isolation evidence. Writable ACPX workers with shared isolation are blocked.
-An operation-level isolation row also reports a known seat incompatibility.
+The operation-level isolation row never passes when a selected seat is
+incompatible.
 If injected isolation evidence passed, `observed_status` retains that supplied
-status alongside the derived failure. The CLI has no read-only operation flag, so it does not claim readiness for a
-read-only ACPX exception.
+status alongside the derived failure. The CLI has no read-only operation flag,
+so it does not claim readiness for a read-only ACPX exception.
 
 The health `isolation-compatibility` check currently tests read-only
 enforcement. Readiness conservatively requires it even for a writable
@@ -138,8 +139,8 @@ minus that observation time. A future replay timestamp, negative cache age,
 or nonfinite time cannot establish fresh health. Isolation health is
 recomputed by the shared cache but conservatively uses the retained age here.
 Missing or malformed checks remain unknown without discarding valid sibling
-checks. Health timestamps and cache ages must be finite real numbers, and
-boolean values are invalid timestamps or ages.
+checks. Health timestamps and cache ages must be finite `int` or `float`
+values, excluding booleans.
 The evaluator expects versionless fingerprints, matching the inspector's
 `collect_executable_version=False` setting.
 
@@ -156,8 +157,8 @@ uses the roster supplied by its caller, including any preference overlay.
 to `Observation` instances. Their status is `passed`, `failed`, `denied`,
 `unsupported`, or `unknown`. An observation must have the exact scope returned
 by `operation_scope` and be no more than 30 seconds old. Observation timestamps
-must be finite real numbers, excluding booleans. Status, scope, and detail
-must be strings. The scope binds the
+must be finite `int` or `float` values, excluding booleans. Status, scope, and
+detail must be strings. The scope binds the
 workspace, request, selected seats, model/transport fingerprints, declared
 capabilities, orchestrator, configured limit, and model allow patterns.
 Changed concurrency, route, isolation, or capability invalidates earlier
