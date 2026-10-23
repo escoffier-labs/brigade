@@ -163,6 +163,71 @@ def test_ready_inspects_only_selected_seat_without_inference_or_persistent_write
     assert {file.relative_to(tmp_path): file.read_bytes() for file in tmp_path.rglob("*") if file.is_file()} == before
 
 
+@pytest.mark.parametrize("target_kind", ["missing", "file"])
+@pytest.mark.parametrize("roster_source", ["explicit", "user-fallback"])
+@pytest.mark.parametrize("output_format", ["json", "text"])
+def test_ready_cli_rejects_unusable_target_before_roster_or_provider_probe(
+    tmp_path, monkeypatch, capsys, target_kind, roster_source, output_format
+):
+    from brigade import cli, roster, seat_health
+
+    home = tmp_path / "home"
+    monkeypatch.setattr(Path, "home", lambda: home)
+    user_roster = home / ".brigade" / "roster.toml"
+    user_roster.parent.mkdir(parents=True)
+    roster_text = (
+        'orchestrator = "chef"\n[agents.chef]\ncli = "codex"\nrole = "plan"\n'
+        '[agents.coder]\ncli = "codex"\nrole = "implement"\n'
+    )
+    user_roster.write_text(roster_text)
+
+    explicit_roster = tmp_path / "explicit-roster.toml"
+    explicit_roster.write_text(roster_text)
+    if target_kind == "missing":
+        target = tmp_path / "missing-workspace"
+        assert not target.exists()
+    else:
+        target = tmp_path / "workspace-file"
+        target.write_text("not a workspace directory")
+
+    calls = []
+    resolve_roster = roster.resolve_roster
+
+    def recording_resolve(target_arg, explicit=None):
+        calls.append("resolve_roster")
+        return resolve_roster(target_arg, explicit)
+
+    def recording_probe(*args, **kwargs):
+        calls.append("provider_health_probe")
+        raise AssertionError("provider health probe ran for an unusable workspace")
+
+    monkeypatch.setattr(roster, "resolve_roster", recording_resolve)
+    monkeypatch.setattr(seat_health.SeatHealthProbe, "probe_roster", recording_probe)
+    args = ["roster", "ready", "--target", str(target), "--worker", "coder"]
+    if output_format == "json":
+        args.append("--json")
+    if roster_source == "explicit":
+        args.extend(["--roster", str(explicit_roster)])
+
+    assert cli.main(args) == 2
+    output = capsys.readouterr().out
+    if output_format == "json":
+        report = json.loads(output)
+        assert report["status"] == "blocked"
+        assert report["exit_code"] == 2
+        assert report["limiting_reason"] == "target-unusable"
+        assert report["evidence"][0]["category"] == "target"
+        assert report["evidence"][0]["reason"] == "target-not-directory"
+        assert str(target) in report["evidence"][0]["detail"]
+    else:
+        assert "readiness: blocked (exit 2)" in output
+        assert "target: failed freshness=current target-not-directory" in output
+        assert str(target) in output
+        assert "roster-unavailable" not in output
+    assert calls == []
+    assert not target.is_dir()
+
+
 @pytest.mark.parametrize(
     "worker,expected,role",
     [
