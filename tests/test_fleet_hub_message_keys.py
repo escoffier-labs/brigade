@@ -133,14 +133,57 @@ def test_who_continuation_reads_live_keys(hub, mutation):
         assert page["nodes"][0]["keys"][0]["record"] == value
 
 
-def test_key_directory_respects_grants(hub):
-    value = record()
-    publish(hub, value)
+@pytest.mark.parametrize("principal", ["node-b", "agent:peer"])
+def test_key_directory_respects_grants(hub, principal):
+    enrolled = messages.add_principal(hub, {"name": "peer"}) if principal.startswith("agent:") else None
+    reader = messages.add_principal(hub, {"name": "reader", "may_send_to": [principal]})
     messages.add_principal(hub, {"name": "limited", "may_send_to": ["node-c"]})
-    assert action(hub, "keys_get", caller="agent:limited", kid=value["kid"])[0] == 404
-    assert all(row["node_id"] != "node-b" for row in action(hub, "who", caller="agent:limited")[1]["nodes"])
-    fleet_hub.revoke_node(hub, "node-b")
-    assert action(hub, "keys_get", kid=value["kid"])[0] == 404
+    old = record(principal)
+    publish(hub, old)
+    value = record(principal, seed=2, prev_kid=old["kid"], prev_sig=binary(bytes(64)))
+    publish(hub, value)
+    assert action(hub, "keys_get", caller="agent:reader", kid=old["kid"])[1]["key"]["state"] == "retired"
+    first = action(hub, "who", limit=1)[1]
+    assert first["next_cursor"]
+    if enrolled:
+        messages.revoke_principal(
+            hub, {"action": "revoke", "name": "peer", "expected_enrollment_id": enrolled["enrollment_id"]}
+        )
+    else:
+        fleet_hub.revoke_node(hub, principal)
+    before = hub.execute("SELECT * FROM fleet_message_keys ORDER BY kid").fetchall()
+    for original in (old, value):
+        for caller in ("node-a", "agent:reader"):
+            status, payload = action(hub, "keys_get", caller=caller, kid=original["kid"])
+            assert status == 200
+            key = payload["key"]
+            assert key["record"] == original and key["state"] == "revoked"
+            assert key["principal_id"] == principal
+            assert key["compromised_from"] == original["created_at"] and key["revoked_at"]
+            stored = next(row for row in before if row[1] == original["kid"])
+            assert key["revoked_at"] == stored[6] and key["compromised_from"] == stored[7]
+        assert action(hub, "keys_get", caller="agent:limited", kid=original["kid"])[0] == 404
+        assert action(hub, "keys_get", caller=None, kid=original["kid"])[0] == 403
+    assert hub.execute("SELECT * FROM fleet_message_keys ORDER BY kid").fetchall() == before
+    pages = [action(hub, "who")[1]]
+    cursor = first["next_cursor"]
+    while cursor:
+        page = action(hub, "who", limit=1, cursor=cursor)[1]
+        pages.append(page)
+        cursor = page["next_cursor"]
+        assert len(pages) < 10
+    for page in pages:
+        assert all(row["node_id"] != principal for row in page["nodes"])
+        assert all(row["principal_id"] != principal for row in page["principals"])
+    messages.revoke_principal(
+        hub, {"action": "revoke", "name": "reader", "expected_enrollment_id": reader["enrollment_id"]}
+    )
+    fleet_hub.revoke_node(hub, "node-c")
+    for caller in ("agent:reader", "node-c"):
+        with pytest.raises(messages.MessageAuthError):
+            action(hub, "keys_get", caller=caller, kid=value["kid"])
+    with pytest.raises(messages.MessageError):
+        action(hub, "keys_get", kid="k1_invalid")
 
 
 @pytest.mark.parametrize("principal", ["node-b", "agent:peer"])
@@ -435,3 +478,87 @@ def test_nested_key_pages_fit_actual_mcp_transport(tmp_path):
         assert all(len(row["keys"]) == 1 for page in pages for group in ("nodes", "principals") for row in page[group])
     finally:
         conn.close()
+
+
+@pytest.mark.parametrize(
+    "created_at",
+    [
+        "2026-10-23T12:00:00+00:60",
+        "2026-10-23T12:00:00-00:60",
+        "2026-10-23T12:00:00+24:00",
+        "2026-10-23T12:00:00-24:00",
+        "2026-10-23T12:00:00+01:99",
+        "2026-02-30T12:00:00Z",
+    ],
+)
+def test_malformed_rotation_timestamp_preserves_all_rows(hub, created_at):
+    old = record()
+    publish(hub, old)
+    before = hub.execute("SELECT * FROM fleet_message_keys ORDER BY kid").fetchall()
+    successor = record(seed=2, prev_kid=old["kid"], prev_sig=binary(bytes(64)), created_at=created_at)
+    with pytest.raises(messages.MessageError, match="invalid mesh timestamp"):
+        publish(hub, successor)
+    assert hub.execute("SELECT * FROM fleet_message_keys ORDER BY kid").fetchall() == before
+
+
+@pytest.mark.parametrize("offset", ["Z", "+00:00", "-00:00", "+23:59", "-23:59", "+01:30"])
+def test_valid_rotation_timestamp_offsets(hub, offset):
+    old = record()
+    publish(hub, old)
+    successor = record(
+        seed=2,
+        prev_kid=old["kid"],
+        prev_sig=binary(bytes(64)),
+        created_at="2026-10-24T12:00:00" + offset,
+    )
+    assert publish(hub, successor)[0] == 201
+    assert action(hub, "keys_get", kid=successor["kid"])[1]["key"]["record"] == successor
+    assert action(hub, "keys_get", kid=old["kid"])[1]["key"]["state"] == "retired"
+
+
+def test_statement_aggregate_wire_bound_is_atomic(hub):
+    from brigade import fleet_client, fleet_client_messages as client, fleet_hub_identity as mesh
+
+    statements = {kind: {"seq": 1, "opaque": "x" * 3_000_000} for kind in ("membership", "manifest")}
+    for kind, statement in statements.items():
+        mesh.upload_statement(hub, {"kind": kind, "statement": statement})
+    # Default HTTP JSON escaping expands these opaque characters on the wire.
+    candidate = {"seq": 1, "opaque": "\u2603" * 1000 + '"\\\n'}
+    empty_response = {"statements": {**statements, "revocation": candidate}}
+    padding = client.MESSAGE_RESPONSE_LIMIT - len(json.dumps(empty_response).encode())
+    candidate["opaque"] += "x" * padding
+    assert (
+        len(json.dumps({"statements": {**statements, "revocation": candidate}}).encode())
+        == client.MESSAGE_RESPONSE_LIMIT
+    )
+
+    path = hub.execute("PRAGMA database_list").fetchone()[2]
+    _, token = fleet_hub.add_node(hub, "http-reader")
+    with serving(path) as address:
+        for seq in (1, 2):
+            # seq=1 adds a kind, seq=2 replaces it. Both must roll back every column.
+            before = hub.execute("SELECT * FROM fleet_mesh_statements ORDER BY kind").fetchall()
+            overflow = {**candidate, "seq": seq, "opaque": candidate["opaque"] + "x"}
+            assert (
+                request(
+                    address, "POST", "/mesh/statements", "fixture-admin", {"kind": "revocation", "statement": overflow}
+                )[0]
+                == 400
+            )
+            assert hub.execute("SELECT * FROM fleet_mesh_statements ORDER BY kind").fetchall() == before
+            valid = {**candidate, "seq": seq}
+            assert request(
+                address, "POST", "/mesh/statements", "fixture-admin", {"kind": "revocation", "statement": valid}
+            ) == (200, {"kind": "revocation", "seq": seq})
+            connection = http.client.HTTPConnection(*address, timeout=3)
+            try:
+                connection.request(
+                    "POST", "/messages", json.dumps({"action": "manifests_get"}), {"Authorization": "Bearer " + token}
+                )
+                response = connection.getresponse()
+                assert response.status == 200
+                body = fleet_client._read_bounded_response(response, limit=client.MESSAGE_RESPONSE_LIMIT)
+                assert len(body) == client.MESSAGE_RESPONSE_LIMIT
+                assert json.loads(body) == {"statements": {**statements, "revocation": valid}}
+            finally:
+                connection.close()

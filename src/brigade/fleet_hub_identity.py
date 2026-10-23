@@ -118,6 +118,11 @@ def upload_statement(conn: sqlite3.Connection, raw: Any) -> dict[str, Any]:
         )
         if changed.rowcount != 1:
             raise MessageConflict("statement sequence must increase", code="signed_statement_rollback")
+        # Match the HTTP serializer, including escaping and the response wrapper.
+        # The existing statement cap also equals the message client's response cap.
+        response = manifests(conn, {"action": "manifests_get"})
+        if len(json.dumps(response).encode("utf-8")) > MAX_STATEMENT_BYTES:
+            raise MessageError("mesh statements exceed the response size limit")
     return {"kind": raw["kind"], "seq": seq}
 
 

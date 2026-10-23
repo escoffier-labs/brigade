@@ -62,7 +62,7 @@ def timestamp(value: Any) -> datetime:
         not isinstance(value, str)
         or len(value) > 32
         or not re.fullmatch(
-            r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{3}(?:[0-9]{3})?)?(?:Z|[+-][0-9]{2}:[0-9]{2})",
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\.[0-9]{3}(?:[0-9]{3})?)?(?:Z|[+-](?:[01][0-9]|2[0-3]):[0-5][0-9])",
             value,
         )
     ):
@@ -153,14 +153,13 @@ def publish(conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str) -> di
 
 def get(conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str) -> dict[str, Any] | None:
     from . import fleet_hub_message_grants as grants
-    from .fleet_hub_messages import _active_principal
 
     if set(raw) != {"action", "kid"} or not isinstance(raw["kid"], str) or not raw["kid"].startswith("k1_"):
         raise MessageError("keys_get requires a key id")
     decode_binary(raw["kid"][3:], 16)
     row = conn.execute(f"SELECT {COLUMNS} FROM fleet_message_keys WHERE kid=?", (raw["kid"],)).fetchone()
     patterns = frozenset(grants.grants_for(conn, caller)) if caller.startswith("agent:") else frozenset()
-    if row is None or not _active_principal(conn, row[0]) or not grants.permits(patterns, caller, row[0]):
+    if row is None or not grants.permits(patterns, caller, row[0]):
         return None
     return {"key": _entry(row)}
 
