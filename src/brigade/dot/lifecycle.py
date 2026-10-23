@@ -23,6 +23,7 @@ from . import access_auth
 from .access_auth import AccessVerifier, METADATA_PATH, bounded_headers, unique_object
 from .adapter import DotTools, build_tools, validate_arguments
 from .events import EventService, EventsApp, IDENTITY
+from .hub_inbox import authenticated_authority
 from .profile import DOT, ConnectorProfile, profile_for
 from .runtime_config import Runtime, load_runtime
 from .safe_state import identity, require_local_platform
@@ -438,6 +439,12 @@ def doctor(target: Path, *, pack_id: str = c.PACK_ID) -> list[dict[str, str]]:
     if profile.fleet_dispatch:
         record("t3-fleet", fleet_check)
     else:
+        try:
+            authenticated_authority(runtime.hub)
+        except c.DotError as error:
+            checks.append({"check": "hub-identity", "status": "fail", "reason": error.code})
+        else:
+            checks.append({"check": "hub-identity", "status": "ok"})
         record("isolation", lambda: _isolated_from_dot(target, runtime))
     record("endpoint", lambda: _probe(_base(config) + "/mcp", method="POST")[0] == 401)
     return checks

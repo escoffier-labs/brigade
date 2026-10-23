@@ -12,7 +12,7 @@ from typing import Any
 
 from .access_auth import METADATA_PATH
 from .contracts import DotError
-from .hub_inbox import sender_name
+from .hub_inbox import authenticated_authority, sender_name
 from brigade.fleet_client_message_credentials import FleetMessageHubError, MessageAuthority
 from .lifecycle import DotListenerConfig, _base, _load_config, _probe
 from .profile import DOT, ConnectorProfile, profile_for
@@ -170,8 +170,18 @@ def read_bridge(
             value = connection.execute(
                 "SELECT MAX(timestamp) FROM wake_attempts WHERE source LIKE ?", ("hub-inbox:" + scope + ":%",)
             ).fetchone()[0]
+        local_error = connection.execute("SELECT value FROM hub_state WHERE key='last_hub_poll_error'").fetchone()
     authority.validate()
-    credential = any(hub.get(key) == "hub_credential_invalid" for key in ("last_sync_error", "last_reconcile_error"))
+    identity_errors = {
+        "hub_credential_invalid",
+        "hub_credential_changed",
+        "hub_identity_invalid",
+        "hub_unauthorized",
+        "hub_forbidden",
+    }
+    credential = any(hub.get(key) in identity_errors for key in ("last_sync_error", "last_reconcile_error")) or bool(
+        local_error and local_error[0] in identity_errors
+    )
     wake = None if value is None else datetime.fromtimestamp(value, timezone.utc)
     return unacked, last_call, pending, hub.get("last_sync_ok_at"), credential, wake
 
@@ -239,7 +249,7 @@ def _credential_health(
             "kind": "hub_credential_invalid",
             "key": "last_credential_alert",
             "title": profile.label + " bridge: hub credential invalid",
-            "text": "The hub message token file is unusable. Inbox sync is failing until it is repaired.",
+            "text": "The hub credential or authenticated principal is invalid. Inbox sync is failing until it is repaired.",
         }
         if dry_run or runtime.notify_command is None:
             alert["result"] = "would_send" if dry_run else "skipped"
@@ -273,7 +283,18 @@ def run_watch_once(
             if error.code not in {"token_file_invalid", "admin_token_refused"}:
                 raise
             return _credential_health(runtime, now, dry_run, profile)
-        return _run_scoped_watch(config, runtime, authority, now, dry_run, profile)
+        identity_error = None
+        if not profile.fleet_dispatch:
+            try:
+                authenticated_authority(runtime.hub, authority=authority)
+            except DotError as error:
+                if error.code != "hub_unavailable":
+                    return _credential_health(runtime, now, dry_run, profile)
+                identity_error = error.code
+        result = _run_scoped_watch(config, runtime, authority, now, dry_run, profile)
+        if identity_error is not None:
+            result.update(ok=False, error=identity_error)
+        return result
     except DotError as error:
         return {
             "ok": False,
@@ -297,7 +318,7 @@ def _run_scoped_watch(
     state_path = runtime.paths.state_dir / ("inbox-watch-" + scope + ".json")
     state = load_state(state_path)
     alerts, notes, stale = decide(now, unacked, last_call, pending, state, label, profile.idle_kind)
-    # A profile runs only its own checks; Duet has no wake or event-sync checks.
+    # Polling health also applies to profiles without webhook wakes.
     alerts = [
         alert
         for alert in alerts
@@ -311,7 +332,7 @@ def _run_scoped_watch(
         if previous is None or now - parse_time(previous) >= REALERT_AFTER:
             kind = "hub_credential_invalid" if credential else "hub_sync_stale"
             text = (
-                "The hub message token file is unusable. Inbox sync is failing until it is repaired. "
+                "The hub credential or authenticated principal is invalid. Inbox sync is failing until it is repaired. "
                 if credential
                 else "No successful hub inbox sync in 15 minutes. "
             )

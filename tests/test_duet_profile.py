@@ -133,7 +133,7 @@ def test_duet_profile_values():
     assert (DUET.handoff_inbox, DUET.handoff_prefix) == (Path(".claude/memory-handoffs"), "duet")
     assert DUET.unit_name == "brigade-duet.service"
     assert DUET.send_limit_per_hour == 20
-    assert DUET.watch_checks == {"stale_inbox", "idle", "route_down", "hub_credential_invalid"}
+    assert DUET.watch_checks == {"stale_inbox", "idle", "route_down", "hub_credential_invalid", "hub_sync_stale"}
     assert "Do not auto-reply to agent messages that contain no new facts" in DUET.operating_instructions
     with pytest.raises(DotError, match="invalid_config"):
         profile_for("dispatch")
@@ -646,13 +646,10 @@ def test_duet_canary_checks_its_own_inventory(duet_configured):
 
 
 @requires_local_state
-def test_duet_doctor_checks_isolation_instead_of_t3_fleet(duet_configured):
+def test_duet_doctor_checks_isolation_instead_of_t3_fleet(authenticated_duet):
     pytest.importorskip("mcp.server", reason="requires the grokbot extra")
-    target, _, _ = duet_configured
-    with (
-        patch("brigade.fleet_client_message_credentials.read_message_token_file", return_value="fixture"),
-        patch.object(m, "_probe", return_value=(401, None)),
-    ):
+    target, _, _ = authenticated_duet
+    with patch.object(m, "_probe", return_value=(401, None)):
         checks = m.doctor(target, pack_id="duet")
     assert [c["check"] for c in checks] == [
         "dependency",
@@ -660,6 +657,7 @@ def test_duet_doctor_checks_isolation_instead_of_t3_fleet(duet_configured):
         "state",
         "access-config",
         "hub-token",
+        "hub-identity",
         "isolation",
         "endpoint",
     ]
@@ -730,13 +728,15 @@ def authenticated_duet(duet_configured, message_hub, monkeypatch):
     monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: dict(hub_url=base, node_token=node_token))
     monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
     with fleet_hub.init_db(db) as connection:
-        principal = fleet_hub_messages.add_principal(connection, {"name": "duet", "label": "Fixture"})
+        principal = fleet_hub_messages.add_principal(
+            connection, {"name": "duet", "label": "Fixture", "may_send_to": [NODE_A]}
+        )
     runtime.hub.message_token_file.write_text(principal["token"])
     return target, runtime, db
 
 
 @requires_local_state
-@pytest.mark.parametrize("evidence", ["matching", "dot", "other", "revoked", "unavailable", "malformed"])
+@pytest.mark.parametrize("evidence", ["matching", "dot", "other", "revoked", "unavailable", "malformed", "old-hub"])
 def test_duet_startup_authenticates_identity_before_registration(authenticated_duet, monkeypatch, evidence):
     target, runtime, db = authenticated_duet
     if evidence in {"dot", "other"}:
@@ -752,6 +752,8 @@ def test_duet_startup_authenticates_identity_before_registration(authenticated_d
             raise fleet_client.FleetClientError("fixture unavailable")
 
         monkeypatch.setattr(fleet_client_messages, "_request", unavailable)
+    elif evidence == "old-hub":
+        monkeypatch.setattr(fleet_client_messages, "_request", lambda *a, **kw: (400, {"error": "unsupported action"}))
     elif evidence == "malformed":
         monkeypatch.setattr(fleet_client_messages, "_request", lambda *a, **kw: (200, {"principal": ["agent:duet"]}))
     cfg, tools, runtime = m.build_listener_from_target(target, pack_id="duet")
@@ -761,10 +763,25 @@ def test_duet_startup_authenticates_identity_before_registration(authenticated_d
             build.assert_called_once()
             run.assert_called_once()
         else:
-            with pytest.raises(DotError, match="^hub_identity_invalid$"):
+            with pytest.raises(
+                DotError, match="^hub_unavailable$" if evidence == "unavailable" else "^hub_identity_invalid$"
+            ):
                 m.run_listener(cfg, tools, runtime)
             build.assert_not_called()
             run.assert_not_called()
+    with patch.object(w, "probe_route", return_value=[]):
+        watched = w.run_watch_once(target, now=NOW, dry_run=True, pack_id="duet")
+    kinds = {alert["kind"] for alert in watched["alerts"]}
+    assert ("hub_credential_invalid" in kinds) == (evidence not in {"matching", "unavailable"})
+    if evidence == "unavailable":
+        assert "hub_sync_stale" in kinds
+    with patch.object(m, "_probe", return_value=(401, None)):
+        checks = {item["check"]: item for item in m.doctor(target, pack_id="duet")}
+    assert checks["hub-identity"]["status"] == ("ok" if evidence == "matching" else "fail")
+    if evidence != "matching":
+        assert checks["hub-identity"]["reason"] == (
+            "hub_unavailable" if evidence == "unavailable" else "hub_identity_invalid"
+        )
 
 
 @requires_local_state
@@ -832,8 +849,9 @@ def test_duet_lifespan_polls_real_hub_without_event_delivery(authenticated_duet)
 
 
 @requires_local_state
-def test_duet_watch_runs_only_its_checks(duet_configured, duet_hub, capsys):
-    target, runtime, _ = duet_configured
+def test_duet_watch_runs_only_its_checks(authenticated_duet, capsys):
+    target, runtime, _ = authenticated_duet
+    duet_hub = message_scope(*message_settings(str(runtime.hub.message_token_file))[:2])
     with BridgeState(runtime.paths.state_dir) as state:
         state.log_call("fleet_digest", True, 5, clock=lambda: NOW)
         with state.transaction() as c:
@@ -848,7 +866,7 @@ def test_duet_watch_runs_only_its_checks(duet_configured, duet_hub, capsys):
     with patch.object(w, "send", return_value=0) as send, patch.object(w, "probe_route", return_value=["edge"]):
         result = w.run_watch_once(target, now=NOW + timedelta(hours=4), pack_id="duet")
     kinds = {alert["kind"] for alert in result["alerts"]}
-    assert kinds == {"stale_inbox", "duet_idle", "route_down"}
+    assert kinds == {"stale_inbox", "duet_idle", "route_down", "hub_sync_stale"}
     assert all(alert["title"].startswith("Duet bridge:") for alert in result["alerts"])
     # The fixture runtime sets no notify_command, so alerts are recorded but nothing is sent.
     assert {alert["result"] for alert in result["alerts"]} == {"skipped"}
@@ -934,3 +952,352 @@ def test_cli_serve_duet_passes_its_pack_id(tmp_path, monkeypatch):
     assert calls == [{"bind": None, "allowed_hosts": None, "allowed_origins": None, "pack_id": "duet"}]
     argv = ["run", "cloud", "grokbot", "serve", "--pack", "duet", "--target", str(tmp_path), "--bearer-env", "X"]
     assert cli.main(argv) == 2
+
+
+@requires_local_state
+@pytest.mark.parametrize("change", ["other", "rotation", "endpoint"])
+@pytest.mark.parametrize(
+    "operation", ["send", "reply", "status", "sync", "reconcile", "flush", "supplied", "supplied-node"]
+)
+def test_duet_startup_scope_stays_bound(authenticated_duet, monkeypatch, change, operation):
+    from brigade.fleet_client_message_credentials import MessageAuthority
+
+    target, runtime, db = authenticated_duet
+    _, tools, _ = m.build_listener_from_target(target, pack_id="duet")
+    hub = tools.inbox.hub
+    try:
+        hub.require_identity()
+        if change == "endpoint":
+            settings = fleet_client.load_fleet_settings()
+            monkeypatch.setattr(
+                fleet_client, "load_fleet_settings", lambda: dict(settings, hub_url="https://changed.invalid")
+            )
+        else:
+            with fleet_hub.init_db(db) as connection:
+                if change == "rotation":
+                    fleet_hub_messages.revoke_principal(
+                        connection,
+                        {
+                            "action": "revoke",
+                            "name": "duet",
+                            "expected_enrollment_id": fleet_hub_messages.get_principal(
+                                connection, {"action": "get", "name": "duet"}
+                            )["enrollment_id"],
+                        },
+                    )
+                principal = fleet_hub_messages.add_principal(
+                    connection,
+                    {
+                        "name": "duet" if change == "rotation" else "other",
+                        "label": "Fixture",
+                        "expected_enrollment_id": fleet_hub_messages.get_principal(
+                            connection, {"action": "get", "name": "duet"}
+                        )["enrollment_id"]
+                        if change == "rotation"
+                        else None,
+                    },
+                )
+            runtime.hub.message_token_file.write_text(principal["token"])
+        replacement = (
+            MessageAuthority.capture(node_only=True)
+            if operation == "supplied-node"
+            else MessageAuthority.capture(str(runtime.hub.message_token_file))
+        )
+        actions = {
+            "send": lambda: hub.send("operator", "subject", "body"),
+            "reply": lambda: hub.reply(1, "body"),
+            "status": lambda: hub.status([1]),
+            "sync": hub.sync,
+            "reconcile": hub.reconcile,
+            "flush": hub.flush_pending,
+            "supplied": lambda: hub.sync(authority=replacement),
+            "supplied-node": lambda: hub.sync(authority=replacement),
+        }
+        with patch.object(fleet_client_messages, "_request", wraps=fleet_client_messages._request) as transport:
+            with pytest.raises(DotError, match="^hub_credential_changed$"):
+                actions[operation]()
+            transport.assert_not_called()
+        with tools.state.transaction() as connection:
+            assert connection.execute("SELECT count(*) FROM hub_inbox").fetchone()[0] == 0
+            assert connection.execute("SELECT count(*) FROM hub_state").fetchone()[0] == 0
+        if change == "rotation":
+            # Only a new listener's startup can adopt a legitimately rotated token.
+            _, restarted, _ = m.build_listener_from_target(target, pack_id="duet")
+            try:
+                restarted.inbox.hub.require_identity()
+                restarted.inbox.hub.sync()
+            finally:
+                restarted.state.close()
+    finally:
+        tools.state.close()
+
+
+@requires_local_state
+def test_duet_maintenance_leaves_shared_node_queue_alone(authenticated_duet, monkeypatch, tmp_path):
+    from brigade.fleet_client_message_credentials import MessageAuthority
+
+    _, runtime, _ = authenticated_duet
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path / "client")
+    tools, state, hub = build_tools(replace(runtime, hub=replace(runtime.hub, recipients={"operator": NODE_A})), DUET)
+    try:
+        hub.require_identity()
+        node = MessageAuthority.capture(node_only=True)
+        agent = hub.capture()
+        with patch.object(fleet_client_messages, "_request", side_effect=OSError("fixture offline")):
+            assert fleet_client_messages.send(
+                recipient="agent:duet", subject="node backlog", body="body", reference=None, priority="normal"
+            )["queued"]
+            assert hub.send("operator", "duet backlog", "body")["queued"]
+        assert fleet_client_messages.has_pending(node) and fleet_client_messages.has_pending(agent)
+        seen = []
+        real_request = fleet_client_messages._request
+
+        def request(base, token, body, **kwargs):
+            seen.append((token == node.token, body["action"]))
+            return real_request(base, token, body, **kwargs)
+
+        node_path = fleet_client_messages._spool_path(node.node_id, node.token, hub_url=node.hub)
+        real_stat = Path.stat
+
+        def stat_path(path, *args, **kwargs):
+            assert path != node_path, "Duet maintenance inspected shared node spool metadata"
+            return real_stat(path, *args, **kwargs)
+
+        with (
+            patch.object(hub, "capture", wraps=hub.capture) as capture,
+            patch.object(fleet_client_messages, "_request", side_effect=request),
+            patch.object(Path, "stat", stat_path),
+        ):
+            hub.reconcile()
+            hub.flush_pending()
+        assert all(call.kwargs.get("agent", True) for call in capture.call_args_list)
+        assert not any(is_node for is_node, _ in seen)
+        assert fleet_client_messages.has_pending(node)
+        assert not fleet_client_messages.has_pending(agent)
+        # Dot retains the shared node flush behavior.
+        dot = HubInbox(state, runtime.hub)
+        dot.flush_pending()
+        assert not fleet_client_messages.has_pending(node)
+    finally:
+        state.close()
+
+
+@requires_local_state
+def test_duet_disabled_restart_holds_queued_send_and_reply(authenticated_duet, monkeypatch, tmp_path):
+    _, runtime, _ = authenticated_duet
+    monkeypatch.setattr(fleet_client, "brigade_home", lambda: tmp_path / "client")
+    runtime = replace(runtime, messaging_enabled=True, hub=replace(runtime.hub, recipients={"operator": NODE_A}))
+    original = fleet_client_messages.send(
+        recipient="agent:duet", subject="question", body="question", reference=None, priority="normal"
+    )["message"]
+    tools, state, hub = build_tools(runtime, DUET)
+    try:
+        hub.require_identity()
+        with patch.object(fleet_client_messages, "_request", side_effect=OSError("fixture offline")):
+            assert hub.send("operator", "queued send", "send body")["queued"]
+            assert hub.reply(original["id"], "reply body")["queued"]
+    finally:
+        state.close()
+    disabled = replace(runtime, messaging_enabled=False)
+    tools, state, hub = build_tools(disabled, DUET)
+    try:
+        hub.require_identity()
+        service = EventService(
+            state, fleet_status=lambda rid: {}, hub=hub, hub_poll_seconds=30, callback_hosts=frozenset()
+        )
+        service._hub_polls = 19
+        asyncio.run(service.poll_hub())
+        asyncio.run(service.poll_hub())
+        assert fleet_client_messages.has_pending(hub.capture())
+        assert hub.list()["unacked_total"] == 1
+        assert hub.ack([original["id"]])["acked"] == [original["id"]]
+        for name, args in (
+            ("message_send", dict(to="operator", subject="new", body="body")),
+            ("inbox_reply", dict(msg_id=original["id"], body="new")),
+        ):
+            with pytest.raises(DotError, match="^messaging_disabled$"):
+                tools.call("fixture-owner", name, args)
+        assert fleet_client_messages.list_messages()["messages"] == []
+        assert fleet_client_messages.has_pending(hub.capture())
+    finally:
+        state.close()
+    tools, state, hub = build_tools(runtime, DUET)
+    try:
+        hub.require_identity()
+        hub.flush_pending()
+        assert not fleet_client_messages.has_pending(hub.capture())
+        delivered = fleet_client_messages.list_messages()["messages"]
+        assert {row["body"] for row in delivered} == {"send body", "reply body"}
+    finally:
+        state.close()
+
+
+@requires_local_state
+def test_duet_watch_alerts_on_real_poll_outage_with_empty_mirror(authenticated_duet):
+    target, runtime, _ = authenticated_duet
+    _, tools, _ = m.build_listener_from_target(target, pack_id="duet")
+    hub = tools.inbox.hub
+    hub.clock = lambda: NOW
+    try:
+        hub.require_identity()
+        service = EventService(
+            tools.state, fleet_status=lambda rid: {}, hub=hub, hub_poll_seconds=30, callback_hosts=frozenset()
+        )
+        asyncio.run(service.poll_hub())
+        assert hub.list()["unacked_total"] == 0
+        real_request = fleet_client_messages._request
+
+        def outage(base, token, body, **kwargs):
+            if body["action"] == "list":
+                return 503, {"code": "hub_unavailable"}
+            return real_request(base, token, body, **kwargs)
+
+        with (
+            patch.object(fleet_client_messages, "_request", side_effect=outage),
+            patch.object(w, "_probe", return_value=(200, {"resource": runtime.auth.resource})),
+        ):
+            asyncio.run(service.poll_hub())
+            result = w.run_watch_once(target, now=NOW + timedelta(minutes=16), dry_run=True, pack_id="duet")
+        assert [alert["kind"] for alert in result["alerts"]] == ["hub_sync_stale"]
+    finally:
+        tools.state.close()
+
+
+@requires_local_state
+@pytest.mark.parametrize("minutes", [1, 15, 16])
+def test_duet_watch_reports_identity_outage_after_fresh_success(authenticated_duet, minutes):
+    target, runtime, _ = authenticated_duet
+    _, tools, _ = m.build_listener_from_target(target, pack_id="duet")
+    hub = tools.inbox.hub
+    hub.clock = lambda: NOW
+    try:
+        hub.require_identity()
+        service = EventService(
+            tools.state, fleet_status=lambda rid: {}, hub=hub, hub_poll_seconds=30, callback_hosts=frozenset()
+        )
+        asyncio.run(service.poll_hub())
+        assert hub.list()["unacked_total"] == 0
+        real_request = fleet_client_messages._request
+
+        def outage(base, token, body, **kwargs):
+            if body["action"] == "identity":
+                raise OSError("fixture private transport detail")
+            return real_request(base, token, body, **kwargs)
+
+        with (
+            patch.object(fleet_client_messages, "_request", side_effect=outage),
+            patch.object(w, "_probe", return_value=(200, {"resource": runtime.auth.resource})),
+        ):
+            result = w.run_watch_once(target, now=NOW + timedelta(minutes=minutes), dry_run=True, pack_id="duet")
+        assert result["ok"] is False
+        assert result["error"] == "hub_unavailable"
+        assert "fixture private transport detail" not in json.dumps(result)
+        assert result["unacked"] == 0
+        assert result["open_requests"] == 0
+        assert [alert["kind"] for alert in result["alerts"]] == (["hub_sync_stale"] if minutes > 15 else [])
+    finally:
+        tools.state.close()
+
+
+@requires_local_state
+def test_duet_changed_scope_poll_failure_is_visible_and_local(authenticated_duet, caplog):
+    target, runtime, db = authenticated_duet
+    _, tools, _ = m.build_listener_from_target(target, pack_id="duet")
+    hub = tools.inbox.hub
+    try:
+        hub.require_identity()
+        service = EventService(
+            tools.state, fleet_status=lambda rid: {}, hub=hub, hub_poll_seconds=30, callback_hosts=frozenset()
+        )
+        asyncio.run(service.poll_hub())
+        with fleet_hub.init_db(db) as connection:
+            other = fleet_hub_messages.add_principal(connection, {"name": "other", "label": "Fixture"})
+        runtime.hub.message_token_file.write_text(other["token"])
+        replacement_scope = message_scope(*message_settings(str(runtime.hub.message_token_file))[:2])
+        with patch.object(fleet_client_messages, "_request", wraps=fleet_client_messages._request) as transport:
+            asyncio.run(service.poll_hub())
+        transport.assert_not_called()
+        assert "hub_credential_changed" in caplog.text
+        with tools.state.transaction() as connection:
+            errors = connection.execute(
+                "SELECT key,value FROM hub_state WHERE value='hub_credential_changed'"
+            ).fetchall()
+            assert errors
+            assert all(not row["key"].startswith(replacement_scope + ":") for row in errors)
+    finally:
+        tools.state.close()
+
+
+@requires_local_state
+def test_duet_shutdown_waits_for_inflight_poll(authenticated_duet):
+    import threading
+    from brigade.dot.event_app import EventsApp
+
+    target, _, _ = authenticated_duet
+    _, tools, _ = m.build_listener_from_target(target, pack_id="duet")
+    hub = tools.inbox.hub
+    hub.require_identity()
+    started, release, finished = threading.Event(), threading.Event(), threading.Event()
+    real_request = fleet_client_messages._request
+    calls = []
+
+    def blocked(base, token, body, **kwargs):
+        calls.append(body["action"])
+        if body["action"] == "list":
+            started.set()
+            assert release.wait(3)
+        try:
+            return real_request(base, token, body, **kwargs)
+        finally:
+            finished.set()
+
+    async def scenario():
+        service = EventService(
+            tools.state, fleet_status=lambda rid: {}, hub=hub, hub_poll_seconds=30, callback_hosts=frozenset()
+        )
+
+        async def inner(scope, receive, send):
+            await send({"type": "lifespan.startup.complete"})
+            assert await asyncio.to_thread(started.wait, 2)
+            shutdown = asyncio.create_task(send({"type": "lifespan.shutdown.complete"}))
+            try:
+                # A ready callback gives cancellation a turn without relying on a long sleep.
+                await asyncio.sleep(0.01)
+                assert not shutdown.done(), "shutdown returned while Hub work still owned the state"
+            finally:
+                release.set()
+                await shutdown
+            assert finished.is_set()
+            assert calls == ["list"]  # No flush or later maintenance after cancellation.
+            tools.state.close()
+
+        await EventsApp(inner, service, enabled=False)({"type": "lifespan"}, AsyncMock(), AsyncMock())
+
+    try:
+        with patch.object(fleet_client_messages, "_request", side_effect=blocked):
+            asyncio.run(scenario())
+    finally:
+        release.set()
+        tools.state.close()
+
+
+@requires_local_state
+@pytest.mark.parametrize(
+    "directory,metadata_id,denied",
+    [("other", "private-notes", True), ("private-notes", "other", True), ("allowed", "allowed-id", False)],
+)
+@pytest.mark.parametrize("resource", ["SKILL.md", "references/detail.md"])
+def test_duet_skill_read_denies_registry_identity(duet_configured, directory, metadata_id, denied, resource):
+    _, runtime, _ = duet_configured
+    entry = runtime.paths.workspace / ".brigade" / "skills" / "registry" / directory
+    entry.mkdir(parents=True)
+    (entry / "skill.json").write_text(json.dumps({"id": metadata_id, "title": "private metadata"}))
+    path = entry / resource
+    path.parent.mkdir(exist_ok=True)
+    path.write_text("fixture skill content")
+    memory = MemoryTools(runtime, commands=SimpleNamespace(), profile=DUET)
+    result = memory.skill_get(directory, resource)
+    if denied:
+        assert result == {"error": "skill_not_found"}
+    else:
+        assert result["content"] == "fixture skill content"

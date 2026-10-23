@@ -158,8 +158,8 @@ DUET = ConnectorProfile(
     handoff_inbox=Path(".claude") / "memory-handoffs",
     handoff_prefix="duet",
     fleet_dispatch=False,
-    # No event webhooks wake Duet, so there is no wake or event-sync check to run.
-    watch_checks=frozenset({"stale_inbox", "idle", "route_down", "hub_credential_invalid"}),
+    # Inbox polling health is independent of webhook delivery; wake checks stay disabled.
+    watch_checks=frozenset({"stale_inbox", "idle", "route_down", "hub_credential_invalid", "hub_sync_stale"}),
     send_limit_per_hour=DUET_SEND_LIMIT_PER_HOUR,
     descriptions=DUET_DESCRIPTIONS,
 )

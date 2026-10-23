@@ -291,7 +291,12 @@ def build_tools(runtime: Runtime, profile: ConnectorProfile = DOT) -> tuple[DotT
         commands = CommandRunner()
         # Profiles without fleet dispatch never construct the T3 fleet client.
         fleet = FleetTools(runtime, state, commands=commands) if profile.fleet_dispatch else None
-        hub_inbox = HubInbox(state, runtime.hub)
+        hub_inbox = HubInbox(
+            state,
+            runtime.hub,
+            profile=profile,
+            messaging_enabled=profile.fleet_dispatch or runtime.messaging_enabled is not False,
+        )
         inbox = InboxTools(runtime, state, hub_inbox)
         hub = HubTools(runtime, state, commands=commands, fleet=fleet, inbox=inbox)
         memory = MemoryTools(runtime, commands=commands, profile=profile)

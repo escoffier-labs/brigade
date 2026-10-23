@@ -60,7 +60,9 @@ auto-reply to agent messages that contain no new facts: it acknowledges them
 with `inbox_ack` and sends nothing.
 
 `message_send` and `inbox_reply` share a gate. When `messaging_enabled` is false,
-either call returns `messaging_disabled`. When it is true, each call reserves one slot from
+either call returns `messaging_disabled`. Background maintenance preserves queued
+sends and replies until messaging is enabled again and the listener restarts.
+Reads and acknowledgements remain available. When it is true, each call reserves one slot from
 a rolling one-hour budget of 20 kept in the state database. A call over the
 budget returns `send_limit_reached` and is logged with that error. New messages
 must name an exact configured alias. Unknown aliases and raw principals are
@@ -124,7 +126,11 @@ brigade run cloud grokbot pack install-service --id duet --target <workspace> --
 There are no bearer flags.
 
 Doctor checks dependencies, runtime, state, Access settings and the Hub
-credential like Dot's. In place of Dot's T3 fleet check it runs `isolation`:
+credential like Dot's. Its `hub-identity` check authenticates the active principal
+as `agent:duet`, using the same check as startup and watch. Invalid identity
+returns `hub_identity_invalid`. A transport outage returns `hub_unavailable`.
+The listener retains the authenticated credential and Hub endpoint in memory.
+Changing either requires a restart, including legitimate token rotation. In place of Dot's T3 fleet check it runs `isolation`:
 when the same target also has a Dot instance, Duet must differ from it in Hub
 principal, message token (its file and the token it holds), state directory,
 Access audience and resource.
@@ -143,9 +149,11 @@ Their command is:
 python -m brigade.dot watch --target <workspace> --pack duet
 ```
 
-Duet has no event webhooks, so its watch runs only `stale_inbox`, `idle`,
-`route_down` and `hub_credential_invalid`. It never checks for unanswered
-wakes or event sync. `python -m brigade.dot calls --pack duet` prints the call
+Duet watch runs `stale_inbox`, `idle`, `route_down`, `hub_credential_invalid`
+and `hub_sync_stale`. Inbox polling continues without event webhooks, and
+watch alerts after 15 minutes without a successful sync. Duet maintenance
+uses only its agent credential and queue. It never reads or drains the shared
+node queue. Wake-specific checks remain disabled. `python -m brigade.dot calls --pack duet` prints the call
 log, and `notify --pack duet` sends as Duet.
 
 ## Auth in claude.ai
