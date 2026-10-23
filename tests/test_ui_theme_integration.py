@@ -358,9 +358,9 @@ def test_populated_deck_orders_summary_alerts_work_and_machines():
     rendered = deck.render_deck(view, nonce="spacing-nonce", now=NOW)
     markers = [
         'aria-label="Fleet summary"',
-        'id="alerts"',
-        'aria-labelledby="working-title"',
+        'class="alert-line"',
         'id="machines-table"',
+        'aria-labelledby="working-title"',
     ]
     positions = [rendered.index(marker) for marker in markers]
     assert positions == sorted(positions)

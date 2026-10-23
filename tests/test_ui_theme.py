@@ -263,3 +263,14 @@ def test_machine_table_gives_seen_room_and_keeps_shared_css_lean():
     assert ".sidebar-foot" not in ui_theme.BASE_CSS
     assert not re.search(r"^\.card \{", ui_theme.BASE_CSS, re.M)  # the overview strip owns .card
     assert not re.search(r"^\.sub \{", ui_theme.OVERVIEW_CSS, re.M)
+
+
+def test_quiet_overview_keeps_ink_values_and_both_machine_column_layouts():
+    css = ui_theme.OVERVIEW_CSS
+    assert re.search(r"^\.card-value \{[^}]*color: var\(--ink\)", css, re.M)
+    assert not re.search(r"\.card--[\w-]+ \.card-value", css)
+    rule = re.search(r"\.verdict-status \{([^}]+)\}", css).group(1)
+    assert "letter-spacing" not in rule and "text-transform" not in rule
+    for column, width in enumerate((30, 34, 20, 16), 1):
+        assert f".machine-table--no-notes th:nth-child({column}) {{ width: {width}%;" in css
+    assert ".alerts {" not in css and ".alert {" not in css
