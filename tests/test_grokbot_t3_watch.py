@@ -629,7 +629,7 @@ def test_pass_budget_leaves_room_for_the_slowest_row():
 
 @pytest.mark.parametrize(
     "elapsed,enabled,expected_timeout,failed",
-    [(0, True, 1, 0), (257.6, True, 0.4, 0), (258, True, None, 1), (301, True, None, 1), (0, False, None, 0)],
+    [(0, True, 1, 0), (257.6, True, 0.4, 0), (258, True, None, 1), (301, True, None, 1), (0, False, 1, 0)],
 )
 def test_flush_lock_wait_respects_unit_budget_after_request_wakes(
     setup, monkeypatch, elapsed, enabled, expected_timeout, failed
@@ -639,7 +639,7 @@ def test_flush_lock_wait_respects_unit_budget_after_request_wakes(
     tmp_path, targets, ledger = setup
     _record(ledger, "r1", state="succeeded")
     runtime = SimpleNamespace(enabled=enabled, hub_token_file=tmp_path / "principal.token", messaging_configured=True)
-    runtime.hub_token_file.write_text("x" * 64)
+    _owner_file(runtime.hub_token_file, "x" * 64)
     from brigade import fleet_client, fleet_client_messages as messages
 
     monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: {"hub_url": "https://hub.example.test"})
@@ -678,6 +678,7 @@ def test_flush_lock_wait_respects_unit_budget_after_request_wakes(
         assert flushed[0]["token_file"] == str(runtime.hub_token_file)
         assert flushed[0]["authority"].token_file == str(runtime.hub_token_file)
         assert flushed[0]["lock_timeout"] == pytest.approx(expected_timeout)
+        assert flushed[0]["warn_inactive"] is False
 
 
 @pytest.mark.parametrize("configured", [False, None])

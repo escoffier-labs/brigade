@@ -245,7 +245,7 @@ def test_messaging_enable_requires_explicit_principal_and_token(tmp_path):
         {"hub_recipients": {"../host-a": "00000000-0000-4000-8000-000000000001"}},
         {"hub_recipients": {"host-a": "00000000000040008000000000000001"}},
         {"hub_recipients": {"host-a": "00000000-0000-4000-8000-00000000000A"}},
-        {"hub_recipients": {"host-a": "agent:example"}},
+        {"hub_recipients": {"host-a": "agent:Example"}},
         {"hub_token": "inline-secret"},
         {"hub_message_principal": None},
     ],
@@ -260,3 +260,13 @@ def test_messaging_runtime_rejects_unsafe_optional_configuration(tmp_path, overr
 def test_runtime_rejects_uuid_alias_keys(tmp_path, alias):
     with pytest.raises(c.T3DispatchError):
         rc.parse_runtime(runtime_payload(tmp_path, hub_recipients={alias: "00000000-0000-4000-8000-000000000001"}))
+
+
+@pytest.mark.parametrize("principal", ["agent:miller", "agent:a", "agent:" + "a" * 63])
+def test_hub_recipient_principals_are_exact_immutable_config_values(tmp_path, principal):
+    aliases = {"helper": principal}
+    runtime = rc.parse_runtime(runtime_payload(tmp_path, hub_recipients=aliases))
+    aliases["helper"] = "agent:other"
+    assert runtime.hub_recipients == {"helper": principal}
+    with pytest.raises(TypeError):
+        runtime.hub_recipients["helper"] = "agent:other"

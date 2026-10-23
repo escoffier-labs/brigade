@@ -2,6 +2,7 @@
 
 from dataclasses import replace
 import json
+import os
 import sys
 
 import pytest
@@ -141,6 +142,29 @@ def transport_settings(monkeypatch):
     return hook
 
 
+def forbid_spool_scope_scans(monkeypatch):
+    from pathlib import Path
+
+    directory = fleet_client.spool_path("node-id").parent
+    original_iterdir, original_glob, original_stat = Path.iterdir, Path.glob, Path.stat
+
+    def iterdir(path):
+        assert path != directory, "enumerated unrelated spool scopes"
+        return original_iterdir(path)
+
+    def glob(path, pattern, **kwargs):
+        assert path != directory, "globbed unrelated spool scopes"
+        return original_glob(path, pattern, **kwargs)
+
+    def stat(path, *args, **kwargs):
+        assert path != directory / "messages-unrelated.jsonl", "statted unrelated spool scope"
+        return original_stat(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "iterdir", iterdir)
+    monkeypatch.setattr(Path, "glob", glob)
+    monkeypatch.setattr(Path, "stat", stat)
+
+
 @pytest.mark.parametrize("name,args", HUB_TOOLS.items())
 def test_missing_hub_config_is_closed_without_breaking_dispatch(dispatch_make, name, args):
     tools, _, _ = dispatch_make()
@@ -169,16 +193,19 @@ def test_hub_tools_list_ack_reply_and_status(hub):
 
 
 @pytest.mark.parametrize("recipient", ["host-a"])
-def test_send_accepts_configured_alias_and_preserves_client_id(hub, recipient):
+@pytest.mark.parametrize("principal", [HUB_NODE_ID, "agent:miller"])
+def test_send_accepts_configured_alias_and_preserves_client_id(hub, recipient, principal):
     tools, calls, _, _, _, _ = hub
+    tools.runtime = replace(tools.runtime, hub_recipients={recipient: principal})
     args = {"alias": recipient, "subject": "subject", "body": "body", "client_id": "stable-id"}
     first = tools.call_tool("hub_message_send", args)
     second = tools.call_tool("hub_message_send", args)
     assert first["client_id"] == second["client_id"] == "stable-id"
     sends = [call for call in calls if call["action"] == "send"]
     assert len(sends) == 2
-    expected = HUB_NODE_ID
-    assert first["recipient"] == expected
+    expected = principal
+    assert "recipient" not in first
+    assert first["to"] == recipient
     assert all(call["to"] == expected and call["client_id"] == "stable-id" for call in sends)
 
 
@@ -842,7 +869,10 @@ def test_review_partial_inbox_and_ack_survive_recount_failure(hub, monkeypatch):
 @pytest.mark.usefixtures("t3_owner_reads", "t3_watch_log")
 @pytest.mark.parametrize("enabled", [True, False])
 @pytest.mark.parametrize("tool_name", ["hub_message_send", "test_only_reply"])
-def test_review_watcher_drains_queued_mutations_only_when_enabled(hub, tmp_path, monkeypatch, enabled, tool_name):
+@pytest.mark.parametrize("messaging", [True, False])
+def test_review_watcher_drains_queued_mutations_only_when_messaging_enabled(
+    hub, tmp_path, monkeypatch, enabled, tool_name, messaging
+):
     from brigade.grokbot_t3 import watch
     from tests.test_grokbot_t3_watch import Post
 
@@ -865,7 +895,16 @@ def test_review_watcher_drains_queued_mutations_only_when_enabled(hub, tmp_path,
     sent = tools.call_tool(tool_name, OPERATION_ARGS[tool_name])
     assert sent["queued"] is True
     online = True
-    tools.runtime = replace(tools.runtime, enabled=enabled)
+    tools.runtime = replace(tools.runtime, enabled=enabled, hub_messaging_enabled=messaging)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("messaging-off accessed identity/inbox/spool")
+
+    if not messaging:
+        monkeypatch.setattr(messages, "identity", forbidden)
+        monkeypatch.setattr(messages, "_spool_path", forbidden)
+        monkeypatch.setattr(messages, "list_messages", forbidden)
+    forbid_spool_scope_scans(monkeypatch)
     key = tmp_path / "wake.key"
     key.write_text("synthetic-wake-key")
     key.chmod(0o600)
@@ -877,7 +916,7 @@ def test_review_watcher_drains_queued_mutations_only_when_enabled(hub, tmp_path,
         log_path=tmp_path / "wake.jsonl",
         post=Post([]),
     )
-    assert len(delivered) == (1 if enabled else 0)
+    assert len(delivered) == (1 if messaging else 0)
 
 
 @pytest.mark.usefixtures("t3_owner_reads", "t3_watch_log")
@@ -1041,14 +1080,14 @@ def test_security_rotation_keeps_wake_scope_consistent(
         return 200, {"messages": [dict(row, id=ident, sender=sender)], "next_cursor": ident}
 
     if rotate_at == "before-persist":
-        original_pages = HubInbox.pages
+        original_pages = HubInbox._trusted_pages
 
         def pages(self, **kwargs):
             for page in original_pages(self, **kwargs):
                 rotate()
                 yield page
 
-        monkeypatch.setattr(HubInbox, "pages", pages)
+        monkeypatch.setattr(HubInbox, "_trusted_pages", pages)
     if rotate_at == "before-post":
         original_read_key = watch.read_key
 
@@ -1823,7 +1862,7 @@ def test_revoked_hub_authority_discards_partial_results(hub, monkeypatch, status
             if operation == "list":
                 return 200, {"messages": [row], "next_cursor": 1}
             return 200, {"message": row}
-        return status, {}
+        return status, {"code": "message_sender_inactive", "error": token}
 
     monkeypatch.setattr(messages, "_request", request)
     name = "hub_inbox_list" if operation == "list" else "hub_inbox_ack"
@@ -1831,3 +1870,150 @@ def test_revoked_hub_authority_discards_partial_results(hub, monkeypatch, status
     assert result["error"]["code"] == "hub-error"
     assert "messages" not in result and "acked" not in result and "not_pending" not in result
     assert seen == ["identity", operation, operation]
+
+
+@pytest.mark.parametrize("method", ["list", "pages"])
+@pytest.mark.parametrize("principal", [HUB_NODE_ID, "agent:other"])
+def test_public_inbox_cannot_accept_an_unproved_authority(hub, monkeypatch, method, principal):
+    from brigade.grokbot_t3.inbox import HubInbox
+    from brigade.fleet_client_message_credentials import MessageAuthority
+
+    _, calls, _, _, token_file, _ = hub
+    supplied = MessageAuthority.capture(str(token_file))
+    monkeypatch.setattr(messages, "identity", lambda **kwargs: {"principal": principal})
+    with pytest.raises(TypeError):
+        getattr(HubInbox(token_file=str(token_file)), method)(authority=supplied)
+    assert calls == []
+
+
+@pytest.mark.skipif(os.name != "posix", reason="POSIX spool locking: docs/grokbot-t3-dispatch.md:122")
+def test_foreground_send_waits_boundedly_and_never_sends_after_timeout(hub, monkeypatch):
+    import fcntl
+    import threading
+    import time
+    from brigade.grokbot_t3 import tools as module
+
+    tools, calls, _, token, _, _ = hub
+    path = messages._spool_path("node-id", token, hub_url="https://hub.example.test")
+    directory = fleet_client._ensure_private_dir(path.parent)
+    if directory is not None:
+        import os
+
+        os.close(directory)
+    lock_file = path.with_name(path.name + ".lock")
+    monkeypatch.setattr(module, "SEND_LOCK_TIMEOUT_SECONDS", 0.05, raising=False)
+    result = []
+    with lock_file.open("a") as held:
+        fcntl.flock(held, fcntl.LOCK_EX)
+        thread = threading.Thread(
+            target=lambda: result.append(tools.call_tool("hub_message_send", HUB_TOOLS["hub_message_send"]))
+        )
+        started = time.monotonic()
+        thread.start()
+        thread.join(0.5)
+        finished_while_locked = not thread.is_alive()
+        elapsed = time.monotonic() - started
+    thread.join(2)
+    assert finished_while_locked and elapsed < 0.5
+    assert result == [c.T3DispatchError("hub-error").public_error()]
+    assert not any(call["action"] == "send" for call in calls)
+    assert fleet_client._read_spool(path) == []
+
+
+def test_foreground_send_does_not_scan_other_spool_scopes(hub, monkeypatch):
+    tools, _, _, token, token_file, _ = hub
+    forbid_spool_scope_scans(monkeypatch)
+    result = tools.call_tool("hub_message_send", HUB_TOOLS["hub_message_send"])
+    assert "error" not in result and "recipient" not in result
+    assert all(
+        value not in json.dumps(result) for value in (HUB_NODE_ID, token, str(token_file), "https://hub.example.test")
+    )
+
+
+@pytest.mark.parametrize("timeout", [-1, True, float("inf"), float("nan"), "1"])
+def test_send_lock_timeout_validated_before_authority_or_spool(hub, monkeypatch, timeout):
+    def forbidden(*args, **kwargs):
+        pytest.fail("invalid timeout reached authority")
+
+    monkeypatch.setattr(messages, "_authority", forbidden)
+    with pytest.raises(fleet_client.FleetClientError, match="invalid fleet spool lock timeout"):
+        messages.send(
+            recipient=HUB_NODE_ID, subject="s", body="b", reference=None, priority="normal", lock_timeout=timeout
+        )
+
+
+@pytest.mark.parametrize("messaging", [False, True])
+@pytest.mark.parametrize(
+    "response",
+    [
+        (200, {"principal": "agent:grokbot"}),
+        (200, {"principal": "agent:other"}),
+        (401, {"error": "revoked"}),
+        (503, {}),
+    ],
+)
+def test_canary_proves_bounded_hub_identity_at_real_transport(hub, monkeypatch, tmp_path, messaging, response):
+    from brigade.grokbot_t3 import lifecycle
+    from tests.test_grokbot_t3_lifecycle import _config, SECRET
+
+    tools, calls, _, token, _, _ = hub
+    tools.runtime = replace(tools.runtime, hub_messaging_enabled=messaging)
+    monkeypatch.setattr(lifecycle, "_load_runtime_config", lambda target: (_config(), SECRET, tools.runtime))
+    monkeypatch.setattr(
+        lifecycle.grokbot_ops, "_request_json", lambda *a, **kw: {"ok": True, "service": c.SERVICE_NAME}
+    )
+    monkeypatch.setattr(lifecycle.grokbot_ops, "_anonymous_health_status", lambda *a: 401)
+    monkeypatch.setattr(lifecycle.grokbot_ops, "_tools_list", lambda *a: [{"name": name} for name in tools.inventory()])
+
+    def request(endpoint, credential, body, *, timeout=None):
+        assert messaging and body == {"action": "identity"}
+        assert 0 < timeout <= 1.0
+        calls.append(body)
+        return response
+
+    monkeypatch.setattr(messages, "_request", request)
+    result = lifecycle.canary(tmp_path)
+    if messaging and response != (200, {"principal": "agent:grokbot"}):
+        assert result == {"ok": False, "pack_id": c.PACK_ID, "reason": "hub-identity"}
+    else:
+        assert result["ok"] is True
+    assert calls == ([{"action": "identity"}] if messaging else [])
+    assert token not in json.dumps(result)
+
+
+@pytest.mark.usefixtures("t3_owner_reads", "t3_watch_log")
+def test_watch_private_nesting_reuses_one_proven_authority(hub, monkeypatch, tmp_path):
+    from brigade.grokbot_t3 import watch
+    from tests.test_grokbot_t3_watch import Post
+
+    tools, _, _, _, _, ledger = hub
+    original_identity, original_authority = messages.identity, messages._authority
+    proofs, used = [], []
+
+    def proof(**kwargs):
+        proofs.append(kwargs["authority"])
+        return original_identity(**kwargs)
+
+    def authority(value, *args, **kwargs):
+        used.append(value)
+        return original_authority(value, *args, **kwargs)
+
+    monkeypatch.setattr(messages, "identity", proof)
+    monkeypatch.setattr(messages, "_authority", authority)
+    key = tmp_path / "wake.key"
+    key.write_text("synthetic-wake-key")
+    key.chmod(0o600)
+    targets = [{"url": "https://wake.example.test/" + name, "key_file": str(key)} for name in ("first", "second")]
+    result = watch.run_watch_once(
+        runner=tools.runner,
+        runtime=tools.runtime,
+        ledger=ledger,
+        wake_targets={"default": targets},
+        log_path=tmp_path / "wake.jsonl",
+        post=Post([]),
+    )
+    assert result["woken"] == 2
+    # Inbox discovery nests across endpoints under one proof. Flush is a separate operation.
+    assert len(proofs) == 2 and proofs[0] is not proofs[1]
+    assert all(value is proofs[0] or value is proofs[1] for value in used)
+    assert sum(value is proofs[0] for value in used) >= 5

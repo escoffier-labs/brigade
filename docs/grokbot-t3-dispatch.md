@@ -96,7 +96,7 @@ paths with your configured values.
 | `hub_messaging_enabled` | Optional boolean, default `false`. Explicit opt-in for the four `hub_*` tools, independent of `enabled`. Requires `hub_token_file` and `hub_message_principal`. |
 | `hub_message_principal` | Optional declaration, accepted only as `agent:grokbot`. Required when messaging is enabled. This declaration does not verify token identity. |
 | `hub_wake_target` | Optional wake target name, default `default`. Must match a key in the wake config when Hub polling is enabled. |
-| `hub_recipients` | Optional map of up to 16 node-name aliases to node UUIDs, default `{}`. Example: `{"host-a":"00000000-0000-4000-8000-000000000001"}`. Destinations must be canonical UUIDs. Sends accept an exact configured alias only. UUIDs, agent names, case variants, prefixes, and paths are not accepted as substitutes. |
+| `hub_recipients` | Optional map of up to 16 name aliases to node UUIDs or agent principals, default `{}`. Example: `{"host-a":"00000000-0000-4000-8000-000000000001"}`. Destinations must be canonical UUIDs or exact `agent:[a-z][a-z0-9._-]{0,62}` principals, such as `agent:miller`. Sends accept an exact configured alias only. UUIDs, agent names, case variants, prefixes, and paths are not accepted as substitutes. |
 
 The service sandbox permits writes to the ledger and wake directories plus
 `writable_paths`. Include the actual t3-fleet state directory explicitly, such
@@ -119,14 +119,16 @@ separate queue, and replay verifies that the queue matches the captured endpoint
 and credential. Older token-only or node-only queues have no proven endpoint.
 They remain untouched for operator reconciliation and are never replayed using
 the current Hub configuration.
-Each watcher tick with messaging and dispatch enabled proves its drain authority
+Each watcher tick with messaging enabled proves its drain authority
 and attempts a drain after request notifications through
 the existing client, whose network drain deadline is 12 seconds. Lock acquisition
 waits at most 1 second, capped by the remaining 300-second unit budget after
 reserving the drain deadline and 30 seconds for shutdown. If that budget is
 exhausted, the tick records a failure and leaves queued mutations for retry.
-A disabled connector leaves queued mutations untouched. Drain errors do not stop
-inbox or request notifications.
+Disabling messaging leaves queued mutations untouched. Drain errors do not stop
+inbox or request notifications. Foreground sends wait at most 1 second for the
+spool lock and return a closed error on contention, without a background send.
+Both sends and watcher drains access only their own spool scope.
 Permit that spool directory in `writable_paths` if the service sandbox otherwise
 makes it read-only. The connector never adds credential values to tool results,
 request ledgers, wake payloads, logs, or subprocess arguments.
@@ -326,8 +328,8 @@ systemctl --user restart brigade-grokbot-t3-dispatch.service
 Submit, followup, answer, and approve then return `dispatch-disabled`.
 Hub messaging registration and calls use the independent
 `hub_messaging_enabled` flag. Watcher polling requires the same explicit opt-in
-and exact principal proof. Queue drains also require the dispatch flag to be
-enabled and prove a separate authority before replay.
+and exact principal proof. Queue drains use the messaging flag independently of
+dispatch and prove a separate authority before replay.
 `t3_interrupt` stays available while disabled so it can stop active work.
 
 To roll back the messaging extension, set `"hub_messaging_enabled": false`

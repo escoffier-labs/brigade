@@ -61,11 +61,31 @@ class HubInbox(MessageOperations):
         max_pages: int = POLL_MAX_PAGES,
         timeout: float = POLL_TIMEOUT_SECONDS,
         budget: float = POLL_BUDGET_SECONDS,
-        authority: MessageAuthority | None = None,
         deadline: float | None = None,
     ) -> Iterator[tuple[builtins.list[dict[str, Any]], int]]:
+        return self._trusted_pages(
+            after=after,
+            unacked=unacked,
+            max_pages=max_pages,
+            timeout=timeout,
+            budget=budget,
+            authority=self.capture(),
+            deadline=deadline,
+        )
+
+    def _trusted_pages(
+        self,
+        *,
+        authority: MessageAuthority,
+        after: int = 0,
+        unacked: bool = True,
+        max_pages: int = POLL_MAX_PAGES,
+        timeout: float = POLL_TIMEOUT_SECONDS,
+        budget: float = POLL_BUDGET_SECONDS,
+        deadline: float | None = None,
+    ) -> Iterator[tuple[builtins.list[dict[str, Any]], int]]:
+        # Only private nested operations may reuse the already proved authority.
         poll_deadline = time.monotonic() + budget
-        authority = self.capture() if authority is None else authority
         deadline = poll_deadline if deadline is None else min(poll_deadline, deadline)
         return self._pages(
             after=after, unacked=unacked, max_pages=max_pages, timeout=timeout, deadline=deadline, authority=authority
@@ -98,15 +118,23 @@ class HubInbox(MessageOperations):
         limit: int = 20,
         *,
         deadline: float | None = None,
-        authority: MessageAuthority | None = None,
+    ) -> dict[str, Any]:
+        return self._list(unacked_only, limit, deadline=deadline, authority=self.capture())
+
+    def _list(
+        self,
+        unacked_only: bool = True,
+        limit: int = 20,
+        *,
+        deadline: float | None = None,
+        authority: MessageAuthority,
     ) -> dict[str, Any]:
         poll_deadline = time.monotonic() + POLL_BUDGET_SECONDS
         deadline = poll_deadline if deadline is None else min(deadline, poll_deadline)
-        authority = self.capture() if authority is None else authority
         rows = []
         complete = False
         try:
-            for page, _ in self.pages(unacked=unacked_only, authority=authority, deadline=deadline):
+            for page, _ in self._trusted_pages(unacked=unacked_only, authority=authority, deadline=deadline):
                 rows.extend(page)
                 complete = not page
         except HubMessageError as error:
@@ -173,7 +201,7 @@ class HubInbox(MessageOperations):
         remaining = deadline - time.monotonic()
         if not remaining_ids and remaining > 0:
             try:
-                listing = self.list(limit=1, deadline=deadline, authority=authority)
+                listing = self._list(limit=1, deadline=deadline, authority=authority)
             except HubMessageError as error:
                 if error.code in {"hub_credential_changed", "hub_credential_invalid"}:
                     raise

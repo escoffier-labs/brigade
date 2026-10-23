@@ -25,6 +25,7 @@ STATUS_KEYS = ("request_id", "host", "state", "needs_attention", "thread_id", "u
 FALLBACK_CODE = "policy_rejected"
 FALLBACK_REASON = "model-admission-denied"
 _REOPEN_ATTEMPTS = 3
+SEND_LOCK_TIMEOUT_SECONDS = 1.0
 
 
 def compose_prompt(caller: str, prompt: str) -> str:
@@ -106,6 +107,11 @@ class T3DispatchTools:
             hub = HubInbox(
                 token_file=str(self.runtime.hub_token_file), recipients=self.runtime.hub_recipients, clock=self.now
             )
+            if name == "hub_message_send":
+                result = hub.send(**args, lock_timeout=SEND_LOCK_TIMEOUT_SECONDS, warn_inactive=False)
+                # The alias is the public address; keep its configured principal private.
+                result.pop("recipient", None)
+                return result
             return getattr(hub, method)(**args)
         except HubMessageError as error:
             raise c.T3DispatchError("hub-error", hub_code=error.hub_code) from None

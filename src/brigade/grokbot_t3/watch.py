@@ -138,7 +138,7 @@ def _wake_hub_inbox(
             try:
                 # Each endpoint discovers independently, so a failed endpoint can retain its
                 # bounded batch without blocking healthy endpoints at the same old ids.
-                for page, _ in hub.pages(after=after, authority=authority):
+                for page, _ in hub._trusted_pages(after=after, authority=authority):
                     if any(len(row["sender"].encode("utf-8")) > 256 for row in page):
                         raise c.T3DispatchError("hub-error")
                     hub.require_authority(authority)
@@ -329,7 +329,7 @@ def run_watch_once(
                     ledger.mark_notified(row["request_id"], state, clock())
             else:
                 ledger.record_status_poll(row["request_id"], failed=True)
-    if runtime is not None and runtime.enabled and runtime.messaging_configured:
+    if runtime is not None and runtime.messaging_configured:
         # Request wakes run first: a competing sender's spool lock must not hold them up.
         # Reserve the existing network-drain deadline and shutdown margin before waiting.
         remaining = (
@@ -348,6 +348,7 @@ def run_watch_once(
                         token_file=authority.token_file,
                         authority=authority,
                         lock_timeout=min(FLUSH_LOCK_TIMEOUT_SECONDS, remaining),
+                        warn_inactive=False,
                     )
                 finally:
                     hub.require_authority(authority)

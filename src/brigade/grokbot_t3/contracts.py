@@ -317,3 +317,73 @@ def parse_inbox(name: str, raw: object) -> dict[str, Any]:
 
 for _inbox_name in HUB_TOOLS:
     PARSERS[_inbox_name] = partial(parse_inbox, _inbox_name)
+
+
+# JSON Schema character bounds supplement, but cannot replace, the UTF-8 byte
+# limits enforced by PARSERS. These schemas describe only the four Hub tools.
+def _nullable(schema: dict[str, Any], default: Any = None) -> dict[str, Any]:
+    return {"anyOf": [schema, {"type": "null"}], "default": default}
+
+
+def _id_array(max_items: int) -> dict[str, Any]:
+    return {
+        "type": "array",
+        "minItems": 1,
+        "maxItems": max_items,
+        "uniqueItems": True,
+        "items": {"type": "integer", "minimum": 1, "maximum": 2**62 - 1},
+    }
+
+
+def _closed(properties: dict[str, Any], required: list[str]) -> dict[str, Any]:
+    return {"type": "object", "additionalProperties": False, "properties": properties, "required": required}
+
+
+def _text_schema(max_chars: int, *, multiline: bool = False) -> dict[str, Any]:
+    controls = (
+        r"[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]" if multiline else r"[\u0000-\u001f\u007f-\u009f]"
+    )
+    return {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": max_chars,
+        "allOf": [{"pattern": r"\S"}, {"not": {"pattern": controls}}],
+    }
+
+
+HUB_INPUT_SCHEMAS = {
+    "hub_inbox_list": _closed(
+        {
+            "unacked_only": _nullable({"type": "boolean"}, True),
+            "limit": _nullable({"type": "integer", "minimum": 1, "maximum": 50}, 20),
+        },
+        [],
+    ),
+    "hub_inbox_ack": _closed({"ids": _id_array(100)}, ["ids"]),
+    "hub_message_status": _closed({"ids": _id_array(50)}, ["ids"]),
+    "hub_message_send": _closed(
+        {
+            "alias": {
+                "type": "string",
+                "minLength": 1,
+                "maxLength": 64,
+                "pattern": r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}(?![\s\S])",
+                "not": {"pattern": r"^(?:[0-9a-fA-F]{32}|[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12})$"},
+            },
+            "subject": _text_schema(200),
+            "body": _text_schema(8192, multiline=True),
+            "ref": _nullable(
+                {"type": "string", "maxLength": 128, "pattern": r"^[A-Za-z0-9][A-Za-z0-9._:/#-]{0,127}(?![\s\S])"}
+            ),
+            "priority": _nullable({"type": "string", "enum": ["low", "normal", "high", "urgent"]}, "normal"),
+            "thread": _nullable(
+                {"type": "string", "maxLength": 128, "pattern": r"^[A-Za-z0-9][A-Za-z0-9._:/#-]{0,127}(?![\s\S])"}
+            ),
+            "kind": _nullable({"type": "string", "enum": ["message", "question", "completion"]}, "message"),
+            "client_id": _nullable(
+                {"type": "string", "minLength": 1, "maxLength": 64, "pattern": r"^[A-Za-z0-9_-]{1,64}(?![\s\S])"}
+            ),
+        },
+        ["alias", "subject", "body"],
+    ),
+}

@@ -219,11 +219,12 @@ def _hub_recipients(value: object) -> Mapping[str, str]:
             pass
         else:
             raise _bad()
-        try:
-            if str(UUID(node_id)) != node_id:
-                raise _bad()
-        except ValueError:
-            raise _bad() from None
+        if re.fullmatch(r"agent:[a-z][a-z0-9._-]{0,62}", node_id) is None:
+            try:
+                if str(UUID(node_id)) != node_id:
+                    raise _bad()
+            except ValueError:
+                raise _bad() from None
         parsed[name] = node_id
     return MappingProxyType(parsed)
 

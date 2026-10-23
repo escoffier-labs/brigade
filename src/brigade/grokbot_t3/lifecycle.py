@@ -156,7 +156,40 @@ def _drop_none(values: dict[str, Any]) -> dict[str, Any]:
     return {key: value for key, value in values.items() if value is not None}
 
 
-def _register_tools(server: Any, tools: T3DispatchTools) -> None:
+def _register_tools(tools: T3DispatchTools) -> list[Any]:
+    from mcp.server.mcpserver.tools import Tool
+    from mcp.server.mcpserver.utilities.func_metadata import ArgModelBase
+    from pydantic import ConfigDict, create_model, model_validator
+
+    def hub_tool(handler: Callable[..., Any]) -> Any:
+        name = handler.__name__
+        schema = c.HUB_INPUT_SCHEMAS[name]
+
+        def validate_arguments(cls: Any, value: Any) -> dict[str, Any]:
+            try:
+                return c.PARSERS[name](value)
+            except c.T3DispatchError:
+                raise ValueError("Tool input failed validation") from None
+
+        # MCP 2.x accepts public Tool objects in MCPServer(tools=...). Use its
+        # public argument model and our runtime parser so SDK coercion cannot
+        # erase unknown keys or weaken integer, uniqueness, or byte validation.
+        fields = {key: (Any, ... if key in schema["required"] else None) for key in schema["properties"]}
+        model = create_model(
+            f"{name}Arguments",
+            __base__=ArgModelBase,
+            __config__=ConfigDict(extra="forbid"),
+            __validators__={"validate_arguments": model_validator(mode="before")(validate_arguments)},
+            **fields,
+        )
+        tool = Tool.from_function(handler, description=_TOOL_DESCRIPTIONS[name])
+        return tool.model_copy(
+            update={
+                "parameters": schema,
+                "fn_metadata": tool.fn_metadata.model_copy(update={"arg_model": model}),
+            }
+        )
+
     def t3_capacity() -> dict[str, Any]:
         return tools.call_tool("t3_capacity", {})
 
@@ -244,6 +277,7 @@ def _register_tools(server: Any, tools: T3DispatchTools) -> None:
     def hub_message_status(ids: list[int]) -> dict[str, Any]:
         return tools.call_tool("hub_message_status", {"ids": ids})
 
+    registered = []
     for handler in (
         hub_inbox_list,
         hub_inbox_ack,
@@ -263,18 +297,22 @@ def _register_tools(server: Any, tools: T3DispatchTools) -> None:
         if name not in tools.inventory():
             continue
         handler.__doc__ = _TOOL_DESCRIPTIONS[name]
-        server.tool(name=name, description=_TOOL_DESCRIPTIONS[name])(handler)
+        registered.append(
+            hub_tool(handler)
+            if name in c.HUB_TOOLS
+            else Tool.from_function(handler, description=_TOOL_DESCRIPTIONS[name])
+        )
+    return registered
 
 
 def build_app(config: T3DispatchListenerConfig, tools: T3DispatchTools) -> Callable[..., Any]:
     MCPServer, JSONResponse, _, TransportSecuritySettings = grokbot_mcp._load_mcp()
-    server = MCPServer(c.SERVICE_NAME, version="1")
+    server = MCPServer(c.SERVICE_NAME, version="1", tools=_register_tools(tools))
 
     @server.custom_route("/health", methods=["GET"])
     async def health(_: Any) -> Any:
         return JSONResponse({"ok": True, "service": c.SERVICE_NAME})
 
-    _register_tools(server, tools)
     allowed_hosts = list(dict.fromkeys((*grokbot_mcp.SDK_LOOPBACK_ALLOWED_HOSTS, *config.allowed_hosts)))
     if not grokbot_mcp._is_loopback(config.bind_host):
         allowed_hosts = list(config.allowed_hosts)
@@ -514,6 +552,12 @@ def canary(target: Path, *, timeout: int | None = None) -> dict[str, Any]:
     if names != set(expected):
         result["reason"] = "inventory-mismatch"
         return result
+    if runtime.messaging_configured:
+        try:
+            HubInbox(token_file=str(runtime.hub_token_file)).capture()
+        except HubMessageError:
+            result["reason"] = "hub-identity"
+            return result
     result.update({"ok": True, "health": health, "auth_rejected_without_bearer": True, "tools": sorted(expected)})
     return result
 
