@@ -12,7 +12,10 @@ from .fleet_ask_user import AskUser, AskUserError
 from .untrusted import scan_untrusted, wrap_untrusted
 
 DEFAULT_PORT = 8933
-_CURSOR_RESTART_HINT = "the paging cursor expired or is not valid for this caller; restart the walk without a cursor"
+_CURSOR_RESTART_HINT = (
+    "the paging cursor expired or is not valid for this caller; restart the walk without a cursor, "
+    "then send the same filter and all with every continuation"
+)
 _SAFE_ERROR_CODES = frozenset(
     {
         "hub_unavailable",
@@ -51,7 +54,8 @@ def tool_specs() -> list[dict[str, Any]]:
         ),
         (
             "fleet_who",
-            "List sessions and permitted recipients; pass next_cursor as cursor to continue a snapshot. "
+            "List sessions and permitted recipients; pass next_cursor as cursor, with the same filter and all, "
+            "to continue a snapshot. "
             "On paging_cursor_expired, restart the walk without a cursor.",
             {
                 "filter": {"type": "string"},
@@ -124,7 +128,7 @@ def tool_specs() -> list[dict[str, Any]]:
         ),
         (
             "fleet_claims",
-            "List a stable snapshot of repository claims; pass next_cursor as cursor to continue. "
+            "List a stable snapshot of repository claims; pass next_cursor as cursor, with the same all, to continue. "
             "On paging_cursor_expired, restart the walk without a cursor.",
             {
                 "all": boolean,

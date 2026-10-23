@@ -1125,7 +1125,10 @@ def test_consumed_directory_cursor_is_typed_and_restartable(stations, hub, actio
         "status": 400,
         "transient": False,
         "permanent": True,
-        "hint": "the paging cursor expired or is not valid for this caller; restart the walk without a cursor",
+        "hint": (
+            "the paging cursor expired or is not valid for this caller; restart the walk without a cursor, "
+            "then send the same filter and all with every continuation"
+        ),
     }
     assert call(stations[0], f"fleet_{action}", limit=1)["next_cursor"]
 
@@ -1257,3 +1260,14 @@ def test_cli_rejects_reserved_operator_question_kind(capsys):
     assert error.value.code == 2
     output = capsys.readouterr().err
     assert "invalid choice: 'operator_question'" in output
+
+
+def test_paging_tools_state_the_cursor_query_binding():
+    # Cursors are bound to action, all and the case-folded filter (fleet_hub_paging.query_hash).
+    # A caller that drops either on a continuation gets paging_cursor_expired and must be told why.
+    from brigade import fleet_mcp
+
+    specs = {spec["name"]: spec["description"] for spec in fleet_mcp.tool_specs()}
+    assert "same filter and all" in specs["fleet_who"]
+    assert "same all" in specs["fleet_claims"]
+    assert "same filter and all" in fleet_mcp._CURSOR_RESTART_HINT
