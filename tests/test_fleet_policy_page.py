@@ -1341,10 +1341,11 @@ def test_policy_route_is_read_only_under_tailscale_identity(tmp_path):
         assert status == 200
         assert "read-only" in page
         assert "<button" not in page
-        status, _headers, text = hub.form(
+        status, response_headers, text = hub.form(
             {"scope": "defaults", "action": "save", "expected_version": "1", "csrf": "x"}, extra=headers
         )
         assert status == 403
+        assert response_headers["connection"] == "close"
         assert "read-only" in text
 
 

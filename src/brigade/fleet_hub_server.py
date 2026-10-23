@@ -24,6 +24,8 @@ class BoundedThreadingHTTPServer(ThreadingHTTPServer):
     final WAL close (checkpoint, sync, and file deletion before a response).
     It holds no transaction. Shutdown releases it after admitted handlers
     finish, including daemon handlers that outlive ``server_close``.
+    A long-poll message waiter can stay admitted for up to MAX_WAIT_MS
+    (20 s), so the idle connection can outlive ``server_close`` by that long.
     """
 
     def __init__(

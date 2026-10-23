@@ -237,13 +237,22 @@ def test_server_close_keeps_database_open_until_admitted_handlers_finish(connect
     assert not wal.exists(), "the last admitted handler must release the shutdown connection"
 
 
-def test_socket_startup_failure_releases_database(tmp_path, monkeypatch):
+def test_schema_read_failure_releases_database(tmp_path, monkeypatch):
     db = tmp_path / "hub.db"
 
-    def fail_bind(self):
-        raise OSError("fixture bind failed")
+    class FailingSchemaConnection(sqlite3.Connection):
+        def execute(self, *args, **kwargs):
+            raise sqlite3.OperationalError("fixture schema read failed")
 
-    monkeypatch.setattr(fleet_hub.ThreadingHTTPServer, "server_bind", fail_bind)
-    with pytest.raises(OSError, match="fixture bind failed"):
-        fleet_hub.make_server("127.0.0.1", 0, db, "fixture-admin-token")
-    assert not Path(f"{db}-wal").exists(), "failed startup must not retain the WAL connection"
+    conn = sqlite3.connect(db, factory=FailingSchemaConnection)
+    monkeypatch.setattr(sqlite3, "connect", lambda *args, **kwargs: conn)
+    server_type = fleet_hub.BoundedThreadingHTTPServer
+    server = server_type.__new__(server_type)
+    try:
+        with pytest.raises(sqlite3.OperationalError, match="fixture schema read failed"):
+            server.__init__(("127.0.0.1", 0), BaseRequestHandler, db_path=db)
+        assert server._db_keepalive is None, "failed startup must release the idle connection"
+        with pytest.raises(sqlite3.ProgrammingError, match="closed database"):
+            sqlite3.Connection.execute(conn, "SELECT 1")
+    finally:
+        conn.close()
