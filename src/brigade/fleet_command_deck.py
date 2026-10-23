@@ -1786,6 +1786,7 @@ def _document(
     view: DeckView | None = None,
     worklore_enabled: bool | None = None,
     extra_css: str = "",
+    script: str = "",
 ) -> str:
     """Every Deck page: its body inside the shared two-column shell.
 
@@ -1809,4 +1810,5 @@ def _document(
         as_of=_stamp(now),
         refresh_seconds=10 if refresh else None,
         extra_css=_STYLE + extra_css,
+        script=script,
     )
