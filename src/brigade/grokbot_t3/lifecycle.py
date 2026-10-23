@@ -14,6 +14,8 @@ from typing import Any, Callable, Mapping
 
 from .. import grokbot_mcp, grokbot_ops
 from ..isolated_exec import module_argv, trusted_cwd
+from ..hub_messages import HubMessageError
+from .inbox import HubInbox
 from . import contracts as c
 from . import runtime_config
 from .fleet import FleetCallError, FleetRunner, FleetTimeout
@@ -321,6 +323,14 @@ def _load_validated_instance(target: Path) -> dict[str, Any]:
     return validated
 
 
+def _require_runtime_identity(runtime: Runtime) -> None:
+    if runtime.messaging_configured:
+        try:
+            HubInbox(token_file=str(runtime.hub_token_file)).capture()
+        except HubMessageError:
+            raise c.T3DispatchError("hub-error") from None
+
+
 def _tools_for(runtime: Runtime) -> T3DispatchTools:
     return T3DispatchTools(
         runtime=runtime,
@@ -353,6 +363,7 @@ def build_listener_from_target(
         bearer=bearer,
         runtime_path=instance["runtime_path"],
     )
+    _require_runtime_identity(runtime)
     return config, _tools_for(runtime)
 
 
@@ -440,6 +451,12 @@ def doctor(target: Path, *, timeout: int | None = None) -> list[dict[str, str]]:
     except (c.T3DispatchError, grokbot_packs.PackError, grokbot_mcp.ConfigurationError, OSError, ValueError, KeyError):
         record("config", False)
         return checks
+    if runtime.messaging_configured:
+        try:
+            _require_runtime_identity(runtime)
+            record("hub-identity", True)
+        except c.T3DispatchError:
+            record("hub-identity", False)
     parent = grokbot_packs.instance_config_path(target, c.PACK_ID).parent
     record("permissions", os.access(parent, os.W_OK) if parent.is_dir() else False)
     try:

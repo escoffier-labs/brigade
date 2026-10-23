@@ -38,13 +38,9 @@ def hub(dispatch_make, tmp_path, monkeypatch):
         hub_token_file=str(token_file),
         hub_recipients={"host-a": HUB_NODE_ID},
     )
-    # UNIT-ONLY routing: bypass the deliberately closed integration gate with fake
-    # transport. This does not establish Hub-verified identity or deployment readiness.
-    from brigade.grokbot_t3 import tools as tools_module
     from brigade.grokbot_t3.inbox import HubInbox
     from brigade.hub_messages import HubMessageError
 
-    monkeypatch.setattr(tools_module, "_require_hub_identity", lambda: None)
     public_call = tools.call_tool
 
     def call_with_internal_reply(name, args):
@@ -77,6 +73,8 @@ def hub(dispatch_make, tmp_path, monkeypatch):
     )
 
     def request(hub_url, credential, body, *, timeout=None):
+        if body["action"] == "identity":
+            return 200, {"principal": "agent:grokbot"}
         assert credential == token
         calls.append(dict(body, timeout=timeout))
         action = body["action"]
@@ -87,7 +85,7 @@ def hub(dispatch_make, tmp_path, monkeypatch):
             row["acked_at"] = "2026-10-20T12:01:00+00:00"
             return 200, {"message": row}
         if action == "sent":
-            return 200, {"messages": [dict(row, id=2, recipient="host-a")], "next_cursor": 2}
+            return 200, {"messages": [dict(row, id=body["ids"][0], recipient="host-a")], "next_cursor": body["ids"][0]}
         return 200, {
             "message": dict(
                 row, id=2, client_id=body["client_id"], sender="agent:example", recipient=body.get("to", "host-a")
@@ -114,13 +112,25 @@ def transport_settings(monkeypatch):
     original_settings, original_transport = credentials.message_settings, messages._authority
     hook = SimpleNamespace(load=original_settings)
     active = False
+    proving = False
+    original_identity = messages.identity
+
+    def identity(**kwargs):
+        nonlocal proving
+        proving = True
+        try:
+            return original_identity(**kwargs)
+        finally:
+            proving = False
+
+    monkeypatch.setattr(messages, "identity", identity)
 
     def settings(*args, **kwargs):
         return hook.load(*args, **kwargs) if active else original_settings(*args, **kwargs)
 
     def transport(*args, **kwargs):
         nonlocal active
-        active = True
+        active = not proving  # These regressions perturb message IO; identity has its own rotation tests.
         try:
             return original_transport(*args, **kwargs)
         finally:
@@ -185,6 +195,8 @@ def test_security_message_scope_change_during_request_closes_result(
     requests = []
 
     def request(hub_url, credential, body, *, timeout=None):
+        if body["action"] == "identity":
+            return 200, {"principal": "agent:grokbot"}
         requests.append((hub_url, credential, dict(body)))
         if change == "endpoint":
             hub_settings["hub_url"] = "https://other.example.test"
@@ -256,6 +268,8 @@ def test_security_message_scope_checks_loaded_transport_pair(
         return loaded
 
     def request(hub_url, credential, body, *, timeout=None):
+        if body["action"] == "identity":
+            return 200, {"principal": "agent:grokbot"}
         requests.append((hub_url, credential))
         if body["action"] == "sent":
             return 200, {"messages": [row], "next_cursor": row["id"]}
@@ -282,6 +296,8 @@ def test_security_status_transport_failure_still_checks_current_scope(hub, hub_s
     _, _, _, token, token_file, _ = hub
 
     def request(hub_url, credential, body, *, timeout=None):
+        if body["action"] == "identity":
+            return 200, {"principal": "agent:grokbot"}
         if change == "endpoint":
             hub_settings["hub_url"] = "https://other.example.test"
         else:
@@ -332,6 +348,8 @@ def test_security_message_projection_scope_change_closes_complete_operation(
             raise HubMessageError("hub_unavailable", "message_not_found")
 
     def request(hub_url, credential, body, *, timeout=None):
+        if body["action"] == "identity":
+            return 200, {"principal": "agent:grokbot"}
         requests.append((hub_url, credential, dict(body)))
         if queued:
             return 503, {}
@@ -582,6 +600,8 @@ def test_hub_poll_bounds_pagination_and_deadline(hub, tmp_path, monkeypatch, ela
     calls = []
 
     def request(hub_url, credential, body, *, timeout=None):
+        if body["action"] == "identity":
+            return 200, {"principal": "agent:grokbot"}
         nonlocal elapsed
         calls.append(timeout)
         elapsed += elapsed_per_page
@@ -675,6 +695,8 @@ def test_review_failed_wake_does_not_starve_other_target_and_survives_ack(hub, t
     scans = []
 
     def request(hub_url, credential, body, *, timeout=None):
+        if body["action"] == "identity":
+            return 200, {"principal": "agent:grokbot"}
         scans.append(body["after"])
         page = [row for row in rows if row["id"] > body["after"]][:100]
         return 200, {"messages": page, "next_cursor": page[-1]["id"] if page else body["after"]}
@@ -733,6 +755,8 @@ def test_review_inbox_projection_fits_public_bytes_and_can_progress(hub, monkeyp
     rows = [dict(template, id=ident, body=body, subject="é" * 100, ref="r" * 500) for ident in range(1, 21)]
 
     def request(hub_url, credential, value, *, timeout=None):
+        if value["action"] == "identity":
+            return 200, {"principal": "agent:grokbot"}
         if value["action"] == "ack":
             row = next(row for row in rows if row["id"] == value["id"])
             row["acked_at"] = "2026-10-20T12:01:00+00:00"
@@ -758,6 +782,8 @@ def test_review_list_and_ack_totals_require_complete_scan(hub, monkeypatch, pend
     rows = [dict(template, id=ident) for ident in range(1, pending + 1)]
 
     def request(hub_url, credential, body, *, timeout=None):
+        if body["action"] == "identity":
+            return 200, {"principal": "agent:grokbot"}
         if body["action"] == "ack":
             rows[0]["acked_at"] = "2026-10-20T12:01:00+00:00"
             return 200, {"message": rows[0]}
@@ -779,6 +805,8 @@ def test_review_incomplete_history_labels_retained_window(hub, monkeypatch):
     tools, _, template, _, _, _ = hub
 
     def request(hub_url, credential, body, *, timeout=None):
+        if body["action"] == "identity":
+            return 200, {"principal": "agent:grokbot"}
         rows = [dict(template, id=ident) for ident in range(body["after"] + 1, body["after"] + 101)]
         return 200, {"messages": rows, "next_cursor": rows[-1]["id"]}
 
@@ -793,6 +821,8 @@ def test_review_partial_inbox_and_ack_survive_recount_failure(hub, monkeypatch):
     tools, _, row, _, _, _ = hub
 
     def request(hub_url, credential, body, *, timeout=None):
+        if body["action"] == "identity":
+            return 200, {"principal": "agent:grokbot"}
         if body["action"] == "ack":
             return 200, {"message": row}
         if body["after"] == 0 and row["acked_at"] is None:
@@ -821,6 +851,8 @@ def test_review_watcher_drains_queued_mutations_only_when_enabled(hub, tmp_path,
     delivered = []
 
     def request(hub_url, credential, body, *, timeout=None):
+        if body["action"] == "identity":
+            return 200, {"principal": "agent:grokbot"}
         if body["action"] in {"send", "reply"}:
             if not online:
                 return 503, {}
@@ -951,6 +983,8 @@ def test_security_rotation_discards_foreground_scan(hub, monkeypatch, caplog, ro
     fetched = 0
 
     def request(hub_url, credential, body, *, timeout=None):
+        if body["action"] == "identity":
+            return 200, {"principal": "agent:grokbot"}
         nonlocal fetched
         fetched += 1
         if fetched == rotate_at:
@@ -996,6 +1030,8 @@ def test_security_rotation_keeps_wake_scope_consistent(
             hub_settings["hub_url"] = "https://other.example.test"
 
     def request(hub_url, credential, body, *, timeout=None):
+        if body["action"] == "identity":
+            return 200, {"principal": "agent:grokbot"}
         nonlocal fetched
         fetched += 1
         if fetched == (1 if rotate_at == "first-fetch" else 2) and rotate_at.endswith("fetch"):
@@ -1061,6 +1097,8 @@ def test_security_ack_deadline_preserves_confirmed_results(hub, monkeypatch, cap
     calls = []
 
     def request(hub_url, credential, body, *, timeout=None):
+        if body["action"] == "identity":
+            return 200, {"principal": "agent:grokbot"}
         nonlocal elapsed
         calls.append((dict(body), timeout))
         if body["action"] == "list":
@@ -1105,6 +1143,8 @@ def test_security_ack_recount_shares_batch_deadline(hub, monkeypatch, setup_dela
         return original_scope(self)
 
     def request(hub_url, credential, body, *, timeout=None):
+        if body["action"] == "identity":
+            return 200, {"principal": "agent:grokbot"}
         nonlocal elapsed
         calls.append((body["action"], timeout))
         if body["action"] == "ack":
@@ -1147,6 +1187,8 @@ def test_security_ack_rotation_closes_batch_after_request(hub, monkeypatch, capl
     requests = []
 
     def request(hub_url, credential, body, *, timeout=None):
+        if body["action"] == "identity":
+            return 200, {"principal": "agent:grokbot"}
         requests.append((credential, dict(body)))
         if body["action"] == "ack":
             if body["id"] == rotate_at:
@@ -1197,6 +1239,8 @@ def test_security_ack_checks_loaded_transport_credential(
         return loaded
 
     def request(hub_url, credential, body, *, timeout=None):
+        if body["action"] == "identity":
+            return 200, {"principal": "agent:grokbot"}
         requests.append((credential, dict(body)))
         if body["action"] == "ack":
             return 200, {"message": dict(row, id=body["id"])}
@@ -1222,6 +1266,8 @@ def test_security_ack_rotation_during_recount_closes_result(hub, monkeypatch, ca
     requests = []
 
     def request(hub_url, credential, body, *, timeout=None):
+        if body["action"] == "identity":
+            return 200, {"principal": "agent:grokbot"}
         requests.append((credential, dict(body)))
         if body["action"] == "ack":
             return 200, {"message": row}
@@ -1285,6 +1331,8 @@ def test_security_ack_endpoint_switch_closes_batch(hub, hub_settings, monkeypatc
     original_hub = hub_settings["hub_url"]
 
     def request(hub_url, credential, body, *, timeout=None):
+        if body["action"] == "identity":
+            return 200, {"principal": "agent:grokbot"}
         requests.append((hub_url, dict(body)))
         if body["action"] == "ack":
             if body["id"] == switch_at:
@@ -1331,6 +1379,8 @@ def test_security_inbox_checks_loaded_endpoint(
         return loaded
 
     def request(hub_url, credential, body, *, timeout=None):
+        if body["action"] == "identity":
+            return 200, {"principal": "agent:grokbot"}
         requests.append((hub_url, dict(body)))
         if body["action"] == "ack":
             return 200, {"message": dict(row, id=body["id"])}
@@ -1353,6 +1403,8 @@ def test_security_ack_endpoint_switch_during_recount(hub, hub_settings, monkeypa
     original_hub = hub_settings["hub_url"]
 
     def request(hub_url, credential, body, *, timeout=None):
+        if body["action"] == "identity":
+            return 200, {"principal": "agent:grokbot"}
         requests.append((hub_url, body["action"]))
         if body["action"] == "ack":
             return 200, {"message": row}
@@ -1375,6 +1427,8 @@ def test_security_endpoint_switch_discards_list_pages(hub, hub_settings, monkeyp
     fetched = 0
 
     def request(hub_url, credential, body, *, timeout=None):
+        if body["action"] == "identity":
+            return 200, {"principal": "agent:grokbot"}
         nonlocal fetched
         fetched += 1
         if fetched == switch_at:
@@ -1457,6 +1511,8 @@ def test_pages_capture_at_invocation_before_iteration(hub, monkeypatch):
     _, calls, _, _, token_file, _ = hub
 
     def request(hub, token, body, **kwargs):
+        if body["action"] == "identity":
+            return 200, {"principal": "agent:grokbot"}
         calls.append(dict(body))
         return 200, {"messages": [], "next_cursor": body["after"]}
 
@@ -1504,6 +1560,8 @@ def test_transient_authority_failure_ends_hub_wake_invocation_but_not_request_wa
         return value
 
     def request(endpoint, token, body, **kwargs):
+        if body["action"] == "identity":
+            return 200, {"principal": "agent:grokbot"}
         nonlocal armed, fired
         if stage == "fetch" and not fired:
             armed = fired = True
@@ -1537,3 +1595,214 @@ def test_transient_authority_failure_ends_hub_wake_invocation_but_not_request_wa
         assert ledger.pending_hub_wake(scope, target_id) == [{"id": row["id"], "sender": row["sender"]}]
     assert watch.run_watch_once(**kwargs)["woken"] == 2
     assert [call[2].get("kind") for call in post.calls[1:]] == ["hub-inbox", "hub-inbox"]
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        (200, {"principal": "agent:grokbot"}),
+        (200, {"principal": "agent:other"}),
+        (200, {"principal": HUB_NODE_ID}),
+        (200, {"principal": "agent:grokbot", "extra": True}),
+        (200, {}),
+        (401, {"error": "revoked"}),
+        (404, {}),
+        (503, {}),
+    ],
+)
+@pytest.mark.parametrize("name,args", HUB_TOOLS.items())
+def test_identity_proof_precedes_messages_and_fails_closed(hub, monkeypatch, response, name, args):
+    tools, _, _, _, _, _ = hub
+    transport = messages._request
+    seen = []
+
+    def request(endpoint, token, body, **kwargs):
+        seen.append(body["action"])
+        if body["action"] == "identity":
+            return response
+        return transport(endpoint, token, body, **kwargs)
+
+    monkeypatch.setattr(messages, "_request", request)
+    result = tools.call_tool(name, args)
+    assert seen[0] == "identity"
+    if response == (200, {"principal": "agent:grokbot"}):
+        assert "error" not in result
+        assert len(seen) > 1
+    else:
+        assert result == c.T3DispatchError("hub-error").public_error()
+        assert seen == ["identity"]
+
+
+@pytest.mark.parametrize("fresh", [False, True])
+def test_every_operation_reproves_identity_after_between_request_rotation(hub, monkeypatch, fresh):
+    from brigade.grokbot_t3.inbox import HubInbox
+    from brigade.hub_messages import HubMessageError
+
+    _, _, _, token, token_file, _ = hub
+    transport = messages._request
+    proofs = []
+    authorities = []
+    original_identity = messages.identity
+
+    def identity(**kwargs):
+        authorities.append(kwargs["authority"])
+        return original_identity(**kwargs)
+
+    def request(endpoint, credential, body, **kwargs):
+        if body["action"] == "identity":
+            proofs.append(credential == token)
+            return 200, {"principal": "agent:grokbot" if credential == token else "agent:other"}
+        return transport(endpoint, credential, body, **kwargs)
+
+    monkeypatch.setattr(messages, "identity", identity)
+    monkeypatch.setattr(messages, "_request", request)
+    inbox = HubInbox(token_file=str(token_file))
+    assert "messages" in inbox.list()
+    token_file.write_text("y" * 64)
+    if fresh:
+        inbox = HubInbox(token_file=str(token_file))
+    with pytest.raises(HubMessageError):
+        inbox.list()
+    assert proofs == [True, False]
+    assert authorities[0] is not authorities[1]
+
+
+@pytest.mark.parametrize("name,args", HUB_TOOLS.items())
+def test_rotation_during_identity_proof_never_reaches_message_transport(hub, monkeypatch, name, args):
+    tools, _, _, _, token_file, _ = hub
+    seen = []
+
+    def request(endpoint, credential, body, **kwargs):
+        seen.append(body["action"])
+        token_file.write_text("y" * 64)
+        return 200, {"principal": "agent:grokbot"}
+
+    monkeypatch.setattr(messages, "_request", request)
+    assert tools.call_tool(name, args) == c.T3DispatchError("hub-error").public_error()
+    assert seen == ["identity"]
+
+
+@pytest.mark.parametrize("name,args", HUB_TOOLS.items())
+def test_identity_and_every_message_call_share_exact_authority(hub, monkeypatch, name, args):
+    tools, _, _, _, _, _ = hub
+    identity, call = messages.identity, messages._authority
+    proven, used = [], []
+
+    def proof(**kwargs):
+        proven.append(kwargs["authority"])
+        return identity(**kwargs)
+
+    def authority(value, *args, **kwargs):
+        used.append(value)
+        return call(value, *args, **kwargs)
+
+    monkeypatch.setattr(messages, "identity", proof)
+    monkeypatch.setattr(messages, "_authority", authority)
+    assert "error" not in tools.call_tool(name, args)
+    assert len(proven) == 1 and len(used) > 1
+    assert all(value is proven[0] for value in used)
+
+
+@pytest.mark.parametrize("alias", [HUB_NODE_ID, HUB_NODE_ID.replace("-", "")])
+def test_configured_uuid_alias_is_rejected_before_client(hub, monkeypatch, alias):
+    from brigade.grokbot_t3 import tools as module
+
+    tools, _, _, _, _, _ = hub
+    tools.runtime = replace(tools.runtime, hub_recipients={alias: HUB_NODE_ID})
+    monkeypatch.setattr(module, "HubInbox", lambda **kwargs: pytest.fail("UUID constructed client"))
+    assert (
+        tools.call_tool("hub_message_send", {"alias": alias, "subject": "s", "body": "b"})["error"]["code"]
+        == "invalid_request"
+    )
+
+
+@pytest.mark.parametrize("failure", ["wrong", "unsupported", "unavailable"])
+def test_enabled_startup_rejects_unproved_identity(hub, monkeypatch, failure):
+    from brigade.grokbot_t3 import lifecycle
+
+    tools, _, _, _, _, _ = hub
+    if failure == "unsupported":
+        monkeypatch.delattr(messages, "identity")
+    else:
+
+        def request(endpoint, token, body, **kwargs):
+            assert body == {"action": "identity"}
+            return (200, {"principal": "agent:other"}) if failure == "wrong" else (503, {})
+
+        monkeypatch.setattr(messages, "_request", request)
+    monkeypatch.setattr(
+        lifecycle, "_load_validated_instance", lambda target: {"bind": "127.0.0.1:8778", "runtime_path": "unused"}
+    )
+    monkeypatch.setattr(lifecycle, "load_runtime", lambda path: tools.runtime)
+    monkeypatch.setattr(lifecycle.grokbot_mcp, "load_bearer", lambda **kwargs: "synthetic-origin-bearer-" * 2)
+    with pytest.raises(c.T3DispatchError) as error:
+        lifecycle.build_listener_from_target(
+            tools.runtime.ledger_path.parent,
+            bind=None,
+            allowed_hosts=[],
+            allowed_origins=[],
+            bearer_file=None,
+            bearer_env=None,
+        )
+    assert error.value.code == "hub-error"
+
+
+@pytest.mark.parametrize("name,args", [("hub_inbox_list", {}), ("hub_message_status", {"ids": [1]})])
+def test_reads_and_identity_never_access_node_credentials_or_spool(hub, monkeypatch, name, args):
+    tools, _, _, _, token_file, _ = hub
+    from brigade import fleet_client_message_credentials as credentials
+
+    original = credentials.message_settings
+
+    def settings(path, *args, **kwargs):
+        assert path == str(token_file)
+        return original(path, *args, **kwargs)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("read accessed spool or drain")
+
+    monkeypatch.setattr(credentials, "message_settings", settings)
+    monkeypatch.setattr(messages, "flush_credential", forbidden)
+    monkeypatch.setattr(messages, "has_pending", forbidden)
+    monkeypatch.setattr(messages, "_spool_path", forbidden)
+    monkeypatch.setattr(fleet_client, "spool_path", forbidden)
+    monkeypatch.setattr(fleet_client, "_read_spool", forbidden)
+    assert "error" not in tools.call_tool(name, args)
+
+
+@pytest.mark.usefixtures("t3_owner_reads", "t3_watch_log")
+def test_watch_lifecycle_identity_failure_preserves_request_wakes(hub, monkeypatch, tmp_path):
+    from brigade.grokbot_t3 import lifecycle
+    from tests.test_grokbot_t3_watch import Post, _record
+
+    tools, _, _, _, _, ledger = hub
+    _record(ledger, "request-wake", state="succeeded")
+    key = tmp_path / "wake.key"
+    key.write_text("synthetic-wake-key")
+    key.chmod(0o600)
+    targets = {"default": [{"url": "https://wake.example.test/request", "key_file": str(key)}]}
+    monkeypatch.setattr(lifecycle, "_load_validated_instance", lambda target: {"runtime_path": "unused"})
+    monkeypatch.setattr(lifecycle, "load_runtime", lambda path: tools.runtime)
+    monkeypatch.setattr(lifecycle, "load_wake_config", lambda path: targets)
+    calls = []
+
+    def request(endpoint, token, body, **kwargs):
+        calls.append(body["action"])
+        return 200, {"principal": "agent:other"}
+
+    monkeypatch.setattr(messages, "_request", request)
+    original = lifecycle.run_watch_once
+    post = Post([])
+
+    def run(**kwargs):
+        owned_ledger = kwargs["ledger"]
+        try:
+            return original(**kwargs, post=post)
+        finally:
+            owned_ledger.close()
+
+    monkeypatch.setattr(lifecycle, "run_watch_once", run)
+    summary = lifecycle.watch_once(tmp_path)
+    assert summary["woken"] == 1
+    assert post.calls[0][2]["request_id"] == "request-wake"
+    assert calls == ["identity", "identity"]

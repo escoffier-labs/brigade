@@ -121,7 +121,7 @@ def _wake_hub_inbox(
     post: Post,
     summary: dict[str, int],
 ) -> None:
-    if runtime.hub_token_file is None:
+    if not runtime.messaging_configured:
         return
     summary["checked"] += 1
     hub = HubInbox(token_file=str(runtime.hub_token_file))
@@ -329,7 +329,7 @@ def run_watch_once(
                     ledger.mark_notified(row["request_id"], state, clock())
             else:
                 ledger.record_status_poll(row["request_id"], failed=True)
-    if runtime is not None and runtime.enabled and runtime.hub_token_file is not None:
+    if runtime is not None and runtime.enabled and runtime.messaging_configured:
         # Request wakes run first: a competing sender's spool lock must not hold them up.
         # Reserve the existing network-drain deadline and shutdown margin before waiting.
         remaining = (
@@ -339,11 +339,18 @@ def run_watch_once(
             summary["failed"] += 1
         else:
             try:
-                call_message(
-                    "flush_credential",
-                    token_file=str(runtime.hub_token_file),
-                    lock_timeout=min(FLUSH_LOCK_TIMEOUT_SECONDS, remaining),
-                )
+                hub = HubInbox(token_file=str(runtime.hub_token_file))
+                authority = hub.capture()
+                try:
+                    hub.require_authority(authority)
+                    call_message(
+                        "flush_credential",
+                        token_file=authority.token_file,
+                        authority=authority,
+                        lock_timeout=min(FLUSH_LOCK_TIMEOUT_SECONDS, remaining),
+                    )
+                finally:
+                    hub.require_authority(authority)
             except Exception:
                 summary["failed"] += 1
     return summary

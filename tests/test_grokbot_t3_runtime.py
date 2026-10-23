@@ -254,3 +254,9 @@ def test_messaging_runtime_rejects_unsafe_optional_configuration(tmp_path, overr
     with pytest.raises(c.T3DispatchError) as error:
         rc.parse_runtime(runtime_payload(tmp_path, **overrides))
     assert error.value.code == "invalid_request"
+
+
+@pytest.mark.parametrize("alias", ["00000000-0000-4000-8000-000000000001", "00000000000040008000000000000001"])
+def test_runtime_rejects_uuid_alias_keys(tmp_path, alias):
+    with pytest.raises(c.T3DispatchError):
+        rc.parse_runtime(runtime_payload(tmp_path, hub_recipients={alias: "00000000-0000-4000-8000-000000000001"}))

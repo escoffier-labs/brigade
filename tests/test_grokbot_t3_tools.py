@@ -690,31 +690,6 @@ def test_disabled_messaging_excludes_hub_without_constructing_client(make, monke
         assert tools.call_tool(name, arguments)["error"]["code"] == "hub-not-configured"
 
 
-@pytest.mark.parametrize("enabled", [False, True])
-def test_pending_identity_binding_never_constructs_hub_client(make, monkeypatch, tmp_path, enabled):
-    from brigade.grokbot_t3 import tools as module
-
-    def forbidden(**kwargs):
-        pytest.fail("pending identity binding constructed a Hub client")
-
-    monkeypatch.setattr(module, "HubInbox", forbidden)
-    tools, _, _ = make(
-        enabled=enabled,
-        hub_messaging_enabled=True,
-        hub_message_principal="agent:grokbot",
-        hub_token_file=str(tmp_path / "principal.token"),
-        hub_recipients={"host-a": "00000000-0000-4000-8000-000000000001"},
-    )
-    assert len(tools.inventory()) == 13
-    for name, arguments in (
-        ("hub_inbox_list", {}),
-        ("hub_inbox_ack", {"ids": [1]}),
-        ("hub_message_send", {"alias": "host-a", "subject": "s", "body": "b"}),
-        ("hub_message_status", {"ids": [1]}),
-    ):
-        assert tools.call_tool(name, arguments)["error"]["code"] == "hub-not-configured"
-
-
 @pytest.mark.parametrize(
     "alias",
     ["Host-a", "host", "host-a/child", "../host-a", "00000000-0000-4000-8000-000000000001", "agent:host-a", "unknown"],
@@ -726,7 +701,6 @@ def test_invalid_alias_never_constructs_client_or_uses_clock_or_dispatch_budget(
         pytest.fail("invalid alias reached a side effect")
 
     monkeypatch.setattr(module, "HubInbox", forbidden)
-    monkeypatch.setattr(module, "_require_hub_identity", lambda: None)  # UNIT-ONLY fake routing.
     tools, _, ledger = make(
         hub_messaging_enabled=True,
         hub_message_principal="agent:grokbot",

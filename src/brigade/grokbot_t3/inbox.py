@@ -7,6 +7,8 @@ import json
 import time
 from typing import Any, Iterator
 
+from .. import fleet_client_messages
+from ..fleet_client import FleetClientError
 from ..fleet_client_message_credentials import MessageAuthority
 from ..hub_messages import HubMessageError, MessageOperations, inbox_page, legacy_message
 from .contracts import PUBLIC_RESULT_LIMIT
@@ -20,6 +22,21 @@ ACK_TIMEOUT_SECONDS = 5.0
 
 
 class HubInbox(MessageOperations):
+    def capture(self) -> MessageAuthority:
+        # Each operation proves the exact credential it will retain for all nested IO.
+        authority = super().capture()
+        try:
+            self.require_authority(authority)
+            try:
+                evidence = fleet_client_messages.identity(authority=authority, timeout=POLL_TIMEOUT_SECONDS)
+            finally:
+                self.require_authority(authority)
+            if evidence != {"principal": "agent:grokbot"}:
+                raise HubMessageError("hub_credential_invalid")
+        except (FleetClientError, OSError, ValueError, AttributeError):
+            raise HubMessageError("hub_credential_invalid") from None
+        return authority
+
     def notification_scope(self) -> str:
         # Compatibility snapshot accessor. Operations pass the captured authority instead.
         return self.capture().scope
@@ -42,8 +59,8 @@ class HubInbox(MessageOperations):
         authority: MessageAuthority | None = None,
         deadline: float | None = None,
     ) -> Iterator[tuple[builtins.list[dict[str, Any]], int]]:
-        authority = self.capture() if authority is None else authority
         poll_deadline = time.monotonic() + budget
+        authority = self.capture() if authority is None else authority
         deadline = poll_deadline if deadline is None else min(poll_deadline, deadline)
         return self._pages(
             after=after, unacked=unacked, max_pages=max_pages, timeout=timeout, deadline=deadline, authority=authority
@@ -78,6 +95,8 @@ class HubInbox(MessageOperations):
         deadline: float | None = None,
         authority: MessageAuthority | None = None,
     ) -> dict[str, Any]:
+        poll_deadline = time.monotonic() + POLL_BUDGET_SECONDS
+        deadline = poll_deadline if deadline is None else min(deadline, poll_deadline)
         authority = self.capture() if authority is None else authority
         rows = []
         complete = False

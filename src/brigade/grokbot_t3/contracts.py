@@ -6,6 +6,7 @@ import json
 from functools import partial
 import re
 from typing import Any, Callable
+from uuid import UUID
 
 from ..hub_messages import HUB_CODES
 
@@ -146,6 +147,15 @@ def _handle(value: object) -> str:
 
 def _name(value: object) -> str:
     return _match(value, NAME_RE)
+
+
+def _alias(value: object) -> str:
+    name = _name(value)
+    try:
+        UUID(name)
+    except ValueError:
+        return name
+    raise _invalid()
 
 
 def _caller(value: object) -> str:
@@ -298,7 +308,7 @@ def parse_inbox(name: str, raw: object) -> dict[str, Any]:
     data = _object(raw, frozenset(key for key, field in fields.items() if field.required), frozenset(fields))
     try:
         return {
-            key: (_name(data[key]) if key == "alias" else field.validator(data[key])) if key in data else field.default
+            key: (_alias(data[key]) if key == "alias" else field.validator(data[key])) if key in data else field.default
             for key, field in fields.items()
         }
     except DotError:

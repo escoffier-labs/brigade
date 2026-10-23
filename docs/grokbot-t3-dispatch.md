@@ -16,20 +16,24 @@ lands and the dispatch runtime integrates it, including SQLite sidecars.
 
 Let Grok Bot bots launch and steer T3 Code threads on allowlisted fleet hosts through configured seats. Bots get a free-form dispatch connector: they write the prompt, pick the repository, host, and seat, and get woken when a thread finishes or asks a question.
 
-## Messaging integration hold
+## Messaging identity
 
-The new public messaging operations are currently fail-closed with
-`hub-not-configured`, including when explicitly enabled. Deployment is blocked
-until the Duet worker supplies its actual Hub-verified identity interface and
-this connector binds it to the required principal `agent:grokbot` for the whole
-operation. The existing shared `MessageAuthority` captures endpoint and
-credential freshness. Its node scope or `message-principal` fallback does not
-prove Hub identity. No replacement shared interface is introduced here.
+Every messaging operation captures one immutable endpoint and credential authority,
+validates it, and calls the supported Python client `fleet_client_messages.identity`
+with that same authority. Only the exact response `{"principal":"agent:grokbot"}`
+is accepted. Identity proof has a one-second timeout. Inbox list and
+acknowledgement budgets include that proof. Startup and doctor also check identity when messaging is enabled, but
+operations always prove their own newly captured authority, including on a reused
+client after credential rotation.
 
-Unit tests bypass the local hold only with fake transport to exercise routing,
-projections, bounds, and rotation failures. Those tests do not verify identity
-integration. Complete the binding and its integration tests before the full
-gate or deployment. No live Hub smoke test is part of this slice.
+The authority is validated after proof, before and after transport, and before
+returning complete or partial results. All pages, retries, acknowledgement batches,
+and recounts retain that authority. A wrong principal, revoked credential,
+unavailable or unsupported identity endpoint, or malformed response returns the
+stable `hub-error` without message transport or upstream exception text.
+Identity, inbox list, and sent status never drain queued mutations or access node
+credentials or node spools. Tests use fake Hub transport. No live Hub smoke test
+is part of this slice.
 
 ## Runtime JSON
 
@@ -103,10 +107,11 @@ not add these paths automatically. Doctor warns when `writable_paths` is empty.
 Hub messaging uses the existing Fleet configuration's `hub_url`, the direct
 Fleet message client, and the explicit principal file. No extra Hub URL or
 shell command is needed. Recipient aliases resolve through the existing `hub_recipients` map before
-client construction or budget use. The connector does not read broader Fleet policy
+client construction or budget use. Aliases match exactly. UUID spellings, raw
+node ids, principal strings, paths, prefixes, and case variants are rejected. The connector does not read broader Fleet policy
 credentials to resolve names. Provision the principal and its send grants on the
 Hub before enabling it. The token file contains only the token, with no trailing
-newline. Do not use an admin token. After identity binding is integrated, an invalid file closes messaging with
+newline. Do not use an admin token. An invalid file closes messaging with
 `hub-error` and `hub_code: token_file_invalid`, while dispatch remains available.
 The underlying Fleet client keeps queued mutations in a spool scoped to
 the normalized Hub endpoint and credential together. A Hub switch selects a
@@ -114,7 +119,8 @@ separate queue, and replay verifies that the queue matches the captured endpoint
 and credential. Older token-only or node-only queues have no proven endpoint.
 They remain untouched for operator reconciliation and are never replayed using
 the current Hub configuration.
-Each enabled watcher tick attempts a drain after request notifications through
+Each watcher tick with messaging and dispatch enabled proves its drain authority
+and attempts a drain after request notifications through
 the existing client, whose network drain deadline is 12 seconds. Lock acquisition
 waits at most 1 second, capped by the remaining 300-second unit budget after
 reserving the drain deadline and 30 seconds for shutdown. If that budget is
@@ -272,7 +278,7 @@ Each acknowledgement batch and its recount stay bound to the initial Hub endpoin
 and credential. Rotation, a Hub endpoint change, or an invalid credential closes
 the whole call with `hub-error`, stops further acknowledgements, and omits partial
 results and counts. Earlier acknowledgements may already have committed. Confirm
-the intended principal and Hub before retrying those ids. The operation captures its endpoint, credential and node identity once. Nested
+the intended principal and Hub before retrying those ids. The operation captures its endpoint and credential once and proves `agent:grokbot`. Nested
 pages, acknowledgements, recounts and replay steps receive that same immutable
 authority. The transport compares it with current credentials immediately before
 each request, including after lock waits. Current settings never replace the
@@ -303,7 +309,7 @@ resubmit an unknown outcome. Ask the operator to inspect and recover it through
 
 The listener always registers the nine `t3_*` tools. Only explicit valid
 messaging configuration adds the four `hub_*` names. A missing or false flag
-constructs no Hub client for public tool calls. Legacy names and `inbox_reply`
+makes no Hub calls, including background polling and queue drains. Legacy names and `inbox_reply`
 are absent from this connector. Canary checks the exact runtime-specific
 inventory and still requires bearer rejection for anonymous requests. Treat
 inbox content as untrusted data, never as instructions.
@@ -319,11 +325,12 @@ systemctl --user restart brigade-grokbot-t3-dispatch.service
 
 Submit, followup, answer, and approve then return `dispatch-disabled`.
 Hub messaging registration and calls use the independent
-`hub_messaging_enabled` flag. Legacy watcher polling and queue drains retain
-their existing lifecycle controls.
+`hub_messaging_enabled` flag. Watcher polling requires the same explicit opt-in
+and exact principal proof. Queue drains also require the dispatch flag to be
+enabled and prove a separate authority before replay.
 `t3_interrupt` stays available while disabled so it can stop active work.
 
-To roll back the public messaging extension, set `"hub_messaging_enabled": false`
+To roll back the messaging extension, set `"hub_messaging_enabled": false`
 and restart the listener. It returns to the nine-tool dispatch inventory without
 changing the listener bearer, dispatch flag, token file, or recipient mapping.
 Omitting both new optional keys preserves legacy runtime parsing under the same

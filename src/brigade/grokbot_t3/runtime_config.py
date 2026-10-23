@@ -214,6 +214,12 @@ def _hub_recipients(value: object) -> Mapping[str, str]:
         if not isinstance(name, str) or not NAME_RE.fullmatch(name) or not isinstance(node_id, str):
             raise _bad()
         try:
+            UUID(name)
+        except ValueError:
+            pass
+        else:
+            raise _bad()
+        try:
             if str(UUID(node_id)) != node_id:
                 raise _bad()
         except ValueError:

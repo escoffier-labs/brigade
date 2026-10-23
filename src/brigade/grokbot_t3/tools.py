@@ -43,15 +43,6 @@ def _fleet_error(exc: FleetCallError) -> c.T3DispatchError:
     return c.T3DispatchError("fleet-error", fleet_code=exc.code, fleet_reason=exc.reason, request_id=exc.request_id)
 
 
-def _require_hub_identity() -> None:
-    """Hold new messaging until Duet supplies the verified principal binding.
-
-    MessageAuthority currently binds endpoint and credential freshness only.
-    Its local scope, including message-principal fallback, is not Hub identity.
-    """
-    raise c.T3DispatchError("hub-not-configured")
-
-
 class T3DispatchTools:
     def __init__(
         self,
@@ -105,7 +96,6 @@ class T3DispatchTools:
                 raise c.T3DispatchError("invalid_request")
             args = {key: value for key, value in args.items() if key != "alias"}
             args["to"] = alias
-        _require_hub_identity()
         method = {
             "hub_inbox_list": "list",
             "hub_inbox_ack": "ack",
