@@ -62,7 +62,7 @@ jobs:
       - name: Collect nightly report
         id: report
         if: ${{ always() }}
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           OBSERVE_OUTCOME: ${{ steps.observe.outcome }}
         with:
@@ -95,7 +95,7 @@ jobs:
       issues: write
     steps:
       - name: Update Windows nightly tracking issue
-        uses: actions/github-script@v8
+        uses: actions/github-script@v9
         env:
           REPORT: ${{ needs.windows-pytest.outputs.report }}
         with:
