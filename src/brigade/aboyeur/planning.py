@@ -932,6 +932,7 @@ def _run_codex_appserver_worker(
 ) -> agents.AgentResult:
     effective_sandbox = sandbox if sandbox is not None else ("read-only" if read_only else None)
     active_turn_id: str | None = None
+    active_registration: run_control.ActiveTurn | None = None
     try:
         try:
             run_control._validate_assignment_ids(task_id, attempt_id)
@@ -953,13 +954,15 @@ def _run_codex_appserver_worker(
         thread = appserver.start_thread(cwd=cwd, model=agent.model, sandbox=effective_sandbox)
 
         def on_turn_start(turn_id: str) -> None:
-            nonlocal active_turn_id
+            nonlocal active_turn_id, active_registration
             active_turn_id = turn_id
             if registry is not None:
                 if task_id is None and attempt_id is None:
-                    registry.register(worker, thread, turn_id)
+                    active_registration = registry.register(worker, thread, turn_id)
                 else:
-                    registry.register(worker, thread, turn_id, task_id=task_id, attempt_id=attempt_id)
+                    active_registration = registry.register(
+                        worker, thread, turn_id, task_id=task_id, attempt_id=attempt_id
+                    )
 
         try:
             turn_kwargs = {"timeout": timeout, "on_event": on_event, "on_turn_start": on_turn_start}
@@ -986,9 +989,11 @@ def _run_codex_appserver_worker(
     finally:
         if registry is not None and active_turn_id is not None:
             if task_id is None and attempt_id is None:
-                registry.unregister(worker, active_turn_id)
+                registry.unregister(worker, active_turn_id, registration=active_registration)
             else:
-                registry.unregister(worker, active_turn_id, task_id=task_id, attempt_id=attempt_id)
+                registry.unregister(
+                    worker, active_turn_id, task_id=task_id, attempt_id=attempt_id, registration=active_registration
+                )
     text = turn.text.strip()
     if getattr(turn, "output_limit_exceeded", False) or len(text.encode("utf-8")) > proc.MAX_CAPTURE_BYTES:
         return agents.AgentResult(

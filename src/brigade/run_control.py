@@ -117,20 +117,33 @@ class LiveTurnRegistry:
 
     def register(
         self, worker: str, thread: Any, turn_id: str, *, task_id: str | None = None, attempt_id: str | None = None
-    ) -> None:
+    ) -> ActiveTurn:
+        """Replace a slot and return its immutable cleanup ownership handle."""
         _validate_assignment_ids(task_id, attempt_id)
         thread_id = getattr(thread, "thread_id", "")
         active = ActiveTurn(worker, thread, thread_id, turn_id, task_id, attempt_id)
         with self._lock:
             self._active[self._key(worker, task_id, attempt_id)] = active
+        return active
 
     def unregister(
-        self, worker: str, turn_id: str, *, task_id: str | None = None, attempt_id: str | None = None
+        self,
+        worker: str,
+        turn_id: str,
+        *,
+        task_id: str | None = None,
+        attempt_id: str | None = None,
+        registration: ActiveTurn | None = None,
     ) -> None:
+        """Remove a matching slot, checking ownership when a handle is supplied."""
         _validate_assignment_ids(task_id, attempt_id)
         key = self._key(worker, task_id, attempt_id)
         with self._lock:
             active = self._active.get(key)
+            # Provider IDs may repeat, even on the same thread. Compare the exact
+            # registration object, not dataclass equality or provider identity.
+            if registration is not None and active is not registration:
+                return
             if active is not None and active.worker == worker and active.turn_id == turn_id:
                 self._active.pop(key, None)
 

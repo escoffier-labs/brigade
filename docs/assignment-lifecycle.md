@@ -10,9 +10,20 @@ task/attempt pair. Different pairs sharing a worker coexist. Re-registering a
 pair replaces only that pair. Registrations without IDs retain the legacy
 single slot per worker. Task and legacy slots have separate namespaces.
 
-`unregister(worker, turn_id, *, task_id=None, attempt_id=None)` removes only an
-exact matching slot and turn. A stale attempt or turn cannot remove its
-replacement. IDs are nonempty ASCII tokens of at most 128 characters, beginning
+`register` returns the frozen `ActiveTurn` record as a cleanup ownership handle.
+Retain that exact object and pass it to `unregister(worker, turn_id, *,
+task_id=None, attempt_id=None, registration=None)`. Cleanup with a handle removes
+only that registration from the matching slot and turn. A stale handle cannot
+remove its replacement, even if the thread, turn, worker, task, and attempt IDs
+all match. Provider turn IDs are scoped to their thread, not globally unique.
+Re-registering the same thread and turn still creates a new ownership handle.
+
+Omitting the handle preserves the legacy slot/worker/turn matching behavior.
+That form cannot distinguish replacements with reused IDs and should only be
+used when the caller prevents overlapping registration and cleanup. Wrappers
+around `register` must return its handle to preserve ownership protection.
+
+IDs are nonempty ASCII tokens of at most 128 characters, beginning
 with a letter or digit and otherwise using letters, digits, `.`, `_`, `:`, `-`.
 An attempt requires a task ID.
 
@@ -42,7 +53,9 @@ still registered after the requests. Neither provider acknowledgement nor
 missing registration proves containment.
 
 The appserver runner accepts optional task/attempt keywords and forwards them
-to turn registration and cleanup. Main dispatch and the transport runner
+to turn registration and cleanup. Its `finally` cleanup retains and supplies
+the registration handle for both assignment and legacy worker slots, on success
+and provider failure. Main dispatch and the transport runner
 protocol currently supply no assignment IDs. Until the owning integration
 adds those IDs, ordinary dispatch uses legacy worker slots. Journals, durable
 results, acceptance deduplication, parent delivery, wait semantics, T3 children,

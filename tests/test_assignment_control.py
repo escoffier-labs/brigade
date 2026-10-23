@@ -111,6 +111,29 @@ def test_reregister_same_attempt_keeps_only_current_turn():
     assert new.calls == [("interrupt", "new-turn")]
 
 
+@pytest.mark.parametrize("assignment", [{}, {"task_id": "task-a", "attempt_id": "attempt-1"}])
+@pytest.mark.parametrize("reuse_thread", [False, True])
+def test_stale_registration_cannot_remove_replacement_with_same_ids(assignment, reuse_thread):
+    registry = run_control.LiveTurnRegistry()
+    first = Turn()
+    first.thread_id = "thread-a"
+    old = registry.register("coder", first, "same-turn", **assignment)
+    replacement = first if reuse_thread else Turn()
+    if not reuse_thread:
+        replacement.thread_id = "thread-b"
+    current = registry.register("coder", replacement, "same-turn", **assignment)
+
+    registry.unregister("coder", "same-turn", registration=old, **assignment)
+
+    response = registry.steer("coder", "continue")
+    assert response["thread_id"] == replacement.thread_id
+    assert replacement.calls == [("steer", "same-turn", "continue")]
+    if not reuse_thread:
+        assert first.calls == []
+    registry.unregister("coder", "same-turn", registration=current, **assignment)
+    assert registry.snapshot() == ()
+
+
 def test_multiple_attempts_require_exact_attempt_selector():
     registry = run_control.LiveTurnRegistry()
     first = register(registry, "task-a", attempt="attempt-1")

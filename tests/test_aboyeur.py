@@ -5336,6 +5336,55 @@ def test_appserver_control_forwards_assignment_ids_and_unregisters_on_failure():
     assert exc.value.code == aboyeur.run_control.NO_ACTIVE_TURN
 
 
+@pytest.mark.parametrize("assignment", [{}, {"task_id": "task-a", "attempt_id": "attempt-1"}])
+@pytest.mark.parametrize("fail", [False, True])
+def test_appserver_cleanup_preserves_replacement_registration(assignment, fail):
+    registry = aboyeur.run_control.LiveTurnRegistry()
+    interrupts = []
+
+    class ReplacementThread:
+        thread_id = "thread-b"
+
+        def interrupt(self, turn_id):
+            interrupts.append(turn_id)
+
+    replacement = ReplacementThread()
+
+    class CompletingThread:
+        thread_id = "thread-a"
+
+        def run_turn(self, prompt, **kwargs):
+            kwargs["on_turn_start"]("same-turn")
+            registry.register("cook", replacement, "same-turn", **assignment)
+            if fail:
+                raise aboyeur.codex_appserver.AppServerError("provider unavailable")
+            return aboyeur.codex_appserver.TurnResult(
+                text="finished", ok=True, status="completed", thread_id=self.thread_id
+            )
+
+    class Server:
+        def start_thread(self, **kwargs):
+            return CompletingThread()
+
+    result = aboyeur._run_codex_appserver_worker(
+        Server(),
+        Agent("cook", "codex", "write code"),
+        "cook",
+        "do work",
+        timeout=5.0,
+        cwd=None,
+        read_only=False,
+        sandbox=None,
+        registry=registry,
+        **assignment,
+    )
+
+    assert result.ok is not fail
+    assert registry.interrupt("cook")["interrupted"] == 1
+    assert interrupts == ["same-turn"]
+    assert registry.snapshot()[0].thread_id == "thread-b"
+
+
 def test_run_appserver_worker_rejects_non_final_output_in_receipts(monkeypatch, tmp_path):
     monkeypatch.setattr(aboyeur.codex_appserver, "AppServer", _IntentOnlyAppServer)
     output_dir = tmp_path / "run"
