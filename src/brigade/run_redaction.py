@@ -29,7 +29,17 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
-from brigade import localio, run_cassette, run_checkpoint, run_events, run_journal, run_projector, run_shadow, runguard
+from brigade import (
+    localio,
+    run_cassette,
+    run_checkpoint,
+    run_events,
+    run_journal,
+    run_projector,
+    run_redaction_rewrite,
+    run_shadow,
+    runguard,
+)
 
 REDACTION_SCHEMA = "brigade.run_redaction.v1"
 REDACTION_SCHEMA_VERSION = 1
@@ -433,10 +443,6 @@ def _rewrite_events(
     sequence_end: int,
     operation_id: str,
 ) -> tuple[list[run_journal.RunEvent], bytes]:
-    rewritten: list[run_journal.RunEvent] = []
-    previous_digest: str | None = None
-    total = bytearray()
-    idempotency_keys: set[str] = set()
     requests: list[tuple[dict[str, Any], str]] = []
     for event in events:
         affected = run_cassette.redaction_affects(event, sequence_start, sequence_end)
@@ -448,75 +454,7 @@ def _rewrite_events(
             else event.idempotency_key
         )
         requests.append((payload, idempotency_key))
-    # Prepare both sides before rebuilding the chain: a checkpoint precedes
-    # its fact, and either side may be outside the selected range. Preserve
-    # the tagged generic identity even when the checkpoint itself is selected.
-    for index, event in enumerate(events):
-        payload, idempotency_key = requests[index]
-        if event.event_type == run_checkpoint.CHECKPOINT_EVENT_TYPE and event.idempotency_key.startswith(
-            run_checkpoint._CHECKPOINT_GENERIC_IDEMPOTENCY_PREFIX
-        ):
-            following = events[index + 1] if index + 1 < len(events) else None
-            if (
-                following is None
-                or following.sequence != event.sequence + 1
-                or following.event_type != event.payload.get("paired_event_type")
-            ):
-                raise RedactionError("generic checkpoint pair is incomplete")
-            fact_payload, fact_key = requests[index + 1]
-            try:
-                fact_digest = run_events.request_digest(
-                    event_type=following.event_type, payload=fact_payload, idempotency_key=fact_key
-                )
-                idempotency_key = run_checkpoint._checkpoint_idempotency_key(
-                    payload["sha256"],
-                    paired_event_type=following.event_type,
-                    body_kind=payload.get("body_kind"),
-                    pairing_key=fact_digest,
-                )
-            except (run_events.CanonicalizationError, ValueError) as exc:
-                raise RedactionError("rewritten checkpoint identity is invalid") from exc
-        if idempotency_key in idempotency_keys:
-            raise RedactionError("rewritten journal idempotency key collision")
-        idempotency_keys.add(idempotency_key)
-        try:
-            envelope = run_events.build_event(
-                run_id=event.run_id,
-                sequence=event.sequence,
-                event_type=event.event_type,
-                payload=payload,
-                idempotency_key=idempotency_key,
-                recorded_at=event.recorded_at,
-                previous_digest=previous_digest,
-            )
-            line = run_events.canonical_bytes(envelope) + b"\n"
-        except (run_events.CanonicalizationError, ValueError) as exc:
-            raise RedactionError("rewritten journal canonicalization failed") from exc
-        if len(line) > run_events.MAX_LINE_BYTES:
-            raise RedactionError("rewritten journal line exceeds size bound")
-        total.extend(line)
-        if len(total) > run_checkpoint.MAX_JOURNAL_BYTES:
-            raise RedactionError("rewritten journal exceeds size bound")
-        try:
-            rewritten_event = run_journal.RunEvent(
-                schema=envelope["schema"],
-                schema_version=envelope["schema_version"],
-                event_id=envelope["event_id"],
-                run_id=envelope["run_id"],
-                sequence=envelope["sequence"],
-                event_type=envelope["event_type"],
-                recorded_at=envelope["recorded_at"],
-                idempotency_key=envelope["idempotency_key"],
-                request_digest=envelope["request_digest"],
-                previous_digest=envelope["previous_digest"],
-                event_digest=envelope["event_digest"],
-                payload=dict(envelope["payload"]),
-            )
-        except (KeyError, TypeError) as exc:
-            raise RedactionError("rewritten journal envelope construction failed") from exc
-        rewritten.append(rewritten_event)
-        previous_digest = rewritten_event.event_digest
-    return rewritten, bytes(total)
+    return run_redaction_rewrite.rewrite_events(events, requests, error_type=RedactionError)
 
 
 def _write_all(fd: int, data: bytes, *, category: str) -> None:

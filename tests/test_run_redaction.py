@@ -1034,6 +1034,34 @@ def test_redaction_retry_refuses_symlinked_record(tmp_path):
     assert outside.read_text() == "{}"
 
 
+def test_redaction_rewrite_failure_keeps_bounded_error_and_prepublication_state(tmp_path, monkeypatch):
+    run_dir, _, _ = _authority_run(tmp_path)
+    before = _artifact_snapshot(run_dir)
+    original_build = run_events.build_event
+    cause = run_events.CanonicalizationError(SECRET)
+
+    def fail_redacted_event(**kwargs):
+        if kwargs["idempotency_key"].startswith("redaction:"):
+            raise cause
+        return original_build(**kwargs)
+
+    monkeypatch.setattr(run_events, "build_event", fail_redacted_event)
+    with pytest.raises(run_redaction.RedactionError, match="^rewritten journal canonicalization failed$") as excinfo:
+        run_redaction.redact_journal(
+            run_dir,
+            sequence_start=2,
+            sequence_end=2,
+            reason=REASON_CODE,
+            operator_confirmed=True,
+        )
+
+    assert type(excinfo.value) is run_redaction.RedactionError
+    assert excinfo.value.diagnostic == "rewritten journal canonicalization failed"
+    assert excinfo.value.__cause__ is cause
+    assert _artifact_snapshot(run_dir) == before
+    assert not (run_dir / "events/redactions").exists()
+
+
 def test_redaction_replace_failure_retains_original_and_durable_quarantine(tmp_path, monkeypatch):
     run_dir, _, _ = _authority_run(tmp_path)
     before = _journal_path(run_dir).read_bytes()
