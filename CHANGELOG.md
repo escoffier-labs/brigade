@@ -9,6 +9,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Fleet MCP tools advertise read-only and destructive annotations, and send/reply accept optional `client_id` keys for duplicate-free replay. The opt-in Executor app recipe documents browser approval, credential boundaries and manual compatibility checks (#1887).
 - Fleet message credentials can read their unread total without fetching bodies through `brigade fleet msg count`, the hub `count` action, or the optional `fleet_inbox` MCP argument `count_only`. Counts exclude expired and acknowledged mail and do not run retention writes (#1715).
 
 - Memory care config accepts `read_only_paths` globs for policy or operator-owned cards. Scan, `plan-fixes`, and `backfill` skip matching cards, `memory proposal create` and `apply` refuse them with an error naming the pattern, and `memory care status` and `doctor` list the active patterns (#1976).
@@ -16,6 +17,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fleet Hub rejection responses drain at most 1 MiB of late upload data within 250 ms to prevent oversized and late-upload resets, including the policy-route WinError 10053. Plain TCP half-closes before draining. TLS skips that early raw half-close and drains before normal server closure, whose stdlib shutdown behavior is unchanged. Zero-length and fully read bodies skip draining, and error responses carry one `Connection: close` header. The HTTP/1.0 roster timeout and credential-test timeouts remain unexplained. The buffered 516-byte roster form does not support a keep-alive explanation, and `leaked_descendants=1` appears on nearly every Windows test file and is not a diagnostic signal. (#2014)
 - Invalid Cursor hook event names no longer let a project configuration suppress the user presence callback.
 - Preserve campaign execution bindings after the 50-link retention window, including against trusted observations and cross-item relinks. Hub schema 42 adds an indexed history lookup without rewriting stored events.
 - Index campaign take event-key lookups without scanning Worklore history. Hub startup upgrades existing databases to schema 41 and preserves stored events.

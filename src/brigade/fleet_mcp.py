@@ -60,6 +60,12 @@ def tool_specs() -> list[dict[str, Any]]:
                 "reply_to": text,
                 "kind": {"type": "string", "enum": ["message", "question", "completion"]},
                 "thread": text,
+                "client_id": {
+                    **text,
+                    "maxLength": 64,
+                    "pattern": "^[A-Za-z0-9_-]+$",
+                    "description": "Reuse this key with identical arguments to retry without duplicates.",
+                },
             },
             ["to", "body"],
         ),
@@ -88,7 +94,16 @@ def tool_specs() -> list[dict[str, Any]]:
         (
             "fleet_reply",
             "Reply to an inbox message, durably spooling when offline.",
-            {"id": text, "body": text},
+            {
+                "id": text,
+                "body": text,
+                "client_id": {
+                    **text,
+                    "maxLength": 64,
+                    "pattern": "^[A-Za-z0-9_-]+$",
+                    "description": "Reuse this key with identical arguments to retry without duplicates.",
+                },
+            },
             ["id", "body"],
         ),
         (
@@ -111,6 +126,11 @@ def tool_specs() -> list[dict[str, Any]]:
         {
             "name": name,
             "description": description,
+            "annotations": {
+                "readOnlyHint": name in {"fleet_who", "fleet_inbox", "fleet_sent", "fleet_claims"},
+                # Sending adds a record. Ack changes existing unread state.
+                "destructiveHint": name == "fleet_ack",
+            },
             "inputSchema": {
                 "type": "object",
                 "properties": properties,
@@ -398,6 +418,7 @@ class FleetMcp:
                 kind=args.get("kind"),
                 thread=args.get("thread"),
                 reply_to=reply_to,
+                client_id=args.get("client_id"),
                 authority=authority,
             )
         elif name == "fleet_reply":
@@ -408,6 +429,7 @@ class FleetMcp:
                 subject=None,
                 reference=None,
                 priority="normal",
+                client_id=args.get("client_id"),
                 authority=authority,
             )
         elif name == "fleet_ack":

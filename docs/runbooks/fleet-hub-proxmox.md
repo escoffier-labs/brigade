@@ -765,7 +765,11 @@ curl --fail http://127.0.0.1:8933/mcp \
 The HTTP listener rejects non-loopback binds, untrusted Host/Origin headers,
 and missing or incorrect bearer tokens. It is stateless and serves no SSE stream.
 
-`fleet_send` accepts `to`, `body`, and optional `reply_to`, `kind`, and `thread`.
+`fleet_send` accepts `to`, `body`, and optional `reply_to`, `kind`, `thread`, and
+`client_id`. `fleet_reply` also accepts an optional `client_id`. Reuse that key
+with identical arguments for duplicate-free retries under the same credential.
+See the [Executor recipe](../fleet-mcp-executor.md) for annotations, explicit
+approval policy, retry limits and manual compatibility checks.
 It supplies the subject `Fleet message` and normal priority. `reply_to` must be
 an inbox message from `to`. Sends and replies use the existing durable offline
 spool and report `delivery` as `delivered` or `spooled`. `fleet_ack` accepts an

@@ -37,6 +37,7 @@ from . import fleet_hub_routing
 from . import fleet_hub_status
 from . import fleet_hub_event_bounds as request_bounds
 from .fleet_hub_claim_cardinality import ClaimCardinalityError
+from .fleet_hub_http_reject import RejectedUploadMixin
 from . import fleet_model_inventory
 from . import fleet_owners
 from . import fleet_owners_page
@@ -222,7 +223,7 @@ def make_handler(
     """
     frozen_deck = deck_config if deck_config is not None else fleet_command_deck.DeckConfig()
 
-    class _Handler(BaseHTTPRequestHandler):
+    class _Handler(RejectedUploadMixin):
         server_version = "brigade-fleet-hub/1"
         sys_version = ""
         # Idle-socket guard: a peer that connects and never sends a request

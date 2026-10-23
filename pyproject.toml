@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "brigade-cli"
 version = "0.31.0"
-description = "Track work, verify results, carry memory, and sync MCP servers, tools, and skills across coding agents."
+description = "Run coding agents anywhere and keep one record of the work, with MCP servers, tools, skills, and memory in sync across your harnesses."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }

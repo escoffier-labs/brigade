@@ -664,8 +664,9 @@ def test_roster_post_tailscale_identity_cannot_write(tmp_path):
         cookie = _login_cookie(hub)
         good = _current_form(hub, cookie)
         before = _tables(_db)
-        status, _headers, _text = _form(hub, good, extra={"Tailscale-User-Login": "operator@example.test"})
+        status, response_headers, _text = _form(hub, good, extra={"Tailscale-User-Login": "operator@example.test"})
         assert status == 403
+        assert response_headers["connection"] == "close"
         assert _tables(_db) == before
 
 
