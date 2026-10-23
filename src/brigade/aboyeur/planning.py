@@ -934,10 +934,11 @@ def _run_codex_appserver_worker(
     active_turn_id: str | None = None
     try:
         try:
+            run_control._validate_assignment_ids(task_id, attempt_id)
             prompt = fleet_session_bootstrap.ensure_prompt(
                 prompt, cli_ref=agent.cli or "codex", model=agent.model, cwd=cwd
             )
-        except fleet_session_bootstrap.PreflightDenial as exc:
+        except (fleet_session_bootstrap.PreflightDenial, run_control.ControlError) as exc:
             return agents.AgentResult(
                 text="",
                 ok=False,

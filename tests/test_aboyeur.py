@@ -5230,6 +5230,72 @@ def test_direct_appserver_failure_receipt_preserves_terminal_semantics(
         assert synthesis["timed_out"] is True
 
 
+@pytest.mark.parametrize("with_registry", [True, False], ids=["registry", "no-registry"])
+@pytest.mark.parametrize(
+    ("task_id", "attempt_id", "detail"),
+    [
+        ("bad task", None, "task_id must be a 1-128 character ASCII identifier"),
+        (None, "attempt-example", "attempt_id requires task_id"),
+        ("task-example", "bad attempt", "attempt_id must be a 1-128 character ASCII identifier"),
+    ],
+    ids=["invalid-task", "attempt-without-task", "invalid-attempt"],
+)
+def test_appserver_worker_rejects_invalid_assignment_ids_before_provider_start(
+    with_registry, task_id, attempt_id, detail
+):
+    import queue
+
+    class CountingServer:
+        def __init__(self):
+            self.started = []
+            self.budget = proc.ByteBudget()
+
+        def start_thread(self, **kwargs):
+            self.started.append(kwargs)
+            events = queue.Queue()
+            events.put(
+                {
+                    "method": "turn/completed",
+                    "params": {"turn": {"id": "turn-example", "status": "completed", "items": []}},
+                }
+            )
+            return aboyeur.codex_appserver.CodexThread(self, "thread-example", events)
+
+        def request(self, method, params):
+            assert method == "turn/start"
+            return {"turn": {"id": "turn-example"}}
+
+        def capture_budget(self, thread_id):
+            return self.budget
+
+    server = CountingServer()
+    registry = aboyeur.run_control.LiveTurnRegistry() if with_registry else None
+    result = aboyeur._run_codex_appserver_worker(
+        server,
+        Agent("cook", "codex", "write code", model="example-model", reasoning="medium"),
+        "cook",
+        "do work",
+        timeout=5.0,
+        cwd=None,
+        read_only=False,
+        sandbox=None,
+        registry=registry,
+        task_id=task_id,
+        attempt_id=attempt_id,
+    )
+
+    assert server.started == []
+    assert result.ok is False
+    assert result.text == ""
+    assert result.status == "failed"
+    assert result.failure_phase == "preflight"
+    assert result.failure_kind == "invalid-target"
+    assert result.detail == detail
+    assert result.transport == "codex-app-server"
+    assert result.requested_model == "example-model"
+    assert result.reasoning == "medium"
+
+
 def test_appserver_control_forwards_assignment_ids_and_unregisters_on_failure():
     registry = aboyeur.run_control.LiveTurnRegistry()
     interrupts = []
