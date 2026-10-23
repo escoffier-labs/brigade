@@ -260,3 +260,129 @@ with runguard.run_lock(workspace, run_dir=run_dir):
     assert json.loads(replay.stdout) == asdict(handle)
     assert (run_dir / "events/lifecycle.jsonl").read_bytes() == before
     assert tasks.read_tasks(run_dir)[0].handle == handle
+
+
+def test_opaque_provider_references_round_trip(task_run):
+    run_dir, workspace = task_run
+    handle = prepared(task_run)
+    references = {
+        "provider_task_id": "node:delegated-task:command%3Afake-example",
+        "original_run_id": "node:run:fake%2Fexample",
+        "provider_result_id": "node:result:fake%3Aexample",
+    }
+    result = tasks.observe_task(
+        run_dir,
+        workspace=workspace,
+        handle=handle,
+        observation=tasks.TaskObservation("running", **references),
+    )
+    assert {key: getattr(tasks.read_tasks(run_dir)[0], key) for key in references} == references
+    assert result.status == "running"
+    for value in ["raw provider body with spaces", "x" * 513, "bad\nreference", '{"body":"secret"}']:
+        with pytest.raises(tasks.TaskJournalError, match="provider correlation"):
+            tasks.TaskObservation("running", provider_task_id=value)
+
+
+def test_task_id_matches_live_control_bound():
+    assert tasks.TaskSpec("t" * 128, "worker", "a" * 64).task_id == "t" * 128
+    for value in ["t" * 129, "t" * 200, "encoded%3Atask", "-task", "task with spaces"]:
+        with pytest.raises(tasks.TaskJournalError, match="immutable task"):
+            tasks.TaskSpec(value, "worker", "a" * 64)
+
+
+def test_active_artifact_refused_before_journal_mutation(task_run):
+    run_dir, workspace = task_run
+    handle = prepared(task_run)
+    before = (run_dir / "events/lifecycle.jsonl").read_bytes()
+    with pytest.raises(tasks.TaskJournalError, match="active containment"):
+        tasks.observe_task(
+            run_dir,
+            workspace=workspace,
+            handle=handle,
+            observation=tasks.TaskObservation(
+                "completed", artifact_kind="patch", artifact_digest="c" * 64, containment="active"
+            ),
+        )
+    assert (run_dir / "events/lifecycle.jsonl").read_bytes() == before
+    terminal = tasks.observe_task(
+        run_dir,
+        workspace=workspace,
+        handle=handle,
+        observation=tasks.TaskObservation(
+            "completed", artifact_kind="patch", artifact_digest="c" * 64, containment="quiescent"
+        ),
+    )
+    assert terminal.artifact_kind == "patch" and terminal.artifact_digest == "c" * 64
+
+
+def test_expected_version_rejects_delayed_retry_but_allows_recurrence(task_run):
+    run_dir, workspace = task_run
+    handle = prepared(task_run)
+    initial = tasks.read_tasks(run_dir)[0]
+    running = tasks.TaskObservation("running")
+    first = tasks.observe_task(
+        run_dir, workspace=workspace, handle=handle, observation=running, expected_version=initial.version
+    )
+    waiting = tasks.observe_task(
+        run_dir,
+        workspace=workspace,
+        handle=handle,
+        observation=tasks.TaskObservation("waiting-for-input"),
+        expected_version=first.version,
+    )
+    before = (run_dir / "events/lifecycle.jsonl").read_bytes()
+    import subprocess
+    import sys
+
+    restarted = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "from pathlib import Path; import sys; from brigade.run_tasks import read_tasks; "
+            "print(read_tasks(Path(sys.argv[1]))[0].version)",
+            str(run_dir),
+        ],
+        capture_output=True,
+        text=True,
+        timeout=20,
+    )
+    assert restarted.returncode == 0, restarted.stderr
+    assert restarted.stdout.strip() == waiting.version
+    assert tasks.read_tasks(run_dir)[0].version == waiting.version
+    with pytest.raises(tasks.TaskJournalError, match="stale task observation"):
+        tasks.observe_task(
+            run_dir, workspace=workspace, handle=handle, observation=running, expected_version=initial.version
+        )
+    assert (run_dir / "events/lifecycle.jsonl").read_bytes() == before
+    resumed = tasks.observe_task(
+        run_dir, workspace=workspace, handle=handle, observation=running, expected_version=waiting.version
+    )
+    assert resumed.status == "running" and resumed.version != first.version
+    assert tasks.read_tasks(run_dir)[0] == resumed
+
+
+def test_containment_update_preserves_published_artifact_and_consumption(task_run):
+    run_dir, workspace = task_run
+    handle = prepared(task_run)
+    terminal = tasks.observe_task(
+        run_dir,
+        workspace=workspace,
+        handle=handle,
+        observation=tasks.TaskObservation(
+            "completed", containment="quiescent", artifact_kind="patch", artifact_digest="b" * 64
+        ),
+    )
+    active = tasks.observe_task(
+        run_dir,
+        workspace=workspace,
+        handle=handle,
+        observation=tasks.TaskObservation("completed", containment="active"),
+        expected_version=terminal.version,
+    )
+    assert active.result_id == terminal.result_id
+    assert active.artifact_kind == "patch" and active.artifact_digest == "b" * 64
+    assert tasks.read_tasks(run_dir)[0] == active
+    consumed = tasks.acknowledge_result(run_dir, workspace=workspace, task_id="one", result_id=terminal.result_id)
+    assert consumed.acknowledged and consumed.containment == "active"
+    assert consumed.result_id == terminal.result_id
+    assert tasks.read_tasks(run_dir)[0] == consumed

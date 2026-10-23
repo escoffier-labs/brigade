@@ -224,7 +224,7 @@ APPROVAL_DECISION_EVENT_STATES = {
     "approval.rejected": "rejected",
     "approval.held": "held",
 }
-_SCHEMA_V2_EVENT_TYPES = frozenset({"approval", "run.ship", "run.merge"})
+_SCHEMA_V2_EVENT_TYPES = frozenset({"approval", "run.ship", "run.merge"}) | _TASK_EVENT_TYPES
 _REQUIRED_PAYLOAD_FIELDS: dict[str, frozenset[str]] = {
     "approval": frozenset(
         {

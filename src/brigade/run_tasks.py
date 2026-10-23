@@ -27,7 +27,7 @@ class TaskSpec:
     payload_digest: str
 
     def __post_init__(self) -> None:
-        if not journal.token(self.task_id) or not journal.token(self.seat) or not journal.digest(self.payload_digest):
+        if not journal.task_id(self.task_id) or not journal.token(self.seat) or not journal.digest(self.payload_digest):
             raise TaskJournalError("invalid immutable task specification")
 
     @property
@@ -62,7 +62,7 @@ class TaskObservation:
         ):
             raise TaskJournalError("invalid task observation")
         for value in (self.provider_task_id, self.original_run_id, self.provider_result_id):
-            if value is not None and not journal.token(value):
+            if value is not None and not journal.provider_reference(value):
                 raise TaskJournalError("invalid provider correlation reference")
         if self.artifact_kind is not None and self.artifact_kind not in journal.ARTIFACT_KINDS:
             raise TaskJournalError("invalid artifact classification")
@@ -82,6 +82,7 @@ class TaskResult:
     artifact_digest: str | None = None
     containment: str = "unknown"
     acknowledged: bool = False
+    version: str | None = None
 
 
 def _attempt_id(handle: TaskHandle) -> str:
@@ -108,7 +109,7 @@ def _observation_payload(result: TaskResult) -> dict[str, Any]:
     return {
         "task_id": result.handle.spec.task_id,
         "attempt_id": result.handle.attempt_id,
-        **{k: v for k, v in asdict(result).items() if k not in {"handle", "acknowledged"}},
+        **{k: v for k, v in asdict(result).items() if k not in {"handle", "acknowledged", "version"}},
     }
 
 
@@ -132,10 +133,7 @@ def _observe(current: TaskResult, observation: TaskObservation) -> TaskResult:
         if kind is None or (kind == "unavailable") != (artifact is None):
             raise TaskJournalError("terminal artifact requires classification and digest")
     elif kind is not None or artifact is not None:
-        # A completed provider turn with live children cannot publish task artifacts yet.
-        if observation.status != "completed" or status != "waiting-for-children":
-            raise TaskJournalError("nonterminal task cannot publish result artifact")
-        kind = artifact = None
+        raise TaskJournalError("nonterminal task cannot publish result artifact")
     result = replace(
         current,
         status=status,
@@ -163,7 +161,9 @@ def _fold(run_id: str, events: list[run_journal.RunEvent]) -> dict[str, TaskResu
             if p["spec_digest"] != spec.spec_digest or task_id in results or p["request_id"] in requests:
                 raise TaskJournalError("conflicting task acceptance history")
             requests.add(p["request_id"])
-            results[task_id] = TaskResult(TaskHandle(run_id, p["request_id"], spec), "queued")
+            results[task_id] = TaskResult(
+                TaskHandle(run_id, p["request_id"], spec), "queued", version=event.event_digest
+            )
             continue
         current = _find(results, task_id)
         if event.event_type == "task.attempt-prepared":
@@ -184,11 +184,12 @@ def _fold(run_id: str, events: list[run_journal.RunEvent]) -> dict[str, TaskResu
             if current.result_id is None or p["result_id"] != current.result_id:
                 raise TaskJournalError("task acknowledgement result mismatch")
             results[task_id] = replace(current, acknowledged=True)
+        results[task_id] = replace(results[task_id], version=event.event_digest)
     return results
 
 
 def _find(results: dict[str, TaskResult], task_id: str) -> TaskResult:
-    if not journal.token(task_id) or task_id not in results:
+    if not journal.task_id(task_id) or task_id not in results:
         raise TaskJournalError("task identity not accepted")
     return results[task_id]
 
@@ -229,18 +230,37 @@ def prepare_attempt(run_dir: Path, *, workspace: Path, task_id: str) -> TaskHand
         return handle
 
 
-def observe_task(run_dir: Path, *, workspace: Path, handle: TaskHandle, observation: TaskObservation) -> TaskResult:
-    """Record classified observations without executing or cancelling work."""
+def observe_task(
+    run_dir: Path,
+    *,
+    workspace: Path,
+    handle: TaskHandle,
+    observation: TaskObservation,
+    expected_version: str | None = None,
+) -> TaskResult:
+    """Record an observation, optionally comparing the last durable task version.
+
+    Retryable or out-of-order callers must retain and pass the version against
+    which they collected the observation. Omission trusts caller ordering.
+    """
     with journal.transaction(run_dir, workspace=workspace, writing=True) as (run_dir, events):
         current = _find(_fold(run_dir.name, events), handle.spec.task_id)
         if handle != current.handle or handle.attempt_id is None:
             raise TaskJournalError("task observation handle mismatch")
+        if expected_version is not None and (
+            not journal.digest(expected_version) or expected_version != current.version
+        ):
+            raise TaskJournalError("stale task observation: expected version does not match")
+        if observation.containment == "active" and (
+            observation.artifact_kind is not None or observation.artifact_digest is not None
+        ):
+            raise TaskJournalError("active containment cannot accept an artifact; retain and resubmit it")
         result = _observe(current, observation)
         if result == current:
             return current
         payload = _observation_payload(result)
-        journal.append(run_dir, workspace=workspace, event_type="task.observed", payload=payload)
-        return result
+        event = journal.append(run_dir, workspace=workspace, event_type="task.observed", payload=payload)
+        return replace(result, version=event.event_digest)
 
 
 def read_tasks(run_dir: Path) -> tuple[TaskResult, ...]:
@@ -256,10 +276,11 @@ def acknowledge_result(run_dir: Path, *, workspace: Path, task_id: str, result_i
         if current.result_id is None or result_id != current.result_id:
             raise TaskJournalError("task acknowledgement result mismatch")
         if not current.acknowledged:
-            journal.append(
+            event = journal.append(
                 run_dir,
                 workspace=workspace,
                 event_type="task.acknowledged",
                 payload={"task_id": task_id, "result_id": result_id},
             )
+            current = replace(current, version=event.event_digest)
         return replace(current, acknowledged=True)

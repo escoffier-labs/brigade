@@ -6,6 +6,7 @@ owner's checkpoint/journal lock order and checkpoint-before-fact protocol.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import re
 from contextlib import contextmanager
@@ -50,6 +51,8 @@ TERMINAL = frozenset({"completed", "failed", "interrupted", "cancelled"})
 CONTAINMENT = frozenset({"unknown", "active", "quiescent"})
 ARTIFACT_KINDS = frozenset({"commit", "patch", "receipt", "unavailable"})
 _TOKEN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]*", re.ASCII)
+_PROVIDER_REFERENCE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:%~+/@=-]*", re.ASCII)
+_PROVIDER_FIELDS = frozenset({"provider_task_id", "original_run_id", "provider_result_id"})
 _DIGEST_FIELDS = frozenset({"payload_digest", "spec_digest", "attempt_id", "result_id", "artifact_digest"})
 
 
@@ -59,6 +62,18 @@ class TaskJournalError(RuntimeError):
 
 def token(value: object) -> bool:
     return isinstance(value, str) and len(value) <= run_events.MAX_PAYLOAD_STR_LEN and bool(_TOKEN.fullmatch(value))
+
+
+def task_id(value: object) -> bool:
+    return isinstance(value, str) and len(value) <= 128 and token(value)
+
+
+def provider_reference(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) <= run_events.MAX_PAYLOAD_STR_LEN
+        and bool(_PROVIDER_REFERENCE.fullmatch(value))
+    )
 
 
 def digest(value: object) -> bool:
@@ -80,6 +95,10 @@ def validate_payload(event_type: str, payload: Mapping[str, Any]) -> None:
             continue
         if key in _DIGEST_FIELDS:
             valid = digest(value)
+        elif key == "task_id":
+            valid = task_id(value)
+        elif key in _PROVIDER_FIELDS:
+            valid = provider_reference(value)
         elif key == "status":
             valid = isinstance(value, str) and value in STATES
         elif key == "containment":
@@ -117,6 +136,24 @@ def _verified(run_dir: Path) -> list[run_journal.RunEvent]:
     checkpoints = [e for e in events if e.event_type == run_checkpoint.CHECKPOINT_EVENT_TYPE]
     if not checkpoints:
         raise TaskJournalError("task journal has no recovery checkpoint")
+    # A later unrelated pair cannot erase a checkpoint-only task crash.
+    for index, checkpoint in enumerate(events):
+        if checkpoint.event_type != run_checkpoint.CHECKPOINT_EVENT_TYPE:
+            continue
+        paired_type = checkpoint.payload.get("paired_event_type")
+        if paired_type not in TASK_FIELDS:
+            continue
+        key = checkpoint.payload.get("pairing_key")
+        if key is None:
+            raise TaskJournalError("task checkpoint refused: pairing")
+        following = events[index + 1] if index + 1 < len(events) else None
+        if (
+            following is None
+            or following.sequence != checkpoint.sequence + 1
+            or following.event_type != paired_type
+            or following.request_digest != key
+        ):
+            raise TaskJournalError("task checkpoint refused: incomplete-pair")
     latest = checkpoints[-1]
     body = json.loads(run_checkpoint.validate_checkpoint(run_dir, latest))
     run_checkpoint._verify_coverage(events, latest, body)
@@ -153,10 +190,8 @@ def transaction(
         raise TaskJournalError("task journal operation refused or durability indeterminate") from exc
 
 
-def append(run_dir: Path, *, workspace: Path, event_type: str, payload: Mapping[str, Any]) -> None:
+def append(run_dir: Path, *, workspace: Path, event_type: str, payload: Mapping[str, Any]) -> run_journal.RunEvent:
     """Publish a checkpoint-paired task fact; no direct journal append shortcut."""
-    import hashlib
-
     identity: dict[str, Any] = {"event_type": event_type, "payload": payload}
     if event_type == "task.observed":
         # Bind real state transitions to their prior task fact. A status can
@@ -171,6 +206,6 @@ def append(run_dir: Path, *, workspace: Path, event_type: str, payload: Mapping[
             None,
         )
     key = "task:" + hashlib.sha256(run_events.canonical_bytes(identity)).hexdigest()
-    run_lifecycle._record_lifecycle_event_paired(
+    return run_lifecycle._record_lifecycle_event_paired(
         run_dir, workspace=workspace, event_type=event_type, payload=payload, idempotency_key=key
     )
