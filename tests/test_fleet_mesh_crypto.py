@@ -834,3 +834,40 @@ def test_parse_envelope_validates_schema(parties, mutation):
         del envelope["ct"]
     with pytest.raises(mesh.MeshError, match="envelope_malformed"):
         mesh.parse_envelope(mesh.canonical(envelope))
+
+
+def test_self_send_rejects_a_different_record_for_the_same_principal(parties):
+    keys, records = parties
+    stale = mesh.build_key_record(keys[2], principal="node-a", hub="mesh", created_at=STAMP)
+    assert stale["kid"] != records[0]["kid"]
+    with pytest.raises(mesh.MeshError, match="mesh_key_invalid"):
+        mesh.seal(
+            PAYLOAD,
+            sender=keys[0],
+            sender_record=records[0],
+            recipient_record=stale,
+            retry_key=b"r" * 32,
+            client_id="self-stale",
+            created_at=STAMP,
+        )
+
+
+def test_self_send_has_one_wrap_and_opens_in_both_contexts(parties):
+    keys, records = parties
+    envelope = mesh.seal(
+        PAYLOAD,
+        sender=keys[0],
+        sender_record=records[0],
+        recipient_record=records[0],
+        retry_key=b"r" * 32,
+        client_id="self-1",
+        created_at=STAMP,
+    )
+    assert [r["kid"] for r in envelope["recipients"]] == [records[0]["kid"]]
+    for context in ("inbound", "outbound"):
+        assert (
+            mesh.open(
+                mesh.canonical(envelope), keys=keys[0], sender_record=records[0], caller="node-a", context=context
+            )
+            == PAYLOAD
+        )

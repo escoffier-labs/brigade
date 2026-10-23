@@ -369,7 +369,10 @@ an extra padding bucket.
 `rcpt` MUST contain unique kids sorted in ASCII lexicographic order.
 `recipients` MUST contain exactly one `{kid, wrap}` object for each kid, in
 that same order. Self-send deduplicates the sender and recipient kid into one
-entry and one wrap. Later slices MUST address wraps by kid, never by position.
+entry and one wrap. A sealer MUST reject a self-send whose recipient record is
+not the sender's own record (for example, a stale pre-rotation record), and
+MUST reject distinct principals that share a kid. Later slices MUST address
+wraps by kid, never by position.
 
 Timestamps MUST match this exact ASCII grammar and name a valid calendar time:
 

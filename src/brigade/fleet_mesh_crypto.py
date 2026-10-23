@@ -577,8 +577,12 @@ def seal(
     )
     padded = encode_payload(payload)
     records = {r["kid"]: r for r in (recipient_record, sender_record)}
-    # A shared key cannot stand for two different message principals.
-    _require(len(records) == 2 or recipient_record == sender_record, "mesh_key_invalid")
+    # A shared key cannot stand for two different message principals, and a
+    # self-send must name the sender's own record so it deduplicates to one wrap.
+    if recipient_record["principal"] == sender_record["principal"]:
+        _require(recipient_record == sender_record, "mesh_key_invalid")
+    else:
+        _require(len(records) == 2, "mesh_key_invalid")
     rh: dict[str, Any] = {
         "v": VERSION,
         "suite": SUITE,
