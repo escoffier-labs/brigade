@@ -290,10 +290,6 @@ jobs:
           # Hosted Windows includes Python. Selection uses only its standard library.
           python scripts/windows_affected_tests.py --base $base --head HEAD --output "$env:RUNNER_TEMP/windows-affected-results/files.txt"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          # Keep the reported slow hub workloads in both experiment conditions.
-          $files = "$env:RUNNER_TEMP/windows-affected-results/files.txt"
-          @((Get-Content $files) + @("test_fleet_hub_request_bounds.py", "test_fleet_admin_stats.py")) |
-            Sort-Object -Unique | Set-Content $files
           $count = @(Get-Content "$env:RUNNER_TEMP/windows-affected-results/files.txt").Count
           "count=$count" >> $env:GITHUB_OUTPUT
       - name: Skip empty selection
@@ -312,22 +308,9 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python -m pip install -e ".[dev]"
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-      - name: Exclude CI SQLite paths from Defender
-        shell: pwsh
-        run: |
-          try {
-            $tempRoot = (python -c "import tempfile; print(tempfile.gettempdir())").Trim()
-            if ($LASTEXITCODE -ne 0) { throw "Could not resolve Python temp root" }
-            $paths = @($tempRoot, $env:GITHUB_WORKSPACE)
-            Add-MpPreference -ExclusionPath $paths -ErrorAction Stop
-            Write-Output "Requested Defender exclusions: $($paths -join ', ')"
-            Get-MpPreference -ErrorAction Stop | Select-Object ExclusionPath | Format-List
-          } catch {
-            Write-Warning "Defender exclusion unavailable: $($_.Exception.Message)"
-          }
       - name: Probe SQLite flush latency
         timeout-minutes: 5
-        run: python scripts/windows_sqlite_flush_probe.py --output "$env:RUNNER_TEMP/windows-affected-results/sqlite-flush.json"
+        run: python scripts/windows_sqlite_flush_probe.py --samples 20 --output "$env:RUNNER_TEMP/windows-affected-results/sqlite-flush.json"
       - name: Run affected Windows tests
         if: ${{ steps.selection.outputs.count != '0' }}
         timeout-minutes: 45
@@ -898,23 +881,10 @@ jobs:
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
-      - name: Exclude CI SQLite paths from Defender
-        shell: pwsh
-        run: |
-          try {
-            $tempRoot = (python -c "import tempfile; print(tempfile.gettempdir())").Trim()
-            if ($LASTEXITCODE -ne 0) { throw "Could not resolve Python temp root" }
-            $paths = @($tempRoot, $env:GITHUB_WORKSPACE)
-            Add-MpPreference -ExclusionPath $paths -ErrorAction Stop
-            Write-Output "Requested Defender exclusions: $($paths -join ', ')"
-            Get-MpPreference -ErrorAction Stop | Select-Object ExclusionPath | Format-List
-          } catch {
-            Write-Warning "Defender exclusion unavailable: $($_.Exception.Message)"
-          }
       - name: Probe SQLite flush latency
         shell: pwsh
         timeout-minutes: 5
-        run: python scripts/windows_sqlite_flush_probe.py --output "$env:RUNNER_TEMP/windows-native-sqlite-flush.json"
+        run: python scripts/windows_sqlite_flush_probe.py --samples 20 --output "$env:RUNNER_TEMP/windows-native-sqlite-flush.json"
       - name: Upload SQLite flush diagnostics
         if: ${{ always() }}
         uses: actions/upload-artifact@v7
