@@ -230,3 +230,17 @@ def test_conflicting_socket_selectors_refuse_without_interrupt(tmp_path):
     assert response["ok"] is False
     assert response["code"] == "invalid-target"
     assert turn.calls == []
+
+
+def test_socket_steer_without_target_returns_invalid_target(tmp_path):
+    registry = run_control.LiveTurnRegistry()
+    turn = register(registry, "task-a")
+    server = run_control.ControlServer(tmp_path / "control.sock", registry)
+    transport = server.start()
+    try:
+        response = run_control.send_request(transport, {"op": "steer", "text": "continue"})
+    finally:
+        server.close()
+    assert response["ok"] is False
+    assert response["code"] == "invalid-target"
+    assert turn.calls == []

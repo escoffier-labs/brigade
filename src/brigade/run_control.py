@@ -437,7 +437,7 @@ class ControlServer:
         if op == "steer":
             text = request.get("text")
             if worker is None and task_id is None:
-                raise ControlError("steer requires worker or task_id")
+                raise ControlError("steer requires worker or task_id", code="invalid-target")
             if not isinstance(text, str):
                 raise ControlError("steer requires text")
             return self.registry.steer(worker, text, task_id=task_id, attempt_id=attempt_id)
