@@ -547,10 +547,13 @@ def _recover_authoritative_dispatch_checkpoint(
     payload: dict[str, object],
     idempotency_key: str,
 ) -> run_journal.RunEvent | None:
-    """Finish only the exact dispatch fact left after its durable checkpoint.
+    """Finish only the exact explicit fact left after its durable checkpoint.
+
+    The dispatch helper's existing name and key checks remain compatible with
+    pending dispatch records. Generic request-digest pairs use the same proof.
 
     A checkpoint-only tail is a narrow crash window: the original dispatch
-    request identity is recoverable, but a generic authority catch-up would
+    request identity is recoverable, but an ordinary authority catch-up would
     treat it as ordinary journal-ahead evidence. Every field below binds the
     missing fact to this run's current base-stripped receipt. Any divergence
     raises before a new checkpoint, retry, shadow write, or run.json write.
@@ -849,7 +852,10 @@ def _record_lifecycle_event_paired(
         if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
             raise LifecycleJournalError(run_events._bound("dispatch fact attempt must be a positive integer"))
         pairing_key = run_checkpoint.dispatch_pairing_key(event_type, seat, attempt)
-    if event_type in run_events._TASK_EVENT_TYPES:
+    else:
+        # Explicit generic facts can share an unchanged snapshot and event
+        # type. Bind their checkpoint to the whole request, including the
+        # caller's idempotency key, just as task facts do.
         pairing_key = run_events.request_digest(event_type=event_type, payload=payload, idempotency_key=idempotency_key)
     journal_path = _journal_path(run_dir)
     if not run_journal.bound_is_file(journal_path):
@@ -884,10 +890,10 @@ def _record_lifecycle_event_paired(
         if not isinstance(snapshot_obj, dict):
             raise LifecycleJournalError(run_events._bound("lifecycle run receipt is not a JSON object"))
         if aboyeur._resolve_authority_state(run_dir) == "authoritative":
-            # Exact dispatch pairing keys share the crash-window recovery
-            # path used by record_dispatch_fact: finish a checkpoint-only
-            # tail before the ordinary prior-decision gate can fail closed.
-            if pairing_key is not None and event_type in run_checkpoint._DISPATCH_FACT_EVENT_TYPES:
+            # Finish an exact explicit fact's checkpoint-only crash window
+            # before the ordinary prior-decision gate fails closed. Task
+            # operations retain their stricter incomplete-pair refusal.
+            if event_type not in run_events._TASK_EVENT_TYPES:
                 report = run_journal.read_journal_bounded(journal_path)
                 if report.partial_tail is not None or report.chain_errors:
                     raise run_journal.ChainIntegrityError(run_events._bound(_CHAIN_CATEGORY))
@@ -923,8 +929,7 @@ def _record_lifecycle_event_paired(
         report = run_journal.read_journal_bounded(journal_path)
         if report.partial_tail is not None or report.chain_errors:
             raise run_journal.ChainIntegrityError(run_events._bound(_CHAIN_CATEGORY))
-        # Task checkpoints bind one exact fact. Generic checkpoints can replay
-        # for distinct facts sharing the same snapshot and event type.
+        # Task checkpoints must be newly adjacent before task publication.
         if event_type in run_events._TASK_EVENT_TYPES and (
             not report.events or checkpoint.sequence != report.events[-1].sequence
         ):

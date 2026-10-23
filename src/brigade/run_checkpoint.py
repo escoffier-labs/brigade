@@ -44,6 +44,7 @@ _CHECKPOINT_PAYLOAD_OPTIONAL_KEYS = frozenset({"body_kind", "pairing_key"})
 # the validation logic now treats body_kind as optional.
 _CHECKPOINT_PAYLOAD_KEYS = _CHECKPOINT_PAYLOAD_REQUIRED_KEYS | _CHECKPOINT_PAYLOAD_OPTIONAL_KEYS
 _CHECKPOINT_IDEMPOTENCY_PREFIX = "checkpoint"
+_CHECKPOINT_GENERIC_IDEMPOTENCY_PREFIX = "checkpoint:fact:"
 _CHECKPOINT_TRUNCATION_KEYS = frozenset({"truncated", "oversized_paths"})
 _CHECKPOINT_ASSET_SUFFIXES = frozenset(
     {
@@ -931,7 +932,12 @@ def _checkpoint_payload(
     }
     if body_kind is not None:
         payload["body_kind"] = body_kind
-    if pairing_key is not None:
+    # Existing readers interpret payload pairing_key as a dispatch/task key.
+    # Generic request identities live in the checkpoint idempotency key so
+    # its payload remains readable by those readers and the shadow projector.
+    if pairing_key is not None and (
+        paired_event_type in _DISPATCH_FACT_EVENT_TYPES or paired_event_type in run_events._TASK_EVENT_TYPES
+    ):
         payload["pairing_key"] = pairing_key
     return payload
 
@@ -964,6 +970,15 @@ def _checkpoint_idempotency_key(
             paired_digest = hashlib.sha256(paired.encode("utf-8")).hexdigest()[:16]
             return f"{prefix}:{sha}:{paired_digest}"
         return f"{prefix}:{sha}:{paired[:budget]}"
+
+    if paired_event_type not in _DISPATCH_FACT_EVENT_TYPES and paired_event_type not in run_events._TASK_EVENT_TYPES:
+        # Preserve existing dispatch/task keys, including crash-window retry
+        # identities. New generic keys hash the complete identity rather than
+        # truncating its request digest to fit the envelope's key limit.
+        identity = run_events.canonical_bytes(
+            {"sha256": sha, "paired_event_type": paired, "pairing_key": pairing_key, "body_kind": body_kind}
+        )
+        return f"{_CHECKPOINT_GENERIC_IDEMPOTENCY_PREFIX}{hashlib.sha256(identity).hexdigest()}"
 
     key = f"{prefix}:{sha}:{paired}:{pairing_key}"
     if len(key) <= run_events.MAX_IDEMPOTENCY_KEY_LEN:
@@ -1279,9 +1294,14 @@ def _verify_coverage(
     """
     paired_event_type = latest.payload.get("paired_event_type")
     pairing_key = latest.payload.get("pairing_key")
+    generic_identity = latest.idempotency_key.startswith(_CHECKPOINT_GENERIC_IDEMPOTENCY_PREFIX)
     tail = events[-1]
     trailing_neutral_facts = 0
-    while tail.event_type in {"run.redaction.recorded", "run.cassette.recorded"}:
+    while tail.event_type in {"run.redaction.recorded", "run.cassette.recorded"} and not (
+        (pairing_key is not None or generic_identity)
+        and tail.sequence == latest.sequence + 1
+        and tail.event_type == paired_event_type
+    ):
         trailing_neutral_facts += 1
         if trailing_neutral_facts == len(events):
             raise CheckpointError(
@@ -1289,16 +1309,20 @@ def _verify_coverage(
             )
         tail = events[-1 - trailing_neutral_facts]
     if latest.sequence == tail.sequence:
-        # A dispatch pairing key promises a specific identity-bearing fact.
+        # A pairing key promises a specific identity-bearing fact.
         # A checkpoint at tail means that fact never committed, so recovery
         # must surface the incomplete pair instead of treating the checkpoint
         # as covered.
-        if pairing_key is not None:
+        if pairing_key is not None or generic_identity:
             raise CheckpointError(
                 _bound(
                     "task checkpoint pair is incomplete"
                     if paired_event_type in run_events._TASK_EVENT_TYPES
-                    else "dispatch checkpoint pair is incomplete"
+                    else (
+                        "dispatch checkpoint pair is incomplete"
+                        if paired_event_type in _DISPATCH_FACT_EVENT_TYPES
+                        else "generic checkpoint pair is incomplete"
+                    )
                 ),
                 category="incomplete-pair",
             )
@@ -1321,6 +1345,15 @@ def _verify_coverage(
         if pairing_key is None or pairing_key != paired.request_digest:
             raise CheckpointError(_bound("checkpoint task pairing identity does not match event"), category="pairing")
         return
+    if generic_identity:
+        expected_key = _checkpoint_idempotency_key(
+            latest.payload["sha256"],
+            paired_event_type=paired.event_type,
+            body_kind=latest.payload.get("body_kind"),
+            pairing_key=paired.request_digest,
+        )
+        if latest.idempotency_key != expected_key:
+            raise CheckpointError(_bound("checkpoint pairing identity does not match event"), category="pairing")
     if pairing_key is not None:
         seat = paired.payload.get("seat")
         attempt = paired.payload.get("attempt")

@@ -15,6 +15,21 @@ prepared = support.prepared
 task_run = support.task_run
 
 
+@pytest.fixture
+def generic_run(task_run):
+    """Exercise actual projection authority, beyond durable opt-in alone."""
+    from brigade import aboyeur
+
+    run_dir, workspace = task_run
+    snapshot = json.loads((run_dir / "run.json").read_bytes())
+    if snapshot.get("run_journal_authority_requested"):
+        aboyeur._write_json(run_dir / "run.json", snapshot)
+        assert aboyeur._resolve_authority_state(run_dir) == "authoritative"
+    else:
+        assert aboyeur._resolve_authority_state(run_dir) == "legacy"
+    return run_dir, workspace
+
+
 def test_owner_required_even_for_replay(task_run):
     run_dir, workspace = task_run
     accepted(task_run)
@@ -355,3 +370,229 @@ def test_forged_task_pair_cannot_authorize_next_write(authoritative_task_run, da
         aboyeur._write_json(run_dir / "run.json", snapshot)
     assert journal_path.read_bytes() == before
     assert (run_dir / "run.json").read_bytes() == snapshot_bytes
+
+
+@pytest.mark.parametrize("interleave_redaction", [False, True])
+def test_distinct_generic_facts_keep_task_operations_usable(generic_run, interleave_redaction):
+    """Unchanged receipts must not collapse distinct budget fact checkpoints."""
+    from brigade import run_budget
+
+    run_dir, workspace = generic_run
+    payload = run_budget.build_usage_reconciled_event(
+        dimension="worker_dispatch_count",
+        usage_source="estimated",
+        used=1,
+        request_id="reservation-one",
+        estimated_used=1,
+        reason_class="reservation_grant",
+    )["payload"]
+    journal = run_dir / "events/lifecycle.jsonl"
+    snapshot_before = (run_dir / "run.json").read_bytes()
+    for key in ("budget-one", "budget-two"):
+        event = run_lifecycle.record_lifecycle_event(
+            run_dir,
+            workspace=workspace,
+            event_type="run_budget.usage_reconciled",
+            payload=payload,
+            idempotency_key=key,
+        )
+        before_replay = journal.read_bytes()
+        assert (
+            run_lifecycle.record_lifecycle_event(
+                run_dir,
+                workspace=workspace,
+                event_type=event.event_type,
+                payload=payload,
+                idempotency_key=key,
+            )
+            == event
+        )
+        assert journal.read_bytes() == before_replay
+        with pytest.raises(run_lifecycle.LifecycleJournalError, match="active run lock"):
+            run_lifecycle.record_lifecycle_event(
+                run_dir,
+                workspace=workspace / "other",
+                event_type=event.event_type,
+                payload=payload,
+                idempotency_key=key,
+            )
+        assert journal.read_bytes() == before_replay
+        assert run_checkpoint.recover_from_checkpoint(run_dir, json.loads(snapshot_before))["status"] == "running"
+        assert tasks.read_tasks(run_dir) == ()
+        if interleave_redaction and key == "budget-one":
+            run_lifecycle.record_lifecycle_event(
+                run_dir,
+                workspace=workspace,
+                event_type="run.redaction.recorded",
+                payload={},
+                idempotency_key="redaction-between",
+            )
+    assert (run_dir / "run.json").read_bytes() == snapshot_before
+    accepted(generic_run)
+    assert [record.handle.spec.task_id for record in tasks.read_tasks(run_dir)] == ["one"]
+    events = run_journal.read_journal_bounded(journal).events
+    budget_facts = [e for e in events if e.event_type == "run_budget.usage_reconciled"]
+    assert len(budget_facts) == 2
+    for fact in budget_facts:
+        checkpoint = events[fact.sequence - 2]
+        assert checkpoint.event_type == run_checkpoint.CHECKPOINT_EVENT_TYPE
+        assert "pairing_key" not in checkpoint.payload
+    assert events[budget_facts[0].sequence - 2].idempotency_key != events[budget_facts[1].sequence - 2].idempotency_key
+
+
+@pytest.mark.parametrize("event_type", ["run.redaction.recorded", "run_budget.usage_reconciled"])
+def test_generic_checkpoint_crash_refuses_recovery_and_retries_exactly(generic_run, monkeypatch, event_type):
+    from brigade import run_budget
+
+    run_dir, workspace = generic_run
+    payload = (
+        {}
+        if event_type == "run.redaction.recorded"
+        else run_budget.build_usage_reconciled_event(
+            dimension="worker_dispatch_count",
+            usage_source="estimated",
+            used=1,
+            request_id="reservation-one",
+            estimated_used=1,
+            reason_class="reservation_grant",
+        )["payload"]
+    )
+    real_append = run_lifecycle._append_owner_event
+
+    def crash(path, **kwargs):
+        if kwargs["event_type"] == event_type:
+            raise OSError("simulated generic checkpoint-only crash")
+        return real_append(path, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(run_lifecycle, "_append_owner_event", crash)
+        with pytest.raises(run_lifecycle.LifecycleJournalError):
+            run_lifecycle.record_lifecycle_event(
+                run_dir,
+                workspace=workspace,
+                event_type=event_type,
+                payload=payload,
+                idempotency_key="generic-crash",
+            )
+    journal = run_dir / "events/lifecycle.jsonl"
+    before = journal.read_bytes()
+    with pytest.raises(run_checkpoint.CheckpointError) as error:
+        run_checkpoint.recover_from_checkpoint(run_dir, json.loads((run_dir / "run.json").read_bytes()))
+    assert error.value.category == "incomplete-pair"
+    event = run_lifecycle.record_lifecycle_event(
+        run_dir,
+        workspace=workspace,
+        event_type=event_type,
+        payload=payload,
+        idempotency_key="generic-crash",
+    )
+    assert len(journal.read_bytes().splitlines()) == len(before.splitlines()) + 1
+    committed = journal.read_bytes()
+    assert (
+        run_lifecycle.record_lifecycle_event(
+            run_dir,
+            workspace=workspace,
+            event_type=event_type,
+            payload=payload,
+            idempotency_key="generic-crash",
+        )
+        == event
+    )
+    assert journal.read_bytes() == committed
+    assert tasks.read_tasks(run_dir) == ()
+
+
+def test_generic_checkpoint_rejects_a_different_request_identity(generic_run):
+    from dataclasses import replace
+
+    run_dir, workspace = generic_run
+    run_lifecycle.record_lifecycle_event(
+        run_dir,
+        workspace=workspace,
+        event_type="run.redaction.recorded",
+        payload={},
+        idempotency_key="redaction-one",
+    )
+    events = run_journal.read_journal_bounded(run_dir / "events/lifecycle.jsonl").events
+    checkpoint = events[-2]
+    changed = replace(events[-1], request_digest="a" * 64)
+    with pytest.raises(run_checkpoint.CheckpointError) as error:
+        run_checkpoint._verify_coverage([*events[:-1], changed], checkpoint, {"status": "running"})
+    assert error.value.category == "pairing"
+
+
+def test_legacy_unkeyed_generic_checkpoint_remains_readable(generic_run):
+    """Use the old writer's real checkpoint/append protocol in both modes."""
+    from brigade import run_budget
+
+    run_dir, workspace = generic_run
+    snapshot = (run_dir / "run.json").read_bytes()
+    snapshot_obj = json.loads(snapshot)
+    payload = run_budget.build_usage_reconciled_event(
+        dimension="worker_dispatch_count",
+        usage_source="estimated",
+        used=1,
+        request_id="legacy-reservation",
+        estimated_used=1,
+        reason_class="reservation_grant",
+    )["payload"]
+    checkpoint = run_checkpoint.write_checkpoint(
+        run_dir,
+        snapshot,
+        workspace=workspace,
+        paired_event_type="run_budget.usage_reconciled",
+        body_kind="base-stripped" if snapshot_obj.get("run_journal_authority_requested") else None,
+    )
+    assert checkpoint is not None and "pairing_key" not in checkpoint.payload
+    run_lifecycle._append_owner_event(
+        run_dir / "events/lifecycle.jsonl",
+        workspace=workspace,
+        run_id=run_dir.name,
+        event_type="run_budget.usage_reconciled",
+        payload=payload,
+        idempotency_key="legacy-fact",
+    )
+    assert run_checkpoint.recover_from_checkpoint(run_dir, snapshot_obj)["status"] == "running"
+    assert tasks.read_tasks(run_dir) == ()
+    journal = run_dir / "events/lifecycle.jsonl"
+    before_replay = journal.read_bytes()
+    run_lifecycle.record_lifecycle_event(
+        run_dir,
+        workspace=workspace,
+        event_type="run_budget.usage_reconciled",
+        payload=payload,
+        idempotency_key="legacy-fact",
+    )
+    assert journal.read_bytes() == before_replay
+
+
+def test_generic_fact_cannot_mask_task_orphan_with_actual_authority(generic_run, monkeypatch):
+    run_dir, workspace = generic_run
+    real_append = run_lifecycle._append_owner_event
+
+    def crash(path, **kwargs):
+        if kwargs["event_type"] == "task.accepted":
+            raise OSError("simulated task checkpoint-only crash")
+        return real_append(path, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(run_lifecycle, "_append_owner_event", crash)
+        with pytest.raises(tasks.TaskJournalError):
+            accepted(generic_run)
+    try:
+        run_lifecycle.record_lifecycle_event(
+            run_dir,
+            workspace=workspace,
+            event_type="run.redaction.recorded",
+            payload={},
+            idempotency_key="masking-generic",
+        )
+    except run_lifecycle.LifecycleJournalError:
+        # Fully authoritative runs may reject the masking write at the prior gate.
+        pass
+    before = (run_dir / "events/lifecycle.jsonl").read_bytes()
+    with pytest.raises(tasks.TaskJournalError, match="incomplete-pair"):
+        tasks.read_tasks(run_dir)
+    with pytest.raises(tasks.TaskJournalError, match="incomplete-pair"):
+        accepted(generic_run)
+    assert (run_dir / "events/lifecycle.jsonl").read_bytes() == before

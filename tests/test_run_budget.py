@@ -217,7 +217,7 @@ def test_budget_thresholds_allow_multiple_seats_with_real_lifecycle_journal(
     tmp_path, monkeypatch, authoritative, together
 ):
     """Budget facts must not prevent subsequent durable dispatch requests."""
-    from brigade import aboyeur, run_journal, run_lifecycle, runguard
+    from brigade import aboyeur, run_checkpoint, run_journal, run_lifecycle, runguard
 
     monkeypatch.delenv("BRIGADE_RUN_JOURNAL_AUTHORITY", raising=False)
     workspace = tmp_path / "workspace"
@@ -247,11 +247,22 @@ def test_budget_thresholds_allow_multiple_seats_with_real_lifecycle_journal(
 
     with runguard.run_lock(workspace, run_dir=run_dir):
         aboyeur._write_json(run_dir / "run.json", snapshot)
+        if authoritative:
+            aboyeur._write_json(run_dir / "run.json", snapshot)
+            assert aboyeur._resolve_authority_state(run_dir) == "authoritative"
 
         def append_event(event_type, payload, idempotency_key):
-            return run_lifecycle.record_lifecycle_event(
+            event = run_lifecycle.record_lifecycle_event(
                 run_dir, workspace=workspace, event_type=event_type, payload=payload, idempotency_key=idempotency_key
             )
+            # Observe coverage before a dispatch checkpoint can mask a gap.
+            assert (
+                run_checkpoint.recover_from_checkpoint(run_dir, json.loads((run_dir / "run.json").read_bytes()))[
+                    "status"
+                ]
+                == "running"
+            )
+            return event
 
         now = datetime(2026, 1, 1, tzinfo=timezone.utc)
         coordinator = run_budget.BudgetCoordinator(
@@ -287,8 +298,14 @@ def test_budget_thresholds_allow_multiple_seats_with_real_lifecycle_journal(
     assert report.partial_tail is None and not report.chain_errors
     thresholds = [event for event in report.events if event.event_type == "run_budget.threshold_reached"]
     assert [event.payload["dimension"] for event in thresholds] == ["wall_clock_seconds", "worker_dispatch_count"]
-    if together:
-        assert thresholds[1].sequence == thresholds[0].sequence + 1
+    for fact in thresholds:
+        checkpoint = report.events[fact.sequence - 2]
+        assert checkpoint.event_type == run_checkpoint.CHECKPOINT_EVENT_TYPE
+        assert checkpoint.payload["paired_event_type"] == fact.event_type
+    assert (
+        report.events[thresholds[0].sequence - 2].idempotency_key
+        != report.events[thresholds[1].sequence - 2].idempotency_key
+    )
     requested = [event for event in report.events if event.event_type == "run.dispatch.requested"]
     assert [(event.payload["seat"], event.payload["attempt"]) for event in requested] == [
         ("seat-a", 1),

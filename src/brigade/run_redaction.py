@@ -365,6 +365,15 @@ def _validate_checkpoint_artifacts(
     try:
         for event in checkpoint_events:
             checkpoint_bytes = run_checkpoint.validate_checkpoint(run_dir, event)
+            if "pairing_key" in event.payload or event.idempotency_key.startswith(
+                run_checkpoint._CHECKPOINT_GENERIC_IDEMPOTENCY_PREFIX
+            ):
+                following = events[event.sequence] if event.sequence < len(events) else None
+                run_checkpoint._verify_coverage(
+                    [event, following] if following is not None else [event],
+                    event,
+                    run_checkpoint._parse_checkpoint_object(checkpoint_bytes),
+                )
             if event.sequence == latest.sequence:
                 latest_bytes = checkpoint_bytes
         if latest_bytes is None:
@@ -428,6 +437,7 @@ def _rewrite_events(
     previous_digest: str | None = None
     total = bytearray()
     idempotency_keys: set[str] = set()
+    requests: list[tuple[dict[str, Any], str]] = []
     for event in events:
         affected = run_cassette.redaction_affects(event, sequence_start, sequence_end)
         preserved_anchor = event.event_type == "run.redaction.recorded"
@@ -437,6 +447,35 @@ def _rewrite_events(
             if affected and not preserved_anchor
             else event.idempotency_key
         )
+        requests.append((payload, idempotency_key))
+    # Prepare both sides before rebuilding the chain: a checkpoint precedes
+    # its fact, and either side may be outside the selected range. Preserve
+    # the tagged generic identity even when the checkpoint itself is selected.
+    for index, event in enumerate(events):
+        payload, idempotency_key = requests[index]
+        if event.event_type == run_checkpoint.CHECKPOINT_EVENT_TYPE and event.idempotency_key.startswith(
+            run_checkpoint._CHECKPOINT_GENERIC_IDEMPOTENCY_PREFIX
+        ):
+            following = events[index + 1] if index + 1 < len(events) else None
+            if (
+                following is None
+                or following.sequence != event.sequence + 1
+                or following.event_type != event.payload.get("paired_event_type")
+            ):
+                raise RedactionError("generic checkpoint pair is incomplete")
+            fact_payload, fact_key = requests[index + 1]
+            try:
+                fact_digest = run_events.request_digest(
+                    event_type=following.event_type, payload=fact_payload, idempotency_key=fact_key
+                )
+                idempotency_key = run_checkpoint._checkpoint_idempotency_key(
+                    payload["sha256"],
+                    paired_event_type=following.event_type,
+                    body_kind=payload.get("body_kind"),
+                    pairing_key=fact_digest,
+                )
+            except (run_events.CanonicalizationError, ValueError) as exc:
+                raise RedactionError("rewritten checkpoint identity is invalid") from exc
         if idempotency_key in idempotency_keys:
             raise RedactionError("rewritten journal idempotency key collision")
         idempotency_keys.add(idempotency_key)
@@ -2433,6 +2472,9 @@ def redact_journal(
             after_projection = _projection(snapshot, rewritten_events)
             if _projection_semantics(before_projection.snapshot) != _projection_semantics(after_projection.snapshot):
                 raise RedactionError("redaction changes the observable run projection")
+            # Prove the planned checkpoint/fact identities before quarantine,
+            # operation state, journal replacement, or projection publication.
+            _validate_checkpoint_artifacts(resolved_run_dir, after_projection.snapshot, rewritten_events)
             original_sha256 = active_digest
             rewritten_sha256 = _digest(rewritten_bytes)
             if prior_state is not None and (
