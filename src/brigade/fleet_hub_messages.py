@@ -145,6 +145,8 @@ def _metadata(raw: dict[str, Any], *, sender: str | None = None) -> dict[str, st
         extras[field] = value
     kind = raw.get("kind")
     if kind is not None:
+        if kind == "operator_question":
+            raise MessageError("operator_question is reserved for hub-created operator questions")
         if not isinstance(kind, str) or kind not in KINDS:
             raise MessageError("kind must be message, question, or completion")
         if kind != "message":
@@ -622,6 +624,18 @@ def send(
     sender: str,
     reply_to: int | None = None,
 ) -> dict[str, Any]:
+    return _send(conn, raw, sender=sender, reply_to=reply_to, extras=_metadata(raw, sender=sender))
+
+
+def _send(
+    conn: sqlite3.Connection,
+    raw: dict[str, Any],
+    *,
+    sender: str,
+    extras: dict[str, str],
+    reply_to: int | None = None,
+) -> dict[str, Any]:
+    """Insert validated metadata. Only question creation supplies the reserved kind."""
     recipient = _text(raw.get("to"), "to", 256)
     subject = _text(raw.get("subject"), "subject", SUBJECT_LIMIT)
     body = _text(raw.get("body"), "body", BODY_LIMIT)
@@ -632,7 +646,6 @@ def send(
     if not isinstance(priority, str) or priority not in PRIORITIES:
         raise MessageError("priority must be low, normal, high, or urgent")
     assert recipient is not None and subject is not None and body is not None
-    extras = _metadata(raw, sender=sender)
     message_hash = _payload_digest(recipient, subject, body, reference, priority, reply_to, extras=extras)
     opened = not conn.in_transaction
     if opened:
@@ -925,6 +938,7 @@ def ack(conn: sqlite3.Connection, message_id: Any, *, recipient: str) -> dict[st
 
 
 def reply(conn: sqlite3.Connection, raw: dict[str, Any], *, sender: str) -> dict[str, Any] | None:
+    _metadata(raw, sender=sender)
     _prune_expired(conn)
     message_id = raw.get("id")
     if not _sqlite_integer(message_id):

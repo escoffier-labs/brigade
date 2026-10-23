@@ -430,7 +430,7 @@ def _deliver_locked(path: Path, event: str, now: float, dir_fd: int | None, hub_
     new_cursor = cursor
     consumed = 0
     for row in rows:
-        if row.get("kind") != "question":
+        if row.get("kind") != "operator_question":
             shown.append(row)
         new_cursor = row["id"]
         consumed += 1

@@ -833,8 +833,12 @@ server should load it by default. The operator must be active and different
 from the caller. Agent send grants must permit the question and the operator's reply. The station sends each
 question to that recipient's inbox and records its audit atomically before
 opening a desktop prompt. Questions are never spooled for later prompting.
-Automatic live inbox delivery skips `kind=question`, so agent sessions are
-never prompted to answer operator questions.
+The hub assigns these messages the reserved `kind=operator_question`. Ordinary
+send and reply requests, including the MCP tool and CLI, reject this kind.
+Automatic live inbox delivery skips only `operator_question`. Peer-to-peer
+`kind=question` messages still reach live sessions. Both kinds remain visible
+through the inbox and message CLI. Schema 43 upgrades only legacy messages
+referenced by `fleet_questions`, preserving peer questions.
 
 On a Linux desktop with `DISPLAY` or `WAYLAND_DISPLAY`, the station tries an
 installed `zenity` entry dialog or `kdialog` input box. Text is displayed as data
@@ -872,10 +876,12 @@ Expired pending questions also become timeout records on that operation,
 without a background timer. A late operator reply records the first
 `late_answer_message_id` and `late_answered_at`, including when the reply
 arrives before the next status read. It remains a timeout and is never
-returned as an authoritative answer. Question messages remain in the operator
-inbox
-until the operator acknowledges them, including questions answered on the
-desktop or timed out. Existing inbox quotas apply.
+returned as an authoritative answer. After a desktop answer, the first operator
+inbox reply is recorded separately in `operator_reply_after_desktop_message_id`
+and `operator_reply_after_desktop_at`. Later replies cannot overwrite these
+fields, replace the desktop answer, or make it operator-authenticated.
+Question messages remain in the operator inbox until the operator acknowledges
+them, including questions answered on the desktop or timed out. Existing inbox quotas apply.
 
 Operator authority currently depends on hub-returned fields. Questions and
 answers are stored in plaintext in `fleet_questions`, and the reply trigger

@@ -395,7 +395,7 @@ def test_terminal_question_frees_pending_quota(asking_station, terminal):
     with sqlite3.connect(station[3]) as conn:
         assert conn.execute("SELECT COUNT(*) FROM fleet_questions WHERE status='pending'").fetchone() == (2,)
         assert conn.execute(
-            "SELECT COUNT(*) FROM fleet_messages WHERE kind='question' AND acked_at IS NULL"
+            "SELECT COUNT(*) FROM fleet_messages WHERE kind='operator_question' AND acked_at IS NULL"
         ).fetchone() == (3,)
 
 
@@ -501,14 +501,19 @@ def test_schema_43_repairs_missing_late_answer_columns(hub, version):
         conn.execute("DROP TRIGGER fleet_questions_reply")
         conn.execute("ALTER TABLE fleet_questions DROP COLUMN late_answer_message_id")
         conn.execute("ALTER TABLE fleet_questions DROP COLUMN late_answered_at")
+        conn.execute("ALTER TABLE fleet_questions DROP COLUMN operator_reply_after_desktop_message_id")
+        conn.execute("ALTER TABLE fleet_questions DROP COLUMN operator_reply_after_desktop_at")
         conn.execute("CREATE TRIGGER fleet_questions_reply AFTER INSERT ON fleet_messages BEGIN SELECT 1; END")
         conn.execute(f"PRAGMA user_version={version}")
     fleet_hub.init_db(hub[3]).close()
     fleet_hub.init_db(hub[3]).close()
     with sqlite3.connect(hub[3]) as conn:
-        assert {"late_answer_message_id", "late_answered_at"} <= {
-            r[1] for r in conn.execute("PRAGMA table_info(fleet_questions)")
-        }
+        assert {
+            "late_answer_message_id",
+            "late_answered_at",
+            "operator_reply_after_desktop_message_id",
+            "operator_reply_after_desktop_at",
+        } <= {r[1] for r in conn.execute("PRAGMA table_info(fleet_questions)")}
 
     code, reply = _request(
         hub[0], hub[2], {"action": "reply", "id": int(question["message_id"]), "body": "After migration"}
@@ -516,3 +521,145 @@ def test_schema_43_repairs_missing_late_answer_columns(hub, version):
     assert code == 201
     result = status(hub, question["question_id"])[1]
     assert result["answer"] == "After migration" and result["answer_id"] == str(reply["message"]["id"])
+
+
+@pytest.mark.parametrize("version", [42, 43])
+def test_schema_43_migrates_only_audited_question_messages(hub, version):
+    question = create(hub)[1]
+    code, peer = _request(
+        hub[0],
+        hub[1],
+        {
+            "action": "send",
+            "to": OPERATOR,
+            "subject": "Peer",
+            "body": "Peer question",
+            "kind": "question",
+        },
+    )
+    assert code == 201
+    with sqlite3.connect(hub[3]) as conn:
+        conn.execute("UPDATE fleet_messages SET kind='question' WHERE id=?", (question["message_id"],))
+        conn.execute(f"PRAGMA user_version={version}")
+    fleet_hub.init_db(hub[3]).close()
+    fleet_hub.init_db(hub[3]).close()
+    code, inbox = _request(hub[0], hub[2], {"action": "list"})
+    assert code == 200
+    assert {row["id"]: row["kind"] for row in inbox["messages"]} == {
+        int(question["message_id"]): "operator_question",
+        peer["message"]["id"]: "question",
+    }
+    assert status(hub, question["question_id"])[1]["status"] == "pending"
+
+
+def test_first_operator_reply_after_desktop_is_immutable_audit_only(hub, monkeypatch):
+    from brigade import fleet_hub_questions
+
+    started = datetime.now(timezone.utc)
+
+    class Clock(datetime):
+        current = started
+
+        @classmethod
+        def now(cls, tz=None):
+            return cls.current
+
+    monkeypatch.setattr(fleet_hub_questions, "datetime", Clock)
+    monkeypatch.setattr(fleet_hub_messages, "datetime", Clock)
+    question = create(hub)[1]
+    Clock.current = started + timedelta(seconds=5)
+    code, accepted = _request(
+        hub[0],
+        hub[1],
+        {
+            "action": "question_desktop",
+            "question_id": question["question_id"],
+            "answer": "yes",
+        },
+    )
+    assert code == 200 and accepted["answer"] == "yes"
+    Clock.current = started + timedelta(seconds=10)
+    code, reply = _request(
+        hub[0],
+        hub[2],
+        {
+            "action": "reply",
+            "id": int(question["message_id"]),
+            "body": "no",
+        },
+    )
+    assert code == 201
+    result = status(hub, question["question_id"])[1]
+    assert result["operator_reply_after_desktop_message_id"] == str(reply["message"]["id"])
+    assert result["operator_reply_after_desktop_at"] == Clock.current.isoformat()
+    assert {key: result[key] for key in accepted if not key.startswith("operator_reply_after_desktop_")} == {
+        key: value for key, value in accepted.items() if not key.startswith("operator_reply_after_desktop_")
+    }
+    Clock.current = started + timedelta(seconds=70)
+    assert (
+        _request(
+            hub[0],
+            hub[2],
+            {
+                "action": "reply",
+                "id": int(question["message_id"]),
+                "body": "another reply",
+            },
+        )[0]
+        == 201
+    )
+    assert status(hub, question["question_id"])[1] == result
+    with sqlite3.connect(hub[3]) as conn:
+        assert conn.execute(
+            "SELECT answer,answer_id,source,answered_at,late_answer_message_id FROM fleet_questions"
+        ).fetchone() == (
+            "yes",
+            None,
+            "caller_reported_desktop",
+            (started + timedelta(seconds=5)).isoformat(),
+            None,
+        )
+
+
+def test_schema_repairs_stale_trigger_that_contains_late_answer_column(hub):
+    question = create(hub)[1]
+    with sqlite3.connect(hub[3]) as conn:
+        conn.execute("DROP TRIGGER fleet_questions_reply")
+        conn.execute(
+            "CREATE TRIGGER fleet_questions_reply AFTER INSERT ON fleet_messages BEGIN SELECT late_answer_message_id FROM fleet_questions; END"
+        )
+    fleet_hub.init_db(hub[3]).close()
+    fleet_hub.init_db(hub[3]).close()
+    code, reply = _request(
+        hub[0],
+        hub[2],
+        {
+            "action": "reply",
+            "id": int(question["message_id"]),
+            "body": "repaired",
+        },
+    )
+    assert code == 201
+    result = status(hub, question["question_id"])[1]
+    assert result["answer"] == "repaired" and result["answer_id"] == str(reply["message"]["id"])
+
+
+def test_operator_cannot_be_a_node_with_agent_prefix(hub, monkeypatch):
+    operator = "agent:node-operator"
+    with sqlite3.connect(hub[3]) as conn:
+        conn.execute("UPDATE nodes SET node_id=? WHERE node_id=?", (operator, NODE_B))
+    monkeypatch.setenv("BRIGADE_FLEET_OPERATOR_RECIPIENT", operator)
+    code, result = create(hub)
+    assert code == 403 and result["code"] == "question_operator_invalid"
+
+
+def test_operator_question_message_created_event_matches_catalog(hub):
+    from brigade import fleet_hub_events
+
+    question = create(hub)[1]
+    code, inbox = _request(hub[0], hub[2], {"action": "list"})
+    assert code == 200
+    message = next(row for row in inbox["messages"] if str(row["id"]) == question["message_id"])
+    event = next(spec for spec in fleet_hub_events.definitions() if spec["name"] == fleet_hub_events.MESSAGE_CREATED)
+    assert message["kind"] == "operator_question"
+    assert message["kind"] in event["payloadSchema"]["properties"]["kind"]["enum"]

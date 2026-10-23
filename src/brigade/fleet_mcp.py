@@ -141,6 +141,10 @@ def _validate(value: Any, schema: dict[str, Any]) -> None:
     if kind == "string" and len(value) < schema.get("minLength", 0):
         raise _InvalidArguments("Invalid tool arguments: a required string is empty.")
     if "enum" in schema and value not in schema["enum"]:
+        if value == "operator_question":
+            raise _InvalidArguments(
+                "Invalid tool arguments: operator_question is reserved for hub-created operator questions."
+            )
         raise _InvalidArguments("Invalid tool arguments: unsupported value.")
     if kind == "array":
         if not schema["minItems"] <= len(value) <= schema["maxItems"]:

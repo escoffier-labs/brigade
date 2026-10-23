@@ -21,7 +21,7 @@ from brigade.claude_hooks import heartbeat, runtime
 from brigade.fleet_mcp import FleetMcp
 from brigade.install import install_selection
 from brigade.selection import Selection
-from tests.test_fleet_messages import NODE_A, NODE_B
+from tests.test_fleet_messages import NODE_A, NODE_B, _request
 
 from brigade.fleet_client_spool_lock import _spool_lock
 
@@ -86,13 +86,13 @@ def _fence_split(text: str) -> tuple[str, list[str]]:
 
 
 def test_new_mail_is_delivered_once_framed_as_untrusted_peer_content(fleet):
-    mid = _send(fleet, INJECTION, kind="completion", thread="issue:1887")
+    mid = _send(fleet, INJECTION, kind="question", thread="issue:1887")
 
     text = delivery.deliver("claude", "session-1", "UserPromptSubmit", now=T0)
 
     assert text is not None
     outside, fenced = _fence_split(text)
-    assert f"Message {mid} from {NODE_B} (completion)" in outside
+    assert f"Message {mid} from {NODE_B} (question)" in outside
     assert "flagged" in outside
     # Sender-chosen text only appears inside the fence, never in the trusted frame.
     assert len(fenced) == 1 and INJECTION in fenced[0] and "issue:1887" in fenced[0]
@@ -1025,9 +1025,34 @@ def test_codex_hook_fails_open_when_the_hub_is_down(fleet, monkeypatch, capsys):
 
 
 @pytest.mark.parametrize("questions_only", [False, True])
-def test_live_delivery_skips_operator_questions_without_acknowledging(fleet, questions_only):
-    qid = _send(fleet, "Operator-only question", kind="question")
-    note = None if questions_only else _send(fleet, "Session note", kind="completion")
+def test_live_delivery_skips_operator_questions_without_acknowledging(
+    fleet, hub, monkeypatch, tmp_path, questions_only
+):
+    from brigade import fleet_hub, fleet_hub_messages
+
+    with fleet_hub.open_db(hub[3]) as conn:
+        principal = fleet_hub_messages.add_principal(conn, {"name": "operator"})
+    monkeypatch.setenv("BRIGADE_FLEET_OPERATOR_RECIPIENT", "agent:operator")
+    code, question = _request(
+        fleet.base,
+        hub[2],
+        {"action": "question_create", "question": "Operator-only question", "request_id": "live-skip"},
+    )
+    assert code == 201, question
+    qid = int(question["message_id"])
+    token_file = tmp_path / "operator.token"
+    token_file.write_text(principal["token"])
+    token_file.chmod(0o600)
+    monkeypatch.setenv("BRIGADE_FLEET_MESSAGE_TOKEN_FILE", str(token_file))
+    fleet.receiver = FleetMcp(token_file=str(token_file))
+    assert _tool(fleet.receiver, "fleet_inbox")["messages"][0]["kind"] == "operator_question"
+    note = (
+        None
+        if questions_only
+        else _tool(fleet.sender, "fleet_send", to="agent:operator", body="Session note", kind="completion")["message"][
+            "id"
+        ]
+    )
     text = delivery.deliver("claude", "question-session", "UserPromptSubmit", now=T0)
     if questions_only:
         assert text is None

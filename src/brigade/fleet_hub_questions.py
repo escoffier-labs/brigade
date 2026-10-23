@@ -35,6 +35,8 @@ _TABLE = """CREATE TABLE IF NOT EXISTS fleet_questions (
     answered_at TEXT,
     late_answer_message_id INTEGER,
     late_answered_at TEXT,
+    operator_reply_after_desktop_message_id INTEGER,
+    operator_reply_after_desktop_at TEXT,
     UNIQUE(caller,generation,request_id)
 )"""
 _INDEX = "CREATE INDEX IF NOT EXISTS fleet_questions_deadline ON fleet_questions(status,deadline)"
@@ -59,6 +61,14 @@ BEGIN
         AND (EXISTS (SELECT 1 FROM nodes WHERE node_id=caller AND token_sha256=generation AND revoked_at IS NULL)
              OR EXISTS (SELECT 1 FROM fleet_message_principals
                 WHERE principal_id=caller AND token_hash=generation AND revoked_at IS NULL));
+    UPDATE fleet_questions SET operator_reply_after_desktop_message_id=NEW.id,
+        operator_reply_after_desktop_at=NEW.received_at
+    WHERE status='answered' AND source='caller_reported_desktop'
+        AND message_id=NEW.reply_to AND operator=NEW.sender AND caller=NEW.recipient
+        AND operator_reply_after_desktop_message_id IS NULL
+        AND (EXISTS (SELECT 1 FROM nodes WHERE node_id=caller AND token_sha256=generation AND revoked_at IS NULL)
+             OR EXISTS (SELECT 1 FROM fleet_message_principals
+                WHERE principal_id=caller AND token_hash=generation AND revoked_at IS NULL));
 END"""
 _OBJECTS = (
     ("fleet_questions", _TABLE),
@@ -68,17 +78,32 @@ _OBJECTS = (
 )
 
 
+def _normalized_trigger(sql: str) -> str:
+    # SQLite omits IF NOT EXISTS from sqlite_master, and may retain formatting.
+    sql = re.sub(r"\bIF\s+NOT\s+EXISTS\b", "", sql, flags=re.IGNORECASE)
+    return " ".join(sql.split()).rstrip(";")
+
+
 def missing_schema(conn: sqlite3.Connection) -> list[str]:
     """Read-only startup fast path, with additive table/index/trigger repair."""
     names = {row[0] for row in conn.execute("SELECT name FROM sqlite_master WHERE name LIKE 'fleet_questions%'")}
     repairs = [ddl for name, ddl in _OBJECTS if name not in names]
     if "fleet_questions" in names:
         columns = {row[1] for row in conn.execute("PRAGMA table_info(fleet_questions)")}
-        for name, kind in (("late_answer_message_id", "INTEGER"), ("late_answered_at", "TEXT")):
+        for name, kind in (
+            ("late_answer_message_id", "INTEGER"),
+            ("late_answered_at", "TEXT"),
+            ("operator_reply_after_desktop_message_id", "INTEGER"),
+            ("operator_reply_after_desktop_at", "TEXT"),
+        ):
             if name not in columns:
                 repairs.insert(0, f"ALTER TABLE fleet_questions ADD COLUMN {name} {kind}")
+        # Migrate only hub-created questions. Peer questions keep their live delivery.
+        legacy = "kind='question' AND id IN (SELECT message_id FROM fleet_questions)"
+        if conn.execute(f"SELECT 1 FROM fleet_messages WHERE {legacy} LIMIT 1").fetchone() is not None:
+            repairs.append(f"UPDATE fleet_messages SET kind='operator_question' WHERE {legacy}")
     trigger = conn.execute("SELECT sql FROM sqlite_master WHERE name='fleet_questions_reply'").fetchone()
-    if trigger is not None and "late_answer_message_id" not in trigger[0]:
+    if trigger is not None and _normalized_trigger(trigger[0]) != _normalized_trigger(_TRIGGER):
         repairs.extend(("DROP TRIGGER fleet_questions_reply", _TRIGGER))
     return repairs
 
@@ -138,10 +163,12 @@ def _result(row: tuple[Any, ...], *, created: bool = False) -> dict[str, Any]:
         "answered_at",
         "late_answer_message_id",
         "late_answered_at",
+        "operator_reply_after_desktop_message_id",
+        "operator_reply_after_desktop_at",
     )
     result = dict(zip(keys, row, strict=True))
     result["message_id"] = str(result["message_id"])
-    for key in ("answer_id", "late_answer_message_id"):
+    for key in ("answer_id", "late_answer_message_id", "operator_reply_after_desktop_message_id"):
         if result[key] is not None:
             result[key] = str(result[key])
     return {**result, "created": created}
@@ -149,7 +176,7 @@ def _result(row: tuple[Any, ...], *, created: bool = False) -> dict[str, Any]:
 
 _COLUMNS = (
     "question_id,caller,request_id,operator,message_id,deadline,status,answer,answer_id,source,answered_by,answered_at,"
-    "late_answer_message_id,late_answered_at"
+    "late_answer_message_id,late_answered_at,operator_reply_after_desktop_message_id,operator_reply_after_desktop_at"
 )
 
 
@@ -180,23 +207,30 @@ def _create(conn: sqlite3.Connection, raw: dict[str, Any], caller: str, generati
     if pending >= 2:
         raise messages.MessageQuotaError("question station has two pending questions", code="question_station_busy")
     operator = os.environ.get("BRIGADE_FLEET_OPERATOR_RECIPIENT", "")
-    if not operator.startswith("agent:") or operator == caller or not messages._active_principal(conn, operator):
+    if (
+        not operator.startswith("agent:")
+        or operator == caller
+        or conn.execute(
+            "SELECT 1 FROM fleet_message_principals WHERE principal_id=? AND revoked_at IS NULL", (operator,)
+        ).fetchone()
+        is None
+    ):
         raise messages.MessageForbidden(
             "hub operator recipient must be a dedicated active agent: message principal different from the caller",
             code="question_operator_invalid",
         )
     question_id = secrets.token_hex(16)
     deadline = (datetime.fromisoformat(now) + timedelta(seconds=timeout)).isoformat()
-    message = messages.send(
+    message = messages._send(
         conn,
         {
             "to": operator,
             "subject": "Operator question",
             "body": question,
-            "kind": "question",
             "client_id": secrets.token_hex(16),
         },
         sender=caller,
+        extras={"kind": "operator_question"},
     )
     conn.execute(
         "INSERT INTO fleet_questions(question_id,caller,generation,request_id,payload_hash,operator,question,message_id,created_at,deadline) VALUES(?,?,?,?,?,?,?,?,?,?)",
