@@ -1894,6 +1894,7 @@ def make_server(
             trust_tailscale_identity=trust_tailscale_identity,
             trust_forwarded_proto=trust_forwarded_proto,
         ),
+        db_path=Path(db_path),
     )
 
 

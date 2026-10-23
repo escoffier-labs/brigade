@@ -16,6 +16,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Fleet Hub keeps one idle database connection until shutdown so request and helper connection closes do not trigger the final WAL checkpoint and file cleanup before an HTTP response.
 - Invalid Cursor hook event names no longer let a project configuration suppress the user presence callback.
 - Preserve campaign execution bindings after the 50-link retention window, including against trusted observations and cross-item relinks. Hub schema 42 adds an indexed history lookup without rewriting stored events.
 - Index campaign take event-key lookups without scanning Worklore history. Hub startup upgrades existing databases to schema 41 and preserves stored events.

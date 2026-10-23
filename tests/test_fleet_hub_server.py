@@ -1,12 +1,72 @@
 """Connection admission is enforced before an unauthenticated handler starts."""
 
+import http.client
+import json
 import socket
+import sqlite3
 import threading
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+from time import monotonic
 from socketserver import BaseRequestHandler
 
 import pytest
 
 from brigade import fleet_hub
+
+
+def test_requests_leave_wal_cleanup_to_server_close(tmp_path):
+    """An idle hub must keep request closes off SQLite's final-checkpoint path."""
+    db = tmp_path / "hub.db"
+    wal = Path(f"{db}-wal")
+    server = fleet_hub.make_server("127.0.0.1", 0, db, "fixture-admin-token")
+    thread = threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.01}, daemon=True)
+    thread.start()
+    try:
+        for number in range(3):
+            client = http.client.HTTPConnection(*server.server_address, timeout=5)
+            try:
+                started = monotonic()
+                client.request(
+                    "POST",
+                    "/nodes",
+                    body=json.dumps({"action": "add", "node_id": f"fixture-node-{number}"}),
+                    headers={"Authorization": "Bearer fixture-admin-token", "Content-Type": "application/json"},
+                )
+                response = client.getresponse()
+                payload = json.loads(response.read())
+                print(f"SQLite {sqlite3.sqlite_version}: enrollment {number} took {monotonic() - started:.3f}s")
+                assert response.status == 200, payload
+            finally:
+                client.close()
+            assert wal.exists(), "request close checkpointed and deleted the WAL before sending its response"
+
+            # An idle keepalive must hold neither a read snapshot nor a write lock.
+            conn = fleet_hub.open_db(db)
+            try:
+                assert conn.execute("PRAGMA wal_autocheckpoint").fetchone()[0] == 1000
+                assert conn.execute("PRAGMA synchronous").fetchone()[0] == 2
+                conn.execute("BEGIN IMMEDIATE")
+                assert conn.execute("SELECT count(*) FROM nodes").fetchone()[0] == number + 1
+                conn.rollback()
+                assert conn.execute("PRAGMA wal_checkpoint(TRUNCATE)").fetchone()[0] == 0
+            finally:
+                conn.close()
+            assert wal.exists(), "a helper connection must not become the final connection either"
+    finally:
+        server.shutdown()
+        # Callers may construct and close the server on different threads.
+        with ThreadPoolExecutor(max_workers=1) as closer:
+            closer.submit(server.server_close).result(timeout=5)
+        thread.join(timeout=5)
+    assert not thread.is_alive()
+    assert not wal.exists(), "server_close must release the final connection and clean up the WAL"
+    server.server_close()  # Closing twice must remain harmless.
+    conn = sqlite3.connect(db)
+    try:
+        assert conn.execute("SELECT count(*) FROM nodes").fetchone()[0] == 3
+    finally:
+        conn.close()
 
 
 def _read_ready(peer):
@@ -158,3 +218,32 @@ def test_inactive_sources_do_not_accumulate_accounting(connections):
     for number in range(64):
         connections.finish(connections.open(f"source-{number}"))
     assert connections.server._source_counts == {}
+
+
+def test_server_close_keeps_database_open_until_admitted_handlers_finish(connections, tmp_path):
+    held = connections.open()
+    db = tmp_path / "hub.db"
+    wal = Path(f"{db}-wal")
+    conn = fleet_hub.open_db(db)
+    try:
+        fleet_hub.add_node(conn, "fixture-node")
+    finally:
+        conn.close()
+    assert wal.exists()
+    connections.server.server_close()
+    assert wal.exists(), "a daemon handler still owns a request slot"
+    assert connections.open()[2] == b"", "shutdown must refuse new admissions"
+    connections.finish(held)
+    assert not wal.exists(), "the last admitted handler must release the shutdown connection"
+
+
+def test_socket_startup_failure_releases_database(tmp_path, monkeypatch):
+    db = tmp_path / "hub.db"
+
+    def fail_bind(self):
+        raise OSError("fixture bind failed")
+
+    monkeypatch.setattr(fleet_hub.ThreadingHTTPServer, "server_bind", fail_bind)
+    with pytest.raises(OSError, match="fixture bind failed"):
+        fleet_hub.make_server("127.0.0.1", 0, db, "fixture-admin-token")
+    assert not Path(f"{db}-wal").exists(), "failed startup must not retain the WAL connection"
