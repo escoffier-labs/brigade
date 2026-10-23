@@ -450,7 +450,39 @@ def test_old_hub_cursor_pages_and_wait_returns_arrival_page(stations, monkeypatc
     from brigade import fleet_mcp
 
     a, b = stations
-    mids = [call(a, "fleet_send", to=NODE_B, body=str(i))["message"]["id"] for i in range(101)]
+    transport = fleet_client_messages._transport
+    last_exchange = {}
+
+    def observed_transport(authority, body, **kwargs):
+        last_exchange.clear()
+        last_exchange["action"] = body.get("action")
+        try:
+            status, payload = transport(authority, body, **kwargs)
+        except fleet_client.FleetClientError as exc:
+            causes = []
+            cause = exc
+            for _ in range(4):
+                causes.append(type(cause).__name__)
+                cause = cause.__cause__ or cause.__context__
+                if cause is None:
+                    break
+            last_exchange.update(
+                error=type(exc).__name__,
+                detail=str(exc),
+                status=getattr(exc, "status", None),
+                code=getattr(exc, "code", None),
+                causes=causes,
+            )
+            raise
+        last_exchange.update(status=status, code=payload.get("code"), error=payload.get("error"))
+        return status, payload
+
+    monkeypatch.setattr(fleet_client_messages, "_transport", observed_transport)
+    mids = []
+    for index in range(101):
+        result = call(a, "fleet_send", to=NODE_B, body=str(index))
+        assert "message" in result, f"send[{index}] result={result!r} transport={last_exchange!r}"
+        mids.append(result["message"]["id"])
     for station, tool in ((a, "fleet_sent"), (b, "fleet_inbox")):
         first = call(station, tool)
         assert [row["id"] for row in first["messages"]] == mids[:100]
