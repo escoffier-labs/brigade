@@ -21,6 +21,7 @@ jobs:
       contents: read
       pull-requests: read
     outputs:
+      mesh: ${{ steps.filter.outputs.mesh }}
       code_graph: ${{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.code_graph }}
       evidence_ledger: ${{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.evidence_ledger }}
       notify: ${{ github.event_name == 'merge_group' && 'true' || steps.filter.outputs.notify }}
@@ -32,6 +33,13 @@ jobs:
         id: filter
         with:
           filters: |
+            mesh:
+              - 'src/brigade/fleet_mesh_*.py'
+              - 'tests/test_fleet_mesh_*.py'
+              - 'tests/mesh_hpke_reference.py'
+              - 'tests/fixtures/mesh/**'
+              - 'pyproject.toml'
+              - '.github/workflows/ci.yml'
             code_graph:
               - 'engines/code-graph/**'
               - 'src/brigade/templates/components/manifest-v1.json'
@@ -1181,3 +1189,110 @@ jobs:
           include-hidden-files: true
           if-no-files-found: error
           retention-days: 30
+
+  # Advisory mesh compatibility checks. Deliberately outside ci-gate until
+  # the floor/newest and native-wheel results have been observed.
+  mesh-compatibility:
+    needs: changes
+    if: ${{ needs.changes.outputs.mesh == 'true' }}
+    name: mesh (${{ matrix.os }}, ${{ matrix.crypto }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-15, windows-latest]
+        crypto: [floor, newest]
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install mesh wheel and dev tools
+        env:
+          CRYPTO: ${{ matrix.crypto }}
+          RUNNER_OS_NAME: ${{ runner.os }}
+        run: |
+          python -m venv .venv
+          if [ "$RUNNER_OS_NAME" = Windows ]; then
+            py=.venv/Scripts
+          else
+            py=.venv/bin
+          fi
+          "$py/python" -m pip install -e '.[dev,mesh]'
+          if [ "$CRYPTO" = floor ]; then
+            "$py/python" -m pip install --only-binary cryptography 'cryptography==48.0.0'
+          else
+            "$py/python" -m pip install --upgrade --only-binary cryptography 'cryptography>=48,<52'
+          fi
+          if [ "$RUNNER_OS_NAME" = Windows ]; then
+            cygpath -w "$PWD/$py" >> "$GITHUB_PATH"
+          else
+            echo "$PWD/$py" >> "$GITHUB_PATH"
+          fi
+          echo "PY=$py" >> "$GITHUB_ENV"
+      - name: Frozen profile, KATs and envelope tests
+        env:
+          MESH_EXPORT: mesh-envelope.json
+        run: brigade work verify run --target . --command './scripts/verify-focused tests/test_fleet_mesh_crypto.py' --capture brigade-work
+      - uses: actions/upload-artifact@v7
+        if: matrix.os == 'ubuntu-latest'
+        with:
+          name: mesh-envelope-${{ matrix.crypto }}
+          path: mesh-envelope.json
+          retention-days: 7
+
+  mesh-cross-version:
+    name: mesh cross-version (${{ matrix.crypto }})
+    needs: [changes, mesh-compatibility]
+    if: ${{ needs.changes.outputs.mesh == 'true' }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        crypto: [floor, newest]
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install
+        env:
+          CRYPTO: ${{ matrix.crypto }}
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -e '.[dev,mesh]'
+          if [ "$CRYPTO" = floor ]; then
+            .venv/bin/pip install --only-binary cryptography 'cryptography==48.0.0'
+          else
+            .venv/bin/pip install --upgrade --only-binary cryptography 'cryptography>=48,<52'
+          fi
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+      - uses: actions/download-artifact@v7
+        with:
+          name: mesh-envelope-${{ matrix.crypto == 'floor' && 'newest' || 'floor' }}
+      - name: Open other version's envelope
+        env:
+          MESH_IMPORT: mesh-envelope.json
+        run: brigade work verify run --target . --command './scripts/verify-focused tests/test_fleet_mesh_crypto.py::test_checked_in_envelope_and_cross_version_exchange' --capture brigade-work
+
+  mesh-without-extra:
+    needs: changes
+    if: ${{ needs.changes.outputs.mesh == 'true' }}
+    name: mesh core without extra
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.12"
+      - name: Install core and dev tools, remove crypto
+        run: |
+          python -m venv .venv
+          .venv/bin/pip install -e '.[dev]'
+          .venv/bin/pip uninstall -y cryptography
+          echo "$PWD/.venv/bin" >> "$GITHUB_PATH"
+      - name: Plain messaging and blocked crypto CLI import
+        run: brigade work verify run --target . --command './scripts/verify-focused tests/test_fleet_messages.py tests/test_fleet_messages_metadata.py tests/test_fleet_mcp.py tests/test_fleet_inbox_delivery.py tests/test_fleet_mesh_crypto.py::test_missing_extra_and_core_cli_independence' --capture brigade-work

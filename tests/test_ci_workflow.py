@@ -1572,6 +1572,9 @@ def test_ci_migration_preserves_existing_job_names_and_hosted_routing():
         "ci-gate",
         "windows-affected-tests",
         "pr-tier-shadow",
+        "mesh-compatibility",
+        "mesh-cross-version",
+        "mesh-without-extra",
     }
     for job, name in EXISTING_CI_JOBS.items():
         section = _workflow_job_section(text, job)
@@ -1837,3 +1840,25 @@ def test_windows_nightly_report_uses_driver_policy(outcome, status, failed, expe
     assert report["clean"] is expected_clean
     assert report["regressed"] == (["test_new.py"] if failed else [])
     assert report["summary"].startswith("windows pytest: files=2 regressions=")
+
+
+def test_mesh_jobs_are_advisory_and_path_filtered():
+    text = (ROOT / ".github/workflows/ci.yml").read_text()
+    changes = _workflow_job_section(text, "changes")
+    assert "mesh: ${{ steps.filter.outputs.mesh }}" in changes
+    for path in (
+        "src/brigade/fleet_mesh_*.py",
+        "tests/test_fleet_mesh_*.py",
+        "tests/mesh_hpke_reference.py",
+        "tests/fixtures/mesh/**",
+        "pyproject.toml",
+    ):
+        assert "'" + path + "'" in changes
+    gate = _workflow_job_section(text, "ci-gate")
+    for job in ("mesh-compatibility", "mesh-cross-version", "mesh-without-extra"):
+        section = _workflow_job_section(text, job)
+        assert "needs.changes.outputs.mesh == 'true'" in section
+        assert job not in gate
+    compatibility = _workflow_job_section(text, "mesh-compatibility")
+    assert "crypto: [floor, newest]" in compatibility
+    assert "os: [ubuntu-latest, macos-15, windows-latest]" in compatibility

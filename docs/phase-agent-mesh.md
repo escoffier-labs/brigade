@@ -428,7 +428,7 @@ records but not their confidentiality. The `bm2` path above addresses it.
 
 Limits. The plaintext limits stay as they are: 64 KiB for the body
 (`BODY_LIMIT`), 200 bytes for the subject, 256 for `ref`, plus the thread and
-label patterns. The largest payload pads to 66 KiB, about 88 KiB in base64url.
+label patterns. The largest payload pads to 65 KiB, about 88 KiB in base64url.
 Each hybrid wrap is 1168 bytes, about 1.5 KiB encoded, so two wraps and the
 header add about 4 KiB, for about 92 KiB in all. The Python hub caps an
 envelope at 96 KiB. Every hub advertises `max_envelope_bytes` in its identity
