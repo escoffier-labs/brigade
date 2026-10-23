@@ -202,7 +202,6 @@ def load(conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str) -> tuple
             or not isinstance(value[0], str)
             or re.fullmatch(r"[0-9a-f]{48}", value[0]) is None
             or not isinstance(value[1], list)
-            or len(value[1]) != (3 if raw["action"] == "who" else 1)
             or any(type(offset) is not int or not 0 <= offset <= 2**31 - 1 for offset in value[1])
         ):
             raise ValueError
@@ -219,6 +218,10 @@ def load(conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str) -> tuple
             "paging cursor is invalid or expired; restart from the first page", code="paging_cursor_expired"
         )
     keys = ("nodes", "principals", "sessions") if raw["action"] == "who" else ("claims",)
+    if len(offsets) != len(keys):
+        # The binding hash includes the action, so only a well-formed cursor for this
+        # query reaches here with the wrong shape.
+        raise MessageError("invalid paging cursor")
     groups = []
     for key, offset in zip(keys, offsets, strict=True):
         group = conn.execute(
@@ -256,10 +259,10 @@ def _save(
     if SNAPSHOT_MAX_PER_CALLER < 1 or size > SNAPSHOT_MAX_PER_CALLER_BYTES:
         raise MessageQuotaError("paging snapshot exceeds caller capacity", code="paging_snapshot_capacity")
     # A full caller budget must not turn its next first-page read into a 429.
-    # Reclaim only that caller's oldest walk, including its indexed child rows.
+    # Reclaim only that caller's least recently used walk, including its indexed child rows.
     while owned >= SNAPSHOT_MAX_PER_CALLER or owned_bytes + size > SNAPSHOT_MAX_PER_CALLER_BYTES:
         oldest, oldest_bytes = conn.execute(
-            "SELECT snapshot_id,payload_bytes FROM fleet_read_snapshots WHERE caller=? ORDER BY expires_at,rowid LIMIT 1",
+            "SELECT snapshot_id,payload_bytes FROM fleet_read_snapshots WHERE caller=? ORDER BY last_access,rowid LIMIT 1",
             (caller,),
         ).fetchone()
         conn.execute("DELETE FROM fleet_read_snapshots WHERE snapshot_id=?", (oldest,))

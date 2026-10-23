@@ -232,9 +232,15 @@ def _online(body: dict[str, Any], *, authority: MessageAuthority, timeout: float
         and payload.get("error") == "invalid station read arguments"
     ):
         # Older hubs reject paging keys before reading either directory.
-        # Removing both keys also bounds this compatibility retry to one.
+        # The retry carries no paging keys, which also bounds it to one.
+        if "cursor" in body:
+            # An unpaged retry would return page one as if it were this continuation,
+            # duplicating rows when the hub was rolled back mid-walk. Restart instead.
+            raise FleetMessageHubError(
+                _rejection(400, {"code": "paging_cursor_expired"}), status=400, code="paging_cursor_expired"
+            )
         legacy = _online(
-            {key: value for key, value in body.items() if key not in {"limit", "cursor"}},
+            {key: value for key, value in body.items() if key != "limit"},
             authority=authority,
             timeout=timeout,
         )

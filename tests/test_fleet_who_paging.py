@@ -120,8 +120,9 @@ def test_invalid_limits_are_rejected(directory, limit):
     ],
 )
 def test_malformed_cursors_are_rejected(directory, cursor):
-    with pytest.raises(messages.MessageError, match="cursor"):
+    with pytest.raises(messages.MessageError, match="cursor") as caught:
         who(directory, cursor=cursor)
+    assert caught.value.code is None
 
 
 def test_mcp_cursor_round_trip_and_credential_arguments(directory, monkeypatch):
@@ -379,8 +380,9 @@ def test_snapshot_rechecks_grants_revocation_and_query_binding(directory):
         ({"action": "who", "cursor": cursor, "filter": "other"}, "agent:limited"),
         ({"action": "claims", "cursor": cursor}, "agent:limited"),
     ):
-        with pytest.raises(messages.MessageError, match="cursor"):
+        with pytest.raises(messages.MessageError, match="cursor") as caught:
             messages.handle(directory, raw, caller=caller)
+        assert caught.value.code == "paging_cursor_expired"
 
 
 @pytest.mark.parametrize("kind", ["node", "agent"])
@@ -411,8 +413,9 @@ def test_snapshot_rejects_cursor_after_caller_reenrollment(directory, kind):
         assert replacement["principal_id"] == caller
         assert messages.lookup_principal_token(directory, replacement["token"]) == caller
 
-    with pytest.raises(messages.MessageError, match="cursor"):
+    with pytest.raises(messages.MessageError, match="cursor") as caught:
         messages.handle(directory, {"action": "who", "cursor": first["next_cursor"]}, caller=caller)
+    assert caught.value.code == "paging_cursor_expired"
     status, fresh = messages.handle(directory, {"action": "who", "limit": 1}, caller=caller)
     assert status == 200 and fresh["next_cursor"]
     status, rest = messages.handle(directory, {"action": "who", "cursor": fresh["next_cursor"]}, caller=caller)
@@ -433,18 +436,43 @@ def test_snapshot_capacity_expiry_and_schema_migration(directory, monkeypatch):
     monkeypatch.setattr(fleet_hub_paging, "SNAPSHOT_MAX_PER_CALLER", 1)
     first = who(directory, limit=1)
     replacement = who(directory, limit=1)
-    with pytest.raises(messages.MessageError, match="restart from the first page"):
+    with pytest.raises(messages.MessageError, match="restart from the first page") as caught:
         who(directory, cursor=first["next_cursor"])
+    assert caught.value.code == "paging_cursor_expired"
     first = replacement
     assert directory.execute("SELECT COUNT(*) FROM fleet_read_snapshots").fetchone()[0] == 1
     now = fleet_hub._now_epoch()
     monkeypatch.setattr(fleet_hub, "_now_epoch", lambda: now + fleet_hub_paging.SNAPSHOT_TTL_SECONDS + 1)
-    with pytest.raises(messages.MessageError, match="cursor"):
+    with pytest.raises(messages.MessageError, match="cursor") as caught:
         who(directory, cursor=first["next_cursor"])
+    assert caught.value.code == "paging_cursor_expired"
     assert who(directory, limit=1)["next_cursor"]
     fleet_hub_paging.ensure_schema(directory)
     fleet_hub_paging.ensure_schema(directory)
     assert directory.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
+
+
+def test_full_caller_budget_evicts_the_abandoned_walk_not_the_active_one(directory, monkeypatch):
+    from brigade import fleet_hub_paging
+
+    roster(directory, 3)
+    monkeypatch.setattr(fleet_hub_paging, "SNAPSHOT_MAX_PER_CALLER", 2)
+    clock = [fleet_hub._now_epoch()]
+    monkeypatch.setattr(fleet_hub, "_now_epoch", lambda: clock[0])
+    walk_a = who(directory, limit=1)
+    clock[0] += 1
+    walk_b = who(directory, limit=1)
+    # Walk A is older by creation but was continued after B started; B was abandoned.
+    clock[0] += 9
+    walk_a = who(directory, cursor=walk_a["next_cursor"], limit=1)
+    assert walk_a["next_cursor"]
+    clock[0] += 1
+    assert who(directory, limit=1)["next_cursor"]
+    assert directory.execute("SELECT COUNT(*) FROM fleet_read_snapshots").fetchone()[0] == 2
+    with pytest.raises(messages.MessageError, match="restart from the first page") as caught:
+        who(directory, cursor=walk_b["next_cursor"])
+    assert caught.value.code == "paging_cursor_expired"
+    assert who(directory, cursor=walk_a["next_cursor"], limit=1)["nodes"]
 
 
 @pytest.mark.parametrize("cap", ["SNAPSHOT_MAX_COUNT", "SNAPSHOT_MAX_BYTES", "SNAPSHOT_SINGLE_MAX_BYTES"])
@@ -466,13 +494,19 @@ def test_previous_schema_migrates_once_and_preserves_snapshot_on_reopen(tmp_path
     conn = fleet_hub.init_db(path)
     fleet_hub.add_node(conn, "reader-node")
     fleet_hub.add_node(conn, "other-node")
+    questions, paging = _both_schemas(conn)
     conn.execute("DROP TABLE fleet_read_snapshots")
+    if previous_version == 42:
+        # Schema 42 predates the questions tables and trigger as well.
+        _drop_schema(conn, questions)
+        assert not _schema_objects(conn, "fleet_questions")
     conn.execute(f"PRAGMA user_version={previous_version}")
     conn.commit()
     conn.close()
     conn = fleet_hub.init_db(path)
     try:
         assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
+        assert _both_schemas(conn) == (questions, paging)
         first = who(conn, limit=1)
     finally:
         conn.close()

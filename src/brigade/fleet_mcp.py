@@ -12,6 +12,7 @@ from .fleet_ask_user import AskUser, AskUserError
 from .untrusted import scan_untrusted, wrap_untrusted
 
 DEFAULT_PORT = 8933
+_CURSOR_RESTART_HINT = "the paging cursor expired or is not valid for this caller; restart the walk without a cursor"
 _SAFE_ERROR_CODES = frozenset(
     {
         "hub_unavailable",
@@ -50,7 +51,8 @@ def tool_specs() -> list[dict[str, Any]]:
         ),
         (
             "fleet_who",
-            "List sessions and permitted recipients; pass next_cursor as cursor to continue a snapshot.",
+            "List sessions and permitted recipients; pass next_cursor as cursor to continue a snapshot. "
+            "On paging_cursor_expired, restart the walk without a cursor.",
             {
                 "filter": {"type": "string"},
                 "all": boolean,
@@ -122,7 +124,8 @@ def tool_specs() -> list[dict[str, Any]]:
         ),
         (
             "fleet_claims",
-            "List a stable snapshot of repository claims; pass next_cursor as cursor to continue.",
+            "List a stable snapshot of repository claims; pass next_cursor as cursor to continue. "
+            "On paging_cursor_expired, restart the walk without a cursor.",
             {
                 "all": boolean,
                 "limit": {"type": "integer", "minimum": 1, "maximum": 500, "default": 200},
@@ -346,16 +349,19 @@ def _tool_error(exc: Exception) -> dict[str, Any]:
                 "hub_unavailable",
                 "message_recipient_inactive",
                 "message_timestamp_future",
-                "paging_cursor_expired",
             }
         )
-        return {
+        body = {
             "error": "Fleet hub operation failed.",
             "code": code,
             "status": status,
             "transient": transient,
             "permanent": not transient,
         }
+        if code == "paging_cursor_expired":
+            # Retrying the same cursor can never succeed; the caller has to start over.
+            body["hint"] = _CURSOR_RESTART_HINT
+        return body
     return {"error": "Fleet operation failed. Check hub connectivity and credential permissions."}
 
 

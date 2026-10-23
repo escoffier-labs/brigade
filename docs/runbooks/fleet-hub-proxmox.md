@@ -832,16 +832,29 @@ receive the first page without storing a snapshot. Legacy `who` requests without
 more rows remain. Completed walks delete their
 snapshots. Snapshots expire after 10 minutes. Storage is capped at eight snapshots
 and 16 MiB per caller, 128 snapshots and 64 MiB across the hub, and 16 MiB per
-snapshot. A full caller budget evicts that caller's oldest walk. Global saturation
+snapshot. A full caller budget evicts that caller's least recently accessed walk. Global saturation
 evicts the least recently accessed snapshot across callers if its last access
 was more than 60 seconds ago, repeating until the new snapshot fits. Continuations
 refresh last access time. If every snapshot was accessed within 60 seconds,
 the hub returns HTTP 429 with `paging_snapshot_capacity`.
 Expired, evicted, and completed cursors return HTTP 400 with
-`paging_cursor_expired`. Clients can retry from the first page, and MCP marks
-this error transient. Cursors are opaque but do not authenticate offsets: callers
+`paging_cursor_expired`. Retrying the same cursor cannot succeed, so MCP marks
+this error permanent and adds a `hint` to restart the walk without a cursor. A
+new MCP client that sends a cursor to a hub that predates paging gets the same
+error instead of an unpaged first page, so a mid-walk rollback never repeats
+rows. Cursors are opaque but do not authenticate offsets: callers
 can skip or rewind within their own snapshot. Pages also enforce a serialized
 byte budget below the client cap.
+
+Accepted limits of the paging design:
+
+- Replaying a cursor refreshes the snapshot's last access time, so a client that
+  keeps re-sending one cursor keeps its snapshot out of idle reclamation.
+- Idle time is wall-clock time on the hub, so a clock step changes when a
+  snapshot becomes reclaimable.
+- A cursor that belongs to another caller returns `paging_cursor_expired`, the
+  same as an unknown cursor. A distinct code would reveal whether someone else's
+  snapshot exists.
 Node `fleet_claims` results match `GET /claims`, including active Grok Bot lease
 rows. Agent claim results include only granted owner nodes and omit `job`,
 `session`, and `owner_conductor`. Small directory and claim reads use a read

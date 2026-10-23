@@ -1043,13 +1043,8 @@ def test_single_oversized_snapshot_remains_permanent(stations, hub, monkeypatch,
     }
 
 
-@pytest.mark.parametrize("action", ["who", "claims"])
-@pytest.mark.parametrize("truncated", [False, True])
-def test_directory_retries_old_hub_without_paging_arguments(stations, monkeypatch, action, truncated):
-    from brigade import fleet_hub_paging
-
+def _old_hub(monkeypatch, requests, truncated):
     original = fleet_hub_messages.handle
-    requests = []
 
     def old_hub(conn, raw, *, caller, **kwargs):
         if raw.get("action") in {"who", "claims"}:
@@ -1063,20 +1058,45 @@ def test_directory_retries_old_hub_without_paging_arguments(stations, monkeypatc
         return original(conn, raw, caller=caller, **kwargs)
 
     monkeypatch.setattr(fleet_hub_messages, "handle", old_hub)
+
+
+@pytest.mark.parametrize("action", ["who", "claims"])
+@pytest.mark.parametrize("truncated", [False, True])
+def test_directory_retries_old_hub_without_paging_arguments(stations, monkeypatch, action, truncated):
+    from brigade import fleet_hub_paging
+
+    requests = []
+    _old_hub(monkeypatch, requests, truncated)
     monkeypatch.setattr(fleet_hub_paging, "PAGE_DEFAULT", 1)
-    args = {"all": True, "limit": 1, "cursor": "old-cursor"}
+    args = {"all": True, "limit": 1}
     if action == "who":
         args["filter"] = "fixture"
     payload, error = stations[0].call(f"fleet_{action}", args)
     assert requests == [
         {"action": action, **args},
-        {"action": action, **{k: v for k, v in args.items() if k not in {"limit", "cursor"}}},
+        {"action": action, **{k: v for k, v in args.items() if k != "limit"}},
     ]
     assert error is truncated
     if truncated:
         assert payload["code"] == "paging_continuation_unsupported" and payload["permanent"]
     else:
         assert payload["next_cursor"] is None
+
+
+@pytest.mark.parametrize("action", ["who", "claims"])
+def test_directory_continuation_against_old_hub_restarts_instead_of_replaying_page_one(stations, monkeypatch, action):
+    requests = []
+    _old_hub(monkeypatch, requests, False)
+    args = {"all": True, "limit": 1, "cursor": "old-cursor"}
+    if action == "who":
+        args["filter"] = "fixture"
+    payload, error = stations[0].call(f"fleet_{action}", args)
+    # The hub is never asked for an unpaged page that would masquerade as the continuation.
+    assert requests == [{"action": action, **args}]
+    assert error
+    assert payload["code"] == "paging_cursor_expired"
+    assert payload["permanent"] and not payload["transient"]
+    assert "restart the walk without a cursor" in payload["hint"]
 
 
 @pytest.mark.parametrize("action", ["who", "claims"])
@@ -1103,8 +1123,9 @@ def test_consumed_directory_cursor_is_typed_and_restartable(stations, hub, actio
         "error": "Fleet hub operation failed.",
         "code": "paging_cursor_expired",
         "status": 400,
-        "transient": True,
-        "permanent": False,
+        "transient": False,
+        "permanent": True,
+        "hint": "the paging cursor expired or is not valid for this caller; restart the walk without a cursor",
     }
     assert call(stations[0], f"fleet_{action}", limit=1)["next_cursor"]
 
