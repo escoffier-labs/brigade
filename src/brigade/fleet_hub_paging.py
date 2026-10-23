@@ -433,6 +433,12 @@ def snapshot_page(
                 if key != "sessions" and len(selected) >= limit:
                     more = True
                     break
+                # Cached costs cover undecorated rows. Live keys can only add
+                # cost, so reject certainly oversized rows without loading them.
+                if size > PAGE_MAX_BYTES - 8192:
+                    oversized += 1
+                    position += 1
+                    continue
                 # Load only a selected candidate. Keys are live and never stored
                 # in the snapshot, so cached wire_bytes cannot admit this row.
                 payload = conn.execute(
