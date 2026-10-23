@@ -15,6 +15,246 @@ prepared = support.prepared
 task_run = support.task_run
 
 
+@pytest.mark.parametrize("outcome", ["observed", "rejected", "exception"])
+def test_public_control_suffix_preserves_task_access_and_attempt_identity(task_run, outcome):
+    from brigade import run_control_journal as control
+
+    run_dir, workspace = task_run
+    original = accepted(task_run)
+    journal = run_dir / "events/lifecycle.jsonl"
+    snapshot = (run_dir / "run.json").read_bytes()
+    sends = []
+
+    def send(payload):
+        sends.append(payload)
+        if outcome == "exception":
+            raise ConnectionError("simulated lost acknowledgment")
+        return {"ok": outcome == "observed", "interrupted": 1}
+
+    result = control.execute_control_request(run_dir, op="interrupt", request_id="interrupt-one", send=send)
+    before = journal.read_bytes()
+    current = tasks.read_tasks(run_dir)[0]
+    assert current.handle == original
+    assert current.status == "queued" and current.result_id is None and current.containment == "unknown"
+    assert journal.read_bytes() == before
+    assert (run_dir / "run.json").read_bytes() == snapshot
+    handle = tasks.prepare_attempt(run_dir, workspace=workspace, task_id="one")
+    assert handle.attempt_id is not None
+    assert tasks.prepare_attempt(run_dir, workspace=workspace, task_id="one") == handle
+    replay = control.execute_control_request(run_dir, op="interrupt", request_id="interrupt-one", send=send)
+    assert replay.replayed and replay.terminal_event == result.terminal_event
+    assert len(sends) == 1
+    assert tasks.read_tasks(run_dir)[0].result_id is None
+
+
+def test_pending_public_control_remains_indeterminate_without_releasing_task(task_run):
+    from brigade import run_control_journal as control
+
+    run_dir, workspace = task_run
+    handle = prepared(task_run)
+    tasks.observe_task(
+        run_dir, workspace=workspace, handle=handle, observation=tasks.TaskObservation("unknown", containment="unknown")
+    )
+    original = tasks.read_tasks(run_dir)
+
+    class LostProcess(BaseException):
+        pass
+
+    sends = []
+
+    def send(payload):
+        sends.append(payload)
+        raise LostProcess
+
+    with pytest.raises(LostProcess):
+        control.execute_control_request(run_dir, op="interrupt", request_id="pending-one", send=send)
+    journal = run_dir / "events/lifecycle.jsonl"
+    before = journal.read_bytes()
+    assert tasks.read_tasks(run_dir) == original
+    assert tasks.prepare_attempt(run_dir, workspace=workspace, task_id="one") == handle
+    with pytest.raises(control.ControlJournalError, match="indeterminate"):
+        control.execute_control_request(run_dir, op="interrupt", request_id="pending-one", send=send)
+    assert len(sends) == 1
+    assert journal.read_bytes() == before
+
+
+def test_control_terminal_can_follow_a_task_checkpoint_while_request_is_pending(task_run):
+    from brigade import run_control_journal as control
+
+    run_dir, workspace = task_run
+    accepted(task_run)
+    handles = []
+
+    def send(payload):
+        # Exercise the real request/terminal window. A task fact can commit
+        # here, so suffix verification must find a request before the checkpoint.
+        handles.append(tasks.prepare_attempt(run_dir, workspace=workspace, task_id="one"))
+        return {"ok": True, "worker": "worker", "turn_id": "response-turn"}
+
+    control.execute_control_request(run_dir, op="interrupt", request_id="interleaved", send=send)
+    record = tasks.read_tasks(run_dir)[0]
+    assert record.handle == handles[0]
+    assert record.status == "queued" and record.result_id is None
+    snapshot = json.loads((run_dir / "run.json").read_bytes())
+    assert run_checkpoint.recover_from_checkpoint(run_dir, snapshot)["status"] == "running"
+
+
+def test_structurally_invalid_control_suffix_is_refused_by_journal_reader(task_run):
+    from brigade import run_control_journal as control
+
+    run_dir, workspace = task_run
+    accepted(task_run)
+    control.execute_control_request(
+        run_dir, op="interrupt", request_id="malformed-control", send=lambda payload: {"ok": True}
+    )
+    journal = run_dir / "events/lifecycle.jsonl"
+    lines = journal.read_bytes().splitlines()
+    envelope = json.loads(lines[-1])
+    envelope["payload"]["status"] = "completed"
+    envelope["request_digest"] = run_events.request_digest(
+        event_type=envelope["event_type"], payload=envelope["payload"], idempotency_key=envelope["idempotency_key"]
+    )
+    envelope["event_digest"] = run_events.compute_event_digest(envelope)
+    envelope["event_id"] = run_events.make_event_id(
+        run_id=run_dir.name, sequence=envelope["sequence"], event_digest=envelope["event_digest"]
+    )
+    lines[-1] = run_events.canonical_bytes(envelope)
+    journal.write_bytes(b"\n".join(lines) + b"\n")
+    report = run_journal.read_journal_bounded(journal)
+    assert any("unknown payload keys" in error for error in report.chain_errors)
+    before = journal.read_bytes()
+    with pytest.raises(tasks.TaskJournalError, match="chain error"):
+        tasks.read_tasks(run_dir)
+    with pytest.raises(tasks.TaskJournalError, match="chain error"):
+        tasks.prepare_attempt(run_dir, workspace=workspace, task_id="one")
+    assert journal.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "damage", ["unpaired", "unpaired-failed", "duplicate-terminal", "op", "worker", "request-id", "text-digest", "key"]
+)
+def test_chain_valid_but_semantically_invalid_control_suffix_refuses_task_access(task_run, damage):
+    """Envelope validity alone does not establish control request correlation."""
+    from brigade import run_control_journal as control
+
+    run_dir, workspace = task_run
+    accepted(task_run)
+    journal = run_dir / "events/lifecycle.jsonl"
+    events = run_journal.read_journal_bounded(journal).events
+    payload = control.control_fingerprint_payload(op="interrupt", request_id="control-one", worker="worker")
+    if damage == "request-id":
+        payload["request_id"] = None
+    if damage == "text-digest":
+        payload["text_digest"] = "invalid"
+    sequence = events[-1].sequence
+    if damage not in {"unpaired", "unpaired-failed"}:
+        requested = run_journal.append_event(
+            journal,
+            run_id=run_dir.name,
+            event_type="control.requested",
+            payload=payload,
+            idempotency_key="wrong-key" if damage == "key" else control.requested_idempotency_key("control-one"),
+            expected_previous_sequence=sequence,
+            workspace=workspace,
+        )
+        sequence = requested.sequence
+    if damage in {"unpaired", "duplicate-terminal", "op", "worker"}:
+        observed = run_journal.append_event(
+            journal,
+            run_id=run_dir.name,
+            event_type="control.observed",
+            payload={
+                "op": "steer" if damage == "op" else "interrupt",
+                "request_id": "control-one",
+                "worker": "other" if damage == "worker" else "worker",
+                "detail": "ok",
+            },
+            idempotency_key=control.observed_idempotency_key("control-one"),
+            expected_previous_sequence=sequence,
+            workspace=workspace,
+        )
+        sequence = observed.sequence
+    if damage in {"unpaired-failed", "duplicate-terminal"}:
+        run_journal.append_event(
+            journal,
+            run_id=run_dir.name,
+            event_type="control.failed",
+            payload={
+                "op": "interrupt",
+                "request_id": "control-one",
+                "worker": "worker",
+                "error_class": "transport_rejected",
+                "detail_digest": "a" * 64,
+            },
+            idempotency_key=control.failed_idempotency_key("control-one"),
+            expected_previous_sequence=sequence,
+            workspace=workspace,
+        )
+    assert not run_journal.read_journal_bounded(journal).chain_errors
+    before = journal.read_bytes()
+    with pytest.raises(tasks.TaskJournalError, match="control-suffix"):
+        tasks.read_tasks(run_dir)
+    with pytest.raises(tasks.TaskJournalError, match="control-suffix"):
+        tasks.prepare_attempt(run_dir, workspace=workspace, task_id="one")
+    assert journal.read_bytes() == before
+
+
+def test_control_suffix_cannot_mask_incomplete_task_pair(task_run, monkeypatch):
+    from brigade import run_control_journal as control
+
+    run_dir, workspace = task_run
+    accepted(task_run)
+    real_append = run_lifecycle._append_owner_event
+
+    def crash(path, **kwargs):
+        if kwargs["event_type"] == "task.attempt-prepared":
+            raise OSError("simulated checkpoint-only crash")
+        return real_append(path, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(run_lifecycle, "_append_owner_event", crash)
+        with pytest.raises(tasks.TaskJournalError):
+            tasks.prepare_attempt(run_dir, workspace=workspace, task_id="one")
+    control.execute_control_request(
+        run_dir, op="interrupt", request_id="after-crash", send=lambda payload: {"ok": True}
+    )
+    journal = run_dir / "events/lifecycle.jsonl"
+    before = journal.read_bytes()
+    with pytest.raises(tasks.TaskJournalError, match="incomplete-pair"):
+        tasks.read_tasks(run_dir)
+    with pytest.raises(tasks.TaskJournalError, match="incomplete-pair"):
+        tasks.prepare_attempt(run_dir, workspace=workspace, task_id="one")
+    with pytest.raises(run_checkpoint.CheckpointError) as error:
+        run_checkpoint.recover_from_checkpoint(run_dir, json.loads((run_dir / "run.json").read_bytes()))
+    assert error.value.category == "incomplete-pair"
+    assert journal.read_bytes() == before
+
+
+def test_control_suffix_cannot_cover_uncheckpointed_status_change(task_run):
+    from brigade import run_control_journal as control
+
+    run_dir, workspace = task_run
+    accepted(task_run)
+    journal = run_dir / "events/lifecycle.jsonl"
+    tail = run_journal.read_journal_bounded(journal).events[-1]
+    run_journal.append_event(
+        journal,
+        run_id=run_dir.name,
+        event_type="run.failed",
+        payload={},
+        idempotency_key="uncovered-status",
+        expected_previous_sequence=tail.sequence,
+        workspace=workspace,
+    )
+    control.execute_control_request(
+        run_dir, op="interrupt", request_id="after-status", send=lambda payload: {"ok": True}
+    )
+    before = journal.read_bytes()
+    with pytest.raises(tasks.TaskJournalError, match="uncovered-tail"):
+        tasks.read_tasks(run_dir)
+    assert journal.read_bytes() == before
+
+
 @pytest.fixture
 def generic_run(task_run):
     """Exercise actual projection authority, beyond durable opt-in alone."""

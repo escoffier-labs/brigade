@@ -1274,6 +1274,59 @@ def _paired_event_derived_status(event: "run_journal.RunEvent") -> str | None:
     return derived if derived is not None else payload_status
 
 
+_CONTROL_SUFFIX_TYPES = frozenset({"control.requested", "control.observed", "control.failed"})
+
+
+def _verify_control_suffix(events: list["run_journal.RunEvent"], suffix: list["run_journal.RunEvent"]) -> None:
+    """Check control semantics separately from the reader's envelope validation.
+
+    A request may precede the latest checkpoint, and an unfinished request is
+    legitimately indeterminate. A terminal receipt must follow its matching
+    request exactly once. Neither acknowledgment nor failure is task completion.
+    """
+    controls = [event for event in suffix if event.event_type in _CONTROL_SUFFIX_TYPES]
+    if not controls:
+        return
+    request_ids = {event.payload.get("request_id") for event in controls}
+    requested: dict[str, run_journal.RunEvent] = {}
+    terminal: set[str] = set()
+    for event in events:
+        if event.event_type not in _CONTROL_SUFFIX_TYPES or event.payload.get("request_id") not in request_ids:
+            continue
+        payload = event.payload
+        request_id = payload.get("request_id")
+        op = payload.get("op")
+        valid = (
+            isinstance(request_id, str)
+            and bool(request_id)
+            and op in {"steer", "interrupt"}
+            and event.idempotency_key == f"{event.event_type}:{request_id}"
+            and all(isinstance(payload[key], str) for key in ("worker", "turn_id") if key in payload)
+        )
+        if not valid:
+            raise CheckpointError("invalid control suffix identity", category="control-suffix")
+        assert isinstance(request_id, str)
+        if event.event_type == "control.requested":
+            text_digest = payload.get("text_digest")
+            if (
+                request_id in requested
+                or not isinstance(text_digest, str)
+                or (text_digest != "" and not _HEX64.fullmatch(text_digest))
+            ):
+                raise CheckpointError("invalid control suffix request", category="control-suffix")
+            requested[request_id] = event
+        else:
+            prior = requested.get(request_id)
+            if (
+                prior is None
+                or request_id in terminal
+                or prior.payload["op"] != op
+                or ("worker" in prior.payload and prior.payload["worker"] != payload.get("worker"))
+            ):
+                raise CheckpointError("control suffix terminal has no matching request", category="control-suffix")
+            terminal.add(request_id)
+
+
 def _verify_coverage(
     events: list["run_journal.RunEvent"],
     latest: "run_journal.RunEvent",
@@ -1286,9 +1339,9 @@ def _verify_coverage(
     ``event_type`` equals the checkpoint's ``paired_event_type`` and whose
     derived status equals the status in the validated checkpoint bytes.
     When ``paired_event_type`` is null, the checkpoint covers only itself
-    as the tail. Trailing redaction anchors and status-neutral cassette
-    references do not require checkpoint coverage. Anything else fails
-    uncovered-tail. ``checkpoint_obj`` is
+    as the tail. Trailing redaction anchors, status-neutral cassette references,
+    and semantically verified control facts do not require checkpoint coverage.
+    Anything else fails uncovered-tail. ``checkpoint_obj`` is
     the parsed validated checkpoint bytes; its ``status`` is the authoritative
     status the paired event must derive to.
     """
@@ -1297,7 +1350,7 @@ def _verify_coverage(
     generic_identity = latest.idempotency_key.startswith(_CHECKPOINT_GENERIC_IDEMPOTENCY_PREFIX)
     tail = events[-1]
     trailing_neutral_facts = 0
-    while tail.event_type in {"run.redaction.recorded", "run.cassette.recorded"} and not (
+    while tail.event_type in {"run.redaction.recorded", "run.cassette.recorded"} | _CONTROL_SUFFIX_TYPES and not (
         (pairing_key is not None or generic_identity)
         and tail.sequence == latest.sequence + 1
         and tail.event_type == paired_event_type
@@ -1308,6 +1361,8 @@ def _verify_coverage(
                 _bound("journal tail is not covered by the latest checkpoint"), category="uncovered-tail"
             )
         tail = events[-1 - trailing_neutral_facts]
+    if trailing_neutral_facts:
+        _verify_control_suffix(events, events[-trailing_neutral_facts:])
     if latest.sequence == tail.sequence:
         # A pairing key promises a specific identity-bearing fact.
         # A checkpoint at tail means that fact never committed, so recovery
