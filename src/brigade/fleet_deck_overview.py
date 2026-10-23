@@ -448,7 +448,7 @@ def _seats_html(station: StationView, machine: MachineState | None, status: str)
     bar = f'<span class="{wrapper}" role="img" aria-label="{_esc(text)}">{segments}</span>'
     return (
         f'<td title="{_esc(text)}">{bar}'
-        f'<span class="seat-text mono" aria-hidden="true">{min(station.busy, capacity)} / {capacity}</span></td>'
+        f'<span class="seat-text mono" aria-hidden="true">{station.busy} / {capacity}</span></td>'
     )
 
 

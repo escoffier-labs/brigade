@@ -1316,7 +1316,9 @@ def test_zero_capacity_station_renders_empty_bar():
 def test_seat_text_is_busy_over_capacity(capacity, busy):
     view = _seat_view(str(capacity), runs=busy, capacity=capacity)
     (row,) = _rows(overview.render_machine_table(view, NOW))
-    assert f">{min(busy, capacity)} / {capacity}<" in row
+    # Over-capacity stays visible: the text shows the real busy count while the bar stays capped.
+    assert f">{busy} / {capacity}<" in row
+    assert row.count("seg--busy") == min(busy, capacity)
 
 
 def test_header_has_no_breadcrumb_and_alerts_have_no_icon():
