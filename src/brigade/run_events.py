@@ -193,6 +193,30 @@ EVENT_TYPES: dict[str, frozenset[str]] = {
         }
     ),
 }
+# Durable assignment facts use closed reference-only shapes, without changing
+# existing envelope bounds or the schema version.
+_TASK_EVENT_TYPES = frozenset({"task.accepted", "task.attempt-prepared", "task.observed", "task.acknowledged"})
+EVENT_TYPES.update(
+    {
+        "task.accepted": frozenset({"task_id", "request_id", "seat", "payload_digest", "spec_digest"}),
+        "task.attempt-prepared": frozenset({"task_id", "attempt_id"}),
+        "task.observed": frozenset(
+            {
+                "task_id",
+                "attempt_id",
+                "status",
+                "provider_task_id",
+                "original_run_id",
+                "provider_result_id",
+                "result_id",
+                "artifact_kind",
+                "artifact_digest",
+                "containment",
+            }
+        ),
+        "task.acknowledged": frozenset({"task_id", "result_id"}),
+    }
+)
 CONTROL_FAILURE_CLASSES = frozenset({"transport_exception", "transport_rejected", "transport_protocol_error"})
 APPROVAL_DECISION_STATES = frozenset({"pending", "approved", "rejected", "held", "consumed"})
 APPROVAL_DECISION_EVENT_STATES = {
@@ -432,6 +456,10 @@ def build_event(
 def _validate_payload(event_type: str, payload: Any) -> None:
     if not isinstance(payload, Mapping):
         raise CanonicalizationError("payload must be an object")
+    if event_type in _TASK_EVENT_TYPES:
+        from brigade.run_task_journal import validate_payload
+
+        validate_payload(event_type, payload)
     allowed = EVENT_TYPES[event_type]
     extra = set(payload.keys()) - allowed
     if extra:

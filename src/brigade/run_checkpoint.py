@@ -1313,6 +1313,10 @@ def _verify_coverage(
     paired = following[0]
     if paired.event_type != paired_event_type:
         raise CheckpointError(_bound("journal tail is not covered by the latest checkpoint"), category="uncovered-tail")
+    if pairing_key is not None and paired.event_type in run_events._TASK_EVENT_TYPES:
+        if pairing_key != paired.request_digest:
+            raise CheckpointError(_bound("checkpoint task pairing identity does not match event"), category="pairing")
+        return
     if pairing_key is not None:
         seat = paired.payload.get("seat")
         attempt = paired.payload.get("attempt")

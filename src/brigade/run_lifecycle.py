@@ -802,6 +802,32 @@ def record_lifecycle_event(
     workspace: Path | None,
 ) -> run_journal.RunEvent:
     """Append or replay one checkpoint-paired fact under the active run lock."""
+    with checkpoint_event_pair():
+        return _record_lifecycle_event_paired(
+            run_dir,
+            event_type=event_type,
+            payload=payload,
+            idempotency_key=idempotency_key,
+            workspace=workspace,
+        )
+
+
+def _record_lifecycle_event_paired(
+    run_dir: Path,
+    *,
+    event_type: str,
+    payload: Mapping[str, Any],
+    idempotency_key: str,
+    workspace: Path | None,
+) -> run_journal.RunEvent:
+    """Publish under a held pair lock, preserving all lifecycle admission checks.
+
+    Task acceptance must inspect identities and publish the fact in one journal
+    transaction. This private entry point avoids reentering the pair lock while
+    keeping its public non-reentrancy guard intact.
+    """
+    if not getattr(_CHECKPOINT_EVENT_PAIR_STATE, "active", False):
+        raise LifecycleJournalError("lifecycle fact requires the checkpoint/event pair lock")
     run_dir = run_journal.normalize_run_dir(run_dir)
     run_id = _run_id_from_dir(run_dir)
     if not run_events._RUN_ID_RE.match(run_id):
@@ -823,95 +849,96 @@ def record_lifecycle_event(
         if isinstance(attempt, bool) or not isinstance(attempt, int) or attempt < 1:
             raise LifecycleJournalError(run_events._bound("dispatch fact attempt must be a positive integer"))
         pairing_key = run_checkpoint.dispatch_pairing_key(event_type, seat, attempt)
-    with checkpoint_event_pair():
-        journal_path = _journal_path(run_dir)
-        if not run_journal.bound_is_file(journal_path):
-            raise LifecycleJournalError("lifecycle journal is not active for this run")
-        if workspace is None or not runguard.is_active_run_owner(workspace, run_dir):
-            raise LifecycleJournalError("lifecycle journal append requires the active run lock for this run")
-        try:
-            existing = run_journal.lookup_idempotent_event(
-                journal_path,
-                event_type=event_type,
-                payload=dict(payload),
-                idempotency_key=idempotency_key,
-            )
-            if existing is not None:
-                return _append_owner_event(
-                    journal_path,
-                    workspace=workspace,
-                    run_id=run_id,
-                    event_type=event_type,
-                    payload=payload,
-                    idempotency_key=idempotency_key,
-                )
-            # Keep every explicit fact recoverable under the same authoritative
-            # prior gate used by status and per-worker dispatch pairs.
-            from brigade import aboyeur, run_shadow
-
-            snapshot = run_journal.bound_read_bytes(run_dir / "run.json")
-            try:
-                snapshot_obj = json.loads(snapshot)
-            except (ValueError, UnicodeDecodeError) as exc:
-                raise LifecycleJournalError(run_events._bound("lifecycle run receipt is not valid JSON")) from exc
-            if not isinstance(snapshot_obj, dict):
-                raise LifecycleJournalError(run_events._bound("lifecycle run receipt is not a JSON object"))
-            if aboyeur._resolve_authority_state(run_dir) == "authoritative":
-                # Exact dispatch pairing keys share the crash-window recovery
-                # path used by record_dispatch_fact: finish a checkpoint-only
-                # tail before the ordinary prior-decision gate can fail closed.
-                if pairing_key is not None:
-                    report = run_journal.read_journal_bounded(journal_path)
-                    if report.partial_tail is not None or report.chain_errors:
-                        raise run_journal.ChainIntegrityError(run_events._bound(_CHAIN_CATEGORY))
-                    recovered = _recover_authoritative_dispatch_checkpoint(
-                        run_dir,
-                        journal_path=journal_path,
-                        workspace=workspace,
-                        journal_report=report,
-                        snapshot=snapshot,
-                        snapshot_obj=snapshot_obj,
-                        event_type=event_type,
-                        pairing_key=pairing_key,
-                        payload=dict(payload),
-                        idempotency_key=idempotency_key,
-                    )
-                    if recovered is not None:
-                        return recovered
-                aboyeur._authoritative_prior_decision(run_dir, snapshot_obj)
-            checkpoint = run_checkpoint.write_checkpoint(
-                run_dir,
-                snapshot,
-                workspace=workspace,
-                paired_event_type=event_type,
-                body_kind=(
-                    run_checkpoint._BODY_KIND_BASE_STRIPPED
-                    if snapshot_obj.get("run_journal_authority_requested") is True
-                    else None
-                ),
-                pairing_key=pairing_key,
-            )
-            if checkpoint is None:
-                raise LifecycleJournalError(run_events._bound("enrolled lifecycle journal checkpoint was not recorded"))
-            report = run_journal.read_journal_bounded(journal_path)
-            if report.partial_tail is not None or report.chain_errors:
-                raise run_journal.ChainIntegrityError(run_events._bound(_CHAIN_CATEGORY))
-            event = _append_owner_event(
+    if event_type in run_events._TASK_EVENT_TYPES:
+        pairing_key = run_events.request_digest(event_type=event_type, payload=payload, idempotency_key=idempotency_key)
+    journal_path = _journal_path(run_dir)
+    if not run_journal.bound_is_file(journal_path):
+        raise LifecycleJournalError("lifecycle journal is not active for this run")
+    if workspace is None or not runguard.is_active_run_owner(workspace, run_dir):
+        raise LifecycleJournalError("lifecycle journal append requires the active run lock for this run")
+    try:
+        existing = run_journal.lookup_idempotent_event(
+            journal_path,
+            event_type=event_type,
+            payload=dict(payload),
+            idempotency_key=idempotency_key,
+        )
+        if existing is not None:
+            return _append_owner_event(
                 journal_path,
                 workspace=workspace,
                 run_id=run_id,
                 event_type=event_type,
-                payload=dict(payload),
+                payload=payload,
                 idempotency_key=idempotency_key,
             )
-            run_shadow.record_shadow_comparison(run_dir, snapshot_obj)
-            return event
-        except run_journal.RunJournalError as exc:
-            raise _bound_journal_failure(exc) from exc
-        except run_events.CanonicalizationError as exc:
-            raise _bound_journal_failure(exc) from exc
-        except OSError as exc:
-            raise _bound_journal_failure(exc) from exc
+        # Keep every explicit fact recoverable under the same authoritative
+        # prior gate used by status and per-worker dispatch pairs.
+        from brigade import aboyeur, run_shadow
+
+        snapshot = run_journal.bound_read_bytes(run_dir / "run.json")
+        try:
+            snapshot_obj = json.loads(snapshot)
+        except (ValueError, UnicodeDecodeError) as exc:
+            raise LifecycleJournalError(run_events._bound("lifecycle run receipt is not valid JSON")) from exc
+        if not isinstance(snapshot_obj, dict):
+            raise LifecycleJournalError(run_events._bound("lifecycle run receipt is not a JSON object"))
+        if aboyeur._resolve_authority_state(run_dir) == "authoritative":
+            # Exact dispatch pairing keys share the crash-window recovery
+            # path used by record_dispatch_fact: finish a checkpoint-only
+            # tail before the ordinary prior-decision gate can fail closed.
+            if pairing_key is not None and event_type in run_checkpoint._DISPATCH_FACT_EVENT_TYPES:
+                report = run_journal.read_journal_bounded(journal_path)
+                if report.partial_tail is not None or report.chain_errors:
+                    raise run_journal.ChainIntegrityError(run_events._bound(_CHAIN_CATEGORY))
+                recovered = _recover_authoritative_dispatch_checkpoint(
+                    run_dir,
+                    journal_path=journal_path,
+                    workspace=workspace,
+                    journal_report=report,
+                    snapshot=snapshot,
+                    snapshot_obj=snapshot_obj,
+                    event_type=event_type,
+                    pairing_key=pairing_key,
+                    payload=dict(payload),
+                    idempotency_key=idempotency_key,
+                )
+                if recovered is not None:
+                    return recovered
+            aboyeur._authoritative_prior_decision(run_dir, snapshot_obj)
+        checkpoint = run_checkpoint.write_checkpoint(
+            run_dir,
+            snapshot,
+            workspace=workspace,
+            paired_event_type=event_type,
+            body_kind=(
+                run_checkpoint._BODY_KIND_BASE_STRIPPED
+                if snapshot_obj.get("run_journal_authority_requested") is True
+                else None
+            ),
+            pairing_key=pairing_key,
+        )
+        if checkpoint is None:
+            raise LifecycleJournalError(run_events._bound("enrolled lifecycle journal checkpoint was not recorded"))
+        report = run_journal.read_journal_bounded(journal_path)
+        if report.partial_tail is not None or report.chain_errors:
+            raise run_journal.ChainIntegrityError(run_events._bound(_CHAIN_CATEGORY))
+        event = _append_owner_event(
+            journal_path,
+            workspace=workspace,
+            run_id=run_id,
+            event_type=event_type,
+            payload=dict(payload),
+            idempotency_key=idempotency_key,
+        )
+        run_shadow.record_shadow_comparison(run_dir, snapshot_obj)
+        return event
+    except run_journal.RunJournalError as exc:
+        raise _bound_journal_failure(exc) from exc
+    except run_events.CanonicalizationError as exc:
+        raise _bound_journal_failure(exc) from exc
+    except OSError as exc:
+        raise _bound_journal_failure(exc) from exc
 
 
 def record_lifecycle_transition(
