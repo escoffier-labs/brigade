@@ -780,7 +780,7 @@ def test_a_draining_machine_is_unavailable_and_counts_toward_neither_card():
     assert "4 unavailable" in row and ' idle"' not in row and "seg--free" not in row
     assert row.count("seg--off") == 4
     sidebar = overview.render_sidebar(view, "overview", NOW, worklore_enabled=True)
-    assert 'class="tree-meta">draining<' in sidebar and "dot--limited" in sidebar
+    assert 'class="tree-meta">draining<' in sidebar and 'data-status="limited"' in sidebar
 
 
 def test_the_limited_summary_escapes_the_machine_state():
@@ -849,7 +849,7 @@ def test_unmatched_station_row_is_unknown_and_adds_no_idle_or_offline():
     assert idle == 8 and _card_value(summary, "idle") == str(idle)
     assert _card_value(summary, "offline") == "0"
     sidebar = overview.render_sidebar(view, "overview", NOW, worklore_enabled=True)
-    assert 'class="tree-meta">unknown<' in sidebar and "dot--unknown" in sidebar
+    assert 'class="tree-meta">unknown<' in sidebar and 'data-status="unknown"' in sidebar
 
 
 def test_unknown_station_with_busy_runs_reports_busy_and_unknown_seats():
@@ -1426,3 +1426,16 @@ def test_activity_explanation_is_a_tooltip_and_verdict_display_is_sentence_case(
     )
     assert overview.verdict_text(_view(plane=clear), NOW) == "ALL CLEAR"
     assert 'verdict-status--clear">All clear' in overview.render_header(_view(plane=clear), NOW)
+
+
+def test_sidebar_state_words_replace_dots_on_the_whole_deck_and_version_has_title():
+    import brigade
+
+    page = deck.render_deck(_mixed_view(), nonce="n", now=NOW)
+    assert 'class="dot' not in page
+    sidebar = page.split("<aside", 1)[1].split("</aside>", 1)[0]
+    for status in ("working", "stale", "offline"):
+        assert f'data-status="{status}"' in sidebar
+    assert f'<span class="mono sidebar-version" title="v{brigade.__version__}">v{brigade.__version__}</span>' in sidebar
+    assert 'class="tree-meta">stale<' in sidebar
+    assert 'class="tree-meta">not enrolled<' in sidebar

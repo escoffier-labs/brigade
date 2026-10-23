@@ -274,3 +274,19 @@ def test_quiet_overview_keeps_ink_values_and_both_machine_column_layouts():
     for column, width in enumerate((30, 34, 20, 16), 1):
         assert f".machine-table--no-notes th:nth-child({column}) {{ width: {width}%;" in css
     assert ".alerts {" not in css and ".alert {" not in css
+
+
+def test_sidebar_labels_stay_sentence_case_and_footer_cannot_wrap():
+    css = ui_theme.BASE_CSS
+    heading = re.search(r"\.tree-heading \{([^}]+)\}", css).group(1)
+    assert "text-transform" not in heading and "letter-spacing" not in heading
+    meta = re.search(r"\.sidebar-meta \{([^}]+)\}", css).group(1)
+    assert "white-space: nowrap" in meta
+    version = re.search(r"\.sidebar-version \{([^}]+)\}", css).group(1)
+    for declaration in ("overflow: hidden", "text-overflow: ellipsis", "min-width: 0"):
+        assert declaration in version
+    assert re.search(r"\.sidebar-telemetry \{[^}]*flex: none", css)
+    for status, color in [("stale", "signal"), ("offline", "muted"), ("unknown", "muted")]:
+        assert re.search(
+            r'\.tree-row\[data-status="' + status + r'"\] \.tree-meta \{[^}]*color: var\(--' + color + r"\)", css
+        )
