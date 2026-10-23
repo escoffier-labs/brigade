@@ -296,3 +296,202 @@ def test_invalid_cached_health_times_never_establish_ready(declared, tmp_path, f
     assert result["status"] == "unverified"
     assert all(item["status"] == "unknown" for item in result["evidence"] if item.get("seat") == "worker")
     json.dumps(result, allow_nan=False)
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"observed_at": "1000"},
+        {"observed_at": None},
+        {"observed_at": True},
+        {"observed_at": 10**400},
+        {"status": ["passed"]},
+        {"scope": {}},
+        {"detail": None},
+        None,
+    ],
+)
+def test_malformed_observation_is_unknown_without_hiding_refusal(declared, tmp_path, changes):
+    import json
+
+    request = readiness.ReadinessRequest(("worker",))
+    evidence = observed(declared, request, tmp_path)
+    evidence["admission"] = replace(evidence["admission"], **changes) if changes is not None else {}
+    result = evaluate(declared, request, tmp_path, observations=evidence)
+    row = next(item for item in result["evidence"] if item["category"] == "admission")
+    assert result["status"] == "unverified"
+    assert (row["status"], row["reason"]) == ("unknown", "observation-malformed")
+    json.dumps(result, allow_nan=False)
+
+    evidence["route-support"] = replace(evidence["route-support"], status="denied")
+    result = evaluate(declared, request, tmp_path, observations=evidence)
+    assert result["status"] == "blocked"
+    assert result["limiting_reason"] == "route-support-denied"
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"finished_wall_at": None},
+        {"finished_wall_at": "1000"},
+        {"finished_wall_at": True},
+        {"finished_wall_at": 10**400},
+        {"cache_age_seconds": "0"},
+        {"cache_age_seconds": False},
+        {"status": []},
+        {"seat": []},
+        {"fingerprint": {}},
+        {"checks": None},
+        None,
+    ],
+)
+def test_malformed_health_is_unobserved_without_hiding_refusal(declared, tmp_path, changes):
+    import json
+
+    request = readiness.ReadinessRequest(("worker",))
+    health = replace(health_for(declared), **changes) if changes is not None else {}
+    evidence = observed(declared, request, tmp_path)
+    result = evaluate(declared, request, tmp_path, health={"worker": health}, observations=evidence)
+    rows = [item for item in result["evidence"] if item.get("seat") == "worker"]
+    assert result["status"] == "unverified"
+    assert all((item["status"], item["reason"]) == ("unknown", "health-unobserved") for item in rows)
+    json.dumps(result, allow_nan=False)
+
+    evidence["admission"] = replace(evidence["admission"], status="denied")
+    result = evaluate(declared, request, tmp_path, health={"worker": health}, observations=evidence)
+    assert result["status"] == "blocked"
+    assert result["limiting_reason"] == "admission-denied"
+
+
+@pytest.mark.parametrize("changes", [{"name": []}, {"status": []}, {"detail": None}, {"cause_code": []}, None])
+def test_malformed_health_check_keeps_independent_health_failure(declared, tmp_path, changes):
+    import json
+
+    request = readiness.ReadinessRequest(("worker",))
+    health = health_for(declared)
+    malformed = replace(health.checks[0], **changes) if changes is not None else {}
+    health = replace(health, checks=(malformed, *health.checks[1:]))
+    evidence = observed(declared, request, tmp_path)
+    result = evaluate(declared, request, tmp_path, health={"worker": health}, observations=evidence)
+    row = next(item for item in result["evidence"] if item["category"] == "declaration")
+    assert result["status"] == "unverified"
+    assert (row["status"], row["reason"]) == ("unknown", "health-unobserved")
+    json.dumps(result, allow_nan=False)
+
+    health = replace(health, checks=(*health.checks[:-1], replace(health.checks[-1], status="failed")))
+    result = evaluate(declared, request, tmp_path, health={"worker": health}, observations=evidence)
+    assert result["status"] == "blocked"
+    assert any(
+        item["category"] == "isolation-compatibility" and item["status"] == "failed" for item in result["evidence"]
+    )
+
+
+@pytest.mark.parametrize("with_observation", [False, True])
+def test_operation_isolation_reflects_known_seat_incompatibility(declared, tmp_path, with_observation):
+    agent = replace(declared.agents["worker"], cli="cursor", transport="acpx", transport_version="0.12.0")
+    declared = replace(declared, agents={**declared.agents, "worker": agent})
+    request = readiness.ReadinessRequest(("worker",))
+    evidence = observed(declared, request, tmp_path) if with_observation else {}
+    result = evaluate(declared, request, tmp_path, observations=evidence)
+    rows = [item for item in result["evidence"] if item["category"] == "isolation"]
+    assert result["status"] == "blocked"
+    assert any(item.get("seat") == "worker" and item["reason"] == "isolation-incompatible" for item in rows)
+    operation = next(item for item in rows if "seat" not in item)
+    assert (operation["status"], operation["reason"]) == ("failed", "isolation-incompatible")
+    if with_observation:
+        assert operation["observed_status"] == "passed"
+        assert operation["observed_at"] == NOW
+
+
+def test_pool_order_and_duplicates_share_scope_preserving_display_and_probe_order(declared, tmp_path):
+    request = readiness.ReadinessRequest(("worker", "unused"), concurrency=2)
+    evidence = observed(declared, request, tmp_path)
+    reordered = replace(request, workers=("unused", "worker", "unused"))
+    result = evaluate(
+        declared,
+        reordered,
+        tmp_path,
+        health={name: health_for(declared, name) for name in request.workers},
+        observations=evidence,
+    )
+    assert result["scope"] == readiness.operation_scope(declared, request, tmp_path)
+    assert result["status"] == "ready"
+    assert result["request"]["workers"] == ("unused", "worker")
+    assert result["request"]["concurrency"] == 2
+    assert [seat["name"] for seat in result["selected_seats"]] == ["unused", "worker"]
+    assert result["usable_worker_count"] == 2
+    probed = []
+
+    class RecordingProbe:
+        def probe_roster(self, selected, **kwargs):
+            probed.extend(selected.agents)
+            return []
+
+    inspected = readiness.inspect_readiness(declared, reordered, workspace=tmp_path, health_probe=RecordingProbe())
+    assert probed == ["unused", "worker"]
+    assert inspected["scope"] == result["scope"]
+    assert [seat["name"] for seat in inspected["selected_seats"]] == probed
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "workers",
+        "concurrency",
+        "route",
+        "isolation",
+        "capability",
+        "workspace",
+        "orchestrator",
+        "max_workers",
+        "allow_models",
+        "model",
+        "capabilities",
+        "role",
+        "transport",
+    ],
+)
+def test_scope_changes_invalidate_operation_evidence(declared, tmp_path, change):
+    request = readiness.ReadinessRequest(("worker",))
+    evidence = observed(declared, request, tmp_path)
+    original_scope = readiness.operation_scope(declared, request, tmp_path)
+    if change in {"workers", "concurrency", "route", "isolation", "capability"}:
+        request = replace(
+            request,
+            **{
+                change: {
+                    "workers": ("worker", "unused"),
+                    "concurrency": 2,
+                    "route": "t3",
+                    "isolation": "worktree",
+                    "capability": "research.plan",
+                }[change]
+            },
+        )
+    elif change == "workspace":
+        tmp_path = tmp_path / "other-workspace"
+    elif change in {"orchestrator", "max_workers", "allow_models"}:
+        declared = replace(
+            declared, **{change: {"orchestrator": "unused", "max_workers": 3, "allow_models": ("codex",)}[change]}
+        )
+    else:
+        agent = replace(
+            declared.agents["worker"],
+            **{
+                change: {
+                    "model": "other-model",
+                    "capabilities": ("research.plan",),
+                    "role": "research",
+                    "transport": "acpx",
+                }[change]
+            },
+        )
+        declared = replace(declared, agents={**declared.agents, "worker": agent})
+    result = evaluate(declared, request, tmp_path, observations=evidence)
+    assert result["scope"] != original_scope
+    assert result["status"] != "ready"
+    assert all(
+        item["status"] == "unknown" and item["reason"] == "observation-stale-or-scope-mismatch"
+        for item in result["evidence"]
+        if item["category"] in {"route-support", "admission", "capacity"}
+    )

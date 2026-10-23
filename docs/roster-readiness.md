@@ -12,7 +12,8 @@ brigade roster ready --worker researcher --capability research.plan --route t3 -
 
 `--worker` is required and repeatable. It names a selected seat pool, not a
 task count. Duplicate names are removed in encounter order for selection,
-health inspection, and operation scope. Each selected seat must be a worker
+display, and health inspection. Operation scope sorts the distinct names, so
+reordering the same pool preserves its scope. Each selected seat must be a worker
 rather than the effective orchestrator. Concurrency defaults to 1 and must be
 a positive integer. A single seat can supply concurrency 3 when
 `limits.max_workers` and fresh admitted capacity both permit 3 assignments.
@@ -47,7 +48,9 @@ model reachability, health isolation, requested operation isolation, route
 support, admission, and capacity separately. Every item has a status, reason,
 freshness, and corrective action when needed. Timed observations include their
 Unix timestamp, age in seconds, and TTL. Nonfinite timestamps are unknown and
-render as JSON null.
+render as JSON null. Malformed operation observations are unknown with reason
+`observation-malformed`. Invalid health values are unknown with reason
+`health-unobserved`. Valid refusals in other evidence retain precedence.
 
 `selected_seats` includes the declared role and a separate selection role
 (`worker`, `orchestrator`, `missing`, or `unresolved`). `structural_worker_count` counts local
@@ -79,11 +82,19 @@ per-seat and 35-second overall health bounds. Prompt-free provider status
 checks and transport initialization may still run. The shared probe's
 in-process cache may be reused when an embedding caller supplies a probe.
 
+The generic CLI dispatcher records nonzero exits in the user-local
+`brigade/last-error.json` under the platform data directory. Both blocked
+(exit 2) and unverified (exit 3) readiness checks can replace the previous
+error record used by `brigade bug report`, including routine checks with
+missing live producers. `roster doctor` uses the same dispatcher behavior.
+
 For worktree requests, a non-Git workspace is blocked before health probing.
 Git eligibility alone does not establish writable disk capacity or permission
 to create a worktree. Worktree isolation remains unverified without scoped
 isolation evidence. Writable ACPX workers with shared isolation are blocked.
-The CLI has no read-only operation flag, so it does not claim readiness for a
+An operation-level isolation row also reports a known seat incompatibility.
+If injected isolation evidence passed, `observed_status` retains that supplied
+status alongside the derived failure. The CLI has no read-only operation flag, so it does not claim readiness for a
 read-only ACPX exception.
 
 The health `isolation-compatibility` check currently tests read-only
@@ -126,15 +137,17 @@ Cached results retain their original age. Their effective `observed_at` is
 minus that observation time. A future replay timestamp, negative cache age,
 or nonfinite time cannot establish fresh health. Isolation health is
 recomputed by the shared cache but conservatively uses the retained age here.
-Missing checks remain unknown.
+Missing or malformed checks remain unknown without discarding valid sibling
+checks. Health timestamps and cache ages must be finite real numbers, and
+boolean values are invalid timestamps or ages.
 The evaluator expects versionless fingerprints, matching the inspector's
 `collect_executable_version=False` setting.
 
 Programmatic callers must supply valid request fields. Malformed requests
 return blocked `malformed-request` before seat selection, scope hashing, or
 provider probes, with null `request` and `scope`. `operation_scope` raises
-`ValueError` for a malformed request and normalizes duplicate worker names for
-valid requests. Set `hub_discovery_possible=True` only when configured Hub
+`ValueError` for a malformed request and canonicalizes the distinct worker pool
+for valid requests. Set `hub_discovery_possible=True` only when configured Hub
 discovery could supply missing local seats. This flag records uncertainty and
 does not authorize network discovery or admit a seat. The Python evaluator
 uses the roster supplied by its caller, including any preference overlay.
@@ -142,7 +155,9 @@ uses the roster supplied by its caller, including any preference overlay.
 `observations` maps `route-support`, `isolation`, `admission`, and `capacity`
 to `Observation` instances. Their status is `passed`, `failed`, `denied`,
 `unsupported`, or `unknown`. An observation must have the exact scope returned
-by `operation_scope` and be no more than 30 seconds old. The scope binds the
+by `operation_scope` and be no more than 30 seconds old. Observation timestamps
+must be finite real numbers, excluding booleans. Status, scope, and detail
+must be strings. The scope binds the
 workspace, request, selected seats, model/transport fingerprints, declared
 capabilities, orchestrator, configured limit, and model allow patterns.
 Changed concurrency, route, isolation, or capability invalidates earlier

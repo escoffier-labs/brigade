@@ -13,6 +13,7 @@ import math
 import re
 import time
 from dataclasses import asdict, dataclass, replace
+from numbers import Real
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -49,11 +50,43 @@ class Observation:
     capacity: int | None = None
 
 
+def _finite_real(value: Any) -> bool:
+    if isinstance(value, bool) or not isinstance(value, Real):
+        return False
+    try:
+        return math.isfinite(value)
+    except OverflowError:
+        return False
+
+
+def _health_result_valid(result: Any) -> bool:
+    return (
+        isinstance(result, seat_health.SeatHealthResult)
+        and isinstance(result.seat, str)
+        and isinstance(result.fingerprint, str)
+        and isinstance(result.status, str)
+        and result.status in {"healthy", "degraded", "unhealthy"}
+        and _finite_real(result.finished_wall_at)
+        and (result.cache_age_seconds is None or _finite_real(result.cache_age_seconds))
+        and isinstance(result.checks, (tuple, list))
+    )
+
+
+def _health_check_valid(check: Any) -> bool:
+    return (
+        isinstance(check, seat_health.SeatHealthCheck)
+        and isinstance(check.name, str)
+        and isinstance(check.status, str)
+        and isinstance(check.detail, str)
+        and (check.cause_code is None or isinstance(check.cause_code, str))
+    )
+
+
 def operation_scope(roster: roster_mod.Roster, request: ReadinessRequest, workspace: Path) -> str:
     error = _request_error(request)
     if error:
         raise ValueError(error)
-    request = replace(request, workers=tuple(dict.fromkeys(request.workers)))
+    request = replace(request, workers=tuple(sorted(set(request.workers))))
     inputs = {
         "request": asdict(request),
         "workspace": str(workspace.expanduser().resolve()),
@@ -224,6 +257,8 @@ def evaluate_readiness(
             )
 
         result = health.get(name)
+        if not _health_result_valid(result):
+            result = None
         observed_at = None
         if result is not None:
             cache_age = result.cache_age_seconds if result.cache_age_seconds is not None else 0.0
@@ -250,7 +285,7 @@ def evaluate_readiness(
             and 0 <= age <= ttl
             and result.fingerprint == seat_health.seat_fingerprint(agent, roster)
         )
-        by_name = {check.name: check for check in result.checks} if result else {}
+        by_name = {check.name: check for check in result.checks if _health_check_valid(check)} if result else {}
         # Read-only enforcement is a separate health fact from the requested
         # shared/worktree isolation. Do not confuse the two contracts.
         for check_name in seat_health.CHECK_NAMES:
@@ -279,13 +314,20 @@ def evaluate_readiness(
 
     scope = operation_scope(roster, request, workspace)
     admitted_capacity = None
+    isolation_incompatible = any(item["category"] == "isolation" and item["status"] == "failed" for item in evidence)
     for category in ("route-support", "isolation", "admission", "capacity"):
         observation = observations.get(category)
         if observation is None:
             if category == "route-support" and request.route == "brigade":
                 add(category, "passed", "brigade-route-declared", freshness="current")
             elif category == "isolation" and request.route == "brigade" and request.isolation == "shared":
-                add(category, "passed", "shared-isolation-requested", freshness="current")
+                add(
+                    category,
+                    "failed" if isolation_incompatible else "passed",
+                    "isolation-incompatible" if isolation_incompatible else "shared-isolation-requested",
+                    "Select workers compatible with the requested isolation." if isolation_incompatible else "",
+                    freshness="current",
+                )
             else:
                 reason = "t3-contract-unavailable" if category == "route-support" else "observation-missing"
                 action = (
@@ -295,6 +337,21 @@ def evaluate_readiness(
                     else f"Obtain fresh operation-scoped {category} evidence from the execution route."
                 )
                 add(category, "unknown", reason, action, freshness="missing")
+            continue
+        if (
+            not isinstance(observation, Observation)
+            or not isinstance(observation.status, str)
+            or not _finite_real(observation.observed_at)
+            or not isinstance(observation.scope, str)
+            or not isinstance(observation.detail, str)
+        ):
+            add(
+                category,
+                "unknown",
+                "observation-malformed",
+                "Obtain well-formed evidence for this exact operation.",
+                freshness="missing",
+            )
             continue
         age = now - observation.observed_at
         fresh = math.isfinite(age) and 0 <= age <= OPERATION_TTL_SECONDS and observation.scope == scope
@@ -308,6 +365,9 @@ def evaluate_readiness(
             reason = f"{category}-{status}"
         elif fresh and status == "unknown":
             reason = "observation-incomplete"
+        isolation_refused = category == "isolation" and status == "passed" and isolation_incompatible
+        if isolation_refused:
+            status, reason = "failed", "isolation-incompatible"
         if category == "capacity" and status == "passed":
             if type(observation.capacity) is not int or observation.capacity < 0:
                 status, reason = "unknown", "capacity-unobserved"
@@ -331,6 +391,7 @@ def evaluate_readiness(
             observed_at=observation.observed_at if math.isfinite(observation.observed_at) else None,
             ttl_seconds=OPERATION_TTL_SECONDS,
             detail=safe_detail(observation.detail)[:240],
+            **({"observed_status": observation.status} if isolation_refused else {}),
         )
 
     blocked = any(item["status"] in {"failed", "denied", "unsupported"} for item in evidence)
