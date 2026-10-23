@@ -27,6 +27,7 @@ MESSAGE_CODES = (
             "message_wait_capped",
             "paging_snapshot_capacity",
             "paging_continuation_unsupported",
+            "paging_cursor_expired",
             "message_recipient_inactive",
             "message_recipient_unknown",
             "message_sender_inactive",

@@ -21,18 +21,22 @@ PAGE_MAX = 500
 # Reserve room below the 8 MiB client cap for both JSON layers, fences and RPC.
 PAGE_MAX_BYTES = 7 * 1024 * 1024
 SNAPSHOT_TTL_SECONDS = 600
+SNAPSHOT_IDLE_SECONDS = 60
 SNAPSHOT_MAX_PER_CALLER = 8
 SNAPSHOT_MAX_PER_CALLER_BYTES = 16 * 1024 * 1024
 SNAPSHOT_MAX_COUNT = 128
 SNAPSHOT_MAX_BYTES = 64 * 1024 * 1024
 SNAPSHOT_SINGLE_MAX_BYTES = 16 * 1024 * 1024
+# Retain the payload column as a format discriminator: pre-release databases
+# can contain whole-document snapshots, whose cursors must never use row seeks.
 _SCHEMA: tuple[tuple[str, str, str], ...] = (
     (
         "table",
         "fleet_read_snapshots",
         "CREATE TABLE IF NOT EXISTS fleet_read_snapshots ("
         "snapshot_id TEXT PRIMARY KEY, caller TEXT NOT NULL, query_hash TEXT NOT NULL, "
-        "expires_at REAL NOT NULL, payload TEXT NOT NULL, payload_bytes INTEGER NOT NULL)",
+        "expires_at REAL NOT NULL, payload TEXT NOT NULL, payload_bytes INTEGER NOT NULL, "
+        "last_access REAL NOT NULL)",
     ),
     (
         "index",
@@ -141,11 +145,20 @@ class SnapshotWriteRequired(Exception):
 
 
 def missing_schema(conn: sqlite3.Connection) -> list[str]:
-    return [
+    missing = [
         ddl
         for kind, name, ddl in _SCHEMA
         if conn.execute("SELECT 1 FROM sqlite_master WHERE type=? AND name=?", (kind, name)).fetchone() is None
     ]
+    columns = {row[1] for row in conn.execute("PRAGMA table_info(fleet_read_snapshots)")}
+    if columns and "last_access" not in columns:
+        missing.extend(
+            [
+                "ALTER TABLE fleet_read_snapshots ADD COLUMN last_access REAL NOT NULL DEFAULT 0",
+                f"UPDATE fleet_read_snapshots SET last_access=expires_at-{SNAPSHOT_TTL_SECONDS}",
+            ]
+        )
+    return missing
 
 
 def ensure_schema(conn: sqlite3.Connection) -> None:
@@ -202,7 +215,9 @@ def load(conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str) -> tuple
         (snapshot_id, caller, query_hash(conn, raw, caller=caller), fleet_hub._now_epoch()),
     ).fetchone()
     if row is None:
-        raise MessageError("paging cursor is invalid or expired; restart from the first page")
+        raise MessageError(
+            "paging cursor is invalid or expired; restart from the first page", code="paging_cursor_expired"
+        )
     keys = ("nodes", "principals", "sessions") if raw["action"] == "who" else ("claims",)
     groups = []
     for key, offset in zip(keys, offsets, strict=True):
@@ -210,7 +225,9 @@ def load(conn: sqlite3.Connection, raw: dict[str, Any], *, caller: str) -> tuple
             "SELECT row_count,total FROM fleet_read_snapshot_groups WHERE snapshot_id=? AND kind=?", (snapshot_id, key)
         ).fetchone()
         if group is None:
-            raise MessageError("paging cursor is invalid or expired; restart from the first page")
+            raise MessageError(
+                "paging cursor is invalid or expired; restart from the first page", code="paging_cursor_expired"
+            )
         if offset > group[0]:
             raise MessageError("invalid paging cursor offset")
         groups.append((key, group[0], group[1]))
@@ -250,14 +267,24 @@ def _save(
         total -= oldest_bytes
         owned -= 1
         owned_bytes -= oldest_bytes
-    if count >= SNAPSHOT_MAX_COUNT or total + size > SNAPSHOT_MAX_BYTES:
-        raise MessageQuotaError(
-            "paging snapshot capacity reached; retry after snapshots expire", code="paging_snapshot_capacity"
-        )
+    while count >= SNAPSHOT_MAX_COUNT or total + size > SNAPSHOT_MAX_BYTES:
+        idle = conn.execute(
+            "SELECT snapshot_id,payload_bytes FROM fleet_read_snapshots "
+            "WHERE last_access<? ORDER BY last_access,rowid LIMIT 1",
+            (now - SNAPSHOT_IDLE_SECONDS,),
+        ).fetchone()
+        if idle is None:
+            raise MessageQuotaError(
+                "paging snapshot capacity reached; retry after idle walks can be reclaimed",
+                code="paging_snapshot_capacity",
+            )
+        conn.execute("DELETE FROM fleet_read_snapshots WHERE snapshot_id=?", (idle[0],))
+        count -= 1
+        total -= idle[1]
     snapshot_id = secrets.token_hex(24)
     conn.execute(
-        "INSERT INTO fleet_read_snapshots VALUES(?,?,?,?,?,?)",
-        (snapshot_id, caller, binding, now + SNAPSHOT_TTL_SECONDS, "rows-v1", size),
+        "INSERT INTO fleet_read_snapshots VALUES(?,?,?,?,?,?,?)",
+        (snapshot_id, caller, binding, now + SNAPSHOT_TTL_SECONDS, "rows-v1", size, now),
     )
     for key, rows in data.items():
         stored = [
@@ -298,19 +325,15 @@ def _wire_size(row: dict[str, Any]) -> int:
 def page(
     conn: sqlite3.Connection,
     raw: dict[str, Any],
-    data: dict[str, list[dict[str, Any]]] | Snapshot,
+    data: dict[str, list[dict[str, Any]]],
     *,
     caller: str,
     limit: int,
     visible: Callable[[str, dict[str, Any]], bool],
-    offsets: list[int] | None = None,
-    snapshot_id: str | None = None,
     snapshot_write: bool = False,
 ) -> dict[str, Any]:
-    if isinstance(data, Snapshot):
-        assert offsets is not None and snapshot_id is not None
-        return _snapshot_page(conn, data, offsets, snapshot_id, limit=limit, snapshot_write=snapshot_write)
-    offsets = list(offsets) if offsets is not None else [0] * len(data)
+    offsets = [0] * len(data)
+    snapshot_id = None
     result: dict[str, Any] = {}
     totals: dict[str, int] = {}
     remaining = PAGE_MAX_BYTES - 8192
@@ -341,7 +364,7 @@ def page(
         offsets[index] = position
         more |= position < len(rows)
     opted_in = "limit" in raw or "cursor" in raw
-    if more and snapshot_id is None and opted_in:
+    if more and opted_in:
         if not snapshot_write:
             raise SnapshotWriteRequired
         snapshot_id = _save(conn, data, caller=caller, binding=query_hash(conn, raw, caller=caller), visible=visible)
@@ -359,7 +382,7 @@ def page(
     }
 
 
-def _snapshot_page(
+def snapshot_page(
     conn: sqlite3.Connection,
     snapshot: Snapshot,
     offsets: list[int],
@@ -368,6 +391,9 @@ def _snapshot_page(
     limit: int,
     snapshot_write: bool,
 ) -> dict[str, Any]:
+    # Every continuation refreshes access time or releases a completed walk.
+    if not snapshot_write:
+        raise SnapshotWriteRequired
     result: dict[str, Any] = {}
     totals = {}
     remaining = PAGE_MAX_BYTES - 8192
@@ -415,9 +441,11 @@ def _snapshot_page(
         result[key] = selected
         offsets[index] = position
     if not more:
-        if not snapshot_write:
-            raise SnapshotWriteRequired
         conn.execute("DELETE FROM fleet_read_snapshots WHERE snapshot_id=?", (snapshot_id,))
+    else:
+        conn.execute(
+            "UPDATE fleet_read_snapshots SET last_access=? WHERE snapshot_id=?", (fleet_hub._now_epoch(), snapshot_id)
+        )
     cursor = (
         base64.urlsafe_b64encode(json.dumps([snapshot_id, offsets], separators=(",", ":")).encode()).decode()
         if more

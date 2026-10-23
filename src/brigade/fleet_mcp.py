@@ -16,6 +16,7 @@ _SAFE_ERROR_CODES = frozenset(
         "hub_unavailable",
         "paging_snapshot_capacity",
         "paging_continuation_unsupported",
+        "paging_cursor_expired",
         "message_recipient_not_permitted",
         "message_sender_recipient_quota",
         "message_recipient_quota",
@@ -303,6 +304,7 @@ def _tool_error(exc: Exception) -> dict[str, Any]:
                 "hub_unavailable",
                 "message_recipient_inactive",
                 "message_timestamp_future",
+                "paging_cursor_expired",
             }
         )
         return {

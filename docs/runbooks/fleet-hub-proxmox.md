@@ -819,18 +819,27 @@ until `next_cursor` is null. Continuation pages retain the original snapshot
 while checking the caller's current permissions. Start a new query to see
 enrollments or claim changes made after that snapshot.
 Upgrade the hub before the clients. A new MCP client against an older hub
-returns `paging_continuation_unsupported` on a truncated claims page.
+retries `fleet_who` and `fleet_claims` once without `limit` and `cursor` if the
+hub rejects those arguments. A truncated legacy response from either tool
+returns `paging_continuation_unsupported`.
 Requests opt in to snapshots by sending `limit` or `cursor`. Legacy requests
-receive the first page without storing a snapshot. Completed walks delete their
+receive the first page without storing a snapshot. Legacy `who` requests without
+`limit` return at most 200 nodes and 200 principals, with `truncated: true` when
+more rows remain. Completed walks delete their
 snapshots. Snapshots expire after 10 minutes. Storage is capped at eight snapshots
 and 16 MiB per caller, 128 snapshots and 64 MiB across the hub, and 16 MiB per
-snapshot. A full caller budget evicts only that caller's oldest walk. Evicted
-cursors require restarting from the first page. Global capacity and expired-cursor
-errors require a fresh query after capacity becomes available. Cursors are opaque but do not authenticate offsets: callers
+snapshot. A full caller budget evicts that caller's oldest walk. Global saturation
+evicts the least recently accessed snapshot across callers if its last access
+was more than 60 seconds ago, repeating until the new snapshot fits. Continuations
+refresh last access time. If every snapshot was accessed within 60 seconds,
+the hub returns HTTP 429 with `paging_snapshot_capacity`.
+Expired, evicted, and completed cursors return HTTP 400 with
+`paging_cursor_expired`. Clients can retry from the first page, and MCP marks
+this error transient. Cursors are opaque but do not authenticate offsets: callers
 can skip or rewind within their own snapshot. Pages also enforce a serialized
 byte budget below the client cap.
 Node `fleet_claims` results match `GET /claims`, including active Grok Bot lease
 rows. Agent claim results include only granted owner nodes and omit `job`,
 `session`, and `owner_conductor`. Small directory and claim reads use a read
-transaction. Creating a continuation snapshot takes write admission and
+transaction. Creating or continuing a snapshot takes write admission and
 rechecks the caller's active status and grants before saving it.

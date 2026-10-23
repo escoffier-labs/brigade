@@ -126,8 +126,10 @@ def test_caller_budget_evicts_only_its_oldest_walk(store, monkeypatch, budget):
         store.execute("SELECT SUM(payload_bytes) FROM fleet_read_snapshots WHERE caller='reader'").fetchone()[0]
         <= 2 * size
     )
-    with pytest.raises(messages.MessageError, match="restart from the first page"):
+    with pytest.raises(messages.MessageError, match="restart from the first page") as caught:
         read(store, oldest["next_cursor"])
+    assert caught.value.code == "paging_cursor_expired"
+    assert not isinstance(caught.value, messages.MessageQuotaError)
     for page, caller in ((other, "other"), (newer, "reader"), (newest, "reader")):
         assert read(store, page["next_cursor"], caller=caller)["claims"][0]["target"] == "item-00001"
 
@@ -138,6 +140,54 @@ def test_snapshot_larger_than_caller_byte_budget_fails_without_eviction(store, m
     with pytest.raises(messages.MessageQuotaError, match="capacity"):
         seed(store, 3)
     assert read(store, first["next_cursor"])["next_cursor"]
+
+
+@pytest.mark.parametrize("budget", ["count", "bytes"])
+def test_global_budget_evicts_oldest_idle_walk_across_callers(store, monkeypatch, budget):
+    clock = [1000.0]
+    monkeypatch.setattr(fleet_hub, "_now_epoch", lambda: clock[0])
+    for caller in ("other", "newcomer"):
+        fleet_hub.add_node(store, caller)
+    touched = seed(store, 4)
+    clock[0] += 1
+    idle = seed(store, 4, caller="other")
+    size = store.execute("SELECT SUM(payload_bytes) FROM fleet_read_snapshots").fetchone()[0]
+    if budget == "count":
+        monkeypatch.setattr(paging, "SNAPSHOT_MAX_COUNT", 2)
+    else:
+        monkeypatch.setattr(paging, "SNAPSHOT_MAX_BYTES", size)
+    clock[0] += 61
+    assert read(store, touched["next_cursor"])["next_cursor"]
+    clock[0] += 1
+    fresh = seed(store, 4, caller="newcomer")
+    with pytest.raises(messages.MessageError, match="restart from the first page") as caught:
+        read(store, idle["next_cursor"], caller="other")
+    assert caught.value.code == "paging_cursor_expired"
+    assert not isinstance(caught.value, messages.MessageQuotaError)
+    assert read(store, touched["next_cursor"])["claims"][0]["target"] == "item-00001"
+    assert read(store, fresh["next_cursor"], caller="newcomer")["next_cursor"]
+    assert store.execute("SELECT COUNT(*) FROM fleet_read_snapshots").fetchone()[0] == 2
+    assert store.execute("SELECT COUNT(*) FROM fleet_read_snapshot_rows").fetchone()[0] == 8
+
+
+def test_global_budget_refuses_when_all_walks_were_recently_accessed(store, monkeypatch):
+    clock = [1000.0]
+    monkeypatch.setattr(fleet_hub, "_now_epoch", lambda: clock[0])
+    for caller in ("other", "newcomer"):
+        fleet_hub.add_node(store, caller)
+    first = seed(store, 4)
+    second = seed(store, 4, caller="other")
+    monkeypatch.setattr(paging, "SNAPSHOT_MAX_COUNT", 2)
+    clock[0] += 61
+    for page, caller in ((first, "reader"), (second, "other")):
+        assert read(store, page["next_cursor"], caller=caller)["next_cursor"]
+    clock[0] += 60
+    with pytest.raises(messages.MessageQuotaError) as caught:
+        seed(store, 4, caller="newcomer")
+    assert caught.value.code == "paging_snapshot_capacity"
+    assert store.execute("SELECT COUNT(*) FROM fleet_read_snapshots").fetchone()[0] == 2
+    for page, caller in ((first, "reader"), (second, "other")):
+        assert read(store, page["next_cursor"], caller=caller)["next_cursor"]
 
 
 def test_expiry_cleanup_removes_snapshot_rows_and_counts(store, monkeypatch):
@@ -156,6 +206,8 @@ def test_expiry_cleanup_removes_snapshot_rows_and_counts(store, monkeypatch):
 def test_old_format_current_schema_migrates_idempotently_and_rejects_cursor(store, previous_version):
     first = seed(store, 3)
     store.execute("UPDATE fleet_read_snapshots SET payload=?", (json.dumps({"claims": []}),))
+    if "last_access" in {row[1] for row in store.execute("PRAGMA table_info(fleet_read_snapshots)")}:
+        store.execute("ALTER TABLE fleet_read_snapshots DROP COLUMN last_access")
     objects = store.execute(
         "SELECT type,name FROM sqlite_master WHERE name GLOB 'fleet_read_snapshot_*' OR name GLOB 'fleet_read_visibility_*' "
         "ORDER BY CASE type WHEN 'trigger' THEN 0 WHEN 'index' THEN 1 ELSE 2 END"
@@ -169,6 +221,7 @@ def test_old_format_current_schema_migrates_idempotently_and_rejects_cursor(stor
         conn = fleet_hub.init_db(path)
         try:
             assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
+            assert "last_access" in {row[1] for row in conn.execute("PRAGMA table_info(fleet_read_snapshots)")}
             with pytest.raises(messages.MessageError, match="restart from the first page"):
                 read(conn, first["next_cursor"])
             fresh = seed(conn, 3)

@@ -55,6 +55,11 @@ def session(conn, node, sid, **extra):
 
 def test_both_rosters_traverse_default_and_max_pages(directory):
     roster(directory, 507)
+    status, legacy = messages.handle(directory, {"action": "who"}, caller="reader-node")
+    assert status == 200
+    assert len(legacy["nodes"]) == len(legacy["principals"]) == 200
+    assert legacy["truncated"] and legacy["next_cursor"] is None
+    assert directory.execute("SELECT COUNT(*) FROM fleet_read_snapshots").fetchone()[0] == 0
     first = who(directory)
     assert len(first["nodes"]) == len(first["principals"]) == 200
     assert first["truncated"] and isinstance(first["next_cursor"], str)

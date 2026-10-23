@@ -73,6 +73,10 @@ _PRINCIPAL_SCHEMA = """CREATE TABLE IF NOT EXISTS fleet_message_principals (
 class MessageError(ValueError):
     """A bounded queue request was invalid."""
 
+    def __init__(self, message: str, *, code: str | None = None) -> None:
+        super().__init__(message)
+        self.code = code
+
 
 class MessageForbidden(MessageError):
     """A principal lacks permission for the requested recipient."""
@@ -99,7 +103,7 @@ class MessageQuotaError(MessageError):
 
     def __init__(self, message: str, *, code: str, recipient: str | None = None) -> None:
         super().__init__(message)
-        self.code = code
+        self.code: str = code
         self.recipient = recipient
 
 
@@ -1014,15 +1018,12 @@ def _station_read(
 
     if snapshot is not None:
         stored_snapshot, offsets, snapshot_id = snapshot
-        return paging.page(
+        return paging.snapshot_page(
             conn,
-            raw,
             stored_snapshot,
-            caller=caller,
+            offsets,
+            snapshot_id,
             limit=limit,
-            visible=lambda *_: True,
-            offsets=offsets,
-            snapshot_id=snapshot_id,
             snapshot_write=snapshot_write,
         )
 

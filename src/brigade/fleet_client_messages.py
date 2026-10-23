@@ -198,6 +198,7 @@ def _rejection(status: int, payload: dict[str, Any]) -> str:
         "message_not_found": "message not found",
         "principal_enrollment_changed": "principal generation changed",
         "principal_enrollment_revoked": "principal generation changed",
+        "paging_cursor_expired": "paging cursor expired; restart from the first page",
     }
     code = payload.get("code")
     if isinstance(code, str) and code in descriptions:
@@ -223,6 +224,25 @@ def _online(body: dict[str, Any], *, authority: MessageAuthority, timeout: float
         status, payload = _transport(authority, body, timeout=_request_timeout(timeout))
     finally:
         authority.validate()
+    if (
+        status == 400
+        and body.get("action") in {"who", "claims"}
+        and ("limit" in body or "cursor" in body)
+        and payload.get("code") is None
+        and payload.get("error") == "invalid station read arguments"
+    ):
+        # Older hubs reject paging keys before reading either directory.
+        # Removing both keys also bounds this compatibility retry to one.
+        legacy = _online(
+            {key: value for key, value in body.items() if key not in {"limit", "cursor"}},
+            authority=authority,
+            timeout=timeout,
+        )
+        if legacy.get("truncated") is True:
+            raise FleetMessageHubError(
+                "Fleet hub does not support directory continuation.", code="paging_continuation_unsupported"
+            )
+        return legacy
     if not 200 <= status < 300:
         raise FleetMessageHubError(
             _rejection(status, payload),

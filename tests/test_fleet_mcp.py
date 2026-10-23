@@ -1010,6 +1010,72 @@ def test_single_oversized_snapshot_remains_permanent(stations, hub, monkeypatch,
 
 
 @pytest.mark.parametrize("action", ["who", "claims"])
+@pytest.mark.parametrize("truncated", [False, True])
+def test_directory_retries_old_hub_without_paging_arguments(stations, monkeypatch, action, truncated):
+    from brigade import fleet_hub_paging
+
+    original = fleet_hub_messages.handle
+    requests = []
+
+    def old_hub(conn, raw, *, caller, **kwargs):
+        if raw.get("action") in {"who", "claims"}:
+            requests.append(dict(raw))
+            if set(raw) - {"action", "all", "filter"}:
+                raise fleet_hub_messages.MessageError("invalid station read arguments")
+            status, page = original(conn, raw, caller=caller, **kwargs)
+            page.pop("next_cursor")
+            page["truncated"] = truncated
+            return status, page
+        return original(conn, raw, caller=caller, **kwargs)
+
+    monkeypatch.setattr(fleet_hub_messages, "handle", old_hub)
+    monkeypatch.setattr(fleet_hub_paging, "PAGE_DEFAULT", 1)
+    args = {"all": True, "limit": 1, "cursor": "old-cursor"}
+    if action == "who":
+        args["filter"] = "fixture"
+    payload, error = stations[0].call(f"fleet_{action}", args)
+    assert requests == [
+        {"action": action, **args},
+        {"action": action, **{k: v for k, v in args.items() if k not in {"limit", "cursor"}}},
+    ]
+    assert error is truncated
+    if truncated:
+        assert payload["code"] == "paging_continuation_unsupported" and payload["permanent"]
+    else:
+        assert payload["next_cursor"] is None
+
+
+@pytest.mark.parametrize("action", ["who", "claims"])
+def test_consumed_directory_cursor_is_typed_and_restartable(stations, hub, action):
+    conn = fleet_hub.open_db(hub[3])
+    try:
+        for index in range(2):
+            status, _ = fleet_hub.handle_claim(
+                conn,
+                {"action": "acquire", "node_id": NODE_A, "target": f"restart-{index}", "holder": "reader"},
+                caller_node=NODE_A,
+            )
+            assert status == 200
+    finally:
+        conn.close()
+    first = call(stations[0], f"fleet_{action}", limit=1)
+    assert call(stations[0], f"fleet_{action}", cursor=first["next_cursor"])["next_cursor"] is None
+    authority = stations[0]._authority()
+    with pytest.raises(fleet_client_messages.FleetMessageHubError, match="restart from the first page") as caught:
+        fleet_client_messages._online({"action": action, "cursor": first["next_cursor"]}, authority=authority)
+    assert caught.value.status == 400 and caught.value.code == "paging_cursor_expired"
+    payload, error = stations[0].call(f"fleet_{action}", {"cursor": first["next_cursor"]})
+    assert error and payload == {
+        "error": "Fleet hub operation failed.",
+        "code": "paging_cursor_expired",
+        "status": 400,
+        "transient": True,
+        "permanent": False,
+    }
+    assert call(stations[0], f"fleet_{action}", limit=1)["next_cursor"]
+
+
+@pytest.mark.parametrize("action", ["who", "claims"])
 def test_directory_legacy_continuation_is_explicit(stations, monkeypatch, action):
     response = (
         {"truncated": True, "total": 2, "claims": []}
