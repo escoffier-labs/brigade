@@ -911,7 +911,8 @@ _BOARD_CSS = """
 .fleet-board .fleet-holds { font-size: 12px; color: var(--muted); margin-bottom: var(--space-3); }
 .fleet-board .fleet-holds ul { margin: 0; padding-left: 1.2rem; }
 .fleet-board table.data-table { table-layout: auto; }
-.fleet-board table.data-table th:nth-child(n) { width: auto; }
+.fleet-board .machine-card table.data-table, .fleet-board #repo-board { min-width: 800px; }
+.fleet-board table.data-table th:nth-child(n) { width: auto; overflow-wrap: normal; }
 .fleet-board .fleet-run-id, .fleet-board .fleet-node { font-family: var(--font-mono); font-size: 12px; word-break: break-all; }
 .fleet-board .fleet-where { margin: 0; padding-left: 1.1rem; }
 .fleet-board .fleet-state { display: inline-block; border: 1px solid var(--line); border-radius: 999px; padding: 2px var(--space-2); font-size: 11px; font-weight: 700; white-space: nowrap; color: var(--ink); }
@@ -962,6 +963,7 @@ def _document(title: str, nonce: str, body: str, *, now: datetime) -> str:
         nonce=nonce,
         now=now,
         active="boards",
+        refresh_seconds=REFRESH_SECONDS,
         extra_css=_BOARD_CSS,
         script=_SCRIPT,
     )

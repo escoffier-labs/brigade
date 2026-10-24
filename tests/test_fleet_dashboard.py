@@ -872,7 +872,8 @@ class TestPureRendering:
 
 
 @pytest.mark.parametrize("view", ["machines", "repos"])
-def test_boards_render_through_the_shared_deck_shell(hub, view):
+def test_boards_render_through_the_shared_deck_shell(hub, view, monkeypatch):
+    monkeypatch.setattr(fleet_dashboard, "REFRESH_SECONDS", 17)
     query = {
         "sort": "seat",
         "node": NODE_A,
@@ -915,7 +916,8 @@ def test_boards_render_through_the_shared_deck_shell(hub, view):
     nonce = re.search(r"'nonce-([^']+)'", headers["content-security-policy"])[1]
     for tag in ["style", "script"]:
         assert re.findall(rf"<{tag}([^>]*)>", page) == [f' nonce="{nonce}"']
-    assert '<meta http-equiv="refresh" content="10">' in page
+    assert '<meta http-equiv="refresh" content="17">' in page
+    assert "Refreshes every 17s" in page
     assert "setInterval(tick, 1000)" in page and 'data-filter-all="1"' in page
     pivots = re.search(r'<nav class="board-nav" aria-label="Board views">(.*?)</nav>', page)[1]
     for name in ["machines", "repos"]:

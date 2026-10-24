@@ -173,6 +173,12 @@ def test_all_fleet_renderers_use_one_shared_shell_and_navigation(fleet_pages):
     for route, rendered in fleet_pages.items():
         markup = Markup(rendered)
         assert len(markup.elements("html")) == len(markup.elements("body")) == len(markup.elements("main")) == 1, route
+        assert len(markup.elements("aside")) == 1, route
+        sidebar = next(index for index, (tag, _) in enumerate(markup.tags) if tag == "aside")
+        assert markup.tags[sidebar][1]["class"] == "shell-sidebar", route
+        assert [markup.tags[index][1] for index in markup.descendants(sidebar, "nav")] == [
+            {"class": "deck-nav", "aria-label": "Command Deck"}
+        ], route
         assert rendered.count("--canvas:") == 2, route  # dark :root plus the light media override
         for tag in ["style", "script"]:
             assert len(markup.elements(tag)) == 1, route

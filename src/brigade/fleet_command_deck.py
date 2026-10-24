@@ -1782,6 +1782,7 @@ def _document(
     now: datetime,
     title: str = "Command Deck",
     refresh: bool = True,
+    refresh_seconds: int = 10,
     active: str = "overview",
     view: DeckView | None = None,
     worklore_enabled: bool | None = None,
@@ -1808,7 +1809,7 @@ def _document(
         body,
         nonce,
         as_of=_stamp(now),
-        refresh_seconds=10 if refresh else None,
+        refresh_seconds=refresh_seconds if refresh else None,
         extra_css=_STYLE + extra_css,
         script=script,
     )
