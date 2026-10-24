@@ -1890,6 +1890,7 @@ def test_enabled_startup_keeps_t3_available_while_hub_operations_fail_closed(hub
         listener_tools.ledger.close()
 
 
+@pytest.mark.usefixtures("t3_platform_admission")
 @pytest.mark.parametrize("response", [(503, {}), (200, {"principal": "agent:other"}), (200, {})])
 def test_doctor_and_canary_still_report_unproved_hub_identity(hub, monkeypatch, response):
     from brigade.grokbot_t3 import lifecycle
@@ -2079,6 +2080,7 @@ def test_send_lock_timeout_validated_before_authority_or_spool(hub, monkeypatch,
         )
 
 
+@pytest.mark.usefixtures("t3_platform_admission")
 @pytest.mark.parametrize("messaging", [False, True])
 @pytest.mark.parametrize(
     "response",
