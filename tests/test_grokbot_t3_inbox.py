@@ -86,7 +86,10 @@ def hub(dispatch_make, tmp_path, monkeypatch):
             row["acked_at"] = "2026-10-20T12:01:00+00:00"
             return 200, {"message": row}
         if action == "sent":
-            return 200, {"messages": [dict(row, id=body["ids"][0], recipient="host-a")], "next_cursor": body["ids"][0]}
+            return 200, {
+                "messages": [dict(row, id=body["ids"][0], recipient=HUB_NODE_ID)],
+                "next_cursor": body["ids"][0],
+            }
         return 200, {
             "message": dict(
                 row, id=2, client_id=body["client_id"], sender="agent:example", recipient=body.get("to", "host-a")
@@ -234,6 +237,45 @@ def test_status_hides_infrastructure_identities_and_preserves_metadata(hub, monk
         inbox.status([7])
     assert tools.call_tool("hub_message_status", {"ids": [7]}) == c.T3DispatchError("hub-error").public_error()
     assert seen == ["identity", "sent"] * 4
+
+
+def test_status_maps_only_exact_raw_destinations_in_mixed_history(hub, monkeypatch):
+    tools, _, row, _, _, _ = hub
+    tools.runtime = replace(
+        tools.runtime,
+        hub_recipients={"helper": "agent:miller", "first": "agent:shared", "second": "agent:shared"},
+    )
+    raw_recipients = ["helper", "agent:miller", "agent:shared", HUB_NODE_ID, "agent:unknown", None]
+    metadata = [
+        dict(id=ident, subject='{"answer":42}', created_at="created", acked_at="acked", reply_to=3)
+        for ident in range(1, 7)
+    ]
+    seen = []
+
+    def request(endpoint, credential, body, **kwargs):
+        seen.append(body["action"])
+        if body["action"] == "identity":
+            return 200, {"principal": "agent:grokbot"}
+        assert body == {"action": "sent", "ids": [1, 2, 3, 4, 5, 6]}
+        return 200, {
+            "messages": [
+                dict(row, **item, recipient=recipient, acked_by="agent:ack-principal")
+                for item, recipient in zip(metadata, raw_recipients, strict=True)
+            ],
+            "next_cursor": 6,
+        }
+
+    monkeypatch.setattr(messages, "_request", request)
+    public = tools.call_tool("hub_message_status", {"ids": [1, 2, 3, 4, 5, 6]})
+    assert public == {
+        "messages": [
+            dict(item, to=alias) for item, alias in zip(metadata, [None, "helper", None, None, None, None], strict=True)
+        ]
+    }
+    serialized = json.dumps(public)
+    assert "acked_by" not in serialized and "agent:" not in serialized and HUB_NODE_ID not in serialized
+    assert len(serialized.encode()) <= c.PUBLIC_RESULT_LIMIT
+    assert seen == ["identity", "sent"]
 
 
 @pytest.mark.parametrize("recipient", ["host-a"])

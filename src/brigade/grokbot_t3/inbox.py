@@ -60,16 +60,27 @@ class HubInbox(MessageOperations):
             self.require_authority(authority)
 
     def status(self, ids: builtins.list[int]) -> dict[str, Any]:
-        result = super().status(ids)
-        counts = Counter(self.recipients.values())
-        aliases = {name for name, recipient in self.recipients.items() if counts[recipient] == 1}
-        for row in result["messages"]:
-            row.pop("acked_by", None)
-            # Runtime aliases cannot be raw principals or UUIDs. The shared fallback
-            # and aliases for ambiguous destinations must both stay private here.
-            if row["to"] not in aliases:
-                row["to"] = None
-        return result
+        with self._operation_scope() as authority:
+            value = self._call("sent", ids=ids, authority=authority)
+            self._require(isinstance(value.get("messages"), list), "hub_unavailable")
+            self._require(
+                all(
+                    isinstance(row, dict) and isinstance(row.get("recipient"), (str, type(None)))
+                    for row in value["messages"]
+                ),
+                "hub_unavailable",
+            )
+            recipients = self.recipients
+            counts = Counter(recipients.values())
+            names = {recipient: name for name, recipient in recipients.items() if counts[recipient] == 1}
+            keys = ("id", "subject", "created_at", "acked_at", "reply_to")
+            # Match the raw destination before any shared alias projection loses it.
+            return dict(
+                messages=[
+                    dict(to=names.get(row.get("recipient")), **{key: row.get(key) for key in keys})
+                    for row in value["messages"]
+                ]
+            )
 
     def pages(
         self,
