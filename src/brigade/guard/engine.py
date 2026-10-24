@@ -280,6 +280,28 @@ def _whole_fstring_field(before: str, after: str) -> bool:
     return _quote_at(stem, len(stem), None) is not None and bool(_FIELD_CLOSE.match(after))
 
 
+def _whole_js_template_field(before: str, after: str) -> bool:
+    """Whether a match is the entire expression of an unescaped `${...}` field."""
+    opener = before.rstrip()
+    if not opener.endswith("${") or not re.match(r"\s*\}", after):
+        return False
+    stem = opener[:-2]
+    if (len(stem) - len(stem.rstrip("\\"))) % 2:
+        return False
+    # A quote may open a literal inside an earlier expression. Keep detecting
+    # its contents rather than treating its `${...}` text as a template field.
+    match = re.search(r"""`(?:\\.|[^`\\"'])*$""", stem)
+    # Templates use the same expression positions as the f-string heuristic.
+    if match is None or not _FSTRING_POSITION.search(stem[: match.start()]):
+        return False
+    prefix = stem[: match.start()]
+    if "/*" in prefix or prefix.lstrip().startswith(_LINE_START_COMMENT_PREFIXES):
+        return False
+    if _quote_at(stem, match.start(), None) is not None:
+        return False
+    return _quote_at(stem, len(stem), None) == "`"
+
+
 def _hostname_context(text: str, start: int, end: int) -> bool:
     """Keep textual hosts while avoiding unquoted attribute expressions.
 
@@ -294,7 +316,7 @@ def _hostname_context(text: str, start: int, end: int) -> bool:
     if re.search(r"[a-z][a-z0-9+.-]*://[^\s]*$", before, re.IGNORECASE):
         # A replacement field holding only the host is an expression even in a
         # formatted URL (#1918). Any other URL context keeps matching.
-        return not _whole_fstring_field(before, after)
+        return not (_whole_fstring_field(before, after) or _whole_js_template_field(before, after))
     # These delimiters introduce expressions, including expressions inside
     # interpolated strings. Check them before accepting a surrounding quote.
     if re.search(r"\bf[\"'][^\n]*\{[^}]*$", before, re.IGNORECASE):
