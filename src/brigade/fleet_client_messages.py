@@ -330,13 +330,21 @@ def _remove_queued_locked(path: Path, message: dict[str, Any], *, dir_fd: int | 
             break
 
 
-def _send_ordered(message: dict[str, Any], authority: MessageAuthority) -> dict[str, Any]:
+def _send_ordered(
+    message: dict[str, Any],
+    authority: MessageAuthority,
+    *,
+    lock_timeout: float | None = None,
+    warn_inactive: bool = True,
+) -> dict[str, Any]:
+    fleet_client._validate_spool_lock_timeout(lock_timeout)
     hub, token, node_id = authority.hub, authority.token, authority.node_id
     fleet_client._require_encrypted_or_loopback_hub(hub)
     path = _spool_path(node_id, token, hub_url=hub)
-    _warn_inactive_spools(node_id, path)
+    if warn_inactive:
+        _warn_inactive_spools(node_id, path)
     try:
-        with fleet_client._spool_lock(path) as dir_fd:
+        with fleet_client._spool_lock(path, timeout=lock_timeout) as dir_fd:
             authority.validate()
             if _spool_exists_locked(path, dir_fd):
                 existing = _queued_retry(path, message, dir_fd=dir_fd)
@@ -405,7 +413,7 @@ def _send_ordered(message: dict[str, Any], authority: MessageAuthority) -> dict[
             return payload
     except (KeyboardInterrupt, SystemExit):
         try:
-            with fleet_client._spool_lock(path) as dir_fd:
+            with fleet_client._spool_lock(path, timeout=lock_timeout) as dir_fd:
                 already_queued = any(
                     entry.get("client_id") == message["client_id"]
                     for entry in fleet_client._read_spool(path, dir_fd=dir_fd, strict=True)
@@ -501,7 +509,10 @@ def send(
     authority: MessageAuthority | None = None,
     expected_scope: str | None = None,
     reply_to: int | None = None,
+    lock_timeout: float | None = None,
+    warn_inactive: bool = True,
 ) -> dict[str, Any]:
+    fleet_client._validate_spool_lock_timeout(lock_timeout)
     authority = _authority(authority, token_file, expected_scope)
     try:
         recipient = _message_limits._text(recipient, "to", 256) or ""
@@ -526,7 +537,7 @@ def send(
         _validate_sqlite_integer(reply_to, "reply_to")
         message["reply_to"] = reply_to
     message.update(_wire_metadata(thread=thread, kind=kind, sender_label=sender_label))
-    result = _send_ordered(message, authority)
+    result = _send_ordered(message, authority, lock_timeout=lock_timeout, warn_inactive=warn_inactive)
     authority.validate()
     return result
 
