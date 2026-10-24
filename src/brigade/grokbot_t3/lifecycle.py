@@ -160,7 +160,6 @@ def _register_tools(tools: T3DispatchTools) -> list[Any]:
     from mcp.server.mcpserver.tools import Tool
     from mcp.server.mcpserver.utilities.func_metadata import ArgModelBase, FuncMetadata
     from pydantic import ConfigDict, create_model, model_validator
-    from typing_extensions import TypeForm
 
     class HubFuncMetadata(FuncMetadata):
         def pre_parse_json(self, data: dict[str, Any]) -> dict[str, Any]:
@@ -186,15 +185,11 @@ def _register_tools(tools: T3DispatchTools) -> list[Any]:
         # MCP 2.x accepts public Tool objects in MCPServer(tools=...). Use its
         # public argument model and our runtime parser so SDK coercion cannot
         # erase unknown keys or weaken integer, uniqueness, or byte validation.
-        fields: dict[str, tuple[TypeForm[Any], Any]] = {
-            key: (Any, ... if key in schema["required"] else None) for key in schema["properties"]
-        }
+        tool = Tool.from_function(handler, description=_TOOL_DESCRIPTIONS[name])
         model = create_model(
             f"{name}Arguments",
-            __base__=HubArguments,
-            **fields,
+            __base__=(HubArguments, tool.fn_metadata.arg_model),
         )
-        tool = Tool.from_function(handler, description=_TOOL_DESCRIPTIONS[name])
         metadata = HubFuncMetadata(
             arg_model=model,
             output_schema=tool.fn_metadata.output_schema,
