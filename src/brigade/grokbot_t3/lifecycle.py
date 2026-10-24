@@ -414,7 +414,6 @@ def build_listener_from_target(
         bearer=bearer,
         runtime_path=instance["runtime_path"],
     )
-    _require_runtime_identity(runtime)
     return config, _tools_for(runtime)
 
 

@@ -22,9 +22,12 @@ Every messaging operation captures one immutable endpoint and credential authori
 validates it, and calls the supported Python client `fleet_client_messages.identity`
 with that same authority. Only the exact response `{"principal":"agent:grokbot"}`
 is accepted. Identity proof has a one-second timeout. Inbox list and
-acknowledgement budgets include that proof. Startup and doctor also check identity when messaging is enabled, but
-operations always prove their own newly captured authority, including on a reused
-client after credential rotation.
+acknowledgement budgets include that proof. Doctor and canary also check identity
+when messaging is enabled. Listener startup keeps T3 dispatch available when the
+Hub or its credential is unavailable. The configured thirteen tools remain
+registered, with Hub operations returning a closed error until identity can be
+proved. Operations always prove their own newly captured authority, including
+on a reused client after credential rotation.
 
 The authority is validated after proof, before and after transport, and before
 returning complete or partial results. All pages, retries, acknowledgement batches,
@@ -34,6 +37,10 @@ stable `hub-error` without message transport or upstream exception text.
 Identity, inbox list, and sent status never drain queued mutations or access node
 credentials or node spools. Tests use fake Hub transport. No live Hub smoke test
 is part of this slice.
+
+Sent status exposes a recipient alias only when it maps uniquely to that
+destination in the current directory. Unknown or ambiguous destinations return
+`to: null`. Status omits `acked_by` and preserves the other message metadata.
 
 ## Runtime JSON
 
@@ -128,6 +135,9 @@ exhausted, the tick records a failure and leaves queued mutations for retry.
 Disabling messaging leaves queued mutations untouched. Drain errors do not stop
 inbox or request notifications. Foreground sends wait at most 1 second for the
 spool lock and return a closed error on contention, without a background send.
+After acquiring the lock, a foreground send may drain up to 100 queued entries
+within the existing 12-second drain deadline before its own transport. The
+one-second lock wait does not bound that drain or the transport time.
 Both sends and watcher drains access only their own spool scope.
 Permit that spool directory in `writable_paths` if the service sandbox otherwise
 makes it read-only. The connector never adds credential values to tool results,

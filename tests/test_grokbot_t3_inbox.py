@@ -192,6 +192,50 @@ def test_hub_tools_list_ack_reply_and_status(hub):
     assert token not in json.dumps([listing, reply, status, ledger.recent(None, 20)])
 
 
+@pytest.mark.parametrize("principal", [HUB_NODE_ID, "agent:outside-current-aliases"])
+@pytest.mark.parametrize("directory", ["unknown", "unique", "ambiguous"])
+def test_status_hides_infrastructure_identities_and_preserves_metadata(hub, monkeypatch, principal, directory):
+    from brigade.grokbot_t3.inbox import HubInbox
+    from brigade.hub_messages import HubMessageError
+
+    tools, _, row, _, token_file, _ = hub
+    recipients = {} if directory == "unknown" else {"helper": principal}
+    if directory == "ambiguous":
+        recipients["other-helper"] = principal
+    tools.runtime = replace(tools.runtime, hub_recipients=recipients)
+    metadata = dict(id=7, subject='{"answer":42}', created_at="created", acked_at="acked", reply_to=3)
+    revoked = False
+    seen = []
+
+    def request(endpoint, credential, body, **kwargs):
+        seen.append(body["action"])
+        if body["action"] == "identity":
+            return 200, {"principal": "agent:grokbot"}
+        assert body == {"action": "sent", "ids": [7]}
+        if revoked:
+            return 401, {"error": "revoked"}
+        return 200, {
+            "messages": [dict(row, **metadata, recipient=principal, acked_by="agent:ack-principal")],
+            "next_cursor": 7,
+        }
+
+    monkeypatch.setattr(messages, "_request", request)
+    inbox = HubInbox(token_file=str(token_file), recipients=recipients)
+    expected = {"messages": [dict(metadata, to="helper" if directory == "unique" else None)]}
+    assert inbox.status([7]) == expected
+    public = tools.call_tool("hub_message_status", {"ids": [7]})
+    assert public == expected
+    serialized = json.dumps(public)
+    assert principal not in serialized and "agent:ack-principal" not in serialized
+    assert "acked_by" not in serialized
+    assert len(serialized.encode()) <= c.PUBLIC_RESULT_LIMIT
+    revoked = True
+    with pytest.raises(HubMessageError, match="hub_credential_invalid"):
+        inbox.status([7])
+    assert tools.call_tool("hub_message_status", {"ids": [7]}) == c.T3DispatchError("hub-error").public_error()
+    assert seen == ["identity", "sent"] * 4
+
+
 @pytest.mark.parametrize("recipient", ["host-a"])
 @pytest.mark.parametrize("principal", [HUB_NODE_ID, "agent:miller"])
 def test_send_accepts_configured_alias_and_preserves_client_id(hub, recipient, principal):
@@ -1755,18 +1799,26 @@ def test_configured_uuid_alias_is_rejected_before_client(hub, monkeypatch, alias
     )
 
 
-@pytest.mark.parametrize("failure", ["wrong", "unsupported", "unavailable"])
-def test_enabled_startup_rejects_unproved_identity(hub, monkeypatch, failure):
+@pytest.mark.parametrize("failure", ["wrong", "unsupported", "unavailable", "malformed-response", "malformed-token"])
+def test_enabled_startup_keeps_t3_available_while_hub_operations_fail_closed(hub, monkeypatch, failure):
     from brigade.grokbot_t3 import lifecycle
 
-    tools, _, _, _, _, _ = hub
+    tools, _, _, _, token_file, _ = hub
+    seen = []
     if failure == "unsupported":
         monkeypatch.delattr(messages, "identity")
     else:
+        if failure == "malformed-token":
+            token_file.write_text("invalid")
 
         def request(endpoint, token, body, **kwargs):
+            seen.append(body["action"])
             assert body == {"action": "identity"}
-            return (200, {"principal": "agent:other"}) if failure == "wrong" else (503, {})
+            return {
+                "wrong": (200, {"principal": "agent:other"}),
+                "unavailable": (503, {}),
+                "malformed-response": (200, {}),
+            }[failure]
 
         monkeypatch.setattr(messages, "_request", request)
     monkeypatch.setattr(
@@ -1774,16 +1826,53 @@ def test_enabled_startup_rejects_unproved_identity(hub, monkeypatch, failure):
     )
     monkeypatch.setattr(lifecycle, "load_runtime", lambda path: tools.runtime)
     monkeypatch.setattr(lifecycle.grokbot_mcp, "load_bearer", lambda **kwargs: "synthetic-origin-bearer-" * 2)
-    with pytest.raises(c.T3DispatchError) as error:
-        lifecycle.build_listener_from_target(
-            tools.runtime.ledger_path.parent,
-            bind=None,
-            allowed_hosts=[],
-            allowed_origins=[],
-            bearer_file=None,
-            bearer_env=None,
-        )
-    assert error.value.code == "hub-error"
+    # Messaging availability is independent of listener startup and T3 reads.
+    config, listener_tools = lifecycle.build_listener_from_target(
+        tools.runtime.ledger_path.parent,
+        bind=None,
+        allowed_hosts=[],
+        allowed_origins=[],
+        bearer_file=None,
+        bearer_env=None,
+    )
+    try:
+        assert seen == []
+        assert set(listener_tools.inventory()) == set(c.TOOLS)
+        assert listener_tools.call_tool("t3_recent", {}) == {"requests": []}
+        result = listener_tools.call_tool("hub_message_status", {"ids": [1]})
+        assert result["error"]["code"] == "hub-error"
+        if failure == "malformed-token":
+            assert result["error"]["hub_code"] == "token_file_invalid"
+        assert seen == ([] if failure in {"unsupported", "malformed-token"} else ["identity"])
+    finally:
+        listener_tools.ledger.close()
+
+
+@pytest.mark.parametrize("response", [(503, {}), (200, {"principal": "agent:other"}), (200, {})])
+def test_doctor_and_canary_still_report_unproved_hub_identity(hub, monkeypatch, response):
+    from brigade.grokbot_t3 import lifecycle
+    from tests.test_grokbot_t3_lifecycle import _config, SECRET
+
+    tools, _, _, _, _, _ = hub
+    monkeypatch.setattr(lifecycle, "_load_runtime_config", lambda target: (_config(), SECRET, tools.runtime))
+    monkeypatch.setattr(lifecycle.FleetRunner, "capacity", lambda self: {"hosts": []})
+    monkeypatch.setattr(
+        lifecycle.grokbot_ops, "_request_json", lambda *args, **kwargs: {"ok": True, "service": c.SERVICE_NAME}
+    )
+    monkeypatch.setattr(lifecycle.grokbot_ops, "_anonymous_health_status", lambda *args: 401)
+    monkeypatch.setattr(lifecycle.grokbot_ops, "_tools_list", lambda *args: [{"name": name} for name in c.TOOLS])
+    seen = []
+
+    def request(endpoint, credential, body, **kwargs):
+        seen.append(body["action"])
+        return response
+
+    monkeypatch.setattr(messages, "_request", request)
+    target = tools.runtime.ledger_path.parent
+    checks = {item["check"]: item["status"] for item in lifecycle.doctor(target)}
+    assert checks["hub-identity"] == "fail"
+    assert lifecycle.canary(target) == {"ok": False, "pack_id": c.PACK_ID, "reason": "hub-identity"}
+    assert seen == ["identity", "identity"]
 
 
 @pytest.mark.parametrize("name,args", [("hub_inbox_list", {}), ("hub_message_status", {"ids": [1]})])

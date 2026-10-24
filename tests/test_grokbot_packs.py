@@ -83,11 +83,10 @@ OPERATIONS_RELAY_TOOLS = (
     "submit_automation_finding",
 )
 T3_DISPATCH_TOOLS = (
-    "inbox_ack",
-    "inbox_list",
-    "inbox_reply",
-    "message_send",
-    "message_status",
+    "hub_inbox_ack",
+    "hub_inbox_list",
+    "hub_message_send",
+    "hub_message_status",
     "t3_answer",
     "t3_approve",
     "t3_capacity",

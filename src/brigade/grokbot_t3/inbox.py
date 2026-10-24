@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import builtins
+from collections import Counter
 import json
 import time
 from typing import Any, Iterator
@@ -57,6 +58,18 @@ class HubInbox(MessageOperations):
             raise
         finally:
             self.require_authority(authority)
+
+    def status(self, ids: builtins.list[int]) -> dict[str, Any]:
+        result = super().status(ids)
+        counts = Counter(self.recipients.values())
+        aliases = {name for name, recipient in self.recipients.items() if counts[recipient] == 1}
+        for row in result["messages"]:
+            row.pop("acked_by", None)
+            # Runtime aliases cannot be raw principals or UUIDs. The shared fallback
+            # and aliases for ambiguous destinations must both stay private here.
+            if row["to"] not in aliases:
+                row["to"] = None
+        return result
 
     def pages(
         self,
