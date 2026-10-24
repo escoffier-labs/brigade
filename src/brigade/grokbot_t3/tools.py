@@ -8,7 +8,7 @@ import threading
 from datetime import datetime, timezone
 from typing import Any, Callable
 
-from ..hub_messages import INBOX_TOOLS, HubMessageError
+from ..hub_messages import HubMessageError
 from .inbox import HubInbox
 from . import contracts as c
 from .fleet import FleetCallError, FleetProtocolError, FleetTimeout, RevisionError
@@ -25,6 +25,7 @@ STATUS_KEYS = ("request_id", "host", "state", "needs_attention", "thread_id", "u
 FALLBACK_CODE = "policy_rejected"
 FALLBACK_REASON = "model-admission-denied"
 _REOPEN_ATTEMPTS = 3
+SEND_LOCK_TIMEOUT_SECONDS = 1.0
 
 
 def compose_prompt(caller: str, prompt: str) -> str:
@@ -59,7 +60,7 @@ class T3DispatchTools:
         self.now = now or (lambda: datetime.now(timezone.utc))
 
     def inventory(self) -> list[str]:
-        return sorted(c.TOOLS)
+        return sorted(c.TOOLS if self.runtime.messaging_configured else c.T3_TOOLS)
 
     def call_tool(self, name: str, arguments: object) -> dict[str, Any]:
         handlers: dict[str, Callable[[dict[str, Any]], dict[str, Any]]] = {
@@ -74,7 +75,7 @@ class T3DispatchTools:
             "t3_wait": self.wait,
         }
         try:
-            if name in INBOX_TOOLS:
+            if name in c.HUB_TOOLS:
                 result = self._inbox_tool(name, c.PARSERS[name](arguments))
             elif name not in handlers:
                 raise c.T3DispatchError("invalid_request")
@@ -87,21 +88,30 @@ class T3DispatchTools:
             return exc.public_error()
 
     def _inbox_tool(self, name: str, args: dict[str, Any]) -> dict[str, Any]:
-        if self.runtime.hub_token_file is None:
+        if not self.runtime.messaging_configured:
             raise c.T3DispatchError("hub-not-configured")
-        if name in {"inbox_ack", "inbox_reply", "message_send"}:
-            self._require_enabled()
-        hub = HubInbox(
-            token_file=str(self.runtime.hub_token_file), recipients=self.runtime.hub_recipients, clock=self.now
-        )
+        if name == "hub_message_send":
+            # Resolve the exact configured alias before construction, clock or budget use.
+            alias = args["alias"]
+            if alias not in self.runtime.hub_recipients:
+                raise c.T3DispatchError("invalid_request")
+            args = {key: value for key, value in args.items() if key != "alias"}
+            args["to"] = alias
         method = {
-            "inbox_list": "list",
-            "inbox_ack": "ack",
-            "inbox_reply": "reply",
-            "message_send": "send",
-            "message_status": "status",
+            "hub_inbox_list": "list",
+            "hub_inbox_ack": "ack",
+            "hub_message_send": "send",
+            "hub_message_status": "status",
         }[name]
         try:
+            hub = HubInbox(
+                token_file=str(self.runtime.hub_token_file), recipients=self.runtime.hub_recipients, clock=self.now
+            )
+            if name == "hub_message_send":
+                result = hub.send(**args, lock_timeout=SEND_LOCK_TIMEOUT_SECONDS, warn_inactive=False)
+                # The alias is the public address; keep its configured principal private.
+                result.pop("recipient", None)
+                return result
             return getattr(hub, method)(**args)
         except HubMessageError as error:
             raise c.T3DispatchError("hub-error", hub_code=error.hub_code) from None

@@ -9,7 +9,7 @@ import json
 from datetime import datetime, timezone
 from typing import Any, Callable, Iterator, Mapping
 
-from . import fleet_client_messages
+from . import fleet_client, fleet_client_messages
 from .fleet_client import FleetClientError
 from .fleet_client_message_credentials import FleetMessageHubError, MessageAuthority
 
@@ -238,7 +238,11 @@ class MessageOperations:
         thread: str | None = None,
         kind: str = "message",
         client_id: str | None = None,
+        *,
+        lock_timeout: float | None = None,
+        warn_inactive: bool = True,
     ) -> dict[str, Any]:
+        fleet_client._validate_spool_lock_timeout(lock_timeout)
         with self._operation_scope() as authority:
             # Node names from hub_recipients resolve to node ids; grants name node ids.
             recipient = dict(self.recipients).get(to, to)
@@ -251,6 +255,11 @@ class MessageOperations:
                     ).encode()
                 ).hexdigest()[:40]
             )
+            send_options: dict[str, Any] = {}
+            if lock_timeout is not None:
+                send_options["lock_timeout"] = lock_timeout
+            if not warn_inactive:
+                send_options["warn_inactive"] = False
             row = self._sent_message(
                 self._call(
                     "send",
@@ -264,6 +273,7 @@ class MessageOperations:
                     sender_label=None,
                     client_id=cid,
                     authority=authority,
+                    **send_options,
                 ),
                 agent=True,
             )
