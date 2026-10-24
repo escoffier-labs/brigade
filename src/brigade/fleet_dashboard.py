@@ -899,7 +899,7 @@ _BOARD_CSS = """
 .fleet-board .fleet-quick { color: var(--muted); }
 .fleet-board .fleet-quick-filter { display: grid; gap: 6px; margin-bottom: var(--space-4); font-size: 12px; color: var(--muted); }
 .fleet-board .fleet-quick-filter input { min-height: 36px; padding: var(--space-2) 10px; border: 1px solid var(--line); border-radius: var(--radius-control); background: var(--surface-raised); color: var(--ink); font: inherit; width: 100%; max-width: 24rem; min-width: 0; }
-.fleet-board .machine-board { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); gap: var(--space-4); margin-bottom: var(--space-4); }
+.fleet-board .machine-board { display: grid; grid-template-columns: repeat(auto-fit, minmax(min(840px, 100%), 1fr)); gap: var(--space-4); margin-bottom: var(--space-4); }
 .fleet-board .machine-card { min-width: 0; padding: var(--space-4); border: 1px solid var(--line); border-radius: var(--radius-card); background: var(--surface); }
 .fleet-board .machine-card-header { display: flex; gap: var(--space-3); align-items: center; margin-bottom: var(--space-3); }
 .fleet-board .machine-glyph { flex: 0 0 auto; stroke: var(--muted); fill: none; stroke-width: 1.6; }
@@ -912,7 +912,7 @@ _BOARD_CSS = """
 .fleet-board .fleet-holds ul { margin: 0; padding-left: 1.2rem; }
 .fleet-board table.data-table { table-layout: auto; }
 .fleet-board .machine-card table.data-table, .fleet-board #repo-board { min-width: 800px; }
-.fleet-board table.data-table th:nth-child(n) { width: auto; overflow-wrap: normal; }
+.fleet-board table.data-table th:nth-child(n) { width: auto; overflow-wrap: normal; white-space: nowrap; }
 .fleet-board .fleet-run-id, .fleet-board .fleet-node { font-family: var(--font-mono); font-size: 12px; word-break: break-all; }
 .fleet-board .fleet-where { margin: 0; padding-left: 1.1rem; }
 .fleet-board .fleet-state { display: inline-block; border: 1px solid var(--line); border-radius: 999px; padding: 2px var(--space-2); font-size: 11px; font-weight: 700; white-space: nowrap; color: var(--ink); }
