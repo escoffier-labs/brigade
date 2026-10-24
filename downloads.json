@@ -1,21 +1,25 @@
 {
   "schemaVersion": 1,
   "label": "downloads/month",
-  "message": "awaiting npm data",
-  "color": "lightgrey",
-  "status": "pending",
-  "total": null,
+  "message": "2,996",
+  "color": "blue",
+  "total": 2996,
   "sources": {
     "pypi": {
       "package": "brigade-cli",
-      "downloads": null,
+      "downloads": 2972,
       "mirrors": false
     },
     "npm": {
       "package": "@escoffier-labs/brigade",
-      "downloads": null
+      "downloads": 24
     }
   },
-  "period": null,
-  "updatedAt": null
+  "period": {
+    "start": "2026-09-23",
+    "end": "2026-10-22",
+    "days": 30,
+    "timezone": "UTC"
+  },
+  "updatedAt": "2026-10-24T16:05:02Z"
 }
