@@ -23,6 +23,10 @@ ERROR_MESSAGES = {
     "not a hub outage. Nothing was sent or queued, and retrying will not help.",
     "client_id_conflict": "This client_id is already queued with different content. Nothing new was queued; "
     "use a new client_id for a different message.",
+    "send_limit_reached": "This connector's hourly message_send limit is reached. Nothing was sent or queued; "
+    "wait for the hour to roll over and do not retry in a loop.",
+    "messaging_disabled": "Hub messaging is turned off for this connector. Nothing was sent or queued, "
+    "and retrying will not help.",
 }
 
 
@@ -276,6 +280,12 @@ TOOL_SCHEMAS = {
 }
 
 TOOLS = frozenset(TOOL_SCHEMAS)
-GATED_TOOLS = frozenset(
-    {"fleet_submit", "fleet_followup", "fleet_answer", "fleet_approve", "fleet_interrupt", "message_send"}
-)
+# Tools that start or steer work on operator machines, gated by dispatch_enabled.
+DISPATCH_GATED_TOOLS = frozenset({"fleet_submit", "fleet_followup", "fleet_answer", "fleet_approve", "fleet_interrupt"})
+# Hub messaging has its own gate, so a profile can send messages without dispatch.
+MESSAGING_GATED_TOOLS = frozenset({"message_send"})
+GATED_TOOLS = DISPATCH_GATED_TOOLS | MESSAGING_GATED_TOOLS
+
+# Capability tools owned by a connector profile other than Dot. Dot's TOOL_SCHEMAS stays fixed.
+PROFILE_TOOL_SCHEMAS = {"duet_capabilities": ToolSchema()}
+ALL_TOOL_SCHEMAS = {**TOOL_SCHEMAS, **PROFILE_TOOL_SCHEMAS}

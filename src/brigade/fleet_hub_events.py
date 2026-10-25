@@ -221,7 +221,7 @@ def definitions() -> list[dict[str, Any]]:
                     "recipient": {"type": "string"},
                     "sender": {"type": "string"},
                     "priority": {"enum": ["low", "normal", "high", "urgent"]},
-                    "kind": {"enum": ["message", "question", "completion"]},
+                    "kind": {"enum": ["message", "question", "completion", "operator_question"]},
                     "created_at": {"type": "string"},
                 },
                 "required": ["message_id", "recipient", "sender", "priority", "created_at"],

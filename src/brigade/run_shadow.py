@@ -296,7 +296,8 @@ def _checkpoint_status_write_gap(
 
     A normal activated-journal mapped transition appends ``run.snapshot.checkpointed``
     immediately before the mapped status event, so the journal tail can jump by two
-    sequences between comparisons without a skipped shadow step.
+    sequences between comparisons without a skipped shadow step. Task facts use
+    the same adjacent pair, bound to the exact fact's request digest.
     """
     if prior_seq is None:
         if tail_seq != 2:
@@ -330,7 +331,28 @@ def _checkpoint_status_write_gap(
         return False
     if status_event.event_type != paired_event_type:
         return False
+    if checkpoint.idempotency_key.startswith(run_checkpoint._CHECKPOINT_GENERIC_IDEMPOTENCY_PREFIX):
+        # A generic tag cannot stand in for task/dispatch pairing identities.
+        if (
+            status_event.event_type in run_events._TASK_EVENT_TYPES
+            or status_event.event_type in run_checkpoint._DISPATCH_FACT_EVENT_TYPES
+        ):
+            return False
+        try:
+            run_checkpoint._validate_payload(checkpoint.payload)
+        except run_checkpoint.CheckpointError:
+            return False
+        expected_key = run_checkpoint._checkpoint_idempotency_key(
+            checkpoint.payload["sha256"],
+            paired_event_type=status_event.event_type,
+            body_kind=checkpoint.payload.get("body_kind"),
+            pairing_key=status_event.request_digest,
+        )
+        if checkpoint.idempotency_key != expected_key:
+            return False
     pairing_key = checkpoint.payload.get("pairing_key")
+    if status_event.event_type in run_events._TASK_EVENT_TYPES:
+        return isinstance(pairing_key, str) and pairing_key == status_event.request_digest
     if status_event.event_type in run_checkpoint._DISPATCH_FACT_EVENT_TYPES and pairing_key is None:
         return False
     if pairing_key is not None:

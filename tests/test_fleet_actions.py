@@ -58,6 +58,17 @@ def setup_action(tmp_path):
     return conn, path, grant, request
 
 
+def backdate_action(conn, action_id, seconds=10):
+    """Make the action older than any evidence stored next.
+
+    Verification needs evidence strictly newer than the action. Coarse wall clocks (Windows ticks
+    about every 15.6 ms) can stamp the action and fresh evidence identically, so tests that expect
+    a cleared condition must not rely on the clock advancing between the two.
+    """
+    with conn:
+        conn.execute("UPDATE agent_actions SET created_at=created_at-? WHERE action_id=?", (seconds, action_id))
+
+
 def seed_t3_roster(conn, *, enabled=True):
     from brigade import fleet_hub_model_roster as roster
 
@@ -306,6 +317,7 @@ def test_only_fresh_original_surface_evidence_can_clear_condition(tmp_path):
         {"event_id": "finished", "status": "finished", "destination_ref": "fixture-turn"},
     )
     assert actions.show(conn, action["action_id"])["verification"] == "pending"
+    backdate_action(conn, action["action_id"])
     with conn:
         conn.execute(
             "UPDATE fleet_machine_telemetry SET status='available', observed_id='fresh', observed_at=?",
