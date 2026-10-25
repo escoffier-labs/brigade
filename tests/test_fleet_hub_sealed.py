@@ -1182,6 +1182,54 @@ def test_startup_policy_refusal_preserves_retention_rows(hub, monkeypatch, schem
     assert hub.execute("PRAGMA foreign_key_check").fetchall() == []
 
 
+@pytest.mark.parametrize("compatible", [False, True])
+def test_startup_stats_history_migration_defers_retention_until_identity_admission(hub, compatible):
+    from brigade import fleet_admin_stats as stats, fleet_hub_identity
+    from tests.test_fleet_hub_message_keys import identity
+
+    now = datetime.now(timezone.utc)
+    old = now - timedelta(days=500)
+    # Store the recent row first so both valid snapshots survive fixture setup.
+    for taken_at in (now - timedelta(days=1), old):
+        value = stats.snapshot(
+            taken_at=taken_at,
+            source_set=["d1"],
+            weeks=[
+                {
+                    "week": taken_at.strftime("%G-W%V"),
+                    "partial": True,
+                    "active_sources": 20,
+                    "retained_2d_sources": 10,
+                    "retained_3d_sources": 5,
+                    "versions": [],
+                    "upgrades": [],
+                }
+            ],
+            daily=[],
+            downloads={"pypi": None, "npm": None},
+        )
+        stats.store(hub, value, now=taken_at)
+    tables = ("admin_stats_snapshots", "admin_stats_weeks")
+    before = {table: hub.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall() for table in tables}
+    assert all(len(rows) == 2 for rows in before.values())
+    fleet_hub_identity.upload_identity(hub, {**identity(), "require_sealed": not compatible})
+    signed = hub.execute("SELECT * FROM hub_meta ORDER BY rowid").fetchall()
+    hub.execute("DROP TABLE admin_stats_weeks")
+    hub.execute("PRAGMA user_version=34")
+    hub.commit()
+    path = hub.execute("PRAGMA database_list").fetchone()[2]
+    if compatible:
+        server = fleet_hub.make_server("127.0.0.1", 0, path, "fixture-admin")
+        server.server_close()
+        # Accepted startup still applies the separate 400-day stats policy.
+        before = {table: rows[:1] for table, rows in before.items()}
+    else:
+        with pytest.raises(fleet_hub.FleetHubError, match="identity"):
+            fleet_hub.make_server("127.0.0.1", 0, path, "fixture-admin")
+    assert {table: hub.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall() for table in tables} == before
+    assert hub.execute("SELECT * FROM hub_meta ORDER BY rowid").fetchall() == signed
+
+
 @pytest.mark.parametrize("legacy", [False, True])
 def test_startup_compatible_upgrade_applies_selected_retention(hub, legacy, startup_foreign_keys):
     from brigade import fleet_hub_identity

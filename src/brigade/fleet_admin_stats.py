@@ -66,7 +66,7 @@ def config() -> dict[str, Any]:
         return {}
 
 
-def ensure_schema(conn: sqlite3.Connection) -> None:
+def ensure_schema(conn: sqlite3.Connection, *, prune: bool = True) -> None:
     conn.execute("""CREATE TABLE IF NOT EXISTS admin_stats_snapshots (
         snapshot_id TEXT PRIMARY KEY, taken_at TEXT NOT NULL, source_set TEXT NOT NULL,
         schema TEXT NOT NULL, payload_json TEXT NOT NULL, digest TEXT NOT NULL)""")
@@ -83,7 +83,8 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
             except (ValueError, TypeError, KeyError, AttributeError):
                 continue
             _store_weeks(conn, value)
-        _prune(conn, datetime.now(timezone.utc))
+        if prune:
+            _prune(conn, datetime.now(timezone.utc))
 
 
 def _keys(value: Any, fields: tuple[str, ...]) -> None:
