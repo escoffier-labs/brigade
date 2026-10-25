@@ -519,7 +519,7 @@ def _hostname_context(text: str, start: int, end: int) -> bool:
         return not _whole_fstring_field(before, after)
     # These delimiters introduce expressions, including expressions inside
     # interpolated strings. Check them before accepting a surrounding quote.
-    if re.search(r"\bf[\"'][^\n]*\{[^}]*$", before, re.IGNORECASE):
+    if re.search(r"\bf[\"'][^\n]*\{[^}]*$", _normalized_shell_assignments(before), re.IGNORECASE):
         return False
     if before.rstrip().endswith(("[", "{")):
         return False
