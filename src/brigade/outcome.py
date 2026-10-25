@@ -26,6 +26,7 @@ SIGNAL_RULES: dict[tuple[str, str], int] = {
     ("run", "ok"): 1,
     ("run", "error"): -1,
     ("run", "failed"): -1,
+    ("run", "incomplete"): -1,
     ("friction", "cleared"): 1,
     ("friction", "recurred"): -1,
     ("learnings", "cleared"): 1,

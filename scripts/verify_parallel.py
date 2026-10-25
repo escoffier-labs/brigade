@@ -79,7 +79,7 @@ def main(argv: list[str] | None = None) -> int:
                     str(work / f"shard-{index}.json"),
                     "--",
                     "-q",
-                    "--cov=brigade",
+                    f"--cov={REPO_ROOT / 'src' / 'brigade'}",
                     "--cov-report=",
                     "--cov-fail-under=0",
                     # Shards must not race on the checkout's shared .pytest_cache.

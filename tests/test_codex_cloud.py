@@ -56,14 +56,14 @@ def test_build_argv_rejects_codex_cloud():
 
 
 def test_run_agent_requires_env_id(monkeypatch):
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c + ".exe")
     result = agents.run_agent("codex-cloud:", "hi")
     assert not result.ok
     assert "environment id" in result.detail
 
 
 def test_run_agent_rejects_model_pin(monkeypatch):
-    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c)
+    monkeypatch.setattr(agents.proc, "which", lambda c: "/x/" + c + ".exe")
     result = agents.run_agent("codex-cloud:env-123", "hi", model="gpt-5.5")
     assert not result.ok
     assert "model" in result.detail
@@ -83,7 +83,7 @@ def test_run_agent_threads_process_registry_to_codex_cloud(monkeypatch):
         )
         return agents.AgentResult(text="done", ok=True)
 
-    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command + ".exe")
     monkeypatch.setattr(codex_cloud, "run_cloud_task", fake_cloud_task)
 
     result = agents.run_agent("codex-cloud:env-123", "fix it", process_registry=registry)
@@ -97,7 +97,7 @@ def test_run_agent_preserves_legacy_codex_cloud_call_shape(monkeypatch):
         del process_registry
         return agents.AgentResult(text=f"{env_id}: {prompt}", ok=True)
 
-    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command + ".exe")
     monkeypatch.setattr(codex_cloud, "run_cloud_task", fake_cloud_task)
 
     assert agents.run_agent("codex-cloud:env-123", "fix it").ok
@@ -524,6 +524,11 @@ def test_cli_codex_launch_rejects_unsupported_flags_before_mutation(monkeypatch,
 
 @pytest.mark.parametrize("reason", ["tracking-failed", "bind-failed", "uncertain"])
 def test_cli_codex_failure_text_preserves_only_sanitized_task_id(monkeypatch, tmp_path, capsys, reason):
+    from brigade.cli import run_cloud
+
+    # This test covers public error formatting; prompt-file security has separate coverage.
+    monkeypatch.setattr(codex_cloud, "_hub_configured", lambda: False)
+    monkeypatch.setattr(run_cloud, "_read_prompt_file", lambda path: "private prompt")
     prompt_file = tmp_path / "prompt.txt"
     prompt_file.write_text("private prompt", encoding="utf-8")
     prompt_file.chmod(0o600)
@@ -2046,7 +2051,12 @@ class TestEnvironmentConfig:
         path = codex_cloud.save_environment_config(tmp_path, environment_id="env-local-file")
         payload = json.loads(path.read_text(encoding="utf-8"))
         assert payload["environment"] == {"kind": "value", "id": "env-local-file"}
-        assert oct(path.stat().st_mode & 0o777) == "0o600"
+        mode = path.stat().st_mode & 0o777
+        if sys.platform == "win32":
+            # Windows mode bits describe read/write metadata, not private ACLs.
+            assert mode & 0o600 == 0o600
+        else:
+            assert mode == 0o600
 
     def test_corrupt_config_fails_closed(self, tmp_path):
         path = codex_cloud.config_path(tmp_path)
@@ -2090,7 +2100,7 @@ class TestEnvironmentConfig:
             return agents.AgentResult(text="ok", ok=True)
 
         monkeypatch.setenv("CODEX_CLOUD_ENV", "env-resolved")
-        monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+        monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command + ".exe")
         monkeypatch.setattr(codex_cloud, "run_cloud_task", fake_cloud_task)
         result = agents.run_agent("codex-cloud:configured", "fix it", cwd=tmp_path)
         assert result.ok
@@ -2099,7 +2109,7 @@ class TestEnvironmentConfig:
     def test_run_agent_unresolved_configured_does_not_dispatch(self, tmp_path, monkeypatch):
         calls = []
         monkeypatch.delenv("CODEX_CLOUD_ENV", raising=False)
-        monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+        monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command + ".exe")
         monkeypatch.setattr(
             codex_cloud, "run_cloud_task", lambda *a, **k: calls.append(k) or agents.AgentResult(ok=True)
         )
@@ -2263,7 +2273,7 @@ class TestEnvironmentConfig:
             return agents.AgentResult(text="ok", ok=True, cloud_environment=environment_audit)
 
         monkeypatch.setenv("CODEX_CLOUD_ENV", "env-resolved")
-        monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+        monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command + ".exe")
         monkeypatch.setattr(codex_cloud, "run_cloud_task", fake_cloud_task)
         result = agents.run_agent("codex-cloud:configured", "fix it", cwd=subdir)
         assert result.ok
@@ -2272,13 +2282,13 @@ class TestEnvironmentConfig:
         assert result.cloud_environment == seen["environment_audit"]
 
     def test_run_agent_blocks_read_only_without_cloud_safe_mode(self, monkeypatch):
-        monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+        monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command + ".exe")
         result = agents.run_agent("codex-cloud:env-123", "fix it", read_only=True)
         assert not result.ok
         assert result.failure_kind == "read-only-cloud-blocked"
 
     def test_run_agent_allows_read_only_with_cloud_safe_mode(self, monkeypatch):
-        monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command)
+        monkeypatch.setattr(agents.proc, "which", lambda command: "/x/" + command + ".exe")
         monkeypatch.setattr(
             codex_cloud,
             "run_cloud_task",
@@ -2594,7 +2604,7 @@ def test_windows_roster_dispatch_obeys_hub_storage_policy(monkeypatch, tmp_path,
     calls = _grant_hub(monkeypatch)
     monkeypatch.setattr(codex_cloud, "_hub_configured", lambda: hub_configured)
     monkeypatch.setattr(codex_cloud, "sys", SimpleNamespace(platform="win32"))
-    monkeypatch.setattr(agents.proc, "which", lambda command: "/fake/codex")
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/fake/codex.exe")
     monkeypatch.setattr(codex_cloud, "resolve_environment_id", lambda *a, **k: "env-local")
     provider = FakeRuns(
         {
@@ -2636,3 +2646,43 @@ def test_windows_roster_dispatch_obeys_hub_storage_policy(monkeypatch, tmp_path,
         assert [argv[2] for argv in provider.calls] == ["exec", "status", "diff"]
         entry = cloud_tracker.load_registry(tmp_path)["entries"][0]
         assert not entry.get("lease_holder")
+
+
+def test_cli_codex_prompt_without_nofollow_refuses_before_submission(monkeypatch, tmp_path, capsys):
+    from types import SimpleNamespace
+
+    from brigade.cli import run_cloud
+
+    monkeypatch.setenv("BRIGADE_EXTRAS", "1")
+    calls = _grant_hub(monkeypatch)
+    monkeypatch.setattr(codex_cloud, "_hub_configured", lambda: False)
+    monkeypatch.setattr(run_cloud, "os", SimpleNamespace(O_RDONLY=codex_cloud.os.O_RDONLY, O_NOFOLLOW=0))
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("unsafe prompt reader reached submission")
+
+    monkeypatch.setattr(codex_cloud, "launch_task", forbidden)
+    assert (
+        cli.main(
+            [
+                "run",
+                "cloud",
+                "launch",
+                "--target",
+                str(tmp_path),
+                "--provider",
+                "codex-cloud",
+                "--repo",
+                "owner/repo",
+                "--label",
+                "test",
+                "--prompt-file",
+                str(tmp_path / "prompt.txt"),
+                "--json",
+            ]
+        )
+        == 2
+    )
+    assert json.loads(capsys.readouterr().out)["reason"] == "bad-prompt-file"
+    assert all(not value for value in calls.values())
+    assert not (tmp_path / ".brigade").exists()

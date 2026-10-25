@@ -459,6 +459,80 @@ def signaled(native, handle):
     assert native.api.WaitForSingleObject(handle, 10000) == job.WAIT_OBJECT_0
 
 
+@pytest.mark.parametrize("failure", [OSError("record publication failed"), KeyboardInterrupt()])
+def test_driver_abort_releases_parent_log_before_stalled_worker_finishes(tmp_path, monkeypatch, failure):
+    waiting = threading.Event()
+    release = threading.Event()
+    finished = threading.Event()
+    streams = {}
+
+    class StalledWaitAPI(FakeAPI):
+        slow_handle = None
+
+        def CreateProcessW(self, *args):
+            result = super().CreateProcessW(*args)
+            if "test_slow.py" in decode(args[1]):
+                self.slow_handle = dereference(args[-1], job.PROCESS_INFORMATION).hProcess
+            return result
+
+        def WaitForSingleObject(self, handle, timeout):
+            if handle == self.slow_handle:
+                waiting.set()
+                assert release.wait(5), "test did not release stalled worker"
+            else:
+                assert waiting.wait(5), "slow worker did not start"
+            return super().WaitForSingleObject(handle, timeout)
+
+    api = StalledWaitAPI()
+    original_launch = driver.launch_process
+    original_run_file = driver.run_file
+
+    def run_file_with_completion(name, **kwargs):
+        try:
+            return original_run_file(name, **kwargs)
+        finally:
+            if name == "test_slow.py":
+                finished.set()
+
+    def launch_with_api(**kwargs):
+        kwargs["tracker"]._api = api
+        streams["slow" if "test_slow.py" in kwargs["args"][-1] else "fast"] = kwargs["log"]
+        return original_launch(**kwargs)
+
+    def progress(rows):
+        assert [row.name for row in rows] == ["test_fast.py"]
+        raise failure
+
+    monkeypatch.setattr(driver, "launch_process", launch_with_api)
+    monkeypatch.setattr(driver, "run_file", run_file_with_completion)
+    monkeypatch.setattr(driver, "_child_environment", dict)
+    monkeypatch.setattr(driver, "CLEANUP_TIMEOUT_SECONDS", 0.05)
+    try:
+        with pytest.raises(type(failure)) as caught:
+            driver.run_files(
+                files=["test_slow.py", "test_fast.py"],
+                serial=set(),
+                repo=tmp_path,
+                python=Path(sys.executable).resolve(),
+                output_dir=tmp_path / "out",
+                temp_root=tmp_path / "temps",
+                workers=2,
+                timeout_seconds=20,
+                deadline=time.monotonic() + 10,
+                on_result=progress,
+            )
+        assert caught.value is failure
+        rows = {row.name: row for row in caught.value.windows_pytest_results}
+        assert rows["test_slow.py"].cleanup_error == "worker unfinished after cleanup deadline"
+        assert waiting.is_set() and not finished.is_set()
+        assert streams["slow"].closed
+        log = tmp_path / "out" / "logs" / "test_slow.py.log"
+        log.rename(log.with_suffix(".finished"))
+    finally:
+        release.set()
+        assert finished.wait(5)
+
+
 class TestNativeContainment:
     """CI selects this class only and rejects every selected skip."""
 
@@ -987,7 +1061,26 @@ class TestNativeContainment:
                 if thread.ident:
                     thread.join(10)
 
-    def test_record_failure_aborts_live_workers_before_final_record(self, native):
+    def test_record_failure_aborts_live_workers_before_final_record(self, native, monkeypatch):
+        streams = []
+        processes = []
+        futures = []
+        original_launch = driver.launch_process
+
+        def observed_launch(**kwargs):
+            streams.append(kwargs["log"])
+            process = original_launch(**kwargs)
+            processes.append(process)
+            return process
+
+        class ObservedExecutor(driver.ThreadPoolExecutor):
+            def submit(self, *args, **kwargs):
+                future = super().submit(*args, **kwargs)
+                futures.append(future)
+                return future
+
+        monkeypatch.setattr(driver, "launch_process", observed_launch)
+        monkeypatch.setattr(driver, "ThreadPoolExecutor", ObservedExecutor)
         marker = native.path / "grandchild"
         tests = native.path / "tests"
         tests.mkdir()
@@ -1007,7 +1100,8 @@ class TestNativeContainment:
             driver.write_record(record, results=rows, expected_files=["test_fast.py", "test_slow.py"])
             raise OSError("record publication failed")
 
-        with pytest.raises(OSError, match="record publication failed"):
+        started = time.monotonic()
+        with pytest.raises(OSError, match="record publication failed") as caught:
             driver.run_files(
                 files=["test_fast.py", "test_slow.py"],
                 serial=set(),
@@ -1028,7 +1122,41 @@ class TestNativeContainment:
         final = record.read_bytes()
         # Actual writers have exited before finalization, including their jobs.
         log = native.path / "out" / "logs" / "test_slow.py.log"
-        log.rename(log.with_suffix(".finished"))
+        try:
+            log.rename(log.with_suffix(".finished"))
+        except OSError:
+            diagnostic = {
+                "elapsed_seconds": time.monotonic() - started,
+                "results": [vars(row) for row in caught.value.windows_pytest_results],
+                "streams": [{"name": stream.name, "closed": stream.closed} for stream in streams],
+                "futures": [{"done": future.done(), "cancelled": future.cancelled()} for future in futures],
+            }
+            # Inspect only after the first rename failed, without retrying it or
+            # waiting for worker/process completion to change the observation.
+            if job._LIFECYCLE.acquire(timeout=0.5):
+                try:
+                    diagnostic["roots"] = [
+                        {
+                            "pid": process.pid,
+                            "handle": process.handle,
+                            "signal": (
+                                native.api.WaitForSingleObject(process.handle, 0)
+                                if process.handle is not None
+                                else "handle closed"
+                            ),
+                            "tracked_entries": len(process.tracker._entries),
+                            "job": process.token.job,
+                            "pending_handles": dict(process.token.pending_handles),
+                        }
+                        for process in processes
+                    ]
+                    diagnostic["descendant_signals"] = [native.api.WaitForSingleObject(handle, 0) for handle in handles]
+                finally:
+                    job._LIFECYCLE.release()
+            else:
+                diagnostic["ownership"] = "lifecycle lock still held"
+            print("immediate log rename failed: " + json.dumps(diagnostic), flush=True)
+            raise
         assert record.read_bytes() == final
 
     def test_atomic_record_replacement_and_prior_json(self, native, monkeypatch):
