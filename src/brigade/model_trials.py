@@ -5,15 +5,19 @@ from __future__ import annotations
 import hashlib
 import json
 import re
+import signal
 import statistics
 import sys
+import threading
 import time
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Iterator, Mapping
 
-from . import aboyeur, localio, run_budget, runguard
+from . import aboyeur, localio, run_budget, runguard, worker_failure
+from .aboyeur import run_io as aboyeur_run_io
 from .roster import Roster
 
 MANIFEST_SCHEMA = "brigade.eval_manifest.v1"
@@ -23,6 +27,20 @@ GRADER_SCHEMA = "brigade.grader_result.v1"
 TERMINAL_STATES = frozenset({"accepted", "rejected", "unscored", "execution_error", "adapter_error", "grader_error"})
 REGRADEABLE_STATES = frozenset({"grader_error"})
 MEASUREMENT_STATES = frozenset({"adapter_error", "grader_error"})
+# Retry caps for --retry-transient: the most retries (attempts after the first)
+# allowed for a cell whose latest attempt failed for the named transient kind.
+RETRY_CAPS: dict[str, int] = {"adapter_error": 2, "timeout": 1}
+# Structured provider quota or capacity response (worker-failure class capacity-exhausted).
+# Recorded as the cell's failure_reason; it is an apparatus condition, never a model result,
+# and never retried as transient.
+CAPACITY_EXHAUSTED = worker_failure.FailureClass.CAPACITY_EXHAUSTED.value
+# A cell that was never launched. Not a terminal state: resume launches it.
+NOT_RUN_STATE = "not_run"
+NOT_RUN_DRAINED = "drained"
+DRAIN_MARKER = "drain.json"
+DRAIN_SCHEMA = "brigade.eval_drain.v1"
+# Process exit for a trial that stopped before launching every cell.
+EXIT_INCOMPLETE = 4
 
 
 @dataclass(frozen=True)
@@ -297,6 +315,26 @@ def _worker_result(run_dir: Path) -> dict[str, Any] | None:
     return results[0]
 
 
+def _is_capacity_exhausted(worker_result: dict[str, Any] | None) -> bool:
+    """True for a capacity-exhausted worker failure that did not come from the seat's output text.
+
+    A `brigade.worker_failure.v1` payload is authoritative. The legacy `rate-limit-error` kind is
+    also produced by final-output validation, which pattern-matches the model's answer; that
+    origin is a model result, so it never stops a seat.
+    """
+    if not isinstance(worker_result, dict):
+        return False
+    failure_payload = worker_result.get("failure")
+    structured = isinstance(failure_payload, dict) and failure_payload.get("schema") == worker_failure.SCHEMA
+    if not structured and worker_result.get("failure_phase") == "output-validation":
+        return False
+    try:
+        failure = worker_failure.worker_result_failure(worker_result)
+    except ValueError:
+        return False
+    return failure is not None and failure.failure_class is worker_failure.FailureClass.CAPACITY_EXHAUSTED
+
+
 def _state(
     exit_code: int,
     graders: list[dict[str, Any]],
@@ -305,6 +343,8 @@ def _state(
     run_meta: dict[str, Any] | None = None,
 ) -> str:
     if exit_code != 0:
+        if _is_capacity_exhausted(worker_result):
+            return "adapter_error"
         if isinstance(run_meta, dict) and run_meta.get("failure_kind") == "timeout":
             return "execution_error"
         if worker_result is not None and worker_result.get("timed_out") is True:
@@ -335,6 +375,8 @@ def _failure_reason(
     worker_result: dict[str, Any] | None,
     state: str,
 ) -> str | None:
+    if state == "adapter_error" and _is_capacity_exhausted(worker_result):
+        return CAPACITY_EXHAUSTED
     if isinstance(run_meta, dict) and run_meta.get("failure_kind") == "timeout":
         return "timeout"
     if isinstance(worker_result, dict) and worker_result.get("timed_out") is True:
@@ -375,6 +417,7 @@ def _finalize_cell_payload(
     graders: list[dict[str, Any]],
     text: str,
     failure_reason: str | None,
+    prior_attempts: list[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     output_digest = _output_digest(text)
     _attach_grader_output_refs(graders, cell_id=cell.cell_id, output_digest=output_digest)
@@ -398,7 +441,63 @@ def _finalize_cell_payload(
     }
     if failure_reason is not None:
         payload["failure_reason"] = failure_reason
+    if prior_attempts:
+        payload["prior_attempts"] = prior_attempts
     return payload
+
+
+def _prior_attempts(cell: dict[str, Any] | None) -> list[dict[str, Any]]:
+    value = (cell or {}).get("prior_attempts")
+    if not isinstance(value, list):
+        return []
+    return [dict(item) for item in value if isinstance(item, dict)]
+
+
+def _attempt_summary(cell: dict[str, Any]) -> dict[str, Any]:
+    """Compact record of a finished attempt kept on the cell after it is retried."""
+    summary: dict[str, Any] = {
+        "attempt": cell.get("attempt"),
+        "state": cell.get("state"),
+        "exit_code": cell.get("exit_code"),
+        "duration_seconds": cell.get("duration_seconds"),
+        "run_dir": cell.get("run_dir"),
+    }
+    if cell.get("failure_reason") is not None:
+        summary["failure_reason"] = cell["failure_reason"]
+    return summary
+
+
+def _transient_kind(cell: dict[str, Any] | None) -> str | None:
+    """Return the RETRY_CAPS key when a recorded cell is eligible for --retry-transient."""
+    if not isinstance(cell, dict):
+        return None
+    if cell.get("failure_reason") == CAPACITY_EXHAUSTED:
+        return None
+    state = cell.get("state")
+    if state == "adapter_error":
+        return "adapter_error"
+    if state == "execution_error" and cell.get("failure_reason") == "timeout":
+        return "timeout"
+    return None
+
+
+def _unfinished_history(cell: dict[str, Any] | None) -> list[dict[str, Any]]:
+    """Retry history for a cell left `running` or `not_run`, so a resume keeps the retry cap.
+
+    A `running` record is an attempt whose runner died before it finished. It is kept as an
+    `interrupted` entry and counts toward the cap like any other prior attempt.
+    """
+    history = _prior_attempts(cell)
+    if isinstance(cell, dict) and cell.get("state") == "running":
+        attempt = cell.get("attempt")
+        if isinstance(attempt, int) and not isinstance(attempt, bool) and attempt > 0:
+            history.append({"attempt": attempt, "state": "interrupted"})
+    return history
+
+
+def _retry_allowed(cell: dict[str, Any] | None) -> bool:
+    kind = _transient_kind(cell)
+    return kind is not None and len(_prior_attempts(cell)) < RETRY_CAPS[kind]
 
 
 def _write_cell_payload(cell_dir: Path, run_parent: Path, payload: dict[str, Any]) -> None:
@@ -462,6 +561,7 @@ def _regrade_cell_from_disk(cell_dir: Path, cell: CellSpec, plan: dict[str, Any]
         graders=graders,
         text=text,
         failure_reason=None,
+        prior_attempts=_prior_attempts(current),
     )
     _write_cell_payload(cell_dir, run_dir.parent, payload)
     return True
@@ -535,6 +635,12 @@ def project_cell(cell: dict[str, Any], *, base_dir: Path) -> dict[str, Any]:
             projected["run_dir"] = str(Path(run_dir).resolve().relative_to(base_dir.resolve()))
         except ValueError:
             projected["run_dir"] = Path(run_dir).name
+    prior_attempts = projected.get("prior_attempts")
+    if isinstance(prior_attempts, list):
+        projected["prior_attempts"] = [
+            project_cell(attempt, base_dir=base_dir) if isinstance(attempt, dict) else attempt
+            for attempt in prior_attempts
+        ]
     return projected
 
 
@@ -544,6 +650,8 @@ def process_exit(summary: dict[str, Any]) -> int:
     counts = summary.get("counts")
     if not isinstance(counts, dict):
         return 0
+    if counts.get(NOT_RUN_STATE, 0) > 0 or counts.get("running", 0) > 0:
+        return EXIT_INCOMPLETE
     if counts.get("rejected", 0) > 0 or counts.get("execution_error", 0) > 0:
         return 1
     return 0
@@ -622,6 +730,226 @@ def build_plan(manifest_path: Path, roster: Roster, output_dir: Path) -> tuple[d
     return payload, cells
 
 
+def request_drain(output_dir: Path) -> Path:
+    """Ask a running trial to stop launching cells; in-flight cells finish and record results."""
+    output_dir = output_dir.expanduser().resolve()
+    marker = output_dir / DRAIN_MARKER
+    localio.write_json(
+        marker,
+        {"schema": DRAIN_SCHEMA, "requested_at": datetime.now(timezone.utc).isoformat()},
+    )
+    return marker
+
+
+class _Drain:
+    """Drain request state: a marker file written by `trial drain`, or SIGINT/SIGTERM to the runner."""
+
+    def __init__(self, output_dir: Path) -> None:
+        self.marker = output_dir / DRAIN_MARKER
+        self.signaled = False
+
+    def clear_stale_marker(self) -> None:
+        self.marker.unlink(missing_ok=True)
+
+    def requested(self) -> bool:
+        return self.signaled or self.marker.exists()
+
+    @contextmanager
+    def signals(self) -> Iterator[None]:
+        """Turn the first SIGINT or SIGTERM into a drain request, then restore the previous handlers.
+
+        A second signal therefore gets the original behavior and hard-stops the trial. While a
+        cell runs, aboyeur's terminal SIGTERM handler replaces ours, so the drain also registers
+        as that handler's deferral: the first SIGTERM lets the cell finish instead of canceling
+        it, and a second one terminalizes the run as usual. Handlers can only be installed from
+        the main thread, so other callers rely on the marker file.
+        """
+        if threading.current_thread() is not threading.main_thread():
+            yield
+            return
+        previous: dict[int, Any] = {}
+
+        def original(signum: int) -> Any:
+            prior = previous[signum]
+            return prior if prior is not None else signal.SIG_DFL
+
+        def restore_owned() -> None:
+            # Leave a handler someone else installed on top of ours (aboyeur's) in place;
+            # it restores ours when it exits, and the next signal then hard-stops.
+            for signum in previous:
+                if signal.getsignal(signum) is handler:
+                    signal.signal(signum, original(signum))
+
+        def request() -> bool:
+            if self.signaled:
+                return False
+            self.signaled = True
+            restore_owned()
+            sys.stderr.write(
+                "drain requested: finishing in-flight cells and launching no more (signal again to abort)\n"
+            )
+            return True
+
+        def handler(signum: int, frame: Any) -> None:
+            if request():
+                return
+            restore_owned()
+            prior = original(signum)
+            if callable(prior):
+                prior(signum, frame)
+            elif prior == signal.SIG_DFL:
+                signal.raise_signal(signum)
+
+        for signum in (signal.SIGINT, signal.SIGTERM):
+            previous[signum] = signal.getsignal(signum)
+            signal.signal(signum, handler)
+        try:
+            with aboyeur_run_io.defer_terminal_sigterm(request):
+                yield
+        finally:
+            for owned in previous:
+                signal.signal(owned, original(owned))
+
+
+def _mark_not_run(
+    cell: CellSpec,
+    cell_dir: Path,
+    current: dict[str, Any] | None,
+    plan: dict[str, Any],
+    *,
+    reason: str,
+    stopped_by: str | None = None,
+) -> bool:
+    """Record an unlaunched cell as not_run. Never overwrites a finished attempt's record."""
+    if current is not None and current.get("state") not in {"running", NOT_RUN_STATE}:
+        return False
+    payload: dict[str, Any] = {
+        "schema": CELL_SCHEMA,
+        **cell.payload(),
+        "state": NOT_RUN_STATE,
+        "not_run_reason": reason,
+        "manifest_digest": plan["manifest_digest"],
+    }
+    if stopped_by is not None:
+        payload["stopped_by"] = stopped_by
+    attempt = (current or {}).get("attempt")
+    if isinstance(attempt, int) and not isinstance(attempt, bool) and attempt > 0:
+        payload["attempt"] = attempt
+    history = _unfinished_history(current)
+    if history:
+        payload["prior_attempts"] = history
+    cell_dir.mkdir(parents=True, exist_ok=True)
+    localio.write_json(cell_dir / "cell.json", payload)
+    return True
+
+
+class _TrialAbort(Exception):
+    """Raised inside a cell attempt to stop the whole trial with a process exit code."""
+
+    def __init__(self, code: int) -> None:
+        super().__init__(code)
+        self.code = code
+
+
+def _run_attempt(
+    cell: CellSpec,
+    *,
+    roster: Roster,
+    plan: dict[str, Any],
+    workspace: Path,
+    output_dir: Path,
+    cell_dir: Path,
+    started_at: str,
+    history: list[dict[str, Any]],
+    run_budget_payload: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    """Run one attempt of a cell, write its payload, and return the payload."""
+    attempt = _attempt_number(cell_dir)
+    cell_dir.mkdir(parents=True, exist_ok=True)
+    running: dict[str, Any] = {
+        "schema": CELL_SCHEMA,
+        **cell.payload(),
+        "state": "running",
+        "attempt": attempt,
+        "started_at": started_at,
+        "manifest_digest": plan["manifest_digest"],
+    }
+    if history:
+        running["prior_attempts"] = history
+    localio.write_json(cell_dir / "cell.json", running)
+    run_dir = cell_dir / "attempts" / f"attempt-{attempt:03d}" / "run"
+    cell_workspace = workspace
+    worktree_path: Path | None = None
+    if cell.execution_mode == "writable-worktree":
+        worktree_path = _trial_worktree_path(workspace, output_dir, cell, attempt)
+        try:
+            cell_workspace = runguard.create_detached_worktree(workspace, worktree_path)
+        except runguard.RunGuardError as exc:
+            print(f"error: {exc}", file=sys.stderr)
+            raise _TrialAbort(2) from exc
+    try:
+        read_only = cell.execution_mode == "read-only"
+        start_kwargs: dict[str, Any] = {
+            "task": cell.prompt,
+            "cwd": cell_workspace,
+            "roster": roster,
+            "read_only": read_only,
+            "worker": cell.seat,
+            "lock_workspace": workspace,
+        }
+        if run_budget_payload is not None:
+            start_kwargs["run_budget_payload"] = run_budget_payload
+        aboyeur.record_run_start(
+            run_dir,
+            **start_kwargs,
+        )
+        with runguard.run_lock(workspace, run_dir=run_dir):
+            run_kwargs: dict[str, Any] = {
+                "worker": cell.seat,
+                "cwd": cell_workspace,
+                "output_dir": run_dir,
+                "route_enabled": False,
+                "read_only": read_only,
+                "authorized_writable_worktree": cell.execution_mode == "writable-worktree",
+                "lock_workspace": workspace,
+            }
+            if run_budget_payload is not None:
+                run_kwargs["run_budget_payload"] = run_budget_payload
+            rc = aboyeur.run(
+                cell.prompt,
+                roster,
+                **run_kwargs,
+            )
+        try:
+            text = (run_dir / "final.txt").read_text()
+        except OSError:
+            text = ""
+        graders = grade_output(
+            graders=cell.graders,
+            text=text,
+            exit_code=rc,
+            workspace=cell_workspace,
+            run_dir=run_dir,
+        )
+    finally:
+        if worktree_path is not None:
+            runguard.remove_worktree(workspace, worktree_path)
+    payload = _finalize_cell_payload(
+        cell,
+        plan=plan,
+        attempt=attempt,
+        started_at=started_at,
+        exit_code=rc,
+        run_dir=run_dir,
+        graders=graders,
+        text=text,
+        failure_reason=None,
+        prior_attempts=history,
+    )
+    _write_cell_payload(cell_dir, run_dir.parent, payload)
+    return payload
+
+
 def execute(
     manifest_path: Path,
     roster: Roster,
@@ -630,6 +958,7 @@ def execute(
     output_dir: Path,
     resume: bool,
     run_budget_payload: Mapping[str, Any] | None = None,
+    retry_transient: bool = False,
 ) -> int:
     if run_budget_payload is not None:
         try:
@@ -655,104 +984,74 @@ def execute(
             f"note: {len(plan['stale_cells'])} stale cell(s) from the previous plan kept and counted in summary",
             file=sys.stderr,
         )
-    for cell in cells:
-        cell_dir = output_dir / "cells" / cell.cell_id
-        current = _load_json(cell_dir / "cell.json")
-        if resume and current is not None and _resume_skip_state(str(current.get("state", ""))):
-            continue
-        if resume and current is not None and current.get("state") in REGRADEABLE_STATES:
-            try:
-                _regrade_cell_from_disk(cell_dir, cell, plan)
-            except ValueError as exc:
-                print(f"error: {exc}", file=sys.stderr)
-                return 2
-            continue
-        attempt = _attempt_number(cell_dir)
-        if isinstance(current, dict) and isinstance(current.get("started_at"), str):
-            started_at = current["started_at"]
-        else:
-            started_at = datetime.now(timezone.utc).isoformat()
-        cell_dir.mkdir(parents=True, exist_ok=True)
-        localio.write_json(
-            cell_dir / "cell.json",
-            {
-                "schema": CELL_SCHEMA,
-                **cell.payload(),
-                "state": "running",
-                "attempt": attempt,
-                "started_at": started_at,
-                "manifest_digest": plan["manifest_digest"],
-            },
-        )
-        run_dir = cell_dir / "attempts" / f"attempt-{attempt:03d}" / "run"
-        cell_workspace = workspace
-        worktree_path: Path | None = None
-        if cell.execution_mode == "writable-worktree":
-            worktree_path = _trial_worktree_path(workspace, output_dir, cell, attempt)
-            try:
-                cell_workspace = runguard.create_detached_worktree(workspace, worktree_path)
-            except runguard.RunGuardError as exc:
-                print(f"error: {exc}", file=sys.stderr)
-                return 2
-        try:
-            read_only = cell.execution_mode == "read-only"
-            start_kwargs: dict[str, Any] = {
-                "task": cell.prompt,
-                "cwd": cell_workspace,
-                "roster": roster,
-                "read_only": read_only,
-                "worker": cell.seat,
-                "lock_workspace": workspace,
-            }
-            if run_budget_payload is not None:
-                start_kwargs["run_budget_payload"] = run_budget_payload
-            aboyeur.record_run_start(
-                run_dir,
-                **start_kwargs,
-            )
-            with runguard.run_lock(workspace, run_dir=run_dir):
-                run_kwargs: dict[str, Any] = {
-                    "worker": cell.seat,
-                    "cwd": cell_workspace,
-                    "output_dir": run_dir,
-                    "route_enabled": False,
-                    "read_only": read_only,
-                    "authorized_writable_worktree": cell.execution_mode == "writable-worktree",
-                    "lock_workspace": workspace,
-                }
-                if run_budget_payload is not None:
-                    run_kwargs["run_budget_payload"] = run_budget_payload
-                rc = aboyeur.run(
-                    cell.prompt,
-                    roster,
-                    **run_kwargs,
+    drain = _Drain(output_dir)
+    drain.clear_stale_marker()
+    not_run = 0
+    exhausted: dict[str, str] = {}
+    with drain.signals():
+        for cell in cells:
+            cell_dir = output_dir / "cells" / cell.cell_id
+            current = _load_json(cell_dir / "cell.json")
+            history: list[dict[str, Any]] = []
+            if resume and current is not None and _resume_skip_state(str(current.get("state", ""))):
+                if not (retry_transient and _retry_allowed(current)):
+                    continue
+                history = [*_prior_attempts(current), _attempt_summary(current)]
+            elif resume and current is not None and current.get("state") in {"running", NOT_RUN_STATE}:
+                history = _unfinished_history(current)
+                # Interrupted attempts consume the last known transient failure's budget too.
+                kind = next(
+                    (kind for attempt in reversed(history) if (kind := _transient_kind(attempt)) is not None), None
                 )
+                if kind is not None and len(history) > RETRY_CAPS[kind]:
+                    continue
+            elif resume and current is not None and current.get("state") in REGRADEABLE_STATES:
+                try:
+                    _regrade_cell_from_disk(cell_dir, cell, plan)
+                except ValueError as exc:
+                    print(f"error: {exc}", file=sys.stderr)
+                    return 2
+                continue
+            if cell.seat in exhausted:
+                if _mark_not_run(
+                    cell, cell_dir, current, plan, reason=CAPACITY_EXHAUSTED, stopped_by=exhausted[cell.seat]
+                ):
+                    not_run += 1
+                continue
+            if drain.requested():
+                if _mark_not_run(cell, cell_dir, current, plan, reason=NOT_RUN_DRAINED):
+                    not_run += 1
+                continue
+            if isinstance(current, dict) and isinstance(current.get("started_at"), str):
+                started_at = current["started_at"]
+            else:
+                started_at = datetime.now(timezone.utc).isoformat()
             try:
-                text = (run_dir / "final.txt").read_text()
-            except OSError:
-                text = ""
-            graders = grade_output(
-                graders=cell.graders,
-                text=text,
-                exit_code=rc,
-                workspace=cell_workspace,
-                run_dir=run_dir,
-            )
-        finally:
-            if worktree_path is not None:
-                runguard.remove_worktree(workspace, worktree_path)
-        payload = _finalize_cell_payload(
-            cell,
-            plan=plan,
-            attempt=attempt,
-            started_at=started_at,
-            exit_code=rc,
-            run_dir=run_dir,
-            graders=graders,
-            text=text,
-            failure_reason=None,
+                while True:
+                    payload = _run_attempt(
+                        cell,
+                        roster=roster,
+                        plan=plan,
+                        workspace=workspace,
+                        output_dir=output_dir,
+                        cell_dir=cell_dir,
+                        started_at=started_at,
+                        history=history,
+                        run_budget_payload=run_budget_payload,
+                    )
+                    if payload.get("failure_reason") == CAPACITY_EXHAUSTED:
+                        exhausted[cell.seat] = cell.coordinate
+                        break
+                    if drain.requested() or not (retry_transient and _retry_allowed(payload)):
+                        break
+                    history = [*_prior_attempts(payload), _attempt_summary(payload)]
+            except _TrialAbort as abort:
+                return abort.code
+    if not_run:
+        print(
+            f"stopped early: {not_run} cell(s) not run; `brigade model trial resume` launches them",
+            file=sys.stderr,
         )
-        _write_cell_payload(cell_dir, run_dir.parent, payload)
     summary = summarize(output_dir)
     localio.write_json(output_dir / "summary.json", summary)
     return process_exit(summary)
@@ -802,6 +1101,8 @@ def summarize(output_dir: Path) -> dict[str, Any]:
         if isinstance(cell.get("duration_seconds"), (int, float)):
             durations.append(float(cell["duration_seconds"]))
         cell_state = cell.get("state")
+        if cell_state == "adapter_error" and cell.get("failure_reason") == CAPACITY_EXHAUSTED:
+            continue
         for grader in cell.get("graders", []):
             if not isinstance(grader, dict) or not isinstance(grader.get("score"), (int, float)):
                 continue
