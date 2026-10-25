@@ -527,7 +527,8 @@ def _hostname_context(text: str, start: int, end: int) -> bool:
         return True
     # Prose punctuation is valid around a host, including commas and
     # parenthesized examples. An identifier immediately before '(' is a call.
-    if re.search(r"\b(?:return|if|const|let|var|assert|import)\b", before):
+    # Complete earlier shell assignment words are opaque to code keywords.
+    if re.search(r"\b(?:return|if|const|let|var|assert|import)\b", _normalized_shell_assignments(before)):
         return False
     if re.fullmatch(r"\s*(?:[a-z]+[,:]?\s+)+(?:\(\s*)?", before, re.IGNORECASE):
         return True
