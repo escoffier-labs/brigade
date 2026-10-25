@@ -88,6 +88,7 @@ digests. The database is one SQLite file in WAL mode with a versioned schema
 
 from __future__ import annotations
 
+import dataclasses
 import argparse
 import hashlib
 import hmac
@@ -105,7 +106,14 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-from . import fleet_command_deck, fleet_hub_events, fleet_hub_preference, worklore_campaigns, worklore_store
+from . import (
+    fleet_command_deck,
+    fleet_hub_events,
+    fleet_hub_preference,
+    fleet_hub_sealed,
+    worklore_campaigns,
+    worklore_store,
+)
 from .fleet_execution_context import serialize_context
 from .fleet_hub_event_bounds import oversized_event_field
 from .fleet_hub_server import BoundedThreadingHTTPServer
@@ -266,6 +274,9 @@ _EVENTS_ADDITIVE_COLUMNS = ("exit_status", "capability_fingerprint", "repo_ident
 # Independently developed migrations can reserve the same schema version.
 # Register nullable additions here so current-version databases self-heal too.
 _ADDITIVE_COLUMNS = (
+    ("fleet_messages", "envelope", "ALTER TABLE fleet_messages ADD COLUMN envelope TEXT"),
+    ("fleet_messages", "envelope_bytes", "ALTER TABLE fleet_messages ADD COLUMN envelope_bytes INTEGER"),
+    ("fleet_messages", "content_state", "ALTER TABLE fleet_messages ADD COLUMN content_state TEXT"),
     ("events", "context", "ALTER TABLE events ADD COLUMN context TEXT"),
     ("model_policy", "t3_model", "ALTER TABLE model_policy ADD COLUMN t3_model TEXT NOT NULL DEFAULT ''"),
     ("fleet_events", "producer", fleet_hub_events.PRODUCER_COLUMN_DDL),
@@ -1864,6 +1875,7 @@ def make_handler(
     deck_config: fleet_command_deck.DeckConfig | None = None,
     trust_tailscale_identity: bool = False,
     trust_forwarded_proto: bool = False,
+    storage_policy: fleet_hub_sealed.StoragePolicy | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     """Build the HTTP adapter around the hub domain operations."""
     from .fleet_hub_http import make_handler as _make_handler
@@ -1875,6 +1887,7 @@ def make_handler(
         deck_config=deck_config,
         trust_tailscale_identity=trust_tailscale_identity,
         trust_forwarded_proto=trust_forwarded_proto,
+        storage_policy=storage_policy,
     )
 
 
@@ -1888,6 +1901,8 @@ def make_server(
     deck_config_path: Path | None = None,
     trust_tailscale_identity: bool = False,
     trust_forwarded_proto: bool = False,
+    storage_policy: fleet_hub_sealed.StoragePolicy | None = None,
+    require_sealed: bool = False,
 ) -> ThreadingHTTPServer:
     """Build (but do not serve) the hub HTTPServer; used by tests.
 
@@ -1907,6 +1922,12 @@ def make_server(
         deck_config = fleet_command_deck.load_config(Path(deck_config_path))
     else:
         deck_config = fleet_command_deck.DeckConfig()
+    try:
+        policy = storage_policy or fleet_hub_sealed.policy_from_environment(os.environ)
+    except ValueError as exc:
+        raise FleetHubError(str(exc)) from exc
+    if require_sealed or os.environ.get("BRIGADE_FLEET_MESSAGES_REQUIRE_SEALED") == "1":
+        policy = dataclasses.replace(policy, require_sealed=True)
     init_db(Path(db_path)).close()
     from . import fleet_admin_stats
 
@@ -1920,6 +1941,7 @@ def make_server(
             deck_config=deck_config,
             trust_tailscale_identity=trust_tailscale_identity,
             trust_forwarded_proto=trust_forwarded_proto,
+            storage_policy=policy,
         ),
         db_path=Path(db_path),
     )
@@ -1935,6 +1957,8 @@ def run(
     deck_config_path: Path | None = None,
     trust_tailscale_identity: bool = False,
     trust_forwarded_proto: bool = False,
+    storage_policy: fleet_hub_sealed.StoragePolicy | None = None,
+    require_sealed: bool = False,
 ) -> int:
     if not host:
         print("error: --host is required (the hub never binds all interfaces by default)", file=sys.stderr)
@@ -1960,6 +1984,8 @@ def run(
             deck_config_path=deck_config_path,
             trust_tailscale_identity=trust_tailscale_identity,
             trust_forwarded_proto=trust_forwarded_proto,
+            storage_policy=storage_policy,
+            require_sealed=require_sealed,
         )
     except (FleetHubError, sqlite3.Error, fleet_command_deck.DeckConfigError) as exc:
         # Startup migration is the one place the hub touches the schema: if

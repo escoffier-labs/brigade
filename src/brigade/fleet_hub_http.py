@@ -27,6 +27,7 @@ from . import (
     fleet_deck_alerts,
     fleet_hub_grokbot,
     fleet_hub_messages,
+    fleet_hub_sealed,
     fleet_hub_identity,
     fleet_hub_sessions,
     worklore_http,
@@ -206,6 +207,7 @@ def make_handler(
     trust_tailscale_identity: bool = False,
     trust_forwarded_proto: bool = False,
     policy_inventory: Callable[[], fleet_policy_page.Inventory] | None = None,
+    storage_policy: fleet_hub_sealed.StoragePolicy | None = None,
 ) -> type[BaseHTTPRequestHandler]:
     """Request handler bound to the admin ``token`` and the hub database.
 
@@ -1804,6 +1806,7 @@ def make_handler(
                         caller=caller_node,
                         open_conn=lambda: open_db(Path(db_path)),
                         source_ip=self.client_address[0],
+                        storage_policy=storage_policy,
                         authenticated_generation=_hub.hash_node_token(self._bearer() or ""),
                     )
                 elif path == "/message-principals":
@@ -1897,7 +1900,9 @@ def make_handler(
                 self._send_json(exc.status, exc.payload())
                 return
             except fleet_hub_messages.MessageConflict as exc:
-                payload = {"error": str(exc)}
+                payload: dict[str, Any] = {"error": str(exc)}
+                if exc.message_id is not None:
+                    payload["id"] = exc.message_id
                 if exc.code is not None:
                     payload["code"] = exc.code
                 self._send_json(409, payload)

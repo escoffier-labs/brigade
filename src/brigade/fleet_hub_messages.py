@@ -14,10 +14,13 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import threading
 from time import monotonic
-from typing import Any, TypeGuard
+from typing import TYPE_CHECKING, Any, TypeGuard
 
 from . import fleet_hub_events
 from .fleet_hub_server import MAX_HANDLER_THREADS
+
+if TYPE_CHECKING:
+    from .fleet_hub_sealed import StoragePolicy
 
 SUBJECT_LIMIT = 200
 BODY_LIMIT = 64 * 1024
@@ -93,9 +96,10 @@ class MessageFutureTimestamp(MessageError):
 class MessageConflict(MessageError):
     """An idempotency key was reused for a different message payload."""
 
-    def __init__(self, message: str, *, code: str | None = None) -> None:
+    def __init__(self, message: str, *, code: str | None = None, message_id: int | None = None) -> None:
         super().__init__(message)
         self.code = code
+        self.message_id = message_id
 
 
 class MessageQuotaError(MessageError):
@@ -184,9 +188,11 @@ def ensure_schema(conn: sqlite3.Connection) -> None:
         conn.execute("ALTER TABLE fleet_messages ADD COLUMN payload_hash TEXT")
     if "received_at" not in columns:
         conn.execute("ALTER TABLE fleet_messages ADD COLUMN received_at TEXT")
-    for column in ("sender_label", "thread", "kind"):
+    for column in ("sender_label", "thread", "kind", "envelope", "content_state"):
         if column not in columns:
             conn.execute(f"ALTER TABLE fleet_messages ADD COLUMN {column} TEXT")
+    if "envelope_bytes" not in columns:
+        conn.execute("ALTER TABLE fleet_messages ADD COLUMN envelope_bytes INTEGER")
     conn.execute("UPDATE fleet_messages SET client_id='legacy-' || id WHERE client_id IS NULL")
     conn.execute("UPDATE fleet_messages SET received_at=created_at WHERE received_at IS NULL")
     rows = conn.execute(
@@ -250,7 +256,12 @@ def _sqlite_integer(value: Any, *, allow_zero: bool = False) -> TypeGuard[int]:
 
 
 def _prune_expired(conn: sqlite3.Connection) -> None:
+    from .fleet_hub_sealed import purge_content
+
     was_in_transaction = conn.in_transaction
+    if not was_in_transaction:
+        conn.execute("BEGIN IMMEDIATE")
+    purge_content(conn)
     cutoff = _expiry_cutoff()
     conn.execute(
         "UPDATE fleet_messages SET reply_to=NULL WHERE reply_to IN "
@@ -340,15 +351,21 @@ def _row(row: tuple[Any, ...]) -> dict[str, Any]:
         "sender_label",
         "thread",
         "kind",
+        "envelope",
+        "envelope_bytes",
+        "content_state",
     )
     result = dict(zip(keys, row, strict=True))
+    if result["envelope"] is None:
+        for key in ("envelope", "envelope_bytes", "content_state"):
+            result.pop(key)
     result["kind"] = result["kind"] or "message"
     return result
 
 
 def _fetch(conn: sqlite3.Connection, message_id: int) -> dict[str, Any] | None:
     row = conn.execute(
-        "SELECT id,sender,recipient,subject,body,reference,priority,client_id,reply_to,created_at,acked_at,acked_by,sender_label,thread,kind "
+        "SELECT id,sender,recipient,subject,body,reference,priority,client_id,reply_to,created_at,acked_at,acked_by,sender_label,thread,kind,envelope,envelope_bytes,content_state "
         "FROM fleet_messages WHERE id=?",
         (message_id,),
     ).fetchone()
@@ -630,8 +647,11 @@ def send(
     *,
     sender: str,
     reply_to: int | None = None,
+    storage_policy: StoragePolicy | None = None,
 ) -> dict[str, Any]:
-    return _send(conn, raw, sender=sender, reply_to=reply_to, extras=_metadata(raw, sender=sender))
+    return _send(
+        conn, raw, sender=sender, reply_to=reply_to, extras=_metadata(raw, sender=sender), storage_policy=storage_policy
+    )
 
 
 def _send(
@@ -641,19 +661,37 @@ def _send(
     sender: str,
     extras: dict[str, str],
     reply_to: int | None = None,
+    storage_policy: StoragePolicy | None = None,
 ) -> dict[str, Any]:
     """Insert validated metadata. Only question creation supplies the reserved kind."""
-    recipient = _text(raw.get("to"), "to", 256)
-    subject = _text(raw.get("subject"), "subject", SUBJECT_LIMIT)
-    body = _text(raw.get("body"), "body", BODY_LIMIT)
-    reference = _text(raw.get("ref"), "ref", REF_LIMIT, required=False)
-    client_id = _text(raw.get("client_id"), "client_id", 64, required=False) or secrets.token_hex(16)
-    enqueued_at = _enqueued_at(raw.get("enqueued_at"))
-    priority = raw.get("priority", "normal")
-    if not isinstance(priority, str) or priority not in PRIORITIES:
-        raise MessageError("priority must be low, normal, high, or urgent")
-    assert recipient is not None and subject is not None and body is not None
-    message_hash = _payload_digest(recipient, subject, body, reference, priority, reply_to, extras=extras)
+    from . import fleet_hub_sealed as sealed
+
+    policy = storage_policy or sealed.StoragePolicy()
+    envelope = None
+    subject: str | None
+    body: str | None
+    if "envelope" in raw:
+        envelope = sealed.prepare(raw, sender=sender, reply_to=reply_to, policy=policy)
+        recipient, priority, client_id = envelope["to"], envelope["priority"], envelope["client_id"]
+        subject = body = ""
+        reference = None
+        extras = {"kind": envelope["kind"]}
+        enqueued_at = _enqueued_at(envelope["created_at"])
+        message_hash = sealed.digest(raw["envelope"])
+    else:
+        if policy.require_sealed:
+            raise MessageError("hub requires sealed messages", code="message_sealing_required")
+        recipient = _text(raw.get("to"), "to", 256)
+        subject = _text(raw.get("subject"), "subject", SUBJECT_LIMIT)
+        body = _text(raw.get("body"), "body", BODY_LIMIT)
+        reference = _text(raw.get("ref"), "ref", REF_LIMIT, required=False)
+        client_id = _text(raw.get("client_id"), "client_id", 64, required=False) or secrets.token_hex(16)
+        enqueued_at = _enqueued_at(raw.get("enqueued_at"))
+        priority = raw.get("priority", "normal")
+        if not isinstance(priority, str) or priority not in PRIORITIES:
+            raise MessageError("priority must be low, normal, high, or urgent")
+        assert recipient is not None and subject is not None and body is not None
+        message_hash = _payload_digest(recipient, subject, body, reference, priority, reply_to, extras=extras)
     opened = not conn.in_transaction
     if opened:
         conn.execute("BEGIN IMMEDIATE")
@@ -667,7 +705,11 @@ def _send(
         ).fetchone()
         if existing is not None:
             if existing[1] is not None and existing[1] != message_hash:
-                raise MessageConflict("client_id was already used for a different message")
+                raise MessageConflict(
+                    "client_id was already used for a different message",
+                    code="message_client_id_conflict",
+                    message_id=int(existing[0]),
+                )
             existing_row = _fetch(conn, int(existing[0])) or {}
             if opened:
                 conn.commit()
@@ -695,6 +737,9 @@ def _send(
                 raise MessageRecipientInactive("recipient is temporarily inactive", recipient=recipient)
             raise MessageError("recipient is not an active hub principal")
         require_recipient_cap(conn, sender, recipient)
+        if envelope is not None:
+            sealed.require_current_keys(conn, envelope)
+            sealed.admit(conn, sender, len(raw["envelope"]), policy)
         count = conn.execute(
             "SELECT COUNT(*) FROM fleet_messages WHERE recipient=? AND acked_at IS NULL", (recipient,)
         ).fetchone()[0]
@@ -710,8 +755,8 @@ def _send(
             raise MessageQuotaError("sender message quota exceeded", code="message_sender_quota")
         created_at = enqueued_at
         cursor = conn.execute(
-            "INSERT INTO fleet_messages(sender,recipient,subject,body,reference,priority,client_id,payload_hash,reply_to,created_at,received_at,sender_label,thread,kind) "
-            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO fleet_messages(sender,recipient,subject,body,reference,priority,client_id,payload_hash,reply_to,created_at,received_at,sender_label,thread,kind,envelope,envelope_bytes,content_state) "
+            "VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (
                 sender,
                 recipient,
@@ -727,6 +772,9 @@ def _send(
                 extras.get("sender_label"),
                 extras.get("thread"),
                 extras.get("kind"),
+                raw["envelope"] if envelope is not None else None,
+                len(raw["envelope"]) if envelope is not None else None,
+                "sealed" if envelope is not None else None,
             ),
         )
         message_id = cursor.lastrowid
@@ -780,7 +828,7 @@ def _query_inbox_rows(
 ) -> list[tuple[Any, ...]]:
     _prune_expired(conn)
     return conn.execute(
-        "SELECT id,sender,recipient,subject,body,reference,priority,client_id,reply_to,created_at,acked_at,acked_by,sender_label,thread,kind "
+        "SELECT id,sender,recipient,subject,body,reference,priority,client_id,reply_to,created_at,acked_at,acked_by,sender_label,thread,kind,envelope,envelope_bytes,content_state "
         "FROM fleet_messages WHERE recipient=? AND id>? "
         + ("AND acked_at IS NULL " if unacked else "")
         + "ORDER BY id LIMIT 100",
@@ -808,7 +856,7 @@ def list_messages(
     wait_ms = _validate_wait_ms(raw.get("wait_ms", 0))
     wake_epoch = _wake_epoch(recipient) if wait_ms > 0 else 0
     rows = conn.execute(
-        "SELECT id,sender,recipient,subject,body,reference,priority,client_id,reply_to,created_at,acked_at,acked_by,sender_label,thread,kind "
+        "SELECT id,sender,recipient,subject,body,reference,priority,client_id,reply_to,created_at,acked_at,acked_by,sender_label,thread,kind,envelope,envelope_bytes,content_state "
         "FROM fleet_messages WHERE recipient=? AND id>? "
         + ("AND acked_at IS NULL " if unacked else "")
         + "ORDER BY id LIMIT 100",
@@ -918,7 +966,9 @@ def sent(conn: sqlite3.Connection, raw: dict[str, Any], *, sender: str) -> dict[
         params.append(after)
     rows = conn.execute(
         "SELECT id,sender,recipient,subject,body,reference,priority,client_id,reply_to,created_at,acked_at,acked_by,"
-        "sender_label,thread,kind FROM fleet_messages WHERE sender=? AND " + condition + " ORDER BY id LIMIT 100",
+        "sender_label,thread,kind,envelope,envelope_bytes,content_state FROM fleet_messages WHERE sender=? AND "
+        + condition
+        + " ORDER BY id LIMIT 100",
         params,
     ).fetchall()
     return _message_page(rows, after=after)
@@ -944,7 +994,14 @@ def ack(conn: sqlite3.Connection, message_id: Any, *, recipient: str) -> dict[st
     )
 
 
-def reply(conn: sqlite3.Connection, raw: dict[str, Any], *, sender: str) -> dict[str, Any] | None:
+def reply(
+    conn: sqlite3.Connection, raw: dict[str, Any], *, sender: str, storage_policy: StoragePolicy | None = None
+) -> dict[str, Any] | None:
+    if "envelope" in raw:
+        message_id = raw.get("id")
+        if not _sqlite_integer(message_id):
+            raise MessageError("id must be a positive integer within SQLite's range")
+        return send(conn, raw, sender=sender, reply_to=message_id, storage_policy=storage_policy)
     _metadata(raw, sender=sender)
     _prune_expired(conn)
     message_id = raw.get("id")
@@ -983,6 +1040,7 @@ def reply(conn: sqlite3.Connection, raw: dict[str, Any], *, sender: str) -> dict
             },
             sender=sender,
             reply_to=message_id,
+            storage_policy=storage_policy,
         )
         return _fetch(conn, message["id"])
     subject = raw.get("subject")
@@ -1012,6 +1070,7 @@ def reply(conn: sqlite3.Connection, raw: dict[str, Any], *, sender: str) -> dict
         },
         sender=sender,
         reply_to=message_id,
+        storage_policy=storage_policy,
     )
     return _fetch(conn, message["id"])
 
@@ -1121,12 +1180,18 @@ def handle(
     open_conn: Callable[[], sqlite3.Connection] | None = None,
     source_ip: str = "",
     authenticated_generation: str | None = None,
+    storage_policy: StoragePolicy | None = None,
 ) -> tuple[int, dict[str, Any]]:
     if caller is None:
         return 403, {"error": "a node principal is required"}
     if not isinstance(raw, dict):
         raise MessageError("message request must be an object")
     action = raw.get("action")
+    if storage_policy is not None and storage_policy.require_sealed:
+        # Legacy question wrappers write plaintext outside the ordinary send
+        # adapter. Refuse those writes until the sealed question adapter lands.
+        if action in ("question_create", "question_desktop") or (action in ("send", "reply") and "envelope" not in raw):
+            raise MessageError("hub requires sealed messages", code="message_sealing_required")
     if action in ("question_create", "question_status", "question_desktop"):
         from . import fleet_hub_questions
 
@@ -1194,15 +1259,43 @@ def handle(
                 if not secrets.compare_digest(_generation(conn, caller), authenticated_generation):
                     raise MessageAuthError("reply credential generation changed")
             if action == "reply":
-                return reply(conn, raw, sender=caller)
-            return send(conn, raw, sender=caller, reply_to=raw.get("reply_to"))
+                return reply(conn, raw, sender=caller, storage_policy=storage_policy)
+            return send(conn, raw, sender=caller, reply_to=raw.get("reply_to"), storage_policy=storage_policy)
 
         # Hold the write lock from credential comparison through insertion and
         # the question audit trigger, including the alternate send/reply_to path.
         message = _as_active_principal(conn, caller, insert_reply)
         return (201, {"message": message}) if message else (404, {"error": "message not found"})
     if action == "send":
-        return 201, {"message": send(conn, raw, sender=caller, reply_to=raw.get("reply_to"))}
+
+        def insert_send() -> dict[str, Any]:
+            if authenticated_generation is not None:
+                from .fleet_hub_questions import _generation
+
+                if not secrets.compare_digest(_generation(conn, caller), authenticated_generation):
+                    raise MessageAuthError("send credential generation changed")
+            return send(conn, raw, sender=caller, storage_policy=storage_policy)
+
+        return 201, {"message": _as_active_principal(conn, caller, insert_send)}
+    if action == "sent_lookup":
+
+        def lookup() -> dict[str, Any] | None:
+            if authenticated_generation is not None:
+                from .fleet_hub_questions import _generation
+
+                if not secrets.compare_digest(_generation(conn, caller), authenticated_generation):
+                    raise MessageAuthError("lookup credential generation changed")
+            _prune_expired(conn)
+            if set(raw) != {"action", "client_id"}:
+                raise MessageError("sent_lookup requires only client_id")
+            client_id = _text(raw.get("client_id"), "client_id", 64)
+            found = conn.execute(
+                "SELECT id FROM fleet_messages WHERE sender=? AND client_id=?", (caller, client_id)
+            ).fetchone()
+            return _fetch(conn, int(found[0])) if found else None
+
+        found = _as_active_principal(conn, caller, lookup)
+        return (200, {"message": found}) if found else (404, {"error": "message not found", "code": "not_found"})
     if action == "sent":
         return 200, _as_active_principal(conn, caller, lambda: sent(conn, raw, sender=caller))
     if action == "count":

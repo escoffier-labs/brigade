@@ -140,6 +140,7 @@ def register(sub: argparse._SubParsersAction) -> None:
     p_serve.add_argument(
         "--trust-forwarded-proto", action="store_true", help="Trust HTTPS scheme from an overwriting loopback proxy."
     )
+    p_serve.add_argument("--require-sealed", action="store_true", help="Refuse plaintext message sends.")
     p_serve.set_defaults(func=_dispatch_serve)
 
     p_nodes = fleet_sub.add_parser(
@@ -516,6 +517,7 @@ def _dispatch_serve(args: argparse.Namespace, *, environ: Mapping[str, str] | No
         db_path=db_path,
         token_file=args.token_file,
         allow_admin_writes=bool(args.allow_admin_writes),
+        require_sealed=bool(getattr(args, "require_sealed", False)),
         deck_config_path=fleet_command_deck.resolve_config_path(
             args.deck_config, os.environ if environ is None else environ
         ),
