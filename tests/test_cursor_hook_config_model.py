@@ -378,6 +378,13 @@ OWNERSHIP_ROWS = [
         {"sessionStart"},
         id="explicit-command-type-is-valid",
     ),
+    pytest.param(
+        "explicit-project-command-type",
+        "issue #1968: command type defaults to command for project ownership",
+        {"version": 1, "hooks": {"sessionStart": [{"type": "command", **PROJECT}]}},
+        {"sessionStart"},
+        id="explicit-command-type-project-ownership",
+    ),
     pytest.param("at-limit", "r4344099017: limit is inclusive", _padded(LIMIT), set(EVENTS), id="owns-at-the-limit"),
     pytest.param(
         "grew-past-limit",
@@ -394,6 +401,36 @@ def test_project_ownership_requires_a_whole_valid_document(tmp_path, name, findi
     _seed(tmp_path, initial)
 
     assert {e for e in EVENTS if cursor_user_cmd.project_presence_hook_installed(tmp_path, e)} == owned
+
+
+def test_init_deduplicates_explicit_command_type_entries_and_preserves_options(tmp_path):
+    hooks_path = _seed(
+        tmp_path,
+        {
+            "version": 1,
+            "hooks": {
+                "sessionStart": [
+                    {"type": "command", **PROJECT},
+                    {"type": "command", **PROJECT},
+                    {"type": "command", "command": LEGACY["command"]},
+                    {"type": "command", "command": LEGACY["command"]},
+                    {"type": "command", **PROJECT, "timeout": 12},
+                ]
+            },
+        },
+    )
+    owned_before_init = cursor_user_cmd.project_presence_hook_installed(tmp_path, "sessionStart")
+
+    command = ["init", "--target", str(tmp_path), "--depth", "repo", "--harnesses", "cursor"]
+    assert cli.main(command) == 0
+    first = hooks_path.read_bytes()
+    hooks = json.loads(first)["hooks"]
+    assert owned_before_init
+    assert hooks["sessionStart"] == [PROJECT, {"type": "command", **PROJECT, "timeout": 12}]
+    for event in EVENTS:
+        assert sum(entry in (PROJECT, {"type": "command", **PROJECT}) for entry in hooks[event]) == 1
+    assert cli.main(command) == 0
+    assert hooks_path.read_bytes() == first
 
 
 # Scope resolution through the real hook entry point. `callbacks` lists the
