@@ -1123,3 +1123,179 @@ def test_routing_retention_two_frozen_hubs_with_longpoll_and_sweeper(tmp_path, m
             thread.join(timeout=3)
         for conn in connections:
             conn.close()
+
+
+@pytest.fixture
+def startup_foreign_keys(monkeypatch):
+    connect = sqlite3.connect
+
+    def connect_with_foreign_keys(*args, **kwargs):
+        conn = connect(*args, **kwargs)
+        conn.execute("PRAGMA foreign_keys=ON")
+        return conn
+
+    monkeypatch.setattr(sqlite3, "connect", connect_with_foreign_keys)
+
+
+@pytest.mark.parametrize("schema", ["older", "repair", "current"])
+@pytest.mark.parametrize(
+    "advertised", [{"require_sealed": True}, {"max_envelope_bytes": 1024}, {"require_sealed": "invalid"}]
+)
+def test_startup_policy_refusal_preserves_retention_rows(hub, monkeypatch, schema, advertised, startup_foreign_keys):
+    from brigade import fleet_hub_identity, fleet_hub_questions as questions
+    from brigade.fleet_hub_sealed import StoragePolicy
+    from tests.test_fleet_hub_message_keys import identity
+
+    hub.execute("PRAGMA foreign_keys=ON")
+    send(hub, envelope(client_id="retained-envelope"))
+    tomb = send(hub, envelope(client_id="retained-tombstone"))
+    messages.handle(hub, {"action": "ack", "id": tomb["id"]}, caller="node-b")
+    old = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    hub.execute("UPDATE fleet_messages SET acked_at=? WHERE id=?", (old, tomb["id"]))
+    hub.commit()
+    assert lookup(hub, "retained-tombstone")[1]["message"]["content_state"] == "content_expired"
+    messages.add_principal(hub, {"name": "operator"})
+    monkeypatch.setenv("BRIGADE_FLEET_OPERATOR_RECIPIENT", "agent:operator")
+    messages.handle(
+        hub,
+        {"action": "question_create", "question": "Proceed?", "request_id": "startup-question"},
+        caller="node-a",
+        authenticated_generation=questions._generation(hub, "node-a"),
+    )
+    fleet_hub_identity.upload_identity(hub, identity())
+    hub.execute("UPDATE hub_meta SET value=? WHERE key='identity'", (json.dumps({**identity(), **advertised}),))
+    hub.execute("UPDATE fleet_messages SET created_at=?,acked_at=?", (old, old))
+    hub.execute("UPDATE fleet_message_sends SET received_at=?", (old,))
+    hub.execute("UPDATE fleet_questions SET created_at=?", (old,))
+    if schema == "older":
+        hub.execute("PRAGMA user_version=0")
+    elif schema == "repair":
+        hub.execute("DROP INDEX fleet_messages_sealed_acked")
+    hub.commit()
+    tables = ("fleet_messages", "fleet_message_sends", "fleet_questions", "hub_meta")
+    before = {table: hub.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall() for table in tables}
+    assert all(before.values())
+    path = hub.execute("PRAGMA database_list").fetchone()[2]
+    with pytest.raises(fleet_hub.FleetHubError, match="identity"):
+        fleet_hub.make_server("127.0.0.1", 0, path, "fixture-admin", storage_policy=StoragePolicy(retention_days=1))
+    assert {table: hub.execute(f"SELECT * FROM {table} ORDER BY rowid").fetchall() for table in tables} == before
+    assert hub.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+def test_startup_compatible_upgrade_applies_selected_retention(hub, legacy, startup_foreign_keys):
+    from brigade import fleet_hub_identity
+    from brigade.fleet_hub_sealed import StoragePolicy
+    from tests.test_fleet_hub_message_keys import identity
+
+    hub.execute("PRAGMA foreign_keys=ON")
+    send(hub, envelope())
+    old = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    hub.execute("UPDATE fleet_messages SET created_at=?", (old,))
+    hub.commit()
+    if legacy:
+        hub.execute("DROP TABLE hub_meta")
+    else:
+        fleet_hub_identity.upload_identity(hub, {**identity(), "require_sealed": False})
+    hub.execute("PRAGMA user_version=0")
+    hub.commit()
+    path = hub.execute("PRAGMA database_list").fetchone()[2]
+    server = fleet_hub.make_server(
+        "127.0.0.1", 0, path, "fixture-admin", storage_policy=StoragePolicy(retention_days=1)
+    )
+    server.server_close()
+    assert hub.execute("SELECT COUNT(*) FROM fleet_messages").fetchone()[0] == 0
+    assert hub.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
+    assert (
+        fleet_hub_identity.identity(hub) is None
+        if legacy
+        else fleet_hub_identity.identity(hub)["require_sealed"] is False
+    )
+    assert hub.execute("PRAGMA foreign_key_check").fetchall() == []
+
+
+def test_startup_policy_validation_serializes_identity_replacement(hub, monkeypatch, startup_foreign_keys):
+    from brigade import fleet_hub_identity
+    from tests.test_fleet_hub_message_keys import identity
+
+    first = send(hub, envelope())
+    for i in range(70):
+        hub.execute(
+            "INSERT INTO fleet_messages(sender,recipient,subject,body,priority,client_id,payload_hash,created_at,received_at,envelope,envelope_bytes,content_state) "
+            "SELECT sender,recipient,subject,body,priority,?,payload_hash,created_at,received_at,envelope,envelope_bytes,content_state FROM fleet_messages WHERE id=?",
+            (f"startup-batch-{i}", first["id"]),
+        )
+    hub.execute("UPDATE fleet_messages SET acked_at=?", ((datetime.now(timezone.utc) - timedelta(days=8)).isoformat(),))
+    hub.commit()
+    statements = []
+    init = fleet_hub.init_db
+
+    def traced_init(*args, **kwargs):
+        conn = init(*args, **kwargs)
+        assert conn.execute("PRAGMA foreign_keys").fetchone()[0] == 1
+        conn.set_trace_callback(statements.append)
+        return conn
+
+    monkeypatch.setattr(fleet_hub, "init_db", traced_init)
+    fleet_hub_identity.upload_identity(hub, {**identity(), "require_sealed": False})
+    path = hub.execute("PRAGMA database_list").fetchone()[2]
+    original = fleet_hub_identity.validate_storage_policy
+    attempts = []
+
+    def validate(raw, policy):
+        original(raw, policy)
+
+        def replace():
+            conn = sqlite3.connect(path, timeout=0)
+            try:
+                conn.execute(
+                    "UPDATE hub_meta SET value=? WHERE key='identity'",
+                    (json.dumps({**identity(), "require_sealed": True}),),
+                )
+                conn.commit()
+                return "replaced"
+            except sqlite3.OperationalError as exc:
+                return str(exc)
+            finally:
+                conn.close()
+
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            attempts.append(pool.submit(replace).result())
+
+    monkeypatch.setattr(fleet_hub_identity, "validate_storage_policy", validate)
+    server = fleet_hub.make_server("127.0.0.1", 0, path, "fixture-admin")
+    server.server_close()
+    assert attempts and all("locked" in result for result in attempts)
+    assert fleet_hub_identity.identity(hub)["require_sealed"] is False
+    batches, updates = [], 0
+    for sql in statements:
+        if sql.startswith("UPDATE fleet_messages SET envelope="):
+            updates += 1
+        elif sql == "COMMIT":
+            batches.append(updates)
+            updates = 0
+    assert sum(batches) == 71 and max(batches) <= 32
+    assert len(attempts) == len(batches) >= 3
+    assert hub.execute("SELECT COUNT(*) FROM fleet_messages WHERE content_state='sealed'").fetchone()[0] == 0
+
+
+def test_startup_retention_rolls_back_on_failure(hub, monkeypatch, startup_foreign_keys):
+    from brigade.fleet_hub_sealed import StoragePolicy
+
+    send(hub, envelope())
+    old = (datetime.now(timezone.utc) - timedelta(days=30)).isoformat()
+    hub.execute("UPDATE fleet_messages SET created_at=?", (old,))
+    hub.execute("PRAGMA user_version=0")
+    hub.commit()
+    before = hub.execute("SELECT * FROM fleet_messages").fetchall()
+    prune = messages._prune_expired
+
+    def fail_after_pruning(conn, *, storage_policy=None):
+        prune(conn, storage_policy=storage_policy)
+        raise sqlite3.OperationalError("injected startup retention failure")
+
+    monkeypatch.setattr(messages, "_prune_expired", fail_after_pruning)
+    path = hub.execute("PRAGMA database_list").fetchone()[2]
+    with pytest.raises(sqlite3.OperationalError, match="injected startup"):
+        fleet_hub.make_server("127.0.0.1", 0, path, "fixture-admin", storage_policy=StoragePolicy(retention_days=1))
+    assert hub.execute("SELECT * FROM fleet_messages").fetchall() == before

@@ -162,7 +162,9 @@ def _metadata(raw: dict[str, Any], *, sender: str | None = None) -> dict[str, st
     return extras
 
 
-def ensure_schema(conn: sqlite3.Connection, *, storage_policy: StoragePolicy | None = None) -> None:
+def ensure_schema(
+    conn: sqlite3.Connection, *, storage_policy: StoragePolicy | None = None, prune_messages: bool = True
+) -> None:
     conn.execute(
         """CREATE TABLE IF NOT EXISTS fleet_messages (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -247,10 +249,11 @@ def ensure_schema(conn: sqlite3.Connection, *, storage_policy: StoragePolicy | N
     from . import fleet_hub_message_grants
 
     fleet_hub_message_grants.ensure_schema(conn)
-    if storage_policy is None:
-        _prune_expired(conn)
-    else:
-        _prune_expired(conn, storage_policy=storage_policy)
+    if prune_messages:
+        if storage_policy is None:
+            _prune_expired(conn)
+        else:
+            _prune_expired(conn, storage_policy=storage_policy)
 
 
 def _expiry_cutoff(storage_policy: StoragePolicy | None = None) -> str:
