@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 import shlex
 import shutil
 import subprocess
@@ -34,6 +33,43 @@ def _repo(tmp_path):
     remote = _bare_remote(tmp_path)
     _seed_remote(remote, repo)
     return repo, remote, base
+
+
+def _run_with_git_shim(repo, remote, base, tip, tools, shim, enumerations):
+    # Git Bash may prepend its bundled Git while starting. Set PATH inside
+    # that verified shell and source the hook without another shell startup.
+    marker = tools / "git-invocations"
+    shim.write_text(
+        shim.read_text().replace(
+            "#!/bin/sh\n", f"#!/bin/sh\nprintf '%s\\n' \"$1\" >> {shlex.quote(marker.as_posix())}\n", 1
+        ),
+        newline="\n",
+    )
+    shim.chmod(0o755)
+    env = _git_env(repo)
+    env["CONTENT_GUARD_EXTRA_POLICY"] = str(tools / "absent.json")
+    # Even a broken fixture must never contact an external destination.
+    env["GIT_ALLOW_PROTOCOL"] = "file"
+    script = (
+        "tools=$1; hook=$2; shift 2\n"
+        'if command -v cygpath >/dev/null 2>&1; then tools=$(cygpath -u "$tools"); fi\n'
+        'export PATH="$tools:$PATH"\n'
+        "hash -r\n"
+        '[ "$(command -v git)" = "$tools/git" ] || exit 97\n'
+        '. "$hook" "$@"\n'
+    )
+    result = subprocess.run(
+        [_hook_shell(), "-c", script, "hook-fixture", tools.as_posix(), _HOOK.as_posix(), "origin", remote],
+        cwd=repo,
+        env=env,
+        input=f"refs/heads/main {tip} refs/heads/main {base}\n",
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert marker.is_file(), result.stdout + result.stderr
+    assert marker.read_text().splitlines().count("ls-remote") == enumerations, result.stdout + result.stderr
+    return result
 
 
 @pytest.mark.parametrize("unpublished_leak", [False, True])
@@ -109,16 +145,8 @@ def test_advertisement_must_be_valid_and_stable(tmp_path, advertisement):
         + "fi\n"
         f'exec {shlex.quote(real_git)} "$@"\n'
     )
-    shim.chmod(0o755)
-    env = {**_git_env(repo), "PATH": str(tools) + os.pathsep + _git_env(repo)["PATH"]}
-    env["CONTENT_GUARD_EXTRA_POLICY"] = str(tmp_path / "absent.json")
-    result = subprocess.run(
-        [_hook_shell(), _HOOK.as_posix(), "origin", remote.as_posix()],
-        cwd=repo,
-        env=env,
-        input=f"refs/heads/main {tip} refs/heads/main {base}\n",
-        capture_output=True,
-        text=True,
+    result = _run_with_git_shim(
+        repo, remote.as_posix(), base, tip, tools, shim, 1 if advertisement == "malformed" else 2
     )
     assert result.returncode == 1
     assert "not a leak verdict" in result.stderr
@@ -189,18 +217,7 @@ def test_successful_remote_diagnostics_are_not_ref_records(tmp_path, external_ho
         'if [ "$1" = ls-remote ]; then printf "transport notice\\n" >&2; fi\n'
         f'exec {shlex.quote(real_git)} "$@"\n'
     )
-    shim.chmod(0o755)
-    env = {**_git_env(repo), "PATH": str(tools) + os.pathsep + _git_env(repo)["PATH"]}
-    env["CONTENT_GUARD_EXTRA_POLICY"] = str(tmp_path / "absent.json")
-    result = subprocess.run(
-        [external_hook_shell, _HOOK.as_posix(), "origin", remote.as_posix()],
-        cwd=repo,
-        env=env,
-        input=f"refs/heads/main {tip} refs/heads/main {base}\n",
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
+    result = _run_with_git_shim(repo, remote.as_posix(), base, tip, tools, shim, 2)
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stderr.count("transport notice") == 2
     assert "scanning introduced content in 1 new commit(s)" in result.stdout
@@ -218,21 +235,10 @@ def test_remote_failure_message_does_not_echo_destination_credentials(tmp_path, 
         'if [ "$1" = ls-remote ]; then printf "fixture transport refused\\n" >&2; exit 1; fi\n'
         f'exec {shlex.quote(real_git)} "$@"\n'
     )
-    shim.chmod(0o755)
-    env = {**_git_env(repo), "PATH": str(tools) + os.pathsep + _git_env(repo)["PATH"]}
-    env["CONTENT_GUARD_EXTRA_POLICY"] = str(tmp_path / "absent.json")
     username, password = "EXAMPLE_USER", "EXAMPLE_PASSWORD"
     userinfo = username + ":" + password
     remote = "https://" + userinfo + "@example.invalid/repo.git"
-    result = subprocess.run(
-        [external_hook_shell, _HOOK.as_posix(), "origin", remote],
-        cwd=repo,
-        env=env,
-        input=f"refs/heads/main {tip} refs/heads/main {base}\n",
-        capture_output=True,
-        text=True,
-        timeout=60,
-    )
+    result = _run_with_git_shim(repo, remote, base, tip, tools, shim, 1)
     assert result.returncode == 1
     assert "failed to enumerate advertised refs" in result.stderr
     assert "fixture transport refused" in result.stderr
