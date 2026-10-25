@@ -291,7 +291,11 @@ def _all_projection_rows(tmp_path, projection):
     payload = json.loads(worker_results.read_text())
     payload["results"][0]["ok"] = False
     worker_results.write_text(json.dumps(payload))
-    _verify_receipt(tmp_path, verify_id)
+    _verify_receipt(
+        tmp_path,
+        verify_id,
+        harness_session={"harness": "claude", "fingerprint": "0123456789abcdef"},
+    )
     _write_outcomes(
         tmp_path,
         _outcome_payload(evidence_ref=str(tmp_path / ".brigade" / "work" / "verify-runs" / verify_id / "receipt.json")),
@@ -300,14 +304,20 @@ def _all_projection_rows(tmp_path, projection):
 
 
 @pytest.mark.parametrize("projection", ["otel-genai", "openinference"])
-def test_mapping_doc_lists_every_exported_attribute(tmp_path, projection):
+@pytest.mark.parametrize(
+    "removed_attribute",
+    [None, "brigade.harness.session.harness", "brigade.harness.session.fingerprint"],
+)
+def test_mapping_doc_lists_every_exported_attribute(tmp_path, projection, removed_attribute):
     doc = (Path(__file__).resolve().parents[1] / "docs" / "telemetry-mapping.md").read_text()
+    if removed_attribute is not None:
+        doc = doc.replace(f"`{removed_attribute}`", "")
     rows = _all_projection_rows(tmp_path, projection)
     names = {row["name"] for row in rows}
     assert any("verify" in name for name in names) and any("outcome" in name for name in names)
     keys = {key for row in rows for key in row["attributes"]}
     missing = sorted(key for key in keys if f"`{key}`" not in doc)
-    assert missing == []
+    assert missing == ([] if removed_attribute is None else [removed_attribute])
     for mapping in (telemetry_export.OTEL_MAPPING, telemetry_export.OPENINFERENCE_MAPPING):
         assert mapping["upstream_revision"] in doc
 
