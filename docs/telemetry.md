@@ -9,6 +9,11 @@ This page covers the Python CLI only. `brigade daily telemetry` inspects local
 daily receipts and is unrelated to usage reporting. Other implementations and
 notification services have their own data flows.
 
+`brigade receipts export otel-genai` and `brigade receipts export openinference`
+write local receipts as OpenTelemetry GenAI or OpenInference JSONL and send
+nothing over the network. [Receipt telemetry mapping](telemetry-mapping.md)
+lists every exported attribute, its upstream pin, and its development status.
+
 ## Version request fields
 
 A detached child may send `GET https://check.brigade.tools/v1/version` with no
