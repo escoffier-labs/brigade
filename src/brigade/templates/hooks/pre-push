@@ -134,7 +134,7 @@ prepare_remote_ranges() {
   # object is not, and it still marks that commit as already public.
   # Transport diagnostics remain on stderr; only stdout contains ref records.
   if ! advertised="$(GIT_TERMINAL_PROMPT=0 git ls-remote "$REMOTE_URL")"; then
-    echo "pre-push: [history] failed to enumerate advertised refs for $REMOTE_URL" >&2
+    echo "pre-push: [history] failed to enumerate advertised refs" >&2
     PLUMBING_ERR=1
     return
   fi

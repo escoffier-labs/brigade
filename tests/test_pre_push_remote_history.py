@@ -204,3 +204,40 @@ def test_successful_remote_diagnostics_are_not_ref_records(tmp_path, external_ho
     assert result.returncode == 0, result.stdout + result.stderr
     assert result.stderr.count("transport notice") == 2
     assert "scanning introduced content in 1 new commit(s)" in result.stdout
+
+
+def test_remote_failure_message_does_not_echo_destination_credentials(tmp_path, external_hook_shell):
+    repo, _, base = _repo(tmp_path)
+    tip = _commit(repo, "new.txt", _CLEAN_LINE)
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    shim = tools / "git"
+    real_git = Path(shutil.which("git")).as_posix()
+    shim.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = ls-remote ]; then printf "fixture transport refused\\n" >&2; exit 1; fi\n'
+        f'exec {shlex.quote(real_git)} "$@"\n'
+    )
+    shim.chmod(0o755)
+    env = {**_git_env(repo), "PATH": str(tools) + os.pathsep + _git_env(repo)["PATH"]}
+    env["CONTENT_GUARD_EXTRA_POLICY"] = str(tmp_path / "absent.json")
+    username, password = "EXAMPLE_USER", "EXAMPLE_PASSWORD"
+    userinfo = username + ":" + password
+    remote = "https://" + userinfo + "@example.invalid/repo.git"
+    result = subprocess.run(
+        [external_hook_shell, _HOOK.as_posix(), "origin", remote],
+        cwd=repo,
+        env=env,
+        input=f"refs/heads/main {tip} refs/heads/main {base}\n",
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 1
+    assert "failed to enumerate advertised refs" in result.stderr
+    assert "fixture transport refused" in result.stderr
+    assert "not a leak verdict" in result.stderr
+    assert remote not in result.stdout + result.stderr
+    assert userinfo not in result.stdout + result.stderr
+    assert username not in result.stdout + result.stderr
+    assert password not in result.stdout + result.stderr
