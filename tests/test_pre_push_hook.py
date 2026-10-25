@@ -144,6 +144,25 @@ def _seed_remote(remote: Path, repo: Path, ref: str = "refs/heads/main") -> str:
     return sha
 
 
+def _hook_shell():
+    if os.name != "nt":
+        return "bash"
+    # Windows' default bash.exe can be the WSL bridge. These native hook
+    # tests require the executable shipped with the verified Git installation.
+    git = shutil.which("git")
+    assert git, "native hook verification requires installed Git for Windows"
+    git_path = Path(git).resolve()
+    version = subprocess.check_output([str(git_path), "--version"], text=True, timeout=15)
+    assert ".windows." in version.lower(), version
+    candidates = [root / "bin/bash.exe" for root in git_path.parents if (root / "cmd/git.exe").is_file()]
+    assert candidates, "Git for Windows installation does not contain bin/bash.exe"
+    bash = candidates[0]
+    assert bash.is_file() and os.access(bash, os.X_OK), f"Git Bash is not executable: {bash}"
+    kernel = subprocess.check_output([str(bash), "-c", "uname -s"], text=True, timeout=15).strip()
+    assert kernel.startswith(("MINGW", "MSYS")), f"expected native Git Bash, got {kernel}"
+    return str(bash)
+
+
 def _run_hook(
     repo: Path,
     remote: str,
@@ -153,7 +172,7 @@ def _run_hook(
 ) -> subprocess.CompletedProcess:
     env = _git_env(repo)
     env["CONTENT_GUARD_EXTRA_POLICY"] = str(extra_policy or repo / "no-private-policy.json")
-    argv = ["bash", str(_HOOK), remote]
+    argv = [_hook_shell(), _HOOK.as_posix(), remote]
     if url is not None:
         argv.append(url)
     return subprocess.run(
@@ -511,22 +530,7 @@ if __name__ == "__main__":
 
 @pytest.fixture(scope="module")
 def external_hook_shell():
-    if os.name != "nt":
-        return "bash"
-    # Windows' default bash.exe can be the WSL bridge. These native hook
-    # tests require the executable shipped with the verified Git installation.
-    git = shutil.which("git")
-    assert git, "native hook verification requires installed Git for Windows"
-    git_path = Path(git).resolve()
-    version = subprocess.check_output([str(git_path), "--version"], text=True, timeout=15)
-    assert ".windows." in version.lower(), version
-    candidates = [root / "bin/bash.exe" for root in git_path.parents if (root / "cmd/git.exe").is_file()]
-    assert candidates, "Git for Windows installation does not contain bin/bash.exe"
-    bash = candidates[0]
-    assert bash.is_file() and os.access(bash, os.X_OK), f"Git Bash is not executable: {bash}"
-    kernel = subprocess.check_output([str(bash), "-c", "uname -s"], text=True, timeout=15).strip()
-    assert kernel.startswith(("MINGW", "MSYS")), f"expected native Git Bash, got {kernel}"
-    return str(bash)
+    return _hook_shell()
 
 
 @pytest.mark.parametrize("mode", ["tip", "range", "revs-stdin"])

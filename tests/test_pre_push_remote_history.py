@@ -19,8 +19,10 @@ from tests.test_pre_push_hook import (
     _commit,
     _git,
     _git_env,
+    _hook_shell,
     _run_hook,
     _seed_remote,
+    external_hook_shell as external_hook_shell,
 )
 
 
@@ -111,7 +113,7 @@ def test_advertisement_must_be_valid_and_stable(tmp_path, advertisement):
     env = {**_git_env(repo), "PATH": str(tools) + os.pathsep + _git_env(repo)["PATH"]}
     env["CONTENT_GUARD_EXTRA_POLICY"] = str(tmp_path / "absent.json")
     result = subprocess.run(
-        ["bash", str(_HOOK), "origin", str(remote)],
+        [_hook_shell(), _HOOK.as_posix(), "origin", remote.as_posix()],
         cwd=repo,
         env=env,
         input=f"refs/heads/main {tip} refs/heads/main {base}\n",
@@ -139,7 +141,10 @@ def test_shallow_history_cannot_prove_all_unpublished_commits(tmp_path):
 def test_missing_local_ancestor_is_not_silently_ignored(tmp_path):
     repo, remote, base = _repo(tmp_path)
     tip = _commit(repo, "new.txt", _CLEAN_LINE)
-    (repo / ".git/objects" / base[:2] / base[2:]).unlink()
+    missing = repo / ".git/objects" / base[:2] / base[2:]
+    missing.chmod(0o600)
+    missing.unlink()
+    assert not missing.exists()
     result = _run_hook(repo, "origin", f"refs/heads/main {tip} refs/heads/main {base}\n", url=str(remote))
     assert result.returncode == 1
     assert "incomplete local ancestry" in result.stderr
@@ -170,3 +175,32 @@ def test_legacy_grafts_cannot_hide_unpublished_ancestors(tmp_path, monkeypatch, 
     result = _run_hook(repo, "origin", f"refs/heads/main {tip} refs/heads/main {base}\n", url=str(remote))
     assert result.returncode == 1
     assert "grafted local ancestry cannot be verified" in result.stderr
+
+
+def test_successful_remote_diagnostics_are_not_ref_records(tmp_path, external_hook_shell):
+    repo, remote, base = _repo(tmp_path)
+    tip = _commit(repo, "new.txt", _CLEAN_LINE)
+    tools = tmp_path / "tools"
+    tools.mkdir()
+    shim = tools / "git"
+    real_git = Path(shutil.which("git")).as_posix()
+    shim.write_text(
+        "#!/bin/sh\n"
+        'if [ "$1" = ls-remote ]; then printf "transport notice\\n" >&2; fi\n'
+        f'exec {shlex.quote(real_git)} "$@"\n'
+    )
+    shim.chmod(0o755)
+    env = {**_git_env(repo), "PATH": str(tools) + os.pathsep + _git_env(repo)["PATH"]}
+    env["CONTENT_GUARD_EXTRA_POLICY"] = str(tmp_path / "absent.json")
+    result = subprocess.run(
+        [external_hook_shell, _HOOK.as_posix(), "origin", remote.as_posix()],
+        cwd=repo,
+        env=env,
+        input=f"refs/heads/main {tip} refs/heads/main {base}\n",
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert result.stderr.count("transport notice") == 2
+    assert "scanning introduced content in 1 new commit(s)" in result.stdout

@@ -132,11 +132,9 @@ prepare_remote_ranges() {
   # Keep peeled annotated-tag lines (`refs/tags/<name>^{}`), which --refs
   # suppresses. The peeled commit can be present locally even when the tag
   # object is not, and it still marks that commit as already public.
-  if ! advertised="$(GIT_TERMINAL_PROMPT=0 git ls-remote "$REMOTE_URL" 2>&1)"; then
+  # Transport diagnostics remain on stderr; only stdout contains ref records.
+  if ! advertised="$(GIT_TERMINAL_PROMPT=0 git ls-remote "$REMOTE_URL")"; then
     echo "pre-push: [history] failed to enumerate advertised refs for $REMOTE_URL" >&2
-    while IFS= read -r line; do
-      [[ -n "$line" ]] && echo "pre-push:   $line" >&2
-    done <<<"$advertised"
     PLUMBING_ERR=1
     return
   fi
