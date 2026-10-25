@@ -1034,6 +1034,34 @@ def test_redaction_retry_refuses_symlinked_record(tmp_path):
     assert outside.read_text() == "{}"
 
 
+def test_redaction_rewrite_failure_keeps_bounded_error_and_prepublication_state(tmp_path, monkeypatch):
+    run_dir, _, _ = _authority_run(tmp_path)
+    before = _artifact_snapshot(run_dir)
+    original_build = run_events.build_event
+    cause = run_events.CanonicalizationError(SECRET)
+
+    def fail_redacted_event(**kwargs):
+        if kwargs["idempotency_key"].startswith("redaction:"):
+            raise cause
+        return original_build(**kwargs)
+
+    monkeypatch.setattr(run_events, "build_event", fail_redacted_event)
+    with pytest.raises(run_redaction.RedactionError, match="^rewritten journal canonicalization failed$") as excinfo:
+        run_redaction.redact_journal(
+            run_dir,
+            sequence_start=2,
+            sequence_end=2,
+            reason=REASON_CODE,
+            operator_confirmed=True,
+        )
+
+    assert type(excinfo.value) is run_redaction.RedactionError
+    assert excinfo.value.diagnostic == "rewritten journal canonicalization failed"
+    assert excinfo.value.__cause__ is cause
+    assert _artifact_snapshot(run_dir) == before
+    assert not (run_dir / "events/redactions").exists()
+
+
 def test_redaction_replace_failure_retains_original_and_durable_quarantine(tmp_path, monkeypatch):
     run_dir, _, _ = _authority_run(tmp_path)
     before = _journal_path(run_dir).read_bytes()
@@ -2578,4 +2606,167 @@ def test_redaction_replace_serializes_against_external_journal_append(tmp_path, 
     assert "external-append-1" in committed_keys, (
         "the external append committed during the redaction read-to-replace window "
         f"was lost; final journal keys: {committed_keys}"
+    )
+
+
+@pytest.fixture
+def generic_authority_run(tmp_path, monkeypatch):
+    from brigade import aboyeur, run_lifecycle, runguard
+
+    monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade/runs/generic-redaction"
+    run_dir.mkdir(parents=True)
+    snapshot = {
+        "schema": "brigade.run.v1",
+        "status": "ok",
+        "lock_workspace": str(workspace),
+        "lifecycle_journal_requested": True,
+        "run_journal_authority_requested": True,
+    }
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        aboyeur._write_json(run_dir / "run.json", snapshot)
+        aboyeur._write_json(run_dir / "run.json", snapshot)
+        assert aboyeur._resolve_authority_state(run_dir) == "authoritative"
+        facts = [
+            run_lifecycle.record_lifecycle_event(
+                run_dir,
+                workspace=workspace,
+                event_type="approval.requested",
+                payload={"approval_id": f"approval-{i}", "source": f"{SECRET}-{i}", "contract_fingerprint": "a" * 64},
+                idempotency_key=f"private-request-{i}",
+            )
+            for i in range(2)
+        ]
+        run_checkpoint.recover_from_checkpoint(run_dir, None)
+    return run_dir, facts
+
+
+@pytest.mark.parametrize("selection", ["fact-only", "split-pairs", "multiple-pairs"])
+def test_generic_redaction_preserves_exact_pairs_and_replay(generic_authority_run, selection):
+    run_dir, facts = generic_authority_run
+    start, end = {
+        "fact-only": (facts[-1].sequence, facts[-1].sequence),
+        "split-pairs": (facts[0].sequence, facts[-1].sequence - 1),
+        "multiple-pairs": (facts[0].sequence - 1, facts[-1].sequence),
+    }[selection]
+    result = run_redaction.redact_journal(
+        run_dir,
+        sequence_start=start,
+        sequence_end=end,
+        reason=REASON_CODE,
+        operator_confirmed=True,
+    )
+    journal = _journal_path(run_dir)
+    committed = journal.read_bytes()
+    report = run_journal.read_journal_bounded(journal)
+    assert not report.chain_errors and report.partial_tail is None
+    for original in facts:
+        fact = report.events[original.sequence - 1]
+        checkpoint = report.events[original.sequence - 2]
+        assert checkpoint.idempotency_key.startswith("checkpoint:fact:")
+        run_checkpoint._verify_coverage(
+            [checkpoint, fact],
+            checkpoint,
+            json.loads(run_checkpoint.validate_checkpoint(run_dir, checkpoint)),
+        )
+        if start <= original.sequence <= end:
+            assert original.payload["source"].encode() not in committed
+            assert original.idempotency_key.encode() not in committed
+        else:
+            assert fact.request_digest == original.request_digest
+    assert (
+        run_checkpoint.recover_from_checkpoint(run_dir, json.loads((run_dir / "run.json").read_bytes()))["status"]
+        == "ok"
+    )
+    again = run_redaction.redact_journal(
+        run_dir,
+        sequence_start=start,
+        sequence_end=end,
+        reason=REASON_CODE,
+        operator_confirmed=True,
+    )
+    assert again.operation_id == result.operation_id
+    assert journal.read_bytes() == committed
+
+
+@pytest.mark.parametrize("pair_index", [0, -1], ids=["earlier-pair", "latest-pair"])
+def test_invalid_rewritten_generic_pair_refuses_before_publication(generic_authority_run, monkeypatch, pair_index):
+    run_dir, facts = generic_authority_run
+    original_rewrite = run_redaction._rewrite_events
+
+    def invalid_pair(events, **kwargs):
+        rewritten, _ = original_rewrite(events, **kwargs)
+        out, lines, previous = [], [], None
+        for event in rewritten:
+            key = (
+                "checkpoint:fact:" + "0" * 64
+                if event.sequence == facts[pair_index].sequence - 1
+                else event.idempotency_key
+            )
+            envelope = run_events.build_event(
+                run_id=event.run_id,
+                sequence=event.sequence,
+                event_type=event.event_type,
+                payload=event.payload,
+                idempotency_key=key,
+                recorded_at=event.recorded_at,
+                previous_digest=previous,
+            )
+            out.append(run_journal.RunEvent(**envelope))
+            lines.append(run_events.canonical_bytes(envelope) + b"\n")
+            previous = envelope["event_digest"]
+        return out, b"".join(lines)
+
+    monkeypatch.setattr(run_redaction, "_rewrite_events", invalid_pair)
+    before = _artifact_snapshot(run_dir)
+    with pytest.raises(run_redaction.RedactionError, match="checkpoint verification failed"):
+        run_redaction.redact_journal(
+            run_dir,
+            sequence_start=facts[-1].sequence,
+            sequence_end=facts[-1].sequence,
+            reason=REASON_CODE,
+            operator_confirmed=True,
+        )
+    assert _artifact_snapshot(run_dir) == before
+    assert not (run_dir / "events/redactions").exists()
+
+
+def test_generic_redaction_retries_after_replacement_crash(generic_authority_run, monkeypatch):
+    run_dir, facts = generic_authority_run
+    original_replace = run_redaction._replace_projection
+    failed = False
+
+    def crash_once(*args, **kwargs):
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise run_redaction.RedactionError("simulated post-replacement crash")
+        return original_replace(*args, **kwargs)
+
+    monkeypatch.setattr(run_redaction, "_replace_projection", crash_once)
+    with pytest.raises(run_redaction.RedactionError, match="simulated post-replacement crash"):
+        run_redaction.redact_journal(
+            run_dir,
+            sequence_start=facts[0].sequence,
+            sequence_end=facts[-1].sequence,
+            reason=REASON_CODE,
+            operator_confirmed=True,
+        )
+    committed_prefix = _journal_path(run_dir).read_bytes()
+    run_redaction.redact_journal(
+        run_dir,
+        sequence_start=facts[0].sequence,
+        sequence_end=facts[-1].sequence,
+        reason=REASON_CODE,
+        operator_confirmed=True,
+    )
+    assert _journal_path(run_dir).read_bytes().startswith(committed_prefix)
+    events = run_journal.read_journal_bounded(_journal_path(run_dir)).events
+    assert len(events) == facts[-1].sequence + 1
+    assert events[-1].event_type == "run.redaction.recorded"
+    assert (
+        run_checkpoint.recover_from_checkpoint(run_dir, json.loads((run_dir / "run.json").read_bytes()))["status"]
+        == "ok"
     )

@@ -178,6 +178,10 @@ _STATUS_NEUTRAL_EVENT_TYPES: frozenset[str] = frozenset(
         "run.redaction.recorded",
         "run.cassette.recorded",
         # Live-control pairs advance the journal cursor only (issue #604).
+        "task.accepted",
+        "task.attempt-prepared",
+        "task.observed",
+        "task.acknowledged",
         "control.requested",
         "control.observed",
         "control.failed",

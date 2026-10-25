@@ -360,6 +360,35 @@ class MissingLeakShapeTests(unittest.TestCase):
         result = scan_text("Config at /root/.config/tool.json")  # content-guard: allow root-path
         self.assertIn("root-path", {finding.rule_id for finding in result.findings})
 
+    def test_quoted_root_spaced_paths_are_completely_matched_and_redacted(self) -> None:
+        public_policy = load_policy(Path(__file__).parents[2] / "src/brigade/guard/policies/public-repo.json")
+        for components in (
+            ("Private Folder",),
+            ("Private Folder", "secret.txt"),
+            (".config", "Private Folder", "secret file.txt"),
+            (".config", "secret file.txt"),
+        ):
+            path = "/".join(("", "root", *components))
+            for quote in ('"', "'", "`"):
+                text = f"Config at {quote}{path}{quote}, then continue."
+                with self.subTest(components=components, quote=quote, check="match"):
+                    result = scan_text(text, policy=public_policy)
+                    self.assertEqual([finding.match for finding in result.findings], [path])
+                    self.assertTrue(result.blocked)
+                with self.subTest(components=components, quote=quote, check="redaction"):
+                    result = scan_text(text, policy=Policy(rules={"root-path": "redact"}))
+                    self.assertEqual(
+                        result.redacted_text,
+                        f"Config at {quote}[redacted-root-path]{quote}, then continue.",
+                    )
+
+    def test_unquoted_root_paths_preserve_surrounding_prose(self) -> None:
+        path = "/".join(("", "root", ".config", "tool.json"))
+        text = f"Config at {path} then consult docs.md."
+        result = scan_text(text, policy=Policy(rules={"root-path": "redact"}))
+        self.assertEqual([finding.match for finding in result.findings], [path])
+        self.assertEqual(result.redacted_text, "Config at [redacted-root-path] then consult docs.md.")
+
     def test_bare_provider_token_matches(self) -> None:
         token = "ghp_" + "A" * 36
         result = scan_text(f"Leaked credential: {token}")
@@ -411,6 +440,14 @@ class MissingLeakShapeTests(unittest.TestCase):
             with self.subTest(text=text):
                 self.assertNotIn("root-path", {f.rule_id for f in scan_text(text).findings})
 
+        for path in ("/rooted/Private Folder", "/srv/root/Private Folder", "relative/root/Private Folder", "/root"):
+            for quote in ('"', "'", "`"):
+                text = f"Config at {quote}{path}{quote}, then continue."
+                with self.subTest(path=path, quote=quote):
+                    result = scan_text(text, policy=Policy(rules={"root-path": "redact"}))
+                    self.assertEqual(result.findings, [])
+                    self.assertEqual(result.redacted_text, text)
+
     def test_provider_prefix_families_match_without_assignment(self) -> None:
         for prefix, body in (
             ("github_pat_", "a" * 30),
@@ -427,6 +464,97 @@ class MissingLeakShapeTests(unittest.TestCase):
 
     def test_provider_prefix_negatives(self) -> None:
         for text in ("ghp_short", "github_pat_example", "xoxb-short", "sk-live-demo", "AKIAEXAMPLE"):
+            with self.subTest(text=text):
+                self.assertNotIn("bare-token-prefix", {f.rule_id for f in scan_text(text).findings})
+
+    def test_worklore_provider_families_preserve_context_and_redact_whole_tokens(self) -> None:
+        for prefix, body in (
+            ("ASIA", "A" * 16),
+            ("AIza", "a" * 30),
+            ("AIza", "a" * 28 + "_-"),
+            ("glpat-", "a" * 16),
+            ("glpat-", "a" * 14 + "-_"),
+        ):
+            credential = prefix + body
+            for before, after, expected in (
+                ("Credential: ", ".", "bare-token-prefix"),
+                ("(", ")", "bare-token-prefix"),
+                ('api_key="', '"', "api-key-assignment"),
+                ("token='", "'", "api-key-assignment"),
+                ("Bearer ", "", "bearer-token"),
+            ):
+                with self.subTest(prefix=prefix, body=body, expected=expected, before=before):
+                    result = scan_text(before + credential + after)
+                    self.assertEqual([finding.rule_id for finding in result.findings], [expected])
+                    self.assertNotIn(credential, result.redacted_text)
+                    if expected == "bare-token-prefix":
+                        self.assertEqual(result.findings[0].match, credential)
+                        self.assertEqual(result.redacted_text, before + "[redacted-secret]" + after)
+                    elif expected == "bearer-token":
+                        self.assertEqual(result.findings[0].match, before + credential)
+                        self.assertEqual(result.redacted_text, before + "[redacted-secret]" + after)
+
+    def test_bearer_provider_tokens_redact_terminal_hyphens_completely(self) -> None:
+        for prefix, minimum in (("AIza", 30), ("glpat-", 16)):
+            for length in (minimum, minimum + 1, minimum + 16):
+                credential = prefix + "a" * (length - 1) + "-"
+                for before, after in (("Bearer ", ""), ("Bearer ", "."), ("(Bearer ", ")")):
+                    with self.subTest(prefix=prefix, length=length, before=before, after=after):
+                        result = scan_text(before + credential + after)
+                        self.assertEqual([finding.rule_id for finding in result.findings], ["bearer-token"])
+                        self.assertEqual(result.findings[0].match, "Bearer " + credential)
+                        self.assertEqual(result.redacted_text, before + "[redacted-secret]" + after)
+
+    def test_bearer_token_minimum_length_with_terminal_hyphen(self) -> None:
+        for length in (19, 20, 21):
+            credential = "a" * (length - 1) + "-"
+            with self.subTest(length=length):
+                result = scan_text("Bearer " + credential)
+                if length < 20:
+                    self.assertEqual(result.findings, [])
+                    self.assertEqual(result.redacted_text, "Bearer " + credential)
+                else:
+                    self.assertEqual([finding.rule_id for finding in result.findings], ["bearer-token"])
+                    self.assertEqual(result.findings[0].match, "Bearer " + credential)
+                    self.assertEqual(result.redacted_text, "Bearer [redacted-secret]")
+
+    def test_bearer_ascii_token_boundaries_preserve_unicode_context(self) -> None:
+        for terminal in ("+", "/", "=", "~", "-"):
+            for length in (19, 20, 21):
+                credential = "a" * (length - 1) + terminal
+                for following in ("é", "λ", "中", ".", ""):
+                    with self.subTest(terminal=terminal, length=length, following=following):
+                        text = "Bearer " + credential + following
+                        result = scan_text(text)
+                        if length < 20:
+                            self.assertEqual(result.findings, [])
+                            self.assertEqual(result.redacted_text, text)
+                        else:
+                            self.assertEqual([finding.rule_id for finding in result.findings], ["bearer-token"])
+                            self.assertEqual(result.findings[0].match, "Bearer " + credential)
+                            self.assertEqual(result.redacted_text, "Bearer [redacted-secret]" + following)
+
+    def test_worklore_provider_short_prefixes_and_embedded_tokens_do_not_match(self) -> None:
+        for text in (
+            "AsiaPacificCustomers",
+            "ASIA" + "a" * 16,
+            "asia" + "A" * 16,
+            "aiza" + "a" * 30,
+            "GLPAT-" + "a" * 16,
+            "ASIAEXAMPLE",
+            "ASIA" + "A" * 15,
+            "ASIA" + "A" * 17,
+            "ASIA" + "A" * 16 + "_",
+            "AIza" + "a" * 29,
+            "glpat-demo",
+            "glpat-" + "a" * 15,
+            "xASIA" + "A" * 16,
+            "_ASIA" + "A" * 16,
+            "xAIza" + "a" * 30,
+            "_AIza" + "a" * 30,
+            "xglpat-" + "a" * 16,
+            "_glpat-" + "a" * 16,
+        ):
             with self.subTest(text=text):
                 self.assertNotIn("bare-token-prefix", {f.rule_id for f in scan_text(text).findings})
 

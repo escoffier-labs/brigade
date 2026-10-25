@@ -26,6 +26,46 @@ from .work_cmd import claiming, ledger
 ACTIONS = frozenset({"reap", "release-claim", "escalate"})
 TERMINAL = frozenset({"complete", "failed", "orphaned"})
 ESCALATE_STATES = frozenset({"dead", "stalled", "zombie", "stranded", "lost-worktree", "unknown"})
+DESTRUCTIVE = frozenset({"reap", "release-claim"})
+MASS_FAULT_STATES = ("dead", "stalled")
+MASS_FAULT_MAX_COUNT = 5
+MASS_FAULT_MAX_FRACTION = 0.5
+# A two-lane workspace with both lanes dead is plausible after one crash, so
+# the fraction rule only applies once enough lanes are affected.
+MASS_FAULT_FRACTION_MIN_COUNT = 3
+
+
+def environment_fault(
+    rows: list[dict[str, Any]],
+    *,
+    max_count: int = MASS_FAULT_MAX_COUNT,
+    max_fraction: float = MASS_FAULT_MAX_FRACTION,
+) -> dict[str, Any] | None:
+    """Flag a pass where so many lanes read dead or stalled that the host or network is suspect.
+
+    A sleeping host, dropped network, or unreachable Hub can make healthy lanes
+    look dead together. Over either threshold, patrol must not repair anything.
+    """
+    counts = {state: sum(row["state"] == state for row in rows) for state in MASS_FAULT_STATES}
+    affected = sum(counts.values())
+    fraction = affected / len(rows) if rows else 0.0
+    exceeded = []
+    if affected > max_count:
+        exceeded.append("count")
+    if affected >= MASS_FAULT_FRACTION_MIN_COUNT and fraction > max_fraction:
+        exceeded.append("fraction")
+    if not exceeded:
+        return None
+    return {
+        "kind": "suspected_environment_fault",
+        **counts,
+        "affected": affected,
+        "lanes": len(rows),
+        "fraction": round(fraction, 4),
+        "max_count": max_count,
+        "max_fraction": max_fraction,
+        "exceeded": exceeded,
+    }
 
 
 def _published(directory: Path) -> bool:
