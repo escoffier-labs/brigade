@@ -211,6 +211,109 @@ def test_wall_clock_and_dispatch_enforced_before_new_work():
     assert wall.exhausted is True
 
 
+@pytest.mark.parametrize("authoritative", [False, True], ids=["legacy", "authoritative"])
+@pytest.mark.parametrize("together", [False, True], ids=["separate-reservations", "same-reservation"])
+def test_budget_thresholds_allow_multiple_seats_with_real_lifecycle_journal(
+    tmp_path, monkeypatch, authoritative, together
+):
+    """Budget facts must not prevent subsequent durable dispatch requests."""
+    from brigade import aboyeur, run_checkpoint, run_journal, run_lifecycle, runguard
+
+    monkeypatch.delenv("BRIGADE_RUN_JOURNAL_AUTHORITY", raising=False)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    run_dir = workspace / ".brigade" / "runs" / "budget-dispatch"
+    run_dir.mkdir(parents=True)
+    snapshot = {
+        "schema": "brigade.run.v1",
+        "status": "running",
+        "lock_workspace": str(workspace),
+        "lifecycle_journal_requested": True,
+        "approval_reference": {
+            key: "test-reference"
+            for key in (
+                "approval_id",
+                "source",
+                "fingerprint",
+                "source_fingerprint",
+                "contract_fingerprint",
+                "evidence_fingerprint",
+            )
+        },
+    }
+    if authoritative:
+        monkeypatch.setenv("BRIGADE_RUN_JOURNAL_AUTHORITY", "1")
+        snapshot["run_journal_authority_requested"] = True
+
+    with runguard.run_lock(workspace, run_dir=run_dir):
+        aboyeur._write_json(run_dir / "run.json", snapshot)
+        if authoritative:
+            aboyeur._write_json(run_dir / "run.json", snapshot)
+            assert aboyeur._resolve_authority_state(run_dir) == "authoritative"
+
+        def append_event(event_type, payload, idempotency_key):
+            event = run_lifecycle.record_lifecycle_event(
+                run_dir, workspace=workspace, event_type=event_type, payload=payload, idempotency_key=idempotency_key
+            )
+            # Observe coverage before a dispatch checkpoint can mask a gap.
+            assert (
+                run_checkpoint.recover_from_checkpoint(run_dir, json.loads((run_dir / "run.json").read_bytes()))[
+                    "status"
+                ]
+                == "running"
+            )
+            return event
+
+        now = datetime(2026, 1, 1, tzinfo=timezone.utc)
+        coordinator = run_budget.BudgetCoordinator(
+            declaration=run_budget.RunBudgetDeclaration(
+                wall_clock_seconds=100, worker_dispatch_count=4, threshold_pct=50
+            ),
+            append_event=append_event,
+            clock=lambda: now,
+        )
+        coordinator.set_started_at(now - timedelta(seconds=10 if together else 60))
+        for seat in ("seat-a", "seat-b", "seat-c"):
+            if together and seat == "seat-b":
+                now += timedelta(seconds=60)
+
+            def record_requested(attempt, seat=seat):
+                event = run_lifecycle.record_dispatch_fact(
+                    run_dir, workspace=workspace, event_type="run.dispatch.requested", seat=seat, attempt=attempt
+                )
+                assert event is not None
+                return event.payload["attempt"]
+
+            assert (
+                coordinator.reserve_and_record_dispatch(
+                    seat=seat,
+                    allocate_attempt=lambda seat=seat: run_lifecycle.allocate_next_dispatch_attempt(run_dir, seat),
+                    record_requested=record_requested,
+                )
+                == 1
+            )
+        assert coordinator.projection.used["worker_dispatch_count"] == 3
+
+    report = run_journal.read_journal_bounded(run_dir / "events/lifecycle.jsonl")
+    assert report.partial_tail is None and not report.chain_errors
+    thresholds = [event for event in report.events if event.event_type == "run_budget.threshold_reached"]
+    assert [event.payload["dimension"] for event in thresholds] == ["wall_clock_seconds", "worker_dispatch_count"]
+    for fact in thresholds:
+        checkpoint = report.events[fact.sequence - 2]
+        assert checkpoint.event_type == run_checkpoint.CHECKPOINT_EVENT_TYPE
+        assert checkpoint.payload["paired_event_type"] == fact.event_type
+    assert (
+        report.events[thresholds[0].sequence - 2].idempotency_key
+        != report.events[thresholds[1].sequence - 2].idempotency_key
+    )
+    requested = [event for event in report.events if event.event_type == "run.dispatch.requested"]
+    assert [(event.payload["seat"], event.payload["attempt"]) for event in requested] == [
+        ("seat-a", 1),
+        ("seat-b", 1),
+        ("seat-c", 1),
+    ]
+
+
 def test_threshold_denial_exhaustion_cancel_reconcile_idempotent_under_recovery():
     recorded: list[tuple[str, str]] = []
 

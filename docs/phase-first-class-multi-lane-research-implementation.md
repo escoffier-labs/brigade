@@ -2004,13 +2004,14 @@ git commit -m "feat: make research runs durable"
 
 ```python
 def test_doctor_reports_each_lane_without_profile_paths(monkeypatch, tmp_path: Path) -> None:
+    profile = "/".join(("", "home", "example-user", ".config", "browser"))
     monkeypatch.setattr("brigade.research.doctor.shutil.which", lambda name: f"/usr/bin/{name}")
     payload = doctor_payload(
         tmp_path,
         roster=doctor_roster(),
         probe=lambda _agent: {
             "auth_status": "authenticated",
-            "detail": "profile=/home/alice/.config/browser secret-cookie-value Bearer abcdef",
+            "detail": f"profile={profile} secret-cookie-value Bearer abcdef",
         },
     )
 
@@ -2025,6 +2026,7 @@ def test_doctor_reports_each_lane_without_profile_paths(monkeypatch, tmp_path: P
     gemini = next(lane for lane in payload["lanes"] if lane["capability"] == "research.browser-discover")
     assert gemini["concurrency"] == 1
     assert gemini["read_only"] is True
+    assert profile not in json.dumps(payload)
     assert "/home/" not in json.dumps(payload)
     assert "secret-cookie-value" not in json.dumps(payload)
     assert "Bearer " not in json.dumps(payload)

@@ -5,7 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "brigade-cli"
 version = "0.31.0"
-description = "Track work, verify results, carry memory, and sync MCP servers, tools, and skills across coding agents."
+description = "Run coding agents anywhere and keep one record of the work, with MCP servers, tools, skills, and memory in sync across your harnesses."
 readme = "README.md"
 requires-python = ">=3.10"
 license = { text = "MIT" }
@@ -25,9 +25,10 @@ classifiers = [
 dependencies = []
 
 [project.optional-dependencies]
-dev = ["pytest>=7", "pytest-cov>=5", "pytest-xdist>=3.6", "ruff>=0.15", "mypy>=1.11"]
+mesh = ["cryptography>=48,<52"]
+dev = ["cryptography>=48,<52", "pytest>=7", "pytest-cov>=5", "pytest-xdist>=3.6", "ruff>=0.17.1", "mypy>=2.4.0"]
 grokbot = ["mcp>=2,<3", "pyjwt[crypto]>=2"]
-research = ["playwright>=1.40"]
+research = ["playwright>=1.64.0"]
 
 [project.urls]
 Homepage = "https://brigade.tools"

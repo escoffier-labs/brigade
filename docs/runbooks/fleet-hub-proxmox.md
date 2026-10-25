@@ -650,8 +650,9 @@ Upgrade the hub to schema 31 before enabling agent sends. Agents start with no
 send grants. A node may supply a display-only `--sender-label`. Agents cannot.
 Every new outbound agent message, including a reply, requires a matching send grant.
 
-Enroll using the administrator credential and stream the one-time token directly
-into a private file. Substitute an enrolled node ID for `example-node`. The token
+Enroll using the administrator credential and stream the token directly into a
+private file. The command prints it once, but it is derived from the
+administrator credential, so treat it as a secret rather than a single-use code. Substitute an enrolled node ID for `example-node`. The token
 file must be owned by the invoking effective user where the platform exposes an
 effective user ID, have no group or other access, and contain only the token,
 with no trailing newline.
@@ -764,7 +765,11 @@ curl --fail http://127.0.0.1:8933/mcp \
 The HTTP listener rejects non-loopback binds, untrusted Host/Origin headers,
 and missing or incorrect bearer tokens. It is stateless and serves no SSE stream.
 
-`fleet_send` accepts `to`, `body`, and optional `reply_to`, `kind`, and `thread`.
+`fleet_send` accepts `to`, `body`, and optional `reply_to`, `kind`, `thread`, and
+`client_id`. `fleet_reply` also accepts an optional `client_id`. Reuse that key
+with identical arguments for duplicate-free retries under the same credential.
+See the [Executor recipe](../fleet-mcp-executor.md) for annotations, explicit
+approval policy, retry limits and manual compatibility checks.
 It supplies the subject `Fleet message` and normal priority. `reply_to` must be
 an inbox message from `to`. Sends and replies use the existing durable offline
 spool and report `delivery` as `delivered` or `spooled`. `fleet_ack` accepts an
@@ -786,6 +791,22 @@ mail, it returns the page containing that arrival even for a full-history read.
 one hub page, with `limit` from 1 to 100. Pass `next_cursor` as `after` to read
 subsequent pages, or acknowledge consumed inbox messages to advance unread mail.
 
+For a body-free inbox total, call `fleet_inbox` with `count_only: true` or run
+`brigade fleet msg count --json` (with `--token-file` for an agent credential).
+Both use `POST /messages` with `{"action":"count"}` and return only
+`{"unread_count":N}`. The total covers the authenticated principal's entire
+unacknowledged, unexpired inbox. Count mode ignores the MCP wait, cursor,
+unacked-only and page options. It neither acknowledges mail nor writes retention
+cleanup. Older hubs without this action return HTTP 400, without a fallback
+that fetches message bodies. Existing inbox and sent calls keep their shapes.
+
+Sender acknowledgement views remain scoped to the authenticated sender.
+`fleet_sent` and `brigade fleet msg sent --id MESSAGE_ID --json` return
+`acked_at` and `acked_by`, initially null. Send grants still govern new agent
+messages and replies. Removing a grant does not hide the sender's own history.
+A revoked token receives HTTP 401 at authentication. A principal revoked after
+authentication receives HTTP 403 from the active-principal query guard.
+
 Message results combine subject, reference, and body inside one untrusted data
 block in `body`. The original `subject` and `ref` fields are omitted. Scans cover
 all three fields and report counts without repeating peer-authored excerpts.
@@ -794,7 +815,138 @@ Fences use random per-call markers and neutralize embedded fence prefixes.
 Node credentials can deliberately list all active agent principals and their
 labels through `fleet_who`. Agent credentials see only recipients allowed by
 their grants. Session filtering by permitted nodes happens before the row limit.
+`fleet_who` and `fleet_claims` accept `limit` from 1 to 500 (default 200).
+For `fleet_who`, this limits nodes and principals. Sessions keep their separate
+upstream row bounds and are split across pages only by the byte budget.
+Pass the opaque `next_cursor` back as `cursor` with the same query to continue
+until `next_cursor` is null. Continuation pages retain the original snapshot
+while checking the caller's current permissions. Start a new query to see
+enrollments or claim changes made after that snapshot.
+Upgrade the hub before the clients. A new MCP client against an older hub
+retries `fleet_who` and `fleet_claims` once without `limit` and `cursor` if the
+hub rejects those arguments. A truncated legacy response from either tool
+returns `paging_continuation_unsupported`.
+Requests opt in to snapshots by sending `limit` or `cursor`. Legacy requests
+receive the first page without storing a snapshot. Legacy `who` requests without
+`limit` return at most 200 nodes and 200 principals, with `truncated: true` when
+more rows remain. Completed walks delete their
+snapshots. Snapshots expire after 10 minutes. Storage is capped at eight snapshots
+and 16 MiB per caller, 128 snapshots and 64 MiB across the hub, and 16 MiB per
+snapshot. A full caller budget evicts that caller's least recently accessed walk. Global saturation
+evicts the least recently accessed snapshot across callers if its last access
+was more than 60 seconds ago, repeating until the new snapshot fits. Continuations
+refresh last access time. If every snapshot was accessed within 60 seconds,
+the hub returns HTTP 429 with `paging_snapshot_capacity`.
+Expired, evicted, and completed cursors return HTTP 400 with
+`paging_cursor_expired`. Retrying the same cursor cannot succeed, so MCP marks
+this error permanent and adds a `hint` to restart the walk without a cursor. A
+new MCP client that sends a cursor to a hub that predates paging gets the same
+error instead of an unpaged first page, so a mid-walk rollback never repeats
+rows. Cursors are opaque but do not authenticate offsets: callers
+can skip or rewind within their own snapshot. Pages also enforce a serialized
+byte budget below the client cap.
+
+Accepted limits of the paging design:
+
+- Replaying a cursor refreshes the snapshot's last access time, so a client that
+  keeps re-sending one cursor keeps its snapshot out of idle reclamation.
+- Idle time is wall-clock time on the hub, so a clock step changes when a
+  snapshot becomes reclaimable.
+- A cursor that belongs to another caller returns `paging_cursor_expired`, the
+  same as an unknown cursor. A distinct code would reveal whether someone else's
+  snapshot exists.
 Node `fleet_claims` results match `GET /claims`, including active Grok Bot lease
 rows. Agent claim results include only granted owner nodes and omit `job`,
-`session`, and `owner_conductor`. Directory and claim reads use a read transaction
-that checks the caller's active status within the same snapshot.
+`session`, and `owner_conductor`. Small directory and claim reads use a read
+transaction. Creating or continuing a snapshot takes write admission and
+rechecks the caller's active status and grants before saving it.
+
+### Operator questions
+
+`fleet_ask_user` accepts `question`, optional `timeout_secs` from 1 to 120
+(default 60), and an optional `request_id`. It returns `status: answered` with
+the exact operator `answer`, or `status: timeout`, together with hub audit identifiers.
+The caller comes from the station's existing node or agent credential. Tool
+arguments cannot choose a caller, operator, credential, answer, or answer source.
+
+Set `BRIGADE_FLEET_OPERATOR_RECIPIENT` in the **hub service environment** to an
+existing dedicated `agent:` message principal, for example `agent:operator`.
+Node IDs and the admin are rejected. Enroll this principal separately and keep
+its token in the operator-only inbox client. No fleet station, hook, or MCP
+server should load it by default. The operator must be active and different
+from the caller. Agent send grants must permit the question and the operator's reply. The station sends each
+question to that recipient's inbox and records its audit atomically before
+opening a desktop prompt. Questions are never spooled for later prompting.
+The hub assigns these messages the reserved `kind=operator_question`. Ordinary
+send and reply requests, including the MCP tool and CLI, reject this kind.
+Automatic live inbox delivery skips only `operator_question`. Peer-to-peer
+`kind=question` messages still reach live sessions. Both kinds remain visible
+through the inbox and message CLI. Schema 43 upgrades only legacy messages
+referenced by `fleet_questions`, preserving peer questions.
+
+On a Linux desktop with `DISPLAY` or `WAYLAND_DISPLAY`, the station tries an
+installed `zenity` entry dialog or `kdialog` input box. Text is displayed as data
+under a fixed title with the authenticated caller and question ID on the first
+line. The preview is limited to 512 characters and eight lines. The dialog
+points to the full question in the operator's hub inbox. Missing,
+failed, cancelled, or timed-out dialogs fall back to the operator inbox. An
+installed `notify-send` can announce that inbox question. No desktop dependency
+is installed. The operator answers by replying to the question message with
+`fleet_reply` or the existing message CLI.
+
+Desktop helpers receive only display, session, locale, and required operating
+system settings. Fleet and other credential environment variables are excluded.
+An inbox answer closes an open dialog on the next status check. A temporary
+status-read failure keeps the dialog open within the original deadline.
+Zenity also receives its own timeout. Kdialog cleanup depends on the station
+remaining alive.
+
+The hub records the first answer received before its deadline. A desktop answer
+is local input from a human at the asking machine. Its result has
+`source: "desktop"`, `operator_authenticated: false`, and
+`answered_at_local_desktop: true`, inside a `desktop-local` content fence.
+The hub audit records it as `caller_reported_desktop`. An authenticated inbox
+reply has source
+`operator_reply`. Only an accepted reply from the configured operator has
+`operator_authenticated: true` and returns the exact answer as operator input.
+The result includes the hub-selected `operator` and authenticated `answered_by`.
+A peer message cannot set these audit fields or answer another recipient's question.
+Desktop input does not verify operator identity. Hub-inbox answers from the
+dedicated operator principal are operator-authenticated against the hub.
+The audit copies the question, answer, identities, source, and timestamps, so
+acknowledging or pruning message links cannot erase an accepted answer. Audit
+retention removes records older than 90 days on the next question operation.
+Expired pending questions also become timeout records on that operation,
+without a background timer. A late operator reply records the first
+`late_answer_message_id` and `late_answered_at`, including when the reply
+arrives before the next status read. It remains a timeout and is never
+returned as an authoritative answer. After a desktop answer, the first operator
+inbox reply is recorded separately in `operator_reply_after_desktop_message_id`
+and `operator_reply_after_desktop_at`. Later replies cannot overwrite these
+fields, replace the desktop answer, or make it operator-authenticated.
+Question messages remain in the operator inbox until the operator acknowledges
+them, including questions answered on the desktop or timed out. Existing inbox quotas apply.
+
+Operator authority currently depends on hub-returned fields. Questions and
+answers are stored in plaintext in `fleet_questions`, and the reply trigger
+copies the message body into `answer`. A compromised hub or anyone with write
+access to its database could fabricate an operator-authenticated answer.
+Signed, sealed answers are planned in the [agent mesh design, slice 7b
+(PR #2013)](https://github.com/escoffier-labs/brigade/pull/2013).
+
+The wait uses the existing inbox long-poll in slices of at most 20 seconds and
+never acknowledges unrelated messages. The hub permits two pending questions
+per caller across station processes. Resuming an existing request does not use
+another slot. Each station process also limits concurrent asks to two. The
+entire call shares a five-second transport and cleanup grace beyond
+`timeout_secs`. An outage returns a structured error with `request_id` and,
+when creation was confirmed, `question_id`. Retry the same question and timeout
+with that `request_id` to resume its audit and original deadline. Retries do not
+create another question or open another dialog. Only the credential generation
+that created a question can resume it after an outage.
+
+Changing the question or timeout requires a new `request_id`. Inbox replies
+remain unacknowledged for the caller's normal inbox consumer. Two pending asks
+can occupy the caller's two long-poll slots, causing other waits to use their
+existing polling fallback. A stdio station serves one tool call at a time,
+so other tools on that process wait for the ask to finish.

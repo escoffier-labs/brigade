@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import json
 import sys
+from dataclasses import replace
 from pathlib import Path
+from typing import Any
 
 from . import agents
 from . import doctor as doctor_mod
@@ -344,6 +347,92 @@ def _doctor_health_status(result: seat_health.SeatHealthResult) -> str:
     if result.status == "degraded" and incomplete_only:
         return doctor_mod.INFO
     return doctor_mod.WARN
+
+
+def ready(
+    target: Path,
+    *,
+    workers: tuple[str, ...],
+    concurrency: int = 1,
+    route: str = "brigade",
+    isolation: str = "shared",
+    capability: str | None = None,
+    roster_path: Path | None = None,
+    json_output: bool = False,
+    health_probe: seat_health.SeatHealthProbe | None = None,
+) -> int:
+    """Operation inspection does not dispatch, reserve capacity, or apply fallbacks."""
+    from . import fleet_client, roster_readiness, run_preference
+
+    target = target.expanduser()
+    if not target.is_dir():
+        report: dict[str, Any] = {
+            "schema": roster_readiness.SCHEMA,
+            "status": "blocked",
+            "exit_code": 2,
+            "limiting_reason": "target-unusable",
+            "evidence": [
+                {
+                    "category": "target",
+                    "status": "failed",
+                    "reason": "target-not-directory",
+                    "detail": f"workspace target is not an existing directory: {target}",
+                    "freshness": "current",
+                    "action": "Choose an existing workspace directory with --target.",
+                }
+            ],
+        }
+    else:
+        try:
+            resolution = roster_mod.resolve_roster(target, roster_path)
+            loaded = replace(roster_mod.load_roster(resolution.path), resolution=resolution)
+            loaded = run_preference.apply_to_roster(loaded, run_preference.load_cached())
+            request = roster_readiness.ReadinessRequest(workers, concurrency, route, isolation, capability)
+            report = roster_readiness.inspect_readiness(
+                loaded,
+                request,
+                workspace=target,
+                health_probe=health_probe,
+                hub_discovery_possible=bool(fleet_client.load_fleet_settings()["hub_url"]),
+            )
+        except (OSError, ValueError) as exc:
+            report = {
+                "schema": roster_readiness.SCHEMA,
+                "status": "blocked",
+                "exit_code": 2,
+                "limiting_reason": "roster-unavailable",
+                "evidence": [
+                    {
+                        "category": "roster",
+                        "status": "failed",
+                        "reason": "roster-unavailable",
+                        "detail": str(exc),
+                        "freshness": "current",
+                        "action": "Inspect the effective roster with brigade roster doctor.",
+                    }
+                ],
+            }
+    if json_output:
+        print(json.dumps(report, sort_keys=True, allow_nan=False))
+    else:
+        print(f"readiness: {report['status']} (exit {report['exit_code']})")
+        if "roster" in report:
+            source = report["roster"]
+            print(f"roster: {source['source']} {source['path']}")
+            print(
+                f"workers: usable={report['usable_worker_count']} structural={report['structural_worker_count']} "
+                f"configured_limit={report['configured_limit']} admitted_capacity={report['admitted_capacity']}"
+            )
+            for seat in report["selected_seats"]:
+                print(f"seat: {seat['name']} selection_role={seat['selection_role']} role={seat['role']}")
+        for item in report["evidence"]:
+            seat_label = f" seat={item['seat']}" if item.get("seat") else ""
+            print(f"{item['category']}{seat_label}: {item['status']} freshness={item['freshness']} {item['reason']}")
+            if item.get("detail"):
+                print(f"  {item['detail']}")
+            if item.get("action"):
+                print(f"  next: {item['action']}")
+    return int(report["exit_code"])
 
 
 def doctor(
