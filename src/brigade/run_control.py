@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import hmac
 import json
+import re
 import secrets
 import socket
 import sys
@@ -11,7 +12,7 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 
 _CLIENT_TIMEOUT_SECONDS = 5.0
 NO_ACTIVE_TURN = "no-active-turn"
@@ -88,78 +89,167 @@ class ActiveTurn:
     thread: Any
     thread_id: str
     turn_id: str
+    task_id: str | None = None
+    attempt_id: str | None = None
+
+
+def _validate_assignment_ids(task_id: object, attempt_id: object) -> tuple[str | None, str | None]:
+    for name, value in (("task_id", task_id), ("attempt_id", attempt_id)):
+        if value is not None and (
+            not isinstance(value, str) or re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,127}", value) is None
+        ):
+            raise ControlError(f"{name} must be a 1-128 character ASCII identifier", code="invalid-target")
+    if attempt_id is not None and task_id is None:
+        raise ControlError("attempt_id requires task_id", code="invalid-target")
+    return cast(str | None, task_id), cast(str | None, attempt_id)
 
 
 class LiveTurnRegistry:
-    """Thread-safe registry of worker names to their current app-server turn."""
+    """Thread-safe assignment slots with unambiguous legacy worker aliases."""
 
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self._active: dict[str, ActiveTurn] = {}
+        self._active: dict[tuple[str, str, str | None], ActiveTurn] = {}
 
-    def register(self, worker: str, thread: Any, turn_id: str) -> None:
+    @staticmethod
+    def _key(worker: str, task_id: str | None, attempt_id: str | None) -> tuple[str, str, str | None]:
+        return ("task", task_id, attempt_id) if task_id is not None else ("worker", worker, None)
+
+    def register(
+        self, worker: str, thread: Any, turn_id: str, *, task_id: str | None = None, attempt_id: str | None = None
+    ) -> ActiveTurn:
+        """Replace a slot and return its immutable cleanup ownership handle."""
+        _validate_assignment_ids(task_id, attempt_id)
         thread_id = getattr(thread, "thread_id", "")
+        active = ActiveTurn(worker, thread, thread_id, turn_id, task_id, attempt_id)
         with self._lock:
-            self._active[worker] = ActiveTurn(worker=worker, thread=thread, thread_id=thread_id, turn_id=turn_id)
+            self._active[self._key(worker, task_id, attempt_id)] = active
+        return active
 
-    def unregister(self, worker: str, turn_id: str) -> None:
+    def unregister(
+        self,
+        worker: str,
+        turn_id: str,
+        *,
+        task_id: str | None = None,
+        attempt_id: str | None = None,
+        registration: ActiveTurn | None = None,
+    ) -> None:
+        """Remove a matching slot, checking ownership when a handle is supplied."""
+        _validate_assignment_ids(task_id, attempt_id)
+        key = self._key(worker, task_id, attempt_id)
         with self._lock:
-            active = self._active.get(worker)
-            if active is not None and active.turn_id == turn_id:
-                self._active.pop(worker, None)
+            active = self._active.get(key)
+            # Provider IDs may repeat, even on the same thread. Compare the exact
+            # registration object, not dataclass equality or provider identity.
+            if registration is not None and active is not registration:
+                return
+            if active is not None and active.worker == worker and active.turn_id == turn_id:
+                self._active.pop(key, None)
 
-    def steer(self, worker: str, text: str) -> dict[str, object]:
+    def snapshot(self) -> tuple[ActiveTurn, ...]:
+        """Return immutable slot records without holding a lock during provider calls."""
+        with self._lock:
+            return tuple(self._active.values())
+
+    def steer(
+        self,
+        worker: str | None = None,
+        text: str = "",
+        *,
+        task_id: str | None = None,
+        attempt_id: str | None = None,
+    ) -> dict[str, object]:
         if not text.strip():
             raise ControlError("steer text must not be empty")
-        active = self._require_worker(worker)
+        if worker is None and task_id is None:
+            raise ControlError("steer requires worker or task_id", code="invalid-target")
+        active = self._turns(worker, task_id=task_id, attempt_id=attempt_id)[0]
         active.thread.steer(text, active.turn_id)
-        return {
+        response: dict[str, object] = {
             "ok": True,
             "worker": active.worker,
             "thread_id": active.thread_id,
             "turn_id": active.turn_id,
         }
+        if active.task_id is not None:
+            response.update(task_id=active.task_id, attempt_id=active.attempt_id)
+        return response
 
-    def interrupt(self, worker: str | None = None) -> dict[str, object]:
-        turns = self._turns(worker)
-        if not turns:
-            target = f" for worker {worker!r}" if worker else ""
-            raise ControlError(f"no active turn{target}", code=NO_ACTIVE_TURN)
+    def interrupt(
+        self, worker: str | None = None, *, task_id: str | None = None, attempt_id: str | None = None
+    ) -> dict[str, object]:
+        """Acknowledge interrupt requests, without asserting execution containment."""
+        turns = self._turns(worker, task_id=task_id, attempt_id=attempt_id)
         interrupted: list[str] = []
         for active in turns:
             active.thread.interrupt(active.turn_id)
             interrupted.append(active.worker)
-        return {"ok": True, "interrupted": len(interrupted), "workers": interrupted}
+        response: dict[str, object] = {"ok": True, "interrupted": len(interrupted), "workers": interrupted}
+        tasks = [
+            {"task_id": active.task_id, "attempt_id": active.attempt_id}
+            for active in turns
+            if active.task_id is not None
+        ]
+        if tasks:
+            response["tasks"] = tasks
+        return response
 
     def interrupt_observed(self, workers: tuple[str, ...]) -> tuple[tuple[tuple[str, str], ...], tuple[str, ...]]:
-        """Request per-seat interruption and return bounded, provider-safe observations."""
-        outcomes: list[tuple[str, str]] = []
-        for worker in workers:
-            active = self._turns(worker)
-            if not active:
+        """Interrupt every matching turn, aggregating acknowledgements per seat."""
+        selected = frozenset(workers)
+        results: dict[str, str] = {}
+        for active in self.snapshot():
+            worker = active.worker
+            if worker not in selected:
                 continue
             try:
-                active[0].thread.interrupt(active[0].turn_id)
+                active.thread.interrupt(active.turn_id)
             except Exception:
-                outcomes.append((worker, "error"))
+                results[worker] = "error"
             else:
-                outcomes.append((worker, "interrupted"))
-        active_workers = tuple(active.worker for active in self._turns(None) if active.worker in workers)
-        return tuple(outcomes), active_workers
+                results.setdefault(worker, "interrupted")
+        active_workers = {active.worker for active in self.snapshot() if active.worker in selected}
+        ordered_workers = tuple(dict.fromkeys(workers))
+        return (
+            tuple((worker, results[worker]) for worker in ordered_workers if worker in results),
+            tuple(worker for worker in ordered_workers if worker in active_workers),
+        )
 
-    def _require_worker(self, worker: str) -> ActiveTurn:
-        with self._lock:
-            active = self._active.get(worker)
-        if active is None:
-            raise ControlError(f"no active turn for worker {worker!r}", code=NO_ACTIVE_TURN)
-        return active
-
-    def _turns(self, worker: str | None) -> list[ActiveTurn]:
-        with self._lock:
-            if worker:
-                active = self._active.get(worker)
-                return [active] if active is not None else []
-            return list(self._active.values())
+    def _turns(
+        self, worker: str | None, *, task_id: str | None = None, attempt_id: str | None = None
+    ) -> tuple[ActiveTurn, ...]:
+        _validate_assignment_ids(task_id, attempt_id)
+        if worker is not None and (not isinstance(worker, str) or not worker):
+            raise ControlError("worker must be a non-empty string", code="invalid-target")
+        if worker is not None and task_id is not None:
+            raise ControlError("worker and task_id are mutually exclusive", code="invalid-target")
+        turns = self.snapshot()
+        target = ""
+        if task_id is not None:
+            turns = tuple(
+                active
+                for active in turns
+                if active.task_id == task_id and (attempt_id is None or active.attempt_id == attempt_id)
+            )
+            target = f" for task {task_id!r}"
+            if attempt_id is not None:
+                target += f" attempt {attempt_id!r}"
+        elif worker is not None:
+            turns = tuple(active for active in turns if active.worker == worker)
+            target = f" for worker {worker[:128]!r}"
+        if not turns:
+            raise ControlError(f"no active turn{target}", code=NO_ACTIVE_TURN)
+        if target and len(turns) > 1:
+            identifiers = sorted(
+                f"{active.task_id}/{active.attempt_id or '<none>'}" if active.task_id is not None else "<legacy>"
+                for active in turns
+            )
+            available = ", ".join(identifiers[:10])
+            if len(identifiers) > 10:
+                available += f" (+{len(identifiers) - 10} more)"
+            raise ControlError(f"ambiguous active turn{target}: {available}", code="ambiguous-target")
+        return turns
 
 
 def _af_unix_available() -> bool:
@@ -340,19 +430,19 @@ class ControlServer:
             if not isinstance(token, str) or expected is None or not hmac.compare_digest(token, expected):
                 raise ControlError("control request denied", code="auth-denied")
         op = request.get("op")
+        worker = request.get("worker")
+        task_id, attempt_id = _validate_assignment_ids(request.get("task_id"), request.get("attempt_id"))
+        if worker is not None and (not isinstance(worker, str) or not worker):
+            raise ControlError("worker must be a non-empty string", code="invalid-target")
         if op == "steer":
-            worker = request.get("worker")
             text = request.get("text")
-            if not isinstance(worker, str) or not worker:
-                raise ControlError("steer requires worker")
+            if worker is None and task_id is None:
+                raise ControlError("steer requires worker or task_id", code="invalid-target")
             if not isinstance(text, str):
                 raise ControlError("steer requires text")
-            return self.registry.steer(worker, text)
+            return self.registry.steer(worker, text, task_id=task_id, attempt_id=attempt_id)
         if op == "interrupt":
-            worker = request.get("worker")
-            if worker is not None and (not isinstance(worker, str) or not worker):
-                raise ControlError("interrupt worker must be a non-empty string")
-            return self.registry.interrupt(worker)
+            return self.registry.interrupt(worker, task_id=task_id, attempt_id=attempt_id)
         raise ControlError(f"unknown control op: {op}")
 
 

@@ -6,6 +6,7 @@ its API while keeping the SQLite schema and primitive helpers in one core module
 
 from __future__ import annotations
 
+import json
 import sqlite3
 from types import ModuleType
 from typing import TYPE_CHECKING, Any, Mapping, Sequence
@@ -208,6 +209,10 @@ def record_attempt(
     actor_type: str = "operator",
     node_id: str | None = None,
     run_id: object | None = None,
+    is_admin: bool = False,
+    is_operator: bool = False,
+    generation: object = None,
+    holder_nonce: object = None,
 ) -> dict[str, Any]:
     """Record a bounded attempt, treating an authenticated run/action retry as a no-op."""
     actions = {
@@ -226,7 +231,12 @@ def record_attempt(
     )
 
     def _write() -> dict[str, Any]:
+        from . import worklore_campaigns as campaigns
+        from . import worklore_ownership as ownership
+
         current = _loaded_item(conn, work_id)
+        if action == "reset" and campaigns.member_campaign(conn, work_id) is not None and not (is_admin or is_operator):
+            raise WorkloreForbidden("operator token required", code="forbidden")
         if node_id is not None and action in {"started", "failed"}:
             _require_owned_fleet_run(conn, work_id, node_id=node_id, run_id=accepted_run_id)
         if accepted_run_id is not None:
@@ -237,6 +247,24 @@ def record_attempt(
             ).fetchone()
             if duplicate is not None:
                 return current
+        binding = ownership.require_campaign_write(
+            conn,
+            work_id,
+            current,
+            actor_id=actor_id,
+            is_admin=is_admin,
+            is_operator=is_operator,
+            generation=generation,
+            holder_nonce=holder_nonce,
+        )
+        if binding is not None:
+            execution = conn.execute(
+                "SELECT detail_json FROM work_events WHERE work_id=? AND event_type='execution-linked' "
+                "AND node_id=? AND run_id=? ORDER BY seq DESC LIMIT 1",
+                (work_id, actor_id, accepted_run_id),
+            ).fetchone()
+            if execution is None or json.loads(execution[0]).get("campaign_grant") != binding:
+                raise WorkloreConflict("execution belongs to another campaign grant", code="stale-generation")
         _require_version(current, expected_version)
         placeholders = ", ".join("?" for _ in _ATTEMPT_EVENT_TYPES)
         at_ceiling = conn.execute(
@@ -745,6 +773,9 @@ def link_execution(
     actor_id: str,
     actor_type: str = "node",
     is_admin: bool = False,
+    is_operator: bool = False,
+    generation: object = None,
+    holder_nonce: object = None,
 ) -> dict[str, Any]:
     """Join a Fleet Hub run to a Worklore item as a fleet-run link.
 
@@ -765,6 +796,31 @@ def link_execution(
             if existing["work_id"] == work_id:
                 return existing
             raise WorkloreConflict("fleet run is already linked to another work item", code="link-conflict")
+        from . import worklore_campaigns as campaigns
+        from . import worklore_ownership as ownership
+
+        # Links are a retained projection. Immutable execution events still reserve a
+        # campaign run after eviction, including against trusted operator observations.
+        # Unbound legacy history cannot acquire a campaign grant retroactively either.
+        history = conn.execute(
+            "SELECT 1 FROM work_events WHERE event_type='execution-linked' AND node_id=? AND run_id=? "
+            "AND (? OR json_extract(detail_json, '$.campaign_grant') IS NOT NULL) LIMIT 1",
+            (node_id, run_id, campaigns.member_campaign(conn, work_id) is not None),
+        ).fetchone()
+        if history is not None:
+            raise WorkloreConflict("historical campaign execution cannot be relinked", code="link-conflict")
+        binding = ownership.require_campaign_write(
+            conn,
+            work_id,
+            current,
+            actor_id=actor_id,
+            is_admin=is_admin,
+            is_operator=is_operator,
+            generation=generation,
+            holder_nonce=holder_nonce,
+        )
+        if binding is not None and isinstance(holder_nonce, str):
+            ownership._reject_nonce_echo({"node_id": node_id, "run_id": run_id}, None, holder_nonce)
         # Retention runs before the claim, so an item whose ceiling is already full of its
         # own past runs makes room for this one instead of refusing every future run.
         _trim_fleet_run_links(conn, work_id)
@@ -796,7 +852,7 @@ def link_execution(
             now=now,
             node_id=node_id,
             run_id=run_id,
-            detail={"external_key": link["external_key"]},
+            detail={"external_key": link["external_key"], **({"campaign_grant": binding} if binding else {})},
         )
         stored_link = _find_link(conn, "fleet-run", external_key)
         assert stored_link is not None

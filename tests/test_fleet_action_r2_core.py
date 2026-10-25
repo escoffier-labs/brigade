@@ -4,7 +4,9 @@ import json
 import os
 import re
 import sys
+import time
 from pathlib import Path
+from types import SimpleNamespace
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 
@@ -12,7 +14,7 @@ import pytest
 
 from brigade import fleet_hub, fleet_hub_actions as actions
 from brigade import fleet_action_auth as auth, fleet_action_sources as sources
-from tests.test_fleet_actions import setup_action, seed_t3_roster
+from tests.test_fleet_actions import backdate_action, setup_action, seed_t3_roster
 from tests.test_fleet_action_runner import broker_fixture, fake_executable, manifest
 from tests.test_fleet_action_http import action_hub, enable, fields, request_http
 from tests.test_fleet_sync import _event
@@ -130,6 +132,7 @@ def test_unrelated_success_never_clears_original_source(tmp_path, state, exit_st
 @pytest.mark.parametrize("completion", ["run.completed", "external.completed"])
 def test_exact_source_success_can_verify_itself(tmp_path, repo, completion):
     conn, action, _, _ = run_action(tmp_path, state="run.started", exit_status=None, repo=repo)
+    backdate_action(conn, action["action_id"])
     event = {
         **_event(node="node-fixture", run_id="source-run", state=completion),
         "sequence": 2,
@@ -139,6 +142,26 @@ def test_exact_source_success_can_verify_itself(tmp_path, repo, completion):
     }
     fleet_hub.store_events(conn, [event], caller_node="node-fixture")
     assert actions.show(conn, action["action_id"])["verification"] == "condition-cleared"
+    conn.close()
+
+
+@pytest.mark.parametrize("lag,verification", [(0, "pending"), (1, "condition-cleared")])
+def test_run_evidence_must_be_strictly_newer_than_the_action(tmp_path, monkeypatch, lag, verification):
+    start = float(int(time.time()))
+    monkeypatch.setattr(actions, "time", SimpleNamespace(time=lambda: start))
+    conn, action, _, _ = run_action(tmp_path, state="run.started", exit_status=None)
+    assert action["created_at"] == start
+    stamp = datetime.fromtimestamp(start + lag, timezone.utc).isoformat()
+    monkeypatch.setattr(fleet_hub, "_utc_now", lambda: stamp)
+    event = {
+        **_event(node="node-fixture", run_id="source-run", state="run.completed"),
+        "sequence": 2,
+        "repo_identity": "repo/fixture",
+        "exit_status": 0,
+        "ts": stamp,
+    }
+    fleet_hub.store_events(conn, [event], caller_node="node-fixture")
+    assert actions.show(conn, action["action_id"])["verification"] == verification
     conn.close()
 
 

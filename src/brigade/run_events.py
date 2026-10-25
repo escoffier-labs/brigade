@@ -193,6 +193,30 @@ EVENT_TYPES: dict[str, frozenset[str]] = {
         }
     ),
 }
+# Durable assignment facts use closed reference-only shapes, without changing
+# existing envelope bounds or the schema version.
+_TASK_EVENT_TYPES = frozenset({"task.accepted", "task.attempt-prepared", "task.observed", "task.acknowledged"})
+EVENT_TYPES.update(
+    {
+        "task.accepted": frozenset({"task_id", "request_id", "seat", "payload_digest", "spec_digest"}),
+        "task.attempt-prepared": frozenset({"task_id", "attempt_id"}),
+        "task.observed": frozenset(
+            {
+                "task_id",
+                "attempt_id",
+                "status",
+                "provider_task_id",
+                "original_run_id",
+                "provider_result_id",
+                "result_id",
+                "artifact_kind",
+                "artifact_digest",
+                "containment",
+            }
+        ),
+        "task.acknowledged": frozenset({"task_id", "result_id"}),
+    }
+)
 CONTROL_FAILURE_CLASSES = frozenset({"transport_exception", "transport_rejected", "transport_protocol_error"})
 APPROVAL_DECISION_STATES = frozenset({"pending", "approved", "rejected", "held", "consumed"})
 APPROVAL_DECISION_EVENT_STATES = {
@@ -200,7 +224,7 @@ APPROVAL_DECISION_EVENT_STATES = {
     "approval.rejected": "rejected",
     "approval.held": "held",
 }
-_SCHEMA_V2_EVENT_TYPES = frozenset({"approval", "run.ship", "run.merge"})
+_SCHEMA_V2_EVENT_TYPES = frozenset({"approval", "run.ship", "run.merge"}) | _TASK_EVENT_TYPES
 _REQUIRED_PAYLOAD_FIELDS: dict[str, frozenset[str]] = {
     "approval": frozenset(
         {
@@ -432,6 +456,10 @@ def build_event(
 def _validate_payload(event_type: str, payload: Any) -> None:
     if not isinstance(payload, Mapping):
         raise CanonicalizationError("payload must be an object")
+    if event_type in _TASK_EVENT_TYPES:
+        from brigade.run_task_journal import validate_payload
+
+        validate_payload(event_type, payload)
     allowed = EVENT_TYPES[event_type]
     extra = set(payload.keys()) - allowed
     if extra:
@@ -576,11 +604,18 @@ def validate_event(env: Any) -> list[str]:
         return errors
 
     # Recompute digests and event_id for content binding (only when structurally valid).
+    assert isinstance(event_type, str)
+    assert isinstance(idempotency_key, str)
     try:
+        recomputed_request_digest = request_digest(
+            event_type=event_type, payload=env["payload"], idempotency_key=idempotency_key
+        )
         recomputed_digest = compute_event_digest(env)
     except CanonicalizationError as exc:
         errors.append(_bound(f"envelope is not canonicalizable: {exc}"))
         return errors
+    if request_digest_value != recomputed_request_digest:
+        errors.append("request_digest does not match recomputed digest")
     if event_digest != recomputed_digest:
         errors.append(_bound("event_digest does not match recomputed digest"))
     assert isinstance(run_id, str)

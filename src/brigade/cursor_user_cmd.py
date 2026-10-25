@@ -12,6 +12,32 @@ from . import __version__, component_bins, harness_profiles, localio
 STATE_VERSION = 1
 MANAGED_MCP_NAMES = ("brigade", "graphtrail", "miseledger")
 _MANAGED_HOOK_EVENTS = ("sessionStart", "postToolUse", "sessionEnd")
+# https://cursor.com/docs/hooks#hook-events (retrieved 2026-10-22)
+_SUPPORTED_HOOK_EVENTS = frozenset(
+    {
+        "sessionStart",
+        "sessionEnd",
+        "preToolUse",
+        "postToolUse",
+        "postToolUseFailure",
+        "subagentStart",
+        "subagentStop",
+        "beforeShellExecution",
+        "afterShellExecution",
+        "beforeMCPExecution",
+        "afterMCPExecution",
+        "beforeReadFile",
+        "afterFileEdit",
+        "beforeSubmitPrompt",
+        "preCompact",
+        "stop",
+        "afterAgentResponse",
+        "afterAgentThought",
+        "beforeTabFileRead",
+        "afterTabFileEdit",
+        "workspaceOpen",
+    }
+)
 _MAX_HOOKS_JSON_BYTES = 1_048_576
 _HOOKS_DOCUMENT_VERSION = 1
 _OVERSIZE_ERROR = "hooks configuration exceeds 1 MiB size limit"
@@ -234,6 +260,8 @@ def _hooks_document_error(doc: dict[str, Any]) -> str | None:
     if not isinstance(hooks, dict):
         return "existing hooks field must be an object"
     for event, entries in hooks.items():
+        if version == _HOOKS_DOCUMENT_VERSION and event not in _SUPPORTED_HOOK_EVENTS:
+            return f"existing hooks configuration has unknown event: {event}"
         if not isinstance(entries, list):
             return f"existing {event} hooks must be a list"
         if not all(_is_hook_definition(entry) for entry in entries):

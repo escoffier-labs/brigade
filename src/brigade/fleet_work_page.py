@@ -139,7 +139,7 @@ def render(page: Mapping[str, Any], *, nonce: str, now: datetime) -> str:
     blocks = "".join(_item(item) for item in items[:PAGE_SIZE])
     if not blocks:
         blocks = '<section class="panel"><p class="empty">No Worklore tasks on this page.</p></section>'
-    pagination = '<nav class="deck-nav" aria-label="Worklore pages"><a href="/deck/work">First page</a>'
+    pagination = '<nav class="pager" aria-label="Worklore pages"><a href="/deck/work">First page</a>'
     cursor = page.get("next_cursor")
     if cursor:
         href = "/deck/work?" + urlencode({"cursor": cursor})

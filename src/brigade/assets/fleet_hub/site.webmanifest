@@ -3,8 +3,8 @@
   "short_name": "Fleet Hub",
   "start_url": "/",
   "display": "standalone",
-  "theme_color": "#111617",
-  "background_color": "#182022",
+  "theme_color": "#0a0a0a",
+  "background_color": "#0a0a0a",
   "icons": [
     {
       "src": "/icon-192.png",
