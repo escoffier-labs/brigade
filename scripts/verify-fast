@@ -20,4 +20,4 @@ PY=${PY:-.venv/bin}
 "$PY/python" scripts/managed_snapshot.py --check
 "$PY/python" scripts/template_profile_snapshot.py --check
 JOBS=${JOBS:-auto}
-"$PY/pytest" -q -n "$JOBS" --cov=brigade --cov-report=term --cov-fail-under=78
+"$PY/pytest" -q -n "$JOBS" --cov="$PWD/src/brigade" --cov-report=term --cov-fail-under=78

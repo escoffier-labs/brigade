@@ -33,7 +33,6 @@ def test_module_argv_runs_exact_package_without_ambient_imports(tmp_path, monkey
     sentinel = tmp_path / "executed"
     (installed / "optional_dependency.py").write_text("VALUE = 'installed dependency'\n", encoding="utf-8")
     hostile_source = f"from pathlib import Path\nPath({str(sentinel)!r}).touch()\n"
-    (installed / "platform.py").write_text(hostile_source, encoding="utf-8")
     (installed / "hostile.pth").write_text(
         f"import pathlib; pathlib.Path({str(sentinel)!r}).touch()\n{workspace}\n", encoding="utf-8"
     )
@@ -41,9 +40,13 @@ def test_module_argv_runs_exact_package_without_ambient_imports(tmp_path, monkey
     planted = workspace / shadow
     planted.parent.mkdir(parents=True, exist_ok=True)
     planted.write_text(f"from pathlib import Path\nPath({str(sentinel)!r}).touch()\n", encoding="utf-8")
+    # Coverage may import platform while starting this ordinary launcher.
+    # Plant its shadow after startup, before invoking the isolated child.
     launcher = tmp_path / "launch.py"
     launcher.write_text(
-        "import os, subprocess, sys\nfrom brigade.isolated_exec import module_argv, trusted_cwd\n"
+        "import os, subprocess, sys\nfrom pathlib import Path\n"
+        "from brigade.isolated_exec import module_argv, trusted_cwd\n"
+        f"Path({str(installed / 'platform.py')!r}).write_text({hostile_source!r}, encoding='utf-8')\n"
         f"os.environ['PYTHONPATH'] = {str(workspace)!r}\n"
         "argv = module_argv('brigade.isolation_probe', 'space argument', '--flag', python=None)\n"
         "assert '\\n' not in argv[3]\n"
