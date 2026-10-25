@@ -1339,7 +1339,7 @@ class TestBoardBounds:
         monkeypatch.setattr(
             fleet_hub_http.fleet_hub_messages,
             "unread_counts",
-            lambda _conn: {node_id: 1 for node_id in node_ids},
+            lambda _conn, *, storage_policy=None: {node_id: 1 for node_id in node_ids},
         )
 
         _status, _headers, first = _request(hub, "GET", "/view/machines", headers=_bearer())
@@ -1379,7 +1379,9 @@ class TestBoardBounds:
         assert status == 200, text
         unread_node_ids = [f"unread-only-{index:03d}" for index in range(3)]
         unread = {claim_node_id: 1, **dict.fromkeys(unread_node_ids, 1)}
-        monkeypatch.setattr(fleet_hub_http.fleet_hub_messages, "unread_counts", lambda _conn: unread)
+        monkeypatch.setattr(
+            fleet_hub_http.fleet_hub_messages, "unread_counts", lambda _conn, *, storage_policy=None: unread
+        )
 
         status, _headers, first = _request(hub, "GET", "/view/machines", headers=_bearer())
 
@@ -1404,7 +1406,9 @@ class TestBoardBounds:
             body=[_event(NODE_A, "finished", 1, "run.completed", repo="repo", harness="codex", ts=now)],
         )
         assert status == 200, text
-        monkeypatch.setattr(fleet_hub_http.fleet_hub_messages, "unread_counts", lambda _conn: {NODE_A: 1})
+        monkeypatch.setattr(
+            fleet_hub_http.fleet_hub_messages, "unread_counts", lambda _conn, *, storage_policy=None: {NODE_A: 1}
+        )
 
         status, _headers, page = _request(hub, "GET", "/view/machines", headers=_bearer())
 
@@ -1625,7 +1629,9 @@ class TestBoardBounds:
         finally:
             conn.close()
 
-        monkeypatch.setattr(fleet_hub_http.fleet_hub_messages, "unread_counts", lambda _conn: {node_ids[-1]: 7})
+        monkeypatch.setattr(
+            fleet_hub_http.fleet_hub_messages, "unread_counts", lambda _conn, *, storage_policy=None: {node_ids[-1]: 7}
+        )
         _status, _headers, first = _request(hub, "GET", "/view/machines", headers=_bearer())
         assert "claim_only=1" in first
         assert "claim_offset=200" in first
@@ -1708,7 +1714,9 @@ class TestBoardBounds:
         finally:
             conn.close()
         unread_ids = {"unread-only-fixture": 1}
-        monkeypatch.setattr(fleet_hub_http.fleet_hub_messages, "unread_counts", lambda _conn: unread_ids)
+        monkeypatch.setattr(
+            fleet_hub_http.fleet_hub_messages, "unread_counts", lambda _conn, *, storage_policy=None: unread_ids
+        )
         path = "/view/machines"
         visited = set()
         seen = set()
@@ -1806,7 +1814,9 @@ class TestBoardBounds:
         status, _headers, text = _request(hub, "POST", "/events", headers=_bearer(), body=events)
         assert status == 200, text
         unread = {f"unread-node-{index:03d}": 1 for index in range(300)}
-        monkeypatch.setattr(fleet_hub_http.fleet_hub_messages, "unread_counts", lambda _conn: unread)
+        monkeypatch.setattr(
+            fleet_hub_http.fleet_hub_messages, "unread_counts", lambda _conn, *, storage_policy=None: unread
+        )
 
         _status, _headers, page = _request(hub, "GET", "/view/machines", headers=_bearer())
 
@@ -1834,7 +1844,7 @@ class TestBoardBounds:
         monkeypatch.setattr(
             fleet_hub_http.fleet_hub_messages,
             "unread_counts",
-            lambda _conn: {**dict.fromkeys(known_node_ids, 1), "unread-only-node": 1},
+            lambda _conn, *, storage_policy=None: {**dict.fromkeys(known_node_ids, 1), "unread-only-node": 1},
         )
 
         _status, _headers, first = _request(hub, "GET", "/view/machines", headers=_bearer())
@@ -1846,7 +1856,9 @@ class TestBoardBounds:
 
     def test_node_filter_paginates_more_than_two_hundred_unread_cards(self, hub, monkeypatch):
         unread = {f"filtered-target-{index:03d}": 1 for index in range(fleet_hub.BOARD_LIMIT + 1)}
-        monkeypatch.setattr(fleet_hub_http.fleet_hub_messages, "unread_counts", lambda _conn: unread)
+        monkeypatch.setattr(
+            fleet_hub_http.fleet_hub_messages, "unread_counts", lambda _conn, *, storage_policy=None: unread
+        )
 
         _status, _headers, first = _request(hub, "GET", "/view/machines?node=filtered-target", headers=_bearer())
         assert "unread_offset=200" in first

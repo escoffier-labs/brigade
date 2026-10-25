@@ -663,6 +663,7 @@ class TestCli:
             "deck_config_path": None,
             "trust_tailscale_identity": False,
             "trust_forwarded_proto": False,
+            "require_sealed": False,
         }
 
     def test_status_json_and_table(self, hub, monkeypatch, capsys):

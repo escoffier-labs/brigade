@@ -700,9 +700,9 @@ class TestServerStartupMigration:
         init_calls: list[Path] = []
         real_init_db = fleet_hub.init_db
 
-        def counting_init(path):
+        def counting_init(path, **kwargs):
             init_calls.append(Path(path))
-            return real_init_db(path)
+            return real_init_db(path, **kwargs)
 
         monkeypatch.setattr(fleet_hub, "init_db", counting_init)
         server = fleet_hub.make_server("127.0.0.1", 0, db, ADMIN, allow_admin_writes=False)
@@ -740,9 +740,9 @@ class TestServerStartupMigration:
         open_calls: list[str] = []
         real_init_db, real_open_db = fleet_hub.init_db, fleet_hub.open_db
 
-        def counting_init(path):
+        def counting_init(path, **kwargs):
             init_calls.append(str(path))
-            return real_init_db(path)
+            return real_init_db(path, **kwargs)
 
         def counting_open(path):
             open_calls.append(str(path))
