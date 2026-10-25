@@ -12,6 +12,7 @@ from brigade.fleet_deck_icons import NAV_ICONS
 from brigade import fleet_command_deck as deck
 from brigade import fleet_deck_overview as overview
 from brigade import fleet_deck_shell, ui_theme
+from brigade.fleet_deck_alerts import render_alerts_page
 
 NOW = datetime(2026, 10, 18, 12, 0, 0, tzinfo=timezone.utc)
 NODE_A = "11111111-1111-4111-8111-111111111111"
@@ -325,14 +326,16 @@ def test_queue_exclusions_preserve_actionable_aggregates_and_identified_blocks(i
     if actionable:
         assert alerts[-1].detail == reason
     html = deck.render_deck(view, nonce="nonce", now=NOW)
-    assert f"Active alerts ({count})" in html
+    noun = "alert" if count == 1 else "alerts"
+    assert (f"<strong>{count} {noun}</strong>" in html) == bool(count)
     summary = "3 excluded from ready queue" if actionable else "3 not ready"
     assert f"<details><summary>{summary}</summary>" in html and 'href="/deck/work"' in html
     readable = {"not-ready": "not ready", "blocker": "blocked", "attempt-limit": "reached the attempt limit"}[reason]
     assert f"<li>3 {readable}</li>" in html
     assert "observed scan" not in html
     if actionable:
-        assert f'class="alert-detail">{readable}<' in html
+        alerts_html = render_alerts_page(view, NOW, nonce="n", worklore_enabled=True)
+        assert f'class="alert-detail">{readable}<' in alerts_html
     assert 'class="row-title">unknown<' not in html
     assert "none blocked" not in html
     details = deck.render_control_plane(plane)
@@ -385,14 +388,19 @@ def test_unenrolled_station_is_counted_offline_but_raises_no_stale_alert():
     assert [alert.kind for alert in overview.page_alerts(view, NOW) if alert.kind == "stale telemetry"] == []
 
 
+def _render_alerts(view, now, **kwargs):
+    page = render_alerts_page(view, now, nonce="n", worklore_enabled=True, **kwargs)
+    return page.split("<main", 1)[1].split("</main>", 1)[0]
+
+
 def test_alert_section_renders_cards_count_and_empty_state():
-    html = overview.render_alerts(_alert_view(), NOW)
-    assert 'id="alerts"' in html and "Active alerts (7)" in html
-    assert html.count('class="alert alert--') == 7
-    assert 'class="alert-kind">collision<' in html
+    html = _render_alerts(_alert_view(), NOW)
+    assert 'class="deck-shell alerts-page"' in html and "7 open" in html
+    assert html.count("<tr>") == 8
+    assert "<td>collision</td>" in html
     assert "held by linux-a, live on shared" in html
     assert "first observed 2h 0m ago" in html
-    assert "</section>" not in html.split('id="alerts"', 1)[1].rsplit("</section>", 1)[0]
+    assert "</section>" not in html.split("<section", 1)[1].rsplit("</section>", 1)[0]
     clear = deck.control_plane_from_snapshot(
         {
             "policy": {},
@@ -406,14 +414,14 @@ def test_alert_section_renders_cards_count_and_empty_state():
             "authority": {"active": True, "status": "active"},
         }
     )
-    empty = overview.render_alerts(_view(plane=clear), NOW)
-    assert "Active alerts (0)" in empty and "No active alerts" in empty and "<li" not in empty
+    empty = _render_alerts(_view(plane=clear), NOW)
+    assert "0 open" in empty and "No active alerts" in empty and "<li" not in empty
 
 
 def test_alerts_escape_hostile_text():
     rail = (deck.RailEntry("failed", NODE_A, HOSTILE, "r1", HOSTILE, 5),)
     view = _view([_station(NODE_A, HOSTILE, 2)], rail=rail)
-    html = overview.render_alerts(view, NOW)
+    html = _render_alerts(view, NOW)
     assert HOSTILE not in html and "&lt;script&gt;alert(1)&lt;/script&gt;" in html
 
 
@@ -435,7 +443,7 @@ def test_verdict_counts_attention_items_and_stale_telemetry_together():
     entry = deck.RailEntry(kind="failed", node_id=NODE_A, repo="skillet", run_id="r9", detail="external.failed")
     with_failure = _view(view.stations, plane=view.control_plane, rail=(entry,))
     assert overview.verdict_text(with_failure, NOW) == "NEEDS ATTENTION (2)"
-    assert 'verdict-status--attention">NEEDS ATTENTION (2)' in overview.render_header(with_failure, NOW)
+    assert 'verdict-status--attention">Needs attention (2)' in overview.render_header(with_failure, NOW)
 
 
 def test_verdict_falls_back_to_the_deck_verdict_when_nothing_needs_attention():
@@ -476,7 +484,7 @@ def test_an_enrolled_station_missing_from_the_machines_snapshot_is_never_all_cle
     assert overview.verdict_text(view, NOW) == "COVERAGE UNKNOWN (1)"
     alerts = [alert for alert in overview.page_alerts(view, NOW) if alert.kind == "no telemetry row"]
     assert [alert.title for alert in alerts] == ["linux-a"]
-    assert "no telemetry row" in overview.render_alerts(view, NOW)
+    assert "no telemetry row" in _render_alerts(view, NOW)
     not_enrolled = _view([_station(NODE_A, "linux-a", 4, enrolled=False)], plane=full)
     assert overview.verdict_text(not_enrolled, NOW) == "ALL CLEAR"
 
@@ -532,7 +540,7 @@ def test_generated_parallel_activity_does_not_count_as_attention(signal):
     assert [alert.kind for alert in alerts] == ([signal] if signal else [])
     expected = "NEEDS ATTENTION (1)" if signal else "COVERAGE UNKNOWN"
     assert deck.deck_verdict(view).startswith(expected)
-    assert expected in overview.render_header(view, NOW)
+    assert expected.capitalize() in overview.render_header(view, NOW)
 
 
 def test_working_row_labels_parallel_activity_and_non_running_buckets():
@@ -773,7 +781,7 @@ def test_a_draining_machine_is_unavailable_and_counts_toward_neither_card():
     assert "4 unavailable" in row and ' idle"' not in row and "seg--free" not in row
     assert row.count("seg--off") == 4
     sidebar = overview.render_sidebar(view, "overview", NOW, worklore_enabled=True)
-    assert 'class="tree-meta">draining<' in sidebar and "dot--limited" in sidebar
+    assert 'class="tree-meta">draining<' in sidebar and 'data-status="limited"' in sidebar
 
 
 def test_the_limited_summary_escapes_the_machine_state():
@@ -842,7 +850,7 @@ def test_unmatched_station_row_is_unknown_and_adds_no_idle_or_offline():
     assert idle == 8 and _card_value(summary, "idle") == str(idle)
     assert _card_value(summary, "offline") == "0"
     sidebar = overview.render_sidebar(view, "overview", NOW, worklore_enabled=True)
-    assert 'class="tree-meta">unknown<' in sidebar and "dot--unknown" in sidebar
+    assert 'class="tree-meta">unknown<' in sidebar and 'data-status="unknown"' in sidebar
 
 
 def test_unknown_station_with_busy_runs_reports_busy_and_unknown_seats():
@@ -948,10 +956,10 @@ def test_overview_body_orders_sections_and_folds_control_plane_details():
     order = [
         'class="page-head"',
         'aria-label="Fleet summary"',
-        'id="alerts"',
+        'class="alert-line"',
+        'id="machines-table"',
         'aria-labelledby="working-title"',
         'id="interactive-sessions"',
-        'id="machines-table"',
         'id="cloud-workers"',
         'id="timeline"',
         "<summary>Control plane details</summary>",
@@ -1058,7 +1066,10 @@ def test_render_deck_escapes_hostile_repo_in_sidebar_table_and_alerts():
     rail = (deck.RailEntry("failed", NODE_A, HOSTILE, "r9", HOSTILE, 5),)
     page = deck.render_deck(_view([station], rail=rail), nonce="n0nce", now=NOW)
     assert HOSTILE not in page
-    assert page.count("&lt;script&gt;alert(1)&lt;/script&gt;") >= 3
+    alerts = _render_alerts(_view([station], rail=rail), NOW)
+    assert HOSTILE not in alerts
+    assert page.count("&lt;script&gt;alert(1)&lt;/script&gt;") >= 2
+    assert alerts.count("&lt;script&gt;alert(1)&lt;/script&gt;") >= 2
     assert page.count("<script") == 1
 
 
@@ -1136,9 +1147,9 @@ def test_action_links_require_concrete_server_registered_subjects():
 
     view = _mixed_view()
     source = canonical({"kind": "telemetry", "node_id": NODE_B})
-    assert "Have an agent fix this" not in overview.render_alerts(view, NOW)
-    rendered = overview.render_alerts(view, NOW, action_sources=frozenset({source}))
-    assert rendered.count("Have an agent fix this") == 1
+    assert ">Fix</a>" not in _render_alerts(view, NOW)
+    rendered = _render_alerts(view, NOW, action_sources=frozenset({source}))
+    assert rendered.count(">Fix</a>") == 1
     assert "/deck/actions/compose?" in rendered
     assert all(not alert.source_ref for alert in overview.page_alerts(view, NOW) if alert.kind == "coverage")
 
@@ -1168,7 +1179,7 @@ def test_activity_groups_presence_identity_and_retains_repository_memberships(ha
     assert f"{name} · " in activity and "current presence" in activity
     assert "unexpired report" in activity
     assert html.count('id="interactive-sessions"') == 1
-    assert activity.index("Reported agent sessions") < html.index('id="machines-table"')
+    assert html.index('id="machines-table"') < html.index('aria-labelledby="working-title"')
     assert "one, two" in activity
     assert "/tmp/one" in activity and "&lt;script&gt;alert(1)&lt;/script&gt;" in activity
     assert HOSTILE not in activity
@@ -1364,3 +1375,76 @@ def test_machine_legend_uses_its_own_swatches_not_seat_segments():
     for kind in ("busy", "free", "off"):
         assert f'legend-swatch legend-swatch--{kind}"' in legend
     assert "seg" not in legend.replace("seat-legend", "")
+
+
+def test_overview_alert_line_groups_kinds_in_first_seen_order_and_hides_at_zero():
+    from collections import Counter
+
+    view = _alert_view()
+    rail = view.rail + (view.rail[0],)
+    view = replace(view, rail=rail)
+    line = overview.render_alert_line(view, NOW)
+    assert "<strong>8 alerts</strong>" in line
+    assert "2 failed, 1 unknown, 1 integration, 1 blocked, 1 collision, 1 stale telemetry, 1 coverage" in line
+    assert '<a href="/deck/alerts">Review</a>' in line
+    assert Counter(alert.kind for alert in overview.page_alerts(view, NOW))["failed"] == 2
+    clear = replace(
+        _plane(present=deck.CONTROL_PLANE_SECTIONS),
+        authority_present=True,
+        authority=deck.AuthorityState("true", "active"),
+    )
+    assert overview.render_alert_line(_view(plane=clear), NOW) == ""
+    single = replace(_view(plane=clear), rail=view.rail[:1])
+    assert len(overview.page_alerts(single, NOW)) == 1
+    assert "<strong>1 alert</strong>" in overview.render_alert_line(single, NOW)
+    page = overview.render_overview(view, NOW, worklore_enabled=True)
+    assert 'class="alert-detail"' not in page and 'class="alerts"' not in page
+    markers = [
+        'class="page-head"',
+        'aria-label="Fleet summary"',
+        'class="alert-line"',
+        'id="machines-table"',
+        'aria-labelledby="working-title"',
+    ]
+    assert [page.index(marker) for marker in markers] == sorted(page.index(marker) for marker in markers)
+
+
+@pytest.mark.parametrize("claims, columns", [("0", 4), ("1", 5)])
+def test_machine_notes_column_is_only_present_when_a_row_has_a_note(claims, columns):
+    station = _station(NODE_A, "machine-a", 4)
+    machine = _machine("machine-a", NODE_A, active_claims=claims)
+    html = overview.render_machine_table(_view([station], plane=_plane([machine])), NOW)
+    assert (">Notes</span>" in html) == (columns == 5)
+    assert len(re.findall(r"<td[ >]", _rows(html)[0])) == columns
+    assert ("machine-table--no-notes" in html) == (columns == 4)
+
+
+def test_activity_explanation_is_a_tooltip_and_verdict_display_is_sentence_case():
+    html = overview.render_work_lists(_mixed_view())
+    assert '<h2 id="working-title">Activity</h2>' in html
+    assert re.search(
+        r'<details class="panel-help"><summary>About activity</summary><p>Managed jobs occupy station slots\.', html
+    )
+    assert 'title="Managed jobs occupy' not in html
+    assert '<p class="station-meta">Managed jobs occupy' not in html
+    assert 'verdict-status--unknown">Coverage unknown (1)' in overview.render_header(_view(), NOW)
+    clear = replace(
+        _plane(present=deck.CONTROL_PLANE_SECTIONS),
+        authority_present=True,
+        authority=deck.AuthorityState("true", "active"),
+    )
+    assert overview.verdict_text(_view(plane=clear), NOW) == "ALL CLEAR"
+    assert 'verdict-status--clear">All clear' in overview.render_header(_view(plane=clear), NOW)
+
+
+def test_sidebar_state_words_replace_dots_on_the_whole_deck_and_version_has_title():
+    import brigade
+
+    page = deck.render_deck(_mixed_view(), nonce="n", now=NOW)
+    assert 'class="dot' not in page
+    sidebar = page.split("<aside", 1)[1].split("</aside>", 1)[0]
+    for status in ("working", "stale", "offline"):
+        assert f'data-status="{status}"' in sidebar
+    assert f'<span class="mono sidebar-version" title="v{brigade.__version__}">v{brigade.__version__}</span>' in sidebar
+    assert 'class="tree-meta">stale<' in sidebar
+    assert 'class="tree-meta">not enrolled<' in sidebar

@@ -60,9 +60,14 @@ optional. Replace placeholders with the deployment's configured values.
 | `digest_pr_repo` | string | Repository for digest PR queries, formatted `owner/repo`. |
 | `callback_hosts` | string array | Nonempty allowlist of callback hostnames. |
 | `notify_command` | string array | Optional notification argv. The first item is an absolute executable path. |
+| `messaging_enabled` | boolean | Optional gate for `message_send`. When omitted, `message_send` follows `dispatch_enabled`. |
 | `owner_authorization` | object | Owner's recorded automation authorization. |
 | `owner_authorization.version` | string | Nonempty printable ASCII authorization version, at most 64 characters. |
 | `owner_authorization.text` | string | Nonempty authorization text, at most 4096 UTF-8 bytes. |
+
+Dot is one profile of this connector code. The duet pack runs the same code with
+its own runtime schema, identity and a smaller tool set. See
+[duet-connector.md](duet-connector.md).
 
 ## Setup and service units
 
@@ -84,6 +89,8 @@ The last command writes `brigade-dot.service`. It does not start the service.
 There are no bearer flags. Doctor checks dependencies, runtime, state, Access
 settings, Hub credential, fleet capacity, and rejection of unauthenticated MCP.
 Canary checks unauthenticated rejection, discovery metadata, and tool inventory.
+The call log records each session's MCP `clientInfo.name` from initialize, so
+`python -m brigade.dot calls` can tell clients apart.
 
 The watch service and timer are rendered separately by
 `brigade.dot.lifecycle.write_watch_units(target, out_dir)`. They are
@@ -104,7 +111,7 @@ overflow uid 65534 in user units, which the ownership walk intentionally rejects
 
 ## Tools
 
-Gated tools require `dispatch_enabled: true`. Other mutations, including inbox
+Gated tools require `dispatch_enabled: true`, except `message_send` when the runtime sets `messaging_enabled`. Other mutations, including inbox
 acknowledgments, replies, and handoff writes, retain their own validation rules.
 
 | Tool | Purpose | Dispatch gate |

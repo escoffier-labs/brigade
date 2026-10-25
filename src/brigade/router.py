@@ -7,7 +7,9 @@ cover and records why each stage joined.
 
 Derived from alp-river's hooks/route.py (https://github.com/alp82/alp-river),
 Copyright (c) 2026 Alper Ortac, MIT license - full notice in
-THIRD_PARTY_NOTICES.md at the repo root. Brigade divergences: a stage cannot
+THIRD_PARTY_NOTICES.md at the repo root. alp-river has since been renamed
+forge (https://github.com/alp82/forge); the derivation predates the rename and
+the original MIT attribution stands. Brigade divergences: a stage cannot
 satisfy its own required input, a dependency cycle raises instead of emitting
 a final wave, and the sticky-stage merge is not ported (no recompose loop yet).
 

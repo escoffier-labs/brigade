@@ -402,7 +402,7 @@ def test_bundled_manifest_pins_graphtrail_mcp_v040_assets():
 
 ```python
 def test_installed_previous_state_path_uses_brigade_subdir():
-    env = {"HOME": "/home/alice"}
+    env = {"HOME": "/tmp/brigade-example-home"}
     data = component_paths.data_root(env=env, system="linux")
     path = component_paths.installed_previous_state_path(data)
     assert path.endswith("brigade/installed.previous.json")

@@ -65,7 +65,7 @@ def _pre_producer_hub(db: Path, now: float, version: int = 39) -> None:
         )
         conn.execute(f"PRAGMA user_version={version}")
         conn.commit()
-        assert fleet_hub.SCHEMA_VERSION == 44
+        assert fleet_hub.SCHEMA_VERSION == 45
         assert "producer" not in {r[1] for r in conn.execute("PRAGMA table_info(fleet_events)")}
     finally:
         conn.close()

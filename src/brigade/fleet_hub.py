@@ -117,7 +117,7 @@ from .fleet_hub_status import (
     latest_status as latest_status,
 )
 
-SCHEMA_VERSION = 44
+SCHEMA_VERSION = 45
 DEFAULT_PORT = 3774
 MAX_BODY_BYTES = 8 * 1024 * 1024
 
@@ -303,7 +303,14 @@ def _missing_additive_columns(conn: sqlite3.Connection) -> list[str]:
     from . import fleet_hub_questions
 
     missing.extend(fleet_hub_questions.missing_schema(conn))
-    return missing + fleet_hub_paging.missing_schema(conn)
+    from . import fleet_hub_identity, fleet_hub_message_keys
+
+    return (
+        missing
+        + fleet_hub_paging.missing_schema(conn)
+        + fleet_hub_message_keys.missing_schema(conn)
+        + fleet_hub_identity.missing_schema(conn)
+    )
 
 
 # Per-node credentials (schema v4, issue #1150): node_id -> SHA-256 of the
@@ -694,6 +701,10 @@ def _apply_schema(conn: sqlite3.Connection) -> None:
     ensure_ci_schema(conn)
     # v38 -> v39: MCP Events subscriptions, event outbox and delivery state.
     fleet_hub_events.ensure_schema(conn)
+    from . import fleet_hub_identity, fleet_hub_message_keys
+
+    fleet_hub_message_keys.ensure_schema(conn)
+    fleet_hub_identity.ensure_schema(conn)
     conn.execute(f"PRAGMA user_version={SCHEMA_VERSION}")
 
 
@@ -1762,8 +1773,11 @@ def add_node(conn: sqlite3.Connection, node_id: str, label: str | None = None) -
 def revoke_node(conn: sqlite3.Connection, node_id: str) -> dict[str, Any] | None:
     """Revoke ``node_id``'s token (idempotent); ``None`` when it was never enrolled."""
     node_id = _validate_node_id(node_id)
-    conn.execute("UPDATE nodes SET revoked_at = ? WHERE node_id = ? AND revoked_at IS NULL", (_utc_now(), node_id))
-    conn.commit()
+    from . import fleet_hub_message_keys
+
+    with conn:
+        conn.execute("UPDATE nodes SET revoked_at = ? WHERE node_id = ? AND revoked_at IS NULL", (_utc_now(), node_id))
+        fleet_hub_message_keys.revoke(conn, node_id)
     row = conn.execute(f"SELECT {_NODE_COLUMNS} FROM nodes WHERE node_id = ?", (node_id,)).fetchone()
     return _node_payload(row) if row is not None else None
 

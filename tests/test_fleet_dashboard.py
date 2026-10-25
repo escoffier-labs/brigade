@@ -12,6 +12,7 @@ import json
 import sys
 import threading
 from datetime import datetime, timedelta, timezone
+from urllib.parse import parse_qs, urlencode, urlsplit
 
 import pytest
 
@@ -870,17 +871,72 @@ class TestPureRendering:
         assert "Fleet: Repos" in page
 
 
-def test_boards_render_through_the_shared_deck_shell():
-    page = fleet_dashboard.render_page(
-        view="machines", query_string="", runs=[], claims=[], nodes=[], started_at={}, nonce="abc"
+@pytest.mark.parametrize("view", ["machines", "repos"])
+def test_boards_render_through_the_shared_deck_shell(hub, view, monkeypatch):
+    monkeypatch.setattr(fleet_dashboard, "REFRESH_SECONDS", 17)
+    query = {
+        "sort": "seat",
+        "node": NODE_A,
+        "repo": "example & tool",
+        "seat": "worker",
+        "state": "awaiting approval",
+        "attention": "1",
+        "all": "1",
+    }
+    event = _event(
+        NODE_A,
+        "shell-regression-run",
+        1,
+        "run.paused",
+        repo=query["repo"],
+        harness="codex",
+        ts=datetime.now(timezone.utc).isoformat(),
     )
+    assert _request(hub, "POST", "/events", headers=_bearer(), body=[event])[0] == 200
+    status, headers, page = _request(hub, "GET", f"/view/{view}?{urlencode(query)}", headers=_bearer())
+    assert status == 200
+    assert '<div class="shell" data-active="boards">' in page
+    assert '<div class="shell-main"><main class="deck-shell fleet-board">' in page
+    sidebar = re.search(r'<aside class="shell-sidebar"[^>]*>(.*?)</aside>', page, re.S)
+    assert sidebar is not None
+    assert page.count('<nav class="deck-nav" aria-label="Command Deck">') == 1
+    assert 'href="/view/machines" aria-current="page"' in sidebar[1]
+    for route in ["/deck", "/deck/repos", "/deck/roster", "/deck/policy", "/deck/owners"]:
+        assert f'href="{route}"' in sidebar[1]
+    for label in ["Resources", "Docs", "Report a bug", "Star on GitHub", 'class="sidebar-meta"', "sidebar-version"]:
+        assert label in sidebar[1]
+    assert "tree-machines" not in sidebar[1]  # Boards have no DeckView projection.
+    assert 'class="status-dot' not in page and 'class="live-pill' not in page
     assert "--canvas: #0a0a0a;" in page
+    assert "prefers-color-scheme: light" in page
     assert '<body class="deck"' in page
-    assert '<nav class="deck-nav" aria-label="Command Deck">' in page
-    assert 'href="/deck"' in page and 'href="/view/repos"' in page
-    assert '<a href="/view/machines" aria-current="page">machines board</a>' in page
-    assert "Command Deck &middot; Machines" in page
+    assert f"<h1>{view.title()} board</h1>" in page
+    assert '<header class="page-head">' in page
     assert "background: #fff" not in page
+    nonce = re.search(r"'nonce-([^']+)'", headers["content-security-policy"])[1]
+    for tag in ["style", "script"]:
+        assert re.findall(rf"<{tag}([^>]*)>", page) == [f' nonce="{nonce}"']
+    assert '<meta http-equiv="refresh" content="17">' in page
+    assert "Refreshes every 17s" in page
+    assert "setInterval(tick, 1000)" in page and 'data-filter-all="1"' in page
+    pivots = re.search(r'<nav class="board-nav" aria-label="Board views">(.*?)</nav>', page)[1]
+    for name in ["machines", "repos"]:
+        link = re.search(rf'<a href="([^"]+)"([^>]*)>{name} board</a>', pivots)
+        assert link is not None
+        url = urlsplit(html.unescape(link[1]))
+        assert url.path == f"/view/{name}"
+        assert parse_qs(url.query) == {key: [value] for key, value in query.items()}
+        assert ('aria-current="page"' in link[2]) == (name == view)
+    for key in ["node", "repo", "seat", "state"]:
+        assert f'name="{key}" value="{html.escape(query[key], quote=True)}"' in page
+    assert '<option value="seat" selected>' in page
+    for key in ["attention", "all"]:
+        assert f'name="{key}" value="1" checked' in page
+    assert f'method="get" action="/view/{view}"' in page
+    assert "example &amp; tool" in page and 'class="fleet-state fleet-state-awaiting-approval"' in page
+    if view == "machines":
+        assert 'data-bucket="awaiting approval"' in page
+        assert "shell-regression-run" in page and "worker/codex" in page
 
 
 def test_machine_summary_counts_nodes_with_only_unread_messages():

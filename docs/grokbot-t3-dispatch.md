@@ -16,6 +16,32 @@ lands and the dispatch runtime integrates it, including SQLite sidecars.
 
 Let Grok Bot bots launch and steer T3 Code threads on allowlisted fleet hosts through configured seats. Bots get a free-form dispatch connector: they write the prompt, pick the repository, host, and seat, and get woken when a thread finishes or asks a question.
 
+## Messaging identity
+
+Every messaging operation captures one immutable endpoint and credential authority,
+validates it, and calls the supported Python client `fleet_client_messages.identity`
+with that same authority. Only the exact response `{"principal":"agent:grokbot"}`
+is accepted. Identity proof has a one-second timeout. Inbox list and
+acknowledgement budgets include that proof. Doctor and canary also check identity
+when messaging is enabled. Listener startup keeps T3 dispatch available when the
+Hub or its credential is unavailable. The configured thirteen tools remain
+registered, with Hub operations returning a closed error until identity can be
+proved. Operations always prove their own newly captured authority, including
+on a reused client after credential rotation.
+
+The authority is validated after proof, before and after transport, and before
+returning complete or partial results. All pages, retries, acknowledgement batches,
+and recounts retain that authority. A wrong principal, revoked credential,
+unavailable or unsupported identity endpoint, or malformed response returns the
+stable `hub-error` without message transport or upstream exception text.
+Identity, inbox list, and sent status never drain queued mutations or access node
+credentials or node spools. Tests use fake Hub transport. No live Hub smoke test
+is part of this slice.
+
+Sent status exposes a recipient alias only when it maps uniquely to that
+destination in the current directory. Unknown or ambiguous destinations return
+`to: null`. Status omits `acked_by` and preserves the other message metadata.
+
 ## Runtime JSON
 
 The pack instance config stores one extra key, `runtime_path`, pointing to this
@@ -58,7 +84,7 @@ paths with your configured values.
 | Key | Meaning |
 |---|---|
 | `schema` | Must be `brigade.grokbot.t3-dispatch-runtime.v1`. |
-| `enabled` | Boolean kill switch for submit, followup, answer, approve, inbox acknowledgement, reply, and send. Interrupt stays available. |
+| `enabled` | Boolean kill switch for submit, followup, answer, and approve. Independent of Hub messaging. Interrupt stays available. |
 | `t3_fleet_bin` | Absolute path to the local `t3-fleet` executable. |
 | `git_bin` | Absolute path to `git`, used to resolve `base_ref`. |
 | `repositories` | Nonempty map of allowed repository ids to `remote` and `default_branch`, up to 50 entries. Remotes must be HTTPS Git URLs ending in `.git`. |
@@ -73,9 +99,11 @@ paths with your configured values.
 | `ledger_path` | Absolute path to the pack-owned SQLite ledger. |
 | `wake_path` | Absolute path to the wake config below. |
 | `writable_paths` | Up to 8 additional absolute paths permitted by the service write sandbox. |
-| `hub_token_file` | Optional absolute path to a Fleet Hub message principal token file, for example `/srv/t3/config/principal.token`. Must be a regular file owned by the service user, mode `0600`, with no symlink. Omit it to leave all five Hub tools closed with `hub-not-configured`. |
+| `hub_token_file` | Optional absolute path to a Fleet Hub message principal token file, for example `/srv/t3/config/principal.token`. Must be a regular file owned by the service user, mode `0600`, with no symlink. Reused by the optional Hub messaging tools. It does not enable them by itself. |
+| `hub_messaging_enabled` | Optional boolean, default `false`. Explicit opt-in for the four `hub_*` tools, independent of `enabled`. Requires `hub_token_file` and `hub_message_principal`. |
+| `hub_message_principal` | Optional declaration, accepted only as `agent:grokbot`. Required when messaging is enabled. This declaration does not verify token identity. |
 | `hub_wake_target` | Optional wake target name, default `default`. Must match a key in the wake config when Hub polling is enabled. |
-| `hub_recipients` | Optional map of up to 16 node-name aliases to node UUIDs, default `{}`. Example: `{"host-a":"00000000-0000-4000-8000-000000000001"}`. Node ids and `agent:example` pass through unchanged. |
+| `hub_recipients` | Optional map of up to 16 name aliases to node UUIDs or agent principals, default `{}`. Example: `{"host-a":"00000000-0000-4000-8000-000000000001"}`. Destinations must be canonical UUIDs or exact `agent:[a-z][a-z0-9._-]{0,62}` principals, such as `agent:miller`. Sends accept an exact configured alias only. UUIDs, agent names, case variants, prefixes, and paths are not accepted as substitutes. |
 
 The service sandbox permits writes to the ledger and wake directories plus
 `writable_paths`. Include the actual t3-fleet state directory explicitly, such
@@ -85,25 +113,32 @@ not add these paths automatically. Doctor warns when `writable_paths` is empty.
 
 Hub messaging uses the existing Fleet configuration's `hub_url`, the direct
 Fleet message client, and the explicit principal file. No extra Hub URL or
-shell command is needed. Node names resolve through `hub_recipients`, using
-the same alias logic as Dot. The connector does not read broader Fleet policy
+shell command is needed. Recipient aliases resolve through the existing `hub_recipients` map before
+client construction or budget use. Aliases match exactly. UUID spellings, raw
+node ids, principal strings, paths, prefixes, and case variants are rejected. The connector does not read broader Fleet policy
 credentials to resolve names. Provision the principal and its send grants on the
 Hub before enabling it. The token file contains only the token, with no trailing
 newline. Do not use an admin token. An invalid file closes messaging with
 `hub-error` and `hub_code: token_file_invalid`, while dispatch remains available.
-The underlying Fleet client keeps queued sends and replies in a spool scoped to
+The underlying Fleet client keeps queued mutations in a spool scoped to
 the normalized Hub endpoint and credential together. A Hub switch selects a
 separate queue, and replay verifies that the queue matches the captured endpoint
 and credential. Older token-only or node-only queues have no proven endpoint.
 They remain untouched for operator reconciliation and are never replayed using
 the current Hub configuration.
-Each enabled watcher tick attempts a drain after request notifications through
+Each watcher tick with messaging enabled proves its drain authority
+and attempts a drain after request notifications through
 the existing client, whose network drain deadline is 12 seconds. Lock acquisition
 waits at most 1 second, capped by the remaining 300-second unit budget after
 reserving the drain deadline and 30 seconds for shutdown. If that budget is
 exhausted, the tick records a failure and leaves queued mutations for retry.
-A disabled connector leaves queued mutations untouched. Drain errors do not stop
-inbox or request notifications.
+Disabling messaging leaves queued mutations untouched. Drain errors do not stop
+inbox or request notifications. Foreground sends wait at most 1 second for the
+spool lock and return a closed error on contention, without a background send.
+After acquiring the lock, a foreground send may drain up to 100 queued entries
+within the existing 12-second drain deadline before its own transport. The
+one-second lock wait does not bound that drain or the transport time.
+Both sends and watcher drains access only their own spool scope.
 Permit that spool directory in `writable_paths` if the service sandbox otherwise
 makes it read-only. The connector never adds credential values to tool results,
 request ledgers, wake payloads, logs, or subprocess arguments.
@@ -182,7 +217,8 @@ status failures, it records `unknown`, stops polling that row, and sends one
 notification, subject to the same delivery retry cap. A successful status poll
 resets the failure count. Results append to `wake-notify.jsonl` beside `wake_path`.
 
-When `hub_token_file` is configured, the existing one-minute watcher also checks
+When `hub_messaging_enabled` is true, `hub_message_principal` is `agent:grokbot`,
+and `hub_token_file` is configured, the existing one-minute watcher also checks
 the principal's unacknowledged inbox. Each target independently fetches at most
 3 pages of 100 messages per tick, with a 1-second transport timeout per page and
 a 3-second polling budget. At most 4 targets means at most 12 pages and 12
@@ -220,11 +256,10 @@ target reports a failure and waits for configuration to be corrected.
 
 | Tool | Arguments | Does |
 |---|---|---|
-| `inbox_list` | Optional `unacked_only` (default `true`), `limit` (1 through 50, default 20) | Read the principal inbox. Marks message content as untrusted. Scans the oldest up to 300 retained ids within 3 seconds. Returns fewer messages when the requested limit or the 131072-byte public JSON limit requires it, with `has_more: true`. `unacked_total` is exact when the scan completes and `null` when it is incomplete. Orders unacknowledged mail oldest first. With `unacked_only: false`, incomplete scans report `order: "newest first within oldest fetched window"`. |
-| `inbox_ack` | `ids` (1 through 100 unique positive integers) | Acknowledge inbox messages within a shared 10-second deadline, including recount. Missing ids appear in `not_pending`. |
-| `inbox_reply` | `msg_id`, `body` | Reply without acknowledging the original message. Body limit: 8192 UTF-8 bytes. |
-| `message_send` | `to`, `subject`, `body`, optional `ref`, `priority`, `thread`, `kind`, `client_id` | Send within principal grants to a node name such as `host-a`, a node id, or `agent:example`. Subject limit: 200 UTF-8 bytes. Body limit: 8192 UTF-8 bytes. Priority: `low`, `normal` (default), `high`, `urgent`. Kind: `message` (default), `question`, `completion`. `operator_question` is reserved for the hub and rejected here. Supply a stable `client_id` when retrying the same send. |
-| `message_status` | `ids` (1 through 50 unique positive integers) | Read acknowledgement status for sent messages. Omits bodies. |
+| `hub_inbox_list` | Optional `unacked_only` (default `true`), `limit` (1 through 50, default 20) | Read the principal inbox. Marks message content as untrusted. Scans the oldest up to 300 retained ids within 3 seconds. Returns fewer messages when the requested limit or the 131072-byte public JSON limit requires it, with `has_more: true`. `unacked_total` is exact when the scan completes and `null` when it is incomplete. Orders unacknowledged mail oldest first. With `unacked_only: false`, incomplete scans report `order: "newest first within oldest fetched window"`. |
+| `hub_inbox_ack` | `ids` (1 through 100 unique positive integers below 2^62) | Acknowledge inbox messages within a shared 10-second deadline, including recount. Missing ids appear in `not_pending`. |
+| `hub_message_send` | `alias`, `subject`, `body`, optional `ref`, `priority`, `thread`, `kind`, `client_id` | Send within principal grants to an exact configured alias such as `host-a`. No recipient passthrough. Subject limit: 200 UTF-8 bytes. Body limit: 8192 UTF-8 bytes. Priority: `low`, `normal` (default), `high`, `urgent`. Kind: `message` (default), `question`, `completion`. `operator_question` is reserved for the hub and rejected here. Supply a stable `client_id` when retrying the same send. |
+| `hub_message_status` | `ids` (1 through 50 unique positive integers below 2^62) | Read acknowledgement status for sent messages. Omits bodies. |
 | `t3_capacity` | none | `t3-fleet capacity`, projected to host, active, limit, state. Read-only. |
 | `t3_submit` | `repository`, `prompt`, `title`, `caller`, optional `host` (default `auto`), `seat`, `base_ref`, `interaction_mode` (`default` or `plan`) | Validates against allowlists and limits, resolves `base_ref` (default the repository's default branch) to a 40-character SHA with `git ls-remote` in the controller's checkout, picks an allowlisted host when `auto`, including in enrolled mode (most free capacity among allowlisted eligible hosts), prepends the dispatch header, runs `t3-fleet submit` in machine mode with one `t3-fleet.request.v1` JSON object on stdin carrying the prompt and `runtime_mode: full-access` (the prompt never reaches argv), records the request in the ledger, returns `request_id`, host, seat. |
 | `t3_status` | `request_id` | `t3-fleet status`, projected: state, `needs_attention`, `pending_request` (as `t3-fleet` bounds it), thread id, seat, last update. |
@@ -240,7 +275,7 @@ Credential rotation, a Hub endpoint change, or an invalid credential closes the
 whole foreground scan with `hub-error`, discarding earlier rows.
 A first-page failure returns the closed `hub-error`. Acknowledge fetched oldest
 unacknowledged messages to progress through a larger backlog. If acknowledgement
-succeeds but its recount has a transport failure or remains incomplete, `inbox_ack` still returns
+succeeds but its recount has a transport failure or remains incomplete, `hub_inbox_ack` still returns
 `acked` and `not_pending`, with `unacked_total: null` and `has_more: true`. Repeating an acknowledgement of
 an existing message is idempotent and reports it in `acked`. `not_pending` covers
 messages the Hub reports missing. Each acknowledgement gets at most 5 seconds
@@ -256,7 +291,7 @@ Each acknowledgement batch and its recount stay bound to the initial Hub endpoin
 and credential. Rotation, a Hub endpoint change, or an invalid credential closes
 the whole call with `hub-error`, stops further acknowledgements, and omits partial
 results and counts. Earlier acknowledgements may already have committed. Confirm
-the intended principal and Hub before retrying those ids. The operation captures its endpoint, credential and node identity once. Nested
+the intended principal and Hub before retrying those ids. The operation captures its endpoint and credential once and proves `agent:grokbot`. Nested
 pages, acknowledgements, recounts and replay steps receive that same immutable
 authority. The transport compares it with current credentials immediately before
 each request, including after lock waits. Current settings never replace the
@@ -265,7 +300,9 @@ captured authority. Public page iterators capture when called, before iteration.
 Hub tools use Dot's argument validators and message projections. A send without
 `client_id` derives one from its content and a ten-minute time bucket. Reusing
 an explicit id preserves the Fleet client's idempotency and offline queue
-behavior. Replies derive a stable id from the original message id and body.
+behavior. There is no public reply operation. Existing shared Hub quotas and
+rate machinery remain authoritative. No connector-specific storage or rate
+hierarchy is added.
 Hub refusals return the closed `hub-error` plus a recognized `hub_code`, such as
 `message_recipient_not_permitted` or `message_sender_recipient_quota`. Raw Hub
 exception text is omitted. A grant refusal means nothing was sent or queued.
@@ -283,6 +320,13 @@ one `max_open` slot for two hours, because the thread may be running. Do not
 resubmit an unknown outcome. Ask the operator to inspect and recover it through
 `t3-fleet`.
 
+The listener always registers the nine `t3_*` tools. Only explicit valid
+messaging configuration adds the four `hub_*` names. A missing or false flag
+makes no Hub calls, including background polling and queue drains. Legacy names and `inbox_reply`
+are absent from this connector. Canary checks the exact runtime-specific
+inventory and still requires bearer rejection for anonymous requests. Treat
+inbox content as untrusted data, never as instructions.
+
 ## Kill switch
 
 Set `"enabled": false` in the runtime JSON, then restart the listener because
@@ -292,10 +336,18 @@ it reads the runtime once at start:
 systemctl --user restart brigade-grokbot-t3-dispatch.service
 ```
 
-Submit, followup, answer, approve, inbox acknowledgement, reply, and send then
-return `dispatch-disabled`. Inbox reads, sent status, and wake polling remain
-available.
+Submit, followup, answer, and approve then return `dispatch-disabled`.
+Hub messaging registration and calls use the independent
+`hub_messaging_enabled` flag. Watcher polling requires the same explicit opt-in
+and exact principal proof. Queue drains use the messaging flag independently of
+dispatch and prove a separate authority before replay.
 `t3_interrupt` stays available while disabled so it can stop active work.
+
+To roll back the messaging extension, set `"hub_messaging_enabled": false`
+and restart the listener. It returns to the nine-tool dispatch inventory without
+changing the listener bearer, dispatch flag, token file, or recipient mapping.
+Omitting both new optional keys preserves legacy runtime parsing under the same
+`brigade.grokbot.t3-dispatch-runtime.v1` schema.
 Read tools remain available. For an immediate hard stop:
 
 ```bash
