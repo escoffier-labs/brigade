@@ -3,7 +3,8 @@
 </p>
 
 <p align="center">
-  One shared record for every coding agent you run: ready work, safe claims, proof that checks passed, and memory that carries over between tools.
+  <strong>Run agents anywhere. Keep one record of the work.</strong><br>
+  Brigade tracks what's ready, who claimed it, and what ran across Claude Code, Codex, cloud agents, and your machines. Your local harnesses stay in sync on MCP servers, skills, and memory.
 </p>
 
 <p align="center">
@@ -23,7 +24,13 @@
   <img src="https://shieldcn.dev/badge/license-MIT-4e7247.svg?size=xs" alt="MIT license">
 </p>
 
-Brigade lets coding agents work autonomously across repos, machines, and cloud seats while the operator stays in control. You set policy, budgets, scopes, and gates, and can inspect or stop the work. Agents leave a record of what they did: verification receipts with real exit codes, run journals, claims, and lineage. For example, a Claude Code agent can hand a verify receipt to Codex in an [evidence package](docs/evidence-package.md), alongside a handoff that explains the change. Codex can check the package and receipt instead of trusting a sentence that says "tests pass."
+Coding work now runs in several places at once. You drive Claude Code or Codex in a terminal, a background run works another repo, a cloud agent opens a pull request in another tab, and CI checks the result somewhere else. Each tool keeps its own history. When one agent hands work to the next, the handoff is usually a sentence like "tests pass."
+
+Agents did not create this split. Terminals, background jobs, and remote machines have always kept separate records. Running agents in parallel makes each gap cost more.
+
+Brigade keeps one record around the work itself, across harnesses, repos, machines, and cloud seats: which tasks are ready, who claimed them, which commands ran and how they exited, and what the next session should know. It also keeps MCP servers, skills, and memory in sync, so an agent picking up the work in another harness starts with the same setup and context. The record is plain local files, with an optional hub for claims across machines. Agents read and write it through the CLI and MCP. You set policy, budgets, scopes, and gates, and can stop the work at any point.
+
+For example, a Claude Code agent can hand a verify receipt to Codex in an [evidence package](docs/evidence-package.md), alongside a handoff that explains the change. Codex checks the package and the receipt's real exit code instead of taking the agent's word for it.
 
 The Python CLI may send a passive version request. [Python CLI telemetry](docs/telemetry.md) lists its fields, retention, and opt-outs.
 

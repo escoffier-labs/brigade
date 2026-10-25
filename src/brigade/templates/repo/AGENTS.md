@@ -73,4 +73,4 @@ Full hard rules: `SAFETY_RULES.md`.
 
 ## Brigade operator setup (advanced)
 
-Beyond the daily work loop above, an operator sets up readiness and tool sync with `brigade operator guide`, `brigade operator doctor --target .`, and `brigade operator sync-tools --target .`. Keep `.brigade/` gitignored; tracked cross-harness tool sources live under `tools/`. Brigade does not run automatically, start daemons, install hooks, send notifications, publish, push, tag, or mutate remotes.
+Beyond the daily work loop above, an operator sets up readiness and tool sync with `brigade operator guide`, `brigade operator doctor --target .`, and `brigade operator sync-tools --target .`. Keep `.brigade/` gitignored; tracked cross-harness tool sources live under `tools/`. Setup/tool sync do not start services/hooks, notify, publish, push, tag or mutate remotes. Fleet Hub/MCP require authorization.

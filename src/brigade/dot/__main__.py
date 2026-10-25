@@ -12,6 +12,7 @@ import hashlib
 from .contracts import MAX_MESSAGE_BYTES, DotError
 from .hub_inbox import HubInbox, default_subject
 from .lifecycle import _load_config
+from .profile import PROFILES, profile_for
 from .state import BridgeState
 from .watch import gaps, load, parse_time, run_watch_once
 
@@ -131,13 +132,18 @@ def main(argv=None):
     calls.add_argument("--json", action="store_true")
     for command in (watch, notify, calls):
         command.add_argument("--target", type=Path, required=True)
+        command.add_argument("--pack", choices=tuple(PROFILES), default="dot")
     args = parser.parse_args(argv)
     try:
         if args.command == "watch":
-            value = run_watch_once(args.target, dry_run=args.dry_run)
+            extra = {} if args.pack == "dot" else {"pack_id": args.pack}
+            value = run_watch_once(args.target, dry_run=args.dry_run, **extra)
             code = 0 if value["ok"] else 2 if "error" in value else 1
         else:
-            _, runtime = _load_config(args.target)
+            if args.pack == "dot":
+                _, runtime = _load_config(args.target)
+            else:
+                _, runtime = _load_config(args.target, profile=profile_for(args.pack))
             if args.command == "notify":
                 value, code = _notify(args, runtime)
             else:
@@ -165,6 +171,7 @@ def main(argv=None):
                                         row["request_id"] or "-",
                                         row["arg_summary"] or "-",
                                         row["error_code"] or "-",
+                                        *([row["client_name"]] if row.get("client_name") else []),
                                     ]
                                 )
                             )

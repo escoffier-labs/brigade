@@ -29,7 +29,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade dogfood` (extras): 1 command path(s)
 - `brigade evidence`: 12 command path(s)
 - `brigade extras`: 3 command path(s)
-- `brigade fleet`: 85 command path(s)
+- `brigade fleet`: 90 command path(s)
 - `brigade friction` (extras): 3 command path(s)
 - `brigade governance`: 1 command path(s)
 - `brigade guard`: 1 command path(s)
@@ -41,7 +41,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade init`: 1 command path(s)
 - `brigade learn` (extras): 13 command path(s)
 - `brigade mcp`: 14 command path(s)
-- `brigade memory`: 32 command path(s)
+- `brigade memory`: 33 command path(s)
 - `brigade model`: 7 command path(s)
 - `brigade node`: 1 command path(s)
 - `brigade notifications` (extras): 4 command path(s)
@@ -58,7 +58,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade repos` (extras): 74 command path(s)
 - `brigade research` (extras): 15 command path(s)
 - `brigade roadmap` (extras): 4 command path(s)
-- `brigade roster`: 4 command path(s)
+- `brigade roster`: 5 command path(s)
 - `brigade route`: 1 command path(s)
 - `brigade run`: 47 command path(s)
 - `brigade run-cloud` (deprecated; use `brigade run cloud`): 45 command path(s)
@@ -203,8 +203,11 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade fleet actions show`
 - `brigade fleet actions targets sync`
 - `brigade fleet actions tick`
+- `brigade fleet campaign create`
 - `brigade fleet campaign inspect`
 - `brigade fleet campaign preview`
+- `brigade fleet campaign show`
+- `brigade fleet campaigns`
 - `brigade fleet ci pull`
 - `brigade fleet ci reconcile`
 - `brigade fleet claims`
@@ -226,7 +229,9 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade fleet models retire`
 - `brigade fleet models set`
 - `brigade fleet msg ack`
+- `brigade fleet msg count`
 - `brigade fleet msg flush`
+- `brigade fleet msg identity`
 - `brigade fleet msg list`
 - `brigade fleet msg principals add`
 - `brigade fleet msg principals grants`
@@ -358,6 +363,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade memory proposal show`
 - `brigade memory recall`
 - `brigade memory reflect candidates`
+- `brigade memory reflect propose`
 - `brigade memory reflect run`
 - `brigade memory reflect show`
 - `brigade memory reflect status`
@@ -575,6 +581,7 @@ enabled: run `brigade extras on` once, or set `BRIGADE_EXTRAS=1`.
 - `brigade roadmap patterns` (extras)
 - `brigade roster doctor`
 - `brigade roster init`
+- `brigade roster ready`
 - `brigade roster stats`
 - `brigade roster suggest`
 - `brigade route`

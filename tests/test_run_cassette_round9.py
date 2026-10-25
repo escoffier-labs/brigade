@@ -6,7 +6,7 @@ import time
 
 import pytest
 
-from brigade import cli, run_cassette
+from brigade import cli, run_cassette, run_dirfd
 from brigade import run_cassette_store as store
 from tests.test_run_cassette import _documents, _record
 from tests.test_run_cassette import auto_recording as auto_recording
@@ -127,14 +127,27 @@ def test_purge_explicit_directory_requires_safe_run_metadata(tmp_path, capsys):
     assert any(d["privacy_class"] == "private" for d in _documents(run))
 
 
-def test_recorder_refuses_symlinked_final_journal(tmp_path):
+@pytest.mark.parametrize("bound_stat_refusal", [False, True], ids=["native", "nt-refusal"])
+def test_recorder_refuses_symlinked_final_journal(tmp_path, monkeypatch, bound_stat_refusal):
     run = tmp_path / "run"
     (run / "events").mkdir(parents=True)
     outside = tmp_path / "outside.jsonl"
     outside.write_bytes(b"")
     (run / "events" / "lifecycle.jsonl").symlink_to(outside)
+    if bound_stat_refusal:
+        original_stat = run_dirfd.BoundRunDir.stat
+
+        def refuse_journal_stat(bound, components, name):
+            if components == ("events",) and name == "lifecycle.jsonl":
+                # NT no-follow metadata lookup refuses reparse points rather
+                # than returning the symlink metadata that POSIX provides.
+                raise OSError("refusing reparse point")
+            return original_stat(bound, components, name)
+
+        monkeypatch.setattr(run_dirfd.BoundRunDir, "stat", refuse_journal_stat)
     assert _record(run) is None
     assert not any(d["privacy_class"] == "private" for d in _documents(run))
+    assert not list((run / "events" / "cassettes").glob("*"))
     assert outside.read_bytes() == b""
 
 

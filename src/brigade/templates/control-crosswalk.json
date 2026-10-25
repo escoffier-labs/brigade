@@ -1,6 +1,6 @@
 {
   "schema": "brigade.control_crosswalk.v1",
-  "crosswalk_version": 2,
+  "crosswalk_version": 3,
   "generated_by": "brigade",
   "claims": [
     {
@@ -155,12 +155,12 @@
     {
       "id": "eu-ai-act-2024-1689",
       "name": "Regulation (EU) 2024/1689 Artificial Intelligence Act",
-      "edition": "as amended by Regulation (EU) 2026/1744, in force 2026-07-27",
+      "edition": "Commission AI Act Service Desk consolidation as at 2026-07-27",
       "publication_date": "2024-07-12",
       "jurisdiction": "EU",
-      "source_locator": "https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32024R1689",
+      "source_locator": "https://ai-act-service-desk.ec.europa.eu/en/ai-act/article-113",
       "licensing": "public",
-      "note": "Edition source verification: the European Commission notice at https://digital-strategy.ec.europa.eu/en/news/ai-omnibus-enters-force reports entry into force of the amending regulation, and the AI Act Service Desk reproduces consolidated Article 113 at https://ai-act-service-desk.ec.europa.eu/en/ai-act/article-113. The Official Journal text at https://eur-lex.europa.eu/legal-content/EN/TXT/?uri=OJ:L_202601744 could not be read directly during review, so the edition line rests on those Commission sources. Rows do not quote amended clause text."
+      "note": "The Commission Service Desk identifies its displayed consolidation as at 2026-07-27 and marks Digital Omnibus amendments. The Official Journal amendment text and Commission notice could not be read during review, so no exact amendment number or entry-into-force date is asserted. Applicability and transitions require an actor-specific assessment. Article 12 rows concern Brigade verification records and do not establish the automatic runtime logs of the high-risk AI system."
     },
     {
       "id": "iso-27001-2022",
@@ -179,10 +179,10 @@
       "edition": "2017 with 2022 points of focus",
       "publication_date": "2022",
       "jurisdiction": "US",
-      "source_locator": "https://www.aicpa-cima.com/resources/download/2017-trust-services-criteria-with-revised-points-of-focus-2022",
+      "source_locator": "https://assets.ctfassets.net/rb9cdnjh59cm/2sK6Ih6dzy6t7aU6RQvoeD/d97a2a14609e74a1af1ce9ab0b142b69/92317096_trust_services_criteria_red-lined_version.pdf",
       "licensing": "licensed",
-      "clause_text_status": "unverified",
-      "note": "Licensed clause text was not reviewed for this crosswalk. Control identifiers and rationales are unverified against the licensed text and are not reconstructed from secondary summaries."
+      "clause_text_status": "reviewed-selected-criteria",
+      "note": "Primary AICPA redline text was reviewed only for CC6.1, CC7.2 and CC8.1 (printed pages 35 to 36, 42 to 43 and 46 to 48). Other licensed clauses remain unverified. Rationales paraphrase artifact properties and do not establish control operation. The selected organizational control determines whether approval and recorded segregation evidence is relevant."
     },
     {
       "id": "owasp-agentic-2026",
@@ -196,13 +196,13 @@
     {
       "id": "csa-aicm-v1-1",
       "name": "CSA AI Controls Matrix",
-      "edition": "v1.1",
-      "publication_date": "2026-06-22",
+      "edition": "AICM 1.1.1 packaged in the v1.1 machine-readable release (generated 2026-07-22)",
+      "publication_date": "2026-08-04",
       "jurisdiction": "international",
-      "source_locator": "https://cloudsecurityalliance.org/artifacts/ai-controls-matrix-v1-1",
+      "source_locator": "https://cloudsecurityalliance.org/artifacts/aicm-machine-readable-bundle-json-yaml-oscal",
       "licensing": "public",
-      "mapping_status": "identifiers-not-sourced",
-      "note": "Official CSA AICM v1.1 JSON/YAML/OSCAL bundle is the source to add later."
+      "mapping_status": "mapped",
+      "note": "Reviewed the eight listed controls in primary-dataset.json and their Orchestrated Services allocations in applicability/ownership.json from the CSA bundle. Scope is the Orchestrated Service Provider (OSP) layer. CCC-02 and STA-09 are OSP-owned. LOG-02, LOG-03, LOG-05, STA-08, MDS-08 and MDS-09 are shared Model Provider-OSP (MP-OSP). These typical allocations depend on the actual shared responsibility model. Unmapped claims below have no direct match within this reviewed subset, not a finding about all AICM controls. No certification conclusion is made."
     }
   ],
   "mappings": [
@@ -447,7 +447,7 @@
       "obligation_bearer": "provider",
       "applicability_condition": "provider of a high-risk AI system",
       "rationale": "Automatic event logging provides traceability of verification executions.",
-      "source_locator": "https://artificialintelligenceact.eu/article/12/"
+      "source_locator": "https://ai-act-service-desk.ec.europa.eu/en/ai-act/article-12"
     },
     {
       "claim_id": "EC-01",
@@ -463,11 +463,11 @@
       "claim_id": "EC-01",
       "framework_id": "soc2-tsc-2017",
       "control_id": "CC8.1",
-      "relationship": "supports",
+      "relationship": "partially-supports",
       "obligation_bearer": "service-organisation",
       "applicability_condition": "any",
-      "rationale": "Changes are authorized, tested, and implemented with captured exit status.",
-      "source_locator": "https://www.aicpa-cima.com/resources/download/2017-trust-services-criteria-with-revised-points-of-focus-2022"
+      "rationale": "EC-01 records planned verification commands, results and exit status for a run. It does not establish authorization, design, configuration, documentation, approval or deployment of changes.",
+      "source_locator": "https://assets.ctfassets.net/rb9cdnjh59cm/2sK6Ih6dzy6t7aU6RQvoeD/d97a2a14609e74a1af1ce9ab0b142b69/92317096_trust_services_criteria_red-lined_version.pdf"
     },
     {
       "claim_id": "EC-01",
@@ -517,7 +517,7 @@
       "obligation_bearer": "provider",
       "applicability_condition": "provider of a high-risk AI system",
       "rationale": "Signed verification results support log integrity for high-risk systems.",
-      "source_locator": "https://artificialintelligenceact.eu/article/12/"
+      "source_locator": "https://ai-act-service-desk.ec.europa.eu/en/ai-act/article-12"
     },
     {
       "claim_id": "EC-02",
@@ -536,8 +536,8 @@
       "relationship": "partially-supports",
       "obligation_bearer": "service-organisation",
       "applicability_condition": "any",
-      "rationale": "Signed attestations are not operational monitoring.",
-      "source_locator": "https://www.aicpa-cima.com/resources/download/2017-trust-services-criteria-with-revised-points-of-focus-2022"
+      "rationale": "EC-02 records a signed, rederivable test result. This corroborates evidence integrity only, without operational monitoring or independent custody.",
+      "source_locator": "https://assets.ctfassets.net/rb9cdnjh59cm/2sK6Ih6dzy6t7aU6RQvoeD/d97a2a14609e74a1af1ce9ab0b142b69/92317096_trust_services_criteria_red-lined_version.pdf"
     },
     {
       "claim_id": "EC-02",
@@ -587,7 +587,7 @@
       "obligation_bearer": "provider",
       "applicability_condition": "provider of a high-risk AI system",
       "rationale": "External verification supports log integrity for high-risk systems.",
-      "source_locator": "https://artificialintelligenceact.eu/article/12/"
+      "source_locator": "https://ai-act-service-desk.ec.europa.eu/en/ai-act/article-12"
     },
     {
       "claim_id": "EC-03",
@@ -606,8 +606,8 @@
       "relationship": "partially-supports",
       "obligation_bearer": "service-organisation",
       "applicability_condition": "any",
-      "rationale": "External verification is not operational monitoring.",
-      "source_locator": "https://www.aicpa-cima.com/resources/download/2017-trust-services-criteria-with-revised-points-of-focus-2022"
+      "rationale": "EC-03 supplies a cosign bundle for external verification of test evidence integrity. It does not provide operational monitoring or independent custody.",
+      "source_locator": "https://assets.ctfassets.net/rb9cdnjh59cm/2sK6Ih6dzy6t7aU6RQvoeD/d97a2a14609e74a1af1ce9ab0b142b69/92317096_trust_services_criteria_red-lined_version.pdf"
     },
     {
       "claim_id": "EC-03",
@@ -655,9 +655,10 @@
       "control_id": "Art.14",
       "relationship": "partially-supports",
       "obligation_bearer": "provider",
-      "applicability_condition": "provider of a high-risk AI system",
-      "rationale": "Human oversight can request and authorize changes before dispatch.",
-      "source_locator": "https://artificialintelligenceact.eu/article/14/"
+      "applicability_condition": "Provider of a high-risk AI system where the signed request's membership in the relevant human-oversight process for that system is independently established.",
+      "rationale": "EC-04 records a signed request bound to a run and requester. It does not independently establish dispatch ordering, organizational authority, or capability to monitor, interpret, override, intervene or stop the AI system.",
+      "source_locator": "https://ai-act-service-desk.ec.europa.eu/en/ai-act/article-14",
+      "responsible_actor": "Provider responsible for Article 14 oversight measures, with deployer implementation where applicable."
     },
     {
       "claim_id": "EC-04",
@@ -673,11 +674,11 @@
       "claim_id": "EC-04",
       "framework_id": "soc2-tsc-2017",
       "control_id": "CC8.1",
-      "relationship": "supports",
+      "relationship": "partially-supports",
       "obligation_bearer": "service-organisation",
       "applicability_condition": "any",
-      "rationale": "Logical access controls for change requesters.",
-      "source_locator": "https://www.aicpa-cima.com/resources/download/2017-trust-services-criteria-with-revised-points-of-focus-2022"
+      "rationale": "EC-04 records a signed change request bound to a run and requester. The authorization record does not establish logical access controls or the full change lifecycle.",
+      "source_locator": "https://assets.ctfassets.net/rb9cdnjh59cm/2sK6Ih6dzy6t7aU6RQvoeD/d97a2a14609e74a1af1ce9ab0b142b69/92317096_trust_services_criteria_red-lined_version.pdf"
     },
     {
       "claim_id": "EC-04",
@@ -723,11 +724,12 @@
       "claim_id": "EC-05",
       "framework_id": "eu-ai-act-2024-1689",
       "control_id": "Art.14",
-      "relationship": "supports",
+      "relationship": "partially-supports",
       "obligation_bearer": "provider",
-      "applicability_condition": "provider of a high-risk AI system",
-      "rationale": "Competent human oversight and approval before changes proceed.",
-      "source_locator": "https://artificialintelligenceact.eu/article/14/"
+      "applicability_condition": "Provider of a high-risk AI system where the bound approval is part of the relevant human-oversight process.",
+      "rationale": "EC-05 records a signed approval bound to the final tree and a segregation-of-duties verdict. It does not show competence, training, understanding of system limits, correct output interpretation, or capability to disregard, override, reverse, intervene or stop the AI system.",
+      "source_locator": "https://ai-act-service-desk.ec.europa.eu/en/ai-act/article-14",
+      "responsible_actor": "Provider responsible for Article 14 oversight measures, with deployer implementation where applicable."
     },
     {
       "claim_id": "EC-05",
@@ -745,9 +747,9 @@
       "control_id": "CC8.1",
       "relationship": "supports",
       "obligation_bearer": "service-organisation",
-      "applicability_condition": "any",
-      "rationale": "Segregation of duties for approval.",
-      "source_locator": "https://www.aicpa-cima.com/resources/download/2017-trust-services-criteria-with-revised-points-of-focus-2022"
+      "applicability_condition": "The selected organizational change control requires approval and recorded segregation evidence for this change.",
+      "rationale": "EC-05 records approval bound to the final tree and a segregation verdict. Relevance depends on the selected organizational control. It does not evidence the full change lifecycle.",
+      "source_locator": "https://assets.ctfassets.net/rb9cdnjh59cm/2sK6Ih6dzy6t7aU6RQvoeD/d97a2a14609e74a1af1ce9ab0b142b69/92317096_trust_services_criteria_red-lined_version.pdf"
     },
     {
       "claim_id": "EC-05",
@@ -797,7 +799,7 @@
       "obligation_bearer": "provider",
       "applicability_condition": "provider of a high-risk AI system",
       "rationale": "Automatic logging of events supports traceability.",
-      "source_locator": "https://artificialintelligenceact.eu/article/12/"
+      "source_locator": "https://ai-act-service-desk.ec.europa.eu/en/ai-act/article-12"
     },
     {
       "claim_id": "EC-06",
@@ -813,11 +815,11 @@
       "claim_id": "EC-06",
       "framework_id": "soc2-tsc-2017",
       "control_id": "CC7.2",
-      "relationship": "supports",
+      "relationship": "partially-supports",
       "obligation_bearer": "service-organisation",
       "applicability_condition": "any",
-      "rationale": "System activity logging for monitoring.",
-      "source_locator": "https://www.aicpa-cima.com/resources/download/2017-trust-services-criteria-with-revised-points-of-focus-2022"
+      "rationale": "EC-06 records run lifecycle events in a hash-chained journal. It does not monitor system components, analyze anomalies or classify security events.",
+      "source_locator": "https://assets.ctfassets.net/rb9cdnjh59cm/2sK6Ih6dzy6t7aU6RQvoeD/d97a2a14609e74a1af1ce9ab0b142b69/92317096_trust_services_criteria_red-lined_version.pdf"
     },
     {
       "claim_id": "EC-06",
@@ -877,7 +879,7 @@
       "obligation_bearer": "provider",
       "applicability_condition": "provider of a high-risk AI system",
       "rationale": "Technical documentation includes agent, model, and tool inventory.",
-      "source_locator": "https://artificialintelligenceact.eu/article/11/"
+      "source_locator": "https://ai-act-service-desk.ec.europa.eu/en/ai-act/article-11"
     },
     {
       "claim_id": "EC-07",
@@ -893,11 +895,11 @@
       "claim_id": "EC-07",
       "framework_id": "soc2-tsc-2017",
       "control_id": "CC6.1",
-      "relationship": "supports",
+      "relationship": "partially-supports",
       "obligation_bearer": "service-organisation",
       "applicability_condition": "any",
-      "rationale": "Inventory of logical access assets.",
-      "source_locator": "https://www.aicpa-cima.com/resources/download/2017-trust-services-criteria-with-revised-points-of-focus-2022"
+      "rationale": "EC-07 records a point-in-time inventory of configured agents, models and tools. It does not implement access protection, authenticate users or establish a complete information-asset inventory.",
+      "source_locator": "https://assets.ctfassets.net/rb9cdnjh59cm/2sK6Ih6dzy6t7aU6RQvoeD/d97a2a14609e74a1af1ce9ab0b142b69/92317096_trust_services_criteria_red-lined_version.pdf"
     },
     {
       "claim_id": "EC-07",
@@ -947,7 +949,7 @@
       "obligation_bearer": "provider",
       "applicability_condition": "provider of a high-risk AI system",
       "rationale": "Traceability through commit linkage to receipts.",
-      "source_locator": "https://artificialintelligenceact.eu/article/12/"
+      "source_locator": "https://ai-act-service-desk.ec.europa.eu/en/ai-act/article-12"
     },
     {
       "claim_id": "EC-08",
@@ -966,8 +968,8 @@
       "relationship": "supports",
       "obligation_bearer": "service-organisation",
       "applicability_condition": "any",
-      "rationale": "Changes are documented and linked to receipts.",
-      "source_locator": "https://www.aicpa-cima.com/resources/download/2017-trust-services-criteria-with-revised-points-of-focus-2022"
+      "rationale": "EC-08 records commit trailers linked to receipts. This corroborates individual change records without establishing the full change lifecycle.",
+      "source_locator": "https://assets.ctfassets.net/rb9cdnjh59cm/2sK6Ih6dzy6t7aU6RQvoeD/d97a2a14609e74a1af1ce9ab0b142b69/92317096_trust_services_criteria_red-lined_version.pdf"
     },
     {
       "claim_id": "EC-08",
@@ -1023,11 +1025,11 @@
       "claim_id": "EC-09",
       "framework_id": "soc2-tsc-2017",
       "control_id": "CC7.2",
-      "relationship": "supports",
+      "relationship": "partially-supports",
       "obligation_bearer": "service-organisation",
       "applicability_condition": "any",
-      "rationale": "Monitoring for sensitive data handling.",
-      "source_locator": "https://www.aicpa-cima.com/resources/download/2017-trust-services-criteria-with-revised-points-of-focus-2022"
+      "rationale": "EC-09 records an operator-saved, point-in-time content-guard summary verdict. It does not provide ongoing component monitoring or anomaly analysis.",
+      "source_locator": "https://assets.ctfassets.net/rb9cdnjh59cm/2sK6Ih6dzy6t7aU6RQvoeD/d97a2a14609e74a1af1ce9ab0b142b69/92317096_trust_services_criteria_red-lined_version.pdf"
     },
     {
       "claim_id": "EC-09",
@@ -1077,7 +1079,7 @@
       "obligation_bearer": "provider",
       "applicability_condition": "provider of a high-risk AI system",
       "rationale": "Quality management system records.",
-      "source_locator": "https://artificialintelligenceact.eu/article/17/"
+      "source_locator": "https://ai-act-service-desk.ec.europa.eu/en/ai-act/article-17"
     },
     {
       "claim_id": "EC-10",
@@ -1096,8 +1098,8 @@
       "relationship": "supports",
       "obligation_bearer": "service-organisation",
       "applicability_condition": "any",
-      "rationale": "Change management records in outcome ledger.",
-      "source_locator": "https://www.aicpa-cima.com/resources/download/2017-trust-services-criteria-with-revised-points-of-focus-2022"
+      "rationale": "EC-10 records outcome ledger entries. These are individual outcome records and do not establish the organizational change-management process.",
+      "source_locator": "https://assets.ctfassets.net/rb9cdnjh59cm/2sK6Ih6dzy6t7aU6RQvoeD/d97a2a14609e74a1af1ce9ab0b142b69/92317096_trust_services_criteria_red-lined_version.pdf"
     },
     {
       "claim_id": "EC-10",
@@ -1143,11 +1145,12 @@
       "claim_id": "EC-11",
       "framework_id": "eu-ai-act-2024-1689",
       "control_id": "Art.26",
-      "relationship": "supports",
+      "relationship": "partially-supports",
       "obligation_bearer": "deployer",
-      "applicability_condition": "deployer of a high-risk AI system under Art. 26",
-      "rationale": "Deployers keep logs under their control for six months.",
-      "source_locator": "https://artificialintelligenceact.eu/article/26/"
+      "applicability_condition": "Deployer of a high-risk AI system subject to Article 26(6), using the Brigade index as supplementary discoverability evidence for verification records only.",
+      "rationale": "EC-11 indexes Brigade verification archives and can help locate those records. It does not establish the statutory AI-system log scope, retention duration, archived content or recoverability under Article 26(6).",
+      "source_locator": "https://ai-act-service-desk.ec.europa.eu/en/ai-act/article-26",
+      "responsible_actor": "Deployer responsible for AI-system logs under its control. Brigade only supplies the verification archive index."
     },
     {
       "claim_id": "EC-11",
@@ -1163,11 +1166,11 @@
       "claim_id": "EC-11",
       "framework_id": "soc2-tsc-2017",
       "control_id": "CC7.2",
-      "relationship": "supports",
+      "relationship": "partially-supports",
       "obligation_bearer": "service-organisation",
       "applicability_condition": "any",
-      "rationale": "Archive index keeps verification evidence available for monitoring after pruning; log retention belongs to the adopting organization.",
-      "source_locator": "https://www.aicpa-cima.com/resources/download/2017-trust-services-criteria-with-revised-points-of-focus-2022"
+      "rationale": "EC-11 records archive index entries and receipt metadata. It does not analyze anomalies or classify security events. The index alone proves neither archived content nor retention.",
+      "source_locator": "https://assets.ctfassets.net/rb9cdnjh59cm/2sK6Ih6dzy6t7aU6RQvoeD/d97a2a14609e74a1af1ce9ab0b142b69/92317096_trust_services_criteria_red-lined_version.pdf"
     },
     {
       "claim_id": "EC-11",
@@ -1217,7 +1220,7 @@
       "obligation_bearer": "provider",
       "applicability_condition": "provider of a high-risk AI system",
       "rationale": "The strict package snapshot rehashes captured entries and rederives the receipt digest. Package integrity does not establish custody or control operation.",
-      "source_locator": "https://artificialintelligenceact.eu/article/11/"
+      "source_locator": "https://ai-act-service-desk.ec.europa.eu/en/ai-act/article-11"
     },
     {
       "claim_id": "EC-12",
@@ -1236,8 +1239,8 @@
       "relationship": "partially-supports",
       "obligation_bearer": "service-organisation",
       "applicability_condition": "any",
-      "rationale": "The strict package snapshot rehashes captured entries and rederives the receipt digest. Package integrity does not establish custody or control operation. Not operational monitoring.",
-      "source_locator": "https://www.aicpa-cima.com/resources/download/2017-trust-services-criteria-with-revised-points-of-focus-2022"
+      "rationale": "EC-12 rehashes package entries, rederives the receipt digest and checks source binding. This corroborates integrity only, without operational monitoring or independent custody.",
+      "source_locator": "https://assets.ctfassets.net/rb9cdnjh59cm/2sK6Ih6dzy6t7aU6RQvoeD/d97a2a14609e74a1af1ce9ab0b142b69/92317096_trust_services_criteria_red-lined_version.pdf"
     },
     {
       "claim_id": "EC-12",
@@ -1257,7 +1260,265 @@
       "obligation_bearer": "provider",
       "applicability_condition": "provider of a high-risk AI system",
       "rationale": "Risk management system records are outside Brigade evidence scope.",
-      "source_locator": "https://artificialintelligenceact.eu/article/9/"
+      "source_locator": "https://ai-act-service-desk.ec.europa.eu/en/ai-act/article-9"
+    },
+    {
+      "claim_id": "EC-06",
+      "framework_id": "eu-ai-act-2024-1689",
+      "control_id": "Art.19",
+      "relationship": "no-relationship",
+      "obligation_bearer": "provider",
+      "applicability_condition": "Provider subject to Article 19, for automatically generated high-risk AI-system logs under its control, subject to applicable-law exceptions.",
+      "rationale": "EC-06 records Brigade orchestration lifecycle events. It does not establish the automatically generated logs of the high-risk AI system, provider control of those logs or their retention.",
+      "source_locator": "https://ai-act-service-desk.ec.europa.eu/en/ai-act/article-19",
+      "responsible_actor": "Provider responsible for automatically generated logs of its high-risk AI system under its control."
+    },
+    {
+      "claim_id": "EC-02",
+      "framework_id": "eu-ai-act-2024-1689",
+      "control_id": "Art.50",
+      "relationship": "no-relationship",
+      "obligation_bearer": "any",
+      "applicability_condition": "Provider or deployer whose system or content falls within a specific Article 50 marking or disclosure duty, subject to its exceptions and feasibility limits.",
+      "rationale": "EC-02 signs verification test evidence. Receipt integrity neither marks synthetic outputs for machine detection nor supplies disclosures to people. No Article 50 output-marking or disclosure evidence is identified.",
+      "source_locator": "https://ai-act-service-desk.ec.europa.eu/en/ai-act/article-50",
+      "responsible_actor": "Provider responsible for applicable output-marking duties or deployer responsible for applicable disclosure duties."
+    },
+    {
+      "claim_id": "EC-01",
+      "framework_id": "eu-ai-act-2024-1689",
+      "control_id": "Art.111(4)",
+      "relationship": "no-relationship",
+      "obligation_bearer": "provider",
+      "applicability_condition": "Provider of an AI system generating synthetic audio, image, video or text placed on the market before 2026-08-02, within the Article 111(4) transition to Article 50(2) compliance by 2026-12-02.",
+      "rationale": "EC-01 records verification commands and exit status. It does not establish market-placement date, the specified system scope or Article 50(2) output-marking compliance. This transition supplies no evidence relationship.",
+      "source_locator": "https://ai-act-service-desk.ec.europa.eu/en/ai-act/article-111",
+      "responsible_actor": "Provider of the specified synthetic-content-generating AI system, including a general-purpose AI system."
+    },
+    {
+      "claim_id": "EC-06",
+      "framework_id": "csa-aicm-v1-1",
+      "control_id": "LOG-02",
+      "relationship": "partially-supports",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "OSP layer, shared Model Provider-OSP (MP-OSP) responsibility under the actual shared responsibility model. Applies only to orchestration logs generated or controlled by this actor.",
+      "rationale": "EC-06 records hash-chained lifecycle events. Chain checks provide limited tamper evidence relative to recorded digests, without establishing log security or retention.",
+      "source_locator": "https://cloudsecurityalliance.org/artifacts/aicm-machine-readable-bundle-json-yaml-oscal primary-dataset.json LOG-02, applicability/ownership.json Orchestrated Services LOG-02",
+      "disposition": "conditional-support",
+      "edition": "AICM 1.1.1 packaged in the v1.1 machine-readable release (generated 2026-07-22)",
+      "artifact_contract": "brigade.run_event.v1 from brigade run.",
+      "responsible_actor": "OSP layer, shared Model Provider-OSP (MP-OSP) responsibility under the actual shared responsibility model. Brigade only supplies the artifact.",
+      "verification_limit": "Neither artifact establishes complete log scope, access restrictions, secure storage, retention or disposal policy, or tested recovery. The journal chain needs an external reference to detect a consistent rewrite. An index does not verify archived content. A Brigade artifact does not establish that an organizational control or process operated."
+    },
+    {
+      "claim_id": "EC-11",
+      "framework_id": "csa-aicm-v1-1",
+      "control_id": "LOG-02",
+      "relationship": "partially-supports",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "OSP layer, shared Model Provider-OSP (MP-OSP) responsibility under the actual shared responsibility model. Applies only where the actor operates the Brigade verification archive and index.",
+      "rationale": "EC-11 records index entries that can help locate verification evidence. Index structure does not establish content integrity, retention duration or recovery.",
+      "source_locator": "https://cloudsecurityalliance.org/artifacts/aicm-machine-readable-bundle-json-yaml-oscal primary-dataset.json LOG-02, applicability/ownership.json Orchestrated Services LOG-02",
+      "disposition": "conditional-support",
+      "edition": "AICM 1.1.1 packaged in the v1.1 machine-readable release (generated 2026-07-22)",
+      "artifact_contract": "brigade.verify_archive_index.v1 from brigade work verify run.",
+      "responsible_actor": "OSP layer, shared Model Provider-OSP (MP-OSP) responsibility under the actual shared responsibility model. Brigade only supplies the artifact.",
+      "verification_limit": "Neither artifact establishes complete log scope, access restrictions, secure storage, retention or disposal policy, or tested recovery. The journal chain needs an external reference to detect a consistent rewrite. An index does not verify archived content. A Brigade artifact does not establish that an organizational control or process operated."
+    },
+    {
+      "claim_id": "EC-06",
+      "framework_id": "csa-aicm-v1-1",
+      "control_id": "LOG-03",
+      "relationship": "no-relationship",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "OSP layer, shared Model Provider-OSP (MP-OSP) responsibility under the actual shared responsibility model. Applies where the actor owns operational security monitoring and alerting.",
+      "rationale": "EC-06 records run lifecycle events. It supplies no monitoring, security alert or stakeholder notification evidence.",
+      "source_locator": "https://cloudsecurityalliance.org/artifacts/aicm-machine-readable-bundle-json-yaml-oscal primary-dataset.json LOG-03, applicability/ownership.json Orchestrated Services LOG-03",
+      "disposition": "corrected-mismatch",
+      "edition": "AICM 1.1.1 packaged in the v1.1 machine-readable release (generated 2026-07-22)",
+      "artifact_contract": "brigade.run_event.v1 from brigade run.",
+      "responsible_actor": "OSP layer, shared Model Provider-OSP (MP-OSP) responsibility under the actual shared responsibility model. Brigade only supplies the artifact.",
+      "verification_limit": "Recording events does not establish monitoring of security events, alert generation, metrics or notification of responsible stakeholders. A Brigade artifact does not establish that an organizational control or process operated."
+    },
+    {
+      "claim_id": "EC-06",
+      "framework_id": "csa-aicm-v1-1",
+      "control_id": "LOG-05",
+      "relationship": "no-relationship",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "OSP layer, shared Model Provider-OSP (MP-OSP) responsibility under the actual shared responsibility model. Applies where the actor owns log correlation, anomaly review and response.",
+      "rationale": "EC-06 records a journal. It does not correlate logs, detect anomalies, record their review or establish timely response.",
+      "source_locator": "https://cloudsecurityalliance.org/artifacts/aicm-machine-readable-bundle-json-yaml-oscal primary-dataset.json LOG-05, applicability/ownership.json Orchestrated Services LOG-05",
+      "disposition": "corrected-mismatch",
+      "edition": "AICM 1.1.1 packaged in the v1.1 machine-readable release (generated 2026-07-22)",
+      "artifact_contract": "brigade.run_event.v1 from brigade run.",
+      "responsible_actor": "OSP layer, shared Model Provider-OSP (MP-OSP) responsibility under the actual shared responsibility model. Brigade only supplies the artifact.",
+      "verification_limit": "The journal and index do not correlate logs, detect anomalies, demonstrate review or establish timely response. A Brigade artifact does not establish that an organizational control or process operated."
+    },
+    {
+      "claim_id": "EC-11",
+      "framework_id": "csa-aicm-v1-1",
+      "control_id": "LOG-05",
+      "relationship": "no-relationship",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "OSP layer, shared Model Provider-OSP (MP-OSP) responsibility under the actual shared responsibility model. Applies where the actor owns log correlation, anomaly review and response.",
+      "rationale": "EC-11 records an archive index. Locating records does not show log analysis, anomaly detection, review or response.",
+      "source_locator": "https://cloudsecurityalliance.org/artifacts/aicm-machine-readable-bundle-json-yaml-oscal primary-dataset.json LOG-05, applicability/ownership.json Orchestrated Services LOG-05",
+      "disposition": "corrected-mismatch",
+      "edition": "AICM 1.1.1 packaged in the v1.1 machine-readable release (generated 2026-07-22)",
+      "artifact_contract": "brigade.verify_archive_index.v1 from brigade work verify run.",
+      "responsible_actor": "OSP layer, shared Model Provider-OSP (MP-OSP) responsibility under the actual shared responsibility model. Brigade only supplies the artifact.",
+      "verification_limit": "The journal and index do not correlate logs, detect anomalies, demonstrate review or establish timely response. A Brigade artifact does not establish that an organizational control or process operated."
+    },
+    {
+      "claim_id": "EC-01",
+      "framework_id": "csa-aicm-v1-1",
+      "control_id": "CCC-02",
+      "relationship": "partially-supports",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "OSP layer, owned by the Orchestrated Service Provider under the actual shared responsibility model. The selected commands are relevant tests for an individual change in the OSP quality process.",
+      "rationale": "EC-01 records verification commands, results and exit status for a run. This is an individual test record without a reconciled full change population or end-to-end process evidence.",
+      "source_locator": "https://cloudsecurityalliance.org/artifacts/aicm-machine-readable-bundle-json-yaml-oscal primary-dataset.json CCC-02, applicability/ownership.json Orchestrated Services CCC-02",
+      "disposition": "conditional-support",
+      "edition": "AICM 1.1.1 packaged in the v1.1 machine-readable release (generated 2026-07-22)",
+      "artifact_contract": "brigade.work_verify_receipt from brigade work verify run.",
+      "responsible_actor": "OSP layer, owned by the Orchestrated Service Provider under the actual shared responsibility model. Brigade only supplies the artifact.",
+      "verification_limit": "Individual records do not establish a reconciled full change population or a defined end-to-end quality change-control process, baselines, testing adequacy and release standards. A Brigade artifact does not establish that an organizational control or process operated."
+    },
+    {
+      "claim_id": "EC-04",
+      "framework_id": "csa-aicm-v1-1",
+      "control_id": "CCC-02",
+      "relationship": "partially-supports",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "OSP layer, owned by the Orchestrated Service Provider under the actual shared responsibility model. The signed request is part of the OSP process for the individual change.",
+      "rationale": "EC-04 records a signed request bound to a run and requester. It does not establish dispatch ordering, a reconciled full change population or the whole quality change process.",
+      "source_locator": "https://cloudsecurityalliance.org/artifacts/aicm-machine-readable-bundle-json-yaml-oscal primary-dataset.json CCC-02, applicability/ownership.json Orchestrated Services CCC-02",
+      "disposition": "conditional-support",
+      "edition": "AICM 1.1.1 packaged in the v1.1 machine-readable release (generated 2026-07-22)",
+      "artifact_contract": "agent-request/v1 from brigade run --requester-key.",
+      "responsible_actor": "OSP layer, owned by the Orchestrated Service Provider under the actual shared responsibility model. Brigade only supplies the artifact.",
+      "verification_limit": "Individual records do not establish a reconciled full change population or a defined end-to-end quality change-control process, baselines, testing adequacy and release standards. A Brigade artifact does not establish that an organizational control or process operated."
+    },
+    {
+      "claim_id": "EC-05",
+      "framework_id": "csa-aicm-v1-1",
+      "control_id": "CCC-02",
+      "relationship": "partially-supports",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "OSP layer, owned by the Orchestrated Service Provider under the actual shared responsibility model. The bound approval and recorded segregation are required by the OSP process for the individual change.",
+      "rationale": "EC-05 records a signed approval bound to the final tree and a segregation verdict. It does not establish a reconciled full change population or the whole quality change process.",
+      "source_locator": "https://cloudsecurityalliance.org/artifacts/aicm-machine-readable-bundle-json-yaml-oscal primary-dataset.json CCC-02, applicability/ownership.json Orchestrated Services CCC-02",
+      "disposition": "conditional-support",
+      "edition": "AICM 1.1.1 packaged in the v1.1 machine-readable release (generated 2026-07-22)",
+      "artifact_contract": "human-approval/v2 from brigade run approve.",
+      "responsible_actor": "OSP layer, owned by the Orchestrated Service Provider under the actual shared responsibility model. Brigade only supplies the artifact.",
+      "verification_limit": "Individual records do not establish a reconciled full change population or a defined end-to-end quality change-control process, baselines, testing adequacy and release standards. A Brigade artifact does not establish that an organizational control or process operated."
+    },
+    {
+      "claim_id": "EC-08",
+      "framework_id": "csa-aicm-v1-1",
+      "control_id": "CCC-02",
+      "relationship": "partially-supports",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "OSP layer, owned by the Orchestrated Service Provider under the actual shared responsibility model. The commit trailer links an individual OSP change to its receipt.",
+      "rationale": "EC-08 records commit-to-receipt linkage. It does not reconcile the full change population or establish the quality change-control, testing and release process.",
+      "source_locator": "https://cloudsecurityalliance.org/artifacts/aicm-machine-readable-bundle-json-yaml-oscal primary-dataset.json CCC-02, applicability/ownership.json Orchestrated Services CCC-02",
+      "disposition": "conditional-support",
+      "edition": "AICM 1.1.1 packaged in the v1.1 machine-readable release (generated 2026-07-22)",
+      "artifact_contract": "receipts trailer from brigade receipts trailer.",
+      "responsible_actor": "OSP layer, owned by the Orchestrated Service Provider under the actual shared responsibility model. Brigade only supplies the artifact.",
+      "verification_limit": "Individual records do not establish a reconciled full change population or a defined end-to-end quality change-control process, baselines, testing adequacy and release standards. A Brigade artifact does not establish that an organizational control or process operated."
+    },
+    {
+      "claim_id": "EC-07",
+      "framework_id": "csa-aicm-v1-1",
+      "control_id": "STA-08",
+      "relationship": "partially-supports",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "OSP layer, shared Model Provider-OSP (MP-OSP) responsibility under the actual shared responsibility model. The declared inventory scope is a documented slice of this actor's supply-chain inventory.",
+      "rationale": "EC-07 records a point-in-time roster of configured agents, models and tools. It corroborates only that scoped slice, without establishing all supply-chain relationships.",
+      "source_locator": "https://cloudsecurityalliance.org/artifacts/aicm-machine-readable-bundle-json-yaml-oscal primary-dataset.json STA-08, applicability/ownership.json Orchestrated Services STA-08",
+      "disposition": "conditional-support",
+      "edition": "AICM 1.1.1 packaged in the v1.1 machine-readable release (generated 2026-07-22)",
+      "artifact_contract": "brigade.governance_inventory.v1 from brigade governance inventory.",
+      "responsible_actor": "OSP layer, shared Model Provider-OSP (MP-OSP) responsibility under the actual shared responsibility model. Brigade only supplies the artifact.",
+      "verification_limit": "The configured agent, model and tool roster does not establish a complete inventory of all supply-chain relationships. A Brigade artifact does not establish that an organizational control or process operated."
+    },
+    {
+      "claim_id": "EC-07",
+      "framework_id": "csa-aicm-v1-1",
+      "control_id": "STA-09",
+      "relationship": "no-relationship",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "OSP layer, owned by the Orchestrated Service Provider under the actual shared responsibility model. Applies where the OSP owns the service supply-chain BOM process.",
+      "rationale": "EC-07 records a scoped roster. It supplies no service BOM or evidence of the required BOM process and review.",
+      "source_locator": "https://cloudsecurityalliance.org/artifacts/aicm-machine-readable-bundle-json-yaml-oscal primary-dataset.json STA-09, applicability/ownership.json Orchestrated Services STA-09",
+      "disposition": "corrected-mismatch",
+      "edition": "AICM 1.1.1 packaged in the v1.1 machine-readable release (generated 2026-07-22)",
+      "artifact_contract": "brigade.governance_inventory.v1 from brigade governance inventory.",
+      "responsible_actor": "OSP layer, owned by the Orchestrated Service Provider under the actual shared responsibility model. Brigade only supplies the artifact.",
+      "verification_limit": "The roster does not establish a service supply-chain BOM, its maintenance process, or annual and significant-change review. A Brigade artifact does not establish that an organizational control or process operated."
+    },
+    {
+      "claim_id": "EC-02",
+      "framework_id": "csa-aicm-v1-1",
+      "control_id": "MDS-08",
+      "relationship": "no-relationship",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "OSP layer, shared Model Provider-OSP (MP-OSP) responsibility under the actual shared responsibility model. Applicable only where the actor has model-checkpoint custody or control. For third-party API models without that custody or control, checkpoint activities are not applicable to this actor.",
+      "rationale": "EC-02 and EC-03 concern signatures on verification test evidence. They do not hash model checkpoints, sign model weights or verify model provenance and ownership.",
+      "source_locator": "https://cloudsecurityalliance.org/artifacts/aicm-machine-readable-bundle-json-yaml-oscal primary-dataset.json MDS-08, applicability/ownership.json Orchestrated Services MDS-08",
+      "disposition": "corrected-mismatch",
+      "edition": "AICM 1.1.1 packaged in the v1.1 machine-readable release (generated 2026-07-22)",
+      "artifact_contract": "brigade.attestation.sshsig-dsse.v1 from brigade receipts export attestation.",
+      "responsible_actor": "OSP layer, shared Model Provider-OSP (MP-OSP) responsibility under the actual shared responsibility model. Brigade only supplies the artifact.",
+      "verification_limit": "Test-evidence signatures do not calculate or compare model-checkpoint hashes or detect model-weight modifications. A Brigade artifact does not establish that an organizational control or process operated."
+    },
+    {
+      "claim_id": "EC-03",
+      "framework_id": "csa-aicm-v1-1",
+      "control_id": "MDS-08",
+      "relationship": "no-relationship",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "OSP layer, shared Model Provider-OSP (MP-OSP) responsibility under the actual shared responsibility model. Applicable only where the actor has model-checkpoint custody or control. For third-party API models without that custody or control, checkpoint activities are not applicable to this actor.",
+      "rationale": "EC-02 and EC-03 concern signatures on verification test evidence. They do not hash model checkpoints, sign model weights or verify model provenance and ownership.",
+      "source_locator": "https://cloudsecurityalliance.org/artifacts/aicm-machine-readable-bundle-json-yaml-oscal primary-dataset.json MDS-08, applicability/ownership.json Orchestrated Services MDS-08",
+      "disposition": "corrected-mismatch",
+      "edition": "AICM 1.1.1 packaged in the v1.1 machine-readable release (generated 2026-07-22)",
+      "artifact_contract": "brigade.attestation.cosign-dsse.v1 from brigade receipts export attestation --profile cosign.",
+      "responsible_actor": "OSP layer, shared Model Provider-OSP (MP-OSP) responsibility under the actual shared responsibility model. Brigade only supplies the artifact.",
+      "verification_limit": "Test-evidence signatures do not calculate or compare model-checkpoint hashes or detect model-weight modifications. A Brigade artifact does not establish that an organizational control or process operated."
+    },
+    {
+      "claim_id": "EC-02",
+      "framework_id": "csa-aicm-v1-1",
+      "control_id": "MDS-09",
+      "relationship": "no-relationship",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "OSP layer, shared Model Provider-OSP (MP-OSP) responsibility under the actual shared responsibility model. Applicable only where the actor has model-checkpoint custody or control. For third-party API models without that custody or control, checkpoint activities are not applicable to this actor.",
+      "rationale": "EC-02 and EC-03 concern signatures on verification test evidence. They do not hash model checkpoints, sign model weights or verify model provenance and ownership.",
+      "source_locator": "https://cloudsecurityalliance.org/artifacts/aicm-machine-readable-bundle-json-yaml-oscal primary-dataset.json MDS-09, applicability/ownership.json Orchestrated Services MDS-09",
+      "disposition": "corrected-mismatch",
+      "edition": "AICM 1.1.1 packaged in the v1.1 machine-readable release (generated 2026-07-22)",
+      "artifact_contract": "brigade.attestation.sshsig-dsse.v1 from brigade receipts export attestation.",
+      "responsible_actor": "OSP layer, shared Model Provider-OSP (MP-OSP) responsibility under the actual shared responsibility model. Brigade only supplies the artifact.",
+      "verification_limit": "Test-evidence signatures do not sign model weights or verify model provenance, ownership, transfer or loading from storage. A Brigade artifact does not establish that an organizational control or process operated."
+    },
+    {
+      "claim_id": "EC-03",
+      "framework_id": "csa-aicm-v1-1",
+      "control_id": "MDS-09",
+      "relationship": "no-relationship",
+      "obligation_bearer": "service-organisation",
+      "applicability_condition": "OSP layer, shared Model Provider-OSP (MP-OSP) responsibility under the actual shared responsibility model. Applicable only where the actor has model-checkpoint custody or control. For third-party API models without that custody or control, checkpoint activities are not applicable to this actor.",
+      "rationale": "EC-02 and EC-03 concern signatures on verification test evidence. They do not hash model checkpoints, sign model weights or verify model provenance and ownership.",
+      "source_locator": "https://cloudsecurityalliance.org/artifacts/aicm-machine-readable-bundle-json-yaml-oscal primary-dataset.json MDS-09, applicability/ownership.json Orchestrated Services MDS-09",
+      "disposition": "corrected-mismatch",
+      "edition": "AICM 1.1.1 packaged in the v1.1 machine-readable release (generated 2026-07-22)",
+      "artifact_contract": "brigade.attestation.cosign-dsse.v1 from brigade receipts export attestation --profile cosign.",
+      "responsible_actor": "OSP layer, shared Model Provider-OSP (MP-OSP) responsibility under the actual shared responsibility model. Brigade only supplies the artifact.",
+      "verification_limit": "Test-evidence signatures do not sign model weights or verify model provenance, ownership, transfer or loading from storage. A Brigade artifact does not establish that an organizational control or process operated."
     }
   ],
   "relationship_semantics": "supports and partially-supports mean conditional corroboration of an outcome when the row's applicability condition holds. Neither means the control is fulfilled, and no Brigade artifact establishes that an organizational control operated. Scope and control operation belong to the adopting organization and its assessor.",
@@ -1304,6 +1565,48 @@
       "source_locator": "https://nvlpubs.nist.gov/nistpubs/ai/NIST.AI.100-1.pdf Section 5.1, Table 1, GOVERN 5.2",
       "rationale": "Packaging alone supplies no adjudicated feedback process. Map the constituent receipt and attestation evidence through EC-01 and EC-02 instead; EC-03 signature integrity is itself an unmapped evidence property.",
       "verification_limit": "The strict package snapshot rehashes every captured entry, rederives the receipt digest and checks the source metadata against that receipt. This does not establish that an organizational control or process operated, and does not establish independent custody."
+    },
+    {
+      "claim_id": "EC-09",
+      "framework_id": "csa-aicm-v1-1",
+      "property": "content-guard summary verdict",
+      "artifact_contract": "brigade.guard.audit from brigade guard audit --json (operator saves output).",
+      "responsible_actor": "Adopting OSP, within its actual shared responsibility model.",
+      "applicability_condition": "No control is assigned within the eight reviewed AICM controls. Other AICM controls were not assessed for this property.",
+      "disposition": "unmapped-evidence-property",
+      "superseded_control_id": "none (new framework mapping)",
+      "edition": "AICM 1.1.1 packaged in the v1.1 machine-readable release (generated 2026-07-22)",
+      "source_locator": "https://cloudsecurityalliance.org/artifacts/aicm-machine-readable-bundle-json-yaml-oscal primary-dataset.json, reviewed subset CCC-02, LOG-02/03/05, STA-08/09, MDS-08/09",
+      "rationale": "A point-in-time content-guard verdict supplies no direct evidence for the eight reviewed AICM controls.",
+      "verification_limit": "This disposition is limited to the reviewed subset. It neither rules out other AICM mappings nor establishes organizational control operation."
+    },
+    {
+      "claim_id": "EC-10",
+      "framework_id": "csa-aicm-v1-1",
+      "property": "outcome ledger records",
+      "artifact_contract": "brigade.outcome_record from brigade outcome record.",
+      "responsible_actor": "Adopting OSP, within its actual shared responsibility model.",
+      "applicability_condition": "No control is assigned within the eight reviewed AICM controls. Other AICM controls were not assessed for this property.",
+      "disposition": "unmapped-evidence-property",
+      "superseded_control_id": "none (new framework mapping)",
+      "edition": "AICM 1.1.1 packaged in the v1.1 machine-readable release (generated 2026-07-22)",
+      "source_locator": "https://cloudsecurityalliance.org/artifacts/aicm-machine-readable-bundle-json-yaml-oscal primary-dataset.json, reviewed subset CCC-02, LOG-02/03/05, STA-08/09, MDS-08/09",
+      "rationale": "Outcome ledger entries supply no direct evidence for the eight reviewed AICM controls.",
+      "verification_limit": "This disposition is limited to the reviewed subset. It neither rules out other AICM mappings nor establishes organizational control operation."
+    },
+    {
+      "claim_id": "EC-12",
+      "framework_id": "csa-aicm-v1-1",
+      "property": "evidence package integrity",
+      "artifact_contract": "brigade.evidence_package.v1 from brigade receipts export package --run-id <id> --out .brigade/evidence-packages/<name>.",
+      "responsible_actor": "Adopting OSP, within its actual shared responsibility model.",
+      "applicability_condition": "No control is assigned within the eight reviewed AICM controls. Other AICM controls were not assessed for this property.",
+      "disposition": "unmapped-evidence-property",
+      "superseded_control_id": "none (new framework mapping)",
+      "edition": "AICM 1.1.1 packaged in the v1.1 machine-readable release (generated 2026-07-22)",
+      "source_locator": "https://cloudsecurityalliance.org/artifacts/aicm-machine-readable-bundle-json-yaml-oscal primary-dataset.json, reviewed subset CCC-02, LOG-02/03/05, STA-08/09, MDS-08/09",
+      "rationale": "Package integrity does not independently establish any of the eight reviewed AICM controls. Relevant constituent records are mapped separately.",
+      "verification_limit": "This disposition is limited to the reviewed subset. It neither rules out other AICM mappings nor establishes organizational control operation."
     }
   ]
 }

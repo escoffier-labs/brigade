@@ -29,7 +29,18 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 from uuid import uuid4
 
-from brigade import localio, run_cassette, run_checkpoint, run_events, run_journal, run_projector, run_shadow, runguard
+from brigade import (
+    localio,
+    run_cassette,
+    run_checkpoint,
+    run_events,
+    run_journal,
+    run_projector,
+    run_redaction_rewrite,
+    run_redaction_tasks,
+    run_shadow,
+    runguard,
+)
 
 REDACTION_SCHEMA = "brigade.run_redaction.v1"
 REDACTION_SCHEMA_VERSION = 1
@@ -357,6 +368,7 @@ def _validate_checkpoint_artifacts(
     snapshot: Mapping[str, Any],
     events: Sequence[run_journal.RunEvent],
 ) -> None:
+    run_redaction_tasks.validate_history(events, error_type=RedactionError)
     checkpoint_events = [event for event in events if event.event_type == run_checkpoint.CHECKPOINT_EVENT_TYPE]
     latest = run_checkpoint.latest_checkpoint_event(list(events))
     if latest is None or not checkpoint_events:
@@ -365,6 +377,17 @@ def _validate_checkpoint_artifacts(
     try:
         for event in checkpoint_events:
             checkpoint_bytes = run_checkpoint.validate_checkpoint(run_dir, event)
+            if (
+                event.payload.get("paired_event_type") in run_events._TASK_EVENT_TYPES
+                or "pairing_key" in event.payload
+                or event.idempotency_key.startswith(run_checkpoint._CHECKPOINT_GENERIC_IDEMPOTENCY_PREFIX)
+            ):
+                following = events[event.sequence] if event.sequence < len(events) else None
+                run_checkpoint._verify_coverage(
+                    [event, following] if following is not None else [event],
+                    event,
+                    run_checkpoint._parse_checkpoint_object(checkpoint_bytes),
+                )
             if event.sequence == latest.sequence:
                 latest_bytes = checkpoint_bytes
         if latest_bytes is None:
@@ -424,60 +447,25 @@ def _rewrite_events(
     sequence_end: int,
     operation_id: str,
 ) -> tuple[list[run_journal.RunEvent], bytes]:
-    rewritten: list[run_journal.RunEvent] = []
-    previous_digest: str | None = None
-    total = bytearray()
-    idempotency_keys: set[str] = set()
+    requests: list[tuple[dict[str, Any], str]] = []
+    selected_tasks: set[int] = set()
     for event in events:
         affected = run_cassette.redaction_affects(event, sequence_start, sequence_end)
         preserved_anchor = event.event_type == "run.redaction.recorded"
-        payload = _redacted_payload(event) if affected and not preserved_anchor else dict(event.payload)
+        task_fact = event.event_type in run_events._TASK_EVENT_TYPES
+        if affected and task_fact:
+            selected_tasks.add(event.sequence)
+        payload = (
+            _redacted_payload(event) if affected and not preserved_anchor and not task_fact else dict(event.payload)
+        )
         idempotency_key = (
             _redaction_idempotency_key(operation_id, event.sequence)
             if affected and not preserved_anchor
             else event.idempotency_key
         )
-        if idempotency_key in idempotency_keys:
-            raise RedactionError("rewritten journal idempotency key collision")
-        idempotency_keys.add(idempotency_key)
-        try:
-            envelope = run_events.build_event(
-                run_id=event.run_id,
-                sequence=event.sequence,
-                event_type=event.event_type,
-                payload=payload,
-                idempotency_key=idempotency_key,
-                recorded_at=event.recorded_at,
-                previous_digest=previous_digest,
-            )
-            line = run_events.canonical_bytes(envelope) + b"\n"
-        except (run_events.CanonicalizationError, ValueError) as exc:
-            raise RedactionError("rewritten journal canonicalization failed") from exc
-        if len(line) > run_events.MAX_LINE_BYTES:
-            raise RedactionError("rewritten journal line exceeds size bound")
-        total.extend(line)
-        if len(total) > run_checkpoint.MAX_JOURNAL_BYTES:
-            raise RedactionError("rewritten journal exceeds size bound")
-        try:
-            rewritten_event = run_journal.RunEvent(
-                schema=envelope["schema"],
-                schema_version=envelope["schema_version"],
-                event_id=envelope["event_id"],
-                run_id=envelope["run_id"],
-                sequence=envelope["sequence"],
-                event_type=envelope["event_type"],
-                recorded_at=envelope["recorded_at"],
-                idempotency_key=envelope["idempotency_key"],
-                request_digest=envelope["request_digest"],
-                previous_digest=envelope["previous_digest"],
-                event_digest=envelope["event_digest"],
-                payload=dict(envelope["payload"]),
-            )
-        except (KeyError, TypeError) as exc:
-            raise RedactionError("rewritten journal envelope construction failed") from exc
-        rewritten.append(rewritten_event)
-        previous_digest = rewritten_event.event_digest
-    return rewritten, bytes(total)
+        requests.append((payload, idempotency_key))
+    run_redaction_tasks.prepare_requests(events, requests, selected=selected_tasks, operation_id=operation_id)
+    return run_redaction_rewrite.rewrite_events(events, requests, error_type=RedactionError)
 
 
 def _write_all(fd: int, data: bytes, *, category: str) -> None:
@@ -2008,7 +1996,11 @@ def _assert_affected_values_removed(
         }:
             continue
         for key, value in prior.payload.items():
-            if key == "status" or value is None:
+            if (
+                key == "status"
+                or value is None
+                or (prior.event_type in run_events._TASK_EVENT_TYPES and key in run_redaction_tasks.STRUCTURAL_FIELDS)
+            ):
                 continue
             if value == REDACTED_VALUE or value == 0:
                 continue
@@ -2433,6 +2425,9 @@ def redact_journal(
             after_projection = _projection(snapshot, rewritten_events)
             if _projection_semantics(before_projection.snapshot) != _projection_semantics(after_projection.snapshot):
                 raise RedactionError("redaction changes the observable run projection")
+            # Prove the planned checkpoint/fact identities before quarantine,
+            # operation state, journal replacement, or projection publication.
+            _validate_checkpoint_artifacts(resolved_run_dir, after_projection.snapshot, rewritten_events)
             original_sha256 = active_digest
             rewritten_sha256 = _digest(rewritten_bytes)
             if prior_state is not None and (

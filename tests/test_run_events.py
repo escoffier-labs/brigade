@@ -503,3 +503,40 @@ def test_control_requested_rejects_forbidden_private_payload_keys():
             previous_digest=None,
         )
     assert len(str(exc.value)) <= 240
+
+
+@pytest.mark.parametrize("schema_version", [1, 2])
+def test_validate_event_binds_stored_request_digest_with_valid_outer_hashes(schema_version):
+    envelope = _sample_envelope()
+    envelope["schema_version"] = schema_version
+    envelope["event_digest"] = run_events.compute_event_digest(envelope)
+    envelope["event_id"] = run_events.make_event_id(run_id=RUN_ID, sequence=1, event_digest=envelope["event_digest"])
+    assert run_events.validate_event(envelope) == []
+
+    envelope["request_digest"] = "b" * 64
+    outer = {key: value for key, value in envelope.items() if key not in {"event_digest", "event_id"}}
+    envelope["event_digest"] = hashlib.sha256(run_events.canonical_bytes(outer)).hexdigest()
+    envelope["event_id"] = f"{RUN_ID}-000001-{envelope['event_digest'][:12]}"
+    assert run_events.validate_event(envelope) == ["request_digest does not match recomputed digest"]
+
+
+def test_validate_event_bounds_noncanonical_request_diagnostic():
+    envelope = _sample_envelope()
+    envelope["payload"] = {"status": 2**63}
+    errors = run_events.validate_event(envelope)
+    assert errors and all(len(error) <= run_events.MAX_DIAGNOSTIC_LEN for error in errors)
+    assert "not canonicalizable" in errors[0]
+
+
+def test_build_event_rejects_inconsistent_cached_request_digest():
+    with pytest.raises(run_events.CanonicalizationError, match="request_digest does not match recomputed digest"):
+        run_events.build_event(
+            run_id=RUN_ID,
+            sequence=1,
+            event_type="run.created",
+            payload={"status": "started"},
+            idempotency_key=IDEMPOTENCY_KEY,
+            recorded_at=RECORDED_AT,
+            previous_digest=None,
+            request_digest_value="b" * 64,
+        )

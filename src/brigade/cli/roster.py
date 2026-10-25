@@ -40,6 +40,17 @@ def register(sub: argparse._SubParsersAction) -> None:
         default=None,
         help="Path to roster.toml. Defaults to .brigade/roster.toml under --target.",
     )
+    p_ready = roster_sub.add_parser("ready", help="Inspect readiness for an explicit worker operation.")
+    p_ready.add_argument("--target", "-t", type=Path, default=Path("."))
+    p_ready.add_argument("--roster", type=Path, default=None)
+    p_ready.add_argument(
+        "--worker", action="append", required=True, help="Selected seat pool; repeat to add seats (duplicates ignored)."
+    )
+    p_ready.add_argument("--concurrency", type=int, default=1)
+    p_ready.add_argument("--route", choices=("brigade", "t3"), default="brigade")
+    p_ready.add_argument("--isolation", choices=("shared", "worktree"), default="shared")
+    p_ready.add_argument("--capability", default=None)
+    p_ready.add_argument("--json", action="store_true", dest="json_output")
     p_roster_suggest = roster_sub.add_parser(
         "suggest",
         help="Assemble a preset roster from installed host capabilities.",
@@ -68,6 +79,17 @@ def dispatch(args) -> int:
         )
     if args.roster_command == "doctor":
         return roster_cmd.doctor(target=args.target, roster_path=args.roster)
+    if args.roster_command == "ready":
+        return roster_cmd.ready(
+            target=args.target,
+            roster_path=args.roster,
+            workers=tuple(args.worker),
+            concurrency=args.concurrency,
+            route=args.route,
+            isolation=args.isolation,
+            capability=args.capability,
+            json_output=args.json_output,
+        )
     if args.roster_command == "suggest":
         return roster_cmd.suggest(target=args.target, preset=args.preset)
     if args.roster_command == "stats":
