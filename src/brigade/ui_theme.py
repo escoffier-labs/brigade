@@ -248,7 +248,8 @@ OVERVIEW_CSS = """
 .overview .alert-row h3 { font-size: 13px; }
 .overview .alert-age { display: inline; margin-right: var(--space-2); }
 .overview .alert-evidence-inline, .overview .alert-evidence-inline summary { display: inline; font-size: 12px; }
-.overview .alert-evidence-inline summary { cursor: pointer; color: var(--muted); }
+.overview .alert-evidence-inline { margin: 0; padding: 0; border: 0; border-radius: 0; background: transparent; }
+.overview .alert-evidence-inline summary { cursor: pointer; color: var(--muted); font-weight: 400; text-decoration: underline; text-underline-offset: 2px; }
 .verdict-status { font-size: 11px; font-weight: 800; }
 .verdict-status--attention { color: var(--signal); }
 .verdict-status--unknown { color: var(--muted); }
