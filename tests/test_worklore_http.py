@@ -5,6 +5,7 @@ import json
 import sqlite3
 import subprocess
 from base64 import urlsafe_b64encode
+from urllib.parse import quote
 from pathlib import Path
 
 from brigade import fleet_hub
@@ -1312,3 +1313,87 @@ def test_a_node_may_not_present_the_reserved_admin_node_id(tmp_path):
 def test_the_admin_node_id_is_never_a_configured_operator_node(monkeypatch):
     monkeypatch.setenv("BRIGADE_WORKLORE_OPERATOR_NODES", "admin,node-a")
     assert worklore_http.operator_nodes() == ("node-a",)
+
+
+def _campaign_body(**changes):
+    body = {
+        "campaign_key": "camp-http",
+        "title": "Sweep",
+        "description": "Do the sweep.",
+        "acceptance": ["Done"],
+        "members": [{"repo": "acme/one"}, {"repo": "acme/two"}],
+    }
+    body.update(changes)
+    return body
+
+
+def test_campaign_routes_create_list_show(tmp_path):
+    conn = _http_conn(tmp_path)
+    status, created = http.handle(conn, _req("POST", "/work/campaigns", admin=True, body=_campaign_body()))
+    assert status == 201 and created["created"] is True and created["added"] == ["acme/one", "acme/two"]
+    status, again = http.handle(conn, _req("POST", "/work/campaigns", node="op", operator=True, body=_campaign_body()))
+    assert status == 200 and again["created"] is False and again["added"] == []
+    status, listing = http.handle(conn, _req("GET", "/work/campaigns?limit=5", node="node-a"))
+    assert status == 200 and [c["campaign_key"] for c in listing["campaigns"]] == ["camp-http"]
+    status, shown = http.handle(conn, _req("GET", "/work/campaigns/camp-http", node="node-a"))
+    assert status == 200 and [m["repo"] for m in shown["members"]] == ["acme/one", "acme/two"]
+    assert shown["campaign"]["summary"]["total"] == 2
+
+
+def test_campaign_create_is_operator_only(tmp_path):
+    conn = _http_conn(tmp_path)
+    status, body = http.handle(conn, _req("POST", "/work/campaigns", node="node-a", body=_campaign_body()))
+    assert status == 403 and body["code"] == "forbidden"
+    assert conn.execute("SELECT COUNT(*) FROM work_campaigns").fetchone()[0] == 0
+
+
+def test_campaign_credential_shaped_key_is_rejected_without_writes_or_echo(tmp_path):
+    conn = _http_conn(tmp_path)
+    synthetic_key = "ghp_" + "fake" * 5
+    status, body = http.handle(
+        conn, _req("POST", "/work/campaigns", admin=True, body=_campaign_body(campaign_key=synthetic_key))
+    )
+    assert status == 400 and body["code"] == "private-data"
+    assert synthetic_key not in json.dumps(body)
+    for table in ("work_items", "work_events", "work_campaigns", "work_campaign_members"):
+        assert conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0] == 0
+    status, listing = http.handle(conn, _req("GET", "/work/campaigns", node="node-a"))
+    assert status == 200 and listing == {"campaigns": []}
+
+
+def test_campaign_unknown_key_spec_change_and_bad_query(tmp_path):
+    conn = _http_conn(tmp_path)
+    status, body = http.handle(conn, _req("GET", "/work/campaigns/nope", node="node-a"))
+    assert status == 404 and body["code"] == "not-found"
+    http.handle(conn, _req("POST", "/work/campaigns", admin=True, body=_campaign_body()))
+    status, body = http.handle(
+        conn, _req("POST", "/work/campaigns", admin=True, body=_campaign_body(description="Changed"))
+    )
+    assert status == 409 and body["code"] == "campaign-spec-changed"
+    status, body = http.handle(conn, _req("GET", "/work/campaigns?bogus=1", node="node-a"))
+    assert status == 400 and body["code"] == "unknown-field"
+    status, body = http.handle(conn, _req("GET", "/work/campaigns?limit=999", node="node-a"))
+    assert status == 400 and body["code"] == "field-bound"
+    status, body = http.handle(conn, _req("POST", "/work/campaigns", admin=True, body=_campaign_body(extra=1)))
+    assert status == 400 and body["code"] == "unknown-field"
+
+
+def test_campaign_key_with_colon_round_trips_through_the_client_path(tmp_path):
+    conn = _http_conn(tmp_path)
+    key = "release:0.28"
+    status, _ = http.handle(conn, _req("POST", "/work/campaigns", admin=True, body=_campaign_body(campaign_key=key)))
+    assert status == 201
+    path = "/work/campaigns/" + quote(key, safe="")
+    assert "%3A" in path
+    status, shown = http.handle(conn, _req("GET", path, node="node-a"))
+    assert status == 200 and shown["campaign"]["campaign_key"] == key
+    for bad in ("bad%20key", "a%2Fb", "latest"):
+        status, body = http.handle(conn, _req("GET", "/work/campaigns/" + bad, node="node-a"))
+        assert status == 404 and body["code"] == "not-found"
+
+
+def test_campaign_list_limit_message_states_the_route_range(tmp_path):
+    conn = _http_conn(tmp_path)
+    for limit in ("51", "9" * 40):
+        status, body = http.handle(conn, _req("GET", f"/work/campaigns?limit={limit}", node="node-a"))
+        assert status == 400 and "1 to 50" in body["error"]

@@ -182,7 +182,7 @@ def _write_verify_receipt(
 def test_crosswalk_json_loads_and_validates():
     crosswalk = load_crosswalk()
     assert crosswalk["schema"] == SCHEMA
-    assert crosswalk["crosswalk_version"] == 2
+    assert crosswalk["crosswalk_version"] == 3
     assert crosswalk["generated_by"] == "brigade"
 
     claim_ids = {c["id"] for c in crosswalk["claims"]}
@@ -251,6 +251,74 @@ def test_iso_42001_a_6_2_8_supports_ec_01():
     assert matches[0]["relationship"] == "supports"
 
 
+def test_soc2_artifact_slices_cannot_claim_full_support():
+    rows = {m["claim_id"]: m for m in load_crosswalk()["mappings"] if m["framework_id"] == "soc2-tsc-2017"}
+    # Inventory, recording and integrity do not implement access protection,
+    # anomaly analysis or the full change lifecycle (#2033).
+    for claim_id in ("EC-01", "EC-02", "EC-03", "EC-04", "EC-06", "EC-07", "EC-09", "EC-11", "EC-12"):
+        assert rows[claim_id]["relationship"] == "partially-supports", claim_id
+    assert rows["EC-05"]["relationship"] == "supports"
+    assert rows["EC-05"]["applicability_condition"] != "any"
+
+
+def test_eu_approval_and_archive_limits_and_explicit_nonmatches():
+    rows = [m for m in load_crosswalk()["mappings"] if m["framework_id"] == "eu-ai-act-2024-1689"]
+    by_pair = {(m["control_id"], m["claim_id"]): m for m in rows}
+    for pair in (("Art.14", "EC-04"), ("Art.14", "EC-05"), ("Art.26", "EC-11")):
+        assert by_pair[pair]["relationship"] == "partially-supports", pair
+    request = by_pair[("Art.14", "EC-04")]
+    condition = request["applicability_condition"].lower()
+    assert "high-risk ai system" in condition
+    assert "independently established" in condition and "human-oversight process" in condition
+    assert request["responsible_actor"]
+    rationale = request["rationale"].lower()
+    assert "signed request" in rationale and "run" in rationale and "requester" in rationale
+    assert "does not independently establish" in rationale
+    for limit in (
+        "dispatch ordering",
+        "organizational authority",
+        "monitor",
+        "interpret",
+        "override",
+        "intervene",
+        "stop",
+    ):
+        assert limit in rationale, limit
+    for control in ("Art.19", "Art.50", "Art.111(4)"):
+        nonmatches = [m for m in rows if m["control_id"] == control]
+        assert nonmatches, control
+        assert all(m["relationship"] == "no-relationship" for m in nonmatches)
+        assert all(m["responsible_actor"] and m["applicability_condition"] != "any" for m in nonmatches)
+    for row in rows:
+        article = row["control_id"].removeprefix("Art.").split("(")[0]
+        assert row["source_locator"] == f"https://ai-act-service-desk.ec.europa.eu/en/ai-act/article-{article}"
+
+
+def test_csa_evidence_does_not_become_monitoring_bom_or_model_signing():
+    rows = [m for m in load_crosswalk()["mappings"] if m["framework_id"] == "csa-aicm-v1-1"]
+    partial = {"CCC-02", "LOG-02", "STA-08"}
+    nonmatches = {"LOG-03", "LOG-05", "STA-09", "MDS-08", "MDS-09"}
+    assert {m["control_id"] for m in rows} == partial | nonmatches
+    # Independent Orchestrated Services allocations in the raw CSA ownership bundle.
+    owned = {"CCC-02", "STA-09"}
+    shared = {"LOG-02", "LOG-03", "LOG-05", "STA-08", "MDS-08", "MDS-09"}
+    owner_phrases = {
+        "owned": "owned by the Orchestrated Service Provider",
+        "shared": "shared Model Provider-OSP (MP-OSP)",
+    }
+    expected_owners = {**dict.fromkeys(owned, "owned"), **dict.fromkeys(shared, "shared")}
+    for row in rows:
+        expected = "partially-supports" if row["control_id"] in partial else "no-relationship"
+        assert row["relationship"] == expected, (row["control_id"], row["claim_id"])
+        assert row["obligation_bearer"] == "service-organisation"
+        assert row["responsible_actor"] and row["applicability_condition"] != "any"
+        for allocation, phrase in owner_phrases.items():
+            assert (phrase in row["responsible_actor"]) == (allocation == expected_owners[row["control_id"]]), row[
+                "control_id"
+            ]
+        assert row["source_locator"].startswith("https://cloudsecurityalliance.org/artifacts/")
+
+
 def test_iso_42001_a_5_has_no_relationship_row():
     crosswalk = load_crosswalk()
     matches = [m for m in crosswalk["mappings"] if m["framework_id"] == "iso-42001-2023" and m["control_id"] == "A.5"]
@@ -275,7 +343,7 @@ def test_framework_not_mapped_appears_in_doc():
     }
     assert not_sourced_names
     rendered = control_crosswalk.render_doc()
-    assert "Not mapped in crosswalk version 2" in rendered
+    assert "Not mapped in crosswalk version 3" in rendered
     for name in not_sourced_names:
         assert name in rendered, f"framework {name} missing from rendered doc"
 
@@ -1505,15 +1573,19 @@ def test_nist_ai_600_1_stays_not_sourced():
     assert not [m for m in crosswalk["mappings"] if m["framework_id"] == "nist-ai-600-1"]
 
 
-def test_licensed_clause_text_is_marked_unverified():
+def test_licensed_clause_review_does_not_extend_beyond_selected_soc2_criteria():
     crosswalk = load_crosswalk()
     licensed = [f for f in crosswalk["frameworks"] if f["licensing"] == "licensed"]
     assert licensed
     rendered = control_crosswalk.render_doc()
     for framework in licensed:
-        assert framework["clause_text_status"] == "unverified"
+        if framework["id"] == "soc2-tsc-2017":
+            assert framework["clause_text_status"] == "reviewed-selected-criteria"
+        else:
+            assert framework["clause_text_status"] == "unverified"
         assert "unverified" in framework["note"]
-    assert rendered.count("Clause text: unverified.") == len(licensed)
+    assert rendered.count("Clause text: unverified.") == len(licensed) - 1
+    assert rendered.count("Clause text: reviewed-selected-criteria.") == 1
 
 
 def test_crosswalk_qualifies_immutability():

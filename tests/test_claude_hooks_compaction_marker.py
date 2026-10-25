@@ -172,6 +172,72 @@ def test_user_prompt_restores_brief_once_then_clears_marker(
     assert runtime.handle_payload("UserPromptSubmit", payload) is None
 
 
+def _inbox_probe(monkeypatch: pytest.MonkeyPatch, *, brief_seconds: float):
+    """Fake clock where the brief takes ``brief_seconds``; records each inbox poll."""
+    clock = [1000.0]
+    polls: list[float | None] = []
+    monkeypatch.setattr(runtime, "_monotonic", lambda: clock[0])
+    monkeypatch.setattr(runtime, "_hook_timeout_seconds", lambda: float(envelope.HOOK_TIMEOUT_SECONDS))
+
+    def slow_brief(_repo: Path) -> str:
+        clock[0] += brief_seconds
+        return "restored-brief"
+
+    def deliver(_harness: str, _session_id: str, _event: str, *, hub_timeout: float | None = None, **_kw):
+        polls.append(hub_timeout)
+        return "fleet text"
+
+    monkeypatch.setattr(runtime, "_run_brief", slow_brief)
+    monkeypatch.setattr(runtime.fleet_inbox.fleet_inbox_delivery, "deliver", deliver)
+    return polls
+
+
+def test_slow_post_compaction_brief_skips_the_inbox_poll_and_keeps_the_claim(
+    tmp_path: Path, marker_env: dict[str, str], monkeypatch
+):
+    target = _wired_claude(tmp_path)
+    compaction_marker.write_pending("session-1", target)
+    polls = _inbox_probe(monkeypatch, brief_seconds=runtime.BRIEF_TIMEOUT_SECONDS + 0.5)
+    monkeypatch.setattr(runtime, "effective_hook_target", lambda _payload, pin=None: target.resolve())
+
+    result = runtime.handle_payload("UserPromptSubmit", _payload(target, "UserPromptSubmit"))
+
+    # A brief at its 10s timeout plus spawn and kill overhead leaves 1.5s of the
+    # 12s hook: under the 1s reserve plus the 1s minimum poll.
+    assert polls == []
+    assert result is not None and result.get(compaction_marker.CLAIM_KEY)
+    context = result["hookSpecificOutput"]["additionalContext"]
+    assert "restored-brief" in context and "fleet text" not in context
+
+
+def test_fast_post_compaction_brief_still_polls_the_inbox_within_the_remaining_budget(
+    tmp_path: Path, marker_env: dict[str, str], monkeypatch
+):
+    target = _wired_claude(tmp_path)
+    compaction_marker.write_pending("session-1", target)
+    polls = _inbox_probe(monkeypatch, brief_seconds=0.5)
+    monkeypatch.setattr(runtime, "effective_hook_target", lambda _payload, pin=None: target.resolve())
+
+    result = runtime.handle_payload("UserPromptSubmit", _payload(target, "UserPromptSubmit"))
+
+    assert polls == [pytest.approx(envelope.HOOK_TIMEOUT_SECONDS - 0.5 - 1.0)]
+    assert result is not None and result.get(compaction_marker.CLAIM_KEY)
+    context = result["hookSpecificOutput"]["additionalContext"]
+    assert "restored-brief" in context and "fleet text" in context
+
+
+def test_inbox_poll_is_capped_to_the_budget_the_brief_left(tmp_path: Path, marker_env: dict[str, str], monkeypatch):
+    target = _wired_claude(tmp_path)
+    compaction_marker.write_pending("session-1", target)
+    polls = _inbox_probe(monkeypatch, brief_seconds=9.5)
+    monkeypatch.setattr(runtime, "effective_hook_target", lambda _payload, pin=None: target.resolve())
+
+    runtime.handle_payload("UserPromptSubmit", _payload(target, "UserPromptSubmit"))
+
+    # 12s - 9.5s - 1s reserve: the poll may run, but never past the outer timeout.
+    assert polls == [pytest.approx(1.5)]
+
+
 def test_injection_failure_leaves_marker_for_retry(tmp_path: Path, marker_env: dict[str, str], monkeypatch, capsys):
     target = _wired_claude(tmp_path)
     compaction_marker.write_pending("session-1", target)

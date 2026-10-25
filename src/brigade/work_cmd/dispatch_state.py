@@ -48,6 +48,10 @@ def _identity(stat: os.stat_result) -> tuple[int, int, int, int, int]:
 
 def _file_identity(path: Path) -> tuple[int, int, int, int, int] | None:
     try:
+        if os.name == "nt":
+            # Match writer metadata through handles, since Windows path ctime can differ.
+            with path.open("rb") as stream:
+                return _identity(os.fstat(stream.fileno()))
         return _identity(path.stat())
     except FileNotFoundError:
         return None

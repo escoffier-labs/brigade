@@ -188,14 +188,14 @@ def _projection(run_dir: Path, agent: Agent, window: _ProjectionWindow) -> dict[
 
 
 def _journal_present(journal: Path) -> bool:
-    if run_journal.bound_lstat(journal) is None:
+    if run_journal.bound_lstat(journal, strict=True) is None:
         return False
     _journal_size(journal)
     return True
 
 
 def _journal_size(journal: Path) -> int:
-    info = run_journal.bound_lstat(journal)
+    info = run_journal.bound_lstat(journal, strict=True)
     if info is None or not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
         raise store.CassetteError("cassette journal is unsafe")
     return info.st_size

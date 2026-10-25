@@ -87,6 +87,7 @@ runaway gets killed instead of taking the machine down.
 ## 2. Codex CLI
 
 Codex reads TOML from `~/.codex/config.toml`. Add one table per server:
+Replace `/ABSOLUTE_ACCOUNT_HOME` below with your account's actual absolute home directory; MCP command fields do not expand this placeholder.
 
 ```toml
 [mcp_servers.graphtrail]
@@ -94,7 +95,7 @@ command = '/abs/path/to/graphtrail-mcp'
 args = ['--db', '/abs/path/to/repo/.graphtrail/graphtrail.db']
 
 [mcp_servers.miseledger]
-command = '/home/you/.local/bin/miseledger'
+command = '/ABSOLUTE_ACCOUNT_HOME/.local/bin/miseledger'
 args = ['mcp']
 timeout = 60
 ```
@@ -158,7 +159,7 @@ Every check reports `"ok": true`, and the MCP checks confirm the protocol initia
 tools register:
 
 ```json
-{ "name": "paths", "ok": true, "detail": "/home/you/.local/share/miseledger/miseledger.db" }
+{ "name": "paths", "ok": true, "detail": "/ABSOLUTE_ACCOUNT_HOME/.local/share/miseledger/miseledger.db" }
 { "name": "schema", "ok": true, "detail": "version 5" }
 { "name": "fts", "ok": true, "detail": "sqlite fts5" }
 { "name": "mcp_initialize", "ok": true }

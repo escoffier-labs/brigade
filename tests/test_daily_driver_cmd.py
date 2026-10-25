@@ -94,12 +94,36 @@ def test_daily_status_text_and_json(tmp_path, capsys):
 
     assert daily_cmd.status(target=tmp_path, json_output=True) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["pending_task_count"] == 1
+    assert payload["pending_task_count"] == 1, payload["status_section_checks"]
     assert payload["selected_action"]["source_subsystem"] == "work-task"
     assert payload["next_recommended_command"] == "brigade work run"
 
     assert cli.main(["daily", "status", "--target", str(tmp_path)]) == 0
     assert "daily status:" in capsys.readouterr().out
+
+
+@pytest.mark.parametrize("threaded", [False, True])
+def test_daily_status_keeps_work_counts_when_optional_snapshot_times_out(tmp_path, monkeypatch, capsys, threaded):
+    from brigade import notifications_cmd
+    from brigade.daily_cmd import config
+
+    if threaded:
+        monkeypatch.delattr(config.signal, "SIGALRM", raising=False)
+
+    _seed_ready_repo(tmp_path, capsys)
+    work_cmd._add_task(tmp_path, "Pending work", priority="high", acceptance=["Complete the task."])
+
+    def timeout(target):
+        raise daily_cmd._DailyStatusSectionTimeout("notifications")
+
+    monkeypatch.setattr(notifications_cmd, "health", timeout)
+    assert daily_cmd.status(target=tmp_path, json_output=True) == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["pending_task_count"] == 1, payload["status_section_checks"]
+    assert payload["selected_action"]["source_subsystem"] == "work-task"
+    center = next(c for c in payload["status_section_checks"] if c["name"] == "daily_status_section:center-status")
+    assert center["status"] == "warn"
+    assert "timed out" in center["detail"]
 
 
 def test_daily_status_includes_bounded_grokbot_cloud_summary(tmp_path, capsys):

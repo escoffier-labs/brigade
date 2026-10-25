@@ -879,6 +879,7 @@ def test_expired_session_does_not_spawn_a_saved_planned_intent(apply_target, cap
 
 
 @pytest.mark.parametrize("reason", ["SIGTERM", "version-changed"])
+@requires_dispatch_apply
 def test_stop_during_prompt_preparation_leaves_claim_resumable(apply_target, capsys, monkeypatch, reason):
     from brigade.work_cmd import dispatch_apply as apply, dispatch_state as store
     from brigade.work_cmd.dispatch_watch import Watch

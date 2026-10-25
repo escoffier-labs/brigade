@@ -729,6 +729,16 @@ the delivery budget available. Each lane permits at most 2 delivery attempts,
 at least 4 hours apart, even if its classification changes. Failed or uncertain
 sends consume that attempt.
 
+A sleeping host, dropped network, or unreachable Hub can make many healthy
+lanes read dead at once. Before any repair, patrol counts lanes classified
+dead or stalled. When more than `--mass-max-count` lanes (default 5) are
+affected, or at least 3 are affected and they exceed `--mass-max-fraction` of
+the pass (default 0.5), patrol adds one `suspected_environment_fault` entry
+to `findings` with the counts. With `--apply`, it then skips `reap` and
+`release-claim`, still runs `escalate`, and exits 1. Report-only output gains
+only that finding and keeps its exit status. `--force-mass-repair` applies the
+repairs anyway and records `mass_repair_override` in the receipt.
+
 Applying actions always writes a patrol receipt. Each attempt records its
 scope, before and after state, timestamp, result, and an idempotency key derived
 from the lane, classification digest, and action. The second escalation also

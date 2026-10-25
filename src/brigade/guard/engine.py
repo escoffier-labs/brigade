@@ -248,6 +248,38 @@ def _line_at(text: str, start: int, end: int) -> str:
     return text[line_start:] if line_end == -1 else text[line_start:line_end]
 
 
+# An f-string opening quote with no other quote between it and the field.
+_FSTRING_OPEN = re.compile(r"""(?<!\w)(?:[rR]?[fF]|[fF][rR])(?:\"\"\"|'''|"|')[^"'\n]*$""")
+# Positions where prose does not put an f-string: line start, '=', a
+# `return` statement, a call paren right after a name, or a bracket opened
+# after '=' or '('.
+_FSTRING_POSITION = re.compile(r"(?:^|=|(?:^|;)\s*return|\w\(|[=(]\s*[\[{])\s*$")
+# The rest of a field after its expression: '=', a conversion, a format spec
+# with at most simple nested fields, then the closing brace.
+_FIELD_CLOSE = re.compile(r"""\s*=?\s*(?:![rsa])?(?::(?:[^{}"'\n]|\{[A-Za-z_][\w.]*\})*)?\}""")
+
+
+def _whole_fstring_field(before: str, after: str) -> bool:
+    """Whether a match is the entire expression of one f-string field."""
+    opener = before.rstrip()
+    braces = len(opener) - len(opener.rstrip("{"))
+    # '{{' is a literal brace, so only an odd run opens a replacement field.
+    if braces % 2 == 0:
+        return False
+    stem = opener[:-braces]
+    match = _FSTRING_OPEN.search(stem)
+    # The prefix must start a literal in an expression position, not in prose,
+    # another string, or a comment, and the literal must still be open at the brace.
+    if match is None or not _FSTRING_POSITION.search(stem[: match.start()]):
+        return False
+    # `_quote_at` stops at '#' and '//' comments but not at a trailing '/*'.
+    if "/*" in stem[: match.start()]:
+        return False
+    if stem.lstrip().startswith(_LINE_START_COMMENT_PREFIXES) or _quote_at(stem, match.start(), None) is not None:
+        return False
+    return _quote_at(stem, len(stem), None) is not None and bool(_FIELD_CLOSE.match(after))
+
+
 def _hostname_context(text: str, start: int, end: int) -> bool:
     """Keep textual hosts while avoiding unquoted attribute expressions.
 
@@ -260,7 +292,9 @@ def _hostname_context(text: str, start: int, end: int) -> bool:
     column = start - (text.rfind("\n", 0, start) + 1)
     before, after = line[:column], line[column + end - start :]
     if re.search(r"[a-z][a-z0-9+.-]*://[^\s]*$", before, re.IGNORECASE):
-        return True
+        # A replacement field holding only the host is an expression even in a
+        # formatted URL (#1918). Any other URL context keeps matching.
+        return not _whole_fstring_field(before, after)
     # These delimiters introduce expressions, including expressions inside
     # interpolated strings. Check them before accepting a surrounding quote.
     if re.search(r"\bf[\"'][^\n]*\{[^}]*$", before, re.IGNORECASE):

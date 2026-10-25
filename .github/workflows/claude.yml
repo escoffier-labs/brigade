@@ -52,7 +52,7 @@ jobs:
         with:
           fetch-depth: 1
       # v1, pinned to the tag's commit.
-      - uses: anthropics/claude-code-action@374f254f5efaf968abfe15d399fd90972e8138b9
+      - uses: anthropics/claude-code-action@e4a6faad497d33dbc7144135c75e41f82f0bf6c0
         with:
           claude_code_oauth_token: ${{ secrets.CLAUDE_CODE_OAUTH_TOKEN }}
           additional_permissions: |

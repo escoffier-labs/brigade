@@ -74,6 +74,7 @@ CONNECTOR_DEFAULT_BINDS = {
     "cerebro-memory": "127.0.0.1:8770",
     "fleet-steward": "127.0.0.1:8771",
     "dot": "127.0.0.1:8779",
+    "duet": "127.0.0.1:8780",
     "n8n-operator": "127.0.0.1:8775",
     "obsidian-operator": "127.0.0.1:8773",
     "operations-relay": "127.0.0.1:8777",
@@ -86,6 +87,9 @@ N8N_PACK_ID = "n8n-operator"
 OPERATIONS_RELAY_PACK_ID = "operations-relay"
 T3_DISPATCH_PACK_ID = "t3-dispatch"
 DOT_PACK_ID = "dot"
+DUET_PACK_ID = "duet"
+# Packs that run the Dot connector code under their own profile and Cloudflare Access application.
+DOT_FAMILY_PACK_IDS = frozenset({DOT_PACK_ID, DUET_PACK_ID})
 FLEET_INSTANCE_KEYS = INSTANCE_KEYS | frozenset(
     {
         "runtime_path",
@@ -156,13 +160,18 @@ def _connector_tools(pack_id: str) -> frozenset[str]:
         return grokbot_n8n.TOOLS
     if pack_id == OPERATIONS_RELAY_PACK_ID:
         return grokbot_operations_relay.TOOLS
-    if pack_id == DOT_PACK_ID:
-        return dot.TOOLS
+    if pack_id in DOT_FAMILY_PACK_IDS:
+        return dot.profile_for(pack_id).tools
     if pack_id == T3_DISPATCH_PACK_ID:
         return grokbot_t3.TOOLS
     if pack_id == "wazuh-triage":
         return grokbot_wazuh.TOOLS
     return frozenset()
+
+
+def _profile_kwargs(pack_id: str) -> dict[str, str]:
+    """Dot keeps its original lifecycle calls; other profiles name themselves."""
+    return {} if pack_id == DOT_PACK_ID else {"pack_id": pack_id}
 
 
 def _connector_pack(pack_id: str) -> dict[str, Any]:
@@ -361,8 +370,8 @@ def doctor(target: Path, pack_id: str, *, service_result: bool = False) -> list[
         checks = grokbot_n8n.doctor(target)
     elif pack["id"] == OPERATIONS_RELAY_PACK_ID:
         checks = grokbot_operations_relay.doctor(target)
-    elif pack["id"] == DOT_PACK_ID:
-        checks = dot.doctor(target)
+    elif pack["id"] in DOT_FAMILY_PACK_IDS:
+        checks = dot.doctor(target, **_profile_kwargs(pack["id"]))
     elif pack["id"] == T3_DISPATCH_PACK_ID:
         checks = grokbot_t3.doctor(target)
     else:
@@ -390,8 +399,8 @@ def canary(target: Path, pack_id: str) -> dict[str, Any]:
         return grokbot_n8n.canary(target)
     if pack["id"] == OPERATIONS_RELAY_PACK_ID:
         return grokbot_operations_relay.canary(target)
-    if pack["id"] == DOT_PACK_ID:
-        return dot.canary(target)
+    if pack["id"] in DOT_FAMILY_PACK_IDS:
+        return dot.canary(target, **_profile_kwargs(pack["id"]))
     if pack["id"] == T3_DISPATCH_PACK_ID:
         return grokbot_t3.canary(target)
     return grokbot_cerebro.canary(target)
@@ -424,8 +433,8 @@ def render_install_service(target: Path, pack_id: str) -> str:
             return grokbot_n8n.render_unit(target, python=sys.executable)
         if pack["id"] == OPERATIONS_RELAY_PACK_ID:
             return grokbot_operations_relay.render_unit(target, python=sys.executable)
-        if pack["id"] == DOT_PACK_ID:
-            return dot.render_unit(target, python=sys.executable)
+        if pack["id"] in DOT_FAMILY_PACK_IDS:
+            return dot.render_unit(target, python=sys.executable, **_profile_kwargs(pack["id"]))
         if pack["id"] == T3_DISPATCH_PACK_ID:
             return grokbot_t3.render_unit(target, python=sys.executable)
         return grokbot_cerebro.render_unit(target, python=sys.executable)
@@ -477,8 +486,8 @@ def apply_install_service(
             path = grokbot_n8n.write_unit(target, out_dir, force=force)
         elif pack["id"] == OPERATIONS_RELAY_PACK_ID:
             path = grokbot_operations_relay.write_unit(target, out_dir, force=force)
-        elif pack["id"] == DOT_PACK_ID:
-            path = dot.write_unit(target, out_dir, force=force)
+        elif pack["id"] in DOT_FAMILY_PACK_IDS:
+            path = dot.write_unit(target, out_dir, force=force, **_profile_kwargs(pack["id"]))
         elif pack["id"] == T3_DISPATCH_PACK_ID:
             path = grokbot_t3.write_unit(target, out_dir, force=force)
         else:
@@ -550,11 +559,11 @@ def _setup(
     owner_workspace: str | Path | None = None,
 ) -> dict[str, Any]:
     pack = show_pack(pack_id)
-    if pack_id == DOT_PACK_ID and any(value is not None for value in (bearer_env, bearer_file, bearer)):
+    if pack_id in DOT_FAMILY_PACK_IDS and any(value is not None for value in (bearer_env, bearer_file, bearer)):
         raise PackError("unexpected-key")
     reference = (
         None
-        if pack_id == DOT_PACK_ID
+        if pack_id in DOT_FAMILY_PACK_IDS
         else _bearer_reference(bearer_env=bearer_env, bearer_file=bearer_file, bearer=bearer)
     )
     chosen_bind = bind or pack["default_bind"]
@@ -623,7 +632,7 @@ def _setup(
         ):
             raise PackError("unexpected-key")
         payload["owner_workspace"] = _operations_relay_owner_reference(owner_workspace)
-    elif pack["id"] in {T3_DISPATCH_PACK_ID, DOT_PACK_ID}:
+    elif pack["id"] in {T3_DISPATCH_PACK_ID} | DOT_FAMILY_PACK_IDS:
         if (
             cli_executable is not None
             or workdir is not None
@@ -636,7 +645,9 @@ def _setup(
         ):
             raise PackError("unexpected-key")
         payload["runtime_path"] = (
-            _dot_runtime_reference(runtime_path) if pack_id == DOT_PACK_ID else _t3_runtime_reference(runtime_path)
+            _dot_runtime_reference(runtime_path, pack_id)
+            if pack_id in DOT_FAMILY_PACK_IDS
+            else _t3_runtime_reference(runtime_path)
         )
     else:
         if (
@@ -1061,8 +1072,8 @@ def _validate_instance_config(payload: Mapping[str, Any], pack_id: str) -> dict[
             payload.get("action_state_path"),
             payload.get("approval_dir"),
         )
-    elif pack["id"] == DOT_PACK_ID:
-        _dot_runtime_reference(payload.get("runtime_path"))
+    elif pack["id"] in DOT_FAMILY_PACK_IDS:
+        _dot_runtime_reference(payload.get("runtime_path"), pack["id"])
     elif pack["id"] == T3_DISPATCH_PACK_ID:
         _t3_runtime_reference(payload.get("runtime_path"))
     elif pack["kind"] == "connector":
@@ -1114,7 +1125,7 @@ def _instance_keys(pack: Mapping[str, Any]) -> frozenset[str]:
         return OBSIDIAN_INSTANCE_KEYS
     if pack["id"] == OPERATIONS_RELAY_PACK_ID:
         return OPERATIONS_RELAY_INSTANCE_KEYS
-    if pack["id"] == DOT_PACK_ID:
+    if pack["id"] in DOT_FAMILY_PACK_IDS:
         return DOT_INSTANCE_KEYS
     if pack["id"] == T3_DISPATCH_PACK_ID:
         return T3_DISPATCH_INSTANCE_KEYS
@@ -1134,11 +1145,12 @@ def _operations_relay_owner_reference(owner_workspace: object) -> str:
         raise PackError("unsafe-path") from exc
 
 
-def _dot_runtime_reference(runtime_path: object) -> str:
+def _dot_runtime_reference(runtime_path: object, pack_id: str = DOT_PACK_ID) -> str:
     if runtime_path is None:
         raise PackError("missing-path-reference")
     try:
-        return dot.validate_runtime_reference(str(runtime_path))
+        schema = dot.profile_for(pack_id).runtime_schema
+        return dot.validate_runtime_reference(str(runtime_path), schema=schema)
     except dot.DotError as exc:
         raise PackError("unsafe-path") from exc
 

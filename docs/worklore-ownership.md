@@ -3,7 +3,9 @@
 An operator can offer a Worklore item to an enrolled node. The named node accepts
 with a private nonce, then records checkpoints, offers a handoff, or releases
 ownership. The Hub records these actions as immutable events in its existing
-`work_events` table. This protocol requires no schema migration.
+`work_events` table. Hub schema 41 adds a nonunique covering index on
+`(event_id, work_id)` for campaign take key lookups. Startup upgrades existing
+databases without changing stored events or the item-scoped event primary key.
 
 Ownership grants authority to mutate this Hub metadata. It does not establish
 filesystem exclusivity, prove that a process stopped, authenticate a verification
@@ -35,6 +37,10 @@ explicit `Idempotency-Key`. Ownership revisions are separate from item versions.
 | `report` | `generation`, `report` | Current holder | Owned remains owned |
 | `handoff` | `generation`, `target_node` | Current holder | Owned to handoff-pending |
 | `release` | `generation` | Current holder | Owned or handoff-pending to unowned |
+| `recover` | `generation`, `holder_quiesced: true`, `evidence_ref` | Admin or configured operator node, campaign members only | Owned or handoff-pending to unowned, increments generation |
+
+These per-item offer and handoff rules apply to noncampaign items. Campaign members
+use the bounded campaign offer and `take` described in [fleet campaigns](fleet-campaigns.md).
 
 The offer event is the authorization root. `granted_by` comes from the bearer
 principal, and the operator supplies exclusions, authorization reference, and
@@ -51,11 +57,12 @@ generation and nonce, including a handoff on the same node. An offer targets a
 node principal, not a particular process. Any process with that node's token can
 race to accept the initial offer or handoff and supply its own fresh nonce.
 
-Completed, canceled, and archived items permit release and withdrawal. They
-refuse new offers, accepts, checkpoints, reports, and handoffs. The protocol never changes
-item status, item version, attempt count, or burn eligibility. Attempt budget is
-operator-authenticated handoff metadata only. Existing attempt and burn rules
-remain authoritative.
+Completed, canceled, and archived items permit release and withdrawal, plus explicit
+campaign recovery. They refuse new offers, accepts, checkpoints, reports, and handoffs. The protocol never changes
+item status, item version, attempt count, or burn eligibility. For noncampaign
+items, attempt budget is operator-authenticated handoff metadata.
+Campaign node execution and attempt writes also enforce the current campaign grant
+and its budget. Existing attempt and burn rules remain authoritative.
 
 ## Nonce and replay
 
@@ -87,7 +94,8 @@ validation, capacity checking, and event insertion. Event identity includes the
 stable authenticated principal class (`admin` or enrolled `node`), actor ID, and
 idempotency key. Holder events always use the node identity, even after promotion
 or removal of operator privileges. Offers and withdrawals require current
-operator or admin privilege on every request, including replay.
+operator or admin privilege on every request, including replay. Campaign recovery
+requires the same current privilege.
 A retry must use the same
 body, nonce, generation, expected revision, and key. The request fingerprint
 contains the nonce hash in place of the secret.
@@ -185,22 +193,48 @@ must not move backwards, and session linkage must remain consistent.
 ## Capacity and recovery
 
 Each item permits 200 ordinary ownership events, with a total maximum of 201.
-Offer and handoff require a prior count at most 197. Accept, checkpoint, and report must
-leave the count at most 200. Release and withdrawal are safety exits that may
-append event 201. An exhausted chain cannot start another ownership cycle.
+Offer, handoff, and campaign take require a prior count at most 197. Accept,
+checkpoint, and report must leave the count at most 200. Release, withdrawal, and
+campaign recovery are safety exits that may append event 201. Take leaves room
+for a checkpoint, progress observation, and safety exit. An exhausted chain cannot
+start another ownership cycle.
 `ownership-capacity-exhausted` requires a successor item.
 
 Claim expiry, session end, lease expiry, node revocation, and unknown liveness
 never transfer ownership automatically or remove a reserved path scope. Release
 requires the current holder nonce and an enrolled, unrevoked holder node. Admin
-and operator privileges cannot force release. A successor item addresses an
-exhausted event chain but cannot checkpoint over another item's reserved paths,
-including a lost holder's scope. Operator-reviewed reservation recovery for a
-lost holder capability remains future epic work. No supported recovery action
-in this slice bypasses holder authority.
+and operator privileges cannot force release on noncampaign items. A successor item
+addresses an exhausted event chain but cannot checkpoint over another item's
+reserved paths, including a lost holder's scope. Noncampaign lost-holder recovery
+remains unsupported.
+
+Campaign members add an explicit operator recovery action as an intentional policy
+addition required by campaign cancellation. Use the existing ownership POST with
+`If-Match` naming the exact current ownership revision, `Idempotency-Key`, and:
+
+```json
+{"action":"recover","generation":1,"holder_quiesced":true,"evidence_ref":"receipt-quiescence"}
+```
+
+Only the existing trusted Hub admin bearer or a configured operator node bearer
+may recover a campaign member. A request cannot supply its own operator status.
+The generation must also match exactly. `holder_quiesced` must be literal JSON
+`true`, and `evidence_ref` must pass the existing nonempty bounded private-data
+reference validation. The operator must first establish that the holder/process
+has stopped writing. The event records the authenticated actor, evidence, and
+acknowledgement as `operator-reported-unverified`. The Hub has no proof that a
+physical process was stopped. It never infers quiescence from expiry, cancellation,
+revocation, or absent presence.
+
+Recovery works independently of campaign eligibility and lease expiry. In one
+transaction it appends `ownership-recovered`, increments generation, and clears
+authority, checkpoint scope, and report. Old capabilities cannot write or release.
+It retains the existing 201-event ceiling and never deletes history. An exact
+replay returns its original result without clearing a newer holder or incrementing
+again. Conflicting replay is refused. No real fleet recovery is performed by tests.
 
 Atomic checkpoint path admission is implemented as described in the
 [phase document](phase-worklore-path-scope-admission.md). Dependencies,
 authoritative verification and review ingestion, GitHub merge reconciliation,
 resource arbitration, delegated scope, bounded client detail propagation,
-lost-holder recovery, and issue completion require later slices.
+noncampaign lost-holder recovery, and issue completion require later slices.

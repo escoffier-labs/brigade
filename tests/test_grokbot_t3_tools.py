@@ -666,3 +666,48 @@ def test_followup_does_not_launch_without_the_reopen_marker(make, monkeypatch):
     assert out["error"]["code"] == "unavailable"
     assert launched == []
     assert ledger.get("r1")["last_state"] == "succeeded"
+
+
+@pytest.mark.parametrize("flag", [None, False])
+def test_disabled_messaging_excludes_hub_without_constructing_client(make, monkeypatch, tmp_path, flag):
+    from brigade.grokbot_t3 import tools as module
+
+    def forbidden(**kwargs):
+        pytest.fail("disabled messaging constructed a Hub client")
+
+    monkeypatch.setattr(module, "HubInbox", forbidden)
+    options = {"hub_messaging_enabled": flag} if flag is not None else {}
+    tools, _, _ = make(
+        hub_token_file=str(tmp_path / "principal.token"), hub_message_principal="agent:grokbot", **options
+    )
+    assert len(tools.inventory()) == 9
+    for name, arguments in (
+        ("hub_inbox_list", {}),
+        ("hub_inbox_ack", {"ids": [1]}),
+        ("hub_message_send", {"alias": "host-a", "subject": "s", "body": "b"}),
+        ("hub_message_status", {"ids": [1]}),
+    ):
+        assert tools.call_tool(name, arguments)["error"]["code"] == "hub-not-configured"
+
+
+@pytest.mark.parametrize(
+    "alias",
+    ["Host-a", "host", "host-a/child", "../host-a", "00000000-0000-4000-8000-000000000001", "agent:host-a", "unknown"],
+)
+def test_invalid_alias_never_constructs_client_or_uses_clock_or_dispatch_budget(make, monkeypatch, tmp_path, alias):
+    from brigade.grokbot_t3 import tools as module
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("invalid alias reached a side effect")
+
+    monkeypatch.setattr(module, "HubInbox", forbidden)
+    tools, _, ledger = make(
+        hub_messaging_enabled=True,
+        hub_message_principal="agent:grokbot",
+        hub_token_file=str(tmp_path / "principal.token"),
+        hub_recipients={"host-a": "00000000-0000-4000-8000-000000000001"},
+    )
+    monkeypatch.setattr(tools, "now", forbidden)
+    monkeypatch.setattr(ledger, "record_attempt", forbidden)
+    result = tools.call_tool("hub_message_send", {"alias": alias, "subject": "s", "body": "b"})
+    assert result["error"]["code"] == "invalid_request"
