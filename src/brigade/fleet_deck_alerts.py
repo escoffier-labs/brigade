@@ -36,18 +36,25 @@ def render_alerts_page(
     )
 
 
-def render_alert_rows(alerts: Sequence[Alert], *, action_sources: frozenset[str] = frozenset()) -> str:
+def render_alert_rows(
+    alerts: Sequence[Alert], *, action_sources: frozenset[str] = frozenset(), compact: bool = False
+) -> str:
     """Keep subject, state, age and the actual action together at every width."""
     rows = []
     for alert in alerts:
         detail = activity.REASONS.get(alert.detail, alert.detail) if alert.kind == "blocked" else alert.detail
         action = fleet_action_page.alert_link(alert.source_ref, action_sources, alert.title)
         if not action:
-            action = '<span class="station-meta">Inspect evidence below</span>'
+            action = '<span class="station-meta">Inspect evidence' + ("" if compact else " below") + "</span>"
+        evidence = (
+            f'<details class="{"alert-evidence-inline" if compact else "alert-evidence"}"><summary>Evidence</summary>'
+            f'<p class="alert-detail">{_esc(detail)}</p></details>'
+        )
         rows.append(
             '<li class="alert-row"><div><span class="attention-kind">' + _esc(alert.kind) + "</span>"
-            f'<h3>{_esc(alert.title)}</h3><p class="alert-age">{_esc(alert.since)}</p></div>'
-            f'<div class="alert-action">{action}</div>'
-            f'<details class="alert-evidence"><summary>Evidence</summary><p class="alert-detail">{_esc(detail)}</p></details></li>'
+            f'<h3>{_esc(alert.title)}</h3><p class="alert-age">{_esc(alert.since)}</p>'
+            + (evidence if compact else "")
+            + "</div>"
+            f'<div class="alert-action">{action}</div>' + ("" if compact else evidence) + "</li>"
         )
     return '<ul class="alert-rows">' + "".join(rows) + "</ul>" if rows else '<p class="empty">No active alerts</p>'

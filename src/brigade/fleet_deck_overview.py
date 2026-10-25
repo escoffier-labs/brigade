@@ -177,7 +177,7 @@ def render_summary(view: DeckView) -> str:
     )
     not_ready = (
         str(sum(int(deck._cp_text(item["count"])) for item in queue.exclusions) + len(queue.blocked_items))
-        if queue is not None and queue.blocked_known
+        if queue is not None and queue.complete and queue.blocked_known
         else UNKNOWN
     )
     return (
@@ -299,11 +299,13 @@ def render_attention(view: DeckView, now: datetime, *, action_sources: frozenset
     from .fleet_deck_alerts import render_alert_rows
 
     alerts = page_alerts(view, now)
+    remaining = len(alerts) - 3
     return (
         '<section class="panel" aria-labelledby="attention-title"><header><h2 id="attention-title">Needs attention</h2>'
         '<a href="/deck/alerts">View all alerts</a></header>'
         + render_alert_line(view, now)
-        + render_alert_rows(alerts, action_sources=action_sources)
+        + render_alert_rows(alerts[:3], action_sources=action_sources, compact=True)
+        + (f'<p><a href="/deck/alerts">{remaining} more alerts · View all alerts</a></p>' if remaining > 0 else "")
         + "</section>"
     )
 

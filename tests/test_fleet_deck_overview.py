@@ -1434,7 +1434,10 @@ def test_overview_alert_line_groups_kinds_in_first_seen_order_and_hides_at_zero(
     assert len(overview.page_alerts(single, NOW)) == 1
     assert "<strong>1 alert</strong>" in overview.render_alert_line(single, NOW)
     page = overview.render_overview(view, NOW, worklore_enabled=True)
-    assert page.count('class="alert-row"') == 8 and "external.failed" in page
+    assert page.count('class="alert-row"') == 3 and "external.failed" in page
+    assert "5 more alerts" in page
+    full = render_alerts_page(view, NOW, nonce="p", worklore_enabled=True)
+    assert full.count('class="alert-row"') == 8 and "external.failed" in full
     markers = [
         'class="page-head"',
         'class="alert-line"',

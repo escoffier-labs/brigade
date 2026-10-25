@@ -221,7 +221,9 @@ tbody tr:hover td { background: var(--surface-raised); }
   .shell { grid-template-columns: 1fr; }
   .shell-sidebar { position: static; height: auto; border-right: 0; border-bottom: 1px solid var(--line-quiet); }
   .shell-sidebar { padding: var(--space-2) var(--space-3); }
-  .shell-sidebar .brand-sub, .shell-sidebar > .section-links { display: none; }
+  .shell-sidebar .brand-sub { display: none; }
+  .shell-sidebar > .section-links { margin: var(--space-2) 0; }
+  .shell-sidebar > .section-links a { padding: 4px 6px; }
   .shell-sidebar .deck-nav a { padding: 6px; gap: 4px; font-size: 12px; }
   .shell-sidebar .deck-nav .icon { display: none; }
   .shell-sidebar .deck-nav { flex-direction: row; flex-wrap: wrap; margin: var(--space-3) 0 0; }
@@ -242,6 +244,11 @@ ALERTS_CSS = """
 
 OVERVIEW_CSS = """
 .overview > * + * { margin-top: var(--space-4); }
+.overview .alert-row { padding: var(--space-2) 0; }
+.overview .alert-row h3 { font-size: 13px; }
+.overview .alert-age { display: inline; margin-right: var(--space-2); }
+.overview .alert-evidence-inline, .overview .alert-evidence-inline summary { display: inline; font-size: 12px; }
+.overview .alert-evidence-inline summary { cursor: pointer; color: var(--muted); }
 .verdict-status { font-size: 11px; font-weight: 800; }
 .verdict-status--attention { color: var(--signal); }
 .verdict-status--unknown { color: var(--muted); }

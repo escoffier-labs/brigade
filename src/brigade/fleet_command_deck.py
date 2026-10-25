@@ -339,6 +339,7 @@ class QueueState:
     queued_count: str = UNKNOWN
     blocked: tuple[Mapping[str, object], ...] = ()
     blocked_known: bool = False
+    complete: bool = False
 
     @property
     def exclusions(self) -> tuple[Mapping[str, object], ...]:
@@ -1363,6 +1364,7 @@ def control_plane_from_snapshot(raw: Mapping[str, object] | None) -> ControlPlan
             queued_count=_cp_text(queue_raw.get("queued_count")),
             blocked=blocked,
             blocked_known=queue_raw.get("blocked") is not None,
+            complete=queue_raw.get("complete") is True,
         )
 
     integrations: list[IntegrationState] = []

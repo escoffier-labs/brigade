@@ -1878,7 +1878,11 @@ def render(
             '<p class="banner">read-only: browser access can inspect settings; editing requires an authorized admin request</p>'
         )
     parts.append(_activation_panel(view))
-    parts.append("<h2>" + ("Active policy" if view.activation.active else "Staged policy, not active") + "</h2>")
+    heading = {
+        "active": "Active policy",
+        "staged": "Staged policy, not active",
+    }.get(view.activation.state, "Policy activation unknown")
+    parts.append(f"<h2>{heading}</h2>")
     parts.append("<details><summary>Document identity and inventory</summary>" + _identity_panel(view) + "</details>")
     parts.append(_plan_panel(plan, activation=view.activation, draft=draft, review=review if editable else None))
     parts.append(_defaults_form(view, editable=editable, csrf=csrf, draft=draft))

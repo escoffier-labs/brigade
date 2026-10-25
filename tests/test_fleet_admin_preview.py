@@ -4,6 +4,8 @@ import re
 from dataclasses import replace
 from html.parser import HTMLParser
 
+import pytest
+
 from brigade import fleet_command_deck as deck, fleet_deck_overview as overview, fleet_work_page
 from tests.test_fleet_deck_overview import NOW, HOSTILE, _alert_view, _mixed_view
 from tests.test_fleet_enrollment import cookie, hub, request, ADMIN  # noqa: F401
@@ -107,7 +109,7 @@ def test_settings_lead_with_authority_and_read_only_values(tmp_path):
         view = policy.load_view(conn)
         page = policy.render(view, nonce="p", now=NOW, csrf="secret", editable=False)
         assert page.index('id="activation"') < page.index('id="identity"')
-        assert "Staged policy" in page and "Effective policy</h2>" not in page
+        assert "Policy activation unknown" in page and "Effective policy</h2>" not in page
         assert "enroll with the fleet token to edit" not in page
         page = roster.render(
             roster.load_view(conn, deck.DeckConfig()), nonce="p", now=NOW, csrf="secret", editable=False
@@ -200,3 +202,106 @@ def test_observed_reporting_leads_with_observation_scope_before_details():
     value = snapshot()
     page = stats.render({"latest": value, "weeks": value["weeks"]}, nonce="p", now=NOW)
     assert page.index("Weekly observations: 1") < page.index("<summary>Snapshot and methodology")
+
+
+def test_current_section_destinations_remain_in_context_with_worklore_on_or_off():
+    from brigade import fleet_deck_sidebar as sidebar
+
+    for enabled in (False, True):
+        for active, routes in (
+            ("work", ("/view/machines", "/deck#queued-title")),
+            ("roster", ("/deck/roster", "/deck/policy", "/deck/stats")),
+        ):
+            page = sidebar.render_sidebar(_mixed_view(), active, NOW, worklore_enabled=enabled)
+            context = page.split('aria-label="Section destinations">', 1)[1].split("</div>", 1)[0]
+            for route in routes:
+                assert f'href="{route}"' in context
+            if active == "work":
+                assert ('href="/deck/work"' in context) == enabled
+            assert len(Navigation(page).links) == 5
+
+
+@pytest.mark.parametrize(
+    ("queue", "expected", "ready"),
+    (
+        # Failed scan, partial empty scan, partial exclusions, and old producers.
+        ({"complete": False, "eligible_count": None, "blocked": []}, "unknown", "unknown"),
+        ({"complete": False, "eligible_count": 2, "blocked": []}, "unknown", "2"),
+        (
+            {"complete": False, "eligible_count": None, "blocked": [{"reason": "manual-mode", "count": 7}]},
+            "unknown",
+            "unknown",
+        ),
+        ({"eligible_count": 0, "blocked": []}, "unknown", "0"),
+        ({"complete": "true", "eligible_count": 0, "blocked": []}, "unknown", "0"),
+        ({"complete": True, "eligible_count": 0, "blocked": None}, "unknown", "0"),
+        ({"complete": True, "eligible_count": 0, "blocked": []}, "0", "0"),
+        (
+            {"complete": True, "eligible_count": 3, "blocked": [{"reason": "manual-mode", "count": 7}]},
+            "7",
+            "3",
+        ),
+    ),
+)
+def test_not_ready_total_requires_complete_queue_projection(queue, expected, ready):
+    from tests.test_fleet_deck_overview import _card_value, _view
+
+    plane = deck.control_plane_from_snapshot({"queue": queue})
+    page = overview.render_summary(_view(plane=plane))
+    assert _card_value(page, "not-ready") == expected, queue
+    assert _card_value(page, "queued") == ready, queue
+
+
+def test_policy_heading_distinguishes_active_staged_and_unknown(tmp_path):
+    from brigade import fleet_hub, fleet_policy_page as policy
+
+    conn = fleet_hub.init_db(tmp_path / "hub.db")
+    try:
+        view = policy.load_view(conn)
+        for state, heading in (
+            ("active", "Active policy"),
+            ("staged", "Staged policy, not active"),
+            ("unknown", "Policy activation unknown"),
+        ):
+            page = policy.render(
+                replace(view, activation=policy.Activation(state, "fixture")),
+                nonce="p",
+                now=NOW,
+                csrf="fixture",
+                editable=False,
+            )
+            assert f"<h2>{heading}</h2>" in page
+    finally:
+        conn.close()
+
+
+def test_overview_limits_attention_while_alerts_retain_every_subject_and_evidence():
+    from html import escape, unescape
+    from urllib.parse import parse_qs, urlsplit
+
+    from brigade import fleet_deck_alerts as alerts_page
+
+    view = _alert_view()
+    view = replace(view, rail=(replace(view.rail[0], repo=HOSTILE), *view.rail[1:]))
+    alerts = overview.page_alerts(view, NOW)
+    assert len(alerts) > 3
+    sources = frozenset(alert.source_ref for alert in alerts if alert.source_ref)
+    compact = overview.render_attention(view, NOW, action_sources=sources)
+    full = alerts_page.render_alerts_page(view, NOW, nonce="p", worklore_enabled=True, action_sources=sources)
+    assert compact.count('<li class="alert-row">') == 3
+    assert full.count('<li class="alert-row">') == len(alerts)
+    assert f"{len(alerts) - 3} more alerts" in compact
+    assert 'href="/deck/alerts"' in compact and "View all alerts" in compact
+    assert '<details class="alert-evidence">' not in compact
+    assert full.count('<details class="alert-evidence">') == len(alerts)
+    assert HOSTILE not in compact and HOSTILE not in full
+    for alert in alerts[:3]:
+        assert escape(alert.title) in compact
+        assert escape(alert.kind) in compact and escape(alert.since) in compact
+    for alert in alerts:
+        assert escape(alert.title) in full
+        assert escape(alert.since) in full
+    for page, expected in ((compact, alerts[:3]), (full, alerts)):
+        links = re.findall(r'href="(/deck/actions/compose\?[^" ]+)"', page)
+        linked_sources = {parse_qs(urlsplit(unescape(link)).query)["source"][0] for link in links}
+        assert linked_sources == {alert.source_ref for alert in expected if alert.source_ref}
