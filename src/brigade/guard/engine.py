@@ -51,6 +51,7 @@ def scan_text(text: str, policy: Policy | None = None, options: ScanOptions | No
     findings: list[Finding] = []
     occupied: list[tuple[int, int, str]] = []
     root_spans: list[tuple[int, int]] = []
+    js_fields: set[int] | None = None
 
     for rule in active_policy.all_rules():
         is_root_path = rule.id == "root-path" and not any(rule is custom for custom in active_policy.custom_rules)
@@ -63,12 +64,14 @@ def scan_text(text: str, policy: Policy | None = None, options: ScanOptions | No
                 match.group(0), _line_at(text, start, end)
             ):
                 continue
-            if (
-                rule.id == "private-hostname"
-                and not any(rule is custom_rule for custom_rule in active_policy.custom_rules)
-                and not _hostname_context(text, start, end)
+            if rule.id == "private-hostname" and not any(
+                rule is custom_rule for custom_rule in active_policy.custom_rules
             ):
-                continue
+                if js_fields is None:
+                    js_fields = set()
+                    _js_template_code_position(text, field_positions=js_fields)
+                if not _hostname_context(text, start, end, js_fields):
+                    continue
             if _inside_ranges(start, end, skipped_ranges):
                 continue
             # Earlier detectors can occupy part of an expanded root path.
@@ -358,7 +361,11 @@ def _js_regex_end(text: str, start: int) -> int | None:
     in_class = False
     while index < len(text):
         char = text[index]
+        if char in "\r\n\u2028\u2029":
+            return None
         if char == "\\":
+            if index + 1 < len(text) and text[index + 1] in "\r\n\u2028\u2029":
+                return None
             index += 2
             continue
         if char == "[":
@@ -374,16 +381,22 @@ def _js_regex_end(text: str, start: int) -> int | None:
     return None
 
 
-def _js_template_code_position(prefix: str, *, template_text: bool = False) -> bool:
+def _js_template_code_position(
+    prefix: str, *, template_text: bool = False, field_positions: set[int] | None = None
+) -> bool:
     """Recognize bounded expression positions with one iterative lexical walk.
 
     The same token transitions handle code before a template and code inside
     completed template literals. Unknown syntax retains hostname detection.
     """
-    if prefix.lstrip().startswith(("<!--", "//", "--", "#", ";", "*")):
+    if prefix.lstrip().startswith(("<!--", ";", "*")) or (
+        field_positions is None and prefix.lstrip().startswith(("//", "--", "#"))
+    ):
         return False
     frames: list[_JSCode | str] = [_JSCode()]
     contextual: dict[str, list[bool]] = {"await": [], "yield": [], "let": []}
+    template_depth = 0
+    eligible_templates: set[int] = set()
 
     def leave_scope(code: _JSCode) -> None:
         for contextual_name in code.bindings - code.keywords:
@@ -417,13 +430,23 @@ def _js_template_code_position(prefix: str, *, template_text: bool = False) -> b
         if isinstance(frame, str):
             if char == "\\":
                 index += 2
+            elif frame != "`" and char in "\r\n":
+                return False
             elif char == frame:
+                if frame == "`":
+                    template_depth -= 1
+                    eligible_templates.discard(len(frames) - 1)
                 frames.pop()
                 parent = frames[-1]
                 assert isinstance(parent, _JSCode)
                 parent.value("literal")
                 index += 1
             elif frame == "`" and prefix.startswith("${", index):
+                if field_positions is not None and len(frames) - 1 in eligible_templates:
+                    position = index + 2
+                    while position < len(prefix) and prefix[position].isspace():
+                        position += 1
+                    field_positions.add(position)
                 frames.append(_JSCode("interpolation", True))
                 index += 2
             else:
@@ -450,7 +473,13 @@ def _js_template_code_position(prefix: str, *, template_text: bool = False) -> b
             or prefix.startswith("//", index)
             or (prefix.startswith("--", index) and (index + 2 == len(prefix) or prefix[index + 2].isspace()))
         ):
-            return False
+            if field_positions is None:
+                return False
+            end = prefix.find("\n", index)
+            if end == -1:
+                return False
+            index = end + 1
+            continue
         if prefix.startswith("/*", index):
             end = prefix.find("*/", index + 2)
             if end == -1:
@@ -465,6 +494,19 @@ def _js_template_code_position(prefix: str, *, template_text: bool = False) -> b
             if not ((frame.parameters and char in "(*") or (frame.body and char == "{")):
                 return False
         if char in "\"'`":
+            if char == "`":
+                if (
+                    field_positions is not None
+                    and template_depth == 0
+                    and not frame.member
+                    and (
+                        (frame.operand and frame.anchor)
+                        or (frame.tag and (frame.anchor or not prefix[index - 1 : index].isspace()))
+                        or (first_word and not prefix[:index].strip())
+                    )
+                ):
+                    eligible_templates.add(len(frames))
+                template_depth += 1
             frames.append(char)
             index += 1
             first_word = False
@@ -941,7 +983,7 @@ def _normalized_shell_assignments(before: str) -> str:
     return "".join(pieces)
 
 
-def _hostname_context(text: str, start: int, end: int) -> bool:
+def _hostname_context(text: str, start: int, end: int, js_fields: set[int] | None = None) -> bool:
     """Keep textual hosts while avoiding unquoted attribute expressions.
 
     This is a lexical heuristic, not a source parser. Bare dotted identifiers,
@@ -955,7 +997,11 @@ def _hostname_context(text: str, start: int, end: int) -> bool:
     if re.search(r"[a-z][a-z0-9+.-]*://[^\s]*$", before, re.IGNORECASE):
         # A replacement field holding only the host is an expression even in a
         # formatted URL (#1918). Any other URL context keeps matching.
-        return not (_whole_fstring_field(before, after) or _whole_js_template_field(before, after))
+        if _whole_fstring_field(before, after):
+            return False
+        if js_fields is not None:
+            return not (start in js_fields and bool(re.match(r"\s*\}", after)))
+        return not _whole_js_template_field(text[:start], after)
     # These delimiters introduce expressions, including expressions inside
     # interpolated strings. Check them before accepting a surrounding quote.
     if re.search(r"\bf[\"'][^\n]*\{[^}]*$", _normalized_shell_assignments(before), re.IGNORECASE):
