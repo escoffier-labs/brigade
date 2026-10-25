@@ -5,7 +5,7 @@ from datetime import datetime
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePath
 import re
 import stat
 from typing import Any
@@ -13,6 +13,7 @@ from uuid import uuid4
 from .contracts import MAX_CARD_FILE_BYTES, DotError, require
 from .hub_tools import BRIGADE_TIMEOUT, MAX_SMALL_CAPTURE
 from .process import CommandRunner, child_environment, child_path, parse_json_bytes
+from .profile import DOT, ConnectorProfile
 from .runtime_config import Runtime
 from .safe_state import private_directory, trusted_directory, redact_credentials
 from .state import utc_now
@@ -22,11 +23,11 @@ POLICY_PATHS = (Path(".codex/AGENTS.md"), Path("AGENTS.md"), Path("ai-tools/AGEN
 
 
 class MemoryTools:
-    def __init__(self, runtime: Runtime, *, commands: CommandRunner) -> None:
-        self.runtime, self.commands = runtime, commands
+    def __init__(self, runtime: Runtime, *, commands: CommandRunner, profile: ConnectorProfile = DOT) -> None:
+        self.runtime, self.commands, self.profile = runtime, commands, profile
         self.workspace = runtime.paths.workspace
         self.cards = self.workspace / "memory" / "cards"
-        self.handoff_inbox = self.workspace / ".codex" / "memory-handoffs"
+        self.handoff_inbox = self.workspace / profile.handoff_inbox
         self.clock = utc_now
         self.environment = child_environment(child_path(runtime.paths.bin))
 
@@ -111,10 +112,11 @@ class MemoryTools:
             return {"error": "content_rejected", "reason": "credential-shaped text"}
         moment = self.clock()
         require(isinstance(moment, datetime) and moment.utcoffset() is not None, "clock_unavailable")
-        filename = f"{moment.astimezone():%Y-%m-%d-%H%M}-dot-{slug}.md"
+        prefix = self.profile.handoff_prefix
+        filename = f"{moment.astimezone():%Y-%m-%d-%H%M}-{prefix}-{slug}.md"
         inbox = trusted_directory(self.handoff_inbox, code="handoff_unavailable")
         lint_name = f"handoff-lint-{uuid4().hex}.md"
-        temporary = f".dot-{uuid4().hex}.tmp"
+        temporary = f".{prefix}-{uuid4().hex}.tmp"
         lint_written = temporary_written = False
         state_fd = None
         try:
@@ -208,11 +210,39 @@ class MemoryTools:
         value, error = self._brigade_json(["skills", "search", query, "--target", str(self.workspace), "--json"])
         if error or not isinstance(value, dict):
             return {"error": error or "brigade_unavailable"}
-        return {"skills": value.get("skills", [])[:limit], "count": value.get("count", 0)}
+        deny = self.runtime.skills_deny
+        if not deny:
+            return {"skills": value.get("skills", [])[:limit], "count": value.get("count", 0)}
+        # Withheld skills are dropped from results the same way they are hidden from skill_get.
+        found = value.get("skills", [])
+        found = found if isinstance(found, list) else []
+        kept = [item for item in found if not (isinstance(item, dict) and _skill_names(item) & deny)]
+        count = value.get("count", 0)
+        if type(count) is int:
+            count = max(0, count - (len(found) - len(kept)))
+        return {"skills": kept[:limit], "count": count}
 
     def skill_get(self, name: str, resource: str = "SKILL.md", offset: int = 0) -> dict[str, Any]:
         require(all(part not in (".", "..") for part in resource.split("/")))
+        if name in self.runtime.skills_deny:
+            # Indistinguishable from a missing skill, so the denylist itself is not disclosed.
+            return {"error": "skill_not_found"}
+        if self.runtime.skills_deny:
+            from brigade.skills_cmd.registry import _anchored_load_registry_metadata
+
+            directory, metadata = _anchored_load_registry_metadata(self.workspace, name)
+            if _skill_names({"skill_dir": str(directory), "metadata": metadata}) & self.runtime.skills_deny:
+                return {"error": "skill_not_found"}
         return skill_get(self.workspace, name, resource, offset)
+
+
+def _skill_names(item: dict[str, Any]) -> set[str]:
+    # Registry rows carry the id in metadata and the entry name in skill_dir, which skill_get reads by.
+    metadata = item.get("metadata")
+    names = {metadata.get("id"), item.get("id")} if isinstance(metadata, dict) else {item.get("id")}
+    if isinstance(item.get("skill_dir"), str):
+        names.add(PurePath(item["skill_dir"]).name)
+    return {name for name in names if isinstance(name, str)}
 
 
 def read_file(path: Path, maximum: int = 1024 * 1024) -> tuple[bytes, os.stat_result]:

@@ -32,15 +32,19 @@ class EventsApp:
         return self.app.router
 
     async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> Any:
-        if not self.enabled:
-            return await self.app(scope, receive, send)
         if scope["type"] == "lifespan":
             worker = None
 
             async def wrapped_send(message: dict[str, Any]) -> None:
                 nonlocal worker
-                if message["type"] == "lifespan.startup.complete":
-                    worker = asyncio.create_task(self.service.run())
+                if message["type"] == "lifespan.startup.complete" and (self.enabled or self.service.hub is not None):
+                    # Disabled webhook transport still maintains the Hub mirror and pending acknowledgements.
+                    action = (
+                        self.service.run()
+                        if self.enabled
+                        else self.service.periodic(self.service.poll_hub, self.service.hub_poll_seconds)
+                    )
+                    worker = asyncio.create_task(action)
                 if message["type"] in ("lifespan.shutdown.complete", "lifespan.shutdown.failed") and worker:
                     worker.cancel()
                     try:
@@ -50,6 +54,8 @@ class EventsApp:
                 await send(message)
 
             return await self.app(scope, receive, wrapped_send)
+        if not self.enabled:
+            return await self.app(scope, receive, send)
         message = await receive()
         request = json.loads(message.get("body", b"{}"))
         method = request.get("method")

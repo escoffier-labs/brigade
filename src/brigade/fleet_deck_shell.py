@@ -61,6 +61,7 @@ def deck_page(
     as_of: str,
     refresh_seconds: int | None = 10,
     extra_css: str = "",
+    script: str = "",
 ) -> str:
     """The shared shell. *sidebar_html* and *body_html* must already be escaped."""
     shell = (
@@ -75,5 +76,5 @@ def deck_page(
         as_of=as_of,
         refresh_seconds=refresh_seconds,
         extra_css=extra_css,
-        script=FILTER_SCRIPT,
+        script=FILTER_SCRIPT + script,
     )

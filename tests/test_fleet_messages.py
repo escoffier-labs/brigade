@@ -3658,6 +3658,9 @@ def test_list_wait_ignores_send_to_different_recipient(message_hub):
         status, payload = _request(base, token_b, {"action": "list", "after": 0, "unacked": True, "wait_ms": 250})
         results.append((status, payload, time.monotonic() - started))
 
+    # Establish an epoch even if the short waiter expires during the send.
+    fleet_hub_messages._notify_recipient(NODE_B)
+    before_epoch = fleet_hub_messages._wake_epoch(NODE_B)
     thread = threading.Thread(target=waiter, daemon=True)
     thread.start()
     _wait_for_active_waiters(NODE_B, 1)
@@ -3668,8 +3671,9 @@ def test_list_wait_ignores_send_to_different_recipient(message_hub):
         {"action": "send", "to": NODE_A, "subject": "Unrelated", "body": "Do not wake NODE_B"},
     )
     assert send_status == 201
-    time.sleep(0.05)
-    assert thread.is_alive()
+    # HTTP latency can exceed the 250 ms deadline, especially on Windows.
+    # A completed timeout is valid, but a notification for NODE_B is not.
+    assert fleet_hub_messages._wake_epoch(NODE_B) == before_epoch
 
     thread.join(timeout=2.0)
     assert not thread.is_alive()
@@ -4112,3 +4116,26 @@ def test_list_wait_rechecks_auth_and_releases_reservations_on_error(message_hub,
         assert fleet_hub_messages._ACTIVE_WAITERS == {}
         assert fleet_hub_messages._SOURCE_WAITERS == {}
         assert fleet_hub_messages._WAKE_CONDITIONS == {}
+
+
+def test_message_identity_is_authenticated_even_with_empty_inbox(message_hub, tmp_path, monkeypatch, capsys):
+    base, token_a, _token_b, db = message_hub
+    monkeypatch.setattr(fleet_client, "load_fleet_settings", lambda: {"hub_url": base, "node_token": token_a})
+    monkeypatch.setattr(fleet_client, "resolve_node_id", lambda: NODE_A)
+    with fleet_hub.init_db(db) as conn:
+        principal = fleet_hub_messages.add_principal(conn, {"name": "duet", "label": "Duet fixture"})
+    token = tmp_path / "message.token"
+    token.write_text(principal["token"])
+    token.chmod(0o600)
+    assert _request(base, principal["token"], {"action": "list"})[1]["messages"] == []
+    assert _request(base, principal["token"], {"action": "identity"}) == (200, {"principal": "agent:duet"})
+    assert fleet_client_messages.identity(token_file=str(token)) == {"principal": "agent:duet"}
+    assert cli.main(["fleet", "msg", "identity", "--token-file", str(token), "--json"]) == 0
+    assert json.loads(capsys.readouterr().out) == {"principal": "agent:duet"}
+    assert _request(base, token_a, {"action": "identity"}) == (200, {"principal": NODE_A})
+    with fleet_hub.init_db(db) as conn:
+        conn.execute(
+            "UPDATE fleet_message_principals SET revoked_at=? WHERE principal_id=?", ("2026-01-01", "agent:duet")
+        )
+    with pytest.raises(fleet_client.FleetClientError):
+        fleet_client_messages.identity(token_file=str(token))

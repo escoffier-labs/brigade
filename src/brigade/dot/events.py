@@ -433,11 +433,30 @@ class EventService:
             actions.append(hub.reconcile)
         actions.append(hub.flush_pending)
         for action in actions:
+            work = asyncio.create_task(asyncio.to_thread(action))
             try:
-                await asyncio.to_thread(action)
+                await asyncio.shield(work)
+            except asyncio.CancelledError:
+                # Threaded Hub operations still own BridgeState until they finish.
+                try:
+                    await work
+                except Exception:
+                    pass
+                raise
             except DotError as error:
-                if error.code == "hub_credential_invalid":
-                    logging.getLogger("dot-events").warning("hub_credential_invalid")
+                if error.code in {
+                    "hub_credential_invalid",
+                    "hub_credential_changed",
+                    "hub_identity_invalid",
+                    "hub_unauthorized",
+                    "hub_forbidden",
+                }:
+                    logging.getLogger("dot-events").warning("hub_poll_failed code=%s", error.code)
+                    # Local health state never adopts an unverified replacement credential's scope.
+                    self.state.hub_set("last_hub_poll_error", error.code)
+            else:
+                if action == hub.sync:
+                    self.state.hub_set("last_hub_poll_error", "")
 
     async def run(self) -> None:
         import anyio

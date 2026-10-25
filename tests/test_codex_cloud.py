@@ -1,5 +1,7 @@
 import hashlib
 import json
+import subprocess
+import sys
 
 import pytest
 
@@ -134,6 +136,837 @@ class FakeRuns:
 
 def _result(code=0, stdout="", stderr=""):
     return proc.Result(code=code, stdout=stdout, stderr=stderr)
+
+
+def _assert_windows_hub_refusal(monkeypatch, target, *, operation="launch", capsys=None):
+    """Assert the approved platform contract instead of exercising unavailable storage."""
+    calls = _grant_hub(monkeypatch)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("unsupported Windows Hub operation reached I/O")
+
+    monkeypatch.setattr(codex_cloud.proc, "run", forbidden)
+    monkeypatch.setattr(codex_cloud, "_preflight_registry", forbidden)
+    monkeypatch.setattr(codex_cloud, "_lease_recovery_path", forbidden)
+    monkeypatch.setattr(cloud_tracker, "load_registry", forbidden)
+    monkeypatch.setattr(cloud_tracker, "register", forbidden)
+    monkeypatch.setattr(fleet_client, "fetch_cloud", forbidden)
+    if operation.startswith("cli-"):
+        monkeypatch.setenv("BRIGADE_EXTRAS", "1")
+        command = operation.removeprefix("cli-")
+        argv = ["run", "cloud", command, "--target", str(target), "--provider", "codex-cloud", "--label", "test"]
+        argv += (
+            ["--repo", "owner/repo", "--prompt-file", str(target / "missing")]
+            if command == "launch"
+            else ["--task-id", "task_windows99"]
+        )
+        assert cli.main(argv + ["--json"]) == 2
+        captured = capsys.readouterr()
+        assert "secure-owner-store-unavailable" in captured.out + captured.err
+    elif operation == "register":
+        with pytest.raises(OSError, match="^secure-owner-store-unavailable$"):
+            codex_cloud.acquire_registered_task_lease(
+                target, task_id="task_windows99", label="test", prompt_hash=None, repo="owner/repo"
+            )
+    elif operation == "roster":
+        result = codex_cloud.run_cloud_task("private prompt", env_id="env-local", timeout=1, register_target=target)
+        assert not result.ok
+        assert result.status == "denied"
+        assert result.failure_phase == "dispatch"
+        assert result.failure_kind == result.detail == "secure-owner-store-unavailable"
+        assert result.thread_id is None
+    elif operation == "storage":
+        with pytest.raises(OSError, match="^secure-owner-store-unavailable$"):
+            codex_cloud._persist_lease_holder(target, "lease-1", "private-holder")
+        assert codex_cloud._recover_lease_holder(target, "lease-1") is None
+    else:
+        assert codex_cloud.launch_task("private prompt", target=target, repo="owner/repo", label="test") == {
+            "ok": False,
+            "reason": "secure-owner-store-unavailable",
+        }
+    assert all(not values for values in calls.values())
+    assert not (target / ".brigade").exists()
+
+
+def test_launch_task_uses_stdin_and_binds_codex_lease(monkeypatch, tmp_path):
+    if sys.platform == "win32":
+        _assert_windows_hub_refusal(monkeypatch, tmp_path)
+        return
+    codex_cloud.save_environment_config(tmp_path, environment_id="env-launch")
+    calls = _grant_hub(monkeypatch)
+    seen = {}
+
+    def fake_run(argv, timeout=30.0, env=None, cwd=None, stdin=None, process_registry=None):
+        seen.update(argv=argv, stdin=stdin, cwd=cwd)
+        return _result(stdout="Submitted https://chatgpt.com/codex/tasks/task_launch99")
+
+    monkeypatch.setattr(codex_cloud.proc, "run", fake_run)
+    launched = codex_cloud.launch_task("private prompt", target=tmp_path, repo="owner/repo", label="launch")
+
+    assert launched["ok"] is True
+    assert launched["task_id"] == "task_launch99"
+    assert seen["argv"] == ["codex", "cloud", "exec", "--env", "env-launch", "-"]
+    assert seen["stdin"] == b"private prompt"
+    assert "private prompt" not in seen["argv"]
+    assert calls["admit"][0]["args"][0] == "codex"
+    assert calls["bind"][0]["kwargs"]["provider_task_id"] == "task_launch99"
+    assert calls["bind"][0]["kwargs"]["ttl_seconds"] == fleet_client.CLOUD_BOUND_TTL_SECONDS
+    assert calls["bind"][0]["kwargs"]["holder"] == "h1"
+    assert cloud_tracker.load_registry(tmp_path)["entries"][0]["task_id"] == "task_launch99"
+
+
+def test_launch_task_releases_lease_when_submission_fails(monkeypatch, tmp_path):
+    if sys.platform == "win32":
+        _assert_windows_hub_refusal(monkeypatch, tmp_path)
+        return
+    codex_cloud.save_environment_config(tmp_path, environment_id="env-launch")
+    calls = _grant_hub(monkeypatch)
+    monkeypatch.setattr(codex_cloud.proc, "run", lambda *a, **k: _result(code=1))
+
+    launched = codex_cloud.launch_task("private prompt", target=tmp_path, repo="owner/repo", label="launch")
+
+    assert launched == {"ok": False, "reason": "submit-failed"}
+    assert calls["release"][0]["kwargs"]["state"] == "submit-failed"
+
+
+def test_launch_task_keeps_lease_when_submission_times_out(monkeypatch, tmp_path):
+    if sys.platform == "win32":
+        _assert_windows_hub_refusal(monkeypatch, tmp_path)
+        return
+    codex_cloud.save_environment_config(tmp_path, environment_id="env-launch")
+    calls = _grant_hub(monkeypatch)
+    monkeypatch.setattr(codex_cloud.proc, "run", lambda *a, **k: _result(code=124))
+
+    launched = codex_cloud.launch_task("private prompt", target=tmp_path, repo="owner/repo", label="launch")
+
+    assert launched == {"ok": False, "reason": "uncertain"}
+    assert calls["release"] == []
+
+
+def test_register_codex_task_lease_is_idempotent(monkeypatch, tmp_path):
+    if sys.platform == "win32":
+        _assert_windows_hub_refusal(monkeypatch, tmp_path, operation="register")
+        return
+    calls = _grant_hub(monkeypatch)
+    monkeypatch.setattr(fleet_client, "fetch_cloud", lambda: {"leases": []})
+    cloud_tracker.register(
+        tmp_path,
+        provider="codex-cloud",
+        task_id="task_register99",
+        label="registered task",
+        prompt_hash="sha256:1234",
+    )
+
+    codex_cloud.acquire_registered_task_lease(
+        tmp_path,
+        task_id="task_register99",
+        label="registered task",
+        prompt_hash="sha256:1234",
+        repo="owner/repo",
+    )
+    codex_cloud.acquire_registered_task_lease(
+        tmp_path,
+        task_id="task_register99",
+        label="registered task",
+        prompt_hash="sha256:1234",
+        repo="owner/repo",
+    )
+
+    assert len(calls["admit"]) == 1
+    assert len(calls["bind"]) == 1
+    assert calls["bind"][0]["kwargs"]["ttl_seconds"] == fleet_client.CLOUD_BOUND_TTL_SECONDS
+    assert calls["bind"][0]["kwargs"]["holder"] == "h1"
+    assert cloud_tracker.load_registry(tmp_path)["entries"][0]["lease_holder"] == "h1"
+
+
+def test_cli_cloud_launch_codex_cloud_submission(monkeypatch, tmp_path, capsys):
+    if sys.platform == "win32":
+        _assert_windows_hub_refusal(monkeypatch, tmp_path, operation="cli-launch", capsys=capsys)
+        return
+    monkeypatch.setenv("BRIGADE_EXTRAS", "1")
+    codex_cloud.save_environment_config(tmp_path, environment_id="env-cli")
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_text("private prompt", encoding="utf-8")
+    prompt_file.chmod(0o600)
+    calls = _grant_hub(monkeypatch)
+    seen = {}
+
+    def fake_run(argv, timeout=30.0, env=None, cwd=None, stdin=None, process_registry=None):
+        seen.update(argv=argv, stdin=stdin)
+        return _result(stdout="task_cli_launch99")
+
+    monkeypatch.setattr(codex_cloud.proc, "run", fake_run)
+    rc = cli.main(
+        [
+            "run",
+            "cloud",
+            "launch",
+            "--target",
+            str(tmp_path),
+            "--provider",
+            "codex-cloud",
+            "--repo",
+            "owner/repo",
+            "--label",
+            "cli-codex",
+            "--prompt-file",
+            str(prompt_file),
+            "--json",
+        ]
+    )
+
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["task_id"] == "task_cli_launch99"
+    assert payload["provider"] == "codex-cloud"
+    assert "holder" not in payload
+    assert seen["argv"] == ["codex", "cloud", "exec", "--env", "env-cli", "-"]
+    assert seen["stdin"] == b"private prompt"
+    assert len(calls["admit"]) == len(calls["bind"]) == 1
+
+
+def test_cli_register_codex_cloud_acquires_one_lease(monkeypatch, tmp_path, capsys):
+    if sys.platform == "win32":
+        _assert_windows_hub_refusal(monkeypatch, tmp_path, operation="cli-register", capsys=capsys)
+        return
+    monkeypatch.setenv("BRIGADE_EXTRAS", "1")
+    calls = _grant_hub(monkeypatch)
+    monkeypatch.setattr(fleet_client, "fetch_cloud", lambda: {"leases": []})
+    argv = [
+        "run",
+        "cloud",
+        "register",
+        "--target",
+        str(tmp_path),
+        "--provider",
+        "codex-cloud",
+        "--task-id",
+        "task_cli_register99",
+        "--label",
+        "registered",
+        "--json",
+    ]
+
+    assert cli.main(argv) == 0
+    first = json.loads(capsys.readouterr().out)
+    assert cli.main(argv) == 0
+    second_output = capsys.readouterr()
+    second = json.loads(second_output.out)
+    assert "lease_holder" not in first
+    assert "lease_holder" not in second
+    assert "h1" not in second_output.out + second_output.err
+
+    assert first["task_id"] == "task_cli_register99"
+    assert len(calls["admit"]) == 1
+    assert len(calls["bind"]) == 1
+
+
+@pytest.mark.parametrize("stream", ["stdout", "stderr"])
+@pytest.mark.parametrize("code", [1, 124])
+@pytest.mark.parametrize("hub_configured", [True, False])
+def test_launch_task_retains_known_work_on_nonzero_exit(monkeypatch, tmp_path, stream, code, hub_configured):
+    if sys.platform == "win32" and hub_configured:
+        _assert_windows_hub_refusal(monkeypatch, tmp_path)
+        return
+    codex_cloud.save_environment_config(tmp_path, environment_id="env-launch")
+    calls = _grant_hub(monkeypatch)
+    monkeypatch.setattr(codex_cloud, "_hub_configured", lambda: hub_configured)
+    submits = []
+
+    def fake_run(argv, **kwargs):
+        if argv[:3] != ["codex", "cloud", "exec"]:
+            return _result(code=1)
+        submits.append((argv, kwargs))
+        return _result(code=code, **{stream: "Submitted task_recover99"})
+
+    monkeypatch.setattr(codex_cloud.proc, "run", fake_run)
+
+    launched = codex_cloud.launch_task("private prompt", target=tmp_path, repo="owner/repo", label="launch")
+
+    assert launched["task_id"] == "task_recover99"
+    assert launched["ok"] is False
+    assert launched["reason"] == "uncertain"
+    assert len(submits) == 1
+    assert calls["release"] == []
+    assert len(calls["bind"]) == int(hub_configured)
+    if hub_configured:
+        assert calls["bind"][0]["kwargs"]["provider_task_id"] == "task_recover99"
+        assert calls["bind"][0]["kwargs"]["holder"] == "h1"
+        assert calls["bind"][0]["kwargs"]["ttl_seconds"] == fleet_client.CLOUD_BOUND_TTL_SECONDS
+    entry = cloud_tracker.load_registry(tmp_path)["entries"][0]
+    assert entry["task_id"] == "task_recover99"
+    if hub_configured:
+        assert entry["lease_holder"] == "h1"
+    else:
+        assert "lease_holder" not in entry
+
+
+@pytest.mark.parametrize("failure", ["open", "write", "fsync"])
+def test_launch_task_registry_preflight_fails_before_admission(monkeypatch, tmp_path, failure):
+    if sys.platform == "win32":
+        _assert_windows_hub_refusal(monkeypatch, tmp_path)
+        return
+    codex_cloud.save_environment_config(tmp_path, environment_id="env-launch")
+    calls = _grant_hub(monkeypatch)
+    monkeypatch.setattr(codex_cloud.proc, "run", lambda *a, **k: pytest.fail("provider invoked"))
+
+    def fail(*args, **kwargs):
+        raise OSError("registry durability unavailable")
+
+    monkeypatch.setattr(codex_cloud.os, failure, fail)
+
+    launched = codex_cloud.launch_task("private prompt", target=tmp_path, repo="owner/repo", label="launch")
+
+    assert launched == {"ok": False, "reason": "registry-unwritable"}
+    assert all(not values for values in calls.values())
+    assert not list(cloud_tracker.registry_path(tmp_path).parent.glob(".registry-preflight-*"))
+
+
+@pytest.mark.parametrize("live_bytes", [b'{"entries": []}\n', b"invalid existing registry\n"])
+def test_codex_registry_preflight_preserves_live_registry(monkeypatch, tmp_path, live_bytes):
+    registry = cloud_tracker.registry_path(tmp_path)
+    registry.parent.mkdir(parents=True)
+    registry.write_bytes(live_bytes)
+    monkeypatch.setattr(cloud_tracker, "load_registry", lambda *a, **k: pytest.fail("live registry read"))
+    monkeypatch.setattr(cloud_tracker, "save_registry", lambda *a, **k: pytest.fail("live registry write"))
+
+    assert codex_cloud._preflight_registry(tmp_path)
+
+    assert registry.read_bytes() == live_bytes
+    assert not list(registry.parent.glob(".registry-preflight-*"))
+
+
+@pytest.mark.parametrize("hub_configured", [True, False])
+def test_launch_task_tracking_failure_preserves_task_and_lease(monkeypatch, tmp_path, hub_configured):
+    if sys.platform == "win32" and hub_configured:
+        _assert_windows_hub_refusal(monkeypatch, tmp_path)
+        return
+    codex_cloud.save_environment_config(tmp_path, environment_id="env-launch")
+    calls = _grant_hub(monkeypatch)
+    monkeypatch.setattr(codex_cloud, "_hub_configured", lambda: hub_configured)
+    monkeypatch.setattr(codex_cloud.proc, "run", lambda *a, **k: _result(stdout="task_tracking99"))
+
+    def fail_register(*args, **kwargs):
+        raise OSError("disk changed after preflight")
+
+    monkeypatch.setattr(cloud_tracker, "register", fail_register)
+
+    launched = codex_cloud.launch_task("private prompt", target=tmp_path, repo="owner/repo", label="launch")
+
+    assert launched == {"ok": False, "reason": "tracking-failed", "task_id": "task_tracking99"}
+    assert len(calls["bind"]) == int(hub_configured)
+    assert calls["release"] == []
+
+
+@pytest.mark.parametrize("code", [0, 1])
+def test_launch_task_bind_failure_preserves_known_work(monkeypatch, tmp_path, code):
+    if sys.platform == "win32":
+        _assert_windows_hub_refusal(monkeypatch, tmp_path)
+        return
+    codex_cloud.save_environment_config(tmp_path, environment_id="env-launch")
+    calls = _grant_hub(monkeypatch)
+    monkeypatch.setattr(codex_cloud.proc, "run", lambda *a, **k: _result(code=code, stdout="task_bind99"))
+    monkeypatch.setattr(
+        fleet_client, "bind_cloud", lambda *a, **k: fleet_client.CloudDecision(granted=False, reason="unavailable")
+    )
+
+    launched = codex_cloud.launch_task("private prompt", target=tmp_path, repo="owner/repo", label="launch")
+
+    assert launched == {"ok": False, "reason": "bind-failed", "task_id": "task_bind99"}
+    assert calls["release"] == []
+    assert cloud_tracker.load_registry(tmp_path)["entries"] == []
+
+
+@pytest.mark.parametrize(
+    "flag", [["--auto-create-pr"], ["--starting-branch", "main"], ["--title", "title"], ["--no-plan-approval"]]
+)
+def test_cli_codex_launch_rejects_unsupported_flags_before_mutation(monkeypatch, tmp_path, capsys, flag):
+    monkeypatch.setenv("BRIGADE_EXTRAS", "1")
+    codex_cloud.save_environment_config(tmp_path, environment_id="env-launch")
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_text("private prompt", encoding="utf-8")
+    prompt_file.chmod(0o600)
+    calls = _grant_hub(monkeypatch)
+    provider_calls = []
+
+    def fake_run(*args, **kwargs):
+        provider_calls.append((args, kwargs))
+        return _result(stdout="task_unsupported99")
+
+    monkeypatch.setattr(codex_cloud.proc, "run", fake_run)
+    rc = cli.main(
+        [
+            "run",
+            "cloud",
+            "launch",
+            "--target",
+            str(tmp_path),
+            "--provider",
+            "codex-cloud",
+            "--repo",
+            "owner/repo",
+            "--label",
+            "launch",
+            "--prompt-file",
+            str(prompt_file),
+            "--json",
+            *flag,
+        ]
+    )
+
+    assert rc == 2
+    payload = json.loads(capsys.readouterr().out)
+    assert payload == {"ok": False, "provider": "codex-cloud", "label": "launch", "reason": "unsupported-flag"}
+    assert all(not values for values in calls.values())
+    assert provider_calls == []
+    assert cloud_tracker.load_registry(tmp_path)["entries"] == []
+
+
+@pytest.mark.parametrize("reason", ["tracking-failed", "bind-failed", "uncertain"])
+def test_cli_codex_failure_text_preserves_only_sanitized_task_id(monkeypatch, tmp_path, capsys, reason):
+    prompt_file = tmp_path / "prompt.txt"
+    prompt_file.write_text("private prompt", encoding="utf-8")
+    prompt_file.chmod(0o600)
+    monkeypatch.setattr(
+        codex_cloud,
+        "launch_task",
+        lambda *a, **k: {"ok": False, "reason": reason, "task_id": "task_recover99", "holder": "private-holder"},
+    )
+    rc = cli.main(
+        [
+            "run",
+            "cloud",
+            "launch",
+            "--target",
+            str(tmp_path),
+            "--provider",
+            "codex-cloud",
+            "--repo",
+            "owner/repo",
+            "--label",
+            "launch",
+            "--prompt-file",
+            str(prompt_file),
+        ]
+    )
+    output = capsys.readouterr()
+    assert rc == 1
+    assert output.err == f"error: {reason} task=task_recover99\n"
+    assert "private-holder" not in output.out + output.err
+    assert "private prompt" not in output.out + output.err
+
+
+@pytest.mark.parametrize("task_id", ["task_valid99\nholder=private-holder", "invalid", "task_valid99\x1b[31m"])
+def test_cli_codex_failure_text_rejects_unsanitized_task_id(task_id, capsys):
+    from brigade.cli import run_cloud
+
+    run_cloud._emit_launch_payload(
+        {"ok": False, "provider": "codex-cloud", "reason": "uncertain", "task_id": task_id},
+        as_json=False,
+        exit_code=1,
+    )
+    assert capsys.readouterr().err == "error: uncertain\n"
+
+
+@pytest.mark.parametrize("state", ["running", "completed"])
+def test_codex_tracking_failure_recovers_holder_for_manual_registration_and_sync(monkeypatch, tmp_path, state):
+    if sys.platform == "win32":
+        _assert_windows_hub_refusal(monkeypatch, tmp_path)
+        return
+    codex_cloud.save_environment_config(tmp_path, environment_id="env-launch")
+    calls = _grant_hub(monkeypatch)
+    monkeypatch.setattr(codex_cloud.proc, "run", lambda *a, **k: _result(stdout="task_recovery99"))
+    with monkeypatch.context() as failed_tracking:
+
+        def fail(*args, **kwargs):
+            raise OSError("registry changed after submission")
+
+        failed_tracking.setattr(cloud_tracker, "register", fail)
+        launched = codex_cloud.launch_task("private prompt", target=tmp_path, repo="owner/repo", label="launch")
+    assert launched == {"ok": False, "reason": "tracking-failed", "task_id": "task_recovery99"}
+    assert calls["release"] == []
+    leases = [{"lease_id": "lease-1", "provider": "codex", "provider_task_id": "task_recovery99", "state": state}]
+    monkeypatch.setattr(fleet_client, "fetch_cloud", lambda: {"leases": leases})
+    cloud_tracker.register(tmp_path, provider="codex-cloud", task_id="task_recovery99", label="launch")
+    codex_cloud.acquire_registered_task_lease(
+        tmp_path,
+        task_id="task_recovery99",
+        label="launch",
+        prompt_hash=None,
+        repo="owner/repo",
+    )
+    assert cloud_tracker.load_registry(tmp_path)["entries"][0]["lease_holder"] == "h1"
+    assert len(calls["admit"]) == len(calls["bind"]) == 1
+    payload = cloud_tracker.sync_payload(
+        tmp_path,
+        provider_tasks={"task_recovery99": {"state": state}},
+        github={"branches": [], "prs": []},
+        hub_leases=leases,
+    )
+    operation = "renew" if state == "running" else "release"
+    assert calls[operation][0]["args"][0] == "lease-1"
+    assert calls[operation][0]["kwargs"]["holder"] == "h1"
+    assert "h1" not in json.dumps(payload)
+
+
+def test_codex_holder_recovery_is_durable_before_provider_submission(monkeypatch, tmp_path):
+    if sys.platform == "win32":
+        _assert_windows_hub_refusal(monkeypatch, tmp_path)
+        return
+    codex_cloud.save_environment_config(tmp_path, environment_id="env-launch")
+    _grant_hub(monkeypatch)
+
+    def fake_run(argv, **kwargs):
+        if argv[:3] != ["codex", "cloud", "exec"]:
+            return _result(code=1)
+        records = list((cloud_tracker.registry_path(tmp_path).parent / "codex-leases").glob("*.json"))
+        assert len(records) == 1
+        assert json.loads(records[0].read_text())["holder"] == "h1"
+        if codex_cloud.os.name != "nt":
+            assert records[0].stat().st_mode & 0o777 == 0o600
+        return _result(stdout="task_durable99")
+
+    monkeypatch.setattr(codex_cloud.proc, "run", fake_run)
+    assert codex_cloud.launch_task("private prompt", target=tmp_path, repo="owner/repo", label="launch")["ok"]
+
+
+def test_codex_holder_recovery_write_failure_prevents_provider_submission(monkeypatch, tmp_path):
+    if sys.platform == "win32":
+        _assert_windows_hub_refusal(monkeypatch, tmp_path)
+        return
+    codex_cloud.save_environment_config(tmp_path, environment_id="env-launch")
+    calls = _grant_hub(monkeypatch)
+
+    def fake_run(argv, **kwargs):
+        if argv[:3] == ["codex", "cloud", "exec"]:
+            pytest.fail("provider invoked")
+        return _result(code=1)
+
+    monkeypatch.setattr(codex_cloud.proc, "run", fake_run)
+
+    def fail(*args, **kwargs):
+        raise OSError("private recovery record unavailable")
+
+    monkeypatch.setattr(codex_cloud, "_persist_lease_holder", fail)
+    launched = codex_cloud.launch_task("private prompt", target=tmp_path, repo="owner/repo", label="launch")
+    assert launched == {"ok": False, "reason": "lease-recovery-unwritable"}
+    assert calls["bind"] == []
+    assert calls["release"][0]["kwargs"] == {"state": "submit-failed", "holder": "h1"}
+
+
+def test_codex_existing_lease_without_private_recovery_fails_closed(monkeypatch, tmp_path):
+    if sys.platform == "win32":
+        _assert_windows_hub_refusal(monkeypatch, tmp_path, operation="register")
+        return
+    calls = _grant_hub(monkeypatch)
+    cloud_tracker.register(tmp_path, provider="codex-cloud", task_id="task_legacy99", label="legacy")
+    monkeypatch.setattr(
+        fleet_client,
+        "fetch_cloud",
+        lambda: {
+            "leases": [{"lease_id": "legacy-lease", "provider_task_id": "task_legacy99"}],
+        },
+    )
+    with pytest.raises(RuntimeError, match="cloud lease holder unavailable"):
+        codex_cloud.acquire_registered_task_lease(
+            tmp_path,
+            task_id="task_legacy99",
+            label="legacy",
+            prompt_hash=None,
+            repo="owner/repo",
+        )
+    assert all(not values for values in calls.values())
+
+
+def test_codex_registry_preflight_unlinks_sidecar_after_close_failure(monkeypatch, tmp_path):
+    original_close = codex_cloud.os.close
+
+    def close_then_fail(descriptor):
+        original_close(descriptor)
+        raise OSError("close failed")
+
+    monkeypatch.setattr(codex_cloud.os, "close", close_then_fail)
+    assert not codex_cloud._preflight_registry(tmp_path)
+    assert not list(cloud_tracker.registry_path(tmp_path).parent.glob(".registry-preflight-*"))
+
+
+def _recovery_record_bytes(holder="h1"):
+    return json.dumps({"schema": "brigade.codex-lease-recovery/1", "lease_id": "lease-1", "holder": holder}).encode()
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "symlink",
+        pytest.param("public", marks=pytest.mark.skipif(codex_cloud.os.name != "posix", reason="POSIX mode bits")),
+        "hardlink",
+        "directory",
+    ],
+)
+def test_recovery_v3_rejects_unsafe_record_reads(tmp_path, kind):
+    path = codex_cloud._lease_recovery_path(tmp_path, "lease-1")
+    path.parent.mkdir(mode=0o700, parents=True)
+    victim = tmp_path / "victim.json"
+    victim.write_bytes(_recovery_record_bytes())
+    victim.chmod(0o600)
+    if kind == "symlink":
+        victim.chmod(0o666)
+        path.symlink_to(victim)
+    elif kind == "hardlink":
+        path.hardlink_to(victim)
+    elif kind == "directory":
+        path.mkdir(mode=0o700)
+    else:
+        path.write_bytes(_recovery_record_bytes())
+        path.chmod(0o666)
+    before = path.lstat()
+
+    assert codex_cloud._recover_lease_holder(tmp_path, "lease-1") is None
+
+    after = path.lstat()
+    assert (before.st_mode, before.st_ino) == (after.st_mode, after.st_ino)
+    assert victim.read_bytes() == _recovery_record_bytes()
+
+
+@pytest.mark.parametrize(
+    "kind",
+    [
+        "symlink",
+        pytest.param("public", marks=pytest.mark.skipif(codex_cloud.os.name != "posix", reason="POSIX mode bits")),
+        "hardlink",
+        "directory",
+        "fifo",
+    ],
+)
+def test_recovery_v3_rejects_unsafe_existing_record_writes(tmp_path, kind):
+    if kind == "fifo" and not hasattr(codex_cloud.os, "mkfifo"):
+        pytest.skip("FIFO creation is unavailable")
+    path = codex_cloud._lease_recovery_path(tmp_path, "lease-1")
+    path.parent.mkdir(mode=0o700, parents=True)
+    victim = tmp_path / "victim.json"
+    victim.write_bytes(_recovery_record_bytes())
+    victim.chmod(0o600)
+    if kind == "symlink":
+        path.symlink_to(victim)
+    elif kind == "hardlink":
+        path.hardlink_to(victim)
+    elif kind == "directory":
+        path.mkdir(mode=0o700)
+    elif kind == "fifo":
+        codex_cloud.os.mkfifo(path, 0o600)
+    else:
+        path.write_bytes(_recovery_record_bytes())
+        path.chmod(0o666)
+    before = path.lstat()
+
+    with pytest.raises(OSError):
+        codex_cloud._persist_lease_holder(tmp_path, "lease-1", "h1")
+
+    after = path.lstat()
+    assert (before.st_mode, before.st_ino) == (after.st_mode, after.st_ino)
+    assert victim.read_bytes() == _recovery_record_bytes()
+
+
+def test_recovery_v3_refuses_symlinked_directory_for_reads_and_writes(tmp_path):
+    path = codex_cloud._lease_recovery_path(tmp_path, "lease-1")
+    path.parent.parent.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o700)
+    victim = outside / path.name
+    victim.write_bytes(_recovery_record_bytes())
+    victim.chmod(0o600)
+    path.parent.symlink_to(outside, target_is_directory=True)
+    before = victim.read_bytes()
+
+    assert codex_cloud._recover_lease_holder(tmp_path, "lease-1") is None
+    with pytest.raises(OSError):
+        codex_cloud._persist_lease_holder(tmp_path, "lease-1", "h1")
+
+    assert victim.read_bytes() == before
+    assert list(outside.iterdir()) == [victim]
+
+
+@pytest.mark.skipif(codex_cloud.os.name != "posix", reason="POSIX ownership and mode checks")
+def test_recovery_v3_refuses_nonprivate_directory_without_chmod(tmp_path):
+    path = codex_cloud._lease_recovery_path(tmp_path, "lease-1")
+    path.parent.mkdir(parents=True)
+    path.parent.chmod(0o755)
+    path.write_bytes(_recovery_record_bytes())
+    path.chmod(0o600)
+
+    assert codex_cloud._recover_lease_holder(tmp_path, "lease-1") is None
+    with pytest.raises(OSError):
+        codex_cloud._persist_lease_holder(tmp_path, "lease-1", "h1")
+    assert path.parent.stat().st_mode & 0o777 == 0o755
+
+
+@pytest.mark.skipif(codex_cloud.os.name != "posix", reason="POSIX UID validation")
+def test_recovery_v3_refuses_foreign_record_descriptor(monkeypatch, tmp_path):
+    path = codex_cloud._lease_recovery_path(tmp_path, "lease-1")
+    path.parent.mkdir(mode=0o700, parents=True)
+    path.write_bytes(_recovery_record_bytes())
+    path.chmod(0o600)
+    identity = (path.stat().st_dev, path.stat().st_ino)
+    real_fstat = codex_cloud.os.fstat
+
+    def foreign_owner(descriptor):
+        info = real_fstat(descriptor)
+        if (info.st_dev, info.st_ino) == identity:
+            fields = list(info)
+            fields[4] += 1
+            return codex_cloud.os.stat_result(fields)
+        return info
+
+    monkeypatch.setattr(codex_cloud.os, "fstat", foreign_owner)
+    assert codex_cloud._recover_lease_holder(tmp_path, "lease-1") is None
+
+
+def test_recovery_v3_bounds_record_bytes(tmp_path):
+    path = codex_cloud._lease_recovery_path(tmp_path, "lease-1")
+    path.parent.mkdir(mode=0o700, parents=True)
+    path.write_bytes(_recovery_record_bytes("x" * 5000))
+    path.chmod(0o600)
+    assert codex_cloud._recover_lease_holder(tmp_path, "lease-1") is None
+
+
+@pytest.mark.skipif(not hasattr(codex_cloud.os, "mkfifo"), reason="FIFO creation is unavailable")
+def test_recovery_v3_fifo_read_is_bounded(tmp_path):
+    path = codex_cloud._lease_recovery_path(tmp_path, "lease-1")
+    path.parent.mkdir(mode=0o700, parents=True)
+    codex_cloud.os.mkfifo(path, 0o600)
+    script = (
+        "import sys; from pathlib import Path; from brigade import codex_cloud; "
+        "assert codex_cloud._recover_lease_holder(Path(sys.argv[1]), 'lease-1') is None"
+    )
+    result = subprocess.run([sys.executable, "-c", script, str(tmp_path)], capture_output=True, timeout=3)
+    assert result.returncode == 0, result.stderr.decode()
+
+
+def test_recovery_v3_fsyncs_new_directory_parent_before_record(monkeypatch, tmp_path):
+    if sys.platform == "win32":
+        _assert_windows_hub_refusal(monkeypatch, tmp_path, operation="storage")
+        return
+    path = codex_cloud._lease_recovery_path(tmp_path, "lease-1")
+    path.parent.parent.mkdir(parents=True)
+    parent = path.parent.parent.stat()
+    synced = []
+    real_fsync = codex_cloud.os.fsync
+
+    def record_sync(descriptor):
+        info = codex_cloud.os.fstat(descriptor)
+        synced.append((info.st_dev, info.st_ino))
+        return real_fsync(descriptor)
+
+    monkeypatch.setattr(codex_cloud.os, "fsync", record_sync)
+    codex_cloud._persist_lease_holder(tmp_path, "lease-1", "h1")
+    record, directory = path.stat(), path.parent.stat()
+    parent_key = (parent.st_dev, parent.st_ino)
+    record_key = (record.st_dev, record.st_ino)
+    directory_key = (directory.st_dev, directory.st_ino)
+    assert parent_key in synced
+    assert synced.index(parent_key) < synced.index(record_key) < synced.index(directory_key)
+
+
+def test_recovery_v3_parent_fsync_failure_prevents_submission(monkeypatch, tmp_path):
+    if sys.platform == "win32":
+        _assert_windows_hub_refusal(monkeypatch, tmp_path)
+        return
+    codex_cloud.save_environment_config(tmp_path, environment_id="env-launch")
+    calls = _grant_hub(monkeypatch)
+    parent = cloud_tracker.registry_path(tmp_path).parent.stat()
+    provider_calls = []
+    real_fsync = codex_cloud.os.fsync
+
+    def fail_parent_sync(descriptor):
+        info = codex_cloud.os.fstat(descriptor)
+        if (info.st_dev, info.st_ino) == (parent.st_dev, parent.st_ino):
+            raise OSError("parent directory fsync failed")
+        return real_fsync(descriptor)
+
+    def fake_run(argv, **kwargs):
+        if argv[:3] == ["codex", "cloud", "exec"]:
+            provider_calls.append(argv)
+            return _result(stdout="task_parent99")
+        return _result(code=1)
+
+    monkeypatch.setattr(codex_cloud.os, "fsync", fail_parent_sync)
+    monkeypatch.setattr(codex_cloud.proc, "run", fake_run)
+    launched = codex_cloud.launch_task("private prompt", target=tmp_path, repo="owner/repo", label="launch")
+    assert launched == {"ok": False, "reason": "lease-recovery-unwritable"}
+    assert provider_calls == []
+    assert calls["bind"] == []
+    assert calls["release"][0]["kwargs"]["holder"] == "h1"
+
+
+def test_recovery_v3_rejects_record_substitution_during_directory_fsync(monkeypatch, tmp_path):
+    if sys.platform == "win32":
+        _assert_windows_hub_refusal(monkeypatch, tmp_path, operation="storage")
+        return
+    from brigade import dirfd
+
+    path = codex_cloud._lease_recovery_path(tmp_path, "lease-1")
+    path.parent.parent.mkdir(parents=True)
+    victim = tmp_path / "victim.json"
+    victim.write_bytes(_recovery_record_bytes())
+    victim.chmod(0o600)
+    original_sync = dirfd.fsync_directory
+    substituted = False
+
+    def swap_record(descriptor):
+        nonlocal substituted
+        info = codex_cloud.os.fstat(descriptor)
+        if path.exists() and not substituted:
+            parent = path.parent.stat()
+            if (info.st_dev, info.st_ino) == (parent.st_dev, parent.st_ino):
+                path.unlink()
+                path.symlink_to(victim)
+                substituted = True
+        original_sync(descriptor)
+
+    monkeypatch.setattr(dirfd, "fsync_directory", swap_record)
+    with pytest.raises(OSError):
+        codex_cloud._persist_lease_holder(tmp_path, "lease-1", "h1")
+    assert substituted
+    assert victim.read_bytes() == _recovery_record_bytes()
+    assert codex_cloud._recover_lease_holder(tmp_path, "lease-1") is None
+
+
+def test_recovery_v3_pins_directory_during_a_path_swap(monkeypatch, tmp_path):
+    if sys.platform == "win32":
+        _assert_windows_hub_refusal(monkeypatch, tmp_path, operation="storage")
+        return
+    from brigade import dirfd
+
+    path = codex_cloud._lease_recovery_path(tmp_path, "lease-1")
+    path.parent.parent.mkdir(parents=True)
+    outside = tmp_path / "outside"
+    outside.mkdir(mode=0o700)
+    moved = tmp_path / "moved-private-directory"
+    original_open = dirfd.open_child_file
+    swapped = False
+
+    def swap_parent(parent, name, flags, mode=0o600, **kwargs):
+        nonlocal swapped
+        if name == path.name and flags & codex_cloud.os.O_CREAT and not swapped:
+            path.parent.rename(moved)
+            path.parent.symlink_to(outside, target_is_directory=True)
+            swapped = True
+        return original_open(parent, name, flags, mode, **kwargs)
+
+    monkeypatch.setattr(dirfd, "open_child_file", swap_parent)
+    with pytest.raises(OSError):
+        codex_cloud._persist_lease_holder(tmp_path, "lease-1", "h1")
+    assert swapped
+    assert list(outside.iterdir()) == []
+
+
+def test_recovery_v3_zero_write_cannot_be_recovered(monkeypatch, tmp_path):
+    path = codex_cloud._lease_recovery_path(tmp_path, "lease-1")
+    path.parent.parent.mkdir(parents=True)
+    monkeypatch.setattr(codex_cloud.os, "write", lambda *a, **k: 0)
+    with pytest.raises(OSError):
+        codex_cloud._persist_lease_holder(tmp_path, "lease-1", "h1")
+    assert codex_cloud._recover_lease_holder(tmp_path, "lease-1") is None
 
 
 def _grant_hub(monkeypatch, *, lease_id: str | None = "lease-1", granted: bool = True, reason: str = "ok"):
@@ -420,7 +1253,10 @@ def test_run_cloud_task_unparseable_submit_output(monkeypatch):
 
 
 class TestFleetAdmission:
-    def test_admission_uses_canonical_codex_hub_provider(self, monkeypatch):
+    def test_admission_uses_canonical_codex_hub_provider(self, monkeypatch, tmp_path):
+        if sys.platform == "win32":
+            _assert_windows_hub_refusal(monkeypatch, tmp_path, operation="roster")
+            return
         recorded = _grant_hub(monkeypatch)
         fake = FakeRuns(
             {
@@ -438,7 +1274,10 @@ class TestFleetAdmission:
         assert result.ok
         assert recorded["admit"][0]["args"][0] == "codex"
 
-    def test_admission_ordering_and_lifecycle(self, monkeypatch):
+    def test_admission_ordering_and_lifecycle(self, monkeypatch, tmp_path):
+        if sys.platform == "win32":
+            _assert_windows_hub_refusal(monkeypatch, tmp_path, operation="roster")
+            return
         recorded = _grant_hub(monkeypatch)
         fake = FakeRuns(
             {
@@ -473,7 +1312,10 @@ class TestFleetAdmission:
         assert recorded["release"][0]["args"][0] == "lease-1"
         assert recorded["release"][0]["kwargs"]["state"] == "completed"
 
-    def test_admission_denial_makes_zero_provider_calls(self, monkeypatch):
+    def test_admission_denial_makes_zero_provider_calls(self, monkeypatch, tmp_path):
+        if sys.platform == "win32":
+            _assert_windows_hub_refusal(monkeypatch, tmp_path, operation="roster")
+            return
         recorded = _grant_hub(monkeypatch, granted=False, reason="refused")
         provider_calls = []
 
@@ -497,7 +1339,10 @@ class TestFleetAdmission:
         assert recorded["bind"] == []
         assert recorded["release"] == []
 
-    def test_missing_lease_id_makes_zero_provider_calls(self, monkeypatch):
+    def test_missing_lease_id_makes_zero_provider_calls(self, monkeypatch, tmp_path):
+        if sys.platform == "win32":
+            _assert_windows_hub_refusal(monkeypatch, tmp_path, operation="roster")
+            return
         recorded = _grant_hub(monkeypatch, lease_id=None)
         provider_calls = []
 
@@ -520,7 +1365,10 @@ class TestFleetAdmission:
         assert recorded["bind"] == []
         assert recorded["release"] == []
 
-    def test_admission_label_uses_sanitized_provider_repo_hash(self, monkeypatch):
+    def test_admission_label_uses_sanitized_provider_repo_hash(self, monkeypatch, tmp_path):
+        if sys.platform == "win32":
+            _assert_windows_hub_refusal(monkeypatch, tmp_path, operation="roster")
+            return
         recorded = _grant_hub(monkeypatch)
         fake = FakeRuns(
             {
@@ -559,7 +1407,10 @@ class TestFleetAdmission:
         ],
         ids=["timeout", "nonzero", "unparseable"],
     )
-    def test_ambiguous_submit_holds_lease_and_does_not_release(self, monkeypatch, exec_result):
+    def test_ambiguous_submit_holds_lease_and_does_not_release(self, monkeypatch, tmp_path, exec_result):
+        if sys.platform == "win32":
+            _assert_windows_hub_refusal(monkeypatch, tmp_path, operation="roster")
+            return
         recorded = _grant_hub(monkeypatch)
         registry_calls = []
         monkeypatch.setattr(
@@ -583,7 +1434,10 @@ class TestFleetAdmission:
         assert recorded["release"] == []
         assert registry_calls == []
 
-    def test_bind_failure_retains_lease(self, monkeypatch):
+    def test_bind_failure_retains_lease(self, monkeypatch, tmp_path):
+        if sys.platform == "win32":
+            _assert_windows_hub_refusal(monkeypatch, tmp_path, operation="roster")
+            return
         recorded = _grant_hub(monkeypatch)
         monkeypatch.setattr(fleet_client, "bind_cloud", lambda *a, **k: fleet_client.CloudDecision(False, "hub-down"))
         fake = FakeRuns(
@@ -605,7 +1459,10 @@ class TestFleetAdmission:
         assert result.thread_id == "task_bindfail1"
         assert recorded["release"] == []
 
-    def test_terminal_failure_releases_lease(self, monkeypatch):
+    def test_terminal_failure_releases_lease(self, monkeypatch, tmp_path):
+        if sys.platform == "win32":
+            _assert_windows_hub_refusal(monkeypatch, tmp_path, operation="roster")
+            return
         recorded = _grant_hub(monkeypatch)
         fake = FakeRuns(
             {
@@ -628,7 +1485,10 @@ class TestFleetAdmission:
         assert recorded["release"][0]["args"][0] == "lease-1"
         assert recorded["release"][0]["kwargs"]["state"] == "failed"
 
-    def test_nonzero_status_with_error_marker_releases_failed_lease(self, monkeypatch):
+    def test_nonzero_status_with_error_marker_releases_failed_lease(self, monkeypatch, tmp_path):
+        if sys.platform == "win32":
+            _assert_windows_hub_refusal(monkeypatch, tmp_path, operation="roster")
+            return
         recorded = _grant_hub(monkeypatch)
         fake = FakeRuns(
             {
@@ -651,7 +1511,10 @@ class TestFleetAdmission:
         assert recorded["release"][0]["args"][0] == "lease-1"
         assert recorded["release"][0]["kwargs"]["state"] == "error"
 
-    def test_unknown_nonzero_status_holds_lease(self, monkeypatch):
+    def test_unknown_nonzero_status_holds_lease(self, monkeypatch, tmp_path):
+        if sys.platform == "win32":
+            _assert_windows_hub_refusal(monkeypatch, tmp_path, operation="roster")
+            return
         recorded = _grant_hub(monkeypatch)
         fake = FakeRuns(
             {
@@ -674,7 +1537,10 @@ class TestFleetAdmission:
         assert result.detail == "cloud status unavailable"
         assert recorded["release"] == []
 
-    def test_transient_unknown_nonzero_status_recovers(self, monkeypatch):
+    def test_transient_unknown_nonzero_status_recovers(self, monkeypatch, tmp_path):
+        if sys.platform == "win32":
+            _assert_windows_hub_refusal(monkeypatch, tmp_path, operation="roster")
+            return
         recorded = _grant_hub(monkeypatch)
         slept: list[float] = []
         fake = FakeRuns(
@@ -704,7 +1570,10 @@ class TestFleetAdmission:
         assert slept == [codex_cloud.POLL_INTERVAL, codex_cloud.POLL_INTERVAL]
         assert len(recorded["renew"]) == 2
 
-    def test_nonzero_pending_status_continues_polling(self, monkeypatch):
+    def test_nonzero_pending_status_continues_polling(self, monkeypatch, tmp_path):
+        if sys.platform == "win32":
+            _assert_windows_hub_refusal(monkeypatch, tmp_path, operation="roster")
+            return
         recorded = _grant_hub(monkeypatch)
         fake = FakeRuns(
             {
@@ -730,7 +1599,10 @@ class TestFleetAdmission:
         assert len(recorded["renew"]) == 1
         assert recorded["release"]
 
-    def test_unknown_nonzero_status_exhausts_grace_then_holds_lease(self, monkeypatch):
+    def test_unknown_nonzero_status_exhausts_grace_then_holds_lease(self, monkeypatch, tmp_path):
+        if sys.platform == "win32":
+            _assert_windows_hub_refusal(monkeypatch, tmp_path, operation="roster")
+            return
         recorded = _grant_hub(monkeypatch)
         fake = FakeRuns(
             {
@@ -757,7 +1629,10 @@ class TestFleetAdmission:
         assert status_calls == retries + 1
         assert len(recorded["renew"]) == retries
 
-    def test_auth_failure_status_fails_immediately(self, monkeypatch):
+    def test_auth_failure_status_fails_immediately(self, monkeypatch, tmp_path):
+        if sys.platform == "win32":
+            _assert_windows_hub_refusal(monkeypatch, tmp_path, operation="roster")
+            return
         recorded = _grant_hub(monkeypatch)
         fake = FakeRuns(
             {
@@ -782,7 +1657,10 @@ class TestFleetAdmission:
         assert sum(1 for call in fake.calls if call[2] == "status") == 1
         assert recorded["renew"] == []
 
-    def test_terminal_success_releases_lease_before_diff(self, monkeypatch):
+    def test_terminal_success_releases_lease_before_diff(self, monkeypatch, tmp_path):
+        if sys.platform == "win32":
+            _assert_windows_hub_refusal(monkeypatch, tmp_path, operation="roster")
+            return
         recorded = _grant_hub(monkeypatch)
         fake = FakeRuns(
             {
@@ -804,7 +1682,10 @@ class TestFleetAdmission:
         assert recorded["release"]
         assert recorded["release"][0]["kwargs"]["state"] == "completed"
 
-    def test_nonterminal_status_polls_renew_lease(self, monkeypatch):
+    def test_nonterminal_status_polls_renew_lease(self, monkeypatch, tmp_path):
+        if sys.platform == "win32":
+            _assert_windows_hub_refusal(monkeypatch, tmp_path, operation="roster")
+            return
         recorded = _grant_hub(monkeypatch)
         fake = FakeRuns(
             {
@@ -829,7 +1710,10 @@ class TestFleetAdmission:
         assert result.ok
         assert len(recorded["renew"]) == 2
 
-    def test_renew_refused_stops_polling_without_release(self, monkeypatch):
+    def test_renew_refused_stops_polling_without_release(self, monkeypatch, tmp_path):
+        if sys.platform == "win32":
+            _assert_windows_hub_refusal(monkeypatch, tmp_path, operation="roster")
+            return
         recorded = _grant_hub(monkeypatch)
 
         def fake_renew(*args, **kwargs):
@@ -862,7 +1746,10 @@ class TestFleetAdmission:
         assert recorded["release"] == []
         assert len(fake.calls) == 2
 
-    def test_consecutive_hub_unavailable_renews_fail_closed_without_duplicate_exec(self, monkeypatch):
+    def test_consecutive_hub_unavailable_renews_fail_closed_without_duplicate_exec(self, monkeypatch, tmp_path):
+        if sys.platform == "win32":
+            _assert_windows_hub_refusal(monkeypatch, tmp_path, operation="roster")
+            return
         recorded = _grant_hub(monkeypatch)
         renew_calls = {"n": 0}
 
@@ -894,7 +1781,10 @@ class TestFleetAdmission:
         assert sum(1 for call in fake.calls if call[2] == "exec") == 1
         assert recorded["release"] == []
 
-    def test_diff_is_read_only_and_never_applies(self, monkeypatch):
+    def test_diff_is_read_only_and_never_applies(self, monkeypatch, tmp_path):
+        if sys.platform == "win32":
+            _assert_windows_hub_refusal(monkeypatch, tmp_path, operation="roster")
+            return
         recorded = _grant_hub(monkeypatch)
         fake = FakeRuns(
             {
@@ -917,7 +1807,10 @@ class TestFleetAdmission:
         assert not any(c[:3] == ["codex", "cloud", "apply"] for c in fake.calls)
         assert recorded["release"]
 
-    def test_status_timeout_holds_lease_and_returns_uncertain(self, monkeypatch):
+    def test_status_timeout_holds_lease_and_returns_uncertain(self, monkeypatch, tmp_path):
+        if sys.platform == "win32":
+            _assert_windows_hub_refusal(monkeypatch, tmp_path, operation="roster")
+            return
         recorded = _grant_hub(monkeypatch)
         fake = FakeRuns(
             {
@@ -940,7 +1833,10 @@ class TestFleetAdmission:
         assert result.timed_out is True
         assert recorded["release"] == []
 
-    def test_unknown_status_renews_lease_until_timeout(self, monkeypatch):
+    def test_unknown_status_renews_lease_until_timeout(self, monkeypatch, tmp_path):
+        if sys.platform == "win32":
+            _assert_windows_hub_refusal(monkeypatch, tmp_path, operation="roster")
+            return
         recorded = _grant_hub(monkeypatch)
         fake = FakeRuns(
             {
@@ -1567,3 +2463,176 @@ class TestCodexCloudCli:
         )
         payload = json.loads(capsys.readouterr().out)
         assert payload["reason"] == "disabled-by-policy"
+
+
+@pytest.mark.parametrize("operation", ["launch", "register", "persist", "recover", "directory"])
+def test_windows_hub_storage_refuses_before_any_io(monkeypatch, tmp_path, operation):
+    from types import SimpleNamespace
+
+    calls = _grant_hub(monkeypatch)
+    monkeypatch.setattr(codex_cloud, "sys", SimpleNamespace(platform="win32"))
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("unsupported storage performed I/O")
+
+    monkeypatch.setattr(codex_cloud, "_preflight_registry", forbidden)
+    monkeypatch.setattr(codex_cloud, "_lease_recovery_path", forbidden)
+    monkeypatch.setattr(codex_cloud.proc, "run", forbidden)
+    monkeypatch.setattr(cloud_tracker, "load_registry", forbidden)
+    monkeypatch.setattr(fleet_client, "fetch_cloud", forbidden)
+    if operation == "launch":
+        assert codex_cloud.launch_task("private prompt", target=tmp_path, repo="owner/repo", label="test") == {
+            "ok": False,
+            "reason": "secure-owner-store-unavailable",
+        }
+    elif operation == "recover":
+        assert codex_cloud._recover_lease_holder(tmp_path, "lease-1") is None
+    else:
+        with pytest.raises(OSError, match="^secure-owner-store-unavailable$"):
+            if operation == "register":
+                codex_cloud.acquire_registered_task_lease(
+                    tmp_path, task_id="task_windows99", label="test", prompt_hash=None, repo="owner/repo"
+                )
+            elif operation == "persist":
+                codex_cloud._persist_lease_holder(tmp_path, "lease-1", "private-holder")
+            else:
+                with codex_cloud._lease_recovery_directory(tmp_path, create=True):
+                    pytest.fail("unsupported directory opened")
+    assert all(not value for value in calls.values())
+    assert not (tmp_path / ".brigade").exists()
+
+
+@pytest.mark.parametrize("command", ["launch", "register"])
+@pytest.mark.parametrize("as_json", [True, False])
+def test_windows_hub_cli_refuses_before_prompt_or_registry(monkeypatch, tmp_path, capsys, command, as_json):
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("BRIGADE_EXTRAS", "1")
+    calls = _grant_hub(monkeypatch)
+    monkeypatch.setattr(codex_cloud, "sys", SimpleNamespace(platform="win32"))
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Windows Hub CLI reached provider or registry")
+
+    monkeypatch.setattr(codex_cloud.proc, "run", forbidden)
+    monkeypatch.setattr(cloud_tracker, "load_registry", forbidden)
+    monkeypatch.setattr(cloud_tracker, "register", forbidden)
+    argv = ["run", "cloud", command, "--target", str(tmp_path), "--provider", "codex-cloud", "--label", "test"]
+    argv += (
+        ["--repo", "owner/repo", "--prompt-file", str(tmp_path / "missing")]
+        if command == "launch"
+        else ["--task-id", "task_windows99"]
+    )
+    assert cli.main(argv + (["--json"] if as_json else [])) == 2
+    captured = capsys.readouterr()
+    assert "secure-owner-store-unavailable" in captured.out + captured.err
+    assert all(not value for value in calls.values())
+    assert not (tmp_path / ".brigade").exists()
+
+
+@pytest.mark.parametrize("command", ["launch", "register"])
+def test_windows_no_hub_keeps_local_launch_and_registration(monkeypatch, tmp_path, capsys, command):
+    from types import SimpleNamespace
+
+    monkeypatch.setenv("BRIGADE_EXTRAS", "1")
+    codex_cloud.save_environment_config(tmp_path, environment_id="env-local")
+    calls = _grant_hub(monkeypatch)
+    monkeypatch.setattr(codex_cloud, "_hub_configured", lambda: False)
+    monkeypatch.setattr(codex_cloud, "sys", SimpleNamespace(platform="win32"))
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("no-Hub path reached private capability storage")
+
+    monkeypatch.setattr(codex_cloud, "_persist_lease_holder", forbidden)
+    monkeypatch.setattr(codex_cloud, "_recover_lease_holder", forbidden)
+    submissions = []
+
+    def fake_run(argv, **kwargs):
+        if argv[:3] != ["codex", "cloud", "exec"]:
+            return _result(code=1)
+        submissions.append(kwargs["stdin"])
+        return _result(stdout="task_windows99")
+
+    monkeypatch.setattr(codex_cloud.proc, "run", fake_run)
+    if command == "launch":
+        result = codex_cloud.launch_task("private prompt", target=tmp_path, repo="owner/repo", label="test")
+        assert result["ok"] is True
+        assert submissions == [b"private prompt"]
+    else:
+        assert (
+            cli.main(
+                [
+                    "run",
+                    "cloud",
+                    "register",
+                    "--target",
+                    str(tmp_path),
+                    "--provider",
+                    "codex-cloud",
+                    "--label",
+                    "test",
+                    "--task-id",
+                    "task_windows99",
+                    "--json",
+                ]
+            )
+            == 0
+        )
+        assert "lease_holder" not in json.loads(capsys.readouterr().out)
+    entry = cloud_tracker.load_registry(tmp_path)["entries"][0]
+    assert entry["task_id"] == "task_windows99"
+    assert not entry.get("lease_holder")
+    assert all(not value for value in calls.values())
+    assert not (cloud_tracker.registry_path(tmp_path).parent / "codex-leases").exists()
+
+
+@pytest.mark.parametrize("through_agents", [False, True])
+@pytest.mark.parametrize("hub_configured", [False, True])
+def test_windows_roster_dispatch_obeys_hub_storage_policy(monkeypatch, tmp_path, through_agents, hub_configured):
+    from types import SimpleNamespace
+
+    calls = _grant_hub(monkeypatch)
+    monkeypatch.setattr(codex_cloud, "_hub_configured", lambda: hub_configured)
+    monkeypatch.setattr(codex_cloud, "sys", SimpleNamespace(platform="win32"))
+    monkeypatch.setattr(agents.proc, "which", lambda command: "/fake/codex")
+    monkeypatch.setattr(codex_cloud, "resolve_environment_id", lambda *a, **k: "env-local")
+    provider = FakeRuns(
+        {
+            "exec": [_result(stdout="task_windows99")],
+            "status": [_result(stdout="Status: completed")],
+            "diff": [_result(stdout="fake diff")],
+        }
+    )
+
+    def fake_run(argv, **kwargs):
+        if argv[:2] != ["codex", "cloud"]:
+            return _result(code=1)
+        assert not hub_configured, "Windows Hub roster dispatch invoked provider"
+        return provider(argv, **kwargs)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("Windows Hub roster dispatch reached credential storage")
+
+    monkeypatch.setattr(codex_cloud.proc, "run", fake_run)
+    monkeypatch.setattr(codex_cloud, "_persist_lease_holder", forbidden)
+    monkeypatch.setattr(codex_cloud, "_recover_lease_holder", forbidden)
+    if hub_configured:
+        monkeypatch.setattr(cloud_tracker, "register", forbidden)
+    if through_agents:
+        result = agents.run_agent("codex-cloud:env-local", "private prompt", cwd=tmp_path, timeout=1)
+    else:
+        result = codex_cloud.run_cloud_task("private prompt", env_id="env-local", timeout=1, register_target=tmp_path)
+    assert all(not values for values in calls.values())
+    assert not (cloud_tracker.registry_path(tmp_path).parent / "codex-leases").exists()
+    if hub_configured:
+        assert not result.ok
+        assert result.status == "denied"
+        assert result.failure_kind == result.detail == "secure-owner-store-unavailable"
+        assert provider.calls == []
+        assert not (tmp_path / ".brigade").exists()
+    else:
+        assert result.ok
+        assert result.thread_id == "task_windows99"
+        assert [argv[2] for argv in provider.calls] == ["exec", "status", "diff"]
+        entry = cloud_tracker.load_registry(tmp_path)["entries"][0]
+        assert not entry.get("lease_holder")

@@ -44,6 +44,7 @@ _CHECKPOINT_PAYLOAD_OPTIONAL_KEYS = frozenset({"body_kind", "pairing_key"})
 # the validation logic now treats body_kind as optional.
 _CHECKPOINT_PAYLOAD_KEYS = _CHECKPOINT_PAYLOAD_REQUIRED_KEYS | _CHECKPOINT_PAYLOAD_OPTIONAL_KEYS
 _CHECKPOINT_IDEMPOTENCY_PREFIX = "checkpoint"
+_CHECKPOINT_GENERIC_IDEMPOTENCY_PREFIX = "checkpoint:fact:"
 _CHECKPOINT_TRUNCATION_KEYS = frozenset({"truncated", "oversized_paths"})
 _CHECKPOINT_ASSET_SUFFIXES = frozenset(
     {
@@ -931,7 +932,12 @@ def _checkpoint_payload(
     }
     if body_kind is not None:
         payload["body_kind"] = body_kind
-    if pairing_key is not None:
+    # Existing readers interpret payload pairing_key as a dispatch/task key.
+    # Generic request identities live in the checkpoint idempotency key so
+    # its payload remains readable by those readers and the shadow projector.
+    if pairing_key is not None and (
+        paired_event_type in _DISPATCH_FACT_EVENT_TYPES or paired_event_type in run_events._TASK_EVENT_TYPES
+    ):
         payload["pairing_key"] = pairing_key
     return payload
 
@@ -964,6 +970,15 @@ def _checkpoint_idempotency_key(
             paired_digest = hashlib.sha256(paired.encode("utf-8")).hexdigest()[:16]
             return f"{prefix}:{sha}:{paired_digest}"
         return f"{prefix}:{sha}:{paired[:budget]}"
+
+    if paired_event_type not in _DISPATCH_FACT_EVENT_TYPES and paired_event_type not in run_events._TASK_EVENT_TYPES:
+        # Preserve existing dispatch/task keys, including crash-window retry
+        # identities. New generic keys hash the complete identity rather than
+        # truncating its request digest to fit the envelope's key limit.
+        identity = run_events.canonical_bytes(
+            {"sha256": sha, "paired_event_type": paired, "pairing_key": pairing_key, "body_kind": body_kind}
+        )
+        return f"{_CHECKPOINT_GENERIC_IDEMPOTENCY_PREFIX}{hashlib.sha256(identity).hexdigest()}"
 
     key = f"{prefix}:{sha}:{paired}:{pairing_key}"
     if len(key) <= run_events.MAX_IDEMPOTENCY_KEY_LEN:
@@ -1259,6 +1274,63 @@ def _paired_event_derived_status(event: "run_journal.RunEvent") -> str | None:
     return derived if derived is not None else payload_status
 
 
+_CONTROL_SUFFIX_TYPES = frozenset({"control.requested", "control.observed", "control.failed"})
+
+
+def _verify_control_suffix(events: list["run_journal.RunEvent"], suffix: list["run_journal.RunEvent"]) -> None:
+    """Check control semantics separately from the reader's envelope validation.
+
+    A request may precede the latest checkpoint, and an unfinished request is
+    legitimately indeterminate. A terminal receipt must follow its matching
+    request exactly once. Neither acknowledgment nor failure is task completion.
+    """
+    controls = [event for event in suffix if event.event_type in _CONTROL_SUFFIX_TYPES]
+    if not controls:
+        return
+    request_ids = {event.payload.get("request_id") for event in controls}
+    requested: dict[str, run_journal.RunEvent] = {}
+    terminal: set[str] = set()
+    for event in events:
+        if event.event_type not in _CONTROL_SUFFIX_TYPES or event.payload.get("request_id") not in request_ids:
+            continue
+        payload = event.payload
+        request_id = payload.get("request_id")
+        op = payload.get("op")
+        valid = (
+            isinstance(request_id, str)
+            and bool(request_id)
+            and op in {"steer", "interrupt"}
+            and event.idempotency_key == f"{event.event_type}:{request_id}"
+            and all(isinstance(payload[key], str) for key in ("worker", "turn_id") if key in payload)
+        )
+        if not valid:
+            raise CheckpointError("invalid control suffix identity", category="control-suffix")
+        assert isinstance(request_id, str)
+        if event.event_type == "control.requested":
+            text_digest = payload.get("text_digest")
+            if (
+                request_id in requested
+                or not isinstance(text_digest, str)
+                or (text_digest != "" and not _HEX64.fullmatch(text_digest))
+            ):
+                raise CheckpointError("invalid control suffix request", category="control-suffix")
+            requested[request_id] = event
+        else:
+            if event.event_type == "control.observed":
+                detail = payload.get("detail")
+                if not isinstance(detail, str) or not detail or len(detail) > run_events.MAX_PAYLOAD_STR_LEN:
+                    raise CheckpointError("invalid control suffix observation", category="control-suffix")
+            prior = requested.get(request_id)
+            if (
+                prior is None
+                or request_id in terminal
+                or prior.payload["op"] != op
+                or ("worker" in prior.payload and prior.payload["worker"] != payload.get("worker"))
+            ):
+                raise CheckpointError("control suffix terminal has no matching request", category="control-suffix")
+            terminal.add(request_id)
+
+
 def _verify_coverage(
     events: list["run_journal.RunEvent"],
     latest: "run_journal.RunEvent",
@@ -1271,31 +1343,46 @@ def _verify_coverage(
     ``event_type`` equals the checkpoint's ``paired_event_type`` and whose
     derived status equals the status in the validated checkpoint bytes.
     When ``paired_event_type`` is null, the checkpoint covers only itself
-    as the tail. Trailing redaction anchors and status-neutral cassette
-    references do not require checkpoint coverage. Anything else fails
-    uncovered-tail. ``checkpoint_obj`` is
+    as the tail. Trailing redaction anchors, status-neutral cassette references,
+    and semantically verified control facts do not require checkpoint coverage.
+    Anything else fails uncovered-tail. ``checkpoint_obj`` is
     the parsed validated checkpoint bytes; its ``status`` is the authoritative
     status the paired event must derive to.
     """
     paired_event_type = latest.payload.get("paired_event_type")
     pairing_key = latest.payload.get("pairing_key")
+    generic_identity = latest.idempotency_key.startswith(_CHECKPOINT_GENERIC_IDEMPOTENCY_PREFIX)
     tail = events[-1]
     trailing_neutral_facts = 0
-    while tail.event_type in {"run.redaction.recorded", "run.cassette.recorded"}:
+    while tail.event_type in {"run.redaction.recorded", "run.cassette.recorded"} | _CONTROL_SUFFIX_TYPES and not (
+        (pairing_key is not None or generic_identity)
+        and tail.sequence == latest.sequence + 1
+        and tail.event_type == paired_event_type
+    ):
         trailing_neutral_facts += 1
         if trailing_neutral_facts == len(events):
             raise CheckpointError(
                 _bound("journal tail is not covered by the latest checkpoint"), category="uncovered-tail"
             )
         tail = events[-1 - trailing_neutral_facts]
+    if trailing_neutral_facts:
+        _verify_control_suffix(events, events[-trailing_neutral_facts:])
     if latest.sequence == tail.sequence:
-        # A dispatch pairing key promises a specific identity-bearing fact.
+        # A pairing key promises a specific identity-bearing fact.
         # A checkpoint at tail means that fact never committed, so recovery
         # must surface the incomplete pair instead of treating the checkpoint
         # as covered.
-        if pairing_key is not None:
+        if pairing_key is not None or generic_identity:
             raise CheckpointError(
-                _bound("dispatch checkpoint pair is incomplete"),
+                _bound(
+                    "task checkpoint pair is incomplete"
+                    if paired_event_type in run_events._TASK_EVENT_TYPES
+                    else (
+                        "dispatch checkpoint pair is incomplete"
+                        if paired_event_type in _DISPATCH_FACT_EVENT_TYPES
+                        else "generic checkpoint pair is incomplete"
+                    )
+                ),
                 category="incomplete-pair",
             )
         # Legacy lifecycle checkpoints remain recoverable at tail after a
@@ -1313,6 +1400,19 @@ def _verify_coverage(
     paired = following[0]
     if paired.event_type != paired_event_type:
         raise CheckpointError(_bound("journal tail is not covered by the latest checkpoint"), category="uncovered-tail")
+    if paired.event_type in run_events._TASK_EVENT_TYPES:
+        if pairing_key is None or pairing_key != paired.request_digest:
+            raise CheckpointError(_bound("checkpoint task pairing identity does not match event"), category="pairing")
+        return
+    if generic_identity:
+        expected_key = _checkpoint_idempotency_key(
+            latest.payload["sha256"],
+            paired_event_type=paired.event_type,
+            body_kind=latest.payload.get("body_kind"),
+            pairing_key=paired.request_digest,
+        )
+        if latest.idempotency_key != expected_key:
+            raise CheckpointError(_bound("checkpoint pairing identity does not match event"), category="pairing")
     if pairing_key is not None:
         seat = paired.payload.get("seat")
         attempt = paired.payload.get("attempt")

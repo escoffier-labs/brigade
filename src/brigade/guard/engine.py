@@ -49,9 +49,11 @@ def scan_text(text: str, policy: Policy | None = None, options: ScanOptions | No
     allow_values = set(active_policy.allow_values)
 
     findings: list[Finding] = []
-    occupied: list[tuple[int, int]] = []
+    occupied: list[tuple[int, int, str]] = []
+    root_spans: list[tuple[int, int]] = []
 
     for rule in active_policy.all_rules():
+        is_root_path = rule.id == "root-path" and not any(rule is custom for custom in active_policy.custom_rules)
         regex = re.compile(rule.pattern, rule.flags)
         for match in regex.finditer(text):
             start, end = match.span()
@@ -69,7 +71,31 @@ def scan_text(text: str, policy: Policy | None = None, options: ScanOptions | No
                 continue
             if _inside_ranges(start, end, skipped_ranges):
                 continue
-            if _overlaps(start, end, occupied):
+            # Earlier detectors can occupy part of an expanded root path.
+            # Retain its independent decision when it fully encloses them;
+            # ordinary and partial-overlap precedence stays unchanged.
+            if any(
+                start < prev_end
+                and end > prev_start
+                and not (is_root_path and start <= prev_start and prev_end <= end)
+                and not (
+                    rule.category in {"secret", "pii"}
+                    and rule.category != prev_category
+                    and any(
+                        root_start <= min(start, prev_start) and max(end, prev_end) <= root_end
+                        for root_start, root_end in root_spans
+                    )
+                )
+                for prev_start, prev_end, prev_category in occupied
+            ):
+                continue
+            # Keep nested secret and PII decisions independent of root policy.
+            if any(
+                start < root_end
+                and end > root_start
+                and not (rule.category in {"secret", "pii"} and root_start <= start and end <= root_end)
+                for root_start, root_end in root_spans
+            ):
                 continue
 
             line = _line_for_offset(line_starts, start)
@@ -107,7 +133,10 @@ def scan_text(text: str, policy: Policy | None = None, options: ScanOptions | No
                     allowed_by=allowed_by,
                 )
             )
-            occupied.append((start, end))
+            if is_root_path:
+                root_spans.append((start, end))
+            else:
+                occupied.append((start, end, rule.category))
 
     for ignored in ignored_file_allows:
         findings.append(
@@ -126,7 +155,7 @@ def scan_text(text: str, policy: Policy | None = None, options: ScanOptions | No
             )
         )
 
-    redacted = _apply_edits(text, _edits_for(findings))
+    redacted = _apply_edits(text, _edits_for(findings, root_spans))
 
     include_opf = active_options.include_opf or active_policy.opf_backend.enabled
     opf_device = active_options.opf_device or active_policy.opf_backend.device
@@ -257,6 +286,7 @@ _FSTRING_POSITION = re.compile(r"(?:^|=|(?:^|;)\s*return|\w\(|[=(]\s*[\[{])\s*$"
 # The rest of a field after its expression: '=', a conversion, a format spec
 # with at most simple nested fields, then the closing brace.
 _FIELD_CLOSE = re.compile(r"""\s*=?\s*(?:![rsa])?(?::(?:[^{}"'\n]|\{[A-Za-z_][\w.]*\})*)?\}""")
+_HOSTNAME_KEY = r"(?:[a-z][a-z0-9]*[_-])*(?:host|hostname|server|endpoint|domain|url|address)"
 
 
 def _whole_fstring_field(before: str, after: str) -> bool:
@@ -278,6 +308,201 @@ def _whole_fstring_field(before: str, after: str) -> bool:
     if stem.lstrip().startswith(_LINE_START_COMMENT_PREFIXES) or _quote_at(stem, match.start(), None) is not None:
         return False
     return _quote_at(stem, len(stem), None) is not None and bool(_FIELD_CLOSE.match(after))
+
+
+def _hostname_option_context(before: str, after: str) -> bool:
+    """Recognize this option's command context, not every later shell argument."""
+    if not re.search(r"(?:^|\s)--?" + _HOSTNAME_KEY + r"=\s*$", before, re.IGNORECASE):
+        return False
+    # Retain the original simple-option recall, including argument punctuation.
+    if not re.search(r"[(){}\[\];]", before) and not re.match(r"\s*[,)}\];]", after):
+        return True
+    if re.match(r"\s*,", after):
+        return False
+    line = before + "hostname" + after
+    masked = list(line)
+    quote: str | None = None
+    escaped = False
+    word_boundary = True
+    for index, char in enumerate(line):
+        if escaped:
+            masked[index] = "x"
+            escaped = False
+            word_boundary = False
+        elif char == "\\" and quote != "'":
+            masked[index] = "x"
+            escaped = True
+            word_boundary = False
+        elif quote is not None:
+            masked[index] = "x"
+            word_boundary = False
+            if char == quote:
+                quote = None
+        elif char in "\"'`":
+            masked[index] = "x"
+            quote = char
+            word_boundary = False
+        elif char == "#" and word_boundary:
+            masked[index:] = " " * (len(line) - index)
+            break
+        else:
+            word_boundary = char.isspace()
+    tokens = list(re.finditer(r"\$\(|&&|\|\||[();{}|&]|[^\s();{}|&$]+|\$(?!\()", "".join(masked)))
+    # A complete earlier word expansion is argument data. Balance delimiters
+    # lexically without interpreting parameter or arithmetic expressions.
+    pairs: dict[int, int] = {}
+    openings: list[tuple[str, int]] = []
+    for index, token in enumerate(tokens):
+        value = token.group()
+        if value in {"(", "$(", "{"}:
+            openings.append(("}" if value == "{" else ")", index))
+        elif value in {")", "}"}:
+            if openings and openings[-1][0] == value:
+                pairs[openings.pop()[1]] = index
+            else:
+                openings.clear()
+    words: list[str] = []
+    groups: list[tuple[str, list[str], bool, bool]] = []
+    bracket_in_command = False
+    found = False
+    previous = ""
+    skip_until = -1
+    for index, token in enumerate(tokens):
+        if index <= skip_until:
+            continue
+        value = token.group()
+        expansion = value == "$(" or (value == "{" and line[max(0, token.start() - 1) : token.start()] == "$")
+        if not found and expansion:
+            closing = pairs.get(index)
+            if closing is not None and tokens[closing].end() <= len(before):
+                words.append("word")
+                previous = "word"
+                skip_until = closing
+                continue
+            if value == "{" or line[token.start() : token.start() + 3] == "$((":
+                return False  # The option itself is inside an expression.
+        if value in {"(", "$(", "{"}:
+            if not found and value != "$(" and words:
+                return False  # callback( ... ) and callback ( ... ) are calls.
+            if not found and value == "{" and (token.end() == len(line) or not line[token.end()].isspace()):
+                return False
+            groups.append((value, words, not found, bracket_in_command))
+            words = []
+            bracket_in_command = False
+        elif value in {")", "}"}:
+            if not groups:
+                return False
+            opening, outer_words, enclosing, outer_bracket = groups.pop()
+            if (value == "}") != (opening == "{"):
+                return False
+            if enclosing and value == "}" and previous not in {";", "&"}:
+                return False
+            if not words and previous not in {")", "}", ";", "&"}:
+                return False
+            words = outer_words + ["group"]
+            bracket_in_command = outer_bracket
+            if found and not groups:
+                return True  # Later commands cannot invalidate this context.
+        elif value in {";", "&&", "||", "|", "&"}:
+            if not words:
+                return False
+            words = []
+            bracket_in_command = False
+        else:
+            if not found and re.search(r"[\[\]]", value):
+                bracket_in_command = True
+            if token.start() <= len(before) < token.end():
+                if bracket_in_command:
+                    return False
+                found = True
+                if not groups:
+                    return not bool(re.match(r"\s*[,)}\]]", after))
+            words.append(value)
+        previous = value
+    return False
+
+
+def _normalized_shell_assignments(before: str) -> str:
+    """Treat balanced expansions in declaration values as opaque word parts."""
+    if not re.match(r"\s*(?:-[ \t]+)?(?:export|readonly|declare|local|@?set)\b", before, re.IGNORECASE):
+        return before
+
+    def closed(index: int, delimiter: str) -> tuple[int, bool] | None:
+        delimiters = [delimiter]
+        expanded = delimiter in {"}", ")", "`"}
+        while index < len(before):
+            delimiter = delimiters[-1]
+            char = before[index]
+            if char == delimiter:
+                delimiters.pop()
+                index += 1
+                if not delimiters:
+                    return index, expanded
+                continue
+            if delimiter == "'":
+                index += 1
+                continue
+            if char == "\\":
+                index += 2
+                continue
+            nested = None
+            width = 1
+            if before.startswith("${", index):
+                nested, width, expanded = "}", 2, True
+            elif before.startswith("$(", index):
+                nested, width, expanded = ")", 2, True
+            elif char in "\"'`" and not (delimiter == '"' and char == "'"):
+                nested = char
+                expanded = expanded or char == "`"
+            elif char == "(" and delimiter == ")":
+                nested = delimiter
+            if nested is not None:
+                delimiters.append(nested)
+                index += width
+            else:
+                index += 1
+        return None
+
+    pieces: list[str] = []
+    position = 0
+    for assignment in re.finditer(r"(?<!\S)[a-z_][a-z0-9_]*=", before, re.IGNORECASE):
+        if assignment.start() < position:
+            continue
+        index = assignment.end()
+        expanded = False
+        while index < len(before) and not before[index].isspace():
+            char = before[index]
+            nested = None
+            width = 1
+            if before.startswith("${", index):
+                nested, width, expanded = "}", 2, True
+            elif before.startswith("$(", index):
+                nested, width, expanded = ")", 2, True
+            elif char in "\"'`":
+                nested = char
+                expanded = expanded or char == "`"
+            elif char == "\\":
+                if index + 1 == len(before):
+                    return before
+                index += 2
+                continue
+            # Attached braces are shell word data, including any brace left
+            # after a parameter expansion closes. Command operators are not.
+            elif char in ";|&()":
+                return before
+            if nested is not None:
+                parsed = closed(index + width, nested)
+                if parsed is None:
+                    return before
+                index, nested_expansion = parsed
+                expanded = expanded or nested_expansion
+            else:
+                index += 1
+        pieces.append(before[position : assignment.end()])
+        pieces.append("value" if expanded else before[assignment.end() : index])
+        position = index
+    pieces.append(before[position:])
+    return "".join(pieces)
 
 
 def _hostname_context(text: str, start: int, end: int) -> bool:
@@ -313,18 +538,22 @@ def _hostname_context(text: str, start: int, end: int) -> bool:
         return False
     if re.match(r"\s*(?:=|\?)", after):
         return False
-    # Shell declarations can carry flags and earlier assignments. Keep each
-    # token bounded so member assignments, calls and other commands stay code.
-    # Spaced local assignments may be Lua, so only accept shell's KEY=value.
+    # Host-related keys after a YAML sequence marker or shell declaration
+    # prefixes (export/readonly, and Windows batch set) are configuration.
+    # Require whitespace after '-' so a hyphenated key is not a sequence item.
     if re.fullmatch(
-        r"\s*(?:(?:(?:export|readonly|declare|(?P<local_declaration>local))(?:[ \t]+-[a-z]+)*"
+        r"\s*(?:-[ \t]+)?(?:(?:(?:export|readonly|declare|(?P<local_declaration>local))(?:[ \t]+-[a-z]+)*"
         r"|@?set(?:[ \t]+/a)?)[ \t]+"
         r"(?:[a-z_][a-z0-9_]*=(?:[^\s\"'`;|&(){}]|'[^'\r\n]*'|\"[^\"\r\n]*\")*[ \t]+)*)*"
-        r"(?:[a-z][a-z0-9]*[_-])*(?:host|hostname|server|endpoint|domain|url|address)"
-        r"(?(local_declaration)=|\s*[:=]\s*)",
-        before,
+        + _HOSTNAME_KEY
+        + r"(?(local_declaration)=|\s*[:=]\s*)",
+        _normalized_shell_assignments(before),
         re.IGNORECASE,
     ):
+        return True
+    # Separators and balanced shell groups bound the active option; punctuation
+    # inside earlier arguments must not hide it or turn a call into a command.
+    if _hostname_option_context(before, after):
         return True
     if re.search(r"[(){}\[\];=]|\b(?:return|const|let|var|assert|import)\b", before):
         return False
@@ -535,12 +764,44 @@ def _overlaps(start: int, end: int, occupied: list[tuple[int, int]]) -> bool:
     return any(start < prev_end and end > prev_start for prev_start, prev_end in occupied)
 
 
-def _edits_for(findings: list[Finding]) -> list[TextEdit]:
-    return [
+def _edits_for(findings: list[Finding], root_spans: list[tuple[int, int]]) -> list[TextEdit]:
+    # Findings retain original offsets, but overlapping replacements cannot
+    # both use those offsets. A masking root edit covers all contained edits.
+    masked_roots = [
+        finding
+        for finding in findings
+        if finding.rule_id == "root-path"
+        and finding.category == "infrastructure"
+        and finding.redacts
+        and (finding.start, finding.end) in root_spans
+    ]
+    edits = [
         TextEdit(finding.start, finding.end, finding.replacement)
         for finding in findings
-        if finding.redacts and finding.start < finding.end
+        if finding.redacts
+        and finding.start < finding.end
+        and not any(
+            root is not finding and root.start <= finding.start and finding.end <= root.end for root in masked_roots
+        )
     ]
+    # Independent nested detectors can overlap without either decision being
+    # discarded. Mask their union once, using original source offsets. Keep
+    # adjacent edits separate and preserve ordinary non-root precedence.
+    selected: list[TextEdit] = []
+    for edit in sorted(edits, key=lambda item: (item.start, -item.end)):
+        if (
+            selected
+            and edit.start < selected[-1].end
+            and any(
+                root_start <= selected[-1].start and max(selected[-1].end, edit.end) <= root_end
+                for root_start, root_end in root_spans
+            )
+        ):
+            previous = selected[-1]
+            selected[-1] = TextEdit(previous.start, max(previous.end, edit.end), previous.replacement)
+        else:
+            selected.append(edit)
+    return selected
 
 
 def _apply_edits(text: str, edits: list[TextEdit]) -> str:
