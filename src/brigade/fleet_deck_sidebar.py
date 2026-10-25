@@ -6,10 +6,19 @@ from datetime import datetime
 
 from . import __version__, fleet_deck_icons as icons
 from .fleet_command_deck import UNKNOWN, DeckView, StationView, Tile
-from .fleet_deck_overview import POLICY_LIMITS, _esc, format_age, machine_for, seconds_since, station_status
+from .fleet_deck_overview import (
+    POLICY_LIMITS,
+    _esc,
+    format_age,
+    machine_for,
+    seconds_since,
+    station_status,
+    page_alerts,
+)
 
 NAV_ITEMS = (
     ("overview", "/deck", "overview"),
+    ("alerts", "/deck/alerts", "alerts"),
     ("repos", "/deck/repos", "repos"),
     ("work", "/deck/work", "work"),
     ("roster", "/deck/roster", "roster"),
@@ -49,8 +58,7 @@ def _machine_tree(view: DeckView) -> str:
         machine_state = POLICY_LIMITS.get(machine.unused_reason, machine.state) if machine is not None else UNKNOWN
         runs = "".join(_tree_run(tile) for tile in station.tiles)
         rows.append(
-            f'<li class="tree-row" data-filter-row title="{_esc(station.station.node_id)}"><div class="tree-line">'
-            f'<span class="dot dot--{status}" aria-hidden="true"></span>'
+            f'<li class="tree-row" data-status="{status}" data-filter-row title="{_esc(station.station.node_id)}"><div class="tree-line">'
             f'<span class="tree-label">{_esc(station.label)}</span>'
             f'<span class="tree-meta">{_esc(_tree_summary(station, status, machine_state))}</span></div>'
             + (f'<ul class="tree-children">{runs}</ul>' if runs else "")
@@ -110,7 +118,7 @@ def _sidebar_meta(view: DeckView | None, now: datetime) -> str:
         modifier = " sidebar-meta--stale" if stale else ""
         text = "telemetry unknown" if age is None else f"telemetry {'stale ' if stale else ''}{format_age(age)}"
         telemetry = f'<span class="mono sidebar-telemetry">{_esc(text)}</span>'
-    return f'<p class="sidebar-meta{modifier}"><span class="mono">v{_esc(__version__)}</span>{telemetry}</p>'
+    return f'<p class="sidebar-meta{modifier}"><span class="mono sidebar-version" title="v{_esc(__version__)}">v{_esc(__version__)}</span>{telemetry}</p>'
 
 
 def render_sidebar(view: DeckView | None, active: str, now: datetime, *, worklore_enabled: bool) -> str:
@@ -123,6 +131,9 @@ def render_sidebar(view: DeckView | None, active: str, now: datetime, *, worklor
         count = (
             f' <span class="nav-count">{len(view.stations)}</span>' if key == "overview" and view is not None else ""
         )
+        if key == "alerts" and view is not None:
+            alerts = len(page_alerts(view, now))
+            count = f' <span class="nav-count">{alerts}</span>' if alerts else ""
         links.append(f'<a href="{href}"{current}>{icons.NAV_ICONS[key]}{label}{count}</a>')
     parts = [
         '<aside class="shell-sidebar" aria-label="Fleet navigation"><div class="brand">'

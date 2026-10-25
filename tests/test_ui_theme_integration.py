@@ -173,11 +173,20 @@ def test_all_fleet_renderers_use_one_shared_shell_and_navigation(fleet_pages):
     for route, rendered in fleet_pages.items():
         markup = Markup(rendered)
         assert len(markup.elements("html")) == len(markup.elements("body")) == len(markup.elements("main")) == 1, route
+        assert len(markup.elements("aside")) == 1, route
+        sidebar = next(index for index, (tag, _) in enumerate(markup.tags) if tag == "aside")
+        assert markup.tags[sidebar][1]["class"] == "shell-sidebar", route
+        assert [markup.tags[index][1] for index in markup.descendants(sidebar, "nav")] == [
+            {"class": "deck-nav", "aria-label": "Command Deck"}
+        ], route
         assert rendered.count("--canvas:") == 2, route  # dark :root plus the light media override
         for tag in ["style", "script"]:
             assert len(markup.elements(tag)) == 1, route
             assert markup.elements(tag)[0]["nonce"] == "integration-nonce", route
-        assert markup.elements("nav") == [{"class": "deck-nav", "aria-label": "Command Deck"}], route
+        expected_nav = [{"class": "deck-nav", "aria-label": "Command Deck"}]
+        if route.startswith("/view/"):
+            expected_nav.append({"class": "board-nav", "aria-label": "Board views"})
+        assert markup.elements("nav") == expected_nav, route
         routes = {urlsplit(attrs["href"]).path for attrs in markup.elements("a") if "href" in attrs}
         assert {"/deck/repos", "/deck/roster", "/deck/policy", "/view/machines"} <= routes, route
         assert "/" in routes or "/deck" in routes, route
@@ -251,7 +260,9 @@ def test_populated_board_tables_keep_rows_semantics_and_individual_scroll_wrappe
             "synthetic-completed-alpha",
             "synthetic-completed-bravo",
         ]
-        assert all(attrs["title"].endswith(BOARD_HOSTILE) for attrs in markup.elements("h2"))
+        machine_titles = [attrs for attrs in markup.elements("h2") if attrs.get("class") == "machine-card-title"]
+        assert len(machine_titles) == 2
+        assert all(attrs["title"].endswith(BOARD_HOSTILE) for attrs in machine_titles)
     else:
         assert (
             len(
@@ -270,8 +281,13 @@ def test_populated_board_tables_keep_rows_semantics_and_individual_scroll_wrappe
         )
     assert markup.elements("img") == []
     assert not [attrs for _, attrs in markup.tags if "onerror" in attrs]
+    pivots = next(index for index, (_, attrs) in enumerate(markup.tags) if attrs.get("aria-label") == "Board views")
     for name in ["machines", "repos"]:
-        link = next(attrs for attrs in markup.nav_links if urlsplit(attrs["href"]).path == "/view/" + name)
+        link = next(
+            markup.tags[index][1]
+            for index in markup.descendants(pivots, "a")
+            if urlsplit(markup.tags[index][1]["href"]).path == "/view/" + name
+        )
         assert parse_qs(urlsplit(link["href"]).query) == {"all": ["1"]}
         assert ("aria-current" in link) == (name == view)
 
@@ -298,8 +314,13 @@ def test_board_navigation_and_filters_preserve_query_state(view):
         now=NOW,
     )
     markup = Markup(rendered)
+    pivots = next(index for index, (_, attrs) in enumerate(markup.tags) if attrs.get("aria-label") == "Board views")
     for name in ["machines", "repos"]:
-        link = next(attrs for attrs in markup.nav_links if urlsplit(attrs["href"]).path == "/view/" + name)
+        link = next(
+            markup.tags[index][1]
+            for index in markup.descendants(pivots, "a")
+            if urlsplit(markup.tags[index][1]["href"]).path == "/view/" + name
+        )
         assert parse_qs(urlsplit(link["href"]).query) == query
         assert ("aria-current" in link) == (name == view)
     fields = {attrs["name"]: attrs for attrs in markup.elements("input") if "name" in attrs}
@@ -358,9 +379,9 @@ def test_populated_deck_orders_summary_alerts_work_and_machines():
     rendered = deck.render_deck(view, nonce="spacing-nonce", now=NOW)
     markers = [
         'aria-label="Fleet summary"',
-        'id="alerts"',
-        'aria-labelledby="working-title"',
+        'class="alert-line"',
         'id="machines-table"',
+        'aria-labelledby="working-title"',
     ]
     positions = [rendered.index(marker) for marker in markers]
     assert positions == sorted(positions)

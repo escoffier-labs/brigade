@@ -1098,3 +1098,13 @@ def test_packaged_presets_remain_byte_identical_after_suggest_and_stats(tmp_targ
     roster_cmd.stats(tmp_target)
 
     assert preset.read_bytes() == original
+
+
+def test_roster_ready_cli_distinguishes_orchestrator_selection(tmp_target, capsys):
+    assert roster_cmd.init(tmp_target) == 0
+    capsys.readouterr()
+    assert cli.main(["roster", "ready", "--target", str(tmp_target), "--worker", "chef", "--json"]) == 2
+    report = json.loads(capsys.readouterr().out)
+    assert report["status"] == "blocked"
+    assert report["selected_seats"][0]["selection_role"] == "orchestrator"
+    assert any(item["reason"] == "orchestrator-selected" for item in report["evidence"])

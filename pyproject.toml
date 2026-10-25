@@ -71,6 +71,9 @@ markers = [
     "real_codex_cloud: test exercises the real codex_cloud.list_tasks with its own fake proc.run",
 ]
 
+[tool.coverage.run]
+patch = ["subprocess"]
+
 [tool.ruff]
 line-length = 120
 src = ["src", "tests"]

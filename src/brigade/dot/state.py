@@ -52,11 +52,19 @@ SUMMARY_KEYS = (
 REQUEST_ID_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:-]{0,159}")
 SUMMARY_VALUE_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._:@/#-]{0,95}")
 LABEL_RE = re.compile(r"[A-Za-z0-9_][A-Za-z0-9_./:-]{0,63}")
+CLIENT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 _.@/:()+-]{0,63}")
 
 
 def call_label(name: Any) -> str:
     """A tool or JSON-RPC method name safe to store; anything else is 'unknown'."""
     return name if isinstance(name, str) and LABEL_RE.fullmatch(name) else "unknown"
+
+
+def client_label(name: Any) -> str | None:
+    """A printable MCP clientInfo.name, bounded; anything else is not stored."""
+    if not isinstance(name, str):
+        return None
+    return name[:64] if CLIENT_RE.fullmatch(name[:64]) else None
 
 
 def summarize_arguments(arguments: Any) -> str | None:
@@ -156,6 +164,10 @@ class BridgeState(PrivateDatabase):
             ok INTEGER NOT NULL, duration_ms INTEGER NOT NULL, request_id TEXT,
             arg_summary TEXT, error_code TEXT)""")
         connection.execute("CREATE INDEX IF NOT EXISTS call_log_ts ON call_log(ts)")
+        if "client_name" not in {row[1] for row in connection.execute("PRAGMA table_info(call_log)")}:
+            # Additive: the MCP clientInfo.name sent with initialize, so hosted clients can be told apart.
+            connection.execute("ALTER TABLE call_log ADD COLUMN client_name TEXT")
+        connection.execute("CREATE TABLE IF NOT EXISTS send_budget (ts REAL NOT NULL)")
         inbox_columns = connection.execute("PRAGMA table_info(hub_inbox)").fetchall()
         if inbox_columns and "scope" not in {row[1] for row in inbox_columns}:
             # Old IDs have no proven endpoint. Archive them without adopting authority.
@@ -382,9 +394,10 @@ class BridgeState(PrivateDatabase):
         request_id: str | None = None,
         arg_summary: str | None = None,
         error_code: str | None = None,
+        client_name: str | None = None,
         clock: Clock = utc_now,
     ) -> int:
-        """Metadata only: tool or method name, outcome, timing and a short id/limit summary."""
+        """Metadata only: tool or method name, outcome, timing, client name and a short id/limit summary."""
         row = (
             _iso(clock()),
             call_label(tool),
@@ -393,17 +406,30 @@ class BridgeState(PrivateDatabase):
             request_id if isinstance(request_id, str) and REQUEST_ID_RE.fullmatch(request_id) else None,
             arg_summary[:MAX_ARG_SUMMARY] if isinstance(arg_summary, str) and arg_summary else None,
             str(error_code)[:64] if error_code else None,
+            client_label(client_name),
         )
         with self.transaction() as connection:
             cursor = connection.execute(
                 """INSERT INTO call_log
-                (ts, tool, ok, duration_ms, request_id, arg_summary, error_code) VALUES (?,?,?,?,?,?,?)""",
+                (ts, tool, ok, duration_ms, request_id, arg_summary, error_code, client_name)
+                VALUES (?,?,?,?,?,?,?,?)""",
                 row,
             )
             assert cursor.lastrowid is not None
             if cursor.lastrowid % 500 == 0:
                 connection.execute("DELETE FROM call_log WHERE ts < ?", (_iso(clock() - CALL_LOG_RETENTION),))
             return cursor.lastrowid
+
+    def reserve_send(self, limit: int, window_seconds: float, *, now: float | None = None) -> bool:
+        """Atomically take one send from a rolling window. A refused reservation records nothing."""
+        now = time.time() if now is None else now
+        with self.transaction() as connection:
+            connection.execute("DELETE FROM send_budget WHERE ts <= ?", (now - window_seconds,))
+            used = connection.execute("SELECT COUNT(*) FROM send_budget").fetchone()[0]
+            if used >= limit:
+                return False
+            connection.execute("INSERT INTO send_budget(ts) VALUES (?)", (now,))
+            return True
 
     def prune_call_log(self, *, clock: Clock = utc_now) -> int:
         with self.transaction() as connection:

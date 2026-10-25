@@ -3,11 +3,12 @@
 from __future__ import annotations
 
 import json
+import subprocess
 import sys
 
 import pytest
 
-from brigade import care_cmd, runbook_cmd
+from brigade import care_cmd, care_schedules, runbook_cmd
 
 
 @pytest.mark.parametrize("backend,schedule", [("systemd", "*:0/10"), ("launchd", "*/10 * * * *")])
@@ -16,6 +17,18 @@ def test_selected_patrol_installs_report_only_runbook(tmp_path, monkeypatch, cap
     target.mkdir()
     monkeypatch.setattr(care_cmd, "_ensure_memory_care_runbooks", lambda target: 0)
     monkeypatch.setattr(runbook_cmd, "_pin_payload_from_runbook", lambda *args: ({}, None))
+    analyzed = []
+    real_run = subprocess.run
+
+    def run(argv, *args, **kwargs):
+        if argv[0] == "systemd-analyze":
+            assert argv == ["systemd-analyze", "calendar", schedule]
+            analyzed.append(schedule)
+            return subprocess.CompletedProcess(argv, 0, "", "")
+        return real_run(argv, *args, **kwargs)
+
+    # Exercise validation without requiring a Linux scheduler on the test host.
+    monkeypatch.setattr(care_schedules.subprocess, "run", run)
     assert (
         care_cmd.install(
             target=target,
@@ -28,6 +41,7 @@ def test_selected_patrol_installs_report_only_runbook(tmp_path, monkeypatch, cap
         == 0
     )
     capsys.readouterr()
+    assert analyzed == ([schedule] if backend == "systemd" else [])
     book = json.loads((target / ".brigade/runbooks/run-patrol.json").read_text())
     command = book["steps"][0]["run"]
     assert "--fail-on stalled,zombie,dead" in command
@@ -37,6 +51,12 @@ def test_selected_patrol_installs_report_only_runbook(tmp_path, monkeypatch, cap
     entry = care_cmd._entry_status(target, care_cmd._catalog_by_id()["run-patrol"])
     assert entry["last_receipt"]["run_id"] == "patrol-run"
     assert entry["repeated_failure"]
+
+
+def test_systemd_schedule_validation_refuses_missing_analyzer(tmp_path, monkeypatch):
+    monkeypatch.setenv("PATH", str(tmp_path))
+    with pytest.raises(ValueError, match="cannot validate systemd calendar: systemd-analyze command not found"):
+        care_schedules.validate_schedule("systemd", "*:0/10")
 
 
 def test_patrol_is_optional_except_in_atomic_crontab(tmp_path, monkeypatch, capsys):

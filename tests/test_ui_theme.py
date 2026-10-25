@@ -263,3 +263,51 @@ def test_machine_table_gives_seen_room_and_keeps_shared_css_lean():
     assert ".sidebar-foot" not in ui_theme.BASE_CSS
     assert not re.search(r"^\.card \{", ui_theme.BASE_CSS, re.M)  # the overview strip owns .card
     assert not re.search(r"^\.sub \{", ui_theme.OVERVIEW_CSS, re.M)
+
+
+def test_quiet_overview_keeps_ink_values_and_both_machine_column_layouts():
+    css = ui_theme.OVERVIEW_CSS
+    assert re.search(r"^\.card-value \{[^}]*color: var\(--ink\)", css, re.M)
+    assert not re.search(r"\.card--[\w-]+ \.card-value", css)
+    rule = re.search(r"\.verdict-status \{([^}]+)\}", css).group(1)
+    assert "letter-spacing" not in rule and "text-transform" not in rule
+    for column, width in enumerate((30, 34, 20, 16), 1):
+        assert f".machine-table--no-notes th:nth-child({column}) {{ width: {width}%;" in css
+    assert ".alerts {" not in css and ".alert {" not in css
+
+
+def test_sidebar_labels_stay_sentence_case_and_footer_cannot_wrap():
+    css = ui_theme.BASE_CSS
+    heading = re.search(r"\.tree-heading \{([^}]+)\}", css).group(1)
+    assert "text-transform" not in heading and "letter-spacing" not in heading
+    meta = re.search(r"\.sidebar-meta \{([^}]+)\}", css).group(1)
+    assert "white-space: nowrap" in meta
+    version = re.search(r"\.sidebar-version \{([^}]+)\}", css).group(1)
+    for declaration in ("overflow: hidden", "text-overflow: ellipsis", "min-width: 0"):
+        assert declaration in version
+    assert re.search(r"\.sidebar-telemetry \{[^}]*flex: none", css)
+    for status, color in [("stale", "signal"), ("offline", "muted"), ("unknown", "muted")]:
+        assert re.search(
+            r'\.tree-row\[data-status="' + status + r'"\] \.tree-meta \{[^}]*color: var\(--' + color + r"\)", css
+        )
+
+
+def test_sidebar_machine_tree_has_no_bullets_and_only_state_words_take_state_color():
+    css = ui_theme.BASE_CSS
+    rules = {
+        selector.strip(): body
+        for selectors, body in re.findall(r"([^{}]+)\{([^{}]*)\}", css)
+        for selector in selectors.split(",")
+    }
+    assert "list-style: none" in rules[".tree-list"]
+    assert "color" not in rules[".tree-list"]
+    assert "var(--signal)" in rules['.tree-row[data-status="stale"] .tree-meta']
+
+
+def test_machine_table_seen_header_stays_right_aligned_without_notes():
+    rules = {
+        selector.strip(): body
+        for selectors, body in re.findall(r"([^{}]+)\{([^{}]*)\}", ui_theme.OVERVIEW_CSS)
+        for selector in selectors.split(",")
+    }
+    assert "text-align: right" in rules[".machine-table--no-notes th:nth-child(4)"]

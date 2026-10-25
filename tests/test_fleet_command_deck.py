@@ -936,7 +936,8 @@ def test_parallel_activity_is_neutral_and_observers_and_expired_claims(tmp_path,
         assert "! collision" not in deck_body
         assert "Same repo label on Alpha, Beta" in deck_body
         assert "File overlap unknown" in deck_body
-        rail = deck_body.split('id="alerts"')[1].split("</section>")[0]
+        alerts_page = _request(hub, "GET", "/deck/alerts", headers=_bearer())[2]
+        rail = alerts_page.split("<tbody>")[1].split("</tbody>")[0]
         assert "shared" not in rail and "parallel" not in rail
         _status, _headers, repos_body = _request(hub, "GET", "/deck/repos", headers=_bearer())
         repo_rows = repos_body.split("<tbody>")[1].split("<tr>")[1:]
@@ -948,7 +949,7 @@ def test_parallel_activity_is_neutral_and_observers_and_expired_claims(tmp_path,
         # Expired claims are absent.
         assert "gone" not in repos_body
         # Observers are excluded from station totals.
-        assert "observer-repo" not in deck_body.split('id="alerts"')[1]
+        assert "observer-repo" not in deck_body.split("<main", 1)[1]
         assert "Other observers" in deck_body and NODE_C[:12] in deck_body
 
 
@@ -1240,7 +1241,7 @@ def test_empty_rail_without_telemetry_is_not_all_clear():
     assert deck.deck_verdict(view) == "COVERAGE UNKNOWN (1)"
     html = deck.render_deck(view, nonce="nonce", now=NOW)
     assert "ALL CLEAR" not in html
-    assert "COVERAGE UNKNOWN" in html
+    assert "Coverage unknown" in html
     assert "not the same as nothing being wrong" in html
 
 
@@ -1284,7 +1285,9 @@ def test_existing_run_and_claim_signals_survive_the_verdict_change():
     entry = deck.RailEntry(kind="failed", node_id=NODE_A, repo="acme/tool", run_id="r-1", detail="exit 1")
     view = _empty_view(deck.control_plane_from_snapshot(_control_plane_snapshot()), rail=[entry])
     assert deck.deck_verdict(view) == "NEEDS ATTENTION (1)"
-    html = deck.render_deck(view, nonce="nonce", now=NOW)
+    from brigade.fleet_deck_alerts import render_alerts_page
+
+    html = render_alerts_page(view, NOW, nonce="nonce", worklore_enabled=True)
     assert "acme/tool" in html
     assert "exit 1" in html
 
@@ -1328,10 +1331,10 @@ def test_optional_integration_telemetry_is_distinct_from_a_missing_section(repor
     if reported:
         assert "No integration readiness reports in this snapshot" in html
         assert "Worklore queue sourcing" not in html
-        assert "ALL CLEAR" in html
+        assert "All clear" in html
     else:
         assert "Integration readiness unknown" in html
-        assert "COVERAGE UNKNOWN (1)" in html
+        assert "Coverage unknown (1)" in html
 
 
 def test_machine_capacity_and_idle_reasons_render():
@@ -1709,4 +1712,5 @@ def test_deck_http_joins_stations_to_telemetry_by_node_id(tmp_path):
         beta = next(row for row in rows if ">Beta<" in row)
         assert "idle-capacity" in alpha and "stale-telemetry" not in alpha
         assert "stale-telemetry" in beta and 'data-status="stale"' in beta and 'class="tag tag--warn">stale<' in beta
-        assert 'class="alert-kind">stale telemetry<' in page
+        alerts_page = _request(hub, "GET", "/deck/alerts", headers=_bearer())[2]
+        assert "<td>stale telemetry</td>" in alerts_page

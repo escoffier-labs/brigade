@@ -13,7 +13,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any
 
-from . import fleet_hub
+from . import fleet_hub, fleet_hub_message_keys
 from .fleet_hub_messages import MessageError, MessageQuotaError
 
 PAGE_DEFAULT = 200
@@ -317,12 +317,22 @@ def _save(
     return snapshot_id
 
 
+def _string_count(value: Any) -> int:
+    if isinstance(value, str):
+        return int(bool(value))
+    if isinstance(value, dict):
+        return sum(_string_count(item) for item in value.values())
+    if isinstance(value, list):
+        return sum(_string_count(item) for item in value)
+    return 0
+
+
 def _wire_size(row: dict[str, Any]) -> int:
     # The outer MCP JSON escapes the indented inner JSON. Each nonempty text
     # may acquire an untrusted fence (under 1 KiB including its JSON wrapper).
     # Charge every string, even authenticated fields that are never fenced.
     text = json.dumps(row, indent=2)
-    return len(json.dumps(text).encode()) + 512 + 1024 * sum(isinstance(v, str) and bool(v) for v in row.values())
+    return len(json.dumps(text).encode()) + 512 + 1024 * _string_count(row)
 
 
 def page(
@@ -353,14 +363,15 @@ def page(
                 continue
             if key != "sessions" and len(selected) >= limit:
                 break
-            size = _wire_size(row)
+            decorated = fleet_hub_message_keys.decorate(conn, key, row)
+            size = _wire_size(decorated)
             if size > PAGE_MAX_BYTES - 8192:
                 oversized += 1
                 position += 1
                 continue
             if size > remaining:
                 break
-            selected.append(row)
+            selected.append(decorated)
             remaining -= size
             position += 1
         result[key] = selected
@@ -422,6 +433,20 @@ def snapshot_page(
                 if key != "sessions" and len(selected) >= limit:
                     more = True
                     break
+                # Cached costs cover undecorated rows. Live keys can only add
+                # cost, so reject certainly oversized rows without loading them.
+                if size > PAGE_MAX_BYTES - 8192:
+                    oversized += 1
+                    position += 1
+                    continue
+                # Load only a selected candidate. Keys are live and never stored
+                # in the snapshot, so cached wire_bytes cannot admit this row.
+                payload = conn.execute(
+                    "SELECT payload FROM fleet_read_snapshot_rows WHERE snapshot_id=? AND kind=? AND ordinal=?",
+                    (snapshot_id, key, ordinal),
+                ).fetchone()[0]
+                decorated = fleet_hub_message_keys.decorate(conn, key, json.loads(payload))
+                size = _wire_size(decorated)
                 if size > PAGE_MAX_BYTES - 8192:
                     oversized += 1
                     position += 1
@@ -429,12 +454,7 @@ def snapshot_page(
                 if size > remaining:
                     more = True
                     break
-                # Lookahead and oversized rows need only cached metadata.
-                payload = conn.execute(
-                    "SELECT payload FROM fleet_read_snapshot_rows WHERE snapshot_id=? AND kind=? AND ordinal=?",
-                    (snapshot_id, key, ordinal),
-                ).fetchone()[0]
-                selected.append(json.loads(payload))
+                selected.append(decorated)
                 remaining -= size
                 position += 1
             else:

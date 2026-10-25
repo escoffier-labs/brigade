@@ -15,7 +15,7 @@ from datetime import datetime, timezone
 from typing import Sequence
 from urllib.parse import urlencode
 
-from . import fleet_action_page, fleet_action_sources, fleet_command_deck as deck
+from . import fleet_action_sources, fleet_command_deck as deck
 from .fleet_action_auth import canonical
 from . import fleet_deck_activity as activity
 from .fleet_command_deck import UNKNOWN, DeckView, LiveRun, MachineState, StationView, Tile
@@ -268,25 +268,17 @@ def page_alerts(view: DeckView, now: datetime) -> tuple[Alert, ...]:
     return tuple(attention + collisions + stale + coverage)
 
 
-def _alert_html(alert: Alert, action_sources: frozenset[str] = frozenset()) -> str:
-    kind_class = alert.kind.replace(" ", "-")
-    detail = activity.REASONS.get(alert.detail, alert.detail) if alert.kind == "blocked" else alert.detail
-    action = fleet_action_page.alert_link(alert.source_ref, action_sources)
-    return (
-        f'<li class="alert alert--{_esc(kind_class)}">'
-        f'<div class="alert-body"><p class="alert-title"><span class="alert-kind">{_esc(alert.kind)}</span> '
-        f'{_esc(alert.title)}</p><p class="alert-detail">{_esc(detail)}</p>'
-        f'<p class="alert-since">{_esc(alert.since)}</p>{action}</div></li>'
-    )
-
-
-def render_alerts(view: DeckView, now: datetime, *, action_sources: frozenset[str] = frozenset()) -> str:
+def render_alert_line(view: DeckView, now: datetime) -> str:
     alerts = page_alerts(view, now)
-    items = "".join(_alert_html(alert, action_sources) for alert in alerts)
-    body = f'<ul class="alerts">{items}</ul>' if items else '<p class="empty">No active alerts</p>'
+    if not alerts:
+        return ""
+    counts: dict[str, int] = {}
+    for alert in alerts:
+        counts[alert.kind] = counts.get(alert.kind, 0) + 1
+    kinds = ", ".join(f"{count} {kind}" for kind, count in counts.items())
     return (
-        '<section class="panel" id="alerts" aria-labelledby="alerts-title"><header>'
-        f'<h2 id="alerts-title">Active alerts ({len(alerts)})</h2></header>{body}</section>'
+        f'<p class="alert-line"><strong>{_plural(len(alerts), "alert")}</strong> · {_esc(kinds)} '
+        '<a href="/deck/alerts">Review</a></p>'
     )
 
 
@@ -310,6 +302,13 @@ def verdict_text(view: DeckView, now: datetime) -> str:
     return f"COVERAGE UNKNOWN ({unknown})" if unknown else deck.deck_verdict(view)
 
 
+def _verdict_display(verdict: str) -> str:
+    for original, display in (("NEEDS ATTENTION", "Needs attention"), ("COVERAGE UNKNOWN", "Coverage unknown")):
+        if verdict.startswith(original):
+            return display + verdict[len(original) :]
+    return "All clear" if verdict == "ALL CLEAR" else verdict
+
+
 def render_header(view: DeckView, now: datetime) -> str:
     verdict = verdict_text(view, now)
     tone = "attention" if verdict.startswith("NEEDS") else "unknown" if verdict.startswith("COVERAGE") else "clear"
@@ -323,7 +322,7 @@ def render_header(view: DeckView, now: datetime) -> str:
     )
     return (
         '<header class="page-head"><div>'
-        f'<h1>Fleet overview <span class="verdict-status verdict-status--{tone}">{_esc(verdict)}</span></h1>'
+        f'<h1>Fleet overview <span class="verdict-status verdict-status--{tone}">{_esc(_verdict_display(verdict))}</span></h1>'
         f'<p class="page-sub">{_esc(sub)}</p></div>'
         f'<p class="header-meta">Updated {_esc(now.strftime("%H:%M UTC"))} '
         '<a class="refresh-link" href="/deck">Refresh</a></p></header>'
@@ -384,9 +383,9 @@ def render_work_lists(view: DeckView, *, worklore_enabled: bool = True) -> str:
     working = f'<ul class="rows">{rows}</ul>' if rows else '<p class="empty">No managed jobs reported.</p>'
     return (
         '<div class="split"><section class="panel" aria-labelledby="working-title"><header>'
-        '<div><h2 id="working-title">Activity</h2><p class="station-meta">Managed jobs occupy station slots. '
-        "Agent sessions report presence; they may be idle or overlap managed jobs. "
-        "Current presence means the Hub has an unexpired report.</p></div>"
+        '<div><h2 id="working-title">Activity</h2><details class="panel-help"><summary>About activity</summary>'
+        "<p>Managed jobs occupy station slots. Agent sessions report presence; they may be idle or overlap "
+        "managed jobs. Current presence means the Hub has an unexpired report.</p></details></div>"
         '<a class="card-link" href="/view/machines">View runs</a></header>'
         f"<h3>Managed jobs ({count})</h3>{working}{render_sessions(view)}</section>"
         '<section class="panel" aria-labelledby="queued-title"><header><h2 id="queued-title">Ready queue</h2></header>'
@@ -486,7 +485,7 @@ def machine_notes(station: StationView, machine: MachineState | None, status: st
     return tuple(notes)
 
 
-def _machine_row(view: DeckView, station: StationView, now: datetime) -> str:
+def _machine_row(view: DeckView, station: StationView, now: datetime, *, show_notes: bool) -> str:
     machine = machine_for(view, station)
     status = station_status(station, machine)
     enrol = "" if station.enrolled else ' <span class="chip chip-muted">not enrolled</span>'
@@ -499,6 +498,7 @@ def _machine_row(view: DeckView, station: StationView, now: datetime) -> str:
         f'<span class="tag{" tag--warn" if warn else ""}">{_esc(label)}</span>'
         for label, warn in machine_notes(station, machine, status)
     )
+    notes_cell = f"<td>{notes}</td>" if show_notes else ""
     seen_class = " seen--stale" if status == "stale" else ""
     seen = f"stale {telemetry}" if status == "stale" and telemetry != UNKNOWN else telemetry
     return (
@@ -506,7 +506,7 @@ def _machine_row(view: DeckView, station: StationView, now: datetime) -> str:
         f'last run {_esc(last_run)} · node {_esc(station.station.node_id)}"><td>'
         f'<span class="machine-name" title="{_esc(station.station.node_id)}">{_esc(station.label)}</span>{enrol}'
         f'<span class="sub-inline">{_esc(os_name)}</span></td>'
-        f"{_seats_html(station, machine, status)}<td>{_load_cell(machine)}</td><td>{notes}</td>"
+        f"{_seats_html(station, machine, status)}<td>{_load_cell(machine)}</td>{notes_cell}"
         f'<td class="seen mono{seen_class}">{_esc(seen)}</td></tr>'
     )
 
@@ -525,10 +525,16 @@ def render_machine_table(view: DeckView, now: datetime) -> str:
             header
             + '<p class="empty">No stations configured. Start the hub with --deck-config to add them.</p></section>'
         )
-    rows = "".join(_machine_row(view, station, now) for station in view.stations)
+    show_notes = any(
+        machine_notes(station, machine_for(view, station), station_status(station, machine_for(view, station)))
+        for station in view.stations
+    )
+    rows = "".join(_machine_row(view, station, now, show_notes=show_notes) for station in view.stations)
+    table_class = "machine-table" + ("" if show_notes else " machine-table--no-notes")
+    notes_header = '<th><span class="visually-hidden">Notes</span></th>' if show_notes else ""
     return (
-        header + '<div class="table-wrap"><table class="machine-table"><thead><tr><th>Machine</th><th>Seats</th>'
-        '<th>Load</th><th><span class="visually-hidden">Notes</span></th><th>Seen</th></tr></thead>'
+        header + f'<div class="table-wrap"><table class="{table_class}"><thead><tr><th>Machine</th><th>Seats</th>'
+        f"<th>Load</th>{notes_header}<th>Seen</th></tr></thead>"
         f"<tbody>{rows}</tbody></table></div></section>"
     )
 
@@ -652,9 +658,9 @@ def render_overview(
         '<main class="deck-shell overview">',
         render_header(view, now),
         render_summary(view),
-        render_alerts(view, now, action_sources=action_sources),
-        render_work_lists(view, worklore_enabled=worklore_enabled),
+        render_alert_line(view, now),
         render_machine_table(view, now),
+        render_work_lists(view, worklore_enabled=worklore_enabled),
         render_cloud_workers(view),
         render_outcomes(view),
         "<details><summary>Control plane details</summary>"

@@ -15,6 +15,7 @@ OUTER_TAG = (
 def test_nav_icons_cover_every_nav_item():
     assert set(fleet_deck_icons.NAV_ICONS) == {
         "overview",
+        "alerts",
         "repos",
         "work",
         "roster",

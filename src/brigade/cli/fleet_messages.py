@@ -31,6 +31,10 @@ def register(fleet_sub: argparse._SubParsersAction) -> None:
     parser = fleet_sub.add_parser("msg", help="Send and manage durable Fleet Hub messages.")
     sub = parser.add_subparsers(dest="msg_command", metavar="<msg-command>")
     sub.required = True
+    identity = sub.add_parser("identity", help="Read this credential's authenticated active Hub principal.")
+    identity.add_argument("--json", action="store_true")
+    _message_options(identity)
+    identity.set_defaults(func=_identity)
     send = sub.add_parser("send", help="Send a message to an active node or agent principal.")
     send.add_argument("--to", required=True, help="Recipient node or agent principal.")
     send.add_argument("--subject", required=True)
@@ -230,6 +234,12 @@ def _wait_ms(value: Any) -> int:
     if value > fleet_hub_messages.MAX_WAIT_MS / 1000:
         raise ValueError("wait must not exceed 20 seconds")
     return max(1, int(round(float(value) * 1000)))
+
+
+def _identity(args: argparse.Namespace) -> int:
+    from .. import fleet_client_messages
+
+    return _result(args, lambda: fleet_client_messages.identity(**_token_kwargs(args)))
 
 
 def _list(args: argparse.Namespace) -> int:
