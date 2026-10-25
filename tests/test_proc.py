@@ -603,21 +603,34 @@ def test_registered_timeout_never_uses_unbounded_output_drain():
 
 
 @pytest.mark.skipif(os.name != "posix", reason="requires POSIX process groups")
-def test_registered_timeout_kills_descendant_after_group_leader_exits(tmp_path):
+@pytest.mark.parametrize("startup_delay", [0.0, 0.3])
+def test_registered_timeout_kills_descendant_after_group_leader_exits(tmp_path, startup_delay):
     descendant_pid_path = tmp_path / "descendant.pid"
     descendant_code = (
         "import os,time; from pathlib import Path; "
+        f"time.sleep({startup_delay!r}); "
         f"Path({str(descendant_pid_path)!r}).write_text(str(os.getpid())); "
         "time.sleep(60)"
     )
     parent_code = f"import subprocess,sys; subprocess.Popen([sys.executable, '-c', {descendant_code!r}])"
     result_holder = {}
 
+    class ReadyRegistry(proc.ProcessRegistry):
+        def register(self, process):
+            super().register(process)
+            # Establish the exited-leader/live-descendant fixture before the
+            # collector's unchanged 0.2-second timeout starts.
+            ready_deadline = time.monotonic() + 2
+            while not descendant_pid_path.is_file() and time.monotonic() < ready_deadline:
+                time.sleep(0.01)
+            assert descendant_pid_path.is_file()
+            assert process.wait(timeout=2) == 0
+
     def invoke():
         result_holder["result"] = proc.run(
             [sys.executable, "-c", parent_code],
             timeout=0.2,
-            process_registry=proc.ProcessRegistry(terminate_grace=0.05, kill_grace=0.05),
+            process_registry=ReadyRegistry(terminate_grace=0.05, kill_grace=0.05),
         )
 
     runner = threading.Thread(target=invoke, daemon=True)
