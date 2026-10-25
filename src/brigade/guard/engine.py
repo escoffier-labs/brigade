@@ -315,6 +315,7 @@ def _whole_fstring_field(before: str, after: str) -> bool:
 
 _JS_WORD = re.compile(r"[A-Za-z_$][\w$]*")
 _JS_NUMBER = re.compile(r"[0-9]+(?:\.[0-9]+)?")
+_JS_LINE_END = re.compile(r"[\r\n\u2028\u2029]")
 # Exhaustive reserved tokens, including strict/future reserved words. Only the
 # explicit roles below may consume them; unsupported grammar retains detection.
 _JS_RESERVED_WORDS = frozenset(
@@ -475,10 +476,10 @@ def _js_template_code_position(
         ):
             if field_positions is None:
                 return False
-            end = prefix.find("\n", index)
-            if end == -1:
+            line_end = _JS_LINE_END.search(prefix, index)
+            if line_end is None:
                 return False
-            index = end + 1
+            index = line_end.end()
             continue
         if prefix.startswith("/*", index):
             end = prefix.find("*/", index + 2)
