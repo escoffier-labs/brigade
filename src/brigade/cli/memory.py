@@ -17,16 +17,23 @@ def register(sub: argparse._SubParsersAction) -> None:
     from .. import memory_reflect
 
     memory_reflect.register(memory_sub)
-    proposal = memory_sub.add_parser("proposal", help="Preview, review and apply bounded memory pair edits.")
+    proposal = memory_sub.add_parser("proposal", help="Preview, review and apply bounded memory edits.")
     commands = proposal.add_subparsers(dest="memory_proposal_command", required=True)
     for name in ("create", "show", "review", "reject", "apply"):
         command = commands.add_parser(name, help=f"{name.capitalize()} an exact reviewed memory proposal.")
         command.add_argument("--target", "-t", type=Path, default=Path("."))
         command.add_argument("--json", action="store_true")
         if name == "create":
-            command.add_argument("--issue", required=True)
-            command.add_argument("--survivor", required=True)
-            command.add_argument("--relation", choices=("merge", "supersede"), required=True)
+            command.add_argument("--issue", help="Saved contradictory finding for a v1 pair proposal.")
+            command.add_argument("--survivor", help="Surviving card for a v1 pair proposal.")
+            command.add_argument("--relation", choices=("merge", "supersede", "consolidate"), required=True)
+            command.add_argument(
+                "--source", action="append", default=[], help="Canonical v2 source card. Repeat up to eight times."
+            )
+            command.add_argument("--ops-file", type=Path, help="JSON list of typed v2 delta operations.")
+            command.add_argument(
+                "--anchor-blocks", action="store_true", help="Propose stable anchors on claim paragraphs and bullets."
+            )
         else:
             command.add_argument("proposal_id")
         if name in ("create", "review", "reject"):
@@ -384,6 +391,20 @@ def dispatch(args) -> int:
         values = {"target": args.target}
         if name == "create":
             values.update(issue_id=args.issue, survivor=args.survivor, relation=args.relation, reason=args.reason)
+            if args.relation == "consolidate":
+                from .. import memory_proposal_io as proposal_io
+
+                try:
+                    raw = proposal_io.read_bytes(args.ops_file) if args.ops_file else b"[]"
+                    values.update(
+                        source_paths=args.source, ops=json.loads(raw or b"[]"), anchor_blocks=args.anchor_blocks
+                    )
+                except (OSError, ValueError):
+                    print("error: invalid or unreadable ops file", file=sys.stderr)
+                    return 2
+            elif args.source or args.ops_file or args.anchor_blocks:
+                print("error: typed operations require --relation consolidate", file=sys.stderr)
+                return 2
         else:
             values["proposal_id"] = args.proposal_id
             if name in ("review", "reject", "apply"):

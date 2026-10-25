@@ -316,6 +316,8 @@ def server(workspace: Path, planted: dict[str, Path]) -> ThreadingHTTPServer:
     yield httpd
     httpd.shutdown()
     httpd.server_close()
+    thread.join(timeout=5)
+    assert not thread.is_alive(), "Run View accept loop survived shutdown (#1916)"
 
 
 def _host(server: ThreadingHTTPServer) -> str:

@@ -54,6 +54,7 @@ def test_package_init_and_deleted_module_still_select_importers(tmp_path):
         "src/brigade/assets/example.json",
         "pyproject.toml",
         "scripts/windows_pytest.py",
+        "scripts/windows_pytest_diagnostics.py",
         "tests/windows_pytest_allowlist.json",
         "src/brigade/__init__.py",
         ".github/workflows/ci.yml",

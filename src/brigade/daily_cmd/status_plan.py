@@ -171,12 +171,22 @@ def _safe_daily_ref(value: object) -> dict[str, Any] | None:
     }
 
 
-def _daily_center_status_payload(target: Path) -> dict[str, Any]:
-    active = work_cmd._active_session_info(target)
-    pending_tasks = work_cmd._pending_tasks(target)
-    pending_imports = work_cmd._pending_imports(target)
+def _daily_work_status_payload(target: Path) -> dict[str, Any]:
+    """Keep local work state independent of optional subsystem health checks."""
+    return {
+        "active_session": work_cmd._active_session_info(target),
+        "pending_task_count": len(work_cmd._pending_tasks(target)),
+        "pending_import_count": len(work_cmd._pending_imports(target)),
+    }
+
+
+def _daily_center_status_payload(target: Path, *, work_status: dict[str, Any] | None = None) -> dict[str, Any]:
+    if work_status is None:
+        work_status = _daily_work_status_payload(target)
     action_queue_full = center_cmd.actions_health(target)
-    review_queue_count = len(pending_imports) + int(action_queue_full.get("open_count") or 0)
+    review_queue_count = int(work_status.get("pending_import_count") or 0) + int(
+        action_queue_full.get("open_count") or 0
+    )
     handoff_drafts_full = handoff_cmd.draft_queue_payload(target)
     handoff_counts = handoff_drafts_full.get("counts") if isinstance(handoff_drafts_full.get("counts"), dict) else {}
     handoffs = {
@@ -200,9 +210,7 @@ def _daily_center_status_payload(target: Path) -> dict[str, Any]:
         "schema_version": SCHEMA_VERSION,
         "schema": {"name": "daily-center-status", "version": SCHEMA_VERSION},
         "target": str(target),
-        "active_session": active,
-        "pending_task_count": len(pending_tasks),
-        "pending_import_count": len(pending_imports),
+        **work_status,
         "review_queue_count": review_queue_count,
         "action_queue": action_queue,
         "handoff_drafts": handoffs,
@@ -262,7 +270,11 @@ def _daily_security_health(target: Path) -> dict[str, Any]:
 def status_payload(target: Path) -> dict[str, Any]:
     target = target.expanduser().resolve()
     status_section_checks: list[dict[str, Any]] = []
-    center, check = _bounded_status_call("center-status", lambda: _daily_center_status_payload(target), {})
+    work_status, check = _bounded_status_call("work-status", lambda: _daily_work_status_payload(target), {})
+    status_section_checks.append(check)
+    center, check = _bounded_status_call(
+        "center-status", lambda: _daily_center_status_payload(target, work_status=work_status), work_status
+    )
     status_section_checks.append(check)
     readiness, check = _bounded_status_call(
         "center-readiness", lambda: _candidates_mod._daily_readiness_payload(target), {"blockers": []}

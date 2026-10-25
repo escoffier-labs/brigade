@@ -56,13 +56,13 @@ If the client does not inherit your shell `PATH`, use the full path:
 which miseledger
 ```
 
-Then configure:
+Then configure, replacing `/ABSOLUTE_ACCOUNT_HOME` with your account's actual absolute home directory:
 
 ```json
 {
   "mcpServers": {
     "miseledger": {
-      "command": "/home/you/.local/bin/miseledger",
+      "command": "/ABSOLUTE_ACCOUNT_HOME/.local/bin/miseledger",
       "args": ["mcp"]
     }
   }

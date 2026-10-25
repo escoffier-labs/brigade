@@ -5,6 +5,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import math
 import sys
 from collections import Counter
 from dataclasses import asdict
@@ -36,6 +37,25 @@ def register(sub: argparse._SubParsersAction) -> None:
     parser.add_argument("--escalate-via", choices=("fleet-msg",), help="Send escalation through fleet messages.")
     parser.add_argument("--escalate-to", help="Fleet message recipient principal. Requires --escalate-via.")
     parser.add_argument("--fail-on", default="", help="Comma-separated states that return exit status 1.")
+    parser.add_argument(
+        "--mass-max-count",
+        type=int,
+        default=runs_patrol_actions.MASS_FAULT_MAX_COUNT,
+        help="Skip reap and release-claim when more lanes than this read dead or stalled "
+        f"(default {runs_patrol_actions.MASS_FAULT_MAX_COUNT}).",
+    )
+    parser.add_argument(
+        "--mass-max-fraction",
+        type=float,
+        default=runs_patrol_actions.MASS_FAULT_MAX_FRACTION,
+        help="Skip reap and release-claim when more than this share of lanes read dead or stalled "
+        f"(default {runs_patrol_actions.MASS_FAULT_MAX_FRACTION}).",
+    )
+    parser.add_argument(
+        "--force-mass-repair",
+        action="store_true",
+        help="Apply reap and release-claim despite a suspected environment fault. Recorded in the receipt.",
+    )
 
 
 def dispatch(args: argparse.Namespace) -> int:
@@ -52,6 +72,9 @@ def dispatch(args: argparse.Namespace) -> int:
         apply=args.apply,
         escalate_via=args.escalate_via,
         escalate_to=args.escalate_to,
+        mass_max_count=args.mass_max_count,
+        mass_max_fraction=args.mass_max_fraction,
+        force_mass_repair=args.force_mass_repair,
     )
 
 
@@ -84,6 +107,9 @@ def patrol(
     apply: str = "",
     escalate_via: str | None = None,
     escalate_to: str | None = None,
+    mass_max_count: int = runs_patrol_actions.MASS_FAULT_MAX_COUNT,
+    mass_max_fraction: float = runs_patrol_actions.MASS_FAULT_MAX_FRACTION,
+    force_mass_repair: bool = False,
     now: datetime | None = None,
 ) -> int:
     written_receipt: Path | None = None
@@ -100,6 +126,12 @@ def patrol(
             "escalate" not in actions or not escalate_via or not escalate_to or not escalate_to.strip()
         ):
             raise ValueError("fleet-msg requires --apply escalate, --escalate-via and --escalate-to")
+        if mass_max_count < 0:
+            raise ValueError("mass-max-count must not be negative")
+        if not math.isfinite(mass_max_fraction) or not 0 <= mass_max_fraction <= 1:
+            raise ValueError("mass-max-fraction must be between 0 and 1")
+        if force_mass_repair and not set(actions) & runs_patrol_actions.DESTRUCTIVE:
+            raise ValueError("force-mass-repair requires --apply reap or release-claim")
         receipt = receipt or bool(actions)
         thresholds = Thresholds(
             older_than=run_reap.parse_older_than(older_than),
@@ -148,6 +180,19 @@ def patrol(
             row["classification_digest"] = hashlib.sha256(json.dumps(stable, sort_keys=True).encode()).hexdigest()
             rows.append(row)
         exit_code = int(any(row["state"] in selected for row in rows) or (lanes.truncated and "unknown" in selected))
+        # Decide before any repair. A host or network fault must not release
+        # many healthy lanes in one pass.
+        finding = runs_patrol_actions.environment_fault(rows, max_count=mass_max_count, max_fraction=mass_max_fraction)
+        destructive = [action for action in actions if action in runs_patrol_actions.DESTRUCTIVE]
+        applied_actions = actions
+        if finding is not None and actions and not force_mass_repair:
+            exit_code = 1
+        if finding is not None and destructive:
+            if force_mass_repair:
+                finding["overridden"] = True
+            else:
+                finding["skipped_actions"] = destructive
+                applied_actions = [action for action in actions if action not in runs_patrol_actions.DESTRUCTIVE]
         patrol_id = clock.strftime("%Y%m%dT%H%M%S") + "-" + uuid4().hex[:12]
         payload = {
             "schema": SCHEMA,
@@ -163,6 +208,10 @@ def patrol(
             "exit_code": exit_code,
             "receipt": f".brigade/patrol/{patrol_id}/patrol.json" if receipt else None,
         }
+        if finding is not None:
+            payload["findings"] = [finding]
+        if force_mass_repair:
+            payload["mass_repair_override"] = {"forced": True, "actions": destructive}
         raw = json.dumps(payload, indent=2, sort_keys=True)
         if receipt:
             with runs_patrol_receipts.receipt_lock(target, report_only=not actions) as locked:
@@ -172,13 +221,13 @@ def patrol(
                     runs_patrol_receipts.prune_reports(
                         written_receipt.parent.parent, clock, keep=written_receipt.parent, strict=bool(actions)
                     )
-                if actions:
+                if applied_actions:
                     runs_patrol_actions.apply_actions(
                         target=target,
                         lanes=lanes,
                         rows=rows,
                         payload=payload,
-                        actions=actions,
+                        actions=applied_actions,
                         thresholds=thresholds,
                         now=clock,
                         escalate_via=escalate_via,
@@ -196,11 +245,19 @@ def patrol(
         return 2
     if json_output:
         print(raw)
-    elif rows:
-        for row in rows:
-            print(f"{row['lane_id']}: {row['state']} ({row['reason']})")
     else:
-        print("No local lanes found.")
+        if rows:
+            for row in rows:
+                print(f"{row['lane_id']}: {row['state']} ({row['reason']})")
+        else:
+            print("No local lanes found.")
+        if finding is not None:
+            line = f"{finding['kind']}: {finding['affected']} of {finding['lanes']} lanes dead or stalled"
+            if finding.get("skipped_actions"):
+                line += f"; skipped {','.join(finding['skipped_actions'])}"
+            elif finding.get("overridden"):
+                line += "; repairs forced by --force-mass-repair"
+            print(line)
     if lanes.truncated and not json_output:
         print("Patrol scan or lane report truncated. Increase --limit or inspect sources directly.")
     return exit_code

@@ -15,11 +15,10 @@ def _submit(**overrides):
 
 def test_tool_set_is_closed():
     assert c.TOOLS == {
-        "inbox_list",
-        "inbox_ack",
-        "inbox_reply",
-        "message_send",
-        "message_status",
+        "hub_inbox_list",
+        "hub_inbox_ack",
+        "hub_message_send",
+        "hub_message_status",
         "t3_approve",
         "t3_answer",
         "t3_capacity",
@@ -150,3 +149,34 @@ def test_error_fields_are_bounded_and_plain():
     assert len(out["fleet_code"]) == c.FIELD_MAX
     assert out["fleet_reason"] == "a-b-c"
     assert "request_id" not in out
+
+
+@pytest.mark.parametrize(
+    "name,args",
+    [
+        ("hub_inbox_list", {"unacked_only": 1}),
+        ("hub_inbox_list", {"limit": 51}),
+        ("hub_inbox_ack", {"ids": [1, 1]}),
+        ("hub_inbox_ack", {"ids": [True]}),
+        ("hub_inbox_ack", {"ids": [2**62]}),
+        ("hub_inbox_ack", {"ids": list(range(1, 102))}),
+        ("hub_message_status", {"ids": list(range(1, 52))}),
+        ("hub_message_send", {"alias": "host-a", "subject": "é" * 101, "body": "b"}),
+        ("hub_message_send", {"alias": "host-a", "subject": "s", "body": "é" * 4097}),
+        ("hub_message_send", {"to": "host-a", "subject": "s", "body": "b"}),
+        ("hub_message_send", {"alias": "../host-a", "subject": "s", "body": "b"}),
+        ("hub_message_send", {"alias": "host-a", "subject": "s", "body": "b", "extra": None}),
+    ],
+)
+def test_hub_contract_bounds(name, args):
+    with pytest.raises(c.T3DispatchError) as error:
+        c.PARSERS[name](args)
+    assert error.value.code == "invalid_request"
+
+
+def test_hub_defaults_and_shared_send_fields():
+    assert c.PARSERS["hub_inbox_list"]({}) == {"unacked_only": True, "limit": 20}
+    assert c.PARSERS["hub_inbox_ack"]({"ids": list(range(1, 101))})["ids"] == list(range(1, 101))
+    parsed = c.PARSERS["hub_message_send"]({"alias": "host-a", "subject": "é" * 100, "body": "é" * 4096})
+    assert parsed["alias"] == "host-a" and parsed["priority"] == "normal"
+    assert parsed["client_id"] is None and "to" not in parsed

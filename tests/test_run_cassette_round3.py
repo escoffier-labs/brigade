@@ -128,6 +128,10 @@ def test_retention_skips_ledger_beyond_aggregate_bounds(tmp_path, monkeypatch, c
 
 
 @pytest.mark.parametrize("failure", ["checkpoint-only", "journal-changed", "anchors"])
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason="Safe redaction transactions require POSIX dir_fd and flock. Tracking #1894 (cassette hardening)",
+)
 def test_rejected_redaction_preserves_cassette_sidecars(tmp_path, monkeypatch, failure):
     run, snapshot, _ = _authority_run(tmp_path)
     _record(run)
@@ -166,6 +170,10 @@ def test_rejected_redaction_preserves_cassette_sidecars(tmp_path, monkeypatch, f
     assert {p.name: p.read_bytes() for p in (run / "events" / "cassettes").iterdir()} == sidecars
 
 
+@pytest.mark.skipif(
+    os.name != "posix",
+    reason="Safe redaction transactions require POSIX dir_fd and flock. Tracking #1894 (cassette hardening)",
+)
 def test_sidecar_cleanup_failure_is_anchored_and_retryable(tmp_path, monkeypatch):
     run, snapshot, _ = _authority_run(tmp_path)
     _record(run)

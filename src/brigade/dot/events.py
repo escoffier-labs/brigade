@@ -4,7 +4,6 @@ from __future__ import annotations
 import asyncio
 from datetime import datetime, timezone
 from functools import partial
-import hashlib
 import hmac
 import json
 import logging
@@ -20,6 +19,7 @@ from brigade.fleet_client_message_credentials import MessageAuthority
 from .contracts import DotError
 from .event_app import EventError, EventsApp as EventsApp, IDENTITY as IDENTITY
 from .state import BridgeState
+from brigade.mcp_events import canonical_arguments, subscription_id
 from .webhooks import callback_url, secret_key, signed_headers, webhook_post
 
 EVENT_NAMES = ("fleet.inbox.message", "fleet.request.completed")
@@ -119,10 +119,7 @@ class EventService:
                     or (not isinstance(delivery.get("url"), str))
                 ):
                     raise EventError(-32602, "invalid_arguments")
-                canonical = json.dumps(arguments, sort_keys=True, separators=(",", ":"))
-                sid = (
-                    "sub_" + hashlib.sha256(json.dumps([owner, delivery["url"], name, canonical]).encode()).hexdigest()
-                )
+                sid = subscription_id(owner, delivery["url"], name, canonical_arguments(arguments))
             with self.state.transaction() as c:
                 c.execute("DELETE FROM subscriptions WHERE id=? AND owner=?", (sid, owner))
             return {}
@@ -149,8 +146,8 @@ class EventService:
             secret_key(delivery["secret"])
         except (ValueError, TypeError):
             raise EventError(-32602, "invalid_delivery") from None
-        canonical = json.dumps(arguments, sort_keys=True, separators=(",", ":"))
-        sid = "sub_" + hashlib.sha256(json.dumps([owner, delivery["url"], name, canonical]).encode()).hexdigest()
+        canonical = canonical_arguments(arguments)
+        sid = subscription_id(owner, delivery["url"], name, canonical)
         challenge = secrets.token_urlsafe(32)
         body = json.dumps({"type": "verification", "challenge": challenge}, separators=(",", ":")).encode()
         status: int | None = None
@@ -436,11 +433,30 @@ class EventService:
             actions.append(hub.reconcile)
         actions.append(hub.flush_pending)
         for action in actions:
+            work = asyncio.create_task(asyncio.to_thread(action))
             try:
-                await asyncio.to_thread(action)
+                await asyncio.shield(work)
+            except asyncio.CancelledError:
+                # Threaded Hub operations still own BridgeState until they finish.
+                try:
+                    await work
+                except Exception:
+                    pass
+                raise
             except DotError as error:
-                if error.code == "hub_credential_invalid":
-                    logging.getLogger("dot-events").warning("hub_credential_invalid")
+                if error.code in {
+                    "hub_credential_invalid",
+                    "hub_credential_changed",
+                    "hub_identity_invalid",
+                    "hub_unauthorized",
+                    "hub_forbidden",
+                }:
+                    logging.getLogger("dot-events").warning("hub_poll_failed code=%s", error.code)
+                    # Local health state never adopts an unverified replacement credential's scope.
+                    self.state.hub_set("last_hub_poll_error", error.code)
+            else:
+                if action == hub.sync:
+                    self.state.hub_set("last_hub_poll_error", "")
 
     async def run(self) -> None:
         import anyio

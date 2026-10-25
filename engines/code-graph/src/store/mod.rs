@@ -14,8 +14,8 @@ mod walk;
 
 pub use db::{db_path, open_db, open_default, open_default_read_only, open_read_only};
 pub use explain::{ExplainRow, explain_calls};
-pub(crate) use repo_policy::{current_git_branch, guard_unsafe_root};
-pub(crate) use resolve::RESOLVER_VERSION;
+pub(crate) use repo_policy::{current_git_branch, current_git_head, guard_unsafe_root};
+pub(crate) use resolve::{RESOLVER_VERSION, resolved_call_site_ids};
 pub use schema::{SCHEMA_VERSION, init_schema};
 pub use skipped::{SkippedFile, parse_error_census, skipped_census};
 pub use sync::{pending_changes, sync_repo, sync_repo_force};

@@ -999,6 +999,12 @@ def execute(
                 history = [*_prior_attempts(current), _attempt_summary(current)]
             elif resume and current is not None and current.get("state") in {"running", NOT_RUN_STATE}:
                 history = _unfinished_history(current)
+                # Interrupted attempts consume the last known transient failure's budget too.
+                kind = next(
+                    (kind for attempt in reversed(history) if (kind := _transient_kind(attempt)) is not None), None
+                )
+                if kind is not None and len(history) > RETRY_CAPS[kind]:
+                    continue
             elif resume and current is not None and current.get("state") in REGRADEABLE_STATES:
                 try:
                     _regrade_cell_from_disk(cell_dir, cell, plan)

@@ -97,6 +97,13 @@ def _dispatch_impl(args) -> int:
             return hook_run(event=args.event, package=args.package)
         return hook_run(event=args.event, package=args.package, target=args.target)
     if args.work_command == "presence-hook":
+        if args.harness == "codex" and args.stdin and args.context == "fleet-inbox":
+            # Kept out of fleet_session_presence: importing the delivery module there
+            # closes an import cycle that breaks mypy's view of fleet_client exports.
+            from ...fleet_inbox_delivery import run_codex_hook
+
+            run_codex_hook()
+            return 0
         from ...fleet_session_presence import run_presence_hook
 
         return run_presence_hook(

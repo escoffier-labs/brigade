@@ -178,7 +178,7 @@ def test_migration_from_37_is_repeatable(tmp_path):
     conn.close()
     for _ in range(2):
         conn = fleet_hub.init_db(path)
-        assert conn.execute("PRAGMA user_version").fetchone()[0] == 38
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == fleet_hub.SCHEMA_VERSION
         assert (
             conn.execute(
                 "SELECT count(*) FROM sqlite_master WHERE name IN ('ci_runs','ci_check_runs','ci_repo_state')"

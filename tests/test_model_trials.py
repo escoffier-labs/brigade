@@ -1563,6 +1563,61 @@ def test_mark_not_run_keeps_prior_attempts_and_resume_honors_the_cap(tmp_path, m
     assert [item["attempt"] for item in _only_cell(root)["prior_attempts"]] == [1, 2]
 
 
+@pytest.mark.parametrize("failure", ["adapter", "timeout"])
+@pytest.mark.parametrize("mark_not_run", [False, True])
+@pytest.mark.parametrize("retry_transient", [False, True])
+def test_resume_never_launches_beyond_an_interrupted_final_retry(
+    tmp_path, monkeypatch, failure, mark_not_run, retry_transient
+):
+    manifest_path = _single_cell_manifest(tmp_path)
+    root = tmp_path / "results"
+    _scripted_run(monkeypatch, [failure])
+    assert model_trials.execute(manifest_path, _roster(), workspace=tmp_path, output_dir=root, resume=False) == 3
+    interrupted: list[int] = []
+
+    def interrupt_provider(task, roster, **kwargs):
+        interrupted.append(_only_cell(root)["attempt"])
+        assert len(interrupted) <= cap, "provider launched beyond the retry cap"
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr(model_trials.aboyeur, "run", interrupt_provider)
+    kind = "adapter_error" if failure == "adapter" else "timeout"
+    cap = model_trials.RETRY_CAPS[kind]
+    for _ in range(cap):
+        with pytest.raises(KeyboardInterrupt):
+            model_trials.execute(
+                manifest_path, _roster(), workspace=tmp_path, output_dir=root, resume=True, retry_transient=True
+            )
+    assert interrupted == list(range(2, cap + 2))
+    current = _only_cell(root)
+    assert current["state"] == "running"
+    assert current["attempt"] == cap + 1
+    if mark_not_run:
+        plan, cells = model_trials.build_plan(manifest_path, _roster(), root)
+        cell = cells[0]
+        assert model_trials._mark_not_run(
+            cell, root / "cells" / cell.cell_id, current, plan, reason=model_trials.NOT_RUN_DRAINED
+        )
+    stored = _only_cell(root)
+    for _ in range(3):
+        assert (
+            model_trials.execute(
+                manifest_path,
+                _roster(),
+                workspace=tmp_path,
+                output_dir=root,
+                resume=True,
+                retry_transient=retry_transient,
+            )
+            == model_trials.EXIT_INCOMPLETE
+        )
+        assert _only_cell(root) == stored
+    assert interrupted == list(range(2, cap + 2))
+    cell_dir = next((root / "cells").iterdir())
+    assert model_trials._attempt_number(cell_dir) == cap + 2
+    assert not (cell_dir / "attempts" / f"attempt-{cap + 2:03d}").exists()
+
+
 # --- #1977 review: output text never stops a seat -----------------------------
 
 

@@ -21,6 +21,7 @@ BROAD_SAMPLE_SIZE = 24
 SHARED_PATHS = {
     "pyproject.toml",
     "scripts/windows_pytest.py",
+    "scripts/windows_pytest_diagnostics.py",
     "scripts/windows_affected_tests.py",
     "tests/windows_pytest_allowlist.json",
     "src/brigade/__init__.py",

@@ -1435,7 +1435,7 @@ def test_center_pages_render_through_the_shared_deck_shell():
     from brigade.center_cmd.dashboard.views import render_nav
 
     html = render.page("Status", "n0nce", render_nav("status"), "<p>hello</p>")
-    assert "--canvas: #111617;" in html
+    assert "--canvas: #0a0a0a;" in html
     assert '<body class="deck"' in html
     assert '<p class="eyebrow">Center</p>' in html
     assert "<h1>Status</h1>" in html
